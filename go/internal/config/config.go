@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,15 +37,20 @@ type Config struct {
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	HomeLink         *HomeLink          `yaml:"home_link,omitempty" json:"home_link,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 }
 
-// OCPP configures the built-in OCPP 1.6J Central System. Chargers connect to
-// us, so there is no driver and no per-charger config entry — a charge point
-// appears as a device the moment it sends its first BootNotification, keyed by
-// the identity segment of the URL it dialled.
+// OCPP configures the built-in OCPP Central System, which serves 1.6J and
+// 2.0.1. Chargers connect to us, so there is no driver and no per-charger
+// config entry — a charge point appears as a device the moment it sends its
+// first BootNotification, keyed by the identity segment of the URL it dialled.
+//
+// Each version needs its own port: a charger picks its dialect during the
+// WebSocket handshake, and the OCPP library keeps one message handler per
+// listener, so a single port cannot serve both.
 //
 // Disabled by default, and enabling it requires credentials. The listener
 // cannot be restricted to one interface: the OCPP library builds its own
@@ -86,6 +93,13 @@ func (o *OCPP) Validate() error {
 	return nil
 }
 
+// HomeLink enables the outbound-only encrypted remote read service. The relay
+// and browser origins are fixed by the protocol and cannot be changed in site
+// config.
+type HomeLink struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
 // DeviceRepository configures independently distributed Lua drivers. Remote
 // refresh never changes an active driver; activation is always an explicit API
 // action. TrustedKeys maps key IDs to base64-encoded Ed25519 public keys.
@@ -99,6 +113,7 @@ type DeviceRepository struct {
 type DriverRepositorySource struct {
 	ID            string            `yaml:"id" json:"id"`
 	Name          string            `yaml:"name,omitempty" json:"name,omitempty"`
+	Format        string            `yaml:"format,omitempty" json:"format,omitempty"`
 	ManifestURL   string            `yaml:"manifest_url" json:"manifest_url"`
 	Enabled       bool              `yaml:"enabled" json:"enabled"`
 	TrustedKeys   map[string]string `yaml:"trusted_keys,omitempty" json:"trusted_keys,omitempty"`
@@ -107,11 +122,20 @@ type DriverRepositorySource struct {
 }
 
 const (
-	DefaultDriverRepositoryID           = "ftw-official"
-	DefaultDriverRepositoryName         = "FTW official drivers"
-	DefaultDriverRepositoryManifestURL  = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
-	DefaultDriverRepositorySigningKeyID = "ftw-drivers-2026-01"
-	DefaultDriverRepositoryPublicKey    = "MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc="
+	DriverRepositoryFormatFTWManifestV1    = "ftw.manifest/v1"
+	DriverRepositoryFormatSourcefulIndexV1 = "sourceful.driver-index/v1"
+
+	DefaultDriverRepositoryID              = "ftw-official"
+	DefaultDriverRepositoryName            = "FTW device drivers"
+	DefaultDriverRepositoryManifestURL     = "https://github.com/srcfl/device-drivers/releases/download/drivers-stable/manifest.json"
+	DefaultDriverRepositoryBetaID          = "ftw-official-beta"
+	DefaultDriverRepositoryBetaName        = "FTW device drivers beta"
+	DefaultDriverRepositoryBetaManifestURL = "https://github.com/srcfl/device-drivers/releases/download/drivers-beta/manifest.json"
+	DefaultDriverRepositorySigningKeyID    = "ftw-drivers-2026-01"
+	DefaultDriverRepositoryPublicKey       = "MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc="
+
+	legacyDriverRepositoryName        = "FTW official drivers"
+	legacyDriverRepositoryManifestURL = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
 )
 
 // Notifications configures outbound push notifications. Exactly one
@@ -595,6 +619,16 @@ type Planner struct {
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
+// OptimizerTimeout returns the runtime contract value for an unset timeout.
+// Parsing also fills it so API clients do not invent a shorter default when
+// they save an otherwise unchanged planner.
+func (p *Planner) OptimizerTimeout() time.Duration {
+	if p == nil || p.OptimizerTimeoutS <= 0 {
+		return optimizercontract.DefaultTimeout
+	}
+	return time.Duration(p.OptimizerTimeoutS * float64(time.Second))
+}
+
 // PVSafetyK resolves the downside-PV haircut scale (forecast − k·σ). Unset
 // config (nil Planner or nil field) → default 1.0; an explicit value is
 // honored verbatim, including 0 (no hedge — "use the battery you have").
@@ -739,6 +773,13 @@ type Driver struct {
 	// Sourceful Zap is the canonical user: its local API exposes battery data,
 	// but no stable semantic set-power endpoint.
 	BatteryTelemetryOnly bool `yaml:"battery_telemetry_only,omitempty" json:"battery_telemetry_only,omitempty"`
+	// ObserveOnly keeps structured battery telemetry (host.emit "battery")
+	// and UI visibility while excluding this driver from dispatch, MPC,
+	// battery-model training, and watchdog DefaultMode commands. Use when
+	// another party (e.g. a retailer VPP) owns actuation. Requires
+	// battery_capacity_wh > 0 — without capacity, battery emits are
+	// dropped at the host boundary anyway.
+	ObserveOnly bool `yaml:"observe_only,omitempty" json:"observe_only,omitempty"`
 	// MaxChargeW + MaxDischargeW set this driver's per-command power
 	// ceiling (site-signed +/-). Both optional; zero = fall through to
 	// the global MaxCommandW = 5 kW default the dispatcher has shipped
@@ -770,6 +811,11 @@ type Driver struct {
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// Control opts this one site into one exact signed control artifact.
+	// The runtime rejects control unless all three pins match the active
+	// Device Support package. Merely selecting the beta channel or installing
+	// a control-capable artifact never enables writes.
+	Control *DriverControlOptIn `yaml:"control,omitempty" json:"control,omitempty"`
 	// HasPassword is a JSON-only signal to the UI that Config["password"]
 	// holds a non-empty value on disk. Populated by MaskSecrets after the
 	// real password is blanked out so the operator can still tell apart
@@ -791,13 +837,24 @@ type Driver struct {
 	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
 }
 
+// DriverControlOptIn is a per-site, fail-closed control grant. PackageID,
+// Version and ArtifactSHA256 must match signed active package metadata.
+type DriverControlOptIn struct {
+	Enabled        bool   `yaml:"enabled" json:"enabled"`
+	PackageID      string `yaml:"package_id" json:"package_id"`
+	Version        string `yaml:"version" json:"version"`
+	ArtifactSHA256 string `yaml:"artifact_sha256" json:"artifact_sha256"`
+}
+
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT      *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus    *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP      *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
-	WebSocket *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
-	TCP       *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	MQTT       *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus     *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	Serial     *SerialConfig   `yaml:"serial,omitempty" json:"serial,omitempty"`
+	HTTP       *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket  *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	TCP        *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	Standalone bool            `yaml:"standalone,omitempty" json:"standalone,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -815,6 +872,16 @@ type ModbusConfig struct {
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
 }
 
+// SerialConfig grants read-only access to one local serial device.
+type SerialConfig struct {
+	Address       string `yaml:"address" json:"address"`
+	BaudRate      int    `yaml:"baud_rate,omitempty" json:"baud_rate,omitempty"`
+	DataBits      int    `yaml:"data_bits,omitempty" json:"data_bits,omitempty"`
+	StopBits      int    `yaml:"stop_bits,omitempty" json:"stop_bits,omitempty"`
+	Parity        string `yaml:"parity,omitempty" json:"parity,omitempty"`
+	ReadTimeoutMS int    `yaml:"read_timeout_ms,omitempty" json:"read_timeout_ms,omitempty"`
+}
+
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
@@ -828,6 +895,14 @@ type HTTPCapability struct {
 	// for this driver only; when empty, standard verification against the
 	// system roots applies (unchanged for every existing HTTP driver).
 	TLSPinSHA256 string `yaml:"tls_pin_sha256,omitempty" json:"tls_pin_sha256,omitempty"`
+	// AllowWrite grants host.http_patch — the verb REST device APIs use for
+	// state-changing writes — as a separate, explicit operator decision, the
+	// HTTP twin of a read-only Modbus driver versus one allowed to write
+	// registers. Scope is exactly http_patch: http_get stays a read and
+	// http_post stays under the plain HTTP grant (existing drivers POST to
+	// query-style APIs), so granting HTTP for telemetry never implicitly
+	// grants the ability to mutate a device. Default off.
+	AllowWrite bool `yaml:"allow_write,omitempty" json:"allow_write,omitempty"`
 }
 
 // WSCapability grants WebSocket (ws://, wss://) access. Same allowlist
@@ -1168,13 +1243,13 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 // Empty string preserves the historical "sibling-of-config" behaviour.
 var DriversDirOverride string
 
-// UserDriversDirOverride is the second lookup path tried before
-// DriversDirOverride. Designed for persistent user-supplied drivers in
+// UserDriversDirOverride is the first lookup path. It is tried before managed
+// signed drivers and DriversDirOverride. It holds persistent user drivers in
 // the docker deploy where DriversDirOverride lives in the immutable
 // image layer. When set, ResolveDriverPaths checks whether a file
 // exists in this directory first and uses it when found; otherwise
-// falls back to DriversDirOverride. Empty = single-dir behaviour
-// (back-compat).
+// falls back to the managed and bundled directories. Empty = single-dir
+// behaviour (back-compat).
 var UserDriversDirOverride string
 
 // ManagedDriversDirOverride contains stable active symlinks maintained by the
@@ -1185,8 +1260,8 @@ var ManagedDriversDirOverride string
 // ResolveDriverPaths joins relative Lua driver paths with baseDir, or
 // with DriversDirOverride when the relative path starts with "drivers/".
 // When UserDriversDirOverride is also set, paths starting with "drivers/"
-// are first probed in UserDriversDirOverride; only if the file is absent
-// there do they fall through to DriversDirOverride.
+// are first probed there. They then fall through to the managed directory
+// and DriversDirOverride.
 func (c *Config) ResolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
 		c.Drivers[i].Lua = stripLeadingDotDot(c.Drivers[i].Lua)
@@ -1289,6 +1364,12 @@ func applyDefaults(c *Config) {
 		c.DeviceRepository = &DeviceRepository{Enabled: true}
 	}
 	if c.DeviceRepository != nil {
+		// Move only the exact built-in FTW source. Sites that changed the URL,
+		// trust root, security flags, name, or source count keep their config.
+		if len(c.DeviceRepository.Repositories) == 1 && isLegacyDefaultDriverRepository(c.DeviceRepository.Repositories[0]) {
+			c.DeviceRepository.Repositories[0].Name = DefaultDriverRepositoryName
+			c.DeviceRepository.Repositories[0].ManifestURL = DefaultDriverRepositoryManifestURL
+		}
 		if c.DeviceRepository.RefreshIntervalH == 0 {
 			c.DeviceRepository.RefreshIntervalH = 24
 		}
@@ -1344,6 +1425,9 @@ func applyDefaults(c *Config) {
 		// minimum, so the holdoff is a no-op debouncer in practice.
 		c.Site.MinDispatchIntervalS = 2
 	}
+	if c.Planner != nil && c.Planner.OptimizerTimeoutS == 0 {
+		c.Planner.OptimizerTimeoutS = optimizercontract.DefaultTimeout.Seconds()
+	}
 	if c.Fuse.Phases == 0 {
 		c.Fuse.Phases = 3
 	}
@@ -1365,6 +1449,23 @@ func applyDefaults(c *Config) {
 			}
 			if cap.UnitID == 0 {
 				cap.UnitID = 1
+			}
+		}
+		if cap := d.Capabilities.Serial; cap != nil {
+			if cap.BaudRate == 0 {
+				cap.BaudRate = 115200
+			}
+			if cap.DataBits == 0 {
+				cap.DataBits = 8
+			}
+			if cap.StopBits == 0 {
+				cap.StopBits = 1
+			}
+			if cap.Parity == "" {
+				cap.Parity = "N"
+			}
+			if cap.ReadTimeoutMS == 0 {
+				cap.ReadTimeoutMS = 500
 			}
 		}
 		if cap := d.MQTT; cap != nil && cap.Port == 0 {
@@ -1457,6 +1558,16 @@ func applyDefaults(c *Config) {
 	}
 }
 
+func isLegacyDefaultDriverRepository(repo DriverRepositorySource) bool {
+	if repo.ID != DefaultDriverRepositoryID || repo.ManifestURL != legacyDriverRepositoryManifestURL ||
+		(repo.Name != "" && repo.Name != legacyDriverRepositoryName) ||
+		(repo.Format != "" && repo.Format != DriverRepositoryFormatFTWManifestV1) ||
+		repo.AllowUnsigned || repo.AllowInsecure || len(repo.TrustedKeys) != 1 {
+		return false
+	}
+	return repo.TrustedKeys[DefaultDriverRepositorySigningKeyID] == DefaultDriverRepositoryPublicKey
+}
+
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
 	if c.State != nil && c.State.ColdRetentionDays < 0 {
@@ -1498,10 +1609,39 @@ func (c *Config) Validate() error {
 		if d.Lua == "" {
 			return fmt.Errorf("driver %q: must specify `lua`", d.Name)
 		}
+		if d.Control != nil && d.Control.Enabled {
+			if !strings.HasPrefix(d.Control.PackageID, "com.sourceful.driver.") || d.Control.Version == "" {
+				return fmt.Errorf("driver %q: control requires an exact Sourceful package_id and version", d.Name)
+			}
+			hash, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(d.Control.ArtifactSHA256)))
+			if err != nil || len(hash) != 32 {
+				return fmt.Errorf("driver %q: control artifact_sha256 must be 64 hexadecimal characters", d.Name)
+			}
+		}
 		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil &&
+			d.Capabilities.Serial == nil && !d.Capabilities.Standalone &&
 			d.Capabilities.HTTP == nil && d.Capabilities.WebSocket == nil &&
 			d.Capabilities.TCP == nil {
-			return fmt.Errorf("driver %q: must have mqtt, modbus, http, websocket, or tcp capability", d.Name)
+			return fmt.Errorf("driver %q: must have mqtt, modbus, serial, http, websocket, tcp, or standalone capability", d.Name)
+		}
+		if serial := d.Capabilities.Serial; serial != nil {
+			if strings.TrimSpace(serial.Address) == "" {
+				return fmt.Errorf("driver %q: serial address is required", d.Name)
+			}
+			if serial.BaudRate <= 0 || serial.ReadTimeoutMS <= 0 || serial.ReadTimeoutMS > 60_000 {
+				return fmt.Errorf("driver %q: serial baud_rate and read_timeout_ms must be valid", d.Name)
+			}
+			if serial.DataBits < 5 || serial.DataBits > 8 || (serial.StopBits != 1 && serial.StopBits != 2) {
+				return fmt.Errorf("driver %q: serial data_bits or stop_bits is invalid", d.Name)
+			}
+			switch strings.ToUpper(serial.Parity) {
+			case "N", "E", "O":
+			default:
+				return fmt.Errorf("driver %q: serial parity must be N, E, or O", d.Name)
+			}
+		}
+		if d.ObserveOnly && d.BatteryCapacityWh <= 0 {
+			return fmt.Errorf("driver %q: observe_only requires battery_capacity_wh > 0", d.Name)
 		}
 	}
 	if len(c.Drivers) > 0 && siteMeters == 0 {
@@ -1697,6 +1837,11 @@ func (c *Config) Validate() error {
 			if !repo.Enabled {
 				continue
 			}
+			switch repo.Format {
+			case "", DriverRepositoryFormatFTWManifestV1, DriverRepositoryFormatSourcefulIndexV1:
+			default:
+				return fmt.Errorf("device_repository %s has unsupported format %q", repo.ID, repo.Format)
+			}
 			u, err := url.Parse(repo.ManifestURL)
 			if err != nil || u.Scheme == "" {
 				return fmt.Errorf("device_repository %s has invalid manifest_url", repo.ID)
@@ -1706,6 +1851,9 @@ func (c *Config) Validate() error {
 			}
 			if repo.AllowUnsigned && u.Scheme != "file" {
 				return fmt.Errorf("device_repository %s allow_unsigned is restricted to local file manifests", repo.ID)
+			}
+			if repo.Format == DriverRepositoryFormatSourcefulIndexV1 && repo.AllowUnsigned {
+				return fmt.Errorf("device_repository %s Sourceful indexes must be signed", repo.ID)
 			}
 			if !repo.AllowUnsigned && len(repo.TrustedKeys) == 0 {
 				return fmt.Errorf("device_repository %s requires at least one trusted Ed25519 key", repo.ID)

@@ -19,23 +19,833 @@
     return caps.indexOf(capability) >= 0;
   }
 
+  // Some drivers expose more than one fixed register map. Keep these choices
+  // in the UI until the signed driver catalog grows a general config-schema
+  // field. Version gating prevents an older bundled GoodWe driver from being
+  // offered a profile it cannot load.
+  var DRIVER_CONFIG_PROFILES = {
+    goodwe: [
+      { value: "community-v1", label: "Community v1", unitId: 1 },
+      { value: "gw8kn-et-hk3000", label: "GW8KN-ET + HK3000", unitId: 247 }
+    ]
+  };
+
+  function versionAtLeast(version, minimum) {
+    var got = String(version || "").match(/^(\d+)\.(\d+)\.(\d+)/);
+    var want = String(minimum || "").match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!got || !want) return false;
+    for (var i = 1; i <= 3; i++) {
+      var g = parseInt(got[i], 10);
+      var w = parseInt(want[i], 10);
+      if (g !== w) return g > w;
+    }
+    return true;
+  }
+
+  // DRIVER.verification_status, in the same words the setup wizard uses. A
+  // driver must not describe its own testing differently depending on which
+  // screen you meet it on.
+  function verificationLabel(status) {
+    if (status === "production") return "verified on hardware";
+    if (status === "beta") return "in testing";
+    if (status === "experimental") return "untested";
+    return "";
+  }
+
+  // Every driver runs locally; they are just fetched from different places.
+  // So this describes where a file came from, not a mode the driver is in.
+  function originLabel(source) {
+    if (source === "local") return "your own file";
+    if (source === "bundled") return "official, shipped with this build";
+    return "official";
+  }
+
+  // What is running, in one line. Kept apart from the DOM so the wording can
+  // be tested against a real catalog entry rather than by reading the source.
+  function runningSummary(entry) {
+    if (!entry) return null;
+    var source = entry.source || "bundled";
+    // An operator's own file carries no version the channel would recognise,
+    // so naming one would read as provenance it does not have. Point at the
+    // file instead, which is what they would edit or delete.
+    var local = source === "local";
+    var detail = [local ? entry.path || "" : originLabel(source),
+                  verificationLabel(entry.verification_status)].filter(Boolean);
+    return {
+      source: source,
+      headline: local ? "your own file" : "v" + (entry.installed_version || entry.version || "unknown"),
+      detail: detail.join(" · "),
+      // An override shadows whatever the channel offers, so installing a newer
+      // version does not change what runs. Offering Update there would be a
+      // lie the operator only discovers by debugging.
+      updatable: !!(entry.update_available && entry.repository_id && !local),
+      upstreamVersion: entry.upstream_version || ""
+    };
+  }
+
+  // GET /versions answers with VersionCandidate: {repository_id, driver:{…},
+  // installed?}. The version lives on .driver, and whether a candidate is
+  // already on disk is .installed -- not a string match against a second list.
+  function versionRows(body) {
+    var installed = (body && body.installed) || [];
+    var available = (body && body.available) || [];
+    var rows = [];
+    var seen = {};
+
+    // Two repositories can publish the same version number with different
+    // content, and ActivateInstalled tells them apart by hash. Keying on the
+    // version alone would drop one of them -- possibly the active one. The
+    // hash is the artifact's identity, so prefer it: the same file listed as
+    // both installed and available is one row, not two.
+    function push(row) {
+      var key = row.sha256 || row.version + "@" + (row.repositoryID || "");
+      if (!row.version || seen[key]) return;
+      seen[key] = true;
+      rows.push(row);
+    }
+
+    available.forEach(function (candidate) {
+      if (!candidate) return;
+      var driver = candidate.driver || {};
+      var onDisk = candidate.installed || null;
+      push({
+        version: driver.version || "",
+        sha256: (onDisk && onDisk.sha256) || driver.sha256 || "",
+        // POST /install refuses a request without one; a version by itself
+        // does not say which repository signed it.
+        repositoryID: candidate.repository_id || "",
+        downloaded: !!onDisk,
+        active: !!(onDisk && onDisk.active),
+        verification: verificationLabel((driver.metadata || {}).verification_status)
+      });
+    });
+
+    // Anything on disk the channel no longer lists -- an older version whose
+    // manifest entry has since been dropped -- is still runnable, and is
+    // exactly what someone reaches for when a new driver misbehaves.
+    installed.forEach(function (item) {
+      if (!item) return;
+      push({
+        version: item.version || "",
+        sha256: item.sha256 || "",
+        repositoryID: item.repo_id || "",
+        downloaded: true,
+        active: !!item.active,
+        verification: ""
+      });
+    });
+
+    return rows;
+  }
+
+  // The version list as its own surface, so a test can drive it with a real
+  // /versions payload. The previous version of this code read the wrong field
+  // and rendered nothing; the test that covered it matched the source with a
+  // regex, so it passed while the panel was empty on screen.
+  // Everything an operator might type: the manufacturer, the driver's name,
+  // and the models it has been run against. tested_models is the one that
+  // matters -- you know you own an SH10RT, not that you need "Sungrow SH
+  // Hybrid Inverter".
+  function catalogHaystack(e) {
+    return [e.name, e.manufacturer, e.id, e.filename]
+      .concat(e.tested_models || [])
+      .concat(e.protocols || [])
+      .join(" ").toLowerCase();
+  }
+
+  // Proven first. Four of thirty-seven have run on customer hardware and the
+  // rest have not; alphabetical order buries that.
+  var VERIFICATION_RANK = {production: 0, beta: 1, experimental: 2};
+
+  function catalogRank(e) {
+    var rank = VERIFICATION_RANK[e.verification_status];
+    return rank === undefined ? 3 : rank;
+  }
+
+  // Every term has to match somewhere, so "sungrow hybrid" narrows rather
+  // than widens.
+  function searchCatalog(entries, query) {
+    var terms = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    var matches = (entries || []).filter(function (e) {
+      if (terms.length === 0) return true;
+      var hay = catalogHaystack(e);
+      return terms.every(function (t) { return hay.indexOf(t) >= 0; });
+    });
+    return matches.sort(function (a, b) {
+      var byRank = catalogRank(a) - catalogRank(b);
+      if (byRank !== 0) return byRank;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+  }
+
+  // Several drivers already begin with the manufacturer, which read as
+  // "CTEK CTEK Chargestorm".
+  function catalogTitle(e) {
+    var name = e.name || e.filename || e.id || "";
+    var maker = e.manufacturer || "";
+    if (!maker || name.toLowerCase().indexOf(maker.toLowerCase()) === 0) return name;
+    return maker + " " + name;
+  }
+
+  S.driverVersions = {
+    runningSummary: runningSummary,
+    verificationLabel: verificationLabel,
+    versionRows: versionRows,
+    render: function (panel, driverID, body, opts) {
+      return renderVersionPicker(panel, driverID, body, opts);
+    },
+    renderSource: function (panel, body) { return renderDriverSource(panel, body); },
+    unifiedDiff: function (before, after, context) { return unifiedDiff(before, after, context); },
+    suggestUpstreamURL: function (body, edited) { return suggestUpstreamURL(body, edited); },
+    maxSuggestionURL: function () { return MAX_SUGGESTION_URL; },
+    searchCatalog: function (entries, query) { return searchCatalog(entries, query); },
+    catalogTitle: function (entry) { return catalogTitle(entry); }
+  };
+
+  // One list of everything this driver could run, and one click to switch.
+  // Switching back matters as much as switching: a version that has been
+  // downloaded stays on disk, so undo is just activating it again.
+  function renderVersionPicker(panel, driverID, body, opts) {
+    var overridden = !!(opts && opts.overridden);
+    var rows = versionRows(body);
+    panel.textContent = "";
+
+    if (rows.length === 0) {
+      panel.textContent = "No versions found for this driver.";
+      return;
+    }
+
+    if (overridden) {
+      var note = document.createElement("div");
+      note.style.color = "var(--text-dim)";
+      note.style.fontSize = "0.75rem";
+      note.style.marginBottom = "6px";
+      note.textContent = "Your own file runs while it is there. Downloading a " +
+        "version here keeps it ready without taking over.";
+      panel.appendChild(note);
+    }
+
+    rows.forEach(function (row) {
+      renderVersionRow(panel, driverID, row, rows, opts, overridden);
+    });
+
+    // The bundled copy is not an install, so /versions never lists it and no
+    // amount of activating reaches it. Once a channel version is running it is
+    // the only thing left to go back to, and it has to stay reachable after
+    // this panel closes -- not just as an undo that lives for one switch.
+    if (!overridden && opts && opts.runningSource !== "bundled") {
+      renderBundledRow(panel, driverID, opts);
+    }
+  }
+
+  function renderVersionRow(panel, driverID, row, rows, opts, overridden) {
+    var line = document.createElement("div");
+    line.style.display = "flex";
+    line.style.alignItems = "center";
+    line.style.gap = "8px";
+    line.style.marginTop = "4px";
+
+    var label = document.createElement("span");
+    label.className = "creds-badge";
+    label.textContent = "v" + row.version;
+    line.appendChild(label);
+
+    var detail = document.createElement("span");
+    detail.className = "drv-version-detail";
+    var facts = [];
+    if (row.active && !overridden) facts.push("running now");
+    else if (row.downloaded) facts.push("on disk");
+    if (row.verification) facts.push(row.verification);
+    detail.textContent = facts.join(" · ");
+    line.appendChild(detail);
+
+    var status = document.createElement("span");
+    status.className = "drv-version-status";
+
+    if (!row.active || overridden) {
+      var action = document.createElement("button");
+      action.type = "button";
+      action.className = "btn-add";
+      // An override means nothing here can take over, so the button must not
+      // claim it will. Otherwise: on disk switches instantly, anything else
+      // is fetched from the channel first.
+      action.textContent = overridden
+        ? (row.downloaded ? "Downloaded" : "Download")
+        : "Use this";
+      if (overridden && row.downloaded) action.disabled = true;
+      action.addEventListener("click", function () {
+        action.disabled = true;
+        var endpoint = row.downloaded ? "/activate" : "/install";
+        var payload = row.downloaded
+          ? {version: row.version, sha256: row.sha256 || ""}
+          : {version: row.version, repository_id: row.repositoryID || ""};
+        status.textContent = row.downloaded ? "Switching…" : "Fetching…";
+        apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + endpoint, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        }).then(function (r) {
+          return r.json().then(function (b) {
+            if (!r.ok) throw new Error(b.error || "could not switch version");
+            return b;
+          });
+        }).then(function () {
+          // It came down from the channel and is kept on disk now. Without
+          // this the next attempt would fetch it again, which fails offline
+          // for a file that is already there.
+          row.downloaded = true;
+          if (overridden) {
+            status.textContent = "Downloaded. Your own file still runs.";
+            action.textContent = "Downloaded";
+            action.disabled = true;
+            return;
+          }
+          status.textContent = "v" + row.version + " is running.";
+          // The line above the panel still named the old version, and the
+          // other rows still claimed to be running, so all three contradicted
+          // each other until the tab was re-rendered.
+          refreshSummary(opts, driverID);
+          markRunning(panel, row.version);
+          // Trying a driver and putting the old one back is the loop that
+          // makes testing safe. It must not need a second trip through the
+          // list, and it has to be repeatable -- undo re-arms this button so
+          // the next attempt is one click, not a reopened panel.
+          offerUndo(line, status, driverID, rows, opts, action, panel);
+        }).catch(function (err) {
+          status.textContent = err.message;
+          action.disabled = false;
+        });
+      });
+      line.appendChild(action);
+    }
+
+    line.appendChild(status);
+    panel.appendChild(line);
+  }
+
+  // "Back to what shipped with this build" as a standing choice, not a
+  // transient undo. POST /use_bundled refuses when no bundled copy exists
+  // rather than stopping the driver it was meant to revert.
+  function renderBundledRow(panel, driverID, opts) {
+    var line = document.createElement("div");
+    line.style.display = "flex";
+    line.style.alignItems = "center";
+    line.style.gap = "8px";
+    line.style.marginTop = "4px";
+
+    var label = document.createElement("span");
+    label.className = "creds-badge";
+    label.textContent = "bundled";
+    line.appendChild(label);
+
+    var detail = document.createElement("span");
+    detail.className = "drv-version-detail";
+    detail.textContent = "the copy shipped with this build";
+    line.appendChild(detail);
+
+    var status = document.createElement("span");
+    status.className = "drv-version-status";
+
+    var action = document.createElement("button");
+    action.type = "button";
+    action.className = "btn-add";
+    action.textContent = "Use this";
+    action.addEventListener("click", function () {
+      action.disabled = true;
+      status.textContent = "Switching…";
+      useBundled(driverID, opts).then(function () {
+        status.textContent = "The bundled driver is running.";
+        refreshSummary(opts, driverID);
+        markRunning(panel, null);
+        action.textContent = "Running";
+      }).catch(function (err) {
+        status.textContent = err.message;
+        action.disabled = false;
+      });
+    });
+
+    line.appendChild(action);
+    line.appendChild(status);
+    panel.appendChild(line);
+  }
+
+  function useBundled(driverID, opts) {
+    return apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + "/use_bundled", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({logical_path: (opts && opts.logicalPath) || ""})
+    }).then(function (r) {
+      return r.json().then(function (b) {
+        if (!r.ok) throw new Error(b.error || "could not switch to the bundled driver");
+        return b;
+      });
+    });
+  }
+
+  // Keep the summary above the panel honest after a switch. Re-rendering the
+  // whole tab would say the same thing but close the panel, which is the
+  // opposite of what someone testing two versions against each other wants.
+  //
+  // It re-reads the catalog rather than editing the text in place: which
+  // version runs, where it came from, how well tested it is and whether it may
+  // control anything are all properties of the artifact now running, and
+  // guessing any of them from the old line gets one of them wrong. The
+  // telemetry-only badge in particular differs between versions of the same
+  // driver.
+  function refreshSummary(opts, driverID) {
+    var badge = opts && opts.headlineEl;
+    if (!badge || !opts.logicalPath) return Promise.resolve();
+    return apiFetch("/api/drivers/catalog")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var entries = (data && data.entries) || [];
+        var entry = null;
+        entries.forEach(function (e) { if (e && e.path === opts.logicalPath) entry = e; });
+        if (!entry) return;
+        var summary = runningSummary(entry);
+        badge.textContent = summary.headline;
+        if (opts.detailEl) opts.detailEl.textContent = summary.detail;
+        if (opts.readOnlyEl) opts.readOnlyEl.style.display = entry.read_only ? "" : "none";
+        // The Update shortcut offers one specific version; once that version
+        // is running it is an invitation to install what is already installed.
+        if (opts.updateEl) {
+          opts.updateEl.style.display = summary.updatable &&
+            opts.updateEl.dataset.version === entry.upstream_version ? "" : "none";
+        }
+      })
+      .catch(function () { /* the switch itself already reported its result */ });
+  }
+
+  // Only one row can be running. Leaving the old one marked would have the
+  // panel contradict the line above it and itself. Nothing else in the row is
+  // touched: whether a version is on disk did not change by switching away
+  // from it.
+  function markRunning(panel, version) {
+    if (!panel) return;
+    var wanted = version === null ? "bundled" : "v" + version;
+    Array.prototype.forEach.call(panel.children, function (line) {
+      var label = line.querySelector ? line.querySelector(".creds-badge") : null;
+      var detail = line.querySelector ? line.querySelector(".drv-version-detail") : null;
+      if (!label || !detail) return;
+      var facts = detail.textContent.split(" · ").filter(function (fact) {
+        return fact !== "running now";
+      });
+      if (label.textContent === wanted) facts.unshift("running now");
+      detail.textContent = facts.join(" · ");
+    });
+  }
+
+  // The Lua that is actually running, and where it came from. Built as DOM:
+  // driver source is a file on disk that an operator may have written, and
+  // setting it as innerHTML would execute whatever is in it.
+  function renderDriverSource(panel, body) {
+    panel.textContent = "";
+
+    var header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.flexWrap = "wrap";
+    header.style.gap = "8px";
+    header.style.marginBottom = "6px";
+
+    var badge = document.createElement("span");
+    badge.className = "creds-badge";
+    badge.textContent = body.version ? "v" + body.version : body.filename || "driver";
+    header.appendChild(badge);
+
+    var detail = document.createElement("span");
+    detail.className = "drv-version-detail";
+    detail.textContent = [originLabel(body.source), body.filename, describeSize(body.bytes)]
+      .filter(Boolean).join(" · ");
+    header.appendChild(detail);
+
+    // The published artifact carries generated metadata the repository copy
+    // does not, so this is a link to the file's history, not to these bytes.
+    if (body.repository_url) {
+      var link = document.createElement("a");
+      link.href = body.repository_url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "Open in device-drivers";
+      link.style.color = "var(--accent-e)";
+      link.style.fontSize = "0.75rem";
+      header.appendChild(link);
+    }
+    panel.appendChild(header);
+
+    var pre = document.createElement("pre");
+    pre.className = "drv-source-code";
+    pre.textContent = body.lua || "";
+    panel.appendChild(pre);
+
+    var footer = document.createElement("div");
+    footer.style.alignItems = "center";
+    footer.style.display = "flex";
+    footer.style.flexWrap = "wrap";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "6px";
+
+    var digest = document.createElement("span");
+    digest.className = "drv-version-detail";
+    digest.textContent = "sha256 " + String(body.sha256 || "").slice(0, 16) + "…";
+    footer.appendChild(digest);
+
+    var edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "btn-add";
+    edit.textContent = "Edit and try";
+    edit.addEventListener("click", function () {
+      renderDriverEditor(panel, body);
+    });
+    footer.appendChild(edit);
+
+    // Everything points at the repository, including from the read view: a
+    // driver that is wrong for your hardware is worth reporting even if you
+    // have not written the fix yourself.
+    appendSuggestButton(footer, body, null);
+
+    var status = document.createElement("span");
+    status.className = "drv-draft-status";
+    footer.appendChild(status);
+
+    panel.appendChild(footer);
+
+    // A draft may already be running from an earlier visit, or from another
+    // tab. The countdown belongs to the gateway, not to this page.
+    resumeDraft(panel, body, status);
+  }
+
+  // The editor is its own surface now: a driver is tens of kilobytes of Lua,
+  // and editing that in a textarea wedged into a device row is squinting, not
+  // editing. This hands it the driver and the actions, and knows nothing about
+  // how the editor is drawn.
+  function renderDriverEditor(panel, body) {
+    if (!S.openDriverEditor) {
+      panel.textContent = "The editor did not load.";
+      return;
+    }
+    var id = encodeURIComponent(body.id);
+
+    function post(path, payload) {
+      return apiFetch("/api/drivers/" + id + path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: payload === undefined ? null : JSON.stringify(payload)
+      }).then(function (r) {
+        return r.json().then(function (b) {
+          if (!r.ok) throw new Error(b.error || "the request was refused");
+          return b;
+        });
+      });
+    }
+
+    S.openDriverEditor({
+      id: body.id,
+      filename: body.filename,
+      version: body.version,
+      bytes: body.bytes,
+      lua: body.lua,
+      sha256: body.sha256,
+      source: body.source,
+      sourceLabel: originLabel(body.source),
+      repository_url: body.repository_url
+    }, {
+      runDraft: function (lua, minutes) { return post("/draft", {lua: lua, minutes: minutes}); },
+      keepDraft: function () { return post("/draft/keep"); },
+      revertDraft: function () { return post("/draft/revert"); },
+      draftStatus: function () {
+        return apiFetch("/api/drivers/" + id + "/draft").then(function (r) { return r.json(); });
+      },
+      lint: function (lua) { return post("/lint", {lua: lua}); },
+      suggest: function (lua, say) {
+        var url = suggestUpstreamURL(body, lua);
+        if (url.length > MAX_SUGGESTION_URL) {
+          url = suggestUpstreamURL(body, "");
+          say("The driver is too large to prefill; paste it into the issue.");
+        }
+        window.open(url, "_blank", "noopener");
+      }
+    });
+  }
+
+  function resumeDraft(panel, body, status) {
+    apiFetch("/api/drivers/" + encodeURIComponent(body.id) + "/draft")
+      .then(function (r) { return r.json(); })
+      .then(function (b) {
+        if (b && b.running) showDraftRunning(panel, body, status, b.expires_at_ms);
+      })
+      .catch(function () { /* nothing is running, which is the normal case */ });
+  }
+
+  // While a draft runs, the only two things worth offering are keeping it and
+  // putting it back. Both are one click, and the clock says how long the
+  // decision stays open.
+  function showDraftRunning(panel, body, status, expiresAtMS) {
+    var host = status.parentElement || panel;
+    host.querySelectorAll(".drv-draft-action").forEach(function (el) { el.remove(); });
+
+    function tick() {
+      var left = Math.max(0, Math.round((expiresAtMS - Date.now()) / 1000));
+      if (left <= 0) {
+        status.textContent = "The draft expired and the previous driver is back.";
+        clearInterval(timer);
+        return;
+      }
+      var minutes = Math.floor(left / 60);
+      var seconds = left % 60;
+      status.textContent = "Draft running · reverts in " + minutes + ":" +
+        (seconds < 10 ? "0" : "") + seconds;
+    }
+    var timer = setInterval(tick, 1000);
+    tick();
+
+    function act(path, label, done) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-add drv-draft-action";
+      btn.textContent = label;
+      btn.addEventListener("click", function () {
+        btn.disabled = true;
+        apiFetch("/api/drivers/" + encodeURIComponent(body.id) + "/draft/" + path, {method: "POST"})
+          .then(function (r) {
+            return r.json().then(function (b) {
+              if (!r.ok) throw new Error(b.error || "could not " + path + " the draft");
+              return b;
+            });
+          }).then(function () {
+            clearInterval(timer);
+            status.textContent = done;
+            host.querySelectorAll(".drv-draft-action").forEach(function (el) { el.remove(); });
+          }).catch(function (err) {
+            status.textContent = err.message;
+            btn.disabled = false;
+          });
+      });
+      host.insertBefore(btn, status);
+    }
+
+    act("keep", "Keep it", "Kept. This is your own file now.");
+    act("revert", "Put it back", "Reverted.");
+  }
+
+  // A line diff with a little context around each change, which is what fits
+  // in a URL and what a maintainer reads anyway.
+  //
+  // Longest-common-subsequence over lines. A driver is a few thousand lines,
+  // so the quadratic table is fine here and worth the exactness: a cheaper
+  // heuristic would drift out of alignment after the first edit and report
+  // changes that were never made.
+  function unifiedDiff(before, after, context) {
+    var a = String(before).split("\n");
+    var b = String(after).split("\n");
+    var contextLines = context === undefined ? 3 : context;
+
+    var lcs = [];
+    for (var i = 0; i <= a.length; i++) lcs.push(new Array(b.length + 1).fill(0));
+    for (var i = a.length - 1; i >= 0; i--) {
+      for (var j = b.length - 1; j >= 0; j--) {
+        lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1
+          : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+
+    var ops = [];
+    var x = 0, y = 0;
+    while (x < a.length && y < b.length) {
+      if (a[x] === b[y]) { ops.push([" ", a[x]]); x++; y++; }
+      else if (lcs[x + 1][y] >= lcs[x][y + 1]) { ops.push(["-", a[x]]); x++; }
+      else { ops.push(["+", b[y]]); y++; }
+    }
+    while (x < a.length) { ops.push(["-", a[x]]); x++; }
+    while (y < b.length) { ops.push(["+", b[y]]); y++; }
+
+    // Only the changed regions, so an unchanged driver body does not fill the
+    // issue with lines nobody needs to read.
+    var keep = new Array(ops.length).fill(false);
+    ops.forEach(function (op, index) {
+      if (op[0] === " ") return;
+      for (var k = Math.max(0, index - contextLines);
+           k <= Math.min(ops.length - 1, index + contextLines); k++) {
+        keep[k] = true;
+      }
+    });
+
+    var out = [];
+    var skipping = false;
+    ops.forEach(function (op, index) {
+      if (!keep[index]) {
+        if (!skipping) { out.push("@@"); skipping = true; }
+        return;
+      }
+      skipping = false;
+      out.push(op[0] + op[1]);
+    });
+    return out.join("\n");
+  }
+
+  // Suggest the edit back to the repository the driver came from.
+  //
+  // The gateway holds no GitHub token and needs none: GitHub accepts a
+  // pre-filled issue over a URL, and the operator is already signed in to
+  // their own browser. One click opens it with the driver, the version, the
+  // hardware and the edit already written out.
+  function suggestUpstreamURL(body, edited) {
+    var title = "[" + (body.id || "driver") + "] ";
+    var lines = [
+      "What I changed and why:",
+      "",
+      "",
+      "---",
+      "Driver: " + (body.id || "") + " " + (body.version ? "v" + body.version : ""),
+      "Came from: " + originLabel(body.source),
+      "File: " + (body.filename || ""),
+      "Original sha256: " + (body.sha256 || "")
+    ];
+    if (edited && edited !== body.lua) {
+      // A diff, not the file. Drivers run to tens of kilobytes and GitHub
+      // rejects a URL past about 8k, so sending the whole file meant the code
+      // never travelled at all -- while a fix is usually a handful of lines.
+      lines.push("", "```diff", unifiedDiff(body.lua || "", edited), "```");
+    }
+    return "https://github.com/srcfl/device-drivers/issues/new" +
+      "?title=" + encodeURIComponent(title) +
+      "&body=" + encodeURIComponent(lines.join("\n"));
+  }
+
+  // GitHub rejects a URL past roughly 8k, and an edited driver is usually
+  // larger than that. Past the limit the issue is opened without the file and
+  // says so, rather than opening a page that errors.
+  var MAX_SUGGESTION_URL = 8000;
+
+  function appendSuggestButton(host, body, getEdited) {
+    var suggest = document.createElement("button");
+    suggest.type = "button";
+    suggest.className = "btn-add";
+    suggest.textContent = "Suggest to repo";
+    suggest.addEventListener("click", function () {
+      var edited = getEdited ? getEdited() : "";
+      var url = suggestUpstreamURL(body, edited);
+      var note = host.querySelector(".drv-draft-status");
+      if (url.length > MAX_SUGGESTION_URL) {
+        url = suggestUpstreamURL(body, "");
+        if (note) {
+          note.textContent = "The driver is too large to prefill; paste it into the issue.";
+        }
+      }
+      window.open(url, "_blank", "noopener");
+    });
+    host.appendChild(suggest);
+  }
+
+  function describeSize(bytes) {
+    if (typeof bytes !== "number" || bytes <= 0) return "";
+    if (bytes < 1024) return bytes + " bytes";
+    return (bytes / 1024).toFixed(1) + " kB";
+  }
+
+  // Put back whatever was running before the switch. Which call does that
+  // depends on what it was, not on its version number: a managed artifact of
+  // the same version can sit on disk from an earlier trial, and activating
+  // that is not the same file as the bundled one -- they can differ in whether
+  // the driver is allowed to control anything.
+  function offerUndo(line, status, driverID, rows, opts, action, panel) {
+    var previousVersion = opts && opts.runningVersion;
+    if (!previousVersion) return;
+    var wasBundled = opts.runningSource === "bundled";
+    var onDisk = null;
+    if (!wasBundled) {
+      rows.forEach(function (row) {
+        if (row.version === previousVersion && row.downloaded) onDisk = row;
+      });
+    }
+
+    var undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "btn-add";
+    undo.textContent = wasBundled
+      ? "Undo (back to the bundled driver)"
+      : "Undo (back to v" + previousVersion + ")";
+    undo.addEventListener("click", function () {
+      undo.disabled = true;
+      status.textContent = "Switching back…";
+      var call = wasBundled
+        ? useBundled(driverID, opts)
+        : switchBack(driverID, previousVersion, onDisk, opts);
+      call.then(function () {
+        status.textContent = wasBundled
+          ? "The bundled driver is running again."
+          : "v" + previousVersion + " is running again.";
+        refreshSummary(opts, driverID);
+        markRunning(panel, wasBundled ? null : previousVersion);
+        undo.remove();
+        if (action) action.disabled = false;
+      }).catch(function (err) {
+        status.textContent = err.message;
+        undo.disabled = false;
+      });
+    });
+    line.appendChild(undo);
+  }
+
+  // A managed version that is still on disk is activated; one that has been
+  // pruned has to be rolled back to, which steps to whatever preceded it.
+  function switchBack(driverID, version, onDisk, opts) {
+    var request = onDisk
+      ? {path: "/activate", body: {version: version, sha256: onDisk.sha256 || ""}}
+      : {path: "/rollback", body: {logical_path: (opts && opts.logicalPath) || ""}};
+    return apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + request.path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(request.body)
+    }).then(function (r) {
+      return r.json().then(function (b) {
+        if (!r.ok) throw new Error(b.error || "could not switch back");
+        return b;
+      });
+    });
+  }
+
+  function configProfilesFor(entry) {
+    if (!entry || entry.id !== "goodwe" || !versionAtLeast(entry.version, "1.0.2")) return [];
+    return DRIVER_CONFIG_PROFILES.goodwe;
+  }
+
+  function profileByValue(profiles, value) {
+    for (var i = 0; i < profiles.length; i++) {
+      if (profiles[i].value === value) return profiles[i];
+    }
+    return profiles[0] || null;
+  }
+
   S.tabs.devices = {
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
       if (!config.drivers) config.drivers = [];
       var html = '<fieldset><legend>Add from catalog</legend>' +
         '<div class="field-row"><div>' +
-        '<label>Driver <span class="help" data-help="Pick a Lua driver from the drivers/ directory. Each driver declares its capabilities (MQTT/Modbus) + which manufacturer/model it supports.">?</span></label>' +
-        '<select id="driver-catalog-picker"><option value="">Loading catalog…</option></select>' +
+        '<label>Channel</label>' +
+        '<select id="driver-catalog-channel"><option value="stable">Stable</option><option value="beta">Beta · test one driver</option></select>' +
         '</div><div>' +
+        // You know your hardware, not which driver covers it. The catalog
+        // carries tested_models for most drivers, so searching those is what
+        // turns "I have an SH10RT" into the right answer.
+        '<label>Find your device ' + help('Search by manufacturer, model or driver name. Drivers that have run on real hardware are listed first.') + '</label>' +
+        '<input type="search" id="driver-catalog-search" placeholder="e.g. SH10RT, Ferroamp, Chargestorm" autocomplete="off">' +
+        '</div></div>' +
+        // The picker stays as the selection the rest of the form reads, but
+        // the cards are what an operator actually looks at.
+        '<select id="driver-catalog-picker" hidden><option value="">Loading catalog…</option></select>' +
+        '<div id="driver-catalog-results" class="drv-catalog-results">Loading catalog…</div>' +
+        '<div class="field-row"><div>' +
         '<label>Friendly name</label><input type="text" id="driver-catalog-name" placeholder="e.g. ferroamp-house">' +
+        '</div><div id="driver-catalog-profile-wrap" hidden>' +
+        '<label>Register profile ' + help('Select the register map used by this inverter. The Unit ID remains editable after the driver is added.') + '</label>' +
+        '<select id="driver-catalog-profile"></select>' +
         '</div></div>' +
         '<button class="btn-add" id="driver-catalog-add">+ Add selected</button>' +
+        '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">Beta installs only the selected signed driver. Core and other drivers stay unchanged.</p>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
-        '🟢 production — verified on real hardware at ≥1 site · ' +
-        '🟡 beta — working on a single site, awaiting a second · ' +
-        '🔴 experimental — ported from reference, not yet proven against live hardware. ' +
-        'Hover a driver for site + date notes.' +
+        '<a href="https://github.com/srcfl/device-drivers/blob/main/SUPPORT_STATUS.md" target="_blank" rel="noopener" style="color:var(--accent-e)">Driver support and hardware test status</a>' +
         '</p>' +
         '</fieldset>';
       html += '<div class="devices-list">';
@@ -61,6 +871,10 @@
           '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
+          '<label class="driver-observe-only" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
+          '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.observe_only"' + (d.observe_only ? ' checked' : '') + '> Observe only ' +
+          help('Poll battery telemetry and show it in the dashboard, but never send charge/discharge commands. Use when another party (e.g. a retailer VPP) controls the battery.') +
+          '</label>' +
           '</div></div>' +
           '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
         if (mqtt) {
@@ -88,6 +902,7 @@
             '<label>Unit ID ' + help('Slave address. Usually 1 for a single-device setup.') + '</label>' +
             '<input type="number" data-path="drivers.' + idx + '.capabilities.modbus.unit_id" value="' + (modbus.unit_id || 1) + '">' +
             '</fieldset>';
+          html += '<div class="drv-profile-slot" data-driver-idx="' + idx + '"></div>';
         }
         // Local-HTTP vs cloud-HTTP vs vehicle-over-proxy detection by
         // declared config shape + catalog capabilities. Vehicle drivers
@@ -138,12 +953,9 @@
           // Backend auto-derives capabilities.http.allowed_hosts from config.host.
           var localCreds = caps.indexOf('apicreds') >= 0;
           var pin = (cap.http && cap.http.tls_pin_sha256) || '';
-          // Render the Disable-PV checkbox for every HTTP driver; the
-          // post-fetch pass in `after` hides it for drivers whose
-          // catalog doesn't advertise BOTH meter + pv capabilities
-          // (only those can double-count generation). Hiding via a
-          // post-render DOM edit mirrors the site-meter pattern above
-          // and avoids a re-render race with the async catalog fetch.
+          // Render overlap controls for local HTTP gateways. The post-fetch
+          // pass reveals each one only when the signed catalog says that the
+          // gateway reports both the site meter and that DER kind.
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
@@ -156,6 +968,12 @@
               (lcfg.disable_pv ? ' checked' : '') + '>' +
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
+            '</label>' +
+            '<label class="drv-disable-battery" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
+              '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_battery"' +
+              (lcfg.disable_battery ? ' checked' : '') + '>' +
+              'Disable battery readings ' +
+              help('Turn this on when another driver reports the same physical battery. It removes the duplicate battery and prevents Combined from counting its power twice.') +
             '</label>' +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint (the "fingeravtryck" in the myUplink app, or from "openssl x509 -fingerprint -sha256"). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
@@ -329,6 +1147,129 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
+      function syncCatalogProfilePicker() {
+        var picker = document.getElementById("driver-catalog-picker");
+        var wrap = document.getElementById("driver-catalog-profile-wrap");
+        var profileSelect = document.getElementById("driver-catalog-profile");
+        if (!picker || !wrap || !profileSelect) return;
+        var chosen = picker.options[picker.selectedIndex];
+        var entry = chosen ? { id: chosen.dataset.id, version: chosen.dataset.version } : null;
+        var profiles = configProfilesFor(entry);
+        wrap.hidden = profiles.length === 0;
+        profileSelect.innerHTML = "";
+        profiles.forEach(function (profile) {
+          var opt = document.createElement("option");
+          opt.value = profile.value;
+          opt.textContent = profile.label + " · Unit ID " + profile.unitId;
+          profileSelect.appendChild(opt);
+        });
+      }
+
+      function populateCatalogPicker(entries, channel) {
+        var sel = document.getElementById("driver-catalog-picker");
+        if (!sel) return;
+        sel.innerHTML = "";
+        if (entries.length === 0) {
+          sel.innerHTML = "<option value=''>(no drivers found)</option>";
+          return;
+        }
+        // Nothing is chosen until the operator chooses. A select takes its
+        // first option on its own, which with cards means one sits silently
+        // outlined and Add would fetch a driver nobody asked for.
+        sel.appendChild(document.createElement("option"));
+        entries.forEach(function (e) {
+          var opt = document.createElement("option");
+          opt.value = e.path;
+          var protoLabel = (e.protocols || []).join("+");
+          opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
+          opt.dataset.protocols = protoLabel;
+          opt.dataset.capabilities = JSON.stringify(e.capabilities || []);
+          opt.dataset.id = e.id || "";
+          opt.dataset.version = e.version || "";
+          opt.dataset.channel = channel;
+          opt.dataset.httpHosts = (e.http_hosts || []).join(",");
+          opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
+          opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
+          opt.dataset.readOnly = e.read_only ? "true" : "false";
+          sel.appendChild(opt);
+        });
+        S.catalogEntries = entries;
+        renderCatalogCards(entries);
+        syncCatalogProfilePicker();
+      }
+
+      function renderCatalogCards(entries) {
+        var host = document.getElementById("driver-catalog-results");
+        var search = document.getElementById("driver-catalog-search");
+        var picker = document.getElementById("driver-catalog-picker");
+        if (!host || !picker) return;
+
+        var query = (search && search.value || "").trim();
+        var matches = searchCatalog(entries, query);
+
+        host.textContent = "";
+        if (matches.length === 0) {
+          var empty = document.createElement("div");
+          empty.className = "drv-version-detail";
+          empty.textContent = "No driver matches “" + query + "”. " +
+            "Try the manufacturer, or the model printed on the unit.";
+          host.appendChild(empty);
+          return;
+        }
+
+        matches.forEach(function (e) {
+          host.appendChild(catalogCard(e, picker, host, entries));
+        });
+      }
+
+      function catalogCard(e, picker, host, entries) {
+        var card = document.createElement("button");
+        card.type = "button";
+        card.className = "drv-catalog-card";
+        if (picker.value === e.path) card.classList.add("is-chosen");
+
+        var title = document.createElement("div");
+        title.className = "drv-catalog-title";
+        title.textContent = catalogTitle(e);
+        card.appendChild(title);
+
+        var tags = document.createElement("div");
+        tags.className = "drv-catalog-tags";
+        (e.capabilities || []).forEach(function (cap) {
+          var tag = document.createElement("span");
+          tag.className = "drv-catalog-tag";
+          tag.textContent = cap;
+          tags.appendChild(tag);
+        });
+        var verdict = verificationLabel(e.verification_status);
+        if (verdict) {
+          var badge = document.createElement("span");
+          badge.className = "drv-catalog-tag drv-catalog-" +
+            (e.verification_status === "production" ? "proven" : "unproven");
+          badge.textContent = verdict;
+          tags.appendChild(badge);
+        }
+        card.appendChild(tags);
+
+        // The models this has actually been run against — the thing an
+        // operator can compare with the label on their own unit.
+        var models = (e.tested_models || []).slice(0, 3).join(", ");
+        var foot = document.createElement("div");
+        foot.className = "drv-catalog-foot";
+        foot.textContent = [(e.protocols || []).join(" + "), e.version ? "v" + e.version : "", models]
+          .filter(Boolean).join(" · ");
+        card.appendChild(foot);
+
+        card.addEventListener("click", function () {
+          picker.value = e.path;
+          // The rest of the form listens to the select, so tell it the value
+          // moved rather than only setting it.
+          picker.dispatchEvent(new Event("change", {bubbles: true}));
+          renderCatalogCards(entries);
+        });
+        return card;
+      }
+
       apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
@@ -347,20 +1288,44 @@
           if (!entry) return;
           var source = entry.source || "bundled";
           var version = entry.installed_version || entry.version || "unknown";
-          var html = '<span class="creds-badge">' + escHtml(source) + ' · v' + escHtml(version) + '</span>';
-          if (entry.read_only) {
-            html += ' <span class="creds-badge">telemetry only</span>';
-          }
-          if (entry.update_available && entry.repository_id) {
+          var summary = runningSummary(entry);
+          // What is running, in words: which version, where the file came
+          // from, and how well tested it is. The catalog has carried
+          // verification_status all along and this view never showed it, so an
+          // operator could update onto an untested driver without being told.
+          var html = '<span class="creds-badge drv-module-headline">' + escHtml(summary.headline) + '</span>' +
+            ' <span class="drv-module-detail">' + escHtml(summary.detail) + '</span>';
+          // Always present, hidden when it does not apply, so a switch can
+          // show or hide it: whether a driver may control anything differs
+          // between versions of the same driver.
+          html += ' <span class="creds-badge drv-module-readonly"' +
+            (entry.read_only ? '' : ' style="display:none"') + '>telemetry only</span>';
+          if (summary.updatable) {
             html += ' <button class="btn-add drv-module-update" type="button" data-driver-id="' + escHtml(entry.id) +
               '" data-repository-id="' + escHtml(entry.repository_id) + '" data-version="' + escHtml(entry.upstream_version) + '">Update to v' +
               escHtml(entry.upstream_version) + '</button>';
           }
-          if (source === "managed") {
-            html += ' <button class="btn-add drv-module-rollback" type="button" data-driver-id="' + escHtml(entry.id) +
-              '" data-logical-path="' + escHtml(entry.path) + '">Rollback</button>';
+          // An override shadows the channel, so installing a newer version
+          // would not change what runs. Say that, rather than offering an
+          // Update button that appears to do nothing.
+          if (source === "local" && entry.upstream_version) {
+            html += ' <span style="color:var(--text-dim);font-size:0.75rem">' +
+              'official v' + escHtml(entry.upstream_version) + ' exists; your file keeps running</span>';
           }
+          // One list, including for an override: seeing what else you could
+          // run is the whole point when you are testing your own driver.
+          // Rollback is gone -- stepping back is picking an older row.
+          html += ' <button class="btn-add drv-module-versions" type="button" data-driver-id="' +
+            escHtml(entry.id) + '" data-source="' + escHtml(source) + '" data-running-version="' +
+            escHtml(version) + '" data-logical-path="' + escHtml(entry.path) + '">Versions</button>';
+          // A driver is one Lua file and the repository is the source of
+          // truth, but from here there was no way to read the code that is
+          // running -- so a fix for someone's inverter stayed on their machine.
+          html += ' <button class="btn-add drv-module-source" type="button" data-driver-id="' +
+            escHtml(entry.id) + '">Source</button>';
           html += ' <span class="drv-module-action"></span>';
+          html += '<div class="drv-module-versions-panel" style="display:none;margin-top:6px"></div>';
+          html += '<div class="drv-module-source-panel" style="display:none;margin-top:6px"></div>';
           slot.innerHTML = html;
         });
         bodyEl.querySelectorAll(".drv-module-update").forEach(function (btn) {
@@ -376,17 +1341,79 @@
               .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
           });
         });
-        bodyEl.querySelectorAll(".drv-module-rollback").forEach(function (btn) {
+        bodyEl.querySelectorAll(".drv-module-versions").forEach(function (btn) {
           btn.addEventListener("click", function () {
-            btn.disabled = true;
-            var status = btn.parentElement.querySelector(".drv-module-action");
-            if (status) status.textContent = " Rolling back…";
-            apiFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/rollback", {
-              method: "POST", headers: {"Content-Type":"application/json"},
-              body: JSON.stringify({logical_path: btn.dataset.logicalPath})
-            }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
-              .then(function () { if (status) status.textContent = " Previous driver restored."; })
-              .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
+            var panel = btn.parentElement.querySelector(".drv-module-versions-panel");
+            if (!panel) return;
+            if (panel.style.display !== "none") { panel.style.display = "none"; return; }
+            panel.style.display = "block";
+            panel.textContent = "Loading versions…";
+            var id = btn.dataset.driverId;
+            apiFetch("/api/device_repository/drivers/" + encodeURIComponent(id) + "/versions")
+              .then(function (r) {
+                return r.json().then(function (body) {
+                  if (!r.ok) throw new Error(body.error || "could not list versions");
+                  return body;
+                });
+              })
+              .then(function (body) {
+                renderVersionPicker(panel, id, body, {
+                  overridden: btn.dataset.source === "local",
+                  runningSource: btn.dataset.source,
+                  runningVersion: btn.dataset.runningVersion,
+                  logicalPath: btn.dataset.logicalPath,
+                  // So a switch can correct the summary line above without
+                  // re-rendering the tab, which would close this panel.
+                  headlineEl: btn.parentElement.querySelector(".drv-module-headline"),
+                  detailEl: btn.parentElement.querySelector(".drv-module-detail"),
+                  updateEl: btn.parentElement.querySelector(".drv-module-update"),
+                  readOnlyEl: btn.parentElement.querySelector(".drv-module-readonly")
+                });
+              })
+              .catch(function (err) { panel.textContent = err.message; });
+          });
+        });
+        bodyEl.querySelectorAll(".drv-module-source").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var panel = btn.parentElement.querySelector(".drv-module-source-panel");
+            if (!panel) return;
+            if (panel.style.display !== "none") { panel.style.display = "none"; return; }
+            panel.style.display = "block";
+            panel.textContent = "Loading source…";
+            var id = btn.dataset.driverId;
+            apiFetch("/api/drivers/" + encodeURIComponent(id) + "/source")
+              .then(function (r) {
+                return r.json().then(function (body) {
+                  if (!r.ok) throw new Error(body.error || "could not read the driver");
+                  return body;
+                });
+              })
+              .then(function (body) { renderDriverSource(panel, body); })
+              .catch(function (err) { panel.textContent = err.message; });
+          });
+        });
+        bodyEl.querySelectorAll(".drv-profile-slot").forEach(function (slot) {
+          var dIdx = parseInt(slot.getAttribute("data-driver-idx"), 10);
+          var d = config.drivers[dIdx];
+          if (!d || !d.lua) return;
+          var entry = byLua[d.lua];
+          var profiles = configProfilesFor(entry);
+          if (profiles.length === 0) return;
+          var current = (d.config && d.config.profile) || profiles[0].value;
+          var fs = '<fieldset><legend>Driver profile</legend>' +
+            '<label>Register profile ' + help('Choose the register map for this GoodWe model. Changing the profile also fills its usual Unit ID; you can edit that ID before saving.') + '</label>' +
+            '<select class="drv-profile-select" data-driver-idx="' + dIdx + '" data-path="drivers.' + dIdx + '.config.profile">';
+          profiles.forEach(function (profile) {
+            fs += '<option value="' + escHtml(profile.value) + '"' + (profile.value === current ? ' selected' : '') + '>' +
+              escHtml(profile.label + " · Unit ID " + profile.unitId) + '</option>';
+          });
+          fs += '</select></fieldset>';
+          slot.innerHTML = fs;
+          var select = slot.querySelector(".drv-profile-select");
+          if (select) select.addEventListener("change", function () {
+            var selected = profileByValue(profiles, select.value);
+            var unitInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.capabilities.modbus.unit_id"]');
+            if (selected && unitInput) unitInput.value = String(selected.unitId);
           });
         });
         // Populate per-driver secret inputs (api_token, etc.) using the
@@ -465,6 +1492,15 @@
             lbl.style.display = "flex";
           }
         });
+        bodyEl.querySelectorAll(".drv-disable-battery").forEach(function (lbl) {
+          var lua = lbl.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          if (!entry) return;
+          var caps = entry.capabilities || [];
+          if (caps.indexOf("meter") >= 0 && caps.indexOf("battery") >= 0) {
+            lbl.style.display = "flex";
+          }
+        });
         bodyEl.querySelectorAll(".driver-battery-capacity").forEach(function (wrap) {
           var lua = wrap.getAttribute("data-drv-lua");
           var entry = lua && byLua[lua];
@@ -484,38 +1520,70 @@
           var caps = (entry && entry.capabilities) || [];
           wrap.hidden = caps.indexOf("apicreds") < 0;
         });
-        var sel = document.getElementById("driver-catalog-picker");
-        if (!sel) return;
-        sel.innerHTML = "";
-        if (entries.length === 0) {
-          sel.innerHTML = "<option value=''>(no drivers found in drivers/)</option>";
+        populateCatalogPicker(entries, "stable");
+      });
+
+      // Filtering happens over the catalog already fetched, so typing costs
+      // nothing and there is no debounce to get wrong.
+      var catalogSearch = document.getElementById("driver-catalog-search");
+      if (catalogSearch) catalogSearch.addEventListener("input", function () {
+        renderCatalogCards(S.catalogEntries || []);
+      });
+
+      var channelSelect = document.getElementById("driver-catalog-channel");
+      if (channelSelect) channelSelect.addEventListener("change", function () {
+        if (channelSelect.value === "stable") {
+          apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+            populateCatalogPicker((data && data.entries) || [], "stable");
+          });
           return;
         }
-        entries.forEach(function (e) {
-          var opt = document.createElement("option");
-          opt.value = e.path;
-          var protoLabel = (e.protocols || []).join("+");
-          var badge =
-            e.verification_status === "production" ? "🟢 " :
-            e.verification_status === "beta" ? "🟡 " : "🔴 ";
-          opt.textContent = badge + (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
-          opt.dataset.protocols = protoLabel;
-          opt.dataset.id = e.id || "";
-          opt.dataset.httpHosts = (e.http_hosts || []).join(",");
-          opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
-          opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
-          opt.dataset.verificationStatus = e.verification_status || "experimental";
-          opt.dataset.readOnly = e.read_only ? "true" : "false";
-          if (e.verification_notes) opt.title = e.verification_notes;
-          sel.appendChild(opt);
-        });
+        var sel = document.getElementById("driver-catalog-picker");
+        if (sel) sel.innerHTML = "<option value=''>Loading signed beta…</option>";
+        apiFetch("/api/device_repository/catalog?channel=beta")
+          .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "beta catalog failed"); return body; }); })
+          .then(function (data) {
+            var entries = ((data && data.entries) || []).map(function (candidate) {
+              var signed = (candidate && candidate.driver) || {};
+              return Object.assign({}, signed.metadata || {}, {
+                id: signed.id,
+                path: signed.path,
+                filename: signed.filename,
+                version: signed.version,
+                read_only: signed.read_only
+              });
+            });
+            populateCatalogPicker(entries, "beta");
+          })
+          .catch(function (err) {
+            if (sel) {
+              sel.innerHTML = "";
+              var opt = document.createElement("option");
+              opt.value = "";
+              opt.textContent = err.message;
+              sel.appendChild(opt);
+            }
+          });
       });
+
+      var catalogPicker = document.getElementById("driver-catalog-picker");
+      if (catalogPicker) catalogPicker.addEventListener("change", syncCatalogProfilePicker);
 
       var btn = document.getElementById("driver-catalog-add");
       if (btn) btn.addEventListener("click", function () {
         var sel = document.getElementById("driver-catalog-picker");
         var nameEl = document.getElementById("driver-catalog-name");
-        if (!sel || !sel.value) return;
+        if (!sel || !sel.value) {
+          // Doing nothing silently reads as a broken button.
+          var results = document.getElementById("driver-catalog-results");
+          if (results) {
+            var say = results.querySelector(".drv-catalog-hint") ||
+              results.insertBefore(document.createElement("div"), results.firstChild);
+            say.className = "drv-catalog-hint drv-version-detail";
+            say.textContent = "Pick a device above first.";
+          }
+          return;
+        }
         ctx.captureCurrentTab();
         var chosen = sel.options[sel.selectedIndex];
         var protocols = (chosen.dataset.protocols || "").split("+");
@@ -524,6 +1592,13 @@
         driver.capabilities = {};
         if (protocols.indexOf("mqtt") >= 0) driver.capabilities.mqtt = { host: "", port: 1883 };
         if (protocols.indexOf("modbus") >= 0) driver.capabilities.modbus = { host: "", port: 502, unit_id: 1 };
+        var profileSelect = document.getElementById("driver-catalog-profile");
+        var profiles = configProfilesFor({ id: chosen.dataset.id, version: chosen.dataset.version });
+        if (profileSelect && profiles.length > 0) {
+          var selectedProfile = profileByValue(profiles, profileSelect.value);
+          driver.config = { profile: selectedProfile.value };
+          if (driver.capabilities.modbus) driver.capabilities.modbus.unit_id = selectedProfile.unitId;
+        }
         if (protocols.indexOf("http") >= 0) {
           var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
           driver.capabilities.http = { allowed_hosts: hosts };
@@ -531,7 +1606,10 @@
           // {host} or {email,password,serial}. Detect via catalog
           // capability so existing local-HTTP and cloud branches stay
           // untouched.
-          var entry = (S.catalogByLua || {})[sel.value];
+          var entry = (S.catalogByLua || {})[sel.value] || {
+            capabilities: JSON.parse(chosen.dataset.capabilities || "[]"),
+            read_only: chosen.dataset.readOnly === "true"
+          };
           var entryCaps = (entry && entry.capabilities) || [];
           if (entry && entry.read_only && entryCaps.indexOf("battery") >= 0) {
             // Admit the battery reading without adding the gateway to the
@@ -570,8 +1648,26 @@
             driver.config = { email: "", password: "", serial: "" };
           }
         }
-        config.drivers.push(driver);
-        ctx.renderTab("devices");
+        var finishAdd = function () {
+          config.drivers.push(driver);
+          ctx.renderTab("devices");
+        };
+        if (chosen.dataset.channel !== "beta") {
+          finishAdd();
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "Installing signed beta…";
+        apiFetch("/api/device_repository/drivers/" + encodeURIComponent(chosen.dataset.id) + "/install", {
+          method: "POST", headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({channel: "beta", version: chosen.dataset.version})
+        }).then(function (r) {
+          return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "beta install failed"); return body; });
+        }).then(finishAdd).catch(function (err) {
+          window.alert("Beta driver install failed: " + err.message);
+          btn.disabled = false;
+          btn.textContent = "+ Add selected";
+        });
       });
 
       // Cloud-driver Connect buttons.

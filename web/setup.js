@@ -150,6 +150,14 @@
       });
   }
 
+  // DRIVER.verification_status, in words an operator can act on.
+  function verificationLabel(status) {
+    if (status === 'production') return 'verified on hardware';
+    if (status === 'beta') return 'in testing';
+    if (status === 'experimental') return 'untested';
+    return '';
+  }
+
   function populateDriverDropdown() {
     var sel = document.getElementById('driver-select');
     sel.innerHTML = '<option value="">-- Select a driver --</option>';
@@ -166,8 +174,14 @@
       }
 
       var label = '';
-      if (entry.manufacturer) label += entry.manufacturer + ' ';
-      label += entry.name || entry.filename;
+      var displayName = entry.name || entry.filename;
+      // Several drivers already begin their name with the manufacturer, which
+      // read as "Sungrow Sungrow SH Hybrid Inverter".
+      if (entry.manufacturer && displayName.toLowerCase()
+            .indexOf(entry.manufacturer.toLowerCase()) !== 0) {
+        label += entry.manufacturer + ' ';
+      }
+      label += displayName;
       if (entry.protocols && entry.protocols.length > 0) {
         label += ' (' + entry.protocols.join(', ');
         if (entry.capabilities && entry.capabilities.length > 0) {
@@ -175,6 +189,12 @@
         }
         label += ')';
       }
+      // Say how well tested it is. The signed channel carries drivers that
+      // have run on customer sites for months alongside ones nobody has ever
+      // put on hardware, and an operator choosing between them should not have
+      // to guess which is which.
+      var verdict = verificationLabel(entry.verification_status);
+      if (verdict) label += ' — ' + verdict;
 
       var opt = document.createElement('option');
       opt.value = String(idx);
@@ -213,8 +233,33 @@
     selectedCatalog = driverCatalog[parseInt(sel.value, 10)];
     btn.disabled = false;
 
-    if (selectedCatalog.description) {
-      descEl.textContent = selectedCatalog.description;
+    var lines = [];
+    if (selectedCatalog.description) lines.push(selectedCatalog.description);
+
+    var version = selectedCatalog.installed_version || selectedCatalog.version;
+    var provenance = [];
+    if (version) provenance.push('version ' + version);
+    // Where the file came from: an operator's own override, a signed artifact
+    // from the channel, or the copy bundled with this build.
+    if (selectedCatalog.source === 'local') provenance.push('your own override');
+    else if (selectedCatalog.source === 'managed') provenance.push('signed driver channel');
+    else if (selectedCatalog.source === 'bundled') provenance.push('bundled with this build');
+    if (provenance.length) lines.push(provenance.join(' · '));
+
+    var verdict = verificationLabel(selectedCatalog.verification_status);
+    if (verdict) {
+      var note = selectedCatalog.verification_notes;
+      lines.push(note ? verdict + ' — ' + note : verdict);
+    }
+
+    if (lines.length) {
+      descEl.textContent = '';
+      lines.forEach(function (line, i) {
+        var el = document.createElement('div');
+        el.textContent = line;
+        if (i > 0) el.style.marginTop = '4px';
+        descEl.appendChild(el);
+      });
       descEl.style.display = 'block';
     } else {
       descEl.style.display = 'none';

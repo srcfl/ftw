@@ -24,7 +24,9 @@
   }
 
   let lastModels = {};
+  let observeOnlyDrivers = {};
   let tunePollHandle = null;
+  let lastTuneStatus = null;
 
   // Keep the latest models payload available for advanced diagnostics and
   // self-tune, but do not render model internals on normal driver cards.
@@ -58,13 +60,31 @@
 
   // ---- Self-tune modal ----
 
+  function controllableTuneBatteries() {
+    return Object.keys(lastModels).filter(function (n) {
+      return !observeOnlyDrivers[n];
+    }).sort();
+  }
+
   function openModal() {
     modal.classList.remove("hidden");
     setStatus("");
     fetchModels();
     // Decide what to render: idle (checklist), active (progress), or done (diff)
-    apiFetch("/api/self_tune/status")
-      .then(function (r) { return r.json(); })
+    Promise.all([
+      apiFetch("/api/self_tune/status").then(function (r) { return r.json(); }),
+      apiFetch("/api/status").then(function (r) { return r.ok ? r.json() : {}; }),
+    ])
+      .then(function (results) {
+        var s = results[0];
+        var status = results[1] || {};
+        observeOnlyDrivers = {};
+        var drvs = status.drivers || {};
+        Object.keys(drvs).forEach(function (name) {
+          if (drvs[name] && drvs[name].observe_only) observeOnlyDrivers[name] = true;
+        });
+        return s;
+      })
       .then(function (s) {
         if (s.active) {
           startBtn.style.display = "none";
@@ -85,8 +105,35 @@
       });
   }
 
+  function batteriesFromChecklist() {
+    var batteries = [];
+    body.querySelectorAll("[data-tune-battery]").forEach(function (c) {
+      if (c.checked) batteries.push(c.dataset.tuneBattery);
+    });
+    return batteries;
+  }
+
+  function batteriesFromStatus(s) {
+    if (!s || !s.after) return [];
+    return Object.keys(s.after).filter(function (n) {
+      return !observeOnlyDrivers[n];
+    });
+  }
+
+  function selectedBatteries() {
+    var fromChecklist = batteriesFromChecklist();
+    if (fromChecklist.length > 0) return fromChecklist;
+    return batteriesFromStatus(lastTuneStatus);
+  }
+
   function renderChecklist() {
-    var names = Object.keys(lastModels).sort();
+    lastTuneStatus = null;
+    var names = controllableTuneBatteries();
+    var checklistHtml = names.length
+      ? names.map(function (n) {
+          return '<label><input type="checkbox" data-tune-battery="' + esc(n) + '" checked> ' + esc(n) + '</label>';
+        }).join("")
+      : '<p style="color:var(--text-dim);font-size:0.85rem;margin:0">No controllable batteries available for self-tune.</p>';
     body.innerHTML =
       '<p style="color:var(--text-dim);font-size:0.9rem;margin:0 0 8px 0">' +
       'Pause grid balancing for ~3 minutes per battery. Drives each through a known step pattern, ' +
@@ -99,9 +146,7 @@
       '&nbsp;&nbsp;• Battery SoC between 30–70%' +
       '</div>' +
       '<div class="self-tune-checklist">' +
-      names.map(function (n) {
-        return '<label><input type="checkbox" data-tune-battery="' + esc(n) + '" checked> ' + esc(n) + '</label>';
-      }).join("") +
+      checklistHtml +
       '</div>';
   }
 
@@ -152,6 +197,7 @@
   }
 
   function renderDiff(s) {
+    lastTuneStatus = s;
     var rows = '';
     var names = Object.keys(s.after);
     names.forEach(function (n) {
@@ -230,9 +276,7 @@
   if (modal) modal.addEventListener("click", function (e) { if (e.target === modal) closeModal(); });
 
   if (startBtn) startBtn.addEventListener("click", function () {
-    var checks = body.querySelectorAll("[data-tune-battery]");
-    var batteries = [];
-    checks.forEach(function (c) { if (c.checked) batteries.push(c.dataset.tuneBattery); });
+    var batteries = selectedBatteries();
     if (batteries.length === 0) {
       setStatus("Select at least one battery", "error");
       return;

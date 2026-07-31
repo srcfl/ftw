@@ -10,23 +10,59 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
 
-const OptimizerProtocolVersion = 1
+const (
+	OptimizerProtocolVersion    = optimizercontract.ProtocolVersion
+	OptimizerProtocolMinVersion = optimizercontract.MinProtocolVersion
+)
+
+// formatProtocolRange keeps a single-version window reading as "1" rather than
+// "1-1", because that is what both sides report today.
+func formatProtocolRange(min, max int) string {
+	if min == max {
+		return strconv.Itoa(min)
+	}
+	return strconv.Itoa(min) + "-" + strconv.Itoa(max)
+}
 
 // OptimizerRuntimeInfo is returned by the sidecar handshake and exposed to
 // component diagnostics. Protocol compatibility, not matching app versions,
 // decides whether core may use a separately released optimizer.
 type OptimizerRuntimeInfo struct {
-	Name            string   `json:"name"`
-	Version         string   `json:"version"`
-	ProtocolVersion int      `json:"protocol_version"`
-	Features        []string `json:"features"`
-	BuildSHA        string   `json:"build_sha,omitempty"`
-	Transport       string   `json:"transport"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	ProtocolVersion int    `json:"protocol_version"`
+	// ProtocolMin and ProtocolMax are the optional window an optimizer speaks.
+	// Omitting them means "exactly ProtocolVersion", which is what every
+	// optimizer released so far reports.
+	ProtocolMin int      `json:"protocol_min,omitempty"`
+	ProtocolMax int      `json:"protocol_max,omitempty"`
+	Features    []string `json:"features"`
+	BuildSHA    string   `json:"build_sha,omitempty"`
+	Transport   string   `json:"transport"`
+}
+
+// protocolWindow resolves the versions this optimizer claims to speak. An
+// optimizer that reports only protocol_version pins to that single value.
+func (i OptimizerRuntimeInfo) protocolWindow() (int, int) {
+	min, max := i.ProtocolMin, i.ProtocolMax
+	if min == 0 {
+		min = i.ProtocolVersion
+	}
+	if max == 0 {
+		max = i.ProtocolVersion
+	}
+	if max < min {
+		min, max = max, min
+	}
+	return min, max
 }
 
 // OptimizerTransport owns request framing and lifecycle only. The request
@@ -85,18 +121,59 @@ func (t *ProcessTransport) RoundTrip(ctx context.Context, payload []byte) ([]byt
 	return line, nil
 }
 
-func (t *ProcessTransport) Health(context.Context) (OptimizerRuntimeInfo, error) {
-	return OptimizerRuntimeInfo{
-		Name: "ftw-optimizer", Version: "bundled",
-		ProtocolVersion: OptimizerProtocolVersion,
-		Features:        []string{"champion", "recourse", "multistage"},
-		Transport:       "process",
-	}, nil
+func (t *ProcessTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cancelIdleStopLocked()
+	if err := ctx.Err(); err != nil {
+		return OptimizerRuntimeInfo{}, err
+	}
+	if err := t.ensureStartedLocked(); err != nil {
+		return OptimizerRuntimeInfo{}, err
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"type":             "handshake",
+		"protocol_version": OptimizerProtocolVersion,
+	})
+	if _, err := t.stdin.Write(append(payload, '\n')); err != nil {
+		t.stopLocked()
+		return OptimizerRuntimeInfo{}, fmt.Errorf("write optimizer handshake: %w", err)
+	}
+	line, err := scanLine(ctx, t.scanner)
+	if err != nil {
+		t.stopLocked()
+		return OptimizerRuntimeInfo{}, fmt.Errorf("read optimizer handshake: %w", err)
+	}
+	info, err := decodeOptimizerHandshake(line, "process")
+	if err != nil {
+		t.stopLocked()
+		return OptimizerRuntimeInfo{}, err
+	}
+	t.scheduleIdleStopLocked()
+	return info, nil
 }
+
+// errOptimizerWorkerMissing marks the absence of the bundled Python worker
+// interpreter in this build. The containerized core ships no Python — the
+// optimizer runs as the separate ftw-optimizer sidecar — so a missing
+// interpreter is the expected state there, not a defect. Callers can use
+// errors.Is to surface an actionable "sidecar unavailable" state instead of a
+// bare `exec: "python3": ... not found in $PATH`, which reads as a missing core
+// dependency and hides the real remedy.
+var errOptimizerWorkerMissing = errors.New(
+	"optimizer worker interpreter not found on PATH; this core build has no bundled Python optimizer — run the ftw-optimizer sidecar (see docs/self-update.md)")
 
 func (t *ProcessTransport) ensureStartedLocked() error {
 	if t.cmd != nil {
 		return nil
+	}
+	// Resolve the interpreter before fork/exec so an absent worker (the normal
+	// case on the containerized core) returns errOptimizerWorkerMissing rather
+	// than the low-level exec error. LookPath also accepts an absolute command
+	// path, so native/all-in-one deployments that set FTW_OPTIMIZER_PYTHON keep
+	// working unchanged.
+	if _, err := exec.LookPath(t.cfg.Command[0]); err != nil {
+		return fmt.Errorf("optimizer worker %q unavailable: %w", t.cfg.Command[0], errOptimizerWorkerMissing)
 	}
 	cmd := exec.Command(t.cfg.Command[0], t.cfg.Command[1:]...)
 	cmd.Stderr = os.Stderr
@@ -110,9 +187,12 @@ func (t *ProcessTransport) ensureStartedLocked() error {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
 		return fmt.Errorf("optimizer stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return fmt.Errorf("start optimizer %q: %w", t.cfg.Command[0], err)
 	}
 	waitCh := make(chan error, 1)
@@ -210,25 +290,61 @@ func (t *UnixTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error
 	if err != nil {
 		return OptimizerRuntimeInfo{}, err
 	}
+	return decodeOptimizerHandshake(line, "unix")
+}
+
+func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeInfo, error) {
 	var info OptimizerRuntimeInfo
 	if err := json.Unmarshal(line, &info); err != nil {
 		return OptimizerRuntimeInfo{}, fmt.Errorf("decode optimizer handshake: %w", err)
 	}
-	if info.ProtocolVersion != OptimizerProtocolVersion {
-		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer protocol version %d, want %d", info.ProtocolVersion, OptimizerProtocolVersion)
+	if info.Name != "ftw-optimizer" {
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer handshake name %q, want %q", info.Name, "ftw-optimizer")
 	}
-	info.Transport = "unix"
+	// Both mismatches below mean the same thing in the field: the Optimizer
+	// image is older than this Core. Core updates do not touch Optimizer — it
+	// has its own release series and its own button — and the container's own
+	// healthcheck validates its own handshake against its own constants, so an
+	// old Optimizer reports itself healthy while Core refuses to use it. The
+	// only signal an operator gets is a plan silently served by the Go
+	// fallback, so these strings have to say what to do, not just what failed.
+	if min, max := info.protocolWindow(); !optimizercontract.Compatible(min, max) {
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer speaks protocol %s but this Core accepts %s — update Optimizer in Update Center",
+			formatProtocolRange(min, max),
+			formatProtocolRange(OptimizerProtocolMinVersion, OptimizerProtocolVersion))
+	}
+	if !optimizerHasFeature(info, "champion") {
+		which := "optimizer"
+		if v := strings.TrimSpace(info.Version); v != "" {
+			which = "optimizer " + v
+		}
+		return OptimizerRuntimeInfo{}, fmt.Errorf("%s is too old for this Core (no champion solver) — update Optimizer in Update Center", which)
+	}
+	info.Transport = transport
 	return info, nil
 }
 
 func (t *UnixTransport) Close() error { return nil }
 
-// AutoTransport prefers an independently updated sidecar, but treats it as an
-// optional capability. Socket absence, failed handshake, protocol mismatch, or
-// a broken request all retry once through the bundled process transport.
+// AutoTransport is an explicit native/development mode. It prefers an
+// independently updated sidecar, then tries a local process. Official
+// containers select unix transport so Core falls straight back to Go DP.
 type AutoTransport struct {
 	primary  OptimizerTransport
 	fallback OptimizerTransport
+}
+
+type autoTransportError struct {
+	primary  error
+	fallback error
+}
+
+func (e *autoTransportError) Error() string {
+	return fmt.Sprintf("optimizer sidecar failed: %v; process fallback failed: %v", e.primary, e.fallback)
+}
+
+func (e *autoTransportError) Unwrap() []error {
+	return []error{e.primary, e.fallback}
 }
 
 func NewAutoTransport(primary, fallback OptimizerTransport) *AutoTransport {
@@ -236,12 +352,22 @@ func NewAutoTransport(primary, fallback OptimizerTransport) *AutoTransport {
 }
 
 func (t *AutoTransport) RoundTrip(ctx context.Context, payload []byte) ([]byte, error) {
-	if info, err := t.primary.Health(ctx); err == nil && optimizerHasFeature(info, requiredOptimizerFeature(payload)) {
-		if response, err := t.primary.RoundTrip(ctx, payload); err == nil {
+	requiredFeature := requiredOptimizerFeature(payload)
+	info, primaryErr := t.primary.Health(ctx)
+	if primaryErr == nil {
+		if !optimizerHasFeature(info, requiredFeature) {
+			primaryErr = fmt.Errorf("optimizer handshake is missing required %s feature", requiredFeature)
+		} else if response, err := t.primary.RoundTrip(ctx, payload); err == nil {
 			return response, nil
+		} else {
+			primaryErr = err
 		}
 	}
-	return t.fallback.RoundTrip(ctx, payload)
+	response, fallbackErr := t.fallback.RoundTrip(ctx, payload)
+	if fallbackErr != nil {
+		return nil, &autoTransportError{primary: primaryErr, fallback: fallbackErr}
+	}
+	return response, nil
 }
 
 func requiredOptimizerFeature(payload []byte) string {
@@ -269,10 +395,15 @@ func optimizerHasFeature(info OptimizerRuntimeInfo, feature string) bool {
 }
 
 func (t *AutoTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
-	if info, err := t.primary.Health(ctx); err == nil {
+	info, primaryErr := t.primary.Health(ctx)
+	if primaryErr == nil {
 		return info, nil
 	}
-	return t.fallback.Health(ctx)
+	info, fallbackErr := t.fallback.Health(ctx)
+	if fallbackErr != nil {
+		return OptimizerRuntimeInfo{}, &autoTransportError{primary: primaryErr, fallback: fallbackErr}
+	}
+	return info, nil
 }
 
 func (t *AutoTransport) Close() error {

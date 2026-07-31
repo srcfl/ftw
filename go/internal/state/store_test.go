@@ -3,12 +3,29 @@ package state
 import (
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestSchemaVersionMatchesReleaseMetadata(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "state-schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Version != SchemaVersion {
+		t.Fatalf("state-schema.json version = %d, Go schema version = %d", metadata.Version, SchemaVersion)
+	}
+}
 
 func freshStore(t *testing.T) *Store {
 	t.Helper()
@@ -803,6 +820,37 @@ func TestBackupToCompressedPreservesCompleteHistory(t *testing.T) {
 	}
 	if err := s.BackupToCompressed(dst); err == nil {
 		t.Fatal("second backup to existing destination should fail")
+	}
+}
+
+func TestBackupToCompressedReportsPhasesAndBytes(t *testing.T) {
+	s := freshStore(t)
+	dst := filepath.Join(t.TempDir(), "state.db.gz")
+	var progress []BackupProgress
+	if err := s.BackupToCompressedWithProgress(dst, func(update BackupProgress) {
+		progress = append(progress, update)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) < 4 {
+		t.Fatalf("progress = %#v", progress)
+	}
+	if progress[0].Phase != BackupPhaseCopying {
+		t.Fatalf("first progress = %#v", progress[0])
+	}
+	var compressed, synced bool
+	for _, update := range progress {
+		if update.Phase == BackupPhaseCompressing && update.TotalBytes > 0 &&
+			update.CompletedBytes == update.TotalBytes {
+			compressed = true
+		}
+		if update.Phase == BackupPhaseSyncing && update.TotalBytes > 0 &&
+			update.CompletedBytes == update.TotalBytes {
+			synced = true
+		}
+	}
+	if !compressed || !synced {
+		t.Fatalf("progress did not finish compression and sync: %#v", progress)
 	}
 }
 

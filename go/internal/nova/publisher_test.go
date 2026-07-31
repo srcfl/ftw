@@ -5,9 +5,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
+
+func TestDriverInventoryContentSHAIgnoresGeneratedAt(t *testing.T) {
+	first := driverinventory.Snapshot{
+		SchemaVersion: driverinventory.SchemaVersion,
+		GeneratedAt:   time.Unix(1, 0),
+		Host: driverinventory.Host{
+			Product: "ftw", Version: "1.5.0-beta.1", UpdateChannel: "beta",
+			Target: "ftw-core", RuntimeABI: driverinventory.RuntimeABI, HostAPI: driverinventory.HostAPI,
+		},
+		Drivers: []driverinventory.Driver{{
+			DriverID: "sdm630", Version: "1.1.1", Source: "bundled",
+			SourceSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ControlClass: "read_only", ConfiguredInstances: 1, RunningInstances: 1,
+			Health: driverinventory.Health{OK: 1},
+		}},
+	}
+	second := first
+	second.GeneratedAt = time.Unix(2, 0)
+	firstSHA, err := driverInventoryContentSHA(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSHA, err := driverInventoryContentSHA(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstSHA != secondSHA {
+		t.Fatal("generated_at changed content identity")
+	}
+	if got := driverInventoryTopic("f42w-gw-1"); got != "gateways/f42w-gw-1/inventory/drivers/json/v1" {
+		t.Fatalf("topic = %q", got)
+	}
+}
 
 // TestAssemble_PicksUpClean Snake CaseFromLuaEmit confirms that
 // arbitrary fields a Lua driver emits inside host.emit() flow into
@@ -94,6 +128,31 @@ func TestAssemble_V2XVehicleSoCFromDerReading(t *testing.T) {
 	}
 	if got.SoC != nil {
 		t.Fatalf("V2X vehicle SoC should not be encoded as battery soc: %+v", got.SoC)
+	}
+}
+
+// The Lua host stamps the nameplate a driver reported via host.set_model
+// and host.set_rated_w onto every emit blob. assemble overwrites the
+// envelope fields it owns (make, serial, hardware_id) but must leave
+// those two alone, otherwise the values never reach Nova.
+func TestAssemble_KeepsModelAndRatedPowerFromEmitBlob(t *testing.T) {
+	r := &telemetry.DerReading{
+		Driver:    "sungrow",
+		DerType:   telemetry.DerPV,
+		RawW:      -2500,
+		Data:      json.RawMessage(`{"w": -2500, "model": "SH10RT", "rated_power_w": 10000}`),
+		UpdatedAt: time.UnixMilli(1713610245123),
+	}
+	dev := state.Device{DeviceID: "sungrow:A2340", Make: "sungrow", Serial: "A2340"}
+	got := assemble(r, dev, 1713610245123)
+	if got.Model != "SH10RT" {
+		t.Errorf("model: got %q, want SH10RT", got.Model)
+	}
+	if got.RatedPowerW == nil || *got.RatedPowerW != 10000 {
+		t.Errorf("rated_power_w: got %v, want 10000", got.RatedPowerW)
+	}
+	if got.Make != "sungrow" || got.Serial != "A2340" {
+		t.Errorf("envelope regressed: %+v", got)
 	}
 }
 

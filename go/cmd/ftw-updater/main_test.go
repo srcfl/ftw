@@ -93,6 +93,8 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
     image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	return s, runner
 }
@@ -111,13 +113,37 @@ func TestSkipPull_BypassesPullStep(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
-	waitForState(t, s, "done")
+	done := waitForState(t, s, "done")
+	if done.Step != 4 || done.TotalSteps != 4 || done.PhaseStartedAt.IsZero() {
+		t.Fatalf("done progress = %+v", done)
+	}
 	calls := runner.snapshot()
 	if len(calls) != 1 {
 		t.Fatalf("skip-pull should yield 1 call (up only), got %d: %v", len(calls), calls)
 	}
 	if !strings.Contains(strings.Join(calls[0], " "), "up -d") {
 		t.Errorf("single call should be `up -d`: %v", calls[0])
+	}
+}
+
+func TestRunWithStateHeartbeatRefreshesLongPhase(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.statusHeartbeatInterval = 5 * time.Millisecond
+	started := time.Now()
+	initial := State{
+		State: "pulling", Action: "update", Component: "core", Target: "v1.2.3",
+		StartedAt: started, PhaseStartedAt: started, UpdatedAt: started,
+		Message: "Downloading pinned release image", Step: 2, TotalSteps: 4,
+	}
+	if err := s.runWithStateHeartbeat(initial, func() error {
+		time.Sleep(18 * time.Millisecond)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.readState()
+	if !got.UpdatedAt.After(started) || got.State != "pulling" || got.Step != 2 || got.TotalSteps != 4 {
+		t.Fatalf("heartbeat state = %+v", got)
 	}
 }
 
@@ -212,6 +238,82 @@ func TestHandleUpdate_HappyPath(t *testing.T) {
 	up := strings.Join(calls[1], " ")
 	if !strings.Contains(up, "up -d") || strings.Contains(up, "--force-recreate") {
 		t.Errorf("update path should NOT force-recreate: %v", calls[1])
+	}
+}
+
+func TestHandleUpdate_BlocksCoreUpdateWithoutOptimizer(t *testing.T) {
+	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes:
+      - ./data:/app/data
+`)
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	state := waitForState(t, s, "failed")
+	if !strings.Contains(state.Message, "core update blocked") ||
+		!strings.Contains(state.Message, optimizerServiceName) ||
+		!strings.Contains(state.Message, "migrate-legacy-compose.sh") {
+		t.Fatalf("missing migration guidance: %+v", state)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("blocked update must not call Docker: %v", calls)
+	}
+}
+
+func TestHandleUpdate_BlocksCoreUpdateWhenOptimizerIsUnhealthy(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.healthCheck = func(_ context.Context, service string) error {
+		if service == optimizerServiceName {
+			return errors.New("container status is unhealthy")
+		}
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	state := waitForState(t, s, "failed")
+	if !strings.Contains(state.Message, "must be running and healthy") ||
+		!strings.Contains(state.Message, "container status is unhealthy") {
+		t.Fatalf("optimizer health failure is unclear: %+v", state)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("blocked update must not call Docker: %v", calls)
+	}
+}
+
+func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) {
+	s, _ := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes:
+      - ./data:/app/data
+`)
+	override := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")
+	original := []byte("services:\n  ftw:\n    environment:\n      OPERATOR_SETTING: preserved\n")
+	if err := os.WriteFile(override, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.overrideFiles = []string{override}
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	waitForState(t, s, "failed")
+	got, err := os.ReadFile(override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("operator override changed:\n%s", got)
 	}
 }
 
@@ -342,6 +444,8 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
     image: forty-two-watts:optimizer-champion-recourse-b10acacd
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 
@@ -374,6 +478,8 @@ func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *test
     image: forty-two-watts:optimizer-champion-recourse-b10acacd
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 
@@ -756,11 +862,16 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
     image: forty-two-watts:optimizer-champion-recourse-b10acacd
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
 	checks := 0
-	s.healthCheck = func(context.Context, string) error {
+	s.healthCheck = func(_ context.Context, service string) error {
+		if service == optimizerServiceName {
+			return nil
+		}
 		checks++
 		if checks == 1 {
 			return errors.New("unhealthy")
@@ -820,5 +931,25 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 	calls := runner.snapshot()
 	if len(calls) != 4 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[3], " ") != "start ftw-container" {
 		t.Fatalf("crashed rollback recovery calls = %v", calls)
+	}
+}
+
+func TestContainerIDsFromDockerPS_IgnoresNoiseAndDedupes(t *testing.T) {
+	const id = "72d81f0fbb2faf0529c3bd611ed06b2d3f5c3f7a82ad1c24f925d81302c46f13"
+	out := "time=\"2026-07-27T18:13:41Z\" level=warning msg=\"orphan containers\"\n" + id + "\n" + id[:12] + "\nnot-an-id\n"
+	ids := containerIDsFromDockerPS(out)
+	if len(ids) != 1 || ids[0] != id {
+		t.Fatalf("ids = %v, want only full id after filtering noise + short prefix", ids)
+	}
+
+	// Pure noise used to become "resolved to 40 containers" via strings.Fields.
+	noise := strings.Repeat("warning about compose project configuration ", 10)
+	if got := containerIDsFromDockerPS(noise); len(got) != 0 {
+		t.Fatalf("noise parsed as ids: %v", got)
+	}
+
+	// Single clean ID (common happy path).
+	if got := containerIDsFromDockerPS(id + "\n"); len(got) != 1 || got[0] != id {
+		t.Fatalf("clean id = %v", got)
 	}
 }

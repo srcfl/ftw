@@ -20,7 +20,7 @@ export class FtwNotifStatus extends FtwElement {
            font-size:0.85rem; font-family:monospace; }
     .ok  { background: var(--ok-bg, #0c2a13); color: var(--ok-fg, #7dd17d); }
     .warn{ background: var(--warn-bg, #2c220d); color: var(--warn-fg, #e0b353); }
-    .off { background: var(--ink-raised, #222); color: var(--text-dim, #888); }
+    .off { background: var(--ink-raised, #161616); color: var(--fg-muted, #858585); }
   `;
 
   static get observedAttributes() { return ["interval-ms", "endpoint"]; }

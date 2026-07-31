@@ -3,7 +3,7 @@
     {
       "name": "FTW",
       "description": "Local-first home energy coordination — Raspberry Pi 4/5 (64-bit)",
-      "icon": "https://raw.githubusercontent.com/srcfl/ftw/master/web/favicon.svg",
+      "icon": "https://raw.githubusercontent.com/srcfl/ftw/master/web/logo.png",
       "url": "__IMAGE_URL__",
       "extract_size": 0,
       "extract_sha256": "__EXTRACT_SHA256__",

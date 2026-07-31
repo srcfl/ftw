@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -25,6 +26,10 @@ func TestIsTransportError(t *testing.T) {
 		{syscall.ECONNRESET, true},
 		{syscall.EPIPE, true},
 		{syscall.ETIMEDOUT, true},
+		{syscall.ECONNREFUSED, true},
+		{syscall.EHOSTUNREACH, true},
+		{syscall.ENETUNREACH, true},
+		{&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("temporary DNS failure")}, true},
 		{errors.New("connection reset by peer"), true},
 		{errors.New("broken pipe"), true},
 		{errors.New("use of closed network connection"), true},
@@ -47,6 +52,161 @@ func TestIsTransportError(t *testing.T) {
 		if got := isTransportError(c.err); got != c.want {
 			t.Errorf("isTransportError(%v) = %v, want %v", c.err, got, c.want)
 		}
+	}
+}
+
+func TestIsRetryableDialError(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{syscall.ECONNREFUSED, true},
+		{syscall.EHOSTUNREACH, true},
+		{&net.DNSError{Name: "meter.local", IsTimeout: true}, true},
+		{&net.DNSError{Name: "meter.local", IsTemporary: true}, true},
+		{&net.DNSError{Name: "meter.local", IsNotFound: true}, true},
+		{errors.New("bad endpoint configuration"), false},
+	}
+	for _, tc := range cases {
+		if got := isRetryableDialError(tc.err); got != tc.want {
+			t.Errorf("isRetryableDialError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestDialRecoversWhenDeviceComesOnlineAfterStartup(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve address: %v", err)
+	}
+	address := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatalf("release address: %v", err)
+	}
+	host, portText, _ := net.SplitHostPort(address)
+	var port int
+	if _, err := fmtSscan(portText, &port); err != nil {
+		t.Fatalf("parse listener port: %v", err)
+	}
+
+	capability, err := Dial(host, port, 1)
+	if err != nil {
+		t.Fatalf("Dial while device offline: %v", err)
+	}
+	defer capability.Close()
+	if capability.client != nil {
+		t.Fatal("offline Dial kept a client")
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("bring device online: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		request := make([]byte, 12)
+		if _, err := io.ReadFull(conn, request); err != nil {
+			return
+		}
+		response := []byte{
+			request[0], request[1],
+			0, 0,
+			0, 5,
+			request[6],
+			request[7],
+			2,
+			1, 65,
+		}
+		_, _ = conn.Write(response)
+	}()
+
+	registers, err := capability.Read(0, 1, drivers.ModbusInput)
+	if err != nil {
+		t.Fatalf("Read after device recovery: %v", err)
+	}
+	if len(registers) != 1 || registers[0] != 321 {
+		t.Fatalf("Read after device recovery = %v, want [321]", registers)
+	}
+}
+
+func TestDialRejectsInvalidEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		host   string
+		port   int
+		unitID int
+	}{
+		{name: "empty host", port: 502, unitID: 1},
+		{name: "host with spaces", host: "bad host", port: 502, unitID: 1},
+		{name: "host with scheme", host: "tcp://meter", port: 502, unitID: 1},
+		{name: "zero port", host: "meter.local", unitID: 1},
+		{name: "large port", host: "meter.local", port: 65536, unitID: 1},
+		{name: "negative unit", host: "meter.local", port: 502, unitID: -1},
+		{name: "large unit", host: "meter.local", port: 502, unitID: 248},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capability, err := Dial(tc.host, tc.port, tc.unitID)
+			if err == nil || capability != nil {
+				t.Fatalf("Dial(%q, %d, %d) = (%v, %v), want direct config error",
+					tc.host, tc.port, tc.unitID, capability, err)
+			}
+		})
+	}
+}
+
+func TestValidateEndpointAllowsSupportedHosts(t *testing.T) {
+	for _, host := range []string{
+		"192.0.2.10",
+		"meter.local",
+		"meter.local.",
+		"2001:db8::10",
+		"fe80::10%en0",
+	} {
+		if err := validateEndpoint(host, 502, 1); err != nil {
+			t.Errorf("validateEndpoint(%q): %v", host, err)
+		}
+	}
+}
+
+func TestNeverConnectedCapabilityCloseAndPollRespectBackoff(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	capability := &Capability{
+		addr:                         "127.0.0.1:502",
+		url:                          "tcp://127.0.0.1:502",
+		requestTimeout:               10 * time.Millisecond,
+		consecutiveTransportFailures: 2,
+		nextReconnectAt:              now.Add(2 * time.Second),
+		now:                          func() time.Time { return now },
+	}
+
+	started := time.Now()
+	for i := 0; i < 100; i++ {
+		if _, err := capability.Read(0, 1, drivers.ModbusInput); err == nil ||
+			!containsFold(err.Error(), "backoff active") {
+			t.Fatalf("poll %d while never connected error = %v, want backoff", i, err)
+		}
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("poll during backoff took %v; possible busy/blocking retry", elapsed)
+	}
+	if capability.client != nil {
+		t.Fatal("poll during backoff opened a client")
+	}
+	if capability.consecutiveTransportFailures != 2 ||
+		!capability.nextReconnectAt.Equal(now.Add(2*time.Second)) {
+		t.Fatalf("poll during backoff changed retry state: failures=%d next=%v",
+			capability.consecutiveTransportFailures, capability.nextReconnectAt)
+	}
+	if err := capability.Close(); err != nil {
+		t.Fatalf("Close before first connection: %v", err)
+	}
+	if err := capability.Close(); err != nil {
+		t.Fatalf("second Close before first connection: %v", err)
 	}
 }
 
@@ -301,6 +461,116 @@ func TestConfigureTCPKeepAlive(t *testing.T) {
 	}
 	if conn.period != 15*time.Second {
 		t.Fatalf("keepalive period = %v, want 15s", conn.period)
+	}
+}
+
+func TestReconnectBackoffSchedule(t *testing.T) {
+	c := &Capability{}
+	want := map[int]time.Duration{
+		0: 0,
+		1: 0,
+		2: 2 * time.Second,
+		3: 4 * time.Second,
+		4: 8 * time.Second,
+		5: 16 * time.Second,
+		6: 32 * time.Second,
+		7: 60 * time.Second,
+		8: 60 * time.Second,
+	}
+	for failures, delay := range want {
+		c.consecutiveTransportFailures = failures
+		if got := c.reconnectBackoff(); got != delay {
+			t.Errorf("failures=%d: backoff=%v, want %v", failures, got, delay)
+		}
+	}
+}
+
+func TestMuteReconnectBackoffReturnsFastAndRecovers(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	var accepted atomic.Int32
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			attempt := accepted.Add(1)
+			go func(conn net.Conn, attempt int32) {
+				defer conn.Close()
+				request := make([]byte, 12)
+				if _, err := io.ReadFull(conn, request); err != nil {
+					return
+				}
+				if attempt <= 2 {
+					time.Sleep(250 * time.Millisecond)
+					return
+				}
+				response := []byte{
+					request[0], request[1],
+					0, 0,
+					0, 5,
+					request[6],
+					request[7],
+					2,
+					0, 222,
+				}
+				_, _ = conn.Write(response)
+			}(conn, attempt)
+		}
+	}()
+
+	host, portText, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	if _, err := fmtSscan(portText, &port); err != nil {
+		t.Fatalf("parse listener port: %v", err)
+	}
+
+	capability, err := Dial(host, port, 1)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer capability.Close()
+	const requestTimeout = 40 * time.Millisecond
+	capability.requestTimeout = requestTimeout
+	capability.client.timeout = requestTimeout
+
+	fakeNow := time.Unix(1_700_000_000, 0)
+	capability.now = func() time.Time { return fakeNow }
+
+	if _, err := capability.Read(0, 1, drivers.ModbusInput); err == nil {
+		t.Fatal("first mute read succeeded")
+	}
+	if capability.consecutiveTransportFailures != 2 {
+		t.Fatalf("transport failures=%d, want 2", capability.consecutiveTransportFailures)
+	}
+	if capability.client != nil {
+		t.Fatal("mute retry left its socket open")
+	}
+
+	started := time.Now()
+	if _, err := capability.Read(0, 1, drivers.ModbusInput); err == nil || !containsFold(err.Error(), "backoff active") {
+		t.Fatalf("read during cooldown error=%v, want backoff error", err)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Millisecond {
+		t.Fatalf("read during cooldown blocked for %v", elapsed)
+	}
+
+	fakeNow = fakeNow.Add(2 * time.Second)
+	registers, err := capability.Read(0, 1, drivers.ModbusInput)
+	if err != nil {
+		t.Fatalf("read after cooldown: %v", err)
+	}
+	if len(registers) != 1 || registers[0] != 222 {
+		t.Fatalf("read after cooldown=%v, want [222]", registers)
+	}
+	if capability.consecutiveTransportFailures != 0 || !capability.nextReconnectAt.IsZero() {
+		t.Fatalf("successful recovery kept failure state: failures=%d next=%v",
+			capability.consecutiveTransportFailures, capability.nextReconnectAt)
 	}
 }
 

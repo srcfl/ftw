@@ -75,6 +75,7 @@ jobs:
           jq -e '
             .os_list | length == 1
             and .[0].name == "FTW"
+            and .[0].icon == "https://raw.githubusercontent.com/srcfl/ftw/master/web/logo.png"
             and .[0].init_format == "cloudinit-rpi"
             and (.[0].url | contains("__IMAGE_URL__"))
             and (.[0].extract_sha256 | contains("__EXTRACT_SHA256__"))

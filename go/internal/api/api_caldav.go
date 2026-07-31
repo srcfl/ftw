@@ -30,8 +30,8 @@ func (s *Server) handleCalDAVStatus(w http.ResponseWriter, r *http.Request) {
 // read on every poll.
 func (s *Server) handleCalDAVCredentials(w http.ResponseWriter, r *http.Request) {
 	// Unlike the ordinary read APIs, this response contains a reusable secret.
-	// Do not use writeJSON: its wildcard CORS header would let any website open
-	// in a LAN browser read the managed CalDAV password. Also prevent caching.
+	// Keep the explicit headers here so it remains non-cacheable and cannot be
+	// content-sniffed if the generic JSON response helper changes later.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

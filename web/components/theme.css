@@ -14,35 +14,18 @@
  */
 
 :root {
-  /* ----- Base palette used by style.css and web components. ----- */
-  --bg: #0f0f1a;
-  --surface: #1a1a2e;
-  --surface2: #22223a;
-  --border: #2a2a44;
-  --text: #e0e0e0;
-  --text-dim: #888;
-  --green: #00cc66;
-  --red: #ee4444;
-  --yellow: #eeaa22;
-  --blue: #3388ff;
-  --accent: #5566ff;
-  --radius: 8px;
-
-  /* ----- Next palette: dark (default). Also used when data-theme is
-         absent so nothing is uncoloured during FOUC. ----- */
-  --ink:        oklch(0.14 0.015 250);
-  --ink-raised: oklch(0.18 0.02 250);
-  --ink-sunken: oklch(0.11 0.015 250);
-  --line:       oklch(0.26 0.015 250);
-  --line-soft:  oklch(0.22 0.015 250);
-  --fg:         oklch(0.96 0.01 250);
-  --fg-dim:     oklch(0.70 0.015 250);
-  --fg-muted:   oklch(0.50 0.015 250);
-  /* Small-label text (.card-label on every card). Kept separate from
-     --fg-muted so semantic muted text elsewhere (subs, placeholders)
-     can stay quiet while the labels themselves read at ~#d9dbe0 on
-     dark — the previous oklch(0.50) was too dim to scan at a glance. */
-  --fg-label:   oklch(0.86 0.015 250);
+  /* ----- Terminal Native surface roles: dark (default). ----- */
+  --ink:          #0d0d0d;
+  --ink-sunken:   #101010;
+  --ink-raised:   #161616;
+  --ink-elevated: #1e1e1e;
+  --line:         #2a2a2a;
+  --line-soft:    #222222;
+  --fg:           #e8e8e8;
+  --fg-dim:       #a0a0a0;
+  --fg-muted:     #858585;
+  --fg-label:     #d8d8d8;
+  --on-accent:    #0a0a0a;
 
   --amber:    oklch(0.82 0.18 75);
   --amber-d:  oklch(0.65 0.14 75);
@@ -51,29 +34,45 @@
   --cyan:     oklch(0.82 0.14 210);
   --cyan-dim: oklch(0.65 0.10 210);
   --violet:   oklch(0.80 0.14 300);
-  --white-s:  oklch(0.95 0.01 250);
+  --white-s:  var(--fg);
 
   --accent-hue: 65;
   --accent-e: oklch(0.82 0.16 var(--accent-hue));
 
+  /* Compatibility bridge for legacy light-DOM CSS and /setup. New work
+     uses the canonical roles above; these aliases keep older surfaces in
+     the same theme without duplicating palette values. */
+  --bg:       var(--ink);
+  --surface:  var(--ink-raised);
+  --surface2: var(--ink-sunken);
+  --border:   var(--line);
+  --text:     var(--fg);
+  --text-dim: var(--fg-dim);
+  --green:    var(--green-e);
+  --red:      var(--red-e);
+  --yellow:   var(--amber);
+  --blue:     var(--cyan);
+  --accent:   var(--accent-e);
+  --radius: 8px;
+
   /* Hero-specific surfaces. Extracted as tokens so the flow hero adapts
      cleanly to the light theme without duplicating the SVG render path. */
-  --hero-bg-top: oklch(0.17 0.02 250);
-  --hero-bg-bot: oklch(0.13 0.015 250);
+  --hero-bg-top: #1a1a1a;
+  --hero-bg-bot: #111111;
   --hero-glow-a: oklch(0.4 0.15 var(--accent-hue) / 0.08);
-  --hero-line-base: oklch(0.24 0.015 250);
-  --hero-box-fill: oklch(0.18 0.02 250 / 0.95);
-  --hero-box-border: oklch(0.28 0.015 250);
-  --hero-house-fill: oklch(0.2 0.025 250);
+  --hero-line-base: #2a2a2a;
+  --hero-box-fill: rgb(22 22 22 / 95%);
+  --hero-box-border: #303030;
+  --hero-house-fill: #1c1c1c;
   --hero-house-stroke: oklch(0.7 0.14 var(--accent-hue));
   --hero-house-ring:   oklch(0.55 0.1 var(--accent-hue));
   --hero-load-text:    oklch(0.9 0.08 var(--accent-hue));
   /* Labels / subs inside the energy-flow bubbles — pulled up to match
      the brighter --fg-label token used by card-labels so the bubble
      text isn't noticeably dimmer than every other label on the page. */
-  --hero-label-text:   oklch(0.86 0.015 250);
-  --hero-sub-text:     oklch(0.78 0.015 250);
-  --hero-soc-track:    oklch(0.25 0.015 250);
+  --hero-label-text:   #d8d8d8;
+  --hero-sub-text:     #b8b8b8;
+  --hero-soc-track:    #2a2a2a;
 
   /* No external font CDN — all fallbacks are either shipped with the
      OS (system-ui, Segoe UI, Roboto, Helvetica Neue) or resolved by
@@ -95,20 +94,19 @@
   --card-pad-tight: 12px 14px;
 }
 
-/* ----- Light application theme. Base tokens remain stable for the setup
-        wizard and shared component fallbacks. ----- */
+/* ----- Light application theme. Compatibility aliases above follow these
+        canonical overrides automatically. ----- */
 html[data-theme="light"] {
-  --ink:        oklch(0.985 0.005 250);
-  --ink-raised: oklch(0.975 0.005 250);
-  --ink-sunken: oklch(0.95 0.008 250);
-  --line:       oklch(0.85 0.01 250);
-  --line-soft:  oklch(0.90 0.008 250);
-  --fg:         oklch(0.22 0.02 250);
-  --fg-dim:     oklch(0.40 0.02 250);
-  --fg-muted:   oklch(0.55 0.015 250);
-  /* Light theme already has enough contrast at --fg-muted; keep labels
-     aligned with it so the hierarchy doesn't flip when switching themes. */
-  --fg-label:   oklch(0.40 0.02 250);
+  --ink:          #f4f4f2;
+  --ink-sunken:   #ecece8;
+  --ink-raised:   #fafaf8;
+  --ink-elevated: #ffffff;
+  --line:         #cecec7;
+  --line-soft:    #ddddd7;
+  --fg:           #191919;
+  --fg-dim:       #4f4f4b;
+  --fg-muted:     #686862;
+  --fg-label:     #4f4f4b;
 
   /* Functional colours pulled ~15% darker so they keep contrast on paper
      without turning neon. Accent hue still drives --accent-e. */
@@ -119,23 +117,20 @@ html[data-theme="light"] {
   --cyan:     oklch(0.58 0.14 210);
   --cyan-dim: oklch(0.48 0.10 210);
   --violet:   oklch(0.55 0.14 300);
-  --white-s:  oklch(0.30 0.015 250);
-
   --accent-e: oklch(0.68 0.16 var(--accent-hue));
 
-  /* Hero: pale paper-ish gradient, mid-contrast lines + boxes so the
-     SVG reads clearly against a light body. */
-  --hero-bg-top:  oklch(0.97 0.008 250);
-  --hero-bg-bot:  oklch(0.93 0.012 250);
+  /* Hero: neutral paper surfaces with semantic energy colors intact. */
+  --hero-bg-top:  #fafaf8;
+  --hero-bg-bot:  #ecece8;
   --hero-glow-a:  oklch(0.72 0.14 var(--accent-hue) / 0.10);
-  --hero-line-base:    oklch(0.82 0.01 250);
-  --hero-box-fill:     oklch(0.98 0.005 250 / 0.96);
-  --hero-box-border:   oklch(0.84 0.01 250);
-  --hero-house-fill:   oklch(0.97 0.008 250);
+  --hero-line-base:    #cecec7;
+  --hero-box-fill:     rgb(255 255 255 / 96%);
+  --hero-box-border:   #cecec7;
+  --hero-house-fill:   #fafaf8;
   --hero-house-stroke: oklch(0.55 0.14 var(--accent-hue));
   --hero-house-ring:   oklch(0.72 0.10 var(--accent-hue));
   --hero-load-text:    oklch(0.40 0.18 var(--accent-hue));
-  --hero-label-text:   oklch(0.45 0.015 250);
-  --hero-sub-text:     oklch(0.55 0.015 250);
-  --hero-soc-track:    oklch(0.88 0.01 250);
+  --hero-label-text:   #4f4f4b;
+  --hero-sub-text:     #686862;
+  --hero-soc-track:    #ddddd7;
 }

@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // snapshotKeepCount caps the normal update snapshots we retain. A rollback
@@ -62,6 +64,13 @@ type SnapshotInfo struct {
 // safety-netted update, so if we can't produce the safety net we'd
 // rather refuse the update than silently proceed without one.
 func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) (SnapshotInfo, error) {
+	return s.createPreUpdateSnapshotWithProgress(action, fromVersion, toVersion, nil)
+}
+
+func (s *Server) createPreUpdateSnapshotWithProgress(
+	action, fromVersion, toVersion string,
+	report func(state.BackupProgress),
+) (SnapshotInfo, error) {
 	if s.deps.SnapshotDir == "" {
 		return SnapshotInfo{}, errors.New("snapshot dir not configured")
 	}
@@ -93,7 +102,7 @@ func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) 
 	// 1. A complete state.db via VACUUM INTO + gzip. Rollback backups must
 	// include history and samples; the compact daily corruption-recovery
 	// snapshot deliberately excludes those large tables and is not safe here.
-	if err := s.deps.State.BackupToCompressed(filepath.Join(dir, "state.db.gz")); err != nil {
+	if err := s.deps.State.BackupToCompressedWithProgress(filepath.Join(dir, "state.db.gz"), report); err != nil {
 		return SnapshotInfo{}, fmt.Errorf("state snapshot: %w", err)
 	}
 	captured = append(captured, "state.db.gz")

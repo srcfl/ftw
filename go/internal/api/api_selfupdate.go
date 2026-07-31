@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/selfupdate"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // handleVersionCheck returns the cached self-update state. ?force=1 bypasses
@@ -71,7 +73,7 @@ func (s *Server) handleVersionChannel(w http.ResponseWriter, r *http.Request) {
 
 func versionUpdateInFlight(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+	case "starting", "snapshotting", "pulling", "restarting", "checking", "restoring":
 		return true
 	default:
 		return false
@@ -147,46 +149,75 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now()
+	fullBackupRequired := info.FullBackupRequired
+	startMessage := "starting update"
+	if !fullBackupRequired {
+		startMessage = "Database schema unchanged; full history backup not needed"
+	}
 	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
-		State:     "starting",
-		Action:    "update",
-		Target:    info.Latest,
-		StartedAt: startedAt,
-		UpdatedAt: time.Now(),
-		Message:   "starting update",
+		State:          "starting",
+		Action:         "update",
+		Component:      "core",
+		Target:         info.Latest,
+		StartedAt:      startedAt,
+		PhaseStartedAt: startedAt,
+		UpdatedAt:      time.Now(),
+		Message:        startMessage,
+		Step:           1,
+		TotalSteps:     4,
 	})
 	s.recordComponentStatus(selfupdate.UpdateStatus{
 		State: "starting", Action: "update", Component: "core", Target: info.Latest,
-		StartedAt: startedAt, UpdatedAt: startedAt, Message: "starting update",
+		StartedAt: startedAt, PhaseStartedAt: startedAt, UpdatedAt: startedAt,
+		Message: startMessage, Step: 1, TotalSteps: 4,
 	}, info.Current)
 
-	go s.runVersionUpdate(startedAt, info.Current, info.Latest)
+	go s.runVersionUpdate(startedAt, info.Current, info.Latest, fullBackupRequired)
 
 	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if s.deps.SnapshotDir == "" {
+	if !fullBackupRequired {
+		resp["snapshot_skipped"] = true
+		resp["snapshot_skip_reason"] = "database schema unchanged"
+	} else if s.deps.SnapshotDir == "" {
 		resp["snapshot_skipped"] = true
 	}
 	writeJSON(w, 202, resp)
 }
 
-func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
+func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, fullBackupRequired bool) {
 	defer s.versionUpdateMu.Unlock()
 
-	writeUpdateStatus := func(state, message string) {
+	writeUpdateStatus := func(updateState, message string) {
+		now := time.Now()
 		s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
-			State:     state,
-			Action:    "update",
-			Target:    latest,
-			StartedAt: startedAt,
-			UpdatedAt: time.Now(),
-			Message:   message,
+			State:          updateState,
+			Action:         "update",
+			Component:      "core",
+			Target:         latest,
+			StartedAt:      startedAt,
+			PhaseStartedAt: now,
+			UpdatedAt:      now,
+			Message:        message,
+			TotalSteps:     4,
 		})
 	}
 
-	snapshotSkipped := s.deps.SnapshotDir == ""
+	snapshotSkipped := s.deps.SnapshotDir == "" || !fullBackupRequired
 	if !snapshotSkipped {
-		writeUpdateStatus("snapshotting", "creating backup snapshot")
-		if _, err := s.createPreUpdateSnapshot("update", current, latest); err != nil {
+		phaseStarted := time.Now()
+		status := selfupdate.UpdateStatus{
+			State: "snapshotting", Action: "update", Component: "core", Target: latest,
+			StartedAt: startedAt, PhaseStartedAt: phaseStarted, UpdatedAt: phaseStarted,
+			Message: "Copying full history database", Step: 1, TotalSteps: 4,
+		}
+		s.writeVersionUpdateStatus(status)
+		heartbeat := newUpdateStatusHeartbeat(s.deps.SelfUpdate, status)
+		heartbeat.Start()
+		_, err := s.createPreUpdateSnapshotWithProgress("update", current, latest, func(progress state.BackupProgress) {
+			heartbeat.SetBackupProgress(progress)
+		})
+		heartbeat.Stop()
+		if err != nil {
 			writeUpdateStatus("failed", "snapshot failed: "+err.Error())
 			return
 		}
@@ -197,6 +228,80 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 	if err := s.deps.SelfUpdate.TriggerComponentAt(ctx, "update", latest, "core", startedAt); err != nil {
 		writeUpdateStatus("failed", err.Error())
 		return
+	}
+}
+
+type updateStatusHeartbeat struct {
+	checker *selfupdate.Checker
+
+	mu     sync.Mutex
+	status selfupdate.UpdateStatus
+	phase  string
+	stop   chan struct{}
+	done   chan struct{}
+}
+
+func newUpdateStatusHeartbeat(checker *selfupdate.Checker, status selfupdate.UpdateStatus) *updateStatusHeartbeat {
+	return &updateStatusHeartbeat{
+		checker: checker,
+		status:  status,
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (h *updateStatusHeartbeat) Start() {
+	go func() {
+		defer close(h.done)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				h.publish(nil)
+			case <-h.stop:
+				return
+			}
+		}
+	}()
+}
+
+func (h *updateStatusHeartbeat) Stop() {
+	close(h.stop)
+	<-h.done
+}
+
+func (h *updateStatusHeartbeat) SetBackupProgress(progress state.BackupProgress) {
+	h.publish(func(status *selfupdate.UpdateStatus) {
+		if progress.Phase != h.phase {
+			h.phase = progress.Phase
+			status.PhaseStartedAt = time.Now()
+		}
+		status.ProgressCurrent = progress.CompletedBytes
+		status.ProgressTotal = progress.TotalBytes
+		status.ProgressUnit = ""
+		switch progress.Phase {
+		case state.BackupPhaseCopying:
+			status.Message = "Copying full history database"
+		case state.BackupPhaseCompressing:
+			status.Message = "Compressing rollback backup"
+			status.ProgressUnit = "bytes"
+		case state.BackupPhaseSyncing:
+			status.Message = "Syncing rollback backup to disk"
+			status.ProgressUnit = "bytes"
+		}
+	})
+}
+
+func (h *updateStatusHeartbeat) publish(update func(*selfupdate.UpdateStatus)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if update != nil {
+		update(&h.status)
+	}
+	h.status.UpdatedAt = time.Now()
+	if err := h.checker.WriteStatus(h.status); err != nil {
+		slog.Warn("selfupdate: backup progress write failed", "err", err)
 	}
 }
 

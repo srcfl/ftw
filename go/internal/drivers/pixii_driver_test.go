@@ -104,6 +104,28 @@ func TestPixiiTroubleshootingStatusAndSetpoint(t *testing.T) {
 		t.Fatalf("control_mode = %v, want remote", data["control_mode"])
 	}
 
+	h := tel.DriverHealth("pixii")
+	if h == nil || !h.DeviceFault {
+		t.Fatal("expected device fault while Pixii ChaSt=testing")
+	}
+	if h.DeviceFaultReason == "" {
+		t.Fatal("expected device_fault_reason while calibrating")
+	}
+	if h.IsOnline() {
+		t.Fatal("calibrating Pixii must be offline for control")
+	}
+	modbus.regs[40137] = 4 // charging: calibration finished
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll: %v", err)
+	}
+	h = tel.DriverHealth("pixii")
+	if h == nil || h.DeviceFault || !h.IsOnline() {
+		t.Fatalf("expected online Pixii after calibration, got %+v", h)
+	}
+	if tel.Get("pixii", telemetry.DerBattery) == nil || tel.Get("pixii", telemetry.DerMeter) == nil {
+		t.Fatal("expected battery and site-meter telemetry through calibration recovery")
+	}
+
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":-1000}`)); err != nil {
 		t.Fatalf("command: %v", err)
 	}
@@ -130,5 +152,35 @@ func TestPixiiTroubleshootingStatusAndSetpoint(t *testing.T) {
 	}
 	if !sawSetpoint {
 		t.Fatal("expected pixii_setpoint_ems_w=-1000 metric")
+	}
+}
+
+func TestPixiiClearsDeviceFaultWhenNotTesting(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "drivers", "pixii.lua")
+	tel := telemetry.NewStore()
+	modbus := newPixiiTestModbus()
+	modbus.regs[40137] = 4 // charging, not testing
+	env := NewHostEnv("pixii", tel).WithModbus(modbus)
+	env.BatteryCapacityWh = 10000
+
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load pixii driver: %v", err)
+	}
+	defer d.Cleanup()
+
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	h := tel.DriverHealth("pixii")
+	if h == nil || h.DeviceFault {
+		t.Fatalf("expected no device fault when ChaSt!=testing, got %+v", h)
+	}
+	if !h.IsOnline() {
+		t.Fatal("healthy Pixii should be online for control")
 	}
 }

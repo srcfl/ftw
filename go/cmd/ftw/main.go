@@ -5,10 +5,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -31,10 +35,12 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
+	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/forecast"
+	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -58,12 +64,169 @@ import (
 // local runs.
 var Version = "dev"
 
+type siteIdentityLoad struct {
+	Nova     *nova.Identity
+	HomeLink gatewayidentity.Identity
+	Binding  gatewayidentity.SoftwareBinding
+}
+
+func loadSiteIdentity(keyPath string) (siteIdentityLoad, error) {
+	return loadSiteIdentityWith(
+		keyPath,
+		gatewayidentity.LoadBoundSoftwareIdentity,
+		nova.LoadExistingIdentity,
+		gatewayidentity.LoadOrCreateUnboundNovaIdentity,
+	)
+}
+
+func loadSiteIdentityWith(
+	keyPath string,
+	loadBound func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error),
+	loadNovaExisting func(string) (*nova.Identity, error),
+	loadNovaUnbound func(string) (*nova.Identity, error),
+) (siteIdentityLoad, error) {
+	identity, binding, err := loadBound(keyPath)
+	switch {
+	case err == nil:
+		if identity == nil {
+			return siteIdentityLoad{}, errors.New("bound home link identity is nil")
+		}
+		existing, loadErr := loadNovaExisting(keyPath)
+		if loadErr != nil {
+			return siteIdentityLoad{}, loadErr
+		}
+		if existing == nil {
+			return siteIdentityLoad{}, errors.New("existing nova identity is nil")
+		}
+		publicKey := identity.PublicKey()
+		if existing.PublicKeyHex() != hex.EncodeToString(publicKey) {
+			return siteIdentityLoad{}, errors.New("nova and home link identities use different keys")
+		}
+		publicHash := sha256.Sum256(publicKey)
+		if binding.PublicKeySHA256 != hex.EncodeToString(publicHash[:]) {
+			return siteIdentityLoad{}, errors.New("home link binding key hash changed")
+		}
+		return siteIdentityLoad{
+			Nova: existing, HomeLink: identity, Binding: binding,
+		}, nil
+	case errors.Is(err, gatewayidentity.ErrBindingNotAdopted),
+		errors.Is(err, gatewayidentity.ErrUnsupportedBinding),
+		errors.Is(err, fs.ErrNotExist):
+		existing, existingErr := loadNovaExisting(keyPath)
+		if existingErr == nil {
+			if existing == nil {
+				return siteIdentityLoad{}, errors.New("existing nova identity is nil")
+			}
+			return siteIdentityLoad{Nova: existing}, nil
+		}
+		if !errors.Is(existingErr, fs.ErrNotExist) {
+			return siteIdentityLoad{}, existingErr
+		}
+		legacy, legacyErr := loadNovaUnbound(keyPath)
+		if legacyErr != nil {
+			return siteIdentityLoad{}, legacyErr
+		}
+		if legacy == nil {
+			return siteIdentityLoad{}, errors.New("unbound nova identity is nil")
+		}
+		return siteIdentityLoad{Nova: legacy}, nil
+	default:
+		return siteIdentityLoad{}, err
+	}
+}
+
+func runHomeLinkAdopt(args []string) {
+	if err := adoptHomeLinkIdentity(args, os.Stdout); err != nil {
+		slog.Error("home link identity adoption failed", "err", err)
+		os.Exit(2)
+	}
+}
+
+func adoptHomeLinkIdentity(args []string, out io.Writer) error {
+	return adoptHomeLinkIdentityWith(
+		args,
+		out,
+		gatewayidentity.PreviewSoftwareBinding,
+		gatewayidentity.ApplySoftwareBinding,
+		gatewayidentity.LoadBoundSoftwareIdentity,
+		gatewayidentity.RouteHandle,
+	)
+}
+
+func adoptHomeLinkIdentityWith(
+	args []string,
+	out io.Writer,
+	preview func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error),
+	apply func(context.Context, string, string) (gatewayidentity.SoftwareBinding, error),
+	load func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error),
+	routeHandle func([]byte) (string, error),
+) error {
+	flags := flag.NewFlagSet("home-link-adopt", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	keyPath := flags.String("key", "", "Path to the existing canonical nova.key")
+	confirmation := flags.String("confirm", "", "Exact confirmation from a fresh preview")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*keyPath) == "" {
+		return errors.New("home-link-adopt requires --key=<existing nova.key>")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if strings.TrimSpace(*confirmation) == "" {
+		candidate, err := preview(ctx, *keyPath)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(
+			out,
+			"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\nconfirmation=%s\n",
+			candidate.Binding.GatewayID,
+			candidate.ThreeWordName,
+			candidate.KeyFingerprint,
+			candidate.Confirmation,
+		)
+		return err
+	}
+	binding, err := apply(ctx, *keyPath, *confirmation)
+	if err != nil {
+		return err
+	}
+	identity, loaded, err := load(*keyPath)
+	if err != nil {
+		return err
+	}
+	if loaded != binding {
+		return errors.New("adopted home link identity changed while reopening")
+	}
+	if identity == nil {
+		return errors.New("adopted home link identity is nil")
+	}
+	handle, err := routeHandle(identity.PublicKey())
+	if err != nil {
+		return err
+	}
+	name, err := gatewayidentity.ThreeWordName(binding.GatewayID)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(
+		out,
+		"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\nroute_handle=%s\n",
+		binding.GatewayID, name, binding.PublicKeySHA256, handle,
+	)
+	return err
+}
+
 func main() {
 	// Subcommand dispatch — a bare first non-flag argument selects one
 	// of the bootstrap CLIs, e.g. `ftw nova-claim --url=…`.
 	// Everything else is the long-running service.
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		switch os.Args[1] {
+		case "home-link-adopt":
+			runHomeLinkAdopt(os.Args[2:])
+			return
 		case "nova-claim":
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
@@ -171,7 +334,7 @@ func main() {
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           apiHandler,
+		Handler:           api.SecureMutations(apiHandler, apiMutationPolicy()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -190,7 +353,9 @@ func main() {
 
 	// The repository is entirely local on startup: existing active symlinks are
 	// usable offline and remote refresh never blocks core boot.
-	driverRepository := driverrepo.New(cfg.DeviceRepository, filepath.Dir(statePath), st)
+	driverRepository := driverrepo.NewWithHostVersion(
+		cfg.DeviceRepository, filepath.Dir(statePath), st, Version,
+	)
 	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
 	config.ManagedDriversDirOverride = driverRepository.ActiveDir()
 	cfg.ResolveDriverPaths(filepath.Dir(*configPath))
@@ -287,7 +452,9 @@ func main() {
 	// ---- Driver capacities (site, for control + fuse guard) ----
 	// Loadpoint drivers are filtered out — their battery_capacity_wh
 	// is vehicle capacity, not site-battery capacity.
-	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog)
+	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog, true)
+	telemetryCapacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog, false)
+	observeOnly := config.ObserveOnlyDriverSet(cfg)
 	warnIfEVHasBatteryCapacity(cfg.Drivers, cfg.Loadpoints, driverCatalog)
 
 	// ---- Battery models — restore from SQLite + ensure one per driver ----
@@ -337,11 +504,23 @@ func main() {
 	}
 	reg := drivers.NewRegistry(tel)
 	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
+	reg.RuntimePolicyResolver = driverRepository.RuntimePolicy
+	reg.CommandResultSink = func(driverName string, result drivers.DriverCommandResultV1) {
+		if err := st.RecordDriverCommandResult(
+			result.ID, driverName, result.Command, result.Status, result.Code,
+			result.CompletedAt.UnixMilli(), result.JSON(),
+		); err != nil {
+			slog.Error("persist driver command result", "driver", driverName, "command_id", result.ID, "err", err)
+		}
+	}
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-"+name)
 	}
 	reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
 		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
+	}
+	reg.SerialFactory = func(name string, c *config.SerialConfig) (drivers.SerialCap, error) {
+		return drivers.OpenSerial(c)
 	}
 	reg.ARPLookup = arp.Lookup
 	// Spawn initial drivers. config.Load has already joined relative Lua
@@ -563,6 +742,9 @@ func main() {
 			for k := range capacities {
 				delete(capacities, k)
 			}
+			for k := range telemetryCapacities {
+				delete(telemetryCapacities, k)
+			}
 			// Re-scan the catalog so a hot-edited Lua driver's
 			// capability change is picked up by the EV-classification
 			// filter on the very next reload tick.
@@ -574,9 +756,13 @@ func main() {
 			} else {
 				driverCatalog = reloadCatalog
 			}
-			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog) {
+			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog, true) {
 				capacities[k] = v
 			}
+			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog, false) {
+				telemetryCapacities[k] = v
+			}
+			observeOnly = config.ObserveOnlyDriverSet(newCfg)
 			capMu.Unlock()
 			warnIfEVHasBatteryCapacity(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog)
 
@@ -845,7 +1031,15 @@ func main() {
 	if loadPeakW <= 0 {
 		loadPeakW = 5000
 	}
-	loadSvc = loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
+	// Training ceiling: the main fuse is the one hard limit on what a house
+	// can actually draw, so a sample above it is a measurement fault rather
+	// than an unusual hour. Passed separately from loadPeakW — that one is a
+	// tunable proxy for "typical peak", this one is physics, and deriving
+	// the second from the first would silently move a safety bound whenever
+	// somebody retuned the proxy. Zero when no fuse is configured, which
+	// disables the check rather than inventing a limit.
+	loadMaxPlausibleW := cfg.Fuse.MaxPowerW() * loadmodel.PlausibleLoadHeadroom
+	loadSvc = loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW, loadMaxPlausibleW)
 	// SeedHeatingCoef — operator config is a cold-start prior. Once the
 	// load model has accumulated samples in production, its
 	// telemetry-fit HeatingW_per_degC survives restart and the config
@@ -909,7 +1103,7 @@ func main() {
 		slog.Info("caldav started", "listen", cfg.CalDAV.ListenAddr(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
 	}
 
-	// ---- Start OCPP 1.6J Central System (optional) ----
+	// ---- Start OCPP Central System, 1.6J and 2.0.1 (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
 	// driver involved. A charge point becomes a device in tel the moment it
 	// sends its first BootNotification, keyed by the identity segment of the
@@ -995,6 +1189,24 @@ func main() {
 				if !st.PluggedIn {
 					continue
 				}
+				// An active boost lease may carry a session-local EV target and
+				// departure. It overrides planning inputs without mutating the
+				// operator's recurring loadpoint schedule; once the lease stops,
+				// the normal schedule is still exactly as it was.
+				effectiveTargetPct := st.TargetSoCPct
+				effectiveTargetTime := st.TargetTime
+				boostActive := false
+				if lpController != nil {
+					if lease, status := lpController.BatteryBoost(st.ID, time.Now()); status.Active {
+						boostActive = true
+						if lease.EVTargetSoCPct > 0 {
+							effectiveTargetPct = lease.EVTargetSoCPct
+						}
+						if !lease.DepartureAt.IsZero() {
+							effectiveTargetTime = lease.DepartureAt
+						}
+					}
+				}
 				// Schedule gate: only extend the DP with an EV-SoC
 				// dimension when the operator has set BOTH a target SoC
 				// and a future deadline. Without a schedule the DP
@@ -1003,8 +1215,8 @@ func main() {
 				// against a target the operator never asked for. With
 				// no schedule, EV is left to the loadpoint controller's
 				// reactive surplus-only behaviour.
-				if st.TargetSoCPct <= 0 || st.TargetTime.IsZero() ||
-					!st.TargetTime.After(time.Now()) {
+				if effectiveTargetPct <= 0 || effectiveTargetTime.IsZero() ||
+					!effectiveTargetTime.After(time.Now()) {
 					continue
 				}
 				// Pull capacity off the configured loadpoint.
@@ -1045,8 +1257,8 @@ func main() {
 					slotLenMin = 60
 				}
 				targetSlot := -1
-				if !st.TargetTime.IsZero() {
-					delta := time.Until(st.TargetTime)
+				if !effectiveTargetTime.IsZero() {
+					delta := time.Until(effectiveTargetTime)
 					if delta > 0 {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
@@ -1057,7 +1269,7 @@ func main() {
 				// so planning past it is wasted DP grid space. When
 				// the limit is unknown, fall back to the deadline
 				// target itself; never plan beyond what was requested.
-				maxPct := st.TargetSoCPct
+				maxPct := effectiveTargetPct
 				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxPct {
 					maxPct = vehicleChargeLimit
 				}
@@ -1070,11 +1282,11 @@ func main() {
 				// and MPC keeps committing grid charging chasing an
 				// unreachable goal. Cap target_pct to whatever the
 				// car will physically accept.
-				targetPct := st.TargetSoCPct
+				targetPct := effectiveTargetPct
 				if vehicleChargeLimit > 0 && vehicleChargeLimit < targetPct {
 					targetPct = vehicleChargeLimit
 					slog.Info("mpc: target capped to vehicle charge limit",
-						"lp", st.ID, "operator_target_pct", st.TargetSoCPct,
+						"lp", st.ID, "operator_target_pct", effectiveTargetPct,
 						"vehicle_limit_pct", vehicleChargeLimit)
 				}
 				// Guard against degenerate grids: if current SoC > maxPct
@@ -1109,19 +1321,19 @@ func main() {
 						}
 					}
 					if !latestEnd.IsZero() &&
-						st.TargetTime.After(latestEnd) &&
-						time.Until(st.TargetTime) > 3*time.Hour {
+						effectiveTargetTime.After(latestEnd) &&
+						time.Until(effectiveTargetTime) > 3*time.Hour {
 						deferGridPlan = true
 					}
 				}
 				slog.Debug("mpc: loadpoint spec",
 					"id", st.ID, "soc_pct", initSoC, "soc_source", socSource,
-					"target_pct", st.TargetSoCPct, "target_slot", targetSlot,
+					"target_pct", effectiveTargetPct, "target_slot", targetSlot,
 					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit,
 					"defer_grid_plan", deferGridPlan)
 				if deferGridPlan {
 					slog.Info("mpc: LP grid-funded planning deferred — target past published prices",
-						"lp", st.ID, "target", st.TargetTime, "hours_to_target", time.Until(st.TargetTime).Hours())
+						"lp", st.ID, "target", effectiveTargetTime, "hours_to_target", time.Until(effectiveTargetTime).Hours())
 				}
 				// Mirror the deferral into the runtime controller so live
 				// dispatch enforces "no grid import" too. Without this,
@@ -1158,7 +1370,7 @@ func main() {
 				// while live execution held the battery at house-only
 				// levels. Take ctrlMu for the bool read.
 				ctrlMu.Lock()
-				noBatteryToEV := !ctrl.BatteryCoversEV
+				noBatteryToEV := !(ctrl.BatteryCoversEV || boostActive)
 				ctrlMu.Unlock()
 				specs = append(specs, &mpc.LoadpointSpec{
 					ID:               st.ID,
@@ -1359,6 +1571,85 @@ func main() {
 			}
 			return ctrl.FuseEVMaxW, true
 		})
+		// Every lease is preflighted and re-evaluated on each loadpoint tick.
+		// This closure owns site/battery health because those concepts belong
+		// to core, not to the protocol-neutral loadpoint package.
+		lpController.SetBatteryBoostSafety(func(id string, lease loadpoint.BatteryBoostLease) loadpoint.BatteryBoostStopReason {
+			ctrlMu.Lock()
+			mode := ctrl.Mode
+			fuseBlocked := ctrl.FuseSaturated
+			_, batteryHeld := ctrl.GetBatteryManualHold(time.Now())
+			siteMeter := ctrl.SiteMeterDriver
+			ctrlMu.Unlock()
+			if mode == control.ModeIdle || mode == control.ModeCharge {
+				return loadpoint.BatteryBoostStoppedCoreMode
+			}
+			if batteryHeld {
+				return loadpoint.BatteryBoostStoppedBatteryHold
+			}
+			if fuseBlocked {
+				return loadpoint.BatteryBoostStoppedFuseSafety
+			}
+			cfgMu.RLock()
+			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			staticFloor := make(map[string]float64, len(cfg.Batteries))
+			for name, batteryCfg := range cfg.Batteries {
+				if batteryCfg.SoCMin != nil {
+					staticFloor[name] = *batteryCfg.SoCMin
+				}
+			}
+			cfgMu.RUnlock()
+			if watchdog <= 0 {
+				watchdog = 60 * time.Second
+			}
+			if siteMeter == "" || tel.IsStale(siteMeter, telemetry.DerMeter, watchdog) {
+				return loadpoint.BatteryBoostStoppedSiteSafety
+			}
+			if h := tel.DriverHealth(siteMeter); h == nil || !h.IsOnline() {
+				return loadpoint.BatteryBoostStoppedSiteSafety
+			}
+			lpState, ok := lpMgr.State(id)
+			if !ok {
+				return loadpoint.BatteryBoostStoppedLoadpointDriver
+			}
+			lpHealth := tel.DriverHealth(lpState.DriverName)
+			if lpHealth == nil || !lpHealth.IsOnline() || tel.IsStale(lpState.DriverName, telemetry.DerEV, watchdog) {
+				return loadpoint.BatteryBoostStoppedLoadpointDriver
+			}
+			capMu.RLock()
+			batteryNames := make([]string, 0, len(capacities))
+			for name := range capacities {
+				batteryNames = append(batteryNames, name)
+			}
+			capMu.RUnlock()
+			usable := 0
+			for _, name := range batteryNames {
+				h := tel.DriverHealth(name)
+				// A configured-but-never-started battery has no health row and is
+				// ignored (for example a disabled config entry). Once a source
+				// has participated, stale/offline/faulted state withdraws the
+				// whole lease rather than silently changing its reserve basis.
+				if h == nil {
+					continue
+				}
+				r := tel.Get(name, telemetry.DerBattery)
+				if !h.IsOnline() || r == nil || r.SoC == nil || tel.IsStale(name, telemetry.DerBattery, watchdog) {
+					return loadpoint.BatteryBoostStoppedBatteryUnavailable
+				}
+				usable++
+				floor := lease.MinBatterySoCPct / 100
+				if staticFloor[name] > floor {
+					floor = staticFloor[name]
+				}
+				if *r.SoC <= floor {
+					return loadpoint.BatteryBoostStoppedBatteryReserve
+				}
+			}
+			if usable == 0 {
+				return loadpoint.BatteryBoostStoppedBatteryUnavailable
+			}
+			return ""
+		})
 		// Persist operator manual holds (the amp-slider "Start") so they
 		// survive reboot / firmware update and the EV keeps charging across
 		// the restart — the in-memory hold would otherwise be lost (Stefan
@@ -1404,6 +1695,46 @@ func main() {
 				slog.Warn("failed to persist manual hold", "lp", id, "err", err)
 			}
 		})
+		const lpBatteryBoostKeyPrefix = "loadpoint_battery_boost:"
+		for _, lpState := range lpMgr.States() {
+			key := lpBatteryBoostKeyPrefix + lpState.ID
+			v, ok := st.LoadConfig(key)
+			if !ok || v == "" || v == "{}" {
+				continue
+			}
+			var lease loadpoint.BatteryBoostLease
+			if err := json.Unmarshal([]byte(v), &lease); err != nil ||
+				!lpController.RestoreBatteryBoost(lpState.ID, lease, time.Now()) {
+				_ = st.SaveConfig(key, "{}")
+				slog.Warn("discarded invalid persisted battery boost lease", "lp", lpState.ID, "err", err)
+				continue
+			}
+			slog.Info("restored bounded battery boost lease", "lp", lpState.ID, "expires_at", lease.ExpiresAt)
+		}
+		lpController.SetBatteryBoostSaver(func(id string, lease loadpoint.BatteryBoostLease, cleared bool) {
+			key := lpBatteryBoostKeyPrefix + id
+			if cleared {
+				if err := st.SaveConfig(key, "{}"); err != nil {
+					slog.Warn("failed to clear persisted battery boost lease", "lp", id, "err", err)
+				}
+				return
+			}
+			b, err := json.Marshal(lease)
+			if err != nil {
+				slog.Warn("failed to marshal battery boost lease", "lp", id, "err", err)
+				return
+			}
+			if err := st.SaveConfig(key, string(b)); err != nil {
+				slog.Warn("failed to persist battery boost lease", "lp", id, "err", err)
+			}
+		})
+		lpController.SetBatteryBoostStopped(func(id string, reason loadpoint.BatteryBoostStopReason) {
+			if mpcSvc == nil {
+				return
+			}
+			go mpcSvc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_stopped")
+			slog.Info("battery boost stopped — replan requested", "lp", id, "reason", reason)
+		})
 		// Wire the live per-phase site-meter current reader. The control
 		// package's fuse guard is site-TOTAL only (sum across phases);
 		// a single phase can still trip from house-load imbalance (e.g.
@@ -1415,17 +1746,22 @@ func main() {
 		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
 			cfgMu.RLock()
 			siteMeter := cfg.SiteMeterDriver()
+			phaseCount := cfg.Fuse.Phases
+			watchdogTimeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
 			cfgMu.RUnlock()
 			if siteMeter == "" {
 				return 0, 0, 0, false
 			}
-			l1, _, ok1 := tel.LatestMetric(siteMeter, "meter_l1_a")
-			l2, _, ok2 := tel.LatestMetric(siteMeter, "meter_l2_a")
-			l3, _, ok3 := tel.LatestMetric(siteMeter, "meter_l3_a")
-			if !ok1 && !ok2 && !ok3 {
+			if watchdogTimeout <= 0 {
+				watchdogTimeout = 60 * time.Second
+			}
+			amps, available, fresh := sitePhaseCurrentsAt(
+				tel, siteMeter, phaseCount, watchdogTimeout, time.Now(),
+			)
+			if !available || !fresh {
 				return 0, 0, 0, false
 			}
-			return l1, l2, l3, true
+			return amps[0], amps[1], amps[2], true
 		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla
@@ -1691,16 +2027,22 @@ func main() {
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
-			CurrentVersion: current,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			CurrentVersion:     current,
+			CurrentStateSchema: state.SchemaVersion,
+			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:         envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 			// Publish events.UpdateAvailable when a new release lands so
 			// the notifications service (or any other subscriber) can act
 			// without polling the checker directly.
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
-		optimizerCurrent := "dev"
+		// Empty means "not known yet", which is the honest answer when the
+		// optimizer is still starting or its handshake is rejected. Claiming
+		// "dev" here made the checker treat the optimizer as older than every
+		// release and light the update badge on an up-to-date stable site.
+		// /api/components calls SetCurrentVersion once a handshake succeeds.
+		optimizerCurrent := ""
 		if mpcSvc != nil && mpcSvc.Optimizer != nil {
 			if health, ok := mpcSvc.Optimizer.(interface {
 				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
@@ -1739,17 +2081,36 @@ func main() {
 	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
 		identityKeyPath = cfg.Nova.KeyPath
 	}
-	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
-	if err != nil {
-		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
-	} else {
-		slog.Info("site identity ready", "pubkey_prefix", siteIdentity.PublicKeyHex()[:16])
+	identityState, identityErr := loadSiteIdentity(identityKeyPath)
+	switch {
+	case identityErr != nil:
+		// Binding and platform checks fail closed. Never create a replacement
+		// key when state is incomplete or this host cannot protect it.
+		slog.Warn("home link identity disabled", "err", identityErr, "path", identityKeyPath)
+	case identityState.HomeLink != nil:
+		handle, handleErr := gatewayidentity.RouteHandle(identityState.HomeLink.PublicKey())
+		if handleErr != nil {
+			slog.Warn("home link identity disabled", "err", handleErr, "path", identityKeyPath)
+		} else {
+			slog.Info("home link identity ready",
+				"gateway_id", identityState.Binding.GatewayID,
+				"route_handle", handle,
+			)
+		}
+	case identityState.Nova != nil:
+		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
+	}
+	homeLinkAdmin, homeLinkEnabled, homeLinkErr := startHomeLink(
+		ctx, cfg, identityState, st, tel, mpcSvc, ctrl, ctrlMu,
+	)
+	if homeLinkErr != nil {
+		slog.Warn("Home Link unavailable")
 	}
 
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
-		CapMu: capMu, Capacities: capacities,
+		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,
@@ -1787,6 +2148,8 @@ func main() {
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
 		OptimizerUpdate:  optimizerUpdater,
+		HomeLink:         homeLinkAdmin,
+		HomeLinkEnabled:  homeLinkEnabled,
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,
@@ -1955,17 +2318,27 @@ func main() {
 	// device/DER records under an org. When disabled or unconfigured,
 	// this block is a no-op.
 	if cfg.Nova != nil && cfg.Nova.Enabled {
-		// Load the persistent gateway identity only for explicitly enabled
-		// federation. Keep the canonical nova.key path so already-claimed
-		// gateways retain their identity across upgrades.
-		identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
-		if cfg.Nova.KeyPath != "" {
-			identityKeyPath = cfg.Nova.KeyPath
-		}
-		siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
-		if err != nil {
-			slog.Warn("nova federation disabled — gateway identity unavailable", "err", err, "path", identityKeyPath)
-		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
+		// Reuse the startup result. A failed or adopted Home Link binding
+		// must never reach a create-if-missing key path later in boot.
+		if identityState.Nova == nil {
+			slog.Warn("nova federation disabled — canonical identity unavailable", "path", identityKeyPath)
+		} else if pub, err := nova.Start(cfg.Nova, identityState.Nova, st, tel,
+			nova.WithDriverInventory(func(now time.Time) (driverinventory.Snapshot, error) {
+				cfgMu.RLock()
+				driverCfg := append([]config.Driver(nil), cfg.Drivers...)
+				cfgMu.RUnlock()
+				return driverinventory.Build(now, driverinventory.Input{
+					HostVersion:       Version,
+					Drivers:           driverCfg,
+					RunningNames:      reg.Names(),
+					Health:            tel.AllHealth(),
+					UserDriverDir:     *userDriversDirFlag,
+					ManagedDriverDir:  driverRepository.ActiveDir(),
+					BundledDriverDir:  resolveDriverDir(),
+					RepositoryDrivers: inventoryRepositoryArtifacts(driverRepository),
+				})
+			}),
+		); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
 			defer pub.Stop()
@@ -2026,6 +2399,7 @@ func main() {
 	const evStopReplanCooldown = 60 * time.Second
 	const evStopHigh = 100.0 // W — "was actually drawing"
 	const evStopLow = 50.0   // W — "now essentially zero"
+	var staleDefaults staleSiteDefaultTracker
 	for {
 		select {
 		case <-sigc:
@@ -2041,7 +2415,8 @@ func main() {
 			}
 			return
 		case <-ticker.C:
-			nowMs := time.Now().UnixMilli()
+			tickNow := time.Now()
+			nowMs := tickNow.UnixMilli()
 
 			// ---- Continuous learning: feed (last_command, actual) per battery ----
 			// Skip while self-tune is active — the override would corrupt RLS.
@@ -2093,11 +2468,16 @@ func main() {
 			cfgMu.RLock()
 			troubleshootingMode := cfg.Site.TroubleshootingMode
 			cfgMu.RUnlock()
+			capMu.RLock()
+			observeOnlySnap := observeOnly
+			capMu.RUnlock()
+			watchdogDefaulted := make(map[string]struct{})
 			for _, tr := range tel.WatchdogScan(watchdogTimeout) {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					sendDriverDefault(ctx, reg, tr.Name, "watchdog")
+					sendDriverDefault(ctx, reg, tr.Name, "watchdog", observeOnlySnap)
+					watchdogDefaulted[tr.Name] = struct{}{}
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
@@ -2109,19 +2489,49 @@ func main() {
 			// rules without the control loop knowing about them.
 			bus.Publish(events.HealthTick{Health: tel.AllHealth(), Now: time.Now()})
 
-			// ---- EV dispatch first — independent of the site meter ----
-			// Loadpoint Observe() reads its own telemetry (the EV
-			// charger driver), so it MUST run before the site-meter
-			// staleness guard below — otherwise a missing/stale site
-			// meter silently freezes the LP manager's plugged_in
-			// state, MPC never extends the DP with the EV dimension,
-			// and the operator sees "schedule set but EV never
-			// charges". The surplus-only clamp inside the LP controller
-			// already returns 0 when site surplus is unknown, so this
-			// is safe: bad grid signal → LP paused, but at least the
-			// LP state machine is alive.
-			lpMgr.RollSchedules(time.Now().UTC())
-			lpController.Tick(ctx, time.Now())
+			// ---- Shared pre-dispatch freshness boundary ----
+			// Compute one verdict before any normal EV/storage/PV command.
+			// A stale site meter, or stale phase currents once that fuse
+			// telemetry exists, closes every physical dispatch path. Safe
+			// standdown/default commands remain permitted.
+			ctrlMu.Lock()
+			siteMeterDriver := ctrl.SiteMeterDriver
+			siteFuseAmps := ctrl.SiteFuseAmps
+			siteFusePhases := ctrl.SiteFusePhases
+			ctrlMu.Unlock()
+			freshness := evaluateSiteDispatchFreshnessAt(
+				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
+			)
+			pendingDefaults, enteredStale, recovered := staleDefaults.update(
+				!freshness.Allowed(), siteMeterDriver, reg.Names(),
+			)
+			if enteredStale {
+				slog.Warn("site dispatch inhibited — reverting controllable drivers to autonomous",
+					"site_meter", siteMeterDriver, "reason", freshness.Reason,
+					"timeout", watchdogTimeout)
+				if troubleshootingMode {
+					slog.Info("troubleshooting: site dispatch inhibited",
+						"site_meter", siteMeterDriver, "reason", freshness.Reason,
+						"timeout", watchdogTimeout)
+				}
+			}
+			if recovered {
+				slog.Info("site dispatch freshness recovered", "site_meter", siteMeterDriver)
+			}
+			for _, name := range pendingDefaults {
+				if _, alreadyDefaulted := watchdogDefaulted[name]; alreadyDefaulted {
+					continue
+				}
+				sendDriverDefault(ctx, reg, name, freshness.Reason, observeOnlySnap)
+			}
+
+			// Loadpoint observation and schedule rolling stay live while the
+			// gate is closed. TickWithDispatch sends an explicit 0 W standdown
+			// instead of executing a schedule or persistent manual hold.
+			lpMgr.RollSchedules(tickNow.UTC())
+			if lpController != nil {
+				lpController.TickWithDispatch(ctx, tickNow, freshness.Allowed())
+			}
 
 			// Anchor each plugged-in loadpoint's inferred SoC to the live
 			// vehicle BMS reading when one is paired. Chargers like Easee
@@ -2147,30 +2557,10 @@ func main() {
 				lpMgr.AnchorVehicleSoC(st.ID, pick.SoCPct)
 			}
 
-			// ---- Safety: site meter stale → idle everything this cycle ----
-			// Otherwise stale grid readings cause one battery to charge another.
-			// Only meaningful when a site meter is actually configured;
-			// without one, IsStale("", DerMeter) is permanently true and
-			// the SendDefault loop below would fire on every tick — and
-			// SendDefault is a blocking send into each driver's cmdCh,
-			// which deadlocks the dispatch loop the first time any
-			// driver's channel buffer fills.
-			ctrlMu.Lock()
-			siteMeterDriver := ctrl.SiteMeterDriver
-			ctrlMu.Unlock()
-			siteMeterStale := false
-			if siteMeterDriver != "" {
-				siteMeterStale = tel.IsStale(siteMeterDriver, telemetry.DerMeter, watchdogTimeout)
-			}
-			if siteMeterStale {
-				slog.Warn("site meter telemetry stale — idling batteries this cycle",
-					"driver", siteMeterDriver)
-				if troubleshootingMode {
-					slog.Info("troubleshooting: site meter stale, dispatch skipped",
-						"site_meter", siteMeterDriver, "timeout", watchdogTimeout)
-				}
-				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), siteMeterDriver) {
-					sendDriverDefault(ctx, reg, n, "site_meter_stale")
+			if !freshness.Allowed() {
+				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
+				if err != nil {
+					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
 				continue
 			}
@@ -2234,10 +2624,13 @@ func main() {
 			// with SoC headroom so PV isn't cut when a vehicle could
 			// resume charging.
 			evCurtailHeadroomW := loadpoint.SurplusPotentialW(lpStatesSnapshot)
+			boostEVW, boostReserveSoC := activeBatteryBoostTotals(lpController, lpStatesSnapshot, tickNow)
 
 			ctrlMu.Lock()
 			ctrl.EVSurplusOnlyReserveW = evReserveW
 			ctrl.EVCurtailHeadroomW = evCurtailHeadroomW
+			ctrl.BatteryBoostEVChargingW = boostEVW
+			ctrl.BatteryBoostReserveSoC = boostReserveSoC
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
@@ -2286,6 +2679,9 @@ func main() {
 
 			// ---- Dispatch to drivers ----
 			for _, t := range finalTargets {
+				if observeOnlySnap[t.Driver] {
+					continue
+				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
 				if err := reg.Send(ctx, t.Driver, payload); err != nil {
 					slog.Warn("driver send", "name", t.Driver, "err", err)
@@ -2400,14 +2796,9 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			hp := buildHistoryPoint(tel, ctrl, nowMs)
-			samples := tel.FlushSamples()
-			stSamples := make([]state.Sample, len(samples))
-			for i, sm := range samples {
-				stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
-			}
-			if err := st.RecordTick(hp, stSamples); err != nil {
-				slog.Warn("tick persistence failed", "samples", len(samples), "err", err)
+			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
+			if err != nil {
+				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
 
 			// ---- Periodic battery-model persistence (every 12 cycles ≈ 60s) ----
@@ -2425,6 +2816,45 @@ func main() {
 			}
 		}
 	}
+}
+
+func inventoryRepositoryArtifacts(manager *driverrepo.Manager) []driverinventory.RepositoryArtifact {
+	if manager == nil {
+		return nil
+	}
+	active := manager.Status().Active
+	out := make([]driverinventory.RepositoryArtifact, 0, len(active))
+	for _, installed := range active {
+		item := driverinventory.RepositoryArtifact{
+			LogicalPath:   installed.LogicalPath,
+			InstalledPath: installed.InstalledPath,
+			DriverID:      installed.DriverID,
+			Version:       installed.Version,
+			SHA256:        installed.SHA256,
+			RepositoryID:  installed.RepoID,
+		}
+		versions, err := manager.AvailableVersions(installed.DriverID)
+		if err == nil {
+			for _, candidate := range versions {
+				driver := candidate.Driver
+				if candidate.RepositoryID != installed.RepoID || driver.Version != installed.Version || !strings.EqualFold(driver.SHA256, installed.SHA256) {
+					continue
+				}
+				item.PackageID = driver.PackageID
+				item.PackageChannel = driver.Channel
+				if driver.PackageID != "" {
+					if driver.Metadata.ReadOnly {
+						item.ControlClass = "read_only"
+					} else {
+						item.ControlClass = "control"
+					}
+				}
+				break
+			}
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // snapshotLoop writes a recovery snapshot of state.db daily and once on
@@ -2517,6 +2947,11 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	if err := st.Prune(ctx); err != nil {
 		slog.Warn("history tier prune failed", "err", err)
 	}
+	if rolled, expired, err := st.PruneEnergyLedger(ctx, time.Now()); err != nil {
+		slog.Warn("energy ledger retention failed", "err", err)
+	} else if rolled > 0 || expired > 0 {
+		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "expired_rows", expired)
+	}
 
 	rows, files, err := st.RolloffToParquet(ctx, coldDir)
 	if err != nil {
@@ -2566,7 +3001,10 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 
 const driverDefaultTimeout = 2 * time.Second
 
-func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string) {
+func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string, observeOnly map[string]bool) {
+	if observeOnly[name] {
+		return
+	}
 	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
 	defer cancel()
 	if err := reg.SendDefault(cmdCtx, name); err != nil {
@@ -2575,27 +3013,14 @@ func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason 
 	}
 }
 
-// driversToDefaultOnSiteMeterStale returns the driver names to revert to
-// DefaultMode when the site meter goes stale: every driver EXCEPT the
-// site-meter owner itself. Skipping the meter owner avoids a flap loop on
-// combined meter+battery devices (Pixii / Ferroamp-class) whose stale meter
-// reading is usually their own hung modbus poll — writing DefaultMode into
-// that same session cuts the battery in/out every minute. The "don't act on
-// a stale grid signal" protection only applies to the OTHER batteries.
-func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		if n == siteMeterDriver {
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
-}
-
 // driverCapacitiesFrom builds the driver-name → battery-capacity map
 // the MPC sums into Params.CapacityWh and the control layer uses for
 // fuse-guard / peak-shave sizing.
+//
+// When controllableOnly is true, drivers with observe_only or
+// battery_telemetry_only are omitted — they still emit battery telemetry
+// for the UI and site-balance math but must not receive dispatch
+// commands or land in the planner pool.
 //
 // Critically: drivers that are referenced by a loadpoint entry are
 // EV chargers, not home batteries — their `battery_capacity_wh`
@@ -2609,7 +3034,7 @@ func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []
 // Filtering here rather than at config-parse time means the vehicle
 // capacity is still available for EV-side logic (loadpoint manager)
 // without a schema migration.
-func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint, catalog []drivers.CatalogEntry) map[string]float64 {
+func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint, catalog []drivers.CatalogEntry, controllableOnly bool) map[string]float64 {
 	evDrivers := make(map[string]struct{}, len(loadpoints))
 	for _, lp := range loadpoints {
 		// Only treat a loadpoint row as authoritative when it's
@@ -2628,7 +3053,10 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 		if d.BatteryCapacityWh <= 0 {
 			continue
 		}
-		if d.BatteryTelemetryOnly || drivers.IsReadOnlyDriver(catalog, d.Lua) {
+		if controllableOnly && d.ObserveOnly {
+			continue
+		}
+		if controllableOnly && (d.BatteryTelemetryOnly || drivers.IsReadOnlyDriver(catalog, d.Lua)) {
 			// A telemetry gateway must never enter MPC/dispatch even if an old
 			// or hand-written config also carries a battery capacity.
 			continue
@@ -2663,6 +3091,9 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
+		if d.ObserveOnly {
+			continue
+		}
 		chg, dis := d.MaxChargeW, d.MaxDischargeW
 		if b, ok := batteries[d.Name]; ok {
 			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
@@ -2864,6 +3295,16 @@ func planSlotsFromMPC(mpcSvc *mpc.Service) []calendar.PlanSlot {
 		})
 	}
 	return out
+}
+
+// activeBatteryBoostTotals keeps the core dispatch tick safe when the optional
+// planner is disabled. The loadpoint controller currently shares the planner's
+// lifecycle, so no controller means there can be no active boost permission.
+func activeBatteryBoostTotals(controller *loadpoint.Controller, states []loadpoint.State, now time.Time) (float64, float64) {
+	if controller == nil {
+		return 0, 0
+	}
+	return controller.ActiveBatteryBoostTotals(states, now)
 }
 
 // buildLoadpointConfigs adapts YAML-facing config.Loadpoint entries
@@ -3083,10 +3524,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		if moduleDir == "" {
 			moduleDir = resolveOptimizerDir()
 		}
-		timeout := time.Duration(pl.OptimizerTimeoutS * float64(time.Second))
-		if timeout <= 0 {
-			timeout = 30 * time.Second
-		}
+		timeout := pl.OptimizerTimeout()
 		idleTimeout := time.Duration(pl.OptimizerIdleTimeoutS * float64(time.Second))
 		if idleTimeout <= 0 {
 			idleTimeout = 2 * time.Minute
@@ -3202,17 +3640,87 @@ func isConfigMissing(err error) bool {
 	return strings.Contains(err.Error(), "no such file")
 }
 
-func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) state.HistoryPoint {
-	gridW := 0.0
-	if r := tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
-		gridW = r.SmoothedW
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration) (int, error) {
+	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge)
+	samples := tel.FlushSamples()
+	stSamples := make([]state.Sample, len(samples))
+	for i, sm := range samples {
+		stSamples[i] = state.Sample{
+			Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs,
+			Value: sm.Value, Unit: sm.Unit,
+		}
 	}
+	energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
+	filtered := energyObservations[:0]
+	for _, observation := range energyObservations {
+		if !historyAvailable && (observation.AssetKind == state.AssetGridMeter ||
+			observation.AssetKind == state.AssetObservedConsumer) {
+			continue
+		}
+		if observation.AssetKind != state.AssetObservedConsumer {
+			h := tel.DriverHealth(observation.Label)
+			maxAge := historyMaxAge
+			if h == nil || h.Status == telemetry.StatusOffline {
+				continue
+			}
+			if h.WatchdogTimeoutOverride > 0 {
+				maxAge = h.WatchdogTimeoutOverride
+			}
+			if maxAge > 0 && time.UnixMilli(nowMs).Sub(time.UnixMilli(observation.AtMs)) > maxAge {
+				continue
+			}
+		}
+		filtered = append(filtered, observation)
+	}
+	energyObservations = filtered
+	var historyPoint *state.HistoryPoint
+	if historyAvailable {
+		historyPoint = &hp
+	}
+	return len(samples), st.RecordTickWithOptionalHistory(historyPoint, stSamples, energyObservations)
+}
+
+func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration) (state.HistoryPoint, bool) {
+	unavailable := state.HistoryPoint{TsMs: nowMs}
+	if tel == nil || ctrl == nil || ctrl.SiteMeterDriver == "" {
+		return unavailable, false
+	}
+	meterHealth := tel.DriverHealth(ctrl.SiteMeterDriver)
+	if meterHealth == nil || meterHealth.Status == telemetry.StatusOffline {
+		return unavailable, false
+	}
+	meter := tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil {
+		return unavailable, false
+	}
+	if historyMaxAge > 0 && time.UnixMilli(nowMs).Sub(meter.UpdatedAt) > historyMaxAge {
+		return unavailable, false
+	}
+	now := time.UnixMilli(nowMs)
+	readingUsable := func(driver string, updatedAt time.Time) bool {
+		h := tel.DriverHealth(driver)
+		if h == nil || h.Status == telemetry.StatusOffline {
+			return false
+		}
+		maxAge := historyMaxAge
+		if h.WatchdogTimeoutOverride > 0 {
+			maxAge = h.WatchdogTimeoutOverride
+		}
+		return maxAge <= 0 || now.Sub(updatedAt) <= maxAge
+	}
+	gridW := meter.SmoothedW
 	var pvW, batW, sumSoC float64
 	var socCount int
 	for _, r := range tel.ReadingsByType(telemetry.DerPV) {
+		if !readingUsable(r.Driver, r.UpdatedAt) {
+			continue
+		}
 		pvW += r.SmoothedW
 	}
 	for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+		if !readingUsable(r.Driver, r.UpdatedAt) {
+			continue
+		}
 		batW += r.SmoothedW
 		if r.SoC != nil {
 			sumSoC += *r.SoC
@@ -3223,8 +3731,23 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 	if socCount > 0 {
 		avgSoC = sumSoC / float64(socCount)
 	}
-	evW := tel.SumOnlineEVW()
-	v2xW := tel.SumOnlineV2XW()
+	var evW, v2xW float64
+	for _, r := range tel.ReadingsByType(telemetry.DerEV) {
+		if readingUsable(r.Driver, r.UpdatedAt) {
+			evW += r.SmoothedW
+		}
+	}
+	for _, r := range tel.ReadingsByType(telemetry.DerV2X) {
+		if readingUsable(r.Driver, r.UpdatedAt) {
+			v2xW += r.SmoothedW
+		}
+	}
+	if evW > -1 && evW < 1 {
+		evW = 0
+	}
+	if v2xW > -1 && v2xW < 1 {
+		v2xW = 0
+	}
 	loadW := gridW - batW - pvW - evW - v2xW
 	if loadW < 0 {
 		loadW = 0
@@ -3234,18 +3757,21 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 	// schema-less by design — UI code reads what it understands and
 	// ignores the rest, so drivers can add fields without a migration.
 	perDriver := make(map[string]map[string]float64)
-	for name, h := range tel.AllHealth() {
+	for name := range tel.AllHealth() {
 		row := map[string]float64{}
-		if r := tel.Get(name, telemetry.DerBattery); r != nil {
+		if r := tel.Get(name, telemetry.DerBattery); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["bat_w"] = r.SmoothedW
 			if r.SoC != nil {
 				row["soc"] = *r.SoC
 			}
 		}
-		if r := tel.Get(name, telemetry.DerPV); r != nil {
+		if r := tel.Get(name, telemetry.DerPV); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["pv_w"] = r.SmoothedW
 		}
-		if r := tel.Get(name, telemetry.DerMeter); r != nil {
+		if r := tel.Get(name, telemetry.DerMeter); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["meter_w"] = r.SmoothedW
 		}
 		// EV charge power: required for the live chart's EV series
@@ -3253,16 +3779,17 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 		// Without it the chart's EV trace is always zero — the in-memory
 		// /api/status DOES carry ev_w, but history rows never did until
 		// this row was added.
-		if r := tel.Get(name, telemetry.DerEV); r != nil {
+		if r := tel.Get(name, telemetry.DerEV); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["ev_w"] = r.SmoothedW
 		}
-		if r := tel.Get(name, telemetry.DerV2X); r != nil {
+		if r := tel.Get(name, telemetry.DerV2X); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["v2x_w"] = r.SmoothedW
 			if r.SoC != nil {
 				row["v2x_vehicle_soc"] = *r.SoC
 			}
 		}
-		_ = h
 		perDriver[name] = row
 	}
 	targets := make(map[string]float64)
@@ -3279,7 +3806,7 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 	return state.HistoryPoint{
 		TsMs: nowMs, GridW: gridW, PVW: pvW, BatW: batW, LoadW: loadW, BatSoC: avgSoC,
 		JSON: string(jsonBlob),
-	}
+	}, true
 }
 
 func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time) {

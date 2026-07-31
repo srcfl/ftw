@@ -12,7 +12,7 @@ import (
 )
 
 func TestHandleLoadModelProfileSwitch(t *testing.T) {
-	lm := loadmodel.NewService(nil, telemetry.NewStore(), "site", 4000)
+	lm := loadmodel.NewService(nil, telemetry.NewStore(), "site", 4000, 17250)
 	srv := New(&Deps{LoadModel: lm})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/loadmodel/profile", strings.NewReader(`{"profile":"away"}`))
@@ -51,7 +51,7 @@ func TestHandleLoadModelProfileSwitch(t *testing.T) {
 }
 
 func TestHandleLoadModelProfileRejectsUnknown(t *testing.T) {
-	lm := loadmodel.NewService(nil, telemetry.NewStore(), "site", 4000)
+	lm := loadmodel.NewService(nil, telemetry.NewStore(), "site", 4000, 17250)
 	srv := New(&Deps{LoadModel: lm})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/loadmodel/profile", strings.NewReader(`{"profile":"vacation"}`))

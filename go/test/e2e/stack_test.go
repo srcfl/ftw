@@ -85,10 +85,14 @@ type stack struct {
 	// Simulators
 	mqttBroker *mqttserver.Server
 	mqttPort   int
-	ferroSim   *ferroamp.Simulator
-	modbusSrv  *sv.ModbusServer
-	modbusPort int
-	sungSim    *sungrow.Simulator
+	// mqttBaseline is the broker's client count with no driver attached — the
+	// inline client, which stays for the life of the server. Close waits for
+	// the count to fall back to it; see closeBroker.
+	mqttBaseline int
+	ferroSim     *ferroamp.Simulator
+	modbusSrv    *sv.ModbusServer
+	modbusPort   int
+	sungSim      *sungrow.Simulator
 
 	// Core pieces
 	reg      *drivers.Registry
@@ -144,6 +148,9 @@ func setupStack(t *testing.T) *stack {
 	}
 	go func() { _ = mb.Serve() }()
 	s.mqttBroker = mb
+	// New registers the inline client, so the count is already settled here and
+	// does not race Serve.
+	s.mqttBaseline = mb.Clients.Len()
 
 	ferroCfg := ferroamp.Default()
 	ferroCfg.ResponseTauS = 0.3
@@ -407,10 +414,49 @@ func (s *stack) Close() {
 		s.modbusSrv.Stop()
 	}
 	if s.mqttBroker != nil {
-		_ = s.mqttBroker.Close()
+		closeBroker(s.t, s.mqttBroker, s.mqttBaseline)
 	}
 	if s.st != nil {
 		s.st.Close()
+	}
+}
+
+// closeBroker stops the broker without tripping the recursive read-lock in
+// mochi-mqtt v2.7.9: Clients.GetByListener takes the read lock and then calls
+// Clients.Len, which takes it again. sync.RWMutex is not reentrant, so a
+// Clients.Delete — what the broker runs once a client drops — landing between
+// the two read locks wedges both goroutines for good. Server.Close walks
+// GetByListener, so closing while a client is still tearing down is the race.
+// ShutdownAll above disconnects the Ferroamp driver, which is exactly that.
+//
+// Waiting for the client count to fall back to baseline closes the window: no
+// disconnect is in flight, so no writer can queue between the two read locks.
+// The deadline is the backstop — if the broker still wedges, the test says so
+// in seconds instead of burning the whole `make e2e` timeout on an unrelated
+// pull request.
+//
+// go/cmd/sim-ferroamp/e2e_test.go carries the same helper for the same reason.
+// v2.7.9 is the newest release, so there is nothing to upgrade to.
+func closeBroker(t *testing.T, mb *mqttserver.Server, baseline int) {
+	t.Helper()
+
+	settle := time.Now().Add(2 * time.Second)
+	for mb.Clients.Len() > baseline && time.Now().Before(settle) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := mb.Clients.Len(); n > baseline {
+		t.Logf("broker still holds %d clients (baseline %d) at close", n, baseline)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = mb.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Errorf("broker Close blocked for 5s: mochi-mqtt Clients read lock is held by GetByListener while a client disconnect waits for the write lock")
 	}
 }
 

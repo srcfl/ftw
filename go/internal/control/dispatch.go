@@ -152,9 +152,10 @@ type SlotDirective struct {
 	HasPlannedGridW bool
 
 	// LivePVSurplusSoCCapPct mirrors mpc.SlotDirective. When non-zero,
-	// the plan has proved that a later grid-funded battery charge costs
-	// more than current export earns. Runtime may absorb live PV surprise
-	// now up to this planned future SoC. Zero preserves deliberate export.
+	// the plan has proved that enough later grid-funded battery charge clears
+	// the economic threshold. Runtime may absorb live PV surprise now up to
+	// the current planned SoC plus that replaceable energy. Zero preserves
+	// deliberate export.
 	LivePVSurplusSoCCapPct float64
 
 	// LoadpointEnergyWh is the current slot's planned EV charging budget.
@@ -394,6 +395,14 @@ type State struct {
 	// "battery_covers_ev"; toggled from HA and POST /api/battery_covers_ev.
 	BatteryCoversEV bool
 
+	// BatteryBoostEVChargingW is the live charging draw belonging to
+	// loadpoints with a currently valid, per-loadpoint battery-boost lease.
+	// Unlike BatteryCoversEV, it never authorises unrelated EV/V2X flow.
+	// BatteryBoostReserveSoC is the strictest active lease reserve (0..1).
+	// main.go refreshes both from loadpoint.Controller every dispatch tick.
+	BatteryBoostEVChargingW float64
+	BatteryBoostReserveSoC  float64
+
 	// PI controller (outer, site-level)
 	PI *PIController
 
@@ -600,21 +609,6 @@ type State struct {
 	// leaves the rest uncapped. Hot-installed via POST
 	// /api/pv/manual_hold; auto-expires. Zero ExpiresAt means inactive.
 	ManualPVHold PVManualHold
-
-	// SettlementAwareSelfConsumption lets self_consumption look at the
-	// running net Wh inside the current fixed 15-minute settlement window
-	// (00/15/30/45) and bias the live grid target negative when the slot
-	// has already accumulated import. It is intentionally asymmetric:
-	// prior import may be worked back by exporting from the battery, but
-	// prior export is not "repaid" by importing from grid. That preserves
-	// the self-consumption contract while matching how operators judge
-	// the system over a billing window rather than one noisy second.
-	SettlementAwareSelfConsumption bool
-
-	settlementSlotStart time.Time
-	settlementLastTs    time.Time
-	settlementNetWh     float64
-	settlementTargetW   float64
 }
 
 // BatteryManualHold is the full payload of a battery manual override.
@@ -828,89 +822,6 @@ func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Tim
 	state.slotActualPlannedWh = dir.BatteryEnergyWh
 }
 
-const (
-	settlementSlotDuration = 15 * time.Minute
-	settlementEnterNetWh   = 30.0
-	settlementExitNetWh    = 10.0
-	settlementMinRemainS   = 30.0
-	settlementMaxDtS       = 60.0
-	settlementTargetAlpha  = 0.35
-	settlementMinSoC       = 0.50
-)
-
-func (s *State) resetSettlementAccounting() {
-	s.settlementSlotStart = time.Time{}
-	s.settlementLastTs = time.Time{}
-	s.settlementNetWh = 0
-	s.settlementTargetW = 0
-}
-
-func (s *State) settlementGridTarget(now time.Time, gridW float64) float64 {
-	slotStart := now.Truncate(settlementSlotDuration)
-	if s.settlementSlotStart.IsZero() ||
-		!s.settlementSlotStart.Equal(slotStart) ||
-		s.settlementLastTs.IsZero() ||
-		s.settlementLastTs.Before(slotStart) ||
-		s.settlementLastTs.After(now) {
-		s.settlementSlotStart = slotStart
-		s.settlementLastTs = now
-		s.settlementNetWh = 0
-		s.settlementTargetW = 0
-		return 0
-	}
-
-	dtS := now.Sub(s.settlementLastTs).Seconds()
-	s.settlementLastTs = now
-	if dtS > 0 {
-		if dtS > settlementMaxDtS {
-			dtS = settlementMaxDtS
-		}
-		s.settlementNetWh += gridW * dtS / 3600.0
-	}
-
-	remainingS := slotStart.Add(settlementSlotDuration).Sub(now).Seconds()
-	if remainingS < settlementMinRemainS {
-		s.settlementTargetW = 0
-		return 0
-	}
-
-	threshold := settlementEnterNetWh
-	if s.settlementTargetW < 0 {
-		threshold = settlementExitNetWh
-	}
-	if s.settlementNetWh <= threshold {
-		s.settlementTargetW = smoothSettlementTarget(s.settlementTargetW, 0)
-		return 0
-	}
-	rawTargetW := -s.settlementNetWh * 3600.0 / remainingS
-	s.settlementTargetW = smoothSettlementTarget(s.settlementTargetW, rawTargetW)
-	return s.settlementTargetW
-}
-
-func smoothSettlementTarget(prev, next float64) float64 {
-	if math.Abs(next) < 1 && math.Abs(prev) < 1 {
-		return 0
-	}
-	out := prev + (next-prev)*settlementTargetAlpha
-	if next == 0 && math.Abs(out) < 5 {
-		return 0
-	}
-	return out
-}
-
-func minBatterySoC(bats []batteryInfo) float64 {
-	if len(bats) == 0 {
-		return 0
-	}
-	min := 1.0
-	for _, b := range bats {
-		if b.soc < min {
-			min = b.soc
-		}
-	}
-	return min
-}
-
 type plannerSelfDecision struct {
 	idleGate          bool
 	exportSurplusGate bool
@@ -996,21 +907,20 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 	pi := NewPI(0.5, 0.1, 3000, 10000)
 	pi.Setpoint = gridTargetW
 	return &State{
-		Mode:                           ModeSelfConsumption,
-		GridTargetW:                    gridTargetW,
-		GridToleranceW:                 gridToleranceW,
-		SiteMeterDriver:                siteMeter,
-		PriorityOrder:                  nil,
-		Weights:                        map[string]float64{},
-		PeakLimitW:                     5000,
-		EVChargingW:                    0,
-		PI:                             pi,
-		SlewRateW:                      500,
-		SlewEnabled:                    true,
-		MinDispatchIntervalS:           5,
-		PrevTargets:                    map[string]float64{},
-		UseCascade:                     true,
-		SettlementAwareSelfConsumption: false,
+		Mode:                 ModeSelfConsumption,
+		GridTargetW:          gridTargetW,
+		GridToleranceW:       gridToleranceW,
+		SiteMeterDriver:      siteMeter,
+		PriorityOrder:        nil,
+		Weights:              map[string]float64{},
+		PeakLimitW:           5000,
+		EVChargingW:          0,
+		PI:                   pi,
+		SlewRateW:            500,
+		SlewEnabled:          true,
+		MinDispatchIntervalS: 5,
+		PrevTargets:          map[string]float64{},
+		UseCascade:           true,
 	}
 }
 
@@ -1334,7 +1244,6 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		state.resetSettlementAccounting()
 		// Even in idle, the reactive fuse-saver runs: an unplanned
 		// load (manual_hold injecting EV power, oven turning on,
 		// neighbour's pool pump on the same fuse) can push grid
@@ -1352,7 +1261,6 @@ func ComputeDispatch(
 		}
 		return out
 	case ModeCharge:
-		state.resetSettlementAccounting()
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 			updatePrevTargets: true,
@@ -1413,9 +1321,8 @@ func ComputeDispatch(
 	// self-consumption the EV/V2X import/export is left outside stationary
 	// battery dispatch unless BatteryCoversEV is enabled.
 	gridW := rawGridW
-	coverEV := state.BatteryCoversEV
-	if !coverEV {
-		gridW -= state.EVChargingW
+	if !state.BatteryCoversEV {
+		gridW -= state.uncoveredEVChargingW()
 		gridW -= vehicleFlow.V2XDischargeW
 	}
 
@@ -1517,14 +1424,12 @@ func ComputeDispatch(
 	var totalCorrection float64
 	switch {
 	case manualHoldActive:
-		state.resetSettlementAccounting()
 		// Drive the aggregate battery toward the operator's setpoint.
 		// PI was already reset above; deadband is intentionally skipped
 		// so even small setpoints are honoured exactly. Slew, SoC clamps,
 		// and the fuse guard still apply downstream.
 		totalCorrection = manualHold.PowerW - currentTotal
 	case useEnergyPath:
-		state.resetSettlementAccounting()
 		// Energy-allocation path: plan's slot directive says "this many Wh
 		// over this slot". Derive the instantaneous power needed to hit the
 		// remaining energy in the remaining time, then pass (target - currentTotal)
@@ -1626,7 +1531,6 @@ func ComputeDispatch(
 		// TestEnergyDispatchIgnoresEVChargingWNoiseUnderThreshold,
 		// TestEnergyDispatchClampsDischargeWhenEVActuallyCharging.
 		//
-		evActive := state.EVChargingW > evActiveThresholdW
 		// CANONICAL "battery may not feed EV" accounting. The MPC's
 		// NoBatteryToEV DP feasibility rule (mpc.go, see the
 		// houseResidualW check inside the action loop) mirrors this
@@ -1643,13 +1547,14 @@ func ComputeDispatch(
 			}
 		}
 		surplusOnlyPlannedEV := state.EVSurplusOnlyReserveW > 0 && plannedLoadpointEnergyWh > 0
-		if ((!state.BatteryCoversEV && evActive) || surplusOnlyPlannedEV) && targetTotalW < 0 {
-			// House-side grid excludes vehicle interactions (EV charge +
-			// V2X discharge), mirroring how gridW is derived above, so the
-			// reactive floor never asks stationary batteries to cover EV
-			// draw or to backstop V2X export.
-			houseGridW := rawGridW - state.EVChargingW - vehicleFlow.V2XDischargeW
-			reactiveTotal := currentTotal - houseGridW
+		uncoveredEVW := state.uncoveredEVChargingW()
+		if ((!state.BatteryCoversEV && uncoveredEVW > evActiveThresholdW) || surplusOnlyPlannedEV) && targetTotalW < 0 {
+			// Protected grid excludes only unauthorised vehicle interactions.
+			// A per-loadpoint lease may cover its own live watts, while other
+			// EV draw and every V2X export stay outside stationary-battery
+			// dispatch. The legacy site-wide toggle preserves its old scope.
+			protectedGridW := rawGridW - uncoveredEVW - vehicleFlow.V2XDischargeW
+			reactiveTotal := currentTotal - protectedGridW
 			if targetTotalW < reactiveTotal {
 				targetTotalW = reactiveTotal
 			}
@@ -1664,7 +1569,8 @@ func ComputeDispatch(
 		// The cap comes either from the operator override or from an MPC
 		// proof that current export earns less than a later grid-funded
 		// battery charge costs. An explicit operator cap overrides the
-		// planner-derived cap, preserving the original opt-in policy.
+		// planner-derived cap, preserving the original opt-in policy. When the
+		// plan already exports, only export beyond that planned amount is eligible.
 		//
 		// Only adds charge — never reverses a discharge plan. The slot
 		// Wh accumulator (state.slotDelivered) sees the extra and the
@@ -1683,7 +1589,7 @@ func ComputeDispatch(
 			if headroomW > 0 {
 				// Grid level if dispatch ran the plan as-is.
 				projectedGridW := gridW + (targetTotalW - currentTotal)
-				extraExportW := -projectedGridW
+				extraExportW := unexpectedExportBeyondPlanW(projectedGridW, currentDirective)
 				if extraExportW > threshold {
 					addW := extraExportW
 					if addW > headroomW {
@@ -1828,18 +1734,10 @@ func ComputeDispatch(
 			// gridW >= 0: leave biasedGridW = gridW (import behavior).
 		}
 
+		// Self-consumption follows the live grid target only. Fixed-window
+		// import/export energy is observed separately by the API; accumulated
+		// import must never lower this target and cause battery-fed export.
 		activeGridTargetW := state.GridTargetW
-		if effectiveMode == ModeSelfConsumption &&
-			!noSelfDischarge &&
-			state.SettlementAwareSelfConsumption &&
-			minBatterySoC(onlineBats) >= settlementMinSoC {
-			settlementTargetW := state.settlementGridTarget(time.Now(), gridW)
-			if settlementTargetW < activeGridTargetW {
-				activeGridTargetW = settlementTargetW
-			}
-		} else {
-			state.resetSettlementAccounting()
-		}
 
 		var errW float64
 		switch effectiveMode {
@@ -2045,14 +1943,14 @@ func ComputeDispatch(
 		}
 		// Economically replaceable arbitrage idle slot: unlike the default
 		// idle gate, allow reactive PI to absorb a genuine live PV surplus,
-		// but never beyond the later grid-charge SoC the plan supplied. The
+		// but never beyond the energy-derived SoC cap the plan supplied. The
 		// same branch still permits discharge when live load is importing.
 		if arbitrageFamilyIdleSlot && arbitrageFamilyIdleAbsorbCapPct > 0 {
 			threshold := state.PVSurplusAbsorbThresholdW
 			if threshold <= 0 {
 				threshold = 100
 			}
-			chargeCeiling := surplus.idleChargeOnlySurplusW(threshold)
+			chargeCeiling := unexpectedIdleExportBeyondPlanW(surplus, currentDirective, threshold)
 			remainingS := currentDirective.SlotEnd.Sub(time.Now()).Seconds()
 			headroomW := pvSurplusAbsorbHeadroomW(onlineBats, arbitrageFamilyIdleAbsorbCapPct, remainingS)
 			if chargeCeiling > headroomW {
@@ -2289,6 +2187,12 @@ func applyDispatchSafetyPipeline(
 		targets = floorNegativeTargets(targets)
 	}
 
+	// A battery-boost lease may never draw the stationary fleet below its
+	// explicit reserve. Apply this immediately before forceFuseDischarge:
+	// normal planning/operator intent is constrained, while the physical fuse
+	// emergency remains superior and may still discharge to prevent a trip.
+	targets = applyBatteryBoostReserve(targets, store, state, driverCapacities)
+
 	// forceFuseDischarge runs LAST. A fuse overflow can demand a battery
 	// target far beyond what slew would allow in one tick; slew-limiting that
 	// response would leave the fuse violated for multiple ticks.
@@ -2355,6 +2259,74 @@ func recordDispatchTargets(targets []DispatchTarget, state *State, updatePrevTar
 		}
 	}
 	state.LastTargets = targets
+}
+
+func (s *State) coveredEVChargingW() float64 {
+	if s == nil {
+		return 0
+	}
+	if s.BatteryCoversEV {
+		return s.EVChargingW
+	}
+	w := s.BatteryBoostEVChargingW
+	if w < 0 {
+		return 0
+	}
+	if w > s.EVChargingW {
+		return s.EVChargingW
+	}
+	return w
+}
+
+func (s *State) uncoveredEVChargingW() float64 {
+	if s == nil || s.BatteryCoversEV {
+		return 0
+	}
+	w := s.EVChargingW - s.coveredEVChargingW()
+	if w < 0 {
+		return 0
+	}
+	return w
+}
+
+func (s *State) batteryMayCoverEV() bool {
+	return s != nil && (s.BatteryCoversEV || s.BatteryBoostEVChargingW > evActiveThresholdW)
+}
+
+func applyBatteryBoostReserve(targets []DispatchTarget, store *telemetry.Store, state *State, driverCapacities map[string]float64) []DispatchTarget {
+	if state == nil || store == nil || state.BatteryBoostReserveSoC <= 0 {
+		return targets
+	}
+	out := make([]DispatchTarget, len(targets))
+	copy(out, targets)
+	for i := range out {
+		if out[i].TargetW >= 0 {
+			continue
+		}
+		r := store.Get(out[i].Driver, telemetry.DerBattery)
+		capacityWh := driverCapacities[out[i].Driver]
+		if r == nil || r.SoC == nil || capacityWh <= 0 || *r.SoC <= state.BatteryBoostReserveSoC {
+			out[i].TargetW = 0
+			out[i].Clamped = true
+			continue
+		}
+		// Bound the next control interval's discharge energy to the SoC
+		// headroom above reserve. A 0.9 discharge-efficiency factor is
+		// deliberately conservative: delivering 1 Wh to the AC bus costs
+		// more than 1 Wh inside the pack. This closes the between-ticks
+		// overshoot that a threshold-only clamp would permit.
+		dtS := float64(state.MinDispatchIntervalS)
+		if dtS <= 0 {
+			dtS = 5
+		}
+		headroomWh := (*r.SoC - state.BatteryBoostReserveSoC) * capacityWh
+		maxDischargeW := headroomWh * 0.9 * 3600 / dtS
+		if -out[i].TargetW > maxDischargeW {
+			out[i].TargetW = -maxDischargeW
+			out[i].Clamped = true
+		}
+	}
+	return out
 }
 
 // ComputePVCurtail returns one CurtailTarget per affected driver for
@@ -3033,6 +3005,30 @@ func plannerSelfIdleDesiredTotal(surplus surplusAccounting, state *State) float6
 	return surplus.idleChargeOnlySurplusW(threshold)
 }
 
+// unexpectedExportBeyondPlanW is the export runtime may redirect without
+// replacing export already present in the plan. A missing grid forecast keeps
+// the original absorber behavior and treats all projected export as surprise.
+func unexpectedExportBeyondPlanW(projectedGridW float64, dir SlotDirective) float64 {
+	plannedExportW := 0.0
+	if dir.HasPlannedGridW && dir.PlannedGridW < 0 {
+		plannedExportW = -dir.PlannedGridW
+	}
+	unexpectedW := -projectedGridW - plannedExportW
+	if unexpectedW < 0 {
+		return 0
+	}
+	return unexpectedW
+}
+
+func unexpectedIdleExportBeyondPlanW(surplus surplusAccounting, dir SlotDirective, thresholdW float64) float64 {
+	unexpectedW := unexpectedExportBeyondPlanW(-surplus.trueMeterExportWithoutBatteryW(), dir)
+	unexpectedW -= surplus.evReserveRemainingW
+	if unexpectedW <= thresholdW {
+		return 0
+	}
+	return unexpectedW
+}
+
 func pvSurplusAbsorbCapPct(state *State, dir SlotDirective) float64 {
 	if state == nil {
 		return 0
@@ -3121,7 +3117,7 @@ func coverLoadChargeSlot(state *State, dir SlotDirective) bool {
 		return true
 	}
 	return state.Mode == ModePlannerPassiveArbitrage &&
-		state.BatteryCoversEV &&
+		state.batteryMayCoverEV() &&
 		state.EVChargingW > evActiveThresholdW
 }
 

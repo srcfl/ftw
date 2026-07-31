@@ -15,6 +15,18 @@
     return fetch(path, opts);
   }
 
+  function driverFileKey(path) {
+    return String(path || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
+  }
+
+  // Header status marks. Inline SVG rather than font glyphs: at 16px the
+  // three announcements have to be separable by silhouette alone, because
+  // colour is not reliable for every operator and the marks sit in the
+  // same slot. A glyph gives you weight and hue; a path gives you shape.
+  const ICON_UPDATE ='<svg class="icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 1.7v6.2"/><path d="M5.3 5.5 8 8.4l2.7-2.9"/><rect x="1.8" y="10.5" width="12.4" height="3.8" rx="1.2"/><path d="M4.4 12.4h.01"/></svg>';
+  const ICON_WARNING = '<svg class="icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 2.3 14.9 13.7H1.1z"/><path d="M8 6.4v3"/><path d="M8 11.6h.01"/></svg>';
+  const ICON_DOT = '<svg class="icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="4.2" fill="currentColor"/></svg>';
+
   // Upstream version checks don't change often; 3 h is plenty of
   // headroom to surface a new release on a normal workday without
   // hammering /api/version/check (which can hit GitHub each tick if
@@ -50,10 +62,12 @@
       this._driverCatalog = null;
       this._driverVersions = {};
       this._componentAction = "";
+      this._connected = true;         // header liveness light; see setConnected()
       this._render();
     }
 
     connectedCallback() {
+      this._resumeUpdateStatus();
       this._refresh(false);
       this._refreshComponents(false);
       this._refreshDriverCatalog();
@@ -64,10 +78,47 @@
       }, CHECK_INTERVAL_MS);
     }
 
+    _resumeUpdateStatus() {
+      apiFetch("/api/version/update/status", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((st) => {
+          if (!st || !isUpdateInFlight(st.state) || this._phase === "updating") return;
+          const started = st.started_at ? Date.parse(st.started_at) : 0;
+          this._phase = "updating";
+          this._sidecarState = st;
+          this._updateStartedAt = started > 0 ? started : Date.now();
+          this._expectedRun = {
+            action: st.action || "update",
+            target: st.target || "",
+            snapshot: st.snapshot || "",
+            component: st.component || "",
+          };
+          this._render();
+          this._startElapsedTicker();
+          this._startStatusPolling();
+        })
+        .catch(() => { /* the service may still be starting */ });
+    }
+
     disconnectedCallback() {
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
+    }
+
+    // Public: called by app.js on every poll tick. The header's liveness
+    // light used to be a separate #conn-status span; folding it in here
+    // means one slot decides what the corner says instead of two elements
+    // hiding each other with CSS. app.js runs before this deferred script,
+    // so the first tick or two may land before the element upgrades and
+    // find no method — harmless, since polling re-asserts the state within
+    // one cycle and the constructor defaults to connected, exactly what
+    // the old markup shipped as.
+    setConnected(ok) {
+      const next = !!ok;
+      if (next === this._connected) return; // avoid re-rendering the modal mid-interaction
+      this._connected = next;
+      this._render();
     }
 
     // Public: called by the header #version click handler in index.html so
@@ -218,14 +269,44 @@
     }
 
     _refreshDriverCatalog() {
-      apiFetch("/api/device_repository/catalog")
-        .then((r) => (r.ok ? r.json() : null))
-        .then((body) => {
-          if (!body) return;
-          this._driverCatalog = body;
+      Promise.all([
+        apiFetch("/api/drivers/catalog").then((r) => (r.ok ? r.json() : null)),
+        apiFetch("/api/config").then((r) => (r.ok ? r.json() : null)),
+        apiFetch("/api/device_repository/catalog?channel=beta").then((r) => (r.ok ? r.json() : { entries: [] })),
+      ])
+        .then(([catalog, config, betaCatalog]) => {
+          if (!catalog || !config) return;
+          const configured = new Set((Array.isArray(config.drivers) ? config.drivers : [])
+            .map((driver) => driverFileKey(driver && driver.lua))
+            .filter(Boolean));
+          const betaByID = new Map((betaCatalog && Array.isArray(betaCatalog.entries) ? betaCatalog.entries : [])
+            .map((candidate) => [candidate && candidate.driver && candidate.driver.id, candidate]));
+          // Every configured driver is part of the inventory, whether or not
+          // it has an update waiting — the dialog answers "what am I running?"
+          // before it answers "what can I change?". Locally edited drivers are
+          // listed too, but carry no actions: nothing signed to move them to.
+          const entries = (Array.isArray(catalog.entries) ? catalog.entries : [])
+            .filter((entry) => configured.has(driverFileKey(entry && (entry.path || entry.filename))))
+            .map((entry) => {
+              const beta = betaByID.get(entry.id) || null;
+              const current = entry.installed_version || entry.version || "";
+              const betaDriver = beta && beta.driver;
+              const managed = entry.source !== "local";
+              const stableAvailable = !!(managed && entry.update_available && entry.repository_id && entry.upstream_version);
+              const betaAvailable = !!(managed && betaDriver && betaDriver.version && betaDriver.version !== current);
+              return {
+                ...entry,
+                beta_candidate: beta,
+                managed,
+                stable_available: stableAvailable,
+                beta_available: betaAvailable,
+                pending_update: stableAvailable || betaAvailable,
+              };
+            });
+          this._driverCatalog = { entries };
           this._render();
         })
-        .catch(() => { /* repository may be explicitly disabled */ });
+        .catch(() => { /* config or repository discovery may be unavailable */ });
     }
 
     _loadDriverVersions(id) {
@@ -240,14 +321,14 @@
         .catch((err) => window.alert("Driver history failed: " + err.message));
     }
 
-    _changeDriverVersion(id, repositoryID, version, sha256, installed) {
+    _changeDriverVersion(id, repositoryID, version, sha256, installed, channel) {
       if (!id || !version || this._componentAction) return;
       this._componentAction = "driver:" + id;
       this._render();
       const url = "/api/device_repository/drivers/" + encodeURIComponent(id) + (installed ? "/activate" : "/install");
       const body = installed
         ? { version, sha256 }
-        : { repository_id: repositoryID, version };
+        : { repository_id: repositoryID, version, ...(channel ? { channel } : {}) };
       this._postJSON(url, body)
         .then((resp) => {
           if (!resp.ok) throw new Error((resp.body && resp.body.error) || "driver update failed");
@@ -449,11 +530,16 @@
           }
           if (action === "update") {
             const skipped = resp.body && resp.body.snapshot_skipped;
+            const skipReason = resp.body && resp.body.snapshot_skip_reason;
             this._sidecarState = {
               state: skipped ? "pulling" : "snapshotting",
               action,
               target: this._expectedRun.target,
-              message: skipped ? "backup snapshot skipped for this update" : "creating backup snapshot",
+              message: skipped
+                ? (skipReason === "database schema unchanged"
+                  ? "Database schema unchanged; full history backup not needed"
+                  : "Backup snapshot skipped for this update")
+                : "Creating backup snapshot",
             };
             this._render();
           }
@@ -494,7 +580,10 @@
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
           if (st && this._statusMatchesCurrentRun(st)) {
-            this._sidecarState = st;
+            const keepTimeout = this._sidecarState && this._sidecarState.timedOut &&
+              this._sidecarState.state === st.state &&
+              (this._sidecarState.phase_started_at || "") === (st.phase_started_at || "");
+            this._sidecarState = keepTimeout ? Object.assign({}, st, { timedOut: true }) : st;
             this._render();
             if (st.state === "done") {
               this._attemptReload();
@@ -532,7 +621,11 @@
       const timeoutMs = this._sidecarState && this._sidecarState.state === "snapshotting"
         ? SNAPSHOT_SOFT_TIMEOUT_MS
         : UPDATE_SOFT_TIMEOUT_MS;
-      if (Date.now() - this._updateStartedAt <= timeoutMs) return false;
+      const phaseStarted = this._sidecarState && this._sidecarState.phase_started_at
+        ? Date.parse(this._sidecarState.phase_started_at)
+        : 0;
+      const timeoutStartedAt = phaseStarted > 0 ? phaseStarted : this._updateStartedAt;
+      if (Date.now() - timeoutStartedAt <= timeoutMs) return false;
       if (!this._sidecarState || this._sidecarState.state === "done" || this._sidecarState.timedOut) return false;
       this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
       return true;
@@ -553,29 +646,71 @@
     }
 
     // ---- render ----
-    _render() {
+
+    // _driverEntries is the full configured inventory; _pendingUpdates counts
+    // only what an operator could act on right now. The badge, the summary
+    // line and the footer all read the same count so they can't disagree.
+    _driverEntries() {
+      return this._driverCatalog && Array.isArray(this._driverCatalog.entries)
+        ? this._driverCatalog.entries
+        : [];
+    }
+
+    _pendingUpdates() {
       const info = this._info || {};
       const optimizerUpdates = this._components && this._components.optimizer && this._components.optimizer.updates;
-      const driverUpdate = this._driverCatalog && Array.isArray(this._driverCatalog.entries) && this._driverCatalog.entries.some((entry) => entry.update_available);
-      const showDot = ((info.update_available && !info.skipped) || (optimizerUpdates && optimizerUpdates.update_available) || driverUpdate) && this._phase !== "updating";
+      const core = !!(info.update_available && !info.skipped);
+      const optimizer = !!(optimizerUpdates && optimizerUpdates.update_available);
+      const drivers = this._driverEntries().filter((entry) => entry.pending_update).length;
+      return { core, optimizer, drivers, total: (core ? 1 : 0) + (optimizer ? 1 : 0) + drivers };
+    }
 
-      // Surface to the rest of the page via body class: the header's
-      // green #conn-status dot sits right next to this badge, and
-      // having both visible at once clutters the corner. CSS in
-      // app.css hides #conn-status when .has-update is on, so the
-      // two dots swap instead of stacking.
-      if (typeof document !== "undefined" && document.body) {
-        document.body.classList.toggle("has-update", !!showDot);
+    _render() {
+      const info = this._info || {};
+      const optimizer = this._components && this._components.optimizer;
+      const pending = this._pendingUpdates();
+      const showDot = pending.total > 0 && this._phase !== "updating";
+      const showOptimizerWarning = !!(optimizer && optimizer.configured && (optimizer.degraded === true || optimizer.healthy === false)) && this._phase !== "updating";
+      const showBadge = showDot || showOptimizerWarning;
+      const activeSolver = optimizer && optimizer.active_solver;
+      const optimizerFallbackActive = !!(activeSolver && (activeSolver.fallback || activeSolver.engine === "go-dp"));
+      const optimizerReason = optimizer && (optimizer.fallback_reason || optimizer.health_error || optimizer.error);
+      const warningTitle = (optimizerFallbackActive ? "Planner fallback active" : "Optimizer unavailable") + (optimizerReason ? ": " + optimizerReason : "");
+      const updateTitle = pending.core && info.latest
+        ? `Core update available: ${info.latest}`
+        : pending.total === 1 ? "1 component update available" : `${pending.total} component updates available`;
+
+      // One header slot, three announcements. Connection loss outranks
+      // the other two and shows alone: the update and optimizer payloads
+      // behind them are whatever we last managed to fetch, so flagging a
+      // possibly-stale update while the site is unreachable is worse than
+      // saying nothing. Otherwise an update and a degraded optimizer are
+      // unrelated facts and both get their own mark — before this the
+      // warning suppressed the update entirely (#693).
+      const marks = [];
+      if (!this._connected) {
+        marks.push(`<span part="badge" class="mark offline" role="img" title="Connection lost" aria-label="Connection lost">${ICON_DOT}</span>`);
+      } else {
+        if (showDot) {
+          marks.push(`<button part="badge" class="mark update" title="${escapeHTML(updateTitle)}" aria-label="${escapeHTML(updateTitle)}">${ICON_UPDATE}</button>`);
+        }
+        if (showOptimizerWarning) {
+          marks.push(`<button part="badge" class="mark warning" title="${escapeHTML(warningTitle)}" aria-label="${escapeHTML(warningTitle)}">${ICON_WARNING}</button>`);
+        }
+        if (!showBadge) {
+          marks.push(`<span part="badge" class="mark ok" role="img" title="Connected, nothing pending" aria-label="Connected, nothing pending">${ICON_DOT}</span>`);
+        }
       }
 
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
-        <button part="badge" class="badge${showDot ? "" : " hidden"}" title="${info.latest ? `Core update available: ${escapeHTML(info.latest)}` : "Component update available"}" aria-label="Update available">●</button>
+        <span class="marks">${marks.join("")}</span>
         ${this._phase !== "idle" ? this._modalHTML() : ""}
       `;
 
-      const btn = this._shadow.querySelector(".badge");
-      if (btn) btn.addEventListener("click", () => this.open());
+      this._shadow.querySelectorAll("button.mark").forEach((btn) => {
+        btn.addEventListener("click", () => this.open());
+      });
 
       const modal = this._shadow.querySelector(".modal");
       if (modal) this._wireModal(modal);
@@ -586,19 +721,33 @@
       if (this._phase === "updating") return this._updatingModalHTML();
 
       const hasUpdate = !!info.update_available;
-      const subtitle = hasUpdate
-        ? `A newer release is available.`
-        : `You're running the latest release.`;
+      const pending = this._pendingUpdates();
+      // The summary covers the whole inventory, not just Core: an operator
+      // with a waiting driver update should not read "up to date".
+      const subtitle = pending.total === 0
+        ? "Everything is up to date."
+        : pending.total === 1
+        ? "1 update available."
+        : `${pending.total} updates available.`;
 
+      // A version check that ran days ago answers a different question than
+      // one that ran a minute ago, so always say when it last ran.
+      const checked = info.checked_at ? Date.parse(info.checked_at) : 0;
+      const checkedLine = checked > 0
+        ? `Checked ${new Date(checked).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · rechecks every 3 h`
+        : "Not checked yet.";
+
+      // Restart is the one footer action that interrupts dispatch, so it
+      // never competes with the primary button for weight.
       const actions = hasUpdate
         ? `
-            <button class="btn btn-primary" data-action="update">Update to ${escapeHTML(info.latest || "")}</button>
-            <button class="btn" data-action="restart">Restart</button>
             <button class="btn btn-ghost" data-action="skip">Skip this version</button>
+            <button class="btn btn-ghost" data-action="restart">Restart</button>
+            <button class="btn btn-primary" data-action="update">Update Core to ${escapeHTML(info.latest || "")}</button>
           `
         : `
+            <button class="btn btn-ghost" data-action="restart">Restart</button>
             <button class="btn" data-action="check">Check for updates</button>
-            <button class="btn" data-action="restart">Restart</button>
           `;
 
       const notesHref = safeHref(info.release_notes_url);
@@ -625,6 +774,40 @@
            </div>`
         : "";
 
+      const skipped = info.skipped_version
+        ? `<p class="dim skipped-note">Skipped ${escapeHTML(info.skipped_version)}. "Check for updates" brings it back.</p>`
+        : "";
+
+      return `
+        <div class="backdrop" data-action="close"></div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
+          <header>
+            <h3 id="ftw-upd-title">Updates</h3>
+            <button class="x" data-action="close" aria-label="Close">×</button>
+          </header>
+          <div class="body">
+            <div class="status-line">
+              <p class="subtitle">${escapeHTML(subtitle)}</p>
+              <p class="checked-at">${escapeHTML(checkedLine)}</p>
+            </div>
+            ${skipped}
+            ${bodyHTML}
+            ${snapshotHint}
+            ${this._componentsSectionHTML()}
+            ${this._channelSectionHTML()}
+            ${this._storageSectionHTML()}
+            ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
+          </div>
+          <footer>${actions}</footer>
+        </div>
+      `;
+    }
+
+    // _channelSectionHTML puts both channel controls side by side. They used
+    // to sit in different parts of the dialog, which left the operator no way
+    // to see that Core and Optimizer can track different channels.
+    _channelSectionHTML() {
+      const info = this._info || {};
       const channels = Array.isArray(info.channels) && info.channels.length
         ? info.channels
         : ["stable", "beta"];
@@ -639,66 +822,86 @@
         ? "Beta receives prereleases and promoted stable releases."
         : "Stable receives production releases only.";
 
-      return `
-        <div class="backdrop" data-action="close"></div>
-        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
-          <header>
-            <h3 id="ftw-upd-title">FTW Update Center</h3>
-            <button class="x" data-action="close" aria-label="Close">×</button>
-          </header>
-          <div class="body">
-            <p class="subtitle">${escapeHTML(subtitle)}</p>
-            <div class="channel-picker">
-              <span class="channel-label">Update channel</span>
-              <div class="channel-options" role="group" aria-label="Update channel">
-                ${channelButtons}
-              </div>
-              <p class="channel-note">${escapeHTML(channelNote)}</p>
-            </div>
-            <dl>
-              <div><dt>Core current</dt><dd>${escapeHTML(info.current || "?")}</dd></div>
-              ${info.latest ? `<div><dt>Latest</dt><dd>${escapeHTML(info.latest)}</dd></div>` : ""}
-              ${info.skipped_version ? `<div><dt>Skipped</dt><dd>${escapeHTML(info.skipped_version)}</dd></div>` : ""}
-            </dl>
-            ${bodyHTML}
-            ${snapshotHint}
-            ${this._componentsSectionHTML()}
-            ${this._snapshotsSectionHTML()}
-            ${this._backupsSectionHTML()}
-            ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
+      const optimizerUpdates = (this._components && this._components.optimizer && this._components.optimizer.updates) || {};
+      const optimizerConfigured = !!(this._components && this._components.optimizer && this._components.optimizer.configured);
+      const optimizerChannels = Array.isArray(optimizerUpdates.channels) && optimizerUpdates.channels.length
+        ? optimizerUpdates.channels
+        : ["stable", "beta"];
+      const optimizerChannel = optimizerUpdates.channel || "stable";
+      const optimizerButtons = optimizerConfigured
+        ? optimizerChannels.map((channel) => `
+            <button class="channel-option${optimizerChannel === channel ? " active" : ""}"
+                    data-action="set-optimizer-channel" data-channel="${escapeHTML(channel)}"
+                    aria-pressed="${optimizerChannel === channel ? "true" : "false"}">
+              ${escapeHTML(channel)}
+            </button>`).join("")
+        : "";
+      const optimizerRow = optimizerConfigured
+        ? `<div class="channel-row">
+             <span class="channel-label">Optimizer</span>
+             <div class="channel-options" role="group" aria-label="Optimizer update channel">${optimizerButtons}</div>
+           </div>
+           ${optimizerChannel !== selectedChannel
+             ? `<p class="channel-note">Optimizer tracks ${escapeHTML(optimizerChannel)} while Core tracks ${escapeHTML(selectedChannel)}.</p>`
+             : ""}`
+        : "";
+
+      // Only Core and the optimizer subscribe to a channel. A driver is
+      // pinned to an exact version, and "stable"/"beta" only says where that
+      // artifact came from — so these buttons must not appear to govern it.
+      return `<details class="snapshots channels">
+        <summary>Update channel · Core ${escapeHTML(selectedChannel)}${optimizerConfigured && optimizerChannel !== selectedChannel ? ` · Optimizer ${escapeHTML(optimizerChannel)}` : ""}</summary>
+        <div class="channel-body">
+          <div class="channel-row">
+            <span class="channel-label">Core</span>
+            <div class="channel-options" role="group" aria-label="Update channel">${channelButtons}</div>
           </div>
-          <footer>${actions}</footer>
+          <p class="channel-note">${escapeHTML(channelNote)}</p>
+          ${optimizerRow}
+          <p class="channel-note">Drivers follow no channel. Each one is pinned to a version you pick per driver above, from either stream.</p>
         </div>
-      `;
+      </details>`;
+    }
+
+    // _storageSectionHTML folds the two backup lists into one collapsed
+    // section whose summary carries the counts, so an empty backup list
+    // costs a phrase instead of a whole row.
+    _storageSectionHTML() {
+      const snapshots = this._snapshots;
+      const backups = this._backups;
+      const snapshotList = snapshots && snapshots.enabled && Array.isArray(snapshots.snapshots) ? snapshots.snapshots : null;
+      const backupList = backups && backups.enabled && Array.isArray(backups.backups) ? backups.backups : null;
+      if (!snapshotList && !backupList) return "";
+      const parts = [];
+      if (snapshotList) parts.push(`${snapshotList.length} rollback point${snapshotList.length === 1 ? "" : "s"}`);
+      if (backupList) parts.push(`${backupList.length} full backup${backupList.length === 1 ? "" : "s"}`);
+      return `<details class="snapshots storage">
+        <summary>Backups · ${escapeHTML(parts.join(" · "))}</summary>
+        ${this._snapshotsSectionHTML()}
+        ${this._backupsSectionHTML()}
+      </details>`;
     }
 
     _snapshotsSectionHTML() {
       const payload = this._snapshots;
       if (!payload || !payload.enabled) return "";
       const snaps = Array.isArray(payload.snapshots) ? payload.snapshots : [];
-      if (!snaps.length) {
-        return `<details class="snapshots">
-                  <summary>Local rollback points (0)</summary>
-                  <div class="snapshots-intro">
-                    <p class="dim">Stored on this device. They protect software changes, not SD-card failure.</p>
-                    <button class="btn btn-small" data-action="create-snapshot" ${this._creatingSnapshot ? "disabled" : ""}>${this._creatingSnapshot ? "Creating…" : "Create rollback point"}</button>
-                  </div>
-                </details>`;
-      }
-      const rows = snaps.map((s) => this._snapshotRowHTML(s)).join("");
-      return `<details class="snapshots">
-                <summary>Local rollback points (${snaps.length})</summary>
+      const table = snaps.length
+        ? `<table class="snapshots-table">
+             <thead>
+               <tr><th>Created</th><th>From → To</th><th>Size</th><th></th></tr>
+             </thead>
+             <tbody>${snaps.map((s) => this._snapshotRowHTML(s)).join("")}</tbody>
+           </table>`
+        : "";
+      return `<div class="storage-block">
+                <h4 class="storage-title">Local rollback points (${snaps.length})</h4>
                 <div class="snapshots-intro">
                   <p class="dim">Stored on this device. They protect software changes, not SD-card failure.</p>
                   <button class="btn btn-small" data-action="create-snapshot" ${this._creatingSnapshot ? "disabled" : ""}>${this._creatingSnapshot ? "Creating…" : "Create rollback point"}</button>
                 </div>
-                <table class="snapshots-table">
-                  <thead>
-                    <tr><th>Created</th><th>From → To</th><th>Size</th><th></th></tr>
-                  </thead>
-                  <tbody>${rows}</tbody>
-                </table>
-              </details>`;
+                ${table}
+              </div>`;
     }
 
     _snapshotRowHTML(s) {
@@ -739,8 +942,8 @@
         ? "Backups are currently staged on this device. Download them to another device or configure an external backup path; local files do not survive SD-card failure."
         : "Backups are written to the configured external backup target.";
       const rows = backups.map((b) => this._backupRowHTML(b)).join("");
-      return `<details class="snapshots full-backups">
-                <summary>Full backups (${backups.length})</summary>
+      return `<div class="storage-block full-backups">
+                <h4 class="storage-title">Full backups (${backups.length})</h4>
                 <div class="snapshots-intro backup-intro">
                   <p class="dim">${escapeHTML(location)}</p>
                   <button class="btn btn-small" data-action="create-backup" ${this._creatingBackup ? "disabled" : ""}>${this._creatingBackup ? "Creating and verifying…" : "Create full backup"}</button>
@@ -749,7 +952,7 @@
                   <thead><tr><th>Created</th><th>Size</th><th>Status</th><th></th></tr></thead>
                   <tbody>${rows}</tbody>
                 </table>` : `<p class="dim backups-empty">No full backups yet.</p>`}
-              </details>`;
+              </div>`;
     }
 
     _backupRowHTML(b) {
@@ -780,32 +983,58 @@
       const optimizerRuntime = optimizer.runtime || {};
       const sharedUpdateStatus = payload.updates && payload.updates.status;
       const previousImages = (sharedUpdateStatus && sharedUpdateStatus.previous_images) || {};
-      const optimizerChannels = Array.isArray(optimizerUpdates.channels) ? optimizerUpdates.channels : ["stable", "beta"];
-      const optimizerChannelButtons = optimizerChannels.map((channel) => `
-        <button class="mini-channel${optimizerUpdates.channel === channel ? " active" : ""}"
-                data-action="set-optimizer-channel" data-channel="${escapeHTML(channel)}">${escapeHTML(channel)}</button>`).join("");
+      const optimizerCurrent = optimizerUpdates.current || optimizerRuntime.version || "";
+      // Only claim a pending version when it actually differs. The old row
+      // printed "v1.3.2 → v1.3.2" next to the words "up to date".
+      const optimizerTarget = optimizerUpdates.latest && optimizerUpdates.latest !== optimizerCurrent
+        ? optimizerUpdates.latest
+        : "";
       const optimizerAction = optimizerUpdates.update_available
         ? `<button class="btn btn-small" data-action="optimizer-update">Update to ${escapeHTML(optimizerUpdates.latest || "")}</button>`
-        : `<span class="dim">${optimizer.configured ? "up to date" : "not configured"}</span>`;
+        : "";
+      // Rolling back stays available whenever a previous image exists — that
+      // is exactly the state you are in right after an update goes wrong. It
+      // sits in the action column so it no longer competes with the status
+      // text for the eye.
       const optimizerRollback = previousImages.optimizer
-        ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback">Roll back</button>`
+        ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback" title="Restore the previous optimizer image">Roll back</button>`
+        : "";
+      const activeSolver = optimizer.active_solver || {};
+      const optimizerFallbackActive = activeSolver.fallback || activeSolver.engine === "go-dp";
+      const optimizerReason = optimizer.fallback_reason || optimizer.health_error || optimizer.error || "";
+      const optimizerWarning = optimizer.degraded === true || optimizer.healthy === false
+        ? `<p class="component-warning" role="alert"><strong>${optimizerFallbackActive ? "Planner fallback active." : "Optimizer unavailable."}</strong>${optimizerFallbackActive ? " Core is using the built-in Go planner." : " The current plan stays active until the next replan."}${optimizerReason ? " " + escapeHTML(optimizerReason) : ""}</p>`
         : "";
 
-      const entries = this._driverCatalog && Array.isArray(this._driverCatalog.entries)
-        ? this._driverCatalog.entries : [];
+      const entries = this._driverEntries();
       const driverRows = entries.map((entry) => {
-        const driver = entry.driver || {};
-        const installed = entry.installed || {};
-        const busy = this._componentAction === "driver:" + driver.id;
-        const action = entry.update_available || !entry.installed
-          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(driver.id || "")}" data-repository="${escapeHTML(entry.repository_id || "")}" data-version="${escapeHTML(driver.version || "")}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : (entry.installed ? "Update" : "Install")}</button>`
-          : `<span class="dim">current</span>`;
-        return `<div class="component-row">
-          <span><strong>${escapeHTML(driver.metadata && driver.metadata.name || driver.id || "driver")}</strong>
-            <span class="dim mono">${escapeHTML(installed.version || "not managed")} → ${escapeHTML(driver.version || "?")}</span></span>
-          <span class="component-actions">${action}<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(driver.id || "")}">History</button></span>
-          ${this._driverVersionsHTML(driver.id)}
-        </div>`;
+        const current = entry.installed_version || entry.version || "unknown";
+        const busy = this._componentAction === "driver:" + entry.id;
+        const action = entry.stable_available
+          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(entry.repository_id)}" data-version="${escapeHTML(entry.upstream_version)}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Stable " + escapeHTML(entry.upstream_version)}</button>`
+          : "";
+        const beta = entry.beta_candidate || {};
+        const betaDriver = beta.driver || {};
+        const betaAction = entry.beta_available
+          ? `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(beta.repository_id || "")}" data-version="${escapeHTML(betaDriver.version)}" data-channel="beta" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Beta " + escapeHTML(betaDriver.version)}</button>`
+          : "";
+        const history = entry.repository_id
+          ? `<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(entry.id || "")}">History</button>`
+          : "";
+        // A locally edited driver has no signed counterpart to move to, so it
+        // reports what it is instead of offering an action it cannot perform.
+        const target = entry.stable_available ? entry.upstream_version : (betaDriver.version || "");
+        const status = !entry.managed
+          ? `<span class="dim" title="Edited on this device; no signed version to switch to">local copy</span>`
+          : entry.pending_update
+          ? `<span class="status-pending">${escapeHTML(target)} available</span>`
+          : `<span class="dim">up to date</span>`;
+        return `<tr>
+          <th scope="row">${escapeHTML(entry.name || entry.id || "driver")}</th>
+          <td class="dim mono">${escapeHTML(current)}</td>
+          <td class="component-status">${status}</td>
+          <td class="component-actions">${action}${betaAction}${history}</td>
+        </tr>${this._driverVersionsHTML(entry.id)}`;
       }).join("");
 
       const history = this._componentHistory && Array.isArray(this._componentHistory.events)
@@ -813,29 +1042,57 @@
       const historyRows = history.map((event) => {
         const when = event.started_at_ms ? new Date(event.started_at_ms).toLocaleString() : "?";
         const range = (event.from_version || "?") + " → " + (event.to_version || "?");
-        return `<tr><td>${escapeHTML(when)}</td><td>${escapeHTML(event.kind + (event.kind === "driver" ? ":" + event.component_id : ""))}</td><td>${escapeHTML(range)}</td><td>${escapeHTML(event.outcome)}</td></tr>`;
+        const result = event.message
+          ? `${event.outcome || "?"} — ${event.message}`
+          : (event.outcome || "?");
+        return `<tr><td>${escapeHTML(when)}</td><td>${escapeHTML(event.kind + (event.kind === "driver" ? ":" + event.component_id : ""))}</td><td>${escapeHTML(range)}</td><td>${escapeHTML(result)}</td></tr>`;
       }).join("");
 
-      return `<details class="snapshots components" open>
-        <summary>Components</summary>
-        <div class="component-card">
-          <div class="component-row"><span><strong>Core</strong><span class="dim mono">${escapeHTML(payload.core && payload.core.version || "?")}</span></span><span class="dim">safety authority · updated with updater</span></div>
-          <div class="component-row optimizer-row">
-            <span><strong>Optimizer</strong><span class="dim mono">${escapeHTML(optimizerUpdates.current || optimizerRuntime.version || "not running")}${optimizerUpdates.latest ? " → " + escapeHTML(optimizerUpdates.latest) : ""}</span></span>
-            <span class="component-actions"><span class="mini-channels">${optimizerChannelButtons}</span>${optimizerAction}${optimizerRollback}</span>
-          </div>
-        </div>
-        <div class="component-subtitle">Drivers · signed catalog, one driver at a time</div>
-        <div class="component-card">${driverRows || `<p class="dim">No managed driver candidates cached yet.</p>`}</div>
+      const info = this._info || {};
+      const coreStatus = info.update_available
+        ? `<span class="status-pending">${escapeHTML(info.latest || "update")} available</span>`
+        : `<span class="dim">up to date</span>`;
+      const optimizerStatus = !optimizer.configured
+        ? `<span class="dim">not configured</span>`
+        : optimizerUpdates.update_available
+        ? `<span class="status-pending">${escapeHTML(optimizerTarget || "update")} available</span>`
+        : `<span class="dim">up to date</span>`;
+
+      // One table listing every component, whether or not it has work waiting.
+      // Rows only ever change their status and action cells, so the operator
+      // reads the running inventory off a shape that holds still — and the
+      // columns line up, which four independent grids could not manage.
+      return `<div class="inventory">
+        ${optimizerWarning}
+        <table class="inventory-table">
+          <thead>
+            <tr><th scope="col">Component</th><th scope="col">Version</th><th scope="col">Status</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Core</th>
+              <td class="dim mono">${escapeHTML(payload.core && payload.core.version || info.current || "?")}</td>
+              <td class="component-status">${coreStatus}</td>
+              <td class="component-actions"></td>
+            </tr>
+            <tr class="optimizer-row">
+              <th scope="row">Optimizer</th>
+              <td class="dim mono">${escapeHTML(optimizerCurrent || "not running")}</td>
+              <td class="component-status">${optimizerStatus}</td>
+              <td class="component-actions">${optimizerAction}${optimizerRollback}</td>
+            </tr>
+            ${driverRows}
+          </tbody>
+        </table>
         ${historyRows ? `<details class="component-history"><summary>Update history</summary><table class="snapshots-table"><thead><tr><th>When</th><th>Component</th><th>Version</th><th>Result</th></tr></thead><tbody>${historyRows}</tbody></table></details>` : ""}
-      </details>`;
+      </div>`;
     }
 
     _driverVersionsHTML(id) {
       const payload = id && this._driverVersions[id];
       if (!payload) return "";
       const versions = Array.isArray(payload.available) ? payload.available : [];
-      if (!versions.length) return `<div class="driver-history dim">No signed or retained versions found.</div>`;
+      if (!versions.length) return `<tr class="driver-history-row"><td colspan="4" class="dim">No signed or retained versions found.</td></tr>`;
       const rows = versions.map((candidate) => {
         const driver = candidate.driver || {};
         const installed = candidate.installed || null;
@@ -844,7 +1101,7 @@
         const button = active ? `<span class="dim">active</span>` : `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(id)}" data-repository="${escapeHTML(candidate.repository_id || "")}" data-version="${escapeHTML(driver.version || "")}" data-sha="${escapeHTML(driver.sha256 || "")}" data-installed="${installed ? "true" : "false"}" ${this._componentAction ? "disabled" : ""}>${label}</button>`;
         return `<span class="driver-version"><span class="mono">${escapeHTML(driver.version || "?")}</span>${button}</span>`;
       }).join("");
-      return `<div class="driver-history">${rows}</div>`;
+      return `<tr class="driver-history-row"><td colspan="4"><div class="driver-history">${rows}</div></td></tr>`;
     }
 
     _updatingModalHTML() {
@@ -855,6 +1112,19 @@
       const spinner = st.state === "failed" ? "" : `<span class="spinner"></span>`;
       const timedOut = !!st.timedOut;
       const failed = st.state === "failed";
+      const progress = operationProgress(st, action);
+      const phaseStarted = st.phase_started_at ? Date.parse(st.phase_started_at) : 0;
+      const phaseElapsed = Math.max(0, Math.round((Date.now() - (phaseStarted > 0 ? phaseStarted : this._updateStartedAt)) / 1000));
+      const byteProgress = st.progress_unit === "bytes" && st.progress_total > 0
+        ? `<p class="dim">${escapeHTML(formatBytes(st.progress_current || 0))} / ${escapeHTML(formatBytes(st.progress_total))}</p>`
+        : "";
+      const progressHTML = failed ? "" : `
+        <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.step}">
+          <span style="width:${progress.percent}%"></span>
+        </div>
+        <p class="update-step">Step ${progress.step} of ${progress.total} · ${escapeHTML(label)}</p>
+        <p class="dim">This step: ${escapeHTML(formatElapsed(phaseElapsed))}</p>
+        ${byteProgress}`;
 
       const body = failed
         ? `<p class="err">${escapeHTML(st.message || "Update failed")}</p>
@@ -862,9 +1132,9 @@
         : timedOut
         ? `<p>Still working after ${elapsed}s. The main container may have been slow to restart.</p>
            <p>You can reload manually if the UI keeps the overlay stuck.</p>`
-        : `<p>${escapeHTML(label)}…</p>
+        : `${progressHTML}
            ${this._operationDetailHTML(st)}
-           <p class="dim">Elapsed: ${elapsed}s. The page will reload automatically.</p>`;
+           <p class="dim">Total: ${escapeHTML(formatElapsed(elapsed))}. The page will reload automatically.</p>`;
 
       const footer = failed || timedOut
         ? `<button class="btn btn-primary" data-action="reload">Reload page</button>
@@ -904,6 +1174,8 @@
           return msg + `<p class="dim">Downloading the pinned release image from GHCR.</p>`;
         case "restarting":
           return msg + `<p class="dim">Recreating the service. Short polling errors are expected while the container swaps.</p>`;
+        case "checking":
+          return msg + `<p class="dim">Core has started. Waiting for its API and health checks before marking the update complete.</p>`;
         case "restoring":
           return msg + `<p class="dim">Restoring files from the selected backup snapshot.</p>`;
         default:
@@ -926,7 +1198,11 @@
               this._beginUpdate("update");
               break;
             case "restart":
-              this._beginUpdate("restart");
+              // Restarting drops control for as long as the service takes to
+              // come back, so it asks first even though it changes no versions.
+              if (window.confirm("Restart the service? Dispatch stops until Core is back and healthy.")) {
+                this._beginUpdate("restart");
+              }
               break;
             case "skip":
               this._skip();
@@ -955,8 +1231,9 @@
               const dataset = e.currentTarget.dataset;
               const installed = dataset.installed === "true";
               const verb = installed ? "activate" : "install";
-              if (window.confirm(`${verb} driver ${dataset.id} ${dataset.version}? Only affected driver instances restart and must return fresh telemetry.`)) {
-                this._changeDriverVersion(dataset.id, dataset.repository, dataset.version, dataset.sha || "", installed);
+              const channel = dataset.channel || "stable";
+              if (window.confirm(`${verb} ${channel} driver ${dataset.id} ${dataset.version}? Only affected driver instances restart and must return fresh telemetry.`)) {
+                this._changeDriverVersion(dataset.id, dataset.repository, dataset.version, dataset.sha || "", installed, dataset.channel || "");
               }
               break;
             }
@@ -1017,25 +1294,50 @@
       return `
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
-        .badge {
-          /* Amber pulse — the system's single accent (the shared design system). The
-             green connection dot next door is reserved for liveness
-             state; the amber dot is an actionable affordance ("update
-             available, open me"). Pulsing animation stays so it reads
-             as actionable, not a static state. */
+        /* The header's status slot. Marks sit side by side when an update
+           and a degraded optimizer are pending at once. */
+        .marks { display: inline-flex; align-items: center; gap: 0.1rem; }
+        .mark {
           appearance: none;
           background: transparent;
-          color: var(--accent-e, #f59e0b);
           border: none;
-          cursor: pointer;
-          font-size: 1.1rem;
-          line-height: 1;
-          padding: 0 0.3rem;
-          animation: pulse 1.4s ease-in-out infinite;
+          padding: 0 0.15rem;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          line-height: 0;
         }
-        @keyframes pulse {
+        .mark .icon { display: block; width: 16px; height: 16px; }
+        button.mark { cursor: pointer; }
+
+        /* An update waiting is an affordance — "something is downloadable,
+           open me" — so it fades to ask for attention. Blue keeps it clear
+           of every alarm colour in the palette; nothing is wrong. */
+        .mark.update { color: var(--cyan, #38bdf8); animation: fade 1.8s ease-in-out infinite; }
+
+        /* A degraded optimizer is a state, not an affordance: the planner
+           has fallen back to the Go solver, which often needs no action.
+           The triangle carries that on silhouette alone, so the two marks
+           stay apart for an operator who cannot separate them by colour
+           — the failure that got the old shared amber dot misread as an
+           update icon in the field (#690, #693). */
+        .mark.warning { color: var(--amber, #f59e0b); animation: fade 1.8s ease-in-out infinite; }
+
+        /* Nothing pending: the quiet "all good" light. Static, because a
+           steady state should not compete with the two that want reading. */
+        .mark.ok { color: var(--green-e, #22c55e); }
+
+        /* Connection lost outranks and replaces the others — see _render. */
+        .mark.offline { color: var(--red-e, #ef4444); }
+
+        @keyframes fade {
           0%, 100% { opacity: 1; }
-          50%      { opacity: 0.45; }
+          50%      { opacity: 0.3; }
+        }
+        /* Fading is the only cue here that is pure motion; shape and colour
+           already carry the meaning without it. */
+        @media (prefers-reduced-motion: reduce) {
+          .mark { animation: none; }
         }
         .backdrop {
           position: fixed; inset: 0;
@@ -1055,9 +1357,9 @@
              laptop-height browser running the dashboard. */
           max-height: 85vh;
           overflow-y: auto;
-          background: var(--ink-raised, #1e293b);
-          color: var(--fg, #e2e8f0);
-          border: 1px solid var(--line, #334155);
+          background: var(--ink-raised, #161616);
+          color: var(--fg, #e8e8e8);
+          border: 1px solid var(--line, #2a2a2a);
           border-radius: var(--radius-sm, 8px);
           z-index: 1001;
           display: flex; flex-direction: column;
@@ -1067,36 +1369,45 @@
         .modal header {
           display: flex; align-items: center; justify-content: space-between;
           padding: 0.9rem 1rem;
-          border-bottom: 1px solid var(--line, #334155);
+          border-bottom: 1px solid var(--line, #2a2a2a);
         }
         .modal h3 { margin: 0; font-size: 1rem; }
         .modal .x {
           appearance: none; background: transparent;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           border: none; cursor: pointer;
           font-size: 1.25rem; line-height: 1;
         }
         .modal .body { padding: 1rem; }
         .modal .body.center { text-align: center; padding: 1.4rem 1rem; }
-        .subtitle { margin: 0 0 0.75rem; color: var(--fg-dim, #94a3b8); }
-        dl { margin: 0; display: grid; gap: 0.35rem; grid-template-columns: auto 1fr; }
-        dl > div { display: contents; }
-        dt { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
-        dd { margin: 0; font-variant-numeric: tabular-nums; }
-        .channel-picker {
-          margin-bottom: 0.85rem;
+        .status-line {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 0.75rem;
+          flex-wrap: wrap;
+          margin-bottom: 0.75rem;
+        }
+        .subtitle { margin: 0; color: var(--fg, #e8e8e8); font-size: 0.95rem; }
+        .checked-at { margin: 0; color: var(--fg-dim, #a0a0a0); font-size: 0.75rem; white-space: nowrap; }
+        .skipped-note { margin: 0 0 0.75rem; }
+        .channel-body { padding: 0.1rem 0.75rem 0.75rem; }
+        .channel-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+          align-items: center;
+          gap: 0.6rem;
+          margin-bottom: 0.4rem;
         }
         .channel-label {
-          display: block;
-          margin-bottom: 0.35rem;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           font-size: 0.78rem;
         }
         .channel-options {
           display: grid;
           grid-auto-flow: column;
           grid-auto-columns: minmax(0, 1fr);
-          border: 1px solid var(--line, #334155);
+          border: 1px solid var(--line, #2a2a2a);
           border-radius: var(--radius-xs, 4px);
           overflow: hidden;
         }
@@ -1105,39 +1416,39 @@
           min-width: 0;
           padding: 0.4rem 0.3rem;
           border: 0;
-          border-right: 1px solid var(--line, #334155);
+          border-right: 1px solid var(--line, #2a2a2a);
           background: transparent;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           cursor: pointer;
           font: inherit;
           font-size: 0.8rem;
           text-transform: capitalize;
         }
         .channel-option:last-child { border-right: 0; }
-        .channel-option:hover { background: rgba(255,255,255,0.04); }
+        .channel-option:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
         .channel-option.active {
           background: var(--accent-e, #f59e0b);
-          color: #0a0a0a;
+          color: var(--on-accent, #0a0a0a);
           font-weight: 600;
         }
         .channel-note {
           margin: 0.35rem 0 0;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           font-size: 0.75rem;
           line-height: 1.35;
         }
         .changelog {
           margin-top: 0.75rem;
-          border: 1px solid var(--line, #334155);
+          border: 1px solid var(--line, #2a2a2a);
           border-radius: var(--radius-xs, 4px);
-          background: rgba(255,255,255,0.02);
+          background: color-mix(in srgb, var(--fg) 2%, transparent);
         }
         .changelog > summary {
           padding: 0.5rem 0.75rem;
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           list-style: none;
         }
         .changelog > summary::-webkit-details-marker { display: none; }
@@ -1158,12 +1469,12 @@
         .changelog-body h4 {
           margin: 0.75rem 0 0.3rem;
           font-size: 0.9rem;
-          color: var(--fg, #e2e8f0);
+          color: var(--fg, #e8e8e8);
         }
         .changelog-body h5 {
           margin: 0.6rem 0 0.25rem;
           font-size: 0.8rem;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           text-transform: uppercase;
           letter-spacing: 0.03em;
         }
@@ -1174,7 +1485,7 @@
         .changelog-body li { margin-bottom: 0.2rem; }
         .changelog-body p { margin: 0.35rem 0; }
         .changelog-body code {
-          background: rgba(255,255,255,0.08);
+          background: color-mix(in srgb, var(--fg) 8%, transparent);
           padding: 0.05rem 0.25rem;
           border-radius: 3px;
           font-size: 0.82rem;
@@ -1196,26 +1507,26 @@
         .snapshot-hint {
           margin-top: 0.75rem;
           padding: 0.5rem 0.7rem;
-          border: 1px solid var(--line, #334155);
+          border: 1px solid var(--line, #2a2a2a);
           border-radius: var(--radius-xs, 4px);
-          background: rgba(148, 163, 184, 0.06);
-          color: var(--fg-dim, #94a3b8);
+          background: color-mix(in srgb, var(--fg) 6%, transparent);
+          color: var(--fg-dim, #a0a0a0);
           font-size: 0.78rem;
           line-height: 1.4;
         }
         .snapshot-hint p { margin: 0; }
         .snapshots {
           margin-top: 0.75rem;
-          border: 1px solid var(--line, #334155);
+          border: 1px solid var(--line, #2a2a2a);
           border-radius: var(--radius-xs, 4px);
-          background: rgba(255,255,255,0.02);
+          background: color-mix(in srgb, var(--fg) 2%, transparent);
         }
         .snapshots > summary {
           padding: 0.5rem 0.75rem;
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
           list-style: none;
         }
         .snapshots > summary::-webkit-details-marker { display: none; }
@@ -1226,9 +1537,13 @@
           transition: transform 0.15s;
         }
         .snapshots[open] > summary::before { transform: rotate(90deg); }
-        .snapshots-empty {
-          margin: 0.25rem 0.9rem 0.6rem;
+        .storage-block { padding: 0 0 0.4rem; }
+        .storage-block + .storage-block { border-top: 1px solid var(--line, #2a2a2a); padding-top: 0.6rem; }
+        .storage-title {
+          margin: 0.3rem 0.75rem 0.1rem;
           font-size: 0.78rem;
+          font-weight: 600;
+          color: var(--fg, #e8e8e8);
         }
         .snapshots-intro {
           display: flex;
@@ -1241,50 +1556,71 @@
         .backup-intro p { max-width: 70%; }
         .backups-empty { margin: 0.25rem 0.75rem 0.7rem; }
         .backup-download { text-decoration: none; }
-        .components > summary { color: var(--fg, #e2e8f0); }
-        .component-card {
-          margin: 0 0.75rem 0.65rem;
-          border: 1px solid var(--line, #334155);
+        .inventory { margin-top: 0.25rem; }
+        .sr-only {
+          position: absolute; width: 1px; height: 1px;
+          padding: 0; margin: -1px; overflow: hidden;
+          clip-path: inset(50%); white-space: nowrap;
+        }
+        .component-warning { margin: 0 0 0.65rem; padding: 0.55rem 0.65rem; border: 1px solid var(--accent-e, #f59e0b); border-radius: var(--radius-xs, 4px); background: rgba(245,158,11,0.12); color: var(--fg, #e8e8e8); font-size: 0.78rem; line-height: 1.4; overflow-wrap: anywhere; }
+        .inventory-table {
+          width: 100%;
+          border-collapse: collapse;
+          border: 1px solid var(--line, #2a2a2a);
           border-radius: var(--radius-xs, 4px);
-          overflow: hidden;
+          font-size: 0.8rem;
         }
-        .component-card > p { margin: 0.6rem 0.75rem; }
-        .component-row {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) auto;
-          align-items: center;
-          gap: 0.6rem;
-          padding: 0.5rem 0.65rem;
-          border-top: 1px solid var(--line, #334155);
+        .inventory-table th,
+        .inventory-table td {
+          padding: 0.45rem 0.65rem;
+          text-align: left;
+          vertical-align: middle;
+          border-top: 1px solid var(--line, #2a2a2a);
         }
-        .component-row:first-child { border-top: 0; }
-        .component-row strong { display: block; font-size: 0.82rem; }
-        .component-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.3rem; flex-wrap: wrap; }
-        .component-subtitle { margin: 0.7rem 0.75rem 0.35rem; color: var(--fg-dim, #94a3b8); font-size: 0.75rem; }
-        .mini-channels { display: inline-flex; border: 1px solid var(--line, #334155); border-radius: 4px; overflow: hidden; }
-        .mini-channel { appearance: none; border: 0; border-right: 1px solid var(--line, #334155); padding: 0.2rem 0.35rem; background: transparent; color: var(--fg-dim, #94a3b8); font-size: 0.7rem; cursor: pointer; }
-        .mini-channel:last-child { border-right: 0; }
-        .mini-channel.active { background: var(--accent-e, #f59e0b); color: #0a0a0a; }
-        .driver-history { grid-column: 1 / -1; display: flex; gap: 0.35rem; flex-wrap: wrap; padding-top: 0.35rem; }
-        .driver-version { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.2rem 0.3rem; border: 1px solid var(--line, #334155); border-radius: 4px; }
-        .component-history { margin: 0.35rem 0.75rem 0.75rem; }
-        .component-history > summary { cursor: pointer; color: var(--fg-dim, #94a3b8); font-size: 0.75rem; }
+        .inventory-table thead th {
+          border-top: 0;
+          background: color-mix(in srgb, var(--fg) 3%, transparent);
+          color: var(--fg-dim, #a0a0a0);
+          font-size: 0.68rem;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .inventory-table tbody th {
+          font-size: 0.82rem;
+          font-weight: 600;
+          color: var(--fg, #e8e8e8);
+        }
+        /* A version string reads as one token or not at all, so it never
+           wraps; the action column shrinks to its buttons and the component
+           name absorbs whatever width is left. */
+        .inventory-table td.mono,
+        .inventory-table td.component-status { white-space: nowrap; }
+        .status-pending { color: var(--accent-e, #f59e0b); font-weight: 600; }
+        .component-actions { width: 1%; white-space: nowrap; text-align: right; }
+        .component-actions > * { margin-left: 0.3rem; }
+        .component-actions .btn { white-space: nowrap; }
+        .driver-history-row > td { padding-top: 0; }
+        .driver-history { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+        .driver-version { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.2rem 0.3rem; border: 1px solid var(--line, #2a2a2a); border-radius: 4px; }
+        .component-history { margin: 0.5rem 0 0; }
+        .component-history > summary { cursor: pointer; color: var(--fg-dim, #a0a0a0); font-size: 0.75rem; }
         .snapshots-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 0.78rem;
-          color: var(--fg-dim, #94a3b8);
+          color: var(--fg-dim, #a0a0a0);
         }
         .snapshots-table th,
         .snapshots-table td {
           padding: 0.3rem 0.75rem;
           text-align: left;
-          border-top: 1px solid var(--line, #334155);
+          border-top: 1px solid var(--line, #2a2a2a);
         }
         .snapshots-table th {
           font-weight: 600;
           border-top: none;
-          color: var(--fg, #e2e8f0);
+          color: var(--fg, #e8e8e8);
         }
         .snapshots-table .nowrap { white-space: nowrap; }
         .snapshots-table .mono { font-family: var(--mono, ui-monospace, monospace); }
@@ -1302,52 +1638,96 @@
           margin-top: 0.75rem;
           color: var(--red-e, #f87171); font-size: 0.85rem;
         }
-        .dim { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
+        .dim { color: var(--fg-dim, #a0a0a0); font-size: 0.8rem; }
         .modal footer {
           display: flex; gap: 0.5rem; justify-content: flex-end;
           padding: 0.75rem 1rem;
-          border-top: 1px solid var(--line, #334155);
+          border-top: 1px solid var(--line, #2a2a2a);
           flex-wrap: wrap;
           /* Stick to the bottom of the modal while body scrolls so
              the primary action (Update / Restart) remains visible
              however long the release-notes body grows. */
           position: sticky;
           bottom: 0;
-          background: var(--ink-raised, #1e293b);
+          background: var(--ink-raised, #161616);
         }
         .btn {
           appearance: none;
           padding: 0.4rem 0.9rem;
-          border: 1px solid var(--line, #334155);
+          border: 1px solid var(--line, #2a2a2a);
           background: transparent;
-          color: var(--fg, #e2e8f0);
+          color: var(--fg, #e8e8e8);
           border-radius: var(--radius-xs, 4px);
           cursor: pointer;
           font-size: 0.85rem;
           font-family: inherit;
         }
-        .btn:hover { background: rgba(255,255,255,0.04); }
+        .btn:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
         .btn-primary {
           background: var(--accent-e, #f59e0b);
           border-color: var(--accent-e, #f59e0b);
           /* the shared design system: on-accent text is near-black (#0a0a0a), never
              white — keeps the amber legible without halation in dark
              mode and stays correct when the theme flips to light. */
-          color: #0a0a0a;
+          color: var(--on-accent, #0a0a0a);
           font-weight: 600;
         }
         .btn-primary:hover { opacity: 0.9; background: var(--accent-e, #f59e0b); }
-        .btn-ghost { color: var(--fg-dim, #94a3b8); border-color: transparent; }
+        .btn-ghost { color: var(--fg-dim, #a0a0a0); border-color: transparent; }
         .spinner {
           display: inline-block;
           width: 20px; height: 20px;
-          border: 2px solid var(--line, #334155);
+          border: 2px solid var(--line, #2a2a2a);
           border-top-color: var(--accent-e, #f59e0b);
           border-radius: 50%;
           animation: spin 0.9s linear infinite;
           margin-bottom: 0.6rem;
         }
+        .update-progress {
+          width: min(360px, 82vw);
+          height: 8px;
+          margin: 0.2rem auto 0.7rem;
+          overflow: hidden;
+          border: 1px solid var(--line, #2a2a2a);
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--fg) 4%, transparent);
+        }
+        .update-progress > span {
+          display: block;
+          height: 100%;
+          min-width: 4px;
+          border-radius: inherit;
+          background: var(--accent-e, #f59e0b);
+          transition: width 0.25s ease;
+        }
+        .update-step { margin: 0.25rem 0; font-weight: 600; }
+        .body.center .dim { margin: 0.25rem 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        /* Four columns don't fit a phone. Drop the header row and let each
+           row stack into its own block, with the component name leading. */
+        @media (max-width: 560px) {
+          .inventory-table thead { display: none; }
+          .inventory-table,
+          .inventory-table tbody,
+          .inventory-table tr,
+          .inventory-table th,
+          .inventory-table td { display: block; width: auto; }
+          .inventory-table tr { border-top: 1px solid var(--line, #2a2a2a); padding: 0.3rem 0; }
+          .inventory-table tbody tr:first-child { border-top: 0; }
+          .inventory-table th,
+          .inventory-table td { border-top: 0; padding: 0.15rem 0.65rem; }
+          /* Stacked rows are no longer columns to align, so the action cell
+             stops holding itself to one line — otherwise its buttons set the
+             modal's width and the whole dialog scrolls sideways. */
+          .component-actions {
+            width: auto;
+            white-space: normal;
+            text-align: left;
+            padding-top: 0.3rem;
+          }
+          .component-actions > * { margin: 0 0.3rem 0.3rem 0; }
+          .channel-row { grid-template-columns: minmax(0, 1fr); gap: 0.25rem; }
+        }
       `;
     }
   }
@@ -1361,6 +1741,7 @@
         if (action === "restart")  return "Restarting service";
         if (action === "rollback") return "Restarting on restored state";
         return "Applying update";
+      case "checking":   return "Checking service health";
       case "done":       return "Reloading";
       case "failed":     return "Failed";
       default:
@@ -1368,6 +1749,50 @@
         if (action === "rollback") return "Starting rollback";
         return "Starting update";
     }
+  }
+
+  function isUpdateInFlight(state) {
+    return ["starting", "snapshotting", "pulling", "restarting", "checking", "restoring"].includes(state);
+  }
+
+  function operationProgress(st, action) {
+    let total = Number(st && st.total_steps) || 0;
+    let step = Number(st && st.step) || 0;
+    if (!total) {
+      const hasBackup = action === "update" && (!st || !st.component || st.component === "core");
+      total = hasBackup ? 4 : 3;
+      const offset = hasBackup ? 1 : 0;
+      switch (st && st.state) {
+        case "snapshotting": step = 1; break;
+        case "pulling": step = 1 + offset; break;
+        case "restarting": step = 2 + offset; break;
+        case "checking":
+        case "done": step = 3 + offset; break;
+        default: step = 1;
+      }
+    }
+    step = Math.max(0, Math.min(step, total));
+    return { step, total, percent: total > 0 ? Math.round((step / total) * 100) : 0 };
+  }
+
+  function formatElapsed(seconds) {
+    const value = Math.max(0, Number(seconds) || 0);
+    if (value < 60) return `${value}s`;
+    const minutes = Math.floor(value / 60);
+    const rest = value % 60;
+    return `${minutes}m ${rest}s`;
+  }
+
+  function formatBytes(bytes) {
+    let value = Math.max(0, Number(bytes) || 0);
+    const units = ["B", "KB", "MB", "GB"];
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit++;
+    }
+    const digits = unit > 0 && value < 10 ? 1 : 0;
+    return `${value.toFixed(digits)} ${units[unit]}`;
   }
 
   // safeHref rejects anything that isn't http:/https:. The release-notes URL

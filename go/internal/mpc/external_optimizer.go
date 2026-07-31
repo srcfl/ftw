@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
 
 const externalOptimizerSchemaVersion = 1
@@ -88,7 +89,7 @@ type ExternalOptimizer struct {
 
 func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, error) {
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 5 * time.Second
+		cfg.Timeout = optimizercontract.DefaultTimeout
 	}
 	if cfg.Solver == "" {
 		cfg.Solver = "HIGHS"
@@ -369,7 +370,7 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 	line, err := o.transport.RoundTrip(timeoutCtx, payload)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
-			return Plan{}, fmt.Errorf("optimizer timeout after %s: %w", o.cfg.Timeout, context.DeadlineExceeded)
+			return Plan{}, fmt.Errorf("optimizer timeout after %s: %w", o.cfg.Timeout, err)
 		}
 		return Plan{}, fmt.Errorf("optimizer transport: %w", err)
 	}

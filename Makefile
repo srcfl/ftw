@@ -13,7 +13,8 @@
 
 .PHONY: help test optimizer-install optimizer-test compose-migration-test container-boundary-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
-		verify verify-all install-hooks driver-repository-validate driver-versions
+		verify verify-all install-hooks driver-repository-validate driver-versions \
+        drivers drivers-present driver-versions-across-pin
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -38,15 +39,36 @@ help:
 	@echo "  install-hooks        install git pre-commit + pre-push hooks (opt-in)"
 	@echo "  driver-repository-validate  build and validate unsigned driver release artifacts"
 	@echo "  driver-versions      require changed Lua drivers to increase SemVer"
+	@echo "  driver-versions-across-pin  same rule, asked of the pinned snapshots"
 	@echo "  ci                   run local CI incl. browser smoke"
 	@echo "  ci-ui                browser smoke against FTW_BASE_URL"
 	@echo "  ci-hw-pi             deploy candidate to Pi CI slot + browser smoke"
 	@echo "  fmt vet              Go format + static checks"
+	@echo "  drivers              fetch drivers/ from the pinned device-drivers commit"
 	@echo "  clean                nuke build artifacts"
+
+# ---- Bundled drivers ----
+#
+# drivers/ is a snapshot of srcfl/device-drivers at the commit pinned in
+# drivers/BUNDLED_SOURCE.json. It is fetched, not authored here. The Go tests
+# read it, the container image copies it, and the release tarballs carry it,
+# so it has to be populated before any of those run.
+
+# Fetch the snapshot. Safe to re-run; it writes the same bytes every time.
+drivers:
+	bash scripts/sync-bundled-drivers.sh
+
+# Cheap enough to run before every test invocation, and it costs no network.
+# Fetching here instead would put a remote call in the inner loop.
+drivers-present:
+	@ls drivers/*.lua >/dev/null 2>&1 || { \
+	  echo "drivers/ has no .lua files. Run 'make drivers' to fetch the" >&2; \
+	  echo "snapshot pinned in drivers/BUNDLED_SOURCE.json." >&2; \
+	  exit 1; }
 
 # ---- Testing ----
 
-test: optimizer/.venv/.installed
+test: optimizer/.venv/.installed drivers-present
 	@status=0; \
 	optimizer/.venv/bin/pytest -q optimizer/tests & py_pid=$$!; \
 	(cd go && go test ./...) & go_pid=$$!; \
@@ -65,7 +87,7 @@ optimizer-test: optimizer/.venv/.installed
 	optimizer/.venv/bin/pytest -q optimizer/tests
 
 compose-migration-test:
-	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh
+	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/deploy-home-link-web.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh
 	bash scripts/test-modular-compose.sh
 
 container-boundary-test:
@@ -74,15 +96,21 @@ container-boundary-test:
 optimizer/.venv/.installed: optimizer/pyproject.toml
 	$(MAKE) optimizer-install
 
-e2e:
+e2e: drivers-present
 	cd go && FTW_E2E=1 go test ./test/e2e -v -timeout 180s
 
-driver-repository-validate:
+driver-repository-validate: drivers-present
 	cd go && go run ./cmd/ftw-driver-repository publish -unsigned -drivers ../drivers -output ../dist/driver-repository -base-url https://example.invalid/releases/download/drivers-local -repository https://github.com/srcfl/ftw
 
 DRIVER_BASE ?= origin/master
 driver-versions:
 	cd go && go run ./cmd/ftw-driver-repository check-versions -repo-root .. -base $(DRIVER_BASE) -head WORKTREE
+
+# The same rule asked of the pins rather than of this repository's history:
+# a bundled driver whose bytes moved between the old pin and the new one must
+# have moved its version too. Quiet when the pin has not moved.
+driver-versions-across-pin:
+	bash scripts/check-driver-versions.sh $(DRIVER_BASE)
 
 ci:
 	./scripts/ci-local.sh
@@ -159,7 +187,7 @@ build-windows-amd64:
 
 # ---- Release archives ----
 
-release: build-arm64 build-amd64 build-windows-amd64
+release: drivers-present build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
 	@# Per-arch staging dirs ship ftw and its compatibility alias.
 	@for arch in arm64 amd64; do \

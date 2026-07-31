@@ -7,6 +7,34 @@
     return fetch(path, opts);
   }
 
+  function statusView(status, desiredEnabled, nowMs) {
+    if (typeof desiredEnabled === "boolean" && desiredEnabled !== !!status.enabled) {
+      return {
+        className: "ha-status-indicator ha-warn",
+        text: desiredEnabled ? "○  unsaved change — Save to enable" : "○  unsaved change — Save to disable",
+      };
+    }
+    if (!status.enabled) {
+      return {
+        className: "ha-status-indicator ha-off",
+        text: "○  disabled in config",
+      };
+    }
+    if (status.connected) {
+      var age = status.last_publish_ms > 0
+        ? Math.round(((nowMs == null ? Date.now() : nowMs) - status.last_publish_ms) / 1000) + "s ago"
+        : "no publish yet";
+      return {
+        className: "ha-status-indicator ha-ok",
+        text: "● connected to " + status.broker + "  ·  " + (status.sensors_announced || 0) + " sensors  ·  last publish " + age,
+      };
+    }
+    return {
+      className: "ha-status-indicator ha-warn",
+      text: "⚠  enabled but not connected to " + (status.broker || "?") + "  —  check broker + credentials",
+    };
+  }
+
   S.tabs.ha = {
     render: function (ctx) {
       var field = ctx.field, config = ctx.config;
@@ -34,19 +62,10 @@
       if (!el) return;
       function refresh() {
         apiFetch("/api/ha/status").then(function (r) { return r.json(); }).then(function (d) {
-          if (!d.enabled) {
-            el.className = "ha-status-indicator ha-off";
-            el.textContent = "○  disabled in config";
-            return;
-          }
-          if (d.connected) {
-            var age = d.last_publish_ms > 0 ? Math.round((Date.now() - d.last_publish_ms) / 1000) + "s ago" : "no publish yet";
-            el.className = "ha-status-indicator ha-ok";
-            el.textContent = "● connected to " + d.broker + "  ·  " + (d.sensors_announced || 0) + " sensors  ·  last publish " + age;
-          } else {
-            el.className = "ha-status-indicator ha-warn";
-            el.textContent = "⚠  not connected to " + (d.broker || "?") + "  —  check broker + credentials";
-          }
+          var checkbox = document.querySelector('[data-checkbox-path="homeassistant.enabled"]');
+          var view = statusView(d, checkbox ? checkbox.checked : null);
+          el.className = view.className;
+          el.textContent = view.text;
         }).catch(function () {
           el.className = "ha-status-indicator ha-warn";
           el.textContent = "? status endpoint unreachable";
@@ -55,6 +74,9 @@
       refresh();
       if (window._haStatusTimer) clearInterval(window._haStatusTimer);
       window._haStatusTimer = setInterval(refresh, 5000);
+    },
+    _pure: {
+      statusView: statusView,
     },
   };
 })();

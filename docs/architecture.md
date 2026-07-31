@@ -10,9 +10,9 @@ make dispatch unsafe.
 
 | Module | Source | Runtime | Responsibility |
 |---|---|---|---|
-| Core | `go/cmd/ftw`, `go/internal`, `web` | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
-| Drivers | `drivers/*.lua`, host in `go/internal/drivers` | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | `optimizer`, contract in `go/internal/mpc` | Optional Python service/process | Solve the long-horizon mathematical plan |
+| Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
+| Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
+| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Optional Python service/process | Solve the long-horizon mathematical plan |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
@@ -38,9 +38,10 @@ changing power math.
 
 ## Core
 
-`go/cmd/ftw/main.go` is the composition root. It wires configuration, driver
-registry, telemetry, persistent state, control, planning, API and integrations.
-Packages under `go/internal` should stay cohesive and communicate through
+[`go/cmd/ftw/main.go`](../go/cmd/ftw/main.go) is the composition root. It wires
+configuration, driver registry, telemetry, persistent state, control, planning,
+API and integrations.
+Packages under [`go/internal`](../go/internal) should stay cohesive and communicate through
 narrow Go interfaces or data types instead of reaching into one another's
 storage.
 
@@ -57,7 +58,8 @@ telemetry → control/planner → core validation and safety → driver command
 
 The in-memory telemetry store owns latest readings and driver health. SQLite
 owns durable configuration state, history, forecasts, prices, device identity
-and learned model state. Database access stays in `go/internal/state`.
+and learned model state. Database access stays in
+[`go/internal/state`](../go/internal/state).
 
 The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
@@ -65,8 +67,16 @@ Planner output is an input to that loop, never a direct device command.
 
 ## Drivers
 
-Each `drivers/*.lua` file contains its own `DRIVER` metadata and implements the
-driver lifecycle. `go/internal/drivers/lua.go` is the source of truth for the
+The public `srcfl/device-drivers` repo owns editable driver source, versions,
+contracts, tests and FTW's signed release channel. FTW downloads only an
+explicitly selected, content-addressed Lua asset after it verifies the signed
+manifest. It never runs raw code from the repository branch. Device Support
+may later consume an exact public commit for other products or a higher support
+level.
+
+Each Lua artifact still contains its own `DRIVER` metadata and implements the
+FTW lifecycle. [`go/internal/drivers/lua.go`](../go/internal/drivers/lua.go) is
+the source of truth for FTW's
 host API and capability sandbox. Network and protocol capabilities must be
 granted in configuration.
 
@@ -78,9 +88,10 @@ Drivers are the only hardware-specific layer. They must:
 - avoid policy decisions that belong in core;
 - remain independently testable and hot-editable.
 
-Bundled drivers provide the recovery set. Signed driver artifacts can be
-updated independently through `beta` and `stable`; activation is explicit and
-atomic. See [writing-a-driver.md](writing-a-driver.md) and
+Bundled drivers provide the offline recovery set. A signed distribution index
+is discovery only; FTW independently verifies the selected package and
+artifact, while activation remains explicit and atomic. See
+[writing-a-driver.md](writing-a-driver.md) and
 [device-repository.md](device-repository.md).
 
 ## Optimizer
@@ -92,6 +103,30 @@ optimizer does not read hardware or issue commands.
 If the socket/process fails, times out or returns invalid output, core falls
 back to its Go planner. Optimizer deployment and dependency churn therefore do
 not enlarge the safety-critical runtime.
+
+## Versioning a module contract
+
+Drivers and the optimizer release on their own schedules, so core cannot assume
+the version on the other side of either contract. Both use the same rule.
+
+Each side declares the **window** of contract versions it speaks — core in
+[`go/internal/components`](../go/internal/components) and
+[`go/internal/optimizercontract`](../go/internal/optimizercontract), a driver in its
+`host_api_min`/`host_api_max` metadata, the optimizer in its handshake reply.
+An overlap of one version is enough. Declaring a single version means a window
+of one.
+
+Grow the contract by adding **features** to the handshake, not by bumping the
+version. A feature an old peer does not advertise costs nothing — core simply
+does not ask it for what it cannot do — while a version bump makes every peer
+outside the new window incompatible at once. That is the mistake the `champion`
+requirement made: it landed in core before any optimizer image advertised it,
+and every site that had not updated the optimizer silently fell back to the Go
+planner.
+
+When the framing or the request shape genuinely changes, bump the version and
+**widen** the window rather than moving it, so sites that have not updated the
+module keep working.
 
 ## Failure boundaries
 
@@ -109,14 +144,85 @@ relevant code are the detailed executable specification.
 
 ## Configuration and interfaces
 
-`config.example.yaml` and the structs plus validation in
-`go/internal/config` define the configuration schema. The handlers registered
-in `go/internal/api/api.go` define the HTTP surface. Driver metadata defines
+[`config.example.yaml`](../config.example.yaml) and the structs plus validation
+in [`go/internal/config`](../go/internal/config) define the configuration
+schema. The handlers registered in
+[`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
 Some startup bindings cannot be hot-reloaded, including state paths, API
 listener and selected integration transports. Normal device and control
-configuration is reloaded through `go/internal/configreload`.
+configuration is reloaded through
+[`go/internal/configreload`](../go/internal/configreload).
+
+## Future remote access boundary
+
+Remote Sourceful access is not implemented by the LAN/API hardening layer. The
+central request policy in [`go/internal/api`](../go/internal/api) is the expansion point: a future
+protected remote request must present a locally verifiable principal and access
+proof there before an API handler runs.
+
+The machine identity has one compatibility contract regardless of where its
+private key lives:
+
+- a gateway name is never operator-selected. It is derived deterministically
+  as adjective-color-animal from the stable gateway ID, using exactly the
+  existing Sourceful Energy Gateway mapping;
+- on compatible hardware, the existing hardware-protected P-256 key and its
+  normalized 18-hex serial number are the gateway/site-controller identity.
+  The private key never leaves the secure element;
+- without that hardware, FTW creates and persists a P-256 identity with the
+  same public-key and signature wire contract and a stable ID in the same
+  format;
+- remote-access policy and composition depend only on the public identity and
+  a narrow signing interface. They must not depend on a key path, exported
+  private-key bytes, or a particular private-key encoding.
+
+The three-word name is a derived display label and the DNS alias is a rotatable
+convenience; neither is an authenticator or secret. Local passkeys authenticate
+users; the resolved machine identity authenticates the tunnel endpoint.
+
+The intended authentication and transport remain deliberately separate:
+
+- the resolved, permanent site/machine identity is authoritative for the
+  gateway;
+- FTW authenticates its tunnel by signing a fresh challenge with that key, not
+  with a long-lived bearer or shared tunnel secret;
+- FTW initiates one long-lived, outbound-only TLS connection to the relay;
+- a small versioned multiplexing contract carries concurrent browser request,
+  passkey ceremony, and event streams over that connection;
+- passkey authentication terminates on the local FTW instance. FTW stores only
+  the WebAuthn verification material needed for enrolled credentials:
+  credential ID, public key, counter, and operator-visible name. The private
+  passkey never leaves its authenticator, and the relay stores no user
+  credential;
+- first enrollment starts from the LAN with a single-use, high-entropy QR/link
+  secret that FTW validates locally. It does not use a PIN;
+- the recommended address is `<alias>.home.sourceful.energy`. The rotatable
+  alias is only a convenience; relay state maps it to the public site identity
+  and is limited to routing, status, and timestamps.
+
+For this future flow, no password or shared access key is retained by FTW or
+the relay. The single-use enrollment secret exists only to authorize the
+initial local ceremony and cannot become a standing login credential.
+
+After local passkey verification, FTW issues short-lived access proofs bound to
+the site and allowed scopes and verifies them at the central request policy.
+Read-only scopes come first. Later mutation scopes must still enter through the
+same policy and ordinary Core handlers. Core remains authoritative for
+telemetry freshness, validation, clamps, planning, and hardware dispatch; no
+remote principal or transport can bypass those checks. Expired or invalid
+proofs fail closed, and an unavailable remote connection leaves local control
+and local recovery intact. The target has no cloud account authentication,
+peer-to-peer or NAT-traversal layer, inbound remote listener, or
+browser-managed site directory or secrets.
+
+Before remote implementation, a focused identity ADR must freeze the existing
+gateway-name mapping, stable-ID normalization and fallback derivation, P-256
+public-key/signature encodings, and identity recovery/rotation rules as
+versioned compatibility contracts. This LAN/API change only preserves the
+central policy expansion point; it does not choose or implement an identity
+provider.
 
 ## Releases
 
@@ -134,7 +240,7 @@ There is no edge channel. See [self-update.md](self-update.md).
 
 1. [site-convention.md](site-convention.md)
 2. this document
-3. `go/cmd/ftw/main.go`
+3. [`go/cmd/ftw/main.go`](../go/cmd/ftw/main.go)
 4. the package or driver being changed and its colocated tests
 5. [writing-a-driver.md](writing-a-driver.md) for hardware support
 6. [operations.md](operations.md) for deployment and recovery

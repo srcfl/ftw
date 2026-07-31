@@ -118,6 +118,12 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
+      # drivers/ is gitignored and fetched from the commit pinned in
+      # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,
+      # so it has to exist before either is built.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -235,6 +241,10 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: ${{ needs.meta.outputs.tag }}
+
+      # drivers/ is gitignored and fetched from the pin; the image copies it.
+      - name: Fetch the bundled drivers
+        run: make drivers
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

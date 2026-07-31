@@ -5,14 +5,17 @@ name: changeset-check
 # CI tooling, markdown). Pattern lifted from umara/u-front.
 #
 # Escape layers, in order:
-#   1. PR title matches the auto-generated Version PR → skip (defensive;
-#      Version PRs are created via GITHUB_TOKEN so they don't cascade
-#      workflow runs, but this guards against a manual push to the
-#      Version PR branch).
+#   1. PR identity exactly matches the auto-generated Version PR → skip
+#      (trusted repository, head branch, base branch and title).
 #   2. PR carries the `no-changeset` label → skip (manual override for
 #      cases the allowlist doesn't anticipate).
 #   3. All changed files are in the path allowlist → skip.
 #   4. Otherwise: require at least one added .changeset/<name>.md file.
+#
+# Layer 3 is decided before Changesets runs, because `changeset status`
+# reports "packages have been changed but no changesets were found" for
+# any diff inside a package — a docs-only PR included. Validating the
+# queue first therefore failed exactly the PRs the allowlist exempts.
 
 on:
   pull_request:
@@ -32,9 +35,15 @@ jobs:
         id: version_pr
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          if [[ "${TITLE}" == "chore(release): version packages"* ]]; then
+          if [[ "${TITLE}" == "chore(release): version packages" \
+            && "${HEAD_REPO}" == "${GITHUB_REPOSITORY}" \
+            && "${HEAD_REF}" == "changeset-release/master" \
+            && "${BASE_REF}" == "master" ]]; then
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             echo "Auto-generated Version PR — gate skipped."
           else
@@ -51,6 +60,10 @@ jobs:
           if echo "${LABELS}" | jq -e '.[] | select(.name == "no-changeset")' >/dev/null; then
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             echo "PR carries 'no-changeset' label — release-notes gate satisfied."
+            {
+              echo "### Changeset exemption"
+              echo "The \`no-changeset\` label skips Changesets setup, install, validation, and entry checks."
+            } >> "${GITHUB_STEP_SUMMARY}"
           else
             echo "skip=false" >> "${GITHUB_OUTPUT}"
           fi
@@ -63,29 +76,8 @@ jobs:
       - name: Validate package and lockfile metadata
         run: node --test web/release-metadata.test.mjs
 
-      # Presence alone is not enough: a Changeset can reference a package that
-      # no longer exists after a rename. Validate the complete pending queue
-      # with Changesets itself so an invalid entry fails on the PR instead of
-      # breaking every release run after it reaches master.
-      - name: Setup Node for Changesets validation
-        if: steps.version_pr.outputs.skip != 'true'
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install Changesets dependencies
-        if: steps.version_pr.outputs.skip != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
-
-      - name: Validate pending Changesets
-        if: steps.version_pr.outputs.skip != 'true'
-        # pull_request workflows run on a detached merge ref. Compare against
-        # the fetched remote base because no local `master` branch exists.
-        run: npx changeset status --since="origin/${{ github.base_ref }}"
-
       - name: Verify changeset present (or PR is allowlisted)
+        id: gate
         if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -96,7 +88,26 @@ jobs:
           git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}"
 
           CHANGED="$(git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}")"
+
+          # Accept any added or modified changeset file. Exclude
+          # deletions (--diff-filter=d) so a PR that *deletes* a
+          # changeset can't satisfy the rule. Exclude the README +
+          # config files which are infrastructure, not real entries.
+          # Computed up front: the verdict below and the Changesets
+          # validation that follows need the same answer.
+          CHANGESETS="$(git diff --name-only --diff-filter=d "${BASE_SHA}"..."${HEAD_SHA}" \
+              | grep -E '^\.changeset/[^/]+\.md$' \
+              | grep -vE '^\.changeset/(README)\.md$' \
+              || true)"
+
+          if [ -n "${CHANGESETS}" ]; then
+            echo "has_changesets=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_changesets=false" >> "${GITHUB_OUTPUT}"
+          fi
+
           if [ -z "${CHANGED}" ]; then
+            echo "exempt=true" >> "${GITHUB_OUTPUT}"
             echo "No file changes — passing."
             exit 0
           fi
@@ -123,6 +134,7 @@ jobs:
               || true)"
 
           if [ -z "${REQUIRES_CHANGESET}" ]; then
+            echo "exempt=true" >> "${GITHUB_OUTPUT}"
             echo "✓ PR changes only docs / repo config / CI tooling (allowlist) — changeset not required."
             echo ""
             echo "Files in this PR:"
@@ -130,14 +142,7 @@ jobs:
             exit 0
           fi
 
-          # Accept any added or modified changeset file. Exclude
-          # deletions (--diff-filter=d) so a PR that *deletes* a
-          # changeset can't satisfy the rule. Exclude the README +
-          # config files which are infrastructure, not real entries.
-          CHANGESETS="$(git diff --name-only --diff-filter=d "${BASE_SHA}"..."${HEAD_SHA}" \
-              | grep -E '^\.changeset/[^/]+\.md$' \
-              | grep -vE '^\.changeset/(README)\.md$' \
-              || true)"
+          echo "exempt=false" >> "${GITHUB_OUTPUT}"
 
           if [ -n "${CHANGESETS}" ]; then
             echo "✓ Found changeset(s):"
@@ -159,3 +164,39 @@ jobs:
           echo "  - apply the 'no-changeset' label to skip the gate, or"
           echo "  - expand the allowlist in .github/workflows/changeset-check.yml in the same PR."
           exit 1
+
+      # Presence alone is not enough: a Changeset can reference a package that
+      # no longer exists after a rename. Validate the complete pending queue
+      # with Changesets itself so an invalid entry fails on the PR instead of
+      # breaking every release run after it reaches master.
+      #
+      # Runs when the PR needs a changeset, and also when an allowlisted PR
+      # carries one anyway — a `.changeset/*.md` file matches the markdown
+      # allowlist, so a changeset-only PR is exempt from the gate and would
+      # otherwise ship its entry unvalidated.
+      - name: Setup Node for Changesets validation
+        if: >-
+          steps.version_pr.outputs.skip != 'true'
+          && steps.label.outputs.skip != 'true'
+          && (steps.gate.outputs.exempt != 'true' || steps.gate.outputs.has_changesets == 'true')
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Changesets dependencies
+        if: >-
+          steps.version_pr.outputs.skip != 'true'
+          && steps.label.outputs.skip != 'true'
+          && (steps.gate.outputs.exempt != 'true' || steps.gate.outputs.has_changesets == 'true')
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Validate pending Changesets
+        if: >-
+          steps.version_pr.outputs.skip != 'true'
+          && steps.label.outputs.skip != 'true'
+          && (steps.gate.outputs.exempt != 'true' || steps.gate.outputs.has_changesets == 'true')
+        # pull_request workflows run on a detached merge ref. Compare against
+        # the fetched remote base because no local `master` branch exists.
+        run: npx changeset status --since="origin/${{ github.base_ref }}"

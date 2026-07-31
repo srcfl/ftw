@@ -28,12 +28,19 @@ func (s *Server) handleDeviceRepositoryStatus(w http.ResponseWriter, _ *http.Req
 	writeJSON(w, 200, s.deps.DriverRepository.Status())
 }
 
-func (s *Server) handleDeviceRepositoryCatalog(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleDeviceRepositoryCatalog(w http.ResponseWriter, r *http.Request) {
 	if s.deps.DriverRepository == nil {
 		writeJSON(w, 503, map[string]string{"error": "device repository disabled"})
 		return
 	}
-	catalog, err := s.deps.DriverRepository.Catalog()
+	channel := r.URL.Query().Get("channel")
+	var catalog any
+	var err error
+	if channel == "" {
+		catalog, err = s.deps.DriverRepository.Catalog()
+	} else {
+		catalog, err = s.deps.DriverRepository.ChannelCatalog(r.Context(), channel)
+	}
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -70,13 +77,14 @@ func (s *Server) handleDeviceRepositoryInstall(w http.ResponseWriter, r *http.Re
 	var body struct {
 		RepositoryID string `json:"repository_id"`
 		Version      string `json:"version,omitempty"`
+		Channel      string `json:"channel,omitempty"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if body.RepositoryID == "" {
-		writeJSON(w, 400, map[string]string{"error": "repository_id is required"})
+	if body.RepositoryID == "" && body.Channel == "" {
+		writeJSON(w, 400, map[string]string{"error": "repository_id or channel is required"})
 		return
 	}
 	if !s.driverUpdateMu.TryLock() {
@@ -86,7 +94,13 @@ func (s *Server) handleDeviceRepositoryInstall(w http.ResponseWriter, r *http.Re
 	defer s.driverUpdateMu.Unlock()
 	started := time.Now()
 	fromVersion := s.activeManagedDriverVersion(r.PathValue("id"))
-	installed, err := s.deps.DriverRepository.Install(r.Context(), body.RepositoryID, r.PathValue("id"), body.Version)
+	var installed state.DriverRepoInstall
+	var err error
+	if body.Channel != "" {
+		installed, err = s.deps.DriverRepository.InstallChannel(r.Context(), body.Channel, r.PathValue("id"), body.Version)
+	} else {
+		installed, err = s.deps.DriverRepository.Install(r.Context(), body.RepositoryID, r.PathValue("id"), body.Version)
+	}
 	if err != nil {
 		s.recordDriverUpdate(r.PathValue("id"), "install", fromVersion, body.Version, "failed", err.Error(), started)
 		writeJSON(w, 422, map[string]string{"error": err.Error()})
@@ -171,6 +185,64 @@ func (s *Server) handleDeviceRepositoryRollback(w http.ResponseWriter, r *http.R
 	}
 	s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, rolledBack.Version, "succeeded", "driver restarted with fresh telemetry", started)
 	writeJSON(w, 200, map[string]any{"status": "rolled_back", "artifact": rolledBack})
+}
+
+// Back to the copy that shipped with this build. Rollback steps between
+// managed artifacts and cannot reach the bundled driver, so without this an
+// operator who installed one channel version over a bundled driver had no way
+// back at all -- which is the first move anyone makes when trying a new one.
+func (s *Server) handleDeviceRepositoryUseBundled(w http.ResponseWriter, r *http.Request) {
+	if s.deps.DriverRepository == nil || s.deps.Registry == nil {
+		writeJSON(w, 503, map[string]string{"error": "device repository or registry unavailable"})
+		return
+	}
+	var body struct {
+		LogicalPath string `json:"logical_path"`
+	}
+	if r.ContentLength > 0 {
+		if err := readJSON(r, &body); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if body.LogicalPath == "" {
+		body.LogicalPath = "drivers/" + filepath.Base(r.PathValue("id")) + ".lua"
+	}
+	if !s.driverUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "another driver update is in progress"})
+		return
+	}
+	defer s.driverUpdateMu.Unlock()
+	started := time.Now()
+	fromVersion := s.activeManagedDriverVersion(r.PathValue("id"))
+	bundledPath := filepath.Join(s.deps.DriverDir, filepath.FromSlash(strings.TrimPrefix(body.LogicalPath, "drivers/")))
+	replaced, err := s.deps.DriverRepository.UseBundled(body.LogicalPath, bundledPath)
+	if err != nil {
+		s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "", "failed", err.Error(), started)
+		writeJSON(w, 422, map[string]string{"error": err.Error()})
+		return
+	}
+	// InstalledPath empty tells restartManagedDrivers to point config at the
+	// bundled file rather than the symlink UseBundled just removed.
+	restartState, restartErr := s.restartManagedDrivers(r.Context(), state.DriverRepoInstall{
+		LogicalPath: body.LogicalPath, DriverID: replaced.DriverID,
+	})
+	if restartErr != nil {
+		// Put the managed artifact back. It is still on disk; only the
+		// resolver entry was removed, so this is an activation, not a fetch.
+		recoveryMessage := ""
+		if _, recoveryErr := s.deps.DriverRepository.ActivateInstalled(r.PathValue("id"), replaced.Version, replaced.SHA256); recoveryErr != nil {
+			recoveryMessage = "; restoring v" + replaced.Version + " failed: " + recoveryErr.Error()
+		} else if _, err := s.restartManagedDriversExpected(context.Background(), replaced, restartState.ExpectedIDs); err != nil {
+			recoveryMessage = "; restarting v" + replaced.Version + " failed: " + err.Error()
+		}
+		message := restartErr.Error() + recoveryMessage
+		s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "", "failed", message, started)
+		writeJSON(w, 502, map[string]string{"error": message})
+		return
+	}
+	s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "bundled", "succeeded", "bundled driver restarted with fresh telemetry", started)
+	writeJSON(w, 200, map[string]any{"status": "using_bundled"})
 }
 
 func (s *Server) handleDeviceRepositoryVersions(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +355,15 @@ func (s *Server) restartManagedDrivers(ctx context.Context, artifact state.Drive
 }
 
 func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact state.DriverRepoInstall, expectedIDs map[string]string) (managedDriverRestartState, error) {
-	activePath := filepath.Join(s.deps.DriverRepository.ActiveDir(), filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/")))
+	rel := filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/"))
+	activePath := filepath.Join(s.deps.DriverRepository.ActiveDir(), rel)
+	// Rolling back the first managed install removes the entry rather than
+	// swapping it, so there is no artifact and no symlink left to point at.
+	// The driver goes back to the bundled copy, which is where it ran before.
+	targetPath := activePath
+	if artifact.InstalledPath == "" {
+		targetPath = filepath.Join(s.deps.DriverDir, rel)
+	}
 	s.deps.CfgMu.Lock()
 	var affected []config.Driver
 	var originals []config.Driver
@@ -298,7 +378,7 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 			continue
 		}
 		originals = append(originals, s.deps.Cfg.Drivers[i])
-		s.deps.Cfg.Drivers[i].Lua = activePath
+		s.deps.Cfg.Drivers[i].Lua = targetPath
 		affected = append(affected, s.deps.Cfg.Drivers[i])
 	}
 	s.deps.CfgMu.Unlock()

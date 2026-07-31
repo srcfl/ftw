@@ -150,21 +150,65 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 	}
 }
 
-func TestPrefixedComponentReleaseUsesIndependentImageTag(t *testing.T) {
+func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing.T) {
+	const repo = "srcfl/ftw"
+	for _, tc := range []struct {
+		name           string
+		body           string
+		targetSchema   int
+		backupRequired bool
+	}{
+		{name: "same", body: "<!-- ftw-state-schema:7 -->", targetSchema: 7, backupRequired: false},
+		{name: "different", body: "<!-- ftw-state-schema:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "missing", body: "ordinary release notes", targetSchema: 0, backupRequired: true},
+		{name: "invalid", body: "<!-- ftw-state-schema:no -->", targetSchema: 0, backupRequired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newFakeRegistry(t, repo)
+			reg.addTag("v1.3.0")
+			registry := reg.server()
+			defer registry.Close()
+			releases := fakeReleasesServer(t, fakeRelease{
+				tag: "v1.3.0", body: tc.body, published: time.Now(),
+			})
+			defer releases.Close()
+
+			c := New(Config{
+				Repo: repo, CurrentVersion: "v1.2.0", CurrentStateSchema: 7,
+				RegistryBaseURL: registry.URL, LatestReleaseURL: releases.URL,
+			}, newMemStore())
+			info, err := c.Check(t.Context(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.CurrentStateSchema != 7 || info.TargetStateSchema != tc.targetSchema {
+				t.Fatalf("schema info = %+v", info)
+			}
+			if info.FullBackupRequired != tc.backupRequired {
+				t.Fatalf("FullBackupRequired = %v, want %v", info.FullBackupRequired, tc.backupRequired)
+			}
+			if strings.Contains(info.ReleaseBody, "ftw-state-schema") {
+				t.Fatalf("internal schema marker leaked into release notes: %q", info.ReleaseBody)
+			}
+		})
+	}
+}
+
+func TestPrefixedOptimizerBootstrapIsMonotonicFromLegacyBeta(t *testing.T) {
 	const image = "srcfl/ftw-optimizer"
 	reg := newFakeRegistry(t, image)
-	reg.addTag("v0.2.0")
+	reg.addTag("v1.3.2-beta.1")
 	rsrv := reg.server()
 	defer rsrv.Close()
 	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"tag_name": "v9.9.9", "prerelease": false},
-			{"tag_name": "optimizer-v0.2.0", "prerelease": false},
+			{"tag_name": "optimizer-v1.3.2-beta.1", "prerelease": true},
 		})
 	}))
 	defer releases.Close()
 	c := New(Config{
-		Repo: "srcfl/ftw", Image: image, CurrentVersion: "v0.1.0",
+		Repo: "srcfl/ftw", Image: image, CurrentVersion: "v1.3.1-beta.1",
 		ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
 		RegistryBaseURL: rsrv.URL, ReleasesURL: releases.URL,
 	}, newMemStore())
@@ -172,7 +216,7 @@ func TestPrefixedComponentReleaseUsesIndependentImageTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Latest != "v0.2.0" || !info.UpdateAvailable {
+	if info.Latest != "v1.3.2-beta.1" || !info.UpdateAvailable {
 		t.Fatalf("optimizer info = %+v", info)
 	}
 }
@@ -526,10 +570,44 @@ func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 		t.Errorf("fresh status = %+v, want restoring snapshot-123", s)
 	}
 
-	stale := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now().Add(-10 * time.Minute)}
+	stale := UpdateStatus{
+		State:          "pulling",
+		Action:         "update",
+		PhaseStartedAt: time.Now().Add(-10 * time.Minute),
+		UpdatedAt:      time.Now().Add(-10 * time.Minute),
+	}
 	writeJSON(t, path, stale)
 	if s := c.Status(); s.State != "failed" {
 		t.Errorf("stale state = %q, want failed", s.State)
+	}
+	stale.State = "checking"
+	writeJSON(t, path, stale)
+	if s := c.Status(); s.State != "failed" {
+		t.Errorf("stale checking state = %q, want failed", s.State)
+	}
+}
+
+func TestStatus_AllowsSilentLegacyPullUntilItsDockerTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now()
+	c := New(Config{StatusPath: path, Now: func() time.Time { return now }}, nil)
+
+	writeJSON(t, path, UpdateStatus{
+		State:     "pulling",
+		Action:    "update",
+		UpdatedAt: now.Add(-15 * time.Minute),
+	})
+	if got := c.Status(); got.State != "pulling" {
+		t.Fatalf("15-minute legacy pull state = %q, want pulling", got.State)
+	}
+
+	writeJSON(t, path, UpdateStatus{
+		State:     "pulling",
+		Action:    "update",
+		UpdatedAt: now.Add(-legacySidecarStaleThreshold - time.Second),
+	})
+	if got := c.Status(); got.State != "failed" {
+		t.Fatalf("expired legacy pull state = %q, want failed", got.State)
 	}
 }
 
@@ -540,11 +618,17 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 
 	started := time.Now().Add(-time.Second)
 	if err := c.WriteStatus(UpdateStatus{
-		State:     "snapshotting",
-		Action:    "update",
-		Target:    "v1.5.0",
-		StartedAt: started,
-		Message:   "creating backup snapshot",
+		State:           "snapshotting",
+		Action:          "update",
+		Target:          "v1.5.0",
+		StartedAt:       started,
+		PhaseStartedAt:  started,
+		Message:         "creating backup snapshot",
+		Step:            1,
+		TotalSteps:      4,
+		ProgressCurrent: 50,
+		ProgressTotal:   100,
+		ProgressUnit:    "bytes",
 	}); err != nil {
 		t.Fatalf("write status: %v", err)
 	}
@@ -555,6 +639,10 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 	}
 	if got.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt should be filled")
+	}
+	if got.Step != 1 || got.TotalSteps != 4 || got.ProgressCurrent != 50 ||
+		got.ProgressTotal != 100 || got.ProgressUnit != "bytes" || got.PhaseStartedAt.IsZero() {
+		t.Fatalf("progress fields = %+v", got)
 	}
 }
 
@@ -622,6 +710,8 @@ func TestIsNewer(t *testing.T) {
 		{"v1.3.0", "v1.3.0-beta.2", true},
 		{"v1.3.0-beta.2", "v1.3.0", false},
 		{"1.2.3", "1.2.2", true},
+		{"v1.3.2-beta.1", "v1.3.1-beta.1", true},
+		{"v1.3.2-beta.1", "v1.3.1", true},
 	}
 	for _, tc := range cases {
 		if got := isNewer(tc.latest, tc.current); got != tc.want {
@@ -668,5 +758,51 @@ func TestTrigger_NoSocket(t *testing.T) {
 	c := New(Config{}, newMemStore())
 	if err := c.Trigger(context.Background(), "update", ""); err == nil {
 		t.Error("expected 'socket not configured' error")
+	}
+}
+
+// Reported from the field: an amber update badge on a site already running the
+// newest stable. The badge counts Core + optimizer + drivers, and the optimizer
+// was the one claiming an update — its current version was never learned, so
+// the "is a newer release available" comparison treated it as older than
+// everything. Absence of knowledge must not read as an old version.
+func TestUnknownCurrentVersionDoesNotClaimAnUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name, latest, current string
+		want                  bool
+	}{
+		{name: "never learned the optimizer version", latest: "v1.3.2", current: "", want: false},
+		{name: "whitespace is still unknown", latest: "v1.3.2", current: "   ", want: false},
+		// An unstamped local build reports a real value and keeps the update
+		// flow testable; see docs/self-update.md.
+		{name: "unstamped dev build still sees releases", latest: "v1.3.2", current: "dev", want: true},
+		{name: "stable site on the newest release", latest: "v1.13.0", current: "v1.13.0", want: false},
+		{name: "stable site behind a release", latest: "v1.13.1", current: "v1.13.0", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := channelUpdateAvailable(tc.latest, tc.current); got != tc.want {
+				t.Fatalf("channelUpdateAvailable(%q, %q) = %v, want %v", tc.latest, tc.current, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetCurrentVersionClearsAStaleUpdateClaim(t *testing.T) {
+	c := New(Config{CurrentVersion: "", StoragePrefix: "optimizer."}, newMemStore())
+	c.mu.Lock()
+	c.info.Latest = "v1.3.2"
+	c.info.UpdateAvailable = channelUpdateAvailable(c.info.Latest, c.info.Current)
+	c.mu.Unlock()
+	if c.Info().UpdateAvailable {
+		t.Fatal("an unknown current version must not claim an update")
+	}
+	// The handshake later succeeds and reports the version actually running.
+	c.SetCurrentVersion("v1.3.2")
+	if c.Info().UpdateAvailable {
+		t.Fatal("learning we already run the latest must clear the claim")
+	}
+	c.SetCurrentVersion("v1.3.1")
+	if !c.Info().UpdateAvailable {
+		t.Fatal("learning we run an older version must raise the claim")
 	}
 }

@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "The bundled drivers in this directory are a snapshot, not a source. They",
+    "exist because startup is deliberately local: a gateway boots and runs",
+    "offline, and a remote refresh must never block it. But they are generated",
+    "from srcfl/device-drivers at the commit pinned here, and CI fails if they",
+    "drift from it. Editing a .lua file in this directory is not a way to",
+    "change a driver -- fix it in device-drivers and move the pin.",
+    "",
+    "The snapshot comes from that repository's source, not from its signed",
+    "channel. Channel artifacts are deliberately write-inert, and a gateway",
+    "that falls back to this recovery copy still has to be able to control a",
+    "battery.",
+    "",
+    "Which drivers are bundled is FTW's choice and is the list below.",
+    "device-drivers publishes more than these; bundling is for recovery, not",
+    "for coverage. Run scripts/sync-bundled-drivers.sh to update."
+  ],
+  "repository": "srcfl/device-drivers",
+  "commit": "76c968bd888193cc9362da951ec9bcca7488b256",
+  "source_dir": "drivers/lua",
+  "drivers": [
+    "ambibox_v2x", "ctek", "ctek_hybrid", "ctek_v2", "deye", "easee_cloud",
+    "esphome_dsmr", "ferroamp", "ferroamp_dc2_v2x", "ferroamp_modbus",
+    "fronius", "fronius_smart_meter", "goodwe", "growatt", "heishamon",
+    "huawei", "kostal", "myuplink", "nibe_local", "pixii", "pixii_pv",
+    "sdm630", "sma", "sma_pv", "sofar", "solaredge", "solaredge_legacy",
+    "solaredge_pv", "solis", "solis_string", "sonnen", "sungrow",
+    "tesla_vehicle", "tibber", "victron", "zap", "zuidwijk_p1"
+  ]
+}

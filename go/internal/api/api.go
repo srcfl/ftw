@@ -64,7 +64,11 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
-	Tel *telemetry.Store
+	// MutationPolicy protects every state-changing route at the shared
+	// Handler boundary. Production requires tokens for non-local hostnames;
+	// the zero value retains local/test embedding compatibility.
+	MutationPolicy MutationPolicy
+	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
 	LogRing           *telemetry.LogRing
@@ -72,7 +76,8 @@ type Deps struct {
 	CtrlMu            *sync.Mutex
 	State             *state.Store
 	CapMu             *sync.RWMutex
-	Capacities        map[string]float64 // driver → battery_capacity_wh
+	Capacities           map[string]float64 // driver → battery_capacity_wh (controllable pool)
+	TelemetryCapacities  map[string]float64 // all site batteries incl. observe_only (SoC weighting)
 	CfgMu             *sync.RWMutex
 	Cfg               *config.Config
 	ConfigPath        string
@@ -125,6 +130,11 @@ type Deps struct {
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
+
+	// HomeLink owns local-only pairing, passkey enrollment, revocation and
+	// status. Nil reports that this host has no safe Home Link identity.
+	HomeLink        HomeLinkAdmin
+	HomeLinkEnabled bool
 
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
@@ -190,6 +200,11 @@ type Server struct {
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
+
+	// Timers that put a driver back after an edit has been tried for its
+	// window. The record on disk is what survives a restart; these only make
+	// the revert prompt while the process lives.
+	drafts *driverDrafts
 }
 
 // New creates a new API server.
@@ -204,19 +219,27 @@ func New(deps *Deps) *Server {
 		deps:       deps,
 		mux:        http.NewServeMux(),
 		dailyCache: make(map[string]state.DayEnergy),
+		drafts:     newDriverDrafts(),
 	}
 	s.routes()
+	// A draft's timer died with the previous process, so anything left behind
+	// goes back now. What runs after a restart should be the driver that was
+	// chosen, not a forgotten experiment.
+	s.RevertDraftsOnStart()
 	return s
 }
 
 // Handler returns the http.Handler suitable for http.ListenAndServe.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler {
+	return SecureMutations(s.mux, s.deps.MutationPolicy)
+}
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", s.handleHealth)
 	s.handle("GET  /api/status", s.handleStatus)
 	s.handle("GET  /api/system/info", s.handleSysInfo)
+	s.handle("GET  /api/storage/inventory", s.handleStorageInventory)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
@@ -234,11 +257,18 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/test", s.handleDriverTest)
+	s.handle("GET  /api/drivers/{id}/source", s.handleDriverSource)
+	s.handle("POST /api/drivers/{id}/lint", s.handleDriverLint)
+	s.handle("POST /api/drivers/{id}/draft", s.handleDriverDraft)
+	s.handle("GET  /api/drivers/{id}/draft", s.handleDriverDraftStatus)
+	s.handle("POST /api/drivers/{id}/draft/keep", s.handleDriverDraftKeep)
+	s.handle("POST /api/drivers/{id}/draft/revert", s.handleDriverDraftRevert)
 	s.handle("POST /api/drivers/fingerprint", s.handleDriverFingerprint)
 	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", s.handleSupportDump)
+	s.handle("GET  /api/support/report", s.handleSupportReport)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
@@ -247,6 +277,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/device_repository/refresh", s.handleDeviceRepositoryRefresh)
 	s.handle("POST /api/device_repository/drivers/{id}/install", s.handleDeviceRepositoryInstall)
 	s.handle("POST /api/device_repository/drivers/{id}/rollback", s.handleDeviceRepositoryRollback)
+	s.handle("POST /api/device_repository/drivers/{id}/use_bundled", s.handleDeviceRepositoryUseBundled)
 	s.handle("GET  /api/device_repository/drivers/{id}/versions", s.handleDeviceRepositoryVersions)
 	s.handle("POST /api/device_repository/drivers/{id}/activate", s.handleDeviceRepositoryActivate)
 	s.handle("GET  /api/components", s.handleComponents)
@@ -255,6 +286,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
 	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/home-link/status", s.handleHomeLinkStatus)
+	s.handle("POST /api/home-link/pairing", s.handleHomeLinkPairing)
+	s.handle("POST /api/home-link/passkeys/revoke", s.handleHomeLinkPasskeyRevoke)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
@@ -268,6 +302,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
 	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
+	s.handle("GET  /api/energy/assets", s.handleEnergyAssets)
+	s.handle("GET  /api/energy/history", s.handleEnergyHistory)
+	s.handle("GET  /api/energy/history.csv", s.handleEnergyHistoryCSV)
 	s.handle("GET  /api/savings/daily", s.handleSavingsDaily)
 	s.handle("GET  /api/prices", s.handlePrices)
 	s.handle("GET  /api/forecast", s.handleForecast)
@@ -299,6 +336,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
 	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
+	s.handle("POST /api/loadpoints/{id}/battery_boost", s.handleLoadpointBatteryBoostEnable)
+	s.handle("DELETE /api/loadpoints/{id}/battery_boost", s.handleLoadpointBatteryBoostCancel)
+	s.handle("GET  /api/loadpoints/{id}/battery_boost", s.handleLoadpointBatteryBoostStatus)
 	s.handle("POST /api/battery/manual_hold", s.handleBatteryManualHold)
 	s.handle("DELETE /api/battery/manual_hold", s.handleBatteryManualHoldClear)
 	s.handle("GET  /api/battery/manual_hold", s.handleBatteryManualHoldGet)
@@ -344,7 +384,6 @@ func (s *Server) handle(methodPath string, h http.HandlerFunc) {
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -435,11 +474,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Unlock()
 
 	s.deps.CapMu.RLock()
-	caps := make(map[string]float64, len(s.deps.Capacities))
-	for k, v := range s.deps.Capacities {
+	capSrc := s.deps.TelemetryCapacities
+	if len(capSrc) == 0 {
+		capSrc = s.deps.Capacities
+	}
+	caps := make(map[string]float64, len(capSrc))
+	for k, v := range capSrc {
 		caps[k] = v
 	}
 	s.deps.CapMu.RUnlock()
+
+	s.deps.CfgMu.RLock()
+	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	s.deps.CfgMu.RUnlock()
 
 	// Aggregate live readings. Offline readings stay in telemetry so detailed
 	// driver views can show the last known value, but they must not leak into
@@ -544,6 +591,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if r.SoC != nil {
 				d["bat_soc"] = *r.SoC
 			}
+		}
+		if observeOnly[name] {
+			d["observe_only"] = true
 		}
 		// Vehicle (DerVehicle) — read-only BMS readings emitted by
 		// drivers like tesla_vehicle.lua. Surfaced so the per-driver
@@ -1552,8 +1602,34 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 // Used by the Settings UI to show a live connection indicator
 // instead of silently relying on "it's saved".
 func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
-	if s.deps.HA == nil {
+	enabled := s.deps.HA != nil
+	broker := ""
+	if s.deps.Cfg != nil {
+		if s.deps.CfgMu != nil {
+			s.deps.CfgMu.RLock()
+		}
+		if cfg := s.deps.Cfg.HomeAssistant; cfg != nil {
+			enabled = cfg.Enabled
+			if cfg.Broker != "" {
+				broker = fmt.Sprintf("%s:%d", cfg.Broker, cfg.Port)
+			}
+		} else {
+			enabled = false
+		}
+		if s.deps.CfgMu != nil {
+			s.deps.CfgMu.RUnlock()
+		}
+	}
+	if !enabled {
 		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	if s.deps.HA == nil {
+		writeJSON(w, 200, map[string]any{
+			"enabled":   true,
+			"connected": false,
+			"broker":    broker,
+		})
 		return
 	}
 	writeJSON(w, 200, map[string]any{
@@ -1643,6 +1719,17 @@ func (s *Server) handleSelfTuneStart(w http.ResponseWriter, r *http.Request) {
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
+	}
+	s.deps.CfgMu.RLock()
+	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	s.deps.CfgMu.RUnlock()
+	for _, name := range req.Batteries {
+		if observeOnly[name] {
+			writeJSON(w, 400, map[string]string{
+				"error": "battery " + name + " is observe_only and cannot be self-tuned",
+			})
+			return
+		}
 	}
 	s.deps.ModelsMu.Lock()
 	err := s.deps.SelfTune.Start(req.Batteries, s.deps.Models, s.deps.DtS)
@@ -2970,6 +3057,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 		decorateLoadpointsWithVehicle(states, s.deps.Tel)
 	}
 	s.decorateLoadpointsWithManual(states)
+	s.decorateLoadpointsWithBatteryBoost(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,

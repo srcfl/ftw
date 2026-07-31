@@ -136,6 +136,23 @@ fleet_statistics:
 	}
 }
 
+func TestHomeLinkIsExplicitAndDisabledByDefault(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HomeLink != nil && cfg.HomeLink.Enabled {
+		t.Fatal("Home Link enabled without explicit config")
+	}
+	cfg, err = Parse([]byte(minimalYAML+"\nhome_link:\n  enabled: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HomeLink == nil || !cfg.HomeLink.Enabled {
+		t.Fatal("explicit Home Link enable was lost")
+	}
+}
+
 func TestSiteTroubleshootingModeParses(t *testing.T) {
 	raw := strings.Replace(minimalYAML, "name: Test", "name: Test\n  troubleshooting_mode: true", 1)
 	c, err := Parse([]byte(raw), "/tmp")
@@ -841,6 +858,86 @@ func TestDeviceRepositoryOfficialTrustRootIsReadOnlyDiscoveryDefault(t *testing.
 	applyDefaults(&disabled)
 	if disabled.DeviceRepository.Enabled {
 		t.Fatal("explicit repository opt-out was overwritten")
+	}
+}
+
+func TestDeviceRepositoryMigratesOnlyTheExactFormerFTWSource(t *testing.T) {
+	legacy := DriverRepositorySource{
+		ID: DefaultDriverRepositoryID, Name: legacyDriverRepositoryName,
+		ManifestURL: legacyDriverRepositoryManifestURL, Enabled: false,
+		TrustedKeys: map[string]string{
+			DefaultDriverRepositorySigningKeyID: DefaultDriverRepositoryPublicKey,
+		},
+	}
+	cfg := Config{DeviceRepository: &DeviceRepository{
+		Enabled: false, RootDir: "kept", RefreshIntervalH: 12,
+		Repositories: []DriverRepositorySource{legacy},
+	}}
+	applyDefaults(&cfg)
+	got := cfg.DeviceRepository.Repositories[0]
+	if got.ManifestURL != DefaultDriverRepositoryManifestURL || got.Name != DefaultDriverRepositoryName {
+		t.Fatalf("former FTW source was not migrated: %+v", got)
+	}
+	if got.Enabled || cfg.DeviceRepository.Enabled || cfg.DeviceRepository.RootDir != "kept" || cfg.DeviceRepository.RefreshIntervalH != 12 {
+		t.Fatalf("repository settings changed during migration: %+v", cfg.DeviceRepository)
+	}
+
+	custom := legacy
+	custom.Name = "My pinned mirror"
+	cfg.DeviceRepository.Repositories[0] = custom
+	applyDefaults(&cfg)
+	if cfg.DeviceRepository.Repositories[0].ManifestURL != legacyDriverRepositoryManifestURL {
+		t.Fatalf("custom source was migrated: %+v", cfg.DeviceRepository.Repositories[0])
+	}
+}
+
+func TestSerialAndStandaloneDriverCapabilities(t *testing.T) {
+	serialCfg := Config{
+		Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16},
+		Drivers: []Driver{{
+			Name: "p1", Lua: "p1.lua", IsSiteMeter: true,
+			Capabilities: Capabilities{Serial: &SerialConfig{Address: "/dev/ttyUSB0"}},
+		}},
+	}
+	applyDefaults(&serialCfg)
+	serial := serialCfg.Drivers[0].Capabilities.Serial
+	if serial.BaudRate != 115200 || serial.DataBits != 8 || serial.StopBits != 1 ||
+		serial.Parity != "N" || serial.ReadTimeoutMS != 500 {
+		t.Fatalf("serial defaults = %+v", serial)
+	}
+	if err := serialCfg.Validate(); err != nil {
+		t.Fatalf("serial driver rejected: %v", err)
+	}
+
+	standalone := serialCfg
+	standalone.Drivers = []Driver{{
+		Name: "local", Lua: "local.lua", IsSiteMeter: true,
+		Capabilities: Capabilities{Standalone: true},
+	}}
+	if err := standalone.Validate(); err != nil {
+		t.Fatalf("standalone driver rejected: %v", err)
+	}
+}
+
+func TestDeviceRepositorySourcefulFormatMustBeSignedAndKnown(t *testing.T) {
+	base := Config{Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16}}
+	base.DeviceRepository = &DeviceRepository{Enabled: true, Repositories: []DriverRepositorySource{{
+		ID: "sourceful", Format: DriverRepositoryFormatSourcefulIndexV1,
+		ManifestURL: "file:///tmp/sourceful-driver-index.json", Enabled: true,
+		AllowInsecure: true, AllowUnsigned: true,
+	}}}
+	applyDefaults(&base)
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "must be signed") {
+		t.Fatalf("unsigned Sourceful index error = %v", err)
+	}
+	base.DeviceRepository.Repositories[0].AllowUnsigned = false
+	base.DeviceRepository.Repositories[0].TrustedKeys = map[string]string{"test": strings.Repeat("A", 44)}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("signed Sourceful source rejected: %v", err)
+	}
+	base.DeviceRepository.Repositories[0].Format = "sourceful.driver-index/v9"
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported format") {
+		t.Fatalf("unknown repository format error = %v", err)
 	}
 }
 

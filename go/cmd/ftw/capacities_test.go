@@ -40,7 +40,7 @@ func TestDriverCapacitiesFromExcludesEV(t *testing.T) {
 	loadpoints := []config.Loadpoint{
 		{ID: "garage", DriverName: "easee"},
 	}
-	got := driverCapacitiesFrom(drivers, loadpoints, evCatalog())
+	got := driverCapacitiesFrom(drivers, loadpoints, evCatalog(), true)
 	if _, ok := got["easee"]; ok {
 		t.Errorf("easee should be filtered out; got %v", got)
 	}
@@ -60,7 +60,7 @@ func TestDriverCapacitiesFromNoLoadpointsBehavesAsBefore(t *testing.T) {
 		{Name: "ferroamp", BatteryCapacityWh: 15200},
 		{Name: "meter", BatteryCapacityWh: 0},
 	}
-	got := driverCapacitiesFrom(drivers, nil, evCatalog())
+	got := driverCapacitiesFrom(drivers, nil, evCatalog(), true)
 	if got["ferroamp"] != 15200 {
 		t.Errorf("lost ferroamp: %v", got)
 	}
@@ -77,7 +77,7 @@ func TestDriverCapacitiesFromExcludesTelemetryOnlyAndReadOnly(t *testing.T) {
 		{Name: "zap", Lua: "drivers/zap.lua", BatteryCapacityWh: 60000},
 		{Name: "custom-gateway", Lua: "drivers/custom.lua", BatteryCapacityWh: 10000, BatteryTelemetryOnly: true},
 	}
-	got := driverCapacitiesFrom(driverConfigs, nil, evCatalog())
+	got := driverCapacitiesFrom(driverConfigs, nil, evCatalog(), true)
 	if len(got) != 1 || got["ferroamp"] != 15200 {
 		t.Fatalf("telemetry-only gateways entered battery control pool: %v", got)
 	}
@@ -96,7 +96,7 @@ func TestDriverCapacitiesFromMultipleLoadpoints(t *testing.T) {
 		{ID: "garage", DriverName: "easee"},
 		{ID: "street", DriverName: "zap"},
 	}
-	got := driverCapacitiesFrom(drivers, loadpoints, evCatalog())
+	got := driverCapacitiesFrom(drivers, loadpoints, evCatalog(), true)
 	if len(got) != 1 || got["ferroamp"] != 15200 {
 		t.Errorf("expected only ferroamp, got %v", got)
 	}
@@ -128,7 +128,7 @@ func TestDriverCapacitiesFromCatalogFallback(t *testing.T) {
 		{Name: "sungrow", Lua: "drivers/sungrow.lua", BatteryCapacityWh: 9600},
 		{Name: "easee", Lua: "drivers/easee_cloud.lua", BatteryCapacityWh: 75000},
 	}
-	got := driverCapacitiesFrom(drivers, nil, evCatalog())
+	got := driverCapacitiesFrom(drivers, nil, evCatalog(), true)
 	if _, ok := got["easee"]; ok {
 		t.Errorf("easee should be filtered out by filename fallback; got %v", got)
 	}
@@ -158,7 +158,7 @@ func TestDriverCapacitiesFromIgnoresInvalidLoadpoints(t *testing.T) {
 	loadpoints := []config.Loadpoint{
 		{ID: "", DriverName: "ferroamp"},
 	}
-	got := driverCapacitiesFrom(drivers, loadpoints, evCatalog())
+	got := driverCapacitiesFrom(drivers, loadpoints, evCatalog(), true)
 	if got["ferroamp"] != 15200 {
 		t.Errorf("ferroamp dropped by invalid loadpoint row: %v", got)
 	}
@@ -174,6 +174,24 @@ func TestDriverCapacitiesFromIgnoresInvalidLoadpoints(t *testing.T) {
 // vendor name. Drivers absent from the catalog are conservatively
 // classified as non-EV (so a missing entry never silently excludes a
 // real battery from the MPC pool).
+func TestDriverCapacitiesFromExcludesObserveOnly(t *testing.T) {
+	drivers := []config.Driver{
+		{Name: "pixii-1", BatteryCapacityWh: 16000, ObserveOnly: true},
+		{Name: "pixii-2", BatteryCapacityWh: 16000},
+	}
+	controllable := driverCapacitiesFrom(drivers, nil, evCatalog(), true)
+	if _, ok := controllable["pixii-1"]; ok {
+		t.Errorf("observe_only driver should be excluded from controllable pool: %v", controllable)
+	}
+	if controllable["pixii-2"] != 16000 {
+		t.Errorf("pixii-2 missing from controllable pool: %v", controllable)
+	}
+	telemetry := driverCapacitiesFrom(drivers, nil, evCatalog(), false)
+	if telemetry["pixii-1"] != 16000 || telemetry["pixii-2"] != 16000 {
+		t.Errorf("telemetry pool should include observe_only: %v", telemetry)
+	}
+}
+
 func TestIsEVOrVehicleDriverByCapabilities(t *testing.T) {
 	cat := evCatalog()
 	cases := []struct {

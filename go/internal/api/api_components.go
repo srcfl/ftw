@@ -18,18 +18,28 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{
 		"manifest_schema_version": components.ComponentManifestSchemaVersion,
 		"core":                    map[string]any{"version": s.deps.Version, "role": "safety_authority"},
-		"optimizer":               map[string]any{"configured": false, "protocol_version": components.OptimizerProtocolVersion},
+		"optimizer": map[string]any{
+			"configured":           false,
+			"protocol_version":     components.OptimizerProtocolVersion,
+			"protocol_min_version": components.OptimizerProtocolMinVersion,
+		},
 		"drivers":                 map[string]any{"host_api": components.DriverHostAPIVersion},
 	}
 	if s.deps.MPC != nil && s.deps.MPC.Optimizer != nil {
-		optimizer := map[string]any{"configured": true, "protocol_version": components.OptimizerProtocolVersion}
+		optimizer := map[string]any{
+			"configured":           true,
+			"protocol_version":     components.OptimizerProtocolVersion,
+			"protocol_min_version": components.OptimizerProtocolMinVersion,
+		}
 		if health, ok := s.deps.MPC.Optimizer.(optimizerHealth); ok {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			info, err := health.Health(ctx)
 			cancel()
 			if err != nil {
 				optimizer["healthy"] = false
+				optimizer["degraded"] = true
 				optimizer["error"] = err.Error()
+				optimizer["health_error"] = err.Error()
 			} else {
 				optimizer["healthy"] = true
 				optimizer["runtime"] = info
@@ -38,6 +48,7 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		applyLatestOptimizerPlanStatus(optimizer, s.deps.MPC.Latest())
 		if s.deps.OptimizerUpdate != nil {
 			if r.URL.Query().Get("force") == "1" {
 				if info, err := s.deps.OptimizerUpdate.Check(r.Context(), true); err != nil {
@@ -62,6 +73,24 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, result)
+}
+
+func applyLatestOptimizerPlanStatus(status map[string]any, plan *mpc.Plan) {
+	if plan == nil || plan.Solver == nil {
+		return
+	}
+	status["active_solver"] = plan.Solver
+	status["last_plan_at_ms"] = plan.GeneratedAtMs
+	if !plan.Solver.Fallback && plan.Solver.Engine != "go-dp" {
+		return
+	}
+	status["healthy"] = false
+	status["degraded"] = true
+	reason := plan.Solver.FallbackReason
+	if reason == "" {
+		reason = "primary optimizer did not produce the active plan"
+	}
+	status["fallback_reason"] = reason
 }
 
 func (s *Server) handleOptimizerComponentUpdate(w http.ResponseWriter, r *http.Request) {

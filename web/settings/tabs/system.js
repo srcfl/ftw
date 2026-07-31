@@ -27,6 +27,31 @@
     return m + "m";
   }
 
+  function optimizerStatus(optimizer) {
+    optimizer = optimizer || {};
+    var runtime = optimizer.runtime || {};
+    var solver = optimizer.active_solver || {};
+    var degraded = optimizer.degraded === true || optimizer.healthy === false || solver.fallback === true;
+    if (!optimizer.configured) {
+      return { label: "Go DP only", degraded: false, warning: "", lastPlanAtMs: 0 };
+    }
+    var runtimeLabel = (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
+    var solverLabel = [solver.engine, solver.backend].filter(Boolean).join(" / ");
+    var reason = optimizer.fallback_reason || solver.fallback_reason || optimizer.health_error || optimizer.error || "";
+    var warning = "";
+    if (solver.fallback || solver.engine === "go-dp") {
+      warning = "Planner fallback active" + (solverLabel ? " — " + solverLabel : "") + (reason ? ". " + reason : "");
+    } else if (degraded) {
+      warning = "Optimizer unavailable" + (reason ? " — " + reason : "");
+    }
+    return {
+      label: runtimeLabel + (degraded ? " · degraded" : ""),
+      degraded: degraded,
+      warning: warning,
+      lastPlanAtMs: Number(optimizer.last_plan_at_ms) || 0,
+    };
+  }
+
   function bar(percent) {
     var p = Math.max(0, Math.min(100, Number(percent) || 0));
     return '<div class="sys-bar"><div class="sys-bar-fill" style="width:' + p.toFixed(1) + '%"></div></div>';
@@ -41,11 +66,14 @@
         '  .sys-row .sys-label { color: var(--text-dim); font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-row .sys-value { font-family: var(--mono, monospace); font-variant-numeric: tabular-nums; text-align: right; }' +
         '  .sys-bar { width: 100%; height: 10px; border-radius: 5px; background: var(--line, rgba(255,255,255,0.08)); overflow: hidden; }' +
-        '  .sys-bar-fill { height: 100%; background: var(--accent, #6cf); transition: width 250ms ease-out; }' +
+        '  .sys-bar-fill { height: 100%; background: var(--accent-e, #f5b942); transition: width 250ms ease-out; }' +
         '  .sys-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: -4px; }' +
+        '  .sys-alert { grid-column: 1 / -1; padding: 9px 11px; border: 1px solid #f59e0b; border-radius: 6px; background: rgba(245,158,11,0.12); color: var(--text, #e8e8e8); font-size: 0.82rem; line-height: 1.4; overflow-wrap: anywhere; }' +
         '  .sys-net { font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-net-iface { color: var(--text-dim); margin-right: 8px; }' +
 		'  .sys-fleet-preview { grid-column: 1 / -1; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.45 var(--mono, monospace); background: var(--line, rgba(255,255,255,0.06)); border-radius: 6px; padding: 10px; }' +
+		'  .sys-help-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }' +
+		'  .sys-help-secondary { margin:10px 0 0; color:var(--text-dim); font-size:0.8rem; }' +
         '</style>' +
         '<fieldset>' +
         '<legend>Host</legend>' +
@@ -100,6 +128,14 @@
         '<fieldset>' +
         '<legend>Components</legend>' +
         '<div class="sys-grid" id="sys-components">Loading component status…</div>' +
+        '</fieldset>' +
+        '<fieldset>' +
+        '<legend>Help</legend>' +
+        '<div class="sys-help-actions">' +
+        '  <a class="btn-add" href="https://github.com/srcfl/ftw/issues/new?template=bug_report.yml" target="_blank" rel="noopener">Report FTW bug</a>' +
+        '  <a class="btn-add" href="https://github.com/srcfl/ftw/issues/new?template=feature_request.yml" target="_blank" rel="noopener">Request FTW feature</a>' +
+        '</div>' +
+        '<p class="sys-help-secondary">GitHub tracks bugs and features. For setup help, <a href="https://discord.gg/25xcBzQaux" target="_blank" rel="noopener">ask on Discord</a>.</p>' +
         '</fieldset>';
     },
 
@@ -180,21 +216,22 @@
           if (!el) return;
           var core = d.core || {};
           var optimizer = d.optimizer || {};
-          var runtime = optimizer.runtime || {};
+          var optimizerState = optimizerStatus(optimizer);
           var drivers = d.drivers || {};
           var release = (d.updates || {}).release || {};
           var updateStatus = (d.updates || {}).status || {};
           var previousImages = updateStatus.previous_images || {};
           var active = Array.isArray(drivers.active) ? drivers.active.length : 0;
-          var optimizerLabel = optimizer.configured
-            ? ((runtime.version || "unknown") + " · " + (runtime.transport || "unknown") + (optimizer.healthy === false ? " · degraded" : ""))
-            : "Go DP only";
+          var planTime = optimizerState.lastPlanAtMs
+            ? " Last plan: " + new Date(optimizerState.lastPlanAtMs).toLocaleString() + "."
+            : "";
           el.innerHTML =
             '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
               ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
-            '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerLabel) +
+            '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
               '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
               ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
+            (optimizerState.warning ? '<div class="sys-alert" role="alert"><strong>' + escHtml(optimizerState.warning) + '</strong>' + escHtml(planTime) + '</div>' : '') +
             '<div class="sys-row"><span class="sys-label">Drivers</span><span>host API ' +
               escHtml(drivers.driver_host_api || drivers.host_api || 1) + ' · ' + active +
               ' managed</span><button class="btn-add" id="sys-refresh-drivers" type="button">Refresh</button></div>' +
@@ -238,4 +275,5 @@
       window._systemStatusTimer = setInterval(refresh, 5000);
     },
   };
+  S.tabs.system._pure = { optimizerStatus: optimizerStatus };
 })();

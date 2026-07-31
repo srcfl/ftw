@@ -1,5 +1,299 @@
 # Changelog
 
+## 1.14.0
+
+### Minor Changes
+
+- a342532: Lua host: `host.http_patch(url, body, headers)` — the verb REST device APIs
+  use for state-changing writes, added for the NIBE Solar PV surplus feed
+  (srcfl/ftw#537). It is gated by a new, explicit `capabilities.http.allow_write`
+  beyond the plain `capabilities.http` grant, so granting HTTP for telemetry
+  never implicitly grants the ability to mutate a device. Scope is exactly
+  PATCH: `http_get` stays a read and `http_post` stays under the plain grant
+  unchanged (existing drivers POST to query-style APIs), so no existing HTTP
+  driver changes behaviour. Without the grant a driver gets an error string and
+  the request never leaves the host.
+
+  The verb shares the allowlist, TLS-pinning, 1 MB response cap and managed-write
+  accounting of the other verbs, and — unlike `http_post` — refuses to follow
+  redirects: Go re-issues a redirected `PATCH` (301/302/303) as a body-less GET,
+  which would otherwise report success for a device write that never landed.
+
+### Patch Changes
+
+- 9d6c1b6: Give the header's status corner three distinct marks.
+
+  A waiting update and a degraded optimizer both rendered as the same pulsing
+  amber mark, so a field tester read the optimizer warning as an update icon.
+  An update now draws a blue download-to-drive icon and a degraded optimizer
+  an orange warning triangle, each fading gently; when neither is pending the
+  slot shows a steady green dot. Silhouette, colour and motion all differ, so
+  the marks stay apart without relying on colour alone.
+
+  An update and a degraded optimizer pending at once now show both marks —
+  previously the warning suppressed the update entirely. The separate
+  connection dot moves into the same slot, and a lost connection replaces the
+  other marks rather than sitting beside readings we may no longer be able to
+  refresh.
+
+- aeb61fd: Move the bundled-driver pin to device-drivers main. A gateway booting offline no longer runs Pixii, SolarEdge legacy or Sungrow with the poll-counter flap on an absent optional register.
+- 828eccb: Move the bundled-driver pin to device-drivers@76c968bd. A gateway booting
+  offline no longer retries the Sungrow EMS control block on an inverter that
+  has already refused it — an SG string inverter logged a failed
+  self-consumption reset once per watchdog tick for the life of the session.
+  Sungrow is the only bundled driver the move changes (1.5.6 → 1.5.7).
+- 4827627: Require a SemVer bump from any bundled driver whose bytes change between the old pin and the new one, asked of the pinned snapshots rather than of this repository's Git history.
+- 2ec7f2d: `make drivers` fetches the bundled snapshot from the pinned device-drivers commit, and CI proves a build works from the pin alone.
+- a1acf67: Driver source is no longer committed here. `drivers/*.lua` is gitignored and fetched from the pinned device-drivers commit with `make drivers`.
+- cbbabae: Clearer optimizer status when the `ftw-optimizer` sidecar is unavailable. The
+  containerized core ships no Python, so the `auto`/`process` transport can never
+  start the bundled `python3` worker there. Instead of surfacing a bare
+  `start optimizer "python3": exec: "python3": executable file not found in $PATH`
+  — which reads as a missing core dependency and hides the real remedy — core now
+  reports that the optimizer worker is unavailable and points operators at the
+  `ftw-optimizer` sidecar, while continuing to plan safely on the built-in Go
+  planner. Native/all-in-one builds that set `FTW_OPTIMIZER_PYTHON` are unchanged.
+- 28b1870: The Sungrow zero-power test confirms the battery before commanding, matching the driver's refusal to write EMS registers a string inverter does not implement.
+- 3fa16c4: Watch for a stale bundled-driver pin. A daily job compares `drivers/` against device-drivers `main` and opens one tracking issue when a bundled driver has changed upstream.
+
+## 1.13.5
+
+### Patch Changes
+
+- 1acface: Let Home Link unlock once per encrypted session and show the remote home in the same dashboard style as local FTW.
+
+## 1.13.4
+
+### Patch Changes
+
+- 4b4c8da: An update now survives the next `docker compose up -d`. Compose resolves `${FTW_IMAGE_TAG:-latest}` fresh every time, and nothing recorded the tag an update installed — so a reboot, adding a service, or any routine compose command on the host silently moved the site back to newest stable. A beta tester lost their beta without touching anything. The updater now records the installed Core and sidecar tags in the project's `.env`, rewriting those two keys in place and leaving every comment, blank line and unrelated setting exactly as it found them. An `.env` that cannot be read is left alone and the update still completes.
+
+## 1.13.3
+
+### Patch Changes
+
+- c7b7639: Fix the sidecar replacement introduced last release: it handed the detached helper a compose file the helper could not read. The updater builds its compose command from the merged config, which during a Core update includes a transient override in the updater's own `/tmp`. The helper is a separate container starting three seconds later, so that path is neither in its mount namespace nor still on disk. The helper now uses only the files that exist on the host, and so does the matching pull, so both resolve the same image. Caught on a Raspberry Pi running the real update path; the Core update itself completed and stayed healthy throughout, exactly as the best-effort design intended.
+
+## 1.13.2
+
+### Patch Changes
+
+- 809e5b6: The amber update badge no longer appears on a site already running the newest release. The badge counts Core, Optimizer and driver updates together, and the Optimizer was claiming one it could not know about: when its version was never learned — the handshake was rejected, or it had not finished starting when Core looked — Core recorded it as `dev`, which the release comparison read as older than every published version. An unknown version now means exactly that, and claims nothing until a handshake reports what is actually running. An unstamped local build still reports a real version, so testing the update flow on a dev machine is unaffected.
+
+## 1.13.1
+
+### Patch Changes
+
+- af438fa: When Core rejects the Optimizer's handshake it now says the Optimizer is too old and to update it in Update Center, instead of naming an internal feature flag. This failure is silent by construction: a Core update never moves Optimizer, and the Optimizer container validates its own handshake against its own constants — so an image older than the champion solver reports itself healthy to Docker and to the updater while Core quietly refuses it and plans on the Go fallback. The rejection string is the only thing an operator ever sees, so it has to name the fix.
+- 8495496: Core and the Optimizer now negotiate a protocol window instead of demanding an exact match. Each side declares the range of wire-protocol versions it speaks, and one shared version is enough — the same rule the driver host API already uses. Nothing changes today, because both sides speak exactly protocol 1; the point is that the next protocol change no longer has to land on both sides at the same moment. The contract is meant to move rarely: growing it means adding a feature to the handshake, which costs an older peer nothing, rather than bumping a version, which makes every peer outside the window incompatible at once.
+
+## 1.13.0
+
+### Minor Changes
+
+- 76a46a6: The driver editor is its own full-height view with syntax highlighting, line numbers, find and replace, and two linters. Ace is vendored under `/vendor/ace/` rather than pulled from a CDN, for the same reason three.js is — a gateway has to work without the internet, and a driver editor is most needed exactly when something is wrong. It loads on first open, not on page load. Ace's own Lua linter marks problems as you type; `POST /api/drivers/{id}/lint` then asks gopher-lua, the parser that actually decides whether the driver will start, and that verdict gates running a draft. Problems are listed under the editor and clicking one jumps to its line.
+- 76a46a6: Edit a driver's Lua and try it for a fixed window. The edit runs as a local override, the driver restarts against it, and it puts the previous file back on its own unless you keep it — so the failure mode of walking away is the driver you started with. A draft that does not compile, or that renames itself into another driver's slot, never reaches the overlay; one that will not start is undone before the error is reported. Keeping a draft turns it into an ordinary override, which already shadows the channel and already tells you when a newer version exists.
+- 76a46a6: Find a driver by the hardware you own. The catalog was a dropdown of 37 entries in alphabetical order, which asked you to translate: you know you have an SH10RT, not that you need "Sungrow SH Hybrid Inverter". There is a search field now that matches the manufacturer, the driver name and the models each driver has actually been run against — type SH10RT and one card comes back. Results are cards showing which DERs the driver covers and whether anyone has run it on hardware, with the four proven drivers first instead of scattered alphabetically among the 33 that are not. Nothing is selected until you select it; Add now says so rather than quietly adding whichever driver happened to be first.
+- 76a46a6: See the Lua a driver is actually running. Every driver is one file and the repository is the source of truth, but from the gateway there was no way to read the code — so a working fix for someone's inverter stayed on their machine. Each configured driver now has a Source view showing the file that is running, which of the three overlays it came from, its size and hash, and a link to the same driver in device-drivers.
+- 76a46a6: Suggest a driver change back to device-drivers from the gateway. One click opens a pre-filled issue carrying the driver, its version, where the running copy came from, the hash it was based on, and the edit as a diff. The gateway holds no GitHub token and needs none — GitHub accepts a pre-filled issue over a URL and the operator is already signed in to their own browser. The change travels as a diff rather than the whole file: drivers run to tens of kilobytes and a URL is limited to about eight, so sending the file meant the code never travelled at all.
+
+### Patch Changes
+
+- 62fe8e8: The app header is no longer dark in light theme. Eleven base tokens — `--bg`, `--surface`, `--surface2`, `--border`, `--text`, `--text-dim` and the five named colours — predate the oklch palette and were declared only for dark mode, so they kept their dark values when the theme switched. `--surface` is `#1a1a2e`, which is what painted the header and the History disclosures a dark blue-violet on a light page. Each token now maps to its equivalent in the current palette, so they follow the theme and cannot drift from it. Dark mode is untouched.
+- 6f9c1af: The dashboard now shows one price. The Electricity prices card applied VAT to bare spot and labelled the result "incl. VAT", leaving the grid tariff out — on a 70 öre/kWh tariff it read 21 öre for a slot the Plan chart correctly priced at 109. Its toggle is now Total / Spot, where Total is (spot + grid tariff) × (1 + VAT), the same arithmetic as the tariff engine and the Plan tooltip, and hovering a slot breaks the total into its three parts. The stored preference carries over, and the header names the tariff when there is one.
+
+  The Plan chart's price band no longer overflows. It drew its bars from the plan's actions — the full horizon, ML-forecast slots included — but scaled them off published prices only, so before the day-ahead release every forecast slot sat above the known maximum: bars were drawn past the top of the band and over the mode strip, and all of them landed above the p75 threshold, painting tomorrow as one solid expensive wall. The scale and the cheap/expensive thresholds now come from the same rows that get drawn, and the band is clipped as a backstop. Predicted slots are marked with a cap on top of the bar instead of a dashed frame around it, which at 15-minute resolution had merged into a hatch that hid the prices behind it.
+
+  Overview gains a price outlook: what a kWh costs now, the cheapest and priciest two-hour window ahead, and a strip of each slot's distance from the 24-hour average. Plotting distance rather than the total keeps the fixed tariff — often four fifths of the bill — from flattening every bar to the same height. Direction against the average carries cheap-versus-dear, so the strip still reads in greyscale and for colour-blind readers, who cannot separate this theme's green and red.
+
+- 173a135: Overview's price card now shows the shape of the day, not just a number. It keeps the current price large and states which two hours ahead are cheapest — a window you can actually run a dishwasher or a charge in, rather than an isolated 15-minute trough. Underneath, each slot is drawn as its distance from the average ahead: the grid tariff is identical every slot and swamps the part that varies, so absolute bars sat in a narrow band near the top and said nothing. Above the line is dearer, below is cheaper, which means the strip still reads in greyscale and for colour-blind readers, who cannot separate this theme's green from its red.
+
+  The card also charges the grid tariff now. It applied VAT to bare spot, reporting 21 öre for a slot that costs 109 on a 70 öre/kWh tariff — the same fault the full price chart had. Both go through one shared calculation, and switching between total and spot on either view now updates the other.
+
+- b183134: A Core update now brings the updater sidecar with it. Core and the updater are built from the same release, but only Core was ever recreated, so the updater kept running whatever image it was installed with — and a fix inside the updater could not reach the sites that needed it, because the broken updater was the thing that had to run the fix. Getting out meant typing a compose command on each machine. The updater cannot recreate its own container without killing the command mid-flight, so it hands that last step to a short-lived detached container started from the image it is already running. This happens after Core is updated and verified healthy, and every failure leaves new Core plus the old updater — exactly where installs sit today, never worse.
+- 173a135: Simplify the dashboard with a Values-or-Flow Power now view, a compact price outlook, and a shared plain-language plan summary.
+- 173a135: Unify dashboard, setup, history, settings, and component chrome around the neutral terminal-native theme, default Power now to Flow, and reset mobile destination scrolling.
+- 87d3cdc: Update Center history now shows the failure message, not only "failed". The updater also ignores non-ID noise when resolving the optimizer/core container, which blocked some stable→beta Core updates after a successful snapshot.
+
+## 1.12.0
+
+### Minor Changes
+
+- 86a6c83: Accept the canonical driver spellings alongside the current ones, so srcfl/device-drivers can convert its catalog one driver at a time without any site losing telemetry. `host.emit` reads `W` and `SoC_nom_fract` when `w` and `soc` are absent, and `write`, `write_registers` and `now_ms` are registered as aliases of `modbus_write`, `modbus_write_multi` and `millis`. Nothing is removed; the older names keep working until the catalog has moved.
+- 7673003: Add the four Blixt L1 host services FTW was still missing, so a driver converted in `srcfl/device-drivers` runs here unchanged. `host.set_model(name)` and `host.set_rated_w(watts)` record the rest of the nameplate beside make and serial, and the host repeats both on every emit so they reach Nova's `model` and `rated_power_w` without the driver restating them each poll. `host.set_warmup_s(seconds)` holds off the first poll for a device that answers Modbus before its registers are meaningful. `host.decode_string(registers, start, count)` reads ASCII from a register block — two characters per register, high byte first, trailing padding stripped — replacing the byte loop a dozen catalog drivers hand-roll. Nothing is removed and no existing driver behaves differently.
+- a5a797e: Add encrypted Home Link sessions for four bounded, read-only Core views with session-bound one-use grants.
+- e1d8055: Add the first Home Link remote transport: a strict versioned wire and a separate invite-only relay that forwards only encrypted session frames.
+- 8b16975: A driver downloaded from the signed channel can now control the hardware it was ported to control. FTW refused any device-drivers artifact that was not marked read-only, and the channel marked all of them read-only, so the same source file could drive a battery when it shipped with the build and could not when it was downloaded. A driver published with a control path now runs under the same terms as the bundled copy of that same source. A driver that declares itself read-only — a meter, a telemetry gateway — still gets a read-only policy, and a manifest whose read_only and control_enabled disagree is refused outright.
+- a9847e8: Switch driver versions, and switch back when the new one misbehaves. Nothing from the signed channel could be installed at all: the metadata parser only read a DRIVER table written inline, and signed artifacts assign it from a local, so every install failed validation with an empty id and version. The Versions list rendered no rows because it read the version off the wrong object, and its install call omitted the repository id the API requires. Going back to the bundled driver was impossible once a channel version was installed — the bundled copy is not an install, so nothing could activate it — which is the case that matters most, since installing over the bundled driver is the first thing anyone does. Each driver row now says which version runs, whether it came from the channel or your own file, and how well tested it is; the version list offers one click to switch, a standing way back to the copy that shipped with the build, and an undo after a switch.
+- 25c5604: Pick which driver version runs, and see when your own copy has fallen behind. The signed channel keeps every version it has ever published, but rollback only stepped back one, so a specific older version was out of reach from the UI. Each managed driver now has a Versions list showing what is downloaded, what the channel offers, and which one is live. A driver you supply yourself is now also told when the channel has something newer — your copy keeps running until you decide otherwise.
+- a5f9c23: Add opt-in Home Link remote access with local passkey setup, end-to-end encrypted relay sessions, and four bounded read-only views.
+- 1418c00: Add local, revocable Home Link passkey enrollment and verification.
+- f83c6df: Setup now says how well tested a driver is before you pick one. The signed channel carries drivers that have run on customer sites for months alongside ones nobody has put on hardware, and both used to be described identically. Each option now ends in plain words — verified on hardware, in testing, untested — and selecting one shows its version, whether it came from your own override, the signed channel or this build, and what the driver says about its own testing.
+
+### Patch Changes
+
+- c1c9fd6: The bundled `drivers/` tree is now a generated snapshot of srcfl/device-drivers, pinned by commit, with CI failing if the two drift. It had become a second source of truth and had already diverged: a Sungrow fix landed upstream while the bundled copy kept reading a battery block on inverters that have no battery, which is what took a customer's SG12RT offline. That copy is now correct, and cannot silently fall behind again.
+- f1bd56f: Accept the shipped Home Link route-handle format in remote browser invites.
+- 1efb08e: Fix Home Link sessions being rejected over a few milliseconds of clock difference between the gateway and the browser. A gateway now issues a session lifetime below the verifier ceiling, so remote passkey access works instead of failing with "Could not reach this home". Reads also reopen a bounded session instead of leaving the page dead until a reload, and a failed session or read now states its cause.
+- b641b2c: Map `rated_W`, `rated_power_W` and `rated_w` onto `rated_power_w`, the name `nova.DerTelemetry` reads. None of the three was mapped, so a device's rated AC power has never reached Nova — including from our own `zap.lua`, which emits `rated_power_W`.
+- d39ace3: Map driver emit keys onto the names the Nova payload reads. Catalog drivers emit `import_wh`, `export_wh`, `charge_wh`, `discharge_wh`, `lifetime_wh` and `hz`, while `DerTelemetry` reads `total_import_wh`, `total_export_wh`, `total_charge_wh`, `total_discharge_wh`, `total_generation_wh` and `freq_hz` — so those values never left the gateway. The canonical `@srcful/data-models` spellings map onto the same names, so the driver catalog can convert without a further host change.
+- 63b5f8b: The update dialog now leads with what the box is running. Every configured component keeps a row in one table — Core, the optimizer and each driver — whether or not it has an update waiting, so a driver only appeared when it was behind and could never be checked otherwise. The summary counts the whole inventory instead of Core alone, and says when the last check ran, which the dialog knew but never showed. Two fixes came out of the same pass: the optimizer row drew "v1.3.2 → v1.3.2" beside the words "up to date", and the notification dot lit for any listed driver rather than only the ones with work waiting. Both channel controls now sit together, so an optimizer tracking beta while Core tracks stable is visible rather than implied, and the dialog no longer implies that the channel governs drivers: only Core and the optimizer subscribe to one, while a driver is pinned to an exact version and takes its channel per install. Core's version is printed once instead of three times; the two backup lists collapse into one section carrying their counts; and Restart, which drops dispatch until Core is healthy again, asks first and no longer carries the same weight as the primary action.
+- bbc3f6e: Update Go network dependencies to include current DNS parser security fixes.
+- b2993b5: Show Home Link as a readable remote energy overview instead of raw JSON, and fix its light and dark theme colours.
+
+## 1.11.4
+
+### Patch Changes
+
+- 2b53817: Make History show clear daily home, solar, import and export totals, move technical data behind one section, and reject impossible energy-counter jumps.
+
+## 1.11.3
+
+### Patch Changes
+
+- b92a57d: Make History shorter by showing summaries first and folding raw energy rows and plan diagnostics into paged detail sections.
+
+## 1.11.2
+
+### Patch Changes
+
+- 8c66e46: Show the saved-versus-no-PV-or-battery result on Overview instead of moving it into History.
+
+## 1.11.1
+
+### Patch Changes
+
+- fb9c05a: Show Home Assistant as enabled but disconnected when its MQTT bridge cannot start, and mark unsaved enable changes in Settings.
+
+## 1.11.0
+
+### Minor Changes
+
+- 912c392: Add crash-safe local adoption and startup checks for the software Home Link identity.
+
+### Patch Changes
+
+- 6009831: Skip full history backups when the release uses the same database schema, reduce Core image downloads, and show live backup, download, restart, and health-check progress.
+- 2a036d7: Stop stale driver readings from adding to dashboard energy history, and let Modbus drivers reconnect when a device comes online after Core starts.
+- 2a036d7: Use the optimizer sidecar without a hidden Python process in Compose, keep its first failure visible when a development fallback also fails, and use the 30-second Core timeout throughout the backend.
+
+## 1.10.5
+
+### Patch Changes
+
+- c563cb5: Add a Settings control that disables duplicate battery readings from multi-resource gateways such as Sourceful Zap.
+
+## 1.10.4
+
+### Patch Changes
+
+- d518600: Show only installed drivers with a different signed stable or beta version in Update Center.
+
+## 1.10.3
+
+### Patch Changes
+
+- 8f26151: Add a GoodWe register-profile picker to the Devices UI so operators can install and configure the GW8KN-ET/HK3000 beta without editing YAML.
+
+## 1.10.2
+
+### Patch Changes
+
+- 94f8ac5: Show only configured drivers in Update Center, let operators try a signed beta for one driver without updating Core, offer stable updates only for newer versions, and move driver support status out of the Devices picker.
+
+## 1.10.1
+
+### Patch Changes
+
+- afd9a81: Add the internal read-only Home Link identity, grant, relay-auth, and energy-ledger contracts.
+- b4150d9: Reject unsafe Nova key files and persist first-boot identity atomically.
+  Key storage now fails closed without Unix owner and link metadata, hard links,
+  no-follow opens, file sync, and directory sync. It creates only the final key
+  directory and requires its trusted parent to exist.
+
+## 1.10.0
+
+### Minor Changes
+
+- 3985c82: Use `srcfl/device-drivers` as FTW's default signed driver source, bind its
+  read-only manifest policy at runtime, and add serial and AES-GCM host support
+  for public P1 drivers.
+- 29731f1: Add a read-only Core storage check for SQLite page use and data-volume headroom.
+
+### Patch Changes
+
+- 7e85444: Start the independent Optimizer release line at 1.3.2 so existing 1.3.1 installations see component releases as upgrades.
+- 9f98463: Sync the bundled ESPHome DSMR recovery driver with the signed 1.0.2 community asset so name-derived and delivered/returned object IDs keep per-phase meter data available offline.
+- 3985c82: Keep Modbus drivers offline when a poll has a failed register read instead of accepting zero-filled telemetry as fresh data, and recover mute TCP sessions with a non-blocking reconnect cooldown.
+
+## 1.9.1
+
+### Patch Changes
+
+- 3352ab0: Block in-app Core updates until the Compose optimizer sidecar is present and healthy. Legacy operator override files remain unchanged and the update error points to the migration guide.
+- 3352ab0: Report the mathematical optimizer as degraded when its worker cannot answer a compatible handshake or the active plan uses the Go fallback, and show the fallback reason in the dashboard and system status.
+- 3352ab0: Preserve planned PV export when live surplus replaces a later grid charge, honor the configured arbitrage spread, and limit early charging to the later grid-funded energy it can replace.
+
+## 1.9.0
+
+### Minor Changes
+
+- 5d3ec43: Enforce signed read-only driver permissions in the host and add a safe public driver feedback flow.
+
+  Local unsigned drivers remain offline-first and take priority over managed and bundled files. FTW now marks that source in inventory, keeps managed cache state unchanged, and documents the exact test, reload and rollback steps.
+
+## 1.8.1
+
+### Patch Changes
+
+- ce90d5d: Pixii: exclude batteries from dispatch and MPC while SunSpec ChaSt reports `testing` (calibration), using the same device-fault path as Ferroamp Fault Mode. Telemetry and site-meter data stay live.
+
+## 1.8.0
+
+### Minor Changes
+
+- cc7de6d: Add `observe_only` on battery drivers: keep structured telemetry and dashboard visibility while excluding the driver from dispatch, MPC, and watchdog commands. For sites where a retailer VPP owns battery actuation.
+
+### Patch Changes
+
+- bb2d644: Fix the battery self-tune "Run again" button so it reuses the batteries from the completed calibration when the results view no longer shows checkboxes.
+
+## 1.7.0
+
+### Minor Changes
+
+- a49f248: Add the signed Device Support control v2 host with exact site pins, short leases, default-mode recovery, a restricted Lua API, Modbus-only permissions, and local command-result records. Existing bundled, local, and read-only v1 drivers keep their current runtime.
+
+## 1.6.0
+
+### Minor Changes
+
+- eb92509: Report a bounded driver inventory to Nova when federation is enabled. Reports include loaded code hashes and package provenance, but no site config, device IDs, endpoints or credentials.
+
+## 1.5.0
+
+### Minor Changes
+
+- 36ac4f6: Add a per-loadpoint Battery boost lease with a four-hour maximum, explicit home-battery reserve, optional EV target and departure, restart-safe persistence, API controls, and visible stop reasons in the Loadpoints UI.
+
+  Battery boost automatically stops on expiry, reserve, unplug, operator holds, surplus-only policy, stale or unavailable meter/drivers, incompatible core modes, and fuse safety. The legacy site-wide `battery_covers_ev` control remains available for compatibility.
+
+- adb70f2: Consume signed canonical Device Support driver indexes and FTW target packages while preserving explicit Core activation, offline recovery and automatic rollback. The first package gate is read-only; control packages remain blocked pending safety-lifecycle HIL acceptance.
+- f7d2da9: Give the dashboard five focused Overview, Energy, Plan, History and More destinations, with a mobile bottom navigation and matching desktop tabs. Add a plain-language active-plan briefing for next actions, fallback or stale operation, forecast uncertainty, expected battery charge and active safety adjustments.
+- 22ab07c: Add a versioned energy history ledger keyed by stable asset identity, with separate grid and battery directions, hardware-counter preference, marked integration fallback, data-quality provenance, bounded system/asset APIs, CSV export, and a read-only History view.
+
+  Existing hot/warm/cold history and Parquet roll-off remain unchanged. XLSX export is deferred to a later phase to avoid adding a heavyweight runtime dependency.
+
+  Five-minute ledger detail is retained for 30 days, then atomically rolled into honest hourly buckets and bounded to the two-year API horizon.
+
+### Patch Changes
+
+- bdc47c8: Publish a gated NOW/NEXT/LATER roadmap for the current P0 work, the optional outbound-only FTW Home Link, and evidence required before later product directions can advance.
+- 630cc69: Consolidate the FTW logo into matching SVG, PNG, JPEG, and favicon assets, and use the scalable or square format appropriate for the dashboard, setup wizard, README, and Raspberry Pi Imager.
+- 5d902a3: Stop EV charging and storage dispatch when the site meter or required per-phase fuse telemetry is stale, while preserving schedules and persistent manual holds for automatic recovery.
+- 1d1e852: Harden the LAN/API trust boundary in setup and normal operation: remove wildcard CORS, block browser cross-site mutations and active reads, require JSON content types, and require an opt-in Bearer token for protected requests addressed through public or fully qualified hostnames. Existing loopback and private-LAN UI/API clients remain compatible, with documented remote-access onboarding and local recovery.
+- eb6979d: Remove the dormant settlement-aware self-consumption path that could offset earlier import by exporting battery energy later in the same 15-minute window. Quarter-hour import and export remain separate observational totals and no longer have a control path that can net one against the other.
+
 ## 1.4.0
 
 ### Minor Changes

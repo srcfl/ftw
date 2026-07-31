@@ -61,7 +61,7 @@ type Service struct {
 }
 
 // NewService constructs + restores from state if present.
-func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW float64) *Service {
+func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW, maxPlausibleW float64) *Service {
 	s := &Service{
 		Store:          st,
 		Tele:           tel,
@@ -75,6 +75,7 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 	}
 	for _, profile := range Profiles() {
 		s.models[profile] = newProfileModel(peakW, profile)
+		s.models[profile].MaxPlausibleW = maxPlausibleW
 	}
 	if st != nil {
 		loadedProfiles := make(map[Profile]bool)
@@ -85,7 +86,7 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 		}
 		for _, profile := range Profiles() {
 			if js, ok := st.LoadConfig(stateKey(profile)); ok && js != "" {
-				if m, ok := restoreModel(js, peakW, profile); ok {
+				if m, ok := restoreModel(js, peakW, maxPlausibleW, profile); ok {
 					s.models[profile] = m
 					loadedProfiles[profile] = true
 					slog.Info("loadmodel restored",
@@ -99,6 +100,7 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 			if err := json.Unmarshal([]byte(js), &m); err == nil && m.Alpha > 0 {
 				if !loadedProfiles[ProfileHome] {
 					m.PeakW = peakW // config may have changed
+					m.MaxPlausibleW = maxPlausibleW
 					if m.PriorScale <= 0 {
 						m.PriorScale = 1
 					}
@@ -125,12 +127,13 @@ func (s *Service) SetSiteMeter(name string) {
 	s.mu.Unlock()
 }
 
-func restoreModel(js string, peakW float64, profile Profile) (*Model, bool) {
+func restoreModel(js string, peakW, maxPlausibleW float64, profile Profile) (*Model, bool) {
 	var m Model
 	if err := json.Unmarshal([]byte(js), &m); err != nil || m.Alpha <= 0 {
 		return nil, false
 	}
-	m.PeakW = peakW // config may have changed
+	m.PeakW = peakW                 // config may have changed
+	m.MaxPlausibleW = maxPlausibleW // ditto — fuse size is editable
 	if m.PriorScale <= 0 {
 		m.PriorScale = newProfileModel(peakW, profile).PriorScale
 	}

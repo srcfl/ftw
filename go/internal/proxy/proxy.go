@@ -45,10 +45,14 @@ func Wrap(next http.Handler, cfg Config) http.Handler {
 		// talking to another FTW we want the upstream to own it.
 		r.Host = cfg.Upstream.Host
 	}
+	rp.ModifyResponse = func(resp *http.Response) error {
+		// Never re-export a legacy upstream's permissive CORS policy.
+		resp.Header.Del("Access-Control-Allow-Origin")
+		return nil
+	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		slog.Warn("proxy upstream error", "path", r.URL.Path, "err", err)
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = io.WriteString(w, fmt.Sprintf(`{"error":"proxy: upstream unreachable (%s)"}`, cfg.Upstream.Host))
 	}
@@ -60,7 +64,6 @@ func Wrap(next http.Handler, cfg Config) http.Handler {
 		}
 		if cfg.ReadOnly && !isReadMethod(r.Method) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = io.WriteString(w, fmt.Sprintf(
 				`{"error":"proxy read-only: %s %s blocked (set FTW_PROXY_READONLY=0 to allow)"}`,

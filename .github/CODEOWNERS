@@ -1,0 +1,18 @@
+# Ownership is here so overlap is caught by the tooling instead of by two
+# people discovering they built the same thing twice. An owner's review is
+# required before anything lands in their area — including work an agent
+# produced.
+#
+# This is about who gets asked, not who is allowed to contribute.
+
+# Dashboard, components and styling.
+/web/                       @erikarenhill
+
+# Drivers and the Lua host.
+/drivers/                   @frahlg
+/go/internal/drivers/       @frahlg
+
+# Release, CI and the rules agents work under.
+/.github/                   @frahlg
+/AGENTS.md                  @frahlg
+/CLAUDE.md                  @frahlg

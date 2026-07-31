@@ -13,13 +13,14 @@ migrated to `beta`; no edge releases are published or accepted.
 ## Release progression
 
 User-visible changes land with a Changeset. The Changesets workflow opens the
-Version Packages PR and updates `package.json` plus `CHANGELOG.md`.
+Version Packages PR and updates [`package.json`](../package.json) plus
+[`CHANGELOG.md`](../CHANGELOG.md).
 
 After that PR merges:
 
-1. run `beta.yml` with `vX.Y.Z-beta.N`;
+1. run [`beta.yml`](../.github/workflows/beta.yml) with `vX.Y.Z-beta.N`;
 2. validate that immutable build on real sites;
-3. manually dispatch `release.yml` from that same commit;
+3. manually dispatch [`release.yml`](../.github/workflows/release.yml) from that same commit;
 4. stable promotion verifies that a matching beta tag resolves to the exact
    stable candidate commit;
 5. release assets publish `vX.Y.Z` and move the stable aliases.
@@ -59,6 +60,12 @@ point for `state.db` and configuration. An older client request cannot skip it.
 These bounded points remain on the same disk and are deliberately labelled
 **Local rollback points**, not full backups. Older incomplete snapshots are
 visible but cannot be restored.
+
+The updater also requires a running, healthy `ftw-optimizer` service before it
+updates Core. If the merged Compose files lack that service, or its health
+check fails, the update stops before pulling or replacing Core. The updater
+does not edit operator override files; use the
+[legacy upgrade guide](upgrade-from-legacy.md) to add the sidecar safely.
 
 Portable `.ftwbak` archives include the complete persistent directory, cold
 history, custom/managed drivers and component inventory. They are independently
@@ -119,6 +126,7 @@ tested locally.
 - Optimizer uses its own `optimizer-vX.Y.Z[-beta.N]` GitHub tags and
   `ftw-optimizer:vX.Y.Z[-beta.N]` images. Stable promotion requires the exact
   beta commit.
-- Signed Lua drivers are versioned independently. Master publishes
-  `drivers-beta`; `drivers-stable` is an explicit promotion and retains signed
-  version history. See [device-repository.md](device-repository.md).
+- Signed Lua drivers are versioned independently in `srcfl/device-drivers`.
+  Main publishes `drivers-beta`; `drivers-stable` promotes the exact signed
+  beta commit and retains per-driver version history. See
+  [device-repository.md](device-repository.md).

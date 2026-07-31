@@ -125,6 +125,13 @@ describe("setup wizard — read-only battery gateways", () => {
     assert.match(DEVICES_JS, /telemetry only/,
       "operators should see why Zap has no battery-capacity control field");
   });
+
+  it("lets a gateway battery source be disabled when a native driver owns the same battery", () => {
+    assert.match(DEVICES_JS, /class="drv-disable-battery"/);
+    assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.disable_battery/);
+    assert.match(DEVICES_JS, /caps\.indexOf\("meter"\) >= 0 && caps\.indexOf\("battery"\) >= 0/);
+    assert.match(DEVICES_JS, /prevents Combined from counting its power twice/);
+  });
 });
 
 describe("price provider defaults", () => {

@@ -5,8 +5,29 @@ S320, …) directly over your LAN through the pump's **Local REST API**. It is
 the on-prem twin of the MyUplink cloud driver (`drivers/myuplink.lua`): same
 `hp_*` telemetry, no cloud account, no OAuth, no internet round-trip.
 
-It is **read-only**. The pump is left in `aidMode: off` and the driver issues
-no writes — it cannot actuate anything, so it cannot cause harm.
+The bundled driver is **read-only** — it issues no writes, so it cannot
+actuate anything. Note the write gate on the pump side is the installer's
+read-only / read-write choice for the Local REST API (installer menu 7.5.15),
+**not** "aid mode": aid mode is the pump's compressor-off fault-recovery
+state and has nothing to do with API permissions. (Earlier revisions of this
+document conflated the two.) A pump whose API is read-only silently refuses
+writes — HTTP 200 with a per-point `error: read only value` result.
+
+The driver's opt-in **write path** (feeding the pump's native Solar PV
+surplus input, registers 2107/2109) is developed in the driver catalog at
+[srcfl/device-drivers](https://github.com/srcfl/device-drivers) and tracked
+in [#537](https://github.com/srcfl/ftw/issues/537); it arrives here through
+the signed driver channel, stays off without `write.solar_pv: true` plus
+`capabilities.http.allow_write: true`, and needs a core with
+`host.http_patch`.
+
+**Decommissioning a write-enabled setup.** Every automatic safeguard around
+the feed (dead-man's switch, default-mode clear, startup orphan sweep) runs
+inside FTW — none of them can fire once FTW is gone, and the pump's own
+timeout for a silently stopped feed is undocumented. Before uninstalling FTW
+or permanently disabling the feed, turn the **Solar PV input (2107) off on
+the pump** — or set the Local REST API back to **read-only (menu 7.5.15)**
+— so no stale surplus value can stand with nobody left to clear it.
 
 ## Why the local API (vs. the cloud or raw Modbus)
 
@@ -36,7 +57,8 @@ flag. That means:
    ```
 
    Use the hex value (colons and case don't matter — they're normalised).
-3. Leave the pump in **read-only** mode for this driver.
+3. Leave the Local REST API in **read-only** mode (installer menu 7.5.15)
+   unless you are deliberately enabling the Solar PV write path.
 
 ## Configuration
 
@@ -130,7 +152,8 @@ thermal/load models consume `hp_power_w` etc. as twins.
 ## Testing
 
 A live integration test exercises the driver against a real pump
-(`go/internal/drivers/nibe_local_test.go`, `TestNibeLocalLive`), skipped unless
+([`go/internal/drivers/nibe_local_test.go`](../go/internal/drivers/nibe_local_test.go),
+`TestNibeLocalLive`), skipped unless
 `NIBE_LIVE=1`:
 
 ```bash

@@ -49,6 +49,7 @@ drivers:
   #   lua: drivers/pixii.lua
   #   is_site_meter: true
   #   battery_capacity_wh: 20000
+  #   observe_only: true   # retailer VPP controls actuation — FTW reads only
   #   capabilities:
   #     modbus:
   #       host: 192.168.1.50
@@ -104,7 +105,14 @@ drivers:
   # "fingeravtryck" shown in the myUplink app, or from `openssl s_client
   # -connect <ip>:8443 | openssl x509 -fingerprint -sha256`). The host then
   # trusts exactly that one cert — never a blanket insecure-skip-verify.
-  # Leave the pump in read-only mode (aidMode off); this driver never writes.
+  # Read-only by default: the driver issues no writes at all. (The pump-side
+  # write gate is the installer's read-only/read-write choice for the Local
+  # REST API, menu 7.5.15 — NOT "aid mode", which is a compressor-off fault
+  # state unrelated to API permissions.) One opt-in write path exists — the
+  # pump's native Solar PV surplus feed (srcfl/ftw#537, developed in
+  # srcfl/device-drivers). It needs BOTH the host capabilities.http.allow_write
+  # grant below AND write.solar_pv: true in the driver config; leave either off
+  # and the driver stays read-only.
   # - name: nibe
   #   lua: drivers/nibe_local.lua
   #   config:
@@ -112,10 +120,14 @@ drivers:
   #     port: 8443
   #     username: <local-api-username>
   #     password: <local-api-password>
+  #     # write:               # opt-in Solar PV feed (off unless present)
+  #     #   solar_pv: true
+  #     #   max_w: 9000         # REQUIRED clamp ceiling (site PV nameplate, W)
   #   capabilities:
   #     http:
   #       allowed_hosts: ["192.168.1.180:8443"]
   #       tls_pin_sha256: "<64-hex-char certificate fingerprint>"
+  #       # allow_write: true  # host gate for host.http_patch; default off
 
 api:
   port: 8080
@@ -165,13 +177,14 @@ caldav:
 # A charger appears as a device on its first BootNotification, keyed by the last
 # segment of the URL it dialled: ws://<ftw-host>:8887/garage-left
 #
+# Each version needs its own port: a charger picks its dialect in the WebSocket
+# handshake, so one listener cannot serve both. 2.1 is not supported — no
+# production-grade Go implementation of it exists yet.
+#
 # Credentials are required when enabled, and FTW refuses to start without them:
 # the OCPP library builds its listen address from the port alone, so the socket
 # is reachable on every interface and basic auth is the only gate. Keep the port
 # closed at your router. See docs/ocpp.md.
-# Each version needs its own port: a charger picks its dialect in the WebSocket
-# handshake, so one listener cannot serve both. 2.1 is not supported — no
-# production-grade Go implementation of it exists yet.
 ocpp:
   enabled: false
   port: 8887                       # OCPP 1.6J
@@ -186,6 +199,11 @@ state:
   path: state.db
   # backup_dir: backups            # use an absolute mounted path for off-device backups
 
+# Home Link is opt-in. It opens only an outbound TLS connection and exposes
+# four read-only views after a local passkey is enrolled.
+home_link:
+  enabled: false
+
 # Independently distributed Lua drivers. The signed stable catalog is refreshed
 # by default, but refresh never downloads, activates, or restarts a driver.
 # Add `device_repository: { enabled: false }` to opt out. The expanded form is:
@@ -194,11 +212,25 @@ state:
 #   refresh_interval_h: 24
 #   repositories:
 #     - id: ftw-official
-#       name: FTW official drivers
-#       manifest_url: https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json
+#       name: FTW device drivers
+#       format: ftw.manifest/v1
+#       manifest_url: https://github.com/srcfl/device-drivers/releases/download/drivers-stable/manifest.json
 #       enabled: true
 #       trusted_keys:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+# Test the public beta channel on one site before stable promotion:
+# device_repository:
+#   enabled: true
+#   refresh_interval_h: 24
+#   repositories:
+#     - id: ftw-device-drivers-beta
+#       name: FTW device drivers beta
+#       format: ftw.manifest/v1
+#       manifest_url: https://github.com/srcfl/device-drivers/releases/download/drivers-beta/manifest.json
+#       enabled: true
+#       trusted_keys:
+#         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+# Refresh only updates the signed catalog. Install and activation stay explicit.
 
 # Mathematical MPC optimizer. Official Compose runs it as the independently
 # updatable ftw-optimizer service; native installs can point optimizer_command
@@ -213,7 +245,7 @@ state:
 #   soc_max_pct: 95
 #   optimizer_solver: HIGHS
 #   optimizer_formulation: auto
-#   optimizer_transport: auto # auto | unix | process
+#   optimizer_transport: process # process | auto | unix; official Compose sets unix
 #   optimizer_socket: /run/ftw-optimizer/optimizer.sock
 #   optimizer_timeout_s: 30
 #   optimizer_idle_timeout_s: 120 # release Python/CVXPY memory between planning bursts

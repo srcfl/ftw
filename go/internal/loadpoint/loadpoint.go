@@ -160,6 +160,10 @@ type State struct {
 	ManualActive  bool    `json:"manual_active"`
 	ManualChargeW float64 `json:"manual_charge_w,omitempty"`
 
+	// BatteryBoost is the explicit, bounded home-battery-to-EV permission
+	// for this loadpoint. Populated by the API layer from Controller state.
+	BatteryBoost BatteryBoostStatus `json:"battery_boost"`
+
 	// SurplusOnly mirrors Config.SurplusOnly with any runtime override
 	// (set via POST /api/loadpoints/{id}/target). Always emitted (no
 	// omitempty) so a polling client can distinguish "explicitly off"

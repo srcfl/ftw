@@ -11,7 +11,7 @@ import (
 )
 
 func TestResetPreservesHeatingCoefficient(t *testing.T) {
-	s := NewService(nil, telemetry.NewStore(), "site", 4000)
+	s := NewService(nil, telemetry.NewStore(), "site", 4000, 17250)
 	s.SetHeatingCoef(275)
 
 	s.Reset()
@@ -28,7 +28,7 @@ func TestResetPreservesHeatingCoefficient(t *testing.T) {
 // startup wiring in cmd/ftw/main.go uses SeedHeatingCoef
 // precisely because operator config is a *prior*, not an override.
 func TestSeedHeatingCoefDoesNotOverwriteLearnedValue(t *testing.T) {
-	s := NewService(nil, telemetry.NewStore(), "site", 4000)
+	s := NewService(nil, telemetry.NewStore(), "site", 4000, 17250)
 	// Simulate a model that has been adapting in production.
 	s.mu.Lock()
 	m := s.activeModelLocked()
@@ -44,7 +44,7 @@ func TestSeedHeatingCoefDoesNotOverwriteLearnedValue(t *testing.T) {
 }
 
 func TestSeedHeatingCoefAppliesOnColdStart(t *testing.T) {
-	s := NewService(nil, telemetry.NewStore(), "site", 4000)
+	s := NewService(nil, telemetry.NewStore(), "site", 4000, 17250)
 	// Fresh model — no samples observed yet.
 
 	s.SeedHeatingCoef(300)
@@ -59,7 +59,7 @@ func TestProfileSwitchTrainsOnlyActiveProfile(t *testing.T) {
 	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
 	tel.RecordDriverSuccess("site")
 
-	s := NewService(nil, tel, "site", 4000)
+	s := NewService(nil, tel, "site", 4000, 17250)
 	now := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
 	s.sampleAt(now)
 
@@ -89,7 +89,7 @@ func TestProfileAndModelsPersist(t *testing.T) {
 	}
 	defer st.Close()
 
-	s := NewService(st, telemetry.NewStore(), "site", 4000)
+	s := NewService(st, telemetry.NewStore(), "site", 4000, 17250)
 	if err := s.SetProfile(ProfileAway); err != nil {
 		t.Fatalf("set profile: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestProfileAndModelsPersist(t *testing.T) {
 		t.Fatalf("persist: %v", err)
 	}
 
-	restored := NewService(st, telemetry.NewStore(), "site", 4000)
+	restored := NewService(st, telemetry.NewStore(), "site", 4000, 17250)
 	if got := restored.Profile(); got != ProfileAway {
 		t.Fatalf("restored profile = %q, want %q", got, ProfileAway)
 	}
@@ -116,7 +116,7 @@ func TestSampleRequiresOnlineSiteMeter(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
 
-	s := NewService(nil, tel, "site", 4000)
+	s := NewService(nil, tel, "site", 4000, 17250)
 	s.sampleAt(time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC))
 
 	if got := s.Model().Samples; got != 0 {
@@ -137,7 +137,7 @@ func TestSampleUsesOnlyOnlineDERsAndSubtractsEV(t *testing.T) {
 	tel.Update("charger", telemetry.DerEV, 300, nil, nil)
 	tel.RecordDriverSuccess("charger")
 
-	s := NewService(nil, tel, "site", 4000)
+	s := NewService(nil, tel, "site", 4000, 17250)
 	now := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
 	s.sampleAt(now)
 

@@ -24,6 +24,11 @@ type CatalogEntry struct {
 	HostAPIMax         int            `json:"host_api_max,omitempty"`
 	Source             string         `json:"source,omitempty"` // local | managed | bundled | upstream
 	RepositoryID       string         `json:"repository_id,omitempty"`
+	PackageID          string         `json:"package_id,omitempty"`
+	PackageChannel     string         `json:"package_channel,omitempty"`
+	ArtifactSHA256     string         `json:"artifact_sha256,omitempty"`
+	RuntimeABI         string         `json:"runtime_abi,omitempty"`
+	HostAPIProfile     string         `json:"host_api_profile,omitempty"`
 	InstalledVersion   string         `json:"installed_version,omitempty"`
 	UpstreamVersion    string         `json:"upstream_version,omitempty"`
 	UpdateAvailable    bool           `json:"update_available,omitempty"`
@@ -37,6 +42,9 @@ type CatalogEntry struct {
 	// UI uses it to avoid presenting battery capacity as a control opt-in and
 	// to enable battery_telemetry_only for gateway-style drivers.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// ReadOnlyDeclared distinguishes an explicit false value from old metadata
+	// that did not state whether the driver can control hardware.
+	ReadOnlyDeclared bool `json:"-"`
 
 	// Verification: who's actually run this driver against real
 	// hardware and how long. Populated from the DRIVER block's optional
@@ -179,7 +187,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Capabilities = pickList(block, "capabilities")
 	e.HTTPHosts = pickList(block, "http_hosts")
 	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
-	e.ReadOnly = pickBool(block, "read_only")
+	e.ReadOnly, e.ReadOnlyDeclared = pickOptionalBool(block, "read_only")
 	e.VerificationStatus = normalizeVerificationStatus(pickString(block, "verification_status"))
 	e.VerifiedBy = pickList(block, "verified_by")
 	e.VerifiedAt = pickString(block, "verified_at")
@@ -263,12 +271,32 @@ func normalizeVerificationStatus(s string) string {
 
 var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
 
+// Signed artifacts do not write the table inline. tools/ftw_repository.py
+// builds it as a local and assigns it twice -- once up front and once after
+// the source has loaded -- so that a driver cannot overwrite its own declared
+// identity. That leaves `DRIVER = __sourceful_ftw_metadata`, which the inline
+// pattern does not match.
+var driverAliasRe = regexp.MustCompile(`(?m)^\s*DRIVER\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+
 func extractDriverBlock(src string) string {
-	m := driverBlockRe.FindStringSubmatch(src)
-	if len(m) < 2 {
+	if m := driverBlockRe.FindStringSubmatch(src); len(m) >= 2 {
+		return m[1]
+	}
+	// Follow the alias to the table it names. Without this, every signed
+	// driver parses as empty metadata, and the installer rejects it for an
+	// id/version mismatch it can never satisfy.
+	alias := driverAliasRe.FindStringSubmatch(src)
+	if len(alias) < 2 {
 		return ""
 	}
-	return m[1]
+	aliasBlockRe, err := regexp.Compile(`(?s)local\s+` + regexp.QuoteMeta(alias[1]) + `\s*=\s*\{(.*?)\n\}`)
+	if err != nil {
+		return ""
+	}
+	if m := aliasBlockRe.FindStringSubmatch(src); len(m) >= 2 {
+		return m[1]
+	}
+	return ""
 }
 
 // pickString matches `name = "value"` inside the block.
@@ -292,9 +320,17 @@ func pickInt(block, name string) int {
 }
 
 func pickBool(block, name string) bool {
+	value, _ := pickOptionalBool(block, name)
+	return value
+}
+
+func pickOptionalBool(block, name string) (bool, bool) {
 	re := regexp.MustCompile(`(?mi)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*(true|false)`)
 	m := re.FindStringSubmatch(block)
-	return len(m) >= 2 && strings.EqualFold(m[1], "true")
+	if len(m) < 2 {
+		return false, false
+	}
+	return strings.EqualFold(m[1], "true"), true
 }
 
 // pickList matches `name = { "a", "b", "c" }` inside the block.

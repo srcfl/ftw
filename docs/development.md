@@ -43,7 +43,8 @@ Set `FTW_PROXY_READONLY=0` only for an intentional live write session.
 ## Containers
 
 `docker compose up -d` mirrors the Linux production topology: core, optimizer,
-updater and MQTT broker. Use `docker-compose.macos.yml` on macOS. Local Compose
+updater and MQTT broker. Use
+[`docker-compose.macos.yml`](../docker-compose.macos.yml) on macOS. Local Compose
 overrides are machine-specific and untracked.
 
 ## Generated files

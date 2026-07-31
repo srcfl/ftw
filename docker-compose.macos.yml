@@ -53,7 +53,12 @@ services:
       # In-app self-update feature (version banner + Update/Restart
       # buttons). Wired to the ftw-updater sidecar below.
       FTW_SELFUPDATE_ENABLED: "1"
-      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}
+      # Optional Bearer token for mutations through public/FQDN hostnames.
+      # Store it in .env so updater-driven recreates retain it.
+      FTW_API_TOKEN: ${FTW_API_TOKEN:-}
+      # The Core image has no local Python worker. A sidecar failure falls
+      # straight back to Core's safe Go DP planner.
+      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}
       FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
 
     # Bridge networking + a published port. The dashboard is reachable at

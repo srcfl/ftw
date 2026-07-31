@@ -62,6 +62,7 @@ override="$TMP/fresh/docker-compose.override.yml"
 test -f "$override"
 grep -q '^  ftw-optimizer:' "$override"
 grep -q 'optimizer-ipc:/run/ftw-optimizer' "$override"
+grep -q 'FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}' "$override"
 grep -q '^up -d ftw-optimizer ftw$' "$DOCKER_LOG"
 
 cp "$override" "$TMP/override.before"
@@ -317,6 +318,8 @@ FAKE_DATA_DIR="$TMP/migrate/data" \
 bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/migrate"
 
 grep -q '^  ftw-optimizer:' "$TMP/migrate/docker-compose.override.yml"
+grep -q 'FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}' \
+  "$TMP/migrate/docker-compose.override.yml"
 test -f "$TMP/migrate/state/ftw"
 test -f "$TMP/migrate/state/ftw-updater"
 test -f "$TMP/migrate/state/ftw-optimizer"

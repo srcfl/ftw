@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Setup — FTW</title>
-  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <!-- No external font CDN — the wizard has to boot on a fresh Pi
        that may not have internet yet. theme.css's --sans / --mono
        stacks fall back to the OS's system fonts. -->
@@ -53,13 +53,6 @@
       justify-content: center;
       gap: 12px;
       margin-bottom: 0.25rem;
-    }
-
-    .wizard-title h1 {
-      font-size: 1.15rem;
-      font-weight: 700;
-      letter-spacing: -0.01em;
-      color: var(--fg);
     }
 
     /* ---- Step indicator ---- */
@@ -207,7 +200,7 @@
       border: none;
       border-radius: 8px;
       background: var(--accent-e);
-      color: #0a0a0a;
+      color: var(--on-accent);
       font-family: var(--sans);
       font-size: 14px;
       font-weight: 500;
@@ -496,8 +489,7 @@
   <!-- Header -->
   <div class="wizard-header">
     <div class="wizard-title">
-      <img src="/logo.jpg" alt="FTW" class="wizard-logo">
-      <h1>FTW</h1>
+      <img src="/logo.svg" alt="FTW" class="wizard-logo">
     </div>
   </div>
 

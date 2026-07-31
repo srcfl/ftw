@@ -79,3 +79,7 @@ deploy/secrets/*
 # Goalbuddy renders local review boards; keep the markdown/state, not the
 # generated static board assets.
 docs/**/.goalbuddy-board/
+
+# Bundled drivers are fetched from srcfl/device-drivers at the commit pinned
+# in drivers/BUNDLED_SOURCE.json, never authored here. Run `make drivers`.
+drivers/*.lua

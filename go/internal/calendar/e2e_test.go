@@ -24,7 +24,7 @@ func TestEndToEndRealCollaborators(t *testing.T) {
 	}
 	defer st.Close()
 
-	loadSvc := loadmodel.NewService(st, nil, "", 5000)
+	loadSvc := loadmodel.NewService(st, nil, "", 5000, 17250)
 	lpMgr := loadpoint.NewManager()
 	lpMgr.Load([]loadpoint.Config{{ID: "garage", VehicleCapacityWh: 60000}})
 

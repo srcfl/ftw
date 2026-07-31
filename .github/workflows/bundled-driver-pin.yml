@@ -1,0 +1,96 @@
+name: bundled driver pin
+
+# drivers/ is a snapshot of srcfl/device-drivers, and two things can go wrong
+# with it. Someone edits a driver here, which the `drivers` job in test.yml
+# already catches on every pull request. Or the pin is left behind while a fix
+# lands upstream, which nothing caught -- a Pixii poll-counter flap reached
+# customer hardware a second time that way, fixed upstream and still bundled.
+#
+# This is the second one. It opens a single issue and keeps editing it, so a
+# pin left alone for a month costs one thread rather than thirty.
+
+on:
+  schedule:
+    # 06:00 UTC daily. The check is quiet unless a bundled driver actually
+    # changed upstream, so a daily run is not a daily notification.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: bundled-driver-pin
+  cancel-in-progress: false
+
+jobs:
+  behind:
+    name: pin follows device-drivers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Compare the bundled drivers against device-drivers main
+        id: compare
+        env:
+          # Lifts the unauthenticated GitHub API rate limit. Read-only, and the
+          # tarball it fetches is public either way.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          output="$(bash scripts/sync-bundled-drivers.sh --behind 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          {
+            echo "status=${status}"
+            echo "report<<REPORT_EOF"
+            echo "$output"
+            echo "REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+          # A network or API failure must not read as "the pin is fine", and
+          # must not open an issue saying drivers changed when we never found
+          # out. 1 means outdated, 0 means current, anything else is broken.
+          if [ "$status" != "0" ] && [ "$status" != "1" ]; then
+            echo "::error::the pin check could not run (exit ${status})"
+            exit "$status"
+          fi
+
+      - name: Open or update the tracking issue
+        if: steps.compare.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.compare.outputs.report }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Bundled driver pin is behind device-drivers"
+          body="$(printf '%s\n\n```\n%s\n```\n\nFrom %s\n\nThis issue is rewritten by each run of the `bundled driver pin` workflow. Closing it without moving the pin means it comes back tomorrow.\n' \
+            "A driver bundled in \`drivers/\` has changed in srcfl/device-drivers. A gateway that boots offline runs the bundled copy, so it keeps running the old driver until the pin moves." \
+            "${REPORT}" "${RUN_URL}")"
+
+          existing="$(gh issue list --state open --search "in:title \"${title}\"" \
+            --json number,title --jq "[.[] | select(.title == \"${title}\")][0].number")"
+
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            gh issue edit "$existing" --body "$body"
+            echo "updated issue #${existing}"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Close the tracking issue once the pin is current
+        if: steps.compare.outputs.status == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="Bundled driver pin is behind device-drivers"
+          existing="$(gh issue list --state open --search "in:title \"${title}\"" \
+            --json number,title --jq "[.[] | select(.title == \"${title}\")][0].number")"
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            gh issue close "$existing" --comment "The pin now matches every bundled driver in device-drivers. Closed by the \`bundled driver pin\` workflow."
+            echo "closed issue #${existing}"
+          else
+            echo "pin is current and no issue is open"
+          fi

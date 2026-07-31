@@ -63,6 +63,13 @@ const HeatingMinDeltaT = 3.0
 // home. Clamp prevents one anomalous sample from blowing up the fit.
 const HeatingCoefMaxW = 1500.0
 
+// PlausibleLoadHeadroom multiplies the main fuse capacity to get the
+// point past which a reading must be a fault. Above 1.0 because a fuse
+// tolerates brief overload and a meter can overshoot a step; well below
+// anything a real house sustains, so a genuine 11 kW hour on a 25 A
+// service is nowhere near it.
+const PlausibleLoadHeadroom = 1.25
+
 // Profile selects which learned occupancy profile is used for training
 // and prediction.
 type Profile string
@@ -104,6 +111,13 @@ type Model struct {
 	MAE               float64         `json:"mae"`
 	Alpha             float64         `json:"alpha"` // EMA coefficient for bucket updates
 	PriorScale        float64         `json:"prior_scale,omitempty"`
+
+	// MaxPlausibleW is the physical ceiling a sample must fall under to be
+	// trained on: main fuse capacity plus headroom. Derived from configured
+	// hardware and never from what the model has learned, so it cannot be
+	// talked down by a model that has mislearned. 0 disables the check —
+	// the state a site with no fuse configuration is in.
+	MaxPlausibleW float64 `json:"max_plausible_w,omitempty"`
 }
 
 // typicalPrior returns an approximate W load for a given hour-of-week
@@ -240,6 +254,28 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	if actualLoadW < 0 {
 		return false
 	}
+
+	// Physical bound — the only sample filter this model needs, and the
+	// first thing it does. A house cannot draw more than its main fuse
+	// passes, so a reading above it is a fault and must touch nothing:
+	// not the buckets, not MAE, and not the heating coefficient. Running
+	// it after the heating fit let one cold-weather meter fault move
+	// HeatingW_per_degC while Update still reported no update applied,
+	// and repeated faults could walk the coefficient to its ceiling.
+	//
+	// A household's real load is strongly multimodal: a few hundred watts
+	// of baseline for most of the day, then 11 kW when the sauna, oven and
+	// car overlap. Both are true readings. Nothing about a residual's size
+	// distinguishes "unusual but real" from "wrong", which is why this is
+	// the only rejection left — see the git history for the MAE band that
+	// used to sit below, and what it cost.
+	//
+	// Short-term noise is handled a layer down: telemetry runs a Kalman
+	// filter per signal and this model reads the smoothed values.
+	if m.MaxPlausibleW > 0 && actualLoadW > m.MaxPlausibleW {
+		return false
+	}
+
 	idx := HourOfWeek(t)
 	b := &m.Bucket[idx]
 	predicted := m.Predict(t, tempC)
@@ -270,14 +306,6 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		}
 		if m.HeatingW_per_degC > HeatingCoefMaxW {
 			m.HeatingW_per_degC = HeatingCoefMaxW
-		}
-	}
-
-	// Outlier filter: once we have some history, reject 10× MAE residuals.
-	if m.Samples > 50 {
-		band := math.Max(m.MAE*10, 200)
-		if math.Abs(err) > band {
-			return false
 		}
 	}
 

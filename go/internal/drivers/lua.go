@@ -18,16 +18,23 @@
 //	host.set_poll_interval(ms)
 //	host.set_sn(s)                  -- device serial (metadata)
 //	host.set_make(s)                -- manufacturer name
+//	host.set_model(s)               -- device model name (metadata)
+//	host.set_rated_w(w)             -- rated AC power, watts (nameplate)
+//	host.set_warmup_s(s)            -- hold off the first poll for s seconds
+//	host.decode_string(regs, start, count) -- ASCII, 2 chars/register, hi byte first
 //	host.mqtt_sub(topic)            -- subscribe
 //	host.mqtt_pub(topic, payload)   -- publish
 //	host.mqtt_messages()            -- array of {topic, payload} since last call
 //	host.modbus_read(addr, count, kind)  -- kind: "coil"|"discrete"|"holding"|"input"
 //	host.modbus_write(addr, value)
 //	host.modbus_write_multi(addr, values)
+//	host.serial_read(max_bytes, timeout_ms) -- raw read-only serial bytes
+//	host.aes_gcm_decrypt(key, iv, ciphertext, aad, tag)
 //	host.json_decode(s)             -- convenience JSON → Lua table
 //	host.json_encode(t)             -- Lua table → JSON string
 //	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
 //	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.http_patch(url, body, headers) -- HTTP PATCH (write); needs capabilities.http.allow_write
 //	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
 //	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
 //	host.ws_messages()              -- drain inbound frames; "" entry = EOF
@@ -44,11 +51,14 @@ package drivers
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	net_http "net/http"
@@ -74,17 +84,46 @@ type LuaDriver struct {
 // The driver's top-level is executed once so `driver_init` etc. become
 // callable globals. Returns an error if the file fails to load/execute.
 func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
+	return NewLuaDriverWithPolicy(path, env, nil)
+}
+
+// NewLuaDriverWithPolicy binds verified managed package permissions to the
+// host. Only control v2 also gets the restricted Lua library surface. Local,
+// bundled and legacy repository drivers keep the existing Lua 5.1 environment.
+func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*LuaDriver, error) {
+	if policy != nil {
+		if err := policy.validate(); err != nil {
+			return nil, fmt.Errorf("driver runtime policy: %w", err)
+		}
+		env.WithRuntimePolicy(policy)
+	}
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	L := lua.NewState(lua.Options{SkipOpenLibs: false})
+	restricted := policy != nil && policy.IsControlV2()
+	L := lua.NewState(lua.Options{SkipOpenLibs: restricted})
+	if restricted {
+		openRestrictedLibraries(L)
+	}
 	d := &LuaDriver{Env: env, Path: path, L: L}
 	registerHost(L, env)
-	if err := L.DoString(string(src)); err != nil {
+	var loadCancel context.CancelFunc
+	if restricted {
+		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		loadCancel = cancel
+		L.SetContext(loadCtx)
+	}
+	err = L.DoString(string(src))
+	if restricted {
+		L.RemoveContext()
+		loadCancel()
+	}
+	if err != nil {
 		L.Close()
 		return nil, fmt.Errorf("execute %s: %w", path, err)
 	}
+	env.requiresFreshModbusRead = driverRequiresFreshModbusRead(L, env.Modbus != nil)
 	// A read-only gateway can expose a real battery without being a battery
 	// controller. Honour the driver's own catalog declaration at runtime so
 	// existing configs gain telemetry after a driver upgrade even before the
@@ -94,6 +133,34 @@ func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
 		env.BatteryTelemetryOnly = true
 	}
 	return d, nil
+}
+
+func openRestrictedLibraries(L *lua.LState) {
+	for _, lib := range []struct {
+		name string
+		open lua.LGFunction
+	}{
+		{lua.BaseLibName, lua.OpenBase},
+		{lua.TabLibName, lua.OpenTable},
+		{lua.StringLibName, lua.OpenString},
+		{lua.MathLibName, lua.OpenMath},
+	} {
+		L.Push(L.NewFunction(lib.open))
+		L.Push(lua.LString(lib.name))
+		L.Call(1, 0)
+	}
+	for _, name := range []string{
+		"collectgarbage", "dofile", "load", "loadfile", "loadstring", "module",
+		"newproxy", "require", "getfenv", "setfenv",
+	} {
+		L.SetGlobal(name, lua.LNil)
+	}
+	L.SetGlobal("package", lua.LNil)
+	L.SetGlobal("os", lua.LNil)
+	L.SetGlobal("io", lua.LNil)
+	L.SetGlobal("debug", lua.LNil)
+	L.SetGlobal("channel", lua.LNil)
+	L.SetGlobal("coroutine", lua.LNil)
 }
 
 func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
@@ -128,6 +195,8 @@ func (d *LuaDriver) Init(ctx context.Context, config map[string]any) error {
 	if config != nil {
 		arg = goToLua(d.L, config)
 	}
+	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
+	defer cleanup()
 	return d.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}, arg)
 }
 
@@ -140,11 +209,22 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	if fn == lua.LNil {
 		return 0, nil
 	}
+	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
+	defer cleanup()
+	d.Env.beginPollEvidence()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
+		_, _, _ = d.Env.endPollEvidence(false)
 		return 0, err
 	}
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
+	attempts, successes, emitErr := d.Env.endPollEvidence(true)
+	if emitErr != nil {
+		return 0, emitErr
+	}
+	if d.Env.requiresFreshModbusRead && attempts > successes {
+		return 0, fmt.Errorf("driver_poll: %d of %d modbus reads failed", attempts-successes, attempts)
+	}
 	// Driver may return an int number of milliseconds.
 	if n, ok := ret.(lua.LNumber); ok && n > 0 {
 		return time.Duration(n) * time.Millisecond, nil
@@ -152,11 +232,35 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	return 0, nil
 }
 
+func driverRequiresFreshModbusRead(L *lua.LState, hasModbusCapability bool) bool {
+	if protocol, ok := L.GetGlobal("PROTOCOL").(lua.LString); ok && strings.TrimSpace(string(protocol)) != "" {
+		return strings.EqualFold(string(protocol), "modbus")
+	}
+	meta, ok := L.GetGlobal("DRIVER").(*lua.LTable)
+	if !ok {
+		return hasModbusCapability
+	}
+	protocols, ok := meta.RawGetString("protocols").(*lua.LTable)
+	if !ok || protocols.Len() == 0 {
+		return hasModbusCapability
+	}
+	usesModbus := false
+	protocols.ForEach(func(_, value lua.LValue) {
+		if strings.EqualFold(value.String(), "modbus") {
+			usesModbus = true
+		}
+	})
+	return usesModbus
+}
+
 // Command sends a command to the driver. Matches the existing Lua
 // driver signature:  driver_command(action_string, power_w, full_cmd)
 // where full_cmd is the original decoded table (for drivers that want
 // extra fields).
 func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
+	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
+		return errors.New("managed control v2 driver requires a sourceful.driver-command/v1 call")
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	fn := d.L.GetGlobal("driver_command")
@@ -182,6 +286,230 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	return luaReturnError("driver_command", ret)
 }
 
+// CommandV2 validates a host-owned command, grants a short write scope, calls
+// the v2 entrypoint and completes the signed-package-bound result. Validation
+// happens before Lua runs.
+func (d *LuaDriver) CommandV2(ctx context.Context, cmd DriverCommandV1, now time.Time) (DriverCommandResultV1, error) {
+	policy := d.Env.RuntimePolicy
+	result := d.commandResult(cmd, now)
+	decl, err := policy.validateCommand(cmd, now)
+	if err != nil {
+		result.Status = "rejected"
+		result.Code = "host_validation_failed"
+		if strings.Contains(err.Error(), "expired") {
+			result.Status = "expired"
+			result.Code = "command_expired"
+		}
+		result.Message = err.Error()
+		return result, err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fn := d.L.GetGlobal("driver_command_v2")
+	if fn == lua.LNil {
+		err = errors.New("driver_command_v2 is required by the control v2 ABI")
+		result.Status, result.Code, result.Message = "failed", "entrypoint_missing", err.Error()
+		return result, err
+	}
+
+	deadline := cmd.ExpiresAt
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := d.Env.beginWriteScope("command", deadline); err != nil {
+		result.Status, result.Code, result.Message = "failed", "write_scope_denied", err.Error()
+		return result, err
+	}
+	writes := 0
+	var hostEvidence []string
+	ended := false
+	endScope := func() {
+		if !ended {
+			writes, hostEvidence = d.Env.endWriteScope()
+			ended = true
+		}
+	}
+	defer endScope()
+
+	callCtx, cancel := boundedLuaContext(ctx, deadline)
+	defer cancel()
+	d.L.SetContext(callCtx)
+	defer d.L.RemoveContext()
+	payload := map[string]interface{}{}
+	raw, _ := json.Marshal(cmd)
+	_ = json.Unmarshal(raw, &payload)
+	// runtime_action is signed package adapter data. The canonical command ID
+	// stays unchanged; the adapter may use this field while old action names are
+	// phased out.
+	payload["runtime_action"] = decl.RuntimeAction
+	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, goToLua(d.L, payload)); err != nil {
+		endScope()
+		result.Status, result.Code, result.Message, result.Writes = "failed", "lua_call_failed", err.Error(), writes
+		return result, err
+	}
+	ret := d.L.Get(-1)
+	d.L.Pop(1)
+	endScope()
+	parsed, err := parseLuaCommandResult(luaToGo(ret))
+	if err != nil {
+		result.Status, result.Code, result.Message, result.Writes = "failed", "invalid_driver_result", err.Error(), writes
+		return result, err
+	}
+	result.Status, result.Code, result.Message = parsed.Status, parsed.Code, parsed.Message
+	result.DeviceState, result.Writes = parsed.DeviceState, writes
+	result.Evidence, result.Applied = parsed.Evidence, parsed.Applied
+	if !evidenceContained(parsed.Evidence, hostEvidence) {
+		err = errors.New("driver result claims evidence not observed by the host")
+		result.Status, result.Code, result.Message = "failed", "evidence_unproven", err.Error()
+		return result, err
+	}
+	if result.Status == "applied" &&
+		((result.DeviceState != "controlled" && result.DeviceState != "default") || result.Writes == 0 ||
+			!containsEvidence(result.Evidence, policy.requiredEvidence())) {
+		err = errors.New("applied result requires a known state, at least one write, and evidence")
+		result.Status, result.Code, result.Message = "failed", "application_unproven", err.Error()
+		return result, err
+	}
+	return result, nil
+}
+
+// DefaultModeV2 runs only the signed default-mode entrypoint with its own
+// bounded write scope. It never calls the legacy default function.
+func (d *LuaDriver) DefaultModeV2(ctx context.Context, id, reason string, now time.Time) (DriverCommandResultV1, error) {
+	policy := d.Env.RuntimePolicy
+	cmd := DriverCommandV1{ID: id, Command: "driver.default_mode", Lease: DriverCommandLeaseV1{ID: id}}
+	result := d.commandResult(cmd, now)
+	result.LeaseID = ""
+	if policy == nil || !policy.IsControlV2() || policy.DefaultMode != "driver_default_mode_v2" {
+		err := errors.New("driver_default_mode_v2 is not declared by the signed package")
+		result.Status, result.Code, result.Message = "failed", "default_mode_not_declared", err.Error()
+		return result, err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fn := d.L.GetGlobal("driver_default_mode_v2")
+	if fn == lua.LNil {
+		err := errors.New("driver_default_mode_v2 is required by the control v2 ABI")
+		result.Status, result.Code, result.Message = "failed", "entrypoint_missing", err.Error()
+		return result, err
+	}
+	deadline := now.Add(5 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := d.Env.beginWriteScope("default", deadline); err != nil {
+		result.Status, result.Code, result.Message = "failed", "write_scope_denied", err.Error()
+		return result, err
+	}
+	writes := 0
+	var hostEvidence []string
+	ended := false
+	endScope := func() {
+		if !ended {
+			writes, hostEvidence = d.Env.endWriteScope()
+			ended = true
+		}
+	}
+	defer endScope()
+	callCtx, cancel := boundedLuaContext(ctx, deadline)
+	defer cancel()
+	d.L.SetContext(callCtx)
+	defer d.L.RemoveContext()
+	callArg := goToLua(d.L, map[string]interface{}{
+		"reason": reason,
+		"at":     now.UTC().Format(time.RFC3339Nano),
+	})
+	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, callArg); err != nil {
+		endScope()
+		result.Status, result.Code, result.Message, result.Writes = "failed", "lua_call_failed", err.Error(), writes
+		return result, err
+	}
+	ret := d.L.Get(-1)
+	d.L.Pop(1)
+	endScope()
+	parsed, err := parseLuaCommandResult(luaToGo(ret))
+	if err != nil {
+		result.Status, result.Code, result.Message, result.Writes = "failed", "invalid_driver_result", err.Error(), writes
+		return result, err
+	}
+	result.Status, result.Code, result.Message = parsed.Status, parsed.Code, parsed.Message
+	result.DeviceState, result.Writes = parsed.DeviceState, writes
+	result.Evidence, result.Applied = parsed.Evidence, parsed.Applied
+	if !evidenceContained(parsed.Evidence, hostEvidence) {
+		err = errors.New("driver default result claims evidence not observed by the host")
+		result.Status, result.Code, result.Message = "failed", "evidence_unproven", err.Error()
+		return result, err
+	}
+	if result.Status != "defaulted" || result.DeviceState != "default" || result.Writes == 0 ||
+		!containsEvidence(result.Evidence, policy.requiredEvidence()) {
+		err = errors.New("default result requires defaulted status, default state, a write, and host-observed evidence")
+		result.Status, result.Code, result.Message = "failed", "default_unproven", err.Error()
+		return result, err
+	}
+	return result, nil
+}
+
+func boundedLuaContext(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithDeadline(parent, deadline)
+}
+
+func evidenceContained(claimed, observed []string) bool {
+	seen := make(map[string]bool, len(observed))
+	for _, item := range observed {
+		seen[item] = true
+	}
+	for _, item := range claimed {
+		if !seen[item] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsEvidence(evidence []string, want string) bool {
+	for _, item := range evidence {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Duration) func() {
+	if d.Env.RuntimePolicy == nil || !d.Env.RuntimePolicy.IsControlV2() {
+		return func() {}
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	d.L.SetContext(ctx)
+	return func() {
+		d.L.RemoveContext()
+		cancel()
+	}
+}
+
+func (d *LuaDriver) commandResult(cmd DriverCommandV1, now time.Time) DriverCommandResultV1 {
+	policy := d.Env.RuntimePolicy
+	result := DriverCommandResultV1{
+		SchemaVersion: DriverCommandResultSchema,
+		ID:            cmd.ID, Command: cmd.Command, LeaseID: cmd.Lease.ID,
+		Status: "failed", Code: "host_error", CompletedAt: now.UTC(), DeviceState: "unknown",
+	}
+	if policy != nil {
+		result.Driver = DriverResultIdentityV1{
+			PackageID: policy.PackageID, Version: policy.Version, ArtifactSHA256: policy.ArtifactSHA256,
+		}
+	}
+	return result
+}
+
 // Cleanup calls driver_cleanup() and closes the VM.
 func (d *LuaDriver) Cleanup() {
 	_ = d.call("driver_cleanup")
@@ -204,6 +532,8 @@ func (d *LuaDriver) call(name string) error {
 	if fn == lua.LNil {
 		return nil
 	}
+	cleanup := d.setLifecycleContext(context.Background(), 5*time.Second)
+	defer cleanup()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		return err
 	}
@@ -334,6 +664,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// safe because each driver has its own goroutine and VM lock.
 	host.RawSetString("sleep", L.NewFunction(func(L *lua.LState) int {
 		ms := L.CheckInt(1)
+		if env.RuntimePolicy != nil && ms > 100 {
+			L.Push(lua.LString("sleep exceeds control v2 limit of 100 ms"))
+			return 1
+		}
 		if ms > 0 {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
@@ -386,6 +720,36 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	// host.set_model(name) — the device model, e.g. "SUN2000-10KTL".
+	// Nameplate, like make and serial: report it from driver_init as
+	// soon as the register read that carries it succeeds. It reaches
+	// Nova's `model` field on every emit; it is not part of device_id.
+	host.RawSetString("set_model", L.NewFunction(func(L *lua.LState) int {
+		env.setModel(L.CheckString(1))
+		return 0
+	}))
+
+	// host.set_rated_w(watts) — the device's rated AC power, read off
+	// the bus. Stored with the other nameplate values, not as telemetry:
+	// it is a property of the hardware, constant between polls, and the
+	// host repeats it on each emit so consumers see `rated_power_w`
+	// without the driver re-reading the register every tick.
+	host.RawSetString("set_rated_w", L.NewFunction(func(L *lua.LState) int {
+		env.setRatedW(float64(L.CheckNumber(1)))
+		return 0
+	}))
+
+	// host.set_warmup_s(seconds) — hold off the first poll for this
+	// many seconds after the driver starts. For devices that answer
+	// Modbus before their registers carry meaningful values, so the
+	// first reading is not a plausible-looking zero. Call it from
+	// driver_init; the run loop reads it once when arming its timer.
+	// Time already spent in driver_init counts towards the window.
+	host.RawSetString("set_warmup_s", L.NewFunction(func(L *lua.LState) int {
+		env.setWarmupS(float64(L.CheckNumber(1)))
+		return 0
+	}))
+
 	// host.persist_secret(key, value) -> ok, err
 	// Durably writes a config secret back into the driver's own config
 	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
@@ -393,7 +757,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("persist_secret", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckString(1)
 		val := L.CheckString(2)
-		if env.PersistSecret == nil {
+		if env.RuntimePolicy != nil || env.PersistSecret == nil {
 			L.Push(lua.LBool(false))
 			L.Push(lua.LString("persist_secret: capability not granted"))
 			return 2
@@ -410,6 +774,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 
 	mqttSubscribe := L.NewFunction(func(L *lua.LState) int {
 		topic := L.CheckString(1)
+		if !env.permissionAllowed("mqtt.subscribe") {
+			L.Push(lua.LString("mqtt.subscribe: permission not granted by signed package"))
+			return 1
+		}
 		if env.MQTT == nil {
 			L.Push(lua.LString("no mqtt capability"))
 			return 1
@@ -430,16 +798,25 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("no mqtt capability"))
 			return 1
 		}
+		if err := env.allowWrite("mqtt.publish"); err != nil {
+			L.Push(lua.LString(err.Error()))
+			return 1
+		}
 		if err := env.MQTT.Publish(topic, []byte(payload)); err != nil {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
+		env.recordWriteEvidence("write_ack")
 		return 0
 	})
 	host.RawSetString("mqtt_publish", mqttPublish)
 	host.RawSetString("mqtt_pub", mqttPublish) // alias
 
 	host.RawSetString("mqtt_messages", L.NewFunction(func(L *lua.LState) int {
+		if !env.permissionAllowed("mqtt.subscribe") {
+			L.Push(L.NewTable())
+			return 1
+		}
 		if env.MQTT == nil {
 			L.Push(L.NewTable())
 			return 1
@@ -456,27 +833,98 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 1
 	}))
 
+	host.RawSetString("serial_read", L.NewFunction(func(L *lua.LState) int {
+		maxBytes := L.CheckInt(1)
+		timeoutMS := L.CheckInt(2)
+		if !env.permissionAllowed("serial.read") {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("serial.read: permission not granted by signed package"))
+			return 2
+		}
+		if env.Serial == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("no serial capability"))
+			return 2
+		}
+		data, err := env.Serial.Read(maxBytes, time.Duration(timeoutMS)*time.Millisecond)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LString(string(data)))
+		return 1
+	}))
+
+	host.RawSetString("aes_gcm_decrypt", L.NewFunction(func(L *lua.LState) int {
+		key, err := aesKeyBytes(L.CheckString(1))
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: %v", err)
+			return 0
+		}
+		iv := []byte(L.CheckString(2))
+		ciphertext := []byte(L.CheckString(3))
+		aad := aesAADBytes(L.CheckString(4))
+		tag := []byte(L.CheckString(5))
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: %v", err)
+			return 0
+		}
+		var gcm cipher.AEAD
+		if len(tag) == 16 {
+			gcm, err = cipher.NewGCM(block)
+		} else {
+			gcm, err = cipher.NewGCMWithTagSize(block, len(tag))
+		}
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: %v", err)
+			return 0
+		}
+		if len(iv) != gcm.NonceSize() {
+			L.RaiseError("aes_gcm_decrypt: nonce is %d bytes, want %d", len(iv), gcm.NonceSize())
+			return 0
+		}
+		sealed := append(append([]byte(nil), ciphertext...), tag...)
+		plaintext, err := gcm.Open(nil, iv, sealed, aad)
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: authentication failed")
+			return 0
+		}
+		L.Push(lua.LString(string(plaintext)))
+		return 1
+	}))
+
 	host.RawSetString("modbus_read", L.NewFunction(func(L *lua.LState) int {
 		addr := L.CheckInt(1)
 		count := L.CheckInt(2)
 		kindS := L.CheckString(3)
+		if !env.permissionAllowed("modbus.read") {
+			env.recordPollModbusRead(false)
+			L.Push(lua.LNil)
+			L.Push(lua.LString("modbus.read: permission not granted by signed package"))
+			return 2
+		}
 		if env.Modbus == nil {
+			env.recordPollModbusRead(false)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("no modbus capability"))
 			return 2
 		}
 		kind, ok := modbusKindFromString(kindS)
 		if !ok {
+			env.recordPollModbusRead(false)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("unknown modbus kind: " + kindS))
 			return 2
 		}
-		regs, err := env.Modbus.Read(uint16(addr), uint16(count), kind)
+		regs, err := env.modbusRead(uint16(addr), uint16(count), kind)
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
 			return 2
 		}
+		env.recordWriteEvidence("readback")
 		t := L.NewTable()
 		for i, r := range regs {
 			t.RawSetInt(i+1, lua.LNumber(r))
@@ -492,10 +940,15 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("no modbus capability"))
 			return 1
 		}
+		if err := env.allowWrite("modbus.write"); err != nil {
+			L.Push(lua.LString(err.Error()))
+			return 1
+		}
 		if err := env.Modbus.WriteSingle(uint16(addr), uint16(val)); err != nil {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
+		env.recordWriteEvidence("write_ack")
 		return 0
 	}))
 
@@ -504,6 +957,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		t := L.CheckTable(2)
 		if env.Modbus == nil {
 			L.Push(lua.LString("no modbus capability"))
+			return 1
+		}
+		if err := env.allowWrite("modbus.write"); err != nil {
+			L.Push(lua.LString(err.Error()))
 			return 1
 		}
 		vals := make([]uint16, 0, t.Len())
@@ -516,8 +973,17 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
+		env.recordWriteEvidence("write_ack")
 		return 0
 	}))
+
+	// Canonical names from the Blixt L1 host API, which srcfl/device-drivers
+	// uses as its naming reference. Registered as aliases so a converted
+	// driver runs here unchanged; the older spellings above stay until the
+	// catalog has moved and can then be retired together.
+	host.RawSetString("write", host.RawGetString("modbus_write"))
+	host.RawSetString("write_registers", host.RawGetString("modbus_write_multi"))
+	host.RawSetString("now_ms", host.RawGetString("millis"))
 
 	// Decode helpers for Modbus registers. Drivers read raw u16[] and
 	// need to combine pairs back into u32/i32. LE = little-endian
@@ -552,6 +1018,34 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 1
 	}))
 
+	// host.decode_string(registers, start, count) — ASCII out of `count`
+	// registers beginning at 1-based index `start`, two characters per
+	// register, high byte first. Trailing NULs and whitespace (the two
+	// ways vendors pad a fixed-width serial field) are stripped.
+	//
+	// start and count are optional: they default to the whole table.
+	// A dozen drivers hand-roll this same byte loop to read a serial
+	// number; this is that loop, written once.
+	host.RawSetString("decode_string", L.NewFunction(func(L *lua.LState) int {
+		regs := L.CheckTable(1)
+		start := L.OptInt(2, 1)
+		if start < 1 {
+			start = 1
+		}
+		count := L.OptInt(3, regs.Len()-start+1)
+		var b []byte
+		for i := 0; i < count; i++ {
+			n, ok := regs.RawGetInt(start + i).(lua.LNumber)
+			if !ok {
+				break // short table: decode what is there
+			}
+			reg := uint16(int64(n))
+			b = append(b, byte(reg>>8), byte(reg))
+		}
+		L.Push(lua.LString(strings.TrimRight(string(b), "\x00\t\n\v\f\r ")))
+		return 1
+	}))
+
 	host.RawSetString("json_decode", L.NewFunction(func(L *lua.LState) int {
 		s := L.CheckString(1)
 		var v any
@@ -579,6 +1073,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// ---- HTTP capability ----
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string);
+	//   the mutating verb, gated by capabilities.http.allow_write (default off)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	rawTLSPin := strings.TrimSpace(env.HTTPTLSPinSHA256)
 	tlsPin := normalizeHexFingerprint(rawTLSPin)
@@ -660,6 +1156,13 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
 			}
+			// A redirected PATCH is unsafe: Go re-issues 301/302/303 as a
+			// body-less GET, so the device write silently never lands while the
+			// call still reports success. Refuse it — a write must reach the
+			// host it was checked against, or fail loudly.
+			if len(via) > 0 && via[0].Method == "PATCH" {
+				return fmt.Errorf("redirect not followed for PATCH (a redirected write cannot be verified)")
+			}
 			if ok, reason := hostAllowed(req.URL.String()); !ok {
 				return fmt.Errorf("redirect blocked: %s", reason)
 			}
@@ -710,6 +1213,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}
 
 	host.RawSetString("http_get", L.NewFunction(func(L *lua.LState) int {
+		if !env.permissionAllowed("http.get") {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http.get: permission not granted by signed package"))
+			return 2
+		}
 		if !env.HTTP {
 			L.Push(lua.LNil)
 			L.Push(lua.LString("http: capability not granted"))
@@ -756,6 +1264,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("http: capability not granted"))
 			return 2
 		}
+		if err := env.allowWrite("http.post"); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
 		url := L.CheckString(1)
 		if ok, reason := hostAllowed(url); !ok {
 			L.Push(lua.LNil)
@@ -789,6 +1302,68 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
 			return 2
 		}
+		env.recordWriteEvidence("write_ack")
+		L.Push(lua.LString(string(body)))
+		return 1
+	}))
+
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string).
+	// The mutating verb REST device APIs use for state-changing writes (a NIBE
+	// heat pump's Solar PV surplus feed, srcfl/ftw#537). Unlike http_post it is
+	// gated by an explicit capabilities.http.allow_write beyond the plain HTTP
+	// grant, so granting HTTP for telemetry never implicitly grants the ability
+	// to mutate a device. Same allowlist, TLS pinning and 1MB response cap as
+	// the other verbs.
+	host.RawSetString("http_patch", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
+		if !env.HTTPAllowWrite {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: write not granted (set capabilities.http.allow_write)"))
+			return 2
+		}
+		if err := env.allowWrite("http.patch"); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
+		payload := L.CheckString(2)
+		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		req.Header.Set("Content-Type", "application/json")
+		applyHeaders(req, L, 3)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		if resp.StatusCode >= 400 {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
+			return 2
+		}
+		env.recordWriteEvidence("write_ack")
 		L.Push(lua.LString(string(body)))
 		return 1
 	}))
@@ -938,7 +1513,40 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	if env.RuntimePolicy != nil {
+		// The canonical package contract has no WebSocket or raw TCP grant.
+		// Do not leave these functions reachable in a v2 VM even when local
+		// YAML happens to configure those legacy capabilities.
+		for _, name := range []string{
+			"persist_secret", "ws_open", "ws_send", "ws_messages", "ws_is_open", "ws_close",
+			"tcp_open", "tcp_recv", "tcp_is_open", "tcp_close",
+		} {
+			host.RawSetString(name, lua.LNil)
+		}
+	}
 	L.SetGlobal("host", host)
+}
+
+func aesKeyBytes(value string) ([]byte, error) {
+	if len(value) == 32 || len(value) == 48 || len(value) == 64 {
+		if decoded, err := hex.DecodeString(value); err == nil {
+			return decoded, nil
+		}
+	}
+	key := []byte(value)
+	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+		return nil, errors.New("key must be 16, 24, or 32 raw bytes or their hex form")
+	}
+	return key, nil
+}
+
+func aesAADBytes(value string) []byte {
+	if len(value) == 33 {
+		if authKey, err := hex.DecodeString(value[1:]); err == nil {
+			return append([]byte{value[0]}, authKey...)
+		}
+	}
+	return []byte(value)
 }
 
 // splitHostPortLower parses an allowlist entry as "host" or "host:port".

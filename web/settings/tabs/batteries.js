@@ -9,7 +9,7 @@
       if (!config.batteries) config.batteries = {};
       var html = '<p style="color:var(--text-dim);font-size:0.8rem">Per-battery limits override the defaults. Leave blank to use BMS defaults.</p>';
       (config.drivers || []).forEach(function (d) {
-        if (d.battery_capacity_wh > 0) {
+        if (d.battery_capacity_wh > 0 && !d.observe_only) {
           if (!config.batteries[d.name]) config.batteries[d.name] = {};
           html += '<fieldset><legend>' + escHtml(d.name) + ' &mdash; ' + (d.battery_capacity_wh / 1000).toFixed(1) + ' kWh</legend>' +
             '<div class="field-row"><div>' +

@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/nova"
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+var loadNovaClaimIdentity = gatewayidentity.LoadOrCreateUnboundNovaIdentity
 
 // runNovaClaim is the entry point for `ftw nova-claim`.
 //
@@ -117,7 +120,7 @@ func claimAndProvision(
 		keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
 	}
 
-	id, err := nova.LoadOrCreateIdentity(keyPath)
+	id, err := loadNovaClaimIdentity(keyPath)
 	if err != nil {
 		return fmt.Errorf("key material: %w", err)
 	}

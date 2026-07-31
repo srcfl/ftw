@@ -121,6 +121,57 @@ type luaKindTestModbus struct {
 	called bool
 }
 
+type luaTestSerial struct {
+	maxBytes int
+	timeout  time.Duration
+	closed   bool
+}
+
+func (s *luaTestSerial) Read(maxBytes int, timeout time.Duration) ([]byte, error) {
+	s.maxBytes, s.timeout = maxBytes, timeout
+	return []byte{0, 1, 2, 255}, nil
+}
+
+func (s *luaTestSerial) Close() error { s.closed = true; return nil }
+
+func TestLuaSerialReadAndAESGCMDecrypt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "serial.lua")
+	src := `
+function driver_init(config) end
+function driver_poll()
+    local data, err = host.serial_read(4, 250)
+    assert(err == nil and #data == 4 and string.byte(data, 4) == 255)
+    local iv = string.rep(string.char(0), 12)
+    local tag = string.char(88, 226, 252, 206, 250, 126, 48, 97, 54, 127, 29, 87, 164, 231, 69, 90)
+    local plaintext = host.aes_gcm_decrypt("00000000000000000000000000000000", iv, "", "", tag)
+    assert(plaintext == "")
+    return 1000
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	serial := &luaTestSerial{}
+	driver, err := NewLuaDriver(path, NewHostEnv("serial", telemetry.NewStore()).WithSerial(serial))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer driver.Cleanup()
+	if err := driver.Init(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if serial.maxBytes != 4 || serial.timeout != 250*time.Millisecond {
+		t.Fatalf("serial read = %d bytes, %v", serial.maxBytes, serial.timeout)
+	}
+	aad := aesAADBytes(string([]byte{0x30}) + "000102030405060708090a0b0c0d0e0f")
+	if len(aad) != 17 || aad[0] != 0x30 || aad[16] != 0x0f {
+		t.Fatalf("hex authentication key was not decoded: %x", aad)
+	}
+}
+
 func (m *luaKindTestModbus) Read(uint16, uint16, int32) ([]uint16, error) {
 	m.called = true
 	return []uint16{1}, nil

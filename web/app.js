@@ -197,19 +197,13 @@
   // Minimal CSS.escape polyfill (legend keys contain ':').
   function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) { return "\\" + c; }); }
 
-  // Latest MPC plan — refreshed every 30s. Drives the forward-looking
-  // dashed PV + Load forecast on the live chart (right-hand segment
-  // extending past "now").
+  // Latest MPC plan for the live chart's forward-looking dashed PV +
+  // Load forecast. plan.js owns the sole plan poll and publishes each
+  // result in-page so the chart and both briefing surfaces stay aligned.
   var chartPlan = null;
-  function refreshChartPlan() {
-    // Local API read.
-    apiFetch("/api/mpc/plan")
-      .then(function (r) { return r.json(); })
-      .then(function (j) { if (j && j.plan) chartPlan = j.plan; })
-      .catch(function () {});
-  }
-  refreshChartPlan();
-  setInterval(refreshChartPlan, 30000);
+  window.addEventListener("ftw-plan-data", function (event) {
+    chartPlan = event && event.detail ? event.detail.plan : null;
+  });
   var chartLayout = null;
   var hoverIndex = -1;
   var hoverForecast = null; // { ts, action } when hovering in future region
@@ -228,7 +222,13 @@
   const pvW = $("pv-w");
   const batW = $("bat-w");
   const batDir = $("bat-dir");
-  const connStatus = $("conn-status");
+  const batSoc = $("bat-soc");
+  // The header's status light lives inside <ftw-update-badge> so one slot
+  // decides what the corner says — connection, updates and optimizer
+  // health used to be separate elements hiding each other with CSS.
+  const updateBadge = document.querySelector("ftw-update-badge");
+  const overviewHealth = $("overview-health");
+  const overviewHealthLabel = $("overview-health-label");
   const driversGrid = $("drivers-grid");
   const dispatchList = $("dispatch-list");
   const modeButtons = $("mode-buttons");
@@ -274,10 +274,14 @@
   const eCharged = $("e-charged");
   const eDischarged = $("e-discharged");
   const eLoad = $("e-load");
+  const overviewEImport = $("overview-e-import");
+  const overviewEExport = $("overview-e-export");
+  const overviewEPv = $("overview-e-pv");
   const lastUpdate = $("last-update");
   const versionEl = $("version");
   // ---- Formatting ----
   function formatW(w) {
+    if (w == null || !isFinite(w)) return "—";
     const abs = Math.abs(w);
     if (abs >= 1000) {
       return (w / 1000).toFixed(1) + " kW";
@@ -384,6 +388,14 @@
     return "target " + formatW(targetW);
   }
 
+  function hasControllableBatteryDrivers(data) {
+    var drvs = (data && data.drivers) || {};
+    return Object.keys(drvs).some(function (name) {
+      var d = drvs[name] || {};
+      return d.bat_w != null && !d.observe_only;
+    });
+  }
+
   function smoothDisplayNumber(key, value, now) {
     if (value == null || !isFinite(value)) return value;
     var prev = statusDisplayState[key];
@@ -476,6 +488,14 @@
     return "status-offline";
   }
 
+  // The component registry loads as a deferred module while this classic
+  // dashboard script starts immediately at the end of the document. A fast
+  // first /api/status response can therefore arrive before <ftw-energy-flow>
+  // has upgraded. Cache the derived payload and replay it when the element is
+  // ready so switching to Flow never reveals placeholders for one poll cycle.
+  var lastFlowReadings = null;
+  var flowUpgradeReplayQueued = false;
+
   // ---- Render ----
   function render(data) {
     var batteryTargetsByDriver = {};
@@ -498,13 +518,26 @@
     // poll so plugging in a battery lights everything back up
     // without a reload.
     var hasBattery = false;
+    var hasControllableBattery = false;
     var drvMap = data.drivers || {};
     for (var drvName in drvMap) {
       if (drvMap[drvName] && drvMap[drvName].bat_w != null) {
-        hasBattery = true; break;
+        hasBattery = true;
+        if (!drvMap[drvName].observe_only) hasControllableBattery = true;
       }
     }
     document.body.classList.toggle("no-battery", !hasBattery);
+    var cardBatEl = document.getElementById("card-bat");
+    if (cardBatEl) {
+      cardBatEl.classList.toggle("clickable", hasControllableBattery);
+      if (hasControllableBattery) {
+        cardBatEl.setAttribute("role", "button");
+        cardBatEl.setAttribute("tabindex", "0");
+      } else {
+        cardBatEl.removeAttribute("role");
+        cardBatEl.removeAttribute("tabindex");
+      }
+    }
 
     // PUSH CHART DATA FIRST — never let a DOM render error somewhere below
     // silently kill the chart-update path. (Prior bug: missing #dispatch-list
@@ -593,6 +626,11 @@
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
     }
+    if (batSoc) {
+      batSoc.textContent = Number.isFinite(data.bat_soc)
+        ? Math.round(data.bat_soc * 100) + "% SoC"
+        : "—";
+    }
     var batTargetDisp = document.getElementById("bat-target-display");
     if (batTargetDisp) {
       batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
@@ -617,7 +655,7 @@
     // setReadings() replaces `planets` atomically, so a transient
     // /api/status error preserves the last good layout if we skip it.
     var flowEl = document.getElementById("energy-flow");
-    if (flowEl && typeof flowEl.setReadings === "function") {
+    if (flowEl) {
       var planets = [];
 
       // Today's totals are aggregate across all drivers; per-driver kWh split
@@ -706,7 +744,9 @@
           // wordy charging/discharging sub-label.
           var bColor = bIdle ? "var(--cyan)" :
                        (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
-          var bTargetLine = batteryTargetLine(batteryTargetsByDriver[name]);
+          var bTargetLine = d.observe_only
+            ? "observe only"
+            : batteryTargetLine(batteryTargetsByDriver[name]);
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
@@ -716,6 +756,7 @@
             dailyKwhParts: batDailyParts,
             dailyScope: "aggregate",
             dailyAggregateMembers: batDailyMembers,
+            clickable: !d.observe_only,
           });
         }
         // EV — always consumes from the house side. When a loadpoint
@@ -770,11 +811,26 @@
         selfPoweredPctToday = Math.max(0, Math.min(100,
           (1 - importKwh / loadKwhTotal) * 100));
       }
-      flowEl.setReadings({
+      lastFlowReadings = {
         load:    (data.load_w || 0) / 1000,
         planets: planets,
         selfPoweredPctToday: selfPoweredPctToday,
-      });
+      };
+      if (typeof flowEl.setReadings === "function") {
+        flowEl.setReadings(lastFlowReadings);
+      } else if (!flowUpgradeReplayQueued &&
+                 window.customElements &&
+                 typeof window.customElements.whenDefined === "function") {
+        flowUpgradeReplayQueued = true;
+        window.customElements.whenDefined("ftw-energy-flow").then(function () {
+          var readyFlow = document.getElementById("energy-flow");
+          if (readyFlow &&
+              typeof readyFlow.setReadings === "function" &&
+              lastFlowReadings) {
+            readyFlow.setReadings(lastFlowReadings);
+          }
+        });
+      }
     }
 
     // Mode buttons — primary (strategy) + advanced (manual)
@@ -866,6 +922,9 @@
       if (eCharged) eCharged.textContent = formatKwh(t.bat_charged_wh);
       if (eDischarged) eDischarged.textContent = formatKwh(t.bat_discharged_wh);
       if (eLoad) eLoad.textContent = formatKwh(t.load_wh);
+      if (overviewEImport) overviewEImport.textContent = formatKwh(t.import_wh);
+      if (overviewEExport) overviewEExport.textContent = formatKwh(t.export_wh);
+      if (overviewEPv) overviewEPv.textContent = formatKwh(t.pv_wh);
     }
 
     // Fuse gauge — per-phase bars if the server reports phase amperage,
@@ -1518,9 +1577,9 @@
       dim:     cssColor("--fg-dim", "#aaaaaa"),
       muted:   cssColor("--fg-muted", "#888888"),
       grid:    cssColor("--line", "#2a2a2a"),
-      surface: cssColor("--ink-raised", "#14141f"),
+      surface: cssColor("--ink-raised", "#161616"),
       accent:  cssColor("--accent-e", "#fbbf24"),
-      load:    cssColor("--fg", "#e2e8f0"),
+      load:    cssColor("--white-s", "#e8e8e8"),
     };
     return _chartColors;
   }
@@ -2012,7 +2071,7 @@
         var batteryRow =
           '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>";
         var disp = (dispatchByDriver || {})[name];
-        if (disp && d.bat_w != null) {
+        if (disp && d.bat_w != null && !d.observe_only) {
           var dev = batWVal - disp.target_w;
           var devClass = Math.abs(dev) > 200 ? "stat-warn" : "stat-dim";
           batteryRow =
@@ -2027,6 +2086,9 @@
           '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
           '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(-pvWVal) + "</span>" +
           batteryRow +
+          (d.observe_only
+            ? '  <span class="stat-label">Control</span><span class="stat-value stat-dim">observe only</span>'
+            : "") +
           '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
@@ -2368,13 +2430,20 @@
   }
 
   function setConnected(ok) {
+    // update-badge.js is deferred, so on the first tick or two the element
+    // may not have upgraded yet and the method is absent. Polling re-asserts
+    // this every cycle and the component defaults to connected, which is
+    // what the old #conn-status markup shipped as.
+    if (updateBadge && typeof updateBadge.setConnected === "function") {
+      updateBadge.setConnected(ok);
+    }
     if (ok) {
-      connStatus.className = "conn-status connected";
-      connStatus.title = "Connected";
+      if (overviewHealth) overviewHealth.classList.add("is-connected");
+      if (overviewHealthLabel) overviewHealthLabel.textContent = "Live";
       // render() will update lastUpdate with timestamp
     } else {
-      connStatus.className = "conn-status disconnected";
-      connStatus.title = "Disconnected";
+      if (overviewHealth) overviewHealth.classList.remove("is-connected");
+      if (overviewHealthLabel) overviewHealthLabel.textContent = "Connection lost";
       lastUpdate.textContent = "Connection lost";
     }
   }
@@ -3457,6 +3526,9 @@
         var d = (e && e.detail) || {};
         if (d.role === "ev") openEvModal(d.name || null);
         if (d.role === "battery") {
+          var drv = (lastStatusPayload && lastStatusPayload.drivers) || {};
+          var clicked = drv[d.name || ""] || {};
+          if (clicked.observe_only) return;
           var bc = document.getElementById("battery-control");
           if (bc && typeof bc.open === "function") bc.open();
         }
@@ -3492,11 +3564,14 @@
       });
     }
     if (cardBat) {
-      cardBat.classList.add("clickable");
-      cardBat.setAttribute("role", "button");
-      cardBat.setAttribute("tabindex", "0");
-      cardBat.setAttribute("aria-label", "Open battery controls");
+      if (hasControllableBatteryDrivers(lastStatusPayload)) {
+        cardBat.classList.add("clickable");
+        cardBat.setAttribute("role", "button");
+        cardBat.setAttribute("tabindex", "0");
+        cardBat.setAttribute("aria-label", "Open battery controls");
+      }
       var openBat = function () {
+        if (!hasControllableBatteryDrivers(lastStatusPayload)) return;
         var bc = document.getElementById("battery-control");
         if (bc && typeof bc.open === "function") bc.open();
       };
@@ -3588,9 +3663,9 @@
     if (!legend) return;
     var items = chartView === "energy" ? [
       ["#ef4444", "Import"], ["#22c55e", "Export"], ["#10b981", "PV"],
-      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["#e2e8f0", "Load"],
+      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["var(--white-s)", "Load"],
     ] : [
-      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["#e2e8f0", "Load"],
+      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["var(--white-s)", "Load"],
       ["#f59e0b", "Ferroamp"], ["#8b5cf6", "Sungrow"],
     ];
     legend.innerHTML = items.map(function(it) {

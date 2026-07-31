@@ -1,0 +1,23 @@
+name: repo hygiene
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  planning-docs:
+    name: no agent planning documents
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check for planning artefacts
+        env:
+          PLANNING_DOCS_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: .github/check-no-planning-docs.sh

@@ -54,19 +54,40 @@ type Manifest struct {
 }
 
 type ManifestDriver struct {
-	ID       string                     `json:"id"`
-	Path     string                     `json:"path"`
-	Filename string                     `json:"filename"`
-	Version  string                     `json:"version"`
-	SHA256   string                     `json:"sha256"`
-	URL      string                     `json:"url"`
-	HostAPI  components.CompatibleRange `json:"host_api"`
-	Metadata drivers.CatalogEntry       `json:"metadata"`
+	ID                    string                     `json:"id"`
+	Path                  string                     `json:"path"`
+	Filename              string                     `json:"filename"`
+	Version               string                     `json:"version"`
+	SHA256                string                     `json:"sha256"`
+	SizeBytes             int64                      `json:"size_bytes,omitempty"`
+	URL                   string                     `json:"url"`
+	HostAPI               components.CompatibleRange `json:"host_api"`
+	Metadata              drivers.CatalogEntry       `json:"metadata"`
+	PackageID             string                     `json:"package_id,omitempty"`
+	Target                string                     `json:"target,omitempty"`
+	ArtifactID            string                     `json:"artifact_id,omitempty"`
+	RuntimeName           string                     `json:"runtime_name,omitempty"`
+	RuntimeSemantics      string                     `json:"runtime_semantics,omitempty"`
+	RuntimeVersion        string                     `json:"runtime_version,omitempty"`
+	RuntimeABI            string                     `json:"runtime_abi,omitempty"`
+	HostAPIProfile        string                     `json:"host_api_profile,omitempty"`
+	PackageKeyID          string                     `json:"package_key_id,omitempty"`
+	PackageEnvelopeURL    string                     `json:"package_envelope_url,omitempty"`
+	PackageEnvelopeSHA256 string                     `json:"package_envelope_sha256,omitempty"`
+	SourceCommit          string                     `json:"source_commit,omitempty"`
+	Channel               string                     `json:"channel,omitempty"`
+	ControlEnabled        bool                       `json:"control_enabled,omitempty"`
+	ReadOnly              bool                       `json:"read_only,omitempty"`
+	Permissions           []string                   `json:"permissions,omitempty"`
+	Commands              []sourcefulCommand         `json:"commands,omitempty"`
+	DefaultMode           sourcefulDefaultMode       `json:"default_mode,omitempty"`
+	LeasePolicy           sourcefulLeasePolicy       `json:"lease_policy,omitempty"`
 }
 
 type RepositoryStatus struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name,omitempty"`
+	Format      string    `json:"format"`
 	ManifestURL string    `json:"manifest_url"`
 	Enabled     bool      `json:"enabled"`
 	LastRefresh time.Time `json:"last_refresh,omitempty"`
@@ -99,10 +120,12 @@ type Status struct {
 }
 
 type Manager struct {
-	cfg    config.DeviceRepository
-	root   string
-	store  *state.Store
-	client *http.Client
+	cfg         config.DeviceRepository
+	root        string
+	store       *state.Store
+	hostVersion string
+	client      *http.Client
+	betaRepo    config.DriverRepositorySource
 
 	mu        sync.Mutex
 	manifests map[string]Manifest
@@ -110,6 +133,12 @@ type Manager struct {
 }
 
 func New(cfg *config.DeviceRepository, persistentDir string, store *state.Store) *Manager {
+	return NewWithHostVersion(cfg, persistentDir, store, "dev")
+}
+
+// NewWithHostVersion binds Sourceful package compatibility to the running FTW
+// release. Local "dev" builds remain fail-closed for canonical packages.
+func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, store *state.Store, hostVersion string) *Manager {
 	effective := config.DeviceRepository{}
 	if cfg != nil {
 		effective = *cfg
@@ -121,12 +150,37 @@ func New(cfg *config.DeviceRepository, persistentDir string, store *state.Store)
 		root = filepath.Join(persistentDir, root)
 	}
 	manager := &Manager{
-		cfg: effective, root: root, store: store,
+		cfg: effective, root: root, store: store, hostVersion: strings.TrimPrefix(hostVersion, "v"),
 		client:    &http.Client{Timeout: 15 * time.Second},
+		betaRepo:  officialBetaRepository(effective.Repositories),
 		manifests: make(map[string]Manifest), statuses: make(map[string]RepositoryStatus),
 	}
 	manager.reconcileActive()
 	return manager
+}
+
+func officialBetaRepository(configured []config.DriverRepositorySource) config.DriverRepositorySource {
+	id := config.DefaultDriverRepositoryBetaID
+	for {
+		available := true
+		for _, repo := range configured {
+			if repo.ID == id {
+				available = false
+				id += "-channel"
+				break
+			}
+		}
+		if available {
+			break
+		}
+	}
+	return config.DriverRepositorySource{
+		ID: id, Name: config.DefaultDriverRepositoryBetaName,
+		ManifestURL: config.DefaultDriverRepositoryBetaManifestURL, Enabled: true,
+		TrustedKeys: map[string]string{
+			config.DefaultDriverRepositorySigningKeyID: config.DefaultDriverRepositoryPublicKey,
+		},
+	}
 }
 
 func (m *Manager) ActiveDir() string { return filepath.Join(m.root, "active") }
@@ -191,7 +245,7 @@ func (m *Manager) Status() Status {
 	statuses := make([]RepositoryStatus, 0, len(m.cfg.Repositories))
 	for _, repo := range m.cfg.Repositories {
 		st := m.statuses[repo.ID]
-		st.ID, st.Name, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repo.ManifestURL, repo.Enabled
+		st.ID, st.Name, st.Format, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repositoryFormat(repo), repo.ManifestURL, repo.Enabled
 		statuses = append(statuses, st)
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
@@ -227,6 +281,9 @@ func (m *Manager) Refresh(ctx context.Context, repositoryID string) error {
 }
 
 func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySource) error {
+	if repositoryFormat(repo) == config.DriverRepositoryFormatSourcefulIndexV1 {
+		return m.refreshSourceful(ctx, repo)
+	}
 	raw, err := m.fetch(ctx, repo.ManifestURL, maxManifestBytes, repo.AllowInsecure)
 	if err != nil {
 		m.recordError(repo, err)
@@ -249,7 +306,7 @@ func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySo
 	m.mu.Lock()
 	m.manifests[repo.ID] = manifest
 	m.statuses[repo.ID] = RepositoryStatus{
-		ID: repo.ID, Name: repo.Name, ManifestURL: repo.ManifestURL, Enabled: repo.Enabled,
+		ID: repo.ID, Name: repo.Name, Format: repositoryFormat(repo), ManifestURL: repo.ManifestURL, Enabled: repo.Enabled,
 		LastRefresh: time.Now(), Cached: true, KeyID: keyID, DriverCount: len(manifest.Drivers),
 	}
 	m.mu.Unlock()
@@ -259,7 +316,7 @@ func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySo
 func (m *Manager) recordError(repo config.DriverRepositorySource, err error) {
 	m.mu.Lock()
 	st := m.statuses[repo.ID]
-	st.ID, st.Name, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repo.ManifestURL, repo.Enabled
+	st.ID, st.Name, st.Format, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repositoryFormat(repo), repo.ManifestURL, repo.Enabled
 	st.LastRefresh, st.LastError = time.Now(), err.Error()
 	_, cacheErr := os.Stat(filepath.Join(m.root, "cache", safeSegment(repo.ID)+".json"))
 	st.Cached = cacheErr == nil
@@ -307,6 +364,46 @@ func (m *Manager) Catalog() ([]CatalogCandidate, error) {
 	return out, nil
 }
 
+// ChannelCatalog reads the official signed beta channel without changing the
+// configured stable source. This lets an operator inspect or install one beta
+// driver while every other driver stays on its current artifact.
+func (m *Manager) ChannelCatalog(ctx context.Context, channel string) ([]CatalogCandidate, error) {
+	if m.store == nil {
+		return nil, errors.New("device repository store unavailable")
+	}
+	if channel != "beta" {
+		return nil, fmt.Errorf("unsupported driver channel %q", channel)
+	}
+	repo := m.betaRepo
+	if err := m.refreshOne(ctx, repo); err != nil {
+		return nil, err
+	}
+	manifest, err := m.manifestFor(repo)
+	if err != nil {
+		return nil, err
+	}
+	active, err := m.store.ActiveDriverRepoInstalls()
+	if err != nil {
+		return nil, err
+	}
+	activeByID := make(map[string]state.DriverRepoInstall, len(active))
+	for _, installed := range active {
+		activeByID[installed.DriverID] = installed
+	}
+	out := make([]CatalogCandidate, 0, len(manifest.Drivers))
+	for _, driver := range manifest.Drivers {
+		candidate := CatalogCandidate{RepositoryID: repo.ID, Repository: manifest.Repository, Driver: driver}
+		if installed, ok := activeByID[driver.ID]; ok {
+			copy := installed
+			candidate.Installed = &copy
+			candidate.UpdateAvailable = compareSemver(driver.Version, installed.Version) > 0
+		}
+		out = append(out, candidate)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Driver.ID < out[j].Driver.ID })
+	return out, nil
+}
+
 // EnrichCatalog overlays installed/upstream versions onto the resolver's
 // local/managed/bundled catalog without changing its precedence.
 func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.CatalogEntry {
@@ -317,24 +414,52 @@ func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.Catalo
 		activeByLogical[in.LogicalPath] = in
 	}
 	for i := range entries {
-		if in, ok := activeByLogical[entries[i].Path]; ok {
+		// A local file is an operator's own copy and is not a managed install,
+		// so none of the install metadata below applies to it. It still needs
+		// the upstream comparison: an override shadows the channel silently,
+		// and without this the operator is never told a newer version exists.
+		if in, ok := activeByLogical[entries[i].Path]; ok && entries[i].Source == "managed" {
 			entries[i].InstalledVersion = in.Version
 			entries[i].RepositoryID = in.RepoID
+			for _, candidate := range candidates {
+				driver := candidate.Driver
+				if candidate.RepositoryID != in.RepoID || driver.ID != in.DriverID || driver.Version != in.Version ||
+					!strings.EqualFold(driver.SHA256, in.SHA256) {
+					continue
+				}
+				entries[i].PackageID = driver.PackageID
+				entries[i].PackageChannel = driver.Channel
+				entries[i].ArtifactSHA256 = strings.ToLower(driver.SHA256)
+				entries[i].RuntimeABI = driver.RuntimeABI
+				entries[i].HostAPIProfile = driver.HostAPIProfile
+				break
+			}
 		}
+		local := entries[i].Source == "local"
 		for _, candidate := range candidates {
 			if candidate.Driver.ID != entries[i].ID {
 				continue
 			}
 			if entries[i].UpstreamVersion == "" || compareSemver(candidate.Driver.Version, entries[i].UpstreamVersion) > 0 {
 				entries[i].UpstreamVersion = candidate.Driver.Version
-				entries[i].RepositoryID = candidate.RepositoryID
+				// A local file came from the operator, not from a repository.
+				// Naming one here would read as provenance it does not have.
+				if !local {
+					entries[i].RepositoryID = candidate.RepositoryID
+				}
 			}
 		}
 		base := entries[i].Version
 		if entries[i].InstalledVersion != "" {
 			base = entries[i].InstalledVersion
 		}
-		entries[i].UpdateAvailable = entries[i].UpstreamVersion != "" && compareSemver(entries[i].UpstreamVersion, base) > 0
+		// Only claim an update when both sides are real versions that can be
+		// ordered. A local driver often carries no version, or something like
+		// "local", and comparing that as a string would announce an update
+		// on nothing better than alphabetical luck.
+		entries[i].UpdateAvailable = entries[i].UpstreamVersion != "" &&
+			isSemver(entries[i].UpstreamVersion) && isSemver(base) &&
+			compareSemver(entries[i].UpstreamVersion, base) > 0
 	}
 	return entries
 }
@@ -349,6 +474,14 @@ func (m *Manager) manifestFor(repo config.DriverRepositorySource) (Manifest, err
 	raw, err := os.ReadFile(filepath.Join(m.root, "cache", safeSegment(repo.ID)+".json"))
 	if err != nil {
 		return Manifest{}, err
+	}
+	if repositoryFormat(repo) == config.DriverRepositoryFormatSourcefulIndexV1 {
+		manifest, keyID, err := m.cachedSourcefulManifest(repo, raw)
+		if err != nil {
+			return Manifest{}, err
+		}
+		m.cacheManifest(repo, manifest, keyID)
+		return manifest, nil
 	}
 	manifest, keyID, err := verifyManifest(raw, repo)
 	if err != nil {
@@ -366,6 +499,15 @@ func (m *Manager) manifestFor(repo config.DriverRepositorySource) (Manifest, err
 	return manifest, nil
 }
 
+func (m *Manager) cacheManifest(repo config.DriverRepositorySource, manifest Manifest, keyID string) {
+	m.mu.Lock()
+	m.manifests[repo.ID] = manifest
+	st := m.statuses[repo.ID]
+	st.Cached, st.KeyID, st.DriverCount = true, keyID, len(manifest.Drivers)
+	m.statuses[repo.ID] = st
+	m.mu.Unlock()
+}
+
 // Install downloads and validates an artifact, stores it content-addressed,
 // then atomically points the stable active path at it. The caller owns the
 // affected runtime restart so hardware safety policy stays in core.
@@ -374,6 +516,35 @@ func (m *Manager) Install(ctx context.Context, repositoryID, driverID, version s
 	if err != nil {
 		return state.DriverRepoInstall{}, err
 	}
+	return m.installResolved(ctx, repo, manifest, entry)
+}
+
+// InstallChannel installs one artifact from the pinned official beta channel.
+// The caller cannot supply a URL or trust root, and the configured stable
+// repository remains unchanged.
+func (m *Manager) InstallChannel(ctx context.Context, channel, driverID, version string) (state.DriverRepoInstall, error) {
+	if m.store == nil {
+		return state.DriverRepoInstall{}, errors.New("device repository store unavailable")
+	}
+	if channel != "beta" {
+		return state.DriverRepoInstall{}, fmt.Errorf("unsupported driver channel %q", channel)
+	}
+	repo := m.betaRepo
+	if err := m.refreshOne(ctx, repo); err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	manifest, err := m.manifestFor(repo)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	entry, err := findManifestDriver(manifest, driverID, version)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	return m.installResolved(ctx, repo, manifest, entry)
+}
+
+func (m *Manager) installResolved(ctx context.Context, repo config.DriverRepositorySource, manifest Manifest, entry ManifestDriver) (state.DriverRepoInstall, error) {
 	raw, err := m.fetch(ctx, entry.URL, maxDriverBytes, repo.AllowInsecure)
 	if err != nil {
 		return state.DriverRepoInstall{}, err
@@ -383,12 +554,28 @@ func (m *Manager) Install(ctx context.Context, repositoryID, driverID, version s
 	if !strings.EqualFold(gotHash, entry.SHA256) {
 		return state.DriverRepoInstall{}, fmt.Errorf("driver sha256 %s, want %s", gotHash, entry.SHA256)
 	}
+	if entry.SizeBytes > 0 && int64(len(raw)) != entry.SizeBytes {
+		return state.DriverRepoInstall{}, fmt.Errorf("driver size %d, want %d", len(raw), entry.SizeBytes)
+	}
 	installPath := filepath.Join(m.root, "installed", safeSegment(repo.ID), safeSegment(entry.ID), entry.Version, strings.ToLower(entry.SHA256), entry.Filename)
 	if err := atomicWrite(installPath, raw, 0o600); err != nil {
 		return state.DriverRepoInstall{}, err
 	}
 	if err := validateLuaArtifact(installPath, entry); err != nil {
 		return state.DriverRepoInstall{}, err
+	}
+	if entry.PackageID != "" {
+		packageRaw, err := readLimitedFile(m.sourcefulPackageCachePath(repo, entry.PackageEnvelopeSHA256), maxManifestBytes)
+		if err != nil {
+			return state.DriverRepoInstall{}, fmt.Errorf("read verified package envelope for install: %w", err)
+		}
+		sum := sha256.Sum256(packageRaw)
+		if hex.EncodeToString(sum[:]) != entry.PackageEnvelopeSHA256 {
+			return state.DriverRepoInstall{}, errors.New("cached package envelope hash changed before install")
+		}
+		if err := atomicWrite(filepath.Join(filepath.Dir(installPath), sourcefulInstalledPackageEnvelope), packageRaw, 0o600); err != nil {
+			return state.DriverRepoInstall{}, fmt.Errorf("persist package envelope with artifact: %w", err)
+		}
 	}
 	logical := filepath.ToSlash(entry.Path)
 	installed := state.DriverRepoInstall{
@@ -426,6 +613,10 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 		return state.DriverRepoInstall{}, err
 	}
 	if current.PreviousInstalledPath == "" {
+		// Going back to the bundled copy is a different operation, not a step
+		// between managed artifacts: see UseBundled. Rolling back here would
+		// deactivate the only active row, leaving the caller's own recovery
+		// path -- a second Rollback -- with nothing to restore.
 		return state.DriverRepoInstall{}, errors.New("driver has no previous managed artifact")
 	}
 	previous, err := m.store.DriverRepoInstallByPath(current.PreviousInstalledPath)
@@ -584,6 +775,37 @@ func (m *Manager) ActivateInstalled(driverID, version, sha256 string) (state.Dri
 	return activated, nil
 }
 
+// UseBundled drops the managed entry so the driver resolves to the copy that
+// shipped with this build. It is the only way back once a channel version has
+// been installed over a bundled driver, since the bundled copy is not an
+// install and cannot be activated by version.
+//
+// bundledPath is checked before anything is deactivated: not every driver the
+// channel offers is bundled, and taking the managed entry away when there is
+// nothing behind it would stop the driver instead of reverting it.
+func (m *Manager) UseBundled(logicalPath, bundledPath string) (state.DriverRepoInstall, error) {
+	logicalPath, err := safeLogicalPath(logicalPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	current, err := m.store.ActiveDriverRepoInstall(logicalPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	if bundledPath == "" {
+		return state.DriverRepoInstall{}, errors.New("no bundled copy of this driver to fall back to")
+	}
+	if _, err := os.Stat(bundledPath); err != nil {
+		return state.DriverRepoInstall{}, fmt.Errorf("no bundled copy of this driver to fall back to: %w", err)
+	}
+	if err := m.Deactivate(logicalPath); err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	// Returned so the caller can put this exact artifact back if the bundled
+	// driver fails to start.
+	return current, nil
+}
+
 // Deactivate removes the managed resolver entry. It is used when the first
 // ever managed activation fails and there is no earlier managed artifact;
 // core can then restart the bundled recovery snapshot.
@@ -609,14 +831,19 @@ func (m *Manager) find(repositoryID, driverID, version string) (config.DriverRep
 		if err != nil {
 			return repo, Manifest{}, ManifestDriver{}, err
 		}
-		for _, d := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
-			if d.ID == driverID && (version == "" || d.Version == version) {
-				return repo, manifest, d, nil
-			}
-		}
-		return repo, manifest, ManifestDriver{}, fmt.Errorf("driver %q version %q not found", driverID, version)
+		driver, err := findManifestDriver(manifest, driverID, version)
+		return repo, manifest, driver, err
 	}
 	return config.DriverRepositorySource{}, Manifest{}, ManifestDriver{}, fmt.Errorf("repository %q not found or disabled", repositoryID)
+}
+
+func findManifestDriver(manifest Manifest, driverID, version string) (ManifestDriver, error) {
+	for _, driver := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
+		if driver.ID == driverID && (version == "" || driver.Version == version) {
+			return driver, nil
+		}
+	}
+	return ManifestDriver{}, fmt.Errorf("driver %q version %q not found", driverID, version)
 }
 
 func (m *Manager) prepareSymlink(logicalPath, target string) (commit func() error, cleanup func(), err error) {
@@ -762,8 +989,11 @@ func validateManifestDriver(d ManifestDriver, allowInsecure bool) error {
 	if d.HostAPI.Min <= 0 || d.HostAPI.Max < d.HostAPI.Min {
 		return fmt.Errorf("driver %s has invalid host API range %d..%d", d.ID, d.HostAPI.Min, d.HostAPI.Max)
 	}
-	if !d.HostAPI.Includes(components.DriverHostAPIVersion) {
-		return fmt.Errorf("driver %s host API range %d..%d excludes host %d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIVersion)
+	if d.SizeBytes < 0 || d.SizeBytes > maxDriverBytes {
+		return fmt.Errorf("driver %s has invalid size %d", d.ID, d.SizeBytes)
+	}
+	if !d.HostAPI.OverlapsDriverHost() {
+		return fmt.Errorf("driver %s host API range %d..%d excludes host range %d..%d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIMinVersion, components.DriverHostAPIVersion)
 	}
 	u, err := url.Parse(d.URL)
 	if err != nil || (u.Scheme != "https" && !(allowInsecure && (u.Scheme == "http" || u.Scheme == "file"))) {
@@ -789,12 +1019,15 @@ func validateLuaArtifact(path string, manifest ManifestDriver) error {
 	if metadata.ID != manifest.ID || metadata.Version != manifest.Version {
 		return fmt.Errorf("driver metadata id/version %s@%s, want %s@%s", metadata.ID, metadata.Version, manifest.ID, manifest.Version)
 	}
+	if manifest.PackageID != "" && metadata.ReadOnly != manifest.Metadata.ReadOnly {
+		return fmt.Errorf("driver metadata read_only %t, want %t", metadata.ReadOnly, manifest.Metadata.ReadOnly)
+	}
 	source := string(raw)
 	if !regexp.MustCompile(`(?m)^\s*host_api_min\s*=\s*[0-9]+`).MatchString(source) ||
 		!regexp.MustCompile(`(?m)^\s*host_api_max\s*=\s*[0-9]+`).MatchString(source) {
 		return errors.New("managed driver must declare host_api_min and host_api_max")
 	}
-	if metadata.HostAPIMin > components.DriverHostAPIVersion || metadata.HostAPIMax < components.DriverHostAPIVersion {
+	if metadata.HostAPIMin > components.DriverHostAPIVersion || metadata.HostAPIMax < components.DriverHostAPIMinVersion {
 		return fmt.Errorf("driver metadata host API range %d..%d is incompatible", metadata.HostAPIMin, metadata.HostAPIMax)
 	}
 	return nil
@@ -886,6 +1119,13 @@ func decodeBase64(value string) ([]byte, error) {
 }
 
 var semverRE = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// isSemver reports whether a version can be ordered at all. compareSemver
+// falls back to comparing strings, which is fine for sorting and wrong for
+// deciding whether a newer release exists.
+func isSemver(value string) bool {
+	return semverRE.MatchString(value)
+}
 
 func compareSemver(a, b string) int {
 	type version struct {

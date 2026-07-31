@@ -1,9 +1,8 @@
 // diagnose.js — time-travel through persisted planner snapshots.
 //
-// Listens to hash routing:
-//   #live                 → show Live view (default)
-//   #diagnose             → show Diagnose, no specific snapshot selected
-//   #diagnose/<ts_ms>     → show Diagnose and load that snapshot's detail
+// Owns the five-destination dashboard router. Historical deep links remain
+// compatible: #live maps to #overview and #diagnose/<ts> opens the
+// matching decision under Plan.
 //
 // Fetches from /api/mpc/diagnose/history for the timeline list and
 // /api/mpc/diagnose/at?ts=<ms> for the detail pane. Persistence lands
@@ -20,54 +19,100 @@
     return fetch(path, opts);
   }
 
-  // ---- Tab routing ----
-  const tabs = document.getElementById('app-tabs');
-  const viewLive = document.getElementById('view-live');
-  const viewDiag = document.getElementById('view-diagnose');
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942',
+        };
+  }
+
+  // ---- Destination layout + routing ----
+  const VIEW_NAMES = ['overview', 'energy', 'plan', 'history', 'more'];
+
+  // The dashboard predates top-level destinations. Move the existing,
+  // stateful sections into their destination shells rather than cloning
+  // them: custom elements, canvas bindings and polling timers keep the same
+  // DOM identity.
+  function organizeDestinations() {
+    const energy = document.getElementById('view-energy');
+    const plan = document.getElementById('view-plan');
+    const more = document.getElementById('view-more');
+    const append = (host, selector) => {
+      const el = document.querySelector(selector);
+      if (host && el) host.appendChild(el);
+    };
+
+    ['#chart-section', '.energy-row', '.prices-row', '#heating-section']
+      .forEach(selector => append(energy, selector));
+    append(energy, '.history-row');
+    append(plan, '#plan-section');
+    append(plan, '#plan-history-details');
+    ['#ui-mode-row', '#twins-section', '#loadpoints-section', '#drivers-section', '#models-section']
+      .forEach(selector => append(more, selector));
+
+    const oldChartRow = document.getElementById('live-plan-row');
+    if (oldChartRow && oldChartRow.children.length === 0) oldChartRow.remove();
+
+    const settingsShortcut = document.getElementById('more-settings-btn');
+    if (settingsShortcut) settingsShortcut.addEventListener('click', () => {
+      const settings = document.getElementById('settings-btn');
+      if (settings) settings.click();
+    });
+    const updateShortcut = document.getElementById('more-update-btn');
+    if (updateShortcut) updateShortcut.addEventListener('click', () => {
+      const badge = document.querySelector('ftw-update-badge');
+      if (badge && typeof badge.open === 'function') badge.open();
+    });
+  }
 
   function applyHash() {
-    const h = (location.hash || '#live').replace(/^#/, '');
+    const h = (location.hash || '#overview').replace(/^#/, '');
     const parts = h.split('/');
-    const view = parts[0] === 'diagnose' ? 'diagnose' : 'live';
-    viewLive.classList.toggle('hidden', view !== 'live');
-    viewDiag.classList.toggle('hidden', view !== 'diagnose');
-    // Sync active state across both the top-row .tab-btn cluster AND
-    // the drawer-nav-btn duplicates inside the mobile header-right
-    // drawer. Query the whole document so both get the active pill.
-    document.querySelectorAll('.tab-btn[data-view], .drawer-nav-btn[data-view]').forEach(b => {
-      if (b.dataset.view === 'live' || b.dataset.view === 'diagnose') {
-        b.classList.toggle('active', b.dataset.view === view);
-      }
+    const requested = parts[0] === 'live' ? 'overview'
+      : parts[0] === 'diagnose' ? 'plan'
+      : parts[0];
+    const view = VIEW_NAMES.includes(requested) ? requested : 'overview';
+    document.querySelectorAll('.app-view').forEach(panel => {
+      panel.classList.toggle('hidden', panel.id !== 'view-' + view);
     });
-    if (view === 'diagnose') {
-      state.selectedTs = parts[1] ? Number(parts[1]) : null;
-      loadTimeline().then(() => {
-        if (state.selectedTs) loadDetail(state.selectedTs);
-        else if (state.timeline.length > 0) {
-          // Default selection: newest snapshot, update hash without
-          // pushing history so "back" still returns to Live.
-          const ts = state.timeline[0].ts_ms;
-          history.replaceState(null, '', '#diagnose/' + ts);
-          loadDetail(ts);
-        }
-      });
+    document.querySelectorAll('.app-nav-btn[data-view]').forEach(b => {
+      const active = b.dataset.view === view;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+      b.tabIndex = active ? 0 : -1;
+    });
+    document.body.dataset.view = view;
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    if (view === 'history') {
+      if (typeof window.ftwEnergyHistoryLoad === 'function') {
+        window.ftwEnergyHistoryLoad();
+      }
+    }
+    if (view === 'plan' && parts[0] === 'diagnose') {
+      const selectedTs = parts[1] ? Number(parts[1]) : null;
+      const plannerDetails = document.getElementById('plan-history-details');
+      state.selectedTs = selectedTs;
+      if (selectedTs && plannerDetails) plannerDetails.open = true;
+      if (selectedTs || (plannerDetails && plannerDetails.open)) {
+        loadTimeline().then(() => {
+          if (selectedTs) loadDetail(selectedTs);
+          else if (!state.selectedTs && state.timeline.length > 0) {
+            loadDetail(state.timeline[0].ts_ms);
+          }
+        });
+      }
     }
   }
 
-  if (tabs) {
-    tabs.addEventListener('click', (e) => {
-      const b = e.target.closest('.tab-btn');
-      if (!b) return;
-      location.hash = b.dataset.view === 'diagnose' ? '#diagnose' : '#live';
-    });
-  }
-  // Drawer navigation duplicates (mobile). Same behavior as the
-  // top-row tabs but they also close the drawer so the user lands
-  // straight on the target view.
   document.addEventListener('click', (e) => {
-    const b = e.target.closest('.drawer-nav-btn[data-view]');
+    const b = e.target.closest('.app-nav-btn[data-view]');
     if (!b) return;
-    if (b.dataset.view !== 'live' && b.dataset.view !== 'diagnose') return;
     location.hash = '#' + b.dataset.view;
     const hdr = document.querySelector('body.ftw-app > header');
     if (hdr) {
@@ -75,6 +120,19 @@
       const mbtn = document.getElementById('mobile-menu-btn');
       if (mbtn) mbtn.setAttribute('aria-expanded', 'false');
     }
+  });
+  document.querySelectorAll('[role="tablist"]').forEach(tablist => {
+    tablist.addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+      const buttons = [...tablist.querySelectorAll('.app-nav-btn[data-view]')];
+      if (!buttons.length) return;
+      const current = Math.max(0, buttons.indexOf(document.activeElement));
+      let next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+        : (current + (e.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+      e.preventDefault();
+      buttons[next].focus();
+      buttons[next].click();
+    });
   });
   window.addEventListener('hashchange', applyHash);
 
@@ -86,6 +144,7 @@
     rangeMs: 24 * 3600 * 1000,
     chartGeom: null,   // {padL, padT, barW, plotH, nSlots} — for hover hit-testing
     hoverSlotIdx: null,
+    timelineLoading: null,
   };
 
   const rangeSelect = document.getElementById('diagnose-range-select');
@@ -97,6 +156,17 @@
   }
   const refreshBtn = document.getElementById('diagnose-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', () => loadTimeline());
+  const plannerDetails = document.getElementById('plan-history-details');
+  if (plannerDetails) {
+    plannerDetails.addEventListener('toggle', () => {
+      if (!plannerDetails.open) return;
+      loadTimeline().then(() => {
+        if (!state.selectedTs && state.timeline.length > 0) {
+          loadDetail(state.timeline[0].ts_ms);
+        }
+      });
+    });
+  }
 
   function parseRange(v) {
     const map = { '1h': 3600e3, '6h': 6 * 3600e3, '24h': 86400e3,
@@ -105,7 +175,15 @@
   }
 
   // ---- Timeline fetch + render ----
-  async function loadTimeline() {
+  function loadTimeline() {
+    if (state.timelineLoading) return state.timelineLoading;
+    state.timelineLoading = fetchTimeline().finally(() => {
+      state.timelineLoading = null;
+    });
+    return state.timelineLoading;
+  }
+
+  async function fetchTimeline() {
     const until = Date.now();
     const since = until - state.rangeMs;
     try {
@@ -118,7 +196,7 @@
       if (el) el.innerHTML = `<div class="diagnose-empty">Error loading: ${escapeHtml(e.message)}</div>`;
     }
     const meta = document.getElementById('diagnose-meta');
-    if (meta) meta.textContent = state.timeline.length + ' snapshot' +
+    if (meta) meta.textContent = state.timeline.length + ' decision' +
       (state.timeline.length === 1 ? '' : 's');
   }
 
@@ -371,6 +449,7 @@
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
+    const C = canvasColors();
 
     const pad = { t: 16, r: 40, b: 24, l: 44 };
     const plotW = cssW - pad.l - pad.r;
@@ -402,9 +481,12 @@
     });
 
     // Background bands
-    ctx.fillStyle = 'rgba(255,255,255,0.02)';
+    ctx.save();
+    ctx.globalAlpha = 0.03;
+    ctx.fillStyle = C.text;
     ctx.fillRect(pad.l, priceY0, plotW, priceH);
     ctx.fillRect(pad.l, socY0, plotW, socH);
+    ctx.restore();
 
     // Price bars — green cheap, red expensive (relative to horizon mean)
     const priceMean = slots.reduce((a, s) => a + s.price_ore, 0) / nSlots;
@@ -422,7 +504,7 @@
 
     // Power zero line
     const powerMidY = powerY0 + powerH / 2;
-    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, powerMidY);
@@ -487,7 +569,7 @@
     ctx.stroke();
 
     // Y-axis labels
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = C.dim;
     ctx.font = '10px system-ui, -apple-system, sans-serif';
     ctx.textAlign = 'right';
     ctx.fillText(maxPrice.toFixed(0) + 'ö', pad.l - 4, priceY0 + 10);
@@ -536,6 +618,10 @@
   }
 
   // ---- Boot ----
-  // Apply hash on load so refreshing the page keeps you on Diagnose.
+  // Build the destination layout before first paint and keep deep links.
+  window.addEventListener('ftw-theme-change', function () {
+    if (state.detail) drawChart(state.detail);
+  });
+  organizeDestinations();
   applyHash();
 })();

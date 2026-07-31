@@ -2,6 +2,8 @@
 // Renders a stacked canvas chart: price bars on top, battery+grid bars in
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
+import { derivePlanBrief } from "./plan-brief.js";
+
 (function () {
   'use strict';
 
@@ -9,6 +11,19 @@
 
   function apiFetch(path, opts) {
     return fetch(path, opts);
+  }
+
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942',
+        };
   }
 
   function escapeHTML(value) {
@@ -81,11 +96,12 @@
   }
 
   async function fetchAll() {
-    const [p, f, m, c] = await Promise.all([
+    const [p, f, m, c, s] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/config').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/status').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     state.forecast = (f && f.items) || [];
@@ -95,12 +111,16 @@
     // Tariff breakdown pulled from /api/config so the price bars can be
     // stacked as spot + grid tariff + VAT instead of one opaque number.
     state.priceCfg = (c && c.price) || null;
+    state.status = s || {};
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
       mpc: m && m.enabled,
     };
     state.lastUpdate = new Date();
+    window.dispatchEvent(new CustomEvent("ftw-plan-data", {
+      detail: { plan: state.plan },
+    }));
     render();
   }
 
@@ -109,6 +129,9 @@
       const r = await apiFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
       if (j && j.plan) state.plan = j.plan;
+      window.dispatchEvent(new CustomEvent("ftw-plan-data", {
+        detail: { plan: state.plan },
+      }));
       render();
     } catch (e) { /* ignore */ }
   }
@@ -117,6 +140,75 @@
     const d = new Date(ts);
     return d.getHours().toString().padStart(2, '0') + ':' +
            d.getMinutes().toString().padStart(2, '0');
+  }
+
+  function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function applyStateBadge(id, planState) {
+    const badge = document.getElementById(id);
+    if (!badge) return;
+    badge.className = `plan-state-badge is-${planState.tone}`;
+    badge.textContent = planState.label;
+  }
+
+  function renderOverviewPlanBrief(brief) {
+    applyStateBadge('overview-plan-state', brief.state);
+    setText('overview-plan-action', brief.next.action);
+    setText('overview-plan-time', brief.next.time);
+    setText('overview-plan-reason', brief.reason);
+    setText('overview-plan-constraint', brief.constraint);
+    const soc = document.getElementById('overview-plan-soc');
+    if (soc) {
+      soc.hidden = !brief.soc;
+      soc.textContent = brief.soc ? `Expected charge · ${brief.soc.label}` : '';
+    }
+  }
+
+  function renderPlanBrief(plan) {
+    const brief = derivePlanBrief({
+      enabled: !!(state.enabled && state.enabled.mpc),
+      plan,
+      status: state.status || {},
+    });
+    applyStateBadge('plan-state-badge', brief.state);
+    setText('plan-next-action', brief.next.action);
+    setText('plan-next-time', brief.next.time);
+    setText('plan-main-reason', brief.reason);
+    setText('plan-constraint', brief.constraint);
+    setText('plan-forecast-state', brief.forecast.label);
+    setText('plan-forecast-detail', brief.forecast.detail);
+    setText('plan-solver-state', brief.planner.label);
+    setText('plan-solver-detail', brief.planner.detail);
+
+    const socMeta = document.getElementById('plan-soc-meta');
+    if (socMeta) socMeta.hidden = !brief.soc;
+    setText('plan-expected-soc', brief.soc ? brief.soc.label : '—');
+    setText('plan-soc-detail', brief.soc ? brief.soc.detail : '');
+    renderOverviewPlanBrief(brief);
+  }
+
+  function renderOptimizerFallbackAlert(plan) {
+    const section = document.getElementById('plan-section');
+    if (!section) return;
+    let alert = document.getElementById('plan-optimizer-fallback');
+    const solver = plan && plan.solver;
+    if (!solver || !solver.fallback) {
+      if (alert) alert.remove();
+      return;
+    }
+    if (!alert) {
+      alert = document.createElement('div');
+      alert.id = 'plan-optimizer-fallback';
+      alert.setAttribute('role', 'alert');
+      alert.style.cssText = 'margin:8px 0;padding:9px 11px;border:1px solid #f59e0b;border-radius:6px;background:rgba(245,158,11,.12);font-size:12px;line-height:1.45;overflow-wrap:anywhere';
+      const help = section.querySelector('.plan-help');
+      section.insertBefore(alert, help || section.firstChild);
+    }
+    const reason = solver.fallback_reason ? ' ' + solver.fallback_reason : '';
+    alert.textContent = 'Mathematical optimizer unavailable. This plan uses the built-in Go fallback.' + reason;
   }
 
   function render() {
@@ -131,6 +223,7 @@
     canvas.style.height = cssH + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
+    const C = canvasColors();
 
     const pad = { l: 44, r: 44, t: 16, b: 28 };
     const plotW = cssW - pad.l - pad.r;
@@ -141,13 +234,31 @@
     const now = Date.now();
     const { tMin, tMax } = horizonBounds(state.horizon);
     const xScale = t => pad.l + (t - tMin) / (tMax - tMin) * plotW;
+    const plan = state.plan;
 
     // Layout: price bars (top) | mode band (thin strip) | power bars (middle) | SoC (bottom)
     const modeBandH = 10;
 
-    // Price range
+    // Price range.
+    //
+    // The bars come from the plan's actions whenever a plan exists, because
+    // those cover the whole horizon — including slots whose day-ahead price
+    // hasn't published yet and is filled in by the ML price twin. The scale
+    // and the tercile thresholds must be derived from the SAME set. Deriving
+    // them from state.prices (published slots only) put every predicted slot
+    // above the known maximum: its bar was drawn past the top of the price
+    // band and over the mode strip, and it always landed above p75 so the
+    // entire forecast period read as "expensive".
     const prices = (state.prices || []).filter(p => p.slot_ts_ms >= tMin && p.slot_ts_ms <= tMax);
-    const totals = prices.map(p => p.total_ore_kwh);
+    const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
+    const priceBars = barSource.filter(b => {
+      const ts = b.slot_ts_ms ?? b.slot_start_ms;
+      const len = b.slot_len_min;
+      if (ts == null || len == null) return false;
+      if ((b.total_ore_kwh ?? b.price_ore) == null) return false;
+      return ts + len * 60 * 1000 >= tMin && ts <= tMax;
+    });
+    const totals = priceBars.map(b => b.total_ore_kwh ?? b.price_ore);
     const priceMin = totals.length ? Math.min(0, ...totals) : 0;
     const priceMax = totals.length ? Math.max(...totals, 1) : 200;
     const priceRange = priceMax - priceMin;
@@ -161,13 +272,22 @@
     // is active per slot. Color-coded so operators see the schedule at a
     // glance without reading per-slot tooltips.
     const modeBandY0 = priceY0 + priceH + 2;
+    // Price bars are clipped to their band as a backstop. The scale above
+    // is derived from the bars themselves so nothing should overflow, but
+    // a single bad slot must never be able to paint over the mode strip
+    // and the power band the way the old known-prices-only scale did.
+    const clipPriceBand = () => {
+      ctx.beginPath();
+      ctx.rect(pad.l, priceY0, plotW, priceH);
+      ctx.clip();
+    };
 
     // Power band in middle — covers battery + grid.
-    // Several later sections ("Plan battery bars", "Load forecast",
-    // predicted-zone shade, etc.) reference `plan` directly. Keep this
-    // alias — removing it leaves those `plan` references undefined and
-    // the whole render throws, wiping the chart.
-    const plan = state.plan;
+    // `plan` is aliased at the top of render() because the price scale
+    // needs it too; several later sections ("Plan battery bars", "Load
+    // forecast", predicted-zone shade) reference it directly.
+    renderPlanBrief(plan);
+    renderOptimizerFallbackAlert(plan);
     const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
     // Scale off the fuse (what the site can *physically* deliver) plus a
@@ -187,9 +307,9 @@
     const socY = p => socY0 + socH - (p / 100) * socH;
 
     // ---- Grid ticks (hours) ----
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
-    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillStyle = C.dim;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
     const tickStep = chartTickStepMs(tMin, tMax);
@@ -264,13 +384,12 @@
     const gridTariff = (state.priceCfg && state.priceCfg.grid_tariff_ore_kwh) || 0;
     const vatPct     = (state.priceCfg && state.priceCfg.vat_percent) || 0;
     state.priceBarBounds = []; // {x0,x1,yMinPx,yMaxPx, action} for hover hit-test
-    const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
-    for (const bar of barSource) {
+    ctx.save();
+    clipPriceBand();
+    for (const bar of priceBars) {
       const ts = bar.slot_ts_ms ?? bar.slot_start_ms;
       const len = bar.slot_len_min;
       const priceVal = bar.total_ore_kwh ?? bar.price_ore;
-      if (ts == null || priceVal == null) continue;
-      if (ts + len * 60 * 1000 < tMin || ts > tMax) continue;
       const x0 = xScale(ts);
       const x1 = xScale(ts + len * 60 * 1000);
       const zero = priceY(Math.max(0, priceMin));
@@ -314,20 +433,27 @@
         const segTopY    = priceY(runningOre + part.ore);
         const segY = Math.min(segBottomY, segTopY);
         const segH = Math.abs(segBottomY - segTopY);
-        const alpha = isPredicted ? part.alpha * 0.2 : part.alpha;
+        const alpha = isPredicted ? part.alpha * 0.45 : part.alpha;
         ctx.fillStyle = `rgba(${part.rgb},${alpha})`;
         ctx.fillRect(rectX, segY, rectW, segH);
         runningOre += part.ore;
       }
       if (isPredicted) {
-        // Dashed outline across the whole bar so predicted slots still
-        // read as "uncertain ghost" regardless of how it's stacked.
-        const outlineRgb = parts[0].rgb;
-        ctx.strokeStyle = `rgba(${outlineRgb},0.75)`;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.strokeRect(rectX + 0.5, Math.min(topY, zero) + 0.5, rectW - 1, Math.abs(topY - zero) - 1);
-        ctx.setLineDash([]);
+        // Predicted slots are marked by a cap on top of the bar, not by an
+        // outline around it. The outline was written for hourly slots; at
+        // the 15-minute resolution NordPool publishes, ~96 dashed frames a
+        // day merge into a solid hatched wall that hides the prices behind
+        // it. The cap survives any bar width, and the shaded band plus the
+        // "predicted →" label already mark the zone.
+        ctx.fillStyle = `rgba(${parts[0].rgb},0.9)`;
+        ctx.fillRect(rectX, Math.min(topY, zero), rectW, 1.5);
+        if (rectW >= 6) {
+          ctx.strokeStyle = `rgba(${parts[0].rgb},0.55)`;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.strokeRect(rectX + 0.5, Math.min(topY, zero) + 0.5, rectW - 1, Math.abs(topY - zero) - 1);
+          ctx.setLineDash([]);
+        }
       }
       // Track for hover hit-test.
       state.priceBarBounds.push({
@@ -336,8 +462,9 @@
         action: bar, // either PricePoint or Action
       });
     }
+    ctx.restore();
     // Price axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
     ctx.fillText(priceMax.toFixed(0) + ' öre', pad.l - 6, priceY0 + 10);
     ctx.fillText(priceMin.toFixed(0), pad.l - 6, priceY0 + priceH);
@@ -428,13 +555,13 @@
     }
 
     // Power zero-line
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, powerYCenter);
     ctx.lineTo(pad.l + plotW, powerYCenter);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
     ctx.fillText('+' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(pMagMax) + 4);
     ctx.fillText('−' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(-pMagMax) + 4);
@@ -443,7 +570,7 @@
     // to remember that positive means "into the site". Placed just below
     // the heading at lower opacity to read as a subtitle.
     ctx.fillText('Power', pad.l + 4, powerY0 + 12);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillStyle = C.muted;
     ctx.font = '9px system-ui, sans-serif';
     ctx.fillText('+ import / charge   − export / discharge', pad.l + 40, powerY0 + 12);
     ctx.font = '11px system-ui, sans-serif';
@@ -467,7 +594,7 @@
         ctx.fillStyle = color;
         ctx.fillRect(x0, modeBandY0, Math.max(1, x1 - x0 - 1), modeBandH);
       }
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillStyle = C.dim;
       ctx.font = '9px system-ui, sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText('Battery', pad.l + 4, modeBandY0 + modeBandH - 2);
@@ -505,7 +632,7 @@
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
       // in whitespace.
-      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillStyle = C.dim;
       ctx.textAlign = 'right';
       ctx.fillText('100%', cssW - pad.r - 4, socY(100) + 4);
       ctx.fillText('0%',   cssW - pad.r - 4, socY(0)   + 4);
@@ -639,8 +766,8 @@
       hoverLine.id = 'plan-hover-line';
       hoverLine.style.cssText =
         'position:absolute;top:0;width:1px;height:100%;' +
-        'background:rgba(255,255,255,0.3);' +
-        'border-left:1px dashed rgba(255,255,255,0.45);' +
+        'background:var(--line);' +
+        'border-left:1px dashed var(--fg-muted);' +
         'pointer-events:none;display:none;z-index:2';
       const host = canvas.parentElement;
       if (host) {
@@ -848,6 +975,7 @@
     setInterval(fetchAll, PLAN_REFRESH_MS);
     setInterval(renderStrategyHint, 5000);
     window.addEventListener('resize', render);
+    window.addEventListener('ftw-theme-change', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
     // Horizon toggle wiring. Each click flips state.horizon, persists
@@ -887,6 +1015,45 @@
         else helpModal.setAttribute('open', '');
       });
     }
+    const reportBtn = document.getElementById('plan-help-report');
+    if (reportBtn) reportBtn.addEventListener('click', downloadHelpReport);
+  }
+
+  // Pulls GET /api/support/report and saves it. Kept here rather than in
+  // the driver Diagnose modal because the question it answers ("why is it
+  // doing that?") is asked while looking at the plan, not at a device.
+  function downloadHelpReport() {
+    const btn = document.getElementById('plan-help-report');
+    if (!btn || btn.disabled) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Building report…';
+    const restore = function (text) {
+      btn.textContent = text;
+      setTimeout(function () {
+        btn.disabled = false;
+        btn.textContent = original;
+      }, 4000);
+    };
+    apiFetch('/api/support/report')
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.blob().then(function (blob) {
+          const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'ftw-help-' + stamp + '.md';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+          restore('Downloaded');
+        });
+      })
+      .catch(function (err) {
+        restore('Failed: ' + (err && err.message ? err.message : String(err)));
+      });
   }
 
   if (document.readyState === 'loading') {

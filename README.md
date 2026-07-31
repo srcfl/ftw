@@ -1,6 +1,6 @@
 # FTW
 
-<img src="web/logo.jpg" alt="FTW" width="120" align="right">
+<img src="web/logo.svg" alt="FTW" width="120" align="right">
 
 > Local-first home energy coordination.
 
@@ -42,8 +42,37 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - hot-reloadable, independently released Lua drivers;
 - a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
 
-The current device catalog is generated from the `DRIVER` metadata in
-[`drivers/*.lua`](drivers/); that source is authoritative.
+The local catalog is generated from `DRIVER` metadata. The public
+[`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
+editable source and FTW's default signed driver channel.
+
+**This repository holds no driver source.** `drivers/*.lua` is gitignored and
+fetched from that repository at the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json):
+
+```bash
+make drivers
+```
+
+The files still ship. FTW's offline recovery set exists because startup is
+deliberately local — a gateway boots and runs without the network, so a remote
+refresh must never block it — so the image, the release tarballs and the tests
+all read `drivers/`. They are simply fetched rather than committed, which is
+why a driver cannot be edited here at all. There is no file to open a pull
+request against; fix it upstream and move the pin. CI fails if one is
+committed.
+
+Moving the pin is a driver release. `make driver-versions-across-pin` compares
+the drivers at the old pin against the drivers at the new one and fails when a
+file changed without its `DRIVER` version moving — the signed channel refuses to
+publish changed bytes under a version it already published, and a gateway
+offered the same version twice cannot tell them apart.
+
+The pin needs watching in both directions. Every pull request runs
+`--check`, which catches a driver edited here. A daily job runs `--behind`,
+which catches the opposite: the pin left in place while a fix lands upstream.
+It opens one issue and keeps it up to date, and stays quiet unless a bundled
+driver actually changed.
 
 ## Install on Linux
 
@@ -65,6 +94,31 @@ are preserved. Raspberry Pi image installation is covered by
 The dashboard is intentionally local. Use a VPN or another operator-managed
 private network when access is needed away from home; FTW does not ship a
 public relay.
+
+## Install on Home Assistant
+
+The official Home Assistant app repository is
+[`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons).
+Its first beta,
+[`ftw-v0.1.0-beta.1`](https://github.com/srcfl/home-assistant-addons/releases/tag/ftw-v0.1.0-beta.1),
+is published. There is no stable app yet — Home Assistant OS and Supervisor
+qualification has to finish first — so treat it as a beta rather than a
+production install.
+
+Open **Settings → Apps → App store → Repositories** in Home Assistant and
+add:
+
+```text
+https://github.com/srcfl/home-assistant-addons
+```
+
+Check the add-on repository's
+[compatibility record](https://github.com/srcfl/home-assistant-addons/blob/main/COMPATIBILITY.md)
+before each install or update. Report Home Assistant install, update, backup,
+restore, or container faults in its
+[issue tracker](https://github.com/srcfl/home-assistant-addons/issues).
+Report Core, API, UI, control, or state faults in this repository. Report driver
+faults to [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers/issues).
 
 ## Local development
 
@@ -92,8 +146,8 @@ workflows.
 
 ## Configuration
 
-`config.example.yaml` and the validation types in `go/internal/config` are
-the configuration reference. Copy the example for a native development setup:
+[`config.example.yaml`](config.example.yaml) and the validation types in
+[`go/internal/config`](go/internal/config) are the configuration reference. Copy the example for a native development setup:
 
 ```bash
 cp config.local.example.yaml config.local.yaml
@@ -108,11 +162,14 @@ writing a driver.
 
 Drivers are plain Lua files and need no compilation. A driver declares its
 catalog metadata, lifecycle and required capabilities in one file. The Go host
-provides capability-scoped Modbus, MQTT, HTTP, WebSocket and TCP access.
+provides capability-scoped Modbus, MQTT, serial, HTTP, WebSocket and TCP access.
 
-Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Signed driver
-artifacts use the same `beta` → `stable` progression as core and can be
-installed or rolled back independently.
+Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Send shared
+driver changes to `srcfl/device-drivers`. That repo publishes one signed,
+content-addressed asset per driver and version. FTW downloads only the chosen
+driver, which can update or roll back without a new FTW core release. Device
+Support may consume the same public source later for other products or a higher
+support level.
 
 EV chargers that speak OCPP are the exception: they need no driver. FTW runs an
 OCPP Central System (1.6J and 2.0.1), so the charger connects and registers itself.
@@ -135,6 +192,7 @@ The repository deliberately keeps prose small. Code, types, tests and driver
 metadata are the detailed reference.
 
 - [Architecture](docs/architecture.md)
+- [Product roadmap](docs/roadmap.md)
 - [Power sign convention](docs/site-convention.md)
 - [Safety invariants](docs/safety.md)
 - [Operations and recovery](docs/operations.md)
@@ -145,8 +203,8 @@ metadata are the detailed reference.
 - [Home Assistant](docs/ha-integration.md)
 - [CalDAV](docs/caldav-integration.md)
 
-Other files under `docs/` are focused installation or external-integration
-guides.
+Other files under [`docs/`](docs/) are focused installation or
+external-integration guides.
 
 ## Contributing
 

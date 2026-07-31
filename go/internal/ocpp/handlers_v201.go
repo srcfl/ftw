@@ -250,4 +250,3 @@ func unitIsKilo(u *types201.UnitOfMeasure) bool {
 		return false
 	}
 }
-

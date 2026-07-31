@@ -66,7 +66,7 @@ jobs:
                 web/*|package.json|package-lock.json)
                   web=true
                   ;;
-                drivers/*.lua)
+                drivers/*.lua|drivers/BUNDLED_SOURCE.json|scripts/sync-bundled-drivers.sh)
                   drivers=true
                   ;;
                 Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh)
@@ -117,9 +117,17 @@ jobs:
       - name: Vet
         working-directory: go
         run: go vet ./...
+      # drivers/ is gitignored and fetched from the pin, so a checkout alone
+      # leaves it empty. Anything that loads a driver needs this first.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Test
         working-directory: go
-        run: go test -count=1 ./...
+        # -timeout is per package. The slowest one takes about 25s, so 120s
+        # leaves plenty of room while capping a hung package at two minutes
+        # instead of the ten-minute default.
+        run: go test -count=1 -timeout 120s ./...
 
   optimizer:
     name: optimizer (Python + contract)
@@ -164,6 +172,56 @@ jobs:
       - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm test
 
+  # Proves the cutover before it happens: throw the committed drivers away,
+  # fetch them from the pin alone, and run the suites that read them. While
+  # the files are still committed this is redundant with the drift check. The
+  # moment they stop being committed it is the only thing standing between a
+  # fresh clone and a build that cannot find a driver.
+  drivers-from-pin:
+    name: drivers build from the pin alone
+    needs: changes
+    if: needs.changes.outputs.drivers == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      - name: Discard the committed snapshot
+        run: rm -f drivers/*.lua
+
+      - name: The presence guard notices
+        run: |
+          if make drivers-present 2>/dev/null; then
+            echo "::error::drivers-present passed with no drivers on disk"
+            exit 1
+          fi
+          echo "guard fired as expected"
+
+      - name: Fetch from the pin
+        run: make drivers
+
+      - name: Every pinned driver came back
+        run: |
+          want="$(jq -r '.drivers | length' drivers/BUNDLED_SOURCE.json)"
+          got="$(ls drivers/*.lua | wc -l | tr -d ' ')"
+          echo "pinned ${want}, fetched ${got}"
+          [ "$want" = "$got" ] || { echo "::error::fetched ${got} of ${want}"; exit 1; }
+
+      # The fetched files land at the same path the committed ones did, so
+      # nothing that reads drivers/ needs to know where they came from.
+      - name: The driver suites pass against the fetched copies
+        working-directory: go
+        run: go test ./internal/drivers/... ./internal/driverinventory/...
+
+      - name: They are byte-for-byte what was committed
+        run: |
+          git diff --exit-code -- drivers/ \
+            || { echo "::error::fetched snapshot differs from the committed one"; exit 1; }
+          echo "identical"
+
   drivers:
     name: drivers
     needs: changes
@@ -177,6 +235,17 @@ jobs:
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
+      # drivers/ is gitignored and fetched from the pin, so a checkout alone
+      # leaves it empty. Anything that loads a driver needs this first.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
+      # drivers/ is a snapshot of srcfl/device-drivers, not a source. Hand-
+      # editing a file here made this a second source of truth and the two
+      # drifted: a Sungrow fix landed upstream while the bundled copy kept the
+      # bug that took a customer's inverter offline.
+      - name: No driver source is committed here
+        run: bash scripts/sync-bundled-drivers.sh --check
       - name: Validate publication
         working-directory: go
         run: >-
@@ -192,7 +261,126 @@ jobs:
           go run ./cmd/ftw-driver-repository check-versions
           -repo-root ..
           -base "${{ needs.changes.outputs.base_sha }}"
+
+      # The check above diffs this repository's history. What reaches a
+      # gateway is decided by where the pin points, so this asks the same
+      # question of the pins -- and keeps asking it once the .lua files stop
+      # being committed here. Quiet on a pull request that does not move it.
+      - name: Require version bumps across the pin
+        run: bash scripts/check-driver-versions.sh "${{ needs.changes.outputs.base_sha }}"
           -head "${{ needs.changes.outputs.head_sha }}"
+
+  device-support-contract:
+    name: Device Support driver contract
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    env:
+      DEVICE_SUPPORT_TOKEN: ${{ secrets.SOURCEFUL_CI_REPO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        if: env.DEVICE_SUPPORT_TOKEN != ''
+        with:
+          python-version: '3.12'
+      - id: baseline
+        name: Read pinned Device Support baseline
+        run: |
+          baseline=go/internal/driverrepo/testdata/device-support-baseline.json
+          for key in repository commit driver version; do
+            echo "${key}=$(jq -r ".${key}" "${baseline}")" >> "${GITHUB_OUTPUT}"
+          done
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      - name: Verify pinned Python-signed fixture and FTW Lua target
+        working-directory: go
+        env:
+          FTW_DEVICE_SUPPORT_INDEX: ${{ github.workspace }}/go/internal/driverrepo/testdata/device-support-v1/index.envelope.json
+          FTW_DEVICE_SUPPORT_PACKAGE: ${{ github.workspace }}/go/internal/driverrepo/testdata/device-support-v1/manifest.envelope.json
+          FTW_DEVICE_SUPPORT_ARTIFACT_DIR: ${{ github.workspace }}/go/internal/driverrepo/testdata/device-support-v1
+        run: |
+          public_key="$(tr -d '\n' < internal/driverrepo/testdata/device-support-v1/public.raw.b64)"
+          FTW_DEVICE_SUPPORT_PUBLIC_KEY="${public_key}" \
+            go test -count=1 ./internal/driverrepo -run '^TestDeviceSupportPythonContract$'
+
+      - name: Check out canonical Device Support package source
+        if: env.DEVICE_SUPPORT_TOKEN != ''
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.baseline.outputs.repository }}
+          ref: ${{ steps.baseline.outputs.commit }}
+          path: .device-support
+          token: ${{ env.DEVICE_SUPPORT_TOKEN }}
+
+      - name: Build and sign the canonical SDM630 package and index from source
+        if: env.DEVICE_SUPPORT_TOKEN != ''
+        env:
+          DRIVER: ${{ steps.baseline.outputs.driver }}
+          VERSION: ${{ steps.baseline.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.baseline.outputs.commit }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/device-support-package"
+          mkdir -p "${output}"
+          uv run --python 3.12 --with cryptography python - <<'PY'
+          import base64
+          from pathlib import Path
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+          output = Path("${{ runner.temp }}") / "device-support-package"
+          key = Ed25519PrivateKey.generate()
+          (output / "private.pem").write_bytes(key.private_bytes(
+              serialization.Encoding.PEM,
+              serialization.PrivateFormat.PKCS8,
+              serialization.NoEncryption(),
+          ))
+          (output / "public.pem").write_bytes(key.public_key().public_bytes(
+              serialization.Encoding.PEM,
+              serialization.PublicFormat.SubjectPublicKeyInfo,
+          ))
+          (output / "public.raw.b64").write_text(base64.b64encode(
+              key.public_key().public_bytes(
+                  serialization.Encoding.Raw,
+                  serialization.PublicFormat.Raw,
+              )
+          ).decode())
+          PY
+          source_date_epoch="$(git -C .device-support show -s --format=%ct "${SOURCE_COMMIT}")"
+          uv run --python 3.12 --with cryptography --with jsonschema --with referencing \
+            python .device-support/tools/driver_package.py package \
+            --source ".device-support/packages/v1/${DRIVER}/package-source.json" \
+            --repo-root .device-support \
+            --output-dir "${output}/artifacts" \
+            --base-url "https://packages.example/${DRIVER}/${VERSION}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --source-date-epoch "${source_date_epoch}" \
+            --key "${output}/private.pem" \
+            --key-id sourceful-test-1
+          uv run --python 3.12 --with cryptography --with jsonschema --with referencing \
+            python .device-support/tools/driver_package.py index \
+            --package-envelope "${output}/artifacts/manifest.envelope.json" \
+            --package-url "https://packages.example/${DRIVER}/${VERSION}/manifest.envelope.json" \
+            --channel beta \
+            --source-date-epoch "${source_date_epoch}" \
+            --public-key "${output}/public.pem" \
+            --key "${output}/private.pem" \
+            --key-id sourceful-test-1 \
+            --output "${output}/index.envelope.json"
+      - name: Verify source-built Python signatures, package binding and FTW Lua target in Go
+        if: env.DEVICE_SUPPORT_TOKEN != ''
+        working-directory: go
+        env:
+          FTW_DEVICE_SUPPORT_INDEX: ${{ runner.temp }}/device-support-package/index.envelope.json
+          FTW_DEVICE_SUPPORT_PACKAGE: ${{ runner.temp }}/device-support-package/artifacts/manifest.envelope.json
+          FTW_DEVICE_SUPPORT_ARTIFACT_DIR: ${{ runner.temp }}/device-support-package/artifacts
+        run: |
+          public_key="$(tr -d '\n' < "${{ runner.temp }}/device-support-package/public.raw.b64")"
+          FTW_DEVICE_SUPPORT_PUBLIC_KEY="${public_key}" \
+            go test -count=1 ./internal/driverrepo -run '^TestDeviceSupportPythonContract$'
 
   compose:
     name: module boundaries
@@ -214,18 +402,24 @@ jobs:
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
+      # drivers/ is gitignored and fetched from the pin, so a checkout alone
+      # leaves it empty. Anything that loads a driver needs this first.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - run: make e2e
 
   test:
     name: go test + vet
     if: always()
-    needs: [changes, core, optimizer, web, drivers, compose, e2e]
+    needs: [changes, core, optimizer, web, drivers, device-support-contract, compose, e2e]
     runs-on: ubuntu-latest
     env:
       RESULTS: >-
         ${{ needs.changes.result }} ${{ needs.core.result }}
         ${{ needs.optimizer.result }} ${{ needs.web.result }}
-        ${{ needs.drivers.result }} ${{ needs.compose.result }}
+        ${{ needs.drivers.result }} ${{ needs.device-support-contract.result }}
+        ${{ needs.compose.result }}
         ${{ needs.e2e.result }}
     steps:
       - name: Require every selected suite to pass

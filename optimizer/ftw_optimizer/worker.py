@@ -19,6 +19,15 @@ from .model import solve
 from .protocol import ProtocolError, error_response, parse_request
 
 
+# PROTOCOL_VERSION is what this worker speaks; MIN_PROTOCOL_VERSION is the
+# oldest Core it still works with. Core accepts any overlap with its own window,
+# so widening this range — rather than moving it — keeps an updated optimizer
+# usable by a Core that has not been updated yet.
+#
+# Prefer adding to FEATURES over bumping the protocol. A feature an old Core
+# does not know about costs it nothing; a protocol bump makes every Core outside
+# the window stop using this optimizer at once.
+MIN_PROTOCOL_VERSION = 1
 PROTOCOL_VERSION = 1
 FEATURES = ["champion", "recourse", "multistage", "commercial_constraints_v1"]
 SOLVE_LOCK = threading.Lock()
@@ -62,6 +71,8 @@ def handshake(raw: Any) -> dict[str, Any] | None:
         "name": "ftw-optimizer",
         "version": os.environ.get("FTW_OPTIMIZER_VERSION", version),
         "protocol_version": PROTOCOL_VERSION,
+        "protocol_min": MIN_PROTOCOL_VERSION,
+        "protocol_max": PROTOCOL_VERSION,
         "features": FEATURES,
         "build_sha": os.environ.get("FTW_OPTIMIZER_BUILD_SHA", ""),
     }
@@ -79,13 +90,25 @@ def process_stream(reader: Any, writer: Any) -> None:
             response = handshake(raw)
             if response is None:
                 # Handshakes stay responsive while a solve is in progress,
-                # but CVXPY/warm-start state remains strictly serialized.
+                # but solver state and its memory cleanup remain serialized.
                 with SOLVE_LOCK:
                     response = handle(raw)
+                    try:
+                        writer.write(
+                            json.dumps(
+                                response,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            )
+                            + "\n"
+                        )
+                        writer.flush()
+                    finally:
+                        response = None
+                        release_unused_memory()
+                continue
         writer.write(json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n")
         writer.flush()
-        response = None
-        release_unused_memory()
 
 
 def serve_unix(socket_path: str) -> None:

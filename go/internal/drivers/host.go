@@ -45,6 +45,12 @@ type ModbusCap interface {
 	Close() error
 }
 
+// SerialCap is read-only access to one serial device.
+type SerialCap interface {
+	Read(maxBytes int, timeout time.Duration) ([]byte, error)
+	Close() error
+}
+
 // WSCap is the host's WebSocket capability. One driver = one upstream
 // connection (matches MQTTCap's single-broker shape) — drivers that
 // need multiple streams can multiplex via GraphQL subscriptions or
@@ -69,6 +75,7 @@ type HostEnv struct {
 	Telemetry  *telemetry.Store
 	MQTT       MQTTCap   // nil → mqtt_* calls return ErrNoCapability
 	Modbus     ModbusCap // nil → modbus_* calls return ErrNoCapability
+	Serial     SerialCap // nil → serial_read returns ErrNoCapability
 	HTTP       bool      // false → http_* calls return ErrNoCapability
 	// HTTPAllowedHosts, when non-empty, restricts which hosts this
 	// driver can reach via host.http_get / host.http_post. Each entry
@@ -88,7 +95,14 @@ type HostEnv struct {
 	// verification (unchanged default for all existing HTTP drivers).
 	// Populated from driver config `capabilities.http.tls_pin_sha256`.
 	HTTPTLSPinSHA256 string
-	WS               WSCap // nil → ws_* calls return ErrNoCapability
+	// HTTPAllowWrite gates host.http_patch, and only http_patch —
+	// http_get stays a read and http_post stays under the plain HTTP
+	// capability (existing drivers POST to query-style APIs). http_patch
+	// returns an error string unless this is set, so granting HTTP for
+	// telemetry never implicitly grants device mutation. Populated from
+	// driver config `capabilities.http.allow_write`.
+	HTTPAllowWrite bool
+	WS             WSCap // nil → ws_* calls return ErrNoCapability
 	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
 	// passed to host.ws_open. Same matching semantics; empty = any host.
 	WSAllowedHosts []string
@@ -99,6 +113,10 @@ type HostEnv struct {
 	// callers / tests can inspect what was granted.
 	TCPAllowedHosts []string
 	Start           time.Time // monotonic start; host.millis() computed from here
+	// RuntimePolicy is nil for bundled, local and legacy repository drivers. A
+	// signed read-only policy denies writes in every phase. A signed v2 control
+	// policy also limits writes to a bounded command/default-mode call.
+	RuntimePolicy *RuntimePolicy
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
 	// declaration for this driver. Zero means "no physical battery
@@ -127,6 +145,23 @@ type HostEnv struct {
 	SN       string
 	MAC      string // resolved by ARP after first connection (best-effort)
 	Endpoint string // e.g. "modbus://192.168.1.1:502" or "mqtt://broker:1883"
+	// Model is the device model name reported via host.set_model. It is
+	// nameplate, not a reading, so it lives beside Make and SN. It is
+	// deliberately NOT part of device_id resolution: a driver often learns
+	// the model from a register read that can fail or arrive late, and a
+	// device_id that changed when the model finally appeared would orphan
+	// every row of persistent state keyed on it.
+	Model string
+	// RatedW is the device's rated AC power in watts, reported via
+	// host.set_rated_w. Nameplate again — it is read off the bus once in
+	// driver_init and does not change between polls, so it belongs here
+	// rather than in each tick's telemetry. Zero means "not reported".
+	RatedW float64
+	// WarmupS holds off the first poll for this many seconds after the
+	// host started the driver, for devices that answer Modbus before
+	// their registers carry meaningful values. Set via host.set_warmup_s
+	// in driver_init; read once by the registry's run loop.
+	WarmupS float64
 
 	// PersistSecret, when non-nil, lets a driver durably write a config
 	// secret (e.g. a rotated OAuth refresh_token) back into its own
@@ -135,6 +170,29 @@ type HostEnv struct {
 	// closure (see registry.go SecretPersister). Keep the value small:
 	// it is round-tripped through config.yaml as a plain string.
 	PersistSecret func(key, value string) error
+	writePhase    string
+	writeDeadline time.Time
+	writeAttempts int
+	writeCount    int
+	writeEvidence map[string]bool
+
+	// Poll-scoped Modbus evidence prevents a Modbus driver from turning failed
+	// reads into fresh zero-valued telemetry. The Lua runtime holds emissions
+	// until driver_poll ends, then commits them only when every read succeeded.
+	requiresFreshModbusRead bool
+	pollActive              bool
+	pollModbusAttempts      int
+	pollModbusSuccesses     int
+	pollTelemetry           [][]byte
+	pollMetrics             []pollMetric
+}
+
+type pollMetric struct {
+	name     string
+	value    float64
+	unit     string
+	register string
+	title    string
 }
 
 // NewHostEnv creates a fresh host environment for a driver.
@@ -148,14 +206,194 @@ func NewHostEnv(name string, tel *telemetry.Store) *HostEnv {
 	}
 }
 
+func (h *HostEnv) WithRuntimePolicy(policy *RuntimePolicy) *HostEnv {
+	h.RuntimePolicy = policy
+	return h
+}
+
+func (h *HostEnv) permissionAllowed(permission string) bool {
+	return h.RuntimePolicy == nil || h.RuntimePolicy.allows(permission)
+}
+
+func (h *HostEnv) beginWriteScope(phase string, deadline time.Time) error {
+	if h.RuntimePolicy == nil {
+		return nil
+	}
+	if !h.RuntimePolicy.IsControlV2() {
+		return errors.New("managed driver has an unsupported control runtime")
+	}
+	if phase != "command" && phase != "default" {
+		return fmt.Errorf("invalid driver write phase %q", phase)
+	}
+	if deadline.IsZero() || !time.Now().Before(deadline) {
+		return errors.New("driver write scope has expired")
+	}
+	h.mu.Lock()
+	h.writePhase = phase
+	h.writeDeadline = deadline
+	h.writeAttempts = 0
+	h.writeCount = 0
+	h.writeEvidence = make(map[string]bool)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *HostEnv) endWriteScope() (int, []string) {
+	if h.RuntimePolicy == nil {
+		return 0, nil
+	}
+	h.mu.Lock()
+	writes := h.writeCount
+	evidence := make([]string, 0, len(h.writeEvidence))
+	for _, name := range []string{"write_ack", "vendor_ack", "readback"} {
+		if h.writeEvidence[name] {
+			evidence = append(evidence, name)
+		}
+	}
+	h.writePhase = ""
+	h.writeDeadline = time.Time{}
+	h.writeAttempts = 0
+	h.writeCount = 0
+	h.writeEvidence = nil
+	h.mu.Unlock()
+	return writes, evidence
+}
+
+func (h *HostEnv) allowWrite(permission string) error {
+	if h.RuntimePolicy == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.RuntimePolicy.allows(permission) {
+		return fmt.Errorf("%s: permission not granted by signed package", permission)
+	}
+	if h.writePhase != "command" && h.writePhase != "default" {
+		return fmt.Errorf("%s: write is not allowed during init, poll, or cleanup", permission)
+	}
+	if h.writeDeadline.IsZero() || !time.Now().Before(h.writeDeadline) {
+		h.writePhase = ""
+		return fmt.Errorf("%s: write scope expired", permission)
+	}
+	if h.writeAttempts >= h.RuntimePolicy.maxWrites() {
+		return fmt.Errorf("%s: write budget exhausted", permission)
+	}
+	h.writeAttempts++
+	return nil
+}
+
+func (h *HostEnv) recordWriteEvidence(name string) {
+	if h.RuntimePolicy == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.writePhase == "command" || h.writePhase == "default" {
+		if name == "write_ack" {
+			h.writeCount++
+		}
+		// Readback proves an applied write only when the read happened after
+		// at least one successful host write in this scope.
+		if name == "readback" && h.writeCount == 0 {
+			h.mu.Unlock()
+			return
+		}
+		if h.writeEvidence == nil {
+			h.writeEvidence = make(map[string]bool)
+		}
+		h.writeEvidence[name] = true
+	}
+	h.mu.Unlock()
+}
+
+func (h *HostEnv) beginPollEvidence() {
+	h.mu.Lock()
+	h.pollActive = true
+	h.pollModbusAttempts = 0
+	h.pollModbusSuccesses = 0
+	h.pollTelemetry = nil
+	h.pollMetrics = nil
+	h.mu.Unlock()
+}
+
+func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err error) {
+	h.mu.Lock()
+	attempts = h.pollModbusAttempts
+	successes = h.pollModbusSuccesses
+	fresh := commit && attempts > 0 && attempts == successes
+	var pendingTelemetry [][]byte
+	var pendingMetrics []pollMetric
+	if h.requiresFreshModbusRead && fresh {
+		pendingTelemetry = h.pollTelemetry
+		pendingMetrics = h.pollMetrics
+	}
+	h.pollActive = false
+	h.pollModbusAttempts = 0
+	h.pollModbusSuccesses = 0
+	h.pollTelemetry = nil
+	h.pollMetrics = nil
+	h.mu.Unlock()
+
+	for _, rawJSON := range pendingTelemetry {
+		if emitErr := h.emitTelemetry(rawJSON); emitErr != nil {
+			return attempts, successes, emitErr
+		}
+	}
+	for _, metric := range pendingMetrics {
+		if emitErr := h.emitMetric(metric.name, metric.value, metric.unit, metric.register, metric.title); emitErr != nil {
+			return attempts, successes, emitErr
+		}
+	}
+	return attempts, successes, nil
+}
+
+func (h *HostEnv) recordPollModbusRead(success bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.pollActive {
+		return
+	}
+	h.pollModbusAttempts++
+	if success {
+		h.pollModbusSuccesses++
+	}
+}
+
+func (h *HostEnv) bufferPollTelemetry(rawJSON []byte) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.pollActive || !h.requiresFreshModbusRead {
+		return false
+	}
+	h.pollTelemetry = append(h.pollTelemetry, append([]byte(nil), rawJSON...))
+	return true
+}
+
+func (h *HostEnv) bufferPollMetric(metric pollMetric) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.pollActive || !h.requiresFreshModbusRead {
+		return false
+	}
+	h.pollMetrics = append(h.pollMetrics, metric)
+	return true
+}
+
 // WithMQTT binds an MQTT capability to this host.
 func (h *HostEnv) WithMQTT(m MQTTCap) *HostEnv { h.MQTT = m; return h }
 
 // WithModbus binds a Modbus capability.
 func (h *HostEnv) WithModbus(m ModbusCap) *HostEnv { h.Modbus = m; return h }
 
+// WithSerial binds a read-only serial capability.
+func (h *HostEnv) WithSerial(s SerialCap) *HostEnv { h.Serial = s; return h }
+
 // WithHTTP enables the HTTP capability.
 func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
+
+// WithHTTPAllowWrite grants the mutating HTTP verb host.http_patch. Scoped
+// to http_patch only; http_get/http_post are unaffected. See
+// HostEnv.HTTPAllowWrite.
+func (h *HostEnv) WithHTTPAllowWrite() *HostEnv { h.HTTPAllowWrite = true; return h }
 
 // WithHTTPAllowedHosts installs an allowlist. An empty / nil slice
 // means "any host" (backward compatible). Matched against URL host.
@@ -247,6 +485,13 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		SoC             *float64 `json:"soc,omitempty"`
 		VehicleSoC      *float64 `json:"vehicle_soc,omitempty"`
 		VehicleSoCFract *float64 `json:"vehicle_soc_fract,omitempty"`
+
+		// Canonical @srcful/data-models spellings. srcfl/device-drivers is
+		// converting its catalog to these, one driver at a time. Accepting
+		// both lets a converted driver run here before the old names are
+		// retired, so no site loses telemetry mid-migration.
+		CanonicalW   *float64 `json:"W,omitempty"`
+		CanonicalSoC *float64 `json:"SoC_nom_fract,omitempty"`
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
 		return fmt.Errorf("emit_telemetry: invalid json: %w", err)
@@ -254,6 +499,12 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	t, err := telemetry.ParseDerType(env.Type)
 	if err != nil {
 		return err
+	}
+	if env.W == nil {
+		env.W = env.CanonicalW
+	}
+	if env.SoC == nil {
+		env.SoC = env.CanonicalSoC
 	}
 	rawW := 0.0
 	if env.W != nil {
@@ -270,6 +521,18 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 			soc = env.VehicleSoCFract
 		}
 	}
+	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
+		return fmt.Errorf("emit_telemetry: %w", err)
+	}
+	// Rewrite alias keys onto the names the Nova payload reads, before the
+	// blob is buffered or stored. Without this a driver's energy counters and
+	// frequency never leave the gateway.
+	rawJSON = normalizeTelemetryKeys(rawJSON)
+	rawJSON = h.stampIdentity(rawJSON)
+
+	if h.bufferPollTelemetry(rawJSON) {
+		return nil
+	}
 	// Drop battery emits from drivers the operator declared as no-battery
 	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
 	// battery registers in firmware, and the driver dutifully emits whatever
@@ -283,9 +546,6 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 			h.Telemetry.RecordDriverSuccess(h.DriverName)
 		}
 		return nil
-	}
-	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
-		return fmt.Errorf("emit_telemetry: %w", err)
 	}
 	if h.Telemetry != nil {
 		h.Telemetry.Update(h.DriverName, t, rawW, soc, rawJSON)
@@ -304,6 +564,9 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 func (h *HostEnv) emitMetric(name string, value float64, unit, register, title string) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
+	}
+	if h.bufferPollMetric(pollMetric{name: name, value: value, unit: unit, register: register, title: title}) {
+		return nil
 	}
 	if h.Telemetry == nil {
 		return nil
@@ -330,6 +593,121 @@ func (h *HostEnv) setMake(m string) {
 	h.mu.Lock()
 	h.Make = m
 	h.mu.Unlock()
+}
+
+// setModel records the device model name.
+func (h *HostEnv) setModel(m string) {
+	h.mu.Lock()
+	h.Model = m
+	h.mu.Unlock()
+}
+
+// setRatedW records the device's rated AC power in watts.
+func (h *HostEnv) setRatedW(w float64) {
+	h.mu.Lock()
+	h.RatedW = w
+	h.mu.Unlock()
+}
+
+// setWarmupS records a startup hold before the first poll, in seconds.
+func (h *HostEnv) setWarmupS(s float64) {
+	h.mu.Lock()
+	h.WarmupS = s
+	h.mu.Unlock()
+}
+
+// DeviceModel returns the model name the driver reported, or "" if it
+// reported none. Named DeviceModel because the field is Model.
+func (h *HostEnv) DeviceModel() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.Model
+}
+
+// RatedPowerW returns the rated AC power the driver reported, or 0.
+func (h *HostEnv) RatedPowerW() float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.RatedW
+}
+
+// Warmup returns the startup hold the driver requested, or 0.
+func (h *HostEnv) Warmup() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.WarmupS <= 0 {
+		return 0
+	}
+	return time.Duration(h.WarmupS * float64(time.Second))
+}
+
+// FirstPollDelay is how long the run loop waits before the first poll.
+// Normally that is just the poll interval; a driver that asked for a
+// warmup gets whatever is left of the warmup window instead, measured
+// from host start so the time already spent in driver_init counts
+// towards it. A warmup shorter than the cadence changes nothing.
+func (h *HostEnv) FirstPollDelay() time.Duration {
+	interval := h.PollInterval()
+	warmup := h.Warmup()
+	if warmup <= 0 {
+		return interval
+	}
+	remaining := warmup - time.Since(h.Start)
+	if remaining > interval {
+		return remaining
+	}
+	return interval
+}
+
+// stampIdentity adds the nameplate values a driver reported once in
+// driver_init — model and rated AC power — to an outgoing telemetry
+// blob. nova.assemble unmarshals this blob straight into DerTelemetry,
+// so a key added here reaches Nova's `model` and `rated_power_w`
+// without every driver repeating the value on every emit.
+//
+// A key the driver set itself always wins: a live reading is closer to
+// the device than a value cached since init.
+func (h *HostEnv) stampIdentity(raw []byte) []byte {
+	h.mu.Lock()
+	model, ratedW := h.Model, h.RatedW
+	h.mu.Unlock()
+	if model == "" && ratedW == 0 {
+		return raw
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
+	}
+	changed := false
+	set := func(key string, value any) {
+		if _, taken := fields[key]; taken {
+			return
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		fields[key] = encoded
+		changed = true
+	}
+	if model != "" {
+		set("model", model)
+	}
+	// The catalog spells rated power both ways. Honour either as
+	// "the driver already said it" so we never contradict a live read.
+	if ratedW != 0 {
+		if _, taken := fields["rated_power_W"]; !taken {
+			set("rated_power_w", ratedW)
+		}
+	}
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // PollInterval returns the driver's current requested poll cadence.
@@ -400,9 +778,12 @@ func (h *HostEnv) mqttPollMessages() ([]MQTTMessage, error) {
 
 func (h *HostEnv) modbusRead(addr, count uint16, kind int32) ([]uint16, error) {
 	if h.Modbus == nil {
+		h.recordPollModbusRead(false)
 		return nil, ErrNoCapability
 	}
-	return h.Modbus.Read(addr, count, kind)
+	regs, err := h.Modbus.Read(addr, count, kind)
+	h.recordPollModbusRead(err == nil)
+	return regs, err
 }
 
 func (h *HostEnv) modbusWriteSingle(addr, value uint16) error {
