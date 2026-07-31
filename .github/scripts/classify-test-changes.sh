@@ -6,6 +6,7 @@ set -euo pipefail
 
 core=false
 optimizer=false
+roofmodel=false
 web=false
 drivers=false
 compose=false
@@ -28,6 +29,11 @@ while IFS= read -r file; do
     optimizer/*|Dockerfile.optimizer|go/internal/mpc/*|go/cmd/ftw/main.go)
       optimizer=true
       ;;
+    # Python roof-geometry module only. Its Go host lives under go/, which
+    # the core suite already covers.
+    roofmodel/*)
+      roofmodel=true
+      ;;
     web/*|package.json|package-lock.json)
       web=true
       ;;
@@ -40,6 +46,7 @@ while IFS= read -r file; do
     Makefile|.github/workflows/test.yml)
       core=true
       optimizer=true
+      roofmodel=true
       web=true
       drivers=true
       compose=true
@@ -52,5 +59,5 @@ while IFS= read -r file; do
   esac
 done
 
-printf 'core=%s\noptimizer=%s\nweb=%s\ndrivers=%s\ncompose=%s\n' \
-  "${core}" "${optimizer}" "${web}" "${drivers}" "${compose}"
+printf 'core=%s\noptimizer=%s\nroofmodel=%s\nweb=%s\ndrivers=%s\ncompose=%s\n' \
+  "${core}" "${optimizer}" "${roofmodel}" "${web}" "${drivers}" "${compose}"
