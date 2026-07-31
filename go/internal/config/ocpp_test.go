@@ -64,6 +64,54 @@ func TestOCPPValidate(t *testing.T) {
 	}
 }
 
+// The OCPP password is the only gate in front of a listener reachable on every
+// interface. It must never be served over /api/config, and a settings save that
+// returns the masked (empty) value must not wipe it.
+func TestOCPPPasswordIsMaskedAndPreserved(t *testing.T) {
+	stored := &Config{OCPP: &OCPP{
+		Enabled:  true,
+		Username: "ftw",
+		Password: "the-real-secret",
+	}}
+
+	masked := stored.MaskSecrets()
+	if masked.OCPP == nil {
+		t.Fatal("masked config lost the ocpp section")
+	}
+	if masked.OCPP.Password != "" {
+		t.Errorf("password leaked through MaskSecrets: %q", masked.OCPP.Password)
+	}
+	if masked.OCPP.Username != "ftw" {
+		t.Errorf("username should survive masking, got %q", masked.OCPP.Username)
+	}
+	// Masking must not mutate the original.
+	if stored.OCPP.Password != "the-real-secret" {
+		t.Errorf("MaskSecrets mutated the source config: %q", stored.OCPP.Password)
+	}
+
+	// The UI round-trips the masked config back on save.
+	incoming := &Config{OCPP: &OCPP{
+		Enabled:  true,
+		Username: "ftw",
+		Password: "",
+	}}
+	incoming.PreserveMaskedSecrets(stored)
+	if incoming.OCPP.Password != "the-real-secret" {
+		t.Errorf("password not preserved on save, got %q", incoming.OCPP.Password)
+	}
+
+	// A genuinely new password must still win.
+	changed := &Config{OCPP: &OCPP{
+		Enabled:  true,
+		Username: "ftw",
+		Password: "a-new-secret",
+	}}
+	changed.PreserveMaskedSecrets(stored)
+	if changed.OCPP.Password != "a-new-secret" {
+		t.Errorf("new password was overwritten, got %q", changed.OCPP.Password)
+	}
+}
+
 // A disabled or absent OCPP section must not stop the rest of the config from
 // validating, and an enabled one without credentials must take the whole
 // config down with it rather than being skipped.

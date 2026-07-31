@@ -999,6 +999,13 @@ func (c Config) MaskSecrets() Config {
 		cp.Password = ""
 		out.HomeAssistant = &cp
 	}
+	// The OCPP password is the only thing standing in front of a listener that
+	// is reachable on every interface, so it must never leave over the API.
+	if out.OCPP != nil {
+		cp := *out.OCPP
+		cp.Password = ""
+		out.OCPP = &cp
+	}
 	if out.Price != nil {
 		cp := *out.Price
 		cp.APIKey = ""
@@ -1070,6 +1077,12 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.CalDAV != nil && existing.CalDAV != nil && incoming.CalDAV.Password == "" {
 		incoming.CalDAV.Password = existing.CalDAV.Password
+	}
+	// Masked out on the way to the UI, so an unchanged password comes back
+	// empty. Without this a save from the settings tab would blank it, and an
+	// enabled server would then fail validation on the next reload.
+	if incoming.OCPP != nil && existing.OCPP != nil && incoming.OCPP.Password == "" {
+		incoming.OCPP.Password = existing.OCPP.Password
 	}
 	if incoming.HomeAssistant != nil && existing.HomeAssistant != nil && incoming.HomeAssistant.Password == "" {
 		incoming.HomeAssistant.Password = existing.HomeAssistant.Password
