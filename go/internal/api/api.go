@@ -51,6 +51,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
 	"github.com/srcfl/ftw/go/internal/pvperf"
+	"github.com/srcfl/ftw/go/internal/roofmodel"
 	"github.com/srcfl/ftw/go/internal/scanner"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
@@ -143,6 +144,10 @@ type Deps struct {
 	// Optional: STRÅNG-based PV performance scoring. Nil when the site has no
 	// PV geometry to score against (surfaced as {enabled:false}).
 	PVPerf *pvperf.Service
+
+	// RoofModel is the optional Lantmäteriet roof-geometry module. nil when the
+	// module is absent or disabled, which is the normal case outside Sweden.
+	RoofModel *roofmodel.Service
 
 	// Optional: MPC planner. Nil if disabled or a buildMPC gate skipped it.
 	MPC *mpc.Service
@@ -472,6 +477,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/forecast", Read, s.handleForecast)
 	s.handle("GET  /api/pv/performance", Read, s.handlePVPerformance)
 	s.handle("GET  /api/data-sources", Read, s.handleDataSources)
+	s.handle("GET  /api/roofmodel", Read, s.handleRoofModel)
+	s.handle("POST /api/roofmodel/derive", Configure, s.handleRoofModelDerive)
 	s.handle("GET  /api/mpc/plan", Read, s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", Configure, s.handleMPCReplan)
 	s.handle("GET  /api/mpc/diagnose", Read, s.handleMPCDiagnose)
@@ -2296,6 +2303,76 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": rows, "enabled": true})
 }
 
+// ---- /api/roofmodel ----
+//
+// GET reports whether roof derivation is available for this site and why not
+// when it is unavailable. POST /api/roofmodel/derive runs it.
+//
+// Deliberately *not* wired: writing the derived arrays straight into
+// weather.pv_arrays. Derivation is a best guess from a point cloud that may be
+// years old, and silently rewriting an operator's panel config is a change they
+// should make knowingly. The endpoint returns the proposal; applying it is a
+// separate, explicit act.
+func (s *Server) handleRoofModel(w http.ResponseWriter, r *http.Request) {
+	lat, lon, haveSite := s.siteLocation()
+	resp := map[string]any{"enabled": s.deps.RoofModel.Enabled()}
+	if haveSite {
+		resp["covers"] = coverage.Covers("lantmateriet", lat, lon)
+		resp["latitude"], resp["longitude"] = lat, lon
+	}
+	if src, ok := coverage.ByID("lantmateriet"); ok {
+		resp["area"] = src.Area
+		resp["license"] = src.License
+		resp["note"] = src.Note
+	}
+	writeJSON(w, 200, resp)
+}
+
+func (s *Server) handleRoofModelDerive(w http.ResponseWriter, r *http.Request) {
+	if !s.deps.RoofModel.Enabled() {
+		writeJSON(w, 200, map[string]any{
+			"enabled": false,
+			"error":   "roof model module is not enabled",
+		})
+		return
+	}
+	lat, lon, haveSite := s.siteLocation()
+	if !haveSite {
+		writeJSON(w, 400, map[string]any{"error": "site latitude/longitude is not configured"})
+		return
+	}
+	// A derive downloads and segments LiDAR tiles; the service time-boxes it,
+	// but the request should also die with the client rather than outliving it.
+	model, err := s.deps.RoofModel.Derive(r.Context(), lat, lon)
+	if err != nil {
+		status := 502
+		if errors.Is(err, roofmodel.ErrOutsideCoverage) || errors.Is(err, roofmodel.ErrNoCredentials) {
+			status = 400
+		}
+		writeJSON(w, status, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled":         true,
+		"model":           model,
+		"proposed_arrays": model.ToPVArrays(),
+	})
+}
+
+// siteLocation returns the configured site coordinates.
+func (s *Server) siteLocation() (lat, lon float64, ok bool) {
+	if s.deps.CfgMu == nil {
+		return 0, 0, false
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if s.deps.Cfg == nil || s.deps.Cfg.Weather == nil {
+		return 0, 0, false
+	}
+	lat, lon = s.deps.Cfg.Weather.Latitude, s.deps.Cfg.Weather.Longitude
+	return lat, lon, lat != 0 || lon != 0
+}
+
 // ---- /api/data-sources ----
 //
 // Where each external data source works, and whether it covers this site.
@@ -2314,14 +2391,7 @@ func (s *Server) handleDataSources(w http.ResponseWriter, r *http.Request) {
 	// Weather is an optional config section, so it is nil on a site that has
 	// never configured one — which is exactly the site most likely to be
 	// looking at this endpoint.
-	if s.deps.CfgMu != nil {
-		s.deps.CfgMu.RLock()
-		if s.deps.Cfg != nil && s.deps.Cfg.Weather != nil {
-			lat, lon = s.deps.Cfg.Weather.Latitude, s.deps.Cfg.Weather.Longitude
-			haveSite = lat != 0 || lon != 0
-		}
-		s.deps.CfgMu.RUnlock()
-	}
+	lat, lon, haveSite = s.siteLocation()
 
 	// An explicit ?lat=&lon= overrides the configured site so the Weather tab
 	// can preview coverage for a pin the operator is still dragging around,

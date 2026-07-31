@@ -31,6 +31,7 @@ type Config struct {
 	State            *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
 	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
+	RoofModel        *RoofModel         `yaml:"roofmodel,omitempty" json:"roofmodel,omitempty"`
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
@@ -1066,6 +1067,34 @@ type Price struct {
 	// most Swedish customer agreements pass through. Set to a pointer
 	// to 0.0 if you have a guaranteed-zero-floor agreement.
 	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
+}
+
+// RoofModel configures the optional Lantmäteriet roof-geometry module.
+//
+// Off by default and off the control tick entirely: it runs only when an
+// operator asks for a derive during setup, in its own time-boxed subprocess,
+// and its output only ever pre-fills the editable weather.pv_arrays. Absent or
+// disabled, everything else behaves normally.
+//
+// GeotorgetToken is the operator's own credential. It is redacted in API
+// responses by the existing sensitive-key rule (any key containing "token").
+type RoofModel struct {
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Command is the interpreter used for the module; defaults to "python3".
+	Command   string `yaml:"command,omitempty" json:"command,omitempty"`
+	ModuleDir string `yaml:"module_dir,omitempty" json:"module_dir,omitempty"`
+
+	GeotorgetUsername string `yaml:"geotorget_username,omitempty" json:"geotorget_username,omitempty"`
+	GeotorgetToken    string `yaml:"geotorget_token,omitempty" json:"geotorget_token,omitempty"`
+
+	// RadiusM is how far around the site to pull LiDAR (default 40 m).
+	RadiusM float64 `yaml:"radius_m,omitempty" json:"radius_m,omitempty"`
+	// PackingFactor is the usable fraction of a roof face after ridges, eaves,
+	// chimneys and walkways (default 0.70).
+	PackingFactor float64 `yaml:"packing_factor,omitempty" json:"packing_factor,omitempty"`
+	// TimeoutS bounds a derive. LiDAR tiles are large and this runs on a Pi,
+	// so an unbounded run could sit on memory indefinitely (default 600).
+	TimeoutS int `yaml:"timeout_s,omitempty" json:"timeout_s,omitempty"`
 }
 
 // Weather is the weather-forecast source config.

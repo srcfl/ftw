@@ -25,6 +25,7 @@ const (
 	KindForecast   Kind = "forecast"
 	KindIrradiance Kind = "irradiance"
 	KindPrice      Kind = "price"
+	KindGeodata    Kind = "geodata"
 )
 
 // BBox is an inclusive latitude/longitude bounding box in WGS84 degrees.
@@ -114,6 +115,18 @@ var sources = []Source{
 		BBox:      strangDomain,
 		License:   "CC BY 4.0",
 		Note:      "Historical only (1999 to ~1 day ago). Used for PV performance scoring and forecast calibration, never as a forward forecast.",
+	},
+	{
+		ID: "lantmateriet", Kind: KindGeodata, Label: "Lantmäteriet (buildings + LiDAR)",
+		Area:      "Sweden",
+		Countries: []string{"SE"},
+		// Sweden's national extent. Generous at the edges for the same reason
+		// as STRÅNG: a box cannot trace a coastline, and the upstream STAC
+		// search returning no tiles is the authoritative answer.
+		BBox:        &BBox{MinLat: 55.0, MinLon: 10.5, MaxLat: 69.5, MaxLon: 24.5},
+		RequiresKey: true,
+		License:     "CC BY 4.0",
+		Note:        "Free open data, but gated behind a Geotorget account the operator orders themselves. Used to derive roof tilt/azimuth; everywhere else that stays a manual entry.",
 	},
 	{
 		ID: "sourceful", Kind: KindPrice, Label: "Sourceful (cached ENTSO-E)",
