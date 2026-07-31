@@ -60,12 +60,38 @@ type Array struct {
 	SegmentID  string  `json:"segment_id"`
 }
 
+// BuildingList is what `--mode buildings` emits: GeoJSON features a map can
+// draw directly, nearest first. Geometry is passed through as raw JSON because
+// core has no business interpreting a polygon -- it only ferries it to the UI.
+type BuildingList struct {
+	SchemaVersion int `json:"schema_version"`
+	Site          struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	} `json:"site"`
+	Buildings []json.RawMessage `json:"buildings"`
+}
+
+// Building records which footprint a model was derived from, and how much of
+// the surrounding cloud survived the clip -- the honest measure of whether the
+// footprint and the scan actually agree.
+type Building struct {
+	BuildingID      string          `json:"building_id"`
+	AreaM2          float64         `json:"area_m2"`
+	Footprint       json.RawMessage `json:"footprint"`
+	ReturnsUsed     int             `json:"returns_used"`
+	ReturnsInRadius int             `json:"returns_in_radius"`
+}
+
 // Model is the versioned document the module emits.
 type Model struct {
 	SchemaVersion int     `json:"schema_version"`
 	Arrays        []Array `json:"arrays"`
 	PlanesFound   int     `json:"planes_found"`
-	Site          struct {
+	// Building is null when the whole search radius was segmented rather than
+	// one picked footprint.
+	Building *Building `json:"building"`
+	Site     struct {
 		Latitude  float64 `json:"latitude"`
 		Longitude float64 `json:"longitude"`
 		RadiusM   float64 `json:"radius_m"`
@@ -134,12 +160,58 @@ func (s *Service) packingFactor() float64 {
 	return defaultPackingFactor
 }
 
+// Buildings lists candidate building footprints near a site, nearest first, so
+// the operator can pick the one their panels are going on.
+//
+// Without this step a derive segments everything inside its radius: the
+// neighbour's roof, the garage, the trees. Worse, RANSAC fits infinite planes,
+// so a second building sharing the ridge orientation lands inside the first
+// one's inlier band however far away it is and steals its returns.
+func (s *Service) Buildings(ctx context.Context, lat, lon float64) (*BuildingList, error) {
+	out, err := s.run(ctx, lat, lon, "buildings", "")
+	if err != nil {
+		return nil, err
+	}
+	var list BuildingList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("roof model returned unreadable output: %w", err)
+	}
+	if list.SchemaVersion != 1 {
+		return nil, fmt.Errorf("roof model schema_version %d is not supported", list.SchemaVersion)
+	}
+	slog.Info("roof model buildings", "lat", lat, "lon", lon, "found", len(list.Buildings))
+	return &list, nil
+}
+
 // Derive runs the module for one site.
+//
+// buildingID is optional; pass one from Buildings to clip the LiDAR to that
+// footprint before segmenting, which is what makes the derived tilt and azimuth
+// belong to the operator's own roof rather than to whatever else stood in range.
 //
 // Coverage and credentials are checked before spawning anything: a site outside
 // Sweden can never succeed, and a missing credential fails the same way every
 // time, so neither is worth an interpreter start and a network round trip.
-func (s *Service) Derive(ctx context.Context, lat, lon float64) (*Model, error) {
+func (s *Service) Derive(ctx context.Context, lat, lon float64, buildingID string) (*Model, error) {
+	out, err := s.run(ctx, lat, lon, "derive", buildingID)
+	if err != nil {
+		return nil, err
+	}
+	var m Model
+	if err := json.Unmarshal(out, &m); err != nil {
+		return nil, fmt.Errorf("roof model returned unreadable output: %w", err)
+	}
+	if m.SchemaVersion != 1 {
+		return nil, fmt.Errorf("roof model schema_version %d is not supported", m.SchemaVersion)
+	}
+	slog.Info("roof model derived",
+		"lat", lat, "lon", lon, "arrays", len(m.Arrays),
+		"planes", m.PlanesFound, "building", buildingID)
+	return &m, nil
+}
+
+// run spawns the module and returns its stdout.
+func (s *Service) run(ctx context.Context, lat, lon float64, mode, buildingID string) ([]byte, error) {
 	if !s.Enabled() {
 		return nil, ErrDisabled
 	}
@@ -155,12 +227,16 @@ func (s *Service) Derive(ctx context.Context, lat, lon float64) (*Model, error) 
 
 	args := []string{
 		"-m", "ftw_roofmodel",
+		"--mode", mode,
 		"--lat", fmt.Sprintf("%.6f", lat),
 		"--lon", fmt.Sprintf("%.6f", lon),
 		"--username", s.cfg.GeotorgetUsername,
 		"--token", s.cfg.GeotorgetToken,
 		"--radius-m", fmt.Sprintf("%.1f", s.radius()),
 		"--packing-factor", fmt.Sprintf("%.3f", s.packingFactor()),
+	}
+	if buildingID != "" {
+		args = append(args, "--building-id", buildingID)
 	}
 	cmd := exec.CommandContext(ctx, s.command(), args...)
 	if s.cfg.ModuleDir != "" {
@@ -170,9 +246,7 @@ func (s *Service) Derive(ctx context.Context, lat, lon float64) (*Model, error) 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	start := time.Now()
 	err := cmd.Run()
-	elapsed := time.Since(start)
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("roof model timed out after %s", s.timeout())
@@ -189,19 +263,7 @@ func (s *Service) Derive(ctx context.Context, lat, lon float64) (*Model, error) 
 	if stdout.Len() > maxOutputBytes {
 		return nil, fmt.Errorf("roof model returned %d bytes, refusing", stdout.Len())
 	}
-
-	var m Model
-	if err := json.Unmarshal(stdout.Bytes(), &m); err != nil {
-		return nil, fmt.Errorf("roof model returned unreadable output: %w", err)
-	}
-	if m.SchemaVersion != 1 {
-		return nil, fmt.Errorf("roof model schema_version %d is not supported", m.SchemaVersion)
-	}
-
-	slog.Info("roof model derived",
-		"lat", lat, "lon", lon, "arrays", len(m.Arrays),
-		"planes", m.PlanesFound, "elapsed", elapsed)
-	return &m, nil
+	return stdout.Bytes(), nil
 }
 
 // ToPVArrays converts derived arrays into config entries ready to be written

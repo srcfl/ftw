@@ -971,6 +971,10 @@ type RoofModel struct {
 
 	GeotorgetUsername string `yaml:"geotorget_username,omitempty" json:"geotorget_username,omitempty"`
 	GeotorgetToken    string `yaml:"geotorget_token,omitempty" json:"geotorget_token,omitempty"`
+	// HasGeotorgetToken is set only on the masked copy the API returns, so the
+	// UI can show that a token is stored without ever receiving it. Never
+	// written to YAML and never read from an incoming config.
+	HasGeotorgetToken bool `yaml:"-" json:"has_geotorget_token,omitempty"`
 
 	// RadiusM is how far around the site to pull LiDAR (default 40 m).
 	RadiusM float64 `yaml:"radius_m,omitempty" json:"radius_m,omitempty"`
@@ -1090,6 +1094,15 @@ func (c Config) MaskSecrets() Config {
 		cp.APIKey = ""
 		out.Weather = &cp
 	}
+	if out.RoofModel != nil {
+		cp := *out.RoofModel
+		// The UI has to distinguish "no credential stored" from "one is stored
+		// but masked", or an operator cannot tell whether they still need to
+		// paste their Geotorget token in.
+		cp.HasGeotorgetToken = strings.TrimSpace(cp.GeotorgetToken) != ""
+		cp.GeotorgetToken = ""
+		out.RoofModel = &cp
+	}
 	if out.Notifications != nil {
 		cp := *out.Notifications
 		if cp.Ntfy != nil {
@@ -1160,6 +1173,9 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.Weather != nil && existing.Weather != nil && incoming.Weather.APIKey == "" {
 		incoming.Weather.APIKey = existing.Weather.APIKey
+	}
+	if incoming.RoofModel != nil && existing.RoofModel != nil && incoming.RoofModel.GeotorgetToken == "" {
+		incoming.RoofModel.GeotorgetToken = existing.RoofModel.GeotorgetToken
 	}
 	if incoming.Notifications != nil && existing.Notifications != nil &&
 		incoming.Notifications.Ntfy != nil && existing.Notifications.Ntfy != nil {
