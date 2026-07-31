@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 // TCPCap is the host's raw TCP socket capability. One driver = one upstream
@@ -93,7 +95,7 @@ func (n *netTCP) Open(addr string) error {
 		return fmt.Errorf("tcp: %s", reason)
 	}
 
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := mdnsresolve.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return fmt.Errorf("tcp dial: %w", err)
 	}

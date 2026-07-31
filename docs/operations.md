@@ -180,30 +180,57 @@ Verify the broker address from the same network namespace as core, then inspect
 broker and driver logs. Device credentials and topic mappings belong to the
 driver configuration.
 
-### `.local` names inside the container
+### A device `.local` name does not resolve
 
-The image ships `libnss-mdns`, so ordinary glibc tools inside the container —
-`getent hosts zap.local` and `wget` — resolve `.local` the way they do on
-the host. `apt` wires `mdns4_minimal [NOTFOUND=return]` into
-`/etc/nsswitch.conf` when the package is installed; nothing else is needed at
-build time.
+FTW resolves `.local` device names itself; the OS resolver is not involved,
+because a `CGO_ENABLED=0` Go binary never consults NSS. There are two places an
+answer can come from, and the log line for a successful lookup says which:
 
-At run time that path talks to `avahi-daemon` over a Unix socket, and a socket
-is not shared by host networking the way a port is. Mount it explicitly:
+```
+resolved host over mDNS host=zap.local addr=192.168.1.42 via=avahi
+```
+
+**`via=avahi`** — the host's `avahi-daemon` answered over its socket. This is
+preferred when available: avahi already holds a record cache, and it is the
+same daemon that `getent hosts zap.local` inside the container goes through, so
+FTW and your shell cannot disagree about an address.
+
+**`via=multicast`** — FTW queried the LAN directly. This is what happens when
+the avahi socket is not mounted, which is the default, and it needs no host
+software at all.
+
+Failures log `mDNS resolution failed`, and the message names both backends when
+both were tried.
+
+Either way multicast has to reach the LAN, which the Linux Compose topology
+provides through `network_mode: host`. Under `docker-compose.macos.yml` the
+container is bridged and multicast does not reach the LAN, so configure devices
+by IP there.
+
+#### Letting FTW use avahi
+
+Host networking shares ports, not Unix sockets, so avahi has to be bind-mounted
+in. `docker-compose.yml` carries the line commented out:
 
 ```yaml
     volumes:
-      - /run/avahi-daemon/socket:/run/avahi-daemon/socket:ro
+      - /run/avahi-daemon:/run/avahi-daemon:ro
 ```
 
-Only add this on a host that actually runs `avahi-daemon` — the Raspberry Pi
-image does. Without the daemon Docker creates a *directory* at that path, which
-resolves nothing and is harmless but confusing; `ls -l` there is the quickest
-way to tell the two apart.
+Mount the *directory*, not the socket file inside it. If the host path is
+missing Docker creates it, and an empty directory is harmless — whereas a
+directory created where the socket belongs stops `avahi-daemon` from ever
+starting. Restarting avahi detaches the mount, so restart FTW after you do.
 
-This makes the container's own tooling agree with the host. Whether the FTW
-process itself resolves a device's `.local` name is a separate question,
-answered by `internal/mdnsresolve`.
+This is an optimisation, not a requirement: device connectivity is unchanged
+without it. What it does add is `libnss-mdns` working for ordinary tools in the
+image — `getent hosts zap.local`, `curl`, `wget` — which is the quickest way to
+check a name from inside the container.
+
+Under the Home Assistant add-on none of this applies: Supervisor mounts only a
+fixed set of named paths, so the socket cannot be provided and FTW always
+queries the LAN directly. The add-on runs with `host_network: true`, which is
+what makes that work.
 
 ### Configuration rejected
 

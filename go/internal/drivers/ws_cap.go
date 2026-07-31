@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 // gorillaWS is the production WSCap implementation. One per driver.
@@ -73,6 +75,8 @@ func (g *gorillaWS) Open(url string, headers map[string]string) error {
 	}
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 15 * time.Second
+	// ".local" hosts need mDNS; everything else falls through to a plain dial.
+	dialer.NetDialContext = mdnsresolve.DialContext
 	if len(subprotocols) > 0 {
 		dialer.Subprotocols = subprotocols
 	}

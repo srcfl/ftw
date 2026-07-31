@@ -4,12 +4,15 @@ package mqtt
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"sync"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 // Capability wraps a paho client to match drivers.MQTTCap.
@@ -51,6 +54,14 @@ func Dial(host string, port int, username, password, clientID string) (*Capabili
 	}
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", host, port)).
+		// paho's built-in dialer goes through the stdlib resolver, which never
+		// answers a ".local" name. Every broker URL built here is tcp://, so a
+		// TCP-only replacement is complete; non-".local" hosts fall through to
+		// a plain dial inside mdnsresolve.
+		SetCustomOpenConnectionFn(func(uri *url.URL, o paho.ClientOptions) (net.Conn, error) {
+			d := mdnsresolve.Dialer{Dialer: net.Dialer{Timeout: o.ConnectTimeout}}
+			return d.Dial("tcp", uri.Host)
+		}).
 		SetClientID(clientID).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).

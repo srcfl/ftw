@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 const (
@@ -39,10 +41,13 @@ func newTCPClient(addr string, timeout, keepAlive time.Duration) *tcpClient {
 }
 
 func (c *tcpClient) Open() error {
-	dialer := net.Dialer{
+	// Resolution happens here, on every Open, so a device configured by its
+	// ".local" name is found again after a DHCP lease moves it — the reconnect
+	// path rebuilds the client from c.addr and picks up the new address.
+	dialer := mdnsresolve.Dialer{Dialer: net.Dialer{
 		Timeout:   modbusDialTimeout,
 		KeepAlive: c.keepAlive,
-	}
+	}}
 	conn, err := dialer.Dial("tcp", c.addr)
 	if err != nil {
 		return err

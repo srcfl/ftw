@@ -91,7 +91,7 @@ drivers:
   #   battery_telemetry_only: true
   #   capabilities:
   #     http:
-  #       allowed_hosts: ["zap.local"]  # use the LAN IP if mDNS is unavailable
+  #       allowed_hosts: ["zap.local"]  # .local is resolved by FTW over mDNS
   #   config:
   #     host: zap.local
   #     # meter_serial: p1m-...          # optional; P1 is auto-selected
