@@ -69,7 +69,7 @@ does not change.
 ## Where the code comes from
 
 The protocol layer is [`github.com/lorenzodonini/ocpp-go`](https://github.com/lorenzodonini/ocpp-go)
-v0.19.0, MIT licensed. It is an ordinary Go module dependency, pinned in
+v0.19.0, under the MIT license. It is an ordinary Go module dependency, pinned in
 `go/go.mod` and checksum-verified through `go/go.sum`. Nothing in FTW is copied
 or forked from it.
 
