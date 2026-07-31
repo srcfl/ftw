@@ -18,6 +18,7 @@ import datetime as dt
 from typing import Any
 
 from . import sweref
+from .buildings import Building, clip_to_footprint, search_buildings
 from .geotorget import (
     COLLECTION_LIDAR,
     Credentials,
@@ -45,6 +46,10 @@ MIN_ARRAY_AREA_M2 = 8.0
 
 # Lantmaeteriet's Laserdata Skog is specified at 1-2 points/m2.
 NOMINAL_POINT_DENSITY = 1.5
+
+# Below this, a clipped footprint cannot support a plane fit -- segment_roof
+# needs 40 points for a single face, and a roof has at least two.
+MIN_POINTS_AFTER_CLIP = 80
 
 
 class RoofModelError(RuntimeError):
@@ -155,11 +160,30 @@ def derive(
     radius_m: float = DEFAULT_RADIUS_M,
     packing_factor: float = DEFAULT_PACKING_FACTOR,
     module_w_per_m2: float = DEFAULT_MODULE_W_PER_M2,
+    building_id: str | None = None,
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
-    """Derive a roof model for one site and return it as a JSON-ready dict."""
+    """Derive a roof model for one site and return it as a JSON-ready dict.
+
+    Pass `building_id` -- one the operator picked from `search_buildings` -- to
+    clip the LiDAR to that footprint before segmenting. Without it the whole
+    radius is segmented, which will happily return the neighbour's roof and lets
+    coplanar buildings steal each other's points; see buildings.py.
+    """
     if client is None:
         client = GeotorgetClient(credentials)
+
+    chosen: Building | None = None
+    if building_id:
+        candidates = search_buildings(
+            client, latitude=latitude, longitude=longitude, radius_m=radius_m
+        )
+        chosen = next((b for b in candidates if b.building_id == building_id), None)
+        if chosen is None:
+            raise RoofModelError(
+                f"building {building_id!r} was not found near this site; it may "
+                "have been picked against a different coordinate"
+            )
 
     south, west, north, east = sweref.metre_box_around(latitude, longitude, radius_m)
     bbox = sweref.bbox_wgs84_to_sweref99tm(south, west, north, east)
@@ -184,6 +208,16 @@ def derive(
     if points is None or len(points) == 0:
         raise RoofModelError("LiDAR tiles carried no readable point data")
 
+    total_returns = len(points)
+    if chosen is not None:
+        points = clip_to_footprint(points, chosen.ring_sweref)
+        if len(points) < MIN_POINTS_AFTER_CLIP:
+            raise RoofModelError(
+                f"only {len(points)} LiDAR returns fall on building "
+                f"{chosen.building_id!r}. The footprint and the point cloud may "
+                "be from different years, or the building is newer than the scan."
+            )
+
     planes = segment_roof(points, point_density=NOMINAL_POINT_DENSITY)
     arrays = planes_to_arrays(
         planes, packing_factor=packing_factor, module_w_per_m2=module_w_per_m2
@@ -200,6 +234,13 @@ def derive(
             "item_count": len(lidar_items),
             "dataset_datetime": captured.isoformat() if captured else None,
         },
+        "building": {
+            "building_id": chosen.building_id,
+            "area_m2": round(chosen.area_m2, 1),
+            "footprint": chosen.to_geojson()["geometry"],
+            "returns_used": len(points),
+            "returns_in_radius": total_returns,
+        } if chosen is not None else None,
         "arrays": [a.to_json() for a in arrays],
         "planes_found": len(planes),
         "captured_at_ms": int(captured.timestamp() * 1000) if captured else None,

@@ -268,6 +268,233 @@
       .catch(function () { /* coverage is advisory; never break the tab */ });
   }
 
+  // ---- Roof geometry from Lantmäteriet -------------------------------------
+  //
+  // Typing a tilt and an azimuth means measuring your own roof, and most people
+  // guess. Sweden publishes the two datasets needed to do it properly, so this
+  // picks your building off a map and reads the slants out of the LiDAR.
+  //
+  // Both datasets are free but sit behind a Geotorget account, so the operator
+  // brings their own credentials. Everything degrades to the numeric fields
+  // above when the module, the credentials or the coverage is missing.
+
+  var roofState = { features: [], selectedId: null };
+
+  function roofFieldset(ctx) {
+    var field = ctx.field, help = ctx.help, config = ctx.config;
+    if (!config.roofmodel) config.roofmodel = {};
+    var stored = config.roofmodel.has_geotorget_token;
+    return '<fieldset><legend>Roof geometry from Lantmäteriet ' + help(
+        'Optional and Sweden-only. Reads the tilt and azimuth of each roof face from ' +
+        'Lantmäteriet\'s laser scanning data (Laserdata Skog) for a building you pick on ' +
+        'the map, and fills in the PV arrays above. Needs a free Geotorget account with ' +
+        'access to "Byggnad Nedladdning, vektor" and "Laserdata Nedladdning, Skog".') +
+      '</legend>' +
+      '<label><input type="checkbox" data-checkbox-path="roofmodel.enabled"' +
+      (config.roofmodel.enabled ? " checked" : "") + '> Enable roof derivation</label>' +
+      '<div class="field-row"><div>' +
+      field("Geotorget username", "roofmodel.geotorget_username", "text", "") +
+      '</div><div>' +
+      field(stored ? "Geotorget token (stored — type to replace)" : "Geotorget token",
+            "roofmodel.geotorget_token", "password", "") +
+      '</div></div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0">' +
+      '<button class="btn-add" id="roof-find" type="button">Find buildings here</button>' +
+      '<button class="btn-add" id="roof-derive" type="button" disabled>Read roof from LiDAR</button>' +
+      '</div>' +
+      '<div id="roof-status" style="font-size:0.75rem;color:var(--text-dim);margin:8px 0 0"></div>' +
+      '<div id="roof-buildings" style="margin:6px 0 0"></div>' +
+      '<p style="color:var(--text-dim);font-size:0.72rem;margin:8px 0 0">' +
+      'Data © Lantmäteriet (CC BY 4.0). Derived values are a starting point — check them ' +
+      'against your installation before relying on the forecast.' +
+      '</p>' +
+      '</fieldset>';
+  }
+
+  function roofSay(html, tone) {
+    var el = document.getElementById("roof-status");
+    if (!el) return;
+    el.style.color = tone === "bad" ? "var(--warn, #f59e0b)" : "var(--text-dim)";
+    el.innerHTML = html;
+  }
+
+  function findBuildings(ctx) {
+    var w = (ctx.config && ctx.config.weather) || {};
+    var q = "";
+    if (w.latitude != null && w.longitude != null) {
+      q = "?lat=" + encodeURIComponent(w.latitude) + "&lon=" + encodeURIComponent(w.longitude);
+    }
+    roofSay("Searching Lantmäteriet for buildings…");
+    return fetch("/api/roofmodel/buildings" + q)
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        var d = res.d || {};
+        if (d.enabled === false) {
+          roofSay("Roof derivation is off. Tick <em>Enable roof derivation</em>, add your " +
+                  "Geotorget credentials and save, then try again.", "bad");
+          return;
+        }
+        if (!res.ok || d.error) {
+          roofSay(ctx.escHtml(d.error || "the building search failed"), "bad");
+          return;
+        }
+        roofState.features = d.buildings || [];
+        roofState.selectedId = null;
+        if (!roofState.features.length) {
+          roofSay("No buildings found here. Move the marker onto your roof and try again.", "bad");
+          return;
+        }
+        roofSay("Found " + roofState.features.length +
+                " building(s). Pick yours on the map or in the list.");
+        drawBuildings();
+        renderBuildingList(ctx);
+      })
+      .catch(function (e) { roofSay(ctx.escHtml(String(e && e.message || e)), "bad"); });
+  }
+
+  function featureCollection() {
+    return {
+      type: "FeatureCollection",
+      features: roofState.features.map(function (f) {
+        var p = Object.assign({}, f.properties || {});
+        p.selected = (f.id || p.building_id) === roofState.selectedId;
+        return { type: "Feature", id: f.id, geometry: f.geometry, properties: p };
+      }),
+    };
+  }
+
+  // MapLibre paints with concrete colours and cannot read var(), the same
+  // problem the canvas charts have. Resolve the theme tokens through a hidden
+  // probe that inherits :root, exactly as app.js's cssColor does. Resolved once
+  // per layer creation, so a theme toggle mid-pick keeps the old hue until the
+  // tab is reopened — the footprints stay legible either way.
+  var _probe = null;
+  function themeColor(name, fallback) {
+    if (!_probe) {
+      _probe = document.createElement("span");
+      _probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none";
+      document.body.appendChild(_probe);
+    }
+    _probe.style.color = "var(" + name + ", " + fallback + ")";
+    return getComputedStyle(_probe).color || fallback;
+  }
+
+  function drawBuildings() {
+    var map = window._weatherMap;
+    if (!map || !map.isStyleLoaded || !map.isStyleLoaded()) return;
+    var data = featureCollection();
+    var src = map.getSource("roof-buildings");
+    if (src) { src.setData(data); return; }
+    var candidate = themeColor("--cyan", "#38bdf8");
+    var picked = themeColor("--accent-e", "#f5b942");
+    map.addSource("roof-buildings", { type: "geojson", data: data });
+    map.addLayer({
+      id: "roof-buildings-fill", type: "fill", source: "roof-buildings",
+      paint: {
+        "fill-color": ["case", ["get", "selected"], picked, candidate],
+        "fill-opacity": ["case", ["get", "selected"], 0.55, 0.25],
+      },
+    });
+    map.addLayer({
+      id: "roof-buildings-line", type: "line", source: "roof-buildings",
+      paint: {
+        "line-color": ["case", ["get", "selected"], picked, candidate],
+        "line-width": ["case", ["get", "selected"], 2.5, 1],
+      },
+    });
+    map.on("click", "roof-buildings-fill", function (e) {
+      if (!e.features || !e.features.length) return;
+      var p = e.features[0].properties || {};
+      selectBuilding(p.building_id || e.features[0].id);
+    });
+    map.on("mouseenter", "roof-buildings-fill", function () {
+      map.getCanvas().style.cursor = "pointer";
+    });
+    map.on("mouseleave", "roof-buildings-fill", function () {
+      map.getCanvas().style.cursor = "";
+    });
+  }
+
+  function selectBuilding(id) {
+    roofState.selectedId = id;
+    drawBuildings();
+    var list = document.getElementById("roof-buildings");
+    if (list) {
+      Array.prototype.forEach.call(list.querySelectorAll("[data-building]"), function (el) {
+        var on = el.getAttribute("data-building") === id;
+        el.style.borderColor = on ? "var(--accent-e)" : "var(--line)";
+        el.style.background = on ? "var(--ink-sunken)" : "transparent";
+      });
+    }
+    var derive = document.getElementById("roof-derive");
+    if (derive) derive.disabled = !id;
+  }
+
+  // Also rendered as a list, so the picker still works where the map does not
+  // (no WebGL, blocked CDN).
+  function renderBuildingList(ctx) {
+    var host = document.getElementById("roof-buildings");
+    if (!host) return;
+    var esc = ctx.escHtml;
+    host.innerHTML = roofState.features.slice(0, 12).map(function (f) {
+      var p = f.properties || {};
+      var id = f.id || p.building_id;
+      return '<button type="button" data-building="' + esc(String(id)) + '" ' +
+        'style="display:block;width:100%;text-align:left;font-family:var(--mono);' +
+        'font-size:0.72rem;border:1px solid var(--line);border-radius:6px;' +
+        'padding:5px 8px;margin:3px 0;background:transparent;color:inherit;cursor:pointer">' +
+        Math.round(p.area_m2 || 0) + " m² · " + Math.round(p.distance_m || 0) + " m away" +
+        '</button>';
+    }).join("");
+    Array.prototype.forEach.call(host.querySelectorAll("[data-building]"), function (el) {
+      el.addEventListener("click", function () {
+        selectBuilding(el.getAttribute("data-building"));
+      });
+    });
+  }
+
+  function deriveRoof(ctx) {
+    if (!roofState.selectedId) return;
+    roofSay("Reading the laser scan and fitting roof planes… this can take a minute.");
+    fetch("/api/roofmodel/derive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ building_id: roofState.selectedId }),
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        var d = res.d || {};
+        if (!res.ok || d.error || d.enabled === false) {
+          roofSay(ctx.escHtml(d.error || "the derive failed"), "bad");
+          return;
+        }
+        var arrays = d.proposed_arrays || [];
+        if (!arrays.length) {
+          roofSay("No roof faces worth mounting panels on were found on that building. " +
+                  "North-facing and very small faces are dropped.", "bad");
+          return;
+        }
+        // Fill the form rather than saving: the operator sees the numbers and
+        // presses Save, so the panel config never changes behind their back.
+        ctx.config.weather.pv_arrays = arrays.map(function (a) {
+          return {
+            name: a.name || "", kwp: a.kwp,
+            tilt_deg: a.tilt_deg, azimuth_deg: a.azimuth_deg,
+          };
+        });
+        renderPVArrays(ctx);
+        var m = d.model || {};
+        var when = m.captured_at_ms
+          ? new Date(m.captured_at_ms).toISOString().slice(0, 10)
+          : "date unknown";
+        var shade = m.shading && m.shading.evaluated ? ", shading evaluated" : "";
+        roofSay("Filled in " + arrays.length + " array(s) from " + m.planes_found +
+                " roof plane(s). Laser data from " + ctx.escHtml(when) + shade +
+                ". <strong>Review them and press Save.</strong>");
+      })
+      .catch(function (e) { roofSay(ctx.escHtml(String(e && e.message || e)), "bad"); });
+  }
+
   function initWeatherMap(ctx) {
     var container = document.getElementById("weather-map");
     if (!container) return;
@@ -305,7 +532,8 @@
         'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W. ' +
         'Rated (W) is watts, same unit as PV rated.' +
         '</p>' +
-        '</fieldset>';
+        '</fieldset>' +
+        roofFieldset(ctx);
     },
     after: function (ctx) {
       initWeatherMap(ctx);
@@ -319,6 +547,11 @@
         ctx.config.weather.pv_arrays.push({ name: "", rated_w: 0, tilt_deg: 35, azimuth_deg: 180 });
         renderPVArrays(ctx);
       });
+      roofState = { features: [], selectedId: null };
+      var findBtn = document.getElementById("roof-find");
+      if (findBtn) findBtn.addEventListener("click", function () { findBuildings(ctx); });
+      var deriveBtn = document.getElementById("roof-derive");
+      if (deriveBtn) deriveBtn.addEventListener("click", function () { deriveRoof(ctx); });
     },
   };
 })();

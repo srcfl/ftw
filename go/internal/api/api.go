@@ -478,6 +478,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/pv/performance", Read, s.handlePVPerformance)
 	s.handle("GET  /api/data-sources", Read, s.handleDataSources)
 	s.handle("GET  /api/roofmodel", Read, s.handleRoofModel)
+	s.handle("GET  /api/roofmodel/buildings", Read, s.handleRoofModelBuildings)
 	s.handle("POST /api/roofmodel/derive", Configure, s.handleRoofModelDerive)
 	s.handle("GET  /api/mpc/plan", Read, s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", Configure, s.handleMPCReplan)
@@ -2306,13 +2307,13 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 // ---- /api/roofmodel ----
 //
 // GET reports whether roof derivation is available for this site and why not
-// when it is unavailable. POST /api/roofmodel/derive runs it.
+// when it is unavailable. GET /api/roofmodel/buildings lists footprints to pick
+// from; POST /api/roofmodel/derive fits the roof of the picked one.
 //
-// Deliberately *not* wired: writing the derived arrays straight into
-// weather.pv_arrays. Derivation is a best guess from a point cloud that may be
-// years old, and silently rewriting an operator's panel config is a change they
-// should make knowingly. The endpoint returns the proposal; applying it is a
-// separate, explicit act.
+// The derived arrays are returned, never written. The settings form fills
+// itself in with them and the operator saves -- so the panel config still
+// changes only when someone looks at the numbers and agrees. Derivation is a
+// best guess from a point cloud that may be years old.
 func (s *Server) handleRoofModel(w http.ResponseWriter, r *http.Request) {
 	lat, lon, haveSite := s.siteLocation()
 	resp := map[string]any{"enabled": s.deps.RoofModel.Enabled()}
@@ -2320,6 +2321,7 @@ func (s *Server) handleRoofModel(w http.ResponseWriter, r *http.Request) {
 		resp["covers"] = coverage.Covers("lantmateriet", lat, lon)
 		resp["latitude"], resp["longitude"] = lat, lon
 	}
+	resp["has_credentials"] = s.roofModelHasCredentials()
 	if src, ok := coverage.ByID("lantmateriet"); ok {
 		resp["area"] = src.Area
 		resp["license"] = src.License
@@ -2341,15 +2343,20 @@ func (s *Server) handleRoofModelDerive(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "site latitude/longitude is not configured"})
 		return
 	}
+	// Optional: which footprint to clip the LiDAR to. An absent or empty body
+	// keeps the old behaviour of segmenting the whole search radius.
+	var body struct {
+		BuildingID string `json:"building_id"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
+	}
+
 	// A derive downloads and segments LiDAR tiles; the service time-boxes it,
 	// but the request should also die with the client rather than outliving it.
-	model, err := s.deps.RoofModel.Derive(r.Context(), lat, lon)
+	model, err := s.deps.RoofModel.Derive(r.Context(), lat, lon, body.BuildingID)
 	if err != nil {
-		status := 502
-		if errors.Is(err, roofmodel.ErrOutsideCoverage) || errors.Is(err, roofmodel.ErrNoCredentials) {
-			status = 400
-		}
-		writeJSON(w, status, map[string]any{"error": err.Error()})
+		writeJSON(w, roofModelErrorStatus(err), map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]any{
@@ -2357,6 +2364,68 @@ func (s *Server) handleRoofModelDerive(w http.ResponseWriter, r *http.Request) {
 		"model":           model,
 		"proposed_arrays": model.ToPVArrays(),
 	})
+}
+
+// handleRoofModelBuildings lists building footprints near the site for the
+// picker. Read-only and cheap relative to a derive: it is one STAC search with
+// no LiDAR download behind it.
+func (s *Server) handleRoofModelBuildings(w http.ResponseWriter, r *http.Request) {
+	if !s.deps.RoofModel.Enabled() {
+		writeJSON(w, 200, map[string]any{
+			"enabled": false,
+			"error":   "roof model module is not enabled",
+		})
+		return
+	}
+	lat, lon, haveSite := s.siteLocation()
+	// The map lets you drag the pin before saving, so honour an explicit
+	// coordinate over the stored one.
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("lat"), 64); err == nil {
+		if w2, err2 := strconv.ParseFloat(r.URL.Query().Get("lon"), 64); err2 == nil {
+			lat, lon, haveSite = v, w2, true
+		}
+	}
+	if !haveSite {
+		writeJSON(w, 400, map[string]any{"error": "site latitude/longitude is not configured"})
+		return
+	}
+
+	list, err := s.deps.RoofModel.Buildings(r.Context(), lat, lon)
+	if err != nil {
+		writeJSON(w, roofModelErrorStatus(err), map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled":   true,
+		"latitude":  lat,
+		"longitude": lon,
+		"buildings": list.Buildings,
+	})
+}
+
+// roofModelErrorStatus separates "you asked for something impossible" from
+// "the module or Lantmateriet failed", so the UI can tell the operator to fix
+// their input rather than to retry.
+func roofModelErrorStatus(err error) int {
+	if errors.Is(err, roofmodel.ErrOutsideCoverage) || errors.Is(err, roofmodel.ErrNoCredentials) {
+		return 400
+	}
+	return 502
+}
+
+// roofModelHasCredentials reports whether a Geotorget token is stored, without
+// revealing it.
+func (s *Server) roofModelHasCredentials() bool {
+	if s.deps.CfgMu == nil {
+		return false
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if s.deps.Cfg == nil || s.deps.Cfg.RoofModel == nil {
+		return false
+	}
+	rm := s.deps.Cfg.RoofModel
+	return rm.GeotorgetUsername != "" && rm.GeotorgetToken != ""
 }
 
 // siteLocation returns the configured site coordinates.
