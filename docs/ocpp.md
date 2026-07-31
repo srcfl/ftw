@@ -66,6 +66,36 @@ Adding 2.1 later means writing one more handler file and one more listener. The
 version-neutral core — charger state, telemetry mapping, control semantics —
 does not change.
 
+## Where the code comes from
+
+The protocol layer is [`github.com/lorenzodonini/ocpp-go`](https://github.com/lorenzodonini/ocpp-go)
+v0.19.0, MIT licensed. It is an ordinary Go module dependency, pinned in
+`go/go.mod` and checksum-verified through `go/go.sum`. Nothing in FTW is copied
+or forked from it.
+
+| Layer | Owner |
+|---|---|
+| WebSocket transport, OCPP-J framing, message types, schema validation | ocpp-go |
+| Handlers, telemetry mapping, control semantics, safety clamps | FTW, `go/internal/ocpp` |
+
+That split is the first thing to check when something misbehaves. A malformed
+message or a dropped connection is upstream; a wrong power figure or a wrong
+current limit is ours.
+
+Upstream health, as of this writing: 367 stars, MIT, no release since August
+2025, and it describes its own 2.0.1 support as "examples working, but will need
+more real-world testing". Treat the 2.0.1 path here as less proven than 1.6J
+regardless of FTW's own tests.
+
+If FTW ever needs a fix upstream will not take, the move is a `srcfl/ocpp-go`
+fork plus a `replace` directive in `go.mod` — still an ordinary module. A git
+submodule is not an option: `go build` resolves dependencies through `go.mod`
+and the module cache, so a submodule checkout would be inert unless paired with
+that same `replace`, while additionally breaking `go install` and any clone
+made without `--recurse-submodules`. To pin the source inside this repository
+instead, the Go-native answer is `go mod vendor`, which commits the dependency
+tree under `vendor/` and is understood by the toolchain without extra flags.
+
 ## Enabling the server
 
 OCPP is off by default. Add an `ocpp` section:

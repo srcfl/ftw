@@ -1,17 +1,27 @@
-// Package ocpp is the OCPP 1.6J Central System for FTW.
+// Package ocpp is the OCPP Central System for FTW, speaking 1.6J and 2.0.1.
 //
-// EV chargers connect to us via WebSocket. We translate every BootNotification,
-// MeterValues, and StatusNotification into a DerEV reading in telemetry.Store,
-// keyed by the chargePointId from the URL path. The dispatch layer
-// (control/dispatch.go:199-216) sums DerEV readings and prevents home batteries
-// from discharging into an active EV charge.
+// EV chargers connect to us via WebSocket. Every BootNotification, MeterValues,
+// StatusNotification and transaction message becomes a DerEV reading in
+// telemetry.Store, keyed by the charge point identity from the URL path. The
+// dispatch layer sums DerEV readings and stops home batteries discharging into
+// an active EV charge. Control goes the other way as charging profiles; see
+// control.go for why never as a remote stop.
 //
-// Phase 1 is read-only — handlers below ack everything but do not push remote
-// commands. Phase 2 will add RemoteStartTransaction / SetChargingProfile.
+// # Provenance
 //
-// The library backing this is github.com/lorenzodonini/ocpp-go (MIT, also used
-// by SteVe) — it owns the WebSocket + JSON layer; we own the message handlers
-// and the telemetry mapping.
+// The protocol layer is github.com/lorenzodonini/ocpp-go v0.19.0 (MIT). It is a
+// third-party dependency resolved through go.mod like any other — nothing in
+// this package is copied or forked from it. It owns the WebSocket transport,
+// OCPP-J framing, message types and schema validation. This package owns the
+// handlers, the telemetry mapping, the control semantics and the safety clamps.
+//
+// The split matters when reading a bug: a malformed-message or transport
+// failure is upstream, a wrong power figure or a wrong current limit is ours.
+//
+// Upstream describes its own 2.0.1 support as "examples working, but will need
+// more real-world testing", so treat the 2.0.1 path here as less proven than
+// 1.6J regardless of the tests in this package. Upstream has cut no release
+// since August 2025 and implements no OCPP 2.1.
 package ocpp
 
 import (
