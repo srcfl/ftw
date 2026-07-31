@@ -2,10 +2,9 @@ package roofmodel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,31 +12,81 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 )
 
-// stubModule writes a script that stands in for the Python module, so the
-// subprocess contract itself is exercised — argument passing, stdout parsing,
-// stderr error reporting, timeouts — without needing the geospatial stack
-// installed on the machine running the tests.
-func stubModule(t *testing.T, script string) (command, dir string) {
-	t.Helper()
-	dir = t.TempDir()
-	var path, interp string
-	if runtime.GOOS == "windows" {
-		path = filepath.Join(dir, "stub.bat")
-		interp = path
-		script = "@echo off\r\n" + script
-	} else {
-		path = filepath.Join(dir, "stub.sh")
-		interp = "sh"
-		script = "#!/bin/sh\n" + script
+// The module is a subprocess, so exercising the contract -- argument passing,
+// stdout parsing, stderr error reporting, timeouts -- needs something to spawn.
+// This test binary stands in for it: with stubEnvVar set, TestMain impersonates
+// the Python module instead of running tests.
+//
+// The first version of this harness wrote little sh and .bat scripts instead.
+// It passed on Windows and failed on Linux in two separate ways: the service
+// invokes the command as `<cmd> -m ftw_roofmodel ...`, which dash reads as
+// "run the script named ftw_roofmodel" (exit 2, the stub never ran at all), and
+// an unquoted JSON document loses its double quotes to shell word-splitting.
+// Re-executing a compiled binary has no shell in the path, so there is no
+// quoting to get wrong and nothing that can behave differently per platform.
+const (
+	stubModeVar    = "FTW_ROOFMODEL_TEST_STUB"
+	stubPayloadVar = "FTW_ROOFMODEL_TEST_PAYLOAD"
+)
+
+func TestMain(m *testing.M) {
+	if mode, ok := os.LookupEnv(stubModeVar); ok {
+		os.Exit(runStub(mode, os.Getenv(stubPayloadVar)))
 	}
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		return interp, dir
-	}
-	return interp, dir
+	os.Exit(m.Run())
 }
+
+// stubInvocation is what the stub records about how it was called, so a test
+// can assert what core actually handed the module.
+type stubInvocation struct {
+	Args       []string `json:"args"`
+	PythonPath string   `json:"pythonpath"`
+}
+
+// runStub plays the part of `python3 -m ftw_roofmodel`.
+func runStub(mode, payload string) int {
+	switch mode {
+	case "stdout":
+		os.Stdout.WriteString(payload)
+		return 0
+	case "stderr":
+		// How the real module reports failure: JSON on stderr, non-zero exit.
+		os.Stderr.WriteString(payload)
+		return 1
+	case "record":
+		enc, err := json.Marshal(stubInvocation{
+			Args:       os.Args[1:],
+			PythonPath: os.Getenv("PYTHONPATH"),
+		})
+		if err != nil {
+			return 3
+		}
+		if err := os.WriteFile(payload, enc, 0o600); err != nil {
+			return 3
+		}
+		os.Stdout.WriteString(minimalModel)
+		return 0
+	case "hang":
+		time.Sleep(30 * time.Second)
+		return 0
+	}
+	os.Stderr.WriteString("unknown stub mode " + mode)
+	return 2
+}
+
+// stubModule points the service at this test binary running in stub mode.
+func stubModule(t *testing.T, mode, payload string) string {
+	t.Helper()
+	t.Setenv(stubModeVar, mode)
+	t.Setenv(stubPayloadVar, payload)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating the test binary: %v", err)
+	}
+	return exe
+}
+
+const minimalModel = `{"schema_version":1,"arrays":[]}`
 
 func svc(t *testing.T, cfg *config.RoofModel) *Service {
 	t.Helper()
@@ -91,7 +140,7 @@ func TestDeriveRefusesOutsideSwedenWithoutSpawning(t *testing.T) {
 	}
 }
 
-// Sweden is a long diagonal, so no lat/lon rectangle can trace its border —
+// Sweden is a long diagonal, so no lat/lon rectangle can trace its border --
 // any box containing Sweden also contains parts of Norway and Finland. Oslo is
 // the clearest example: it is west of Sweden but inside the box.
 //
@@ -161,8 +210,8 @@ func TestDeriveParsesAModel(t *testing.T) {
 		`"source":{"provider":"lantmateriet","item_count":2,"dataset_datetime":"2018-03-01T00:00:00+00:00"},` +
 		`"arrays":[{"name":"Roof south","kwp":7.2,"tilt_deg":35,"azimuth_deg":180,"area_m2":51.4,"segment_id":"seg-0"}],` +
 		`"captured_at_ms":1519862400000,"derived_at_ms":1785456000000}`
-	cmd, dir := stubModule(t, "echo "+quoteForShell(doc))
-	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, ModuleDir: dir, GeotorgetUsername: "u", GeotorgetToken: "t"})
+	cmd := stubModule(t, "stdout", doc)
+	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
 
 	m, err := s.Derive(context.Background(), stockholmLat, stockholmLon)
 	if err != nil {
@@ -179,12 +228,60 @@ func TestDeriveParsesAModel(t *testing.T) {
 	}
 }
 
+// The site and the operator's credentials have to survive the process boundary,
+// or the module derives a roof somewhere else entirely.
+func TestDerivePassesTheSiteAndCredentials(t *testing.T) {
+	dir := t.TempDir()
+	record := dir + string(os.PathSeparator) + "invocation.json"
+	cmd := stubModule(t, "record", record)
+	s := svc(t, &config.RoofModel{
+		Enabled: true, Command: cmd, ModuleDir: dir,
+		GeotorgetUsername: "operator", GeotorgetToken: "secret-token",
+		RadiusM: 25,
+	})
+
+	if _, err := s.Derive(context.Background(), stockholmLat, stockholmLon); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("stub recorded nothing: %v", err)
+	}
+	var got stubInvocation
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	line := strings.Join(got.Args, " ")
+	for _, want := range []string{
+		"-m ftw_roofmodel",
+		"--lat 59.330000",
+		"--lon 18.070000",
+		"--username operator",
+		"--token secret-token",
+		"--radius-m 25.0",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("args %q missing %q", line, want)
+		}
+	}
+	// Without PYTHONPATH the module is only importable if it happens to be
+	// installed system-wide, which on a Pi it is not.
+	if got.PythonPath != dir {
+		t.Errorf("PYTHONPATH = %q, want %q", got.PythonPath, dir)
+	}
+	// vostok is opt-in: absent config must not silently enable a GPL tool.
+	if strings.Contains(line, "--vostok") {
+		t.Errorf("args %q passed --vostok without configuration", line)
+	}
+}
+
 // The module signals failure as JSON on stderr precisely so an operator sees a
 // cause rather than a traceback.
 func TestDeriveSurfacesTheModuleErrorMessage(t *testing.T) {
-	cmd, dir := stubModule(t, `echo {"error":"Geotorget rejected the credentials","kind":"MissingCredentials"} 1>&2
-exit 1`)
-	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, ModuleDir: dir, GeotorgetUsername: "u", GeotorgetToken: "t"})
+	cmd := stubModule(t, "stderr",
+		`{"error":"Geotorget rejected the credentials","kind":"MissingCredentials"}`)
+	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
 
 	_, err := s.Derive(context.Background(), stockholmLat, stockholmLon)
 	if err == nil {
@@ -195,9 +292,21 @@ exit 1`)
 	}
 }
 
+// A crash that is not the module's own JSON must still surface as an error
+// rather than being mistaken for a successful empty model.
+func TestDeriveReportsNonJSONFailure(t *testing.T) {
+	cmd := stubModule(t, "stderr", "Traceback (most recent call last):\n  MemoryError\n")
+	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
+
+	_, err := s.Derive(context.Background(), stockholmLat, stockholmLon)
+	if err == nil || !strings.Contains(err.Error(), "roof model failed") {
+		t.Errorf("err = %v, want a plain failure", err)
+	}
+}
+
 func TestDeriveRejectsUnknownSchemaVersion(t *testing.T) {
-	cmd, dir := stubModule(t, "echo "+quoteForShell(`{"schema_version":99,"arrays":[]}`))
-	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, ModuleDir: dir, GeotorgetUsername: "u", GeotorgetToken: "t"})
+	cmd := stubModule(t, "stdout", `{"schema_version":99,"arrays":[]}`)
+	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
 
 	_, err := s.Derive(context.Background(), stockholmLat, stockholmLon)
 	if err == nil || !strings.Contains(err.Error(), "schema_version") {
@@ -206,8 +315,8 @@ func TestDeriveRejectsUnknownSchemaVersion(t *testing.T) {
 }
 
 func TestDeriveRejectsUnreadableOutput(t *testing.T) {
-	cmd, dir := stubModule(t, "echo not-json-at-all")
-	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, ModuleDir: dir, GeotorgetUsername: "u", GeotorgetToken: "t"})
+	cmd := stubModule(t, "stdout", "not-json-at-all")
+	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
 
 	_, err := s.Derive(context.Background(), stockholmLat, stockholmLon)
 	if err == nil || !strings.Contains(err.Error(), "unreadable") {
@@ -218,12 +327,9 @@ func TestDeriveRejectsUnreadableOutput(t *testing.T) {
 // LiDAR tiles are large and this runs on a Pi; an unbounded derive could hold
 // memory indefinitely.
 func TestDeriveIsTimeBoxed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("no portable sleep in a .bat stub")
-	}
-	cmd, dir := stubModule(t, "sleep 30")
+	cmd := stubModule(t, "hang", "")
 	s := svc(t, &config.RoofModel{
-		Enabled: true, Command: cmd, ModuleDir: dir,
+		Enabled: true, Command: cmd,
 		GeotorgetUsername: "u", GeotorgetToken: "t", TimeoutS: 1,
 	})
 
@@ -265,15 +371,4 @@ func TestToPVArraysMatchesConfigShape(t *testing.T) {
 	if nilModel.ToPVArrays() != nil {
 		t.Error("nil model must yield nil arrays")
 	}
-}
-
-// quoteForShell wraps a JSON document so both sh and cmd.exe echo it intact.
-func quoteForShell(s string) string {
-	if runtime.GOOS == "windows" {
-		// cmd.exe has no quoting that survives embedded quotes cleanly; escape
-		// the shell metacharacters instead.
-		r := strings.NewReplacer("^", "^^", "&", "^&", "<", "^<", ">", "^>", "|", "^|")
-		return r.Replace(s)
-	}
-	return "'" + s + "'"
 }
