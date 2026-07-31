@@ -1,0 +1,116 @@
+# OCPP chargers
+
+FTW has a built-in OCPP 1.6J Central System. An EV charger that speaks OCPP
+connects straight to FTW over your local network.
+
+**An OCPP charger does not need a driver.** There is no Lua file to write, no
+entry in `drivers:`, and nothing to add to the device catalog. OCPP is a vendor-
+neutral protocol, so one server in core handles every charger that speaks it —
+Charge Amps, Easee, Zaptec, ABB, Alfen and the rest are all the same code path.
+
+This is the opposite of how the rest of FTW works. Every other device needs a
+driver because every vendor invented its own protocol. OCPP is the standard that
+makes drivers unnecessary, so the driver boundary does not apply.
+
+## How a charger becomes a device
+
+Drivers poll outward: FTW opens the connection and asks for data. OCPP runs the
+other way — the charger dials FTW and pushes.
+
+So there is nothing to configure per charger. You point the charger at FTW, and
+it appears as a device the moment it sends its first `BootNotification`. Its
+identity is the last segment of the URL it connected to:
+
+```
+ws://<ftw-host>:8887/garage-left
+                     └── this becomes the device key
+```
+
+Give each charger a distinct identity segment. Reuse one and two chargers will
+collapse into a single device.
+
+From there it behaves like any other EV reading: `MeterValues` and
+`StatusNotification` become telemetry, and dispatch stops the home battery
+discharging into an active EV charge.
+
+## Enabling the server
+
+OCPP is off by default. Add an `ocpp` section:
+
+```yaml
+ocpp:
+  enabled: true
+  port: 8887          # default 8887
+  path: /             # default /
+  username: ftw
+  password: <a long random string>
+  heartbeat_interval_s: 60
+```
+
+**Credentials are mandatory.** FTW refuses to start with `enabled: true` and an
+empty username or password. That is deliberate, and the reason is below.
+
+## Security: the listener is on every interface
+
+The OCPP library builds its listen address from the port alone, so the socket
+binds to every interface the host has. There is no bind-address setting, and
+there is no TLS on this path yet.
+
+On a Raspberry Pi with one LAN connection that is usually fine. It is not fine
+if the host also has a public interface or a permissive port forward.
+
+So:
+
+- Keep the port closed at your router. Never forward it from the internet.
+- Treat the password as a real secret; it is the only gate in front of the
+  server.
+- Basic auth over `ws://` sends the credential unencrypted. Anyone who can sniff
+  your LAN can read it.
+
+Credentials being required is a mitigation, not a fix. Binding to one interface
+needs a change to the upstream library.
+
+## Pointing a charger at FTW
+
+The backend URL is always `ws://<ftw-host>:<port><path><identity>`. What differs
+is how you reach the charger to set it.
+
+| Charger | Where you set it | Cloud needed? |
+|---|---|---|
+| Charge Amps Halo, Aura | WiFi hotspot → `192.168.250.1` → Settings → OCPP | no |
+| Charge Amps Dawn, Luna | Charge Amps Installer app over Bluetooth → CPMS settings | no |
+| Easee | Easee's commissioning API, once | one-time |
+| Zaptec | Zaptec Portal, needs the `Allow OCPP 1.6J` permission | one-time |
+
+Easee and Zaptec need a one-time commissioning step through the vendor portal.
+After that the charger talks only to FTW and the cloud is out of the runtime
+path. Charge Amps needs no cloud at all.
+
+Two traps worth knowing:
+
+- **Charge Amps Bluetooth is only discoverable for 10 minutes after power-up.**
+  If the unit has been on longer, cut the fuse and re-energise before searching.
+- **Zaptec appends the charger serial to the URL itself.** Enter the URL without
+  it.
+
+For the full commissioning and factory-reset detail per model, see the bench
+guide in the device-drivers repository.
+
+## Current limits
+
+- **Read-only.** The server accepts and records everything a charger reports,
+  but sends no commands, so FTW cannot yet start, stop or throttle an OCPP
+  charge. Control is the next step.
+- **No TLS**, and the listener cannot be pinned to one interface.
+- Chargers that also have a native protocol may work better through a driver.
+  Easee over Modbus and Zaptec over its cloud API already have drivers; OCPP is
+  the option when you want the cloud out of the loop.
+
+## When you still need a driver
+
+Only for chargers that do not speak OCPP, or where a vendor protocol exposes
+something OCPP does not. The Ambibox V2G / InterControl ambiCHARGE is the
+example on the bench: it is DC-coupled and bidirectional, runs over MQTT, and
+uses the `ambibox_v2x` driver.
+
+See [writing-a-driver.md](writing-a-driver.md) for that path.

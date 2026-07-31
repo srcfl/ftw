@@ -7,6 +7,11 @@ build is needed.
 Start from the closest existing file in `drivers/`, not from a generic
 template.
 
+> **An EV charger that speaks OCPP does not need a driver.** FTW has a built-in
+> OCPP 1.6J Central System, and one server in core handles every charger that
+> speaks the protocol. Point the charger at FTW and it registers itself. See
+> [ocpp.md](ocpp.md) before writing anything.
+
 ## Metadata
 
 Every driver declares one authoritative catalog block:

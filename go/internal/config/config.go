@@ -37,6 +37,45 @@ type Config struct {
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
+	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
+}
+
+// OCPP configures the built-in OCPP 1.6J Central System. Chargers connect to
+// us, so there is no driver and no per-charger config entry — a charge point
+// appears as a device the moment it sends its first BootNotification, keyed by
+// the identity segment of the URL it dialled.
+//
+// Disabled by default, and enabling it requires credentials. The listener
+// cannot be restricted to one interface: the OCPP library builds its own
+// listen address from the port alone, so the socket is reachable on every
+// interface the host has. Basic auth is the only thing standing in front of
+// it, which is why an empty Username or Password is rejected rather than
+// silently accepted.
+type OCPP struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Port               int    `yaml:"port,omitempty" json:"port,omitempty"`
+	Path               string `yaml:"path,omitempty" json:"path,omitempty"`
+	Username           string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password           string `yaml:"password,omitempty" json:"password,omitempty"`
+	HeartbeatIntervalS int    `yaml:"heartbeat_interval_s,omitempty" json:"heartbeat_interval_s,omitempty"`
+}
+
+// Validate rejects an enabled server that would accept anonymous charge
+// points. A nil or disabled section is fine — OCPP is opt-in.
+func (o *OCPP) Validate() error {
+	if o == nil || !o.Enabled {
+		return nil
+	}
+	if o.Username == "" || o.Password == "" {
+		return errors.New("ocpp: username and password are required when enabled, because the listener cannot be bound to a single interface")
+	}
+	if o.Port < 0 || o.Port > 65535 {
+		return fmt.Errorf("ocpp.port must be between 0 and 65535, got %d", o.Port)
+	}
+	if o.HeartbeatIntervalS < 0 {
+		return fmt.Errorf("ocpp.heartbeat_interval_s must be >= 0, got %d", o.HeartbeatIntervalS)
+	}
+	return nil
 }
 
 // DeviceRepository configures independently distributed Lua drivers. Remote
@@ -1409,6 +1448,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.CalDAV.Validate(); err != nil {
+		return err
+	}
+	if err := c.OCPP.Validate(); err != nil {
 		return err
 	}
 

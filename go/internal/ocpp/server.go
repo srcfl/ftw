@@ -110,3 +110,21 @@ func (s *Server) Stop() {
 
 // Handler exposes per-charger state for tests + introspection.
 func (s *Server) Handler() *Handler { return s.handler }
+
+// Port is the port the listener actually took, after defaults were applied.
+// Callers configuring an unset port need this to log or display the real value.
+func (s *Server) Port() int {
+	if s == nil || s.cfg == nil {
+		return 0
+	}
+	return s.cfg.Port
+}
+
+// Path is the URL prefix charge points connect to, after defaults were applied.
+// A charger dials <path><identity>, and that identity becomes its device key.
+func (s *Server) Path() string {
+	if s == nil || s.cfg == nil {
+		return ""
+	}
+	return s.cfg.Path
+}

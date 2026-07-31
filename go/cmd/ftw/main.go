@@ -43,6 +43,7 @@ import (
 	mqttcli "github.com/srcfl/ftw/go/internal/mqtt"
 	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/nova"
+	"github.com/srcfl/ftw/go/internal/ocpp"
 	"github.com/srcfl/ftw/go/internal/priceforecast"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/proxy"
@@ -906,6 +907,34 @@ func main() {
 		calSvc.Start(ctx)
 		defer calSvc.Stop()
 		slog.Info("caldav started", "listen", cfg.CalDAV.ListenAddr(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
+	}
+
+	// ---- Start OCPP 1.6J Central System (optional) ----
+	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
+	// driver involved. A charge point becomes a device in tel the moment it
+	// sends its first BootNotification, keyed by the identity segment of the
+	// URL it connected to, and dispatch picks it up from there like any other
+	// EV reading.
+	if cfg.OCPP != nil && cfg.OCPP.Enabled {
+		ocppSrv, err := ocpp.Start(ctx, &ocpp.Config{
+			Enabled:            cfg.OCPP.Enabled,
+			Port:               cfg.OCPP.Port,
+			Path:               cfg.OCPP.Path,
+			Username:           cfg.OCPP.Username,
+			Password:           cfg.OCPP.Password,
+			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
+		}, tel)
+		if err != nil {
+			// A charger that cannot reach us is a missing device, not a
+			// broken site, so keep the rest of the process running.
+			slog.Error("ocpp: central system failed to start", "err", err)
+		} else {
+			defer ocppSrv.Stop()
+			slog.Info("ocpp: central system started",
+				"port", ocppSrv.Port(),
+				"path", ocppSrv.Path(),
+				"note", "listener is reachable on every interface; basic auth is the only gate")
+		}
 	}
 
 	// ---- Start MPC planner (optional) ----
