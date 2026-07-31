@@ -96,11 +96,35 @@ Two traps worth knowing:
 For the full commissioning and factory-reset detail per model, see the bench
 guide in the device-drivers repository.
 
+## Control
+
+FTW throttles, pauses and resumes an OCPP charger the same way it steers any
+other EV charger. Loadpoints do not know the difference.
+
+Every command is expressed as a **current limit**, never as a remote start or
+stop. Pausing means "you may draw zero amps"; resuming raises the limit again.
+
+That is not a stylistic choice. `RemoteStopTransaction` is unreliable on Charge
+Amps hardware — units acknowledge the stop and then resume charging on their
+own. A charging profile of 0 A is honoured consistently. It also leaves the
+transaction open, so the session meter keeps counting across a pause instead of
+being split into two sessions.
+
+Two limits worth knowing:
+
+- **Below 6 A, FTW sends 0 A.** IEC 61851 has no duty cycle under 6 A. When the
+  allocator has less headroom than that to give, rounding up would draw current
+  the site fuse was never asked to carry, so charging stops instead.
+- **A pause remembers the previous rate.** Resuming returns to the last non-zero
+  limit, not to the maximum.
+
+If FTW loses contact, the charger holds its last granted limit. Dropping to zero
+would strand a driver with an uncharged car because the EMS went down, and the
+last limit was already judged safe for the site. This matches what every EV
+driver in FTW already does.
+
 ## Current limits
 
-- **Read-only.** The server accepts and records everything a charger reports,
-  but sends no commands, so FTW cannot yet start, stop or throttle an OCPP
-  charge. Control is the next step.
 - **No TLS**, and the listener cannot be pinned to one interface.
 - Chargers that also have a native protocol may work better through a driver.
   Easee over Modbus and Zaptec over its cloud API already have drivers; OCPP is

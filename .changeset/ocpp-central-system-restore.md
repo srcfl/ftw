@@ -17,10 +17,15 @@ has no FTW driver at all and every current model speaks OCPP, while Easee and
 Zaptec can be commissioned once through their vendor portal and then run with no
 cloud in the runtime path.
 
+FTW throttles, pauses and resumes an OCPP charger like any other EV charger.
+Every command is a current limit rather than a remote start or stop, because
+`RemoteStopTransaction` is unreliable on Charge Amps hardware — units
+acknowledge the stop and resume charging on their own, while a 0 A charging
+profile is honoured consistently and keeps the session meter intact across a
+pause. Below the IEC 61851 minimum of 6 A the charger is told 0 A rather than
+being rounded up to current the site fuse was not asked to carry.
+
 The server is off by default. Enabling it requires a username and password, and
 FTW refuses to start without them: the OCPP library builds its listen address
 from the port alone, so the socket is reachable on every interface and basic
 auth is the only gate. Keep the port closed at your router.
-
-Phase 1 is read-only — chargers are metered and monitored, but FTW does not yet
-start, stop or throttle a charge.

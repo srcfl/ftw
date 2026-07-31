@@ -915,8 +915,9 @@ func main() {
 	// sends its first BootNotification, keyed by the identity segment of the
 	// URL it connected to, and dispatch picks it up from there like any other
 	// EV reading.
+	var ocppSrv *ocpp.Server
 	if cfg.OCPP != nil && cfg.OCPP.Enabled {
-		ocppSrv, err := ocpp.Start(ctx, &ocpp.Config{
+		srv, err := ocpp.Start(ctx, &ocpp.Config{
 			Enabled:            cfg.OCPP.Enabled,
 			Port:               cfg.OCPP.Port,
 			Path:               cfg.OCPP.Path,
@@ -929,6 +930,7 @@ func main() {
 			// broken site, so keep the rest of the process running.
 			slog.Error("ocpp: central system failed to start", "err", err)
 		} else {
+			ocppSrv = srv
 			defer ocppSrv.Stop()
 			slog.Info("ocpp: central system started",
 				"port", ocppSrv.Port(),
@@ -1321,7 +1323,20 @@ func main() {
 				RequestActive: reqActive,
 			}, true
 		}
-		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// An OCPP charge point is not in the driver registry — it connected to
+		// us rather than being dialled — so route by name: if an online charger
+		// answers to it, command it over OCPP, otherwise fall through to the
+		// Lua driver registry. Loadpoints stay unaware of the difference.
+		send := reg.Send
+		if ocppSrv != nil {
+			send = func(ctx context.Context, name string, payload []byte) error {
+				if ocppSrv.Handler().IsOnline(name) {
+					return ocppSrv.Command(ctx, name, payload)
+				}
+				return reg.Send(ctx, name, payload)
+			}
+		}
+		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, send)
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.

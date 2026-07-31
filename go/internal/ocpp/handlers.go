@@ -29,12 +29,20 @@ type Handler struct {
 // chargerState is what we accumulate from successive OCPP messages for one
 // charge point. Survives the OCPP library's stateless handler invocations.
 type chargerState struct {
+	// online is whether the charger currently holds a WebSocket session.
+	// Distinct from connected below, which tracks whether a connector has a
+	// vehicle on it. A charger can be online with nothing plugged in, and
+	// still needs to accept a default charging profile in that state.
+	online              bool
 	connected           bool
 	charging            bool
 	transactionID       int
 	sessionStartMeterWh float64
 	sessionMeterWh      float64
 	lastPowerW          float64
+	// lastAmps is the most recent per-phase limit this charger accepted.
+	// A resume with no rate of its own restores it.
+	lastAmps float64
 }
 
 // NewHandler returns a Handler ready to register with a CentralSystem.
@@ -91,6 +99,10 @@ type ChargerView struct {
 // connection callbacks, not part of CoreHandler.
 func (h *Handler) OnConnect(id string) {
 	slog.Info("OCPP charger connected", "charger", id)
+	s := h.state(id)
+	h.mu.Lock()
+	s.online = true
+	h.mu.Unlock()
 	h.tel.RecordDriverSuccess(id)
 }
 
@@ -98,6 +110,7 @@ func (h *Handler) OnDisconnect(id string) {
 	slog.Info("OCPP charger disconnected", "charger", id)
 	s := h.state(id)
 	h.mu.Lock()
+	s.online = false
 	s.connected = false
 	s.charging = false
 	s.lastPowerW = 0
