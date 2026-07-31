@@ -69,9 +69,13 @@ class DerivedArray:
     azimuth_deg: float
     area_m2: float
     segment_id: str
+    # Fraction of open-sky irradiation this face actually receives once
+    # neighbouring geometry is accounted for. None when shading was not
+    # evaluated, which is different from 1.0 ("evaluated, unobstructed").
+    shading_factor: float | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out = {
             "name": self.name,
             "rated_w": round(self.rated_w),
             "tilt_deg": round(self.tilt_deg, 1),
@@ -79,6 +83,9 @@ class DerivedArray:
             "area_m2": round(self.area_m2, 1),
             "segment_id": self.segment_id,
         }
+        if self.shading_factor is not None:
+            out["shading_factor"] = round(self.shading_factor, 3)
+        return out
 
 
 def _compass_name(azimuth_deg: float, tilt_deg: float) -> str:
@@ -185,6 +192,7 @@ def derive(
     radius_m: float = DEFAULT_RADIUS_M,
     packing_factor: float = DEFAULT_PACKING_FACTOR,
     module_w_per_m2: float = DEFAULT_MODULE_W_PER_M2,
+    vostok_binary: str | None = None,
     building_id: str | None = None,
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
@@ -242,6 +250,26 @@ def derive(
         planes, packing_factor=packing_factor, module_w_per_m2=module_w_per_m2
     )
 
+    # Optional shadow-aware pass. vostok is GPL-3.0 and separately installed by
+    # the operator; absent, every face keeps shading_factor None, which reads as
+    # "not evaluated" rather than "unobstructed".
+    shading_info: dict[str, Any] = {"evaluated": False, "reason": "not requested"}
+    if vostok_binary:
+        from .shading import compute_shading
+
+        result = compute_shading(
+            points, planes, latitude=latitude, longitude=longitude,
+            binary=vostok_binary,
+        )
+        shading_info = {"evaluated": result.evaluated, "reason": result.reason}
+        if result.evaluated:
+            # planes_to_arrays drops faces, so map back through segment_id
+            # rather than assuming the two lists line up.
+            for arr in arrays:
+                idx = int(arr.segment_id.split("-")[-1])
+                if idx in result.factors:
+                    arr.shading_factor = result.factors[idx]
+
     captured = newest_capture(lidar_items)
     stamp = now or dt.datetime.now(dt.timezone.utc)
     return {
@@ -266,6 +294,7 @@ def derive(
         } if chosen is not None else None,
         "arrays": [a.to_json() for a in arrays],
         "planes_found": len(planes),
+        "shading": shading_info,
         "captured_at_ms": int(captured.timestamp() * 1000) if captured else None,
         "derived_at_ms": int(stamp.timestamp() * 1000),
     }

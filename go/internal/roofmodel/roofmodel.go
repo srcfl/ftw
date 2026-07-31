@@ -58,6 +58,11 @@ type Array struct {
 	AzimuthDeg float64 `json:"azimuth_deg"`
 	AreaM2     float64 `json:"area_m2"`
 	SegmentID  string  `json:"segment_id"`
+	// ShadingFactor is the fraction of open-sky irradiation this face receives
+	// once neighbouring geometry is accounted for. nil means shading was not
+	// evaluated, which is deliberately distinct from 1.0 ("evaluated, and
+	// unobstructed").
+	ShadingFactor *float64 `json:"shading_factor,omitempty"`
 }
 
 // BuildingList is what `--mode buildings` emits: GeoJSON features a map can
@@ -91,7 +96,13 @@ type Model struct {
 	// Building is null when the whole search radius was segmented rather than
 	// one picked footprint.
 	Building *Building `json:"building"`
-	Site     struct {
+	// Shading reports whether the optional vostok pass ran, and why not when it
+	// did not. Absent evaluation leaves every ShadingFactor nil.
+	Shading struct {
+		Evaluated bool   `json:"evaluated"`
+		Reason    string `json:"reason"`
+	} `json:"shading"`
+	Site struct {
 		Latitude  float64 `json:"latitude"`
 		Longitude float64 `json:"longitude"`
 		RadiusM   float64 `json:"radius_m"`
@@ -242,6 +253,9 @@ func (s *Service) run(ctx context.Context, lat, lon float64, mode, buildingID st
 	}
 	if buildingID != "" {
 		args = append(args, "--building-id", buildingID)
+	}
+	if s.cfg.VostokBinary != "" {
+		args = append(args, "--vostok", s.cfg.VostokBinary)
 	}
 	cmd := exec.CommandContext(ctx, s.command(), args...)
 	if s.cfg.ModuleDir != "" {

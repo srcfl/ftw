@@ -1099,6 +1099,16 @@ type RoofModel struct {
 	// TimeoutS bounds a derive. LiDAR tiles are large and this runs on a Pi,
 	// so an unbounded run could sit on memory indefinitely (default 600).
 	TimeoutS int `yaml:"timeout_s,omitempty" json:"timeout_s,omitempty"`
+
+	// VostokBinary optionally enables shadow-aware irradiance, giving each roof
+	// face a shading factor from neighbouring buildings and trees.
+	//
+	// vostok is GPL-3.0 and is NOT shipped with FTW: the operator installs it
+	// themselves and points this at it. FTW invokes it at arm's length as a
+	// separate process, never links it, and never installs it. Empty means
+	// shading is not evaluated — which is reported as unknown, not as
+	// unobstructed.
+	VostokBinary string `yaml:"vostok_binary,omitempty" json:"vostok_binary,omitempty"`
 }
 
 // Weather is the weather-forecast source config.

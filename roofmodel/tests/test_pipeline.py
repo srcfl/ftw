@@ -263,3 +263,73 @@ def test_derive_reports_unknown_capture_date_without_failing(monkeypatch):
     assert model["captured_at_ms"] is None
     assert model["source"]["dataset_datetime"] is None
     assert model["arrays"], "a missing provenance date must not block the model"
+
+
+# --- optional shading pass -------------------------------------------------
+
+def test_derive_without_vostok_reports_shading_as_not_evaluated(monkeypatch):
+    """The default path: no vostok configured, so shading is unknown -- and
+    unknown must not be recorded as 1.0, which would read as 'unobstructed'."""
+    _patched_points(monkeypatch, make_plane(tilt_deg=35, azimuth_deg=180))
+    session = FakeSession(search={"features": [feature()]}, asset=b"x")
+    model = pipeline.derive(
+        latitude=59.33, longitude=18.07, credentials=CREDS,
+        client=GeotorgetClient(CREDS, session=session),
+    )
+    assert model["shading"]["evaluated"] is False
+    for arr in model["arrays"]:
+        assert "shading_factor" not in arr
+
+
+def test_derive_with_missing_vostok_degrades_cleanly(monkeypatch):
+    """A configured-but-absent binary must not fail the whole derive: the roof
+    geometry is still perfectly good without a shading number."""
+    _patched_points(monkeypatch, make_plane(tilt_deg=35, azimuth_deg=180))
+    session = FakeSession(search={"features": [feature()]}, asset=b"x")
+    model = pipeline.derive(
+        latitude=59.33, longitude=18.07, credentials=CREDS,
+        client=GeotorgetClient(CREDS, session=session),
+        vostok_binary="definitely-not-installed-vostok",
+    )
+    assert model["arrays"], "geometry must survive an absent shading tool"
+    assert model["shading"]["evaluated"] is False
+    assert "not installed" in model["shading"]["reason"]
+
+
+def test_derive_attaches_shading_factors_when_vostok_runs(monkeypatch):
+    """Shading factors must land on the surviving arrays, matched by segment id
+    rather than by list position -- planes_to_arrays drops faces, so the two
+    lists do not line up."""
+    from ftw_roofmodel.shading import ShadingResult
+
+    # Pin the planes rather than relying on how a synthetic cloud happens to
+    # segment: this test is about the factor-to-array mapping, and segmentation
+    # itself is covered in test_segment.py.
+    #
+    # Plane 0 faces north and is dropped by planes_to_arrays, so the single
+    # surviving array is seg-1. A positional mapping would hand it index 0's
+    # factor; the two values are far apart so that mistake cannot pass.
+    pinned = [
+        RoofPlane(tilt_deg=35, azimuth_deg=0, area_m2=120.0, point_count=900, mean_height_m=6.0),
+        RoofPlane(tilt_deg=35, azimuth_deg=180, area_m2=80.0, point_count=600, mean_height_m=6.0),
+    ]
+    _patched_points(monkeypatch, make_plane(tilt_deg=35, azimuth_deg=180))
+    monkeypatch.setattr(pipeline, "segment_roof", lambda *a, **k: pinned)
+    monkeypatch.setattr(
+        "ftw_roofmodel.shading.compute_shading",
+        lambda *a, **k: ShadingResult({0: 0.10, 1: 0.62}, evaluated=True),
+    )
+    session = FakeSession(search={"features": [feature()]}, asset=b"x")
+    model = pipeline.derive(
+        latitude=59.33, longitude=18.07, credentials=CREDS,
+        client=GeotorgetClient(CREDS, session=session),
+        vostok_binary="stub-vostok",
+    )
+    assert model["shading"]["evaluated"] is True
+    assert len(model["arrays"]) == 1, model["arrays"]
+    kept = model["arrays"][0]
+    assert kept["segment_id"] == "seg-1", "premise: the north face should sort first"
+    assert kept["shading_factor"] == pytest.approx(0.62), (
+        "factor must be matched by segment id, not by list position"
+    )
+    json.dumps(model)
