@@ -449,3 +449,83 @@ func TestServicePOAPathDiffersFromFlat(t *testing.T) {
 	}
 	t.Logf("POA-per-array estimate %.0fW vs flat %.0fW", got, flat)
 }
+
+// ---- STRÅNG calibration hook ----
+
+// radiationForecastPVW runs one fetch against a stub shortwave-radiation
+// provider and returns the stored PV estimate, so calibration variants can be
+// compared against an otherwise identical run.
+func radiationForecastPVW(t *testing.T, calibration func() (float64, bool)) float64 {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"hourly": map[string]any{
+				"time":                []string{"2026-06-21T11:00"},
+				"shortwave_radiation": []float64{700},
+				"cloud_cover":         []float64{5},
+				"temperature_2m":      []float64{20},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	st, _ := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	defer st.Close()
+
+	p := NewOpenMeteo()
+	p.BaseURL = srv.URL
+	s := &Service{
+		Provider: p, Store: st, Lat: 59.3293, Lon: 18.0686, RatedPVW: 10000,
+		Arrays:      []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}},
+		Calibration: calibration,
+	}
+	s.fetchAndStore(context.Background())
+
+	tt := time.Date(2026, 6, 21, 11, 0, 0, 0, time.UTC)
+	rows, err := st.LoadForecasts(tt.UnixMilli(), tt.Add(time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PVWEstimated == nil {
+		t.Fatalf("expected 1 forecast with PV estimate, got %+v", rows)
+	}
+	return *rows[0].PVWEstimated
+}
+
+// The point of scoring: a site measured at 80% of its physics baseline should
+// have its forward forecast scaled to match.
+func TestServiceAppliesCalibrationToIrradianceEstimate(t *testing.T) {
+	uncalibrated := radiationForecastPVW(t, nil)
+	calibrated := radiationForecastPVW(t, func() (float64, bool) { return 0.8, true })
+
+	want := uncalibrated * 0.8
+	if math.Abs(calibrated-want) > 1.0 {
+		t.Errorf("calibrated estimate = %.1f W, want %.1f W (0.8 × %.1f)", calibrated, want, uncalibrated)
+	}
+	t.Logf("uncalibrated %.0fW → calibrated %.0fW", uncalibrated, calibrated)
+}
+
+// An untrusted factor must change nothing: too few days, or a ratio outside the
+// plausible band, leaves the physics estimate exactly as it was.
+func TestServiceIgnoresUntrustedCalibration(t *testing.T) {
+	uncalibrated := radiationForecastPVW(t, nil)
+	rejected := radiationForecastPVW(t, func() (float64, bool) { return 0.05, false })
+
+	if math.Abs(rejected-uncalibrated) > 1e-9 {
+		t.Errorf("estimate = %.1f W, want the uncalibrated %.1f W", rejected, uncalibrated)
+	}
+}
+
+// A zero or negative factor would silently zero out the site's whole forecast,
+// so it is refused even when the source claims it is usable.
+func TestServiceIgnoresNonPositiveCalibration(t *testing.T) {
+	uncalibrated := radiationForecastPVW(t, nil)
+	for _, factor := range []float64{0, -0.5} {
+		got := radiationForecastPVW(t, func() (float64, bool) { return factor, true })
+		if math.Abs(got-uncalibrated) > 1e-9 {
+			t.Errorf("factor %v: estimate = %.1f W, want the uncalibrated %.1f W", factor, got, uncalibrated)
+		}
+	}
+}
