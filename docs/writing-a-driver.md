@@ -12,9 +12,9 @@ tree here is the bundled FTW recovery snapshot; operator-only drivers may still
 live locally.
 
 > **An EV charger that speaks OCPP does not need a driver.** FTW has a built-in
-> OCPP 1.6J Central System, and one server in core handles every charger that
-> speaks the protocol. Point the charger at FTW and it registers itself. See
-> [ocpp.md](ocpp.md) before writing anything.
+> OCPP Central System serving 1.6J and 2.0.1, and one server in core handles
+> every charger that speaks the protocol. Point the charger at FTW and it
+> registers itself. See [ocpp.md](ocpp.md) before writing anything.
 
 ## Metadata
 
