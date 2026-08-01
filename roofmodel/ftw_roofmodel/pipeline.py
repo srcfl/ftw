@@ -17,8 +17,13 @@ import dataclasses
 import datetime as dt
 from typing import Any
 
-from . import sweref
-from .buildings import Building, clip_to_footprint, search_buildings
+from . import geotorget, pointcloud, sweref
+from .buildings import (
+    DEFAULT_EAVES_BUFFER_M,
+    Building,
+    clip_to_footprint,
+    search_buildings,
+)
 from .geotorget import (
     COLLECTION_LIDAR,
     Credentials,
@@ -128,27 +133,47 @@ def planes_to_arrays(
 
 
 def load_points(data: bytes) -> Any:
-    """Decode a LAZ/LAS payload into an (N, 3) array of SWEREF 99 TM metres.
+    """Decode a whole LAZ/LAS payload into (N, 3) SWEREF 99 TM metres.
 
-    laspy is imported here rather than at module scope so that everything above
-    -- projection, segmentation, array derivation -- is importable and testable
-    without the geospatial stack installed.
+    Re-exported from pointcloud so that laspy stays lazily imported: everything
+    above -- projection, segmentation, array derivation -- is importable and
+    testable without the geospatial stack installed.
     """
-    import io
+    return pointcloud.load_points(data)
 
-    try:
-        import laspy
-    except ImportError as exc:  # pragma: no cover - depends on the install
-        raise RoofModelError(
-            "laspy is required to read Lantmaeteriet LiDAR. Install the module's "
-            "extras: pip install -e roofmodel[geo]"
-        ) from exc
 
-    import numpy as np
+def _read_lidar(
+    client: GeotorgetClient,
+    items: list[StacItem],
+    chosen: Building | None,
+) -> tuple[Any, str]:
+    """Points for the first readable LiDAR asset, and how they were fetched.
 
-    with laspy.open(io.BytesIO(data)) as reader:
-        las = reader.read()
-    return np.column_stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)])
+    Laserdata Skog is LAZ organised as COPC, so when the operator has already
+    picked a building there is no reason to move the rest of a 2.5 km tile
+    across the network: the footprint's bounding box is exactly the query COPC
+    is built to answer. Everything about that is best-effort -- a plain LAZ
+    asset, a host that ignores `Range`, or a laspy without COPC support all
+    fall back to reading the tile whole.
+    """
+    for item in items:
+        asset = item.pick(
+            geotorget.MEDIA_COPC, geotorget.MEDIA_LAZ, geotorget.MEDIA_LAS
+        )
+        if asset is None or not asset.href:
+            continue
+        if chosen is not None and asset.effective_media_type == geotorget.MEDIA_COPC:
+            session = getattr(client, "session", None)
+            if session is not None:
+                bounds = pointcloud.bounds_of(chosen.ring_sweref, DEFAULT_EAVES_BUFFER_M)
+                try:
+                    return pointcloud.read_copc_window(session, asset.href, bounds), "copc-window"
+                except pointcloud.PointCloudError:
+                    # A slow success beats a failure; the operator gets their
+                    # roof either way, and `fetch` records which path ran.
+                    pass
+        return load_points(client.download(asset.href)), "whole-tile"
+    raise RoofModelError("LiDAR tiles carried no readable point data")
 
 
 def derive(
@@ -198,13 +223,7 @@ def derive(
             "Lantmaeteriet data is Sweden only"
         )
 
-    points = None
-    for item in lidar_items:
-        url = item.asset_url("data", "laz", "copc")
-        if not url:
-            continue
-        points = load_points(client.download(url))
-        break
+    points, fetch = _read_lidar(client, lidar_items, chosen)
     if points is None or len(points) == 0:
         raise RoofModelError("LiDAR tiles carried no readable point data")
 
@@ -233,6 +252,10 @@ def derive(
             "collection": COLLECTION_LIDAR,
             "item_count": len(lidar_items),
             "dataset_datetime": captured.isoformat() if captured else None,
+            # "copc-window" means only the footprint's neighbourhood was moved
+            # across the network, which also makes returns_in_radius below a
+            # count over that window rather than over the whole search radius.
+            "fetch": fetch,
         },
         "building": {
             "building_id": chosen.building_id,

@@ -24,9 +24,30 @@ from typing import Any, Iterable
 
 DEFAULT_BASE_URL = "https://api.lantmateriet.se"
 
-# Collection ids as published in Lantmaeteriet's STAC catalogue.
+# Collection ids as published in Lantmaeteriet's STAC catalogue. Both products
+# are STAC APIs over the same base URL and the same credentials; they differ
+# only in what their items point at, which is what the media types below say.
 COLLECTION_BUILDINGS = "byggnad-nedladdning-vektor"
 COLLECTION_LIDAR = "laserdata-nedladdning-skog"
+
+# Media types, so an asset is chosen by *what it is* rather than by hoping the
+# publisher named the key "data". Byggnad-vektor delivers GeoPackage; Laserdata
+# Skog delivers LAZ organised as COPC (Cloud Optimized Point Cloud).
+MEDIA_GEOPACKAGE = "application/geopackage+sqlite3"
+MEDIA_COPC = "application/vnd.laszip+copc"
+MEDIA_LAZ = "application/vnd.laszip"
+MEDIA_LAS = "application/vnd.las"
+MEDIA_GEOJSON = "application/geo+json"
+
+# Longest suffix first: a COPC file is also a .laz, and reading it as a plain
+# one would download the whole tile instead of the part we asked for.
+_EXTENSION_MEDIA: tuple[tuple[str, str], ...] = (
+    (".copc.laz", MEDIA_COPC),
+    (".gpkg", MEDIA_GEOPACKAGE),
+    (".geojson", MEDIA_GEOJSON),
+    (".laz", MEDIA_LAZ),
+    (".las", MEDIA_LAS),
+)
 
 
 class GeotorgetError(RuntimeError):
@@ -51,22 +72,85 @@ class Credentials:
             )
 
 
+def media_type_for(href: str) -> str | None:
+    """Media type implied by a URL's extension, or None if it says nothing."""
+    path = href.split("?", 1)[0].split("#", 1)[0].lower()
+    for suffix, media in _EXTENSION_MEDIA:
+        if path.endswith(suffix):
+            return media
+    return None
+
+
+@dataclasses.dataclass(frozen=True)
+class Asset:
+    """One STAC asset: where it is, and what it is."""
+
+    href: str
+    media_type: str | None = None
+    roles: tuple[str, ...] = ()
+    title: str = ""
+
+    @property
+    def effective_media_type(self) -> str | None:
+        """Declared media type, or the one the extension implies.
+
+        Catalogues are inconsistent about `type`, and an asset with no declared
+        type is common enough that refusing to guess would mean refusing most
+        real items. The extension is only consulted when nothing was declared.
+        """
+        return self.media_type or media_type_for(self.href)
+
+
 @dataclasses.dataclass
 class StacItem:
     """One STAC item, reduced to what the pipeline needs."""
 
     item_id: str
     collection: str
-    assets: dict[str, str]
+    assets: dict[str, Asset]
     captured_at: dt.datetime | None
     raw: dict[str, Any] = dataclasses.field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        # A bare href is accepted wherever an Asset is, so callers and tests can
+        # write {"data": "http://.../tile.copc.laz"} without losing the typing
+        # that selection depends on -- the extension supplies it.
+        self.assets = {
+            name: value if isinstance(value, Asset) else Asset(href=str(value))
+            for name, value in (self.assets or {}).items()
+        }
+
+    def pick(self, *media_types: str) -> Asset | None:
+        """Best asset for a wanted media type, most preferred type first.
+
+        Where nothing declares a usable type the search widens: an asset with
+        the `data` role, then a lone asset, since an item carrying exactly one
+        asset is unambiguous however it is labelled.
+
+        Both fallbacks consider only assets of *unknown* type. Guessing in the
+        absence of information is reasonable; guessing against it is not, and an
+        item whose single asset is a thumbnail must not be handed back as a
+        point cloud.
+        """
+        for wanted in media_types:
+            for asset in self.assets.values():
+                if asset.effective_media_type == wanted:
+                    return asset
+        untyped = [a for a in self.assets.values() if a.effective_media_type is None]
+        for asset in untyped:
+            if "data" in asset.roles:
+                return asset
+        if len(untyped) == 1:
+            return untyped[0]
+        return None
 
     def asset_url(self, *preferred: str) -> str | None:
         """First matching asset href, trying each preferred key in order."""
         for key in preferred:
             if key in self.assets:
-                return self.assets[key]
-        return next(iter(self.assets.values()), None)
+                return self.assets[key].href
+        first = next(iter(self.assets.values()), None)
+        return first.href if first else None
 
 
 def _parse_datetime(value: str | None) -> dt.datetime | None:
@@ -87,7 +171,12 @@ def _parse_datetime(value: str | None) -> dt.datetime | None:
 def _item_from_feature(feature: dict[str, Any]) -> StacItem:
     props = feature.get("properties") or {}
     assets = {
-        name: asset.get("href", "")
+        name: Asset(
+            href=asset.get("href", ""),
+            media_type=asset.get("type") or None,
+            roles=tuple(asset.get("roles") or ()),
+            title=str(asset.get("title") or ""),
+        )
         for name, asset in (feature.get("assets") or {}).items()
         if asset.get("href")
     }
@@ -134,6 +223,11 @@ class GeotorgetClient:
             session = requests.Session()
             session.auth = (credentials.username, credentials.password)
         self._session = session
+
+    @property
+    def session(self) -> Any:
+        """The authenticated session, for readers that stream their own ranges."""
+        return self._session
 
     def search(
         self,

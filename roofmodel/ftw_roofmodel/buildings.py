@@ -4,14 +4,21 @@ Picking a building matters more than it sounds. Searching LiDAR by a radius
 around a coordinate returns the neighbours' roofs, the garage and whatever trees
 stand in the garden, and the segmenter has no way to know which returns belong
 to the operator's own house. Worse, RANSAC fits *infinite* planes over the whole
-tile: an azimuth-180 roof plane is z = f(y) with no x term, so a second building
-sharing the ridge orientation falls inside its inlier band however far away it
-is, and loses points to it. Measured on a synthetic pair, a detached garage
-recovered 93% of its true area and split into two fragments when it lay on the
-house's plane, against 100% and one face when it did not.
+tile: an azimuth-180 roof plane is z = f(y) with no x term, so it does not stop
+at the wall, and a second building sharing the pitch and ridge orientation lies
+on *the same* plane rather than a similar one.
+
+Measured on a synthetic pair, one RANSAC pass over a house and a garage 40 m
+apart consumed all 576 of the house's south-face returns and all 256 of the
+garage's as a single surface -- and produced identical output at every
+separation from 3 m to 40 m, which is the signature of a global fit rather than
+a neighbourhood effect. Only the DBSCAN pass afterwards told the two buildings
+apart, leaving a clustering parameter as the sole thing standing between a
+garage and its neighbour's roof.
 
 Clipping to a chosen footprint removes that whole class of error: the returns
-that reach the segmenter are the ones standing on the operator's building.
+that reach the segmenter are the ones standing on the operator's building, and
+the derived face is then identical to segmenting that building in isolation.
 
 Coordinate frames
 -----------------
@@ -29,7 +36,15 @@ import math
 from typing import Any, Iterable
 
 from . import sweref
-from .geotorget import COLLECTION_BUILDINGS, GeotorgetClient, GeotorgetError, StacItem
+from .geopackage import GeoPackageError, read_features
+from .geotorget import (
+    COLLECTION_BUILDINGS,
+    MEDIA_GEOJSON,
+    MEDIA_GEOPACKAGE,
+    GeotorgetClient,
+    GeotorgetError,
+    StacItem,
+)
 
 # How far around the site to look for candidate buildings. Wide enough to reach
 # a house set back from its coordinate, narrow enough not to return a village.
@@ -169,16 +184,49 @@ def _to_sweref(ring: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return [sweref.wgs84_to_sweref99tm(lat, lon) for lon, lat in ring]
 
 
-def _features_from_item(item: StacItem) -> list[dict[str, Any]]:
+def _features_from_item(item: StacItem, client: GeotorgetClient | None = None) -> list[dict[str, Any]]:
     """Every building-like feature an item carries.
 
-    A STAC item may itself be the building, or it may be a tile whose asset
-    holds them. Inline geometry is preferred: it costs no download.
+    A STAC item may *be* the building -- geometry inline, no download -- or it
+    may be a tile whose asset holds thousands of them. Lantmaeteriet publishes
+    *Byggnad Nedladdning, vektor* as **GeoPackage**, so the asset path is the
+    normal one and the inline path is the exception.
     """
     geom = (item.raw or {}).get("geometry")
     if geom:
         return [{"geometry": geom, "properties": (item.raw or {}).get("properties") or {},
                  "id": item.item_id}]
+    if client is None:
+        return []
+    asset = item.pick(MEDIA_GEOPACKAGE, MEDIA_GEOJSON)
+    if asset is None or not asset.href:
+        return []
+    media = asset.effective_media_type
+    payload = client.download(asset.href)
+    if media == MEDIA_GEOJSON:
+        return _features_from_geojson(payload)
+    try:
+        return read_features(payload)
+    except GeoPackageError as exc:
+        raise BuildingLookupError(
+            f"the building tile for this site could not be read: {exc}"
+        ) from exc
+
+
+def _features_from_geojson(payload: bytes) -> list[dict[str, Any]]:
+    """A GeoJSON FeatureCollection asset, for catalogues that publish one."""
+    import json
+
+    try:
+        doc = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise BuildingLookupError(
+            f"the building tile was announced as GeoJSON but did not parse: {exc}"
+        ) from exc
+    if isinstance(doc, dict) and doc.get("type") == "FeatureCollection":
+        return list(doc.get("features") or [])
+    if isinstance(doc, dict) and doc.get("type") == "Feature":
+        return [doc]
     return []
 
 
@@ -228,7 +276,7 @@ def search_buildings(
     items = client.search(COLLECTION_BUILDINGS, bbox, limit=limit)
     features: list[dict[str, Any]] = []
     for item in items:
-        features.extend(_features_from_item(item))
+        features.extend(_features_from_item(item, client))
     if not features:
         raise BuildingLookupError(
             "no building footprints were returned for this site. The Geotorget "
