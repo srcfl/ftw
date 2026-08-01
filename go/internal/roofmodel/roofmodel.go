@@ -101,6 +101,11 @@ type Model struct {
 		Collection      string `json:"collection"`
 		ItemCount       int    `json:"item_count"`
 		DatasetDatetime string `json:"dataset_datetime"`
+		// Fetch is "copc-window" when only the picked building's neighbourhood
+		// was pulled from the LiDAR tile, or "whole-tile" when the whole thing
+		// came across. It also qualifies Building.ReturnsInRadius below, whose
+		// denominator is the fetched window in the first case.
+		Fetch string `json:"fetch"`
 	} `json:"source"`
 	// CapturedAtMs is when Lantmäteriet flew the LiDAR. Null while their STAC
 	// datetime backfill is incomplete, which is a missing provenance date and

@@ -228,6 +228,30 @@ func TestDeriveParsesAModel(t *testing.T) {
 	}
 }
 
+// Whether the module streamed a window out of the COPC tile or pulled the whole
+// thing changes what ReturnsInRadius counts, so the answer has to reach core
+// rather than being inferred from the numbers.
+func TestDeriveCarriesHowTheLidarWasFetched(t *testing.T) {
+	doc := `{"schema_version":1,"planes_found":2,` +
+		`"source":{"provider":"lantmateriet","collection":"laserdata-nedladdning-skog",` +
+		`"item_count":1,"fetch":"copc-window"},` +
+		`"building":{"building_id":"b-1","area_m2":144,"returns_used":220,"returns_in_radius":260},` +
+		`"arrays":[]}`
+	cmd := stubModule(t, "stdout", doc)
+	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
+
+	m, err := s.Derive(context.Background(), stockholmLat, stockholmLon, "b-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Source.Fetch != "copc-window" {
+		t.Errorf("fetch = %q, want copc-window", m.Source.Fetch)
+	}
+	if m.Building == nil || m.Building.ReturnsUsed != 220 {
+		t.Fatalf("building = %+v", m.Building)
+	}
+}
+
 // The site and the operator's credentials have to survive the process boundary,
 // or the module derives a roof somewhere else entirely.
 func TestDerivePassesTheSiteAndCredentials(t *testing.T) {

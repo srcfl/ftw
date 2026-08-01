@@ -14,10 +14,15 @@ A free [Geotorget](https://geotorget.lantmateriet.se) account with access
 ordered to two products. Both are open data under CC BY 4.0; the account exists
 so Lantmäteriet can see who is downloading, not to charge you.
 
-| Product | What FTW uses it for |
-|---|---|
-| [Byggnad Nedladdning, vektor](https://geotorget.lantmateriet.se/geodataprodukter/byggnad-nedladdning-vektor-api) | Building footprints, so you can point at your house |
-| [Laserdata Nedladdning, Skog](https://geotorget.lantmateriet.se/geodataprodukter/laserdata-nedladdning-skog-api) | The laser scan the roof planes are fitted to |
+| Product | Delivered as | What FTW uses it for |
+|---|---|---|
+| [Byggnad Nedladdning, vektor](https://geotorget.lantmateriet.se/geodataprodukter/byggnad-nedladdning-vektor-api) | STAC → **GeoPackage** | Building footprints, so you can point at your house |
+| [Laserdata Nedladdning, Skog](https://geotorget.lantmateriet.se/geodataprodukter/laserdata-nedladdning-skog-api) | STAC → **LAZ as COPC** | The laser scan the roof planes are fitted to |
+
+Both are STAC APIs behind the same account, so one set of credentials covers
+both and FTW searches them the same way. They differ only in what the items
+point at, and FTW picks the right asset by its declared media type rather than
+by its name — a catalogue that renames `data` to `punktmoln` keeps working.
 
 Ordering access is not instant — Lantmäteriet approves it — so do it before you
 plan to use this.
@@ -30,7 +35,22 @@ pip install -e roofmodel[geo]
 
 The `geo` extra pulls the LAZ reader. Without it everything except reading the
 point cloud works, which is enough to run the tests but not enough to derive a
-real roof.
+real roof. GeoPackage needs nothing extra: it is a SQLite file, and FTW reads it
+with the standard library.
+
+### Why picking a building also makes it fast
+
+COPC — Cloud Optimized Point Cloud — is LAZ with the points ordered into an
+octree and an index at a known offset, so a reader can ask for a region and
+fetch only the parts that cover it. Once you have picked a building, FTW asks
+for the bounding box of *that footprint* instead of the tile: a Laserdata Skog
+tile covers 2.5 km and runs to hundreds of megabytes, and a house is a few tens
+of metres across.
+
+This is best-effort. A plain (non-COPC) `.laz` asset, a server that ignores
+`Range` requests, or a laspy without COPC support all fall back to reading the
+tile whole — slower, same answer. The result records which path ran as
+`source.fetch`: `copc-window` or `whole-tile`.
 
 ## Using it
 
@@ -69,15 +89,18 @@ knows whether there are panels on that face at all.
 Without a footprint the module segments everything within its radius: your
 neighbour's roof, the garage, the trees. Worse, the plane fitting is *global* —
 a fitted plane is infinite, so a roof at azimuth 180° is described by `z = f(y)`
-with no `x` term at all and extends right across the tile. A second building
-sharing your ridge orientation falls inside its inlier band however far away it
-is, and the two lose points to each other.
+with no `x` term at all and does not stop at your wall. A second building
+sharing your pitch and ridge orientation is not on a *similar* plane; it is on
+the same one.
 
-Measured on a synthetic pair: a detached garage recovered 93% of its true area
-and split into two fragments when it lay on the house's plane, against 100% and
-a single clean face once the cloud was clipped to its own footprint.
+Measured on a synthetic pair, a single fitting pass over a house and a garage
+40 m apart swallowed **all** of both south faces — 576 returns from one and 256
+from the other — as one surface. The result was identical at every separation
+from 3 m to 40 m, which is what tells you it is a global effect and not a
+proximity one. Only the clustering step afterwards told the two buildings apart.
 
-Picking a building is what makes the answer yours.
+Clipping to your footprint first gives exactly the same face you would get by
+scanning your building alone. Picking a building is what makes the answer yours.
 
 ## Optional: shading
 
@@ -104,6 +127,7 @@ is clear" are different claims.
 | "No buildings found here" | The marker is not on a building, or you are outside Sweden |
 | "only N LiDAR returns fall on building" | The building is newer than the scan, or you picked the wrong footprint |
 | "No roof faces worth mounting panels on" | Everything found was north-facing or under 8 m² |
+| "the building tile could not be read" | The GeoPackage asset was not a GeoPackage — usually a changed download URL |
 
 Failures never change your configuration.
 
