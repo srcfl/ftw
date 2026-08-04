@@ -205,7 +205,15 @@ both were tried.
 Either way multicast has to reach the LAN, which the Linux Compose topology
 provides through `network_mode: host`. Under `docker-compose.macos.yml` the
 container is bridged and multicast does not reach the LAN, so configure devices
-by IP there.
+by IP there. The direct path sends on every active, non-loopback multicast
+interface. It supports IPv4 and IPv6; a link-local IPv6 answer is used only
+with its interface zone, and an unscoped link-local answer is discarded.
+
+mDNS has no built-in authentication. Treat a `.local` name as a LAN trust
+boundary, reserve names used by control drivers, and use TLS certificate pins
+where the driver supports them. Network allowlists still check the configured
+host name and port before resolution; they do not prove that an mDNS responder
+is the intended device.
 
 #### Letting FTW use avahi
 
@@ -223,9 +231,8 @@ directory created where the socket belongs stops `avahi-daemon` from ever
 starting. Restarting avahi detaches the mount, so restart FTW after you do.
 
 This is an optimisation, not a requirement: device connectivity is unchanged
-without it. What it does add is `libnss-mdns` working for ordinary tools in the
-image — `getent hosts zap.local`, `curl`, `wget` — which is the quickest way to
-check a name from inside the container.
+without it. It lets `getent hosts zap.local`, `curl` and `wget` check the name
+from inside the container.
 
 Under the Home Assistant add-on none of this applies: Supervisor mounts only a
 fixed set of named paths, so the socket cannot be provided and FTW always

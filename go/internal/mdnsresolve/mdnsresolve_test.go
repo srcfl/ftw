@@ -57,6 +57,17 @@ func aResource(t *testing.T, name string, ip [4]byte, ttl uint32) dnsmessage.Res
 	}
 }
 
+func aaaaResource(t *testing.T, name string, ip [16]byte, ttl uint32) dnsmessage.Resource {
+	t.Helper()
+	return dnsmessage.Resource{
+		Header: dnsmessage.ResourceHeader{
+			Name: mustDNSName(t, name), Type: dnsmessage.TypeAAAA,
+			Class: dnsmessage.ClassINET, TTL: ttl,
+		},
+		Body: &dnsmessage.AAAAResource{AAAA: ip},
+	}
+}
+
 func packAnswer(t *testing.T, qname string, answers []dnsmessage.Resource) []byte {
 	t.Helper()
 	msg := dnsmessage.Message{
@@ -123,6 +134,112 @@ func TestParseAddrAnswerClampsTTL(t *testing.T) {
 	}
 }
 
+func TestParseAddrAnswerRequiresInterfaceZoneForLinkLocalIPv6(t *testing.T) {
+	qname := "inverter.local."
+	packet := packAnswer(t, qname, []dnsmessage.Resource{
+		aaaaResource(t, qname, [16]byte{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 60),
+	})
+	if _, _, ok := parseAddrAnswer(packet, qname); ok {
+		t.Fatal("accepted link-local IPv6 answer without an interface zone")
+	}
+	addrs, _, ok := parseAddrAnswer(packet, qname, "test0")
+	if !ok || len(addrs) != 1 || addrs[0].String() != "fe80::1%test0" {
+		t.Fatalf("zoned answer = %v, ok=%v; want [fe80::1%%test0]", addrs, ok)
+	}
+}
+
+func TestQueryIPv6UsesSelectedInterfaceForLinkLocalAnswer(t *testing.T) {
+	qname := "inverter.local"
+	qnameWire := mustDNSName(t, qname+".")
+	queryMessage := dnsmessage.Message{Questions: []dnsmessage.Question{
+		{Name: qnameWire, Type: dnsmessage.TypeAAAA, Class: classQU},
+	}}
+	query, err := queryMessage.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	responder, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: 0})
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	defer responder.Close()
+
+	origAddr, origInterfaces, origListen := mdnsAddr6, multicastInterfaces, listenMulticastPacket
+	mdnsAddr6 = responder.LocalAddr().(*net.UDPAddr)
+	multicastInterfaces = func() ([]net.Interface, error) {
+		return []net.Interface{{Index: 7, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}}, nil
+	}
+	listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
+		if network != "udp6" || iface.Name != "test0" {
+			t.Fatalf("query used network=%q iface=%v", network, iface)
+		}
+		return net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1")})
+	}
+	t.Cleanup(func() {
+		mdnsAddr6, multicastInterfaces, listenMulticastPacket = origAddr, origInterfaces, origListen
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 1500)
+		_ = responder.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, from, err := responder.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		var parser dnsmessage.Parser
+		header, err := parser.Start(buf[:n])
+		if err != nil {
+			return
+		}
+		question, err := parser.Question()
+		if err != nil {
+			return
+		}
+		responseMessage := dnsmessage.Message{
+			Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: true},
+			Questions: []dnsmessage.Question{question},
+			Answers:   []dnsmessage.Resource{aaaaResource(t, qname+".", [16]byte{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 60)},
+		}
+		response, err := responseMessage.Pack()
+		if err == nil {
+			_, _ = responder.WriteToUDP(response, from)
+		}
+	}()
+
+	addrs, _, err := queryIPv6(context.Background(), query, qname)
+	if err != nil {
+		t.Fatalf("queryIPv6: %v", err)
+	}
+	<-done
+	if len(addrs) != 1 || addrs[0].String() != "fe80::1%test0" {
+		t.Fatalf("addrs = %v, want [fe80::1%%test0]", addrs)
+	}
+}
+
+func TestEligibleMulticastInterfacesRejectsUnsafeChoices(t *testing.T) {
+	orig := multicastInterfaces
+	multicastInterfaces = func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Index: 1, Name: "lo", Flags: net.FlagUp | net.FlagMulticast | net.FlagLoopback},
+			{Index: 2, Name: "down0", Flags: net.FlagMulticast},
+			{Index: 3, Name: "unicast0", Flags: net.FlagUp},
+			{Index: 4, Name: "lan0", Flags: net.FlagUp | net.FlagMulticast},
+		}, nil
+	}
+	t.Cleanup(func() { multicastInterfaces = orig })
+
+	got, err := eligibleMulticastInterfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "lan0" {
+		t.Fatalf("eligible interfaces = %v, want [lan0]", got)
+	}
+}
+
 // disableAvahi forces the fallback path. Without it these tests would behave
 // differently on a developer machine that happens to run avahi-daemon.
 func disableAvahi(t *testing.T) {
@@ -141,9 +258,15 @@ func startResponder(t *testing.T, answers []dnsmessage.Resource) {
 		t.Fatalf("listen responder: %v", err)
 	}
 
-	origAddr, origListen := mdnsAddr, listenPacket
+	origAddr, origMulticast, origInterfaces := mdnsAddr, listenMulticastPacket, multicastInterfaces
 	mdnsAddr = rc.LocalAddr().(*net.UDPAddr)
-	listenPacket = func() (*net.UDPConn, error) {
+	multicastInterfaces = func() ([]net.Interface, error) {
+		return []net.Interface{{Index: 1, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}}, nil
+	}
+	listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
+		if network != "udp4" {
+			return nil, errors.New("IPv6 disabled in IPv4 responder test")
+		}
 		return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	}
 
@@ -183,7 +306,8 @@ func startResponder(t *testing.T, answers []dnsmessage.Resource) {
 	t.Cleanup(func() {
 		_ = rc.Close()
 		<-done
-		mdnsAddr, listenPacket = origAddr, origListen
+		mdnsAddr = origAddr
+		listenMulticastPacket, multicastInterfaces = origMulticast, origInterfaces
 		Flush()
 	})
 }
@@ -251,8 +375,8 @@ func TestCacheExpires(t *testing.T) {
 }
 
 func TestDialerSkipsResolutionForPlainHosts(t *testing.T) {
-	origListen, origAvail := listenPacket, avahiAvailable
-	listenPacket = func() (*net.UDPConn, error) {
+	origAvail, origMulticast := avahiAvailable, listenMulticastPacket
+	listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
 		t.Error("issued an mDNS query for a host that is not a .local name")
 		return nil, errors.New("should not be called")
 	}
@@ -260,7 +384,7 @@ func TestDialerSkipsResolutionForPlainHosts(t *testing.T) {
 		t.Error("consulted avahi for a host that is not a .local name")
 		return false
 	}
-	t.Cleanup(func() { listenPacket, avahiAvailable = origListen, origAvail })
+	t.Cleanup(func() { avahiAvailable, listenMulticastPacket = origAvail, origMulticast })
 
 	d := Dialer{Dialer: net.Dialer{Timeout: 500 * time.Millisecond}}
 	// Nothing listens on port 1; the point is that the failure comes from the
@@ -269,6 +393,45 @@ func TestDialerSkipsResolutionForPlainHosts(t *testing.T) {
 		t.Fatal("expected the dial to fail")
 	} else if strings.Contains(err.Error(), "mDNS") {
 		t.Fatalf("plain IP dial went through mDNS: %v", err)
+	}
+}
+
+func TestDialerResolvesLocalNameBeforeConnecting(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			close(accepted)
+			_ = conn.Close()
+		}
+	}()
+	fakeAvahi(t, func(command, name string) string {
+		if command == "RESOLVE-HOSTNAME-IPV4" && name == "inverter.local" {
+			return "+ 2 0 inverter.local 127.0.0.1"
+		}
+		return "- 15 Timeout reached"
+	})
+
+	d := Dialer{Dialer: net.Dialer{Timeout: time.Second}}
+	conn, err := d.Dial("tcp", "inverter.local:"+port)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	_ = conn.Close()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("resolved TCP endpoint was not reached")
 	}
 }
 

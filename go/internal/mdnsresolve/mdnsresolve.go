@@ -25,6 +25,9 @@
 // paths at all — only a fixed set of named ones. FTW ships as an add-on, so a
 // resolver that required that socket would simply not work there. The fallback
 // also covers any Docker host that does not run avahi.
+// Direct queries bind an ephemeral socket to every active, non-loopback
+// multicast interface. IPv4 and IPv6 are queried separately; IPv6 link-local
+// answers carry the interface zone and are rejected when no zone is known.
 //
 // Only ".local" names take either path. Literal IPs and ordinary DNS names are
 // handed straight to the standard dialer.

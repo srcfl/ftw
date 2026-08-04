@@ -35,3 +35,8 @@ Only `.local` names take this path; literal IPs and ordinary DNS names dial
 exactly as before. Multicast still has to reach the LAN, which the Linux
 Compose topology has via `network_mode: host`. Under `docker-compose.macos.yml`
 the container is bridged, so configure devices by IP there.
+
+Direct queries use each active multicast interface. IPv4 and IPv6 are
+supported; link-local IPv6 addresses carry their interface zone and unscoped
+answers are rejected. mDNS is unauthenticated, so reserve control-device names
+on the LAN and use TLS certificate pins where available.

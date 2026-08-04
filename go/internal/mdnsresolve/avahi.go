@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,10 @@ var avahiAvailable = func() bool {
 	return err == nil && fi.Mode()&os.ModeSocket != 0
 }
 
+// avahiInterfaceByIndex is a var so tests can provide a stable interface name
+// for link-local IPv6 answers without depending on the host's interfaces.
+var avahiInterfaceByIndex = net.InterfaceByIndex
+
 type avahiResult struct {
 	addr netip.Addr
 	err  error
@@ -58,14 +63,33 @@ type avahiResult struct {
 func avahiLookup(ctx context.Context, name string) ([]netip.Addr, error) {
 	v4 := make(chan avahiResult, 1)
 	v6 := make(chan avahiResult, 1)
-	go func() { v6 <- avahiResolve(ctx, "RESOLVE-HOSTNAME-IPV6", name) }()
-	go func() { v4 <- avahiResolve(ctx, "RESOLVE-HOSTNAME-IPV4", name) }()
+	lookupCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { v6 <- avahiResolve(lookupCtx, "RESOLVE-HOSTNAME-IPV6", name) }()
+	go func() { v4 <- avahiResolve(lookupCtx, "RESOLVE-HOSTNAME-IPV4", name) }()
 
-	r4 := <-v4
+	var r4, r6 avahiResult
+	got4, got6 := false, false
+	for !got4 || !got6 {
+		select {
+		case r4 = <-v4:
+			got4 = true
+			if r4.err == nil {
+				// IPv4 is preferred, but wait for the cancelled IPv6
+				// exchange before returning so no goroutine can outlive
+				// this lookup or read test hooks during cleanup.
+				cancel()
+			}
+		case r6 = <-v6:
+			got6 = true
+			// Do not cancel IPv4 here. IPv4 is the preferred answer, so
+			// let an in-flight IPv4 request finish before accepting IPv6.
+		}
+	}
 	if r4.err == nil {
 		return []netip.Addr{r4.addr}, nil
 	}
-	if r6 := <-v6; r6.err == nil {
+	if r6.err == nil {
 		return []netip.Addr{r6.addr}, nil
 	}
 	return nil, fmt.Errorf("avahi: %s: %w", name, r4.err)
@@ -73,7 +97,7 @@ func avahiLookup(ctx context.Context, name string) ([]netip.Addr, error) {
 
 // avahiResolve runs one request/response exchange over the socket.
 //
-// The wire format is a single line each way. A success is
+// The wire format is a single line each way. A success is:
 //
 //	+ <interface> <protocol> <name> <address>
 //
@@ -85,7 +109,16 @@ func avahiResolve(ctx context.Context, command, name string) avahiResult {
 	if err != nil {
 		return avahiResult{err: fmt.Errorf("connect %s: %w", avahiSocket, err)}
 	}
+	done := make(chan struct{})
+	defer close(done)
 	defer conn.Close()
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
 
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -102,10 +135,10 @@ func avahiResolve(ctx context.Context, command, name string) avahiResult {
 		}
 		return avahiResult{err: fmt.Errorf("no reply")}
 	}
-	return parseAvahiReply(scanner.Text())
+	return parseAvahiReply(scanner.Text(), name)
 }
 
-func parseAvahiReply(line string) avahiResult {
+func parseAvahiReply(line, expectedName string) avahiResult {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return avahiResult{err: fmt.Errorf("empty reply")}
@@ -119,9 +152,35 @@ func parseAvahiReply(line string) avahiResult {
 	if len(fields) < 5 {
 		return avahiResult{err: fmt.Errorf("short reply %q", line)}
 	}
+	if expectedName != "" && canonical(fields[3]) != canonical(expectedName) {
+		return avahiResult{err: fmt.Errorf("reply name %q does not match %q", fields[3], expectedName)}
+	}
+	protocol, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return avahiResult{err: fmt.Errorf("unparsable protocol %q", fields[2])}
+	}
 	addr, err := netip.ParseAddr(fields[4])
 	if err != nil {
 		return avahiResult{err: fmt.Errorf("unparsable address %q", fields[4])}
+	}
+	if (addr.Is4() && protocol != 0) || (addr.Is6() && protocol != 1) {
+		return avahiResult{err: fmt.Errorf("protocol %d does not match address %s", protocol, addr)}
+	}
+	if addr.Is6() && addr.IsLinkLocalUnicast() {
+		interfaceIndex, err := strconv.Atoi(fields[1])
+		if err != nil || interfaceIndex <= 0 {
+			return avahiResult{err: fmt.Errorf("link-local address %s has no interface", addr)}
+		}
+		iface, err := avahiInterfaceByIndex(interfaceIndex)
+		if err != nil || iface == nil || iface.Name == "" ||
+			iface.Index != interfaceIndex || iface.Flags&net.FlagUp == 0 ||
+			iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
+			if err == nil {
+				err = fmt.Errorf("interface %d is unavailable or not multicast-capable", interfaceIndex)
+			}
+			return avahiResult{err: fmt.Errorf("link-local address %s: %w", addr, err)}
+		}
+		addr = addr.WithZone(iface.Name)
 	}
 	return avahiResult{addr: addr.Unmap()}
 }

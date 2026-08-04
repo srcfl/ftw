@@ -23,7 +23,11 @@ import (
 func fakeAvahi(t *testing.T, reply func(command, name string) string) {
 	t.Helper()
 	origAvail, origDial := avahiAvailable, avahiDial
+	origInterfaceByIndex := avahiInterfaceByIndex
 	avahiAvailable = func() bool { return true }
+	avahiInterfaceByIndex = func(index int) (*net.Interface, error) {
+		return &net.Interface{Index: index, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}, nil
+	}
 	avahiDial = func(ctx context.Context, path string) (net.Conn, error) {
 		client, server := net.Pipe()
 		go func() {
@@ -44,6 +48,7 @@ func fakeAvahi(t *testing.T, reply func(command, name string) string) {
 	}
 	t.Cleanup(func() {
 		avahiAvailable, avahiDial = origAvail, origDial
+		avahiInterfaceByIndex = origInterfaceByIndex
 		Flush()
 	})
 }
@@ -56,17 +61,23 @@ func TestParseAvahiReply(t *testing.T) {
 	}{
 		// The exact shape avahi-daemon returns, confirmed against the daemon.
 		{"ipv4", "+ 2 0 zap.local 192.168.1.42", "192.168.1.42"},
-		{"ipv6", "+ 2 1 zap.local fe80::1", "fe80::1"},
+		{"ipv6", "+ 2 1 zap.local fe80::1", "fe80::1%test0"},
 		// A v4-mapped answer must dial as plain IPv4.
 		{"v4 mapped", "+ 2 1 zap.local ::ffff:192.168.1.42", "192.168.1.42"},
+		{"wrong name", "+ 2 0 other.local 192.168.1.42", ""},
 		{"failure", "- 15 Timeout reached", ""},
 		{"empty", "", ""},
 		{"truncated", "+ 2 0 zap.local", ""},
 		{"unparsable address", "+ 2 0 zap.local not-an-address", ""},
 	}
+	origInterfaceByIndex := avahiInterfaceByIndex
+	avahiInterfaceByIndex = func(index int) (*net.Interface, error) {
+		return &net.Interface{Index: index, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}, nil
+	}
+	t.Cleanup(func() { avahiInterfaceByIndex = origInterfaceByIndex })
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := parseAvahiReply(c.line)
+			got := parseAvahiReply(c.line, "zap.local")
 			if c.want == "" {
 				if got.err == nil {
 					t.Fatalf("accepted %q, got %v", c.line, got.addr)
@@ -86,7 +97,7 @@ func TestParseAvahiReply(t *testing.T) {
 // A failure line must carry avahi's own wording, so the log says what the
 // daemon said rather than something this package made up.
 func TestParseAvahiReplyKeepsDaemonWording(t *testing.T) {
-	got := parseAvahiReply("- 15 Timeout reached")
+	got := parseAvahiReply("- 15 Timeout reached", "zap.local")
 	if got.err == nil {
 		t.Fatal("expected an error")
 	}
@@ -104,12 +115,12 @@ func TestLookupPrefersAvahi(t *testing.T) {
 		return "- 15 Timeout reached"
 	})
 
-	orig := listenPacket
-	listenPacket = func() (*net.UDPConn, error) {
+	orig := listenMulticastPacket
+	listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
 		t.Error("queried the LAN directly even though avahi answered")
 		return nil, errors.New("should not be called")
 	}
-	t.Cleanup(func() { listenPacket = orig })
+	t.Cleanup(func() { listenMulticastPacket = orig })
 
 	addrs, err := Lookup(context.Background(), "inverter.local")
 	if err != nil {
@@ -156,8 +167,8 @@ func TestAvahiLookupFallsBackToIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("avahiLookup: %v", err)
 	}
-	if len(addrs) != 1 || addrs[0] != netip.MustParseAddr("fe80::2") {
-		t.Fatalf("addrs = %v, want [fe80::2]", addrs)
+	if len(addrs) != 1 || addrs[0].String() != "fe80::2%test0" {
+		t.Fatalf("addrs = %v, want [fe80::2%%test0]", addrs)
 	}
 }
 

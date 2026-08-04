@@ -368,6 +368,37 @@ func TestReloadRestartsDriversWhenTroubleshootingModeChanges(t *testing.T) {
 	}
 }
 
+func TestReloadRestartsDriverWhenTransportHostChangesToLocalName(t *testing.T) {
+	var dials atomic.Int32
+	r := NewRegistry(telemetry.NewStore())
+	r.ModbusFactory = func(name string, cfg *config.ModbusConfig) (ModbusCap, error) {
+		dials.Add(1)
+		return &mockModbus{}, nil
+	}
+	path := writeTestDriver(t, registryRestartTestDriver)
+	cfg := config.Driver{
+		Name: "d1",
+		Lua:  path,
+		Capabilities: config.Capabilities{
+			Modbus: &config.ModbusConfig{Host: "192.168.1.20", Port: 502, UnitID: 1},
+		},
+	}
+	if err := r.Add(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	defer r.ShutdownAll()
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("initial Modbus factory calls = %d, want 1", got)
+	}
+
+	updated := cfg
+	updated.Capabilities.Modbus = &config.ModbusConfig{Host: "inverter.local", Port: 502, UnitID: 1}
+	r.Reload(context.Background(), []config.Driver{updated}, false)
+	if got := dials.Load(); got != 2 {
+		t.Fatalf("Modbus factory calls after .local reload = %d, want 2", got)
+	}
+}
+
 // runLoop should bump TickCount on every poll-return-without-error so
 // a Lua driver that is alive but hasn't emitted yet (e.g. between
 // MQTT subscribe and the first inbound message) is visibly running
