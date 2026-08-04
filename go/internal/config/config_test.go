@@ -719,12 +719,8 @@ func TestSaveAtomicWritesOwnerOnlyMode(t *testing.T) {
 			if err := SaveAtomic(path, c); err != nil {
 				t.Fatal(err)
 			}
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := info.Mode().Perm(); got != 0o600 {
-				t.Errorf("saved config mode = %04o, want 0600 — the file holds MQTT passwords and OAuth refresh tokens", got)
+			if err := verifyConfigFileOwnerOnly(path); err != nil {
+				t.Errorf("saved config is not owner-only — the file holds MQTT passwords and OAuth refresh tokens: %v", err)
 			}
 			if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 				t.Errorf("tmp file survived the save: %v", err)

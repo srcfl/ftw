@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1914,20 +1913,6 @@ var defaultDurableWriter = durableWriter{
 	syncDir:  syncDir,
 }
 
-// syncDir fsyncs a directory so a completed rename survives power loss.
-// Best-effort on platforms where directories can't be fsynced (Windows).
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil && runtime.GOOS != "windows" {
-		return err
-	}
-	return nil
-}
-
 // SaveAtomic writes config to disk via tmp-file + rename. Safe from partial
 // writes and from power loss: the temp file is fsynced before the rename and
 // the containing directory is fsynced after it.
@@ -1964,7 +1949,7 @@ func saveAtomic(w durableWriter, path string, c *Config) error {
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clear stale tmp: %w", err)
 	}
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, configFileMode)
+	f, err := createConfigTemp(tmp, configFileMode)
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
@@ -1986,7 +1971,7 @@ func saveAtomic(w durableWriter, path string, c *Config) error {
 		os.Remove(tmp)
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := replaceConfigTemp(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename tmp: %w", err)
 	}
