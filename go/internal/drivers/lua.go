@@ -566,6 +566,17 @@ func luaReturnError(name string, ret lua.LValue) error {
 
 // ---- host.* API exposed to Lua ----
 
+func newLuaHTTPTransport(allowUnverifiedLocal bool, proxy func(*net_http.Request) (*net_url.URL, error)) *net_http.Transport {
+	transport := net_http.DefaultTransport.(*net_http.Transport).Clone()
+	if proxy == nil {
+		proxy = transport.Proxy
+	}
+	transport.Proxy = guardMDNSProxy(proxy, allowUnverifiedLocal)
+	mdnsDialer := mdnsresolve.Dialer{AllowUnverifiedLocal: allowUnverifiedLocal}
+	transport.DialContext = mdnsDialer.DialContext
+	return transport
+}
+
 func registerHost(L *lua.LState, env *HostEnv) {
 	host := L.NewTable()
 
@@ -1160,10 +1171,9 @@ func registerHost(L *lua.LState, env *HostEnv) {
 
 	// Drivers routinely address a device by its ".local" name, which the
 	// stdlib resolver cannot answer. Clone the default transport so proxying,
-	// HTTP/2 and connection pooling are all unchanged — only the dial step
-	// differs, and only for ".local" hosts.
-	transport := net_http.DefaultTransport.(*net_http.Transport).Clone()
-	transport.DialContext = mdnsresolve.DialContext
+	// HTTP/2 and connection pooling are all unchanged. Guard proxy selection
+	// as well as the dial step: net/http chooses a proxy before DialContext.
+	transport := newLuaHTTPTransport(env.AllowUnverifiedLocal, nil)
 
 	httpClient := &net_http.Client{
 		Timeout:   15 * time.Second,
@@ -1193,8 +1203,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// endpoint with a self-signed cert (a NIBE heat pump's local REST API)
 	// without the SSRF-grade hole of blanket InsecureSkipVerify: a swapped
 	// cert (MITM) is rejected at the handshake even if it chains to a real
-	// CA. Drivers WITHOUT a pin keep Go's default transport untouched, so
-	// nothing about existing HTTP drivers changes.
+	// CA. Drivers WITHOUT a pin keep standard system-root certificate
+	// verification; the shared mDNS and proxy policy still applies.
 	if pin := tlsPin; pin != "" {
 		// Clone the transport built above so the pinned client keeps the same
 		// mDNS-aware dialer — a pinned device is usually a local appliance

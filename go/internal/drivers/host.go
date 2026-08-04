@@ -86,6 +86,10 @@ type HostEnv struct {
 	// backward compat with existing drivers that didn't declare a list.
 	// Populated from driver config `capabilities.http.allowed_hosts`.
 	HTTPAllowedHosts []string
+	// AllowUnverifiedLocal permits all this driver's mDNS-resolved .local
+	// transports. The name allowlist is not server identity; core keeps this
+	// false unless the operator explicitly opts in.
+	AllowUnverifiedLocal bool
 	// HTTPTLSPinSHA256, when non-empty, pins the HTTPS leaf certificate to
 	// this SHA-256 fingerprint (hex; colons/whitespace ignored, case-
 	// insensitive — same value as `openssl x509 -fingerprint -sha256`).
@@ -489,6 +493,12 @@ func (h *HostEnv) WithHTTPAllowWrite() *HostEnv { h.HTTPAllowWrite = true; retur
 // means "any host" (backward compatible). Matched against URL host.
 func (h *HostEnv) WithHTTPAllowedHosts(hosts []string) *HostEnv {
 	h.HTTPAllowedHosts = hosts
+	return h
+}
+
+// WithAllowUnverifiedLocal permits this driver's raw .local transports.
+func (h *HostEnv) WithAllowUnverifiedLocal() *HostEnv {
+	h.AllowUnverifiedLocal = true
 	return h
 }
 

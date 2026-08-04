@@ -73,6 +73,8 @@ drivers:
   # - name: ambibox
   #   lua: drivers/ambibox_v2x.lua
   #   capabilities:
+  #     # mDNS does not prove the server identity; opt in per driver only
+  #     allow_unverified_local: true
   #     mqtt:
   #       host: sid-os.local
   #       port: 1883
@@ -90,6 +92,8 @@ drivers:
   #   is_site_meter: true
   #   battery_telemetry_only: true
   #   capabilities:
+  #     # Required for an unauthenticated raw .local endpoint.
+  #     allow_unverified_local: true
   #     http:
   #       allowed_hosts: ["zap.local"]  # .local is resolved by FTW over mDNS
   #   config:
@@ -136,6 +140,7 @@ api:
 homeassistant:
   enabled: false
   broker: 192.168.1.1
+  # allow_unverified_local: true  # required for an unauthenticated broker.local
   port: 1883
   username: homeems
   password: homeems

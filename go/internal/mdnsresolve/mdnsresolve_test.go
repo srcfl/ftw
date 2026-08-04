@@ -501,6 +501,52 @@ func TestDialerSkipsResolutionForPlainHosts(t *testing.T) {
 	}
 }
 
+func TestDialerDeniesUnverifiedLocalByDefault(t *testing.T) {
+	_, err := (&Dialer{}).Dial("tcp", "inverter.local:502")
+	if !errors.Is(err, ErrUnverifiedLocal) {
+		t.Fatalf("Dial without local opt-in error = %v, want ErrUnverifiedLocal", err)
+	}
+}
+
+func TestDialerLeavesOrdinaryDNSAndIPUnchanged(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan struct{}, 2)
+	go func() {
+		for range 2 {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+
+	for _, address := range []string{"127.0.0.1:" + port, "localhost:" + port} {
+		conn, err := (&Dialer{}).Dial("tcp4", address)
+		if err != nil {
+			t.Fatalf("Dial(%q): %v", address, err)
+		}
+		_ = conn.Close()
+	}
+	for range 2 {
+		select {
+		case <-accepted:
+		case <-time.After(time.Second):
+			t.Fatal("ordinary DNS/IP dial was not accepted")
+		}
+	}
+}
+
 func TestDialerResolvesLocalNameBeforeConnecting(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -527,7 +573,10 @@ func TestDialerResolvesLocalNameBeforeConnecting(t *testing.T) {
 		return "- 15 Timeout reached"
 	})
 
-	d := Dialer{Dialer: net.Dialer{Timeout: time.Second}}
+	d := Dialer{
+		Dialer:               net.Dialer{Timeout: time.Second},
+		AllowUnverifiedLocal: true,
+	}
 	conn, err := d.Dial("tcp", "inverter.local:"+port)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)

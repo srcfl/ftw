@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -195,6 +198,71 @@ func TestHTTPTestRigSelfCheck(t *testing.T) {
 	if atomic.LoadInt32(&hits) != 1 {
 		t.Errorf("rig sanity: server saw %d hits, want 1", atomic.LoadInt32(&hits))
 	}
+}
+
+func TestLuaHTTPProxyChecksLocalDestinationBeforeProxy(t *testing.T) {
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		if r.URL.Host == "" {
+			t.Errorf("proxy request lost absolute destination: %+v", r.URL)
+		}
+		_, _ = w.Write([]byte("proxy-ok"))
+	}))
+	defer proxy.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newRequest := func(method, target string) *http.Request {
+		req, err := http.NewRequest(method, target, strings.NewReader(`{"command":"start"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Basic dTpw")
+		return req
+	}
+
+	t.Run("default deny stops every HTTP method before proxy", func(t *testing.T) {
+		proxyHits.Store(0)
+		client := &http.Client{Transport: newLuaHTTPTransport(false, http.ProxyURL(proxyURL))}
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch} {
+			_, err := client.Do(newRequest(method, "http://inverter.local/api"))
+			if !errors.Is(err, mdnsresolve.ErrUnverifiedLocal) {
+				t.Errorf("%s error = %v, want ErrUnverifiedLocal", method, err)
+			}
+		}
+		if got := proxyHits.Load(); got != 0 {
+			t.Fatalf("denied .local requests reached proxy %d times, want 0", got)
+		}
+	})
+
+	t.Run("explicit opt-in uses the configured proxy", func(t *testing.T) {
+		proxyHits.Store(0)
+		client := &http.Client{Transport: newLuaHTTPTransport(true, http.ProxyURL(proxyURL))}
+		resp, err := client.Do(newRequest(http.MethodPost, "http://inverter.local/api"))
+		if err != nil {
+			t.Fatalf("opt-in request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+		if got := proxyHits.Load(); got != 1 {
+			t.Fatalf("opt-in request reached proxy %d times, want 1", got)
+		}
+	})
+
+	t.Run("ordinary host still uses the proxy without opt-in", func(t *testing.T) {
+		proxyHits.Store(0)
+		client := &http.Client{Transport: newLuaHTTPTransport(false, http.ProxyURL(proxyURL))}
+		resp, err := client.Do(newRequest(http.MethodGet, "http://ordinary.example/api"))
+		if err != nil {
+			t.Fatalf("ordinary host request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+		if got := proxyHits.Load(); got != 1 {
+			t.Fatalf("ordinary host reached proxy %d times, want 1", got)
+		}
+	})
 }
 
 // TLS pinning lets a driver reach a self-signed HTTPS endpoint (e.g. a

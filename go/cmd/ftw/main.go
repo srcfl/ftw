@@ -521,10 +521,10 @@ func main() {
 		}
 	}
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
-		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-"+name)
+		return mqttcli.DialWithOptions(c.Host, c.Port, c.Username, c.Password, "ftw-"+name, c.AllowUnverifiedLocal)
 	}
 	reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
-		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
+		return modbuscli.DialWithOptions(c.Host, c.Port, c.UnitID, c.AllowUnverifiedLocal)
 	}
 	reg.SerialFactory = func(name string, c *config.SerialConfig) (drivers.SerialCap, error) {
 		return drivers.OpenSerial(c)

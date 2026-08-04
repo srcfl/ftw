@@ -187,29 +187,33 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		return r.SecretPersister(driverName, key, value)
 	}
 	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
-		cap, err := r.MQTTFactory(cfg.Name, mq)
+		dialCfg := *mq
+		dialCfg.AllowUnverifiedLocal = cfg.Capabilities.AllowUnverifiedLocal
+		cap, err := r.MQTTFactory(cfg.Name, &dialCfg)
 		if err != nil {
 			return fmt.Errorf("mqtt capability: %w", err)
 		}
 		env.WithMQTT(cap)
-		env.SetEndpoint(fmt.Sprintf("mqtt://%s:%d", mq.Host, mq.Port))
+		env.SetEndpoint(fmt.Sprintf("mqtt://%s:%d", dialCfg.Host, dialCfg.Port))
 		// Best-effort MAC resolution. Cross-VLAN devices return ""; that's
 		// fine — device_id falls back to the endpoint.
 		if r.ARPLookup != nil {
-			if mac, ok := r.ARPLookup(mq.Host); ok {
+			if mac, ok := r.ARPLookup(dialCfg.Host); ok {
 				env.SetMAC(mac)
 			}
 		}
 	}
 	if mb := cfg.EffectiveModbus(); mb != nil && r.ModbusFactory != nil {
-		cap, err := r.ModbusFactory(cfg.Name, mb)
+		dialCfg := *mb
+		dialCfg.AllowUnverifiedLocal = cfg.Capabilities.AllowUnverifiedLocal
+		cap, err := r.ModbusFactory(cfg.Name, &dialCfg)
 		if err != nil {
 			return fmt.Errorf("modbus capability: %w", err)
 		}
 		env.WithModbus(cap)
-		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", mb.Host, mb.Port))
+		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", dialCfg.Host, dialCfg.Port))
 		if r.ARPLookup != nil {
-			if mac, ok := r.ARPLookup(mb.Host); ok {
+			if mac, ok := r.ARPLookup(dialCfg.Host); ok {
 				env.SetMAC(mac)
 			}
 		}
@@ -235,8 +239,11 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			env.WithHTTPAllowWrite()
 		}
 	}
+	if cfg.Capabilities.AllowUnverifiedLocal {
+		env.WithAllowUnverifiedLocal()
+	}
 	if cfg.Capabilities.WebSocket != nil {
-		env.WithWS(NewGorillaWS(cfg.Name))
+		env.WithWS(NewGorillaWS(cfg.Name, cfg.Capabilities.AllowUnverifiedLocal))
 		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
 			env.WithWSAllowedHosts(hosts)
 		}
@@ -250,7 +257,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		// the operator can still loosen this by listing bare hosts in
 		// capabilities.tcp.allowed_hosts when they want any-port access.
 		hosts := tcpAllowedHostsFor(cfg)
-		env.WithTCP(NewNetTCP(cfg.Name, hosts))
+		env.WithTCP(NewNetTCP(cfg.Name, hosts, cfg.Capabilities.AllowUnverifiedLocal))
 		if len(hosts) > 0 {
 			env.WithTCPAllowedHosts(hosts)
 		}
@@ -884,6 +891,7 @@ func sameDriverConfig(a, b config.Driver) bool {
 		a.BatteryTelemetryOnly != b.BatteryTelemetryOnly ||
 		a.ObserveOnly != b.ObserveOnly ||
 		a.Disabled != b.Disabled ||
+		a.Capabilities.AllowUnverifiedLocal != b.Capabilities.AllowUnverifiedLocal ||
 		!reflect.DeepEqual(a.Control, b.Control) {
 		return false
 	}

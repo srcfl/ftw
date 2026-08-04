@@ -256,7 +256,10 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 		// which the stdlib resolver cannot answer. See internal/mqtt for why a
 		// TCP-only replacement is complete here.
 		SetCustomOpenConnectionFn(func(uri *url.URL, o paho.ClientOptions) (net.Conn, error) {
-			d := mdnsresolve.Dialer{Dialer: net.Dialer{Timeout: o.ConnectTimeout}}
+			d := mdnsresolve.Dialer{
+				Dialer:               net.Dialer{Timeout: o.ConnectTimeout},
+				AllowUnverifiedLocal: cfg.AllowUnverifiedLocal,
+			}
 			return d.Dial("tcp", uri.Host)
 		}).
 		SetClientID("forty-two-watts-ha").

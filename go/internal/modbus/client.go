@@ -29,12 +29,13 @@ const (
 // single-session dongle can release its old socket without blocking the
 // driver's poll and command loop.
 type Capability struct {
-	mu             sync.Mutex
-	client         *tcpClient
-	url            string
-	addr           string
-	unitID         int
-	requestTimeout time.Duration
+	mu                   sync.Mutex
+	client               *tcpClient
+	url                  string
+	addr                 string
+	unitID               int
+	allowUnverifiedLocal bool
+	requestTimeout       time.Duration
 
 	consecutiveTransportFailures int
 	nextReconnectAt              time.Time
@@ -43,18 +44,25 @@ type Capability struct {
 
 // Dial opens a Modbus TCP connection.
 func Dial(host string, port, unitID int) (*Capability, error) {
+	return DialWithOptions(host, port, unitID, false)
+}
+
+// DialWithOptions opens a Modbus TCP connection with the core's explicit
+// policy for unauthenticated mDNS names.
+func DialWithOptions(host string, port, unitID int, allowUnverifiedLocal bool) (*Capability, error) {
 	if err := validateEndpoint(host, port, unitID); err != nil {
 		return nil, err
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	url := "tcp://" + addr
-	cli := newTCPClient(addr, modbusRequestTimeout, modbusTCPKeepAlive)
+	cli := newTCPClientWithOptions(addr, modbusRequestTimeout, modbusTCPKeepAlive, allowUnverifiedLocal)
 	capability := &Capability{
-		url:            url,
-		addr:           addr,
-		unitID:         unitID,
-		requestTimeout: modbusRequestTimeout,
-		now:            time.Now,
+		url:                  url,
+		addr:                 addr,
+		unitID:               unitID,
+		allowUnverifiedLocal: allowUnverifiedLocal,
+		requestTimeout:       modbusRequestTimeout,
+		now:                  time.Now,
 	}
 	if err := cli.Open(); err != nil {
 		if !isRetryableDialError(err) {
@@ -330,7 +338,7 @@ func (c *Capability) reconnect() error {
 	if timeout <= 0 {
 		timeout = modbusRequestTimeout
 	}
-	cli := newTCPClient(c.addr, timeout, modbusTCPKeepAlive)
+	cli := newTCPClientWithOptions(c.addr, timeout, modbusTCPKeepAlive, c.allowUnverifiedLocal)
 	if err := cli.Open(); err != nil {
 		c.noteTransportFailure()
 		return err

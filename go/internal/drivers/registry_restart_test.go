@@ -399,6 +399,34 @@ func TestReloadRestartsDriverWhenTransportHostChangesToLocalName(t *testing.T) {
 	}
 }
 
+func TestReloadRestartsDriverWhenLocalTrustPolicyChanges(t *testing.T) {
+	var seen []bool
+	r := NewRegistry(telemetry.NewStore())
+	r.ModbusFactory = func(name string, cfg *config.ModbusConfig) (ModbusCap, error) {
+		seen = append(seen, cfg.AllowUnverifiedLocal)
+		return &mockModbus{}, nil
+	}
+	path := writeTestDriver(t, registryRestartTestDriver)
+	cfg := config.Driver{
+		Name: "d1",
+		Lua:  path,
+		Capabilities: config.Capabilities{
+			Modbus: &config.ModbusConfig{Host: "192.168.1.20", Port: 502, UnitID: 1},
+		},
+	}
+	if err := r.Add(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	defer r.ShutdownAll()
+
+	updated := cfg
+	updated.Capabilities.AllowUnverifiedLocal = true
+	r.Reload(context.Background(), []config.Driver{updated}, false)
+	if len(seen) != 2 || seen[0] || !seen[1] {
+		t.Fatalf("Modbus factory trust flags after reload = %v, want [false true]", seen)
+	}
+}
+
 // runLoop should bump TickCount on every poll-return-without-error so
 // a Lua driver that is alive but hasn't emitted yet (e.g. between
 // MQTT subscribe and the first inbound message) is visibly running

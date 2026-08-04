@@ -25,12 +25,13 @@ import (
 // net.Conn close races a graceful WS close message — either path lands
 // the goroutine on a sane stop).
 type gorillaWS struct {
-	driverName string
+	driverName           string
+	allowUnverifiedLocal bool
 
-	mu     sync.Mutex // protects conn, open, queue
-	conn   *websocket.Conn
-	open   bool
-	queue  []string
+	mu      sync.Mutex // protects conn, open, queue
+	conn    *websocket.Conn
+	open    bool
+	queue   []string
 	writeMu sync.Mutex // serializes WriteMessage calls
 	stop    chan struct{}
 }
@@ -39,8 +40,21 @@ type gorillaWS struct {
 // until Open is called by the driver — drivers commonly need to do an
 // HTTP call (e.g. resolve a Tibber homeId) before they know what to
 // subscribe to, so connecting eagerly from the registry would be wrong.
-func NewGorillaWS(driverName string) WSCap {
-	return &gorillaWS{driverName: driverName}
+func NewGorillaWS(driverName string, allowUnverifiedLocal ...bool) WSCap {
+	allow := len(allowUnverifiedLocal) > 0 && allowUnverifiedLocal[0]
+	return &gorillaWS{driverName: driverName, allowUnverifiedLocal: allow}
+}
+
+func newGorillaWSDialer(allowUnverifiedLocal bool, proxy func(*net_http.Request) (*net_url.URL, error)) websocket.Dialer {
+	dialer := *websocket.DefaultDialer
+	dialer.HandshakeTimeout = 15 * time.Second
+	if proxy == nil {
+		proxy = dialer.Proxy
+	}
+	dialer.Proxy = guardMDNSProxy(proxy, allowUnverifiedLocal)
+	mdnsDialer := mdnsresolve.Dialer{AllowUnverifiedLocal: allowUnverifiedLocal}
+	dialer.NetDialContext = mdnsDialer.DialContext
+	return dialer
 }
 
 // Open establishes the WebSocket connection. headers go into the HTTP
@@ -73,10 +87,10 @@ func (g *gorillaWS) Open(url string, headers map[string]string) error {
 		}
 		hdr.Set(k, v)
 	}
-	dialer := *websocket.DefaultDialer
-	dialer.HandshakeTimeout = 15 * time.Second
 	// ".local" hosts need mDNS; everything else falls through to a plain dial.
-	dialer.NetDialContext = mdnsresolve.DialContext
+	// Guard the proxy callback too: gorilla selects a proxy before it invokes
+	// NetDialContext.
+	dialer := newGorillaWSDialer(g.allowUnverifiedLocal, nil)
 	if len(subprotocols) > 0 {
 		dialer.Subprotocols = subprotocols
 	}

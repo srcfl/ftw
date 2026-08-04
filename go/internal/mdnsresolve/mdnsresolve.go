@@ -35,6 +35,7 @@ package mdnsresolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -43,6 +44,10 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrUnverifiedLocal is returned before any mDNS query when a caller has not
+// explicitly accepted that a .local name is not a server identity.
+var ErrUnverifiedLocal = errors.New("mDNS .local resolution requires allow_unverified_local=true")
 
 // now is swappable so cache-expiry tests do not have to sleep.
 var now = time.Now
@@ -84,6 +89,17 @@ func IsLocal(host string) bool {
 		return false
 	}
 	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), ".local")
+}
+
+// CheckLocalDestination enforces the core trust decision before a transport
+// chooses a direct socket or an HTTP/WebSocket proxy. Proxy selection happens
+// before a net.Dialer callback, so keeping this check separate from Dialer is
+// what prevents an untrusted .local request from reaching a proxy first.
+func CheckLocalDestination(host string, allowUnverifiedLocal bool) error {
+	if IsLocal(host) && !allowUnverifiedLocal {
+		return fmt.Errorf("mDNS resolution for %s denied: %w", host, ErrUnverifiedLocal)
+	}
+	return nil
 }
 
 func canonical(name string) string {
@@ -179,6 +195,10 @@ func resolve(ctx context.Context, key string) ([]netip.Addr, time.Duration, stri
 // connection from the original address string pick up the new IP on reconnect.
 type Dialer struct {
 	net.Dialer
+	// AllowUnverifiedLocal is a per-driver/core policy. Name allowlists do not
+	// prove which LAN host answered an mDNS query, so this stays false unless
+	// the operator explicitly accepts that trust model.
+	AllowUnverifiedLocal bool
 }
 
 // DialContext resolves address if it names a ".local" host, then dials it.
@@ -186,6 +206,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || !IsLocal(host) {
 		return d.Dialer.DialContext(ctx, network, address)
+	}
+	if err := CheckLocalDestination(host, d.AllowUnverifiedLocal); err != nil {
+		return nil, err
 	}
 
 	addrs, err := Lookup(ctx, host)
@@ -229,6 +252,15 @@ func DialContext(ctx context.Context, network, address string) (net.Conn, error)
 
 // DialTimeout mirrors net.DialTimeout with mDNS resolution added.
 func DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
-	d := Dialer{Dialer: net.Dialer{Timeout: timeout}}
+	return DialTimeoutWithOptions(network, address, timeout, false)
+}
+
+// DialTimeoutWithOptions mirrors DialTimeout and carries the core's explicit
+// mDNS trust decision to the TCP capability.
+func DialTimeoutWithOptions(network, address string, timeout time.Duration, allowUnverifiedLocal bool) (net.Conn, error) {
+	d := Dialer{
+		Dialer:               net.Dialer{Timeout: timeout},
+		AllowUnverifiedLocal: allowUnverifiedLocal,
+	}
 	return d.Dial(network, address)
 }

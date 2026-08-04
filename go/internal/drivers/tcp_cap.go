@@ -35,21 +35,23 @@ type TCPCap interface {
 // background read pump that appends bytes to an in-memory buffer, and a
 // non-blocking PopBytes drain. Mirrors gorillaWS's concurrency model.
 type netTCP struct {
-	driverName string
-	allowed    []string // empty = any host
+	driverName           string
+	allowed              []string // empty = any host
+	allowUnverifiedLocal bool
 
-	mu     sync.Mutex
-	conn   net.Conn
-	open   bool
-	buf    []byte
-	stop   chan struct{}
+	mu   sync.Mutex
+	conn net.Conn
+	open bool
+	buf  []byte
+	stop chan struct{}
 }
 
 // NewNetTCP returns a TCPCap bound to a driver name. The connection is not
 // opened until the driver calls host.tcp_open.
-func NewNetTCP(driverName string, allowedHosts []string) TCPCap {
+func NewNetTCP(driverName string, allowedHosts []string, allowUnverifiedLocal ...bool) TCPCap {
 	cp := append([]string(nil), allowedHosts...)
-	return &netTCP{driverName: driverName, allowed: cp}
+	allow := len(allowUnverifiedLocal) > 0 && allowUnverifiedLocal[0]
+	return &netTCP{driverName: driverName, allowed: cp, allowUnverifiedLocal: allow}
 }
 
 // tcpHostAllowed checks `host:port` style addresses against the allowlist.
@@ -95,7 +97,7 @@ func (n *netTCP) Open(addr string) error {
 		return fmt.Errorf("tcp: %s", reason)
 	}
 
-	conn, err := mdnsresolve.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := mdnsresolve.DialTimeoutWithOptions("tcp", addr, 10*time.Second, n.allowUnverifiedLocal)
 	if err != nil {
 		return fmt.Errorf("tcp dial: %w", err)
 	}

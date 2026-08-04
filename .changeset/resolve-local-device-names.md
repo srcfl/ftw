@@ -41,5 +41,9 @@ supported; link-local IPv6 addresses carry their interface zone and unscoped
 answers are rejected. The resolver also rejects non-response DNS packets,
 wrong answer classes or families, invalid sources, and Avahi replies whose
 interface, name, address family or address does not match the request. mDNS is
-unauthenticated, so reserve control-device names on the LAN and use TLS
-certificate pins where available.
+unauthenticated, so `.local` transport dials are denied by default. Set
+`capabilities.allow_unverified_local: true` for a driver, or
+`homeassistant.allow_unverified_local: true` for the Home Assistant bridge,
+when the operator accepts that trust boundary. Host allowlists do not prove
+server identity, and a TLS pin does not bypass the gate yet. Literal IP and
+ordinary DNS endpoints are unchanged.

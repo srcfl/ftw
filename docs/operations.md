@@ -215,6 +215,25 @@ where the driver supports them. Network allowlists still check the configured
 host name and port before resolution; they do not prove that an mDNS responder
 is the intended device.
 
+FTW therefore rejects `.local` transport dials by default, before it queries
+Avahi or the LAN. To use an unauthenticated `.local` endpoint, opt in on that
+driver:
+
+```yaml
+capabilities:
+  allow_unverified_local: true
+  modbus:
+    host: inverter.local
+    port: 502
+```
+
+For the Home Assistant bridge, set `homeassistant.allow_unverified_local: true`
+instead. This is required for every mDNS transport, including HTTP, WebSocket,
+MQTT, Modbus and raw TCP. A TLS pin does not bypass this gate yet. Literal IP
+addresses and ordinary DNS names keep their existing behavior. The opt-in is
+per driver so a name allowlist never becomes a server identity for another
+driver.
+
 #### Letting FTW use avahi
 
 Host networking shares ports, not Unix sockets, so avahi has to be bind-mounted

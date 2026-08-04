@@ -23,20 +23,26 @@ const (
 )
 
 type tcpClient struct {
-	addr      string
-	timeout   time.Duration
-	keepAlive time.Duration
-	unitID    uint8
-	txID      uint16
-	conn      net.Conn
+	addr                 string
+	timeout              time.Duration
+	keepAlive            time.Duration
+	allowUnverifiedLocal bool
+	unitID               uint8
+	txID                 uint16
+	conn                 net.Conn
 }
 
 func newTCPClient(addr string, timeout, keepAlive time.Duration) *tcpClient {
+	return newTCPClientWithOptions(addr, timeout, keepAlive, false)
+}
+
+func newTCPClientWithOptions(addr string, timeout, keepAlive time.Duration, allowUnverifiedLocal bool) *tcpClient {
 	return &tcpClient{
-		addr:      addr,
-		timeout:   timeout,
-		keepAlive: keepAlive,
-		unitID:    1,
+		addr:                 addr,
+		timeout:              timeout,
+		keepAlive:            keepAlive,
+		allowUnverifiedLocal: allowUnverifiedLocal,
+		unitID:               1,
 	}
 }
 
@@ -47,7 +53,7 @@ func (c *tcpClient) Open() error {
 	dialer := mdnsresolve.Dialer{Dialer: net.Dialer{
 		Timeout:   modbusDialTimeout,
 		KeepAlive: c.keepAlive,
-	}}
+	}, AllowUnverifiedLocal: c.allowUnverifiedLocal}
 	conn, err := dialer.Dial("tcp", c.addr)
 	if err != nil {
 		return err
