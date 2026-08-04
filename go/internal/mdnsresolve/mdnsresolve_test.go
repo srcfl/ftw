@@ -70,11 +70,13 @@ func aaaaResource(t *testing.T, name string, ip [16]byte, ttl uint32) dnsmessage
 
 func packAnswer(t *testing.T, qname string, answers []dnsmessage.Resource) []byte {
 	t.Helper()
-	msg := dnsmessage.Message{
-		Header:    dnsmessage.Header{Response: true, Authoritative: true},
-		Questions: []dnsmessage.Question{{Name: mustDNSName(t, qname), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
-		Answers:   answers,
-	}
+	return packDNSMessage(t, dnsmessage.Header{Response: true, Authoritative: true},
+		[]dnsmessage.Question{{Name: mustDNSName(t, qname), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}}, answers)
+}
+
+func packDNSMessage(t *testing.T, header dnsmessage.Header, questions []dnsmessage.Question, answers []dnsmessage.Resource) []byte {
+	t.Helper()
+	msg := dnsmessage.Message{Header: header, Questions: questions, Answers: answers}
 	packet, err := msg.Pack()
 	if err != nil {
 		t.Fatalf("pack: %v", err)
@@ -82,11 +84,44 @@ func packAnswer(t *testing.T, qname string, answers []dnsmessage.Resource) []byt
 	return packet
 }
 
+func parseTestAddrAnswer(t *testing.T, packet []byte, qname, network string) ([]netip.Addr, time.Duration, bool) {
+	t.Helper()
+	var sourceIP string
+	if network == "udp6" {
+		sourceIP = "2001:db8::1"
+	} else {
+		sourceIP = "192.0.2.1"
+	}
+	return parseAddrAnswer(packet, qname, &net.UDPAddr{
+		IP:   net.ParseIP(sourceIP),
+		Port: 5353,
+	}, network, &net.Interface{
+		Index: 1,
+		Name:  "test0",
+		Flags: net.FlagUp | net.FlagMulticast,
+	})
+}
+
+func TestParseAddrAnswerRequiresResponseBitButNotQuestion(t *testing.T) {
+	qname := "inverter.local."
+	answers := []dnsmessage.Resource{aResource(t, qname, [4]byte{192, 168, 1, 42}, 60)}
+
+	withoutQuestion := packDNSMessage(t, dnsmessage.Header{Response: true, Authoritative: true}, nil, answers)
+	if _, _, ok := parseTestAddrAnswer(t, withoutQuestion, qname, "udp4"); !ok {
+		t.Fatal("rejected a valid mDNS response without an echoed question")
+	}
+
+	query := packDNSMessage(t, dnsmessage.Header{Response: false}, nil, answers)
+	if _, _, ok := parseTestAddrAnswer(t, query, qname, "udp4"); ok {
+		t.Fatal("accepted a DNS query with answer records as an mDNS response")
+	}
+}
+
 func TestParseAddrAnswer(t *testing.T) {
 	qname := "inverter.local."
 	packet := packAnswer(t, qname, []dnsmessage.Resource{aResource(t, qname, [4]byte{192, 168, 1, 42}, 60)})
 
-	addrs, ttl, ok := parseAddrAnswer(packet, qname)
+	addrs, ttl, ok := parseTestAddrAnswer(t, packet, qname, "udp4")
 	if !ok {
 		t.Fatal("parseAddrAnswer did not accept a valid answer")
 	}
@@ -98,12 +133,67 @@ func TestParseAddrAnswer(t *testing.T) {
 	}
 
 	// An answer for a different name must be ignored.
-	if _, _, ok := parseAddrAnswer(packet, "other.local."); ok {
+	if _, _, ok := parseTestAddrAnswer(t, packet, "other.local.", "udp4"); ok {
 		t.Fatal("accepted an answer for a different name")
 	}
 	// Garbage must not panic or resolve.
-	if _, _, ok := parseAddrAnswer([]byte{1, 2, 3}, qname); ok {
+	if _, _, ok := parseTestAddrAnswer(t, []byte{1, 2, 3}, qname, "udp4"); ok {
 		t.Fatal("accepted a malformed packet")
+	}
+}
+
+func TestParseAddrAnswerValidatesSourceFamilyAndClass(t *testing.T) {
+	qname := "inverter.local."
+	answer := aResource(t, qname, [4]byte{192, 168, 1, 42}, 60)
+	packet := packAnswer(t, qname, []dnsmessage.Resource{answer})
+	iface := &net.Interface{Index: 1, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}
+
+	for _, tc := range []struct {
+		name    string
+		source  *net.UDPAddr
+		network string
+	}{
+		{"nil source", nil, "udp4"},
+		{"wrong source port", &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5354}, "udp4"},
+		{"wrong source family", &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 5353}, "udp4"},
+		{"unspecified source", &net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 5353}, "udp4"},
+		{"multicast source", &net.UDPAddr{IP: net.ParseIP("224.0.0.251"), Port: 5353}, "udp4"},
+		{"wrong requested family", &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5353}, "udp6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, ok := parseAddrAnswer(packet, qname, tc.source, tc.network, iface); ok {
+				t.Fatalf("accepted source=%v network=%s", tc.source, tc.network)
+			}
+		})
+	}
+
+	wrongClass := answer
+	wrongClass.Header.Class = dnsmessage.ClassCHAOS
+	if _, _, ok := parseTestAddrAnswer(t, packAnswer(t, qname, []dnsmessage.Resource{wrongClass}), qname, "udp4"); ok {
+		t.Fatal("accepted an A answer from the wrong DNS class")
+	}
+
+	cacheFlush := answer
+	cacheFlush.Header.Class |= classCacheFlush
+	if _, _, ok := parseTestAddrAnswer(t, packAnswer(t, qname, []dnsmessage.Resource{cacheFlush}), qname, "udp4"); !ok {
+		t.Fatal("rejected an IN answer carrying the mDNS cache-flush bit")
+	}
+}
+
+func TestParseAddrAnswerRejectsAnswerFromWrongFamily(t *testing.T) {
+	qname := "inverter.local."
+	iface := &net.Interface{Index: 1, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}
+
+	ipv6 := packDNSMessage(t, dnsmessage.Header{Response: true}, nil, []dnsmessage.Resource{
+		aaaaResource(t, qname, [16]byte{0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 60),
+	})
+	if _, _, ok := parseAddrAnswer(ipv6, qname, &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 5353}, "udp4", iface); ok {
+		t.Fatal("accepted an IPv6 answer on the IPv4 query path")
+	}
+
+	ipv4 := packAnswer(t, qname, []dnsmessage.Resource{aResource(t, qname, [4]byte{192, 168, 1, 42}, 60)})
+	if _, _, ok := parseAddrAnswer(ipv4, qname, &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 5353}, "udp6", iface); ok {
+		t.Fatal("accepted an IPv4 answer on the IPv6 query path")
 	}
 }
 
@@ -123,7 +213,7 @@ func TestParseAddrAnswerClampsTTL(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			packet := packAnswer(t, qname, []dnsmessage.Resource{aResource(t, qname, [4]byte{10, 0, 0, 1}, c.ttl)})
-			_, ttl, ok := parseAddrAnswer(packet, qname)
+			_, ttl, ok := parseTestAddrAnswer(t, packet, qname, "udp4")
 			if !ok {
 				t.Fatal("answer rejected")
 			}
@@ -134,15 +224,19 @@ func TestParseAddrAnswerClampsTTL(t *testing.T) {
 	}
 }
 
-func TestParseAddrAnswerRequiresInterfaceZoneForLinkLocalIPv6(t *testing.T) {
+func TestParseAddrAnswerUsesSelectedInterfaceForLinkLocalIPv6(t *testing.T) {
 	qname := "inverter.local."
 	packet := packAnswer(t, qname, []dnsmessage.Resource{
 		aaaaResource(t, qname, [16]byte{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 60),
 	})
-	if _, _, ok := parseAddrAnswer(packet, qname); ok {
-		t.Fatal("accepted link-local IPv6 answer without an interface zone")
+	source := &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 5353}
+	if _, _, ok := parseAddrAnswer(packet, qname, source, "udp6", &net.Interface{
+		Index: 1,
+		Flags: net.FlagUp | net.FlagMulticast,
+	}); ok {
+		t.Fatal("accepted link-local IPv6 answer without a valid selected interface")
 	}
-	addrs, _, ok := parseAddrAnswer(packet, qname, "test0")
+	addrs, _, ok := parseTestAddrAnswer(t, packet, qname, "udp6")
 	if !ok || len(addrs) != 1 || addrs[0].String() != "fe80::1%test0" {
 		t.Fatalf("zoned answer = %v, ok=%v; want [fe80::1%%test0]", addrs, ok)
 	}
@@ -164,6 +258,11 @@ func TestQueryIPv6UsesSelectedInterfaceForLinkLocalAnswer(t *testing.T) {
 		t.Skipf("IPv6 loopback unavailable: %v", err)
 	}
 	defer responder.Close()
+	responseConn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("::1"), Port: mdnsPort})
+	if err != nil {
+		t.Skipf("IPv6 mDNS response port unavailable: %v", err)
+	}
+	defer responseConn.Close()
 
 	origAddr, origInterfaces, origListen := mdnsAddr6, multicastInterfaces, listenMulticastPacket
 	mdnsAddr6 = responder.LocalAddr().(*net.UDPAddr)
@@ -205,7 +304,7 @@ func TestQueryIPv6UsesSelectedInterfaceForLinkLocalAnswer(t *testing.T) {
 		}
 		response, err := responseMessage.Pack()
 		if err == nil {
-			_, _ = responder.WriteToUDP(response, from)
+			_, _ = responseConn.WriteToUDP(response, from)
 		}
 	}()
 
@@ -257,6 +356,11 @@ func startResponder(t *testing.T, answers []dnsmessage.Resource) {
 	if err != nil {
 		t.Fatalf("listen responder: %v", err)
 	}
+	responseConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: mdnsPort})
+	if err != nil {
+		_ = rc.Close()
+		t.Skipf("mDNS response port unavailable: %v", err)
+	}
 
 	origAddr, origMulticast, origInterfaces := mdnsAddr, listenMulticastPacket, multicastInterfaces
 	mdnsAddr = rc.LocalAddr().(*net.UDPAddr)
@@ -300,12 +404,13 @@ func startResponder(t *testing.T, answers []dnsmessage.Resource) {
 		if err != nil {
 			return
 		}
-		_, _ = rc.WriteToUDP(packed, from)
+		_, _ = responseConn.WriteToUDP(packed, from)
 	}()
 
 	t.Cleanup(func() {
 		_ = rc.Close()
 		<-done
+		_ = responseConn.Close()
 		mdnsAddr = origAddr
 		listenMulticastPacket, multicastInterfaces = origMulticast, origInterfaces
 		Flush()

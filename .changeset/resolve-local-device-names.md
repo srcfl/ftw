@@ -38,5 +38,8 @@ the container is bridged, so configure devices by IP there.
 
 Direct queries use each active multicast interface. IPv4 and IPv6 are
 supported; link-local IPv6 addresses carry their interface zone and unscoped
-answers are rejected. mDNS is unauthenticated, so reserve control-device names
-on the LAN and use TLS certificate pins where available.
+answers are rejected. The resolver also rejects non-response DNS packets,
+wrong answer classes or families, invalid sources, and Avahi replies whose
+interface, name, address family or address does not match the request. mDNS is
+unauthenticated, so reserve control-device names on the LAN and use TLS
+certificate pins where available.

@@ -15,13 +15,15 @@ import (
 // 6762 query, used only where avahi-daemon's socket cannot be reached. It is
 // deliberately the second choice — see avahi.go for the first.
 
+const mdnsPort = 5353
+
 // mdnsAddr is the RFC 6762 IPv4 multicast group. A var, not a const, so tests
 // can aim a query at a loopback responder.
-var mdnsAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+var mdnsAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 
 // mdnsAddr6 is the RFC 6762 IPv6 multicast group. The interface zone is added
 // to a copy for each query because ff02::fb is link-local by definition.
-var mdnsAddr6 = &net.UDPAddr{IP: net.ParseIP("ff02::fb"), Port: 5353}
+var mdnsAddr6 = &net.UDPAddr{IP: net.ParseIP("ff02::fb"), Port: mdnsPort}
 
 // multicastInterfaces and listenMulticastPacket are vars so tests can select
 // a stable interface and responder without touching the host LAN.
@@ -40,6 +42,10 @@ var listenMulticastPacket = func(network string, iface *net.Interface, group *ne
 
 // classQU is IN with the RFC 6762 unicast-response bit set.
 const classQU = dnsmessage.Class(0x8001)
+
+// mDNS answer classes may carry the cache-flush bit in the high bit. It is a
+// record flag, not a different DNS class.
+const classCacheFlush = dnsmessage.Class(0x8000)
 
 func queryAddrs(ctx context.Context, name string) ([]netip.Addr, time.Duration, error) {
 	qname, err := dnsmessage.NewName(name + ".")
@@ -124,8 +130,7 @@ func eligibleMulticastInterfaces() ([]net.Interface, error) {
 	}
 	eligible := make([]net.Interface, 0, len(ifaces))
 	for _, iface := range ifaces {
-		if iface.Index <= 0 || iface.Flags&net.FlagUp == 0 ||
-			iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if !validMulticastInterface(&iface) {
 			continue
 		}
 		eligible = append(eligible, iface)
@@ -134,6 +139,12 @@ func eligibleMulticastInterfaces() ([]net.Interface, error) {
 		return nil, fmt.Errorf("no active non-loopback multicast interface")
 	}
 	return eligible, nil
+}
+
+func validMulticastInterface(iface *net.Interface) bool {
+	return iface != nil && iface.Index > 0 && iface.Name != "" &&
+		iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagMulticast != 0 &&
+		iface.Flags&net.FlagLoopback == 0
 }
 
 func queryInterfaces(ctx context.Context, packed []byte, name string, ifaces []net.Interface, network string, group *net.UDPAddr, zoneMode string) ([]netip.Addr, time.Duration, error) {
@@ -158,14 +169,7 @@ func queryInterfaces(ctx context.Context, packed []byte, name string, ifaces []n
 			_, _, err := exchange(queryCtx, packed, &target, func() (*net.UDPConn, error) {
 				return listenMulticastPacket(network, &iface, &target)
 			}, func(packet []byte, source *net.UDPAddr) bool {
-				zone := ""
-				if zoneMode == "interface" {
-					zone = iface.Name
-					if source != nil && source.Zone != "" {
-						zone = source.Zone
-					}
-				}
-				got, gotTTL, ok := parseAddrAnswer(packet, name+".", zone)
+				got, gotTTL, ok := parseAddrAnswer(packet, name+".", source, network, &iface)
 				if !ok {
 					return false
 				}
@@ -251,13 +255,13 @@ func exchange(ctx context.Context, packed []byte, target *net.UDPAddr, open func
 	}
 }
 
-func parseAddrAnswer(packet []byte, qname string, zones ...string) ([]netip.Addr, time.Duration, bool) {
-	zone := ""
-	if len(zones) > 0 {
-		zone = zones[0]
+func parseAddrAnswer(packet []byte, qname string, source *net.UDPAddr, network string, iface *net.Interface) ([]netip.Addr, time.Duration, bool) {
+	if !validMulticastInterface(iface) || !validMDNSSource(source, network, iface) {
+		return nil, 0, false
 	}
 	var p dnsmessage.Parser
-	if _, err := p.Start(packet); err != nil {
+	header, err := p.Start(packet)
+	if err != nil || !header.Response || header.RCode != dnsmessage.RCodeSuccess {
 		return nil, 0, false
 	}
 	if err := p.SkipAllQuestions(); err != nil {
@@ -271,11 +275,16 @@ parse:
 	for {
 		h, err := p.AnswerHeader()
 		if err != nil {
-			break parse
-		}
-		if !strings.EqualFold(h.Name.String(), qname) {
-			if err := p.SkipAnswer(); err != nil {
+			if err == dnsmessage.ErrSectionDone {
 				break parse
+			}
+			return nil, 0, false
+		}
+		if !strings.EqualFold(h.Name.String(), qname) ||
+			h.Class&^classCacheFlush != dnsmessage.ClassINET ||
+			!answerTypeMatchesNetwork(h.Type, network) {
+			if err := p.SkipAnswer(); err != nil {
+				return nil, 0, false
 			}
 			continue
 		}
@@ -296,15 +305,15 @@ parse:
 			if addr.Is6() && addr.IsLinkLocalUnicast() {
 				// A link-local address without a zone is not a safe dial
 				// target: the kernel cannot know which interface to use.
-				if zone == "" {
+				if iface.Name == "" {
 					continue
 				}
-				addr = addr.WithZone(zone)
+				addr = addr.WithZone(iface.Name)
 			}
 			addrs = append(addrs, addr)
 		default:
 			if err := p.SkipAnswer(); err != nil {
-				break parse
+				return nil, 0, false
 			}
 			continue
 		}
@@ -313,6 +322,49 @@ parse:
 		}
 	}
 	return finishAnswer(addrs, ttl)
+}
+
+func answerTypeMatchesNetwork(typ dnsmessage.Type, network string) bool {
+	switch network {
+	case "udp4":
+		return typ == dnsmessage.TypeA
+	case "udp6":
+		return typ == dnsmessage.TypeAAAA
+	default:
+		return false
+	}
+}
+
+func validMDNSSource(source *net.UDPAddr, network string, iface *net.Interface) bool {
+	// RFC 6762 requires every mDNS response to use the well-known source
+	// port, including a response sent directly to a QU query's ephemeral port.
+	if source == nil || source.Port != mdnsPort || source.IP == nil || !validMulticastInterface(iface) {
+		return false
+	}
+	ip, ok := netip.AddrFromSlice(source.IP)
+	if !ok {
+		return false
+	}
+	ip = ip.Unmap()
+	if ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	switch network {
+	case "udp4":
+		if !ip.Is4() {
+			return false
+		}
+	case "udp6":
+		if !ip.Is6() {
+			return false
+		}
+		if source.Zone != "" && source.Zone != iface.Name {
+			return false
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 func finishAnswer(addrs []netip.Addr, ttl time.Duration) ([]netip.Addr, time.Duration, bool) {

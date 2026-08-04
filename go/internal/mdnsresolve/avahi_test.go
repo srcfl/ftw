@@ -55,20 +55,24 @@ func fakeAvahi(t *testing.T, reply func(command, name string) string) {
 
 func TestParseAvahiReply(t *testing.T) {
 	cases := []struct {
-		name string
-		line string
-		want string // empty means the reply must be rejected
+		name     string
+		line     string
+		protocol int
+		want     string // empty means the reply must be rejected
 	}{
 		// The exact shape avahi-daemon returns, confirmed against the daemon.
-		{"ipv4", "+ 2 0 zap.local 192.168.1.42", "192.168.1.42"},
-		{"ipv6", "+ 2 1 zap.local fe80::1", "fe80::1%test0"},
+		{"ipv4", "+ 2 0 zap.local 192.168.1.42", 0, "192.168.1.42"},
+		{"ipv6", "+ 2 1 zap.local fe80::1", 1, "fe80::1%test0"},
 		// A v4-mapped answer must dial as plain IPv4.
-		{"v4 mapped", "+ 2 1 zap.local ::ffff:192.168.1.42", "192.168.1.42"},
-		{"wrong name", "+ 2 0 other.local 192.168.1.42", ""},
-		{"failure", "- 15 Timeout reached", ""},
-		{"empty", "", ""},
-		{"truncated", "+ 2 0 zap.local", ""},
-		{"unparsable address", "+ 2 0 zap.local not-an-address", ""},
+		{"v4 mapped", "+ 2 1 zap.local ::ffff:192.168.1.42", 1, "192.168.1.42"},
+		{"wrong name", "+ 2 0 other.local 192.168.1.42", 0, ""},
+		{"nonnumeric interface", "+ eth0 0 zap.local 192.168.1.42", 0, ""},
+		{"ipv6 answer to ipv4 command", "+ 2 1 zap.local fe80::1", 0, ""},
+		{"ipv4 answer to ipv6 command", "+ 2 0 zap.local 192.168.1.42", 1, ""},
+		{"failure", "- 15 Timeout reached", 0, ""},
+		{"empty", "", 0, ""},
+		{"truncated", "+ 2 0 zap.local", 0, ""},
+		{"unparsable address", "+ 2 0 zap.local not-an-address", 0, ""},
 	}
 	origInterfaceByIndex := avahiInterfaceByIndex
 	avahiInterfaceByIndex = func(index int) (*net.Interface, error) {
@@ -77,7 +81,7 @@ func TestParseAvahiReply(t *testing.T) {
 	t.Cleanup(func() { avahiInterfaceByIndex = origInterfaceByIndex })
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := parseAvahiReply(c.line, "zap.local")
+			got := parseAvahiReply(c.line, "zap.local", c.protocol)
 			if c.want == "" {
 				if got.err == nil {
 					t.Fatalf("accepted %q, got %v", c.line, got.addr)
@@ -97,7 +101,7 @@ func TestParseAvahiReply(t *testing.T) {
 // A failure line must carry avahi's own wording, so the log says what the
 // daemon said rather than something this package made up.
 func TestParseAvahiReplyKeepsDaemonWording(t *testing.T) {
-	got := parseAvahiReply("- 15 Timeout reached", "zap.local")
+	got := parseAvahiReply("- 15 Timeout reached", "zap.local", avahiProtocolIPv4)
 	if got.err == nil {
 		t.Fatal("expected an error")
 	}

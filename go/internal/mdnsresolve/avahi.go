@@ -53,6 +53,11 @@ type avahiResult struct {
 	err  error
 }
 
+const (
+	avahiProtocolIPv4 = 0
+	avahiProtocolIPv6 = 1
+)
+
 // avahiLookup asks avahi-daemon to resolve name, preferring IPv4.
 //
 // The two address families are asked concurrently on separate connections
@@ -99,12 +104,16 @@ func avahiLookup(ctx context.Context, name string) ([]netip.Addr, error) {
 //
 // The wire format is a single line each way. A success is:
 //
-//	+ <interface> <protocol> <name> <address>
+//	"+ <interface> <protocol> <name> <address>"
 //
 // and a failure is "- <errno> <message>". There is no framing, no length
 // prefix and nothing to decode, which is the point of using it: no DNS wire
 // format is parsed anywhere on this path.
 func avahiResolve(ctx context.Context, command, name string) avahiResult {
+	expectedProtocol, ok := avahiProtocolForCommand(command)
+	if !ok {
+		return avahiResult{err: fmt.Errorf("unsupported resolve command %q", command)}
+	}
 	conn, err := avahiDial(ctx, avahiSocket)
 	if err != nil {
 		return avahiResult{err: fmt.Errorf("connect %s: %w", avahiSocket, err)}
@@ -135,10 +144,21 @@ func avahiResolve(ctx context.Context, command, name string) avahiResult {
 		}
 		return avahiResult{err: fmt.Errorf("no reply")}
 	}
-	return parseAvahiReply(scanner.Text(), name)
+	return parseAvahiReply(scanner.Text(), name, expectedProtocol)
 }
 
-func parseAvahiReply(line, expectedName string) avahiResult {
+func avahiProtocolForCommand(command string) (int, bool) {
+	switch command {
+	case "RESOLVE-HOSTNAME-IPV4":
+		return avahiProtocolIPv4, true
+	case "RESOLVE-HOSTNAME-IPV6":
+		return avahiProtocolIPv6, true
+	default:
+		return 0, false
+	}
+}
+
+func parseAvahiReply(line, expectedName string, expectedProtocol int) avahiResult {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return avahiResult{err: fmt.Errorf("empty reply")}
@@ -155,9 +175,16 @@ func parseAvahiReply(line, expectedName string) avahiResult {
 	if expectedName != "" && canonical(fields[3]) != canonical(expectedName) {
 		return avahiResult{err: fmt.Errorf("reply name %q does not match %q", fields[3], expectedName)}
 	}
+	interfaceIndex, err := strconv.Atoi(fields[1])
+	if err != nil || interfaceIndex <= 0 {
+		return avahiResult{err: fmt.Errorf("unparsable interface %q", fields[1])}
+	}
 	protocol, err := strconv.Atoi(fields[2])
 	if err != nil {
 		return avahiResult{err: fmt.Errorf("unparsable protocol %q", fields[2])}
+	}
+	if protocol != expectedProtocol {
+		return avahiResult{err: fmt.Errorf("protocol %d does not match requested protocol %d", protocol, expectedProtocol)}
 	}
 	addr, err := netip.ParseAddr(fields[4])
 	if err != nil {
@@ -166,20 +193,15 @@ func parseAvahiReply(line, expectedName string) avahiResult {
 	if (addr.Is4() && protocol != 0) || (addr.Is6() && protocol != 1) {
 		return avahiResult{err: fmt.Errorf("protocol %d does not match address %s", protocol, addr)}
 	}
+	iface, err := avahiInterfaceByIndex(interfaceIndex)
+	if err != nil || iface == nil || iface.Name == "" || iface.Index != interfaceIndex ||
+		iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if err == nil {
+			err = fmt.Errorf("interface %d is unavailable or not multicast-capable", interfaceIndex)
+		}
+		return avahiResult{err: fmt.Errorf("interface %d: %w", interfaceIndex, err)}
+	}
 	if addr.Is6() && addr.IsLinkLocalUnicast() {
-		interfaceIndex, err := strconv.Atoi(fields[1])
-		if err != nil || interfaceIndex <= 0 {
-			return avahiResult{err: fmt.Errorf("link-local address %s has no interface", addr)}
-		}
-		iface, err := avahiInterfaceByIndex(interfaceIndex)
-		if err != nil || iface == nil || iface.Name == "" ||
-			iface.Index != interfaceIndex || iface.Flags&net.FlagUp == 0 ||
-			iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
-			if err == nil {
-				err = fmt.Errorf("interface %d is unavailable or not multicast-capable", interfaceIndex)
-			}
-			return avahiResult{err: fmt.Errorf("link-local address %s: %w", addr, err)}
-		}
 		addr = addr.WithZone(iface.Name)
 	}
 	return avahiResult{addr: addr.Unmap()}
