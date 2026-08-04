@@ -1,0 +1,35 @@
+name: Windows config
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "go/internal/config/**"
+      - "go/go.mod"
+      - "go/go.sum"
+      - ".github/workflows/windows-config.yml"
+  push:
+    branches: [master]
+    paths:
+      - "go/internal/config/**"
+      - "go/go.mod"
+      - "go/go.sum"
+      - ".github/workflows/windows-config.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-config:
+    name: Windows config ACL
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Test config package and Windows ACLs
+        working-directory: go
+        run: go test -count=1 -timeout 2m ./internal/config
