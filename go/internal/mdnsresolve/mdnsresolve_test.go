@@ -142,6 +142,28 @@ func TestParseAddrAnswer(t *testing.T) {
 	}
 }
 
+// A truncated record after a good one must void the whole packet. Keeping the
+// address read before the damage would let a malformed UDP response populate
+// the cache, and the parser has already lost sync at that point.
+func TestParseAddrAnswerRejectsPacketTruncatedAfterAGoodAnswer(t *testing.T) {
+	qname := "inverter.local."
+	packet := packAnswer(t, qname, []dnsmessage.Resource{
+		aResource(t, qname, [4]byte{192, 168, 1, 42}, 60),
+		aResource(t, qname, [4]byte{192, 168, 1, 43}, 60),
+	})
+
+	// Sanity check: intact, both answers are accepted.
+	if addrs, _, ok := parseTestAddrAnswer(t, packet, qname, "udp4"); !ok || len(addrs) != 2 {
+		t.Fatalf("intact packet: addrs = %v, ok = %v, want two addresses", addrs, ok)
+	}
+
+	// Cut into the final record's rdata: its header still parses, its body
+	// does not.
+	if _, _, ok := parseTestAddrAnswer(t, packet[:len(packet)-2], qname, "udp4"); ok {
+		t.Fatal("accepted a packet whose last matching record is truncated")
+	}
+}
+
 func TestParseAddrAnswerValidatesSourceFamilyAndClass(t *testing.T) {
 	qname := "inverter.local."
 	answer := aResource(t, qname, [4]byte{192, 168, 1, 42}, 60)
@@ -603,5 +625,50 @@ func TestDialerReportsResolutionFailure(t *testing.T) {
 	// able to tell resolution apart from an unreachable device.
 	if !strings.Contains(err.Error(), "mDNS") {
 		t.Fatalf("error %q does not mention mDNS", err)
+	}
+}
+
+// A ".local" name we cannot resolve must still be offered to the system
+// resolver. Home Assistant is the case that makes this mandatory: the app has
+// no avahi socket, but Supervisor's CoreDNS answers ".local" over unicast DNS,
+// so failing here would break an install that works today.
+func TestDialerFallsBackToSystemResolver(t *testing.T) {
+	Flush()
+	disableAvahi(t)
+	// No usable interface fails the multicast path immediately, without
+	// binding a socket — startResponder needs port 5353, which some hosts
+	// refuse outright.
+	origInterfaces := multicastInterfaces
+	multicastInterfaces = func() ([]net.Interface, error) { return nil, nil }
+	t.Cleanup(func() { multicastInterfaces = origInterfaces })
+
+	consulted := make(chan struct{}, 1)
+	d := Dialer{AllowUnverifiedLocal: true, Dialer: net.Dialer{
+		Timeout: 500 * time.Millisecond,
+		Resolver: &net.Resolver{
+			PreferGo: true,
+			Dial: func(context.Context, string, string) (net.Conn, error) {
+				select {
+				case consulted <- struct{}{}:
+				default:
+				}
+				return nil, errors.New("no nameserver in this test")
+			},
+		},
+	}}
+
+	_, err := d.Dial("tcp", "missing.local:502")
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	select {
+	case <-consulted:
+	default:
+		t.Fatal("system resolver was never consulted after mDNS failed")
+	}
+	// Both failures have to survive into the message. "no such host" on its own
+	// sends an operator looking for a DNS problem that isn't there.
+	if !strings.Contains(err.Error(), "mDNS:") {
+		t.Fatalf("error %q drops the mDNS cause", err)
 	}
 }

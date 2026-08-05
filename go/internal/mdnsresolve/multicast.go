@@ -269,8 +269,10 @@ func parseAddrAnswer(packet []byte, qname string, source *net.UDPAddr, network s
 	}
 	var addrs []netip.Addr
 	ttl := maxTTL
-	// Labelled so a parse error inside the type switch abandons the whole
-	// packet: once the parser desynchronises, every later record is suspect.
+	// A malformed record abandons the whole packet rather than keeping the
+	// addresses read before it: once the parser desynchronises, nothing after
+	// that point is trustworthy, and a truncated answer must not be allowed to
+	// populate the cache. The label is only the normal end-of-section exit.
 parse:
 	for {
 		h, err := p.AnswerHeader()
@@ -292,13 +294,13 @@ parse:
 		case dnsmessage.TypeA:
 			r, err := p.AResource()
 			if err != nil {
-				break parse
+				return nil, 0, false
 			}
 			addrs = append(addrs, netip.AddrFrom4(r.A))
 		case dnsmessage.TypeAAAA:
 			r, err := p.AAAAResource()
 			if err != nil {
-				break parse
+				return nil, 0, false
 			}
 			// Unmap so a v4-mapped AAAA dials as plain IPv4.
 			addr := netip.AddrFrom16(r.AAAA).Unmap()

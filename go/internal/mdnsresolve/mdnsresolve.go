@@ -215,9 +215,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		// Name the mechanism. Without this the operator sees a bare dial
 		// failure and has no way to tell that resolution was the reason.
-		slog.Warn("mDNS resolution failed; check the device is on this LAN and the container uses host networking",
+		slog.Warn("mDNS resolution failed, falling back to the system resolver",
 			"host", host, "err", err)
-		return nil, fmt.Errorf("resolve %s over mDNS: %w", host, err)
+		return d.systemFallback(ctx, network, address, err)
 	}
 
 	var firstErr error
@@ -231,6 +231,28 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		}
 	}
 	return nil, fmt.Errorf("dial %s over mDNS: %w", host, firstErr)
+}
+
+// systemFallback hands a ".local" name that mDNS could not resolve to the
+// stdlib resolver.
+//
+// It exists because one supported platform already resolves these names
+// without us. Under Home Assistant the app has no avahi socket to ask, but
+// Supervisor points every container at its own CoreDNS, which carries an mdns
+// plugin backed by systemd-resolved — so `zap.local` resolves there today over
+// ordinary unicast DNS, verified on a pilot install running v1.10.0-beta.1:
+//
+//	lookup ftw-no-such-device-xyz.local on 172.30.32.3:53: no such host
+//
+// Returning the mDNS error instead of trying that resolver would take a
+// working install and break it. Both errors are reported when both paths fail,
+// because "no such host" alone sends an operator looking in the wrong place.
+func (d *Dialer) systemFallback(ctx context.Context, network, address string, mdnsErr error) (net.Conn, error) {
+	conn, err := d.Dialer.DialContext(ctx, network, address)
+	if err == nil {
+		return conn, nil
+	}
+	return nil, fmt.Errorf("%w (mDNS: %v)", err, mdnsErr)
 }
 
 // Dial is the context-free form, for callers that have no context to pass.
