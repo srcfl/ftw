@@ -1,7 +1,9 @@
 # ADR 0005: Outbound FTW Home Link
 
-- Status: accepted direction; implementation is gated by the roadmap's NOW
-  exit evidence
+- Status: **superseded by [ADR 0006](0006-app-uplink.md)** on 2026-08-05. Home
+  Link was built, shipped as opt-in, and then removed whole. What follows is
+  the record of the decision, kept because 0006 only reads as an argument
+  against it
 - Date: 2026-07-20
 - Supersedes: historical ADR 0003's placement of user passkeys at a Sourceful
   account boundary, plus its replacement-deferred and transport-specific

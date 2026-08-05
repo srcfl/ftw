@@ -155,74 +155,48 @@ listener and selected integration transports. Normal device and control
 configuration is reloaded through
 [`go/internal/configreload`](../go/internal/configreload).
 
-## Future remote access boundary
+## Remote access boundary
 
-Remote Sourceful access is not implemented by the LAN/API hardening layer. The
-central request policy in [`go/internal/api`](../go/internal/api) is the expansion point: a future
-protected remote request must present a locally verifiable principal and access
-proof there before an API handler runs.
+Remote access is the FTW app and nothing else. The box holds one outbound WSS
+connection to `wss://relay.ftw.energy`; there is no inbound listener, no
+NAT-traversal layer, no cloud account and no browser-managed site directory.
+See [ADR 0006](adr/0006-app-uplink.md) for why Home Link was removed rather
+than kept alongside it.
 
-The machine identity has one compatibility contract regardless of where its
-private key lives:
+The path is four packages:
 
-- a gateway name is never operator-selected. It is derived deterministically
-  as adjective-color-animal from the stable gateway ID, using exactly the
-  existing Sourceful Energy Gateway mapping;
-- on compatible hardware, the existing hardware-protected P-256 key and its
-  normalized 18-hex serial number are the gateway/site-controller identity.
-  The private key never leaves the secure element;
-- without that hardware, FTW creates and persists a P-256 identity with the
-  same public-key and signature wire contract and a stable ID in the same
-  format;
-- remote-access policy and composition depend only on the public identity and
-  a narrow signing interface. They must not depend on a key path, exported
-  private-key bytes, or a particular private-key encoding.
+- [`go/internal/appenroll`](../go/internal/appenroll) — the Noise static key,
+  the rotatable rendezvous secret, the single-use pairing code, the QR payload
+  and the list of app keys that have been let in. All of it is boot-time
+  material stored beside `nova.key`, not in SQLite;
+- [`go/internal/appwire`](../go/internal/appwire) — frames, the Noise IK
+  responder and the transport;
+- [`go/internal/appproto`](../go/internal/appproto) — the message layer;
+- [`go/internal/appuplink`](../go/internal/appuplink) — the outbound
+  connection, the per-epoch rendezvous handle and session demultiplexing.
 
-The three-word name is a derived display label and the DNS alias is a rotatable
-convenience; neither is an authenticator or secret. Local passkeys authenticate
-users; the resolved machine identity authenticates the tunnel endpoint.
+The properties that matter:
 
-The intended authentication and transport remain deliberately separate:
-
-- the resolved, permanent site/machine identity is authoritative for the
-  gateway;
-- FTW authenticates its tunnel by signing a fresh challenge with that key, not
-  with a long-lived bearer or shared tunnel secret;
-- FTW initiates one long-lived, outbound-only TLS connection to the relay;
-- a small versioned multiplexing contract carries concurrent browser request,
-  passkey ceremony, and event streams over that connection;
-- passkey authentication terminates on the local FTW instance. FTW stores only
-  the WebAuthn verification material needed for enrolled credentials:
-  credential ID, public key, counter, and operator-visible name. The private
-  passkey never leaves its authenticator, and the relay stores no user
-  credential;
-- first enrollment starts from the LAN with a single-use, high-entropy QR/link
-  secret that FTW validates locally. It does not use a PIN;
-- the recommended address is `<alias>.home.sourceful.energy`. The rotatable
-  alias is only a convenience; relay state maps it to the public site identity
-  and is limited to routing, status, and timestamps.
-
-For this future flow, no password or shared access key is retained by FTW or
-the relay. The single-use enrollment secret exists only to authorize the
-initial local ceremony and cannot become a standing login credential.
-
-After local passkey verification, FTW issues short-lived access proofs bound to
-the site and allowed scopes and verifies them at the central request policy.
-Read-only scopes come first. Later mutation scopes must still enter through the
-same policy and ordinary Core handlers. Core remains authoritative for
-telemetry freshness, validation, clamps, planning, and hardware dispatch; no
-remote principal or transport can bypass those checks. Expired or invalid
-proofs fail closed, and an unavailable remote connection leaves local control
-and local recovery intact. The target has no cloud account authentication,
-peer-to-peer or NAT-traversal layer, inbound remote listener, or
-browser-managed site directory or secrets.
-
-Before remote implementation, a focused identity ADR must freeze the existing
-gateway-name mapping, stable-ID normalization and fallback derivation, P-256
-public-key/signature encodings, and identity recovery/rotation rules as
-versioned compatibility contracts. This LAN/API change only preserves the
-central policy expansion point; it does not choose or implement an identity
-provider.
+- the app's trust anchor arrives optically. The QR payload is a URL fragment,
+  which is never sent in an HTTP request, so a hostile or compelled
+  `app.ftw.energy` can deny service but cannot impersonate a box;
+- the box is not a WebAuthn relying party and stores no user credential. It
+  authorises a first connection by the pairing code inside the Noise handshake
+  and later ones by the app's pinned static key;
+- the relay forwards encrypted frames and holds no keys. The handle the box
+  joins under is derived per epoch from the rendezvous secret, so it rotates
+  hourly and gives the relay operator nothing stable to key a household on;
+- the machine identity in [`go/internal/gatewayidentity`](../go/internal/gatewayidentity)
+  is separate and does not authenticate this connection. It resolves to a
+  hardware-protected P-256 key where the hardware exists and a bound software
+  key with the same public-key and signature wire contract otherwise, with a
+  deterministic adjective-color-animal display name derived from the stable
+  18-hex gateway ID. The name is a label, never an authenticator;
+- authority is unchanged by the transport. A command carries an expiry and
+  preconditions, and core revalidates against fresh state before acting. Core
+  remains authoritative for telemetry freshness, validation, clamps, planning
+  and dispatch. An unavailable relay leaves local control and local recovery
+  intact.
 
 ## Releases
 

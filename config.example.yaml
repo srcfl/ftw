@@ -176,9 +176,11 @@ state:
   path: state.db
   # backup_dir: backups            # use an absolute mounted path for off-device backups
 
-# Home Link is opt-in. It opens only an outbound TLS connection and exposes
-# four read-only views after a local passkey is enrolled.
-home_link:
+# The FTW app. Opt-in, and one switch: the box holds an outbound connection to
+# a relay that carries encrypted frames and holds no keys, so there is no
+# endpoint to choose and no transport to pick. Pair a phone by scanning the
+# box's code; the pairing code is single-use and expires in ten minutes.
+app_link:
   enabled: false
 
 # Independently distributed Lua drivers. The signed stable catalog is refreshed

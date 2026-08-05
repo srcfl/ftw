@@ -17,7 +17,7 @@ const (
 var (
 	ErrNoUsableRoute      = errors.New("no usable uplink route")
 	ErrAmbiguousRoute     = errors.New("uplink route is ambiguous")
-	ErrUnsupportedBinding = errors.New("home link identity binding is unsupported")
+	ErrUnsupportedBinding = errors.New("gateway identity binding is unsupported")
 )
 
 type StableInterface struct {
