@@ -30,10 +30,12 @@ func freePort(t *testing.T) int {
 
 // startServer brings up an OCPP CS on a free port and returns the port + a
 // matching ws://… URL plus the running server. Caller must defer Stop.
-func startServer(t *testing.T, tel *telemetry.Store) (int, *Server) {
+// approved lists the charger ids treated as loadpoint-named; chargers outside
+// it connect as pending and push no telemetry.
+func startServer(t *testing.T, tel *telemetry.Store, approved ...string) (int, *Server) {
 	t.Helper()
 	port := freePort(t)
-	cfg := &Config{Enabled: true, Bind: "127.0.0.1", Port: port, HeartbeatIntervalS: 60}
+	cfg := &Config{Enabled: true, Bind: "127.0.0.1", Port: port, HeartbeatIntervalS: 60, ApprovedIDs: approved}
 	srv, err := Start(context.Background(), cfg, tel)
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -70,7 +72,7 @@ func TestStopIsConcurrentAndIdempotent(t *testing.T) {
 
 func TestBootAndMeterValuesPushDerEV(t *testing.T) {
 	tel := telemetry.NewStore()
-	port, srv := startServer(t, tel)
+	port, srv := startServer(t, tel, "EH123456")
 	defer srv.Stop()
 
 	cp := ocpp16.NewChargePoint("EH123456", nil, nil)
@@ -129,7 +131,7 @@ func TestBootAndMeterValuesPushDerEV(t *testing.T) {
 
 func TestStartStopTransactionTracksSession(t *testing.T) {
 	tel := telemetry.NewStore()
-	port, srv := startServer(t, tel)
+	port, srv := startServer(t, tel, "EH-SESSION")
 	defer srv.Stop()
 
 	cp := ocpp16.NewChargePoint("EH-SESSION", nil, nil)
@@ -164,6 +166,68 @@ func TestStartStopTransactionTracksSession(t *testing.T) {
 	}
 	view := srv.Handler().Snapshot()["EH-SESSION"]
 	t.Errorf("expected session_wh=7500, got %+v", view)
+}
+
+// A charger no loadpoint names may connect and is visible in Snapshot, but
+// nothing it reports may reach telemetry — otherwise any device holding the
+// shared basic-auth secret could fabricate EV load and steer dispatch.
+func TestPendingChargerIsQuarantinedFromTelemetry(t *testing.T) {
+	tel := telemetry.NewStore()
+	port, srv := startServer(t, tel, "adopted-charger")
+	defer srv.Stop()
+
+	cp := ocpp16.NewChargePoint("intruder", nil, nil)
+	if err := cp.Start(fmt.Sprintf("ws://127.0.0.1:%d", port)); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer cp.Stop()
+
+	if _, err := cp.BootNotification("EvilCo", "FakeCharger"); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	if _, err := cp.StatusNotification(1, core.NoError, core.ChargePointStatusCharging); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	mv := []types.MeterValue{{
+		Timestamp: types.NewDateTime(time.Now()),
+		SampledValue: []types.SampledValue{{
+			Value:     "7200",
+			Measurand: types.MeasurandPowerActiveImport,
+			Unit:      types.UnitOfMeasureW,
+		}},
+	}}
+	if _, err := cp.MeterValues(1, mv); err != nil {
+		t.Fatalf("meter values: %v", err)
+	}
+
+	// Wait until the handler has demonstrably processed the meter values —
+	// the snapshot shows the power — so the nil telemetry check below is a
+	// real assertion, not a race won by asserting too early.
+	deadline := time.Now().Add(2 * time.Second)
+	var view ChargerView
+	for time.Now().Before(deadline) {
+		view = srv.Handler().Snapshot()["intruder"]
+		if view.PowerW == 7200 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if view.PowerW != 7200 {
+		t.Fatalf("snapshot never showed the meter value: %+v", view)
+	}
+	if !view.Pending {
+		t.Errorf("expected pending=true for an unadopted charger, got %+v", view)
+	}
+	if r := tel.Get("intruder", telemetry.DerEV); r != nil {
+		t.Errorf("pending charger leaked into telemetry: %+v", r)
+	}
+
+	if srv.Handler().isApproved("intruder") {
+		t.Error("intruder must not be approved")
+	}
+	if !srv.Handler().isApproved("adopted-charger") {
+		t.Error("adopted-charger should be approved")
+	}
 }
 
 func TestBasicAuthRejectsWrongCredentials(t *testing.T) {

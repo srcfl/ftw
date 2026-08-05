@@ -56,6 +56,26 @@ describe("OCPP section", () => {
     assert.match(html, /No OCPP charger has connected yet/);
   });
 
+  it("marks an unadopted charger as pending and explains the quarantine", () => {
+    const html = ocppSection({
+      enabled: true, port: 8887, path: "/",
+      chargers: [{ id: "intruder", online: true, power_w: 7200, pending: true }],
+    }, "ftw.lan", escHtml);
+    assert.match(html, /intruder/);
+    assert.match(html, /· pending/);
+    assert.match(html, /ignores their telemetry/);
+    assert.match(html, /restart FTW/);
+  });
+
+  it("shows no quarantine note when every charger is adopted", () => {
+    const html = ocppSection({
+      enabled: true, port: 8887, path: "/",
+      chargers: [{ id: "bench-dawn", online: true }],
+    }, "ftw.lan", escHtml);
+    assert.doesNotMatch(html, /· pending/);
+    assert.doesNotMatch(html, /ignores their telemetry/);
+  });
+
   it("renders a connected charger with hardware, dialect and power", () => {
     const html = ocppSection({
       enabled: true, port: 8887, port_v201: 8888, path: "/",

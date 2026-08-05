@@ -1,11 +1,18 @@
 // Package ocpp is the OCPP Central System for FTW, speaking 1.6J and 2.0.1.
 //
-// EV chargers connect to us via WebSocket. Every BootNotification, MeterValues,
-// StatusNotification and transaction message becomes a DerEV reading in
-// telemetry.Store, keyed by the charge point identity from the URL path. The
-// dispatch layer sums DerEV readings and stops home batteries discharging into
-// an active EV charge. Control goes the other way as charging profiles; see
-// control.go for why never as a remote stop.
+// EV chargers connect to us via WebSocket. For a charger a loadpoint names in
+// config, every BootNotification, MeterValues, StatusNotification and
+// transaction message becomes a DerEV reading in telemetry.Store, keyed by the
+// charge point identity from the URL path. The dispatch layer sums DerEV
+// readings and stops home batteries discharging into an active EV charge.
+// Control goes the other way as charging profiles; see control.go for why
+// never as a remote stop.
+//
+// A charger no loadpoint names is quarantined as "pending": it may stay
+// connected and is visible in Snapshot so the UI can offer it for adoption,
+// but none of its messages reach telemetry — an unknown device that merely
+// knows the shared basic-auth secret cannot fabricate EV load and steer
+// dispatch. See Handler.SetApprovedIDs.
 //
 // # Provenance
 //
@@ -82,6 +89,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 
 	cs := ocpp16.NewCentralSystem(nil, wsServer)
 	h := NewHandler(tel, cfg.HeartbeatIntervalS)
+	h.SetApprovedIDs(cfg.ApprovedIDs)
 	cs.SetCoreHandler(h)
 	cs.SetNewChargePointHandler(func(cp ocpp16.ChargePointConnection) {
 		h.OnConnect(cp.ID())

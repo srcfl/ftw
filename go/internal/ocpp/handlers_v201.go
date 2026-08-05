@@ -58,7 +58,7 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	s.model = model
 	h.mu.Unlock()
 	h.setVersion(id, Version201)
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 
 	return provisioning.NewBootNotificationResponse(
 		types201.NewDateTime(time.Now()),
@@ -70,14 +70,14 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 // OnNotifyReport carries variable inventory. FTW does not model charger
 // configuration, so this is acknowledged and dropped.
 func (h *handlerV201) OnNotifyReport(id string, _ *provisioning.NotifyReportRequest) (*provisioning.NotifyReportResponse, error) {
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return provisioning.NewNotifyReportResponse(), nil
 }
 
 // ---- availability.CSMSHandler ----
 
 func (h *handlerV201) OnHeartbeat(id string, _ *availability.HeartbeatRequest) (*availability.HeartbeatResponse, error) {
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return availability.NewHeartbeatResponse(*types201.NewDateTime(time.Now())), nil
 }
 
@@ -111,9 +111,9 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 		"evse", req.EvseID, "connector", req.ConnectorID, "status", req.ConnectorStatus)
 
 	if faulted {
-		h.tel.RecordDriverError(id, "ocpp: connector faulted")
+		h.telError(id, "ocpp: connector faulted")
 	} else {
-		h.tel.RecordDriverSuccess(id)
+		h.telSuccess(id)
 	}
 	h.pushReading(id, s)
 	return availability.NewStatusNotificationResponse(), nil
@@ -176,9 +176,9 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 
 	h.pushReading(id, s)
 	if ended {
-		h.tel.EmitMetric(id, "ev_session_wh", sessionWh, "Wh", "", "")
+		h.telMetric(id, "ev_session_wh", sessionWh, "Wh")
 	}
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 
 	return transactions.NewTransactionEventResponse(), nil
 }
@@ -197,7 +197,7 @@ func (h *handlerV201) OnMeterValues(id string, req *meter.MeterValuesRequest) (*
 	h.mu.Unlock()
 
 	h.pushReading(id, s)
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return meter.NewMeterValuesResponse(), nil
 }
 
@@ -207,7 +207,7 @@ func (h *handlerV201) OnMeterValues(id string, req *meter.MeterValuesRequest) (*
 // control system: the charger is behind the operator's own front door, and
 // refusing here would only stop them charging. Matches the 1.6 path.
 func (h *handlerV201) OnAuthorize(id string, _ *authorization.AuthorizeRequest) (*authorization.AuthorizeResponse, error) {
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return authorization.NewAuthorizationResponse(types201.IdTokenInfo{
 		Status: types201.AuthorizationStatusAccepted,
 	}), nil

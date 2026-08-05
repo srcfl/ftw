@@ -45,7 +45,7 @@ func TestOCPPChargersReportsSnapshotSorted(t *testing.T) {
 		CfgMu: &sync.RWMutex{},
 		OCPPChargers: func() map[string]ocpp.ChargerView {
 			return map[string]ocpp.ChargerView{
-				"garage-right": {Online: true, Version: "2.0.1"},
+				"garage-right": {Online: true, Version: "2.0.1", Pending: true},
 				"garage-left": {
 					Online: true, Connected: true, Charging: true,
 					PowerW: 7400, Version: "1.6", LastAmps: 10,
@@ -81,5 +81,14 @@ func TestOCPPChargersReportsSnapshotSorted(t *testing.T) {
 	}
 	if first["last_amps"] != float64(10) || first["version"] != "1.6" {
 		t.Fatalf("last_amps/version = %v/%v", first["last_amps"], first["version"])
+	}
+	// Quarantine state must reach the UI: pending surfaces on the pending
+	// charger and, being omitempty, stays absent from the adopted one.
+	if _, ok := first["pending"]; ok {
+		t.Fatalf("adopted charger should not carry pending, got %v", first["pending"])
+	}
+	second := chargers[1].(map[string]any)
+	if second["pending"] != true {
+		t.Fatalf("pending = %v, want true for garage-right", second["pending"])
 	}
 }

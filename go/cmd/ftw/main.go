@@ -1156,12 +1156,20 @@ func main() {
 
 	// ---- Start OCPP Central System, 1.6J and 2.0.1 (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
-	// driver involved. A charge point becomes a device in tel the moment it
-	// sends its first BootNotification, keyed by the identity segment of the
-	// URL it connected to, and dispatch picks it up from there like any other
-	// EV reading.
+	// driver involved. A charge point whose identity (the last segment of the
+	// URL it dialed) is named by a loadpoint becomes a device in tel on its
+	// first message and dispatch picks it up like any other EV reading. Any
+	// other identity is quarantined as pending — visible in the UI, absent
+	// from telemetry — so a device that merely knows the shared password
+	// cannot inject EV load into dispatch.
 	var ocppSrv *ocpp.Server
 	if cfg.OCPP != nil && cfg.OCPP.Enabled {
+		approved := make([]string, 0, len(cfg.Loadpoints))
+		for _, lp := range cfg.Loadpoints {
+			if lp.DriverName != "" {
+				approved = append(approved, lp.DriverName)
+			}
+		}
 		srv, err := ocpp.Start(ctx, &ocpp.Config{
 			Enabled:            cfg.OCPP.Enabled,
 			Port:               cfg.OCPP.Port,
@@ -1170,6 +1178,7 @@ func main() {
 			Username:           cfg.OCPP.Username,
 			Password:           cfg.OCPP.Password,
 			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
+			ApprovedIDs:        approved,
 		}, tel)
 		if err != nil {
 			// A charger that cannot reach us is a missing device, not a
@@ -1182,7 +1191,7 @@ func main() {
 				"port", ocppSrv.Port(),
 				"port_v201", cfg.OCPP.PortV201,
 				"path", ocppSrv.Path(),
-				"note", "listener is reachable on every interface; basic auth is the only gate")
+				"note", "listener is reachable on every interface; basic auth gates the socket, and chargers no loadpoint names stay pending outside telemetry")
 		}
 	}
 	// Snapshot hook for GET /api/ocpp/chargers. Left nil when the server is

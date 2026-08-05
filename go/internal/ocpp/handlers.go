@@ -23,6 +23,12 @@ type Handler struct {
 
 	mu       sync.Mutex
 	chargers map[string]*chargerState
+	// approved is the set of charger ids named by a loadpoint in config. A
+	// charger outside it is "pending": it may connect and is visible in
+	// Snapshot, but nothing it reports enters telemetry — no DerEV reading,
+	// no driver health, no metrics — so it cannot influence dispatch. See
+	// SetApprovedIDs.
+	approved map[string]bool
 	nextTxID int
 }
 
@@ -63,7 +69,55 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 		tel:                tel,
 		heartbeatIntervalS: heartbeatIntervalS,
 		chargers:           map[string]*chargerState{},
+		approved:           map[string]bool{},
 		nextTxID:           1,
+	}
+}
+
+// SetApprovedIDs declares which charger ids are part of the site — the ids
+// loadpoints name in config. Everything else that connects is quarantined as
+// pending: accepted at the protocol level so the operator can see it in the
+// UI and adopt it, but kept out of telemetry so an unknown-but-authenticated
+// device cannot fabricate EV load and steer dispatch (the DerEV sum
+// suppresses home-battery discharge). Replaces the previous set.
+func (h *Handler) SetApprovedIDs(ids []string) {
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			m[id] = true
+		}
+	}
+	h.mu.Lock()
+	h.approved = m
+	h.mu.Unlock()
+}
+
+// isApproved reports whether a charger id is named by a charger entry
+// (loadpoint) and therefore allowed to feed the site model.
+func (h *Handler) isApproved(id string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.approved[id]
+}
+
+// The tel* wrappers are the quarantine choke points: every telemetry write
+// for a charger goes through one of them, so a pending charger is dropped
+// here once rather than gated at each call site.
+func (h *Handler) telSuccess(id string) {
+	if h.isApproved(id) {
+		h.tel.RecordDriverSuccess(id)
+	}
+}
+
+func (h *Handler) telError(id, msg string) {
+	if h.isApproved(id) {
+		h.tel.RecordDriverError(id, msg)
+	}
+}
+
+func (h *Handler) telMetric(id, name string, v float64, unit string) {
+	if h.isApproved(id) {
+		h.tel.EmitMetric(id, name, v, unit, "", "")
 	}
 }
 
@@ -96,6 +150,7 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 			LastAmps:  s.lastAmps,
 			Vendor:    s.vendor,
 			Model:     s.model,
+			Pending:   !h.approved[id],
 		}
 	}
 	return out
@@ -118,17 +173,26 @@ type ChargerView struct {
 	LastAmps float64 `json:"last_amps,omitempty"`
 	Vendor   string  `json:"vendor,omitempty"`
 	Model    string  `json:"model,omitempty"`
+	// Pending is set when no charger entry (loadpoint) names this id. A
+	// pending charger is visible here but quarantined from the site: its
+	// telemetry is withheld from dispatch until an operator adopts it.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // OnConnect / OnDisconnect are wired by the Server to the OCPP library's
 // connection callbacks, not part of CoreHandler.
 func (h *Handler) OnConnect(id string) {
-	slog.Info("OCPP charger connected", "charger", id)
+	if h.isApproved(id) {
+		slog.Info("OCPP charger connected", "charger", id)
+	} else {
+		slog.Info("OCPP charger connected as pending — no charger entry names it, telemetry withheld",
+			"charger", id)
+	}
 	s := h.state(id)
 	h.mu.Lock()
 	s.online = true
 	h.mu.Unlock()
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 }
 
 func (h *Handler) OnDisconnect(id string) {
@@ -158,7 +222,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	s.vendor = req.ChargePointVendor
 	s.model = req.ChargePointModel
 	h.mu.Unlock()
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),
 		h.heartbeatIntervalS,
@@ -167,7 +231,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 }
 
 func (h *Handler) OnHeartbeat(id string, _ *core.HeartbeatRequest) (*core.HeartbeatConfirmation, error) {
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return core.NewHeartbeatConfirmation(types.NewDateTime(time.Now())), nil
 }
 
@@ -210,14 +274,14 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 	h.mu.Unlock()
 
 	if req.Status == core.ChargePointStatusFaulted {
-		h.tel.EmitMetric(id, "ev_fault", 1, "", "", "")
+		h.telMetric(id, "ev_fault", 1, "")
 		slog.Warn("OCPP charger faulted", "charger", id, "errorCode", req.ErrorCode, "info", req.Info)
 	}
 	slog.Info("OCPP status",
 		"charger", id, "connector", req.ConnectorId, "status", req.Status)
 
 	h.pushReading(id, s)
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return core.NewStatusNotificationConfirmation(), nil
 }
 
@@ -254,7 +318,7 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 	h.mu.Unlock()
 
 	h.pushReading(id, s)
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return core.NewMeterValuesConfirmation(), nil
 }
 
@@ -273,7 +337,7 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 	slog.Info("OCPP transaction started",
 		"charger", id, "txid", txID, "tag", req.IdTag, "meter_start_wh", req.MeterStart)
 	h.pushReading(id, s)
-	h.tel.RecordDriverSuccess(id)
+	h.telSuccess(id)
 	return core.NewStartTransactionConfirmation(
 		types.NewIdTagInfo(types.AuthorizationStatusAccepted),
 		txID,
@@ -294,8 +358,8 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 		"charger", id, "txid", req.TransactionId,
 		"session_wh", sessionWh, "reason", req.Reason)
 	h.pushReading(id, s)
-	h.tel.EmitMetric(id, "ev_session_wh", sessionWh, "Wh", "", "")
-	h.tel.RecordDriverSuccess(id)
+	h.telMetric(id, "ev_session_wh", sessionWh, "Wh")
+	h.telSuccess(id)
 	return core.NewStopTransactionConfirmation(), nil
 }
 
@@ -315,6 +379,7 @@ func (h *Handler) chargersLocked(id string) *chargerState {
 // battery discharge.
 func (h *Handler) pushReading(id string, s *chargerState) {
 	h.mu.Lock()
+	approved := h.approved[id]
 	w := s.lastPowerW
 	data := map[string]any{
 		"type":       "ev",
@@ -324,6 +389,10 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 		"session_wh": s.sessionMeterWh,
 	}
 	h.mu.Unlock()
+	if !approved {
+		// Pending charger: visible in Snapshot, absent from the site model.
+		return
+	}
 	blob, _ := json.Marshal(data)
 	h.tel.Update(id, telemetry.DerEV, w, nil, blob)
 }

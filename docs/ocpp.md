@@ -17,9 +17,9 @@ makes drivers unnecessary, so the driver boundary does not apply.
 Drivers poll outward: FTW opens the connection and asks for data. OCPP runs the
 other way — the charger dials FTW and pushes.
 
-So there is nothing to configure per charger. You point the charger at FTW, and
-it appears as a device the moment it sends its first `BootNotification`. Its
-identity is the last segment of the URL it connected to:
+You point the charger at FTW and it appears on **Settings → Chargers** the
+moment it sends its first `BootNotification`. Its identity is the last segment
+of the URL it connected to:
 
 ```
 ws://<ftw-host>:8887/garage-left
@@ -29,7 +29,20 @@ ws://<ftw-host>:8887/garage-left
 Give each charger a distinct identity segment. Reuse one and two chargers will
 collapse into a single device.
 
-From there it behaves like any other EV reading: `MeterValues` and
+Connecting alone does not make it part of the site. A charge point no charger
+entry names is **pending**: FTW shows its vendor, dialect and live state so
+you can adopt it, but ignores its telemetry and never commands it. To adopt
+it, add a charger entry on the same tab with the charge point's id as the
+charger driver, save, and restart FTW.
+
+The quarantine is deliberate. Every charge point shares one basic-auth secret,
+so "it authenticated" proves the password, not the device. If pending chargers
+fed telemetry, anything on the LAN holding that password could invent EV load
+— and the dispatch clamp would obligingly stop the home battery discharging
+into a charge that does not exist. Naming the id in a charger entry is what
+turns *seen* into *trusted*.
+
+Once adopted it behaves like any other EV reading: `MeterValues` and
 `StatusNotification` become telemetry, and dispatch stops the home battery
 discharging into an active EV charge.
 
@@ -131,6 +144,13 @@ So:
 - Basic auth over `ws://` sends the credential unencrypted. Anyone who can sniff
   your LAN can read it.
 
+Behind the password sits a second gate: a charge point no charger entry names
+stays pending, outside telemetry and dispatch (see above). A stolen password
+gets an attacker a row in the Chargers table, not influence over the site.
+What it does not stop is impersonation — a device that knows the password *and*
+an adopted charger's id can still pose as it, which is what per-charger
+credentials and TLS would fix.
+
 Credentials being required is a mitigation, not a fix. Binding to one interface
 needs a change to the upstream library.
 
@@ -152,8 +172,10 @@ ships an mDNS resolver. When in doubt, use the reserved IP.
 
 The **Settings → Chargers** tab shows the exact URL to enter, and every charge
 point that has connected appears there with its vendor, OCPP dialect and live
-state. To let the planner steer one, add it as a charger entry on the same tab
-— its identity appears in the driver dropdown once it has connected.
+state — as pending, until you adopt it. Add it as a charger entry on the same
+tab (its identity appears in the driver dropdown once it has connected), save,
+and restart FTW; that both lets the planner steer it and admits its telemetry
+into the site.
 
 | Charger | Where you set it | Cloud needed? |
 |---|---|---|

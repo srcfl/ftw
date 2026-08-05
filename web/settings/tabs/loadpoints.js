@@ -107,8 +107,10 @@
       'The OCPP server is <b>on</b>. A charger that speaks OCPP needs no driver — set its backend URL to ' +
       '<code>ws://' + escHtml(host) + ':' + port + escHtml(path) + '&lt;charger-name&gt;</code>' +
       (status.port_v201 ? ' (OCPP 2.0.1: port ' + status.port_v201 + ')' : '') +
-      ' and it registers itself below. The <code>&lt;charger-name&gt;</code> you choose is the id to pick ' +
-      'as the charger driver when adding it as a charger binding on this tab.' +
+      ' and it appears below. The <code>&lt;charger-name&gt;</code> you choose is the id to pick ' +
+      'as the charger driver when adding it as a charger binding on this tab. Until a charger entry ' +
+      'names it, a charge point is <b>pending</b>: visible here, but FTW ignores its data and never ' +
+      'commands it.' +
       '</p>' +
       '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
       'Give this machine a <b>DHCP reservation</b> (fixed IP) in your router first: chargers store the URL ' +
@@ -134,16 +136,27 @@
         '</tr></thead><tbody>';
       chargers.forEach(function (c) {
         var hw = [c.vendor, c.model].filter(Boolean).join(" ") || "—";
-        html += '<tr>' +
+        var state = ocppStateLabel(c);
+        if (c.pending) state += " · pending";
+        html += '<tr' + (c.pending ? ' style="opacity:.65"' : '') + '>' +
           '<td><code>' + escHtml(c.id || "") + '</code></td>' +
           '<td>' + escHtml(hw) + '</td>' +
           '<td>' + escHtml(c.version || "?") + '</td>' +
-          '<td>' + escHtml(ocppStateLabel(c)) + '</td>' +
+          '<td>' + escHtml(state) + '</td>' +
           '<td style="text-align:right">' + fmtPowerW(c.power_w) + '</td>' +
           '<td style="text-align:right">' + ((c.session_wh || 0) / 1000).toFixed(2) + ' kWh</td>' +
           '</tr>';
       });
       html += '</tbody></table>';
+      if (chargers.some(function (c) { return c.pending; })) {
+        html +=
+          '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
+          '<b>Pending</b> chargers are connected but not part of the site: FTW ignores their ' +
+          'telemetry and never commands them, so an unknown device cannot influence dispatch. ' +
+          'To adopt one, add a charger entry below with its id as the charger driver, save, ' +
+          'and restart FTW.' +
+          '</p>';
+      }
     }
     html += '</fieldset>';
     return html;
