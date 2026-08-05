@@ -260,7 +260,7 @@
 
           '<div class="field-row">' +
           '<div>' +
-          '<label>Vehicle capacity (Wh) ' + help("Usable battery capacity of the connected EV. Used by MPC to size the energy needed to reach the target SoC. 75000 = 75 kWh.") + '</label>' +
+          '<label>Vehicle capacity (Wh) ' + help("Usable battery capacity of ONE car — the one this charger usually serves. 75000 = 75 kWh. Used by MPC to size the energy needed to reach the target SoC; a wrong value costs planning accuracy, not safety. If several cars share the charger, enter the one you plan deadlines for and correct SoC in the EV modal for the others — automatic per-car detection needs OCPP 2.0.1 / ISO 15118 hardware.") + '</label>' +
           '<input type="number" min="0" step="500" data-path="' + prefix + '.vehicle_capacity_wh" value="' + (lp.vehicle_capacity_wh || 0) + '">' +
           '</div>' +
           '<div>' +

@@ -221,13 +221,23 @@ type Nova struct {
 // Loadpoint is one EV charge point the planner can reason about.
 // The planner and go/internal/loadpoint optimize battery + EV jointly.
 type Loadpoint struct {
-	ID                string    `yaml:"id" json:"id"`
-	DriverName        string    `yaml:"driver_name" json:"driver_name"`
-	MinChargeW        float64   `yaml:"min_charge_w,omitempty" json:"min_charge_w,omitempty"`
-	MaxChargeW        float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
-	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
-	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
-	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
+	ID            string    `yaml:"id" json:"id"`
+	DriverName    string    `yaml:"driver_name" json:"driver_name"`
+	MinChargeW    float64   `yaml:"min_charge_w,omitempty" json:"min_charge_w,omitempty"`
+	MaxChargeW    float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	AllowedStepsW []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
+	// VehicleCapacityWh is the usable battery capacity of ONE vehicle — the
+	// car this charger usually serves. It feeds the SoC estimate and the
+	// planner's energy sizing; charging works without it, and a wrong value
+	// costs planning accuracy, never safety. There are no per-car profiles:
+	// when several cars share the charger, enter the car whose deadlines you
+	// plan around and correct SoC in the EV modal for the others. Switching
+	// capacity automatically requires the protocol to identify the vehicle,
+	// which OCPP 1.6 cannot (its idTag names the RFID card, not the car) —
+	// that is OCPP 2.0.1 + ISO 15118 territory (MacAddress/eMAID id tokens,
+	// NotifyEVChargingNeeds), tracked as future work.
+	VehicleCapacityWh float64 `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
+	PluginSoCPct      float64 `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
 	// delivery: "3p" (default) | "1p" | "auto". Empty == "3p" for
