@@ -72,11 +72,11 @@ def test_area_and_centroid_of_a_known_square():
 def test_wgs84_rings_are_projected_before_measuring():
     """A ring in degrees must be recognised and converted, not measured raw."""
     lat, lon = STOCKHOLM
-    e, n = sweref.wgs84_to_sweref99tm(lat, lon)
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
     ring_sweref = square_ring(e, n, 12.0)
     ring_wgs84 = []
     for x, y in ring_sweref:
-        blat, blon = sweref.sweref99tm_to_wgs84(x, y)
+        blat, blon = sweref.sweref99tm_to_wgs84(y, x)  # ring is (E, N)
         ring_wgs84.append([blon, blat])  # GeoJSON is [lon, lat]
 
     [b] = buildings_from_features(
@@ -89,7 +89,7 @@ def test_wgs84_rings_are_projected_before_measuring():
 
 def test_tiles_and_slivers_are_not_offered_as_buildings():
     lat, lon = STOCKHOLM
-    e, n = sweref.wgs84_to_sweref99tm(lat, lon)
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
     feats = [
         {"geometry": {"type": "Polygon", "coordinates": [square_ring(e, n, 2500.0)]}, "id": "tile"},
         {"geometry": {"type": "Polygon", "coordinates": [square_ring(e, n, 1.0)]}, "id": "sliver"},
@@ -101,7 +101,7 @@ def test_tiles_and_slivers_are_not_offered_as_buildings():
 
 def test_candidates_come_back_nearest_first():
     lat, lon = STOCKHOLM
-    e, n = sweref.wgs84_to_sweref99tm(lat, lon)
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
     feats = [
         {"geometry": {"type": "Polygon", "coordinates": [square_ring(e + 60, n, 10.0)]}, "id": "far"},
         {"geometry": {"type": "Polygon", "coordinates": [square_ring(e + 5, n, 10.0)]}, "id": "near"},
@@ -114,7 +114,7 @@ def test_candidates_come_back_nearest_first():
 
 def test_multipolygon_yields_one_candidate_per_part():
     lat, lon = STOCKHOLM
-    e, n = sweref.wgs84_to_sweref99tm(lat, lon)
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
     feat = {
         "id": "pair",
         "geometry": {
@@ -129,7 +129,7 @@ def test_multipolygon_yields_one_candidate_per_part():
 
 def test_search_queries_the_building_collection_and_maps_results():
     lat, lon = STOCKHOLM
-    e, n = sweref.wgs84_to_sweref99tm(lat, lon)
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
     session = FakeSession({"features": [stac_feature(square_ring(e, n, 10.0), "b1")]})
     client = GeotorgetClient(Credentials("u", "t"), session=session)
 
@@ -194,7 +194,7 @@ def test_clip_of_an_empty_cloud_is_empty_not_an_error():
 
 def test_geojson_feature_is_wgs84_and_closed():
     lat, lon = STOCKHOLM
-    e, n = sweref.wgs84_to_sweref99tm(lat, lon)
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
     b = Building("b1", square_ring(e, n, 10.0), 100.0, 0.0)
     feat = b.to_geojson()
 
@@ -204,3 +204,31 @@ def test_geojson_feature_is_wgs84_and_closed():
         assert -180 <= x <= 180 and -90 <= y <= 90
     assert feat["properties"]["latitude"] == pytest.approx(lat, abs=1e-3)
     assert feat["properties"]["longitude"] == pytest.approx(lon, abs=1e-3)
+
+
+def test_both_ring_orders_come_back_at_the_real_site():
+    """Axis order must not depend on where the ring came from.
+
+    A GeoPackage stores x=easting first; wgs84_to_sweref99tm returns northing
+    first; EPSG's registry declares EPSG:3006 north-first and some exports
+    follow it. The first mismatch shipped: GeoPackage-sourced buildings — the
+    normal Lantmäteriet case — reported their centroids in the Indian Ocean
+    (lat ≈ 4°) with 8 000 km distances, while every test asserted only areas
+    and SWEREF centroids, both of which are blind to a consistent swap.
+    """
+    lat, lon = STOCKHOLM
+    n, e = sweref.wgs84_to_sweref99tm(lat, lon)
+    ring_en = square_ring(e, n, 10.0)                # as a GeoPackage stores it
+    ring_ne = [(y, x) for x, y in ring_en]           # as the EPSG registry says
+
+    for ring in (ring_en, ring_ne):
+        [b] = buildings_from_features(
+            [{"geometry": {"type": "Polygon", "coordinates": [ring]}, "id": "b"}],
+            latitude=lat, longitude=lon,
+        )
+        feat = b.to_geojson()
+        assert feat["properties"]["latitude"] == pytest.approx(lat, abs=1e-3)
+        assert feat["properties"]["longitude"] == pytest.approx(lon, abs=1e-3)
+        assert b.distance_m < 50.0, (
+            f"a building drawn around the site is {b.distance_m:.0f} m away"
+        )

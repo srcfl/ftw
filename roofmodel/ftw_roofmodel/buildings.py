@@ -82,13 +82,13 @@ class Building:
 
     def centroid_wgs84(self) -> tuple[float, float]:
         e, n = self.centroid_sweref()
-        return sweref.sweref99tm_to_wgs84(e, n)
+        return sweref.sweref99tm_to_wgs84(n, e)
 
     def ring_wgs84(self) -> list[list[float]]:
         """GeoJSON ring: [lon, lat] pairs, closed."""
         out = []
         for e, n in self.ring_sweref:
-            lat, lon = sweref.sweref99tm_to_wgs84(e, n)
+            lat, lon = sweref.sweref99tm_to_wgs84(n, e)
             out.append([round(lon, 7), round(lat, 7)])
         if out and out[0] != out[-1]:
             out.append(out[0])
@@ -177,11 +177,40 @@ def _rings_from_geometry(geometry: dict[str, Any]) -> list[list[tuple[float, flo
     return [r for r in rings if len(r) >= 3]
 
 
+def _normalize_sweref_ring(
+    ring: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Force a projected ring into (easting, northing) order.
+
+    GIS files conventionally store x=easting first, but EPSG:3006 formally
+    declares north-first and some exports follow the registry. The two ranges
+    cannot collide -- eastings stay under a million metres, northings start
+    above six million -- so each point states its own order.
+    """
+    out = []
+    for point in ring:
+        x, y = float(point[0]), float(point[1])
+        if x > 1_000_000.0 and y < 1_000_000.0:
+            x, y = y, x
+        out.append((x, y))
+    return out
+
+
 def _to_sweref(ring: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Any ring -> (easting, northing) SWEREF, the order ring_sweref documents.
+
+    Both sources must land in the same order: the LiDAR clip compares these
+    rings against point coordinates, and wgs84_to_sweref99tm returns
+    (northing, easting) -- stored unswapped it would put every inline-geometry
+    building's clip window sideways.
+    """
     if _looks_like_sweref(ring):
-        return ring
+        return _normalize_sweref_ring(ring)
     # GeoJSON order is [lon, lat].
-    return [sweref.wgs84_to_sweref99tm(lat, lon) for lon, lat in ring]
+    return [
+        (e, n)
+        for n, e in (sweref.wgs84_to_sweref99tm(lat, lon) for lon, lat in ring)
+    ]
 
 
 def _features_from_item(item: StacItem, client: GeotorgetClient | None = None) -> list[dict[str, Any]]:
@@ -238,7 +267,7 @@ def buildings_from_features(
     fallback_id: str = "building",
 ) -> list[Building]:
     """Turn GeoJSON-ish features into ranked Building candidates."""
-    site_e, site_n = sweref.wgs84_to_sweref99tm(latitude, longitude)
+    site_n, site_e = sweref.wgs84_to_sweref99tm(latitude, longitude)
     out: list[Building] = []
     for i, feat in enumerate(features):
         for j, ring in enumerate(_rings_from_geometry(feat.get("geometry") or {})):

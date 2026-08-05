@@ -59,7 +59,7 @@ def scene(monkeypatch):
     so it extends across the whole tile and the two buildings compete for each
     other's returns unless the cloud is clipped first.
     """
-    e, n = sweref.wgs84_to_sweref99tm(*STOCKHOLM)
+    n, e = sweref.wgs84_to_sweref99tm(*STOCKHOLM)
     mine = np.vstack([
         roof_face(35, 180, 12, 6, (e, n, 0), seed=2),
         roof_face(35, 0, 12, 6, (e, n + 6, 4.2), seed=3),
