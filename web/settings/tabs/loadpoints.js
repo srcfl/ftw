@@ -153,8 +153,8 @@
           '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
           '<b>Pending</b> chargers are connected but not part of the site: FTW ignores their ' +
           'telemetry and never commands them, so an unknown device cannot influence dispatch. ' +
-          'To adopt one, add a charger entry below with its id as the charger driver, save, ' +
-          'and restart FTW.' +
+          'To adopt one, add a charger entry below with its id as the charger driver and save ' +
+          '— it joins the site on that save.' +
           '</p>';
       }
     }

@@ -9,4 +9,5 @@ withheld from the site — no DerEV reading, no driver health, no metrics — an
 it is never commanded. This stops any device that merely knows the shared OCPP
 password from fabricating EV load and steering dispatch (the DerEV sum
 suppresses home-battery discharge). Adopting a charger = adding a charger
-entry with its id as the charger driver, saving, and restarting FTW.
+entry with its id as the charger driver and saving — charger entries
+hot-reload, so adoption and un-adoption take effect on the save.

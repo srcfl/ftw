@@ -33,7 +33,8 @@ Connecting alone does not make it part of the site. A charge point no charger
 entry names is **pending**: FTW shows its vendor, dialect and live state so
 you can adopt it, but ignores its telemetry and never commands it. To adopt
 it, add a charger entry on the same tab with the charge point's id as the
-charger driver, save, and restart FTW.
+charger driver and save — charger entries hot-reload, so it joins the site on
+that save, and removing the entry returns it to pending just as immediately.
 
 The quarantine is deliberate. Every charge point shares one basic-auth secret,
 so "it authenticated" proves the password, not the device. If pending chargers
@@ -173,9 +174,9 @@ ships an mDNS resolver. When in doubt, use the reserved IP.
 The **Settings → Chargers** tab shows the exact URL to enter, and every charge
 point that has connected appears there with its vendor, OCPP dialect and live
 state — as pending, until you adopt it. Add it as a charger entry on the same
-tab (its identity appears in the driver dropdown once it has connected), save,
-and restart FTW; that both lets the planner steer it and admits its telemetry
-into the site.
+tab (its identity appears in the driver dropdown once it has connected) and
+save; that both lets the planner steer it and admits its telemetry into the
+site, immediately — no restart needed.
 
 | Charger | Where you set it | Cloud needed? |
 |---|---|---|

@@ -64,7 +64,7 @@ describe("OCPP section", () => {
     assert.match(html, /intruder/);
     assert.match(html, /· pending/);
     assert.match(html, /ignores their telemetry/);
-    assert.match(html, /restart FTW/);
+    assert.match(html, /joins the site on that save/);
   });
 
   it("shows no quarantine note when every charger is adopted", () => {

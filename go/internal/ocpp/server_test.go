@@ -228,6 +228,36 @@ func TestPendingChargerIsQuarantinedFromTelemetry(t *testing.T) {
 	if !srv.Handler().isApproved("adopted-charger") {
 		t.Error("adopted-charger should be approved")
 	}
+
+	// Hot adoption: loadpoints hot-reload and the config applier re-calls
+	// SetApprovedIDs, so naming the id admits the very next reading — no
+	// reconnect, no restart.
+	srv.Handler().SetApprovedIDs([]string{"intruder"})
+	if _, err := cp.MeterValues(1, mv); err != nil {
+		t.Fatalf("meter values after adopt: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	var r *telemetry.DerReading
+	for time.Now().Before(deadline) {
+		r = tel.Get("intruder", telemetry.DerEV)
+		if r != nil && r.RawW == 7200 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if r == nil || r.RawW != 7200 {
+		t.Fatalf("adopted charger should reach telemetry, got %+v", r)
+	}
+
+	// Revocation pushes a zero synchronously so the last power figure
+	// cannot linger in the DerEV sum, and the charger is pending again.
+	srv.Handler().SetApprovedIDs(nil)
+	if r := tel.Get("intruder", telemetry.DerEV); r == nil || r.RawW != 0 {
+		t.Fatalf("revocation should zero the reading, got %+v", r)
+	}
+	if v := srv.Handler().Snapshot()["intruder"]; !v.Pending {
+		t.Errorf("revoked charger should be pending, got %+v", v)
+	}
 }
 
 func TestBasicAuthRejectsWrongCredentials(t *testing.T) {

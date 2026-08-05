@@ -746,6 +746,12 @@ func main() {
 	// hot-reload the calendar client (#498). Assigned later (calendar.New).
 	var calSvc *calendar.Service
 
+	// Forward-declared so the reload callback can keep the OCPP quarantine
+	// in step with hot-reloaded loadpoints — adopting a pending charger is
+	// naming it in a charger entry, and must take effect on the same save.
+	// Assigned where the OCPP server starts (optional; nil-guarded).
+	var ocppSrv *ocpp.Server
+
 	// ---- Config hot-reload watcher ----
 	// Named because two callers share it: the fsnotify watcher created
 	// below and POST /api/config (Deps.ConfigApplier), so a config saved
@@ -894,6 +900,19 @@ func main() {
 		// anchor, current SoC estimate) — see loadpoint.Manager.Load.
 		lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
 		hydrateLoadpointSurplusOnly()
+
+		// The OCPP quarantine follows the loadpoints just reloaded:
+		// a pending charger a new entry names is adopted on this save,
+		// and one whose entry was removed goes back to pending.
+		if ocppSrv != nil {
+			approved := make([]string, 0, len(newCfg.Loadpoints))
+			for _, lp := range newCfg.Loadpoints {
+				if lp.DriverName != "" {
+					approved = append(approved, lp.DriverName)
+				}
+			}
+			ocppSrv.Handler().SetApprovedIDs(approved)
+		}
 
 		// Notifications: rebuild the provider from fresh config
 		// (handles the cold-start case where the initial config
@@ -1162,7 +1181,6 @@ func main() {
 	// other identity is quarantined as pending — visible in the UI, absent
 	// from telemetry — so a device that merely knows the shared password
 	// cannot inject EV load into dispatch.
-	var ocppSrv *ocpp.Server
 	if cfg.OCPP != nil && cfg.OCPP.Enabled {
 		approved := make([]string, 0, len(cfg.Loadpoints))
 		for _, lp := range cfg.Loadpoints {

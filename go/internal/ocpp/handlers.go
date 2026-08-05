@@ -80,6 +80,12 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 // UI and adopt it, but kept out of telemetry so an unknown-but-authenticated
 // device cannot fabricate EV load and steer dispatch (the DerEV sum
 // suppresses home-battery discharge). Replaces the previous set.
+//
+// Loadpoints hot-reload, so this is called again on every config apply:
+// adoption takes effect on the next message from the charger, and a charger
+// whose loadpoint was removed goes back to pending — with a zero reading
+// pushed first, for the same reason OnDisconnect pushes one: its last
+// non-zero power must not linger in the DerEV sum it is no longer part of.
 func (h *Handler) SetApprovedIDs(ids []string) {
 	m := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -88,8 +94,18 @@ func (h *Handler) SetApprovedIDs(ids []string) {
 		}
 	}
 	h.mu.Lock()
+	var revoked []string
+	for id := range h.chargers {
+		if h.approved[id] && !m[id] {
+			revoked = append(revoked, id)
+		}
+	}
 	h.approved = m
 	h.mu.Unlock()
+	for _, id := range revoked {
+		blob, _ := json.Marshal(map[string]any{"type": "ev", "w": 0.0})
+		h.tel.Update(id, telemetry.DerEV, 0, nil, blob)
+	}
 }
 
 // isApproved reports whether a charger id is named by a charger entry
