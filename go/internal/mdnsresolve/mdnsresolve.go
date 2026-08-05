@@ -91,10 +91,16 @@ func IsLocal(host string) bool {
 	return strings.HasSuffix(strings.ToLower(strings.TrimSuffix(host, ".")), ".local")
 }
 
-// CheckLocalDestination enforces the core trust decision before a transport
-// chooses a direct socket or an HTTP/WebSocket proxy. Proxy selection happens
-// before a net.Dialer callback, so keeping this check separate from Dialer is
-// what prevents an untrusted .local request from reaching a proxy first.
+// CheckLocalDestination reports whether this caller may use FTW's own mDNS
+// answer for host. It gates the resolution path, not the connection: a caller
+// that has not opted in still reaches the name through the system resolver,
+// exactly as it did before this package existed.
+//
+// The distinction matters because the two are not the same risk. An mDNS
+// answer FTW obtained itself is a new, unverified input. A name the operating
+// system resolves is the status quo on every platform FTW ships to — and under
+// Home Assistant it is the only path there is, since Supervisor answers .local
+// through its own DNS service.
 func CheckLocalDestination(host string, allowUnverifiedLocal bool) error {
 	if IsLocal(host) && !allowUnverifiedLocal {
 		return fmt.Errorf("mDNS resolution for %s denied: %w", host, ErrUnverifiedLocal)
@@ -208,7 +214,13 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return d.Dialer.DialContext(ctx, network, address)
 	}
 	if err := CheckLocalDestination(host, d.AllowUnverifiedLocal); err != nil {
-		return nil, err
+		// Not a refusal to connect — a refusal to trust *our* mDNS answer.
+		// The name still goes to the system resolver, which is what every
+		// shipped version of FTW does with it today, and what makes it work
+		// under Home Assistant. Denying it outright would break installs that
+		// work now, and would not buy the security it appears to: a raw IP is
+		// no more an identity on a LAN than a name is.
+		return d.systemFallback(ctx, network, address, err)
 	}
 
 	addrs, err := Lookup(ctx, host)
@@ -252,7 +264,9 @@ func (d *Dialer) systemFallback(ctx context.Context, network, address string, md
 	if err == nil {
 		return conn, nil
 	}
-	return nil, fmt.Errorf("%w (mDNS: %v)", err, mdnsErr)
+	// Both causes are wrapped, not just formatted, so a caller can test for
+	// either with errors.Is — ErrUnverifiedLocal in particular.
+	return nil, fmt.Errorf("%w (mDNS: %w)", err, mdnsErr)
 }
 
 // Dial is the context-free form, for callers that have no context to pass.

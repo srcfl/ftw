@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"crypto/sha1"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -97,18 +95,27 @@ func (p *wsTestProxy) nextHost(t *testing.T) string {
 	}
 }
 
-func TestGorillaWSProxyChecksLocalDestinationBeforeProxy(t *testing.T) {
+// allow_unverified_local gates FTW's *own* mDNS answer. With a proxy
+// configured FTW never resolves the destination — the proxy does — so a
+// ".local" WebSocket takes the same path as any other host, with or without
+// the opt-in. Denying it would break Home Assistant, where the platform
+// resolves ".local" and always has.
+func TestGorillaWSLocalDestinationTakesTheProxyLikeAnyHost(t *testing.T) {
 	proxy := newWSTestProxy(t)
 	proxyURL := proxy.proxyURL(t)
 
-	t.Run("default deny stops local CONNECT", func(t *testing.T) {
+	t.Run("no opt-in still reaches the proxy", func(t *testing.T) {
 		dialer := newGorillaWSDialer(false, http.ProxyURL(proxyURL))
-		_, _, err := dialer.Dial("ws://inverter.local/v1", nil)
-		if !errors.Is(err, mdnsresolve.ErrUnverifiedLocal) {
-			t.Fatalf("local WebSocket error = %v, want ErrUnverifiedLocal", err)
+		conn, _, err := dialer.Dial("ws://inverter.local/v1", nil)
+		if err != nil {
+			t.Fatalf("local WebSocket without opt-in failed: %v", err)
 		}
-		if got := proxy.hits.Load(); got != 0 {
-			t.Fatalf("denied local WebSocket reached proxy %d times, want 0", got)
+		_ = conn.Close()
+		if got := proxy.hits.Load(); got != 1 {
+			t.Fatalf("local WebSocket reached proxy %d times, want 1", got)
+		}
+		if host := proxy.nextHost(t); host != "inverter.local:80" {
+			t.Fatalf("proxy CONNECT host = %q, want inverter.local:80", host)
 		}
 	})
 
@@ -119,8 +126,8 @@ func TestGorillaWSProxyChecksLocalDestinationBeforeProxy(t *testing.T) {
 			t.Fatalf("opt-in WebSocket failed: %v", err)
 		}
 		_ = conn.Close()
-		if got := proxy.hits.Load(); got != 1 {
-			t.Fatalf("opt-in local WebSocket reached proxy %d times, want 1", got)
+		if got := proxy.hits.Load(); got != 2 {
+			t.Fatalf("opt-in local WebSocket reached proxy %d times, want 2", got)
 		}
 		if host := proxy.nextHost(t); host != "inverter.local:80" {
 			t.Fatalf("proxy CONNECT host = %q, want inverter.local:80", host)
@@ -134,8 +141,8 @@ func TestGorillaWSProxyChecksLocalDestinationBeforeProxy(t *testing.T) {
 			t.Fatalf("ordinary WebSocket failed: %v", err)
 		}
 		_ = conn.Close()
-		if got := proxy.hits.Load(); got != 2 {
-			t.Fatalf("ordinary WebSocket total proxy hits = %d, want 2", got)
+		if got := proxy.hits.Load(); got != 3 {
+			t.Fatalf("ordinary WebSocket total proxy hits = %d, want 3", got)
 		}
 		if host := proxy.nextHost(t); host != "ordinary.example:80" {
 			t.Fatalf("proxy CONNECT host = %q, want ordinary.example:80", host)

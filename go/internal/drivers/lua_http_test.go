@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -224,30 +222,24 @@ func TestLuaHTTPProxyChecksLocalDestinationBeforeProxy(t *testing.T) {
 		return req
 	}
 
-	t.Run("default deny stops every HTTP method before proxy", func(t *testing.T) {
+	t.Run("no opt-in still goes through the proxy", func(t *testing.T) {
+		// allow_unverified_local gates *our own* mDNS answer. With a proxy
+		// configured FTW never resolves the name at all — the proxy does — so
+		// the flag has nothing to say here and a .local host must behave like
+		// any other. Refusing would break Home Assistant, where the platform
+		// resolves .local and always has.
 		proxyHits.Store(0)
 		client := &http.Client{Transport: newLuaHTTPTransport(false, http.ProxyURL(proxyURL))}
 		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch} {
-			_, err := client.Do(newRequest(method, "http://inverter.local/api"))
-			if !errors.Is(err, mdnsresolve.ErrUnverifiedLocal) {
-				t.Errorf("%s error = %v, want ErrUnverifiedLocal", method, err)
+			resp, err := client.Do(newRequest(method, "http://inverter.local/api"))
+			if err != nil {
+				t.Errorf("%s failed: %v", method, err)
+				continue
 			}
+			_ = resp.Body.Close()
 		}
-		if got := proxyHits.Load(); got != 0 {
-			t.Fatalf("denied .local requests reached proxy %d times, want 0", got)
-		}
-	})
-
-	t.Run("explicit opt-in uses the configured proxy", func(t *testing.T) {
-		proxyHits.Store(0)
-		client := &http.Client{Transport: newLuaHTTPTransport(true, http.ProxyURL(proxyURL))}
-		resp, err := client.Do(newRequest(http.MethodPost, "http://inverter.local/api"))
-		if err != nil {
-			t.Fatalf("opt-in request failed: %v", err)
-		}
-		_ = resp.Body.Close()
-		if got := proxyHits.Load(); got != 1 {
-			t.Fatalf("opt-in request reached proxy %d times, want 1", got)
+		if got := proxyHits.Load(); got != 3 {
+			t.Fatalf(".local requests reached proxy %d times, want 3", got)
 		}
 	})
 

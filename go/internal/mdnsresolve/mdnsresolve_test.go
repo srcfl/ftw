@@ -523,11 +523,82 @@ func TestDialerSkipsResolutionForPlainHosts(t *testing.T) {
 	}
 }
 
-func TestDialerDeniesUnverifiedLocalByDefault(t *testing.T) {
-	_, err := (&Dialer{}).Dial("tcp", "inverter.local:502")
-	if !errors.Is(err, ErrUnverifiedLocal) {
-		t.Fatalf("Dial without local opt-in error = %v, want ErrUnverifiedLocal", err)
+// Without the opt-in, FTW must not use its *own* mDNS answer — but it must
+// still let the system resolver try the name. Refusing outright would break
+// Home Assistant, where Supervisor's DNS answers .local and always has.
+func TestDialerWithoutOptInIgnoresOurAnswerButStillResolves(t *testing.T) {
+	Flush()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer listener.Close()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+
+	// An avahi that would happily point at the live listener. A dialer without
+	// the opt-in must never reach it.
+	fakeAvahi(t, func(command, name string) string {
+		if command == "RESOLVE-HOSTNAME-IPV4" && name == "inverter.local" {
+			return "+ 2 0 inverter.local 127.0.0.1"
+		}
+		return "- 15 Timeout reached"
+	})
+
+	consulted := make(chan struct{}, 1)
+	d := Dialer{Dialer: net.Dialer{
+		Timeout: 500 * time.Millisecond,
+		Resolver: &net.Resolver{
+			PreferGo: true,
+			Dial: func(context.Context, string, string) (net.Conn, error) {
+				select {
+				case consulted <- struct{}{}:
+				default:
+				}
+				return nil, errors.New("no nameserver in this test")
+			},
+		},
+	}}
+
+	conn, err := d.Dial("tcp", "inverter.local:"+port)
+	if err == nil {
+		conn.Close()
+		t.Fatal("dialed our own mDNS answer without allow_unverified_local")
+	}
+	select {
+	case <-consulted:
+	default:
+		t.Fatal("the system resolver was never given the name")
+	}
+	// The reason we did not use our own answer has to survive into the error,
+	// or an operator cannot tell this from a device that is simply gone.
+	if !errors.Is(err, ErrUnverifiedLocal) {
+		t.Fatalf("error %v does not carry ErrUnverifiedLocal", err)
+	}
+}
+
+// With the opt-in, our own answer is used.
+func TestDialerWithOptInUsesOurAnswer(t *testing.T) {
+	Flush()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+
+	fakeAvahi(t, func(command, name string) string {
+		if command == "RESOLVE-HOSTNAME-IPV4" && name == "inverter.local" {
+			return "+ 2 0 inverter.local 127.0.0.1"
+		}
+		return "- 15 Timeout reached"
+	})
+
+	d := Dialer{AllowUnverifiedLocal: true, Dialer: net.Dialer{Timeout: time.Second}}
+	conn, err := d.Dial("tcp", "inverter.local:"+port)
+	if err != nil {
+		t.Fatalf("dial with opt-in: %v", err)
+	}
+	conn.Close()
 }
 
 func TestDialerLeavesOrdinaryDNSAndIPUnchanged(t *testing.T) {

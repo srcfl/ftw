@@ -215,9 +215,17 @@ where the driver supports them. Network allowlists still check the configured
 host name and port before resolution; they do not prove that an mDNS responder
 is the intended device.
 
-FTW therefore rejects `.local` transport dials by default, before it queries
-Avahi or the LAN. To use an unauthenticated `.local` endpoint, opt in on that
-driver:
+That risk is not unique to names, which is why the opt-in below gates the
+resolver rather than the connection. A raw IP address is no more an identity on
+a LAN than a name is — it can be claimed by ARP, and DHCP can hand it to a
+different device with no attacker involved at all. The durable check is the
+identity a device reports once connected: make and serial, or its MAC.
+
+So by default FTW does not use *its own* mDNS answer for a `.local` name: the
+name goes to the system resolver, exactly as it did before this package
+existed, and on platforms that answer `.local` themselves — Home Assistant does,
+through Supervisor's DNS service — it simply works. Opt in per driver to let FTW
+resolve the name itself, over Avahi or the LAN:
 
 ```yaml
 capabilities:
@@ -228,11 +236,19 @@ capabilities:
 ```
 
 For the Home Assistant bridge, set `homeassistant.allow_unverified_local: true`
-instead. This is required for every mDNS transport, including HTTP, WebSocket,
-MQTT, Modbus and raw TCP. A TLS pin does not bypass this gate yet. Literal IP
-addresses and ordinary DNS names keep their existing behavior. The opt-in is
-per driver so a name allowlist never becomes a server identity for another
-driver.
+instead. It applies to every transport — HTTP, WebSocket, MQTT, Modbus and raw
+TCP — and is per driver, so a name allowlist never becomes a server identity for
+another driver. Literal IP addresses and ordinary DNS names are untouched.
+
+Without it, a `.local` dial is not refused; it is handed to the system resolver,
+and the log records why FTW's own answer was not used. That matters on a host
+where nothing else resolves `.local` — a plain Compose or Raspberry Pi install,
+whose `resolv.conf` points at the router — because there the name will simply
+not resolve until you opt in.
+
+Note the limit of the gate: where an HTTP proxy is configured, FTW never
+resolves the destination at all, so the flag has nothing to say about that path.
+A TLS pin does not bypass the gate yet.
 
 #### Letting FTW use avahi
 
