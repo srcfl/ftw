@@ -39,15 +39,16 @@ type Config struct {
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	HomeLink         *HomeLink          `yaml:"home_link,omitempty" json:"home_link,omitempty"`
+	AppLink          *AppLink           `yaml:"app_link,omitempty" json:"app_link,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 }
 
-// HomeLink enables the outbound-only encrypted remote read service. The relay
-// and browser origins are fixed by the protocol and cannot be changed in site
-// config.
-type HomeLink struct {
+// AppLink enables the outbound connection the FTW app reaches this box
+// through. One switch: the relay is blind and fixed by the protocol, so there
+// is no endpoint to choose and no transport to pick. A question the site owner
+// cannot answer is the wrong question.
+type AppLink struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 

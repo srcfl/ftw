@@ -83,6 +83,10 @@ type Deps struct {
 	// BatteryIdentity resolves the live driver to its current hardware.
 	BatteryIdentity func(driver string) (deviceID string, ok bool)
 
+	// AppEnroll mints pairing codes for the FTW app. Nil when app_link is off,
+	// which the pairing routes report rather than hiding.
+	AppEnroll AppEnroller
+
 	CfgMu         *sync.RWMutex
 	Cfg           *config.Config
 	ConfigPath    string
@@ -143,11 +147,6 @@ type Deps struct {
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
-
-	// HomeLink owns local-only pairing, passkey enrollment, revocation and
-	// status. Nil reports that this host has no safe Home Link identity.
-	HomeLink        HomeLinkAdmin
-	HomeLinkEnabled bool
 
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
@@ -285,6 +284,8 @@ func (s *Server) routes() {
 	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
 	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
+	s.handle("GET  /api/app-link/status", s.handleAppLinkStatus)
+	s.handle("POST /api/app-link/pairing", s.handleAppLinkPairing)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
@@ -326,9 +327,6 @@ func (s *Server) routes() {
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
 	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
-	s.handle("GET  /api/home-link/status", s.handleHomeLinkStatus)
-	s.handle("POST /api/home-link/pairing", s.handleHomeLinkPairing)
-	s.handle("POST /api/home-link/passkeys/revoke", s.handleHomeLinkPasskeyRevoke)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
@@ -1359,23 +1357,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
 		return
 	}
+	// control.ApplyMode is the one door into a mode change: it drops any
+	// active manual hold and resets the PI integrator along with setting the
+	// mode. See its comment for what leaving either out has already cost.
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.Mode = m
-	// An explicit mode change is a reset signal: drop any active
-	// battery manual hold so the new mode takes effect on the very
-	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-	s.deps.Ctrl.ClearBatteryManualHold()
-	// Reset the PI integrator. The integral accumulated under the
-	// previous mode's error signal is meaningless to the new mode
-	// — keeping it caused integrator windup → wrong-direction stuck
-	// output across the 2026-05-24 evening mode switch (live
-	// regression: discharged the fleet to 7 % overnight while the
-	// PI integral was pinned in the wrong direction). Mode change
-	// is a discrete event; start the new regime from a clean PI.
-	if s.deps.Ctrl.PI != nil {
-		s.deps.Ctrl.PI.Reset()
-	}
+	applyErr := s.deps.Ctrl.ApplyMode(m)
 	s.deps.CtrlMu.Unlock()
+	if applyErr != nil {
+		writeJSON(w, 400, map[string]string{"error": applyErr.Error()})
+		return
+	}
 	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 		slog.Warn("failed to persist mode", "err", err)
 	}

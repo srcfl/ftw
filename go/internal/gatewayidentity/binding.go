@@ -24,9 +24,9 @@ const (
 )
 
 var (
-	ErrBindingNotAdopted = errors.New("home link identity is not adopted")
-	ErrBindingIncomplete = errors.New("home link identity binding is incomplete")
-	ErrBindingMismatch   = errors.New("home link identity binding does not match")
+	ErrBindingNotAdopted = errors.New("gateway identity is not adopted")
+	ErrBindingIncomplete = errors.New("gateway identity binding is incomplete")
+	ErrBindingMismatch   = errors.New("gateway identity binding does not match")
 )
 
 type SoftwareBinding struct {
@@ -93,6 +93,10 @@ func PathsForKey(keyPath string) (BindingPaths, error) {
 	if base == "." || base == string(filepath.Separator) || !fs.ValidPath(filepath.ToSlash(base)) {
 		return BindingPaths{}, errors.New("canonical key path has no file name")
 	}
+	// The .home-link suffixes name the feature that first needed a bound
+	// identity, not what the binding is for. They stay: every adopted gateway
+	// already has these two files on disk, and a box that stops finding them
+	// reads as unadopted and would try to bind itself a second time.
 	return BindingPaths{
 		Key:     abs,
 		Sidecar: abs + ".home-link.json",
@@ -176,7 +180,7 @@ func applySoftwareBindingConfirmed(
 			return SoftwareBinding{}, err
 		}
 		if confirmation == "" || confirmation != frozen.Confirmation {
-			return SoftwareBinding{}, errors.New("home link adoption confirmation does not match the frozen candidate")
+			return SoftwareBinding{}, errors.New("adoption confirmation does not match the frozen candidate")
 		}
 		return finishFrozenBinding(store, paths, state)
 	}
@@ -185,7 +189,7 @@ func applySoftwareBindingConfirmed(
 		return SoftwareBinding{}, err
 	}
 	if confirmation == "" || confirmation != preview.Confirmation {
-		return SoftwareBinding{}, errors.New("home link adoption confirmation does not match the current candidate")
+		return SoftwareBinding{}, errors.New("adoption confirmation does not match the current candidate")
 	}
 	return applySoftwareBinding(store, paths, preview)
 }
@@ -251,7 +255,7 @@ func previewSoftwareBinding(
 		return SoftwareBindingPreview{}, err
 	}
 	if state.hasAny() {
-		return SoftwareBindingPreview{}, errors.New("home link identity adoption has already started")
+		return SoftwareBindingPreview{}, errors.New("gateway identity adoption has already started")
 	}
 
 	keyBytes, err := store.Read(filepath.Base(paths.Key))
@@ -309,6 +313,9 @@ func bindingPreview(binding SoftwareBinding) (SoftwareBindingPreview, error) {
 		return SoftwareBindingPreview{}, err
 	}
 	confirmDigest := sha256.New()
+	// Frozen domain tag. A candidate confirmation can outlive a restart in the
+	// marker file, so changing this string would reject an adoption already in
+	// progress on a live box.
 	_, _ = confirmDigest.Write([]byte("ftw-home-link-adoption-v1"))
 	_, _ = confirmDigest.Write(sidecar)
 	return SoftwareBindingPreview{

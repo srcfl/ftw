@@ -22,7 +22,7 @@ func TestBoundSoftwareIdentitySignsWireFormat(t *testing.T) {
 		publicKey:  publicKey,
 		privateKey: privateKey,
 	}
-	message := []byte("ftw-home-link-test/v1\nbound identity")
+	message := []byte("ftw-gateway-identity-test/v1\nbound identity")
 	signature, err := identity.Sign(message)
 	if err != nil {
 		t.Fatal(err)
