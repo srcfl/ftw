@@ -10,8 +10,9 @@ import (
 // A stub enroller. Pairing is the one surface that hands out a credential, so
 // what matters here is who is allowed to ask, not what comes back.
 type stubEnroller struct {
-	minted int
-	err    error
+	minted  int
+	revoked int
+	err     error
 }
 
 func (s *stubEnroller) MintPairingCode() ([]byte, time.Time, error) {
@@ -24,6 +25,18 @@ func (s *stubEnroller) MintPairingCode() ([]byte, time.Time, error) {
 
 func (s *stubEnroller) EnrollmentURL(code []byte, lanHint string) (string, error) {
 	return "https://app.ftw.energy/p#v2.aaa.bbb.ccc.ddd", nil
+}
+
+func (s *stubEnroller) Devices() []AppDevice {
+	return []AppDevice{{ID: "aaaa1111", AddedAtMs: 1, LastSeenMs: 2}}
+}
+
+func (s *stubEnroller) RevokeDevice(id string) error {
+	if id != "aaaa1111" {
+		return ErrUnknownAppDevice
+	}
+	s.revoked++
+	return nil
 }
 
 func (s *stubEnroller) AuthorisedCount() int { return 2 }

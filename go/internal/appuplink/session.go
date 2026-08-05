@@ -1,6 +1,7 @@
 package appuplink
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -185,6 +186,31 @@ func (s *sessions) admit(sess *session) {
 		s.live[0].transport.Close()
 		s.live = s.live[1:]
 	}
+}
+
+// dropByAppKey terminates and forgets every session a revoked key is
+// running. Termination is best-effort — the socket may already be gone —
+// but the forget is not: a frame from a dropped session no longer
+// authenticates against anything.
+func (s *sessions) dropByAppKey(pub []byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dropped := 0
+	kept := s.live[:0]
+	for _, live := range s.live {
+		if bytes.Equal(live.appStatic, pub) {
+			// The reason the app already knows how to say: its terminated
+			// screen reads "your access was withdrawn by its owner".
+			_ = live.handler.Terminate("revoked")
+			live.transport.Close()
+			dropped++
+			continue
+		}
+		kept = append(kept, live)
+	}
+	s.live = kept
+	return dropped
 }
 
 func (s *sessions) drop(sess *session) {

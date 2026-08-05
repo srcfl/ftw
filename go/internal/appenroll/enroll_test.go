@@ -2,6 +2,7 @@ package appenroll
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -313,4 +314,109 @@ func mustDecode(t *testing.T, segment string) []byte {
 		t.Fatalf("decoding %q: %v", segment, err)
 	}
 	return raw
+}
+
+// The device list exists so someone can lock a phone out. Everything it
+// promises is tested from the outside: rows, order, stamps, and that the old
+// bare-string file still reads — an update must never silently unpair a house.
+func TestDeviceListAndRevoke(t *testing.T) {
+	dir := t.TempDir()
+	id, err := LoadOrCreate(filepath.Join(dir, "nova.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.UnixMilli(1_760_000_000_000)
+	clock := base
+	id.now = func() time.Time { return clock }
+
+	pairPhone := func() []byte {
+		code, _, err := id.MintPairingCode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub := make([]byte, 32)
+		if _, err := rand.Read(pub); err != nil {
+			t.Fatal(err)
+		}
+		if err := id.Authorise(pub, code); err != nil {
+			t.Fatal(err)
+		}
+		return pub
+	}
+
+	first := pairPhone()
+	clock = base.Add(time.Hour)
+	second := pairPhone()
+
+	devices := id.Devices()
+	if len(devices) != 2 {
+		t.Fatalf("%d devices, want 2", len(devices))
+	}
+	// Most recently seen first: the phone in daily use tops the list, and
+	// the stale key someone wants to revoke sinks.
+	if devices[0].LastSeenMs != base.Add(time.Hour).UnixMilli() {
+		t.Fatalf("newest first: got lastSeen %d", devices[0].LastSeenMs)
+	}
+
+	// A reconnect stamps lastSeen — that is what tells a live phone from a
+	// key that paired once and vanished.
+	clock = base.Add(2 * time.Hour)
+	if err := id.Authorise(first, nil); err != nil {
+		t.Fatalf("reconnect refused: %v", err)
+	}
+	devices = id.Devices()
+	if devices[0].LastSeenMs != clock.UnixMilli() {
+		t.Fatal("the reconnect did not stamp lastSeen")
+	}
+
+	// Revoke by row id: the key comes back so live sessions can be dropped,
+	// and the next handshake meets ErrNoPairing like any stranger's.
+	key, err := id.Revoke(devices[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key) != string(second) {
+		t.Fatal("revoke returned a different key than it removed")
+	}
+	if err := id.Authorise(second, nil); !errors.Is(err, ErrNoPairing) {
+		t.Fatalf("a revoked key reconnected: %v", err)
+	}
+	if _, err := id.Revoke("nosuchid"); !errors.Is(err, ErrUnknownDevice) {
+		t.Fatalf("revoking a ghost: %v", err)
+	}
+
+	// Survives a reload, stamps and all.
+	again, err := LoadOrCreate(filepath.Join(dir, "nova.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := again.AuthorisedCount(); n != 1 {
+		t.Fatalf("after reload: %d devices, want 1", n)
+	}
+}
+
+func TestLegacyBareKeyListStillReads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName)
+
+	// A file written by the previous version: keys as bare strings.
+	legacy := `{"noiseSecret":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) +
+		`","rendezvousSecret":"` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) +
+		`","authorisedApps":["oldphone-key-in-base64"]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := LoadOrCreate(filepath.Join(dir, "nova.key"))
+	if err != nil {
+		t.Fatalf("the legacy file must read: %v", err)
+	}
+	if id.AuthorisedCount() != 1 {
+		t.Fatal("the legacy phone was lost in migration")
+	}
+	devices := id.Devices()
+	if len(devices) != 1 || devices[0].AddedAtMs != 0 {
+		t.Fatalf("legacy row should carry unknown stamps: %+v", devices)
+	}
 }

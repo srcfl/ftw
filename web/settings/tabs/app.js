@@ -47,6 +47,62 @@
     return "Off. Turn it on above, save, and restart.";
   }
 
+  function agoText(ms) {
+    if (!ms) return "never seen";
+    var d = Date.now() - ms;
+    if (d < 90 * 1000) return "just now";
+    if (d < 90 * 60 * 1000) return Math.round(d / 60000) + " min ago";
+    if (d < 36 * 3600 * 1000) return Math.round(d / 3600000) + " h ago";
+    return Math.round(d / 86400000) + " d ago";
+  }
+
+  // The device list is what makes "remove" possible at all. Rows carry a
+  // short key prefix and two timestamps — the phone in daily use shows a
+  // fresh "last seen" and floats to the top; a key that paired once and
+  // vanished (a test run, a mistake, a stranger) sinks and is the one to
+  // remove. Removal is immediate: the box drops any live session too.
+  function refreshDevices() {
+    var list = document.getElementById("app-link-devices");
+    if (!list) return;
+    fetch("/api/app-link/devices")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (body) {
+        list.textContent = "";
+        var devices = (body && body.devices) || [];
+        if (devices.length === 0) return;
+
+        devices.forEach(function (d) {
+          var row = document.createElement("div");
+          row.className = "app-device-row";
+
+          var name = document.createElement("span");
+          name.className = "mono";
+          name.textContent = "Phone " + d.id;
+          row.appendChild(name);
+
+          var seen = document.createElement("span");
+          seen.className = "hint";
+          seen.textContent = d.last_seen_ms ? "seen " + agoText(d.last_seen_ms) : "never connected";
+          row.appendChild(seen);
+
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "Remove";
+          btn.addEventListener("click", function () {
+            if (!confirm("Remove this phone? It loses access immediately and must scan a new code to come back.")) return;
+            btn.disabled = true;
+            fetch("/api/app-link/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
+              .then(function () { refreshDevices(); refreshStatus(pairingCtx); })
+              .catch(function () { btn.disabled = false; });
+          });
+          row.appendChild(btn);
+
+          list.appendChild(row);
+        });
+      })
+      .catch(function () {});
+  }
+
   function refreshStatus(ctx) {
     var saved = !!(ctx && ctx.config.app_link && ctx.config.app_link.enabled);
 
@@ -64,6 +120,7 @@
         var note = describe(saved, s.enabled);
         setStatus(note === null ? pairedText(s.paired_devices) : note);
         if (button) button.disabled = !s.enabled;
+        if (s.enabled) refreshDevices();
       })
       .catch(function () {
         setStatus("Could not reach the box.");
@@ -183,6 +240,7 @@
         '<p class="hint">Takes effect after a restart — the box offers one when ' +
         "you save.</p>" +
         '<p id="app-link-status" class="hint">checking…</p>' +
+        '<div id="app-link-devices"></div>' +
         '<button type="button" id="app-link-pair" disabled>Show pairing code</button>' +
         '<p class="hint">Scan the code with the FTW app to add a phone. It works ' +
         "once and expires in a few minutes, so ask for a new one when you need it. " +

@@ -138,6 +138,24 @@ type Uplink struct {
 	epochOffset int64
 	attempt     int
 	corrections int
+
+	// liveMu guards live, the sessions of the current relay connection.
+	// Kept on the uplink so a revoke can reach into whatever connection is
+	// up right now; nil between connections, when there is nothing to drop.
+	liveMu sync.Mutex
+	live   *sessions
+}
+
+// DropSessionsByAppKey tears down every live session a revoked key holds.
+// Returns how many went; zero is normal when the phone is not connected.
+func (u *Uplink) DropSessionsByAppKey(pub []byte) int {
+	u.liveMu.Lock()
+	live := u.live
+	u.liveMu.Unlock()
+	if live == nil {
+		return 0
+	}
+	return live.dropByAppKey(pub)
 }
 
 // New builds an uplink.
@@ -301,7 +319,15 @@ func (u *Uplink) serve(ctx context.Context, conn *websocket.Conn) (int, string, 
 		write:  write,
 		log:    u.log,
 	}
-	defer live.closeAll()
+	u.liveMu.Lock()
+	u.live = live
+	u.liveMu.Unlock()
+	defer func() {
+		u.liveMu.Lock()
+		u.live = nil
+		u.liveMu.Unlock()
+		live.closeAll()
+	}()
 
 	conn.SetReadLimit(maxFrameBytes)
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -31,12 +32,32 @@ type AppEnroller interface {
 	EnrollmentURL(code []byte, lanHint string) (string, error)
 	// AuthorisedCount is how many devices may currently connect.
 	AuthorisedCount() int
+	// Devices lists the paired phones, most recently seen first.
+	Devices() []AppDevice
+	// RevokeDevice forgets one and tears down its live sessions. Returns
+	// ErrUnknownAppDevice when no row carries the id.
+	RevokeDevice(id string) error
 }
+
+// AppDevice is one paired phone. The id is a short prefix of its key —
+// enough to name a row and revoke it, never enough to impersonate it.
+type AppDevice struct {
+	ID         string `json:"id"`
+	AddedAtMs  int64  `json:"added_at_ms,omitempty"`
+	LastSeenMs int64  `json:"last_seen_ms,omitempty"`
+}
+
+// ErrUnknownAppDevice is a revoke aimed at an id no paired phone carries.
+var ErrUnknownAppDevice = errors.New("api: no such app device")
 
 type appLinkStatus struct {
 	Enabled bool `json:"enabled"`
-	// PairedDevices is a count, never a list. A device list on an unauthenticated
-	// LAN endpoint is a household inventory.
+	// PairedDevices is the count; the list lives behind its own endpoint.
+	// The list was originally refused as "a household inventory", but this
+	// page can already mint a pairing code — the strictly stronger power —
+	// so hiding key prefixes from whoever holds it protected nothing, and
+	// it made locking a device out impossible, which is a real control a
+	// household needs. The rows still carry prefixes, never keys.
 	PairedDevices int `json:"paired_devices"`
 }
 
@@ -94,6 +115,37 @@ func (s *Server) handleAppLinkPairing(w http.ResponseWriter, r *http.Request) {
 		URL:         url,
 		ExpiresAtMs: expiresAt.UnixMilli(),
 	})
+}
+
+func (s *Server) handleAppLinkDevices(w http.ResponseWriter, r *http.Request) {
+	if !s.appLinkLocalRequest(w, r) {
+		return
+	}
+	if s.deps.AppEnroll == nil {
+		writeAppLinkError(w, http.StatusServiceUnavailable, "app_link is off — set app_link.enabled and restart")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": s.deps.AppEnroll.Devices()})
+}
+
+func (s *Server) handleAppLinkDeviceRevoke(w http.ResponseWriter, r *http.Request) {
+	if !s.appLinkLocalRequest(w, r) {
+		return
+	}
+	if s.deps.AppEnroll == nil {
+		writeAppLinkError(w, http.StatusServiceUnavailable, "app_link is off — set app_link.enabled and restart")
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.deps.AppEnroll.RevokeDevice(id); err != nil {
+		if errors.Is(err, ErrUnknownAppDevice) {
+			writeAppLinkError(w, http.StatusNotFound, "that phone is no longer paired")
+			return
+		}
+		writeAppLinkError(w, http.StatusInternalServerError, "could not remove the phone")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }
 
 // appLinkLANHint is the host the caller reached this box on.

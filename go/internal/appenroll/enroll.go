@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -67,10 +68,54 @@ var (
 type stored struct {
 	NoiseSecret      string `json:"noiseSecret"`
 	RendezvousSecret string `json:"rendezvousSecret"`
-	// AuthorisedApps holds the static public key of every phone that has
-	// completed a pairing. A key here needs no code on later handshakes,
-	// which is what makes the code single-use without breaking reconnects.
-	AuthorisedApps []string `json:"authorisedApps"`
+	// AuthorisedApps holds every phone that has completed a pairing, with
+	// enough metadata to tell them apart on the settings page. A key here
+	// needs no code on later handshakes, which is what makes the code
+	// single-use without breaking reconnects.
+	//
+	// Earlier versions stored a bare list of key strings; load() reads both
+	// so an update never silently unpairs a house.
+	AuthorisedApps []storedApp `json:"authorisedApps"`
+}
+
+type storedApp struct {
+	Key        string `json:"key"`
+	AddedAtMs  int64  `json:"addedAtMs,omitempty"`
+	LastSeenMs int64  `json:"lastSeenMs,omitempty"`
+}
+
+// UnmarshalJSON accepts the legacy bare-string form beside the current one.
+func (a *storedApp) UnmarshalJSON(raw []byte) error {
+	var key string
+	if err := json.Unmarshal(raw, &key); err == nil {
+		*a = storedApp{Key: key}
+		return nil
+	}
+	type plain storedApp
+	var v plain
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	*a = storedApp(v)
+	return nil
+}
+
+// DeviceInfo is one paired phone, as the settings page needs to see it.
+//
+// The ID is a prefix of the key, not the key: enough to name a row and to
+// revoke it, not enough to impersonate anyone even in a leaked screenshot.
+type DeviceInfo struct {
+	ID         string
+	AddedAtMs  int64
+	LastSeenMs int64
+}
+
+// deviceID is the row name: the first eight characters of the base64 key.
+func deviceID(key string) string {
+	if len(key) <= 8 {
+		return key
+	}
+	return key[:8]
 }
 
 // Identity is the box's app-facing enrollment state.
@@ -87,12 +132,18 @@ type Identity struct {
 	// package's job and nobody else's.
 	staticSecret []byte
 	rendezvous   []byte
-	authorised   map[string]bool
+	authorised   map[string]*appMeta
 	pairing      *pairingCode
 	now          func() time.Time
 	// randRead is the entropy source. Injectable so a test can prove the
 	// failure path instead of only the happy one.
 	randRead func([]byte) (int, error)
+}
+
+// appMeta is what the box remembers about one paired phone.
+type appMeta struct {
+	addedAtMs  int64
+	lastSeenMs int64
 }
 
 type pairingCode struct {
@@ -111,7 +162,7 @@ func LoadOrCreate(keyPath string) (*Identity, error) {
 
 	id := &Identity{
 		path:       path,
-		authorised: map[string]bool{},
+		authorised: map[string]*appMeta{},
 		now:        time.Now,
 		randRead:   rand.Read,
 	}
@@ -159,8 +210,8 @@ func (i *Identity) load(raw []byte) error {
 	i.static = static
 	i.staticSecret = secret
 	i.rendezvous = rendezvous
-	for _, key := range s.AuthorisedApps {
-		i.authorised[key] = true
+	for _, app := range s.AuthorisedApps {
+		i.authorised[app.Key] = &appMeta{addedAtMs: app.AddedAtMs, lastSeenMs: app.LastSeenMs}
 	}
 	return nil
 }
@@ -196,11 +247,18 @@ func (i *Identity) save() error {
 	s := stored{
 		NoiseSecret:      base64.RawURLEncoding.EncodeToString(i.staticSecret),
 		RendezvousSecret: base64.RawURLEncoding.EncodeToString(i.rendezvous),
-		AuthorisedApps:   make([]string, 0, len(i.authorised)),
+		AuthorisedApps:   make([]storedApp, 0, len(i.authorised)),
 	}
-	for key := range i.authorised {
-		s.AuthorisedApps = append(s.AuthorisedApps, key)
+	for key, meta := range i.authorised {
+		s.AuthorisedApps = append(s.AuthorisedApps, storedApp{
+			Key: key, AddedAtMs: meta.addedAtMs, LastSeenMs: meta.lastSeenMs,
+		})
 	}
+	// Deterministic on disk, so two saves of the same state are the same
+	// bytes and a diff of applink.json says something.
+	sort.Slice(s.AuthorisedApps, func(a, b int) bool {
+		return s.AuthorisedApps[a].Key < s.AuthorisedApps[b].Key
+	})
 	i.mu.Unlock()
 
 	raw, err := json.Marshal(s)
@@ -287,8 +345,16 @@ func (i *Identity) Authorise(appStatic, payload []byte) error {
 	key := base64.RawURLEncoding.EncodeToString(appStatic)
 
 	i.mu.Lock()
-	if i.authorised[key] {
+	if meta := i.authorised[key]; meta != nil {
+		// A reconnect. The stamp is what lets the settings page tell a
+		// phone in daily use from a key that paired once and vanished —
+		// which is exactly the row someone wants to revoke.
+		meta.lastSeenMs = i.now().UnixMilli()
 		i.mu.Unlock()
+		if err := i.save(); err != nil {
+			// A stamp that could not be persisted must not block a session.
+			return nil
+		}
 		return nil
 	}
 	pairing := i.pairing
@@ -307,13 +373,68 @@ func (i *Identity) Authorise(appStatic, payload []byte) error {
 	}
 
 	i.mu.Lock()
-	i.authorised[key] = true
+	now := i.now().UnixMilli()
+	i.authorised[key] = &appMeta{addedAtMs: now, lastSeenMs: now}
 	// Spent. A second phone offering the same photographed code now meets
 	// ErrBadPairing rather than a pairing.
 	i.pairing = nil
 	i.mu.Unlock()
 
 	return i.save()
+}
+
+// Devices lists every paired phone, most recently seen first.
+func (i *Identity) Devices() []DeviceInfo {
+	i.mu.Lock()
+	out := make([]DeviceInfo, 0, len(i.authorised))
+	for key, meta := range i.authorised {
+		out = append(out, DeviceInfo{
+			ID: deviceID(key), AddedAtMs: meta.addedAtMs, LastSeenMs: meta.lastSeenMs,
+		})
+	}
+	i.mu.Unlock()
+
+	sort.Slice(out, func(a, b int) bool {
+		if out[a].LastSeenMs != out[b].LastSeenMs {
+			return out[a].LastSeenMs > out[b].LastSeenMs
+		}
+		return out[a].ID < out[b].ID
+	})
+	return out
+}
+
+// ErrUnknownDevice is a revoke aimed at an id no paired phone carries.
+var ErrUnknownDevice = errors.New("appenroll: no such device")
+
+// Revoke forgets a phone by its device id and returns the full key, so the
+// caller can also tear down any session that key is running right now. The
+// next handshake from it meets ErrNoPairing like any stranger's.
+func (i *Identity) Revoke(id string) ([]byte, error) {
+	i.mu.Lock()
+	var fullKey string
+	for key := range i.authorised {
+		if deviceID(key) == id {
+			fullKey = key
+			break
+		}
+	}
+	if fullKey == "" {
+		i.mu.Unlock()
+		return nil, ErrUnknownDevice
+	}
+	delete(i.authorised, fullKey)
+	i.mu.Unlock()
+
+	if err := i.save(); err != nil {
+		return nil, err
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(fullKey)
+	if err != nil {
+		// The key was minted by EncodeToString; this cannot happen outside a
+		// corrupted file, and the revoke itself already stuck.
+		return nil, nil
+	}
+	return raw, nil
 }
 
 // AuthorisedCount is for the API and for tests. The keys themselves stay here.

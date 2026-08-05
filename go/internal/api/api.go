@@ -292,6 +292,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("GET  /api/app-link/status", s.handleAppLinkStatus)
 	s.handle("POST /api/app-link/pairing", s.handleAppLinkPairing)
+	s.handle("GET  /api/app-link/devices", s.handleAppLinkDevices)
+	s.handle("DELETE /api/app-link/devices/{id}", s.handleAppLinkDeviceRevoke)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
