@@ -1170,6 +1170,13 @@ func main() {
 				"note", "listener is reachable on every interface; basic auth is the only gate")
 		}
 	}
+	// Snapshot hook for GET /api/ocpp/chargers. Left nil when the server is
+	// disabled or failed to start, which the endpoint reports as an empty
+	// list rather than an error.
+	var ocppChargersFn func() map[string]ocpp.ChargerView
+	if ocppSrv != nil {
+		ocppChargersFn = ocppSrv.Handler().Snapshot
+	}
 
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
@@ -2191,6 +2198,7 @@ func main() {
 		LoadModel:        loadSvc,
 		Loadpoints:       lpMgr,
 		LoadpointCtrl:    lpController,
+		OCPPChargers:     ocppChargersFn,
 		CalDAV:           calSvc,
 		HA:               haBridge,
 		Registry:         reg,

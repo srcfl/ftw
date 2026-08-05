@@ -86,6 +86,11 @@ It installs Docker when needed, creates `~/ftw`, downloads the Compose file
 and starts core, optimizer, updater and the local MQTT broker. Open
 `http://<host>:8080/setup` on the LAN.
 
+Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
+that dial in to FTW — OCPP chargers store their backend URL at commissioning,
+and some hardware whitelists which addresses may talk to it — silently lose
+the connection if DHCP later hands the host a different address.
+
 Existing Forty Two Watts or older FTW deployments must use the
 [legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
 are preserved. Raspberry Pi image installation is covered by

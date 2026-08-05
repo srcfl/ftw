@@ -49,6 +49,10 @@ type chargerState struct {
 	// transactionRef is the 2.0.1 transaction id, which is a string rather
 	// than the int transactionID above. Empty on the 1.6 path.
 	transactionRef string
+	// vendor and model come from BootNotification and exist so the UI can
+	// label a charger with what it actually is rather than its URL segment.
+	vendor string
+	model  string
 }
 
 // NewHandler returns a Handler ready to register with a CentralSystem.
@@ -82,11 +86,16 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 	out := make(map[string]ChargerView, len(h.chargers))
 	for id, s := range h.chargers {
 		out[id] = ChargerView{
+			Online:    s.online,
 			Connected: s.connected,
 			Charging:  s.charging,
 			PowerW:    s.lastPowerW,
 			SessionWh: s.sessionMeterWh,
 			TxID:      s.transactionID,
+			Version:   string(s.version),
+			LastAmps:  s.lastAmps,
+			Vendor:    s.vendor,
+			Model:     s.model,
 		}
 	}
 	return out
@@ -94,11 +103,21 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 
 // ChargerView is the public snapshot of a charger's state.
 type ChargerView struct {
+	// Online is the WebSocket session; Connected is a vehicle on the
+	// connector. A charger is usually online long before it is connected.
+	Online    bool    `json:"online"`
 	Connected bool    `json:"connected"`
 	Charging  bool    `json:"charging"`
 	PowerW    float64 `json:"power_w"`
 	SessionWh float64 `json:"session_wh"`
 	TxID      int     `json:"tx_id"`
+	// Version is the OCPP dialect ("1.6" or "2.0.1"); empty until known.
+	Version string `json:"version,omitempty"`
+	// LastAmps is the last non-zero per-phase limit the charger accepted —
+	// what a resume would restore, not necessarily what is flowing now.
+	LastAmps float64 `json:"last_amps,omitempty"`
+	Vendor   string  `json:"vendor,omitempty"`
+	Model    string  `json:"model,omitempty"`
 }
 
 // OnConnect / OnDisconnect are wired by the Server to the OCPP library's
@@ -134,6 +153,11 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 		"vendor", req.ChargePointVendor,
 		"model", req.ChargePointModel,
 		"fw", req.FirmwareVersion)
+	s := h.state(id)
+	h.mu.Lock()
+	s.vendor = req.ChargePointVendor
+	s.model = req.ChargePointModel
+	h.mu.Unlock()
 	h.tel.RecordDriverSuccess(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),

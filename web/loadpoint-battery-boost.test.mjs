@@ -27,5 +27,5 @@ test('active boost and every core stop class are visible', () => {
 test('operator clamps disable the start affordance', () => {
   assert.match(source, /!lp\.plugged_in \|\| lp\.manual_active \|\| lp\.surplus_only/);
   assert.match(source, /Turn off surplus-only first/);
-  assert.match(source, /Release the loadpoint hold first/);
+  assert.match(source, /Release the charger hold first/);
 });

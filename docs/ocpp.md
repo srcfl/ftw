@@ -139,6 +139,22 @@ needs a change to the upstream library.
 The backend URL is always `ws://<ftw-host>:<port><path><identity>`. What differs
 is how you reach the charger to set it.
 
+**Reserve FTW's IP address first.** Chargers store the backend URL at
+commissioning time, and some also whitelist which addresses may talk to them —
+an FTW host that later gets a different address from DHCP silently orphans
+every charger pointed at it. Give the FTW machine a DHCP reservation (a fixed
+IP) in your router before commissioning the first charger.
+
+`<ftw-host>` can be a hostname instead of an IP if the charger's firmware can
+resolve it: plain DNS names (a router DNS entry, a local zone) work on most
+chargers, but mDNS `.local` names usually do not — charger firmware rarely
+ships an mDNS resolver. When in doubt, use the reserved IP.
+
+The **Settings → Chargers** tab shows the exact URL to enter, and every charge
+point that has connected appears there with its vendor, OCPP dialect and live
+state. To let the planner steer one, add it as a charger entry on the same tab
+— its identity appears in the driver dropdown once it has connected.
+
 | Charger | Where you set it | Cloud needed? |
 |---|---|---|
 | Charge Amps Halo, Aura | WiFi hotspot → `192.168.250.1` → Settings → OCPP | no |

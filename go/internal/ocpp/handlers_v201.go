@@ -52,6 +52,11 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 		"charger", id, "version", Version201,
 		"vendor", vendor, "model", model, "serial", serial)
 
+	s := h.state(id)
+	h.mu.Lock()
+	s.vendor = vendor
+	s.model = model
+	h.mu.Unlock()
 	h.setVersion(id, Version201)
 	h.tel.RecordDriverSuccess(id)
 
