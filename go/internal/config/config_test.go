@@ -131,26 +131,11 @@ fleet_statistics:
   enabled: true
   endpoint: https://relay.example.test/fleet/heartbeat
   interval_h: 24
+home_link:
+  enabled: true
 `
 	if _, err := Parse([]byte(legacy), "/tmp"); err != nil {
 		t.Fatalf("existing config with retired remote keys must keep loading: %v", err)
-	}
-}
-
-func TestHomeLinkIsExplicitAndDisabledByDefault(t *testing.T) {
-	cfg, err := Parse([]byte(minimalYAML), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.HomeLink != nil && cfg.HomeLink.Enabled {
-		t.Fatal("Home Link enabled without explicit config")
-	}
-	cfg, err = Parse([]byte(minimalYAML+"\nhome_link:\n  enabled: true\n"), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.HomeLink == nil || !cfg.HomeLink.Enabled {
-		t.Fatal("explicit Home Link enable was lost")
 	}
 }
 

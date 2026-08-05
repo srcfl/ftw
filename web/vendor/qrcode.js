@@ -129,6 +129,20 @@ function bchTypeInfo(data) {
   return ((data << 10) | d) ^ G15_MASK;
 }
 
+// Version information, required from type 7 up.
+//
+// Without it a reader has to infer the version from the module count alone,
+// and the ones that refuse to guess — jsQR among them — return nothing. The
+// symbol looks perfectly well-formed, which is why this stayed hidden: every
+// short payload lands on type 6 or below and needs no version block at all.
+const G18 =
+  (1 << 12) | (1 << 11) | (1 << 10) | (1 << 9) | (1 << 8) | (1 << 5) | (1 << 2) | (1 << 0);
+function bchTypeNumber(data) {
+  let d = data << 12;
+  while (bchDigit(d) - bchDigit(G18) >= 0) d ^= G18 << (bchDigit(d) - bchDigit(G18));
+  return (data << 12) | d;
+}
+
 // ---- alignment-pattern centres (upstream QRUtil.PATTERN_POSITION_TABLE) ----
 const ALIGN_POS = [
   [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34],
@@ -238,15 +252,13 @@ function makeModules(typeNumber, data, maskPattern) {
   setupPositionProbe(moduleCount - 7, 0);
   setupPositionProbe(0, moduleCount - 7);
 
-  // timing patterns
-  for (let r = 8; r < moduleCount - 8; r++) {
-    if (modules[r][6] === null) modules[r][6] = r % 2 === 0;
-  }
-  for (let c = 8; c < moduleCount - 8; c++) {
-    if (modules[6][c] === null) modules[6][c] = c % 2 === 0;
-  }
-
-  // alignment patterns
+  // Alignment before timing, as upstream does, and the order matters.
+  //
+  // From type 7 the centres include row 6 and column 6 — (6,22) and (22,6) on
+  // a type 7 — and those do not overlap any finder, so they must be drawn.
+  // Laying the timing line down first fills exactly those modules, and the
+  // "already taken" check below then skips the patterns. The symbol still
+  // looks like a QR code and no decoder will read it.
   const pos = ALIGN_POS[typeNumber - 1];
   for (let i = 0; i < pos.length; i++) {
     for (let j = 0; j < pos.length; j++) {
@@ -258,6 +270,25 @@ function makeModules(typeNumber, data, maskPattern) {
             r === -2 || r === 2 || c === -2 || c === 2 || (r === 0 && c === 0);
         }
       }
+    }
+  }
+
+  // timing patterns, filling only what the alignment patterns left
+  for (let r = 8; r < moduleCount - 8; r++) {
+    if (modules[r][6] === null) modules[r][6] = r % 2 === 0;
+  }
+  for (let c = 8; c < moduleCount - 8; c++) {
+    if (modules[6][c] === null) modules[6][c] = c % 2 === 0;
+  }
+
+  // version info (type 7 and up), placed twice: a 6×3 block above the
+  // bottom-left finder and its transpose left of the top-right one.
+  if (typeNumber >= 7) {
+    const versionBits = bchTypeNumber(typeNumber);
+    for (let i = 0; i < 18; i++) {
+      const mod = ((versionBits >> i) & 1) === 1;
+      modules[Math.floor(i / 3)][(i % 3) + moduleCount - 8 - 3] = mod;
+      modules[(i % 3) + moduleCount - 8 - 3][Math.floor(i / 3)] = mod;
     }
   }
 

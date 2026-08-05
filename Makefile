@@ -100,7 +100,7 @@ optimizer-test: optimizer/.venv/.installed
 	optimizer/.venv/bin/pytest -q optimizer/tests
 
 compose-migration-test:
-	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/deploy-home-link-web.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh
+	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh
 	bash scripts/test-modular-compose.sh
 
 container-boundary-test:

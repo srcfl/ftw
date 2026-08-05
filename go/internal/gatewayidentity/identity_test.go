@@ -123,7 +123,7 @@ func TestSoftwareProviderReusesCanonicalKey(t *testing.T) {
 		t.Fatalf("identity created unexpected files: %v", entries)
 	}
 
-	message := []byte("ftw-home-link-test/v1\nhello")
+	message := []byte("ftw-gateway-identity-test/v1\nhello")
 	signature, err := first.Sign(message)
 	if err != nil {
 		t.Fatal(err)

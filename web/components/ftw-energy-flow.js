@@ -234,6 +234,15 @@ class FtwEnergyFlow extends FtwElement {
     .sv-hub-value  { font-family: var(--mono); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
     .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
     .sv-hub-sub    { font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+    /* static — the caller's claim that these readings are not live (the
+       FTW app shows a cached snapshot before it reconnects). Animation is
+       a statement about *now*, so everything that moves holds still: CSS
+       dashes and rings pause here, and afterRender() skips the particle
+       loop entirely. Numbers and colours keep saying what they said. */
+    :host([static]) svg *,
+    :host([static]) .ring {
+      animation-play-state: paused !important;
+    }
     .ef-clickable { cursor: pointer; outline: none; }
     .ef-clickable:focus-visible > circle { stroke-width: 3; filter: drop-shadow(0 0 4px var(--accent-e, #f5b942)); }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
@@ -452,6 +461,9 @@ class FtwEnergyFlow extends FtwElement {
       .sv-hub-sub    { font-size: 11px; }
     }
   `;
+
+  static get observedAttributes() { return ["static"]; }
+  attributeChangedCallback() { this.update(); }
 
   constructor() {
     super();
@@ -736,6 +748,9 @@ class FtwEnergyFlow extends FtwElement {
         if (g) { e.preventDefault(); fire(g); }
       });
     }
+    // Static means "not now": a cached view must hold still, because a
+    // moving particle is a claim that power is flowing at this moment.
+    if (this.hasAttribute("static")) return;
     const nodes = this.shadowRoot.querySelectorAll('.ef-p');
     if (!nodes.length || !this._particles.length) return;
     // Wire each DOM node to its param slot. `render()` assigned indices

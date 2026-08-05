@@ -877,7 +877,7 @@ func linuxBindingNoFollow() (int, error) {
 	case "386", "amd64", "loong64", "mips", "mips64", "mips64le", "mipsle", "riscv64", "s390x":
 		return 0x20000, nil
 	default:
-		return 0, fmt.Errorf("home link binding does not support linux/%s", runtime.GOARCH)
+		return 0, fmt.Errorf("gateway identity binding does not support linux/%s", runtime.GOARCH)
 	}
 }
 
