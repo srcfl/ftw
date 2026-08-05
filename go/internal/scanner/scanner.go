@@ -17,6 +17,27 @@ import (
 	"time"
 )
 
+const (
+	// Name lookups are best-effort and must not stretch a scan. Both run
+	// concurrently per address, and at most one further mDNS round follows.
+	mdnsLookupTimeout    = 900 * time.Millisecond
+	unicastLookupTimeout = 800 * time.Millisecond
+)
+
+// The three name probes, swappable so the preference order can be tested
+// without a LAN, a responder or a DNS server.
+var (
+	probeReverseMDNS = reverseMDNS
+	probeVerifyLocal = verifiedLocalName
+	probeReverseDNS  = func(ctx context.Context, resolver *net.Resolver, ip string) string {
+		hosts, err := resolver.LookupAddr(ctx, ip)
+		if err != nil || len(hosts) == 0 {
+			return ""
+		}
+		return strings.TrimSuffix(hosts[0], ".")
+	}
+)
+
 // FoundDevice is one open port discovered on the local network.
 type FoundDevice struct {
 	IP        string `json:"ip"`
@@ -120,18 +141,7 @@ func resolveHostnames(ctx context.Context, devices []FoundDevice) {
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			dnsCtx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
-			hosts, err := resolver.LookupAddr(dnsCtx, ip)
-			cancel()
-			name := ""
-			if err == nil && len(hosts) > 0 {
-				name = strings.TrimSuffix(hosts[0], ".")
-			}
-			if name == "" && ctx.Err() == nil {
-				mdnsCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
-				name = reverseMDNS(mdnsCtx, ip)
-				cancel()
-			}
+			name := lookupName(ctx, &resolver, ip)
 			if name != "" {
 				mu.Lock()
 				names[ip] = name
@@ -143,6 +153,64 @@ func resolveHostnames(ctx context.Context, devices []FoundDevice) {
 	for i := range devices {
 		devices[i].Hostname = names[devices[i].IP]
 	}
+}
+
+// lookupName picks the best name for ip, preferring one the device answers
+// for itself.
+//
+// The preference is the whole point, and it used to run the other way round.
+// Unicast reverse DNS is answered by the router, which hands back its own
+// label for the lease — "zap-000064963cd51edc.localdomain" on a UniFi
+// network. That is a display string: it resolves only while that router is
+// the resolver, and it does not follow the device anywhere. A ".local" name
+// belongs to the device and survives a new DHCP lease, which is exactly why
+// the setup wizard offers it as the address to save. Asking unicast first
+// meant the good name was never even looked for on any network whose router
+// answers PTR, which is most of them.
+func lookupName(ctx context.Context, resolver *net.Resolver, ip string) string {
+	var mdnsName, unicastName string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Independent queries on separate transports, so the scan waits for the
+	// slower of the two rather than for both in turn.
+	go func() {
+		defer wg.Done()
+		c, cancel := context.WithTimeout(ctx, mdnsLookupTimeout)
+		defer cancel()
+		mdnsName = probeReverseMDNS(c, ip)
+	}()
+	go func() {
+		defer wg.Done()
+		c, cancel := context.WithTimeout(ctx, unicastLookupTimeout)
+		defer cancel()
+		unicastName = probeReverseDNS(c, resolver, ip)
+	}()
+	wg.Wait()
+
+	if isLocalName(mdnsName) {
+		return mdnsName
+	}
+	// No reverse mDNS record is the common case, not a failure: try the label
+	// we did get as a forward ".local" name and let the device confirm it.
+	if label := hostLabel(firstNonEmpty(mdnsName, unicastName)); label != "" && ctx.Err() == nil {
+		c, cancel := context.WithTimeout(ctx, mdnsLookupTimeout)
+		defer cancel()
+		if verified := probeVerifyLocal(c, label, ip); verified != "" {
+			return verified
+		}
+	}
+	// Nothing the device owns. Return the router's label as a display name;
+	// the wizard knows not to save a non-".local" name as an address.
+	return firstNonEmpty(mdnsName, unicastName)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // probe tries to TCP-connect to ip:port with a 500 ms timeout.

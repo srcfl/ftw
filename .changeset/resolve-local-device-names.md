@@ -41,9 +41,22 @@ supported; link-local IPv6 addresses carry their interface zone and unscoped
 answers are rejected. The resolver also rejects non-response DNS packets,
 wrong answer classes or families, invalid sources, and Avahi replies whose
 interface, name, address family or address does not match the request. mDNS is
-unauthenticated, so `.local` transport dials are denied by default. Set
-`capabilities.allow_unverified_local: true` for a driver, or
-`homeassistant.allow_unverified_local: true` for the Home Assistant bridge,
-when the operator accepts that trust boundary. Host allowlists do not prove
-server identity, and a TLS pin does not bypass the gate yet. Literal IP and
-ordinary DNS endpoints are unchanged.
+unauthenticated, so `capabilities.allow_unverified_local: true` for a driver —
+or `homeassistant.allow_unverified_local: true` for the Home Assistant bridge —
+gates whether FTW acts on an answer it obtained itself. It gates the resolution
+path, not the connection: without it a `.local` name still goes to the system
+resolver exactly as it does today, which is what keeps working installs working
+under Home Assistant, where Supervisor answers `.local` through its own DNS
+service. Host allowlists do not prove server identity, and a TLS pin does not
+bypass the gate yet. Literal IP and ordinary DNS endpoints are unchanged.
+
+Network scanning now reports the name a device answers for itself. It used to
+ask unicast reverse DNS first and only fall back to mDNS, which meant the
+router's label for the lease — `zap-000064963cd51edc.localdomain` on a UniFi
+network — was what reached the setup wizard, and the wizard fell back to the
+raw IP because that is not a `.local` name. Both queries now run together and a
+`.local` answer wins. Reverse mDNS alone is not enough either: RFC 6762 leaves
+`in-addr.arpa` mapping optional and many responders publish a forward `A`
+record without one, so where no reverse record exists FTW re-asks the label
+forward as `<label>.local` and keeps it only when it resolves back to the same
+address. Unverified names are still shown, but only as display text.
