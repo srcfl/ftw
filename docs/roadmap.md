@@ -26,89 +26,65 @@ this lane, not parallel remote products. Their contracts must converge on one
 rule: identity can establish who or what is speaking, but only core can admit a
 mutation and validate its effect.
 
-## NEXT — optional FTW Home Link
+## NEXT — the FTW app
 
-After the NOW exit evidence is complete, FTW can add an opt-in managed remote
-experience. Its first releasable slice is read-only status, health, plan preview
-and history summaries. Pairing or service availability must not change local
-control, setup, history or fallback planning.
+The optional FTW Home Link was built, shipped and then removed whole; see
+[ADR 0006](adr/0006-app-uplink.md). The remote lane is now one thing: the FTW
+app at `app.ftw.energy`, talking to the box over its own protocol. Pairing or
+relay availability must not change local control, setup, history or fallback
+planning, and does not.
 
 ### Identity and pairing
 
-- Passkey authentication terminates at the local FTW instance through the
-  tunnel. There is no Sourceful user account or cloud authentication step.
-- FTW stores only the public WebAuthn verifier needed for each local
-  credential: credential ID, public key, signature counter and local credential
-  label. It never receives or stores a passkey private key, password or shared
-  access key. The relay stores no user credential material.
-- Each FTW installation has a separate permanent gateway identity for the
-  site/machine. A compatible hardware-protected P-256 secure element is always
-  tried first: its existing key and normalized 18-hex serial become the gateway
-  identity, and the private key never leaves the chip.
-- Without compatible hardware, FTW creates and atomically persists a local
-  P-256 identity with the same contract: a stable 18-hex gateway ID, a raw
-  64-byte `X || Y` public key, and raw 64-byte `r || s` signatures over SHA-256.
-  The private key remains local. Either identity authenticates the tunnel; it
-  is not a user passkey and grants no control by itself.
-- First passkey enrollment starts from the LAN UI. FTW creates a short-lived,
-  single-use, high-entropy secret and shows one QR code/deep link. FTW validates
-  and consumes the secret locally; there is no PIN or durable enrollment key.
-- Later passkey ceremonies and requests use the same remote route, but FTW
-  still creates the challenge and verifies the response locally.
-- Multi-site means several independently paired site aliases. Each site
-  authenticates locally; there is no central user-to-site directory. A richer
-  consolidated multi-site view remains gated in LATER.
-
-Proposed domain layout:
-
-| Host | Single responsibility |
-|---|---|
-| `<adjective>-<color>-<animal>.home.sourceful.energy` | Deterministic human address for one FTW gateway |
-| `home.sourceful.energy` | Stable WebAuthn relying-party ID; no account directory |
-| `uplink.home.sourceful.energy` | FTW machine connection endpoint |
-
-The public `srcfl/device-drivers` release channel remains separate from pairing,
-authentication and Home Link.
-
-The three-word name is derived from the stable gateway ID in the exact order
-adjective–color–animal. It is a display name and DNS alias, never an
-authentication factor or secret. Existing compatible Sourceful Energy
-Gateways must derive exactly the same name. There are no chosen names or manual
-namespace exceptions. The gateway's public key and 18-hex ID are authoritative.
+- The box holds three secrets with three lifetimes: a Noise static X25519 key
+  that never changes, a rotatable 32-byte rendezvous secret, and a single-use
+  pairing code with a ten-minute life. None of them is in SQLite.
+- Trust reaches the app optically. The QR code is a URL fragment carrying the
+  static public key, the pairing code, a LAN hint and the rendezvous secret.
+  A fragment is never sent in an HTTP request, so nothing the app trusts ever
+  passes through a server.
+- The box is not a WebAuthn relying party. It authenticates a phone by the
+  pairing code in the first handshake message and afterwards by the app's
+  pinned static key. The passkey lives in the app against `app.ftw.energy`,
+  where it gates enrollment and privileged commands rather than reading.
+- The machine identity in [`go/internal/gatewayidentity`](../go/internal/gatewayidentity)
+  is unchanged and unrelated: hardware-protected P-256 where the hardware
+  exists, a bound software key otherwise, and the same deterministic
+  adjective-color-animal display name derived from the stable 18-hex gateway
+  ID. It identifies the machine; it authorises nothing.
+- Multi-site means several independently paired boxes. There is no central
+  user-to-site directory. A consolidated multi-site view stays gated in LATER.
 
 ### Connection and authorization contract
 
-FTW opens one outbound-only, long-lived TLS connection to the machine endpoint.
-The relay challenges the connection; FTW signs that challenge with its
-permanent site/machine key. There is no long-lived bearer or shared tunnel
-token. A small versioned multiplexing contract carries several concurrent
-request/response and event streams over that connection. The contract must
-define stream identity, message kind, ordering, deadlines, cancellation,
-per-stream flow control, bounded buffering and reconnect behavior. It must not
-expose a generic tunnel or make transport reachability equivalent to authority.
+The box holds one outbound WSS connection to `wss://relay.ftw.energy`, joining
+under a handle derived per epoch from the rendezvous secret with HKDF-SHA256.
+The handle rotates hourly, so the relay operator cannot follow a household from
+one hour to the next, and there is no DNS alias or other stable per-box name.
+An epoch correction from the relay is read as a clock correction and clamped;
+it is never an order.
 
-Relay state is limited to alias-to-public-gateway-identity mapping, active
-routing, status and timestamps. It stores no user credentials and makes no user
-authorization decision.
+The relay forwards encrypted frames and holds no keys. Up to four phones share
+one uplink; the relay broadcasts, and the box lets the AEAD decide which
+session a frame belongs to, because asking the relay would require the relay to
+know. Lane 0 frames are constant in length and cadence, because a
+variable-length 1 Hz power stream leaks a household's load pattern through
+perfect encryption.
 
-After a locally verified passkey ceremony, FTW creates a short-lived access
-proof bound to its own site identity, the authenticated local credential and
-the exact scope. FTW verifies that proof on later requests, rejects replay and
-expiry, and records the outcome. Read-only scopes ship first.
+Commands carry an expiry and preconditions, and core revalidates against fresh
+state before acting. A queued command is never replayed silently. Site mode
+changes go through `control.ApplyMode` from every door. Stale telemetry, local
+limits and local operator actions remain authoritative.
 
-Later NEXT slices may introduce only semantic, expiring intents, such as an EV
-departure target or a temporary operating strategy. Intents never contain raw
-device writes. Core translates an accepted intent into its own plan, clamps and
-leases; stale telemetry, local limits and local operator actions remain
-authoritative.
+The public `srcfl/device-drivers` release channel remains separate from
+pairing and authentication.
 
-NEXT cannot graduate until tests demonstrate enrollment-secret consumption,
-passkey and gateway-key revocation, challenge replay rejection, stream
-isolation and backpressure, multi-site separation, bounded outage recovery, and
-uninterrupted local operation while the relay is unavailable. Identity tests
-must cover hardware-first selection, atomic software-key persistence, exact
-wire encodings, normalized 18-hex IDs, and known gateway-ID-to-name vectors
-without special cases.
+Open work before this lane is finished:
+
+- an on-box pairing surface, so the QR payload can be seen without a terminal;
+- per-device revocation, so one lost phone does not require rotating the
+  rendezvous secret and re-pairing the household;
+- push, history and the plan surface over the same protocol.
 
 ### Conditional Apple EnergyKit native companion
 
@@ -146,7 +122,7 @@ These are bounded follow-on directions, not scheduled commitments:
 | OCPP gateway | The EV lease/action model and stable charger identity are proven locally, including disconnect and autonomous-default behavior. |
 | External grid constraints | A versioned constraint record has provenance, effective window, expiry, conflict handling and an audit trail; it can never weaken physical site limits. |
 | Active heat | Neutral thermal capabilities, comfort bounds and a safe autonomous default are demonstrated before dispatch is enabled. |
-| Native widgets and richer multi-site views | The read-only Home Link schema, per-site authentication and privacy budget are stable in production. |
+| Native widgets and richer multi-site views | The app protocol's read schema, per-site pairing and privacy budget are stable in production. |
 | V2X automation | Bidirectional capability, metering, lease ownership, interlocks and fallback are proven for the complete local actuation path. |
 | General vehicle snapshot adapter | A minimal vendor-neutral snapshot has stable vehicle identity, freshness and consent semantics without becoming a second control path. |
 

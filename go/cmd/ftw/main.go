@@ -34,6 +34,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/caldavserver"
@@ -71,10 +72,16 @@ import (
 // local runs.
 var Version = "dev"
 
+// siteIdentityLoad is the machine's own identity, not a user's.
+//
+// Bound is set when nova.key has been adopted into a hardware-protected
+// binding. It outlived Home Link, which is what first needed it: the binding
+// is what stops a box from quietly minting a replacement key and losing its
+// Nova claim when the sidecar state is incomplete.
 type siteIdentityLoad struct {
-	Nova     *nova.Identity
-	HomeLink gatewayidentity.Identity
-	Binding  gatewayidentity.SoftwareBinding
+	Nova    *nova.Identity
+	Bound   gatewayidentity.Identity
+	Binding gatewayidentity.SoftwareBinding
 }
 
 func loadSiteIdentity(keyPath string) (siteIdentityLoad, error) {
@@ -96,7 +103,7 @@ func loadSiteIdentityWith(
 	switch {
 	case err == nil:
 		if identity == nil {
-			return siteIdentityLoad{}, errors.New("bound home link identity is nil")
+			return siteIdentityLoad{}, errors.New("bound gateway identity is nil")
 		}
 		existing, loadErr := loadNovaExisting(keyPath)
 		if loadErr != nil {
@@ -107,14 +114,14 @@ func loadSiteIdentityWith(
 		}
 		publicKey := identity.PublicKey()
 		if existing.PublicKeyHex() != hex.EncodeToString(publicKey) {
-			return siteIdentityLoad{}, errors.New("nova and home link identities use different keys")
+			return siteIdentityLoad{}, errors.New("nova and bound gateway identities use different keys")
 		}
 		publicHash := sha256.Sum256(publicKey)
 		if binding.PublicKeySHA256 != hex.EncodeToString(publicHash[:]) {
-			return siteIdentityLoad{}, errors.New("home link binding key hash changed")
+			return siteIdentityLoad{}, errors.New("gateway binding key hash changed")
 		}
 		return siteIdentityLoad{
-			Nova: existing, HomeLink: identity, Binding: binding,
+			Nova: existing, Bound: identity, Binding: binding,
 		}, nil
 	case errors.Is(err, gatewayidentity.ErrBindingNotAdopted),
 		errors.Is(err, gatewayidentity.ErrUnsupportedBinding),
@@ -142,33 +149,38 @@ func loadSiteIdentityWith(
 	}
 }
 
-func runHomeLinkAdopt(args []string) {
-	if err := adoptHomeLinkIdentity(args, os.Stdout); err != nil {
-		slog.Error("home link identity adoption failed", "err", err)
+func runGatewayIdentityAdopt(args []string) {
+	if err := adoptGatewayIdentity(args, os.Stdout); err != nil {
+		slog.Error("gateway identity adoption failed", "err", err)
 		os.Exit(2)
 	}
 }
 
-func adoptHomeLinkIdentity(args []string, out io.Writer) error {
-	return adoptHomeLinkIdentityWith(
+func adoptGatewayIdentity(args []string, out io.Writer) error {
+	return adoptGatewayIdentityWith(
 		args,
 		out,
 		gatewayidentity.PreviewSoftwareBinding,
 		gatewayidentity.ApplySoftwareBinding,
 		gatewayidentity.LoadBoundSoftwareIdentity,
-		gatewayidentity.RouteHandle,
 	)
 }
 
-func adoptHomeLinkIdentityWith(
+// adoptGatewayIdentityWith binds an existing nova.key to this machine.
+//
+// The sidecar files it writes are still called nova.key.home-link.{state,json}
+// and the confirmation is still domain-separated as home-link adoption. Those
+// names are on disk on shipped boxes, so renaming them would orphan every
+// gateway already adopted. The subcommand is not: it was only ever named after
+// the first feature that needed a bound identity.
+func adoptGatewayIdentityWith(
 	args []string,
 	out io.Writer,
 	preview func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error),
 	apply func(context.Context, string, string) (gatewayidentity.SoftwareBinding, error),
 	load func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error),
-	routeHandle func([]byte) (string, error),
 ) error {
-	flags := flag.NewFlagSet("home-link-adopt", flag.ContinueOnError)
+	flags := flag.NewFlagSet("gateway-identity-adopt", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	keyPath := flags.String("key", "", "Path to the existing canonical nova.key")
 	confirmation := flags.String("confirm", "", "Exact confirmation from a fresh preview")
@@ -176,7 +188,7 @@ func adoptHomeLinkIdentityWith(
 		return err
 	}
 	if flags.NArg() != 0 || strings.TrimSpace(*keyPath) == "" {
-		return errors.New("home-link-adopt requires --key=<existing nova.key>")
+		return errors.New("gateway-identity-adopt requires --key=<existing nova.key>")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -204,14 +216,10 @@ func adoptHomeLinkIdentityWith(
 		return err
 	}
 	if loaded != binding {
-		return errors.New("adopted home link identity changed while reopening")
+		return errors.New("adopted gateway identity changed while reopening")
 	}
 	if identity == nil {
-		return errors.New("adopted home link identity is nil")
-	}
-	handle, err := routeHandle(identity.PublicKey())
-	if err != nil {
-		return err
+		return errors.New("adopted gateway identity is nil")
 	}
 	name, err := gatewayidentity.ThreeWordName(binding.GatewayID)
 	if err != nil {
@@ -219,8 +227,8 @@ func adoptHomeLinkIdentityWith(
 	}
 	_, err = fmt.Fprintf(
 		out,
-		"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\nroute_handle=%s\n",
-		binding.GatewayID, name, binding.PublicKeySHA256, handle,
+		"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\n",
+		binding.GatewayID, name, binding.PublicKeySHA256,
 	)
 	return err
 }
@@ -231,8 +239,8 @@ func main() {
 	// Everything else is the long-running service.
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		switch os.Args[1] {
-		case "home-link-adopt":
-			runHomeLinkAdopt(os.Args[2:])
+		case "gateway-identity-adopt":
+			runGatewayIdentityAdopt(os.Args[2:])
 			return
 		case "nova-claim":
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
@@ -576,6 +584,13 @@ func main() {
 
 	// ---- Shared mutexes for API/control/models ----
 	ctrlMu := &sync.Mutex{}
+	// The revision of controllable state. The app sends the revision a
+	// command expected to act against and the box refuses the command when
+	// they differ, so this has to move whenever the mode, the targets or the
+	// ceilings do. It is derived from the state rather than incremented at
+	// each mutation site, because control is written from four places and a
+	// counter every one of them had to remember would be wrong within a month.
+	controlRev := &control.Revision{}
 	capMu := &sync.RWMutex{}
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
@@ -2089,25 +2104,37 @@ func main() {
 	case identityErr != nil:
 		// Binding and platform checks fail closed. Never create a replacement
 		// key when state is incomplete or this host cannot protect it.
-		slog.Warn("home link identity disabled", "err", identityErr, "path", identityKeyPath)
-	case identityState.HomeLink != nil:
-		handle, handleErr := gatewayidentity.RouteHandle(identityState.HomeLink.PublicKey())
-		if handleErr != nil {
-			slog.Warn("home link identity disabled", "err", handleErr, "path", identityKeyPath)
-		} else {
-			slog.Info("home link identity ready",
-				"gateway_id", identityState.Binding.GatewayID,
-				"route_handle", handle,
-			)
-		}
+		slog.Warn("site identity disabled", "err", identityErr, "path", identityKeyPath)
+	case identityState.Bound != nil:
+		slog.Info("site identity ready (hardware-bound)",
+			"gateway_id", identityState.Binding.GatewayID,
+		)
 	case identityState.Nova != nil:
 		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
 	}
-	homeLinkAdmin, homeLinkEnabled, homeLinkErr := startHomeLink(
-		ctx, cfg, identityState, st, tel, mpcSvc, ctrl, ctrlMu,
+
+	// The FTW app's uplink. It speaks the app's own protocol end to end and
+	// reaches the box through a relay that holds no keys.
+	appLinkWatchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+	if appLinkWatchdog <= 0 {
+		appLinkWatchdog = 60 * time.Second
+	}
+	boxID := ""
+	if identityState.Nova != nil {
+		boxID = identityState.Nova.PublicKeyHex()[:16]
+	}
+	appEnroll, appLinkEnabled, appLinkErr := startAppLink(
+		ctx, cfg, identityKeyPath, boxID, Version,
+		st, tel, mpcSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
 	)
-	if homeLinkErr != nil {
-		slog.Warn("Home Link unavailable")
+	switch {
+	case appLinkErr != nil:
+		slog.Warn("app link unavailable", "err", appLinkErr)
+	case appLinkEnabled:
+		slog.Info("app link connected", "relay", appuplink.Endpoint,
+			"paired_devices", appEnroll.AuthorisedCount())
+	default:
+		slog.Info("app link disabled — set app_link.enabled to turn it on")
 	}
 
 	deps = &api.Deps{
@@ -2115,6 +2142,7 @@ func main() {
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		BatteryIdentity: batteryIdentity,
+		AppEnroll:       appEnrollForAPI(appEnroll, appLinkEnabled),
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),
@@ -2153,8 +2181,6 @@ func main() {
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
 		OptimizerUpdate:  optimizerUpdater,
-		HomeLink:         homeLinkAdmin,
-		HomeLinkEnabled:  homeLinkEnabled,
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,

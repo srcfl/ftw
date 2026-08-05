@@ -59,13 +59,6 @@ type Store struct {
 	// cache.db gets no marker: it is tiny + disposable, so it is always checked.
 	mainDBPath string
 
-	// homeLinkFenceMu serializes the append-only emergency revoke markers
-	// stored beside state.db. Those markers remain writable when SQLite itself
-	// is unavailable and keep a failed revoke closed across restart.
-	homeLinkFenceMu     sync.Mutex
-	homeLinkFenceRoot   *os.Root
-	homeLinkFenceDBName string
-
 	// healMu guards corrupt + verifyCancel. corrupt is set by the background
 	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
 	// marked clean). verifyCancel interrupts the in-flight background scan so
@@ -100,7 +93,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	fenceRoot, absolutePath, dbName, err := openHomeLinkFenceRoot(path)
+	absolutePath, err := resolveMainDBPath(path)
 	if err != nil {
 		db.Close()
 		cache.Close()
@@ -110,7 +103,6 @@ func Open(path string) (*Store, error) {
 
 	s := &Store{
 		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath,
-		homeLinkFenceRoot: fenceRoot, homeLinkFenceDBName: dbName,
 	}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
@@ -121,13 +113,11 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		cache.Close()
-		fenceRoot.Close()
 		return nil, err
 	}
 	if err := s.migrateLegacyTierSplit(); err != nil {
 		db.Close()
 		cache.Close()
-		fenceRoot.Close()
 		return nil, err
 	}
 	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
@@ -198,58 +188,24 @@ func (s *Store) Close() error {
 			err = errors.Join(err, e)
 		}
 	}
-	s.homeLinkFenceMu.Lock()
-	if s.homeLinkFenceRoot != nil {
-		if e := s.homeLinkFenceRoot.Close(); e != nil {
-			err = errors.Join(err, e)
-		}
-		s.homeLinkFenceRoot = nil
-	}
-	s.homeLinkFenceMu.Unlock()
 	return err
 }
 
-func openHomeLinkFenceRoot(path string) (*os.Root, string, string, error) {
+// resolveMainDBPath is where heal.go drops the clean-shutdown marker.
+//
+// The parent's symlinks are resolved so the marker lands beside the real file
+// rather than beside a link to it — two boxes sharing a linked data directory
+// would otherwise each skip the other's integrity check.
+func resolveMainDBPath(path string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("resolve Home Link emergency block root: %w", err)
+		return "", fmt.Errorf("resolve state database path: %w", err)
 	}
 	parent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
 	if err != nil {
-		return nil, "", "", fmt.Errorf("resolve Home Link emergency block parent: %w", err)
+		return "", fmt.Errorf("resolve state database parent: %w", err)
 	}
-	root, err := os.OpenRoot(parent)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("open Home Link emergency block root: %w", err)
-	}
-	name := filepath.Base(absolute)
-	before, err := root.Lstat(name)
-	if err != nil {
-		root.Close()
-		return nil, "", "", fmt.Errorf("inspect Home Link state database: %w", err)
-	}
-	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		root.Close()
-		return nil, "", "", errors.New("Home Link state database path is unsafe")
-	}
-	file, err := root.Open(name)
-	if err != nil {
-		root.Close()
-		return nil, "", "", fmt.Errorf("open Home Link state database: %w", err)
-	}
-	opened, statErr := file.Stat()
-	closeErr := file.Close()
-	after, pathErr := root.Lstat(name)
-	if statErr != nil || pathErr != nil || !os.SameFile(before, opened) ||
-		!os.SameFile(opened, after) {
-		root.Close()
-		return nil, "", "", errors.New("Home Link state database changed while binding its parent")
-	}
-	if closeErr != nil {
-		root.Close()
-		return nil, "", "", fmt.Errorf("close Home Link state database: %w", closeErr)
-	}
-	return root, filepath.Join(parent, name), name, nil
+	return filepath.Join(parent, filepath.Base(absolute)), nil
 }
 
 // VerifyInBackground runs the integrity check OFF the startup hot path. Call it
@@ -914,44 +870,13 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (device_id, der_type)
 		) STRICT`,
 
-		// Home Link passkey verifier state stays local. The credential id and
-		// public key are verifier data; no private credential material or
-		// pairing secret is stored here.
-		`CREATE TABLE IF NOT EXISTS homelink_credentials (
-			site_id           TEXT NOT NULL,
-			credential_id     BLOB NOT NULL,
-			public_key        BLOB NOT NULL,
-			sign_count        INTEGER NOT NULL CHECK(sign_count BETWEEN 0 AND 4294967295),
-			label             TEXT NOT NULL,
-			user_handle       BLOB NOT NULL,
-			backup_eligible   INTEGER NOT NULL CHECK(backup_eligible IN (0, 1)),
-			backup_state      INTEGER NOT NULL CHECK(backup_state IN (0, 1)),
-			status            TEXT NOT NULL CHECK(status IN ('active', 'revoked', 'uncertain')),
-			revision          INTEGER NOT NULL CHECK(revision > 0),
-			created_at_ms     INTEGER NOT NULL,
-			updated_at_ms     INTEGER NOT NULL,
-			PRIMARY KEY (site_id, credential_id)
-		) WITHOUT ROWID, STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_homelink_credentials_site_status
-			ON homelink_credentials(site_id, status)`,
-		// A revoke intent is a permanent fail-closed tombstone. It is committed
-		// before the credential row changes, so a failed or ambiguous later
-		// write cannot make the credential active again after restart.
-		`CREATE TABLE IF NOT EXISTS homelink_credential_revocations (
-			site_id           TEXT NOT NULL,
-			credential_id     BLOB NOT NULL,
-			started_at_ms     INTEGER NOT NULL,
-			PRIMARY KEY (site_id, credential_id)
-		) WITHOUT ROWID, STRICT`,
-		// A policy block is a permanent fail-closed tombstone. It is committed
-		// before a credential row is marked uncertain, so a later failed or
-		// ambiguous write cannot make a cloned credential usable after restart.
-		`CREATE TABLE IF NOT EXISTS homelink_credential_policy_blocks (
-			site_id           TEXT NOT NULL,
-			credential_id     BLOB NOT NULL,
-			started_at_ms     INTEGER NOT NULL,
-			PRIMARY KEY (site_id, credential_id)
-		) WITHOUT ROWID, STRICT`,
+		// The homelink_credentials, homelink_credential_revocations and
+		// homelink_credential_policy_blocks tables were dropped from this list
+		// when Home Link was removed. Boxes that ran it still have them, and
+		// they are left alone: the rows are WebAuthn verifier data for a
+		// relying party that no longer exists, so they authorise nothing, and
+		// a migration that deletes rows is the one kind that cannot be undone
+		// if this turns out to have been wrong. Do not reuse these names.
 
 		// Persistent daily-energy aggregate cache.
 		//

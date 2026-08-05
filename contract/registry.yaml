@@ -1,0 +1,130 @@
+# FTW shared contract registry.
+#
+# The single source for every name shared between this app and the box.
+# Generates TypeScript (src/lib/contract/generated.ts) and Go constants in
+# srcfl/ftw. CI fails when the two drift.
+#
+# Never hand-write one of these names in either language. Three separate
+# namespaces for authorisation already exist in the codebase; this file is
+# what stops that from happening again.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Frozen field ids. Permanent as of v1 — an app of any age can draw the core
+# view from these alone. Freezing them now is free. Adding to the frozen set
+# later is not, so think before extending.
+# ---------------------------------------------------------------------------
+frozen_fields:
+  1: { name: mode, kind: enum, unit: null }
+  2: { name: grid_w, kind: power, unit: W }
+  3: { name: pv_w, kind: power, unit: W }
+  4: { name: battery_w, kind: power, unit: W }
+  5: { name: battery_soc, kind: ratio, unit: permille }
+  6: { name: load_w, kind: power, unit: W }
+  7: { name: src_grid, kind: source_ref, unit: null }
+  8: { name: src_pv, kind: source_ref, unit: null }
+  9: { name: src_battery, kind: source_ref, unit: null }
+
+# ---------------------------------------------------------------------------
+# Capabilities. A set of names, not version numbers. Absent means the box does
+# not have it; the UI hides the feature and never crashes.
+# ---------------------------------------------------------------------------
+capabilities:
+  - status.core
+  - status.phases
+  - status.drivers
+  - history.5m
+  - history.1h
+  - history.etag
+  - cmd.lease
+  - cmd.precondition
+  - cmd.readback
+  - der.battery
+  - der.ev
+  - der.v2x
+  - plan.dispatch
+  - net.webrtc
+
+# ---------------------------------------------------------------------------
+# Scopes. One object axis, two verb axes: <object>.<read|write>.
+# Roles are a UI projection over these, never a replacement for them.
+# ---------------------------------------------------------------------------
+scopes:
+  - { name: ftw.live.read, desc: Current readings and freshness }
+  - { name: ftw.history.read, desc: Stored history }
+  - { name: ftw.plan.read, desc: Dispatch plan and its reasoning }
+  - { name: ftw.health.read, desc: Box and driver health }
+  - { name: ftw.assets.read, desc: Devices and their capabilities }
+  - { name: ftw.dispatch.write, desc: Control energy assets }
+  - { name: ftw.mode.write, desc: Change site operating mode }
+  - { name: ftw.members.read, desc: See who has access }
+  - { name: ftw.members.write, desc: Invite and revoke }
+
+roles:
+  owner:
+    label: Owner
+    scopes: ['*']
+  viewer:
+    label: Viewer
+    scopes: [ftw.live.read]
+
+# ---------------------------------------------------------------------------
+# Dispatch modes.
+#
+# These keys are FTW's, from control.AllModes() in go/internal/control/
+# dispatch.go. They are copied here so the app can validate and translate
+# them — not so the app can decide what exists.
+#
+# The box is the authority: it sends its own catalogue (key, label, tooltip,
+# tier) and the app renders that. A mode listed here gets our own wording; a
+# mode we have never heard of still appears, using the box's label. That is
+# what lets a newer box ship a new strategy without waiting for an app
+# release, and it is the same degrade-don't-die rule as capabilities.
+#
+# tier decides placement, not permission:
+#   primary  — the forecast-driven strategies, shown as the main choices
+#   advanced — manual fallbacks, behind a "More ways to run it" disclosure
+#   hidden   — valid over the API but never rendered as a button
+# ---------------------------------------------------------------------------
+modes:
+  - { key: planner_passive_arbitrage, tier: primary }
+  - { key: planner_arbitrage, tier: primary }
+  - { key: idle, tier: advanced }
+  - { key: self_consumption, tier: advanced }
+  - { key: peak_shaving, tier: advanced }
+  - { key: charge, tier: advanced }
+  - { key: planner_self, tier: hidden }
+  - { key: planner_cheap, tier: hidden }
+  - { key: priority, tier: hidden }
+  - { key: weighted, tier: hidden }
+
+# ---------------------------------------------------------------------------
+# Error codes. The box sends the code and args; this app owns all prose.
+# retryable tells the client whether to offer a retry at all.
+# ---------------------------------------------------------------------------
+errors:
+  - { code: E_BOOTING, retryable: true, desc: Box is starting up }
+  - { code: E_UNKNOWN_OP, retryable: false, desc: Message type not understood }
+  - { code: E_CMD_EXPIRED, retryable: false, desc: Command outlived not_valid_after_ms }
+  - { code: E_PRECONDITION, retryable: false, desc: Guard failed against fresh state }
+  - { code: E_CONFLICT, retryable: true, desc: expect.rev did not match }
+  - { code: E_SCOPE_DENIED, retryable: false, desc: Grant lacks the required scope }
+  - { code: E_GRANT_REVOKED, retryable: false, desc: Access was withdrawn }
+  - { code: E_LAST_OWNER_PROTECTED, retryable: false, desc: Cannot remove the only owner }
+  - { code: E_RANGE_TOO_LARGE, retryable: false, desc: History window exceeds the limit }
+  - { code: E_UNAVAILABLE, retryable: true, desc: Source or subsystem is down }
+
+# ---------------------------------------------------------------------------
+# Source states. Orthogonal to carrier state — see docs/protocol.md. Merging
+# the two into one enum cannot express "connected, but the inverter is quiet".
+# ---------------------------------------------------------------------------
+source_states: [live, lagging, stale, down, never]
+carrier_states: [webrtc, relay, cache, none]
+
+# ---------------------------------------------------------------------------
+# History resolutions backed by what the box actually stores.
+# ---------------------------------------------------------------------------
+resolutions:
+  '5m': { tile_span_ms: 43200000, retention_days: 30, source: energy_ledger }
+  '1h': { tile_span_ms: 604800000, retention_days: 730, source: hourly_rollup }

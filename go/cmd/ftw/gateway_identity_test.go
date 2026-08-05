@@ -26,7 +26,7 @@ func (i cliIdentity) Sign([]byte) ([]byte, error) {
 	return nil, errors.New("not used")
 }
 
-func TestHomeLinkAdoptCLIPreviewsBeforeExactApply(t *testing.T) {
+func TestGatewayIdentityAdoptCLIPreviewsBeforeExactApply(t *testing.T) {
 	publicKey, err := hex.DecodeString(
 		"6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296" +
 			"4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
@@ -48,7 +48,7 @@ func TestHomeLinkAdoptCLIPreviewsBeforeExactApply(t *testing.T) {
 		KeyFingerprint: binding.PublicKeySHA256, Confirmation: "exact-candidate",
 	}
 	var out bytes.Buffer
-	err = adoptHomeLinkIdentityWith(
+	err = adoptGatewayIdentityWith(
 		[]string{"--key=/data/nova.key"},
 		&out,
 		func(_ context.Context, path string) (gatewayidentity.SoftwareBindingPreview, error) {
@@ -65,10 +65,6 @@ func TestHomeLinkAdoptCLIPreviewsBeforeExactApply(t *testing.T) {
 			t.Fatal("load called during preview")
 			return nil, gatewayidentity.SoftwareBinding{}, nil
 		},
-		func(got []byte) (string, error) {
-			t.Fatal("route handle called during preview")
-			return "", nil
-		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +78,7 @@ func TestHomeLinkAdoptCLIPreviewsBeforeExactApply(t *testing.T) {
 	}
 
 	out.Reset()
-	err = adoptHomeLinkIdentityWith(
+	err = adoptGatewayIdentityWith(
 		[]string{"--key=/data/nova.key", "--confirm=exact-candidate"},
 		&out,
 		func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error) {
@@ -98,22 +94,19 @@ func TestHomeLinkAdoptCLIPreviewsBeforeExactApply(t *testing.T) {
 		func(path string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error) {
 			return cliIdentity{id: binding.GatewayID, public: publicKey}, binding, nil
 		},
-		func(got []byte) (string, error) {
-			if !bytes.Equal(got, publicKey) {
-				t.Fatal("CLI passed a different public key")
-			}
-			return "route-handle", nil
-		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(out.Bytes(), []byte("route_handle=route-handle\n")) {
-		t.Fatalf("apply output = %q", out.String())
+	wantApply := "gateway_id=" + binding.GatewayID + "\n" +
+		"three_word_name=" + mustThreeWordName(t, binding.GatewayID) + "\n" +
+		"key_fingerprint_sha256=" + binding.PublicKeySHA256 + "\n"
+	if got := out.String(); got != wantApply {
+		t.Fatalf("apply output = %q", got)
 	}
 }
 
-func TestHomeLinkAdoptCLIRequiresKeyPathAndExactReload(t *testing.T) {
+func TestGatewayIdentityAdoptCLIRequiresKeyPathAndExactReload(t *testing.T) {
 	noCallPreview := func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error) {
 		t.Fatal("preview called without a key path")
 		return gatewayidentity.SoftwareBindingPreview{}, nil
@@ -126,19 +119,15 @@ func TestHomeLinkAdoptCLIRequiresKeyPathAndExactReload(t *testing.T) {
 		t.Fatal("load called without adoption")
 		return nil, gatewayidentity.SoftwareBinding{}, nil
 	}
-	noCallHandle := func([]byte) (string, error) {
-		t.Fatal("route handle called without adoption")
-		return "", nil
-	}
-	if err := adoptHomeLinkIdentityWith(
-		nil, &bytes.Buffer{}, noCallPreview, noCallApply, noCallLoad, noCallHandle,
+	if err := adoptGatewayIdentityWith(
+		nil, &bytes.Buffer{}, noCallPreview, noCallApply, noCallLoad,
 	); err == nil {
 		t.Fatal("CLI accepted a missing key path")
 	}
 
 	first := gatewayidentity.SoftwareBinding{GatewayID: "012300112201334455"}
 	second := gatewayidentity.SoftwareBinding{GatewayID: "012300112201334456"}
-	err := adoptHomeLinkIdentityWith(
+	err := adoptGatewayIdentityWith(
 		[]string{"--key=/data/nova.key", "--confirm=candidate"},
 		&bytes.Buffer{},
 		func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error) {
@@ -150,7 +139,6 @@ func TestHomeLinkAdoptCLIRequiresKeyPathAndExactReload(t *testing.T) {
 		func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error) {
 			return cliIdentity{}, second, nil
 		},
-		noCallHandle,
 	)
 	if err == nil {
 		t.Fatal("CLI accepted a changed binding after reopen")
@@ -201,7 +189,7 @@ func TestStartupIdentityUsesLegacyKeyOnlyBeforeAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Nova != legacy || got.HomeLink != nil || createCalls != 1 {
+	if got.Nova != legacy || got.Bound != nil || createCalls != 1 {
 		t.Fatalf("legacy result = %+v, create calls=%d", got, createCalls)
 	}
 }
@@ -279,7 +267,7 @@ func TestStartupIdentityUsesSameBoundKeyForNovaWithoutCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.HomeLink == nil || got.Nova != legacy || got.Binding != binding || createCalls != 0 {
+	if got.Bound == nil || got.Nova != legacy || got.Binding != binding || createCalls != 0 {
 		t.Fatalf("bound result = %+v, create calls=%d", got, createCalls)
 	}
 }
@@ -364,6 +352,15 @@ func testNovaIdentity(t *testing.T) *nova.Identity {
 		t.Fatal(err)
 	}
 	return identity
+}
+
+func mustThreeWordName(t *testing.T, gatewayID string) string {
+	t.Helper()
+	name, err := gatewayidentity.ThreeWordName(gatewayID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return name
 }
 
 func sha256Bytes(data []byte) []byte {
