@@ -171,6 +171,29 @@ caldav:
   plan_path: /ftw/plan/
   # plan_publish_interval_s: 900   # how often the plan calendar is reconciled
 
+# Built-in OCPP Central System, speaking 1.6J and 2.0.1. EV chargers that speak
+# OCPP connect to FTW directly — there is no driver to write and nothing to add
+# under `drivers:`.
+# A charger appears as a device on its first BootNotification, keyed by the last
+# segment of the URL it dialled: ws://<ftw-host>:8887/garage-left
+#
+# Each version needs its own port: a charger picks its dialect in the WebSocket
+# handshake, so one listener cannot serve both. 2.1 is not supported — no
+# production-grade Go implementation of it exists yet.
+#
+# Credentials are required when enabled, and FTW refuses to start without them:
+# the OCPP library builds its listen address from the port alone, so the socket
+# is reachable on every interface and basic auth is the only gate. Keep the port
+# closed at your router. See docs/ocpp.md.
+ocpp:
+  enabled: false
+  port: 8887                       # OCPP 1.6J
+  # port_v201: 8888                # OCPP 2.0.1; omit to disable
+  path: /
+  username: ftw
+  password: ""                     # required when enabled; use a long random string
+  heartbeat_interval_s: 60
+
 # Persistent state (SQLite)
 state:
   path: state.db

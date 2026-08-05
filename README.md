@@ -39,7 +39,8 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - local web UI, SQLite history and Parquet rolloff;
 - Home Assistant MQTT discovery;
 - CalDAV planning intents and published schedules;
-- hot-reloadable, independently released Lua drivers.
+- hot-reloadable, independently released Lua drivers;
+- a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
 
 The local catalog is generated from `DRIVER` metadata. The public
 [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
@@ -84,6 +85,11 @@ curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh
 It installs Docker when needed, creates `~/ftw`, downloads the Compose file
 and starts core, optimizer, updater and the local MQTT broker. Open
 `http://<host>:8080/setup` on the LAN.
+
+Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
+that dial in to FTW — OCPP chargers store their backend URL at commissioning,
+and some hardware whitelists which addresses may talk to it — silently lose
+the connection if DHCP later hands the host a different address.
 
 Existing Forty Two Watts or older FTW deployments must use the
 [legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
@@ -177,6 +183,10 @@ driver, which can update or roll back without a new FTW core release. Device
 Support may consume the same public source later for other products or a higher
 support level.
 
+EV chargers that speak OCPP are the exception: they need no driver. FTW runs an
+OCPP Central System (1.6J and 2.0.1), so the charger connects and registers itself.
+See [docs/ocpp.md](docs/ocpp.md).
+
 ## Releases
 
 There are two channels:
@@ -200,6 +210,7 @@ metadata are the detailed reference.
 - [Operations and recovery](docs/operations.md)
 - [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)
+- [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)

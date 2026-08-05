@@ -1,10 +1,16 @@
-// Settings → Loadpoints tab: connect an EV-capable driver to a loadpoint
-// and set its electrical envelope (min/max charging power, allowed steps,
-// vehicle capacity). Schedules + surplus_only stay on the dashboard EV
-// modal — those are operator-day decisions, not site-setup.
+// Settings → Chargers tab: connect an EV charger to the planner and set its
+// electrical envelope (min/max charging power, allowed steps, vehicle
+// capacity). Internally a charger binding is a "loadpoint" — the config
+// field names keep that spelling. Schedules + surplus_only stay on the
+// dashboard EV modal — those are operator-day decisions, not site-setup.
 //
 // Bound state: config.loadpoints[] — same JSON shape persisted to YAML
 // (see go/internal/config/config.go::Loadpoint).
+//
+// Chargers come from two places: Lua drivers the catalog tags "ev", and
+// OCPP charge points, which have no driver at all — they dial FTW's
+// built-in central system and self-register. GET /api/ocpp/chargers is
+// the live view of the latter.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
@@ -13,7 +19,7 @@
     return fetch(path, opts);
   }
 
-  // Drivers eligible to back a loadpoint = ones the catalog tags with
+  // Drivers eligible to back a charger binding = ones the catalog tags with
   // the "ev" capability. We resolve via the same catalogByLua map the
   // Devices tab populates (loaded once per modal open).
   function evDrivers(config) {
@@ -25,6 +31,234 @@
       if (caps.indexOf("ev") >= 0) out.push(d.name || "");
     });
     return out;
+  }
+
+  // Set of charge-point ids seen by the OCPP server. An OCPP charger is
+  // bound to a loadpoint by its identity (the last URL segment it dialed),
+  // so these ids belong in the same driver dropdown as Lua EV drivers.
+  function ocppChargerIds(ocppStatus) {
+    var out = [];
+    ((ocppStatus && ocppStatus.chargers) || []).forEach(function (c) {
+      if (c.id) out.push(c.id);
+    });
+    return out;
+  }
+
+  // Everything a loadpoint may name as its power source, OCPP ids included.
+  function evDriverNames(config, ocppStatus) {
+    var out = evDrivers(config);
+    ocppChargerIds(ocppStatus).forEach(function (id) {
+      if (out.indexOf(id) < 0) out.push(id);
+    });
+    return out;
+  }
+
+  // One human-readable state per charger. Online is the WebSocket session;
+  // connected is a vehicle on the connector — a charger is usually online
+  // long before anything is plugged into it.
+  function ocppStateLabel(c) {
+    if (!c.online) return "offline";
+    if (c.charging) return "charging";
+    if (c.connected) return "vehicle plugged";
+    return "online, no vehicle";
+  }
+
+  function fmtPowerW(w) {
+    if (!w || !isFinite(w)) return "0 W";
+    if (Math.abs(w) >= 1000) return (w / 1000).toFixed(1) + " kW";
+    return Math.round(w) + " W";
+  }
+
+  // Which vehicle profile claims a session identity (RFID tag / MAC /
+  // eMAID). Mirrors config.VehicleByIdentifier in Go: trimmed,
+  // case-insensitive.
+  function vehicleForIdentifier(vehicles, ident) {
+    if (!ident) return null;
+    var want = String(ident).trim().toLowerCase();
+    if (!want) return null;
+    for (var i = 0; i < (vehicles || []).length; i++) {
+      var ids = vehicles[i].identifiers || [];
+      for (var j = 0; j < ids.length; j++) {
+        if (String(ids[j]).trim().toLowerCase() === want) return vehicles[i];
+      }
+    }
+    return null;
+  }
+
+  function parseIdentifiers(s) {
+    if (!s || !s.trim()) return [];
+    return s.split(",").map(function (p) { return p.trim(); }).filter(Boolean);
+  }
+
+  // The OCPP block of the Chargers tab: what the server is, where a charger
+  // should dial, and the live list of charge points it has seen. vehicles
+  // (config.vehicles) resolves each session's identity to a profile name.
+  function ocppSection(status, host, escHtml, vehicles) {
+    var html = '<fieldset><legend>OCPP chargers</legend>';
+
+    if (!status) {
+      html += '<p style="color:var(--text-dim);font-size:0.8rem;margin:0">Checking the OCPP server…</p></fieldset>';
+      return html;
+    }
+
+    if (!status.enabled) {
+      html +=
+        '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
+        'An EV charger that speaks <b>OCPP</b> needs no driver: FTW has a built-in OCPP 1.6J + 2.0.1 server, ' +
+        'and the charger connects to it and registers itself. The server is currently <b>off</b>. ' +
+        'Enable it in <code>config.yaml</code>:' +
+        '</p>' +
+        '<pre style="font-size:0.75rem;margin:0 0 8px">ocpp:\n' +
+        '    enabled: true\n' +
+        '    port: 8887          # OCPP 1.6J\n' +
+        '    port_v201: 8888     # OCPP 2.0.1, omit to disable\n' +
+        '    username: ftw\n' +
+        '    password: &lt;a long random string&gt;</pre>' +
+        '<p style="color:var(--text-dim);font-size:0.8rem;margin:0">' +
+        'Then point the charger at <code>ws://' + escHtml(host) + ':8887/&lt;charger-name&gt;</code> ' +
+        'and it appears here. See <b>docs/ocpp.md</b> for per-vendor steps.' +
+        '</p>';
+      html += '</fieldset>';
+      return html;
+    }
+
+    var port = status.port || 8887;
+    var path = status.path || "/";
+    html +=
+      '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
+      'The OCPP server is <b>on</b>. A charger that speaks OCPP needs no driver — set its backend URL to ' +
+      '<code>ws://' + escHtml(host) + ':' + port + escHtml(path) + '&lt;charger-name&gt;</code>' +
+      (status.port_v201 ? ' (OCPP 2.0.1: port ' + status.port_v201 + ')' : '') +
+      ' and it appears below. The <code>&lt;charger-name&gt;</code> you choose is the id to pick ' +
+      'as the charger driver when adding it as a charger binding on this tab. Until a charger entry ' +
+      'names it, a charge point is <b>pending</b>: visible here, but FTW ignores its data and never ' +
+      'commands it.' +
+      '</p>' +
+      '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
+      'Give this machine a <b>DHCP reservation</b> (fixed IP) in your router first: chargers store the URL ' +
+      'at commissioning time, and some also whitelist which addresses may talk to them, so an FTW host that ' +
+      'changes address silently orphans every charger pointed at it. A plain DNS hostname works on most ' +
+      'chargers too, but <code>.local</code> (mDNS) names usually do not — charger firmware rarely resolves them.' +
+      '</p>';
+
+    var chargers = status.chargers || [];
+    if (!chargers.length) {
+      html +=
+        '<div class="ha-status-indicator ha-off" style="margin:0">' +
+        '○ No OCPP charger has connected yet.' +
+        '</div>';
+    } else {
+      html += '<table class="settings-table" style="width:100%;font-size:0.8rem"><thead><tr>' +
+        '<th style="text-align:left">Charger</th>' +
+        '<th style="text-align:left">Hardware</th>' +
+        '<th style="text-align:left">OCPP</th>' +
+        '<th style="text-align:left">State</th>' +
+        '<th style="text-align:left">Vehicle</th>' +
+        '<th style="text-align:right">Power</th>' +
+        '<th style="text-align:right">Session</th>' +
+        '</tr></thead><tbody>';
+      chargers.forEach(function (c) {
+        var hw = [c.vendor, c.model].filter(Boolean).join(" ") || "—";
+        var state = ocppStateLabel(c);
+        if (c.pending) state += " · pending";
+        // Session identity → profile name; an unmatched identity is shown
+        // raw so the operator can paste it into a vehicle profile below.
+        var veh = "—";
+        if (c.vehicle_id) {
+          var match = vehicleForIdentifier(vehicles, c.vehicle_id);
+          veh = match
+            ? escHtml(match.name || match.id || "")
+            : '<code>' + escHtml(c.vehicle_id) + '</code> <span style="color:var(--text-dim)">(no profile)</span>';
+        }
+        html += '<tr' + (c.pending ? ' style="opacity:.65"' : '') + '>' +
+          '<td><code>' + escHtml(c.id || "") + '</code></td>' +
+          '<td>' + escHtml(hw) + '</td>' +
+          '<td>' + escHtml(c.version || "?") + '</td>' +
+          '<td>' + escHtml(state) + '</td>' +
+          '<td>' + veh + '</td>' +
+          '<td style="text-align:right">' + fmtPowerW(c.power_w) + '</td>' +
+          '<td style="text-align:right">' + ((c.session_wh || 0) / 1000).toFixed(2) + ' kWh</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+      if (chargers.some(function (c) { return c.pending; })) {
+        html +=
+          '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
+          '<b>Pending</b> chargers are connected but not part of the site: FTW ignores their ' +
+          'telemetry and never commands them, so an unknown device cannot influence dispatch. ' +
+          'To adopt one, add a charger entry below with its id as the charger driver and save ' +
+          '— it joins the site on that save.' +
+          '</p>';
+      }
+    }
+    html += '</fieldset>';
+    return html;
+  }
+
+  // Car profiles: capacity + charging policy applied to a charger for the
+  // session when the transaction's identity (RFID tag on 1.6, MAC/eMAID on
+  // 2.0.1) matches. A session matching no profile changes nothing — that is
+  // the visitor default.
+  function vehiclesSection(config, escHtml, help) {
+    var vehicles = config.vehicles || [];
+    var html = '<fieldset><legend>Vehicles</legend>' +
+      '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
+      'Car profiles for chargers shared by several cars. When a charging session identifies the car — ' +
+      'the <b>RFID tag</b> that started it on OCPP 1.6, the car’s own <b>MAC / eMAID</b> on OCPP 2.0.1 — ' +
+      'FTW switches the charger to that car’s battery capacity and charging policy for the session. ' +
+      'A car matching no profile changes nothing. The identity a session presented shows in the ' +
+      '<b>Vehicle</b> column above; paste it into Identifiers here.' +
+      '</p>';
+
+    vehicles.forEach(function (v, idx) {
+      var prefix = "vehicles." + idx;
+      html +=
+        '<fieldset class="device-card" data-vehicle-idx="' + idx + '">' +
+        '<legend>Vehicle ' + (idx + 1) + ' <span class="dim">·</span> ' + escHtml(v.name || v.id || "(unnamed)") + '</legend>' +
+        '<div class="field-row">' +
+        '<div>' +
+        '<label>ID ' + help("Stable identifier used in config and logs. Letters/digits/dashes.") + '</label>' +
+        '<input type="text" data-path="' + prefix + '.id" value="' + escHtml(v.id || "") + '" placeholder="leaf">' +
+        '</div>' +
+        '<div>' +
+        '<label>Name ' + help("Human label shown in the charger table and logs.") + '</label>' +
+        '<input type="text" data-path="' + prefix + '.name" value="' + escHtml(v.name || "") + '" placeholder="Nissan Leaf">' +
+        '</div>' +
+        '</div>' +
+        '<div class="field-row">' +
+        '<div>' +
+        '<label>Battery capacity (Wh) ' + help("This car’s usable capacity. Applied to the charger for the session so SoC estimation and planner sizing follow the car actually plugged in. 40000 = 40 kWh.") + '</label>' +
+        '<input type="number" min="0" step="500" data-path="' + prefix + '.capacity_wh" value="' + (v.capacity_wh || 0) + '">' +
+        '</div>' +
+        '<div>' +
+        '<label>Identifiers ' + help("Comma-separated identities that mean this car: RFID tag uid (1.6), MAC address or eMAID (2.0.1 / ISO 15118). Case-insensitive.") + '</label>' +
+        '<input type="text" data-path="' + prefix + '.identifiers__str" value="' + escHtml((v.identifiers || []).join(", ")) + '" placeholder="04A2B3C4, aa:bb:cc:dd:ee:ff">' +
+        '</div>' +
+        '</div>' +
+        '<div class="field-row">' +
+        '<div>' +
+        '<label><input type="checkbox" data-checkbox-path="' + prefix + '.surplus_only"' + (v.surplus_only ? ' checked' : '') + '> Charge from PV surplus only ' +
+        help("When this car is identified, the charger goes PV-surplus-only: it never imports grid power for this car. Unchecked = grid charging allowed.") + '</label>' +
+        '</div>' +
+        '<div>' +
+        '<label>Target SoC (%) ' + help("Above 0, identifying this car sets a charge target, which hands the session to the planner: it fills toward the target in the cheapest tariff hours. 0 = no target.") + '</label>' +
+        '<input type="number" min="0" max="100" step="5" data-path="' + prefix + '.target_soc_pct" value="' + (v.target_soc_pct || 0) + '">' +
+        '</div>' +
+        '</div>' +
+        '<div style="margin-top:12px">' +
+        '<button class="btn-remove" data-action="remove-vehicle" data-idx="' + idx + '">Remove vehicle</button>' +
+        '</div>' +
+        '</fieldset>';
+    });
+
+    html +=
+      '<div class="field-row" style="margin-top:8px"><div>' +
+      '<label>ID</label><input type="text" id="new-vehicle-id" placeholder="leaf">' +
+      '</div><div style="align-self:end">' +
+      '<button class="btn-add" id="new-vehicle-add">+ Add vehicle</button>' +
+      '</div></div>' +
+      '</fieldset>';
+    return html;
   }
 
   function fmtStepsW(arr) {
@@ -56,19 +290,23 @@
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
       if (!config.loadpoints) config.loadpoints = [];
-      var drivers = evDrivers(config);
+      var ocppIds = ocppChargerIds(S.ocppStatus);
+      var drivers = evDriverNames(config, S.ocppStatus);
 
       var html =
         '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 12px">' +
-        'A <b>loadpoint</b> binds a configured EV charger driver to the planner so it can schedule charging against your tariff + PV forecast. ' +
-        'Add a driver first under <b>Devices</b>; then pick it here and set the electrical envelope.' +
+        'A <b>charger</b> entry binds an EV charger to the planner so it can schedule charging against your tariff + PV forecast. ' +
+        'The power source is either a driver added under <b>Devices</b>, or an OCPP charge point from the list below — ' +
+        'pick it here and set the electrical envelope. (Config files call this binding a <code>loadpoint</code>.)' +
         '</p>';
+
+      html += ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml, config.vehicles);
 
       if (!drivers.length) {
         html +=
-          '<div class="ha-status-indicator ha-warn" style="margin:0 0 12px">' +
-          '⚠ No EV-capable driver configured. Add one under <b>Devices</b> first ' +
-          '(e.g. drivers/ctek_hybrid.lua, drivers/easee_cloud.lua).' +
+          '<div class="ha-status-indicator ha-warn" style="margin:12px 0">' +
+          '⚠ No EV-capable driver configured and no OCPP charger connected. Add a driver under <b>Devices</b> ' +
+          '(e.g. drivers/ctek_hybrid.lua), or point an OCPP charger at the URL above.' +
           '</div>';
       }
 
@@ -77,20 +315,22 @@
         var prefix = "loadpoints." + idx;
         var stepsStr = fmtStepsW(lp.allowed_steps_w);
         var driverOpts = drivers.map(function (n) {
+          var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "");
           return '<option value="' + escHtml(n) + '"' +
-            (n === lp.driver_name ? " selected" : "") + ">" + escHtml(n) + "</option>";
+            (n === lp.driver_name ? " selected" : "") + ">" + escHtml(label) + "</option>";
         }).join("");
         if (lp.driver_name && drivers.indexOf(lp.driver_name) < 0) {
           // Show the bound driver even if it's not currently EV-tagged
-          // (driver was renamed / catalog reload pending). Operator can
-          // re-pick from the list to fix it.
+          // (driver was renamed / catalog reload pending / an OCPP charger
+          // that is not connected right now). Operator can re-pick from
+          // the list to fix it.
           driverOpts = '<option value="' + escHtml(lp.driver_name) + '" selected>' +
-            escHtml(lp.driver_name) + ' (not in catalog?)</option>' + driverOpts;
+            escHtml(lp.driver_name) + ' (not connected?)</option>' + driverOpts;
         }
 
         html +=
           '<fieldset class="device-card" data-lp-idx="' + idx + '">' +
-          '<legend>Loadpoint ' + (idx + 1) + ' <span class="dim">·</span> ' + escHtml(lp.id || "(unnamed)") + '</legend>' +
+          '<legend>Charger ' + (idx + 1) + ' <span class="dim">·</span> ' + escHtml(lp.id || "(unnamed)") + '</legend>' +
 
           '<div class="field-row">' +
           '<div>' +
@@ -98,7 +338,7 @@
           '<input type="text" data-path="' + prefix + '.id" value="' + escHtml(lp.id || "") + '" placeholder="garage">' +
           '</div>' +
           '<div>' +
-          '<label>Charger driver ' + help("Which configured driver delivers power for this loadpoint. The dropdown lists drivers with the `ev` capability.") + '</label>' +
+          '<label>Charger driver ' + help("Which power source this charger entry commands. The dropdown lists drivers with the `ev` capability plus every OCPP charge point the built-in server has seen.") + '</label>' +
           '<select data-path="' + prefix + '.driver_name">' +
           '<option value="">— select driver —</option>' +
           driverOpts +
@@ -119,7 +359,7 @@
 
           '<div class="field-row">' +
           '<div>' +
-          '<label>Vehicle capacity (Wh) ' + help("Usable battery capacity of the connected EV. Used by MPC to size the energy needed to reach the target SoC. 75000 = 75 kWh.") + '</label>' +
+          '<label>Vehicle capacity (Wh) ' + help("Usable battery capacity of ONE car — the one this charger usually serves. 75000 = 75 kWh. Used by MPC to size the energy needed to reach the target SoC; a wrong value costs planning accuracy, not safety. If several cars share the charger, add Vehicle profiles below — an identified car overrides this for its session; unidentified cars (visitors) charge under this value.") + '</label>' +
           '<input type="number" min="0" step="500" data-path="' + prefix + '.vehicle_capacity_wh" value="' + (lp.vehicle_capacity_wh || 0) + '">' +
           '</div>' +
           '<div>' +
@@ -136,14 +376,14 @@
           '<input type="text" data-path="' + prefix + '.allowed_steps_w__str" value="' + escHtml(stepsStr) + '" placeholder="4140, 4830, 5520, 6210, 6900, 7590">' +
 
           '<div style="margin-top:12px">' +
-          '<button class="btn-remove" data-action="remove-lp" data-idx="' + idx + '">Remove loadpoint</button>' +
+          '<button class="btn-remove" data-action="remove-lp" data-idx="' + idx + '">Remove charger</button>' +
           '</div>' +
           '</fieldset>';
       });
       html += '</div>';
 
       html +=
-        '<fieldset><legend>Add loadpoint</legend>' +
+        '<fieldset><legend>Add charger</legend>' +
         '<div class="field-row"><div>' +
         '<label>ID</label><input type="text" id="new-lp-id" placeholder="garage">' +
         '</div><div>' +
@@ -151,18 +391,36 @@
         '<select id="new-lp-driver">' +
         '<option value="">— select driver —</option>' +
         drivers.map(function (n) {
-          return '<option value="' + escHtml(n) + '">' + escHtml(n) + '</option>';
+          var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "");
+          return '<option value="' + escHtml(n) + '">' + escHtml(label) + '</option>';
         }).join('') +
         '</select>' +
         '</div></div>' +
-        '<button class="btn-add" id="new-lp-add">+ Add loadpoint</button>' +
+        '<button class="btn-add" id="new-lp-add">+ Add charger</button>' +
         '</fieldset>';
+
+      html += vehiclesSection(config, escHtml, help);
 
       return html;
     },
 
     after: function (ctx) {
       var bodyEl = ctx.bodyEl, config = ctx.config;
+
+      // Live OCPP view. Re-render only when the answer actually changed,
+      // so the refetch on every tab open cannot loop.
+      apiFetch('/api/ocpp/chargers')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (!data) return;
+          var raw = JSON.stringify(data);
+          if (raw === S._ocppStatusRaw) return;
+          S._ocppStatusRaw = raw;
+          S.ocppStatus = data;
+          ctx.captureCurrentTab();
+          ctx.renderTab('loadpoints');
+        })
+        .catch(function () { /* section keeps its last known state */ });
 
       // Ensure catalog is loaded so evDrivers() resolves capability tags.
       // The Devices tab also primes this; calling again is cheap because
@@ -206,7 +464,7 @@
           // Reject duplicates — the controller treats id as the join key.
           var exists = (config.loadpoints || []).some(function (lp) { return lp.id === id; });
           if (exists) {
-            alert('A loadpoint with id "' + id + '" already exists.');
+            alert('A charger with id "' + id + '" already exists.');
             return;
           }
           ctx.captureCurrentTab();
@@ -223,6 +481,53 @@
           ctx.renderTab('loadpoints');
         });
       }
+
+      // Vehicle profile handlers.
+      bodyEl.querySelectorAll('[data-action="remove-vehicle"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var idx = parseInt(btn.dataset.idx, 10);
+          if (!isFinite(idx) || !config.vehicles) return;
+          ctx.captureCurrentTab();
+          config.vehicles.splice(idx, 1);
+          ctx.renderTab('loadpoints');
+        });
+      });
+      var addVehicleBtn = document.getElementById('new-vehicle-add');
+      if (addVehicleBtn) {
+        addVehicleBtn.addEventListener('click', function () {
+          var idEl = document.getElementById('new-vehicle-id');
+          var id = (idEl && idEl.value || '').trim();
+          if (!id) { idEl && idEl.focus(); return; }
+          var exists = (config.vehicles || []).some(function (v) { return v.id === id; });
+          if (exists) {
+            alert('A vehicle with id "' + id + '" already exists.');
+            return;
+          }
+          ctx.captureCurrentTab();
+          config.vehicles = config.vehicles || [];
+          config.vehicles.push({
+            id: id,
+            name: '',
+            capacity_wh: 60000,
+            identifiers: [],
+            surplus_only: false,
+            target_soc_pct: 0,
+          });
+          ctx.renderTab('loadpoints');
+        });
+      }
+      // Same __str trick as allowed_steps_w below: the shell's generic
+      // capture writes the literal string; rewrite it to the real array.
+      bodyEl.querySelectorAll('input[data-path$=".identifiers__str"]').forEach(function (inp) {
+        inp.addEventListener('change', function () {
+          var idx = parseInt(inp.dataset.path.split('.')[1], 10);
+          if (!isFinite(idx) || !config.vehicles || !config.vehicles[idx]) return;
+          config.vehicles[idx].identifiers = parseIdentifiers(inp.value);
+        });
+        inp.addEventListener('blur', function () {
+          inp.dispatchEvent(new Event('change'));
+        });
+      });
 
       // Translate the freeform "allowed steps" text input into the real
       // allowed_steps_w[] array on every change — the Settings shell's
@@ -242,6 +547,17 @@
           inp.dispatchEvent(new Event('change'));
         });
       });
+    },
+
+    // Pure helpers exposed for node tests.
+    _pure: {
+      evDriverNames: evDriverNames,
+      ocppChargerIds: ocppChargerIds,
+      ocppStateLabel: ocppStateLabel,
+      ocppSection: ocppSection,
+      vehiclesSection: vehiclesSection,
+      vehicleForIdentifier: vehicleForIdentifier,
+      parseIdentifiers: parseIdentifiers,
     },
   };
 })();
