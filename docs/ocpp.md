@@ -226,23 +226,50 @@ would strand a driver with an uncharged car because the EMS went down, and the
 last limit was already judged safe for the site. This matches what every EV
 driver in FTW already does.
 
-## One capacity, several cars
+## One capacity, several cars: vehicle profiles
 
-`vehicle_capacity_wh` on a charger entry describes **one** car — the one whose
-deadlines you plan around. FTW has no per-car profiles: when a second car uses
-the same charger, correct its SoC in the dashboard EV modal after plugging in.
-A wrong capacity skews planning accuracy only, never safety — the car's own BMS
-always protects it.
+`vehicle_capacity_wh` on a charger entry describes the **one** car the charger
+usually serves. For a charger shared by several cars, add **vehicle profiles**:
 
-Switching capacity automatically means detecting *which* car is plugged in, and
-that needs identity from the protocol. OCPP 1.6 offers only the RFID `idTag`
-that started the transaction — it names the card, not the car, so it only works
-if each card lives permanently in one car. OCPP 2.0.1 with ISO 15118 carries
-real vehicle identity (`MacAddress` autocharge, `eMAID` Plug & Charge) and
-`NotifyEVChargingNeeds`, where the car states the energy it actually wants —
-more useful than capacity for planning. That hardware is mostly DC chargers or
-the newest AC models; every charger on the bench speaks 1.6J. Vehicle profiles
-keyed to these identifiers are future work, not present behavior.
+```yaml
+vehicles:
+  - id: leaf
+    name: Nissan Leaf
+    capacity_wh: 40000
+    identifiers: ["04A2B3C4"]         # RFID tag uid (1.6), MAC / eMAID (2.0.1)
+    surplus_only: true                # this car charges from PV surplus alone
+  - id: model3
+    capacity_wh: 75000
+    identifiers: ["aa:bb:cc:dd:ee:ff"]
+    target_soc_pct: 80                # planner fills to 80 % in the cheapest hours
+```
+
+When a charging session identifies the car, FTW switches the charger to that
+car's capacity and charging policy for the session. The capacity reverts on
+plug-out; `surplus_only` and the target are set the same way the dashboard
+sets them, so they persist until another car (or the operator) changes them.
+The identity each session presented is shown in the Chargers tab's Vehicle
+column — paste it into a profile's Identifiers from there. The same profiles
+are edited under **Settings → Chargers → Vehicles**.
+
+A car matching no profile changes **nothing**. That is the visitor default:
+the loadpoint keeps its own settings, and the visitor charges under them.
+
+What "identifies" means depends on the dialect:
+
+- **OCPP 1.6**: the RFID `idTag` that started the transaction. It names the
+  card, not the car — profiles work when each card lives permanently in one
+  car.
+- **OCPP 2.0.1**: idTokens can name the actual vehicle — `MacAddress`
+  (autocharge) or `eMAID` (ISO 15118 Plug & Charge) — no card involved. With
+  ISO 15118 hardware, `NotifyEVChargingNeeds` can additionally state the
+  energy the car actually wants; consuming that is future work, tracked with
+  OCPP 2.1 in issue #835.
+
+A wrong or missing capacity skews planning accuracy only, never safety — the
+car's own BMS always protects it. An unprofiled car larger than the configured
+capacity makes the SoC estimate rise too fast, so a target charge can stop
+early; correct the SoC in the dashboard EV modal, or use Force start.
 
 ## Current limits
 

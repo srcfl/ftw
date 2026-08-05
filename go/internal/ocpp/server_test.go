@@ -134,6 +134,17 @@ func TestStartStopTransactionTracksSession(t *testing.T) {
 	port, srv := startServer(t, tel, "EH-SESSION")
 	defer srv.Stop()
 
+	// The idTag that starts a transaction is the session's vehicle identity
+	// — main.go turns it into a vehicle-profile lookup, so the callback and
+	// the snapshot must both carry it.
+	var idMu sync.Mutex
+	var identified [][3]string
+	srv.Handler().SetVehicleIdentified(func(chargerID, vehicleID, source string) {
+		idMu.Lock()
+		identified = append(identified, [3]string{chargerID, vehicleID, source})
+		idMu.Unlock()
+	})
+
 	cp := ocpp16.NewChargePoint("EH-SESSION", nil, nil)
 	if err := cp.Start(fmt.Sprintf("ws://127.0.0.1:%d", port)); err != nil {
 		t.Fatalf("connect: %v", err)
@@ -150,6 +161,15 @@ func TestStartStopTransactionTracksSession(t *testing.T) {
 	if startConf.IdTagInfo.Status != types.AuthorizationStatusAccepted {
 		t.Errorf("expected accepted, got %s", startConf.IdTagInfo.Status)
 	}
+	idView := srv.Handler().Snapshot()["EH-SESSION"]
+	if idView.VehicleID != "RFID-ABCD" || idView.VehicleIDSource != "rfid" {
+		t.Errorf("vehicle identity not captured: %+v", idView)
+	}
+	idMu.Lock()
+	if len(identified) != 1 || identified[0] != [3]string{"EH-SESSION", "RFID-ABCD", "rfid"} {
+		t.Errorf("vehicleIdentified callback: got %v", identified)
+	}
+	idMu.Unlock()
 
 	if _, err := cp.StopTransaction(8500, types.NewDateTime(time.Now()), startConf.TransactionId); err != nil {
 		t.Fatalf("stop tx: %v", err)

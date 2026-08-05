@@ -37,6 +37,7 @@ type Config struct {
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	CalDAV           *CalDAV            `yaml:"caldav,omitempty" json:"caldav,omitempty"`
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	Vehicles         []Vehicle          `yaml:"vehicles,omitempty" json:"vehicles,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	AppLink          *AppLink           `yaml:"app_link,omitempty" json:"app_link,omitempty"`
@@ -229,13 +230,12 @@ type Loadpoint struct {
 	// VehicleCapacityWh is the usable battery capacity of ONE vehicle — the
 	// car this charger usually serves. It feeds the SoC estimate and the
 	// planner's energy sizing; charging works without it, and a wrong value
-	// costs planning accuracy, never safety. There are no per-car profiles:
-	// when several cars share the charger, enter the car whose deadlines you
-	// plan around and correct SoC in the EV modal for the others. Switching
-	// capacity automatically requires the protocol to identify the vehicle,
-	// which OCPP 1.6 cannot (its idTag names the RFID card, not the car) —
-	// that is OCPP 2.0.1 + ISO 15118 territory (MacAddress/eMAID id tokens,
-	// NotifyEVChargingNeeds), tracked as future work.
+	// costs planning accuracy, never safety. When several cars share the
+	// charger, add Vehicles profiles: a charging session that identifies
+	// the car (RFID idTag on 1.6, MacAddress/eMAID idToken on 2.0.1)
+	// switches the loadpoint to that car's capacity and policy for the
+	// session. A session matching no profile leaves this value in charge —
+	// the visitor default.
 	VehicleCapacityWh float64 `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
 	PluginSoCPct      float64 `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 
@@ -246,6 +246,87 @@ type Loadpoint struct {
 	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
 	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
 	SurplusOnly   bool    `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
+}
+
+// Vehicle is a car profile the loadpoint can switch to when a charging
+// session identifies the vehicle. Identification comes from the OCPP
+// transaction: the RFID idTag on 1.6 (names the card — works only if the
+// card lives in the car), a MacAddress (autocharge) or eMAID (ISO 15118
+// Plug & Charge) idToken on 2.0.1 (names the actual vehicle). A session
+// whose identity matches no profile leaves the loadpoint's own settings
+// untouched — that is the visitor default. Tracked upstream in issue #835.
+type Vehicle struct {
+	// ID is the stable slug other config and logs refer to.
+	ID string `yaml:"id" json:"id"`
+	// Name is the human label the UI shows; falls back to ID.
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	// CapacityWh is this car's usable battery capacity. Applied to the
+	// loadpoint for the session so SoC estimation and planner energy
+	// sizing follow the car actually plugged in. 0 = leave unchanged.
+	CapacityWh float64 `yaml:"capacity_wh,omitempty" json:"capacity_wh,omitempty"`
+	// Identifiers are the identity strings that mean "this car": RFID tag
+	// uids, MAC addresses, eMAIDs. Compared case-insensitively, trimmed.
+	Identifiers []string `yaml:"identifiers,omitempty" json:"identifiers,omitempty"`
+	// SurplusOnly, when the car is identified, sets the loadpoint's
+	// PV-surplus-only flag to exactly this value — charge this car from
+	// surplus PV alone (true) or allow grid charging (false).
+	SurplusOnly bool `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
+	// TargetSoCPct > 0 sets a charge target for the session, which is what
+	// hands the loadpoint to the planner: it fills toward the target in
+	// the cheapest tariff slots. 0 = no target, loadpoint keeps its own.
+	TargetSoCPct float64 `yaml:"target_soc_pct,omitempty" json:"target_soc_pct,omitempty"`
+}
+
+// VehicleByIdentifier finds the vehicle profile claiming an identity string,
+// or nil. Matching is case-insensitive on trimmed identifiers, so an eMAID
+// or MAC compares the way the wire formats vary.
+func (c *Config) VehicleByIdentifier(identifier string) *Vehicle {
+	want := strings.ToLower(strings.TrimSpace(identifier))
+	if want == "" {
+		return nil
+	}
+	for i := range c.Vehicles {
+		for _, id := range c.Vehicles[i].Identifiers {
+			if strings.ToLower(strings.TrimSpace(id)) == want {
+				return &c.Vehicles[i]
+			}
+		}
+	}
+	return nil
+}
+
+// validateVehicles keeps vehicle profiles unambiguous: unique ids, sane
+// numbers, and no identifier claimed by two cars — the identify-then-apply
+// path must never have to guess which profile wins.
+func (c *Config) validateVehicles() error {
+	ids := make(map[string]bool, len(c.Vehicles))
+	claimed := make(map[string]string, len(c.Vehicles))
+	for _, v := range c.Vehicles {
+		if v.ID == "" {
+			return errors.New("vehicle: id is required")
+		}
+		if ids[v.ID] {
+			return fmt.Errorf("vehicle %q: duplicate id", v.ID)
+		}
+		ids[v.ID] = true
+		if v.CapacityWh < 0 {
+			return fmt.Errorf("vehicle %q: capacity_wh must be >= 0", v.ID)
+		}
+		if v.TargetSoCPct < 0 || v.TargetSoCPct > 100 {
+			return fmt.Errorf("vehicle %q: target_soc_pct must be within 0..100", v.ID)
+		}
+		for _, ident := range v.Identifiers {
+			key := strings.ToLower(strings.TrimSpace(ident))
+			if key == "" {
+				return fmt.Errorf("vehicle %q: empty identifier", v.ID)
+			}
+			if owner, dup := claimed[key]; dup {
+				return fmt.Errorf("vehicle %q: identifier %q already claimed by vehicle %q", v.ID, ident, owner)
+			}
+			claimed[key] = v.ID
+		}
+	}
+	return nil
 }
 
 // V2XPolicy is the opt-in policy envelope for automatic V2X use. The
@@ -1614,6 +1695,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.OCPP.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateVehicles(); err != nil {
 		return err
 	}
 

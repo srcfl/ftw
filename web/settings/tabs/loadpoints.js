@@ -69,9 +69,31 @@
     return Math.round(w) + " W";
   }
 
+  // Which vehicle profile claims a session identity (RFID tag / MAC /
+  // eMAID). Mirrors config.VehicleByIdentifier in Go: trimmed,
+  // case-insensitive.
+  function vehicleForIdentifier(vehicles, ident) {
+    if (!ident) return null;
+    var want = String(ident).trim().toLowerCase();
+    if (!want) return null;
+    for (var i = 0; i < (vehicles || []).length; i++) {
+      var ids = vehicles[i].identifiers || [];
+      for (var j = 0; j < ids.length; j++) {
+        if (String(ids[j]).trim().toLowerCase() === want) return vehicles[i];
+      }
+    }
+    return null;
+  }
+
+  function parseIdentifiers(s) {
+    if (!s || !s.trim()) return [];
+    return s.split(",").map(function (p) { return p.trim(); }).filter(Boolean);
+  }
+
   // The OCPP block of the Chargers tab: what the server is, where a charger
-  // should dial, and the live list of charge points it has seen.
-  function ocppSection(status, host, escHtml) {
+  // should dial, and the live list of charge points it has seen. vehicles
+  // (config.vehicles) resolves each session's identity to a profile name.
+  function ocppSection(status, host, escHtml, vehicles) {
     var html = '<fieldset><legend>OCPP chargers</legend>';
 
     if (!status) {
@@ -131,6 +153,7 @@
         '<th style="text-align:left">Hardware</th>' +
         '<th style="text-align:left">OCPP</th>' +
         '<th style="text-align:left">State</th>' +
+        '<th style="text-align:left">Vehicle</th>' +
         '<th style="text-align:right">Power</th>' +
         '<th style="text-align:right">Session</th>' +
         '</tr></thead><tbody>';
@@ -138,11 +161,21 @@
         var hw = [c.vendor, c.model].filter(Boolean).join(" ") || "—";
         var state = ocppStateLabel(c);
         if (c.pending) state += " · pending";
+        // Session identity → profile name; an unmatched identity is shown
+        // raw so the operator can paste it into a vehicle profile below.
+        var veh = "—";
+        if (c.vehicle_id) {
+          var match = vehicleForIdentifier(vehicles, c.vehicle_id);
+          veh = match
+            ? escHtml(match.name || match.id || "")
+            : '<code>' + escHtml(c.vehicle_id) + '</code> <span style="color:var(--text-dim)">(no profile)</span>';
+        }
         html += '<tr' + (c.pending ? ' style="opacity:.65"' : '') + '>' +
           '<td><code>' + escHtml(c.id || "") + '</code></td>' +
           '<td>' + escHtml(hw) + '</td>' +
           '<td>' + escHtml(c.version || "?") + '</td>' +
           '<td>' + escHtml(state) + '</td>' +
+          '<td>' + veh + '</td>' +
           '<td style="text-align:right">' + fmtPowerW(c.power_w) + '</td>' +
           '<td style="text-align:right">' + ((c.session_wh || 0) / 1000).toFixed(2) + ' kWh</td>' +
           '</tr>';
@@ -159,6 +192,72 @@
       }
     }
     html += '</fieldset>';
+    return html;
+  }
+
+  // Car profiles: capacity + charging policy applied to a charger for the
+  // session when the transaction's identity (RFID tag on 1.6, MAC/eMAID on
+  // 2.0.1) matches. A session matching no profile changes nothing — that is
+  // the visitor default.
+  function vehiclesSection(config, escHtml, help) {
+    var vehicles = config.vehicles || [];
+    var html = '<fieldset><legend>Vehicles</legend>' +
+      '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
+      'Car profiles for chargers shared by several cars. When a charging session identifies the car — ' +
+      'the <b>RFID tag</b> that started it on OCPP 1.6, the car’s own <b>MAC / eMAID</b> on OCPP 2.0.1 — ' +
+      'FTW switches the charger to that car’s battery capacity and charging policy for the session. ' +
+      'A car matching no profile changes nothing. The identity a session presented shows in the ' +
+      '<b>Vehicle</b> column above; paste it into Identifiers here.' +
+      '</p>';
+
+    vehicles.forEach(function (v, idx) {
+      var prefix = "vehicles." + idx;
+      html +=
+        '<fieldset class="device-card" data-vehicle-idx="' + idx + '">' +
+        '<legend>Vehicle ' + (idx + 1) + ' <span class="dim">·</span> ' + escHtml(v.name || v.id || "(unnamed)") + '</legend>' +
+        '<div class="field-row">' +
+        '<div>' +
+        '<label>ID ' + help("Stable identifier used in config and logs. Letters/digits/dashes.") + '</label>' +
+        '<input type="text" data-path="' + prefix + '.id" value="' + escHtml(v.id || "") + '" placeholder="leaf">' +
+        '</div>' +
+        '<div>' +
+        '<label>Name ' + help("Human label shown in the charger table and logs.") + '</label>' +
+        '<input type="text" data-path="' + prefix + '.name" value="' + escHtml(v.name || "") + '" placeholder="Nissan Leaf">' +
+        '</div>' +
+        '</div>' +
+        '<div class="field-row">' +
+        '<div>' +
+        '<label>Battery capacity (Wh) ' + help("This car’s usable capacity. Applied to the charger for the session so SoC estimation and planner sizing follow the car actually plugged in. 40000 = 40 kWh.") + '</label>' +
+        '<input type="number" min="0" step="500" data-path="' + prefix + '.capacity_wh" value="' + (v.capacity_wh || 0) + '">' +
+        '</div>' +
+        '<div>' +
+        '<label>Identifiers ' + help("Comma-separated identities that mean this car: RFID tag uid (1.6), MAC address or eMAID (2.0.1 / ISO 15118). Case-insensitive.") + '</label>' +
+        '<input type="text" data-path="' + prefix + '.identifiers__str" value="' + escHtml((v.identifiers || []).join(", ")) + '" placeholder="04A2B3C4, aa:bb:cc:dd:ee:ff">' +
+        '</div>' +
+        '</div>' +
+        '<div class="field-row">' +
+        '<div>' +
+        '<label><input type="checkbox" data-checkbox-path="' + prefix + '.surplus_only"' + (v.surplus_only ? ' checked' : '') + '> Charge from PV surplus only ' +
+        help("When this car is identified, the charger goes PV-surplus-only: it never imports grid power for this car. Unchecked = grid charging allowed.") + '</label>' +
+        '</div>' +
+        '<div>' +
+        '<label>Target SoC (%) ' + help("Above 0, identifying this car sets a charge target, which hands the session to the planner: it fills toward the target in the cheapest tariff hours. 0 = no target.") + '</label>' +
+        '<input type="number" min="0" max="100" step="5" data-path="' + prefix + '.target_soc_pct" value="' + (v.target_soc_pct || 0) + '">' +
+        '</div>' +
+        '</div>' +
+        '<div style="margin-top:12px">' +
+        '<button class="btn-remove" data-action="remove-vehicle" data-idx="' + idx + '">Remove vehicle</button>' +
+        '</div>' +
+        '</fieldset>';
+    });
+
+    html +=
+      '<div class="field-row" style="margin-top:8px"><div>' +
+      '<label>ID</label><input type="text" id="new-vehicle-id" placeholder="leaf">' +
+      '</div><div style="align-self:end">' +
+      '<button class="btn-add" id="new-vehicle-add">+ Add vehicle</button>' +
+      '</div></div>' +
+      '</fieldset>';
     return html;
   }
 
@@ -201,7 +300,7 @@
         'pick it here and set the electrical envelope. (Config files call this binding a <code>loadpoint</code>.)' +
         '</p>';
 
-      html += ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml);
+      html += ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml, config.vehicles);
 
       if (!drivers.length) {
         html +=
@@ -260,7 +359,7 @@
 
           '<div class="field-row">' +
           '<div>' +
-          '<label>Vehicle capacity (Wh) ' + help("Usable battery capacity of ONE car — the one this charger usually serves. 75000 = 75 kWh. Used by MPC to size the energy needed to reach the target SoC; a wrong value costs planning accuracy, not safety. If several cars share the charger, enter the one you plan deadlines for and correct SoC in the EV modal for the others — automatic per-car detection needs OCPP 2.0.1 / ISO 15118 hardware.") + '</label>' +
+          '<label>Vehicle capacity (Wh) ' + help("Usable battery capacity of ONE car — the one this charger usually serves. 75000 = 75 kWh. Used by MPC to size the energy needed to reach the target SoC; a wrong value costs planning accuracy, not safety. If several cars share the charger, add Vehicle profiles below — an identified car overrides this for its session; unidentified cars (visitors) charge under this value.") + '</label>' +
           '<input type="number" min="0" step="500" data-path="' + prefix + '.vehicle_capacity_wh" value="' + (lp.vehicle_capacity_wh || 0) + '">' +
           '</div>' +
           '<div>' +
@@ -299,6 +398,8 @@
         '</div></div>' +
         '<button class="btn-add" id="new-lp-add">+ Add charger</button>' +
         '</fieldset>';
+
+      html += vehiclesSection(config, escHtml, help);
 
       return html;
     },
@@ -381,6 +482,53 @@
         });
       }
 
+      // Vehicle profile handlers.
+      bodyEl.querySelectorAll('[data-action="remove-vehicle"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var idx = parseInt(btn.dataset.idx, 10);
+          if (!isFinite(idx) || !config.vehicles) return;
+          ctx.captureCurrentTab();
+          config.vehicles.splice(idx, 1);
+          ctx.renderTab('loadpoints');
+        });
+      });
+      var addVehicleBtn = document.getElementById('new-vehicle-add');
+      if (addVehicleBtn) {
+        addVehicleBtn.addEventListener('click', function () {
+          var idEl = document.getElementById('new-vehicle-id');
+          var id = (idEl && idEl.value || '').trim();
+          if (!id) { idEl && idEl.focus(); return; }
+          var exists = (config.vehicles || []).some(function (v) { return v.id === id; });
+          if (exists) {
+            alert('A vehicle with id "' + id + '" already exists.');
+            return;
+          }
+          ctx.captureCurrentTab();
+          config.vehicles = config.vehicles || [];
+          config.vehicles.push({
+            id: id,
+            name: '',
+            capacity_wh: 60000,
+            identifiers: [],
+            surplus_only: false,
+            target_soc_pct: 0,
+          });
+          ctx.renderTab('loadpoints');
+        });
+      }
+      // Same __str trick as allowed_steps_w below: the shell's generic
+      // capture writes the literal string; rewrite it to the real array.
+      bodyEl.querySelectorAll('input[data-path$=".identifiers__str"]').forEach(function (inp) {
+        inp.addEventListener('change', function () {
+          var idx = parseInt(inp.dataset.path.split('.')[1], 10);
+          if (!isFinite(idx) || !config.vehicles || !config.vehicles[idx]) return;
+          config.vehicles[idx].identifiers = parseIdentifiers(inp.value);
+        });
+        inp.addEventListener('blur', function () {
+          inp.dispatchEvent(new Event('change'));
+        });
+      });
+
       // Translate the freeform "allowed steps" text input into the real
       // allowed_steps_w[] array on every change — the Settings shell's
       // generic capture pass writes the literal string into
@@ -407,6 +555,9 @@
       ocppChargerIds: ocppChargerIds,
       ocppStateLabel: ocppStateLabel,
       ocppSection: ocppSection,
+      vehiclesSection: vehiclesSection,
+      vehicleForIdentifier: vehicleForIdentifier,
+      parseIdentifiers: parseIdentifiers,
     },
   };
 })();

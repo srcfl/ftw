@@ -174,6 +174,12 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		"charger", id, "version", Version201,
 		"event", req.EventType, "seq", req.SequenceNo, "w", powerW)
 
+	// 2.0.1 idTokens can name the actual vehicle: MacAddress is autocharge,
+	// eMAID is ISO 15118 Plug & Charge. Cards (ISO14443/ISO15693) still
+	// only name the card. The token may ride on any event type.
+	if req.IDToken != nil {
+		h.noteVehicleID(id, req.IDToken.IdToken, string(req.IDToken.Type))
+	}
 	h.pushReading(id, s)
 	if ended {
 		h.telMetric(id, "ev_session_wh", sessionWh, "Wh")

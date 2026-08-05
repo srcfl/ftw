@@ -30,6 +30,12 @@ type Handler struct {
 	// SetApprovedIDs.
 	approved map[string]bool
 	nextTxID int
+
+	// vehicleIdentified, when set, fires once per new vehicle identity seen
+	// on an APPROVED charger's transaction — main.go uses it to apply the
+	// matching vehicle profile (capacity, charging policy) to the loadpoint.
+	// Pending chargers never fire it: quarantine means no influence.
+	vehicleIdentified func(chargerID, vehicleID, source string)
 }
 
 // chargerState is what we accumulate from successive OCPP messages for one
@@ -59,6 +65,13 @@ type chargerState struct {
 	// label a charger with what it actually is rather than its URL segment.
 	vendor string
 	model  string
+	// vehicleID is the identity presented when the current/last transaction
+	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
+	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
+	// vehicle rather than a card. vehicleIDSource records which kind it was.
+	// Kept after the session ends so the UI can show what was last seen.
+	vehicleID       string
+	vehicleIDSource string
 }
 
 // NewHandler returns a Handler ready to register with a CentralSystem.
@@ -137,6 +150,36 @@ func (h *Handler) telMetric(id, name string, v float64, unit string) {
 	}
 }
 
+// SetVehicleIdentified registers the callback fired when a transaction on an
+// approved charger presents a new vehicle identity (RFID idTag on 1.6, any
+// idToken on 2.0.1). Fired outside the handler lock.
+func (h *Handler) SetVehicleIdentified(fn func(chargerID, vehicleID, source string)) {
+	h.mu.Lock()
+	h.vehicleIdentified = fn
+	h.mu.Unlock()
+}
+
+// noteVehicleID records the identity a transaction presented and fires the
+// vehicleIdentified callback when it is new for this charger. Quarantine
+// applies: a pending charger's identity is stored (the UI shows it so the
+// operator can build a profile from it) but never fires the callback.
+func (h *Handler) noteVehicleID(id, vehicleID, source string) {
+	if vehicleID == "" {
+		return
+	}
+	h.mu.Lock()
+	s := h.chargersLocked(id)
+	changed := s.vehicleID != vehicleID
+	s.vehicleID = vehicleID
+	s.vehicleIDSource = source
+	fn := h.vehicleIdentified
+	approved := h.approved[id]
+	h.mu.Unlock()
+	if changed && approved && fn != nil {
+		fn(id, vehicleID, source)
+	}
+}
+
 // state returns the per-charger state, creating it lazily on first sight.
 func (h *Handler) state(id string) *chargerState {
 	h.mu.Lock()
@@ -156,17 +199,19 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 	out := make(map[string]ChargerView, len(h.chargers))
 	for id, s := range h.chargers {
 		out[id] = ChargerView{
-			Online:    s.online,
-			Connected: s.connected,
-			Charging:  s.charging,
-			PowerW:    s.lastPowerW,
-			SessionWh: s.sessionMeterWh,
-			TxID:      s.transactionID,
-			Version:   string(s.version),
-			LastAmps:  s.lastAmps,
-			Vendor:    s.vendor,
-			Model:     s.model,
-			Pending:   !h.approved[id],
+			Online:          s.online,
+			Connected:       s.connected,
+			Charging:        s.charging,
+			PowerW:          s.lastPowerW,
+			SessionWh:       s.sessionMeterWh,
+			TxID:            s.transactionID,
+			Version:         string(s.version),
+			LastAmps:        s.lastAmps,
+			Vendor:          s.vendor,
+			Model:           s.model,
+			Pending:         !h.approved[id],
+			VehicleID:       s.vehicleID,
+			VehicleIDSource: s.vehicleIDSource,
 		}
 	}
 	return out
@@ -193,6 +238,11 @@ type ChargerView struct {
 	// pending charger is visible here but quarantined from the site: its
 	// telemetry is withheld from dispatch until an operator adopts it.
 	Pending bool `json:"pending,omitempty"`
+	// VehicleID is the identity the current/last transaction presented —
+	// an RFID idTag on 1.6 (names the card), a MacAddress/eMAID idToken on
+	// 2.0.1 (names the car). VehicleIDSource says which kind.
+	VehicleID       string `json:"vehicle_id,omitempty"`
+	VehicleIDSource string `json:"vehicle_id_source,omitempty"`
 }
 
 // OnConnect / OnDisconnect are wired by the Server to the OCPP library's
@@ -352,6 +402,9 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 
 	slog.Info("OCPP transaction started",
 		"charger", id, "txid", txID, "tag", req.IdTag, "meter_start_wh", req.MeterStart)
+	// The 1.6 idTag names the RFID card that started the session — the
+	// closest thing to a vehicle identity this dialect has.
+	h.noteVehicleID(id, req.IdTag, "rfid")
 	h.pushReading(id, s)
 	h.telSuccess(id)
 	return core.NewStartTransactionConfirmation(

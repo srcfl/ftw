@@ -1205,6 +1205,53 @@ func main() {
 		} else {
 			ocppSrv = srv
 			defer ocppSrv.Stop()
+			// Vehicle profiles: when a charging transaction identifies the
+			// car (RFID idTag on 1.6, MacAddress/eMAID idToken on 2.0.1),
+			// apply the matching vehicles: profile to the loadpoint bound
+			// to that charger — capacity for SoC/planner sizing, plus the
+			// profile's charging policy. An identity matching no profile
+			// changes nothing (the visitor default); it still shows in the
+			// Chargers panel so the operator can paste it into a profile.
+			ocppSrv.Handler().SetVehicleIdentified(func(chargerID, vehicleID, source string) {
+				cfgMu.RLock()
+				lpID := ""
+				for _, lp := range cfg.Loadpoints {
+					if lp.DriverName == chargerID {
+						lpID = lp.ID
+						break
+					}
+				}
+				var vehicle *config.Vehicle
+				if lpID != "" {
+					if v := cfg.VehicleByIdentifier(vehicleID); v != nil {
+						vc := *v
+						vehicle = &vc
+					}
+				}
+				cfgMu.RUnlock()
+				if lpID == "" {
+					return
+				}
+				if vehicle == nil {
+					slog.Info("ocpp: session identity matches no vehicle profile — loadpoint keeps its own settings",
+						"charger", chargerID, "identity", vehicleID, "source", source)
+					return
+				}
+				name := vehicle.Name
+				if name == "" {
+					name = vehicle.ID
+				}
+				lpMgr.ApplyVehicleProfile(lpID, name, vehicle.CapacityWh)
+				lpMgr.SetSurplusOnly(lpID, vehicle.SurplusOnly)
+				if vehicle.TargetSoCPct > 0 {
+					lpMgr.SetTarget(lpID, vehicle.TargetSoCPct, time.Time{})
+				}
+				slog.Info("ocpp: vehicle profile applied",
+					"charger", chargerID, "lp", lpID, "vehicle", vehicle.ID,
+					"source", source, "capacity_wh", vehicle.CapacityWh,
+					"surplus_only", vehicle.SurplusOnly,
+					"target_soc_pct", vehicle.TargetSoCPct)
+			})
 			slog.Info("ocpp: central system started",
 				"port", ocppSrv.Port(),
 				"port_v201", cfg.OCPP.PortV201,
