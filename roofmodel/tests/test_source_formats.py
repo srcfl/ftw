@@ -30,7 +30,7 @@ from ftw_roofmodel.pointcloud import PointCloudError
 from .test_geopackage import build_gpkg, gpkg_blob, wkb_polygon
 
 STOCKHOLM = (59.33, 18.07)
-E, N = sweref.wgs84_to_sweref99tm(*STOCKHOLM)
+N, E = sweref.wgs84_to_sweref99tm(*STOCKHOLM)
 
 
 def square(cx, cy, w, d):
