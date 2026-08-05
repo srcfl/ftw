@@ -7,6 +7,7 @@ require (
 	github.com/emersion/go-ical v0.0.0-20250609112844-439c63cef608
 	github.com/emersion/go-webdav v0.7.0
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/goburrow/serial v0.1.0
 	github.com/google/uuid v1.6.0
@@ -16,6 +17,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.3
 	github.com/simonvetter/modbus v1.6.4
 	github.com/yuin/gopher-lua v1.1.2
+	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.56.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.48.2
@@ -25,7 +27,6 @@ require (
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
@@ -49,7 +50,6 @@ require (
 	github.com/twpayne/go-geom v1.6.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect

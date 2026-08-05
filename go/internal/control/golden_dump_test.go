@@ -680,7 +680,8 @@ func targetedScenarios() []goldenScenario {
 		State:     defaultGoldenState(ModeSelfConsumption),
 	}))
 
-	// forceFuseDischarge from idle mode (fuseSaverFromZero path).
+	// forceFuseDischarge from idle mode: the saver flips idle's held zero to
+	// discharge through the ordinary safety pipeline.
 	out = append(out, mk("force_fuse_discharge_idle", goldenInputs{
 		FuseMaxW: 11040, GridW: 12500,
 		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
@@ -821,6 +822,310 @@ func targetedScenarios() []goldenScenario {
 		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.55)},
 		State:     sp,
 		Slot:      staleSlot(),
+	}))
+
+	return out
+}
+
+// ---- family: early exits meeting a binding protection ---------------------
+//
+// THIS FAMILY RECORDS THE LAW AS FIXED, NOT A BUG. slew_limiter above
+// deliberately holds a known defect still so the fix shows up as a diff in
+// watts; this family is the opposite. Every record here was recorded after
+// #803 landed and states what dispatch is supposed to do. A record that moves
+// is a protection that stopped protecting.
+//
+// Three branches of ComputeDispatch walk away from a cycle before the safety
+// pipeline: idle mode, the holdoff window, and the reactive deadband. None of
+// them means the site is safe — each means the normal control law has nothing
+// to say — so all three run fuseSaverEarlyExit before returning.
+//
+// The corpus had no record of any of that. Of the 590 records that shipped
+// before this family, 33 returned no targets: 25 idle, 1 holdoff, 8 deadband,
+// and every one of the 8 deadband records had site_fuse_amps=0 and
+// peak_import_ceiling_w=0, so nothing could bind in any of them. That is why
+// 590 recorded ticks did not catch the deadband exit skipping every
+// protection, which is what #803 fixed. An early exit is only interesting
+// where something binds, and nothing bound.
+//
+// Each shape appears twice: once where the protection binds, and once where
+// the same site is configured identically and nothing is over its limit. The
+// quiet half is not filler. A corpus of only-firing records cannot tell a fix
+// from an over-fire: a change that makes the fuse-saver discharge on every
+// tick passes a corpus that only ever recorded it firing.
+//
+// What can bind at an early exit is exactly what forceFuseDischarge reads
+// from a fleet of zero-watt targets:
+//
+//   - the aggregate ceiling — the fuse less its safety margin, capped by
+//     PeakImportCeilingW when the operator set a tariff peak;
+//   - the worst single phase over the breaker, converted to aggregate watts
+//     by the site's phase count (#812), and only on the import side, because
+//     the one lever here is more discharge.
+//
+// Single-phase sites are recorded on their own because the phase count is the
+// conversion: on 1 phase the aggregate meter and the phase are the same wire,
+// so relief is the overage once. The 1p records land on the same watts by
+// both routes, which is the point — under the bare `* 3.0` that #812 removed
+// they would command three times the overage and drive the meter through zero
+// into an export-side violation.
+func earlyExitScenarios() []goldenScenario {
+	mk := func(id string, in goldenInputs) goldenScenario {
+		return goldenScenario{ID: "early_exit/" + id, Inputs: in}
+	}
+	// deadband builds a reactive state whose grid target sits exactly on the
+	// meter, so errW is 0 and ComputeDispatch takes the deadband exit.
+	deadband := func(gridTargetW float64) goldenStateInputs {
+		s := defaultGoldenState(ModeSelfConsumption)
+		s.GridTargetW = gridTargetW
+		return s
+	}
+	// holdoff builds a state inside its own minimum dispatch interval, with a
+	// grid error far outside the deadband so the holdoff is unambiguously the
+	// exit taken.
+	holdoff := func() goldenStateInputs {
+		s := defaultGoldenState(ModeSelfConsumption)
+		s.MinDispatchIntervalS = 60
+		s.HoldoffActive = true
+		return s
+	}
+	// phases3 configures a 16 A three-phase service; phases1 a 25 A
+	// single-phase one, whose aggregate fuse is 25 A x 230 V x 1.
+	phases3 := func(s goldenStateInputs, safetyA float64) goldenStateInputs {
+		s.SiteFuseAmps = 16
+		s.SiteFuseVoltage = 230
+		s.SiteFusePhases = 3
+		s.SiteFuseSafetyA = safetyA
+		return s
+	}
+	phases1 := func(s goldenStateInputs) goldenStateInputs {
+		s.SiteFuseAmps = 25
+		s.SiteFuseVoltage = 230
+		s.SiteFusePhases = 1
+		return s
+	}
+	const fuse1PhaseW = 5750 // 25 A x 230 V x 1
+
+	var out []goldenScenario
+
+	// ---- deadband exit: aggregate ceilings -------------------------------
+	//
+	// The plan asks for 8 kW of import, the meter delivers 8 kW, the error is
+	// zero — and every watt above the operator's 5 kW tariff ceiling is
+	// billed at the peak rate that ceiling exists to avoid. The deadband
+	// reads one aggregate against one target; it never reads the ceiling.
+	out = append(out, mk("deadband_peak_ceiling_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 8000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State: func() goldenStateInputs {
+			s := deadband(8000)
+			s.PeakImportCeilingW = 5000
+			return s
+		}(),
+	}))
+	// Negative control: same site, same tick, ceiling above the draw.
+	out = append(out, mk("deadband_peak_ceiling_clear", goldenInputs{
+		FuseMaxW: 11040, GridW: 8000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State: func() goldenStateInputs {
+			s := deadband(8000)
+			s.PeakImportCeilingW = 9000
+			return s
+		}(),
+	}))
+	// No tariff ceiling, just a peak limit set above the fuse: peak_shaving
+	// computes errW = 0 whenever import is at or under PeakLimitW, so a limit
+	// misconfigured above the breaker parks the site in the deadband while
+	// the meter sits over the fuse. This is the shape the eight pre-existing
+	// deadband records have — all peak_shaving — with the one number that
+	// makes it bind.
+	psOver := defaultGoldenState(ModePeakShaving)
+	psOver.PeakLimitW = 12000
+	out = append(out, mk("deadband_fuse_ceiling_binds_peak_shaving", goldenInputs{
+		FuseMaxW: 11040, GridW: 12000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.65)},
+		State:     psOver,
+	}))
+	psUnder := defaultGoldenState(ModePeakShaving)
+	psUnder.PeakLimitW = 9000
+	out = append(out, mk("deadband_fuse_ceiling_clear_peak_shaving", goldenInputs{
+		FuseMaxW: 11040, GridW: 9000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.65)},
+		State:     psUnder,
+	}))
+	// Two batteries with different discharge limits: the relief is split by
+	// remaining headroom, inside the early exit, the same way the main path
+	// splits it.
+	twoA := gb("ferroamp", 15200, 0, 0.60)
+	twoA.MaxDischargeW = 3000
+	twoA.MaxChargeW = 3000
+	twoB := gb("sungrow", 9600, 0, 0.60)
+	twoB.MaxDischargeW = 1000
+	twoB.MaxChargeW = 1000
+	out = append(out, mk("deadband_peak_ceiling_two_batteries", goldenInputs{
+		FuseMaxW: 11040, GridW: 9000,
+		Batteries: []goldenBattery{twoA, twoB},
+		State: func() goldenStateInputs {
+			s := deadband(9000)
+			s.PeakImportCeilingW = 6000
+			return s
+		}(),
+	}))
+	// Negative control at the allocator rather than the ceiling: the ceiling
+	// binds by 3 kW, and the only pack is below the 5 % floor. The fuse-saver
+	// cannot invent energy, so the tick stays quiet.
+	out = append(out, mk("deadband_peak_ceiling_empty_pack_quiet", goldenInputs{
+		FuseMaxW: 11040, GridW: 8000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.03)},
+		State: func() goldenStateInputs {
+			s := deadband(8000)
+			s.PeakImportCeilingW = 5000
+			return s
+		}(),
+	}))
+
+	// ---- deadband exit: per-phase breaker --------------------------------
+	//
+	// A single-phase EVSE on L1 against three-phase PV export: the aggregate
+	// sits on target and L1 is at 18 A on a 16 A fuse.
+	out = append(out, mk("deadband_per_phase_3p_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 0,
+		MeterPhases: &goldenPhases{L1A: 18, L2A: 4, L3A: 4},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases3(deadband(0), 0),
+	}))
+	// Negative control: the same service, balanced and well under the fuse.
+	out = append(out, mk("deadband_per_phase_3p_balanced_clear", goldenInputs{
+		FuseMaxW: 11040, GridW: 0,
+		MeterPhases: &goldenPhases{L1A: 8, L2A: 8, L3A: 8},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases3(deadband(0), 0),
+	}))
+	// The safety margin moves both thresholds at once: it lowers the
+	// per-phase trip point to 15 A and the aggregate ceiling by
+	// 1 A x 230 V x 3. L1 at 17 A is inside the breaker and outside the
+	// margin, so the record pins the margin rather than the breaker.
+	out = append(out, mk("deadband_per_phase_safety_amps_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 2000,
+		MeterPhases: &goldenPhases{L1A: 17, L2A: 5, L3A: 5},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases3(deadband(2000), 1),
+	}))
+	// Export side. The worst phase is 10 A over the breaker, and relief must
+	// NOT fire: this function's only lever is more discharge, which would
+	// push that phase further over. applyFuseGuard owns the export side, and
+	// it has no charge target to shrink here. The record exists so a change
+	// that drops forceFuseDischarge's import-only gate is visible as watts
+	// appearing on a tick that must stay quiet.
+	out = append(out, mk("deadband_per_phase_export_side_quiet", goldenInputs{
+		FuseMaxW: 11040, GridW: -6000,
+		MeterPhases: &goldenPhases{L1A: -26, L2A: -8, L3A: -8},
+		PV:          []goldenPV{{Driver: "pv-0", PowerW: -9000}},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases3(deadband(-6000), 0),
+	}))
+	// Single-phase site: 32 A on a 25 A service. The phase and the aggregate
+	// are the same wire, so both routes to the overage agree at 1610 W and
+	// the relief is that overage once, not three times it.
+	out = append(out, mk("deadband_per_phase_1p_binds", goldenInputs{
+		FuseMaxW: fuse1PhaseW, GridW: 7360,
+		MeterPhases: &goldenPhases{L1A: 32},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases1(deadband(7360)),
+	}))
+	out = append(out, mk("deadband_per_phase_1p_clear", goldenInputs{
+		FuseMaxW: fuse1PhaseW, GridW: 4600,
+		MeterPhases: &goldenPhases{L1A: 20},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases1(deadband(4600)),
+	}))
+	// A stale plan drops a planner mode into reactive self_consumption with a
+	// grid target of 0, which is a deadband tick whenever the meter is near
+	// zero. The protection still has to run — a plan going stale is not a
+	// reason for the breaker to trip.
+	stale := phases3(defaultGoldenState(ModePlannerArbitrage), 0)
+	stale.GridToleranceW = 60
+	stale.UseEnergyDispatch = true
+	out = append(out, mk("deadband_stale_plan_fallback_per_phase_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 20,
+		MeterPhases: &goldenPhases{L1A: 19, L2A: 5, L3A: 5},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.55)},
+		State:       stale,
+		Slot:        staleSlot(),
+	}))
+
+	// ---- idle ------------------------------------------------------------
+	//
+	// Idle has run the fuse-saver against the aggregate fuse since long
+	// before #803 — targeted/force_fuse_discharge_idle records that. What it
+	// had no record of is the other two numbers the saver reads.
+	//
+	// These four now also record the hold underneath: idle commands 0 W to
+	// every battery it may command, so each of them answers two questions at
+	// once — is the fleet stopped, and can the protection still reach past
+	// the stop when the breaker is threatened.
+	idlePeak := defaultGoldenState(ModeIdle)
+	idlePeak.PeakImportCeilingW = 4000
+	out = append(out, mk("idle_peak_ceiling_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 7000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:     idlePeak,
+	}))
+	out = append(out, mk("idle_per_phase_3p_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 1000,
+		MeterPhases: &goldenPhases{L1A: 20, L2A: 4, L3A: 5},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases3(defaultGoldenState(ModeIdle), 0),
+	}))
+	out = append(out, mk("idle_per_phase_1p_binds", goldenInputs{
+		FuseMaxW: fuse1PhaseW, GridW: 6900,
+		MeterPhases: &goldenPhases{L1A: 30},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases1(defaultGoldenState(ModeIdle)),
+	}))
+	// Negative control: idle with both protections configured and neither
+	// over its limit. Nothing binds, so what is left is the bare hold —
+	// 0 W, unclamped. This is the record that would catch an over-fire.
+	idleQuiet := phases3(defaultGoldenState(ModeIdle), 0)
+	idleQuiet.PeakImportCeilingW = 8000
+	out = append(out, mk("idle_nothing_binds_quiet", goldenInputs{
+		FuseMaxW: 11040, GridW: 3000,
+		MeterPhases: &goldenPhases{L1A: 10, L2A: 9, L3A: 9},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       idleQuiet,
+	}))
+
+	// ---- holdoff exit ----------------------------------------------------
+	//
+	// The grid error is thousands of watts wide in each of these, so the
+	// holdoff — not the deadband — is the exit under test. An overflow does
+	// not wait for the next eligible tick.
+	holdPeak := holdoff()
+	holdPeak.PeakImportCeilingW = 4000
+	out = append(out, mk("holdoff_peak_ceiling_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 7000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:     holdPeak,
+	}))
+	out = append(out, mk("holdoff_per_phase_3p_binds", goldenInputs{
+		FuseMaxW: 11040, GridW: 2000,
+		MeterPhases: &goldenPhases{L1A: 21, L2A: 4, L3A: 4},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases3(holdoff(), 0),
+	}))
+	out = append(out, mk("holdoff_per_phase_1p_binds", goldenInputs{
+		FuseMaxW: fuse1PhaseW, GridW: 7360,
+		MeterPhases: &goldenPhases{L1A: 32},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       phases1(holdoff()),
+	}))
+	holdQuiet := phases3(holdoff(), 0)
+	holdQuiet.PeakImportCeilingW = 9000
+	out = append(out, mk("holdoff_nothing_binds_quiet", goldenInputs{
+		FuseMaxW: 11040, GridW: 2000,
+		MeterPhases: &goldenPhases{L1A: 9, L2A: 8, L3A: 8},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
+		State:       holdQuiet,
 	}))
 
 	return out
@@ -1821,6 +2126,8 @@ func TestGoldenDump(t *testing.T) {
 		"seeded_siblings":     seededSiblings,
 		"seeded_ev_boost":     seededEVBoost,
 		"slew_limiter":        slewScenarios,
+
+		"early_exit_protections": earlyExitScenarios,
 	}
 	families := goldenFamilyNames
 	for _, name := range families {

@@ -807,7 +807,20 @@ func main() {
 		// explicit 0 → disabled. See EffectiveSafetyMarginA.
 		ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 		ctrl.MaxExportW = newCfg.Site.MaxExportW
+		// Lowering the fuse can strand a peak limit that was legal when it
+		// was set. SetPeakLimit refuses to create that state; only a reload
+		// can arrive at it from the other side, and it is silent — the
+		// threshold simply stops being the first thing to bind. Say so
+		// while the operator is still looking at the config they just saved.
+		// Peak shaving only: in every other mode the threshold is unread,
+		// so warning about it would be noise.
+		peakCeilingW, peakDead := ctrl.PeakLimitIsDead()
+		peakLimitW, peakMode := ctrl.PeakLimitW, ctrl.Mode == control.ModePeakShaving
 		ctrlMu.Unlock()
+		if peakDead && peakMode {
+			slog.Warn("peak limit is now above the site's import ceiling and cannot bind",
+				"peak_limit_w", peakLimitW, "import_ceiling_w", peakCeilingW)
+		}
 
 		// Keep the loadpoint controller's per-phase EV fuse clamp in
 		// sync with hot-reloaded fuse params — previously startup-only,
@@ -3893,11 +3906,16 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 			ctrl.SetGridTarget(w)
 			return st.SaveConfig("grid_target_w", strconv.FormatFloat(w, 'f', 1, 64))
 		},
+		// Same validation as POST /api/peak_limit — an HA number can be
+		// dragged past the site's fuse just as easily as an API caller can
+		// post past it, and the two setters must not diverge (#mode-drift
+		// again, one field down). The returned error reaches the bridge,
+		// which logs it; HA's own state topic republishes the value FTW
+		// actually holds, so the operator sees the number snap back.
 		SetPeakLimit: func(w float64) error {
 			ctrlMu.Lock()
 			defer ctrlMu.Unlock()
-			ctrl.PeakLimitW = w
-			return nil
+			return ctrl.SetPeakLimit(w)
 		},
 		SetEVCharging: func(w float64, active bool) error {
 			ctrlMu.Lock()

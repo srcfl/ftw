@@ -1,7 +1,7 @@
 {
   "family": "seeded_fuse",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "c7fe6c98bc7de24861ff7a1c1b54fe73a64d0035",
+  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
   "record_count": 80,
   "records": [
     {
@@ -283,7 +283,18 @@
           "pv_surplus_absorb_threshold_w": 0
         }
       },
-      "per_driver_targets": [],
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -305,7 +316,7 @@
         "battery_current_w": -1857,
         "battery_target_sum_w": 0,
         "raw_grid_w": 14791,
-        "projected_grid_w": 14791
+        "projected_grid_w": 16648
       }
     },
     {
@@ -3422,7 +3433,18 @@
           "pv_surplus_absorb_threshold_w": 0
         }
       },
-      "per_driver_targets": [],
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -3444,7 +3466,7 @@
         "battery_current_w": 3,
         "battery_target_sum_w": 0,
         "raw_grid_w": 12656,
-        "projected_grid_w": 12656
+        "projected_grid_w": 12653
       }
     },
     {
@@ -3870,7 +3892,23 @@
           "pv_surplus_absorb_threshold_w": 0
         }
       },
-      "per_driver_targets": [],
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "pixii",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -3892,7 +3930,7 @@
         "battery_current_w": 500,
         "battery_target_sum_w": 0,
         "raw_grid_w": 14974,
-        "projected_grid_w": 14974
+        "projected_grid_w": 14474
       }
     },
     {
@@ -5465,7 +5503,18 @@
           "pv_surplus_absorb_threshold_w": 0
         }
       },
-      "per_driver_targets": [],
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -5487,7 +5536,7 @@
         "battery_current_w": 4726,
         "battery_target_sum_w": 0,
         "raw_grid_w": 14101,
-        "projected_grid_w": 14101
+        "projected_grid_w": 9375
       }
     },
     {
@@ -5862,7 +5911,13 @@
           "pv_surplus_absorb_threshold_w": 0
         }
       },
-      "per_driver_targets": [],
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -5884,7 +5939,7 @@
         "battery_current_w": 2658,
         "battery_target_sum_w": 0,
         "raw_grid_w": 17645,
-        "projected_grid_w": 17645
+        "projected_grid_w": 14987
       }
     },
     {
@@ -6322,7 +6377,23 @@
           "pv_surplus_absorb_threshold_w": 0
         }
       },
-      "per_driver_targets": [],
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "pixii",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -6344,7 +6415,7 @@
         "battery_current_w": 4500,
         "battery_target_sum_w": 0,
         "raw_grid_w": 20047,
-        "projected_grid_w": 20047
+        "projected_grid_w": 15547
       }
     },
     {

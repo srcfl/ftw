@@ -964,7 +964,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     self_consumption: 'Self (manual). Simple grid-zero controller with no planner; charges surplus and discharges to cover local import.',
     peak_shaving: 'Manual peak shaving. Limits grid import to the peak-limit setting.',
     charge: 'Manual full charge — forces the battery to charge regardless of price.',
-    idle: 'Battery idle — no dispatch.',
+    idle: 'Stop batteries. Every battery is held at 0 W while this mode is on, so none drifts back to the inverter\'s own behaviour. Fuse protection still applies. EV charging and PV curtailment carry on.',
   };
   function renderStrategyHint() {
     apiFetch('/api/status')

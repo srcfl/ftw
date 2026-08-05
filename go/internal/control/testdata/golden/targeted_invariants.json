@@ -1,7 +1,7 @@
 {
   "family": "targeted_invariants",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "c7fe6c98bc7de24861ff7a1c1b54fe73a64d0035",
+  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
   "record_count": 18,
   "records": [
     {

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -768,22 +769,38 @@ func TestE2E_FullStack(t *testing.T) {
 	bat = status["bat_w"].(float64)
 	t.Logf("after target=-3000W (want more export): bat=%.0fW (site: − = discharge)", bat)
 
-	// 4. Mode switching — idle should zero out dispatch.
+	// 4. Mode switching — idle should drive dispatch to zero.
 	// The API handler flips the mode as soon as it returns, so reading the
-	// mode back proves nothing about dispatch. Clearing the targets is the
-	// next control tick's work: idle short-circuits ComputeDispatch, which
-	// leaves no targets behind unless the fuse-saver overrides it. Wait for
-	// both — the mode the operator asked for, and dispatch actually empty.
+	// mode back proves nothing about dispatch. The zeros are the next
+	// control tick's work: idle commands 0 W to every battery it may
+	// command, and keeps commanding it, so the fleet stops instead of
+	// holding the setpoint the previous mode left behind. Wait for both —
+	// the mode the operator asked for, and every battery actually at zero.
+	// An empty dispatch list would be the old behaviour and is a failure.
 	s.postJSON("/api/mode", map[string]any{"mode": "idle"}, nil)
-	status = s.waitForStatus("idle mode to clear the dispatch targets", 20*time.Second,
+	status = s.waitForStatus("idle mode to hold every battery at 0 W", 20*time.Second,
 		func(st map[string]any) bool {
 			if m, _ := st["mode"].(string); m != "idle" {
 				return false
 			}
 			targets, ok := st["dispatch"].([]any)
-			return ok && len(targets) == 0
+			if !ok || len(targets) == 0 {
+				return false
+			}
+			for _, raw := range targets {
+				tg, ok := raw.(map[string]any)
+				if !ok {
+					return false
+				}
+				w, ok := tg["target_w"].(float64)
+				if !ok || math.Abs(w) > 0.01 {
+					return false
+				}
+			}
+			return true
 		})
-	t.Logf("idle: mode=%v dispatch targets=%d", status["mode"], len(status["dispatch"].([]any)))
+	t.Logf("idle: mode=%v dispatch targets=%d (all held at 0 W)",
+		status["mode"], len(status["dispatch"].([]any)))
 
 	// Back to self_consumption for subsequent tests
 	s.postJSON("/api/mode", map[string]any{"mode": "self_consumption"}, nil)

@@ -176,7 +176,7 @@ func caps(items map[string]float64) map[string]float64 { return items }
 
 func ptrF64(v float64) *float64 { return &v }
 
-func TestIdleModeReturnsNothing(t *testing.T) {
+func TestIdleModeCommandsZero(t *testing.T) {
 	store := seedStore(2000, []struct {
 		name          string
 		currentW, soc float64
@@ -186,8 +186,11 @@ func TestIdleModeReturnsNothing(t *testing.T) {
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeIdle
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 0 {
-		t.Errorf("idle should dispatch nothing, got %d", len(targets))
+	if len(targets) != 1 {
+		t.Fatalf("idle should command every battery, got %d targets: %v", len(targets), targets)
+	}
+	if math.Abs(targets[0].TargetW) > 0.01 {
+		t.Errorf("idle target = %.2f W, want 0 W", targets[0].TargetW)
 	}
 }
 

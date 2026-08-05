@@ -2,10 +2,11 @@ package control
 
 // Golden replay of ComputeDispatch.
 //
-// testdata/golden/ holds 590 recorded dispatch ticks: eight families covering
+// testdata/golden/ holds 611 recorded dispatch ticks: nine families covering
 // the reactive modes, all four planner modes, fuse pressure in both
 // directions, degraded siblings, EV and battery-boost reserves, the slew
-// limiter at rates a site actually runs, and the incident scenarios that
+// limiter at rates a site actually runs, the three early exits meeting a
+// protection that binds, and the incident scenarios that
 // forecast_scenarios_test.go already names. Each record stores the inputs to
 // one ComputeDispatch call — telemetry, State, slot directive, driver
 // capacities, fuse ceiling — next to the per-driver targets and clamp
@@ -15,8 +16,10 @@ package control
 // What the corpus is NOT: a statement of what dispatch SHOULD do. It is what
 // dispatch DID do at the commit each file records in its ftw_commit — a
 // family recorded later carries a later one — clamps, quirks and all. Nothing
-// here was reviewed as correct. Its value is that it makes any change to
-// dispatch visible and specific, which the unit tests around it cannot: they
+// here was reviewed as correct, with one exception: early_exit_protections
+// was recorded after the law it covers was fixed, and its doc comment in
+// golden_dump_test.go says so. The corpus's value is that it makes any change
+// to dispatch visible and specific, which the unit tests around it cannot: they
 // pin the cases somebody thought to write down, and dispatch is a long
 // function whose paths interact.
 //
@@ -61,7 +64,7 @@ const (
 
 	// goldenExpectedRecords guards against a half-written re-recording
 	// silently shrinking the net.
-	goldenExpectedRecords = 590
+	goldenExpectedRecords = 611
 
 	// goldenSlewBindingMarginW is how far a record's targets have to move
 	// when the slew limiter is switched off before that record counts as
@@ -100,6 +103,7 @@ var goldenFamilyNames = []string{
 	"seeded_siblings",
 	"seeded_ev_boost",
 	"slew_limiter",
+	"early_exit_protections",
 }
 
 // readGoldenCorpus loads every family from dir and returns the records in
@@ -233,6 +237,7 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 	}
 
 	assertGoldenSlewCoverage(t, all, byID)
+	assertGoldenEarlyExitCoverage(t, all, byID)
 
 	// Generic scans across the whole corpus.
 	var nFuseSaturated, nHoldLatched, nPerPhase, nStale, nBlocked, nEmpty int
@@ -369,6 +374,167 @@ func assertGoldenSlewCoverage(t *testing.T, all []goldenRecord, byID map[string]
 	if bindingAtRealisticRate < goldenMinSlewBindingRecords {
 		t.Errorf("coverage gap: only %d binding records run at <= %.0f W/tick; the rest bind only at rates no site configures",
 			bindingAtRealisticRate, float64(goldenSlewRealisticRateW))
+	}
+}
+
+// assertGoldenEarlyExitCoverage holds the corpus to the three branches of
+// ComputeDispatch that walk away from a cycle: idle mode, the holdoff window
+// and the reactive deadband.
+//
+// The corpus before this family had 33 records returning no targets and not
+// one of them could have caught a protection going missing at an early exit:
+// the 8 deadband records all ran with site_fuse_amps=0 and
+// peak_import_ceiling_w=0, so nothing was over any limit to defend. That is
+// the gap these assertions exist to keep closed. Every claim below is a
+// safety outcome, not a quirk — this family was recorded after #803 fixed the
+// deadband exit, so a record that moves is a protection that stopped
+// protecting.
+//
+// Each exit needs both halves. Without a firing record the corpus cannot see
+// a protection disappear; without a quiet one it cannot see the fuse-saver
+// start discharging on ticks where nothing binds, and an over-fire drains the
+// pack just as surely as an under-fire trips the breaker.
+func assertGoldenEarlyExitCoverage(t *testing.T, all []goldenRecord, byID map[string]goldenRecord) {
+	t.Helper()
+
+	for _, exit := range []string{"deadband", "holdoff"} {
+		prefix := "early_exit/" + exit + "_"
+		var fired, quiet int
+		for _, r := range all {
+			if !strings.HasPrefix(r.ScenarioID, prefix) {
+				continue
+			}
+			if len(r.PerDriverTargets) == 0 {
+				quiet++
+				continue
+			}
+			fired++
+			// A fuse-saver discharge, and nothing else, is what an
+			// early exit is allowed to produce: every target marked
+			// clamped so the dispatch trace names the saver, and the
+			// fleet total on the discharge side.
+			for _, tg := range r.PerDriverTargets {
+				if !tg.Clamped || tg.TargetW > 0 {
+					t.Errorf("%s: an early exit may only command clamped discharge, got %+.0f W clamped=%v on %s",
+						r.ScenarioID, tg.TargetW, tg.Clamped, tg.Driver)
+				}
+			}
+			if sum := sumGoldenTargets(r); sum > -1 {
+				t.Errorf("%s: recorded as firing but the fleet total is %+.0f W", r.ScenarioID, sum)
+			}
+		}
+		if fired == 0 {
+			t.Errorf("coverage gap: no %s record where a protection binds — the exit is unguarded again", exit)
+		}
+		if quiet == 0 {
+			t.Errorf("coverage gap: no %s record where nothing binds; a corpus of only-firing records cannot see an over-fire", exit)
+		}
+	}
+
+	// Idle is held to a different law than the two exits above, and the
+	// difference is the point of it: it does not leave the cycle, so it is
+	// never allowed to be silent. Its quiet case is a commanded zero — the
+	// hold that stops a battery keeping the last setpoint it accepted, or
+	// (Ferroamp, 2026-06-10) letting a forced mode expire back into charging
+	// from the grid. Its firing case is the fuse-saver, which must still
+	// reach past that hold. A record with no targets at all would mean idle
+	// had gone back to trusting the vendor, so it is the one thing this
+	// cannot accept.
+	var idleHeld, idleFired int
+	for _, r := range all {
+		if !strings.HasPrefix(r.ScenarioID, "early_exit/idle_") {
+			continue
+		}
+		if len(r.PerDriverTargets) == 0 {
+			t.Errorf("%s: idle commanded nothing — the fleet is holding its last setpoint, not stopped", r.ScenarioID)
+			continue
+		}
+		if sum := sumGoldenTargets(r); sum < -1 {
+			idleFired++
+			for _, tg := range r.PerDriverTargets {
+				if !tg.Clamped || tg.TargetW > 0 {
+					t.Errorf("%s: the fuse-saver may only command clamped discharge, got %+.0f W clamped=%v on %s",
+						r.ScenarioID, tg.TargetW, tg.Clamped, tg.Driver)
+				}
+			}
+			continue
+		}
+		idleHeld++
+		for _, tg := range r.PerDriverTargets {
+			if math.Abs(tg.TargetW) > goldenToleranceW {
+				t.Errorf("%s: idle holds at 0 W, got %+.2f W on %s", r.ScenarioID, tg.TargetW, tg.Driver)
+			}
+		}
+	}
+	if idleFired == 0 {
+		t.Error("coverage gap: no idle record where a protection binds — the fuse-saver no longer reaches past the hold")
+	}
+	if idleHeld == 0 {
+		t.Error("coverage gap: no idle record where nothing binds; a corpus of only-firing records cannot see an over-fire")
+	}
+
+	// The aggregate ceiling. The operator's tariff peak sits below the fuse,
+	// the meter sits above the peak, and the battery bridges the difference
+	// exactly — over-discharging here costs cycles, under-discharging costs
+	// the peak charge the ceiling exists to avoid.
+	if r, ok := byID["early_exit/deadband_peak_ceiling_binds"]; !ok {
+		t.Error("missing early_exit/deadband_peak_ceiling_binds")
+	} else {
+		want := -(r.Inputs.GridW - r.ClampAttributions.EffectiveImportCeilingW)
+		if math.Abs(sumGoldenTargets(r)-want) > 1 {
+			t.Errorf("deadband peak-ceiling bridge = %.0f W, want %.0f W (meter %.0f W, ceiling %.0f W)",
+				sumGoldenTargets(r), want, r.Inputs.GridW, r.ClampAttributions.EffectiveImportCeilingW)
+		}
+	}
+
+	// Per-phase relief is the worst phase's overage converted to aggregate
+	// watts by the site's phase count — the conversion #812 gave one owner.
+	// A three-phase site relieves three times the phase overage; a
+	// single-phase site relieves it once, because the phase and the
+	// aggregate are the same wire. Tripling it there would drive the meter
+	// through zero into an export-side violation.
+	for id, phases := range map[string]float64{
+		"early_exit/deadband_per_phase_3p_binds": 3,
+		"early_exit/idle_per_phase_3p_binds":     3,
+		"early_exit/holdoff_per_phase_3p_binds":  3,
+		"early_exit/deadband_per_phase_1p_binds": 1,
+		"early_exit/idle_per_phase_1p_binds":     1,
+		"early_exit/holdoff_per_phase_1p_binds":  1,
+	} {
+		r, ok := byID[id]
+		if !ok {
+			t.Errorf("missing %s", id)
+			continue
+		}
+		overage := r.ClampAttributions.PerPhaseOverageW
+		if overage <= 0 {
+			t.Errorf("%s: no per-phase overage recorded, so the record no longer exercises the breaker", id)
+			continue
+		}
+		if got, want := sumGoldenTargets(r), -overage*phases; math.Abs(got-want) > 1 {
+			t.Errorf("%s: fleet total = %.0f W, want %.0f W — %.0f W over on the worst phase, across %.0f phases",
+				id, got, want, overage, phases)
+		}
+		if float64(r.Inputs.State.SiteFusePhases) != phases {
+			t.Errorf("%s: recorded with site_fuse_phases=%d, not the %.0f the assertion names",
+				id, r.Inputs.State.SiteFusePhases, phases)
+		}
+	}
+
+	// Direction. forceFuseDischarge's only lever is more discharge, which
+	// relieves an import-side phase and pushes an export-side one further
+	// over the breaker. Its import-only gate is what stops that, and this
+	// record is a phase 10 A over on the export side that must stay quiet.
+	if r, ok := byID["early_exit/deadband_per_phase_export_side_quiet"]; !ok {
+		t.Error("missing early_exit/deadband_per_phase_export_side_quiet")
+	} else {
+		if r.ClampAttributions.PerPhaseOverageW <= 0 {
+			t.Errorf("export-side control no longer has a phase over the breaker: %+v", r.ClampAttributions)
+		}
+		if len(r.PerDriverTargets) != 0 {
+			t.Errorf("per-phase relief fired on the export side: %v — it would push the over-current phase further over",
+				r.PerDriverTargets)
+		}
 	}
 }
 

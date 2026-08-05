@@ -1412,7 +1412,11 @@ func (s *Server) handleSetTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- /api/peak_limit ----
-
+//
+// Peak-shaving mode's import threshold. Validated against the site's
+// fuse — a limit above the breaker can never bind, and a negative one
+// would order export. See control.State.SetPeakLimit for the rules and
+// why 0 stays a real threshold here rather than "disabled".
 func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PeakLimitW float64 `json:"peak_limit_w"`
@@ -1422,8 +1426,13 @@ func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.PeakLimitW = req.PeakLimitW
+	err := s.deps.Ctrl.SetPeakLimit(req.PeakLimitW)
 	s.deps.CtrlMu.Unlock()
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	slog.Info("peak limit changed", "w", req.PeakLimitW)
 	writeJSON(w, 200, map[string]any{"status": "ok", "peak_limit_w": req.PeakLimitW})
 }
 
