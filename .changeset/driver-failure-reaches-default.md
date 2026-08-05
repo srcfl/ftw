@@ -1,0 +1,5 @@
+---
+"ftw": patch
+---
+
+A driver that cannot actuate now receives its autonomous default mode, and leaves dispatch and the plan while it can't. Two cases were missed before. A driver that reports a device fault — a Ferroamp EnergyHub in Fault Mode with its relays open, a Pixii mid-calibration — kept polling, so the staleness watchdog saw nothing wrong and never asked it for its safe state; it was dropped from dispatch and held its last setpoint indefinitely. And a driver that answered every poll but rejected every command stayed marked healthy, so it stayed in the dispatch set and in the MPC fleet, and the power the plan counted on but never got became grid import instead. Three refused commands in a row now take a driver out of control until it accepts one again, with one command let through every five minutes so a device that recovers on its own comes back without an operator. Both cases send the driver's own declared default exactly once per transition, and both re-arm on recovery. `observe_only` drivers still receive no command of any kind.

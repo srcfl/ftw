@@ -545,6 +545,18 @@ func main() {
 		}
 	}
 	defer reg.ShutdownAll()
+	batteryIdentity := func(name string) (string, bool) {
+		return runningDeviceID(reg, name)
+	}
+	ctrl.BatteryHoldTargetValid = func(name, deviceID string) bool {
+		currentID, ok := batteryIdentity(name)
+		if !ok || currentID != deviceID {
+			return false
+		}
+		health := tel.DriverHealth(name)
+		reading := tel.Get(name, telemetry.DerBattery)
+		return health != nil && health.IsOnline() && reading != nil && reading.SoC != nil
+	}
 
 	// ---- Identity bootstrap ----
 	// Drivers report make/serial inside driver_init via host.set_make / set_sn,
@@ -1468,6 +1480,13 @@ func main() {
 		}()
 	}
 
+	// One tracker for every dispatch path: storage, PV curtail and EV all
+	// report refused commands here, and it walks a driver that cannot
+	// actuate to its declared default. Built before the loadpoint
+	// controller because that controller needs it. See
+	// driver_failure_default.go.
+	actuation := newDriverActuationTracker(tel)
+
 	// ---- EV loadpoint controller ----
 	// loadpoint.Controller owns per-tick EV dispatch, including the
 	// energy-allocation contract, snapping and phase transitions.
@@ -1516,6 +1535,12 @@ func main() {
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// A charger that answers every poll and refuses every setpoint is
+		// the storage bug of #800 on the EV wire: it holds its last
+		// current and the plan keeps counting the load. Only the periodic
+		// ev_set_current is reported — see loadpoint.DispatchOutcomeFunc
+		// for the sends that are deliberately not.
+		lpController.SetDispatchOutcome(actuation.recordCommandOutcome)
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.
@@ -2076,7 +2101,8 @@ func main() {
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
-		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
+		BatteryIdentity: batteryIdentity,
+		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,
@@ -2331,6 +2357,9 @@ func main() {
 	// the configreload watcher updates those fields directly, so a
 	// startup snapshot here would go stale on the first hot-reload.
 	dtS := float64(cfg.Site.ControlIntervalS)
+	// Every dispatch command carries its own deadline — see
+	// driverCommandTimeout for the stall it bounds.
+	driverCmdTimeout := driverCommandTimeout(controlInterval)
 
 	// Graceful shutdown
 	sigc := make(chan os.Signal, 1)
@@ -2442,13 +2471,22 @@ func main() {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					sendDriverDefault(ctx, reg, tr.Name, "watchdog", observeOnlySnap)
+					sendDriverDefault(ctx, srv, tr.Name, "watchdog", observeOnlySnap)
 					watchdogDefaulted[tr.Name] = struct{}{}
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
 					bus.Publish(events.DriverRecovered{Driver: tr.Name, At: time.Now()})
 				}
+			}
+			// Same law for a driver that is answering but cannot actuate,
+			// whether it says so itself or core found out by having its
+			// commands refused. Joins watchdogDefaulted so the freshness
+			// gate below doesn't send it a second default this tick. See
+			// driver_failure_default.go.
+			for _, name := range actuation.update(tickNow, observeOnlySnap) {
+				sendDriverDefault(ctx, srv, name, driverCannotActuateReason, observeOnlySnap)
+				watchdogDefaulted[name] = struct{}{}
 			}
 			// Fire a HealthTick so subscribers that track user-level
 			// thresholds (e.g. notifications) can evaluate their own
@@ -2488,7 +2526,7 @@ func main() {
 				if _, alreadyDefaulted := watchdogDefaulted[name]; alreadyDefaulted {
 					continue
 				}
-				sendDriverDefault(ctx, reg, name, freshness.Reason, observeOnlySnap)
+				sendDriverDefault(ctx, srv, name, freshness.Reason, observeOnlySnap)
 			}
 
 			// Loadpoint observation and schedule rolling stay live while the
@@ -2524,6 +2562,10 @@ func main() {
 			}
 
 			if !freshness.Allowed() {
+				// Clear before persisting: persistTelemetryTick snapshots
+				// ctrl, so the stored tick has to show the hold already
+				// released rather than one the blocked tick never executed.
+				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
 				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
@@ -2649,9 +2691,7 @@ func main() {
 					continue
 				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
-				if err := reg.Send(ctx, t.Driver, payload); err != nil {
-					slog.Warn("driver send", "name", t.Driver, "err", err)
-				}
+				actuation.dispatchCommand(ctx, reg, "driver send", t.Driver, payload, driverCmdTimeout, tickNow)
 			}
 
 			// ---- PV curtailment dispatch ----
@@ -2665,22 +2705,9 @@ func main() {
 			ctrlMu.Lock()
 			curtailTargets := control.ComputePVCurtail(ctrl, tel)
 			ctrlMu.Unlock()
-			for _, c := range curtailTargets {
-				var payload []byte
-				if c.LimitW > 0 {
-					payload, _ = json.Marshal(map[string]any{
-						"action":  "curtail",
-						"power_w": c.LimitW,
-					})
-				} else {
-					payload, _ = json.Marshal(map[string]any{
-						"action": "curtail_disable",
-					})
-				}
-				if err := reg.Send(ctx, c.Driver, payload); err != nil {
-					slog.Warn("pv curtail send", "name", c.Driver, "err", err)
-				}
-			}
+			// The cap is a dispatch command and its outcome is counted; the
+			// release is not. See pv_curtail_dispatch.go.
+			dispatchPVCurtail(ctx, reg, actuation, curtailTargets, driverCmdTimeout, tickNow)
 
 			// LP dispatch ran at the top of this tick — see the
 			// "EV dispatch first" block above.
@@ -2965,15 +2992,37 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 	}
 }
 
+func runningDeviceID(reg *drivers.Registry, name string) (string, bool) {
+	if reg == nil || name == "" {
+		return "", false
+	}
+	env := reg.Env(name)
+	if env == nil {
+		return "", false
+	}
+	makeName, serial, mac, endpoint := env.FullIdentity()
+	id := state.ResolveDeviceID(makeName, serial, mac, endpoint)
+	return id, id != ""
+}
+
+func clearBatteryManualHoldForDispatchBlock(ctrl *control.State, ctrlMu *sync.Mutex) {
+	if ctrl == nil || ctrlMu == nil {
+		return
+	}
+	ctrlMu.Lock()
+	ctrl.ClearBatteryManualHold()
+	ctrlMu.Unlock()
+}
+
 const driverDefaultTimeout = 2 * time.Second
 
-func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string, observeOnly map[string]bool) {
+func sendDriverDefault(ctx context.Context, srv *api.Server, name, reason string, observeOnly map[string]bool) {
 	if observeOnly[name] {
 		return
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
 	defer cancel()
-	if err := reg.SendDefault(cmdCtx, name); err != nil {
+	if err := srv.SendDriverDefault(cmdCtx, name); err != nil {
 		slog.Warn("driver default command failed",
 			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
 	}

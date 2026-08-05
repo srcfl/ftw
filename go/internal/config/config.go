@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
@@ -1904,8 +1906,51 @@ func (c *Config) SiteMeterDriver() string {
 	return ""
 }
 
-// SaveAtomic writes config to disk via tmp-file + rename. Safe from partial writes.
+// configFileMode is owner-only because config.yaml carries MQTT passwords,
+// API keys and OAuth refresh tokens. Rename replaces the destination inode, so
+// whatever mode the temp file has is the mode the saved config ends up with.
+const configFileMode os.FileMode = 0o600
+
+// saveMu serializes config saves. The settings handlers do not hold a write
+// lock across a save, so two overlapping requests would otherwise both write
+// the shared temp path and rename half of each other's bytes over config.yaml.
+var saveMu sync.Mutex
+
+// durableWriter holds the two sync calls that make a save survive power loss.
+// They are fields so a test can prove the ordering and force a sync failure;
+// production always uses defaultDurableWriter.
+type durableWriter struct {
+	syncFile func(*os.File) error
+	syncDir  func(string) error
+}
+
+var defaultDurableWriter = durableWriter{
+	syncFile: (*os.File).Sync,
+	syncDir:  syncDir,
+}
+
+// syncDir fsyncs a directory so a completed rename survives power loss.
+// Best-effort on platforms where directories can't be fsynced (Windows).
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
+	return nil
+}
+
+// SaveAtomic writes config to disk via tmp-file + rename. Safe from partial
+// writes and from power loss: the temp file is fsynced before the rename and
+// the containing directory is fsynced after it.
 func SaveAtomic(path string, c *Config) error {
+	return saveAtomic(defaultDurableWriter, path, c)
+}
+
+func saveAtomic(w durableWriter, path string, c *Config) error {
 	// Driver paths are resolved to absolute-ish paths at Load() time.
 	// Convert them back to config-relative before writing so that
 	// repeated save cycles don't accumulate extra "../" prefixes.
@@ -1923,11 +1968,50 @@ func SaveAtomic(path string, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("yaml marshal: %w", err)
 	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	// Clear any temp left by an interrupted save, then create with O_EXCL.
+	// OpenFile only applies the mode when it creates the file, so reusing a
+	// stale 0644 temp would hand the secrets in config.yaml to every user on
+	// the box; O_EXCL also refuses to follow a symlink planted at that path.
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear stale tmp: %w", err)
+	}
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, configFileMode)
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("write tmp: %w", err)
 	}
-	return os.Rename(tmp, path)
+	// fsync before rename: a rename is only atomic for bytes that have already
+	// reached the disk. Without this, a power cut mid-save can publish a
+	// truncated or zero-length config.yaml — the file the gateway boots from,
+	// on a device that is expected to come back up unattended.
+	if err := w.syncFile(f); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename tmp: %w", err)
+	}
+	// fsync the directory so the rename itself survives power loss. The
+	// caller's contract is "the config is now saved", so this failure is
+	// reported rather than swallowed.
+	if err := w.syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync config dir: %w", err)
+	}
+	return nil
 }
 
 func relDriverPath(baseDir, p string) string {

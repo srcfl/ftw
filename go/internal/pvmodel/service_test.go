@@ -1,7 +1,6 @@
 package pvmodel
 
 import (
-	"encoding/json"
 	"math"
 	"path/filepath"
 	"testing"
@@ -36,10 +35,7 @@ func TestResetPersistsSurvivesRestart(t *testing.T) {
 	if !ok || js == "" {
 		t.Fatal("trained model not persisted")
 	}
-	var trained Model
-	if err := json.Unmarshal([]byte(js), &trained); err != nil {
-		t.Fatal(err)
-	}
+	trained := storedModel(t, js)
 	if trained.Samples != 200 {
 		t.Fatalf("expected 200 samples in stored model, got %d", trained.Samples)
 	}
@@ -52,10 +48,7 @@ func TestResetPersistsSurvivesRestart(t *testing.T) {
 	if !ok || js2 == "" {
 		t.Fatal("reset model not persisted")
 	}
-	var reset Model
-	if err := json.Unmarshal([]byte(js2), &reset); err != nil {
-		t.Fatal(err)
-	}
+	reset := storedModel(t, js2)
 	if reset.Samples != 0 {
 		t.Fatalf("expected 0 samples after reset, got %d", reset.Samples)
 	}

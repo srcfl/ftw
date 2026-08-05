@@ -52,3 +52,13 @@ overrides are machine-specific and untracked.
 `bin/`, `dist/`, `artifacts/`, local databases, caches, `node_modules/`
 and `optimizer/.venv/` are disposable and ignored. Do not treat generated
 output or agent plans as project documentation.
+
+`drivers/*.lua` is ignored too: it is a snapshot of the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](../drivers/BUNDLED_SOURCE.json), fetched, never
+authored here. A fresh clone or `git worktree` therefore starts without either
+it or the virtual environment, and the first `make test` builds both. There is
+no separate setup step. Later runs cost nothing.
+
+The optimizer needs Python 3.11 or newer. `make` picks an interpreter that
+qualifies, overridable with `PYTHON=`, and falls back to `uv` — optional, used
+only when the machine has no suitable Python of its own.

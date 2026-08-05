@@ -58,13 +58,24 @@ help:
 drivers:
 	bash scripts/sync-bundled-drivers.sh
 
-# Cheap enough to run before every test invocation, and it costs no network.
-# Fetching here instead would put a remote call in the inner loop.
+# Cheap enough to run before every test invocation: when the snapshot is on
+# disk this costs one ls and no network, which is every run after the first.
+#
+# When it is not on disk the answer is to fetch it, not to stop and explain
+# how. A fresh clone or worktree has an empty drivers/ -- they are gitignored
+# -- and telling four people in a row to run one specific command is a worse
+# use of their afternoon than running it for them. `go test` already downloads
+# its modules on a fresh checkout; this is the same bargain, once.
 drivers-present:
 	@ls drivers/*.lua >/dev/null 2>&1 || { \
-	  echo "drivers/ has no .lua files. Run 'make drivers' to fetch the" >&2; \
-	  echo "snapshot pinned in drivers/BUNDLED_SOURCE.json." >&2; \
-	  exit 1; }
+	  echo "drivers/ is empty; fetching the snapshot pinned in drivers/BUNDLED_SOURCE.json"; \
+	  $(MAKE) --no-print-directory drivers || { \
+	    echo "" >&2; \
+	    echo "Could not fetch the bundled drivers. They come from" >&2; \
+	    echo "srcfl/device-drivers over the network and are not in git, so this" >&2; \
+	    echo "needs curl, jq and a route out. Fix that and run 'make drivers'," >&2; \
+	    echo "or copy drivers/*.lua from a checkout that already has them." >&2; \
+	    exit 1; }; }
 
 # ---- Testing ----
 
@@ -78,9 +89,11 @@ test: optimizer/.venv/.installed drivers-present
 	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./internal/mpc \
 		-run 'TestExternalOptimizer(EndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$$'
 
+# The interpreter is chosen in the script, not here: the optimizer needs
+# Python 3.11+ and PEP 660, and the python3 macOS ships is 3.9 with pip 21.2.
+# PYTHON still overrides the choice.
 optimizer-install:
-	$(PYTHON) -m venv optimizer/.venv
-	optimizer/.venv/bin/pip install -e 'optimizer[test]'
+	PYTHON="$(PYTHON)" bash scripts/optimizer-venv.sh
 	@touch optimizer/.venv/.installed
 
 optimizer-test: optimizer/.venv/.installed

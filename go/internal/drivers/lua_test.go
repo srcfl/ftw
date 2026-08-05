@@ -117,6 +117,44 @@ end
 	}
 }
 
+func TestLuaLegacyCommandHonorsContextAndDefaultCanRunAfterCancel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "loop.lua")
+	src := `
+function driver_command(action, w, cmd)
+    host.emit_metric("command_side_effect", 1)
+    while true do end
+end
+function driver_default_mode()
+    host.emit_metric("default_called", 1)
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	d, err := NewLuaDriver(path, NewHostEnv("loop", tel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err = d.Command(ctx, []byte(`{"action":"set_offset","value":2}`))
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("cancellable legacy command error = %v, want context deadline exceeded", err)
+	}
+	if got, _, ok := tel.LatestMetric("loop", "command_side_effect"); !ok || got != 1 {
+		t.Fatalf("command side effect metric = %v/%v, want 1", got, ok)
+	}
+	if err := d.DefaultModeContext(context.Background()); err != nil {
+		t.Fatalf("default after cancelled command: %v", err)
+	}
+	if got, _, ok := tel.LatestMetric("loop", "default_called"); !ok || got != 1 {
+		t.Fatalf("default metric = %v/%v, want 1", got, ok)
+	}
+}
+
 type luaKindTestModbus struct {
 	called bool
 }

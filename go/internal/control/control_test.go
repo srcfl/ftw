@@ -262,6 +262,38 @@ func TestDeviceFaultExcludesBatteryAndReallocates(t *testing.T) {
 	}
 }
 
+// Same exclusion, reached from the other side: the driver reports itself
+// healthy but has rejected the commands core sent it. Before, it kept
+// Status=ok and stayed in the dispatch set, so the plan went on counting on
+// power it never delivered and the shortfall became grid import.
+func TestCommandFaultExcludesBatteryAndReallocates(t *testing.T) {
+	store := seedStore(3000, []struct { // site importing 3 kW
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
+	})
+	store.SetDriverCommandFault("ferroamp", true, "modbus write refused")
+
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	var sungrow float64
+	sawSungrow := false
+	for _, tg := range ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600}), 11040) {
+		if tg.Driver == "ferroamp" {
+			t.Errorf("a battery that refuses commands must NOT get a dispatch target, got %.0f W", tg.TargetW)
+		}
+		if tg.Driver == "sungrow" {
+			sungrow = tg.TargetW
+			sawSungrow = true
+		}
+	}
+	if !sawSungrow || sungrow >= 0 {
+		t.Errorf("sungrow should cover the load alone (negative target), got saw=%v %.0f W", sawSungrow, sungrow)
+	}
+}
+
 func TestChargeModeRespectsFuseGuard(t *testing.T) {
 	store := seedStore(10000, []struct {
 		name          string
@@ -4627,6 +4659,108 @@ func TestBatteryManualHoldBypassesHoldoff(t *testing.T) {
 	}
 	if math.Abs(targets[0].TargetW-1500) > 1 {
 		t.Errorf("got %f, want 1500", targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldScopedPinsTargetAndStopsSiblingBeforeSlew(t *testing.T) {
+	store := seedStore(5000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"bat_a", 3000, 0.5},
+		{"bat_b", 2000, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.SlewEnabled = true
+	st.SlewRateW = 500
+	st.BatteryHoldTargetValid = func(driver, deviceID string) bool {
+		return driver == "bat_a" && deviceID == "maker:serial-a"
+	}
+	st.SetBatteryManualHold(BatteryManualHold{
+		Driver: "bat_a", DeviceID: "maker:serial-a", PowerW: 3000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000, "bat_b": 10000}), 100000)
+	byDriver := map[string]float64{}
+	for _, target := range targets {
+		byDriver[target.Driver] = target.TargetW
+	}
+	if math.Abs(byDriver["bat_a"]-3000) > 1 || math.Abs(byDriver["bat_b"]) > 1 {
+		t.Fatalf("scoped targets = %+v, want bat_a=3000 bat_b=0", byDriver)
+	}
+}
+
+func TestBatteryManualHoldScopedClearsWhenTargetIsNoLongerSafe(t *testing.T) {
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat_a", 0, 0.5}})
+	st := NewState(0, 50, "ferroamp")
+	valid := false
+	st.BatteryHoldTargetValid = func(string, string) bool { return valid }
+	st.SetBatteryManualHold(BatteryManualHold{
+		Driver: "bat_a", DeviceID: "maker:serial-a", PowerW: 3000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000}), 100000)
+	if _, active := st.GetBatteryManualHold(time.Now()); active {
+		t.Fatal("unsafe target left scoped hold active")
+	}
+	valid = true
+	ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000}), 100000)
+	if _, active := st.GetBatteryManualHold(time.Now()); active {
+		t.Fatal("cleared scoped hold resumed after target recovered")
+	}
+}
+
+func TestBatteryManualHoldScopedClearsWhenHardwareIdentityChanges(t *testing.T) {
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat_a", 0, 0.5}})
+	st := NewState(0, 50, "ferroamp")
+	currentDeviceID := "maker:serial-b"
+	st.BatteryHoldTargetValid = func(driver, deviceID string) bool {
+		return driver == "bat_a" && deviceID == currentDeviceID
+	}
+	st.SetBatteryManualHold(BatteryManualHold{
+		Driver: "bat_a", DeviceID: "maker:serial-a", PowerW: 3000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+
+	ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000}), 100000)
+
+	if _, active := st.GetBatteryManualHold(time.Now()); active {
+		t.Fatal("driver name moved the scoped hold to different hardware")
+	}
+}
+
+func TestBatteryManualHoldScopedStillUsesCoreClamps(t *testing.T) {
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat_a", 0, 0.2}})
+	st := NewState(0, 50, "ferroamp")
+	st.SlewEnabled = false
+	st.DriverLimits = map[string]PowerLimits{"bat_a": {MaxChargeW: 1000, MaxDischargeW: 1000}}
+	st.BatteryHoldTargetValid = func(string, string) bool { return true }
+	st.SetBatteryManualHold(BatteryManualHold{
+		Driver: "bat_a", DeviceID: "maker:serial-a", PowerW: 3000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000}), 100000)
+	if len(targets) != 1 || math.Abs(targets[0].TargetW-1000) > 1 {
+		t.Fatalf("cap targets = %+v, want bat_a=1000", targets)
+	}
+
+	st.BatteryBoostReserveSoC = 0.3
+	st.SetBatteryManualHold(BatteryManualHold{
+		Driver: "bat_a", DeviceID: "maker:serial-a", PowerW: -1000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	targets = ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000}), 100000)
+	if len(targets) != 1 || math.Abs(targets[0].TargetW) > 1 {
+		t.Fatalf("reserve targets = %+v, want bat_a=0", targets)
 	}
 }
 

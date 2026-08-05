@@ -36,7 +36,26 @@ type metricEntry struct {
 }
 
 // internCache holds the in-memory id↔name maps for one Store.
+//
+// Two locks, taken in this order — allocMu first, mu second, never the
+// reverse:
+//
+//   - mu guards the maps. It is a memory-only lock and must never be held
+//     across disk I/O. Allocation used to hold it exclusively across the
+//     INSERT, so on a slow SD card the first sample of a new metric — sent
+//     from inside the five-second control tick — parked every API reader
+//     (MetricsCatalog, MetricNames, DriverNames, LoadSeries, LatestSample)
+//     until SQLite committed. That is the 2026-07-16 prune hazard, expressed
+//     as a lock instead of a channel.
+//   - allocMu serializes the disk half: one allocator at a time runs its
+//     statement and then publishes the id. Readers never take it, so a stuck
+//     write cannot reach them. It also keeps the row and the cached entry in
+//     step when two callers relabel a metric's unit at once, and lets
+//     hydrate swap in freshly scanned maps without dropping an id allocated
+//     meanwhile.
 type internCache struct {
+	allocMu sync.Mutex
+
 	mu      sync.RWMutex
 	drivers map[string]int64
 	metrics map[string]metricEntry
@@ -51,13 +70,23 @@ func newInternCache() *internCache {
 }
 
 // hydrate loads the existing id mappings from disk. Idempotent.
+//
+// The two table scans run with no map lock held; readers see the old (empty)
+// maps until the finished result is swapped in. allocMu keeps an allocation
+// from publishing an id between the scan and the swap, which would otherwise
+// be thrown away.
 func (s *Store) hydrateIntern() error {
 	ts := s.ts
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if ts.loaded {
+	if ts.isLoaded() {
 		return nil
 	}
+	ts.allocMu.Lock()
+	defer ts.allocMu.Unlock()
+	if ts.isLoaded() {
+		return nil
+	}
+
+	drivers := make(map[string]int64)
 	rows, err := s.db.Query(`SELECT id, name FROM ts_drivers`)
 	if err != nil {
 		return err
@@ -69,9 +98,14 @@ func (s *Store) hydrateIntern() error {
 			rows.Close()
 			return err
 		}
-		ts.drivers[name] = id
+		drivers[name] = id
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	metrics := make(map[string]metricEntry)
 	rows, err = s.db.Query(`SELECT id, name, COALESCE(unit, '') FROM ts_metrics`)
 	if err != nil {
 		return err
@@ -83,72 +117,109 @@ func (s *Store) hydrateIntern() error {
 			rows.Close()
 			return err
 		}
-		ts.metrics[name] = metricEntry{id: id, unit: unit}
+		metrics[name] = metricEntry{id: id, unit: unit}
 	}
 	rows.Close()
-	ts.loaded = true
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	ts.mu.Lock()
+	ts.drivers, ts.metrics, ts.loaded = drivers, metrics, true
+	ts.mu.Unlock()
 	return nil
 }
 
+func (c *internCache) isLoaded() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.loaded
+}
+
 // driverID returns the id for a driver name, allocating one on first use.
-// Holds the intern mutex for the lookup; safe for concurrent calls.
+// Safe for concurrent calls: the cached name answers under a read lock, and
+// allocation writes to disk with no map lock held (see internCache).
 func (s *Store) driverID(name string) (int64, error) {
 	ts := s.ts
 	ts.mu.RLock()
-	if id, ok := ts.drivers[name]; ok {
-		ts.mu.RUnlock()
-		return id, nil
-	}
+	id, ok := ts.drivers[name]
 	ts.mu.RUnlock()
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if id, ok := ts.drivers[name]; ok {
+	if ok {
 		return id, nil
 	}
-	res, err := s.db.Exec(`INSERT INTO ts_drivers (name) VALUES (?)`, name)
-	if err != nil {
+
+	ts.allocMu.Lock()
+	defer ts.allocMu.Unlock()
+	ts.mu.RLock()
+	id, ok = ts.drivers[name]
+	ts.mu.RUnlock()
+	if ok {
+		return id, nil
+	}
+
+	// ts_drivers.name is UNIQUE, so a row left by an earlier process (or by
+	// a caller that raced us before hydrate finished) resolves to the same
+	// id rather than failing the whole sample batch.
+	if _, err := s.db.Exec(
+		`INSERT INTO ts_drivers (name) VALUES (?) ON CONFLICT(name) DO NOTHING`, name,
+	); err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
+	if err := s.db.QueryRow(`SELECT id FROM ts_drivers WHERE name = ?`, name).Scan(&id); err != nil {
 		return 0, err
 	}
+
+	ts.mu.Lock()
 	ts.drivers[name] = id
+	ts.mu.Unlock()
 	return id, nil
 }
 
 // metricID returns the id for a metric name, allocating one on first use.
 // A non-empty unit is persisted the first time it is seen (the unit column
 // used to stay NULL forever — units only lived in the in-memory telemetry
-// cache, so the catalog lost its labels on every restart).
+// cache, so the catalog lost its labels on every restart), and a later
+// non-empty unit relabels the metric.
+//
+// Same locking contract as driverID: no disk write under the map lock.
 func (s *Store) metricID(name, unit string) (int64, error) {
 	ts := s.ts
 	ts.mu.RLock()
-	if m, ok := ts.metrics[name]; ok && (unit == "" || m.unit == unit) {
-		ts.mu.RUnlock()
-		return m.id, nil
-	}
+	m, ok := ts.metrics[name]
 	ts.mu.RUnlock()
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	if m, ok := ts.metrics[name]; ok {
-		if unit != "" && m.unit != unit {
-			if _, err := s.db.Exec(`UPDATE ts_metrics SET unit = ? WHERE id = ?`, unit, m.id); err != nil {
-				return 0, err
-			}
-			ts.metrics[name] = metricEntry{id: m.id, unit: unit}
-		}
+	if ok && (unit == "" || m.unit == unit) {
 		return m.id, nil
 	}
-	res, err := s.db.Exec(`INSERT INTO ts_metrics (name, unit) VALUES (?, NULLIF(?, ''))`, name, unit)
-	if err != nil {
+
+	ts.allocMu.Lock()
+	defer ts.allocMu.Unlock()
+	ts.mu.RLock()
+	m, ok = ts.metrics[name]
+	ts.mu.RUnlock()
+	if ok && (unit == "" || m.unit == unit) {
+		return m.id, nil
+	}
+
+	// One statement covers both jobs: allocate the row, or relabel an
+	// existing one once the driver supplies a unit. An empty unit never
+	// erases a label already stored.
+	if _, err := s.db.Exec(`INSERT INTO ts_metrics (name, unit) VALUES (?, NULLIF(?, ''))
+		ON CONFLICT(name) DO UPDATE SET unit = COALESCE(NULLIF(excluded.unit, ''), ts_metrics.unit)`,
+		name, unit,
+	); err != nil {
 		return 0, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
+	var id int64
+	var stored string
+	if err := s.db.QueryRow(
+		`SELECT id, COALESCE(unit, '') FROM ts_metrics WHERE name = ?`, name,
+	).Scan(&id, &stored); err != nil {
 		return 0, err
 	}
-	ts.metrics[name] = metricEntry{id: id, unit: unit}
+
+	ts.mu.Lock()
+	ts.metrics[name] = metricEntry{id: id, unit: stored}
+	ts.mu.Unlock()
 	return id, nil
 }
 

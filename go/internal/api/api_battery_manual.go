@@ -6,13 +6,13 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// Battery manual-hold endpoint. Pins the aggregate battery setpoint to
-// a fixed power (charge / discharge / idle) for a bounded duration,
-// bypassing both the active control mode and the MPC. SoC clamps,
-// per-driver capability caps, slew, and the site fuse guard still
-// apply on the resulting target — operators cannot override safety.
+// Battery manual-hold endpoint. Pins the pool or one named battery to
+// a fixed power for a bounded duration. A scoped request binds the
+// runtime driver name to its current hardware identity. Core SoC,
+// power, slew, reserve, and fuse limits still apply.
 //
 // Sibling of api_loadpoint_manual.go and registered alongside it in
 // api.go's routes() table.
@@ -25,6 +25,7 @@ type batteryManualHoldRequest struct {
 	Direction string  `json:"direction"`
 	PowerW    float64 `json:"power_w"`
 	HoldS     int     `json:"hold_s"`
+	Driver    string  `json:"driver,omitempty"`
 }
 
 // batteryManualHoldResponse mirrors the active hold so the operator
@@ -33,6 +34,7 @@ type batteryManualHoldResponse struct {
 	Active      bool    `json:"active"`
 	Direction   string  `json:"direction,omitempty"`
 	PowerW      float64 `json:"power_w,omitempty"`
+	Driver      string  `json:"driver,omitempty"`
 	ExpiresAtMs int64   `json:"expires_at_ms,omitempty"`
 }
 
@@ -70,9 +72,20 @@ func (s *Server) handleBatteryManualHold(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	deviceID := ""
+	if req.Driver != "" {
+		var status int
+		deviceID, status, err = s.resolveBatteryManualHoldTarget(req.Driver)
+		if err != nil {
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+	}
 
 	expires := time.Now().Add(time.Duration(req.HoldS) * time.Second)
 	hold := control.BatteryManualHold{
+		Driver:    req.Driver,
+		DeviceID:  deviceID,
 		PowerW:    signed,
 		ExpiresAt: expires,
 	}
@@ -85,8 +98,34 @@ func (s *Server) handleBatteryManualHold(w http.ResponseWriter, r *http.Request)
 		"power_w", req.PowerW,
 		"signed_w", signed,
 		"hold_s", req.HoldS,
+		"driver", req.Driver,
 	)
 	writeJSON(w, 200, batteryManualHoldResponseFrom(hold, true))
+}
+
+func (s *Server) resolveBatteryManualHoldTarget(driver string) (string, int, error) {
+	if s.deps.CapMu == nil || s.deps.Capacities == nil {
+		return "", http.StatusServiceUnavailable, apiError("battery control inventory not available")
+	}
+	s.deps.CapMu.RLock()
+	_, known := s.deps.Capacities[driver]
+	s.deps.CapMu.RUnlock()
+	if !known {
+		return "", http.StatusBadRequest, apiError("unknown controllable battery driver")
+	}
+	if s.deps.Tel == nil || s.deps.BatteryIdentity == nil {
+		return "", http.StatusServiceUnavailable, apiError("battery control state not available")
+	}
+	health := s.deps.Tel.DriverHealth(driver)
+	reading := s.deps.Tel.Get(driver, telemetry.DerBattery)
+	if health == nil || !health.IsOnline() || reading == nil || reading.SoC == nil {
+		return "", http.StatusConflict, apiError("battery driver is not ready for a scoped hold")
+	}
+	deviceID, ok := s.deps.BatteryIdentity(driver)
+	if !ok || deviceID == "" {
+		return "", http.StatusConflict, apiError("battery hardware identity is not available")
+	}
+	return deviceID, http.StatusOK, nil
 }
 
 func (s *Server) handleBatteryManualHoldClear(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +189,7 @@ func batteryManualHoldResponseFrom(h control.BatteryManualHold, active bool) bat
 		resp.Direction = "idle"
 		resp.PowerW = 0
 	}
+	resp.Driver = h.Driver
 	if !h.ExpiresAt.IsZero() {
 		resp.ExpiresAtMs = h.ExpiresAt.UnixMilli()
 	}

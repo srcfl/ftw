@@ -271,6 +271,14 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Legacy commands are allowed to write hardware before they return. Give
+	// the VM the caller's context so a cancelled request or a driver lifecycle
+	// stop can terminate a Lua loop and let the registry run the default path.
+	d.L.SetContext(ctx)
+	defer d.L.RemoveContext()
 	fn := d.L.GetGlobal("driver_command")
 	if fn == lua.LNil {
 		return nil
@@ -488,6 +496,18 @@ func containsEvidence(evidence []string, want string) bool {
 	return false
 }
 
+func (d *LuaDriver) setLuaCallContext(parent context.Context, timeout time.Duration) func() {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	d.L.SetContext(ctx)
+	return func() {
+		d.L.RemoveContext()
+		cancel()
+	}
+}
+
 func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Duration) func() {
 	if d.Env.RuntimePolicy == nil || !d.Env.RuntimePolicy.IsControlV2() {
 		return func() {}
@@ -520,7 +540,14 @@ func (d *LuaDriver) commandResult(cmd DriverCommandV1, now time.Time) DriverComm
 
 // Cleanup calls driver_cleanup() and closes the VM.
 func (d *LuaDriver) Cleanup() {
-	_ = d.call("driver_cleanup")
+	d.CleanupContext(context.Background())
+}
+
+// CleanupContext runs driver_cleanup with a bounded, cancellable VM context
+// before closing the state. The no-argument Cleanup method remains for tests
+// and direct embedders that do not have a lifecycle context.
+func (d *LuaDriver) CleanupContext(ctx context.Context) {
+	_ = d.call(ctx, "driver_cleanup")
 	d.mu.Lock()
 	d.L.Close()
 	d.mu.Unlock()
@@ -529,18 +556,36 @@ func (d *LuaDriver) Cleanup() {
 // DefaultMode calls driver_default_mode() — typically tells the device
 // to revert to autonomous self-consumption when the EMS is offline.
 func (d *LuaDriver) DefaultMode() error {
-	return d.call("driver_default_mode")
+	return d.DefaultModeContext(context.Background())
+}
+
+// DefaultModeContext calls driver_default_mode with a caller-owned context.
+// This is the safety path after an ambiguous or failed command, so it must
+// not leave a legacy Lua loop holding the VM lock forever.
+func (d *LuaDriver) DefaultModeContext(ctx context.Context) error {
+	return d.call(ctx, "driver_default_mode")
+}
+
+// hasEntrypoint reports whether the loaded driver defines a callable global.
+// Missing lifecycle hooks remain optional for reporting-only drivers, so the
+// registry uses this only when it has already established that an operator
+// control declaration makes the default hook a safety requirement.
+func (d *LuaDriver) hasEntrypoint(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.L.GetGlobal(name).(*lua.LFunction)
+	return ok
 }
 
 // call is a convenience for parameter-less void-returning lifecycle funcs.
-func (d *LuaDriver) call(name string) error {
+func (d *LuaDriver) call(ctx context.Context, name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	fn := d.L.GetGlobal(name)
 	if fn == lua.LNil {
 		return nil
 	}
-	cleanup := d.setLifecycleContext(context.Background(), 5*time.Second)
+	cleanup := d.setLuaCallContext(ctx, 5*time.Second)
 	defer cleanup()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		return err
