@@ -164,6 +164,13 @@ Drivers are plain Lua files and need no compilation. A driver declares its
 catalog metadata, lifecycle and required capabilities in one file. The Go host
 provides capability-scoped Modbus, MQTT, serial, HTTP, WebSocket and TCP access.
 
+Which devices are covered, and on what evidence, is published as a searchable
+catalog: **[Device driver catalog](https://srcfl.github.io/device-drivers/)**.
+It is generated from `srcfl/device-drivers` on every push to that repository's
+`main`, so the versions, tested models and per-target status it shows are the
+ones FTW installs. Listing is not an install claim: the page states which
+drivers have been confirmed against physical hardware and which have not.
+
 Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Send shared
 driver changes to `srcfl/device-drivers`. That repo publishes one signed,
 content-addressed asset per driver and version. FTW downloads only the chosen
@@ -199,6 +206,7 @@ metadata are the detailed reference.
 - [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)
 - [OCPP chargers (no driver needed)](docs/ocpp.md)
+- [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)
 - [CalDAV](docs/caldav-integration.md)

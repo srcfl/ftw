@@ -149,8 +149,8 @@ fi
 echo ""
 echo "==[3/5]== Preparing install directory: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/data"
-# The image runs as uid 100 / gid 101 (the `ftw` user created in the
-# alpine runtime stage — see Dockerfile). A bind-mounted host dir must
+# The image runs as uid 100 / gid 101 — a bare numeric USER, no account is
+# created in the image at all (see Dockerfile). A bind-mounted host dir must
 # match those IDs so SQLite can create state.db inside it.
 $SUDO chown -R 100:101 "$INSTALL_DIR/data"
 

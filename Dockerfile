@@ -22,8 +22,10 @@ RUN cd go && go mod download
 
 COPY go/ ./go/
 
-# Cross-compile by mapping TARGETARCH → GOARCH. CGO is off so the
-# binary is fully static and runs on alpine without glibc.
+# Cross-compile by mapping TARGETARCH → GOARCH. CGO stays off: the binary is
+# fully static, so it is the runtime's *userland* we are choosing below, not a
+# libc the binary depends on. Keeping CGO off is what lets the toolchain run
+# natively on the build platform instead of under emulation.
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=dev
@@ -36,11 +38,43 @@ RUN cd go && \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-backup ./cmd/ftw-backup
 # --- Runtime ---------------------------------------------------------------
-FROM alpine:3.22
+# Debian trixie-slim — current Debian stable (13), and the same suite as
+# Dockerfile.updater and Dockerfile.optimizer's python:3.12-slim-trixie. One
+# rootfs blob is pulled once and shared by all three images, so the extra bytes
+# over alpine are paid a single time per host rather than per image, and there
+# is one libc and one security stream to track. It also matches the Raspberry Pi
+# OS release the SD image is built from (deploy/pi-gen/config: RELEASE=trixie).
+#
+# Pinned to the codename, not `stable-slim`: a suite alias would silently jump
+# major versions on some future rebuild. The `debian base currency` workflow
+# watches for a new stable and files an issue, so the bump stays deliberate.
+#
+# glibc also means the image can run ordinary prebuilt vendor binaries, which
+# musl cannot, and ships a full userland for on-site debugging.
+FROM debian:trixie-slim
 
-# HTTPS integrations and timezone-aware price/plan windows need these at
-# runtime. BusyBox wget provides the health check without adding Python/curl.
-RUN apk add --no-cache ca-certificates tzdata
+# ca-certificates  — HTTPS integrations.
+# tzdata           — timezone-aware price/plan windows. Without a zoneinfo tree
+#                    time.Local silently degrades to UTC and mis-times plan
+#                    boundaries with no error, so this is load-bearing.
+# wget             — the HEALTHCHECK below AND ftw-updater's readiness probe,
+#                    which `docker exec`s wget in THIS image to decide whether
+#                    an update commits. Debian slim does not include wget by
+#                    default, so it must be installed explicitly; dropping it
+#                    would make every self-update fail its health gate and roll
+#                    back.
+# libnss-mdns      — resolves ".local" for glibc programs in the image (getent,
+#                    wget), so in-container debugging agrees with the
+#                    host. apt wires mdns4_minimal into /etc/nsswitch.conf on
+#                    install. At run time it forwards to avahi-daemon over
+#                    /run/avahi-daemon/socket, which must be bind-mounted; see
+#                    docs/operations.md. It does nothing for the FTW binary
+#                    itself, which is CGO_ENABLED=0 and therefore never consults
+#                    NSS — see the note on the builder stage above.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates tzdata wget libnss-mdns && \
+    rm -rf /var/lib/apt/lists/*
 
 # Image layout:
 #   /app/ftw              binary (immutable, replaced on upgrade)
@@ -79,7 +113,13 @@ EXPOSE 8080
 # with each release.
 #
 # UID note: the process runs as uid 100 / gid 101 for compatibility with
-# existing bind mounts. Named docker volumes inherit ownership from the image
+# existing bind mounts. These are deliberately NUMERIC — no account is created
+# and none is needed, which is why ENV HOME above is load-bearing. Verified on
+# this base: uid 100 and gid 101 have no passwd/group entry, so ownership simply
+# renders numerically. Do not renumber: gid 101 is what grants access to the
+# optimizer's 0660 socket, and existing installs (and every flashed SD card)
+# already own their data dir as 100:101.
+# Named docker volumes inherit ownership from the image
 # automatically and just work. For HOST BIND MOUNTS, the host
 # directory must be owned by uid 100 (or world-writable) before the
 # container starts:

@@ -1781,6 +1781,25 @@ func (s *Store) LoadPrices(zone string, sinceMs, untilMs int64) ([]PricePoint, e
 	return out, rows.Err()
 }
 
+// ClearPrices drops every cached price row and returns how many went.
+//
+// Price rows carry no currency of their own — they are minor units of
+// whichever currency was configured when they were fetched. Changing the
+// currency therefore has to empty the cache, or cost history would sum
+// öre and cent as if they were the same thing. Prices live in the
+// disposable cache DB and the next fetch refills today and tomorrow.
+func (s *Store) ClearPrices() (int64, error) {
+	res, err := s.cache.Exec(`DELETE FROM prices`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil // deletion succeeded; the count is a nicety
+	}
+	return n, nil
+}
+
 // ---- Forecasts ----
 
 // ForecastPoint is one slot's weather + derived PV estimate.

@@ -3,7 +3,7 @@
 // flows, the control loop responds to transients, commands round-trip,
 // self-tune runs, battery models learn.
 //
-// Run with:  FTW_E2E=1 go test ./go/test/e2e -timeout 120s -v
+// Run with:  FTW_E2E=1 go test ./go/test/e2e -timeout 180s -v   (or: make e2e)
 // Uses the repo's drivers/ferroamp.lua + drivers/sungrow.lua scripts.
 package e2e
 
@@ -11,8 +11,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -225,6 +227,11 @@ func setupStack(t *testing.T) *stack {
 		}
 	}()
 
+	// One physics tick before the drivers connect, so the first Modbus read and
+	// the first MQTT message have a simulated site behind them. This one stays
+	// a sleep: at this point there is no driver, no telemetry and no API to
+	// ask, so there is no condition to poll. Everything after the drivers
+	// start waits on a condition instead — see waitForStatus.
 	time.Sleep(200 * time.Millisecond)
 
 	// ---- Build cfg + open state + start drivers ----
@@ -377,24 +384,222 @@ func setupStack(t *testing.T) *stack {
 	return s
 }
 
+// waitForStatus polls /api/status until want reports true, and returns the
+// status that satisfied it.
+//
+// Nothing in this stack settles on a schedule. The control loop ticks once a
+// second, the PI output passes a slew limiter, the driver readings are
+// exponentially smoothed and the simulators run their own physics ticker, so
+// how long a change takes to show up moves with the machine. A literal sleep
+// has to be sized for the slowest runner and then costs that much on every
+// run, and it still fails as a bare "wrong value" once a runner is slower than
+// the guess. Polling the condition costs what the stack actually needs.
+//
+// timeout is a backstop, not a schedule: pick it far above the observed
+// settling time so that hitting it means the state never arrived at all. The
+// what string is what the failure says the stack was waiting for, so write it
+// as the condition itself.
+func (s *stack) waitForStatus(what string, timeout time.Duration, want func(map[string]any) bool) map[string]any {
+	s.t.Helper()
+	start := time.Now()
+	status, err := pollStatus(http.DefaultClient, s.baseURL()+"/api/status", timeout, want)
+	if err != nil {
+		s.t.Fatalf("timed out after %s waiting for %s: %v", timeout, what, err)
+	}
+	s.t.Logf("waited %s for %s", time.Since(start).Round(10*time.Millisecond), what)
+	return status
+}
+
+type statusPollError struct {
+	lastStatus     map[string]any
+	requestErrors  int
+	lastRequestErr error
+}
+
+func (e *statusPollError) Error() string {
+	if e.lastRequestErr == nil {
+		return fmt.Sprintf("last status: %s; status request errors: none", statusSummary(e.lastStatus))
+	}
+	return fmt.Sprintf("last status: %s; status request errors: %d (last: %v)",
+		statusSummary(e.lastStatus), e.requestErrors, e.lastRequestErr)
+}
+
+func pollStatus(client *http.Client, endpoint string, timeout time.Duration, want func(map[string]any) bool) (map[string]any, error) {
+	deadline := time.Now().Add(timeout)
+	var last map[string]any
+	var requestErrors int
+	var lastRequestErr error
+	for {
+		if !time.Now().Before(deadline) {
+			return nil, &statusPollError{lastStatus: last, requestErrors: requestErrors, lastRequestErr: lastRequestErr}
+		}
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		status, err := fetchStatus(ctx, client, endpoint)
+		cancel()
+		if err == nil {
+			last = status
+			if want(status) {
+				return status, nil
+			}
+		} else {
+			requestErrors++
+			lastRequestErr = err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, &statusPollError{lastStatus: last, requestErrors: requestErrors, lastRequestErr: lastRequestErr}
+		}
+		pause := 100 * time.Millisecond
+		if remaining < pause {
+			pause = remaining
+		}
+		timer := time.NewTimer(pause)
+		<-timer.C
+	}
+}
+
+func fetchStatus(ctx context.Context, client *http.Client, endpoint string) (map[string]any, error) {
+	var status map[string]any
+	if err := fetchJSON(ctx, client, endpoint, &status); err != nil {
+		return nil, err
+	}
+	return status, nil
+}
+
+func fetchJSON(ctx context.Context, client *http.Client, endpoint string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("JSON request returned %s", resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// statusSummary renders the fields a stuck wait needs in its failure message:
+// which mode the controller was in, what it saw and what it commanded.
+func statusSummary(status map[string]any) string {
+	if status == nil {
+		return "none received"
+	}
+	mode, _ := status["mode"].(string)
+	num := func(key string) float64 {
+		v, _ := status[key].(float64)
+		return v
+	}
+	dispatch := "[]"
+	if targets, ok := status["dispatch"].([]any); ok && len(targets) > 0 {
+		parts := make([]string, 0, len(targets))
+		for _, t := range targets {
+			m, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := m["driver"].(string)
+			target, _ := m["target_w"].(float64)
+			parts = append(parts, fmt.Sprintf("%s=%.0fW", name, target))
+		}
+		dispatch = "[" + strings.Join(parts, " ") + "]"
+	}
+	return fmt.Sprintf("mode=%s grid=%.0fW target=%.0fW pv=%.0fW bat=%.0fW load=%.0fW dispatch=%s",
+		mode, num("grid_w"), num("grid_target_w"), num("pv_w"), num("bat_w"), num("load_w"), dispatch)
+}
+
 func (s *stack) waitForPV(timeout time.Duration) {
 	s.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(s.baseURL() + "/api/status")
-		if err == nil {
-			var status map[string]any
-			_ = json.NewDecoder(resp.Body).Decode(&status)
-			resp.Body.Close()
-			if pv, ok := status["pv_w"].(float64); ok && pv != 0 {
-				return
-			}
-		} else if resp != nil {
-			resp.Body.Close()
-		}
-		time.Sleep(100 * time.Millisecond)
+	s.waitForStatus("pv_w telemetry to arrive from the ferroamp driver", timeout,
+		func(status map[string]any) bool {
+			pv, ok := status["pv_w"].(float64)
+			return ok && pv != 0
+		})
+}
+
+func TestPollStatusCancelsBlockedRequestAtDeadline(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, err := pollStatus(http.DefaultClient, srv.URL, 100*time.Millisecond,
+		func(map[string]any) bool { return false })
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("pollStatus returned nil error for a blocked request")
 	}
-	s.t.Fatalf("timed out after %s waiting for pv_w telemetry", timeout)
+	if elapsed > time.Second {
+		t.Fatalf("blocked status request took %s to time out", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("test server did not receive the status request")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("test server did not observe request context cancellation")
+	}
+	pollErr, ok := err.(*statusPollError)
+	if !ok {
+		t.Fatalf("error type = %T, want *statusPollError", err)
+	}
+	if pollErr.requestErrors != 1 {
+		t.Fatalf("request errors = %d, want 1", pollErr.requestErrors)
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("timeout error = %q, want context deadline summary", err)
+	}
+}
+
+func TestFetchJSONCancelsBlockedRequestAtDeadline(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	var status map[string]any
+	err := fetchJSON(ctx, http.DefaultClient, srv.URL, &status)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("fetchJSON returned nil error for a blocked request")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("blocked JSON request took %s to time out", elapsed)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("test server did not receive the JSON request")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("test server did not observe request context cancellation")
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("timeout error = %q, want context deadline error", err)
+	}
 }
 
 func (s *stack) Close() {
@@ -462,13 +667,12 @@ func closeBroker(t *testing.T, mb *mqttserver.Server, baseline int) {
 
 func (s *stack) baseURL() string { return fmt.Sprintf("http://127.0.0.1:%d", s.apiPort) }
 
+const oneShotJSONTimeout = 5 * time.Second
+
 func (s *stack) getJSON(path string, v any) {
-	resp, err := http.Get(s.baseURL() + path)
-	if err != nil {
-		s.t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), oneShotJSONTimeout)
+	defer cancel()
+	if err := fetchJSON(ctx, http.DefaultClient, s.baseURL()+path, v); err != nil {
 		s.t.Fatal(err)
 	}
 }
@@ -531,38 +735,72 @@ func TestE2E_FullStack(t *testing.T) {
 	if code := s.postJSON("/api/target", map[string]any{"grid_target_w": 3000}, nil); code != 200 {
 		t.Errorf("target POST: %d", code)
 	}
-	time.Sleep(6 * time.Second)
-	s.getJSON("/api/status", &status)
+	// Target is positive (want more import) → batteries should charge → bat > 0.
+	// The wait carries the assertion: it holds the same threshold the fixed
+	// sleep used to check once, so a controller that never charges still fails
+	// the test — it just stops costing six seconds when the controller is
+	// working.
+	status = s.waitForStatus("batteries to charge (bat_w >= 300 W) under grid_target_w=+3000",
+		30*time.Second, func(st map[string]any) bool {
+			bat, ok := st["bat_w"].(float64)
+			return ok && bat >= 300
+		})
 	bat := status["bat_w"].(float64)
 	t.Logf("after target=+3000W (want more import): bat=%.0fW (site: + = charge)", bat)
-	// Target is positive (want more import) → batteries should charge → bat > 0
-	if bat < 300 {
-		t.Errorf("expected batteries to charge (bat_w > 300), got %.0f", bat)
-	}
 
-	// Also test the opposite: target negative → batteries discharge.
-	// Longer wait because the PI integrator has to fully unwind from the
-	// previous strong-charge state + slew rate caps the reversal speed.
+	// Also test the opposite: target negative → batteries discharge. At
+	// minimum, the battery should be moving AWAY from the charging state it
+	// was in. The reversal is slow by construction — the PI integrator has to
+	// unwind from the charge state and the slew limiter caps how fast the
+	// target can cross — and how slow depends on where in the charge ramp the
+	// reading above was taken, since that is what the 500 W is measured from.
+	// Between 5 s and 15 s here on a developer machine, so the deadline is
+	// four times the worst of that: still loud, still well inside the 180 s
+	// the suite gets from `make e2e`.
 	prevBat := bat
 	s.postJSON("/api/target", map[string]any{"grid_target_w": -3000}, nil)
-	time.Sleep(12 * time.Second)
-	s.getJSON("/api/status", &status)
+	status = s.waitForStatus(
+		fmt.Sprintf("batteries to move toward discharge (bat_w < %.0f W, from %.0f W) under grid_target_w=-3000",
+			prevBat-500, prevBat),
+		60*time.Second, func(st map[string]any) bool {
+			b, ok := st["bat_w"].(float64)
+			return ok && b < prevBat-500
+		})
 	bat = status["bat_w"].(float64)
 	t.Logf("after target=-3000W (want more export): bat=%.0fW (site: − = discharge)", bat)
-	// At minimum, battery should be moving AWAY from charging state toward
-	// discharge. Full reversal takes ~15-20s with default PI tuning.
-	if bat >= prevBat-500 {
-		t.Errorf("expected bat to move meaningfully toward discharge (was %.0f, now %.0f)",
-			prevBat, bat)
-	}
 
-	// 4. Mode switching — idle should zero out dispatch
+	// 4. Mode switching — idle should drive dispatch to zero.
+	// The API handler flips the mode as soon as it returns, so reading the
+	// mode back proves nothing about dispatch. The zeros are the next
+	// control tick's work: idle commands 0 W to every battery it may
+	// command, and keeps commanding it, so the fleet stops instead of
+	// holding the setpoint the previous mode left behind. Wait for both —
+	// the mode the operator asked for, and every battery actually at zero.
+	// An empty dispatch list would be the old behaviour and is a failure.
 	s.postJSON("/api/mode", map[string]any{"mode": "idle"}, nil)
-	time.Sleep(2 * time.Second)
-	s.getJSON("/api/status", &status)
-	if m := status["mode"].(string); m != "idle" {
-		t.Errorf("mode: %s", m)
-	}
+	status = s.waitForStatus("idle mode to hold every battery at 0 W", 20*time.Second,
+		func(st map[string]any) bool {
+			if m, _ := st["mode"].(string); m != "idle" {
+				return false
+			}
+			targets, ok := st["dispatch"].([]any)
+			if !ok || len(targets) == 0 {
+				return false
+			}
+			for _, raw := range targets {
+				tg, ok := raw.(map[string]any)
+				if !ok {
+					return false
+				}
+				w, ok := tg["target_w"].(float64)
+				if !ok || math.Abs(w) > 0.01 {
+					return false
+				}
+			}
+			return true
+		})
+	t.Logf("idle: mode=%v dispatch targets=%d (all held at 0 W)",
+		status["mode"], len(status["dispatch"].([]any)))
 
 	// Back to self_consumption for subsequent tests
 	s.postJSON("/api/mode", map[string]any{"mode": "self_consumption"}, nil)

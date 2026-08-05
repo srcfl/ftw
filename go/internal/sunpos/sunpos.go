@@ -125,35 +125,120 @@ func ClearSkyW(t time.Time, lat, lon float64) float64 {
 }
 
 // POA estimates plane-of-array irradiance for one tilted panel using the
-// isotropic-sky model. Splits clear-sky horizontal irradiance into beam
-// (DNI) and diffuse (DHI) components via a simple Erbs correlation, then
-// projects each onto the panel.
+// isotropic-sky model, driven by the package's own clear-sky prior. It splits
+// that clear-sky horizontal irradiance into beam (DNI) and diffuse (DHI)
+// components with a fixed 20% diffuse fraction, then projects each onto the
+// panel. Used as the prior signal for the PV twin when no measured irradiance
+// is available.
 //
 // Returns W/m² on the panel surface; clamped to ≥ 0.
+//
+// When a data source supplies measured irradiance, prefer the two variants
+// below: POAFromComponents (GHI + DHI both known, e.g. SMHI STRÅNG params
+// 117 + 122) or POAFromGHI (only GHI known, e.g. Open-Meteo shortwave).
 func POA(t time.Time, lat, lon, panelTiltDeg, panelAzDeg float64) float64 {
+	sun := At(t, lat, lon)
+	ghi := ClearSkyW(t, lat, lon)
+	// No measured diffuse component from the clear-sky prior, so keep the
+	// historical fixed 20% diffuse fraction for this variant.
+	return POAFromComponents(sun, ghi, 0.2*ghi, panelTiltDeg, panelAzDeg)
+}
+
+// POAFromComponents projects measured global (GHI) and diffuse (DHI)
+// horizontal irradiance onto a tilted panel using the isotropic-sky model,
+// reusing AOI for the beam projection. All irradiances in W/m²; returns the
+// plane-of-array irradiance in W/m², clamped ≥ 0.
+//
+// Use this when a source gives both GHI and DHI directly (e.g. SMHI STRÅNG
+// parameters 117 + 122). When only GHI is available use POAFromGHI, which
+// estimates the diffuse split via the Erbs correlation first.
+func POAFromComponents(sun Position, ghi, dhi, panelTiltDeg, panelAzDeg float64) float64 {
+	if sun.ZenithDeg >= 90 || ghi <= 0 {
+		return 0
+	}
+	if dhi < 0 {
+		dhi = 0
+	}
+	if dhi > ghi {
+		dhi = ghi
+	}
+	tiltR := panelTiltDeg * math.Pi / 180
+	diffusePOA := dhi * (1 + math.Cos(tiltR)) / 2 // isotropic sky dome
+	aoi := AOI(sun, panelTiltDeg, panelAzDeg)
+	if aoi > 90 {
+		// Sun behind the panel — only diffuse reaches the surface.
+		return diffusePOA
+	}
+	cosZ := math.Cos(sun.ZenithDeg * math.Pi / 180)
+	if cosZ < 0.01 {
+		// Sun on the horizon: beam projection is ill-conditioned
+		// (divide-by-~0) and diffuse dominates anyway.
+		return diffusePOA
+	}
+	dni := (ghi - dhi) / cosZ
+	beamPOA := dni * math.Cos(aoi*math.Pi/180)
+	out := beamPOA + diffusePOA
+	if out < 0 {
+		out = 0
+	}
+	return out
+}
+
+// POAFromGHI projects a measured/forecast global horizontal irradiance (GHI,
+// W/m²) onto a tilted panel when no diffuse component is available. It
+// estimates the diffuse fraction from the hourly clearness index via the Erbs
+// et al. (1982) correlation, then delegates to POAFromComponents.
+//
+// Use this for radiation providers that expose shortwave/GHI but not diffuse
+// (e.g. Open-Meteo shortwave_radiation, or SMHI STRÅNG global-only windows).
+func POAFromGHI(t time.Time, lat, lon, ghi, panelTiltDeg, panelAzDeg float64) float64 {
+	if math.IsNaN(ghi) || math.IsInf(ghi, 0) || ghi <= 0 {
+		return 0
+	}
 	sun := At(t, lat, lon)
 	if sun.ZenithDeg >= 90 {
 		return 0
 	}
-	ghi := ClearSkyW(t, lat, lon)
-	if ghi <= 0 {
+	cosZ := math.Cos(sun.ZenithDeg * math.Pi / 180)
+	i0h := extraterrestrialHorizontalW(t, cosZ)
+	kt := 0.0
+	if i0h > 0 {
+		kt = ghi / i0h
+	}
+	dhi := ghi * ErbsDiffuseFraction(kt)
+	return POAFromComponents(sun, ghi, dhi, panelTiltDeg, panelAzDeg)
+}
+
+// ErbsDiffuseFraction returns the diffuse fraction (DHI/GHI) for an hourly
+// clearness index kt, per Erbs, Klein & Duffie (1982). Result is in
+// [0.165, 1]: overcast skies (low kt) are almost entirely diffuse, clear
+// skies (high kt) settle near 16.5% diffuse.
+func ErbsDiffuseFraction(kt float64) float64 {
+	switch {
+	case kt <= 0:
+		return 1
+	case kt <= 0.22:
+		return 1 - 0.09*kt
+	case kt <= 0.80:
+		return 0.9511 - 0.1604*kt + 4.388*kt*kt - 16.638*kt*kt*kt + 12.336*kt*kt*kt*kt
+	default:
+		return 0.165
+	}
+}
+
+// extraterrestrialHorizontalW returns top-of-atmosphere irradiance on a
+// horizontal surface (W/m²) at time t for a solar cosine-zenith cosZ. Used as
+// the denominator of the clearness index. Returns 0 when the sun is at/below
+// the horizon.
+func extraterrestrialHorizontalW(t time.Time, cosZ float64) float64 {
+	if cosZ <= 0 {
 		return 0
 	}
-	// Erbs et al. (1982) clearness-based diffuse fraction. We don't have
-	// real GHI measurements, so kt comes from our own clear-sky model →
-	// always ~0.7-0.75 → diffuse ratio ~0.2. Conservative.
-	kd := 0.2
-	dhi := ghi * kd
-	dni := (ghi - dhi) / math.Cos(sun.ZenithDeg*math.Pi/180)
-
-	aoi := AOI(sun, panelTiltDeg, panelAzDeg)
-	if aoi > 90 {
-		// Sun behind panel — only diffuse counts.
-		return dhi * (1 + math.Cos(panelTiltDeg*math.Pi/180)) / 2
-	}
-	beamPOA := dni * math.Cos(aoi*math.Pi/180)
-	diffusePOA := dhi * (1 + math.Cos(panelTiltDeg*math.Pi/180)) / 2
-	out := beamPOA + diffusePOA
-	if out < 0 { out = 0 }
-	return out
+	doy := float64(t.UTC().YearDay())
+	gamma := 2 * math.Pi * (doy - 1) / 365
+	e0 := 1.000110 +
+		0.034221*math.Cos(gamma) + 0.001280*math.Sin(gamma) +
+		0.000719*math.Cos(2*gamma) + 0.000077*math.Sin(2*gamma)
+	const i0 = 1361.0 // solar constant W/m²
+	return i0 * e0 * cosZ
 }

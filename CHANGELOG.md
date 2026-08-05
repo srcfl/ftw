@@ -1,5 +1,429 @@
 # Changelog
 
+## 1.16.1
+
+### Patch Changes
+
+- 65cad56: Idle mode now stops the batteries instead of stopping the commands.
+
+  Selecting idle used to issue no command at all. A battery holds the last
+  setpoint it accepted until it is given another one, so switching to idle while
+  a battery ran at 5 kW left it running at 5 kW, and what happened after that was
+  the vendor's decision rather than ours: a Ferroamp EnergyHub's forced mode
+  expires, and on 2026-06-10 one reverted to its own behaviour and charged 2.6 kW
+  from the grid while FTW believed it was idling, while a Sungrow holds until
+  told otherwise. Idle now commands 0 W to every battery it may command and
+  re-sends it on every control tick, so the hold is ours and cannot decay.
+
+  The mode key stays `idle` — the `/api/modes` and Home Assistant contract is
+  unchanged, and so is every automation built on it. The button is now labelled
+  "Stop batteries", and its tooltip says what the mode does: the fuse-saver still
+  overrides the hold and discharges a battery when the site is about to trip its
+  main fuse, and EV charging and PV curtailment are unaffected and keep their own
+  controls. To leave a battery to another controller entirely, use the per-driver
+  `observe_only` setting, which excludes it from dispatch altogether.
+
+## 1.16.0
+
+### Minor Changes
+
+- fad4752: An operator can now send a driver's declared command and hold it for a bounded
+  time. `POST /api/drivers/{name}/control` takes `{control, value, duration_s}`;
+  `DELETE` on the same path ends the hold early. The active hold appears on
+  `/api/drivers/{name}` so a UI can show what is set and until when.
+
+  Deliberately outside control v2. A signed package binds a RuntimePolicy and
+  goes through `CommandV2` with its write scope, lease and evidence, unchanged.
+  A bundled or local driver has no policy, and synthesising one would be worse
+  than doing nothing: `HostEnv.permissionAllowed` grants everything only while
+  the policy is nil, so a policy without permissions silently blocks the driver's
+  own MQTT, and `LuaDriver.Command` refuses a control v2 driver on the legacy
+  path — v2 wants `driver_command_v2` entrypoints no community driver has. This
+  path leaves the policy layer untouched and validates against the catalog
+  declaration instead.
+
+  What that costs, stated plainly: no host-enforced write scope, no host-verified
+  evidence. What it keeps is the part that protects hardware. Core clamps every
+  value to the declared bounds rather than trusting the Lua to do it — a driver
+  that forgets to clamp is exactly the driver this protects — and the driver's
+  own declaration is the whole allowlist, so an undeclared control is a 400
+  rather than a 200 for a command the Lua silently ignored.
+
+  Every hold ends by itself, and ending means calling the driver's own
+  `driver_default_mode` rather than writing a value Core invented: only the
+  driver knows what neutral is. Default 4 h, maximum 24 h, and nothing survives a
+  restart. On process start or driver re-add, a legacy driver must also confirm
+  that default before control opens; a failed confirmation keeps control blocked
+  and retries with a bounded backoff. An offset left behind by a browser tab that
+  closed is a house heated wrong for weeks.
+
+- 603a0d4: Drivers can declare the commands an operator may send, and Core reads them.
+  A `controls` list in the `DRIVER` block names the command, gives it a label,
+  describes its single input — type, bounds, step, unit — and states what counts
+  as proof the device took it. `/api/drivers/{name}` and `/api/drivers/catalog`
+  surface it.
+
+  This is the description, not the path: nothing sends these commands yet. It
+  exists because there is currently no way to describe one at all. Settings →
+  Devices renders a hand-written branch per driver family, so a driver with a
+  real control surface — the Heishamon heat pump's curve offset, verified
+  against hardware since June — has no way to reach a person, and its author is
+  told to write a Home Assistant automation instead (srcfl/ftw#520).
+
+  Signed packages already carry this shape in `RuntimeCommand`, but only for
+  drivers shipping through the signed channel. Bundled and local drivers have no
+  policy, so the `DRIVER` block is where their declaration has to live.
+
+  A declaration the UI could not render is dropped rather than surfaced half
+  formed: no id, an input type outside number/boolean/string, or a number
+  missing either bound. A slider with one end is a guess, not a control. Drivers
+  that declare nothing are unchanged, and the JSON key stays absent for them, so
+  a client can tell "reports only" from "declares an empty list".
+
+- 53b5af5: The Heating view can now set a heat pump's curve offset. A pump whose driver
+  declares a control gets a row on its card: the value in force, when the hold
+  ends, and buttons to move it or release it. A pump that declares nothing looks
+  exactly as it did.
+
+  It lives on the Heating card rather than in Settings → Devices because that is
+  where the pump's own state already is — the offset sits next to the
+  temperatures it moves. Settings is for connecting a device, not for running it.
+
+  Rendered entirely from the declaration: label, bounds, step and unit come from
+  the driver, and nothing in the view knows a driver by name. Stepper buttons
+  rather than a slider or a number field, because the card is re-rendered every
+  30 s and a control holding input state would lose a half-typed value on each
+  refresh.
+
+  With no hold the row reads "Auto" rather than a number. Nothing in the browser
+  knows what offset the pump has settled on internally, and printing 0 would
+  claim knowledge we do not have. Held state is carried by the text and the
+  weight of the value, never by colour: the theme's green/red pair is not
+  separable under deuteranopia.
+
+  A driver that declares `evidence: "write_ack"` instead of `"readback"` says so
+  in the row — "the pump does not confirm this setting". The weaker guarantee
+  belongs where the operator is standing.
+
+- 2defa8e: Move the whole container stack to one base: Debian 13 "trixie" slim.
+
+  Core was `alpine:3.22`, the updater sidecar was `docker:27-cli` (also alpine),
+  and the optimizer was `python:3.12-slim-bookworm` — two libcs, three unrelated
+  base images and three security streams in one deployment. Core, updater and
+  optimizer now all sit on `debian:trixie-slim`, verified to share a single base
+  layer, so a host pulls that rootfs once and there is one suite to track. It also
+  matches the Raspberry Pi OS release the SD image is built from.
+
+  What the move buys: glibc, so the image can run ordinary prebuilt vendor
+  binaries, which musl cannot; a full userland, which makes `docker exec`
+  debugging on a live site practical; and `libnss-mdns` wired into
+  `/etc/nsswitch.conf`, so `.local` names resolve for glibc tools inside the
+  container — `getent hosts zap.local`, `curl`, `wget` — once an avahi socket is
+  mounted. Alpine has no NSS plugin mechanism at all, so none of that was
+  available before.
+
+  That covers tools in the image, not the FTW process itself: the binary is built
+  `CGO_ENABLED=0` and so never consults NSS. It stays fully static and still
+  cross-compiles on the build platform.
+
+  `wget` is now installed explicitly and asserted by the container boundary test.
+  It is contractual rather than incidental: `ftw-updater` `docker exec`s it inside
+  the core image to decide whether an update commits, and updaters already
+  deployed in the field will keep doing so. The zoneinfo database is also embedded
+  in the binary as a fallback, so a base image without `tzdata` can never silently
+  push `time.Local` to UTC and mis-time price and plan windows.
+
+  Size: the core image grows from about 53 MB to about 133 MB uncompressed. The
+  updater is unchanged at about 203 MB — `docker:27-cli` was never a small image —
+  and now shares its base with the other two, so the per-host download is well
+  below the nominal sum.
+
+  Data ownership is unchanged: the process still runs as the bare numeric uid 100
+  / gid 101, and gid 101 is still what grants access to the optimizer's socket.
+
+  The optimizer is versioned independently and moves to 1.4.0, because its image
+  is a materially different artifact once the base changes. Its release workflow
+  verifies that a published image's revision label matches the commit it claims,
+  so the new base could not have shipped under the old version number at all.
+
+  The base is pinned to the `trixie` codename rather than a `stable` alias so a
+  major-version jump can never arrive silently on a rebuild. A new scheduled
+  `debian base currency` workflow watches for a newer Debian stable and opens a
+  tracking issue when one appears.
+
+- 10fd54b: A read-only driver may now sign in before it reads.
+
+  A driver that reads a vendor cloud cannot read anything until it has exchanged
+  a token, and it exchanges one with a POST issued from `driver_init` or
+  `driver_poll` — the phases the write scope refuses, correctly, since nothing
+  there carries a command lease. Such a driver could therefore only be published
+  control-capable, and its catalog entry then claimed a control path it does not
+  have.
+
+  `RuntimePolicy` now carries `auth_post_path` from the signed driver manifest,
+  and `host.http_post` skips the write scope only for a URL whose path equals it.
+  The exemption requires a read-only policy, a declared path, `http.post` still
+  granted, and an exact path match, and it does not consume the write budget — a
+  token refresh is driven by expiry rather than by a caller. A driver that
+  declares nothing behaves exactly as before.
+
+- a55328d: Let an operator place a short manual hold on one home battery. The hold binds to the battery hardware, stops when that battery is not safe to control, clears on restart or stale site data, and keeps all core power, SoC, slew, and fuse limits in force.
+- 6380af0: PV forecasts are now orientation-aware. When per-plane geometry is configured
+  (the Weather tab's PV arrays: tilt/azimuth/kWp), a radiation-bearing forecast
+  provider's global horizontal irradiance is projected onto each panel plane via
+  the physics `sunpos` model and summed, instead of the previous flat
+  `rated × (W/m² / 1000)` estimate that ignored panel orientation. Sites with no
+  arrays configured keep the existing behaviour, and providers that already return
+  site-calibrated watts (Forecast.Solar) are left untouched.
+
+  Providers that publish only global horizontal irradiance get an Erbs correlation
+  to split it into direct and diffuse components before projection, so a
+  south-facing 35° roof and a flat one no longer receive the same forecast.
+
+### Patch Changes
+
+- 7803081: The setup wizard's driver picker no longer dead-ends when a device has no catalog entry. A "My device is not listed…" option explains that more drivers can be installed from the signed repository after setup (Settings → Devices), links to requesting a driver that doesn't exist yet, and lets onboarding continue without the device.
+- b348685: Saving a config through the API now applies it exactly like a file edit. Previously POST /api/config hot-applied only a hand-picked subset of control fields and swapped the shared config pointer itself, which blinded the config watcher's own diff — so a site meter set for the first time (the setup wizard's normal path) never reached the running controller: the dashboard showed Grid 0 W and an inflated Load, and dispatch had no site boundary until a process restart. Both paths now run one shared apply, so hot-reload of the site meter, slew enable, DC-link protection, inverter groups, fuse parameters and the mpc/loadmodel sync all work from the UI too.
+- 20b3ea7: Settings → Remote no longer offers passkey setup it cannot start. The section's gating toggled a `hidden` class no stylesheet defines, so the setup controls stayed visible and clickable while the gateway identity wasn't adopted — clicking opened a blank tab that immediately closed itself (a white flicker), and the error text was overwritten by the next status poll. The gating now uses the DOM hidden property, the click refuses with a durable explanation before any tab opens, and enrollment failures land in an error element the poller doesn't rewrite.
+- 2aa74bc: Home Link now logs the wrapped local uplink failure, retry attempt, and retry delay while keeping the public runtime error as the fixed `connection-failed` code.
+- e04d900: One slow driver can no longer stall dispatch for the whole site. Every command the control tick sends now carries its own deadline, derived from `site.control_interval_s` (half the interval, capped at 2 s and floored at 250 ms). Before this, the tick handed the driver registry the process-lifetime context, which has no deadline, and the driver goroutine runs the device call inline — so a cloud driver waiting on an HTTP or OAuth request that never answered held up every other battery on the site, and the reactive fuse guard with them. A command that runs out of time is logged at Warn with the driver name, so a chronically slow driver shows up in the log instead of quietly eating tick cadence.
+- f4eedde: A site sitting inside the reactive deadband is now protected. The reactive control arm stops early when grid power is close enough to its target, and that exit walked away from the cycle before the fuse guard and the fuse-saver ran — so on a site whose grid error was small, no protection ran at all. Two things bind on numbers the deadband never reads. An operator peak ceiling below the plan's grid target: the plan asks for 8 kW of import, the meter delivers 8 kW, the error is zero, and every watt above the ceiling is billed at the peak tariff the operator set it to avoid. And a single phase over the breaker while the three-phase sum sits still — a single-phase EV charger on L1 against three-phase solar export. Both now force the battery to bridge, the same way idle mode and the dispatch holdoff already did. A deadband tick with nothing binding still commands nothing.
+- 4007fdb: A battery can no longer keep charging against a charge block that the site has already closed. The reactive control arm stops early when grid power is close enough to its target, and it issued no command when it did — but a battery holds its last setpoint until it gets another one, so an earlier charge command kept running. The trap is that the charge itself is what keeps the meter near target: on a planner slot that forbids charging, a battery absorbing a 2 kW solar surplus holds the meter at −50 W, the error stays inside the deadband, and the tick that would have stopped the charge walks away for as long as the sun holds. The surplus the slot exists to export goes into the pack instead. The same silence kept a battery charging after its own driver reported that it cannot charge. Such a tick now commands zero, and a deadband tick with nothing blocked still commands nothing.
+- a4f1300: The rule that a driver which cannot actuate leaves dispatch and gets its autonomous default now covers EV chargers and PV inverters, not just batteries. Until now only the storage loop filed what a driver made of its command: the PV curtail loop threw the error away and the loadpoint controller only logged it. So a wallbox that answered every poll and refused every setpoint held its last current while the plan kept booking the charge, and an inverter that refused every cap kept exporting into a negative price while the plan booked the saving — the same silent failure, one wire over. Which command counts on each path is chosen for what refusing it proves: the PV cap counts but the curtail release does not, and on the EV side the periodic setpoint counts while the safety standdown, the vehicle wake and the contactor cycle do not. A parked car refusing a wake, or a charger that has no pause action, is behaving correctly and stays in dispatch.
+- 7a1252a: A driver that cannot actuate now receives its autonomous default mode, and leaves dispatch and the plan while it can't. Two cases were missed before. A driver that reports a device fault — a Ferroamp EnergyHub in Fault Mode with its relays open, a Pixii mid-calibration — kept polling, so the staleness watchdog saw nothing wrong and never asked it for its safe state; it was dropped from dispatch and held its last setpoint indefinitely. And a driver that answered every poll but rejected every command stayed marked healthy, so it stayed in the dispatch set and in the MPC fleet, and the power the plan counted on but never got became grid import instead. Three refused commands in a row now take a driver out of control until it accepts one again, with one command let through every five minutes so a device that recovers on its own comes back without an operator. Both cases send the driver's own declared default exactly once per transition, and both re-arm on recovery. `observe_only` drivers still receive no command of any kind.
+- 963fb0d: A settings save now survives a power cut, and stops leaving the config world-readable. `config.yaml` is the file the gateway boots from, and every save from the UI rewrote it with no fsync of the temp file and no fsync of the containing directory — a rename is only atomic for bytes that already reached the disk, so losing power mid-save could publish a truncated or zero-length config and leave an unattended gateway unbootable. The save now fsyncs the temp file, renames, then fsyncs the directory, and reports a failure instead of claiming a config was saved that the next power cut can still take away. The file is also written 0600 rather than 0644: it holds MQTT passwords, API keys and OAuth refresh tokens.
+- 1cb49e3: Canonicalize solver-scale state-of-charge noise to the exact operating maximum before building optimizer models, while keeping storage plans replay-consistent when a battery starts above its configured maximum.
+- 2aa23c3: Recording a metric name for the first time no longer stalls the API. The time-series intern cache held its exclusive lock across the allocating SQLite INSERT, so on a slow SD card every reader of the metric catalog, metric and driver lists, or any chart series queued behind a disk write issued from inside the control tick — the same shape as the 2026-07-16 prune incident, expressed as a lock instead of a channel. Allocation now writes with no cache lock held and takes the lock only to publish the resulting id, and the boot-time hydrate scans the two intern tables into local maps before swapping them in. Concurrent allocation of the same name still resolves to one row and one id.
+- 1e5eb03: Format bare and already-bracketed IPv6 literals, including Nova zone IDs, correctly for CTEK, Nova, and driver-fingerprint endpoints.
+- b16016e: The peak-shaving import limit is now checked against the site's fuse. It
+  used to be stored exactly as sent, from the API and from the Home
+  Assistant number alike, so a limit above the breaker was accepted and
+  then never bound: every import clamp already stops at the fuse, so the
+  operator read their number back from the status page and believed a
+  tariff peak was defended that nothing was defending. A negative limit was
+  worse than useless — the shaving arm treats it as an error to correct and
+  commands the battery to push power out, from a setting named for import.
+  Both are refused now, with a message naming the value sent and the
+  ceiling that beat it. A limit of 0 still means what it always meant in
+  peak shaving, "correct everything above zero import"; peak shaving is
+  switched off by leaving the mode, not by zeroing its threshold. A site
+  whose fuse is not described in the config keeps the old behaviour. When a
+  config reload lowers the fuse under a limit that was legal when it was
+  set, the log says so.
+- 1bee6e4: The per-phase fuse guard now sizes its correction from the site's own phase count and voltage. When one phase runs over the breaker, the guard converts that overage into battery watts, and it used to assume every site had three phases and 230 V per phase. On a single-phase site that asked the battery for three times the relief the site needed, enough to push the meter through zero and into a violation the other way; the phase count and voltage the operator configured now do the conversion. The guard also reads only the phases the site has: current reported on an L2 that a single-phase site does not own no longer fires it. A site whose fuse is described by amps alone gets no per-phase clamp rather than one computed from invented numbers — the same rule the fuse safety margin already follows. Three-phase 230 V sites, which is what configuration defaults to, are unaffected.
+- c85bfe1: The slew limiter can no longer re-open a charge block another stage closed. Because the limiter anchors each target on the battery's measured output rather than on the previous command, a battery physically charging pulled its own command back up after the tick had already pinned the fleet to 0 W — so a passive-arbitrage idle slot with the meter exporting 2000 W and the battery at +2000 W commanded 1500 W of charging on a tick that forbids charging, and a battery reporting `charge_capable=false` was commanded to charge anyway while a capable sibling absorbed the same share. A charge floor now runs after the limiter, mirroring the discharge-side floor already there: the site-wide charge block (planner_self's export-surplus gate, planner_self's stale plan, the arbitrage-family idle live-export gate) and a driver's own charge-capability report both survive to the hardware.
+- bd18d7a: Learned PV and load state is now stored with a fingerprint of the feature vector it was fitted against, and is discarded when that fingerprint no longer matches. Coefficients only mean something against the features that produced them: change the number of time-of-day harmonics, the bucket a moment maps to, or what clear-sky irradiance refers to, and the old model keeps predicting — with a plausible-looking error — from a fit that describes a different world. Nothing in the stored numbers gave that away before. The fingerprint is derived from the feature functions themselves, so a code change to the features moves it without anyone having to remember. On a mismatch the model logs both fingerprints and cold-starts, which both models recover from; wrong coefficients they do not recover from. Existing state is carried over unchanged on upgrade.
+
+## 1.15.2
+
+### Patch Changes
+
+- de94bae: A Modbus device that answers but refuses a register no longer costs the whole
+  poll. Only a failure to reach the device does.
+
+  The rule was `attempts == successes`: one register missing out of twenty threw
+  away every reading in that poll, including the ones that arrived. That made a
+  driver's own tolerance count for nothing — `sungrow.lua` marks 19 of its 20
+  reads optional precisely so a partial read still reports — and it made the
+  driver permanently useless on a string inverter, which has no battery
+  registers and refuses them on every poll for as long as it is installed.
+
+  A device replying "illegal data address" is stronger proof of life than a
+  register that read cleanly: it replied. So a poll is now current when
+  something was read and nothing failed at the transport. Reads skipped because
+  a reconnect backoff was already running are counted separately too — they are
+  downstream of one transport failure, not fresh evidence of several, which is
+  why a single dropped packet used to report as "8 of 20 modbus reads failed"
+  when seven of those eight never reached the wire.
+
+  The guarantee that matters is unchanged: an unreachable device still fails
+  every poll, so a stale site meter still stops dispatch. Poll errors now say
+  which of the two happened.
+
+- c7fe6c9: Driver installs: the metadata check now reads the identity a signed artifact
+  was signed under, so a wrapped FTW-native source installs again.
+
+  A signed artifact assigns DRIVER three times when it wraps a source that
+  declares its own table: the generator's alias first, the source's inline
+  block, and the alias again at the end — reasserted exactly so the source
+  cannot overwrite the identity it was signed under. Lua runs the last
+  assignment, but the catalog parser preferred the inline block whenever one
+  existed. A v1.15.0 install refused the myuplink 1.1.1 beta with "driver
+  metadata id/version myuplink@1.0.0, want myuplink@1.1.1": the manifest and
+  the wrapper both said 1.1.1; the stale inline block said 1.0.0. The sungrow
+  artifact fails the same way on id — inline sungrow-shx against catalog
+  sungrow — so no wrapped FTW-native source could install from the repository
+  at all.
+
+  The parser now takes the assignment that appears last, as the VM would. A
+  trailing alias that names no parseable table still parses as empty rather
+  than borrowing an earlier table's identity, and an inline block written after
+  the trailing alias is reported as-is, so the installer refuses the override
+  against the manifest.
+
+## 1.15.1
+
+### Patch Changes
+
+- ca4822b: Help report: the forecast check now compares forecast and reality as a ratio,
+  and the load-model note no longer repeats an explanation that turned out to be
+  wrong.
+
+  A live report from a v1.15.0 install showed a plan slot sized for 1.47 kW
+  against a house drawing 3.65 kW — two and a half times out — and Findings said
+  nothing. The old measure divided the difference by the larger figure, which
+  saturates at 1.0 and therefore cannot express "twice wrong" at all: that case
+  scored 0.597 against a 0.6 threshold. A solar forecast of 11.7 kW against
+  7.4 kW actual scored 0.584 and was missed the same way. Both are exactly what
+  the check exists to catch. It is now `max/min ≥ 1.5`, which has no ceiling, on
+  figures above a 500 W floor.
+
+  The load-model paragraph claimed that discarding negative samples makes a
+  large-solar site's model skew low. Discarding the lower tail biases the
+  surviving mean _high_, so the explanation was backwards. It now describes what
+  the model actually does — one sample a minute into 168 hourly buckets — and
+  what a real problem looks like: a small average error next to a gap that
+  persists across several plan slots.
+
+  A forecast gap on an install whose model has not finished learning is now a
+  note rather than a problem, and says so, instead of contradicting the "still
+  learning" line two rows below it and suggesting a reset that would only
+  restart the clock.
+
+- ca4822b: Overview: the Market now price strip draws its bars from zero, like the
+  full chart.
+
+  It used to draw each slot's distance from the mean — the cheapest
+  mornings drew the tallest bars, hanging below the line — which read
+  backwards next to the full chart one tap away. Height now means price.
+  The average ahead stays visible as a dotted line at its own height, the
+  same mark the full chart uses for it; a negative-price slot hangs below
+  zero in yellow the same way; and a flat day draws level bars instead of
+  stretching a small wobble to full height.
+
+- 8b59603: One button, one file when asking for help. The plan card's "Something looks
+  wrong?" button now downloads `ftw-help-<stamp>.zip` — the help report as
+  `00-help-report.md`, sorted first, with the redacted config, driver health,
+  recent logs and an hour of telemetry behind it.
+
+  Before this there were two downloads and the user had to guess which one we
+  wanted: the report from the plan card, the log bundle from a driver's Diagnose
+  modal. They would send one and we would ask for the other.
+
+  The archive is a zip rather than a `.tar.gz` because its whole purpose is to be
+  handed to somebody else, and Windows and every chat client open a zip without a
+  second tool. Around 10 kB on a two-driver install.
+
+  `GET /api/support/report` still returns the bare Markdown for anyone who wants
+  only the text.
+
+  The report also now carries the slot's energy books — what the plan asked for,
+  what the batteries actually moved, and what the energy-allocation path thinks
+  it delivered — plus a finding when a slot is a quarter of the way through and
+  delivery is under half the rate the plan needs. That is the shape of the
+  reports that keep arriving: a plan card reading "charge 4.5 kW, now", a live
+  target of 0 W, and nothing in between to show whether the plan reached
+  dispatch at all.
+
+## 1.15.0
+
+### Minor Changes
+
+- 54d6530: Prices: pick any of the 46 European bidding zones the price API publishes,
+  and be billed in the currency of the country you picked.
+
+  The zone picker offered twelve Nordic codes typed into two `<select>`
+  elements and the Go side knew twelve EIC codes, so a household in Belgium,
+  the Netherlands or Spain could not choose its own zone even though the
+  Sourceful API has served every ENTSO-E area all along. Both lists now come
+  from one table, `go/internal/prices/zones.go`, generated from that API's
+  `/areas` endpoint and served to the UI at `GET /api/prices/zones`. The
+  picker asks for a country first and a zone second, because everyone knows
+  they live in Italy and nobody knows their area code is `IT-CENTRE-NORTH`.
+
+  Currency stops being Swedish by assumption. It defaults to the currency of
+  the chosen zone, and the price API — which converts to EUR and SEK and
+  quietly answers anything else with EUR — is only asked for those two;
+  every other currency is converted here from EUR with the ECB rates the
+  service already caches. Where no rate is available the fetch fails rather
+  than storing a number that is wrong by an exchange rate, which is a number
+  the planner would spend money on. The old 11.5 SEK/EUR fallback is gone for
+  the same reason.
+
+  Two related faults fixed on the way. The direct ENTSO-E provider assumed
+  every day-ahead document is priced in EUR; Poland and Hungary among others
+  publish in their own currency, so it now reads `currency_Unit.name` and
+  converts from that. Its EIC code for Germany was the country code rather
+  than the DE-LU bidding zone, and NO5 was missing outright.
+
+  Prices are stored as minor units per kWh with no currency attached, so
+  changing the currency clears the price cache — otherwise cost history would
+  add öre to cent. The next fetch refills today and tomorrow. Every price
+  label in the UI now follows the configured currency: öre, cent, øre, grosz,
+  Rappen, or the major unit where the minor one is out of circulation
+  (4.30 Kč/kWh, not 430 haléř).
+
+  Existing installs are untouched: no zone means SE3, no currency means SEK,
+  and a Swedish install still asks the API for SEK exactly as before.
+
+- 4212dbb: Help report: `GET /api/support/report` returns a single Markdown file
+  describing what FTW is doing and why, reachable from a "Something looks
+  wrong?" button under the plan chart and from any driver's Diagnose modal.
+  It exists because answering "why is it discharging when the plan says
+  charge?" currently takes a screenshot round-trip per question — one thread
+  needed nine of them to establish that a load forecast said 383 W while the
+  house was drawing 7.9 kW.
+
+  The file opens with `Findings`: automated checks written in the order a
+  person would run them — stale plan, fallback solver, offline or faulted
+  devices, active safety limits, and a forecast-versus-reality comparison for
+  both load and solar. Under that come the live site state, the plan slot
+  covering _this moment_ (stated before anything about the next one, since
+  confusing the two is what sends these threads sideways), the surrounding
+  slots with the solver's reasoning, forecast accuracy, driver health,
+  component versions, and the recent warning and error log.
+
+  It is one file rather than a bundle because people paste it into a chat and
+  ask for help there; a tarball of JSON does not survive that. The plan window
+  is trimmed to a few hours either side of now and logs to warnings and errors,
+  which keeps it small enough to upload and to read in full.
+
+  `/api/support/dump` is unchanged and remains the deep bundle for cases the
+  report cannot close.
+
+### Patch Changes
+
+- 41e59ef: Load model: replace the MAE-band outlier filter with a physical ceiling
+  taken from the main fuse. The band rejected the upper half of the real
+  load distribution, and could lock the model out of a level it had not seen
+  before, permanently.
+
+  A rejected sample updates neither `MAE` nor `Samples`, so the band
+  `max(MAE × 10, 200)` never grew in response to being persistently wrong.
+  Measured on a clean model: an hour at 400 W left MAE at 57 W and the band
+  at 570 W; a following week at 5 kW was rejected in full, 100% of samples,
+  and the prediction never moved off 1794 W.
+
+  The band was the wrong instrument, not merely mistuned. Household load is
+  multimodal — a few hundred watts of baseline, then 11 kW when the sauna,
+  oven and car overlap — and nothing about a residual's size separates
+  "unusual but real" from "wrong". A band fitted to the quiet hours always
+  excludes the busy ones. Short-term measurement noise is already handled a
+  layer down, by the Kalman filter in telemetry whose smoothed output this
+  model reads, so the second filter was both harmful and redundant.
+
+  What remains is the rejection physics licenses: a house cannot draw more
+  than its main fuse passes. The ceiling is `fuse capacity × 1.25`, passed in
+  from configuration and never derived from what the model has learned, so it
+  holds from the first sample and cannot be talked down by a model that has
+  mislearned. With no fuse configured the check disables itself rather than
+  inventing a limit.
+
+  A sustained shift to a new load level is now learned directly. A one-minute
+  spike still trains — it is real consumption — and the bucket EMA damps it
+  to a tenth of the gap, which is what keeps an hour from being defined by
+  its loudest minute.
+
 ## 1.14.0
 
 ### Minor Changes

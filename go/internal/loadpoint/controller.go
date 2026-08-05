@@ -36,6 +36,11 @@ type Controller struct {
 	tel     TelemetryFunc
 	send    SenderFunc
 
+	// dispatchOutcome files the result of the periodic ev_set_current, and
+	// only that command. See DispatchOutcomeFunc for what it deliberately
+	// does not see. nil disables the reporting entirely.
+	dispatchOutcome DispatchOutcomeFunc
+
 	// fuseEVMax is the joint fuse-budget allocator's verdict for how much
 	// W this controller may command to the EV this tick. Set by the
 	// dispatch package each control cycle; nil/zero-returning func means
@@ -412,6 +417,32 @@ type TelemetryFunc func(driver string) (EVSample, bool)
 // drivers.Registry.Send.
 type SenderFunc func(ctx context.Context, driver string, payload []byte) error
 
+// DispatchOutcomeFunc reports what a charger made of the one command that
+// decides whether core can actuate it: the periodic `ev_set_current`. Core
+// uses it to stop counting on a charger that answers every poll and refuses
+// every command — the storage side of the same law lives in
+// go/cmd/ftw/driver_failure_default.go.
+//
+// Deliberately only that command. The controller emits four other kinds of
+// send, and a refusal of any of them says nothing about whether the charger
+// takes a setpoint:
+//
+//   - the 0 W safety standdown, which core sends while the site meter is
+//     stale. That is core withdrawing, not core actuating, and the staleness
+//     tracker already owns the transition;
+//   - `charge_start` to the bound *vehicle* driver, which a parked car
+//     refuses whenever it is asleep. wakeVehicleAuto has its own backoff for
+//     exactly that, and excluding the vehicle driver would take its SoC out
+//     of the plan because the car was napping;
+//   - `ev_pause`/`ev_resume` in a contactor cycle, which is documented as
+//     free for any charger that implements those actions — a charger that
+//     does not returns an error and is behaving correctly;
+//   - the operator's own force-start and refresh, which are not dispatch.
+//
+// Called synchronously from the dispatch tick, on the caller's goroutine, so
+// the receiver may be as unsynchronised as the storage tracker is.
+type DispatchOutcomeFunc func(driver string, err error, now time.Time)
+
 // NewController wires the dependencies. Passing nil for plan, tel,
 // or send disables the corresponding step — useful in tests.
 func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFunc) *Controller {
@@ -423,6 +454,16 @@ func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFu
 		batteryBoost:       map[string]BatteryBoostLease{},
 		batteryBoostStatus: map[string]BatteryBoostStatus{},
 	}
+}
+
+// SetDispatchOutcome wires the reporter for refused EV dispatch commands.
+// Pass nil to disable — the controller then behaves exactly as it did before,
+// logging the refusal and moving on.
+func (c *Controller) SetDispatchOutcome(f DispatchOutcomeFunc) {
+	if c == nil {
+		return
+	}
+	c.dispatchOutcome = f
 }
 
 // SetFuseEVMax wires the joint allocator's verdict from control.State.
@@ -1257,6 +1298,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// safety gate is closed. Do not advance manual-hold completion timers
 		// or auto-wake state while we are the reason current is withheld; a
 		// persistent hold or schedule must resume normally after recovery.
+		// The outcome is deliberately not reported to dispatchOutcome: this
+		// is core withdrawing under a stale site meter, not core actuating,
+		// and the staleness tracker already owns that transition. A charger
+		// that refuses the standdown must not be excluded for it — the fault
+		// being handled is the meter's.
 		payload, err := json.Marshal(map[string]any{
 			"action":  "ev_set_current",
 			"power_w": 0,
@@ -1503,9 +1549,17 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	if c.send == nil {
 		return
 	}
-	if err := c.send(ctx, lpCfg.DriverName, payload); err != nil {
+	// The one command whose outcome decides whether core can actuate this
+	// charger. A charger that answers every poll and refuses this holds
+	// whatever current it last accepted, and the plan goes on counting the
+	// EV load it is not drawing — the storage bug #800 fixed, one wire over.
+	sendErr := c.send(ctx, lpCfg.DriverName, payload)
+	if sendErr != nil {
 		slog.Warn("loadpoint dispatch", "lp", lpCfg.ID,
-			"driver", lpCfg.DriverName, "err", err)
+			"driver", lpCfg.DriverName, "err", sendErr)
+	}
+	if c.dispatchOutcome != nil {
+		c.dispatchOutcome(lpCfg.DriverName, sendErr, now)
 	}
 
 	// Auto-wake: if the matched vehicle reports `Stopped` /

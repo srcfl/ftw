@@ -52,9 +52,21 @@
     return p.toFixed(1) + '%';
   }
 
+  // Bare number — the column header carries the unit.
   function fmtPriceOre(o) {
     if (o == null || !isFinite(o)) return '—';
-    return o.toFixed(0);
+    const u = typeof window !== 'undefined' && window.FTWUnits;
+    if (!u) return o.toFixed(0);
+    const cur = u.activeCurrency();
+    const unit = u.unitFor(cur);
+    return u.toDisplay(o, cur).toFixed(unit.scale === 1 ? 0 : 2);
+  }
+
+  // "Price (öre)" only holds for a Swedish install; the header follows the
+  // configured currency like every other price surface.
+  function priceColumnHeader() {
+    const u = typeof window !== 'undefined' && window.FTWUnits;
+    return 'Price (' + (u ? u.unitLabel(u.activeCurrency()) : 'öre') + ')';
   }
 
   function fmtSlotTime(ms) {
@@ -229,7 +241,7 @@
       '<table class="diag-table lp-schedule">' +
       '<thead><tr>' +
         '<th>Slot</th>' +
-        '<th>Price (öre)</th>' +
+        '<th>' + priceColumnHeader() + '</th>' +
         '<th>EV W</th>' +
         '<th>EV SoC</th>' +
         '<th>Battery W</th>' +

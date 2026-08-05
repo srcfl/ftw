@@ -181,8 +181,8 @@
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +
         '</fieldset>' +
         '<fieldset><legend>PV arrays ' + help(
-          'Optional. If set, forecast_solar uses these per-plane values to produce a site-calibrated forecast. ' +
-          'Leave empty to let the model learn your orientation from telemetry — predictions are fine after a few varied days.') + '</legend>' +
+          'Optional. Open-Meteo uses these per-plane values to project shortwave radiation onto each array. ' +
+          'Forecast.Solar uses them for its site-calibrated forecast. Leave empty for the safe flat estimate or the provider default.') + '</legend>' +
         '<div id="pv-arrays-list"></div>' +
         '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +

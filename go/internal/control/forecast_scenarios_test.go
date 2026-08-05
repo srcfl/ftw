@@ -294,9 +294,12 @@ func TestScenario_B8_SelfConsumption_Export_Charges(t *testing.T) {
 	assertSign(t, "B8", targets, "charge")
 }
 
-// B9. idle mode → battery never moves regardless of grid.
+// B9. idle mode → battery never moves regardless of grid. It never moves
+// because idle holds it at 0 W, not because idle looks away: a 5 kW import
+// is exactly the condition under which an uncommanded battery would be left
+// doing whatever the last mode asked of it.
 func TestScenario_B9_IdleMode_NeverMoves(t *testing.T) {
-	// Large import to make sure idle truly blocks dispatch.
+	// Large import to make sure idle does not chase the grid error.
 	store := makeSeedStore(5000, 0, []batterySetup{
 		{name: "ferroamp", currentW: 0, soc: 0.60, online: true},
 	})
@@ -306,8 +309,11 @@ func TestScenario_B9_IdleMode_NeverMoves(t *testing.T) {
 	st.MinDispatchIntervalS = 0
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 0 {
-		t.Errorf("B9: idle mode should return no targets, got %d: %v", len(targets), targets)
+	if len(targets) != 1 {
+		t.Fatalf("B9: idle mode should hold the battery at 0 W, got %d targets: %v", len(targets), targets)
+	}
+	if math.Abs(targets[0].TargetW) > 0.01 {
+		t.Errorf("B9: idle target = %.0f W under a 5 kW import, want 0 W", targets[0].TargetW)
 	}
 }
 

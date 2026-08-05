@@ -36,8 +36,8 @@
         (ctx.config.home_link.enabled ? " checked" : "") +
         '> Enable Home Link</label>' +
         '<p class="hint">FTW connects out to the relay. The relay cannot read your data. Every remote read needs your local passkey.</p>' +
-        '<div id="home-link-actions" class="hidden">' +
-        '<div id="home-link-setup" class="hidden">' +
+        '<div id="home-link-actions" hidden>' +
+        '<div id="home-link-setup" hidden>' +
         '<label>Passkey label</label>' +
         '<div class="field-row"><input id="home-link-label" type="text" maxlength="80" value="My device">' +
         '<button id="home-link-enroll" type="button" class="btn-send">Open passkey setup</button></div>' +
@@ -45,6 +45,7 @@
         '<div class="field-row"><input id="home-link-invite" type="text" readonly>' +
         '<button id="home-link-copy" type="button" class="btn-ghost">Copy</button></div>' +
         '</div>' +
+        '<div id="home-link-error" class="error-msg" hidden></div>' +
         '<p class="hint">Passkeys remain available to revoke when Remote is off.</p>' +
         '<div id="home-link-credentials"></div>' +
         '</div></fieldset>';
@@ -56,6 +57,7 @@
       var inviteEl = document.getElementById("home-link-invite");
       var credentialsEl = document.getElementById("home-link-credentials");
       var enrollBtn = document.getElementById("home-link-enroll");
+      var errorEl = document.getElementById("home-link-error");
       var copyBtn = document.getElementById("home-link-copy");
       var latestStatus = null;
 
@@ -108,8 +110,11 @@
             (status.runtime && status.runtime.connected ? "ha-ok" :
               status.enabled ? "ha-warn" : "ha-off");
           var view = actionsState(status);
-          actionsEl.classList.toggle("hidden", !view.showAdmin);
-          setupEl.classList.toggle("hidden", !view.showSetup);
+          // The DOM hidden property, not a class: no stylesheet has a
+          // global .hidden rule, so the class variant never hid anything
+          // and this section stayed clickable while unusable (#762).
+          actionsEl.hidden = !view.showAdmin;
+          setupEl.hidden = !view.showSetup;
           inviteEl.value = status.invite_url || "";
           renderCredentials(status.credentials || []);
         }).catch(function () {
@@ -118,15 +123,33 @@
         });
       }
 
+      // The status line is rewritten by refresh() every five seconds, so
+      // an error written there survives at most one poll tick. Errors an
+      // operator must read get their own element.
+      function showError(text) {
+        errorEl.textContent = text || "";
+        errorEl.hidden = !text;
+      }
+
       enrollBtn.addEventListener("click", function () {
+        showError("");
         var label = document.getElementById("home-link-label").value;
         if (!validPairingLabel(label)) {
-          statusEl.textContent = "Use a label from 1 to 80 bytes without control characters.";
+          showError("Use a label from 1 to 80 bytes without control characters.");
+          return;
+        }
+        // Refuse before opening any tab: without an invite URL the new
+        // tab has nowhere to go, and a tab that opens and closes itself
+        // is the \"flickers white, then nothing\" from #762.
+        if (!latestStatus || !latestStatus.invite_url) {
+          showError(latestStatus && latestStatus.identity_ready
+            ? "Remote is not connected yet. Save, restart Core, then try again."
+            : "The gateway identity is not adopted on this host yet, so passkey setup cannot start.");
           return;
         }
         var setupTab = window.open("about:blank", "_blank");
         if (!setupTab) {
-          statusEl.textContent = "Allow popups for this local FTW page, then try again.";
+          showError("Allow popups for this local FTW page, then try again.");
           return;
         }
         setupTab.opener = null;
@@ -144,7 +167,7 @@
           })
           .catch(function () {
             setupTab.close();
-            statusEl.textContent = "Could not start passkey setup.";
+            showError("Could not start passkey setup.");
           })
           .finally(function () { enrollBtn.disabled = false; });
       });

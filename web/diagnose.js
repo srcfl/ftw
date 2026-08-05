@@ -19,6 +19,17 @@
     return fetch(path, opts);
   }
 
+  // Costs come from the planner as minor units per kWh in the configured
+  // currency; window.FTWUnits (components/price-units.js) knows what to
+  // call them. Falls back to öre, which is what installs without the
+  // currency setting are in.
+  function fmtCost(minor) {
+    const u = typeof window !== 'undefined' && window.FTWUnits;
+    if (!u) return Math.round(minor) + ' öre';
+    const cur = u.activeCurrency();
+    return u.formatPrice(minor, cur, u.unitFor(cur).scale === 1 ? 0 : 2);
+  }
+
   function canvasColors() {
     return window.ftwThemeColors
       ? window.ftwThemeColors.palette()
@@ -213,7 +224,7 @@
       return `<button class="${cls}${active}" data-ts="${s.ts_ms}">
         <span class="diag-row-time">${fmtHHMM(s.ts_ms)} <span class="diag-row-date">${fmtMonthDay(s.ts_ms)}</span></span>
         <span class="diag-row-reason">${escapeHtml(s.reason)}</span>
-        <span class="diag-row-cost">${Math.round(s.total_cost_ore)} öre · ${s.horizon_slots} slots</span>
+        <span class="diag-row-cost">${fmtCost(s.total_cost_ore)} · ${s.horizon_slots} slots</span>
       </button>`;
     }).join('');
     el.innerHTML = rows;
@@ -293,7 +304,7 @@
             <span class="diag-reason-${reasonClass(s.reason)} diag-pill">${escapeHtml(s.reason)}</span>
             zone <b>${escapeHtml(s.zone)}</b> ·
             ${s.horizon_slots} slots ·
-            expected ${Math.round(s.total_cost_ore)} öre ·
+            expected ${fmtCost(s.total_cost_ore)} ·
             ${ageMin} min ago
           </div>
         </div>

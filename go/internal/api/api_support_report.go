@@ -53,6 +53,31 @@ const reportLogGroups = 40
 // noise in the log and becomes a finding in its own right.
 const logRepeatThreshold = 10
 
+// forecastMissRatio is how many times apart forecast and reality have to be
+// before it is worth saying so. 1.5× is past anything cloud movement or a
+// single appliance explains, and comfortably below the 2–20× misses seen in
+// the reports that motivated this check.
+const forecastMissRatio = 1.5
+
+// forecastMissFloorW is the level below which both figures are too small for
+// the comparison to mean anything.
+const forecastMissFloorW = 500
+
+// slotEnergyIdleWh matches the dispatcher's own idle gate: below this the
+// slot is not asking the battery for anything and cannot fall behind.
+const slotEnergyIdleWh = 50
+
+// slotPaceMinElapsed is how much of a slot must have passed before its
+// delivery rate says anything. A slot is allowed to start slowly and catch
+// up; a quarter of the way through is not.
+const slotPaceMinElapsed = 0.25
+
+// slotPaceFloor is the fraction of the required rate below which delivery
+// counts as not happening. Half is generous — a slot tracking its plan at
+// all clears it easily — so what trips this is a slot doing essentially
+// nothing, or moving energy the wrong way.
+const slotPaceFloor = 0.5
+
 // loadmodelWarmBucketsForTrust is the point past which the weekly load
 // pattern is filled in enough that its predictions carry the plan. Below
 // it the planner is guessing, which is worth saying out loud before
@@ -153,6 +178,7 @@ func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
 	s.deps.CtrlMu.Lock()
 	ctrl := *s.deps.Ctrl
 	targets := append([]control.DispatchTarget{}, s.deps.Ctrl.LastTargets...)
+	slotEnergy := s.deps.Ctrl.SlotEnergy()
 	s.deps.CtrlMu.Unlock()
 
 	snap := s.liveNow(ctrl, now)
@@ -168,12 +194,12 @@ func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
 	}
 
 	health := s.deps.Tel.AllHealth()
-	findings := s.collectFindings(ctrl, snap, plan, activeSlot, targets, health, now)
+	findings := s.collectFindings(ctrl, snap, plan, activeSlot, targets, health, slotEnergy, now)
 
 	var b strings.Builder
 	writeReportHeader(&b, s.deps.Version, now)
 	writeFindings(&b, findings)
-	writeRightNow(&b, ctrl, snap, activeSlot, targets, now)
+	writeRightNow(&b, ctrl, snap, activeSlot, targets, slotEnergy, now)
 	writePlanSection(&b, plan, lastReplanAt, lastReplanReason, now)
 	writeForecastSection(&b, s, snap, activeSlot, now)
 	writeDeviceSection(&b, health, now)
@@ -222,6 +248,7 @@ func writeRightNow(
 	snap liveSnapshot,
 	activeSlot *mpc.Action,
 	targets []control.DispatchTarget,
+	slotEnergy control.SlotEnergySnapshot,
 	now time.Time,
 ) {
 	b.WriteString("## Right now\n\n")
@@ -296,6 +323,26 @@ func writeRightNow(
 			"rated power, fuse guard. A limit applied to the site total " +
 			"before it was split across devices does not appear here — check " +
 			"the log for clamp messages.\n\n")
+	}
+
+	// The slot's energy books. Without these a report can show a plan
+	// asking for 4.5 kW and a target of 0 W and give no way to tell
+	// whether the plan never reached dispatch, or dispatch already
+	// finished the slot's energy early and is coasting.
+	if slotEnergy.HasSlot && !slotEnergy.SlotEnd.IsZero() {
+		elapsed := now.Sub(slotEnergy.SlotStart)
+		remaining := slotEnergy.SlotEnd.Sub(now)
+		fmt.Fprintf(b, "Energy booked for this slot: plan asked for **%s**, "+
+			"the batteries have moved **%s** so far, %s elapsed and %s left.\n\n",
+			fmtReportWh(slotEnergy.PlannedWh), fmtReportWh(slotEnergy.ActualWh),
+			fmtReportAge(elapsed), fmtReportAge(remaining))
+		if slotEnergy.EnergyPathWh != 0 || slotEnergy.PlannedWh != 0 {
+			fmt.Fprintf(b, "The energy-allocation path counts %s delivered. "+
+				"That figure only moves while that path is executing, so a "+
+				"real plan figure beside a zero here means the slot is being "+
+				"run by a reactive path instead.\n\n",
+				fmtReportWh(slotEnergy.EnergyPathWh))
+		}
 	}
 
 	st := ctrl.SlotDeliveryStats
@@ -407,11 +454,15 @@ func writeForecastSection(b *strings.Builder, s *Server, snap liveSnapshot, acti
 			stats.Samples, fmtReportW(stats.MAEW), stats.Quality,
 			stats.BucketsWarm, stats.BucketsTotal, stats.HeatingWPerDegC,
 			s.deps.LoadModel.Profile())
-		b.WriteString("The load model learns from `grid − solar − battery − EV`. " +
-			"It discards any sample where that arithmetic comes out negative, " +
-			"so on a site with large solar the surviving daytime samples skew " +
-			"low. A model that reports a small average error while the table " +
-			"above shows a large gap has learned the wrong house.\n\n")
+		b.WriteString("The load model learns from `grid − solar − battery − EV`, " +
+			"one sample a minute, into 168 hourly buckets. It predicts the " +
+			"average for an hour, so a single sharp draw — oven, sauna, a car " +
+			"starting to charge — will read as a large gap in the table above " +
+			"without meaning the model is wrong.\n\n")
+		b.WriteString("What does mean it is wrong: a small average error " +
+			"alongside a gap that persists across the surrounding plan slots. " +
+			"That combination says the model is confident about a house it has " +
+			"not actually learned, and every slot was sized against it.\n\n")
 	} else {
 		b.WriteString("Load model is not running: the planner is using a flat " +
 			"base load for every slot.\n\n")
@@ -584,6 +635,7 @@ func (s *Server) collectFindings(
 	activeSlot *mpc.Action,
 	targets []control.DispatchTarget,
 	health map[string]telemetry.DriverHealth,
+	slotEnergy control.SlotEnergySnapshot,
 	now time.Time,
 ) []finding {
 	var out []finding
@@ -614,20 +666,34 @@ func (s *Server) collectFindings(
 
 	// The load-forecast check. This is the one that would have closed the
 	// 383 W thread in a single message.
+	//
+	// Severity depends on whether the model has had a chance yet. On a
+	// fresh install a gap is the model doing its job, not a fault, and a
+	// report that shouts PROBLEM at it while also saying "still learning"
+	// two lines down contradicts itself and teaches the reader to skim.
+	forecastSeverity := sevProblem
+	learningNote := " Resetting the load model (Settings, or POST " +
+		"/api/loadmodel/reset) makes it relearn from scratch."
+	if s.deps.LoadModel != nil &&
+		loadModelStatsFrom(s.deps.LoadModel.Model()).BucketsWarm < loadmodelWarmBucketsForTrust {
+		forecastSeverity = sevNote
+		learningNote = " The model has not finished learning this house yet, " +
+			"so expect this to close on its own over the first weeks. A reset " +
+			"would only start that clock again."
+	}
 	if forecastMiss(snap.PredictedLd, snap.LoadW) {
-		out = append(out, finding{sevProblem, "The load forecast is far from reality",
+		out = append(out, finding{forecastSeverity, "The load forecast is far from reality",
 			fmt.Sprintf("The model predicts %s for right now; the house is "+
 				"drawing %s. The planner sized this slot against the forecast, "+
 				"so its charge and discharge decisions are built on the wrong "+
-				"house. Resetting the load model (Settings, or POST "+
-				"/api/loadmodel/reset) makes it relearn.",
-				fmtReportW(snap.PredictedLd), fmtReportW(snap.LoadW))})
+				"house.%s",
+				fmtReportW(snap.PredictedLd), fmtReportW(snap.LoadW), learningNote)})
 	} else if activeSlot != nil && forecastMiss(activeSlot.LoadW, snap.LoadW) {
-		out = append(out, finding{sevProblem, "The active slot assumed a different house",
+		out = append(out, finding{forecastSeverity, "The active slot assumed a different house",
 			fmt.Sprintf("This slot was planned for a load of %s; actual load is "+
 				"%s. Expect the live setpoint to diverge from the plan, and "+
-				"expect frequent replans.",
-				fmtReportW(activeSlot.LoadW), fmtReportW(snap.LoadW))})
+				"expect frequent replans.%s",
+				fmtReportW(activeSlot.LoadW), fmtReportW(snap.LoadW), learningNote)})
 	}
 
 	if activeSlot != nil && forecastMiss(math.Abs(activeSlot.PVW), math.Abs(snap.PVW)) {
@@ -644,6 +710,26 @@ func (s *Server) collectFindings(
 					"a replan changed the plan after this slot started.",
 					fmtReportW(activeSlot.BatteryW), fmtReportW(snap.BatW))})
 		}
+	}
+
+	// The slot is asking for energy and the batteries are not moving it.
+	// This is the shape of the reports that keep arriving: a plan card
+	// reading "charge 4.5 kW, now", a live target of 0 W, and no way from
+	// the outside to tell whether the plan reached dispatch at all.
+	if pace, ok := slotPaceShortfall(slotEnergy, now); ok {
+		detail := fmt.Sprintf("This slot asked for %s and the batteries have "+
+			"moved %s with %s of it gone — about %.0f%% of the rate the plan "+
+			"needs.",
+			fmtReportWh(slotEnergy.PlannedWh), fmtReportWh(slotEnergy.ActualWh),
+			fmtReportAge(now.Sub(slotEnergy.SlotStart)), pace*100)
+		if slotEnergy.EnergyPathWh == 0 && slotEnergy.PlannedWh != 0 {
+			detail += " The energy-allocation path has delivered nothing this " +
+				"slot, so a reactive path is driving instead of the plan."
+		}
+		detail += " Safety limits, a charge ceiling and a device that cannot " +
+			"follow the command all look like this from here — the dispatch " +
+			"table and the log below separate them."
+		out = append(out, finding{sevProblem, "The slot's energy is not being delivered", detail})
 	}
 
 	var clamped []string
@@ -748,14 +834,76 @@ func (s *Server) collectFindings(
 }
 
 // forecastMiss reports whether a forecast is wrong enough to change decisions.
-// The 500 W floor keeps small absolute errors on a quiet house from firing;
-// the 60 % band is wide enough that ordinary forecast noise stays quiet.
+//
+// Stated as a ratio between the two figures, not as a relative error. The
+// first version divided the difference by the larger value, which saturates
+// at 1.0 and so cannot express "two and a half times wrong" at all: a plan
+// built for 1.47 kW against a house drawing 3.65 kW scored 0.597 and stayed
+// below a 0.6 threshold, as did a solar forecast of 11.7 kW against 7.4 kW
+// actual. Both were exactly the misses this check exists to catch. A ratio
+// has no ceiling, so the number keeps growing with the mistake.
 func forecastMiss(predicted, actual float64) bool {
-	base := math.Max(math.Abs(actual), 500)
-	return math.Abs(predicted-actual)/base > 0.6
+	p, a := math.Abs(predicted), math.Abs(actual)
+	// Both small: at these levels the absolute error decides nothing, and
+	// the ratio is dominated by noise. 200 W against 600 W is arithmetically
+	// a 3× miss and operationally irrelevant.
+	if p < forecastMissFloorW && a < forecastMissFloorW {
+		return false
+	}
+	lo, hi := math.Min(p, a), math.Max(p, a)
+	if lo < 1 {
+		// One side is essentially zero — any real load on the other side
+		// is a miss, and the ratio would be meaningless or infinite.
+		return hi >= forecastMissFloorW
+	}
+	return hi/lo >= forecastMissRatio
+}
+
+// slotPaceShortfall reports how far behind the slot's required rate the
+// batteries actually are, as a fraction of it, and whether that is worth
+// saying. Returns (pace, true) only when the slot has a real energy ask,
+// enough of it has passed to judge, and delivery is meaningfully behind.
+//
+// Pace rather than a plain energy comparison, because a slot is allowed
+// to be behind early and catch up. What is not normal is being a quarter
+// of the way through having moved almost nothing.
+func slotPaceShortfall(e control.SlotEnergySnapshot, now time.Time) (float64, bool) {
+	if !e.HasSlot || e.SlotEnd.IsZero() {
+		return 0, false
+	}
+	if math.Abs(e.PlannedWh) < slotEnergyIdleWh {
+		return 0, false // an idle slot cannot fall behind
+	}
+	total := e.SlotEnd.Sub(e.SlotStart)
+	elapsed := now.Sub(e.SlotStart)
+	if total <= 0 || elapsed <= 0 || elapsed > total {
+		return 0, false
+	}
+	fraction := elapsed.Seconds() / total.Seconds()
+	if fraction < slotPaceMinElapsed {
+		return 0, false // too early to tell
+	}
+	expected := e.PlannedWh * fraction
+	if expected == 0 {
+		return 0, false
+	}
+	// Signed ratio: wrong-direction delivery lands negative and is
+	// therefore always a shortfall, which is what it should be.
+	pace := e.ActualWh / expected
+	if pace >= slotPaceFloor {
+		return 0, false
+	}
+	return pace, true
 }
 
 // ---- helpers ----
+
+func fmtReportWh(v float64) string {
+	if math.Abs(v) >= 1000 {
+		return fmt.Sprintf("%.2f kWh", v/1000)
+	}
+	return fmt.Sprintf("%.0f Wh", v)
+}
 
 func activeAction(plan *mpc.Plan, now time.Time) *mpc.Action {
 	if plan == nil {

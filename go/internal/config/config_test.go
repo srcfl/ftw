@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -574,6 +575,42 @@ batteries:
 	}
 }
 
+func TestPVArrayGeometryDistinguishesMissingFromZero(t *testing.T) {
+	yaml := minimalYAML + `
+weather:
+  provider: open_meteo
+  latitude: 59.3293
+  longitude: 18.0686
+  pv_arrays:
+    - name: partial
+      kwp: 10
+      tilt_deg: 35
+    - name: north flat
+      kwp: 5
+      tilt_deg: 0
+      azimuth_deg: 0
+`
+	c, err := Parse([]byte(yaml), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Weather == nil || len(c.Weather.PVArrays) != 2 {
+		t.Fatalf("weather arrays missing: %+v", c.Weather)
+	}
+	partial := c.Weather.PVArrays[0]
+	if partial.AzimuthDeg != nil {
+		t.Fatalf("omitted azimuth should remain nil, got %v", *partial.AzimuthDeg)
+	}
+	if _, _, _, ok := partial.CompleteGeometry(); ok {
+		t.Fatal("partial geometry must not be treated as a north-facing array")
+	}
+	northFlat := c.Weather.PVArrays[1]
+	tilt, azimuth, kwp, ok := northFlat.CompleteGeometry()
+	if !ok || tilt != 0 || azimuth != 0 || kwp != 5 {
+		t.Fatalf("explicit zero geometry should remain valid: tilt=%v azimuth=%v kwp=%v ok=%v", tilt, azimuth, kwp, ok)
+	}
+}
+
 func TestSiteMeterDriverReturnsName(t *testing.T) {
 	c, err := Parse([]byte(minimalYAML), ".")
 	if err != nil {
@@ -636,6 +673,168 @@ func TestSaveAtomicKeepsOutOfTreeDriverPathAbsolute(t *testing.T) {
 	}
 	if loaded.Drivers[0].Lua != outside {
 		t.Fatalf("driver path after save/load = %q, want original absolute %q", loaded.Drivers[0].Lua, outside)
+	}
+}
+
+// config.yaml holds MQTT passwords, API keys and OAuth refresh tokens. Rename
+// replaces the destination inode, so the temp file's mode is the mode the
+// operator ends up with — including when the config on disk was already
+// world-readable, or when an interrupted save left a world-readable temp
+// behind for the next save to reuse.
+func TestSaveAtomicWritesOwnerOnlyMode(t *testing.T) {
+	tests := []struct {
+		name string
+		prep func(t *testing.T, path string)
+	}{
+		{
+			name: "new config file",
+			prep: func(*testing.T, string) {},
+		},
+		{
+			name: "replacing a world-readable config",
+			prep: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte("site:\n  name: old\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "stale world-readable tmp from an interrupted save",
+			prep: func(t *testing.T, path string) {
+				if err := os.WriteFile(path+".tmp", []byte("half a config"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "c.yaml")
+			c, err := Parse([]byte(minimalYAML), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.prep(t, path)
+			if err := SaveAtomic(path, c); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Errorf("saved config mode = %04o, want 0600 — the file holds MQTT passwords and OAuth refresh tokens", got)
+			}
+			if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+				t.Errorf("tmp file survived the save: %v", err)
+			}
+		})
+	}
+}
+
+// A rename is only atomic for bytes that already reached the disk, and the
+// rename itself only survives power loss once the directory entry is synced.
+// Both syncs must happen, and they must straddle the rename in that order.
+func TestSaveAtomicSyncsFileBeforeRenameAndDirAfter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c, err := Parse([]byte(minimalYAML), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}
+	var order []string
+	var savedAtFileSync, savedAtDirSync bool
+	w := durableWriter{
+		syncFile: func(f *os.File) error {
+			order = append(order, "file")
+			savedAtFileSync = saved()
+			return f.Sync()
+		},
+		syncDir: func(d string) error {
+			order = append(order, "dir")
+			savedAtDirSync = saved()
+			if d != dir {
+				t.Errorf("syncDir got %q, want the config's directory %q", d, dir)
+			}
+			return syncDir(d)
+		},
+	}
+	if err := saveAtomic(w, path, c); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, ","); got != "file,dir" {
+		t.Fatalf("sync order = [%s], want [file,dir]", got)
+	}
+	if savedAtFileSync {
+		t.Error("the temp file was fsynced after the rename; a power cut could publish a truncated config")
+	}
+	if !savedAtDirSync {
+		t.Error("the directory was fsynced before the rename; the rename itself would not be durable")
+	}
+}
+
+// The caller's contract is "the config is now saved". A sync that fails must
+// not report success, or the settings UI tells the operator a change landed
+// that the next power cut can still take away.
+func TestSaveAtomicReportsSyncFailure(t *testing.T) {
+	syncFailed := errors.New("no space left on device")
+	const oldConfig = "site:\n  name: previous\n"
+	tests := []struct {
+		name        string
+		writer      durableWriter
+		keepsOldCfg bool
+	}{
+		{
+			name: "temp file sync fails",
+			writer: durableWriter{
+				syncFile: func(*os.File) error { return syncFailed },
+				syncDir:  syncDir,
+			},
+			// The rename never ran, so the config the gateway boots from is
+			// still the one that was there before.
+			keepsOldCfg: true,
+		},
+		{
+			name: "directory sync fails",
+			writer: durableWriter{
+				syncFile: (*os.File).Sync,
+				syncDir:  func(string) error { return syncFailed },
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "c.yaml")
+			c, err := Parse([]byte(minimalYAML), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(oldConfig), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = saveAtomic(tt.writer, path, c)
+			if !errors.Is(err, syncFailed) {
+				t.Fatalf("saveAtomic error = %v, want it to report %v", err, syncFailed)
+			}
+			if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+				t.Errorf("tmp file survived a failed save: %v", err)
+			}
+			if tt.keepsOldCfg {
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != oldConfig {
+					t.Errorf("config on disk = %q, want the previous config left untouched", got)
+				}
+			}
+		})
 	}
 }
 

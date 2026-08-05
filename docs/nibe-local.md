@@ -46,17 +46,19 @@ flag. That means:
 
 ## One-time setup on the pump
 
-1. In the NIBE **myUplink** app, enable the **Local REST API** for the pump and
-   note the generated **username** and **password**.
-2. The app shows the API's certificate **fingerprint** ("fingeravtryck"). You
-   will pin this. You can also read it yourself:
+1. On the **pump's own screen**, enable the **Local REST API** (installer menu
+   **7.5**, the section that also holds 7.5.15 below) and note the **username**
+   and **password** it generates. No app and no myUplink account are involved —
+   confirmed on an S735.
+2. Pin the API's certificate **fingerprint**. Read it off the pump yourself:
 
    ```bash
    openssl s_client -connect <pump-ip>:8443 -servername <pump-ip> </dev/null 2>/dev/null \
      | openssl x509 -noout -fingerprint -sha256
    ```
 
-   Use the hex value (colons and case don't matter — they're normalised).
+   Use the hex value (colons and case don't matter — they're normalised). The
+   myUplink app shows the same value as "fingeravtryck" if you have it.
 3. Leave the Local REST API in **read-only** mode (installer menu 7.5.15)
    unless you are deliberately enabling the Solar PV write path.
 

@@ -32,6 +32,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Check the snapshot and comparison order
+        run: bash scripts/test-bundled-driver-pin-order.sh
+
+      # drivers/ is gitignored and empty after checkout. Restore the exact
+      # pinned snapshot before --behind compares it with device-drivers main;
+      # comparing against an empty directory reports every driver as outdated.
+      - name: Fetch the pinned bundled drivers
+        run: make drivers
+
       - name: Compare the bundled drivers against device-drivers main
         id: compare
         env:

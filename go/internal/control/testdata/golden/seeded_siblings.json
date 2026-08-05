@@ -1,0 +1,6540 @@
+{
+  "family": "seeded_siblings",
+  "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
+  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
+  "record_count": 60,
+  "records": [
+    {
+      "scenario_id": "seeded_siblings/000_discharge_blocked",
+      "seed": 4000,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3361,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -2277
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 2741,
+            "soc": 0.35,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": 3019,
+            "soc": 0.52,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 2995.2367346938777,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 748.1632653061225,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 5760,
+        "battery_target_sum_w": 3743.4,
+        "raw_grid_w": 3361,
+        "projected_grid_w": 1344.4
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/001_charge_blocked",
+      "seed": 4001,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5864,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -5881
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -1909,
+            "soc": 0.53,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -3712,
+            "soc": 0.63,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": -858,
+            "soc": 0.36,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": -1785.75873015873,
+          "clamped": false
+        },
+        {
+          "driver": "pixii",
+          "target_w": -587.4206349206348,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -587.4206349206348,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -6479,
+        "battery_target_sum_w": -2960.5999999999995,
+        "raw_grid_w": -5864,
+        "projected_grid_w": -2345.5999999999995
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/002_offline",
+      "seed": 4002,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4919,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 684,
+            "soc": 0.35,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 3772,
+            "soc": 0.75,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": 820.5999999999999,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 3772,
+        "battery_target_sum_w": 820.5999999999999,
+        "raw_grid_w": 4919,
+        "projected_grid_w": 1967.6
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/003_device_fault",
+      "seed": 4003,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -4368,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4416
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 3794,
+            "soc": 0.68,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": -1965,
+            "soc": 0.4,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": 1952,
+            "soc": 0.47,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -13,
+        "battery_target_sum_w": 0,
+        "raw_grid_w": -4368,
+        "projected_grid_w": -4355
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/004_soc_floor",
+      "seed": 4004,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 5262,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": -611,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -356,
+            "soc": 0.5,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": -1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp",
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": -1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -967,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 5262,
+        "projected_grid_w": 1229
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/005_tiny_cap",
+      "seed": 4005,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -4557,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -4327
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 2738,
+            "soc": 0.32,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 3098,
+            "soc": 0.62,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": -3233,
+            "soc": 0.46,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 1084.7967479674796,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 2082.809756097561,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 2603,
+        "battery_target_sum_w": 3467.606504065041,
+        "raw_grid_w": -4557,
+        "projected_grid_w": -3692.393495934959
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/006_discharge_blocked",
+      "seed": 4006,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 2409,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -2788
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -2664,
+            "soc": 0.64,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -2666,
+            "soc": 0.71,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp",
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -5330,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 2409,
+        "projected_grid_w": 2739
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/007_charge_blocked",
+      "seed": 4007,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -3048,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -4167
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 427,
+            "soc": 0.33,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 3850,
+            "soc": 0.33,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": 517,
+            "soc": 0.33,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 3311.4,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 3311.4,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 4794,
+        "battery_target_sum_w": 6622.8,
+        "raw_grid_w": -3048,
+        "projected_grid_w": -1219.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/008_offline",
+      "seed": 4008,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 5355,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -3976,
+            "soc": 0.77,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 3081,
+            "soc": 0.45,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -132,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 3081,
+        "battery_target_sum_w": -132,
+        "raw_grid_w": 5355,
+        "projected_grid_w": 2142
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/009_device_fault",
+      "seed": 4009,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5208,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -2966
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": -693,
+            "soc": 0.46,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -2466,
+            "soc": 0.61,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": 3316,
+            "soc": 0.69,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": 1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 2568.0000044676126,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 4066.0000070737206,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 850,
+        "battery_target_sum_w": 6634.000011541333,
+        "raw_grid_w": -5208,
+        "projected_grid_w": 576.0000115413332
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/010_soc_floor",
+      "seed": 4010,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 2096,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 1909,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -1212,
+            "soc": 0.73,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -186.86666666666662,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 697,
+        "battery_target_sum_w": -186.86666666666662,
+        "raw_grid_w": 2096,
+        "projected_grid_w": 1212.1333333333334
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/011_tiny_cap",
+      "seed": 4011,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5887,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -2128
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -2997,
+            "soc": 0.61,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 1272,
+            "soc": 0.34,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": -2870,
+            "soc": 0.55,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": -300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": -296.5953488372094,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -296.5953488372094,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -4595,
+        "battery_target_sum_w": -893.1906976744187,
+        "raw_grid_w": -5887,
+        "projected_grid_w": -2185.1906976744185
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/012_discharge_blocked",
+      "seed": 4012,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 2408,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -2574
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 581,
+            "soc": 0.43,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -3465,
+            "soc": 0.43,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -4328.8,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -2884,
+        "battery_target_sum_w": -4328.8,
+        "raw_grid_w": 2408,
+        "projected_grid_w": 963.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/013_charge_blocked",
+      "seed": 4013,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -3827,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -5730
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 3928,
+            "soc": 0.74,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -1918,
+            "soc": 0.55,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": 5,
+            "soc": 0.52,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 1710.7936507936506,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 2600.4063492063488,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 2015,
+        "battery_target_sum_w": 4311.199999999999,
+        "raw_grid_w": -3827,
+        "projected_grid_w": -1530.800000000001
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/014_offline",
+      "seed": 4014,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4264,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": -1476,
+            "soc": 0.56,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -400,
+            "soc": 0.65,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": -1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": -1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -400,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 4264,
+        "projected_grid_w": -336
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/015_device_fault",
+      "seed": 4015,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -4568,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3172
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 1623,
+            "soc": 0.38,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": -1166,
+            "soc": 0.31,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": 2805,
+            "soc": 0.64,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 402.6,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 805.2,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 1639,
+        "battery_target_sum_w": 1207.8000000000002,
+        "raw_grid_w": -4568,
+        "projected_grid_w": -4999.2
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/016_soc_floor",
+      "seed": 4016,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4785,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -2785,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 350,
+            "soc": 0.43,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -2653,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -2435,
+        "battery_target_sum_w": -2653,
+        "raw_grid_w": 4785,
+        "projected_grid_w": 4567
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/017_tiny_cap",
+      "seed": 4017,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -2508,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -2161
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 561,
+            "soc": 0.4,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 2519,
+            "soc": 0.54,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": -1386,
+            "soc": 0.75,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 660.909090909091,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 1268.9454545454546,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 1694,
+        "battery_target_sum_w": 2229.8545454545456,
+        "raw_grid_w": -2508,
+        "projected_grid_w": -1972.1454545454544
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/018_discharge_blocked",
+      "seed": 4018,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 1702,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3132
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 3223,
+            "soc": 0.35,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -1965,
+            "soc": 0.63,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 236.79999999999995,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 1258,
+        "battery_target_sum_w": 236.79999999999995,
+        "raw_grid_w": 1702,
+        "projected_grid_w": 680.8
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/019_charge_blocked",
+      "seed": 4019,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5443,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -5509
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": -1180,
+            "soc": 0.53,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -728,
+            "soc": 0.76,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": 1429,
+            "soc": 0.36,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": 1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 5000,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 3287.6712395762556,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp",
+          "pixii"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -479,
+        "battery_target_sum_w": 8287.671239576255,
+        "raw_grid_w": -5443,
+        "projected_grid_w": 3323.671239576255
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/020_offline",
+      "seed": 4020,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4438,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 1917,
+            "soc": 0.47,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 1787,
+            "soc": 0.38,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -875.8000000000002,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 1787,
+        "battery_target_sum_w": -875.8000000000002,
+        "raw_grid_w": 4438,
+        "projected_grid_w": 1775.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/021_device_fault",
+      "seed": 4021,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5902,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4705
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -3228,
+            "soc": 0.67,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 1145,
+            "soc": 0.53,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": 2918,
+            "soc": 0.35,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 1122.2709677419355,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 1776.9290322580644,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 4063,
+        "battery_target_sum_w": 2899.2,
+        "raw_grid_w": -5902,
+        "projected_grid_w": -7065.8
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/022_soc_floor",
+      "seed": 4022,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 1855,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": -129,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 3599,
+            "soc": 0.65,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 1549.808219178082,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 807.1917808219177,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 3470,
+        "battery_target_sum_w": 2357,
+        "raw_grid_w": 1855,
+        "projected_grid_w": 742
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/023_tiny_cap",
+      "seed": 4023,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -4406,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -4467
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": 3469,
+            "soc": 0.32,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -1916,
+            "soc": 0.77,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 15200,
+            "current_w": -3273,
+            "soc": 0.71,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 265.40229885057465,
+          "clamped": false
+        },
+        {
+          "driver": "pixii",
+          "target_w": 403.4114942528735,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 254.7862068965517,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -1720,
+        "battery_target_sum_w": 923.5999999999999,
+        "raw_grid_w": -4406,
+        "projected_grid_w": -1762.4
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/024_discharge_blocked",
+      "seed": 4024,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3272,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3178
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": -1434,
+            "soc": 0.64,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 1350,
+            "soc": 0.33,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": -1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp",
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": -1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -84,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 3272,
+        "projected_grid_w": -1644
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/025_charge_blocked",
+      "seed": 4025,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -2343,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -3572
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 1409,
+            "soc": 0.45,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 3834,
+            "soc": 0.45,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": -457,
+            "soc": 0.44,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 4071.3205479452054,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 2120.4794520547944,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 4786,
+        "battery_target_sum_w": 6191.799999999999,
+        "raw_grid_w": -2343,
+        "projected_grid_w": -937.2000000000007
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/026_offline",
+      "seed": 4026,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3476,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": -3497,
+            "soc": 0.77,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -2965,
+            "soc": 0.57,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -2965,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 3476,
+        "projected_grid_w": 1441
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/027_device_fault",
+      "seed": 4027,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -3097,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4559
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": 104,
+            "soc": 0.46,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -3480,
+            "soc": 0.72,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": 2417,
+            "soc": 0.42,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -1063,
+        "battery_target_sum_w": 0,
+        "raw_grid_w": -3097,
+        "projected_grid_w": -2034
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/028_soc_floor",
+      "seed": 4028,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 5104,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 3140,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -1230,
+            "soc": 0.34,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -394.6575342465753,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 1910,
+        "battery_target_sum_w": -394.6575342465753,
+        "raw_grid_w": 5104,
+        "projected_grid_w": 2799.3424657534247
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/029_tiny_cap",
+      "seed": 4029,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5457,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -4502
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -2016,
+            "soc": 0.61,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -714,
+            "soc": 0.47,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": -1783,
+            "soc": 0.79,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": 1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 3243.243246846847,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 3113.5135169729733,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -4513,
+        "battery_target_sum_w": 6656.75676381982,
+        "raw_grid_w": -5457,
+        "projected_grid_w": 5712.75676381982
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/030_discharge_blocked",
+      "seed": 4030,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3710,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3736
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 1122,
+            "soc": 0.43,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": 2832,
+            "soc": 0.56,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 1728,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 3954,
+        "battery_target_sum_w": 1728,
+        "raw_grid_w": 3710,
+        "projected_grid_w": 1484
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/031_charge_blocked",
+      "seed": 4031,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5925,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -3843
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": -3280,
+            "soc": 0.74,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -2902,
+            "soc": 0.68,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": 1025,
+            "soc": 0.65,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": -625.1707317073171,
+          "clamped": false
+        },
+        {
+          "driver": "pixii",
+          "target_w": -651.219512195122,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -325.609756097561,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -5157,
+        "battery_target_sum_w": -1602,
+        "raw_grid_w": -5925,
+        "projected_grid_w": -2370
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/032_offline",
+      "seed": 4032,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4951,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -181,
+            "soc": 0.56,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -1416,
+            "soc": 0.8,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -4386.6,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -1416,
+        "battery_target_sum_w": -4386.6,
+        "raw_grid_w": 4951,
+        "projected_grid_w": 1980.3999999999996
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/033_device_fault",
+      "seed": 4033,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -3867,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3086
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 2417,
+            "soc": 0.38,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -2151,
+            "soc": 0.45,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": 2778,
+            "soc": 0.51,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 0,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 627,
+        "battery_target_sum_w": 0,
+        "raw_grid_w": -3867,
+        "projected_grid_w": -4494
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/034_soc_floor",
+      "seed": 4034,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 5401,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -2242,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 273,
+            "soc": 0.57,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": -1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -3200.0000029653334,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": -1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -1969,
+        "battery_target_sum_w": -3200.0000029653334,
+        "raw_grid_w": 5401,
+        "projected_grid_w": 4169.999997034667
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/035_tiny_cap",
+      "seed": 4035,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -2365,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -2809
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 1354,
+            "soc": 0.4,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": 1535,
+            "soc": 0.67,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": -2419,
+            "soc": 0.5,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 755.6,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 755.6,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 470,
+        "battery_target_sum_w": 1811.1999999999998,
+        "raw_grid_w": -2365,
+        "projected_grid_w": -1023.8000000000002
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/036_discharge_blocked",
+      "seed": 4036,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 2635,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3498
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": -3545,
+            "soc": 0.34,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 1022,
+            "soc": 0.76,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -4104,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -2523,
+        "battery_target_sum_w": -4104,
+        "raw_grid_w": 2635,
+        "projected_grid_w": 1054
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/037_charge_blocked",
+      "seed": 4037,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -2548,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -5656
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -887,
+            "soc": 0.54,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -3714,
+            "soc": 0.37,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": 390,
+            "soc": 0.6,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": -1368.1020134228188,
+          "clamped": false
+        },
+        {
+          "driver": "pixii",
+          "target_w": -864.0644295302012,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -450.03355704697987,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -4211,
+        "battery_target_sum_w": -2682.2,
+        "raw_grid_w": -2548,
+        "projected_grid_w": -1019.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/038_offline",
+      "seed": 4038,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3138,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 2459,
+            "soc": 0.47,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -2166,
+            "soc": 0.49,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -4048.8,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -2166,
+        "battery_target_sum_w": -4048.8,
+        "raw_grid_w": 3138,
+        "projected_grid_w": 1255.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/039_device_fault",
+      "seed": 4039,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5478,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3316
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -1935,
+            "soc": 0.67,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 348,
+            "soc": 0.64,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 15200,
+            "current_w": -3796,
+            "soc": 0.71,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": 1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 3142.0000053333333,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 3142.0000053333333,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -3448,
+        "battery_target_sum_w": 6284.000010666667,
+        "raw_grid_w": -5478,
+        "projected_grid_w": 4254.000010666667
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/040_soc_floor",
+      "seed": 4040,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4414,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": 1166,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -417,
+            "soc": 0.77,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -470.1485148514852,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 749,
+        "battery_target_sum_w": -470.1485148514852,
+        "raw_grid_w": 4414,
+        "projected_grid_w": 3194.8514851485147
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/041_tiny_cap",
+      "seed": 4041,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5949,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -3103
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 3761,
+            "soc": 0.31,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 1099,
+            "soc": 0.4,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": -921,
+            "soc": 0.32,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 2571.3698630136983,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 2468.5150684931505,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 3939,
+        "battery_target_sum_w": 5339.884931506849,
+        "raw_grid_w": -5949,
+        "projected_grid_w": -4548.115068493151
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/042_discharge_blocked",
+      "seed": 4042,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 2789,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4055
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -891,
+            "soc": 0.63,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 3334,
+            "soc": 0.48,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 769.5999999999999,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 0,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 2443,
+        "battery_target_sum_w": 769.5999999999999,
+        "raw_grid_w": 2789,
+        "projected_grid_w": 1115.6
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/043_charge_blocked",
+      "seed": 4043,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -2194,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -5684
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 2703,
+            "soc": 0.45,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -2214,
+            "soc": 0.6,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": 1878,
+            "soc": 0.31,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 1841.7,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 1841.7,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 2367,
+        "battery_target_sum_w": 3683.4,
+        "raw_grid_w": -2194,
+        "projected_grid_w": -877.5999999999999
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/044_offline",
+      "seed": 4044,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 4700,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -2203,
+            "soc": 0.76,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": -980,
+            "soc": 0.72,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": -1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": -1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -980,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 4700,
+        "projected_grid_w": 680
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/045_device_fault",
+      "seed": 4045,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -4631,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4653
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 397,
+            "soc": 0.46,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": 1522,
+            "soc": 0.35,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": 3693,
+            "soc": 0.67,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": 1670.3000000000002,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 1670.3000000000002,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 5215,
+        "battery_target_sum_w": 3340.6000000000004,
+        "raw_grid_w": -4631,
+        "projected_grid_w": -6505.4
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/046_soc_floor",
+      "seed": 4046,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 5132,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 3745,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 789,
+            "soc": 0.47,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 956.5808219178083,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 498.21917808219183,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 4534,
+        "battery_target_sum_w": 1454.8000000000002,
+        "raw_grid_w": 5132,
+        "projected_grid_w": 2052.8
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/047_tiny_cap",
+      "seed": 4047,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5314,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -5127
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -744,
+            "soc": 0.57,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": 2333,
+            "soc": 0.59,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": -1312,
+            "soc": 0.54,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 995.8045977011494,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 955.9724137931034,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 277,
+        "battery_target_sum_w": 2251.7770114942527,
+        "raw_grid_w": -5314,
+        "projected_grid_w": -3339.2229885057473
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/048_discharge_blocked",
+      "seed": 4048,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 2014,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3910
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 2354,
+            "soc": 0.52,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -3152,
+            "soc": 0.67,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -2006.4,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -798,
+        "battery_target_sum_w": -2006.4,
+        "raw_grid_w": 2014,
+        "projected_grid_w": 805.5999999999999
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/049_charge_blocked",
+      "seed": 4049,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -3251,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -3997
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -3049,
+            "soc": 0.71,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 81,
+            "soc": 0.79,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": 1491,
+            "soc": 0.76,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": 1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 4800.000008448,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 4800.000008448,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -1477,
+        "battery_target_sum_w": 9600.000016896,
+        "raw_grid_w": -3251,
+        "projected_grid_w": 7826.000016896
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/050_offline",
+      "seed": 4050,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3448,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 299,
+            "soc": 0.52,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": 3599,
+            "soc": 0.43,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": 1530.1999999999998,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 3599,
+        "battery_target_sum_w": 1530.1999999999998,
+        "raw_grid_w": 3448,
+        "projected_grid_w": 1379.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/051_device_fault",
+      "seed": 4051,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -5965,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4691
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 3895,
+            "soc": 0.34,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -3228,
+            "soc": 0.58,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 15200,
+            "current_w": -2698,
+            "soc": 0.37,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": -1173.5,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -1173.5,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -5926,
+        "battery_target_sum_w": -2347,
+        "raw_grid_w": -5965,
+        "projected_grid_w": -2386
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/052_soc_floor",
+      "seed": 4052,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 1808,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -1010,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -3714,
+            "soc": 0.7,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -2248.567741935484,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -4724,
+        "battery_target_sum_w": -2248.567741935484,
+        "raw_grid_w": 1808,
+        "projected_grid_w": 4283.432258064517
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/053_tiny_cap",
+      "seed": 4053,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -1655,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -4943
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 1586,
+            "soc": 0.49,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 9600,
+            "current_w": -1481,
+            "soc": 0.31,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 9600,
+            "current_w": 117,
+            "soc": 0.48,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 405,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 405,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 222,
+        "battery_target_sum_w": 1110,
+        "raw_grid_w": -1655,
+        "projected_grid_w": -767
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/054_discharge_blocked",
+      "seed": 4054,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3155,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -4466
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -3067,
+            "soc": 0.31,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": true,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": 37,
+            "soc": 0.4,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": -1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -5000,
+          "clamped": true
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp",
+          "sungrow"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": -1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -3030,
+        "battery_target_sum_w": -5000,
+        "raw_grid_w": 3155,
+        "projected_grid_w": 1185
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/055_charge_blocked",
+      "seed": 4055,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -4654,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -4033
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 532,
+            "soc": 0.5,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": true,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": 3583,
+            "soc": 0.5,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 15200,
+            "current_w": 1981,
+            "soc": 0.6,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 5000,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 2200.09900990099,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp",
+          "pixii"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": 6096,
+        "battery_target_sum_w": 7200.0990099009905,
+        "raw_grid_w": -4654,
+        "projected_grid_w": -3549.9009900990095
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/056_offline",
+      "seed": 4056,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 3728,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 9600,
+            "current_w": 3201,
+            "soc": 0.44,
+            "online": false,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": -2150,
+            "soc": 0.62,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "sungrow",
+          "target_w": -4386.8,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -2150,
+        "battery_target_sum_w": -4386.8,
+        "raw_grid_w": 3728,
+        "projected_grid_w": 1491.1999999999998
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/057_device_fault",
+      "seed": 4057,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -2525,
+        "pv": [
+          {
+            "driver": "pv-fa",
+            "power_w": -3027
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 15200,
+            "current_w": -1703,
+            "soc": 0.63,
+            "online": true,
+            "device_fault": true,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "fa"
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 15200,
+            "current_w": -1667,
+            "soc": 0.77,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "sg"
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 10000,
+            "current_w": -3213,
+            "soc": 0.34,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "group": "px"
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0,
+          "inverter_groups": {
+            "pv-fa": "fa"
+          }
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "pixii",
+          "target_w": -1335.3174603174602,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -2029.6825396825395,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -4880,
+        "battery_target_sum_w": -3365,
+        "raw_grid_w": -2525,
+        "projected_grid_w": -1010
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/058_soc_floor",
+      "seed": 4058,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": 5620,
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 5000,
+            "current_w": 2143,
+            "soc": 0.03,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 5000,
+            "current_w": -2400,
+            "soc": 0.38,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "self_consumption",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 50,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": false,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 0,
+          "clamped": true
+        },
+        {
+          "driver": "sungrow",
+          "target_w": -1814.5,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 0,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -257,
+        "battery_target_sum_w": -1814.5,
+        "raw_grid_w": 5620,
+        "projected_grid_w": 4062.5
+      }
+    },
+    {
+      "scenario_id": "seeded_siblings/059_tiny_cap",
+      "seed": 4059,
+      "inputs": {
+        "fuse_max_w": 11040,
+        "grid_w": -3266,
+        "pv": [
+          {
+            "driver": "pv-0",
+            "power_w": -2968
+          }
+        ],
+        "batteries": [
+          {
+            "driver": "ferroamp",
+            "capacity_wh": 10000,
+            "current_w": -2756,
+            "soc": 0.78,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 300,
+            "max_discharge_w": 300
+          },
+          {
+            "driver": "sungrow",
+            "capacity_wh": 10000,
+            "current_w": 84,
+            "soc": 0.51,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          },
+          {
+            "driver": "pixii",
+            "capacity_wh": 5000,
+            "current_w": -395,
+            "soc": 0.7,
+            "online": true,
+            "device_fault": false,
+            "discharge_blocked": false,
+            "charge_blocked": false,
+            "max_charge_w": 0,
+            "max_discharge_w": 0
+          }
+        ],
+        "state": {
+          "mode": "planner_arbitrage",
+          "grid_target_w": 0,
+          "grid_tolerance_w": 60,
+          "slew_rate_w": 100000,
+          "slew_enabled": true,
+          "min_dispatch_interval_s": 0,
+          "holdoff_active": false,
+          "use_energy_dispatch": true,
+          "ev_charging_w": 0,
+          "battery_covers_ev": false,
+          "battery_boost_ev_charging_w": 0,
+          "battery_boost_reserve_soc": 0,
+          "ev_surplus_only_reserve_w": 0,
+          "peak_limit_w": 5000,
+          "peak_import_ceiling_w": 0,
+          "max_export_w": 0,
+          "site_fuse_amps": 0,
+          "site_fuse_voltage": 0,
+          "site_fuse_phases": 0,
+          "site_fuse_safety_a": 0,
+          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_threshold_w": 0
+        },
+        "slot": {
+          "present": true,
+          "battery_energy_wh": 1200,
+          "strategy": "arbitrage",
+          "planned_grid_w": 0,
+          "has_planned_grid_w": false,
+          "live_pv_surplus_soc_cap_pct": 0,
+          "elapsed_s": 450,
+          "remaining_s": 450
+        }
+      },
+      "per_driver_targets": [
+        {
+          "driver": "ferroamp",
+          "target_w": 300,
+          "clamped": true
+        },
+        {
+          "driver": "pixii",
+          "target_w": 1920.0000032,
+          "clamped": false
+        },
+        {
+          "driver": "sungrow",
+          "target_w": 3840.0000064,
+          "clamped": false
+        }
+      ],
+      "clamp_attributions": {
+        "clamped_drivers": [
+          "ferroamp"
+        ],
+        "all_targets_zero_clamped": false,
+        "plan_sign_intent": 1,
+        "plan_sign_floor_zeroed": false,
+        "plan_stale": false,
+        "fuse_saturated": false,
+        "fuse_ev_max_w": 0,
+        "fuse_hold_latched": false,
+        "fuse_hold_max_charge_w": 0,
+        "fuse_hold_max_discharge_w": 0,
+        "per_phase_overage_w": 0,
+        "effective_import_ceiling_w": 11040,
+        "effective_export_ceiling_w": 11040,
+        "import_ceiling_binding": false,
+        "export_ceiling_binding": false
+      },
+      "site_totals": {
+        "battery_current_w": -3067,
+        "battery_target_sum_w": 6060.000009599999,
+        "raw_grid_w": -3266,
+        "projected_grid_w": 5861.000009599999
+      }
+    }
+  ]
+}

@@ -501,7 +501,7 @@
         "/api/support/dump",
         "Preparing support bundle",
         "Collecting logs, redacted config, driver health, and recent telemetry.",
-        "ftw-support.tar.gz"
+        "ftw-support.zip"
       );
     });
     state.bodyEl.querySelector('[data-role="research"]').addEventListener("click", function () {

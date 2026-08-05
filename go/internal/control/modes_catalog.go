@@ -44,7 +44,14 @@ func ModeCatalog() []ModeInfo {
 		{ModePlannerPassiveArbitrage, "Passive arbitrage", "Charge from the cheapest available source (PV when sunny, grid during cheap hours). Never exports from battery.", TierPrimary},
 		{ModePlannerArbitrage, "Active arbitrage", "Full price arbitrage — charge cheap, discharge into expensive hours (battery may export to grid).", TierPrimary},
 		// Advanced — manual fallbacks behind the "Manual…" toggle.
-		{ModeIdle, "Idle", "Do nothing — no dispatch.", TierAdvanced},
+		// The key stays "idle": it is the /api/modes and Home Assistant
+		// contract. Only the words change, and they changed because the
+		// old ones described a mechanism ("no dispatch") that was also
+		// the wrong mechanism — a battery left uncommanded holds its
+		// last setpoint, or on Ferroamp reverts to charging itself from
+		// the grid. Say what the operator gets: the batteries stop, the
+		// fuse still wins, and the EV is somebody else's switch.
+		{ModeIdle, "Stop batteries", "Hold every battery at 0 W for as long as this mode is on, so none of them drifts back to the inverter's own behaviour. Fuse protection still applies: a battery discharges if the site is about to trip its main fuse. EV charging and PV curtailment carry on — stop those on their own controls.", TierAdvanced},
 		{ModeSelfConsumption, "Self (manual)", "Manual self-consumption — PI chases grid target, no plan.", TierAdvanced},
 		{ModePeakShaving, "Peak", "Limit grid import to the configured peak limit.", TierAdvanced},
 		{ModeCharge, "Charge", "Force full charge regardless of price.", TierAdvanced},

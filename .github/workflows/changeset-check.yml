@@ -26,6 +26,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# A label change or a new push re-asks the same question of a newer diff, so
+# the older answer is worthless. Cancelling is also what makes the `labeled`
+# trigger cheap: adding `no-changeset` mid-run drops the run it would fail.
+concurrency:
+  group: changeset-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   changeset-required:
     name: changeset present (or auto-exempt)

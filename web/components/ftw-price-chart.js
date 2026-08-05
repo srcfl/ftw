@@ -30,6 +30,7 @@ import {
   formatPriceSlotLabel,
 } from "./price-summary.js";
 import { bestBlock, consumerTotalOre, priceParts } from "./price-math.js";
+import { setActiveCurrency, toDisplay, unitFor } from "./price-units.js";
 import { buildPriceStrip } from "./price-strip.js";
 
 class FtwPriceChart extends FtwElement {
@@ -346,20 +347,26 @@ class FtwPriceChart extends FtwElement {
       margin-top: 16px;
       overflow: visible;
     }
-    /* Bars sit above or below the average line; the side already says
-       dear or cheap, so colour is reinforcement and the strip still reads
-       in greyscale. */
+    /* Bars rise from zero like the full chart's, so both views teach one
+       reading: height is price. The dotted line is the average ahead — a
+       bar's top is read against it, and colour only reinforces what the
+       geometry already says, so the strip survives greyscale. */
     .compact-profile rect { opacity: 0.85; }
-    .compact-profile rect.is-dear  { fill: var(--red-e); }
-    .compact-profile rect.is-cheap { fill: var(--green-e); }
-    .compact-profile rect.is-flat  { fill: var(--fg-muted); }
+    .compact-profile rect.is-dear     { fill: var(--red-e); }
+    .compact-profile rect.is-cheap    { fill: var(--green-e); }
+    .compact-profile rect.is-flat     { fill: var(--fg-muted); }
+    .compact-profile rect.is-negative { fill: var(--yellow); }
     .compact-profile rect.is-current {
       fill: var(--accent-e);
       opacity: 1;
     }
+    /* Dotted like the full chart's mean line — one visual word for
+       "average" across both views. */
     .compact-profile line {
       stroke: var(--fg-muted);
       stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-dasharray: 0.01 6;
       opacity: 0.9;
     }
     .compact-profile-note {
@@ -429,7 +436,8 @@ class FtwPriceChart extends FtwElement {
     this._refreshTimer = null;
     this._hover = null;       // { idx, x, y } during hover
     this._vatPct = 25;        // fallback; overwritten from /api/config
-    this._gridTariff = 0;     // öre/kWh excl. VAT; from /api/config
+    this._gridTariff = 0;     // minor units/kWh excl. VAT; from /api/config
+    this._currency = "SEK";   // what those minor units are; from /api/prices
     this._geom = null;        // { padL, plotW, n, W } — set in _renderChart
     this._isTouching = false; // suppresses synthesized mouse events after touch
   }
@@ -524,6 +532,10 @@ class FtwPriceChart extends FtwElement {
           spot:  Number(it.spot_ore_kwh) || 0,
         })).sort((a, b) => a.tsMs - b.tsMs);
         this._data = { zone: j.zone || "", items };
+        // The response says which currency the stored minor units are in;
+        // it decides the label, not the arithmetic. Sharing it saves the
+        // views that show a price without fetching one their own request.
+        if (j.currency) this._currency = setActiveCurrency(j.currency);
         this._priceState = "ready";
       }
       this.update();
@@ -533,14 +545,14 @@ class FtwPriceChart extends FtwElement {
     }
   }
 
-  // Resolved öre/kWh per slot for the active toggle. "Total" is what the
-  // slot actually costs to import: (spot + grid tariff) × (1 + VAT/100).
+  // Resolved minor units/kWh per slot for the active toggle. "Total" is
+  // what the slot actually costs to import: (spot + grid tariff) × (1 + VAT/100).
   _priceFor(item) {
     if (!this._totalOn) return item.spot;
     return consumerTotalOre(item.spot, this._gridTariff, this._vatPct);
   }
 
-  // Breakdown of the consumer total for one slot, in öre/kWh.
+  // Breakdown of the consumer total for one slot, in minor units/kWh.
   _partsFor(item) {
     return priceParts(item.spot, this._gridTariff, this._vatPct);
   }
@@ -606,7 +618,8 @@ class FtwPriceChart extends FtwElement {
       const lo = Math.min(...prices);
       const hi = Math.max(...prices);
       const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
-      const fmt = v => (v == null ? "—" : v.toFixed(1) + " öre");
+      const unit = unitFor(this._currency);
+      const fmt = v => (v == null ? "—" : toDisplay(v, this._currency).toFixed(unit.decimals) + " " + unit.label);
       statsHtml = `
           <div class="meta meta-stats">
             <span><span class="meta-label">now</span> ${fmt(cur)}</span>
@@ -673,10 +686,12 @@ class FtwPriceChart extends FtwElement {
     }
 
     const summary = view.summary;
+    const unit = unitFor(this._currency);
     const formatOre = (value) => {
       if (!Number.isFinite(value)) return "—";
-      const digits = Math.abs(value) >= 100 ? 0 : 1;
-      return Number(value).toFixed(digits);
+      const shown = toDisplay(value, this._currency);
+      const digits = Math.abs(shown) >= 100 ? 0 : unit.decimals;
+      return shown.toFixed(digits);
     };
     const currentValue = summary.current ? formatOre(summary.current.ore) : "—";
     // The cheapest contiguous 2 h ahead, not the cheapest single slot: a
@@ -699,19 +714,19 @@ class FtwPriceChart extends FtwElement {
       ? `<span class="compact-stale">Last update failed</span>`
       : "";
     const accessible = summary.current
-      ? `Current electricity price ${currentValue} öre per kilowatt-hour. Cheapest two hours ${lowValue} öre at ${lowTime}.`
-      : `No current electricity price slot. Cheapest two hours ${lowValue} öre at ${lowTime}.`;
+      ? `Current electricity price ${currentValue} ${unit.label} per kilowatt-hour. Cheapest two hours ${lowValue} ${unit.label} at ${lowTime}.`
+      : `No current electricity price slot. Cheapest two hours ${lowValue} ${unit.label} at ${lowTime}.`;
 
     return `${head}
       <div class="compact-summary" aria-label="${escapeXml(accessible)}">
         <div class="compact-current">
           <span class="compact-value">${currentValue}</span>
-          <span class="compact-unit">öre/kWh</span>
+          <span class="compact-unit">${unit.perKwh}</span>
           <span class="compact-meta">${escapeXml(data.zone || "—")} · ${vatLabel}</span>
         </div>
         <div class="compact-low">
           <span>Cheapest 2 h</span>
-          <strong>${lowValue} öre</strong>
+          <strong>${lowValue} ${unit.label}</strong>
           <small>${escapeXml(lowTime)}</small>
         </div>
       </div>
@@ -731,19 +746,20 @@ class FtwPriceChart extends FtwElement {
     if (!strip) {
       return `<div class="compact-profile-empty">No prices published ahead yet.</div>`;
     }
+    const unit = unitFor(this._currency);
+    const mean = roundOre(toDisplay(strip.mean, this._currency));
     const bars = strip.bars.map((b) => {
-      const cls = [b.side === "up" ? "is-dear" : b.side === "down" ? "is-cheap" : "is-flat",
-                   b.current ? "is-current" : ""].filter(Boolean).join(" ");
+      const cls = [`is-${b.tone}`, b.current ? "is-current" : ""].filter(Boolean).join(" ");
       return `<rect class="${cls}" x="${b.x.toFixed(2)}" y="${b.y.toFixed(2)}"
                     width="${b.w.toFixed(2)}" height="${b.h.toFixed(2)}" />`;
     }).join("");
     return `
       <svg class="compact-profile" viewBox="0 0 ${strip.W} ${strip.H}" preserveAspectRatio="none"
-           role="img" aria-label="Price against today's average of ${roundOre(strip.mean)} öre per kWh. Bars above the line are dearer, below are cheaper.">
+           role="img" aria-label="Upcoming prices as bars from zero, like the full chart. The dotted line marks the average ahead, ${mean} ${unit.label} per kWh.">
         ${bars}
-        <line x1="0" x2="${strip.W}" y1="${strip.midY.toFixed(2)}" y2="${strip.midY.toFixed(2)}" />
+        <line x1="0" x2="${strip.W}" y1="${strip.meanY.toFixed(2)}" y2="${strip.meanY.toFixed(2)}" />
       </svg>
-      <div class="compact-profile-note">vs the average ahead, ${roundOre(strip.mean)} öre</div>
+      <div class="compact-profile-note">dotted line: average ahead, ${mean} ${unit.label}</div>
     `;
   }
 
@@ -787,7 +803,7 @@ class FtwPriceChart extends FtwElement {
     // were readable but the NOW marker felt thin and crowded against
     // the bars. +50 % on axes, +33 % on NOW + thicker stroke so the
     // current hour reads at-a-glance from across a room.
-    const fsAxis = small ? 27 : 10;  // y-axis öre + x-axis time
+    const fsAxis = small ? 27 : 10;  // y-axis price + x-axis time
     const fsNow  = small ? 24 : 10;  // NOW label
     const fsMark = small ? 26 : 11;  // peak/low ▼▲ glyphs
     const nowStrokeW = small ? 3 : 1.5;
@@ -875,10 +891,12 @@ class FtwPriceChart extends FtwElement {
       }
     }
     // Y-axis labels — min / mean / max.
+    const axisUnit = unitFor(this._currency);
+    const axisTick = (v) => roundOre(toDisplay(v, this._currency)) + " " + axisUnit.axis;
     const yLabels = [
-      { y: yToPx(yMax), text: roundOre(yMax) + " ö" },
-      { y: meanY,       text: roundOre(meanP) + " ö" },
-      { y: yToPx(yMin), text: roundOre(yMin) + " ö" },
+      { y: yToPx(yMax), text: axisTick(yMax) },
+      { y: meanY,       text: axisTick(meanP) },
+      { y: yToPx(yMin), text: axisTick(yMin) },
     ].map((l) => `<text x="${pad.l - 4}" y="${l.y + 3}" text-anchor="end"
                        fill="var(--fg-label)" font-family="var(--mono)" font-size="${fsAxis}">${l.text}</text>`).join("");
 
@@ -1111,7 +1129,8 @@ class FtwPriceChart extends FtwElement {
     tip.querySelector("[data-tip-time]").textContent =
       `${fmtClock(item.tsMs)}–${fmtClock(tEnd)}`;
     const priceEl = tip.querySelector("[data-tip-price]");
-    priceEl.textContent = `${roundOre(price)} öre`;
+    const shown = (v) => roundOre(toDisplay(v, this._currency));
+    priceEl.textContent = `${shown(price)} ${unitFor(this._currency).label}`;
     // Breakdown line — only in Total mode, and only when there is
     // something beyond spot to break out.
     const partsEl = tip.querySelector("[data-tip-parts]");
@@ -1120,7 +1139,7 @@ class FtwPriceChart extends FtwElement {
       if (showParts) {
         const p = this._partsFor(item);
         partsEl.textContent =
-          `spot ${roundOre(p.spot)} + grid ${roundOre(p.grid)} + VAT ${roundOre(p.vat)}`;
+          `spot ${shown(p.spot)} + grid ${shown(p.grid)} + VAT ${shown(p.vat)}`;
         partsEl.hidden = false;
       } else {
         partsEl.hidden = true;
@@ -1249,6 +1268,9 @@ function fmtClock(tsMs) {
          d.getMinutes().toString().padStart(2, "0");
 }
 
+// Significant-figure rounding for a display-unit value: three digits when
+// the number is large, two decimals when it's small. Works the same for 234
+// öre and for 2.34 Kč, which is why it takes the already-scaled value.
 function roundOre(v) {
   if (Math.abs(v) >= 100) return v.toFixed(0);
   if (Math.abs(v) >= 10)  return v.toFixed(1);

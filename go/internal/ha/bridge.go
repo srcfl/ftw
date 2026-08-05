@@ -756,7 +756,14 @@ func (b *Bridge) subscribeCommands() {
 			return
 		}
 		if b.cb.SetPeakLimit != nil {
-			_ = b.cb.SetPeakLimit(f)
+			// A rejected peak limit (negative, or above the site's fuse)
+			// must not vanish here — discarding it left the operator with
+			// an HA slider showing a number FTW never took. Log it the way
+			// SetMode does; the retained state topic republishes the value
+			// FTW actually holds.
+			if err := b.cb.SetPeakLimit(f); err != nil {
+				slog.Warn("HA set peak limit failed", "w", f, "err", err)
+			}
 		}
 	})
 	b.client.Subscribe(b.cmdTopic("ev_charging_w"), 0, func(_ paho.Client, m paho.Message) {

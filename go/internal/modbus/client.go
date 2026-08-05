@@ -165,7 +165,21 @@ func (c *Capability) Read(addr, count uint16, kind int32) ([]uint16, error) {
 	}
 	regs, err = c.client.ReadRegisters(addr, count, fc)
 	c.finishRequest(err)
-	return regs, err
+	return regs, markTransport(err)
+}
+
+// markTransport tags a genuine link failure so the driver host can tell it
+// from a device that answered and simply refused the register. Anything the
+// device replied to — an illegal-address exception, say — passes through
+// untouched, because it is evidence the device is alive.
+func markTransport(err error) error {
+	if err == nil || !isTransportError(err) {
+		return err
+	}
+	if errors.Is(err, drivers.ErrModbusTransport) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", drivers.ErrModbusTransport, err)
 }
 
 // WriteSingle — implements drivers.ModbusCap. Reconnects once on transport error.
@@ -221,7 +235,10 @@ func (c *Capability) ensureClient() error {
 		return nil
 	}
 	if remaining := c.reconnectDelay(); remaining > 0 {
-		return fmt.Errorf("modbus reconnect backoff active for %s", remaining.Round(time.Millisecond))
+		// Not new evidence about the link — the earlier transport failure
+		// already supplied that. Marked separately so a poll does not
+		// count one dropped packet as a dozen.
+		return fmt.Errorf("%w for %s", drivers.ErrModbusBackoff, remaining.Round(time.Millisecond))
 	}
 	return c.reconnect()
 }
@@ -230,7 +247,7 @@ func (c *Capability) prepareTransportRetry() error {
 	c.noteTransportFailure()
 	_ = c.closeClient()
 	if c.consecutiveTransportFailures > 1 {
-		return fmt.Errorf("modbus reconnect backoff active for %s", c.reconnectDelay().Round(time.Millisecond))
+		return fmt.Errorf("%w for %s", drivers.ErrModbusBackoff, c.reconnectDelay().Round(time.Millisecond))
 	}
 	return c.reconnect()
 }

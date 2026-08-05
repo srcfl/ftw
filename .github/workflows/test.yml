@@ -192,14 +192,19 @@ jobs:
       - name: Discard the committed snapshot
         run: rm -f drivers/*.lua
 
-      - name: The presence guard notices
+      # This is the fresh-clone path itself: drivers-present is what `make
+      # test`, `make e2e` and `make release` depend on, and on an empty
+      # drivers/ it fetches the snapshot rather than stopping to say how.
+      - name: The presence guard materialises the snapshot
         run: |
-          if make drivers-present 2>/dev/null; then
-            echo "::error::drivers-present passed with no drivers on disk"
-            exit 1
-          fi
-          echo "guard fired as expected"
+          make drivers-present
+          want="$(jq -r '.drivers | length' drivers/BUNDLED_SOURCE.json)"
+          got="$(ls drivers/*.lua | wc -l | tr -d ' ')"
+          echo "guard fetched ${got} of ${want}"
+          [ "$want" = "$got" ] \
+            || { echo "::error::guard left ${got} of ${want} drivers"; exit 1; }
 
+      # Idempotent by design: asking again writes the same bytes.
       - name: Fetch from the pin
         run: make drivers
 

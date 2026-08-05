@@ -184,7 +184,7 @@ func (s *Server) fingerprintOne(luaPath, protocol, host string, port, unit int) 
 		}
 		defer cap.Close()
 		env := drivers.NewHostEnv("__fingerprint", telemetry.NewStore()).WithModbus(cap)
-		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", host, port))
+		env.SetEndpoint(fingerprintEndpoint("modbus", host, port))
 		fp, _ := drivers.RunFingerprint(luaPath, env, target)
 		return fp
 	case "http":
@@ -194,12 +194,16 @@ func (s *Server) fingerprintOne(luaPath, protocol, host string, port, unit int) 
 		allowedEndpoint := net.JoinHostPort(host, strconv.Itoa(port))
 		env := drivers.NewHostEnv("__fingerprint", telemetry.NewStore()).
 			WithHTTP().WithHTTPAllowedHosts([]string{allowedEndpoint})
-		env.SetEndpoint(fmt.Sprintf("http://%s:%d", host, port))
+		env.SetEndpoint(fingerprintEndpoint("http", host, port))
 		fp, _ := drivers.RunFingerprint(luaPath, env, target)
 		return fp
 	default:
 		return drivers.Fingerprint{Match: drivers.MatchUnknown, Err: "unsupported protocol: " + protocol}
 	}
+}
+
+func fingerprintEndpoint(scheme, host string, port int) string {
+	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // normalizeFingerprintHost accepts a bare IP address or DNS/mDNS hostname.

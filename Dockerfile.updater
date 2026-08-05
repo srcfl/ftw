@@ -28,12 +28,24 @@ RUN cd go && \
     -o /out/ftw-updater ./cmd/ftw-updater
 
 # --- Runtime ---------------------------------------------------------------
-# docker:27-cli bundles the `docker` binary + `docker compose` plugin +
-# ca-certificates + tzdata, which is exactly what we need to execute
-# compose pulls against the host daemon.
-FROM docker:27-cli
+# Same debian:trixie-slim rootfs as Dockerfile and Dockerfile.optimizer, so
+# the whole stack pulls one base layer instead of three. docker:27-cli is
+# alpine-based and was the last thing keeping a second libc in the deployment.
+#
+# The docker CLI and the compose plugin are copied straight out of the official
+# CLI image rather than installed from Docker's apt repository. The reference is
+# pinned to Docker Official Images' multi-arch index digest, so BuildKit selects
+# the matching amd64 or arm64 manifest without pinning one platform by mistake.
+FROM debian:trixie-slim
 
-# Compose pull hits GHCR over TLS; docker:cli already bundles ca-certs.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c /usr/local/libexec/docker/cli-plugins/docker-compose \
+                          /usr/local/libexec/docker/cli-plugins/docker-compose
+
 COPY --from=builder /out/ftw-updater /usr/local/bin/ftw-updater
 COPY LICENSE NOTICE /usr/share/doc/ftw/
 

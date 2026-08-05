@@ -155,7 +155,9 @@ describe("simplified dashboard overview", () => {
   });
 
   it("renders Overview and Plan from the sole plan polling path", () => {
-    assert.match(html, /<script type="module" src="\/plan\.js\?v=dashboard1"><\/script>/);
+    // The cache-bust token moves whenever plan.js changes; what this test
+    // is about is that the page loads plan.js as a module at all.
+    assert.match(html, /<script type="module" src="\/plan\.js(\?v=[^"]*)?"><\/script>/);
     assert.match(plan, /import \{ derivePlanBrief \} from "\.\/plan-brief\.js"/);
     assert.equal((plan.match(/apiFetch\(['"]\/api\/mpc\/plan['"]/g) || []).length, 1);
     assert.doesNotMatch(app, /apiFetch\(['"]\/api\/mpc\/plan['"]/);

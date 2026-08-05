@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -93,7 +94,7 @@ func TestSupportReportFlagsLoadForecastMiss(t *testing.T) {
 		LoadW:       7900,
 		PredictedLd: 383,
 	}
-	findings := srv.collectFindings(*ctrl, snap, nil, nil, nil, nil, now)
+	findings := srv.collectFindings(*ctrl, snap, nil, nil, nil, nil, control.SlotEnergySnapshot{}, now)
 
 	var got *finding
 	for i := range findings {
@@ -120,18 +121,33 @@ func TestForecastMiss(t *testing.T) {
 		want              bool
 	}{
 		{"the 383 W case", 383, 7900, true},
+		// Both of these scored just under the old 0.6 relative-error
+		// threshold and stayed silent in a real report. They are the
+		// reason the measure is a ratio now.
+		{"active slot planned 1.47 kW, house drawing 3.65 kW", 1470, 3650, true},
+		{"model says 1.74 kW, house drawing 3.65 kW", 1740, 3650, true},
+		{"solar planned 11.7 kW, actual 7.4 kW", 11720, 7400, true},
 		{"close enough", 2000, 2200, false},
 		{"exact", 1000, 1000, false},
 		// A quiet house: 200 W of absolute error must not fire just
 		// because the ratio looks bad against a small denominator.
 		{"small absolute error on a quiet house", 100, 300, false},
 		{"forecast far too high", 8000, 400, true},
+		{"forecast of nothing against real load", 0, 3000, true},
+		{"forecast of nothing against nothing much", 0, 200, false},
+		{"just under the ratio", 1000, 1400, false},
+		{"just over the ratio", 1000, 1500, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := forecastMiss(tc.predicted, tc.actual); got != tc.want {
 				t.Errorf("forecastMiss(%v, %v) = %v, want %v",
 					tc.predicted, tc.actual, got, tc.want)
+			}
+			// The check must not care which way round it is asked.
+			if got := forecastMiss(tc.actual, tc.predicted); got != tc.want {
+				t.Errorf("forecastMiss(%v, %v) = %v, want %v (asymmetric)",
+					tc.actual, tc.predicted, got, tc.want)
 			}
 		})
 	}
@@ -180,7 +196,7 @@ func TestSupportReportMarksTheActiveSlot(t *testing.T) {
 
 	// And the live section should state the active slot's intent in prose.
 	var live strings.Builder
-	writeRightNow(&live, *ctrl, liveSnapshot{HaveGrid: true, BatW: -7500}, &plan.Actions[0], nil, now)
+	writeRightNow(&live, *ctrl, liveSnapshot{HaveGrid: true, BatW: -7500}, &plan.Actions[0], nil, control.SlotEnergySnapshot{}, now)
 	if !strings.Contains(live.String(), "-8.40 kW") {
 		t.Errorf("active-slot intent missing from Right now:\n%s", live.String())
 	}
@@ -198,7 +214,7 @@ func TestSupportReportFlagsFallbackSolver(t *testing.T) {
 	}
 	findings := srv.collectFindings(*ctrl,
 		liveSnapshot{HaveGrid: true, LoadW: 1000, PredictedLd: 1000},
-		plan, nil, nil, nil, time.Now())
+		plan, nil, nil, nil, control.SlotEnergySnapshot{}, time.Now())
 
 	found := false
 	for _, f := range findings {
@@ -223,7 +239,7 @@ func TestSupportReportFlagsOfflineAndFaultedDevices(t *testing.T) {
 	}
 	findings := srv.collectFindings(*ctrl,
 		liveSnapshot{HaveGrid: true, LoadW: 1000, PredictedLd: 1000},
-		nil, nil, nil, health, time.Now())
+		nil, nil, nil, health, control.SlotEnergySnapshot{}, time.Now())
 
 	var sawOffline, sawFault bool
 	for _, f := range findings {
@@ -340,7 +356,7 @@ func TestRepeatedWarningBecomesAFinding(t *testing.T) {
 
 	findings := srv.collectFindings(*st,
 		liveSnapshot{HaveGrid: true, LoadW: 1000, PredictedLd: 1000},
-		nil, nil, nil, nil, time.Now())
+		nil, nil, nil, nil, control.SlotEnergySnapshot{}, time.Now())
 
 	var got *finding
 	for i := range findings {
@@ -367,8 +383,7 @@ func TestDispatchTableDisclaimsSiteLevelClamps(t *testing.T) {
 	var b strings.Builder
 	writeRightNow(&b, *st, liveSnapshot{HaveGrid: true},
 		nil,
-		[]control.DispatchTarget{{Driver: "ferroamp", TargetW: 6400, Clamped: false}},
-		time.Now())
+		[]control.DispatchTarget{{Driver: "ferroamp", TargetW: 6400, Clamped: false}}, control.SlotEnergySnapshot{}, time.Now())
 	out := b.String()
 	if !strings.Contains(out, "per-device limits") {
 		t.Errorf("dispatch table lacks its scope caveat:\n%s", out)
@@ -379,3 +394,139 @@ func TestDispatchTableDisclaimsSiteLevelClamps(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// A fresh install predicting badly is the model working, not a fault.
+// Shouting PROBLEM at it while the next line says "still learning"
+// contradicts itself and teaches the reader to skim the section.
+func TestForecastMissIsANoteWhileTheModelIsStillLearning(t *testing.T) {
+	st := control.NewState(0, 50, "meter")
+	tel := telemetry.NewStore()
+	tel.DriverHealthMut("meter").RecordSuccess()
+	// A load model with no trained buckets — the day-one state.
+	lm := loadmodel.NewService(nil, tel, "meter", 4000, 17250)
+	srv := New(&Deps{Ctrl: st, CtrlMu: &sync.Mutex{}, Tel: tel, LoadModel: lm})
+
+	findings := srv.collectFindings(*st,
+		liveSnapshot{HaveGrid: true, LoadW: 3650, PredictedLd: 1470},
+		nil, nil, nil, nil, control.SlotEnergySnapshot{}, time.Now())
+
+	var got *finding
+	for i := range findings {
+		if strings.Contains(findings[i].Title, "load forecast") {
+			got = &findings[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("the miss should still be reported; got %+v", findings)
+	}
+	if got.Severity != sevNote {
+		t.Errorf("severity = %q, want %q while the model is untrained",
+			got.Severity, sevNote)
+	}
+	if !strings.Contains(got.Detail, "not finished learning") {
+		t.Errorf("detail should explain why it is only a note, got %q", got.Detail)
+	}
+	if strings.Contains(got.Detail, "reset") && !strings.Contains(got.Detail, "start that clock again") {
+		t.Error("a reset must not be recommended to someone whose model is still filling in")
+	}
+}
+
+// Björn's second report: plan card reading "Charge battery at 4.5 kW ·
+// Now, until 15:00", live target 0 W, 4 kW going out to the grid. The
+// report showed the plan and the target and gave no way to tell whether
+// the plan reached dispatch at all.
+func TestSlotEnergyShortfallIsAFinding(t *testing.T) {
+	srv, ctrl, _ := reportTestServer(t)
+	now := time.Now()
+	slot := control.SlotEnergySnapshot{
+		HasSlot:   true,
+		PlannedWh: 1125, // 4.5 kW across a 15-minute slot
+		ActualWh:  20,   // the batteries are doing nothing
+		SlotStart: now.Add(-8 * time.Minute),
+		SlotEnd:   now.Add(7 * time.Minute),
+	}
+	findings := srv.collectFindings(*ctrl,
+		liveSnapshot{HaveGrid: true, LoadW: 700, PredictedLd: 700},
+		nil, nil, nil, nil, slot, now)
+
+	var got *finding
+	for i := range findings {
+		if strings.Contains(findings[i].Title, "energy is not being delivered") {
+			got = &findings[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("a slot delivering nothing produced no finding: %+v", findings)
+	}
+	if got.Severity != sevProblem {
+		t.Errorf("severity = %q, want %q", got.Severity, sevProblem)
+	}
+	if !strings.Contains(got.Detail, "1.12 kWh") {
+		t.Errorf("detail should quote the planned energy, got %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "energy-allocation path has delivered nothing") {
+		t.Errorf("detail should call out the idle energy path, got %q", got.Detail)
+	}
+}
+
+func TestSlotPaceShortfall(t *testing.T) {
+	now := time.Now()
+	slot := func(planned, actual float64, elapsed, total time.Duration) control.SlotEnergySnapshot {
+		return control.SlotEnergySnapshot{
+			HasSlot: true, PlannedWh: planned, ActualWh: actual,
+			SlotStart: now.Add(-elapsed), SlotEnd: now.Add(total - elapsed),
+		}
+	}
+	cases := []struct {
+		name string
+		in   control.SlotEnergySnapshot
+		want bool
+	}{
+		{"delivering nothing against a real ask",
+			slot(1125, 20, 8*time.Minute, 15*time.Minute), true},
+		{"moving energy the wrong way",
+			slot(1125, -300, 8*time.Minute, 15*time.Minute), true},
+		{"tracking the plan",
+			slot(1125, 560, 8*time.Minute, 15*time.Minute), false},
+		{"a little behind but working",
+			slot(1125, 400, 8*time.Minute, 15*time.Minute), false},
+		// A slot is allowed to start slowly and catch up.
+		{"barely started",
+			slot(1125, 0, 30*time.Second, 15*time.Minute), false},
+		// An idle slot asks for nothing and cannot fall behind.
+		{"idle slot",
+			slot(10, 0, 8*time.Minute, 15*time.Minute), false},
+		{"discharge slot delivering",
+			slot(-1125, -560, 8*time.Minute, 15*time.Minute), false},
+		{"discharge slot doing nothing",
+			slot(-1125, -20, 8*time.Minute, 15*time.Minute), true},
+		{"no slot in flight", control.SlotEnergySnapshot{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got := slotPaceShortfall(tc.in, now)
+			if got != tc.want {
+				t.Errorf("slotPaceShortfall = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The books have to be in the report even when nothing is wrong — that is
+// what lets somebody else check the reasoning rather than trust a verdict.
+func TestSlotEnergyBooksAreInTheReport(t *testing.T) {
+	_, ctrl, _ := reportTestServer(t)
+	now := time.Now()
+	var b strings.Builder
+	writeRightNow(&b, *ctrl, liveSnapshot{HaveGrid: true}, nil, nil,
+		control.SlotEnergySnapshot{
+			HasSlot: true, PlannedWh: 1125, ActualWh: 560, EnergyPathWh: 545,
+			SlotStart: now.Add(-8 * time.Minute), SlotEnd: now.Add(7 * time.Minute),
+		}, now)
+	out := b.String()
+	for _, want := range []string{"1.12 kWh", "560 Wh", "545 Wh", "Energy booked for this slot"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Right now is missing %q:\n%s", want, out)
+		}
+	}
+}

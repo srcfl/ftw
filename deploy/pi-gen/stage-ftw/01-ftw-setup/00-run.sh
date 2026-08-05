@@ -69,8 +69,9 @@ EOF
 # records /opt/ftw automatically. COMPOSE_PROJECT_NAME
 # stays the literal `ftw`.
 #
-# data/ is owned 100:101 because the in-container ftw user (alpine
-# `adduser -S`) needs to own it before SQLite can create state.db.
+# data/ is owned 100:101 because the container process runs as that bare
+# numeric uid/gid (no account exists in the image) and needs to own the
+# directory before SQLite can create state.db.
 # Same UID/GID mapping as scripts/install.sh.
 install -d -m 0755                    "${ROOTFS_DIR}/opt/ftw"
 install -d -m 0755 -o 100 -g 101      "${ROOTFS_DIR}/opt/ftw/data"

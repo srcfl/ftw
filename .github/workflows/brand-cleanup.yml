@@ -9,6 +9,20 @@ on:
 permissions:
   contents: read
 
+# Superseded pull-request runs answer a diff nobody will read again, so drop
+# them: every run for one PR shares a group keyed by its number, and only the
+# newest survives.
+#
+# Pushes to master fall back to the commit SHA, which gives each one a group of
+# its own. That is deliberate, and `cancel-in-progress: false` would NOT have
+# achieved it: a group holds one running plus one pending run, so a third push
+# arriving during a slow run evicts the second one's pending run. Every master
+# commit is the record that it passed the gate, so none of them may be dropped.
+# A unique group cannot queue, so nothing can be evicted from it.
+concurrency:
+  group: brand-cleanup-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   active-copy:
     name: no new legacy product copy

@@ -3,8 +3,8 @@
 //
 // Supported:
 //   - sourceful — Default. Keyless European day-ahead prices through
-//     Sourceful's cached ENTSO-E API. Resolution varies per bidding zone
-//     (currently 15m in the Nordics).
+//     Sourceful's cached ENTSO-E API, for every zone in zones.go.
+//     Resolution varies per bidding zone (currently 15m in most of Europe).
 //   - elprisetjustnu — Sweden, zones SE1-SE4, no API key. Since late 2025
 //     NordPool publishes in 15-minute PTU (quarterly) resolution; this
 //     package defaults to the quarterly endpoint and can fall back to
@@ -14,7 +14,12 @@
 //
 // Consumer price = (spot + grid_tariff) × (1 + VAT/100). We store both
 // pure spot AND the consumer total so the UI can surface either.
-// Prices are in öre/kWh (1 SEK = 100 öre).
+//
+// Stored prices are in minor units of the configured currency per kWh —
+// öre for SEK, cent for EUR, øre for NOK and DKK. One install holds one
+// currency: the cache is cleared when the currency changes, because rows
+// carry no currency of their own and mixed units would silently corrupt
+// cost history.
 package prices
 
 import (
@@ -46,7 +51,8 @@ type Provider interface {
 	Fetch(ctx context.Context, zone string, day time.Time) ([]RawPrice, error)
 }
 
-// RawPrice is one time slot's pure-spot price in SEK/kWh (before grid + VAT).
+// RawPrice is one time slot's pure-spot price in major units of the
+// configured currency per kWh (SEK/kWh, EUR/kWh, …), before grid + VAT.
 // SlotLenMin is typically 15 (NordPool PTU) or 60 (legacy hourly).
 type RawPrice struct {
 	SlotStart  time.Time
@@ -57,27 +63,56 @@ type RawPrice struct {
 // ---- Sourceful ----
 
 // SourcefulProvider uses the same keyless, cached ENTSO-E price API as the
-// Sourceful Energy app. The API returns the requested currency per MWh; FTW
-// always requests SEK so the package-wide SEK/kWh invariant remains true.
+// Sourceful Energy app.
+//
+// The API converts to SEK on request but serves nothing else — every other
+// currency code silently returns EUR. So we ask it only for what it really
+// has (see sourcefulNative), and convert the rest ourselves from EUR with
+// the same ECB rates the API uses.
 type SourcefulProvider struct {
 	Client  *http.Client
 	BaseURL string // override in tests
+
+	// Currency is the ISO code the caller wants prices in. Empty means SEK.
+	Currency string
+	// FX converts the EUR the API falls back to into Currency. Required
+	// when Currency is neither EUR nor SEK.
+	FX FXConverter
 }
+
+// sourcefulNative lists the currencies the price API converts to itself.
+// Anything else has to go through EURToNative.
+var sourcefulNative = map[string]bool{"EUR": true, "SEK": true}
 
 // NewSourceful returns a provider pointed at Sourceful's production API.
 func NewSourceful() *SourcefulProvider {
 	return &SourcefulProvider{
-		Client:  &http.Client{Timeout: 15 * time.Second},
-		BaseURL: "https://novacore-mainnet.sourceful.dev/services/price/electricity",
+		Client:   &http.Client{Timeout: 15 * time.Second},
+		BaseURL:  "https://novacore-mainnet.sourceful.dev/services/price/electricity",
+		Currency: "SEK",
 	}
 }
 
 func (s *SourcefulProvider) Name() string { return "sourceful" }
 
+// apiCurrency is what we ask the API for: the wanted currency when it can
+// serve it, EUR otherwise.
+func (s *SourcefulProvider) apiCurrency() string {
+	want := strings.ToUpper(strings.TrimSpace(s.Currency))
+	if want == "" {
+		return "SEK"
+	}
+	if sourcefulNative[want] {
+		return want
+	}
+	return "EUR"
+}
+
 func (s *SourcefulProvider) Fetch(ctx context.Context, zone string, day time.Time) ([]RawPrice, error) {
 	zone = strings.ToUpper(strings.TrimSpace(zone))
-	endpoint := fmt.Sprintf("%s/%s?currency=SEK&date=%s&days=1",
-		strings.TrimRight(s.BaseURL, "/"), url.PathEscape(zone), day.Format("2006-01-02"))
+	apiCur := s.apiCurrency()
+	endpoint := fmt.Sprintf("%s/%s?currency=%s&date=%s&days=1",
+		strings.TrimRight(s.BaseURL, "/"), url.PathEscape(zone), apiCur, day.Format("2006-01-02"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -112,8 +147,11 @@ func (s *SourcefulProvider) Fetch(ctx context.Context, zone string, day time.Tim
 	if payload.Area != "" && !strings.EqualFold(payload.Area, zone) {
 		return nil, fmt.Errorf("sourceful: response area %q does not match %q", payload.Area, zone)
 	}
-	if !strings.EqualFold(payload.Currency, "SEK") {
-		return nil, fmt.Errorf("sourceful: unexpected currency %q", payload.Currency)
+	// The API answers an unsupported currency code with EUR rather than an
+	// error, so this check is what stops a NOK install from storing EUR
+	// numbers labelled NOK.
+	if !strings.EqualFold(payload.Currency, apiCur) {
+		return nil, fmt.Errorf("sourceful: asked for %s, got %q", apiCur, payload.Currency)
 	}
 	if !strings.HasSuffix(strings.ToUpper(strings.TrimSpace(payload.Unit)), "MWH") {
 		return nil, fmt.Errorf("sourceful: unexpected unit %q", payload.Unit)
@@ -122,6 +160,12 @@ func (s *SourcefulProvider) Fetch(ctx context.Context, zone string, day time.Tim
 	if slotMin <= 0 {
 		return nil, fmt.Errorf("sourceful: bad resolution %q", payload.Resolution)
 	}
+	// Currencies the API can't serve arrive as EUR and are converted here.
+	want := strings.ToUpper(strings.TrimSpace(s.Currency))
+	convert := want != "" && want != apiCur
+	if convert && s.FX == nil {
+		return nil, fmt.Errorf("sourceful: no exchange rate source for %s→%s", apiCur, want)
+	}
 
 	out := make([]RawPrice, 0, len(payload.Prices))
 	for _, point := range payload.Prices {
@@ -129,10 +173,18 @@ func (s *SourcefulProvider) Fetch(ctx context.Context, zone string, day time.Tim
 		if err != nil {
 			return nil, fmt.Errorf("sourceful: datetime %q: %w", point.Datetime, err)
 		}
+		perKWh := point.Price / 1000.0
+		if convert {
+			native, ok := s.FX.Convert(perKWh, apiCur, want)
+			if !ok {
+				return nil, fmt.Errorf("sourceful: no %s→%s rate yet", apiCur, want)
+			}
+			perKWh = native
+		}
 		out = append(out, RawPrice{
 			SlotStart:  t,
 			SlotLenMin: slotMin,
-			SEKPerKWh:  point.Price / 1000.0,
+			SEKPerKWh:  perKWh,
 		})
 	}
 	return out, nil
@@ -225,19 +277,21 @@ func (e *ElpriserProvider) Fetch(ctx context.Context, zone string, day time.Time
 // https://transparency.entsoe.eu/ then email for activation (~1 day).
 //
 // Fetches the A44 day-ahead Publication_MarketDocument for a bidding zone
-// (EIC codes below), decodes its TimeSeries > Period > Point structure
-// (handling both PT60M and PT15M resolutions and the sparse carry-forward
-// representation), and converts EUR/MWh to native currency per kWh via
-// EURToNative. Returns {} for a day not yet published, like elprisetjustnu.
+// (EIC codes come from the zone catalog in zones.go), decodes its
+// TimeSeries > Period > Point structure (handling both PT60M and PT15M
+// resolutions and the sparse carry-forward representation), and converts
+// EUR/MWh to the configured currency per kWh via EURToNative. Returns {}
+// for a day not yet published, like elprisetjustnu.
 type ENTSOEProvider struct {
 	Client  *http.Client
 	APIKey  string
 	BaseURL string
 
 	// Currency is the ISO code the caller wants prices in (default SEK).
-	// ENTSOE publishes EUR/MWh; we convert via EURToNative if non-nil.
-	Currency    string
-	EURToNative func(eur float64) float64 // returns amount in native currency
+	// Most zones publish EUR/MWh; FX converts from whatever the document
+	// says to Currency, and is only needed when the two differ.
+	Currency string
+	FX       FXConverter
 }
 
 // NewENTSOE returns a provider — caller must set APIKey.
@@ -252,31 +306,15 @@ func NewENTSOE(apiKey string) *ENTSOEProvider {
 
 func (e *ENTSOEProvider) Name() string { return "entsoe" }
 
-// EIC codes for common zones. Full list at
-// https://eepublicdownloads.entsoe.eu/clean-documents/EDI/Library/Y_codes_list.pdf
-var entsoeZoneEIC = map[string]string{
-	"SE1": "10Y1001A1001A44P",
-	"SE2": "10Y1001A1001A45N",
-	"SE3": "10Y1001A1001A46L",
-	"SE4": "10Y1001A1001A47J",
-	"NO1": "10YNO-1--------2",
-	"NO2": "10YNO-2--------T",
-	"NO3": "10YNO-3--------J",
-	"NO4": "10YNO-4--------9",
-	"DK1": "10YDK-1--------W",
-	"DK2": "10YDK-2--------M",
-	"FI":  "10YFI-1--------U",
-	"DE":  "10Y1001A1001A83F",
-}
-
 func (e *ENTSOEProvider) Fetch(ctx context.Context, zone string, day time.Time) ([]RawPrice, error) {
 	if e.APIKey == "" {
 		return nil, errors.New("entsoe: API key required")
 	}
-	eic, ok := entsoeZoneEIC[zone]
+	z, ok := LookupZone(zone)
 	if !ok {
 		return nil, fmt.Errorf("entsoe: unknown zone %q", zone)
 	}
+	eic := z.EIC
 	periodStart := day.UTC().Format("200601021504")
 	periodEnd := day.Add(24 * time.Hour).UTC().Format("200601021504")
 	url := fmt.Sprintf("%s?documentType=A44&in_Domain=%s&out_Domain=%s&periodStart=%s&periodEnd=%s&securityToken=%s",
@@ -304,9 +342,10 @@ func (e *ENTSOEProvider) Fetch(ctx context.Context, zone string, day time.Time) 
 // ---- ENTSOE XML decode ----
 //
 // The transparency platform returns a Publication_MarketDocument with
-// nested TimeSeries > Period > Point entries. Prices are EUR/MWh. We
-// convert to native currency per kWh via EURToNative (set from config FX;
-// falls back to a ballpark 11.5 SEK/EUR when unwired).
+// nested TimeSeries > Period > Point entries. Most zones publish EUR/MWh,
+// but not all — Poland and Hungary among others publish in their own
+// currency — so each TimeSeries carries its own currency_Unit.name and we
+// convert from that, not from an assumed EUR.
 //
 // The struct tags carry no namespace, which encoding/xml matches by local
 // name regardless of the document's default xmlns — so the dotted element
@@ -317,7 +356,8 @@ type entsoePublication struct {
 }
 
 type entsoeTimeSeries struct {
-	Periods []entsoePeriod `xml:"Period"`
+	Currency string         `xml:"currency_Unit.name"`
+	Periods  []entsoePeriod `xml:"Period"`
 }
 
 type entsoePeriod struct {
@@ -332,14 +372,38 @@ type entsoePoint struct {
 	Amount   float64 `xml:"price.amount"`
 }
 
-// eurMWhToNative converts an EUR/MWh figure to native currency per kWh,
-// using the provider's configured converter or the ballpark fallback.
-func (e *ENTSOEProvider) eurMWhToNative(eurPerMWh float64) float64 {
-	eurPerKWh := eurPerMWh / 1000.0
-	if e.EURToNative != nil {
-		return e.EURToNative(eurPerKWh)
+// wantCurrency is the ISO code prices are stored in; empty config means SEK,
+// which is what NewENTSOE and FromConfig already default to.
+func (e *ENTSOEProvider) wantCurrency() string {
+	if c := strings.ToUpper(strings.TrimSpace(e.Currency)); c != "" {
+		return c
 	}
-	return eurPerKWh * 11.5
+	return "SEK"
+}
+
+// perMWhToNative converts a published price per MWh into the configured
+// currency per kWh. from is the document's own currency; a document that
+// already publishes in the wanted currency needs no rate at all.
+//
+// A missing rate is an error rather than a guess: a price off by an
+// exchange rate steers dispatch and lands in cost history.
+func (e *ENTSOEProvider) perMWhToNative(amountPerMWh float64, from string) (float64, error) {
+	perKWh := amountPerMWh / 1000.0
+	want := e.wantCurrency()
+	if from == "" {
+		from = "EUR" // the platform's default, and what it omits
+	}
+	if strings.EqualFold(from, want) {
+		return perKWh, nil
+	}
+	if e.FX == nil {
+		return 0, fmt.Errorf("entsoe: no exchange rate source for %s→%s", from, want)
+	}
+	v, ok := e.FX.Convert(perKWh, from, want)
+	if !ok {
+		return 0, fmt.Errorf("entsoe: no %s→%s rate yet", from, want)
+	}
+	return v, nil
 }
 
 // parseXML decodes a day-ahead Publication_MarketDocument into raw slots.
@@ -354,7 +418,7 @@ func (e *ENTSOEProvider) parseXML(body []byte) ([]RawPrice, error) {
 	var out []RawPrice
 	for _, ts := range doc.TimeSeries {
 		for _, pd := range ts.Periods {
-			rows, err := e.expandPeriod(pd)
+			rows, err := e.expandPeriod(pd, ts.Currency)
 			if err != nil {
 				return nil, err
 			}
@@ -368,7 +432,7 @@ func (e *ENTSOEProvider) parseXML(body []byte) ([]RawPrice, error) {
 // A44 representation: a Point is omitted when its price equals the previous
 // position's, so we carry the last seen price forward to fill the period's
 // full slot count (derived from the timeInterval, not the Point count).
-func (e *ENTSOEProvider) expandPeriod(pd entsoePeriod) ([]RawPrice, error) {
+func (e *ENTSOEProvider) expandPeriod(pd entsoePeriod, docCurrency string) ([]RawPrice, error) {
 	slotMin := resolutionMinutes(pd.Resolution)
 	if slotMin <= 0 {
 		return nil, fmt.Errorf("entsoe: bad resolution %q", pd.Resolution)
@@ -407,10 +471,14 @@ func (e *ENTSOEProvider) expandPeriod(pd entsoePeriod) ([]RawPrice, error) {
 		if !have {
 			continue // no leading price to carry yet
 		}
+		native, err := e.perMWhToNative(last, docCurrency)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, RawPrice{
 			SlotStart:  start.Add(time.Duration(pos-1) * time.Duration(slotMin) * time.Minute),
 			SlotLenMin: slotMin,
-			SEKPerKWh:  e.eurMWhToNative(last),
+			SEKPerKWh:  native,
 		})
 	}
 	return out, nil
@@ -454,10 +522,10 @@ type Applier struct {
 	VATPercent float64
 }
 
-// Apply computes total öre/kWh the consumer pays (spot + grid tariff) × (1 + VAT).
-// Returns (spot_ore, total_ore).
+// Apply computes the total the consumer pays, (spot + grid tariff) ×
+// (1 + VAT), in minor units per kWh. Returns (spot, total).
 func (a Applier) Apply(sekPerKwh float64) (spotOre, totalOre float64) {
-	spotOre = sekPerKwh * 100 // SEK/kWh → öre/kWh
+	spotOre = sekPerKwh * 100 // major → minor units (SEK→öre, EUR→cent)
 	// Consumer cost: (spot + grid tariff) * (1 + VAT/100)
 	totalOre = (spotOre + a.GridTariffOreKwh) * (1 + a.VATPercent/100)
 	return
@@ -471,6 +539,9 @@ type Service struct {
 	Store    *state.Store
 	Applier  Applier
 	Zone     string
+	// Currency the stored minor units are in. Read by the API so the UI
+	// can label them.
+	Currency string
 
 	stop chan struct{}
 	done chan struct{}
@@ -478,8 +549,8 @@ type Service struct {
 
 // FXConverter abstracts currency conversion so the prices package
 // doesn't need to import currency/ directly (and FromConfig callers
-// can pass a test stub). If nil, ENTSOE assumes 1 EUR = 11.5 SEK — a
-// ballpark used only until live rates land.
+// can pass a test stub). When it is nil, or has no rate for the pair, a
+// provider that needs conversion fails its fetch instead of guessing.
 type FXConverter interface {
 	Convert(amount float64, from, to string) (float64, bool)
 }
@@ -490,37 +561,35 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 	if cfg == nil || cfg.Provider == "" || cfg.Provider == "none" {
 		return nil
 	}
-	currency := cfg.Currency
+	zone := cfg.Zone
+	if zone == "" {
+		zone = "SE3"
+	}
+	// An unset currency follows the zone: picking BE should not leave a
+	// Belgian household paying in öre. Unknown zones keep the old default.
+	currency := strings.ToUpper(strings.TrimSpace(cfg.Currency))
+	if currency == "" {
+		currency = ZoneCurrency(zone)
+	}
 	if currency == "" {
 		currency = "SEK"
 	}
 	var p Provider
 	switch cfg.Provider {
 	case "sourceful":
-		p = NewSourceful()
+		sp := NewSourceful()
+		sp.Currency = currency
+		sp.FX = fx
+		p = sp
 	case "elprisetjustnu":
 		p = NewElpriser()
 	case "entsoe":
 		ep := NewENTSOE(cfg.APIKey)
 		ep.Currency = currency
-		if fx != nil {
-			ep.EURToNative = func(eur float64) float64 {
-				v, ok := fx.Convert(eur, "EUR", currency)
-				if !ok {
-					return eur * 11.5 // fallback until rates land
-				}
-				return v
-			}
-		} else {
-			ep.EURToNative = func(eur float64) float64 { return eur * 11.5 }
-		}
+		ep.FX = fx
 		p = ep
 	default:
 		return nil
-	}
-	zone := cfg.Zone
-	if zone == "" {
-		zone = "SE3"
 	}
 	vat := cfg.VATPercent
 	if vat == 0 {
@@ -530,16 +599,47 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 		Provider: p,
 		Store:    st,
 		Zone:     zone,
+		Currency: currency,
 		Applier:  Applier{GridTariffOreKwh: cfg.GridTariffOreKwh, VATPercent: vat},
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
 }
 
+// priceCurrencyKey records the currency the cached price rows are in.
+const priceCurrencyKey = "prices/currency"
+
 // Start begins the fetch-on-schedule goroutine. Does an initial fetch
 // immediately + every hour (plus specifically at 13:05 CET for day-ahead release).
 func (s *Service) Start(ctx context.Context) {
+	s.syncCachedCurrency()
 	go s.loop(ctx)
+}
+
+// syncCachedCurrency empties the price cache when the configured currency
+// no longer matches the currency the cached rows were fetched in. Runs
+// before the first fetch so no reader ever sees two currencies at once.
+func (s *Service) syncCachedCurrency() {
+	if s.Store == nil || s.Currency == "" {
+		return
+	}
+	prev, ok := s.Store.LoadConfig(priceCurrencyKey)
+	if ok && prev == s.Currency {
+		return
+	}
+	if ok && prev != "" {
+		n, err := s.Store.ClearPrices()
+		if err != nil {
+			slog.Warn("price cache clear failed after currency change",
+				"from", prev, "to", s.Currency, "err", err)
+			return
+		}
+		slog.Warn("price currency changed — cached prices cleared",
+			"from", prev, "to", s.Currency, "rows", n)
+	}
+	if err := s.Store.SaveConfig(priceCurrencyKey, s.Currency); err != nil {
+		slog.Warn("could not record price currency", "err", err)
+	}
 }
 
 // Stop terminates the fetcher.

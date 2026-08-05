@@ -3,6 +3,7 @@
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief } from "./plan-brief.js";
+import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 
 (function () {
   'use strict';
@@ -57,6 +58,7 @@ import { derivePlanBrief } from "./plan-brief.js";
     forecast: null,
     plan: null,
     fuse: null,         // { max_amps, phases, voltage } — drives the power y-axis
+    currency: 'SEK',    // what price and cost numbers are in; from /api/prices
     lastUpdate: null,
     horizon: readHorizonPref(),  // "today" | "all" | "tomorrow"
   };
@@ -104,6 +106,9 @@ import { derivePlanBrief } from "./plan-brief.js";
       apiFetch('/api/status').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
+    // /api/prices says which currency the stored minor units are in, so
+    // the labels aren't stuck on Swedish öre.
+    state.currency = setActiveCurrency((p && p.currency) || 'SEK');
     state.forecast = (f && f.items) || [];
     state.plan = (m && m.plan) || null;
     state.planMeta = (m && m.meta) || null;
@@ -466,8 +471,10 @@ import { derivePlanBrief } from "./plan-brief.js";
     // Price axis labels
     ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
-    ctx.fillText(priceMax.toFixed(0) + ' öre', pad.l - 6, priceY0 + 10);
-    ctx.fillText(priceMin.toFixed(0), pad.l - 6, priceY0 + priceH);
+    const priceUnit = unitFor(state.currency);
+    ctx.fillText(toDisplay(priceMax, state.currency).toFixed(0) + ' ' + priceUnit.axis,
+                 pad.l - 6, priceY0 + 10);
+    ctx.fillText(toDisplay(priceMin, state.currency).toFixed(0), pad.l - 6, priceY0 + priceH);
     ctx.textAlign = 'left';
     ctx.fillText('Price', pad.l + 4, priceY0 + 12);
 
@@ -704,8 +711,8 @@ import { derivePlanBrief } from "./plan-brief.js";
           const shadow = plan.dp_shadow;
           const deltaSek = (shadow.active_minus_shadow_ore || 0) / 100;
           const comparison = deltaSek <= 0
-            ? `${Math.abs(deltaSek).toFixed(2)} SEK below DP`
-            : `${deltaSek.toFixed(2)} SEK above DP`;
+            ? `${Math.abs(deltaSek).toFixed(2)} ${state.currency} below DP`
+            : `${deltaSek.toFixed(2)} ${state.currency} above DP`;
           const shadowTitle =
             `Legacy DP shadow over ${shadow.compared_slots || 0} slots; ` +
             `mean battery difference ${(shadow.mean_abs_battery_delta_w || 0).toFixed(0)} W; ` +
@@ -724,7 +731,7 @@ import { derivePlanBrief } from "./plan-brief.js";
         parts.push(
           `<span title="Total grid spend the plan expects over the full ${hh.toFixed(0)} h horizon. Negative means the plan expects to earn money (net export).">` +
           `<span class="s-label">${costLabel} </span>` +
-          `<span class="s-value">${cost.toFixed(2)} SEK</span></span>`
+          `<span class="s-value">${cost.toFixed(2)} ${state.currency}</span></span>`
         );
         if (state.planMeta && state.planMeta.last_replan_ms) {
           const age = Math.round((Date.now() - state.planMeta.last_replan_ms) / 1000);
@@ -807,9 +814,11 @@ import { derivePlanBrief } from "./plan-brief.js";
       // PV is site-signed internally (generation = negative). Flip it for
       // display so the tooltip reads as a positive production number —
       // that's what everyone expects when they see the word "PV".
+      const u = unitFor(state.currency);
+      const inUnit = (v, d) => toDisplay(v, state.currency).toFixed(d == null ? u.decimals : d);
       const lines = [
         `<div class="tip-head">${dayStr} ${hh}${predicted ? ' <span class="tip-pred">predicted</span>' : ''}</div>`,
-        `<div class="tip-row"><span title="Consumer total: spot + grid tariff + VAT — the actual öre/kWh you pay during this 15-minute slot">Price</span><b>${price.toFixed(1)} öre/kWh</b></div>`,
+        `<div class="tip-row"><span title="Consumer total: spot + grid tariff + VAT — the actual ${u.perKwh} you pay during this 15-minute slot">Price</span><b>${inUnit(price)} ${u.perKwh}</b></div>`,
       ];
       // Price breakdown: show where the consumer total comes from.
       // Same stacking model the chart uses, so hover numbers match
@@ -823,13 +832,13 @@ import { derivePlanBrief } from "./plan-brief.js";
           `<div class="tip-breakdown">` +
             `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(148,163,184,0.72)"></span>` +
               `<span title="Raw Nord Pool wholesale price — the part that varies hour by hour and drives the planner's timing decisions">spot</span>` +
-              `<b>${tipSpot.toFixed(1)} öre</b></div>` +
+              `<b>${inUnit(tipSpot)} ${u.label}</b></div>` +
             `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(100,116,139,0.45)"></span>` +
               `<span title="Fixed transport / network fee added by the grid operator — doesn't change hour to hour">grid tariff</span>` +
-              `<b>+${tipGrid.toFixed(1)} öre</b></div>` +
+              `<b>+${inUnit(tipGrid)} ${u.label}</b></div>` +
             `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(100,116,139,0.25)"></span>` +
               `<span title="Value-added tax (moms) applied on spot + grid tariff">VAT ${tipVat.toFixed(0)}%</span>` +
-              `<b>+${tipVatOre.toFixed(1)} öre</b></div>` +
+              `<b>+${inUnit(tipVatOre)} ${u.label}</b></div>` +
           `</div>`
         );
       }
@@ -955,7 +964,7 @@ import { derivePlanBrief } from "./plan-brief.js";
     self_consumption: 'Self (manual). Simple grid-zero controller with no planner; charges surplus and discharges to cover local import.',
     peak_shaving: 'Manual peak shaving. Limits grid import to the peak-limit setting.',
     charge: 'Manual full charge — forces the battery to charge regardless of price.',
-    idle: 'Battery idle — no dispatch.',
+    idle: 'Stop batteries. Every battery is held at 0 W while this mode is on, so none drifts back to the inverter\'s own behaviour. Fuse protection still applies. EV charging and PV curtailment carry on.',
   };
   function renderStrategyHint() {
     apiFetch('/api/status')
@@ -1019,9 +1028,15 @@ import { derivePlanBrief } from "./plan-brief.js";
     if (reportBtn) reportBtn.addEventListener('click', downloadHelpReport);
   }
 
-  // Pulls GET /api/support/report and saves it. Kept here rather than in
-  // the driver Diagnose modal because the question it answers ("why is it
-  // doing that?") is asked while looking at the plan, not at a device.
+  // Pulls GET /api/support/dump and saves it. That archive leads with
+  // 00-help-report.md — the readable answer to "why is it doing that?" —
+  // and carries the logs, config and telemetry behind it. One button and
+  // one file, because a user asking for help should not have to work out
+  // which of two downloads we wanted. The bare report is still at
+  // /api/support/report for anyone who wants only the text.
+  //
+  // Lives here rather than in the driver Diagnose modal because the
+  // question is asked while looking at the plan, not at a device.
   function downloadHelpReport() {
     const btn = document.getElementById('plan-help-report');
     if (!btn || btn.disabled) return;
@@ -1035,7 +1050,7 @@ import { derivePlanBrief } from "./plan-brief.js";
         btn.textContent = original;
       }, 4000);
     };
-    apiFetch('/api/support/report')
+    apiFetch('/api/support/dump')
       .then(function (resp) {
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         return resp.blob().then(function (blob) {
@@ -1043,7 +1058,7 @@ import { derivePlanBrief } from "./plan-brief.js";
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = 'ftw-help-' + stamp + '.md';
+          a.download = 'ftw-help-' + stamp + '.zip';
           document.body.appendChild(a);
           a.click();
           a.remove();

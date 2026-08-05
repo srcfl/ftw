@@ -758,6 +758,10 @@ func (m *Manager) directManifestRuntimePolicy(
 		HostAPIProfile: sourcefulFTWHostAPIProfileV1,
 		ReadOnly:       true,
 		Permissions:    permissions,
+		// Only a read-only driver can have one, and only the path the signed
+		// manifest names. An unsigned or absent value leaves it empty, which
+		// is the same as having no exemption at all.
+		AuthPostPath: matched.Metadata.AuthPostPath,
 	}, nil
 }
 

@@ -180,6 +180,31 @@ Verify the broker address from the same network namespace as core, then inspect
 broker and driver logs. Device credentials and topic mappings belong to the
 driver configuration.
 
+### `.local` names inside the container
+
+The image ships `libnss-mdns`, so ordinary glibc tools inside the container —
+`getent hosts zap.local` and `wget` — resolve `.local` the way they do on
+the host. `apt` wires `mdns4_minimal [NOTFOUND=return]` into
+`/etc/nsswitch.conf` when the package is installed; nothing else is needed at
+build time.
+
+At run time that path talks to `avahi-daemon` over a Unix socket, and a socket
+is not shared by host networking the way a port is. Mount it explicitly:
+
+```yaml
+    volumes:
+      - /run/avahi-daemon/socket:/run/avahi-daemon/socket:ro
+```
+
+Only add this on a host that actually runs `avahi-daemon` — the Raspberry Pi
+image does. Without the daemon Docker creates a *directory* at that path, which
+resolves nothing and is harmless but confusing; `ls -l` there is the quickest
+way to tell the two apart.
+
+This makes the container's own tooling agree with the host. Whether the FTW
+process itself resolves a device's `.local` name is a separate question,
+answered by `internal/mdnsresolve`.
+
 ### Configuration rejected
 
 Read the validation error, compare with

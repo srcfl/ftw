@@ -14,10 +14,13 @@ test("the plan card offers a help report", () => {
   assert.match(index, /Something looks wrong\?/);
 });
 
-test("the help-report button downloads from the report endpoint", () => {
+// One button, one file. The archive leads with the readable report and
+// carries the logs behind it, so a user asking for help never has to work
+// out which of two downloads we meant.
+test("the help-report button downloads the bundle, not just the text", () => {
   assert.match(plan, /getElementById\('plan-help-report'\)/);
-  assert.match(plan, /apiFetch\('\/api\/support\/report'\)/);
-  assert.match(plan, /a\.download = 'ftw-help-'/);
+  assert.match(plan, /apiFetch\('\/api\/support\/dump'\)/);
+  assert.match(plan, /a\.download = 'ftw-help-' \+ stamp \+ '\.zip'/);
 });
 
 test("the help-report button reports failure instead of failing silently", () => {

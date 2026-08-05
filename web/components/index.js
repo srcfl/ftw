@@ -4,6 +4,12 @@
 // components get picked up by adding one line below.
 
 import "./ftw-element.js";
+// Price units land on window.FTWUnits for the classic scripts that can't
+// import them; the import has to happen whether or not a component uses it.
+import { bootstrapCurrency } from "./price-units.js";
+// One request, so a view that shows prices without fetching them still
+// labels them in the household's own currency.
+bootstrapCurrency();
 // Foundations — registered as each lands.
 import "./ftw-modal.js";
 import "./ftw-progress-bar.js";
@@ -14,11 +20,11 @@ import "./ftw-legend.js";
 import "./ftw-energy-flow.js";
 import "./ftw-battery-control.js?v=apifetch1";
 import "./ftw-pv-control.js?v=apifetch1";
-import "./ftw-price-chart.js?v=apiread3";
+import "./ftw-price-chart.js?v=zones1";
 import "./ftw-energy-cake.js";
 import "./ftw-bar-chart.js";
 import "./ftw-history-card.js?v=apiread2";
-import "./ftw-savings-card.js?v=apiread1";
+import "./ftw-savings-card.js?v=zones1";
 import "./ftw-update-check.js?v=apifetch1";
 import "./ftw-notif-status.js?v=apifetch1";
 import "./ftw-notif-test-button.js";

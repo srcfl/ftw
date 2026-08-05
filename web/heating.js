@@ -7,7 +7,11 @@
 // fetch per driver); steady-state polling then only touches the heat-pump
 // drivers, avoiding unnecessary work every 30 seconds.
 //
-// See docs/myuplink-oauth.md. No control here — telemetry only.
+// See docs/myuplink-oauth.md.
+//
+// Control is rendered only for a driver that declares one (/api/drivers/{name}
+// → controls). Nothing here knows a driver by name: a pump that declares
+// nothing shows telemetry and no buttons, exactly as before.
 
 (function () {
   'use strict';
@@ -19,7 +23,10 @@
   var DISCOVER_EVERY_MS = 300000;     // re-scan for newly-added heat pumps (5 min)
   var HISTORY_REFRESH_MS = 300000;    // long TS queries refresh at most every 5 min
   var historyCache = Object.create(null);
+  var controlInFlight = Object.create(null);
   var refreshInFlight = false;
+  var refreshQueued = false;
+  var refreshWaiters = [];
 
   function apiFetch(path, opts) {
     return fetch(path, opts);
@@ -125,6 +132,24 @@
       '.ftw-hp-legend{display:flex;gap:14px;flex-wrap:wrap}',
       '.ftw-hp-chartsub{font-family:var(--sans);font-size:0.72rem;color:var(--fg-muted);margin:-2px 0 6px}',
       '.ftw-hp-asof{font-family:var(--mono);font-size:0.62rem;letter-spacing:0.04em;color:var(--fg-muted);margin:-4px 0 10px}',
+      // Control row. Held vs Auto is carried by the text and the weight of the
+      // value, never by colour alone — the palette's green/red pair is not
+      // separable under deuteranopia.
+      '.ftw-hpc{border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:0 0 12px}',
+      '.ftw-hpc-row{display:flex;align-items:center;gap:8px}',
+      '.ftw-hpc-label{font-family:var(--mono);font-size:0.66rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted);flex:0 0 auto}',
+      '.ftw-hpc-state{flex:1 1 auto;display:flex;align-items:baseline;gap:6px;min-width:0}',
+      '.ftw-hpc-value{font-family:var(--mono);font-size:0.95rem;font-weight:600;color:var(--fg)}',
+      '.ftw-hpc-until{font-family:var(--mono);font-size:0.62rem;color:var(--fg-muted);white-space:nowrap}',
+      '.ftw-hpc-auto{font-family:var(--mono);font-size:0.8rem;color:var(--fg-muted)}',
+      '.ftw-hpc-observed{font-family:var(--mono);font-size:0.72rem;color:var(--fg-muted);white-space:nowrap}',
+      '.ftw-hpc-btn{width:30px;height:30px;flex:0 0 auto;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:1rem;line-height:1;cursor:pointer;font-family:var(--mono)}',
+      '.ftw-hpc-btn:hover:not(:disabled){border-color:var(--fg-muted)}',
+      '.ftw-hpc-btn:disabled{opacity:0.35;cursor:default}',
+      '.ftw-hpc-release{flex:0 0 auto;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--fg-muted);font-family:var(--mono);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.06em;padding:6px 8px;cursor:pointer}',
+      '.ftw-hpc-release:hover:not(:disabled){color:var(--fg);border-color:var(--fg-muted)}',
+      '.ftw-hpc-note{font-family:var(--sans);font-size:0.68rem;color:var(--fg-muted);margin-top:6px}',
+      '.ftw-hpc-err{font-family:var(--sans);font-size:0.68rem;color:var(--fg);margin-top:6px}',
       '.ftw-hp-leg{font-family:var(--mono);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted);display:inline-flex;align-items:center;gap:4px}',
       '.ftw-hp-leg-dot{width:8px;height:8px;border-radius:2px;display:inline-block}',
       '.ftw-hp-erow{display:grid;grid-template-columns:1fr auto auto;gap:7px 18px;align-items:baseline}',
@@ -363,6 +388,7 @@
       '<div class="ftw-hp-head"><span class="ftw-hp-name">' + escapeHtml(name) + '</span>' +
       '<span class="ftw-hp-more">All signals →</span></div>' +
       asof +
+      controlBlock(name, detail) +
       groups +
       energyPeriodsBlock(energy) +
       tempChartBlock(temps) +
@@ -374,6 +400,218 @@
     return String(s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
+  }
+
+  // ---- Control: one declared command per pump ----
+  //
+  // Rendered from what the driver declares (/api/drivers/{name} → controls),
+  // so a pump that declares nothing shows nothing and this file never learns
+  // a driver's name. Stepper buttons rather than a slider or a number field:
+  // the whole card is re-rendered every 30 s, and a control holding input
+  // state would lose a half-typed value on every refresh.
+  //
+  // Only number controls render today, which is what a heat curve offset is.
+  // A boolean would want a different shape and no driver declares one yet.
+  function firstNumberControl(detail) {
+    var controls = (detail && detail.controls) || [];
+    for (var i = 0; i < controls.length; i++) {
+      if (controls[i] && controls[i].input && controls[i].input.type === 'number') return controls[i];
+    }
+    return null;
+  }
+
+  function fmtHoldUntil(ms) {
+    if (!ms) return '';
+    return new Date(ms).toLocaleTimeString('en-US', {
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  }
+
+  // Signed, because an offset's sign is its whole meaning: +1 is warmer,
+  // -1 is cooler, and "1" would be ambiguous.
+  function fmtOffsetValue(v, unit) {
+    var sign = v > 0 ? '+' : '';
+    return sign + String(v) + (unit ? ' ' + unit : '');
+  }
+
+  // A control value is an absolute setting. When no hold is active, use the
+  // driver's latest offset telemetry as the starting point; zero is not a
+  // safe default because the driver may have a non-zero autonomous offset.
+  function observedControlValue(detail, control) {
+    if (!detail || !control || control.id !== 'set_heat_curve_offset') return null;
+    var metrics = detail.metrics || [];
+    var preferred = ['hp_z1_heat_offset', 'hp_heating_offset_climate_system_1'];
+    for (var i = 0; i < preferred.length; i++) {
+      for (var j = 0; j < metrics.length; j++) {
+        if (metrics[j] && metrics[j].name === preferred[i] && Number.isFinite(metrics[j].value)) {
+          return metrics[j].value;
+        }
+      }
+    }
+    return null;
+  }
+
+  function controlKey(name, control) {
+    return String(name) + '\u0000' + String(control);
+  }
+
+  function syncControlElements(name, control) {
+    var grid = document.getElementById('heating-grid');
+    if (!grid || !grid.querySelectorAll) return;
+    var nodes = grid.querySelectorAll('.ftw-hpc-btn, .ftw-hpc-release');
+    var key = controlKey(name, control);
+    var inFlight = !!controlInFlight[key];
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      var nodeName = node.dataset && (node.dataset.hpcDriver || node.dataset.hpcRelease);
+      if (nodeName !== name || !node.dataset || node.dataset.hpcControl !== control) continue;
+      node.disabled = inFlight || node.dataset.hpcEnabled !== 'true';
+    }
+  }
+
+  function beginControl(name, control) {
+    var key = controlKey(name, control);
+    if (controlInFlight[key]) return false;
+    controlInFlight[key] = true;
+    syncControlElements(name, control);
+    return true;
+  }
+
+  function endControl(name, control) {
+    delete controlInFlight[controlKey(name, control)];
+    syncControlElements(name, control);
+  }
+
+  function controlBlock(name, detail) {
+    var control = firstNumberControl(detail);
+    if (!control) return '';
+    var input = control.input || {};
+    var hold = (detail && detail.hold && detail.hold.control === control.id) ? detail.hold : null;
+    var held = hold && typeof hold.value === 'number';
+    var step = typeof input.step === 'number' && input.step > 0 ? input.step : 1;
+    var observed = observedControlValue(detail, control);
+    var value = observed;
+    var canAdjust = typeof observed === 'number' && Number.isFinite(observed);
+    var inFlight = !!controlInFlight[controlKey(name, control.id)];
+
+    // Without a hold the driver is running its own default. Saying "Auto" is
+    // still the state label, but the current telemetry value anchors the next
+    // absolute command. Without it, the buttons stay disabled rather than
+    // guessing a starting point.
+    var state = held
+      ? '<span class="ftw-hpc-value">' + escapeHtml(fmtOffsetValue(hold.value, input.unit)) + '</span>' +
+        '<span class="ftw-hpc-until">until ' + escapeHtml(fmtHoldUntil(hold.expires_at_ms)) + '</span>'
+      : '<span class="ftw-hpc-auto">Auto</span>' +
+        (canAdjust ? '<span class="ftw-hpc-observed">current ' + escapeHtml(fmtOffsetValue(value, input.unit)) + '</span>' : '');
+
+    var atMin = canAdjust && typeof input.min === 'number' && value <= input.min;
+    var atMax = canAdjust && typeof input.max === 'number' && value >= input.max;
+    var btn = function (delta, label, disabled) {
+      var target = canAdjust ? clampControl(value + delta, input) : null;
+      var enabled = canAdjust && !disabled;
+      return '<button type="button" class="ftw-hpc-btn" data-hpc-driver="' + escapeHtml(name) + '"' +
+        ' data-hpc-control="' + escapeHtml(control.id) + '"' +
+        (enabled ? ' data-hpc-value="' + escapeHtml(String(target)) + '"' : '') +
+        ' data-hpc-enabled="' + (enabled ? 'true' : 'false') + '"' +
+        (!enabled || inFlight ? ' disabled' : '') +
+        ' aria-label="' + escapeHtml(label + ' ' + (control.label || control.id)) + '">' +
+        escapeHtml(label === 'Lower' ? '−' : '+') + '</button>';
+    };
+
+    var note = !canAdjust
+      ? '<div class="ftw-hpc-note">Current offset unavailable — controls wait for telemetry instead of assuming 0.</div>'
+      : '';
+    note += control.evidence === 'readback'
+      ? ''
+      : '<div class="ftw-hpc-note">The pump does not confirm this setting — FTW cannot tell whether it took.</div>';
+
+    return '<div class="ftw-hpc">' +
+      '<div class="ftw-hpc-row">' +
+      '<span class="ftw-hpc-label">' + escapeHtml(control.label || control.id) + '</span>' +
+      '<span class="ftw-hpc-state">' + state + '</span>' +
+      btn(-step, 'Lower', atMin) +
+      btn(step, 'Raise', atMax) +
+      (held
+        ? '<button type="button" class="ftw-hpc-release" data-hpc-release="' + escapeHtml(name) + '"' +
+          ' data-hpc-control="' + escapeHtml(control.id) + '" data-hpc-enabled="true"' +
+          (inFlight ? ' disabled' : '') + '>Release</button>'
+        : '') +
+      '</div>' +
+      note +
+      '<div class="ftw-hpc-err" hidden></div>' +
+      '</div>';
+  }
+
+  function clampControl(v, input) {
+    if (typeof input.min === 'number' && v < input.min) v = input.min;
+    if (typeof input.max === 'number' && v > input.max) v = input.max;
+    // Steps are commonly fractional (0.5 °C); rounding here keeps 0.30000000000000004
+    // out of both the button label and the request body.
+    return Math.round(v * 1000) / 1000;
+  }
+
+  function controlError(el, message) {
+    var box = el.closest('.ftw-hpc') && el.closest('.ftw-hpc').querySelector('.ftw-hpc-err');
+    if (!box) return;
+    box.textContent = message;
+    box.hidden = false;
+  }
+
+  function sendControl(el, name, control, value) {
+    if (!beginControl(name, control)) return;
+    var request;
+    try {
+      request = apiFetch('/api/drivers/' + encodeURIComponent(name) + '/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ control: control, value: value }),
+      });
+    } catch (err) {
+      try { controlError(el, String(err.message || err)); } finally { endControl(name, control); }
+      return;
+    }
+    Promise.resolve(request).then(function (r) {
+      return r.json().then(function (body) {
+        if (!r.ok) throw new Error(body && body.error ? body.error : 'request failed');
+        return body;
+      });
+    }).then(function () {
+      return refreshAfterControl();
+    }).then(function () {
+      endControl(name, control);
+    }).catch(function (err) {
+      try { controlError(el, String(err.message || err)); } finally { endControl(name, control); }
+    });
+  }
+
+  function releaseControl(el, name, control) {
+    if (!beginControl(name, control)) return;
+    var request;
+    try {
+      request = apiFetch('/api/drivers/' + encodeURIComponent(name) + '/control', { method: 'DELETE' });
+    } catch (err) {
+      try { controlError(el, String(err.message || err)); } finally { endControl(name, control); }
+      return;
+    }
+    Promise.resolve(request)
+      .then(function (r) {
+        return r.json().then(function (body) {
+          if (!r.ok) throw new Error(body && body.error ? body.error : 'request failed');
+          return body;
+        });
+      })
+      .then(function () { return refreshAfterControl(); })
+      .then(function () { endControl(name, control); })
+      .catch(function (err) {
+        try { controlError(el, String(err.message || err)); } finally { endControl(name, control); }
+      });
+  }
+
+  // refresh() queues one follow-up when a cycle is already running. This is
+  // needed after a control response: a fixed-delay retry can also land inside
+  // a long history cycle and get dropped again.
+  function refreshAfterControl() {
+    return refresh();
   }
 
   // The live values are cheap and refresh every 30 s. Month/year history is
@@ -411,8 +649,11 @@
   function refresh() {
     var section = document.getElementById('heating-section');
     var grid = document.getElementById('heating-grid');
-    if (!section || !grid) return;
-    if (refreshInFlight) return;
+    if (!section || !grid) return Promise.resolve();
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return new Promise(function (resolve) { refreshWaiters.push(resolve); });
+    }
     refreshInFlight = true;
 
     // Re-run discovery on first call, then periodically — so a heat-pump
@@ -427,34 +668,49 @@
       ? discover().then(function (names) { heatPumpDrivers = names; lastDiscoverMs = nowMs; return names; })
       : Promise.resolve(heatPumpDrivers);
 
-    ready.then(function (names) {
-      if (!names || names.length === 0) {
-        section.hidden = true;
-        return;
-      }
-      // Refresh live detail every cycle; reuse bounded-age history.
-      return Promise.all(names.map(function (n) {
-        return Promise.all([
-          fetchJSON('/api/drivers/' + encodeURIComponent(n)),
-          fetchPumpHistory(n),
-        ]).then(function (parts) {
-          var h = parts[1] || {};
-          return { name: n, detail: parts[0], temps: h.temps, energy: h.energy, power: h.power };
+    return new Promise(function (resolve) {
+      ready.then(function (names) {
+        if (!names || names.length === 0) {
+          section.hidden = true;
+          return;
+        }
+        // Refresh live detail every cycle; reuse bounded-age history.
+        return Promise.all(names.map(function (n) {
+          return Promise.all([
+            fetchJSON('/api/drivers/' + encodeURIComponent(n)),
+            fetchPumpHistory(n),
+          ]).then(function (parts) {
+            var h = parts[1] || {};
+            return { name: n, detail: parts[0], temps: h.temps, energy: h.energy, power: h.power };
+          });
+        })).then(function (pumps) {
+          var live = pumps.filter(function (p) { return p.detail && isHeatPump(p.detail); });
+          if (live.length === 0) { section.hidden = true; return; }
+          injectStyles();
+          section.hidden = false;
+          grid.innerHTML = live.map(function (p) {
+            return renderPump(p.name, p.detail, p.temps, p.energy, p.power);
+          }).join('');
         });
-      })).then(function (pumps) {
-        var live = pumps.filter(function (p) { return p.detail && isHeatPump(p.detail); });
-        if (live.length === 0) { section.hidden = true; return; }
-        injectStyles();
-        section.hidden = false;
-        grid.innerHTML = live.map(function (p) {
-          return renderPump(p.name, p.detail, p.temps, p.energy, p.power);
-        }).join('');
+      }).then(function () {
+        finishRefresh(resolve);
+      }, function () {
+        finishRefresh(resolve);
       });
-    }).then(function () {
-      refreshInFlight = false;
-    }, function () {
-      refreshInFlight = false;
     });
+  }
+
+  function finishRefresh(resolve) {
+    refreshInFlight = false;
+    resolve();
+    if (refreshQueued) {
+      refreshQueued = false;
+      var waiters = refreshWaiters;
+      refreshWaiters = [];
+      refresh().then(function () {
+        waiters.forEach(function (waiter) { waiter(); });
+      });
+    }
   }
 
   // ---- Detail drill-in: all points grouped by unit ----
@@ -619,6 +875,23 @@
     // The ? help icons explain a metric in place (native tooltip) — a click on
     // one must NOT navigate into the all-signals detail.
     if (e.target.closest && e.target.closest('.ftw-hp-i')) return;
+    // Commanding the pump is not navigating to its signals. The card is the
+    // button, so every control click has to stop here or the detail view
+    // opens over the thing the operator just pressed.
+    var step = e.target.closest && e.target.closest('.ftw-hpc-btn');
+    if (step) {
+      e.stopPropagation();
+      sendControl(step, step.dataset.hpcDriver, step.dataset.hpcControl,
+        parseFloat(step.dataset.hpcValue));
+      return;
+    }
+    var release = e.target.closest && e.target.closest('.ftw-hpc-release');
+    if (release) {
+      e.stopPropagation();
+      releaseControl(release, release.dataset.hpcRelease, release.dataset.hpcControl);
+      return;
+    }
+    if (e.target.closest && e.target.closest('.ftw-hpc')) return;
     var card = e.target.closest && e.target.closest('.ftw-hp-clickable');
     if (card && card.dataset.hpDriver) openDetail(card.dataset.hpDriver);
   }

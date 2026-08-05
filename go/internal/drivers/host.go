@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	net_url "net/url"
 	"sync"
 	"time"
 
@@ -183,8 +184,17 @@ type HostEnv struct {
 	pollActive              bool
 	pollModbusAttempts      int
 	pollModbusSuccesses     int
-	pollTelemetry           [][]byte
-	pollMetrics             []pollMetric
+	// Failures split by what they prove about the device. Only a transport
+	// failure means the readings might be stale; a refusal means the device
+	// answered, and a skip never reached the wire at all.
+	pollModbusTransportFailures int
+	pollModbusRefused           int
+	pollModbusSkipped           int
+	// lastPollEvidence keeps the finished poll's breakdown so the caller
+	// can report what actually went wrong rather than a bare count.
+	lastPollEvidence pollEvidence
+	pollTelemetry    [][]byte
+	pollMetrics      []pollMetric
 }
 
 type pollMetric struct {
@@ -259,6 +269,33 @@ func (h *HostEnv) endWriteScope() (int, []string) {
 	return writes, evidence
 }
 
+// allowAuthPost reports whether this POST is the sign-in the signed package
+// declared, and so may proceed outside the write phases.
+//
+// A read-only driver that reads a vendor cloud cannot read anything until it
+// has exchanged a token, and it exchanges one from init or poll -- the phases
+// allowWrite refuses, for good reason, since nothing there can carry a command
+// lease. Authenticating is a precondition for reading rather than a write to
+// the device, so it is admitted here instead, confined to the single path the
+// signed manifest names and only for a driver published read-only. It does not
+// consume the write budget: a token refresh is driven by expiry, not by a
+// caller, and spending the budget on it would leave the driver unable to read
+// once its token aged out.
+func (h *HostEnv) allowAuthPost(rawURL string) bool {
+	if h.RuntimePolicy == nil || !h.RuntimePolicy.ReadOnly {
+		return false
+	}
+	declared := h.RuntimePolicy.AuthPostPath
+	if declared == "" || !h.RuntimePolicy.allows("http.post") {
+		return false
+	}
+	parsed, err := net_url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return parsed.Path == declared
+}
+
 func (h *HostEnv) allowWrite(permission string) error {
 	if h.RuntimePolicy == nil {
 		return nil
@@ -310,16 +347,54 @@ func (h *HostEnv) beginPollEvidence() {
 	h.pollActive = true
 	h.pollModbusAttempts = 0
 	h.pollModbusSuccesses = 0
+	h.pollModbusTransportFailures = 0
+	h.pollModbusRefused = 0
+	h.pollModbusSkipped = 0
 	h.pollTelemetry = nil
 	h.pollMetrics = nil
 	h.mu.Unlock()
 }
 
+// pollEvidence summarises one poll's Modbus traffic by what each result
+// proves about the device on the other end.
+type pollEvidence struct {
+	Attempts  int
+	Successes int
+	Transport int // could not reach the device
+	Refused   int // device answered and declined the register
+	Skipped   int // never attempted; a reconnect backoff was running
+}
+
+// fresh reports whether this poll's readings can be trusted as current.
+//
+// The rule used to be attempts == successes, which threw away the whole
+// poll if a single register missed. That made a driver's own tolerance —
+// sungrow.lua marks 19 of its 20 reads optional — count for nothing, and
+// it made the driver permanently useless on a string inverter, which has
+// no battery registers and refuses them on every poll forever.
+//
+// What actually matters is whether we reached the device. A refusal is
+// proof of life: it replied. So the poll is fresh when something was read
+// successfully and nothing failed at the transport. Skips are not counted
+// against it either — they are downstream of a transport failure that has
+// already been counted once.
+func (e pollEvidence) fresh() bool {
+	return e.Successes > 0 && e.Transport == 0
+}
+
 func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err error) {
 	h.mu.Lock()
-	attempts = h.pollModbusAttempts
-	successes = h.pollModbusSuccesses
-	fresh := commit && attempts > 0 && attempts == successes
+	ev := pollEvidence{
+		Attempts:  h.pollModbusAttempts,
+		Successes: h.pollModbusSuccesses,
+		Transport: h.pollModbusTransportFailures,
+		Refused:   h.pollModbusRefused,
+		Skipped:   h.pollModbusSkipped,
+	}
+	attempts = ev.Attempts
+	successes = ev.Successes
+	h.lastPollEvidence = ev
+	fresh := commit && ev.fresh()
 	var pendingTelemetry [][]byte
 	var pendingMetrics []pollMetric
 	if h.requiresFreshModbusRead && fresh {
@@ -329,6 +404,9 @@ func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err err
 	h.pollActive = false
 	h.pollModbusAttempts = 0
 	h.pollModbusSuccesses = 0
+	h.pollModbusTransportFailures = 0
+	h.pollModbusRefused = 0
+	h.pollModbusSkipped = 0
 	h.pollTelemetry = nil
 	h.pollMetrics = nil
 	h.mu.Unlock()
@@ -346,15 +424,27 @@ func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err err
 	return attempts, successes, nil
 }
 
-func (h *HostEnv) recordPollModbusRead(success bool) {
+func (h *HostEnv) recordPollModbusRead(err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.pollActive {
 		return
 	}
 	h.pollModbusAttempts++
-	if success {
+	switch {
+	case err == nil:
 		h.pollModbusSuccesses++
+	case errors.Is(err, ErrModbusBackoff):
+		// Never left the host. Counting it as a link failure would turn
+		// one dropped packet into however many reads the poll had left.
+		h.pollModbusSkipped++
+	case errors.Is(err, ErrModbusTransport):
+		h.pollModbusTransportFailures++
+	default:
+		// The device answered and refused — an illegal address on a model
+		// that lacks the register, most often. It is alive, so this says
+		// nothing about whether the rest of the poll is current.
+		h.pollModbusRefused++
 	}
 }
 
@@ -447,6 +537,29 @@ const (
 	ModbusDiscrete int32 = 1
 	ModbusHolding  int32 = 2
 	ModbusInput    int32 = 3
+)
+
+// Why a read failed decides whether the whole poll is worthless or just
+// incomplete, and only the transport layer can tell the two apart. It
+// wraps its errors with these so the poll-freshness rule can ask.
+//
+// The distinction is not pedantic. A device answering "illegal data
+// address" is stronger proof of life than a register that read fine: it
+// replied. A string inverter has no battery registers and will answer
+// that way forever, and treating it as a dead link makes the driver
+// permanently useless on that hardware.
+var (
+	// ErrModbusTransport marks a failure to reach the device at all —
+	// reset connection, timeout, refused, unreachable. Readings from
+	// this poll cannot be trusted to be current.
+	ErrModbusTransport = errors.New("modbus transport failure")
+
+	// ErrModbusBackoff marks a read that was never attempted because a
+	// reconnect backoff was already running. It is a consequence of an
+	// earlier transport failure, not new evidence of one, and counting
+	// it as such turns a single dropped packet into a whole poll's worth
+	// of apparent failures.
+	ErrModbusBackoff = errors.New("modbus reconnect backoff active")
 )
 
 func (h *HostEnv) log(level int32, msg string) {
@@ -778,11 +891,11 @@ func (h *HostEnv) mqttPollMessages() ([]MQTTMessage, error) {
 
 func (h *HostEnv) modbusRead(addr, count uint16, kind int32) ([]uint16, error) {
 	if h.Modbus == nil {
-		h.recordPollModbusRead(false)
+		h.recordPollModbusRead(ErrNoCapability)
 		return nil, ErrNoCapability
 	}
 	regs, err := h.Modbus.Read(addr, count, kind)
-	h.recordPollModbusRead(err == nil)
+	h.recordPollModbusRead(err)
 	return regs, err
 }
 
@@ -798,4 +911,32 @@ func (h *HostEnv) modbusWriteMulti(addr uint16, values []uint16) error {
 		return ErrNoCapability
 	}
 	return h.Modbus.WriteMulti(addr, values)
+}
+
+// describe explains a poll in the terms that decide whether its readings
+// were kept. The old message counted every miss the same way and read
+// "8 of 20 modbus reads failed" when one packet dropped and the rest were
+// never sent — which pointed the reader at the wrong problem.
+func (e pollEvidence) describe() string {
+	switch {
+	case e.Attempts == 0:
+		return "no modbus reads attempted"
+	case e.Transport > 0:
+		msg := fmt.Sprintf("%d of %d modbus reads could not reach the device",
+			e.Transport, e.Attempts)
+		if e.Skipped > 0 {
+			msg += fmt.Sprintf(" (%d more skipped while reconnecting)", e.Skipped)
+		}
+		if e.Successes > 0 {
+			msg += fmt.Sprintf("; %d did read", e.Successes)
+		}
+		return msg
+	case e.Successes == 0 && e.Refused > 0:
+		return fmt.Sprintf("the device refused all %d modbus reads", e.Attempts)
+	case e.Successes == 0:
+		return fmt.Sprintf("none of %d modbus reads returned data", e.Attempts)
+	default:
+		return fmt.Sprintf("%d of %d modbus reads did not return data",
+			e.Attempts-e.Successes, e.Attempts)
+	}
 }

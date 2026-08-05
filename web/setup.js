@@ -13,6 +13,10 @@
   var selectedCatalog = null;    // CatalogEntry from /api/drivers/catalog
   var driverCatalog = [];        // full catalog cache
 
+  // Picker option for a device with no catalog entry. Deliberately not a
+  // number so it can never be mistaken for a catalog index.
+  var NOT_LISTED = '__not_listed__';
+
   // --- Step navigation ---
 
   function renderDots() {
@@ -49,6 +53,13 @@
   // Back from step 7 goes to step 6 if we have drivers, step 2 if we skipped
   window.goStepBack7 = function () {
     goStep(configuredDrivers.length > 0 ? 6 : 2);
+  };
+
+  // Forward path for a device the catalog cannot serve: the devices
+  // summary when something is already configured, otherwise straight on
+  // to the integrations.
+  window.skipUnlistedDevice = function () {
+    goStep(configuredDrivers.length > 0 ? 6 : 7);
   };
 
   // --- Step 3: Scan ---
@@ -202,6 +213,14 @@
       sel.appendChild(opt);
     });
 
+    // The escape hatch. Without it, a device with no catalog entry
+    // dead-ends this step: Continue stays disabled and the only
+    // affordance left is Back.
+    var notListed = document.createElement('option');
+    notListed.value = NOT_LISTED;
+    notListed.textContent = 'My device is not listed…';
+    sel.appendChild(notListed);
+
     // A positive fingerprint preselects the matching catalog driver while
     // still sending the operator through the normal configuration form.
     if (selectedDevice && selectedDevice.matchedFilename) {
@@ -222,13 +241,26 @@
     var sel = document.getElementById('driver-select');
     var btn = document.getElementById('driver-next-btn');
     var descEl = document.getElementById('driver-description');
+    var notListedEl = document.getElementById('driver-not-listed');
 
     if (!sel.value) {
       selectedCatalog = null;
       btn.disabled = true;
       descEl.style.display = 'none';
+      notListedEl.style.display = 'none';
       return;
     }
+
+    if (sel.value === NOT_LISTED) {
+      // Nothing to configure, so Continue stays held; the panel offers
+      // its own forward path instead.
+      selectedCatalog = null;
+      btn.disabled = true;
+      descEl.style.display = 'none';
+      notListedEl.style.display = 'block';
+      return;
+    }
+    notListedEl.style.display = 'none';
 
     selectedCatalog = driverCatalog[parseInt(sel.value, 10)];
     btn.disabled = false;
@@ -761,6 +793,8 @@
         provider: priceProv,
         zone: zone
       };
+      var cur = currencyForZone(zone);
+      if (cur) cfg.price.currency = cur;
     }
 
     // EV Charger — shape the block to match the provider's transport
@@ -809,6 +843,62 @@
     return d.innerHTML;
   }
 
+  // --- Price zones ---
+  //
+  // The country and zone lists come from /api/prices/zones — the same
+  // table the price fetchers use — so the wizard can't offer a zone the
+  // providers don't know. A failed request leaves the Swedish options in
+  // setup.html standing.
+  var priceZones = [];
+
+  function loadPriceZones() {
+    fetch('/api/prices/zones')
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !Array.isArray(j.zones) || !j.zones.length) return;
+        priceZones = j.zones;
+        var countryEl = document.getElementById('price-country');
+        countryEl.innerHTML = '';
+        var seen = {};
+        priceZones.forEach(function (z) {
+          if (seen[z.country]) return;
+          seen[z.country] = true;
+          var o = document.createElement('option');
+          o.value = z.country;
+          o.textContent = z.country;
+          if (z.country === 'Sweden') o.selected = true;
+          countryEl.appendChild(o);
+        });
+        countryEl.addEventListener('change', fillZonesForCountry);
+        fillZonesForCountry();
+      })
+      .catch(function () { /* the Swedish fallback list stays */ });
+  }
+
+  function fillZonesForCountry() {
+    var country = document.getElementById('price-country').value;
+    var zoneEl = document.getElementById('price-zone');
+    zoneEl.innerHTML = '';
+    priceZones.filter(function (z) { return z.country === country; })
+      .forEach(function (z, i) {
+        var sub = z.name && z.name.indexOf(' — ') > 0 ? z.name.split(' — ')[1] : '';
+        var o = document.createElement('option');
+        o.value = z.code;
+        o.textContent = sub ? z.code + ' · ' + sub : z.code;
+        if (i === 0 || z.code === 'SE3') o.selected = true;
+        zoneEl.appendChild(o);
+      });
+  }
+
+  // The currency the picked zone bills in, so a Belgian install doesn't
+  // start out priced in Swedish öre.
+  function currencyForZone(code) {
+    for (var i = 0; i < priceZones.length; i++) {
+      if (priceZones[i].code === code) return priceZones[i].currency;
+    }
+    return '';
+  }
+
   // --- Init ---
   // Honor a `?step=N` deep-link (the dashboard links to /setup?step=3 from
   // its "no devices" prompt). Clamp into the valid 1..TOTAL_STEPS range so a
@@ -830,5 +920,6 @@
   }
 
   renderDots();
+  loadPriceZones();
   goStep(initialStep());
 })();

@@ -19,11 +19,12 @@ import (
 // ---- test helpers ----
 
 type fakePub struct {
-	mu    sync.Mutex
-	msgs  []Message
-	errOn int // fail after this many (0 means never)
-	count int
-	fail  bool
+	mu        sync.Mutex
+	msgs      []Message
+	errOn     int // fail after this many (0 means never)
+	count     int
+	fail      bool
+	published chan struct{}
 }
 
 func (f *fakePub) Publish(_ context.Context, m Message) error {
@@ -34,6 +35,12 @@ func (f *fakePub) Publish(_ context.Context, m Message) error {
 		return fmt.Errorf("boom")
 	}
 	f.msgs = append(f.msgs, m)
+	if f.published != nil {
+		select {
+		case f.published <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -62,6 +69,20 @@ func newSvc(cfg *config.Notifications, pub Publisher) (*Service, *clock) {
 	s := New(cfg, pub, nil)
 	s.now = clk.now
 	return s, clk
+}
+
+func waitForFuseEvaluation(t *testing.T, svc *Service, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("fuse reader was not called")
+	}
+	// The reader is called while evaluateFuse holds svc.mu. Taking the same
+	// lock after the reader signal makes the test wait for the full evaluation,
+	// not just for the goroutine to start.
+	svc.mu.Lock()
+	svc.mu.Unlock()
 }
 
 func healthOk(lastSuccess time.Time) map[string]telemetry.DriverHealth {
@@ -513,30 +534,36 @@ func TestFuseOverLimitFiresAfterThresholdAndResets(t *testing.T) {
 	cfg.Events = append(cfg.Events, config.NotificationRule{
 		Type: EventFuseOverLimit, Enabled: true, ThresholdS: 30, Priority: 5, CooldownS: 900,
 	})
-	pub := &fakePub{}
+	pub := &fakePub{published: make(chan struct{}, 1)}
 	svc, clk := newSvc(cfg, pub)
 	bus := events.NewBus()
 	svc.Subscribe(bus)
 
 	// Reader starts with L1 at 20 A, limit 16 A.
 	var l1 float64 = 20.0
+	fuseEvaluationStarted := make(chan struct{}, 1)
 	svc.SetFuseReader(func() (map[string]float64, float64, bool) {
+		fuseEvaluationStarted <- struct{}{}
 		return map[string]float64{"L1": l1, "L2": 10, "L3": 11}, 16.0, true
 	})
+	tick := func() {
+		bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+		waitForFuseEvaluation(t, svc, fuseEvaluationStarted)
+	}
 
 	// First tick: over the limit, but threshold hasn't sustained.
-	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
-	time.Sleep(20 * time.Millisecond)
+	tick()
 	if n := len(pub.Messages()); n != 0 {
 		t.Fatalf("before threshold: got %d msgs", n)
 	}
 
 	// Advance past threshold — should fire once.
 	clk.advance(40 * time.Second)
-	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
-	deadline := time.Now().Add(time.Second)
-	for len(pub.Messages()) < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	tick()
+	select {
+	case <-pub.published:
+	case <-time.After(time.Second):
+		t.Fatal("fuse notification was not published")
 	}
 	msgs := pub.Messages()
 	if len(msgs) != 1 {
@@ -551,24 +578,21 @@ func TestFuseOverLimitFiresAfterThresholdAndResets(t *testing.T) {
 
 	// Still over — latch prevents a second fire in the same outage.
 	clk.advance(5 * time.Second)
-	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
-	time.Sleep(20 * time.Millisecond)
+	tick()
 	if n := len(pub.Messages()); n != 1 {
 		t.Fatalf("still-over: expected 1, got %d", n)
 	}
 
 	// Back under: the window + latch reset.
 	l1 = 12
-	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
-	time.Sleep(20 * time.Millisecond)
+	tick()
 
 	// New outage — cooldown still blocks a quick refire.
 	l1 = 20
 	clk.advance(40 * time.Second)
-	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	tick()
 	clk.advance(60 * time.Second)
-	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
-	time.Sleep(20 * time.Millisecond)
+	tick()
 	if n := len(pub.Messages()); n != 1 {
 		t.Fatalf("cooldown did not block refire: got %d msgs", n)
 	}

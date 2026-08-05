@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"time"
@@ -417,6 +418,10 @@ type State struct {
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
 
+	// clock is nil in production. Tests may set it to keep a dispatch
+	// scenario on one instant even when the test runner is delayed.
+	clock func() time.Time
+
 	LastTargets []DispatchTarget
 
 	// Cascade toggle — set by main.go based on whether models exist
@@ -589,10 +594,10 @@ type State struct {
 	FuseHoldMaxChargeW    float64
 	FuseHoldUntil         time.Time
 
-	// ManualHold pins the aggregate battery setpoint to a fixed power
-	// for a bounded duration, bypassing both the active manual mode
-	// and the MPC. Hot-installed via POST /api/battery/manual_hold;
-	// auto-expires. Zero ExpiresAt means inactive.
+	// ManualHold pins the battery pool or one battery to a fixed power
+	// for a bounded duration, bypassing both the active manual mode and
+	// the MPC. Hot-installed via POST /api/battery/manual_hold; it is
+	// never persisted and auto-expires. Zero ExpiresAt means inactive.
 	//
 	// Site sign convention: PowerW > 0 = charge, < 0 = discharge,
 	// 0 = idle. SoC clamps, slew, and the fuse guard still apply on
@@ -600,6 +605,10 @@ type State struct {
 	// Mutated under the same outer ctrlMu that protects the rest of
 	// State; no internal mutex.
 	ManualHold BatteryManualHold
+	// BatteryHoldTargetValid checks that a scoped hold still points at
+	// the same live hardware. Core wires this to driver health, battery
+	// telemetry, and the hardware identity reported by the driver.
+	BatteryHoldTargetValid func(driver, deviceID string) bool
 
 	// ManualPVHold pins a PV curtail cap for a bounded duration,
 	// overriding whatever the planner's slot directive says about
@@ -612,15 +621,17 @@ type State struct {
 }
 
 // BatteryManualHold is the full payload of a battery manual override.
-// See State.ManualHold for invariants.
+// Driver empty keeps the pool behavior. A scoped hold must also carry
+// DeviceID so a reused driver name cannot move it to other hardware.
 type BatteryManualHold struct {
+	Driver    string
+	DeviceID  string
 	PowerW    float64
 	ExpiresAt time.Time
 }
 
-// SetBatteryManualHold installs a manual override on the aggregate
-// battery setpoint. Caller must hold the outer ctrlMu. A zero
-// ExpiresAt clears any active hold (same as ClearBatteryManualHold).
+// SetBatteryManualHold installs a manual override. Caller must hold the
+// outer ctrlMu. A zero ExpiresAt clears any active hold.
 func (s *State) SetBatteryManualHold(h BatteryManualHold) {
 	if h.ExpiresAt.IsZero() {
 		s.ManualHold = BatteryManualHold{}
@@ -646,6 +657,52 @@ func (s *State) GetBatteryManualHold(now time.Time) (BatteryManualHold, bool) {
 		return BatteryManualHold{}, false
 	}
 	return s.ManualHold, true
+}
+
+// SlotEnergySnapshot is the per-slot energy accounting, exposed for
+// diagnostics. Both accumulators are here because they answer different
+// questions and can disagree — which is itself the interesting signal.
+//
+// ActualWh updates on every dispatch tick regardless of which path ran,
+// so it is the honest record of what the fleet moved. EnergyPathWh is
+// what the energy-allocation path believes it delivered, and only moves
+// while that path is executing. A slot with a real PlannedWh, an
+// EnergyPathWh of zero and an ActualWh going nowhere means the plan is
+// not reaching the hardware — a case a support report otherwise cannot
+// distinguish from "the plan asked for nothing".
+type SlotEnergySnapshot struct {
+	HasSlot bool
+	// PlannedWh is the plan's BatteryEnergyWh for the slot in flight.
+	// Site-signed: positive charges.
+	PlannedWh float64
+	// ActualWh is what the fleet has moved since the slot began, counted
+	// on every tick and every path.
+	ActualWh float64
+	// EnergyPathWh is the energy path's own delivered count. Zero when
+	// that path has not run this slot.
+	EnergyPathWh float64
+	SlotStart    time.Time
+	SlotEnd      time.Time
+}
+
+// SlotEnergy returns the current slot's energy accounting. Caller must
+// hold the outer ctrlMu.
+func (s *State) SlotEnergy() SlotEnergySnapshot {
+	out := SlotEnergySnapshot{
+		PlannedWh:    s.slotActualPlannedWh,
+		ActualWh:     s.slotActualWh,
+		EnergyPathWh: s.slotDelivered,
+		SlotStart:    s.slotActualSlotStart,
+		SlotEnd:      s.currentDirective.SlotEnd,
+	}
+	// The path-agnostic accumulator carries the authoritative slot start;
+	// the energy path's directive carries the end. Either being unset
+	// means no slot is in flight yet.
+	out.HasSlot = !out.SlotStart.IsZero()
+	if out.SlotEnd.IsZero() && !s.currentDirective.SlotStart.IsZero() {
+		out.SlotEnd = s.currentDirective.SlotStart
+	}
+	return out
 }
 
 // PVManualHold is an operator-installed PV curtail override. See
@@ -924,10 +981,120 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 	}
 }
 
+// now is the only wall-clock read in this package. Production leaves clock
+// nil and gets time.Now(); a test may pin one instant so a scheduler pause
+// between building a scenario and dispatching it cannot move a target.
+func (s *State) now() time.Time {
+	if s != nil && s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
 // SetGridTarget updates both the state and the PI setpoint.
 func (s *State) SetGridTarget(w float64) {
 	s.GridTargetW = w
 	s.PI.Setpoint = w
+}
+
+// SetPeakLimit applies the peak-shaving import threshold, rejecting the
+// values a site can never act on. Both operator paths — POST
+// /api/peak_limit and the Home Assistant peak_limit_w number — go
+// through here, so the rule has one home; there is no YAML key for it.
+// Callers hold the control mutex.
+//
+// Two rejections, both about a setting that reads as armed and is not:
+//
+//   - Negative. The threshold is the import level above which shaving
+//     starts correcting. Below zero, dispatch's `gridW > PeakLimitW`
+//     branch turns a site sitting at zero grid into a positive error and
+//     commands discharge to force export; the band between the limit and
+//     zero meanwhile falls into the `gridW < 0` charge arm, so the two
+//     halves of the same setting disagree. A knob named for an import
+//     peak must not be able to order export.
+//
+//   - Above the fuse. Every import-side clamp already binds at the fuse
+//     less its safety margin, so a threshold above that can never be the
+//     first thing to bind: peak-shaving mode would do nothing the fuse
+//     guard was not already doing, while the operator reads their number
+//     back from /api/status and believes the tariff is defended.
+//
+// Zero is accepted and keeps the meaning dispatch already gives it —
+// "correct everything above 0 W of import". This is deliberately NOT the
+// zero-means-disabled convention that PeakImportCeilingW and MaxExportW
+// use. Peak shaving is a mode: it is switched off by leaving the mode,
+// not by zeroing the threshold. Reading 0 as "disabled" here would let a
+// site running peak_shaving import without limit, and a wire value that
+// means two things is how the Ferroamp pplim=0 lock bit us.
+//
+// The comparison is against the fuse, not effectiveImportCeilingW, even
+// though PeakImportCeilingW can bind lower. The fuse is a property of the
+// site; the ceiling is another operator knob that may be set after this
+// one, and validating a knob against a knob makes acceptance depend on
+// the order the two were typed. A peak limit under the fuse but over a
+// tighter tariff ceiling is redundant, not misleading — the tighter
+// number is already doing the operator's stated job.
+//
+// There is no lower bound beyond zero. A threshold under the site's base
+// load binds hard rather than silently, the battery covers what it can,
+// and the rest shows up as import over the limit — visible, and the
+// operator's business. We have no quantified hardware or control risk to
+// point at, so we do not clamp it.
+//
+// A site whose fuse is not described (SiteFuseAmps <= 0, as in test and
+// e2e harnesses) gets the negative check only, matching fuseSafetyMarginW
+// and perPhaseOverageW: an incomplete fuse description yields no clamp
+// rather than an invented one.
+func (s *State) SetPeakLimit(w float64) error {
+	if w < 0 {
+		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
+	}
+	if ceiling := s.peakLimitCeilingW(); ceiling > 0 && w > ceiling {
+		return fmt.Errorf(
+			"peak_limit_w %.0f W is above the site's import ceiling %.0f W "+
+				"(fuse %.0f A × %.0f V × %d phases, less a %.1f A safety margin) "+
+				"— a peak limit above the fuse can never bind",
+			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, s.SiteFuseSafetyA)
+	}
+	s.PeakLimitW = w
+	return nil
+}
+
+// PeakLimitIsDead reports whether the current peak-shaving threshold sits
+// above the site's import ceiling, i.e. can never bind. SetPeakLimit
+// refuses to create that state, but a config reload that lowers
+// fuse.max_amps can arrive at it from the other direction, under a value
+// that was legal when it was set. Returns false when the fuse is not
+// described. Caller holds the control mutex.
+func (s *State) PeakLimitIsDead() (float64, bool) {
+	ceiling := s.peakLimitCeilingW()
+	return ceiling, ceiling > 0 && s.PeakLimitW > ceiling
+}
+
+// peakLimitCeilingW is the highest peak limit that can still be the first
+// thing to bind: the fuse less the margin every import clamp already
+// keeps. 0 means "the site's fuse is not described", not "no headroom".
+func (s *State) peakLimitCeilingW() float64 {
+	fuseW := s.siteFuseMaxW()
+	if fuseW <= 0 {
+		return 0
+	}
+	ceiling := fuseW - s.fuseSafetyMarginW()
+	if ceiling < 0 {
+		return 0
+	}
+	return ceiling
+}
+
+// siteFuseMaxW is the aggregate breaker budget in watts, from the same
+// three fields the control tick multiplies together. Returns 0 when any
+// of them is unset — no invented 230 V / 3 phases here, matching
+// fuseSafetyMarginW.
+func (s *State) siteFuseMaxW() float64 {
+	if s == nil || s.SiteFuseAmps <= 0 || s.SiteFuseVoltage <= 0 || s.SiteFusePhases <= 0 {
+		return 0
+	}
+	return s.SiteFuseAmps * s.SiteFuseVoltage * float64(s.SiteFusePhases)
 }
 
 // batteryInfo is internal state read from telemetry per dispatch cycle.
@@ -1023,7 +1190,7 @@ func ComputeDispatch(
 	// from this data. The point is to measure first, decide whether a
 	// cap is warranted later.
 	{
-		now := time.Now()
+		now := state.now()
 		var liveBatTotal float64
 		for name := range driverCapacities {
 			if r := store.Get(name, telemetry.DerBattery); r != nil {
@@ -1107,7 +1274,16 @@ func ComputeDispatch(
 	// pre-processing, the idle/charge short-circuits, the holdoff timer,
 	// and the deadband. Falls through to distribute → slew → SoC clamp
 	// → fuse guard so safety bounds still apply.
-	manualHold, manualHoldActive := state.GetBatteryManualHold(time.Now())
+	manualHold, manualHoldActive := state.GetBatteryManualHold(state.now())
+	if manualHoldActive && manualHold.Driver != "" {
+		valid := manualHold.DeviceID != "" && state.BatteryHoldTargetValid != nil &&
+			state.BatteryHoldTargetValid(manualHold.Driver, manualHold.DeviceID)
+		if !valid {
+			state.ClearBatteryManualHold()
+			manualHold = BatteryManualHold{}
+			manualHoldActive = false
+		}
+	}
 	if manualHoldActive {
 		// Reset PI + slot accumulators so reverting to a planner mode
 		// after the hold expires doesn't read stale state — same reset
@@ -1126,14 +1302,14 @@ func ComputeDispatch(
 		// Already handled — leave effectiveMode at ModeSelfConsumption.
 	case state.Mode == ModePlannerSelf:
 		effectiveMode = ModeSelfConsumption
-		decision := preparePlannerSelf(state, time.Now())
+		decision := preparePlannerSelf(state, state.now())
 		plannerSelfIdleGate = decision.idleGate
 		plannerSelfExportSurplusGate = decision.exportSurplusGate
 		plannerSelfNoChargeStalePlan = decision.noChargeOnStalePlan
 	case state.Mode.IsPlannerMode():
 		// planner_cheap / planner_arbitrage.
 		if state.UseEnergyDispatch && state.SlotDirective != nil {
-			if dir, ok := state.SlotDirective(time.Now()); ok {
+			if dir, ok := state.SlotDirective(state.now()); ok {
 				currentDirective = dir
 				// planner_arbitrage and planner_passive_arbitrage idle slots: skip the energy path and
 				// fall through to reactive PI (same as planner_self does always).
@@ -1224,7 +1400,7 @@ func ComputeDispatch(
 			var gridW float64
 			ok := false
 			if state.PlanTarget != nil {
-				modeStr, gridW, ok = state.PlanTarget(time.Now())
+				modeStr, gridW, ok = state.PlanTarget(state.now())
 			}
 			if ok {
 				effectiveMode = Mode(modeStr)
@@ -1244,22 +1420,36 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		// Even in idle, the reactive fuse-saver runs: an unplanned
-		// load (manual_hold injecting EV power, oven turning on,
-		// neighbour's pool pump on the same fuse) can push grid
-		// import past the fuse with the battery sitting at 0 W. The
-		// fuse-saver overrides idle and forces discharge.
-		out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
-		// LastTargets reflects what we actually issued: nil when
-		// the fuse-saver no-op'd, the discharge targets when it
-		// fired. /api/status, the history snapshot, and the RLS
-		// model loop all depend on this being accurate.
-		state.LastTargets = out
-		if out != nil {
-			now := time.Now()
-			state.LastDispatch = &now
-		}
-		return out
+		// Idle stops the fleet; it does not stop talking to it. A
+		// battery holds the last setpoint it accepted until it is given
+		// another one, so a mode that issues nothing parks the fleet
+		// wherever the previous mode left it — enter idle while the
+		// battery is charging at 5 kW and it charges at 5 kW.
+		//
+		// What happens next is then the vendor's decision rather than
+		// ours, and the vendors disagree. Ferroamp's forced mode
+		// EXPIRES: on 2026-06-10 an EnergyHub reverted to its own
+		// self-consumption and charged 2.6 kW from the grid while FTW
+		// believed it was idling. Sungrow holds instead, so the same
+		// operator action leaves two sites in two different states.
+		// ferroamp.lua's zero branch already re-publishes forced idle
+		// on every command for exactly this reason — it just never
+		// heard from this mode.
+		//
+		// So command it: an explicit 0 W to every battery we may
+		// command, rebuilt and re-sent every tick, which makes the hold
+		// ours and stops it decaying into autonomous behaviour.
+		//
+		// Protection is not off in idle. These zeros go through the
+		// same safety pipeline as every other dispatch path, so the
+		// reactive fuse-saver still overrides them and forces discharge
+		// when an unplanned load (an oven, an EV, a neighbour's pump on
+		// the same fuse) threatens the breaker.
+		targets := holdFleetAtZero(store, driverCapacities)
+		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
+			updatePrevTargets: true,
+			recordDispatch:    true,
+		})
 	case ModeCharge:
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
@@ -1273,21 +1463,12 @@ func ComputeDispatch(
 	// setpoint and expects immediate effect, not a 5 s wait. The fuse
 	// guard at the end of the cycle still protects the site.
 	if !manualHoldActive && state.LastDispatch != nil {
-		elapsed := time.Since(*state.LastDispatch).Seconds()
+		elapsed := state.now().Sub(*state.LastDispatch).Seconds()
 		if elapsed < float64(state.MinDispatchIntervalS) {
 			// Holdoff suppresses normal re-dispatch, but the
 			// fuse-saver overrides — an overflow can't wait 5 s for
 			// the next eligible tick.
-			out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
-			if out != nil {
-				// Same bookkeeping as the idle path so downstream
-				// consumers (status/history/learner) see the
-				// commanded discharge.
-				state.LastTargets = out
-				now := time.Now()
-				state.LastDispatch = &now
-			}
-			return out
+			return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
 		}
 	}
 
@@ -1434,7 +1615,7 @@ func ComputeDispatch(
 		// over this slot". Derive the instantaneous power needed to hit the
 		// remaining energy in the remaining time, then pass (target - currentTotal)
 		// as the correction the existing distributors expect.
-		now := time.Now()
+		now := state.now()
 		// Slot rollover: new slot → reset the delivered accumulator.
 		if !currentDirective.SlotStart.Equal(state.currentDirective.SlotStart) {
 			state.currentDirective = currentDirective
@@ -1765,10 +1946,35 @@ func ComputeDispatch(
 		// stuck at that previous level, defeating the whole point of
 		// the reserve. Falling through forces a fresh dispatch that
 		// drives the battery toward 0 (or the post-PI cap below).
+		//
+		// The charge-side clause is the mirror of the discharge one on
+		// the line above it, and it is here for the same reason: a
+		// small grid error can be small BECAUSE the battery is doing
+		// the forbidden thing. An idle arbitrage slot over a 2 kW PV
+		// surplus reads -50 W at the meter while the battery absorbs
+		// the other 2000 W; the error stays inside the deadband for as
+		// long as the violation lasts, and no tick ever reaches
+		// floorBlockedCharge to stop it. Falling through issues the 0 W
+		// the block already decided. Gated on a battery MEASURED
+		// charging, not on the block alone, so a tick with nothing to
+		// withdraw stays quiet and no driver is handed a command it
+		// could refuse. Safety does not thin out on this path: the
+		// full pipeline ends in the same forceFuseDischarge the
+		// early exit's fuse-saver would have run.
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
 		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
-			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) {
-			return nil
+			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) &&
+			!anyBlockedBatteryCharging(onlineBats, noSelfCharge) {
+			// A small grid error is not a statement that the site is
+			// safe. errW compares one aggregate number against one
+			// aggregate target; two protections bind on numbers this
+			// check never reads — an operator tariff ceiling below the
+			// grid target, and a single phase over the breaker while
+			// the three-phase sum sits still. Leaving here without the
+			// fuse-saver skipped both, so a site inside the deadband
+			// had no per-phase protection at all. Idle and holdoff
+			// already do this; this exit was the one that did not.
+			return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
 		}
 
 		// Outer PI — drives total correction we want across all batteries.
@@ -1951,7 +2157,7 @@ func ComputeDispatch(
 				threshold = 100
 			}
 			chargeCeiling := unexpectedIdleExportBeyondPlanW(surplus, currentDirective, threshold)
-			remainingS := currentDirective.SlotEnd.Sub(time.Now()).Seconds()
+			remainingS := currentDirective.SlotEnd.Sub(state.now()).Seconds()
 			headroomW := pvSurplusAbsorbHeadroomW(onlineBats, arbitrageFamilyIdleAbsorbCapPct, remainingS)
 			if chargeCeiling > headroomW {
 				chargeCeiling = headroomW
@@ -2046,13 +2252,17 @@ func ComputeDispatch(
 
 	// ---- Distribute across batteries ----
 	var raw []DispatchTarget
-	switch effectiveMode {
-	case ModeSelfConsumption, ModePeakShaving:
-		raw = distributeProportional(onlineBats, totalCorrection, groupPV)
-	case ModePriority:
-		raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
-	case ModeWeighted:
-		raw = distributeWeighted(onlineBats, totalCorrection, state.Weights)
+	if manualHoldActive && manualHold.Driver != "" {
+		raw = distributeScopedManualHold(onlineBats, manualHold.Driver, currentTotal+totalCorrection)
+	} else {
+		switch effectiveMode {
+		case ModeSelfConsumption, ModePeakShaving:
+			raw = distributeProportional(onlineBats, totalCorrection, groupPV)
+		case ModePriority:
+			raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
+		case ModeWeighted:
+			raw = distributeWeighted(onlineBats, totalCorrection, state.Weights)
+		}
 	}
 
 	// ---- Slew rate limit per driver ----
@@ -2087,7 +2297,8 @@ func ComputeDispatch(
 		// A direct move to 0 W is safe here: it only removes battery load /
 		// discharge, and the fuse overflow guard below can still force
 		// discharge if the site actually needs it.
-		if (plannerSelfExportSurplusGate ||
+		scopedSiblingStanddown := manualHoldActive && manualHold.Driver != "" && raw[i].Driver != manualHold.Driver
+		if (plannerSelfExportSurplusGate || scopedSiblingStanddown ||
 			(manualHoldActive && math.Abs(manualHold.PowerW) < 1)) &&
 			math.Abs(raw[i].TargetW) < 1 {
 			raw[i].TargetW = 0
@@ -2143,14 +2354,36 @@ func ComputeDispatch(
 	return applyDispatchSafetyPipeline(raw, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 		manualHoldActive:  manualHoldActive,
 		noSelfDischarge:   noSelfDischarge,
+		noSelfCharge:      noSelfCharge,
+		chargeBlocked:     chargeBlockedDrivers(onlineBats),
 		updatePrevTargets: true,
 		recordDispatch:    true,
 	})
 }
 
+// chargeBlockedDrivers is the set of online batteries that told us this tick
+// they cannot charge. distributeProportional already parks them at 0; this
+// carries the same fact past the slew limiter, which anchors on measured
+// power and knows nothing about capability.
+func chargeBlockedDrivers(bats []batteryInfo) map[string]bool {
+	var out map[string]bool
+	for _, b := range bats {
+		if !b.chargeBlocked {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]bool, len(bats))
+		}
+		out[b.driver] = true
+	}
+	return out
+}
+
 type dispatchSafetyOptions struct {
 	manualHoldActive  bool
 	noSelfDischarge   bool
+	noSelfCharge      bool
+	chargeBlocked     map[string]bool
 	updatePrevTargets bool
 	recordDispatch    bool
 }
@@ -2186,6 +2419,7 @@ func applyDispatchSafetyPipeline(
 	if opts.noSelfDischarge {
 		targets = floorNegativeTargets(targets)
 	}
+	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
 
 	// A battery-boost lease may never draw the stationary fleet below its
 	// explicit reserve. Apply this immediately before forceFuseDischarge:
@@ -2250,7 +2484,7 @@ func recordDispatchTargets(targets []DispatchTarget, state *State, updatePrevTar
 		return
 	}
 	if recordDispatch {
-		now := time.Now()
+		now := state.now()
 		state.LastDispatch = &now
 	}
 	if updatePrevTargets {
@@ -2451,7 +2685,7 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		return nil
 	}
 
-	now := time.Now()
+	now := state.now()
 
 	// Operator-installed manual hold takes precedence over the planner
 	// directive. Driver-scoped → cap only that driver. Site-aggregate
@@ -2784,6 +3018,19 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	return liveLoadW + batHeadroomW + evReserveW, true
 }
 
+func distributeScopedManualHold(bats []batteryInfo, driver string, powerW float64) []DispatchTarget {
+	out := make([]DispatchTarget, 0, len(bats))
+	for _, b := range bats {
+		targetW := 0.0
+		if b.driver == driver {
+			targetW = powerW
+		}
+		clamped, wasClamped := clampWithSoC(targetW, b)
+		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: wasClamped})
+	}
+	return out
+}
+
 // distributeProportional splits the total desired battery power across the
 // available batteries by capacity. Each battery gets its share of the TOTAL
 // desired site battery power — not its share of the delta. This prevents the
@@ -2906,6 +3153,37 @@ func distributeByCapacity(bats []batteryInfo, desiredTotal, totalCap float64) []
 func anyBatteryDischarging(bats []batteryInfo) bool {
 	for _, b := range bats {
 		if b.currentW < -1 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyBlockedBatteryCharging reports whether a battery whose charge direction
+// this tick has closed is measured charging right now. It is the charge-side
+// twin of anyBatteryDischarging, and it exists for the deadband exit: an
+// exit that issues no target withdraws nothing, because the control tick
+// only sends commands for targets ComputeDispatch returned and a driver
+// holds its last accepted setpoint until it gets another one.
+//
+// Both authorities that floorBlockedCharge honours are read here, so the two
+// cannot drift apart:
+//
+//   - noSelfCharge — the site-wide block, already computed above.
+//   - chargeBlocked — the driver's own capability report.
+//
+// MEASURED charge, not the previous command, decides. That mirrors
+// anyBatteryDischarging's ±1 W test and keeps the predicate honest: a
+// battery that is not actually charging has nothing to withdraw, so the
+// tick stays quiet and no driver is handed a command it could refuse. The
+// cost is that a fresh charge command not yet visible at the meter waits one
+// tick, which is the same latency the discharge side has always accepted.
+func anyBlockedBatteryCharging(bats []batteryInfo, noSelfCharge bool) bool {
+	for _, b := range bats {
+		if b.currentW <= 1 {
+			continue
+		}
+		if noSelfCharge || b.chargeBlocked {
 			return true
 		}
 	}
@@ -3084,6 +3362,60 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 	return targets
 }
 
+// floorBlockedCharge is the charge-side mirror of floorNegativeTargets: a
+// target may not command charge into a direction this tick already closed.
+//
+// It exists because the slew limiter anchors every target on the battery's
+// MEASURED output rather than on the command, so a battery physically
+// charging at +2000 W is pulled back toward +2000 W from whatever the stages
+// above decided — including the 0 W that noSelfCharge pinned two hundred
+// lines earlier. Nothing below used to undo that: applyFuseGuard only shrinks
+// toward zero, floorNegativeTargets covers the discharge side only, and
+// planSignIntent reports "idle, no opinion" for an idle slot. A
+// passive-arbitrage idle slot with the meter at -2000 W, the battery live at
+// +2000 W and SlewRateW=500 therefore commanded +1500 W of charging on the
+// tick whose entire purpose was to let that surplus reach the meter.
+//
+// Two authorities close the charge direction, both decided before slew runs:
+//
+//   - noSelfCharge — the site-wide block: planner_self's export-surplus gate,
+//     planner_self's stale plan, and the arbitrage-family idle live-export
+//     gate. It pins the fleet TOTAL to zero; this bounds each command.
+//   - chargeBlocked — the driver's own capability report. Its share was
+//     already handed to capable siblings, so re-opening it double-counts the
+//     charge as well as ignoring the hardware.
+//
+// This is a bound on the output, not a list of the reasons the output was
+// closed. The snap-to-zero carve-out inside the slew loop is the list
+// version, and it names only plannerSelfExportSurplusGate and manual hold;
+// the two charge gates added to ComputeDispatch after it were never added to
+// it. That is how this bug was born, and a floor cannot be born that way. It
+// only ever moves a target toward zero, so it can neither create motion nor
+// widen a clamp applied above it — and nothing after it raises charge:
+// applyBatteryBoostReserve touches negative targets only, and
+// forceFuseDischarge only forces discharge.
+//
+// The discharge-side twin of the per-driver half is deliberately NOT here: a
+// dischargeBlocked battery re-opened by slew is the same shape, but flooring
+// it has to answer whether the fuse emergency in forceFuseDischarge outranks
+// a driver's "I cannot discharge". Charge has no such override, so it is the
+// half that can be fixed without deciding that.
+func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlocked map[string]bool) []DispatchTarget {
+	if !noSelfCharge && len(chargeBlocked) == 0 {
+		return targets
+	}
+	for i := range targets {
+		if targets[i].TargetW <= 0 {
+			continue
+		}
+		if noSelfCharge || chargeBlocked[targets[i].Driver] {
+			targets[i].TargetW = 0
+			targets[i].Clamped = true
+		}
+	}
+	return targets
+}
+
 // coverLoadChargeSlot reports whether the current plan slot is a charge-from-
 // PV-surplus slot: the DP meant to soak surplus (PlannedGridW below the
 // grid-charge import band), NOT buy from the grid. Such a slot carries no hard
@@ -3163,7 +3495,7 @@ func planHasNonDischargeIntent(state *State) bool {
 	const idleWh = 50.0
 	const idleGridW = 100.0
 	if state.SlotDirective != nil {
-		if dir, ok := state.SlotDirective(time.Now()); ok {
+		if dir, ok := state.SlotDirective(state.now()); ok {
 			// For passive_arbitrage: only block reactive discharge when the
 			// plan slot has explicit charge intent. Idle and discharge slots
 			// get no non-discharge block — reactive discharge may cover load.
@@ -3190,7 +3522,7 @@ func planHasNonDischargeIntent(state *State) bool {
 		}
 	}
 	if state.PlanTarget != nil {
-		if modeStr, gridW, ok := state.PlanTarget(time.Now()); ok {
+		if modeStr, gridW, ok := state.PlanTarget(state.now()); ok {
 			switch Mode(modeStr) {
 			case ModeCharge:
 				return true
@@ -3383,25 +3715,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	// Per-phase overage: the worst single-phase amperage above the fuse
-	// trip threshold (less the safety margin), expressed as AGGREGATE
-	// battery action needed to bring it back. Assumes a 3Φ-balanced
-	// battery — each unit of total battery action contributes 1/3 to
-	// each phase, so a worst-phase overage of N watts requires 3 × N
-	// watts of total battery action to bring it under. Conservative
-	// for 1Φ batteries (Pixii Home etc.): they over-correct on the
-	// other phases, less import / export there, still safe.
+	// Per-phase relief: the worst single-phase amperage above the fuse
+	// trip threshold (less the safety margin), converted by
+	// perPhaseReliefW into the AGGREGATE battery action needed to bring
+	// it back — the site's configured phase count does that conversion.
 	//
-	// `perPhaseOverageW` is direction-agnostic — phase amps from the
-	// meter are absolute magnitudes. Attribute to whichever side the
-	// AGGREGATE METER is currently flowing (currentGrid), not to the
-	// post-target `predicted`. Per-phase amps and currentGrid are read
-	// from the same DerMeter sample, so they're internally consistent;
+	// This guard uses relief in BOTH directions. `perPhaseOverageW` is
+	// direction-agnostic — phase amps from the meter are absolute
+	// magnitudes. Attribute to whichever side the AGGREGATE METER is
+	// currently flowing (currentGrid), not to the post-target
+	// `predicted`. Per-phase amps and currentGrid are read from the
+	// same DerMeter sample, so they're internally consistent;
 	// `predicted` mixes in `sumTarget` (a hypothetical future state)
 	// and can swing across 0 on a large planner request, attributing
 	// a current-export overage to the import path (or vice versa) and
 	// pushing the grid further into the violating direction.
-	perPhase := perPhaseOverageW(store, state) * 3.0
+	perPhase := perPhaseReliefW(store, state)
 	// Aggregate budget honours the safety margin too — keep dispatch
 	// commands strictly inside the breaker envelope so the inverter's
 	// own per-phase limiter doesn't fire first and cause a flap.
@@ -3435,7 +3764,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// the planner can't ramp back through the boundary on the next
 	// tick. Window is refreshed every time the clamp fires, so the
 	// hold persists as long as the planner keeps trying to push past.
-	now := time.Now()
+	now := state.now()
 	if state.FuseHoldUntil.After(now) {
 		if state.FuseHoldMaxDischargeW > 0 {
 			var totalDischarge float64
@@ -3617,12 +3946,26 @@ func (s *State) effectiveExportCeilingW(fuseMaxW float64) float64 {
 // driver must emit l1_a / l2_a / l3_a in DerReading.Data — Pixii,
 // Ferroamp, and Sungrow all do this today.
 //
+// Only the configured phases are read, in L1/L2/L3 order, matching
+// sitePhaseCurrentsAt in cmd/ftw: a 1Φ site has no L2, so a stray
+// l2_a in the meter payload is not a breaker this site owns.
+//
+// Same law as fuseSafetyMarginW: amps become watts only through the
+// configured per-phase voltage. No hardcoded 230 V here — a site whose
+// fuse description is incomplete gets no per-phase clamp rather than an
+// invented one. Config fills both fields (fuse.voltage defaults to 230,
+// fuse.phases to 3, and validation rejects <= 0), so this only affects
+// harnesses that wire SiteFuseAmps alone.
+//
 // Direction-agnostic: phase amps from the meter are absolute magnitudes,
 // so this function reports overage regardless of whether the breaker is
 // being approached on the import or export side. The caller attributes
 // the overage to whichever direction the aggregate grid is flowing.
 func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	if state == nil || state.SiteFuseAmps <= 0 || state.SiteMeterDriver == "" {
+		return 0
+	}
+	if state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
 		return 0
 	}
 	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
@@ -3643,8 +3986,14 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	// when a phase is at -17 A. The fuse trips on current magnitude
 	// regardless of direction, and the caller attributes the overage
 	// to the active aggregate-grid direction.
+	phaseAmps := [...]*float64{d.L1A, d.L2A, d.L3A}
+	phases := state.SiteFusePhases
+	if phases > len(phaseAmps) {
+		phases = len(phaseAmps)
+	}
 	maxA := 0.0
-	for _, p := range []*float64{d.L1A, d.L2A, d.L3A} {
+	for i := 0; i < phases; i++ {
+		p := phaseAmps[i]
 		if p == nil {
 			continue
 		}
@@ -3660,11 +4009,30 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	if maxA <= threshold {
 		return 0
 	}
-	v := state.SiteFuseVoltage
-	if v <= 0 {
-		v = 230 // back-compat for tests / e2e that wire only SiteFuseAmps
+	return (maxA - threshold) * state.SiteFuseVoltage
+}
+
+// perPhaseReliefW converts a worst-phase overage into the AGGREGATE
+// battery action needed to clear it. One conversion, one law: a battery
+// spreads its action evenly across the site's phases, so each watt of
+// aggregate action relieves 1/SiteFusePhases watts on the worst phase,
+// and an overage of N watts needs N × SiteFusePhases watts of action.
+//
+// The phase count is the site's, from config — not the constant 3 the
+// two call sites used to carry separately. On a 1Φ site the aggregate
+// meter and the single phase are the same wire, so demanding 3 × N
+// there overshoots by 2 × N and can push the grid through zero into a
+// violation on the opposite side.
+//
+// Conservative for a 1Φ battery on a 3Φ site (Pixii Home etc.): it
+// over-corrects on the phases it does not sit on — less import/export
+// there, still safe.
+func perPhaseReliefW(store *telemetry.Store, state *State) float64 {
+	overage := perPhaseOverageW(store, state)
+	if overage <= 0 {
+		return 0
 	}
-	return (maxA - threshold) * v
+	return overage * float64(state.SiteFusePhases)
 }
 
 // applyPlanSignFloor enforces "executed battery total must agree in sign
@@ -3729,7 +4097,7 @@ func planSignIntent(state *State) int {
 	const idleWh = 50.0     // a near-zero per-slot energy is idle, not signed
 	const idleGridW = 100.0 // matches mpc.IdleGateThresholdW for sign decisions
 	if state.SlotDirective != nil {
-		if dir, ok := state.SlotDirective(time.Now()); ok {
+		if dir, ok := state.SlotDirective(state.now()); ok {
 			if dir.BatteryEnergyWh > idleWh {
 				// A charge-from-PV-surplus slot has no hard charge commitment
 				// (see coverLoadChargeSlot) — report idle intent so the sign
@@ -3746,7 +4114,7 @@ func planSignIntent(state *State) int {
 		}
 	}
 	if state.PlanTarget != nil {
-		if modeStr, gridW, ok := state.PlanTarget(time.Now()); ok {
+		if modeStr, gridW, ok := state.PlanTarget(state.now()); ok {
 			switch Mode(modeStr) {
 			case ModeCharge:
 				return +1
@@ -3764,16 +4132,79 @@ func planSignIntent(state *State) int {
 	return 0
 }
 
+// fuseSaverEarlyExit is the one shape every ComputeDispatch branch that
+// walks away from a cycle uses: run the fuse-saver, and when it fires,
+// record the dispatch so /api/status, the history snapshot and the RLS
+// model loop see the commanded discharge — and so the holdoff counts it
+// as a real dispatch rather than re-firing on the next tick.
+//
+// Two branches leave early — the holdoff window and the reactive deadband.
+// Neither means the site is safe; each means the normal control law has
+// nothing to say. This is one law, so it lives in one place: the deadband
+// exit was missing it for the whole life of the function, and copies of a
+// safety rule are how that happens.
+//
+// Idle used to be the third. It no longer leaves early at all: it commands a
+// held zero and reaches the fuse-saver through the ordinary safety pipeline,
+// which is the same protection by a shorter route.
+func fuseSaverEarlyExit(
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+	if out == nil || state == nil {
+		return out
+	}
+	state.LastTargets = out
+	now := state.now()
+	state.LastDispatch = &now
+	return out
+}
+
+// holdFleetAtZero builds the forced-idle command set: 0 W for every battery
+// this dispatcher is allowed to command. Eligibility is the same predicate the
+// main path's "gather online batteries" applies — a health record that reports
+// online, plus a live DerBattery reading — so idle commands exactly the fleet
+// every other mode commands, and no more.
+//
+// Both exclusions are load-bearing rather than tidiness. An offline or faulted
+// driver is owed its autonomous default mode, not a setpoint, and that is the
+// tracker's job in cmd/ftw, not this one's. A driver with no battery reading
+// has not shown it has a battery to hold: sungrow.lua rejects a `battery`
+// command on a string inverter outright, and a rejection core asked for is a
+// rejection core counts.
+//
+// Used by ModeIdle to hold the fleet, and by fuseSaverFromZero as the baseline
+// the fuse-saver flips to discharge. One function so the two can never come to
+// disagree about which batteries are under our control.
+func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []DispatchTarget {
+	if store == nil {
+		return nil
+	}
+	out := make([]DispatchTarget, 0, len(capacities))
+	for name := range capacities {
+		h := store.DriverHealth(name)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r := store.Get(name, telemetry.DerBattery); r == nil {
+			continue
+		}
+		out = append(out, DispatchTarget{Driver: name, TargetW: 0})
+	}
+	return out
+}
+
 // fuseSaverFromZero is the early-return entry point for the fuse-saver.
-// Called from ComputeDispatch branches that would otherwise return nil
-// (idle mode, holdoff window) so the safety primary still gets a chance
-// to fire before we walk away from the cycle. Builds zero-W targets for
-// every battery that is BOTH online (per DriverHealth) AND has a current
-// DerBattery reading, then runs them through forceFuseDischarge; if no
-// overflow is predicted, the result is nil (caller sees the same
-// empty-dispatch behaviour as before). Filtering to online+telemetry
-// matches ComputeDispatch's main path and avoids commanding offline
-// batteries via the fuse-saver back door.
+// Called via fuseSaverEarlyExit from the ComputeDispatch branches that
+// would otherwise return nil (holdoff window, reactive deadband) so the
+// safety primary still gets a chance to fire before we walk away from the
+// cycle. Takes holdFleetAtZero's command set — every battery that is BOTH
+// online (per DriverHealth) AND has a current DerBattery reading — and runs
+// it through forceFuseDischarge; if no overflow is predicted, the result is
+// nil and the caller sees the same empty dispatch it saw before.
 func fuseSaverFromZero(
 	store *telemetry.Store,
 	state *State,
@@ -3783,17 +4214,7 @@ func fuseSaverFromZero(
 	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil {
 		return nil
 	}
-	zeros := make([]DispatchTarget, 0, len(driverCapacities))
-	for name := range driverCapacities {
-		h := store.DriverHealth(name)
-		if h == nil || !h.IsOnline() {
-			continue
-		}
-		if r := store.Get(name, telemetry.DerBattery); r == nil {
-			continue
-		}
-		zeros = append(zeros, DispatchTarget{Driver: name, TargetW: 0})
-	}
+	zeros := holdFleetAtZero(store, driverCapacities)
 	if len(zeros) == 0 {
 		return nil
 	}
@@ -3893,21 +4314,23 @@ func forceFuseDischarge(
 	// aggregate, not per-phase.
 	effImportW := state.effectiveImportCeilingW(fuseMaxW)
 	overage := predicted - effImportW
-	// Per-phase overage trumps aggregate when bigger — but ONLY on the
-	// import side. perPhaseOverageW is direction-agnostic (uses |amps|),
-	// so an export-side phase trip would otherwise cause this function
-	// to command MORE discharge, pushing the over-current phase further
-	// over the breaker. applyFuseGuard's exportOverage branch already
-	// shrinks discharge for that case before we run.
+	// Per-phase relief trumps aggregate when bigger — but ONLY on the
+	// import side. This function's single lever is MORE discharge, and
+	// perPhaseReliefW is direction-agnostic (its overage uses |amps|),
+	// so honouring it during export would push the over-current phase
+	// further over the breaker. applyFuseGuard's exportOverage branch
+	// already shrinks discharge for that case before we run. The
+	// direction limit is stated here, at the one call that needs it,
+	// rather than baked into a second copy of the conversion.
 	//
 	// Gate on `currentGrid` (live aggregate at the meter) rather than
 	// `predicted`. Per-phase amps and currentGrid come from the same
 	// DerMeter sample; predicted mixes in sumTarget which can swing
 	// across 0 and silently flip the gate.
-	if currentGrid >= 0 {
-		perPhaseOverage := perPhaseOverageW(store, state) * 3.0
-		if perPhaseOverage > overage {
-			overage = perPhaseOverage
+	importSide := currentGrid >= 0
+	if importSide {
+		if relief := perPhaseReliefW(store, state); relief > overage {
+			overage = relief
 		}
 	}
 	if overage <= 0 {
