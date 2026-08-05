@@ -154,13 +154,72 @@ func keygen(args []string) error {
 	return nil
 }
 
+// checkVersionsAcrossDirs compares two materialised driver snapshots rather
+// than two Git revisions.
+//
+// The bundled drivers are generated from srcfl/device-drivers at a pinned
+// commit, so what actually reaches a gateway is decided by where that pin
+// points, not by what this repository's history happens to show. Diffing the
+// pins asks the question that matters -- did a driver's bytes change without
+// its version moving -- and keeps asking it once the files stop being
+// committed here at all.
+//
+// A driver present in new but not in old is newly bundled: nothing to compare,
+// and ValidateDriverVersionChange treats an empty previous as fine. One present
+// in old but not in new was dropped from the pin, which is not a version
+// question.
+func checkVersionsAcrossDirs(oldDir, newDir string) error {
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		return fmt.Errorf("read new snapshot: %w", err)
+	}
+	var failures []error
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || filepath.Ext(name) != ".lua" {
+			continue
+		}
+		current, err := os.ReadFile(filepath.Join(newDir, name))
+		if err != nil {
+			failures = append(failures, fmt.Errorf("%s: read new snapshot: %w", name, err))
+			continue
+		}
+		previous, err := os.ReadFile(filepath.Join(oldDir, name))
+		if err != nil {
+			if !os.IsNotExist(err) {
+				failures = append(failures, fmt.Errorf("%s: read old snapshot: %w", name, err))
+				continue
+			}
+			previous = nil // newly bundled
+		}
+		checked++
+		if err := driverrepo.ValidateDriverVersionChange(name, previous, current); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	fmt.Printf("driver version changes verified across %d bundled drivers\n", checked)
+	return nil
+}
+
 func checkVersions(args []string) error {
 	fs := flag.NewFlagSet("check-versions", flag.ContinueOnError)
 	repoRoot := fs.String("repo-root", "..", "Git repository root")
 	base := fs.String("base", "", "base Git revision")
 	head := fs.String("head", "HEAD", "head Git revision or WORKTREE")
+	oldDir := fs.String("old-dir", "", "previous driver snapshot; compares snapshots instead of Git revisions")
+	newDir := fs.String("new-dir", "", "current driver snapshot; requires -old-dir")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if (*oldDir == "") != (*newDir == "") {
+		return errors.New("-old-dir and -new-dir must be given together")
+	}
+	if *oldDir != "" {
+		return checkVersionsAcrossDirs(*oldDir, *newDir)
 	}
 	if *base == "" {
 		return errors.New("base revision is required")

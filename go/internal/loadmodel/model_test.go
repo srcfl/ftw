@@ -125,8 +125,15 @@ func TestRejectsNegativeLoad(t *testing.T) {
 	}
 }
 
+// Outlier rejection is now anchored to the site's fuse rather than to a
+// band fitted from the model's own history. The behaviour this test
+// protects is unchanged — a 50 kW reading must not move the bucket — but
+// it needs the physical ceiling set, which production wires from the fuse
+// configuration. The band version of this check also rejected genuine
+// household peaks; see TestFullHouseholdRangeIsTrained.
 func TestRejectsOutliers(t *testing.T) {
 	m := NewModel(4000)
+	m.MaxPlausibleW = 17250
 	start := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 200; i++ {
 		m.Update(start.Add(time.Duration(i)*time.Minute), 1500, HeatingReferenceC)
@@ -327,5 +334,172 @@ func TestHeatingFitWaitsForBucketTrust(t *testing.T) {
 	m.Update(t0, 5000, 5.0) // arbitrary big load, cold day
 	if m.HeatingW_per_degC != 0 {
 		t.Errorf("untrusted bucket must not drive heating fit, coef = %.0f", m.HeatingW_per_degC)
+	}
+}
+
+// The MAE-band outlier filter used to reject the real house permanently.
+// A rejected sample updates neither MAE nor Samples, so the band could
+// never grow in response to being persistently wrong: one quiet hour at
+// 400 W produced a 570 W band, after which a week at 5 kW was rejected in
+// full and the prediction never moved off 1794 W.
+//
+// The band was the wrong instrument. Household load is multimodal — a few
+// hundred watts of baseline, then 11 kW when the sauna, oven and car
+// overlap — and nothing about a residual's size separates "unusual but
+// real" from "wrong". Short-term noise is already handled by the Kalman
+// filter in telemetry, one layer down.
+func TestSustainedLevelShiftIsLearned(t *testing.T) {
+	m := NewModel(10000)
+	m.MaxPlausibleW = 17000
+	start := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
+
+	// Two quiet days — under the old filter this is what armed a band so
+	// narrow that the house could never be learned.
+	n := 0
+	for ; n < 2*24*60; n++ {
+		m.Update(start.Add(time.Duration(n)*time.Minute), 400, HeatingReferenceC)
+	}
+
+	trainedFrom := n
+	for i := 0; i < 3*24*60; i++ {
+		m.Update(start.Add(time.Duration(n)*time.Minute), 3000, HeatingReferenceC)
+		n++
+	}
+
+	for i := trainedFrom; i < n; i += 60 {
+		got := m.Predict(start.Add(time.Duration(i)*time.Minute), HeatingReferenceC)
+		if math.Abs(got-3000) > 300 {
+			t.Fatalf("bucket at minute %d predicts %.0f W, want ~3000 W", i, got)
+		}
+	}
+}
+
+// A house that goes from near-idle to 11 kW is doing something ordinary,
+// not reporting a fault. That whole range has to reach the model.
+func TestFullHouseholdRangeIsTrained(t *testing.T) {
+	m := NewModel(8000)
+	m.MaxPlausibleW = 17250 // 25 A × 3 × 230 V
+	start := time.Date(2026, 7, 1, 3, 0, 0, 0, time.UTC)
+
+	for i, load := range []float64{200, 11000, 300, 9500, 250, 11000} {
+		if !m.Update(start.Add(time.Duration(i)*time.Minute), load, HeatingReferenceC) {
+			t.Errorf("%.0f W is a normal household reading and was rejected", load)
+		}
+	}
+	if m.Samples != 6 {
+		t.Errorf("samples = %d, want 6", m.Samples)
+	}
+}
+
+// Rejection is licensed by physics alone: a house cannot draw more than
+// its main fuse passes. Because the bound comes from configured hardware
+// rather than from what the model has learned, it holds from the first
+// sample and a mislearned model cannot talk it down.
+func TestImplausibleLoadRejected(t *testing.T) {
+	m := NewModel(4000)
+	m.MaxPlausibleW = 11000 * PlausibleLoadHeadroom // 16 A service
+	t0 := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+
+	if m.Update(t0, 50000, HeatingReferenceC) {
+		t.Error("50 kW past a 16 A service should never be accepted")
+	}
+	if m.Samples != 0 {
+		t.Errorf("rejected sample must not count, samples = %d", m.Samples)
+	}
+	// Right at the service limit is high but real — a fuse passes its
+	// rating, so this has to train.
+	if !m.Update(t0, 11000, HeatingReferenceC) {
+		t.Error("a load at the service limit should be accepted")
+	}
+}
+
+// No fuse configured means no defensible ceiling, so the check disables
+// itself rather than inventing one.
+func TestNoFuseConfiguredTrainsEverything(t *testing.T) {
+	m := NewModel(4000)
+	t0 := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	if !m.Update(t0, 50000, HeatingReferenceC) {
+		t.Error("with MaxPlausibleW unset the model should not reject")
+	}
+}
+
+// A one-minute spike is real and trains, but the bucket EMA is what keeps
+// it from dominating the hour — no separate rejection needed.
+func TestSpikeIsDampedByTheBucketEMA(t *testing.T) {
+	m := NewModel(8000)
+	m.MaxPlausibleW = 17250
+	start := time.Date(2026, 7, 1, 4, 0, 0, 0, time.UTC)
+
+	// Settle the bucket at 400 W, past the exact-running-mean phase.
+	for i := 0; i < 40; i++ {
+		m.Update(start.Add(time.Duration(i)*time.Minute), 400, HeatingReferenceC)
+	}
+	before := m.Predict(start, HeatingReferenceC)
+	m.Update(start.Add(41*time.Minute), 11000, HeatingReferenceC)
+	after := m.Predict(start, HeatingReferenceC)
+
+	moved := after - before
+	if moved <= 0 {
+		t.Error("a real 11 kW reading should move the estimate up")
+	}
+	// alpha = 0.1, so one sample carries a tenth of the gap and no more.
+	if moved > 0.15*(11000-400) {
+		t.Errorf("one spike moved the hour by %.0f W — EMA is not damping it", moved)
+	}
+}
+
+// A fault must touch nothing on its way out — not the buckets, not MAE,
+// and not the heating coefficient. The physical bound used to run after
+// the online heating fit, so a cold-weather meter fault moved
+// HeatingW_per_degC while Update still reported no update applied, and a
+// run of faults could walk the coefficient to its ceiling. Codex P2 on
+// PR #742.
+//
+// Every sample here stays inside one hour-of-week bucket: the heating fit
+// is gated on that bucket's trust, so a fault landing in a fresh bucket
+// would be filtered by the gate rather than by the bound, and the test
+// would pass either way without proving anything.
+func TestImplausibleLoadDoesNotMoveHeatingCoefficient(t *testing.T) {
+	m := NewModel(4000)
+	m.MaxPlausibleW = 11000
+	start := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	const coldC = 0.0 // well past HeatingMinDeltaT
+
+	// Warm the bucket past MinTrustSamples so the fit is ungated, and hold
+	// the load below the learned mean so the residual — and therefore the
+	// coefficient — is driven somewhere a fault could visibly move it.
+	for i := 0; i < 20; i++ {
+		m.Update(start.Add(time.Duration(i)*time.Minute), 1200, coldC)
+	}
+	idx := HourOfWeek(start)
+	if m.Bucket[idx].Samples < MinTrustSamples {
+		t.Fatalf("warmup left the bucket untrusted (%d samples) — the fit would be gated, not bounded",
+			m.Bucket[idx].Samples)
+	}
+
+	before := m.HeatingW_per_degC
+	beforeMAE := m.MAE
+	beforeSamples := m.Samples
+
+	// Faults in the SAME bucket, so only the bound can stop them.
+	for i := 20; i < 60; i++ {
+		at := start.Add(time.Duration(i) * time.Minute)
+		if HourOfWeek(at) != idx {
+			t.Fatalf("sample %d escaped the bucket under test", i)
+		}
+		if m.Update(at, 50000, coldC) {
+			t.Fatal("an implausible reading was accepted")
+		}
+	}
+
+	if m.HeatingW_per_degC != before {
+		t.Errorf("heating coefficient moved on rejected faults: %.4f → %.4f",
+			before, m.HeatingW_per_degC)
+	}
+	if m.MAE != beforeMAE {
+		t.Errorf("MAE moved on rejected faults: %.1f → %.1f", beforeMAE, m.MAE)
+	}
+	if m.Samples != beforeSamples {
+		t.Errorf("sample count moved on rejected faults: %d → %d", beforeSamples, m.Samples)
 	}
 }

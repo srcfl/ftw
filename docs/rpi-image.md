@@ -110,7 +110,7 @@ beta/stable updater.
 
 ## Build the image
 
-Image provisioning lives under `deploy/pi-gen`:
+Image provisioning lives under [`deploy/pi-gen`](../deploy/pi-gen):
 
 ```bash
 deploy/pi-gen/build.sh

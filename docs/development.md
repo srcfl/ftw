@@ -43,7 +43,8 @@ Set `FTW_PROXY_READONLY=0` only for an intentional live write session.
 ## Containers
 
 `docker compose up -d` mirrors the Linux production topology: core, optimizer,
-updater and MQTT broker. Use `docker-compose.macos.yml` on macOS. Local Compose
+updater and MQTT broker. Use
+[`docker-compose.macos.yml`](../docker-compose.macos.yml) on macOS. Local Compose
 overrides are machine-specific and untracked.
 
 ## Generated files
@@ -51,3 +52,13 @@ overrides are machine-specific and untracked.
 `bin/`, `dist/`, `artifacts/`, local databases, caches, `node_modules/`
 and `optimizer/.venv/` are disposable and ignored. Do not treat generated
 output or agent plans as project documentation.
+
+`drivers/*.lua` is ignored too: it is a snapshot of the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](../drivers/BUNDLED_SOURCE.json), fetched, never
+authored here. A fresh clone or `git worktree` therefore starts without either
+it or the virtual environment, and the first `make test` builds both. There is
+no separate setup step. Later runs cost nothing.
+
+The optimizer needs Python 3.11 or newer. `make` picks an interpreter that
+qualifies, overridable with `PYTHON=`, and falls back to `uv` — optional, used
+only when the machine has no suitable Python of its own.

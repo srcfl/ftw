@@ -89,8 +89,9 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 			c.Weather = &Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18}
 		}, "weather"},
 		{"weather pv_arrays added", func(c *Config) {
+			tilt, azimuth := 30.0, 180.0
 			c.Weather = &Weather{Provider: "met_no", Latitude: 59, Longitude: 18,
-				PVArrays: []PVArray{{KWp: 5, TiltDeg: 30, AzimuthDeg: 180}}}
+				PVArrays: []PVArray{{KWp: 5, TiltDeg: &tilt, AzimuthDeg: &azimuth}}}
 		}, "weather"},
 		{"weather heating coefficient", func(c *Config) {
 			c.Weather.HeatingWPerDegC = 250

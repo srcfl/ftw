@@ -2,7 +2,8 @@
 
 Thanks for helping build the local energy coordination layer. This document
 covers the legal bits — for how the code is organized and how to add a driver,
-start with `AGENTS.md` and `docs/writing-a-driver.md`.
+start with [`AGENTS.md`](AGENTS.md) and
+[`docs/writing-a-driver.md`](docs/writing-a-driver.md).
 
 ## Website
 
@@ -80,4 +81,4 @@ By making a contribution to this project, I certify that:
 - Keep PRs focused on one logical change.
 - New code needs tests; `make verify` must pass before review.
 - User-visible changes need a Changeset entry (`npx changeset`) — see the
-  Release Process section in `README.md`.
+  Release Process section in [`README.md`](README.md).

@@ -52,14 +52,75 @@ func startSimServer(t *testing.T, sim *ferroamp.Simulator, port string) *mqttser
 		t.Fatal(err)
 	}
 
+	// Shut the broker down through closeBroker, never s.Close directly — see
+	// there for why. baseline is the inline client, which stays for the life
+	// of the server.
+	baseline := s.Clients.Len()
+	t.Cleanup(func() { closeBroker(t, s, baseline) })
+
 	return s
+}
+
+// closeBroker stops the broker without tripping the recursive read-lock in
+// mochi-mqtt v2.7.9: Clients.GetByListener takes the read lock and then calls
+// Clients.Len, which takes it again. sync.RWMutex is not reentrant, so a
+// Clients.Delete — what the broker runs once a client drops — landing between
+// the two read locks wedges both goroutines for good. Server.Close walks
+// GetByListener, so closing while a client is still tearing down is the race,
+// and it cost a full 10-minute go test timeout in CI on 2026-07-28.
+//
+// Waiting for the client count to fall back to baseline closes that window.
+// The deadline is the backstop: if the broker still wedges, the test says so in
+// seconds instead of burning the whole timeout on an unrelated pull request.
+func closeBroker(t *testing.T, s *mqttserver.Server, baseline int) {
+	t.Helper()
+
+	settle := time.Now().Add(2 * time.Second)
+	for s.Clients.Len() > baseline && time.Now().Before(settle) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := s.Clients.Len(); n > baseline {
+		t.Logf("broker still holds %d clients (baseline %d) at close", n, baseline)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Errorf("broker Close blocked for 5s: mochi-mqtt Clients read lock is held by GetByListener while a client disconnect waits for the write lock")
+	}
+}
+
+// connectClient dials the test broker and fails the test if the connect does
+// not land. WaitTimeout reports whether the token finished in time, so a
+// timed-out connect needs its own check — miss it and the test runs against a
+// client that never attached, then fails later for a reason that reads like a
+// broker bug.
+func connectClient(t *testing.T, port, clientID string) mqtt.Client {
+	t.Helper()
+
+	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:" + port).SetClientID(clientID)
+	cli := mqtt.NewClient(opts)
+	tok := cli.Connect()
+	if !tok.WaitTimeout(2 * time.Second) {
+		t.Fatalf("client %q did not connect within 2s", clientID)
+	}
+	if err := tok.Error(); err != nil {
+		t.Fatalf("client %q connect: %v", clientID, err)
+	}
+	t.Cleanup(func() { cli.Disconnect(100) })
+
+	return cli
 }
 
 func TestE2E_Subscribes_ReceivesEhub(t *testing.T) {
 	port := pickFreePort(t)
 	sim := ferroamp.New(ferroamp.Default())
 	s := startSimServer(t, sim, port)
-	defer s.Close()
 
 	// Publisher goroutine — publish one tick worth of data
 	snap := sim.Tick(time.Second)
@@ -68,12 +129,7 @@ func TestE2E_Subscribes_ReceivesEhub(t *testing.T) {
 	publishSso(s, snap)
 
 	// Subscribe via paho client
-	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:" + port).SetClientID("t-sub")
-	cli := mqtt.NewClient(opts)
-	if tok := cli.Connect(); tok.WaitTimeout(2*time.Second) && tok.Error() != nil {
-		t.Fatal(tok.Error())
-	}
-	defer cli.Disconnect(100)
+	cli := connectClient(t, port, "t-sub")
 
 	got := make(chan map[string]any, 3)
 	cli.Subscribe("extapi/data/#", 0, func(_ mqtt.Client, m mqtt.Message) {
@@ -124,14 +180,7 @@ func TestE2E_ChargeCommand_AffectsActualBatteryPower(t *testing.T) {
 	cfg.ResponseTauS = 0.2 // fast for test
 	sim := ferroamp.New(cfg)
 	s := startSimServer(t, sim, port)
-	defer s.Close()
-
-	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:" + port).SetClientID("t-cmd")
-	cli := mqtt.NewClient(opts)
-	if tok := cli.Connect(); tok.WaitTimeout(2*time.Second) && tok.Error() != nil {
-		t.Fatal(tok.Error())
-	}
-	defer cli.Disconnect(100)
+	cli := connectClient(t, port, "t-cmd")
 
 	// Subscribe to ehub to observe actual battery power
 	var latestPBat atomic.Value
@@ -173,15 +222,8 @@ func TestE2E_ChargeCommand_AffectsActualBatteryPower(t *testing.T) {
 func TestE2E_CommandResultPublished(t *testing.T) {
 	port := pickFreePort(t)
 	sim := ferroamp.New(ferroamp.Default())
-	s := startSimServer(t, sim, port)
-	defer s.Close()
-
-	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:" + port).SetClientID("t-res")
-	cli := mqtt.NewClient(opts)
-	if tok := cli.Connect(); tok.WaitTimeout(2*time.Second) && tok.Error() != nil {
-		t.Fatal(tok.Error())
-	}
-	defer cli.Disconnect(100)
+	startSimServer(t, sim, port)
+	cli := connectClient(t, port, "t-res")
 
 	var result atomic.Value
 	cli.Subscribe("extapi/result", 0, func(_ mqtt.Client, m mqtt.Message) {
@@ -220,7 +262,6 @@ func TestE2E_PublishLoop_SendsMultipleTicks(t *testing.T) {
 	cfg.ResponseTauS = 0.1
 	sim := ferroamp.New(cfg)
 	s := startSimServer(t, sim, port)
-	defer s.Close()
 
 	// Start the actual publishLoop in a goroutine
 	done := make(chan struct{})
@@ -249,12 +290,7 @@ func TestE2E_PublishLoop_SendsMultipleTicks(t *testing.T) {
 		wg.Wait()
 	}()
 
-	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:" + port).SetClientID("t-loop")
-	cli := mqtt.NewClient(opts)
-	if tok := cli.Connect(); tok.WaitTimeout(2*time.Second) && tok.Error() != nil {
-		t.Fatal(tok.Error())
-	}
-	defer cli.Disconnect(100)
+	cli := connectClient(t, port, "t-loop")
 
 	var count atomic.Int32
 	cli.Subscribe("extapi/data/ehub", 0, func(_ mqtt.Client, _ mqtt.Message) {
@@ -276,14 +312,7 @@ func TestE2E_DischargePbatPositive(t *testing.T) {
 	cfg.ResponseTauS = 0.1
 	sim := ferroamp.New(cfg)
 	s := startSimServer(t, sim, port)
-	defer s.Close()
-
-	opts := mqtt.NewClientOptions().AddBroker("tcp://127.0.0.1:" + port).SetClientID("t-disch")
-	cli := mqtt.NewClient(opts)
-	if tok := cli.Connect(); tok.WaitTimeout(2*time.Second) && tok.Error() != nil {
-		t.Fatal(tok.Error())
-	}
-	defer cli.Disconnect(100)
+	cli := connectClient(t, port, "t-disch")
 
 	var lastPBat atomic.Value
 	lastPBat.Store(0.0)

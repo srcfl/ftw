@@ -153,9 +153,27 @@ func (t *ProcessTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, er
 	return info, nil
 }
 
+// errOptimizerWorkerMissing marks the absence of the bundled Python worker
+// interpreter in this build. The containerized core ships no Python — the
+// optimizer runs as the separate ftw-optimizer sidecar — so a missing
+// interpreter is the expected state there, not a defect. Callers can use
+// errors.Is to surface an actionable "sidecar unavailable" state instead of a
+// bare `exec: "python3": ... not found in $PATH`, which reads as a missing core
+// dependency and hides the real remedy.
+var errOptimizerWorkerMissing = errors.New(
+	"optimizer worker interpreter not found on PATH; this core build has no bundled Python optimizer — run the ftw-optimizer sidecar (see docs/self-update.md)")
+
 func (t *ProcessTransport) ensureStartedLocked() error {
 	if t.cmd != nil {
 		return nil
+	}
+	// Resolve the interpreter before fork/exec so an absent worker (the normal
+	// case on the containerized core) returns errOptimizerWorkerMissing rather
+	// than the low-level exec error. LookPath also accepts an absolute command
+	// path, so native/all-in-one deployments that set FTW_OPTIMIZER_PYTHON keep
+	// working unchanged.
+	if _, err := exec.LookPath(t.cfg.Command[0]); err != nil {
+		return fmt.Errorf("optimizer worker %q unavailable: %w", t.cfg.Command[0], errOptimizerWorkerMissing)
 	}
 	cmd := exec.Command(t.cfg.Command[0], t.cfg.Command[1:]...)
 	cmd.Stderr = os.Stderr

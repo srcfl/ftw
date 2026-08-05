@@ -56,11 +56,25 @@ func TestSungrowZeroBatteryCommandForcesIdle(t *testing.T) {
 	env := NewHostEnv("sungrow", tel).WithModbus(modbus)
 	env.BatteryCapacityWh = 9600
 
+	// Answer register 4999 as an SH8.0RT so the driver classifies this as a
+	// hybrid. Sungrow ships two families behind one driver and an SG string
+	// inverter implements none of 13049-13051, so the driver refuses a battery
+	// setpoint until the model has named itself a hybrid or a battery register
+	// has answered. Without this the mock answers 0 everywhere, detection
+	// settles on "unknown", and the refusal is correct rather than a bug --
+	// see srcfl/device-drivers#40 and #43.
+	modbus.regs[4999] = 0x0E0E
+
 	d, err := NewLuaDriver("../../../drivers/sungrow.lua", env)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	defer d.Cleanup()
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	modbus.resetWrites()
 
 	cmd, _ := json.Marshal(map[string]any{"action": "battery", "power_w": 0})
 	if err := d.Command(context.Background(), cmd); err != nil {

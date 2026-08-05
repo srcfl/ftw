@@ -52,19 +52,6 @@ header h1 {
   color: var(--text-dim);
 }
 
-.conn-status {
-  font-size: 0.75rem;
-  transition: color 0.3s;
-}
-
-.conn-status.connected {
-  color: var(--green);
-}
-
-.conn-status.disconnected {
-  color: var(--red);
-}
-
 /* ---- Top-level tab nav (Live | Diagnose) ---- */
 .app-tabs {
   display: flex;

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,12 +15,15 @@ import (
 )
 
 type controlV2Modbus struct {
+	mu        sync.RWMutex
 	registers map[uint16]uint16
 	writes    int
 	writeErr  error
 }
 
 func (m *controlV2Modbus) Read(addr, count uint16, _ int32) ([]uint16, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make([]uint16, count)
 	for i := range out {
 		out[i] = m.registers[addr+uint16(i)]
@@ -28,6 +32,8 @@ func (m *controlV2Modbus) Read(addr, count uint16, _ int32) ([]uint16, error) {
 }
 
 func (m *controlV2Modbus) WriteSingle(addr, value uint16) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.writeErr != nil {
 		return m.writeErr
 	}
@@ -37,6 +43,8 @@ func (m *controlV2Modbus) WriteSingle(addr, value uint16) error {
 }
 
 func (m *controlV2Modbus) WriteMulti(addr uint16, values []uint16) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.writeErr != nil {
 		return m.writeErr
 	}
@@ -48,6 +56,30 @@ func (m *controlV2Modbus) WriteMulti(addr uint16, values []uint16) error {
 }
 
 func (m *controlV2Modbus) Close() error { return nil }
+
+func (m *controlV2Modbus) registerValue(addr uint16) uint16 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.registers[addr]
+}
+
+func (m *controlV2Modbus) writeCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.writes
+}
+
+func (m *controlV2Modbus) setRegister(addr, value uint16) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registers[addr] = value
+}
+
+func (m *controlV2Modbus) setWriteError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.writeErr = err
+}
 
 const controlV2Lua = `
 assert(os == nil and io == nil and debug == nil and package == nil)
@@ -161,14 +193,14 @@ func TestControlV2RestrictsWritesAndReturnsHostEvidence(t *testing.T) {
 	if err := driver.Init(context.Background(), map[string]interface{}{}); err != nil {
 		t.Fatal(err)
 	}
-	if modbus.writes != 0 {
-		t.Fatalf("init wrote to hardware: %d writes", modbus.writes)
+	if modbus.writeCount() != 0 {
+		t.Fatalf("init wrote to hardware: %d writes", modbus.writeCount())
 	}
 	if _, err := driver.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if modbus.writes != 0 {
-		t.Fatalf("poll wrote to hardware: %d writes", modbus.writes)
+	if modbus.writeCount() != 0 {
+		t.Fatalf("poll wrote to hardware: %d writes", modbus.writeCount())
 	}
 
 	now := time.Now()
@@ -179,16 +211,16 @@ func TestControlV2RestrictsWritesAndReturnsHostEvidence(t *testing.T) {
 	if result.Status != "applied" || result.DeviceState != "controlled" || result.Writes != 1 {
 		t.Fatalf("unexpected command result: %+v", result)
 	}
-	if modbus.registers[10] != 750 {
-		t.Fatalf("register = %d, want 750", modbus.registers[10])
+	if modbus.registerValue(10) != 750 {
+		t.Fatalf("register = %d, want 750", modbus.registerValue(10))
 	}
 
 	defaultResult, err := driver.DefaultModeV2(context.Background(), "ftw.default:0123456789abcdef", "test", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaultResult.Status != "defaulted" || defaultResult.DeviceState != "default" || modbus.registers[10] != 0 {
-		t.Fatalf("unexpected default result: %+v register=%d", defaultResult, modbus.registers[10])
+	if defaultResult.Status != "defaulted" || defaultResult.DeviceState != "default" || modbus.registerValue(10) != 0 {
+		t.Fatalf("unexpected default result: %+v register=%d", defaultResult, modbus.registerValue(10))
 	}
 }
 
@@ -229,8 +261,8 @@ function driver_cleanup() host.modbus_write(10, 5) end
 		t.Fatal(err)
 	}
 	driver.Cleanup()
-	if modbus.writes != 0 {
-		t.Fatalf("signed read-only driver reached hardware: %d writes", modbus.writes)
+	if modbus.writeCount() != 0 {
+		t.Fatalf("signed read-only driver reached hardware: %d writes", modbus.writeCount())
 	}
 }
 
@@ -238,8 +270,8 @@ func TestControlV2RequiresExactSiteOptIn(t *testing.T) {
 	driver, modbus := loadControlV2Driver(t, testControlV2Policy(false))
 	now := time.Now()
 	result, err := driver.CommandV2(context.Background(), commandV2(now), now)
-	if err == nil || result.Status != "rejected" || modbus.writes != 0 {
-		t.Fatalf("result=%+v err=%v writes=%d", result, err, modbus.writes)
+	if err == nil || result.Status != "rejected" || modbus.writeCount() != 0 {
+		t.Fatalf("result=%+v err=%v writes=%d", result, err, modbus.writeCount())
 	}
 }
 
@@ -248,8 +280,8 @@ func TestControlV2RejectsExpiredCommand(t *testing.T) {
 	now := time.Now()
 	cmd := commandV2(now.Add(-time.Minute))
 	result, err := driver.CommandV2(context.Background(), cmd, now)
-	if err == nil || result.Status != "expired" || modbus.writes != 0 {
-		t.Fatalf("result=%+v err=%v writes=%d", result, err, modbus.writes)
+	if err == nil || result.Status != "expired" || modbus.writeCount() != 0 {
+		t.Fatalf("result=%+v err=%v writes=%d", result, err, modbus.writeCount())
 	}
 }
 
@@ -290,8 +322,8 @@ function driver_default_mode_v2(context)
 end
 `
 	driver, modbus := loadControlV2DriverSource(t, testControlV2Policy(true), source)
-	modbus.registers[10] = 750
-	modbus.writeErr = errors.New("device write failed")
+	modbus.setRegister(10, 750)
+	modbus.setWriteError(errors.New("device write failed"))
 	now := time.Now()
 	result, err := driver.CommandV2(context.Background(), commandV2(now), now)
 	if err == nil || result.Status != "failed" || result.Code != "evidence_unproven" || result.Writes != 0 {
@@ -362,8 +394,8 @@ end
 	if err := registry.Send(context.Background(), cfg.Name, []byte(`{"action":"battery","power_w":750}`)); err == nil {
 		t.Fatal("partly applied failed command was accepted")
 	}
-	if modbus.registers[10] != 0 || modbus.writes != 3 {
-		t.Fatalf("register=%d writes=%d, want default register and startup/command/fallback writes", modbus.registers[10], modbus.writes)
+	if modbus.registerValue(10) != 0 || modbus.writeCount() != 3 {
+		t.Fatalf("register=%d writes=%d, want default register and startup/command/fallback writes", modbus.registerValue(10), modbus.writeCount())
 	}
 	if len(results) != 3 || results[1].Status != "failed" || results[2].Status != "defaulted" {
 		t.Fatalf("command results = %+v", results)
@@ -414,16 +446,16 @@ end
 	if err := registry.Send(context.Background(), cfg.Name, []byte(`{"action":"battery","power_w":750}`)); err != nil {
 		t.Fatal(err)
 	}
-	if modbus.registers[10] != 750 {
-		t.Fatalf("controlled register = %d, want 750", modbus.registers[10])
+	if modbus.registerValue(10) != 750 {
+		t.Fatalf("controlled register = %d, want 750", modbus.registerValue(10))
 	}
 	deadline := time.After(4 * time.Second)
 	for {
 		select {
 		case result := <-resultCh:
 			if result.Status == "defaulted" {
-				if modbus.registers[10] != 0 {
-					t.Fatalf("expired lease left register at %d", modbus.registers[10])
+				if modbus.registerValue(10) != 0 {
+					t.Fatalf("expired lease left register at %d", modbus.registerValue(10))
 				}
 				return
 			}

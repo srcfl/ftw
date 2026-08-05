@@ -1,11 +1,11 @@
 # Independently releasable FTW mathematical optimizer.
-FROM python:3.12-slim-bookworm AS build
+FROM python:3.12-slim-trixie AS build
 
 COPY optimizer/ /src/optimizer/
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir /src/optimizer
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-trixie
 
 ARG VERSION=dev
 ARG BUILD_SHA=""

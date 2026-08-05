@@ -116,7 +116,9 @@ test("Update dialog wires independent Optimizer and Driver history actions", () 
 
 test("optimizer fallback is visible in the global header and Update Center", () => {
   assert.match(badge, /Planner fallback active/);
-  assert.match(badge, /aria-label="\$\{showOptimizerWarning \? "Planner fallback active"/);
+  // The header mark labels itself from the same warning title it shows on
+  // hover; header-status-marks.test.mjs drives the rendered states.
+  assert.match(badge, /class="mark warning"[^`]*aria-label="\$\{escapeHTML\(warningTitle\)\}"/);
   assert.match(badge, /class="component-warning" role="alert"/);
   assert.match(badge, /optimizer\.fallback_reason \|\| optimizer\.health_error/);
 });

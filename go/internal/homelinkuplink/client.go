@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -139,7 +140,15 @@ func (c *Client) runWithStatus(
 		}
 		delay, delayErr := retry(attempt)
 		if delayErr != nil {
+			if err != nil {
+				slog.Warn("Home Link uplink retry delay failed",
+					"attempt", attempt+1, "err", err, "retry_err", delayErr)
+			}
 			return delayErr
+		}
+		if err != nil {
+			slog.Warn("Home Link uplink failed; retrying",
+				"attempt", attempt+1, "retry_delay", delay, "err", err)
 		}
 		if attempt < 6 {
 			attempt++

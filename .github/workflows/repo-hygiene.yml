@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: repo-hygiene-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   planning-docs:
     name: no agent planning documents

@@ -155,3 +155,25 @@ func TestCTekDescribe(t *testing.T) {
 		t.Errorf("defaults: got port=%d unit=%d, want 502/1", d.DefaultPort, d.DefaultUnitID)
 	}
 }
+
+func TestCTekAddressFormatsHost(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "bare IPv6", host: "fd00::5", want: "[fd00::5]:1502"},
+		{name: "bracketed IPv6", host: "[fd00::5]", want: "[fd00::5]:1502"},
+		{name: "raw zone ID", host: "fe80::5%en0", want: "[fe80::5%en0]:1502"},
+		{name: "bracketed raw zone ID", host: "[fe80::5%en0]", want: "[fe80::5%en0]:1502"},
+		{name: "IPv4", host: "10.0.0.5", want: "10.0.0.5:1502"},
+		{name: "hostname", host: "charger.local", want: "charger.local:1502"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ctekAddress(tc.host, 1502); got != tc.want {
+				t.Fatalf("address = %q, want %s", got, tc.want)
+			}
+		})
+	}
+}

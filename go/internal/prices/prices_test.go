@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -121,8 +122,62 @@ func TestSourcefulRejectsUnexpectedCurrency(t *testing.T) {
 	defer srv.Close()
 	p := &SourcefulProvider{Client: &http.Client{}, BaseURL: srv.URL}
 	_, err := p.Fetch(context.Background(), "SE3", time.Now())
-	if err == nil || !strings.Contains(err.Error(), "unexpected currency") {
-		t.Fatalf("got error %v, want unexpected currency", err)
+	if err == nil || !strings.Contains(err.Error(), "asked for SEK") {
+		t.Fatalf("got error %v, want a currency mismatch", err)
+	}
+}
+
+// The API serves EUR and SEK and quietly answers anything else with EUR.
+// A euro zone asks for EUR directly; a Norwegian asks for EUR and converts,
+// because asking for NOK would return EUR numbers labelled EUR.
+func TestSourcefulAsksForServableCurrency(t *testing.T) {
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := r.URL.Query().Get("currency")
+		asked = append(asked, cur)
+		area := strings.Trim(r.URL.Path, "/")
+		fmt.Fprintf(w, `{"area":%q,"currency":%q,"unit":"MWH","resolution":"PT60M",
+			"prices":[{"datetime":"2026-07-31T00:00:00+00:00","price":180.0}]}`, area, cur)
+	}))
+	defer srv.Close()
+
+	eur := &SourcefulProvider{Client: &http.Client{}, BaseURL: srv.URL, Currency: "EUR"}
+	rows, err := eur.Fetch(context.Background(), "BE", time.Now())
+	if err != nil {
+		t.Fatalf("EUR fetch: %v", err)
+	}
+	if math.Abs(rows[0].SEKPerKWh-0.180) > 1e-9 {
+		t.Errorf("EUR price: got %g, want 0.18/kWh", rows[0].SEKPerKWh)
+	}
+
+	nok := &SourcefulProvider{Client: &http.Client{}, BaseURL: srv.URL, Currency: "NOK", FX: fxStub{rate: 11.7}}
+	rows, err = nok.Fetch(context.Background(), "NO1", time.Now())
+	if err != nil {
+		t.Fatalf("NOK fetch: %v", err)
+	}
+	if math.Abs(rows[0].SEKPerKWh-0.180*11.7) > 1e-9 {
+		t.Errorf("NOK price: got %g, want %g/kWh", rows[0].SEKPerKWh, 0.180*11.7)
+	}
+	if want := []string{"EUR", "EUR"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked the API for %v, want %v", asked, want)
+	}
+}
+
+// Without a rate, a NOK install gets no prices rather than EUR numbers
+// stored as if they were NOK.
+func TestSourcefulFailsWithoutRateForNonNativeCurrency(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"area":"NO1","currency":"EUR","unit":"MWH","resolution":"PT60M",
+			"prices":[{"datetime":"2026-07-31T00:00:00+00:00","price":180.0}]}`)
+	}))
+	defer srv.Close()
+	for name, p := range map[string]*SourcefulProvider{
+		"no FX source": {Client: &http.Client{}, BaseURL: srv.URL, Currency: "NOK"},
+		"no rate yet":  {Client: &http.Client{}, BaseURL: srv.URL, Currency: "NOK", FX: fxStub{}},
+	} {
+		if _, err := p.Fetch(context.Background(), "NO1", time.Now()); err == nil {
+			t.Errorf("%s: expected an error, got prices", name)
+		}
 	}
 }
 
@@ -336,13 +391,24 @@ func entsoeServer(t *testing.T, body string) (*ENTSOEProvider, func()) {
 		fmt.Fprint(w, body)
 	}))
 	p := &ENTSOEProvider{
-		Client:      &http.Client{},
-		APIKey:      "test-key",
-		BaseURL:     srv.URL,
-		Currency:    "SEK",
-		EURToNative: func(eur float64) float64 { return eur }, // identity
+		Client:   &http.Client{},
+		APIKey:   "test-key",
+		BaseURL:  srv.URL,
+		Currency: "SEK",
+		FX:       fxStub{rate: 1}, // identity
 	}
 	return p, srv.Close
+}
+
+// fxStub converts at a fixed rate, or refuses when rate is 0 — standing in
+// for the ECB service before rates land.
+type fxStub struct{ rate float64 }
+
+func (f fxStub) Convert(amount float64, _, _ string) (float64, bool) {
+	if f.rate == 0 {
+		return 0, false
+	}
+	return amount * f.rate, true
 }
 
 // A real day-ahead A44 document, trimmed to a 3-hour PT60M period. The
@@ -444,26 +510,73 @@ func TestENTSOEFifteenMinCarriesForwardGaps(t *testing.T) {
 	}
 }
 
-// With no converter wired (NewENTSOE path before FromConfig sets one),
-// the parser must still produce a sane SEK figure rather than emitting
-// raw EUR. Falls back to the ballpark 11.5 SEK/EUR.
-func TestENTSOEFallsBackToBallparkFXWhenConverterNil(t *testing.T) {
+// A EUR document with no way to reach SEK must fail the fetch. Storing the
+// EUR figure as if it were SEK would understate every price elevenfold and
+// steer the planner; no prices at all is the safe answer.
+func TestENTSOEFailsWithoutExchangeRate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, entsoeHourlyXML)
 	}))
 	defer srv.Close()
-	p := &ENTSOEProvider{Client: &http.Client{}, APIKey: "k", BaseURL: srv.URL} // EURToNative nil
 	day, _ := time.Parse("2006-01-02", "2026-06-03")
-	rows, err := p.Fetch(context.Background(), "SE3", day)
+
+	for name, p := range map[string]*ENTSOEProvider{
+		"no FX source": {Client: &http.Client{}, APIKey: "k", BaseURL: srv.URL, Currency: "SEK"},
+		"no rate yet":  {Client: &http.Client{}, APIKey: "k", BaseURL: srv.URL, Currency: "SEK", FX: fxStub{}},
+	} {
+		if _, err := p.Fetch(context.Background(), "SE3", day); err == nil {
+			t.Errorf("%s: expected an error, got prices", name)
+		}
+	}
+}
+
+// A household paying in the currency the document already publishes needs
+// no rate at all — Belgium reading a EUR document is the common case.
+func TestENTSOENeedsNoRateWhenCurrencyMatches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, entsoeHourlyXML)
+	}))
+	defer srv.Close()
+	p := &ENTSOEProvider{Client: &http.Client{}, APIKey: "k", BaseURL: srv.URL, Currency: "EUR"}
+	day, _ := time.Parse("2006-01-02", "2026-06-03")
+	rows, err := p.Fetch(context.Background(), "BE", day)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("got %d rows, want 3", len(rows))
+	if len(rows) != 3 || math.Abs(rows[0].SEKPerKWh-0.050) > 1e-9 {
+		t.Fatalf("got %d rows, first %g; want 3 rows, first 0.05 EUR/kWh", len(rows), rows[0].SEKPerKWh)
 	}
-	// 50 EUR/MWh → 0.05 EUR/kWh × 11.5 ≈ 0.575 SEK/kWh
-	if math.Abs(rows[0].SEKPerKWh-0.575) > 1e-9 {
-		t.Errorf("fallback price: got %g, want 0.575", rows[0].SEKPerKWh)
+}
+
+// Not every zone publishes in EUR — Poland and Hungary among others price
+// in their own currency. Reading currency_Unit.name is what keeps a Polish
+// install from converting PLN as though it were EUR.
+func TestENTSOEReadsDocumentCurrency(t *testing.T) {
+	const plnXML = `<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:0">
+  <TimeSeries>
+    <currency_Unit.name>PLN</currency_Unit.name>
+    <Period>
+      <timeInterval><start>2026-06-02T22:00Z</start><end>2026-06-02T23:00Z</end></timeInterval>
+      <resolution>PT60M</resolution>
+      <Point><position>1</position><price.amount>430.0</price.amount></Point>
+    </Period>
+  </TimeSeries>
+</Publication_MarketDocument>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, plnXML)
+	}))
+	defer srv.Close()
+	// A Polish household wants PLN and the document is already PLN, so no
+	// rate is consulted — a converter that refuses everything proves it.
+	p := &ENTSOEProvider{Client: &http.Client{}, APIKey: "k", BaseURL: srv.URL, Currency: "PLN", FX: fxStub{}}
+	day, _ := time.Parse("2006-01-02", "2026-06-03")
+	rows, err := p.Fetch(context.Background(), "PL", day)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(rows) != 1 || math.Abs(rows[0].SEKPerKWh-0.430) > 1e-9 {
+		t.Fatalf("got %d rows, first %g; want 1 row at 0.43 PLN/kWh", len(rows), rows[0].SEKPerKWh)
 	}
 }
 

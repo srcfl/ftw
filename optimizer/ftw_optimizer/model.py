@@ -41,6 +41,144 @@ class ThermalVars:
     upper_slack: cp.Variable
 
 
+class ReplayConsistencyError(RuntimeError):
+    """The reported storage state cannot be replayed from reported power."""
+
+
+_REPLAY_TOLERANCE_FRACTION = 0.0002
+_REPLAY_TOLERANCE_MIN_WH = 1.0
+_STORAGE_NUMERIC_TOLERANCE_WH = 1e-6
+_STORAGE_INITIAL_ABOVE_MAXIMUM_KEY = "_optimizer_initial_above_maximum"
+
+
+def _storage_starts_above_maximum(storages: Any) -> bool:
+    return any(
+        bool(spec.get(_STORAGE_INITIAL_ABOVE_MAXIMUM_KEY, False))
+        or float(spec["initial_energy_wh"])
+        > float(spec.get("max_energy_wh", spec["capacity_wh"]))
+        for spec in storages
+    )
+
+
+def _within_storage_numeric_tolerance(value: float, bound: float) -> bool:
+    """Accept one micro-Wh of decimal input plus float representation error."""
+    return value - bound <= _STORAGE_NUMERIC_TOLERANCE_WH + max(
+        math.ulp(value), math.ulp(bound)
+    )
+
+
+def _normalize_storage_specs(
+    storages: Any,
+) -> tuple[tuple[dict[str, Any], ...], tuple[bool, ...]]:
+    """Clamp only solver-scale bound noise and retain the original guard signal."""
+    normalized: list[dict[str, Any]] = []
+    starts_above_maximum: list[bool] = []
+    for i, raw in enumerate(storages):
+        spec = require_dict(raw, f"storages[{i}]")
+        capacity = positive_number(spec.get("capacity_wh"), f"storages[{i}].capacity_wh")
+        minimum = finite_number(spec.get("min_energy_wh", 0), f"storages[{i}].min_energy_wh")
+        maximum = finite_number(
+            spec.get("max_energy_wh", capacity), f"storages[{i}].max_energy_wh"
+        )
+        initial = finite_number(spec.get("initial_energy_wh"), f"storages[{i}].initial_energy_wh")
+        if not (
+            0 <= minimum <= maximum <= capacity + _STORAGE_NUMERIC_TOLERANCE_WH
+            and 0 <= initial <= capacity + _STORAGE_NUMERIC_TOLERANCE_WH
+        ):
+            raise ProtocolError(f"storages[{i}] energy bounds are inconsistent")
+
+        model_maximum = maximum
+        if model_maximum > capacity and _within_storage_numeric_tolerance(
+            model_maximum, capacity
+        ):
+            model_maximum = capacity
+        initial_above_maximum = bool(
+            spec.get(_STORAGE_INITIAL_ABOVE_MAXIMUM_KEY, False)
+        ) or initial > model_maximum
+        model_initial = initial
+        if initial_above_maximum and _within_storage_numeric_tolerance(
+            initial, model_maximum
+        ):
+            model_initial = model_maximum
+
+        model_spec = dict(spec)
+        if model_maximum != maximum:
+            model_spec["max_energy_wh"] = model_maximum
+        if model_initial != initial:
+            model_spec["initial_energy_wh"] = model_initial
+        model_spec[_STORAGE_INITIAL_ABOVE_MAXIMUM_KEY] = initial_above_maximum
+        normalized.append(model_spec)
+        starts_above_maximum.append(initial_above_maximum)
+    return tuple(normalized), tuple(starts_above_maximum)
+
+
+def _canonicalize_storage_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize storage state once before any policy or scenario builder runs."""
+    storage_specs, _ = _normalize_storage_specs(
+        require_list(payload.get("storages", []), "storages")
+    )
+    canonical = dict(payload)
+    canonical["storages"] = [dict(spec) for spec in storage_specs]
+    return canonical
+
+
+def _storage_replay_tolerance_wh(spec: dict[str, Any]) -> float:
+    return max(
+        _REPLAY_TOLERANCE_MIN_WH,
+        float(spec["capacity_wh"]) * _REPLAY_TOLERANCE_FRACTION,
+    )
+
+
+def _validate_storage_replay(
+    actions: list[dict[str, Any]],
+    slots: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    storages: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> None:
+    if len(actions) != len(slots):
+        raise ReplayConsistencyError(
+            f"action count {len(actions)} does not match slot count {len(slots)}"
+        )
+    energy = {
+        str(spec["id"]): float(spec["initial_energy_wh"]) for spec in storages
+    }
+    for slot_index, (slot, action) in enumerate(zip(slots, actions)):
+        dt_h = float(slot["len_min"]) / 60.0
+        storage_power = action.get("storage_power_w", {})
+        storage_energy = action.get("storage_energy_wh", {})
+        for spec in storages:
+            storage_id = str(spec["id"])
+            if storage_id not in storage_power or storage_id not in storage_energy:
+                raise ReplayConsistencyError(
+                    f"slot {slot_index} storage {storage_id} output is missing"
+                )
+            power = float(storage_power[storage_id])
+            reported = float(storage_energy[storage_id])
+            if not math.isfinite(power) or not math.isfinite(reported):
+                raise ReplayConsistencyError(
+                    f"slot {slot_index} storage {storage_id} output is non-finite"
+                )
+            if power >= 0:
+                replayed = energy[storage_id] + power * dt_h * float(
+                    spec.get("charge_efficiency", 0.95)
+                )
+            else:
+                replayed = energy[storage_id] + power * dt_h / float(
+                    spec.get("discharge_efficiency", 0.95)
+                )
+            tolerance = _storage_replay_tolerance_wh(spec)
+            if (
+                replayed < -tolerance
+                or replayed > float(spec["capacity_wh"]) + tolerance
+                or abs(reported - replayed) > tolerance
+            ):
+                raise ReplayConsistencyError(
+                    f"slot {slot_index} storage {storage_id} energy "
+                    f"{reported:.6f} is inconsistent with replay "
+                    f"{replayed:.6f} (tolerance {tolerance:.6f})"
+                )
+            energy[storage_id] = replayed
+
+
 def _vector(value: Any, n: int, field: str) -> np.ndarray:
     items = require_list(value, field)
     if len(items) != n:
@@ -100,6 +238,7 @@ def _solver_options(settings: dict[str, Any], solver: str) -> dict[str, Any]:
 
 
 def solve(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = _canonicalize_storage_payload(payload)
     settings = require_dict(payload.get("settings", {}), "settings")
     commercial = require_dict(
         payload.get("commercial_constraints", {}),
@@ -264,13 +403,15 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     constraints: list[cp.Constraint] = []
     discrete = False
 
+    storage_specs, storage_above_maximum = _normalize_storage_specs(
+        require_list(payload.get("storages", []), "storages")
+    )
     storages: list[StorageVars] = []
     asset_ids: set[str] = set()
     total_charge: cp.Expression = cp.Constant(np.zeros(n))
     total_discharge: cp.Expression = cp.Constant(np.zeros(n))
     service_slack: cp.Expression = cp.Constant(0.0)
-    for i, raw in enumerate(require_list(payload.get("storages", []), "storages")):
-        spec = require_dict(raw, f"storages[{i}]")
+    for i, spec in enumerate(storage_specs):
         asset_id = spec.get("id")
         if not isinstance(asset_id, str) or not asset_id or asset_id in asset_ids:
             raise ProtocolError(f"storages[{i}].id must be non-empty and unique")
@@ -315,7 +456,8 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         # starts have zero recovery allowance, preserving hard min/max bounds.
         service_slack += cp.sum(lower_recovery[1:] + upper_recovery[1:]) / (capacity * n)
         unsafe_cycle = bool(np.any(eff_import < 0)) or pv_charge_bonus_ore > 0
-        if force_milp or (formulation == "auto" and unsafe_cycle):
+        initial_above_max = storage_above_maximum[i]
+        if force_milp or initial_above_max or (formulation == "auto" and unsafe_cycle):
             direction = cp.Variable(n, boolean=True, name=f"storage_{i}_charge_mode")
             constraints += [charge <= max_charge * direction, discharge <= max_discharge * (1 - direction)]
             discrete = True
@@ -817,6 +959,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
                 mip_gap = float(value)
                 break
     solve_ms = (time.perf_counter() - started) * 1000.0
+    _validate_storage_replay(actions, slots, [storage.spec for storage in storages])
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": str(payload["request_id"]),

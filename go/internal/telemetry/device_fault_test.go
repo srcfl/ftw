@@ -52,3 +52,63 @@ func TestStoreSetDriverDeviceFault(t *testing.T) {
 		t.Error("clearing via the store should restore online")
 	}
 }
+
+// The other end of the same wire: a driver that answers polls and rejects
+// writes believes the device is fine and says so on every poll. Its verdict
+// must not be able to clear core's, or the two would flip the driver in and
+// out of the fleet for as long as the refusals lasted.
+func TestDriverPollCannotClearACommandFault(t *testing.T) {
+	s := NewStore()
+	s.DriverHealthMut("sungrow").RecordSuccess()
+
+	s.SetDriverCommandFault("sungrow", true, "modbus write refused")
+	if s.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("a driver that refuses commands must leave the control set")
+	}
+
+	// Every poll of a driver that thinks it is healthy.
+	for i := 0; i < 5; i++ {
+		s.SetDriverDeviceFault("sungrow", false, "")
+		s.RecordDriverSuccess("sungrow")
+		if s.DriverHealth("sungrow").IsOnline() {
+			t.Fatalf("poll %d cleared the command fault", i)
+		}
+	}
+
+	s.SetDriverCommandFault("sungrow", false, "")
+	if !s.DriverHealth("sungrow").IsOnline() {
+		t.Error("clearing the command fault should restore online")
+	}
+}
+
+// The driver's own fault survives core clearing its command fault: two
+// sources, one derived flag, neither able to overwrite the other.
+func TestDeviceAndCommandFaultsAreIndependent(t *testing.T) {
+	h := &DriverHealth{Name: "sungrow"}
+	h.RecordSuccess()
+
+	h.SetDeviceFault(true, "inverter fault 0x12")
+	h.SetCommandFault(true, "modbus write refused")
+	if h.DeviceFaultReason != "inverter fault 0x12" {
+		t.Errorf("reason = %q, want the driver's own — it saw the device", h.DeviceFaultReason)
+	}
+
+	h.SetCommandFault(false, "")
+	if !h.DeviceFault {
+		t.Error("clearing the command fault dropped the driver's own fault")
+	}
+
+	h.SetDeviceFault(false, "")
+	if h.DeviceFault || !h.IsOnline() {
+		t.Error("with both sources clear the driver should be back in control")
+	}
+}
+
+// A driver that is gone must not be resurrected by a late verdict about it.
+func TestSetDriverCommandFaultDoesNotCreateHealth(t *testing.T) {
+	s := NewStore()
+	s.SetDriverCommandFault("ghost", true, "modbus write refused")
+	if h := s.DriverHealth("ghost"); h != nil {
+		t.Fatalf("command fault created a health record for an unknown driver: %+v", h)
+	}
+}

@@ -311,3 +311,54 @@ api:
 	w.Stop()
 	w.Stop()
 }
+
+// Apply is the one shared apply path (#760): POST /api/config calls it
+// directly with the config it just saved, so a site meter set for the
+// first time must reach the controller without any fsnotify round trip.
+func TestApplyFirstSiteMeterWithoutAWatcher(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	const noDriversYAML = `
+site:
+  name: Test
+  grid_target_w: 0
+fuse:
+  max_amps: 16
+drivers: []
+api:
+  port: 8080
+`
+	writeConfig(t, path, noDriversYAML)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, path, minimalYAML)
+	newCfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfgMu sync.RWMutex
+	var ctrlMu sync.Mutex
+	ctrl := control.NewState(0, 0, cfg.SiteMeterDriver())
+
+	var gotNew, gotOld *config.Config
+	Apply(&cfgMu, cfg, &ctrlMu, ctrl, newCfg, func(n, o *config.Config) {
+		gotNew, gotOld = n, o
+	})
+
+	if ctrl.SiteMeterDriver != "ferroamp" {
+		t.Fatalf("Ctrl.SiteMeterDriver = %q, want %q", ctrl.SiteMeterDriver, "ferroamp")
+	}
+	if cfg.SiteMeterDriver() != "ferroamp" {
+		t.Fatalf("shared cfg not swapped: SiteMeterDriver() = %q", cfg.SiteMeterDriver())
+	}
+	if gotNew == nil || gotNew.SiteMeterDriver() != "ferroamp" {
+		t.Fatal("applier did not receive the new config")
+	}
+	if gotOld == nil || gotOld.SiteMeterDriver() != "" {
+		t.Fatal("applier did not receive the pre-apply snapshot as old")
+	}
+}

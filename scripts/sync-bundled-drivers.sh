@@ -10,17 +10,40 @@
 #
 # Usage:
 #   scripts/sync-bundled-drivers.sh            # write the snapshot
-#   scripts/sync-bundled-drivers.sh --check    # fail if drivers/ has drifted
+#   scripts/sync-bundled-drivers.sh --check    # fail if any driver is committed
+#   scripts/sync-bundled-drivers.sh --behind   # fail if the pin is out of date
 #
 # To take a newer driver: move the commit in BUNDLED_SOURCE.json, run this, and
 # commit the result. To add or drop a bundled driver, edit the list there --
 # which drivers are bundled is FTW's decision, and device-drivers publishes
 # more than FTW needs to carry for recovery.
+#
+# --check and --behind ask opposite questions. --check catches a driver being
+# committed here at all, and runs on every pull request. --behind catches the
+# pin being left behind while a fix lands upstream, and runs on a schedule --
+# nothing noticed that until a Pixii flap reached customer hardware a second
+# time.
+#
+# --check used to compare committed bytes against the pin. There are no
+# committed bytes now: the drivers are gitignored and fetched, so the only way
+# to make this a second source again is to commit one, and that is the single
+# thing --check has left to look for. Cheaper than a content diff, and a
+# stricter rule.
+#
+# --behind compares against the drivers upstream, not against the commit id, so
+# a doc change or a dependency bump in device-drivers stays quiet. It only
+# speaks up when a bundled driver would actually change.
 
 set -euo pipefail
 
 CHECK=0
-[ "${1:-}" = "--check" ] && CHECK=1
+BEHIND=0
+case "${1:-}" in
+  --check)  CHECK=1 ;;
+  --behind) BEHIND=1; CHECK=1 ;;
+  "")       ;;
+  *) echo "unknown option '${1}'; see the header for usage" >&2; exit 2 ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIN="${ROOT}/drivers/BUNDLED_SOURCE.json"
@@ -29,9 +52,49 @@ DEST="${ROOT}/drivers"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 [ -f "$PIN" ] || { echo "missing ${PIN}" >&2; exit 2; }
 
+# --check is a question about this repository, not about upstream, so it
+# answers before any network call. The drivers are gitignored and fetched;
+# committing one is the only way to make this a second source of truth again.
+if [ "$CHECK" = "1" ] && [ "$BEHIND" = "0" ]; then
+  committed="$(git -C "$ROOT" ls-files -- 'drivers/*.lua')"
+  if [ -n "$committed" ]; then
+    echo "$committed" | sed 's/^/COMMITTED /' >&2
+    cat >&2 <<'MSG'
+
+A driver is committed under drivers/.
+
+These files are fetched from srcfl/device-drivers at the commit pinned in
+drivers/BUNDLED_SOURCE.json, and they are gitignored so that stays true. A
+driver committed here is a second source of truth, which is how a Sungrow fix
+once landed upstream while the bundled copy kept the bug that took a
+customer's inverter offline.
+
+Fix the driver in srcfl/device-drivers, move the pin, and run
+scripts/sync-bundled-drivers.sh.
+MSG
+    exit 1
+  fi
+  echo "no driver source is committed here (drivers/ is fetched from the pin)"
+  exit 0
+fi
+
 REPOSITORY="$(jq -r .repository "$PIN")"
 COMMIT="$(jq -r .commit "$PIN")"
 SOURCE_DIR="$(jq -r .source_dir "$PIN")"
+PINNED="$COMMIT"
+
+# The branch to measure against. device-drivers releases from main.
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
+
+if [ "$BEHIND" = "1" ]; then
+  COMMIT="$(curl -fsSL \
+    -H "Accept: application/vnd.github+json" \
+    ${GITHUB_TOKEN:+-H "Authorization: Bearer ${GITHUB_TOKEN}"} \
+    "https://api.github.com/repos/${REPOSITORY}/commits/${UPSTREAM_BRANCH}" \
+    | jq -r .sha)"
+  [ -n "$COMMIT" ] && [ "$COMMIT" != "null" ] \
+    || { echo "could not resolve ${REPOSITORY}@${UPSTREAM_BRANCH}" >&2; exit 2; }
+fi
 # Read into an array the long way: the bash that ships with macOS has no
 # mapfile, and this script has to run the same locally and in CI.
 DRIVERS=()
@@ -68,7 +131,11 @@ for id in "${DRIVERS[@]}"; do
   fi
   if [ "$CHECK" = "1" ]; then
     if ! cmp -s "$from" "$to"; then
-      echo "DRIFTED ${id}.lua"
+      if [ "$BEHIND" = "1" ]; then
+        echo "OUTDATED ${id}.lua"
+      else
+        echo "DRIFTED ${id}.lua"
+      fi
       drift=1
     fi
   else
@@ -77,26 +144,55 @@ for id in "${DRIVERS[@]}"; do
 done
 
 # A .lua in drivers/ that the pin does not list is a file nothing regenerates,
-# which is how the second source of truth grew in the first place.
-for path in "${DEST}"/*.lua; do
-  [ -e "$path" ] || continue
-  id="$(basename "$path" .lua)"
-  listed=0
-  for known in "${DRIVERS[@]}"; do
-    [ "$id" = "$known" ] && { listed=1; break; }
+# which is how the second source of truth grew in the first place. Skipped in
+# --behind mode, which asks about the pin rather than about local files.
+if [ "$BEHIND" = "0" ]; then
+  for path in "${DEST}"/*.lua; do
+    [ -e "$path" ] || continue
+    id="$(basename "$path" .lua)"
+    listed=0
+    for known in "${DRIVERS[@]}"; do
+      [ "$id" = "$known" ] && { listed=1; break; }
+    done
+    if [ "$listed" = "0" ]; then
+      echo "UNLISTED ${id}.lua is in drivers/ but not in BUNDLED_SOURCE.json" >&2
+      drift=1
+    fi
   done
-  if [ "$listed" = "0" ]; then
-    echo "UNLISTED ${id}.lua is in drivers/ but not in BUNDLED_SOURCE.json" >&2
-    drift=1
-  fi
-done
+fi
 
 if [ "$missing" = "1" ]; then
   echo "the pin names drivers that do not exist upstream" >&2
   exit 1
 fi
 
-if [ "$CHECK" = "1" ]; then
+if [ "$BEHIND" = "1" ]; then
+  if [ "$drift" = "1" ]; then
+    cat >&2 <<MSG
+
+The bundled driver pin is out of date.
+
+  pinned:   ${PINNED}
+  upstream: ${COMMIT}  (${REPOSITORY}@${UPSTREAM_BRANCH})
+
+The drivers listed above have changed upstream. A gateway that boots offline
+runs the bundled copy, so until the pin moves it keeps running the old one.
+
+  1. set .commit in drivers/BUNDLED_SOURCE.json to ${COMMIT}
+  2. run scripts/sync-bundled-drivers.sh
+  3. commit the result
+
+Read what changed before taking it -- moving the pin takes every driver at
+that commit, not only the ones you came for.
+MSG
+    exit 1
+  fi
+  if [ "$PINNED" = "$COMMIT" ]; then
+    echo "pin is current: ${REPOSITORY}@${COMMIT:0:12}"
+  else
+    echo "pin is ${PINNED:0:12}, ${UPSTREAM_BRANCH} is ${COMMIT:0:12}, and no bundled driver differs"
+  fi
+elif [ "$CHECK" = "1" ]; then
   if [ "$drift" = "1" ]; then
     cat >&2 <<'MSG'
 

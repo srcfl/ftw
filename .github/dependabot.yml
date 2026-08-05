@@ -1,31 +1,171 @@
 # Dependabot opens PRs when newer dependency versions are published.
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
 #
-# Added for the CalDAV feature (#498), which depends on the emersion/* Go
-# libraries — most importantly github.com/emersion/go-webdav.
+# Conventions shared by every ecosystem below:
+#   - weekly on Monday, so bumps arrive as one predictable batch;
+#   - minor + patch grouped into a single PR per ecosystem; majors are left
+#     out of the group so each lands alone and gets a deliberate review;
+#   - a 7-day cooldown, so a freshly published release settles before we take it;
+#   - the `no-changeset` label, because a dependency bump carries no release
+#     note of its own. It is the documented escape hatch and short-circuits
+#     .github/workflows/changeset-check.yml before any Changesets step runs.
 version: 2
+
 updates:
   # ---- Go modules -------------------------------------------------------
   # The Go module lives in the go/ subdirectory, so `directory` must point
-  # there (not the repo root) or Dependabot finds no go.mod.
+  # there (not the repo root) or Dependabot finds no go.mod. Indirect
+  # requires move alongside the direct ones that pull them in.
+  #
+  # Go major bumps are import-path changes (/v2), which Dependabot cannot
+  # rewrite — expect majors here to surface rarely or not at all.
   - package-ecosystem: "gomod"
     directory: "/go"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "no-changeset"
     commit-message:
       prefix: "chore(deps)"
-    # Scope to the CalDAV stack. go-webdav ships tagged releases (v0.7.0), so
-    # its bump PRs are clean semver; go-ical is on an untagged pseudo-version,
-    # which Dependabot bumps only best-effort (tags are more reliable).
-    # Delete this `allow` block to watch EVERY Go dependency instead.
-    allow:
-      - dependency-name: "github.com/emersion/go-webdav"
-      - dependency-name: "github.com/emersion/go-ical"
-    # Move the emersion libs together — they're developed in lockstep, and
-    # go-webdav depends on go-ical, so a single grouped PR avoids churn.
+    cooldown:
+      default-days: 7
     groups:
-      emersion:
+      go-minor-patch:
         patterns:
-          - "github.com/emersion/*"
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- GitHub Actions ---------------------------------------------------
+  # Scans .github/workflows/**; `directory` is always "/" for this ecosystem.
+  # Majors are the interesting case here (checkout@v5 -> @v6).
+  #
+  # Caveat for reviewers: test.yml's path classifier matches no
+  # .github/workflows/** path, so an Actions bump skips every language suite
+  # and only the aggregate reports. Review these on their merits.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "no-changeset"
+    commit-message:
+      prefix: "chore(ci)"
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- Docker base images -----------------------------------------------
+  # Covers all three root Dockerfiles: the updater matches file names against
+  # an unanchored /dockerfile|containerfile/i, so Dockerfile.optimizer and
+  # Dockerfile.updater are picked up alongside Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "no-changeset"
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+    groups:
+      docker-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- Compose ----------------------------------------------------------
+  # A distinct ecosystem from `docker`. The only third-party image here is
+  # eclipse-mosquitto; the ghcr.io/srcfl/* and legacy ghcr.io/frahlg/* refs
+  # are first-party, and their tags are set by the release pipeline rather
+  # than by Dependabot, so they are ignored outright.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "no-changeset"
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "ghcr.io/srcfl/*"
+      - dependency-name: "ghcr.io/frahlg/*"
+    groups:
+      compose-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- Python (optimizer) -----------------------------------------------
+  # optimizer/pyproject.toml declares PEP 621 [project] dependencies under a
+  # hatchling backend; the pip updater reads that standard location whatever
+  # the build backend is. Deps are exact-pinned (==), so bumps are clean.
+  #
+  # Reviewer note: a python base-image or interpreter move must keep
+  # cvxpy/highspy wheel availability in mind.
+  - package-ecosystem: "pip"
+    directory: "/optimizer"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "no-changeset"
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+    groups:
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- npm (root) -------------------------------------------------------
+  # Version metadata plus the Changesets CLI only; web/ ships hand-written ES
+  # modules and has no package.json of its own.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "no-changeset"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

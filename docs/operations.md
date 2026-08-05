@@ -70,14 +70,15 @@ changing ownership or deleting any SQLite sidecar files.
 
 ## Configuration
 
-`config.example.yaml` and `go/internal/config` define the current schema.
+[`config.example.yaml`](../config.example.yaml) and
+[`go/internal/config`](../go/internal/config) define the current schema.
 Edits are validated before application. A rejected hot reload leaves the
 previous live configuration intact.
 
 Driver set and most control values reload live. Listener addresses, state
 paths and some integration transports are startup bindings; restart after
 changing them. When unsure, inspect the restart classification in
-`go/internal/config/restart_required.go`.
+[`go/internal/config/restart_required.go`](../go/internal/config/restart_required.go).
 
 ## LAN and API access
 
@@ -179,9 +180,35 @@ Verify the broker address from the same network namespace as core, then inspect
 broker and driver logs. Device credentials and topic mappings belong to the
 driver configuration.
 
+### `.local` names inside the container
+
+The image ships `libnss-mdns`, so ordinary glibc tools inside the container —
+`getent hosts zap.local` and `wget` — resolve `.local` the way they do on
+the host. `apt` wires `mdns4_minimal [NOTFOUND=return]` into
+`/etc/nsswitch.conf` when the package is installed; nothing else is needed at
+build time.
+
+At run time that path talks to `avahi-daemon` over a Unix socket, and a socket
+is not shared by host networking the way a port is. Mount it explicitly:
+
+```yaml
+    volumes:
+      - /run/avahi-daemon/socket:/run/avahi-daemon/socket:ro
+```
+
+Only add this on a host that actually runs `avahi-daemon` — the Raspberry Pi
+image does. Without the daemon Docker creates a *directory* at that path, which
+resolves nothing and is harmless but confusing; `ls -l` there is the quickest
+way to tell the two apart.
+
+This makes the container's own tooling agree with the host. Whether the FTW
+process itself resolves a device's `.local` name is a separate question,
+answered by `internal/mdnsresolve`.
+
 ### Configuration rejected
 
-Read the validation error, compare with `config.example.yaml`, fix the file and
+Read the validation error, compare with
+[`config.example.yaml`](../config.example.yaml), fix the file and
 save again. Do not delete `state.db` to resolve a YAML error.
 
 ### Port already in use
@@ -196,7 +223,8 @@ Stop the conflicting service or change the configured API port, then restart.
 
 `make build-arm64` and `make build-amd64` produce static Core and `ftw-backup`
 binaries.
-`deploy/ftw.service` is the reference systemd unit. A conventional layout is:
+[`deploy/ftw.service`](../deploy/ftw.service) is the reference systemd unit. A
+conventional layout is:
 
 ```text
 /opt/ftw/                 binary, web, bundled drivers, optional optimizer

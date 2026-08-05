@@ -169,17 +169,32 @@ describe("release metadata", () => {
     const presence = changesetCheckWorkflow.indexOf(
       "- name: Verify changeset present (or PR is allowlisted)",
     );
-    const guard =
-      "if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'";
+    // Checked as two separate conditions rather than one exact string: a
+    // step may carry a further guard of its own — the allowlist verdict
+    // does — and matching the concatenation would read that as a removed
+    // short-circuit.
+    const guards = [
+      "steps.version_pr.outputs.skip != 'true'",
+      "steps.label.outputs.skip != 'true'",
+    ];
 
     assert.ok(labelDecision >= 0, "workflow must resolve the label exemption");
     assert.ok(labelDecision < setup && setup < install && install < validate);
+    // `changeset status` fails whenever a package changed and no changeset
+    // was added, which is true of a docs-only PR. Reaching it before the
+    // allowlist verdict failed exactly the PRs the allowlist exempts.
+    assert.ok(
+      presence >= 0 && presence < setup,
+      "the allowlist verdict must be resolved before Changesets validation runs",
+    );
     for (const step of [setup, install, validate, presence]) {
-      assert.equal(
-        changesetCheckWorkflow.slice(step, step + 240).includes(guard),
-        true,
-        "every Changesets validation step must use the label guard",
-      );
+      for (const guard of guards) {
+        assert.equal(
+          changesetCheckWorkflow.slice(step, step + 320).includes(guard),
+          true,
+          `every Changesets validation step must keep the guard: ${guard}`,
+        );
+      }
     }
     assert.match(changesetCheckWorkflow, /GITHUB_STEP_SUMMARY/);
     assert.match(changesetCheckWorkflow, /npx changeset status/);

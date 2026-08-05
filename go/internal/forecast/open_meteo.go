@@ -17,10 +17,11 @@ import (
 // than cloud_area_fraction alone because "49% cloud in the sky" can
 // mean anything from full sun to overcast depending on which part of
 // the sky the Sun is behind — radiation measures what actually reaches
-// a horizontal surface. The downstream PV derivation simplifies to
-// `rated × (W/m² / 1000)` with a single calibration coefficient per
-// site (orientation + soiling), not the brittle `(1 - cloud)^1.5`
-// curve used when only cloud fraction is available.
+// a horizontal surface. The downstream PV derivation projects this
+// irradiance onto each complete `weather.pv_arrays` plane when present,
+// and uses the safe flat `rated × (W/m² / 1000)` estimate otherwise.
+// Forecast.Solar remains site-calibrated server-side; Open-Meteo uses the
+// configured arrays directly rather than ignoring them.
 type OpenMeteoProvider struct {
 	Client  *http.Client
 	BaseURL string

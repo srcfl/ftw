@@ -16,6 +16,7 @@
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
+import { activeCurrency } from "./price-units.js";
 
 class FtwSavingsCard extends FtwElement {
   static styles = `
@@ -525,7 +526,10 @@ class FtwSavingsCard extends FtwElement {
       return v.toFixed(2);
     };
 
-    totalEl.textContent = `${sign(savedSek)}${fmtSek(savedSek)} SEK ${savedSek >= 0 ? "saved" : "lost"}`;
+    // Savings are the same minor units the prices are in, so the headline
+    // carries the household's currency rather than a hardcoded SEK.
+    const cur = activeCurrency();
+    totalEl.textContent = `${sign(savedSek)}${fmtSek(savedSek)} ${cur} ${savedSek >= 0 ? "saved" : "lost"}`;
     if (Math.abs(pct) >= 0.5) {
       pctEl.textContent = `(${sign(pct)}${Math.abs(pct).toFixed(0)}%)`;
     } else {
@@ -545,7 +549,7 @@ class FtwSavingsCard extends FtwElement {
     const actualSek = actualOre / 100;
     const baselineSek = baselineOre / 100;
     subEl.innerHTML =
-      `Actual <b>${fmtSek(actualSek)} SEK</b>, no PV/battery <b>${fmtSek(baselineSek)} SEK</b>`;
+      `Actual <b>${fmtSek(actualSek)} ${cur}</b>, no PV/battery <b>${fmtSek(baselineSek)} ${cur}</b>`;
 
     // ---- Sparkline -----------------------------------------------------
     // Bars on a zero baseline, full height split 50/50 above/below.
@@ -572,7 +576,7 @@ class FtwSavingsCard extends FtwElement {
     }
     const axisAbs = maxAbs;
     if (maxAbs === 0) maxAbs = 1;
-    if (axisMaxEl) axisMaxEl.textContent = axisAbs > 0 ? '+' + fmtSekOre(axisAbs) : '0 SEK';
+    if (axisMaxEl) axisMaxEl.textContent = axisAbs > 0 ? '+' + fmtSekOre(axisAbs) : '0 ' + activeCurrency();
     if (axisMinEl) axisMinEl.textContent = hasNegative ? '−' + fmtSekOre(axisAbs) : '';
     const maxBarH = baselineY - 4; // 4 px headroom
 
@@ -592,7 +596,7 @@ class FtwSavingsCard extends FtwElement {
         hh = h;
         cls = "bar-neg";
       }
-      const title = `${d.day}: ${sign(v / 100)}${fmtSek(Math.abs(v) / 100)} SEK`;
+      const title = `${d.day}: ${sign(v / 100)}${fmtSek(Math.abs(v) / 100)} ${cur}`;
       parts.push(
         `<rect class="${cls}" x="${x.toFixed(2)}" y="${y.toFixed(2)}" ` +
         `width="${barW.toFixed(2)}" height="${Math.max(0.5, hh).toFixed(2)}">` +
@@ -618,11 +622,13 @@ function fmtDayShort(iso) {
   const d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
   return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
 }
+// Minor units in, major units out, labelled with the household's currency.
 function fmtSekOre(ore) {
+  const cur = activeCurrency();
   const sek = Math.abs(Number(ore) || 0) / 100;
-  if (sek >= 100) return sek.toFixed(0) + " SEK";
-  if (sek >= 10) return sek.toFixed(1) + " SEK";
-  return sek.toFixed(2) + " SEK";
+  if (sek >= 100) return sek.toFixed(0) + " " + cur;
+  if (sek >= 10) return sek.toFixed(1) + " " + cur;
+  return sek.toFixed(2) + " " + cur;
 }
 function fmtSavedSekOre(ore) {
   const v = Number(ore) || 0;

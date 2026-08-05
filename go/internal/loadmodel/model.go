@@ -32,7 +32,10 @@ package loadmodel
 
 import (
 	"math"
+	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/modelstate"
 )
 
 // Buckets is the number of hour-of-week buckets: 7 days × 24 hours.
@@ -62,6 +65,13 @@ const HeatingMinDeltaT = 3.0
 // District-heating-replacement territory; well above any single-family
 // home. Clamp prevents one anomalous sample from blowing up the fit.
 const HeatingCoefMaxW = 1500.0
+
+// PlausibleLoadHeadroom multiplies the main fuse capacity to get the
+// point past which a reading must be a fault. Above 1.0 because a fuse
+// tolerates brief overload and a meter can overshoot a step; well below
+// anything a real house sustains, so a genuine 11 kW hour on a 25 A
+// service is nowhere near it.
+const PlausibleLoadHeadroom = 1.25
 
 // Profile selects which learned occupancy profile is used for training
 // and prediction.
@@ -104,6 +114,13 @@ type Model struct {
 	MAE               float64         `json:"mae"`
 	Alpha             float64         `json:"alpha"` // EMA coefficient for bucket updates
 	PriorScale        float64         `json:"prior_scale,omitempty"`
+
+	// MaxPlausibleW is the physical ceiling a sample must fall under to be
+	// trained on: main fuse capacity plus headroom. Derived from configured
+	// hardware and never from what the model has learned, so it cannot be
+	// talked down by a model that has mislearned. 0 disables the check —
+	// the state a site with no fuse configuration is in.
+	MaxPlausibleW float64 `json:"max_plausible_w,omitempty"`
 }
 
 // typicalPrior returns an approximate W load for a given hour-of-week
@@ -203,6 +220,69 @@ func HourOfWeek(t time.Time) int {
 	return wd*24 + u.Hour()
 }
 
+// heatingGain is the load a learned slope predicts at an outdoor
+// temperature: linear in the shortfall below the reference, zero above it.
+// One definition, used by both Predict and Update and probed by
+// featureProbe — HeatingW_per_degC means nothing except against this shape.
+func heatingGain(coefWPerDegC, tempC float64) float64 {
+	if tempC >= HeatingReferenceC {
+		return 0
+	}
+	return coefWPerDegC * (HeatingReferenceC - tempC)
+}
+
+// featureSemantics declares what the numbers this model learns from mean. It
+// is the half of the fingerprint a probe cannot derive: change what the
+// sampler subtracts before calling Update — stop netting out the EV, say —
+// and every bucket mean is a measurement of something else, while nothing in
+// the model's own code has moved.
+//
+// CHANGE THIS STRING in the commit that changes what a caller feeds in.
+// Changes to the bucket indexing or the heating shape need no edit here —
+// featureProbe moves the fingerprint on its own.
+const featureSemantics = "loadmodel/1 load=site_w_less_pv_bat_ev_v2x temp=outdoor_c target=house_w"
+
+// featureProbe pins the two things whose change would invalidate stored
+// coefficients: which bucket a moment maps to, and the shape the heating
+// slope is measured against.
+//
+// The instants are given in a non-UTC zone and sit near midnight on purpose.
+// Drop the UTC coercion in HourOfWeek and both the hour and the weekday move
+// for those — which is precisely the defect commit 3255deba fixed, the one
+// that silently misaligned every learned bucket across a DST change.
+//
+// Deliberately absent: typicalPrior. A bucket mean is measured watts and stays
+// meaningful when the prior it started from is retuned; the prior only sets
+// the fallback for buckets nobody has observed yet. Discarding months of
+// learned buckets over a prior tweak would cost more than it protects.
+func featureProbe() []float64 {
+	out := []float64{float64(Buckets), HeatingReferenceC}
+	zone := time.FixedZone("probe", 2*60*60)
+	for _, t := range []time.Time{
+		time.Date(2024, 1, 1, 0, 30, 0, 0, time.UTC),
+		time.Date(2024, 3, 31, 1, 30, 0, 0, zone),
+		time.Date(2024, 6, 21, 23, 45, 0, 0, zone),
+		time.Date(2024, 10, 27, 0, 15, 0, 0, zone),
+		time.Date(2024, 12, 24, 18, 0, 0, 0, time.UTC),
+	} {
+		out = append(out, float64(HourOfWeek(t)))
+	}
+	for _, tempC := range []float64{-20, -3, 0, 10, 17.5, 18, 25} {
+		out = append(out, heatingGain(1, tempC))
+	}
+	return out
+}
+
+var featureHash = sync.OnceValue(func() string {
+	return modelstate.Fingerprint(featureSemantics, featureProbe())
+})
+
+// FeatureHash fingerprints the feature space the bucket means and the heating
+// slope are fitted against. Stored state is only restored when its recorded
+// hash matches this one; see internal/modelstate for why, and service.go for
+// what happens when it does not.
+func FeatureHash() string { return featureHash() }
+
 // Predict returns the expected load (W, non-negative) at time t with
 // outdoor temperature tempC (0 if unknown). Blends per-bucket EMA with
 // the typical prior by sample count, then adds the heating correction.
@@ -215,11 +295,7 @@ func (m Model) Predict(t time.Time, tempC float64) float64 {
 	}
 	prior := m.prior(idx)
 	base := trust*b.Mean + (1-trust)*prior
-	heating := 0.0
-	if tempC < HeatingReferenceC {
-		heating = m.HeatingW_per_degC * (HeatingReferenceC - tempC)
-	}
-	y := base + heating
+	y := base + heatingGain(m.HeatingW_per_degC, tempC)
 	if y < 0 {
 		return 0
 	}
@@ -240,6 +316,28 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	if actualLoadW < 0 {
 		return false
 	}
+
+	// Physical bound — the only sample filter this model needs, and the
+	// first thing it does. A house cannot draw more than its main fuse
+	// passes, so a reading above it is a fault and must touch nothing:
+	// not the buckets, not MAE, and not the heating coefficient. Running
+	// it after the heating fit let one cold-weather meter fault move
+	// HeatingW_per_degC while Update still reported no update applied,
+	// and repeated faults could walk the coefficient to its ceiling.
+	//
+	// A household's real load is strongly multimodal: a few hundred watts
+	// of baseline for most of the day, then 11 kW when the sauna, oven and
+	// car overlap. Both are true readings. Nothing about a residual's size
+	// distinguishes "unusual but real" from "wrong", which is why this is
+	// the only rejection left — see the git history for the MAE band that
+	// used to sit below, and what it cost.
+	//
+	// Short-term noise is handled a layer down: telemetry runs a Kalman
+	// filter per signal and this model reads the smoothed values.
+	if m.MaxPlausibleW > 0 && actualLoadW > m.MaxPlausibleW {
+		return false
+	}
+
 	idx := HourOfWeek(t)
 	b := &m.Bucket[idx]
 	predicted := m.Predict(t, tempC)
@@ -273,14 +371,6 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		}
 	}
 
-	// Outlier filter: once we have some history, reject 10× MAE residuals.
-	if m.Samples > 50 {
-		band := math.Max(m.MAE*10, 200)
-		if math.Abs(err) > band {
-			return false
-		}
-	}
-
 	// Bucket update: exact running mean for the first 10 samples (crisp
 	// early convergence), EMA after (smooth drift as the home evolves).
 	// Subtract the current heating-gain estimate so the bucket learns
@@ -293,10 +383,7 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	// though a real baseline — fridge, server, standby — always exists).
 	// Instead, skip the bucket update entirely for this sample and let
 	// existing Samples + Mean stand. Global Samples and MAE still update.
-	heatEst := 0.0
-	if tempC < HeatingReferenceC {
-		heatEst = m.HeatingW_per_degC * (HeatingReferenceC - tempC)
-	}
+	heatEst := heatingGain(m.HeatingW_per_degC, tempC)
 	if heatEst < actualLoadW {
 		baseSample := actualLoadW - heatEst
 		if b.Samples < 10 {

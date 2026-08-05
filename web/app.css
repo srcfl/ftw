@@ -136,30 +136,11 @@ body.ftw-app .version {
   border-radius: 8px;
 }
 
-/* Green connection dot — the element itself is the colored disc
-   (background: currentColor picks up .connected/.disconnected from
-   style.css), wrapped in a 2px white ring + hairline --line outer
-   outline via layered box-shadows so it reads as a "status light"
-   on both dark and paper themes. The ● glyph is hidden (font-size 0)
-   since the background is doing the drawing now. */
-body.ftw-app .conn-status {
-  display: inline-grid;
-  place-items: center;
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  border-radius: 999px;
-  background: currentColor;
-  box-shadow: 0 0 0 2px #fff, 0 0 0 3px var(--line);
-  font-size: 0;
-  line-height: 1;
-}
-
-/* When the update badge has something to announce (see
-   update-badge.js's _render toggling body.has-update) the green
-   connection dot yields the slot to the blue blinking update dot —
-   two dots next to each other was too noisy. */
-body.ftw-app.has-update #conn-status { display: none; }
+/* The connection dot used to live here as its own #conn-status element,
+   hidden by a body.has-update rule whenever the update badge had
+   something to say. Both now render inside <ftw-update-badge> (shadow
+   DOM), so one component decides what the header's status slot shows
+   instead of two elements racing to hide each other. */
 body.ftw-app .settings-btn {
   background: transparent;
   border: 1px solid var(--line);
@@ -1460,6 +1441,30 @@ body.ftw-app .plan-help {
   max-width: 68ch;
 }
 body.ftw-app .plan-actions { gap: 10px; display: flex; align-items: center; }
+
+/* The "why is it doing that?" escape hatch, below the chart because
+   that's where the question forms. Understated: it should be findable
+   when something looks wrong, not compete with the plan itself. */
+body.ftw-app .plan-help-request {
+  margin: 10px 0 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+body.ftw-app .plan-help-request button { padding-left: 0; }
+body.ftw-app .plan-help-request button[disabled] {
+  opacity: 0.6;
+  cursor: default;
+  text-decoration: none;
+}
+body.ftw-app .plan-help-request small {
+  display: block;
+  font-family: var(--sans);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin-top: 2px;
+  max-width: 68ch;
+}
 
 body.ftw-app .more-actions {
   display: grid;

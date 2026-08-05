@@ -16,6 +16,15 @@
     return w / 1000;
   }
   function isFlowIdle(kw) { return Math.abs(kw) <= flowIdleKw(); }
+  // Prices arrive as minor units per kWh; what to call them depends on the
+  // configured currency. window.FTWUnits is set when
+  // components/price-units.js loads — same read-at-use-time pattern as
+  // flowIdleKw above, with öre as the no-modules fallback.
+  function fmtPricePerKwh(minorPerKwh) {
+    const u = typeof window !== "undefined" && window.FTWUnits;
+    if (!u) return minorPerKwh.toFixed(0) + " öre/kWh";
+    return u.formatPricePerKwh(minorPerKwh, u.activeCurrency());
+  }
   const CHART_POINTS = 360;          // up to 30 min of points (server pushes every ~5s)
   const CHART_RANGE_MS = {           // visible time window per range option
     "5m": 5 * 60 * 1000,
@@ -223,7 +232,10 @@
   const batW = $("bat-w");
   const batDir = $("bat-dir");
   const batSoc = $("bat-soc");
-  const connStatus = $("conn-status");
+  // The header's status light lives inside <ftw-update-badge> so one slot
+  // decides what the corner says — connection, updates and optimizer
+  // health used to be separate elements hiding each other with CSS.
+  const updateBadge = document.querySelector("ftw-update-badge");
   const overviewHealth = $("overview-health");
   const overviewHealthLabel = $("overview-health-label");
   const driversGrid = $("drivers-grid");
@@ -1717,7 +1729,7 @@
       { name: "Battery",   val: a.battery_w, color: "#f59e0b", showSign: true },
       { name: "Grid",      val: a.grid_w,    color: "#ef4444", showSign: true },
       { name: "SoC",       val: a.soc_pct + "%", color: "#60a5fa", literal: true },
-      { name: "Price",     val: a.price_ore.toFixed(0) + " öre/kWh", color: "#fbbf24", literal: true },
+      { name: "Price",     val: fmtPricePerKwh(a.price_ore), color: "#fbbf24", literal: true },
     ];
 
     var lineHeight = 16;
@@ -2427,15 +2439,18 @@
   }
 
   function setConnected(ok) {
+    // update-badge.js is deferred, so on the first tick or two the element
+    // may not have upgraded yet and the method is absent. Polling re-asserts
+    // this every cycle and the component defaults to connected, which is
+    // what the old #conn-status markup shipped as.
+    if (updateBadge && typeof updateBadge.setConnected === "function") {
+      updateBadge.setConnected(ok);
+    }
     if (ok) {
-      connStatus.className = "conn-status connected";
-      connStatus.title = "Connected";
       if (overviewHealth) overviewHealth.classList.add("is-connected");
       if (overviewHealthLabel) overviewHealthLabel.textContent = "Live";
       // render() will update lastUpdate with timestamp
     } else {
-      connStatus.className = "conn-status disconnected";
-      connStatus.title = "Disconnected";
       if (overviewHealth) overviewHealth.classList.remove("is-connected");
       if (overviewHealthLabel) overviewHealthLabel.textContent = "Connection lost";
       lastUpdate.textContent = "Connection lost";
@@ -3509,11 +3524,10 @@
       evModalDriver = null;
     });
 
-    // Planet click routing. EV → EV modal scoped to driver. Battery →
-    // <ftw-battery-control> manual-hold modal (no driver scoping; the
-    // hold applies to the aggregate battery setpoint). Grid → grid
-    // modal hosting the peak-import ceiling and the (legacy) grid
-    // target setpoint.
+    // Planet click routing. EV → EV modal scoped to driver. A battery
+    // driver opens its own short hold; the merged battery opens pool
+    // control. Grid → grid modal hosting the peak-import ceiling and
+    // the legacy grid target setpoint.
     var gridModal = document.getElementById("grid-modal");
     if (energyFlowEl) {
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
@@ -3524,7 +3538,7 @@
           var clicked = drv[d.name || ""] || {};
           if (clicked.observe_only) return;
           var bc = document.getElementById("battery-control");
-          if (bc && typeof bc.open === "function") bc.open();
+          if (bc && typeof bc.open === "function") bc.open(d.name || d.id || "");
         }
         if (d.role === "pv") {
           var pc = document.getElementById("pv-control");

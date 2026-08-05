@@ -19,6 +19,14 @@
     return String(path || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
   }
 
+  // Header status marks. Inline SVG rather than font glyphs: at 16px the
+  // three announcements have to be separable by silhouette alone, because
+  // colour is not reliable for every operator and the marks sit in the
+  // same slot. A glyph gives you weight and hue; a path gives you shape.
+  const ICON_UPDATE ='<svg class="icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 1.7v6.2"/><path d="M5.3 5.5 8 8.4l2.7-2.9"/><rect x="1.8" y="10.5" width="12.4" height="3.8" rx="1.2"/><path d="M4.4 12.4h.01"/></svg>';
+  const ICON_WARNING = '<svg class="icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M8 2.3 14.9 13.7H1.1z"/><path d="M8 6.4v3"/><path d="M8 11.6h.01"/></svg>';
+  const ICON_DOT = '<svg class="icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="4.2" fill="currentColor"/></svg>';
+
   // Upstream version checks don't change often; 3 h is plenty of
   // headroom to surface a new release on a normal workday without
   // hammering /api/version/check (which can hit GitHub each tick if
@@ -54,6 +62,7 @@
       this._driverCatalog = null;
       this._driverVersions = {};
       this._componentAction = "";
+      this._connected = true;         // header liveness light; see setConnected()
       this._render();
     }
 
@@ -95,6 +104,21 @@
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
+    }
+
+    // Public: called by app.js on every poll tick. The header's liveness
+    // light used to be a separate #conn-status span; folding it in here
+    // means one slot decides what the corner says instead of two elements
+    // hiding each other with CSS. app.js runs before this deferred script,
+    // so the first tick or two may land before the element upgrades and
+    // find no method — harmless, since polling re-asserts the state within
+    // one cycle and the constructor defaults to connected, exactly what
+    // the old markup shipped as.
+    setConnected(ok) {
+      const next = !!ok;
+      if (next === this._connected) return; // avoid re-rendering the modal mid-interaction
+      this._connected = next;
+      this._render();
     }
 
     // Public: called by the header #version click handler in index.html so
@@ -651,29 +675,42 @@
       const activeSolver = optimizer && optimizer.active_solver;
       const optimizerFallbackActive = !!(activeSolver && (activeSolver.fallback || activeSolver.engine === "go-dp"));
       const optimizerReason = optimizer && (optimizer.fallback_reason || optimizer.health_error || optimizer.error);
-      const badgeTitle = showOptimizerWarning
-        ? (optimizerFallbackActive ? "Planner fallback active" : "Optimizer unavailable") + (optimizerReason ? ": " + optimizerReason : "")
-        : (pending.core && info.latest
-          ? `Core update available: ${info.latest}`
-          : pending.total === 1 ? "1 component update available" : `${pending.total} component updates available`);
+      const warningTitle = (optimizerFallbackActive ? "Planner fallback active" : "Optimizer unavailable") + (optimizerReason ? ": " + optimizerReason : "");
+      const updateTitle = pending.core && info.latest
+        ? `Core update available: ${info.latest}`
+        : pending.total === 1 ? "1 component update available" : `${pending.total} component updates available`;
 
-      // Surface to the rest of the page via body class: the header's
-      // green #conn-status dot sits right next to this badge, and
-      // having both visible at once clutters the corner. CSS in
-      // app.css hides #conn-status when .has-update is on, so the
-      // two dots swap instead of stacking.
-      if (typeof document !== "undefined" && document.body) {
-        document.body.classList.toggle("has-update", !!showBadge);
+      // One header slot, three announcements. Connection loss outranks
+      // the other two and shows alone: the update and optimizer payloads
+      // behind them are whatever we last managed to fetch, so flagging a
+      // possibly-stale update while the site is unreachable is worse than
+      // saying nothing. Otherwise an update and a degraded optimizer are
+      // unrelated facts and both get their own mark — before this the
+      // warning suppressed the update entirely (#693).
+      const marks = [];
+      if (!this._connected) {
+        marks.push(`<span part="badge" class="mark offline" role="img" title="Connection lost" aria-label="Connection lost">${ICON_DOT}</span>`);
+      } else {
+        if (showDot) {
+          marks.push(`<button part="badge" class="mark update" title="${escapeHTML(updateTitle)}" aria-label="${escapeHTML(updateTitle)}">${ICON_UPDATE}</button>`);
+        }
+        if (showOptimizerWarning) {
+          marks.push(`<button part="badge" class="mark warning" title="${escapeHTML(warningTitle)}" aria-label="${escapeHTML(warningTitle)}">${ICON_WARNING}</button>`);
+        }
+        if (!showBadge) {
+          marks.push(`<span part="badge" class="mark ok" role="img" title="Connected, nothing pending" aria-label="Connected, nothing pending">${ICON_DOT}</span>`);
+        }
       }
 
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
-        <button part="badge" class="badge${showOptimizerWarning ? " warning" : ""}${showBadge ? "" : " hidden"}" title="${escapeHTML(badgeTitle)}" aria-label="${showOptimizerWarning ? "Planner fallback active" : "Update available"}">${showOptimizerWarning ? "!" : "●"}</button>
+        <span class="marks">${marks.join("")}</span>
         ${this._phase !== "idle" ? this._modalHTML() : ""}
       `;
 
-      const btn = this._shadow.querySelector(".badge");
-      if (btn) btn.addEventListener("click", () => this.open());
+      this._shadow.querySelectorAll("button.mark").forEach((btn) => {
+        btn.addEventListener("click", () => this.open());
+      });
 
       const modal = this._shadow.querySelector(".modal");
       if (modal) this._wireModal(modal);
@@ -1257,25 +1294,50 @@
       return `
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
-        .badge {
-          /* Amber pulse — the system's single accent (the shared design system). The
-             green connection dot next door is reserved for liveness
-             state; the amber dot is an actionable affordance ("update
-             available, open me"). Pulsing animation stays so it reads
-             as actionable, not a static state. */
+        /* The header's status slot. Marks sit side by side when an update
+           and a degraded optimizer are pending at once. */
+        .marks { display: inline-flex; align-items: center; gap: 0.1rem; }
+        .mark {
           appearance: none;
           background: transparent;
-          color: var(--accent-e, #f59e0b);
           border: none;
-          cursor: pointer;
-          font-size: 1.1rem;
-          line-height: 1;
-          padding: 0 0.3rem;
-          animation: pulse 1.4s ease-in-out infinite;
+          padding: 0 0.15rem;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          line-height: 0;
         }
-        @keyframes pulse {
+        .mark .icon { display: block; width: 16px; height: 16px; }
+        button.mark { cursor: pointer; }
+
+        /* An update waiting is an affordance — "something is downloadable,
+           open me" — so it fades to ask for attention. Blue keeps it clear
+           of every alarm colour in the palette; nothing is wrong. */
+        .mark.update { color: var(--cyan, #38bdf8); animation: fade 1.8s ease-in-out infinite; }
+
+        /* A degraded optimizer is a state, not an affordance: the planner
+           has fallen back to the Go solver, which often needs no action.
+           The triangle carries that on silhouette alone, so the two marks
+           stay apart for an operator who cannot separate them by colour
+           — the failure that got the old shared amber dot misread as an
+           update icon in the field (#690, #693). */
+        .mark.warning { color: var(--amber, #f59e0b); animation: fade 1.8s ease-in-out infinite; }
+
+        /* Nothing pending: the quiet "all good" light. Static, because a
+           steady state should not compete with the two that want reading. */
+        .mark.ok { color: var(--green-e, #22c55e); }
+
+        /* Connection lost outranks and replaces the others — see _render. */
+        .mark.offline { color: var(--red-e, #ef4444); }
+
+        @keyframes fade {
           0%, 100% { opacity: 1; }
-          50%      { opacity: 0.45; }
+          50%      { opacity: 0.3; }
+        }
+        /* Fading is the only cue here that is pure motion; shape and colour
+           already carry the meaning without it. */
+        @media (prefers-reduced-motion: reduce) {
+          .mark { animation: none; }
         }
         .backdrop {
           position: fixed; inset: 0;

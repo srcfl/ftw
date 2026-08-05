@@ -88,14 +88,20 @@ jobs:
         with:
           ref: ${{ needs.tag.outputs.version }}
 
+      # drivers/ is gitignored and fetched from the commit pinned in
+      # drivers/BUNDLED_SOURCE.json. The image copies it, so it has to exist
+      # in the build context before buildx runs.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to canonical GHCR namespace
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.5.2
         with:
           registry: ghcr.io
           username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
@@ -103,7 +109,7 @@ jobs:
 
       - name: Build and publish beta image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -125,7 +131,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
       - name: Login to compatibility GHCR namespace
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.5.2
         with:
           registry: ghcr.io
           username: frahlg

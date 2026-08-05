@@ -10,9 +10,9 @@ make dispatch unsafe.
 
 | Module | Source | Runtime | Responsibility |
 |---|---|---|---|
-| Core | `go/cmd/ftw`, `go/internal`, `web` | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
-| Drivers | Editable source in `srcfl/device-drivers`; bundled recovery in `drivers/*.lua`; host in `go/internal/drivers` | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | `optimizer`, contract in `go/internal/mpc` | Optional Python service/process | Solve the long-horizon mathematical plan |
+| Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
+| Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
+| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Optional Python service/process | Solve the long-horizon mathematical plan |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
@@ -38,9 +38,10 @@ changing power math.
 
 ## Core
 
-`go/cmd/ftw/main.go` is the composition root. It wires configuration, driver
-registry, telemetry, persistent state, control, planning, API and integrations.
-Packages under `go/internal` should stay cohesive and communicate through
+[`go/cmd/ftw/main.go`](../go/cmd/ftw/main.go) is the composition root. It wires
+configuration, driver registry, telemetry, persistent state, control, planning,
+API and integrations.
+Packages under [`go/internal`](../go/internal) should stay cohesive and communicate through
 narrow Go interfaces or data types instead of reaching into one another's
 storage.
 
@@ -57,7 +58,8 @@ telemetry → control/planner → core validation and safety → driver command
 
 The in-memory telemetry store owns latest readings and driver health. SQLite
 owns durable configuration state, history, forecasts, prices, device identity
-and learned model state. Database access stays in `go/internal/state`.
+and learned model state. Database access stays in
+[`go/internal/state`](../go/internal/state).
 
 The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
@@ -73,7 +75,8 @@ may later consume an exact public commit for other products or a higher support
 level.
 
 Each Lua artifact still contains its own `DRIVER` metadata and implements the
-FTW lifecycle. `go/internal/drivers/lua.go` is the source of truth for FTW's
+FTW lifecycle. [`go/internal/drivers/lua.go`](../go/internal/drivers/lua.go) is
+the source of truth for FTW's
 host API and capability sandbox. Network and protocol capabilities must be
 granted in configuration.
 
@@ -107,7 +110,8 @@ Drivers and the optimizer release on their own schedules, so core cannot assume
 the version on the other side of either contract. Both use the same rule.
 
 Each side declares the **window** of contract versions it speaks — core in
-`go/internal/components` and `go/internal/optimizercontract`, a driver in its
+[`go/internal/components`](../go/internal/components) and
+[`go/internal/optimizercontract`](../go/internal/optimizercontract), a driver in its
 `host_api_min`/`host_api_max` metadata, the optimizer in its handshake reply.
 An overlap of one version is enough. Declaring a single version means a window
 of one.
@@ -140,19 +144,21 @@ relevant code are the detailed executable specification.
 
 ## Configuration and interfaces
 
-`config.example.yaml` and the structs plus validation in
-`go/internal/config` define the configuration schema. The handlers registered
-in `go/internal/api/api.go` define the HTTP surface. Driver metadata defines
+[`config.example.yaml`](../config.example.yaml) and the structs plus validation
+in [`go/internal/config`](../go/internal/config) define the configuration
+schema. The handlers registered in
+[`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
 Some startup bindings cannot be hot-reloaded, including state paths, API
 listener and selected integration transports. Normal device and control
-configuration is reloaded through `go/internal/configreload`.
+configuration is reloaded through
+[`go/internal/configreload`](../go/internal/configreload).
 
 ## Future remote access boundary
 
 Remote Sourceful access is not implemented by the LAN/API hardening layer. The
-central request policy in `go/internal/api` is the expansion point: a future
+central request policy in [`go/internal/api`](../go/internal/api) is the expansion point: a future
 protected remote request must present a locally verifiable principal and access
 proof there before an API handler runs.
 
@@ -234,7 +240,7 @@ There is no edge channel. See [self-update.md](self-update.md).
 
 1. [site-convention.md](site-convention.md)
 2. this document
-3. `go/cmd/ftw/main.go`
+3. [`go/cmd/ftw/main.go`](../go/cmd/ftw/main.go)
 4. the package or driver being changed and its colocated tests
 5. [writing-a-driver.md](writing-a-driver.md) for hardware support
 6. [operations.md](operations.md) for deployment and recovery

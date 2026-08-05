@@ -2,11 +2,11 @@ package pvmodel
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/modelstate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -17,6 +17,18 @@ import (
 // features and would silently misalign if restored under the current
 // UTC-based Features(). Fresh init + ~50 samples retrains.
 const stateKey = "pvmodel/state_utc"
+
+// legacyFeatureHash is the fingerprint of the feature space in force when the
+// envelope was introduced. State written before then carries no fingerprint,
+// but it was fitted against exactly this space, so it is still worth
+// restoring — and only while the running build still computes that space.
+//
+// This constant is frozen. The first change to Features moves FeatureHash()
+// away from it, and unversioned state is discarded from then on, which is the
+// whole point. Never update it to match a new FeatureHash(): that would
+// re-arm the migration under features the old coefficients were never fitted
+// against, restoring exactly the silent-wrong-model fault this guards.
+const legacyFeatureHash = "fd42eb2a7c1e9f55"
 
 // ClearSkyFunc is injected by main.go to decouple pvmodel from the
 // forecast package. Returns clear-sky GHI (W/m²) for the site's lat/lon
@@ -71,7 +83,24 @@ func NewService(st *state.Store, tel *telemetry.Store, cs ClearSkyFunc, cf Cloud
 	if st != nil {
 		if js, ok := st.LoadConfig(stateKey); ok && js != "" {
 			var m Model
-			if err := json.Unmarshal([]byte(js), &m); err == nil && m.Forgetting > 0 {
+			res := modelstate.Unwrap(js, FeatureHash(), legacyFeatureHash, &m)
+			reason := res.Reason
+			if res.OK() && m.Forgetting <= 0 {
+				// No forgetting factor means no usable RLS state, whatever
+				// the envelope says. Kept as a second net below the hash.
+				reason = "no forgetting factor"
+			}
+			if reason != "" {
+				// Info, not Warn: a cold start is the designed response to
+				// state we cannot vouch for, and ~50 daylight samples
+				// rebuild it. Both hashes go in the line so an operator can
+				// tell "the features changed under me" from "the file is
+				// damaged" without a debugger.
+				slog.Info("pvmodel: discarding learned state, cold starting",
+					"reason", reason,
+					"stored_hash", res.StoredHash,
+					"current_hash", FeatureHash())
+			} else {
 				m.RatedW = ratedW // config may have changed rated value
 				// Migrate pre-#134 persisted models: Beta[0] was a free
 				// intercept that drifted during training and leaked into
@@ -81,7 +110,9 @@ func NewService(st *state.Store, tel *telemetry.Store, cs ClearSkyFunc, cf Cloud
 				// self-heal kicks in.
 				m.Beta[0] = 0
 				s.model = &m
-				slog.Info("pvmodel restored", "samples", m.Samples, "mae_w", m.MAE, "quality", m.Quality())
+				slog.Info("pvmodel restored",
+					"samples", m.Samples, "mae_w", m.MAE, "quality", m.Quality(),
+					"unversioned", res.Legacy())
 			}
 		}
 	}
@@ -399,7 +430,7 @@ func (s *Service) persist() {
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
 	s.mu.RLock()
-	js, err := json.Marshal(s.model)
+	js, err := modelstate.Wrap(FeatureHash(), s.model)
 	s.mu.RUnlock()
 	if err != nil {
 		return

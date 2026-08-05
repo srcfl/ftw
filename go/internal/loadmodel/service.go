@@ -2,13 +2,13 @@ package loadmodel
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/modelstate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -27,6 +27,19 @@ const (
 	stateKeyPrefix  = "loadmodel/state_utc:"
 	profileStateKey = "loadmodel/profile"
 )
+
+// legacyFeatureHash is the fingerprint of the feature space in force when the
+// envelope was introduced. State written before then — both the per-profile
+// keys and legacyStateKey — carries no fingerprint, but it was fitted against
+// exactly this space, so it is still worth restoring, and only while the
+// running build still computes that space.
+//
+// This constant is frozen. The first change to the bucket indexing or the
+// heating shape moves FeatureHash() away from it, and unversioned state is
+// discarded from then on, which is the whole point. Never update it to match
+// a new FeatureHash(): that would re-arm the migration under features the old
+// coefficients were never fitted against.
+const legacyFeatureHash = "f79385ff0412d66b"
 
 func stateKey(profile Profile) string { return stateKeyPrefix + string(profile) }
 
@@ -61,7 +74,7 @@ type Service struct {
 }
 
 // NewService constructs + restores from state if present.
-func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW float64) *Service {
+func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW, maxPlausibleW float64) *Service {
 	s := &Service{
 		Store:          st,
 		Tele:           tel,
@@ -75,6 +88,7 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 	}
 	for _, profile := range Profiles() {
 		s.models[profile] = newProfileModel(peakW, profile)
+		s.models[profile].MaxPlausibleW = maxPlausibleW
 	}
 	if st != nil {
 		loadedProfiles := make(map[Profile]bool)
@@ -85,7 +99,7 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 		}
 		for _, profile := range Profiles() {
 			if js, ok := st.LoadConfig(stateKey(profile)); ok && js != "" {
-				if m, ok := restoreModel(js, peakW, profile); ok {
+				if m := restoreModel(js, peakW, maxPlausibleW, profile); m != nil {
 					s.models[profile] = m
 					loadedProfiles[profile] = true
 					slog.Info("loadmodel restored",
@@ -94,19 +108,16 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 				}
 			}
 		}
-		if js, ok := st.LoadConfig(legacyStateKey); ok && js != "" {
-			var m Model
-			if err := json.Unmarshal([]byte(js), &m); err == nil && m.Alpha > 0 {
-				if !loadedProfiles[ProfileHome] {
-					m.PeakW = peakW // config may have changed
-					if m.PriorScale <= 0 {
-						m.PriorScale = 1
-					}
-					s.models[ProfileHome] = &m
-					slog.Info("loadmodel migrated legacy state",
-						"profile", ProfileHome, "samples", m.Samples,
-						"mae_w", m.MAE, "quality", m.Quality())
-				}
+		if js, ok := st.LoadConfig(legacyStateKey); ok && js != "" && !loadedProfiles[ProfileHome] {
+			// The pre-profile key. It goes through the same restore as every
+			// other blob, so the feature fingerprint gates it too: this is
+			// the oldest state on any box, and the likeliest to have been
+			// fitted against a feature space nobody remembers.
+			if m := restoreModel(js, peakW, maxPlausibleW, ProfileHome); m != nil {
+				s.models[ProfileHome] = m
+				slog.Info("loadmodel migrated legacy state",
+					"profile", ProfileHome, "samples", m.Samples,
+					"mae_w", m.MAE, "quality", m.Quality())
 			}
 		}
 	}
@@ -125,19 +136,38 @@ func (s *Service) SetSiteMeter(name string) {
 	s.mu.Unlock()
 }
 
-func restoreModel(js string, peakW float64, profile Profile) (*Model, bool) {
+// restoreModel rebuilds one profile's model from stored state, or returns nil
+// when that state cannot be trusted and the caller must cold start.
+func restoreModel(js string, peakW, maxPlausibleW float64, profile Profile) *Model {
 	var m Model
-	if err := json.Unmarshal([]byte(js), &m); err != nil || m.Alpha <= 0 {
-		return nil, false
+	res := modelstate.Unwrap(js, FeatureHash(), legacyFeatureHash, &m)
+	if !res.OK() || m.Alpha <= 0 {
+		reason := res.Reason
+		if reason == "" {
+			// Restored, but with no EMA coefficient it cannot predict.
+			// Kept as a second net below the hash.
+			reason = "no EMA coefficient"
+		}
+		// Info, not Warn: a cold start is the designed response to state we
+		// cannot vouch for. Both hashes go in the line so an operator can
+		// tell "the features changed under me" from "the file is damaged".
+		// Unlike the PV twin this costs weeks of bucket coverage, which is
+		// why the fingerprint is deliberately blind to prior retuning — see
+		// featureProbe.
+		slog.Info("loadmodel: discarding learned state, cold starting",
+			"profile", profile, "reason", reason,
+			"stored_hash", res.StoredHash, "current_hash", FeatureHash())
+		return nil
 	}
-	m.PeakW = peakW // config may have changed
+	m.PeakW = peakW                 // config may have changed
+	m.MaxPlausibleW = maxPlausibleW // ditto — fuse size is editable
 	if m.PriorScale <= 0 {
 		m.PriorScale = newProfileModel(peakW, profile).PriorScale
 	}
 	// Repair any bucket means that were poisoned by the pre-guard bug where
 	// heating-subtracted samples were clamped to 0 and stored in the EMA.
 	m.repairPoisonedBuckets()
-	return &m, true
+	return &m
 }
 
 // Model returns a snapshot.
@@ -397,7 +427,7 @@ func (s *Service) persist() error {
 		if s.models[profile] == nil {
 			continue
 		}
-		js, err := json.Marshal(s.models[profile])
+		js, err := modelstate.Wrap(FeatureHash(), s.models[profile])
 		if err != nil {
 			s.mu.RUnlock()
 			return err

@@ -454,6 +454,38 @@ func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
 	}
 }
 
+// A battery that answers polls but rejects every command is not a battery
+// the plan can spend. Counting its capacity and its charge/discharge limits
+// makes the optimizer promise energy that never arrives.
+func TestOnlineFleetParamsDropsCommandFaultedBattery(t *testing.T) {
+	tel := telemetry.NewStore()
+	socA := 0.20
+	socRefusing := 0.95
+	tel.Update("a", telemetry.DerBattery, 0, &socA, nil)
+	tel.DriverHealthMut("a").RecordSuccess()
+	tel.Update("refusing", telemetry.DerBattery, 0, &socRefusing, nil)
+	tel.DriverHealthMut("refusing").RecordSuccess()
+	tel.SetDriverCommandFault("refusing", true, "modbus write refused")
+
+	s := &Service{Tele: tel, FuseMaxW: 20000}
+	p, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
+		{Driver: "refusing", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
+	})
+	if !ok {
+		t.Fatal("onlineFleetParams returned ok=false")
+	}
+	if p.CapacityWh != 10000 {
+		t.Fatalf("CapacityWh = %.0f, want 10000 — the refusing battery must not be counted", p.CapacityWh)
+	}
+	if len(p.Storages) != 1 || p.Storages[0].ID != "a" {
+		t.Fatalf("Storages = %+v, want only battery a", p.Storages)
+	}
+	if math.Abs(p.InitialSoCPct-20) > 1e-9 {
+		t.Fatalf("InitialSoCPct = %.3f, want 20.000 — the refusing battery's 95%% must not count", p.InitialSoCPct)
+	}
+}
+
 func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("no-soc", telemetry.DerBattery, 0, nil, nil)

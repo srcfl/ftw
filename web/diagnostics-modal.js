@@ -468,6 +468,7 @@
     html += '</div>';
 
     html += '<div class="ftw-diag-section"><h4>Local exports</h4><div class="ftw-diag-actions">' +
+      '<button class="ftw-diag-btn" data-role="report">Download help report</button>' +
       '<button class="ftw-diag-btn" data-role="dump">Download recent logs</button>' +
       '<button class="ftw-diag-btn" data-role="research">Download load research</button>' +
       '</div></div>';
@@ -484,12 +485,23 @@
 
     state.bodyEl.innerHTML = html;
 
+    // The report is the one to reach for first: it explains what the
+    // system is doing and why, in a single file someone else can read.
+    // The log bundle below it is for when that isn't enough.
+    state.bodyEl.querySelector('[data-role="report"]').addEventListener("click", function () {
+      downloadWithFeedback(
+        "/api/support/report",
+        "Building help report",
+        "Collecting live state, the active plan slot, forecast accuracy and driver health.",
+        "ftw-help.md"
+      );
+    });
     state.bodyEl.querySelector('[data-role="dump"]').addEventListener("click", function () {
       downloadWithFeedback(
         "/api/support/dump",
         "Preparing support bundle",
         "Collecting logs, redacted config, driver health, and recent telemetry.",
-        "ftw-support.tar.gz"
+        "ftw-support.zip"
       );
     });
     state.bodyEl.querySelector('[data-role="research"]').addEventListener("click", function () {

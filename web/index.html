@@ -50,7 +50,7 @@
   }
   </script>
   <script type="module" src="/theme-runtime.js?v=theme1"></script>
-  <script type="module" src="/components/index.js?v=histwrap7"></script>
+  <script type="module" src="/components/index.js?v=zones1"></script>
 </head>
 <body class="ftw-app">
   <header>
@@ -80,7 +80,6 @@
       <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
       <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
-      <span id="conn-status" class="conn-status connected" title="Connected">&#9679;</span>
     </div>
   </header>
 
@@ -570,6 +569,16 @@
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
           <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
         </div>
+        <!-- The escape hatch for "why is it doing that?". Downloads one
+             Markdown file holding the live state, the active plan slot,
+             forecast-versus-reality and any automated findings — enough
+             for someone else to answer without a screenshot round-trip. -->
+        <div class="plan-help-request">
+          <button type="button" id="plan-help-report" class="btn-link">
+            Something looks wrong? Download a help report
+          </button>
+          <small>One file describing what FTW is doing and why, with the logs behind it. Share it when asking for help.</small>
+        </div>
       </section>
     </section>
 
@@ -921,13 +930,13 @@
     </div>
   </ftw-modal>
 
-  <script src="/app.js?v=app1"></script>
+  <script src="/app.js?v=zones1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
   <script src="/settings/tabs/devices.js?v=catcards2"></script>
   <script src="/settings/tabs/loadpoints.js?v=lp2"></script>
-  <script src="/settings/tabs/price.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/price.js?v=zones1"></script>
   <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
   <script src="/settings/tabs/planner.js?v=cvxpy1"></script>
@@ -939,12 +948,12 @@
   <script src="/settings/tabs/system.js?v=tabsplit2"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
   <script src="/models.js?v=diag2"></script>
-  <script type="module" src="/plan.js?v=dashboard1"></script>
+  <script type="module" src="/plan.js?v=zones1"></script>
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
-  <script src="/loadpoints.js?v=lp4"></script>
+  <script src="/loadpoints.js?v=zones1"></script>
   <script src="/energy-history.js?v=story1"></script>
-  <script src="/diagnose.js?v=ia3"></script>
+  <script src="/diagnose.js?v=zones1"></script>
   <script type="module" src="/mobile-navigation.js?v=scroll1"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
   <script>

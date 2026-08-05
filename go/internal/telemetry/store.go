@@ -129,16 +129,49 @@ type DriverHealth struct {
 	// detection — there is no separate "degraded" state.
 	WatchdogTimeoutOverride time.Duration
 
-	// DeviceFault is set by a driver (via host.set_device_fault) when it can
-	// reach the device but the device is in a fault state where it cannot
-	// actuate — e.g. a Ferroamp EnergyHub in Fault Mode with its relays open.
-	// It is orthogonal to Status: the driver keeps emitting fresh telemetry
-	// (so the watchdog sees it as alive and RecordSuccess keeps Status=ok),
-	// but IsOnline() returns false so the dispatcher and the MPC plan exclude
-	// it — otherwise we keep commanding a dead battery and the un-delivered
-	// power silently becomes grid import. DeviceFaultReason is operator-facing.
+	// DeviceFault means the driver reaches the device but the device
+	// cannot actuate — e.g. a Ferroamp EnergyHub in Fault Mode with its
+	// relays open. It is orthogonal to Status: the driver keeps emitting
+	// fresh telemetry (so the watchdog sees it as alive and RecordSuccess
+	// keeps Status=ok), but IsOnline() returns false so the dispatcher and
+	// the MPC plan exclude it — otherwise we keep commanding a dead battery
+	// and the un-delivered power silently becomes grid import.
+	// DeviceFaultReason is operator-facing.
+	//
+	// Read it; do not assign it. It is derived from the two sources below
+	// so that both reach every consumer — /api/health, the driver
+	// inventory, the support report — through one field.
 	DeviceFault       bool
 	DeviceFaultReason string
+
+	// The two writers behind DeviceFault, kept apart so neither can undo
+	// the other. A driver re-asserts its own view on every poll; without
+	// the split, a core-set fault would be cleared by the next poll of a
+	// driver that believes the device is fine, and the two would flip the
+	// derived flag back and forth for as long as the fault lasted.
+	//
+	// driverFault: the driver's own verdict, via host.set_device_fault.
+	// commandFault: core's verdict, when the driver has refused the
+	// commands core sent it. Refusing to actuate is the same condition
+	// seen from the other end of the wire.
+	driverFault        bool
+	driverFaultReason  string
+	commandFault       bool
+	commandFaultReason string
+}
+
+// refreshDeviceFault recomputes the derived fault from its two sources.
+// The driver's own reason wins when both are set: it saw the device.
+func (h *DriverHealth) refreshDeviceFault() {
+	h.DeviceFault = h.driverFault || h.commandFault
+	switch {
+	case h.driverFault:
+		h.DeviceFaultReason = h.driverFaultReason
+	case h.commandFault:
+		h.DeviceFaultReason = h.commandFaultReason
+	default:
+		h.DeviceFaultReason = ""
+	}
 }
 
 // RecordSuccess resets error state and marks the driver healthy. Call
@@ -182,25 +215,40 @@ func (h *DriverHealth) RecordError(err string) {
 	}
 }
 
-// SetOffline marks the driver offline (e.g. by watchdog).
+// SetOffline marks the driver offline. WatchdogScan is the only runtime
+// caller: staleness is the one condition that takes a driver offline, so
+// this is the single place that writes StatusOffline. Tests use it to put
+// a driver in that state directly.
 func (h *DriverHealth) SetOffline() {
 	h.Status = StatusOffline
 }
 
-// SetDeviceFault flags (or clears) a device-level fault — the driver reaches
-// the device but it can't actuate. Independent of Status so a driver that
-// keeps emitting from cache doesn't flap it back on every RecordSuccess.
+// SetDeviceFault records the driver's own verdict that the device can't
+// actuate. Independent of Status so a driver that keeps emitting from cache
+// doesn't flap it back on every RecordSuccess.
 func (h *DriverHealth) SetDeviceFault(faulted bool, reason string) {
-	h.DeviceFault = faulted
+	h.driverFault = faulted
+	h.driverFaultReason = ""
 	if faulted {
-		h.DeviceFaultReason = reason
-	} else {
-		h.DeviceFaultReason = ""
+		h.driverFaultReason = reason
 	}
+	h.refreshDeviceFault()
+}
+
+// SetCommandFault records core's verdict that the device can't actuate,
+// because it refused the commands core sent it. Kept apart from
+// SetDeviceFault so a driver still reporting itself healthy cannot clear it.
+func (h *DriverHealth) SetCommandFault(faulted bool, reason string) {
+	h.commandFault = faulted
+	h.commandFaultReason = ""
+	if faulted {
+		h.commandFaultReason = reason
+	}
+	h.refreshDeviceFault()
 }
 
 // IsOnline reports whether the driver is usable for control. A stale-flagged
-// driver (Status offline) OR one its driver flagged as device-faulted is not.
+// driver (Status offline) OR one that cannot actuate is not.
 func (h *DriverHealth) IsOnline() bool {
 	return h.Status != StatusOffline && !h.DeviceFault
 }
@@ -650,7 +698,7 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > eff
 		wasOnline := h.Status != StatusOffline
 		if stale && wasOnline {
-			h.Status = StatusOffline
+			h.SetOffline()
 			out = append(out, WatchdogTransition{Name: name, Online: false})
 		} else if !stale && !wasOnline {
 			h.Status = StatusOk
@@ -685,8 +733,9 @@ func (s *Store) SetDriverDeviceFault(name string, faulted bool, reason string) {
 		h = &DriverHealth{Name: name}
 		s.health[name] = h
 	}
-	changed := h.DeviceFault != faulted
+	before := h.DeviceFault
 	h.SetDeviceFault(faulted, reason)
+	changed := h.DeviceFault != before
 	s.mu.Unlock()
 	// Log only the transition (the driver re-asserts the fault every poll) so
 	// the entry/exit surfaces in /api/logs as an operator alert without spam.
@@ -695,6 +744,33 @@ func (s *Store) SetDriverDeviceFault(name string, faulted bool, reason string) {
 			slog.Warn("driver device fault — excluding from dispatch + plan until it recovers", "driver", name, "reason", reason)
 		} else {
 			slog.Info("driver device fault cleared — back in control", "driver", name)
+		}
+	}
+}
+
+// SetDriverCommandFault records that core could not get its commands into
+// this device (or that it can again). Unlike SetDriverDeviceFault this does
+// NOT create a health record: only a driver that has been running can have
+// refused a command, and a removed driver must not be resurrected as a card
+// in the UI by a late verdict about it. Removing a driver therefore clears
+// this fault along with the rest of its health.
+func (s *Store) SetDriverCommandFault(name string, faulted bool, reason string) {
+	s.mu.Lock()
+	h, ok := s.health[name]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	before := h.DeviceFault
+	h.SetCommandFault(faulted, reason)
+	changed := h.DeviceFault != before
+	s.mu.Unlock()
+	if changed {
+		if faulted {
+			slog.Warn("driver refused control — excluding from dispatch + plan until it accepts a command again",
+				"driver", name, "reason", reason)
+		} else {
+			slog.Info("driver command fault cleared — back in control", "driver", name)
 		}
 	}
 }

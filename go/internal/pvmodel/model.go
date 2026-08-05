@@ -34,7 +34,10 @@ package pvmodel
 
 import (
 	"math"
+	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/modelstate"
 )
 
 // NFeat is the number of features in the RLS regression.
@@ -106,6 +109,56 @@ func Features(clearSkyW, cloudPct float64, t time.Time) [NFeat]float64 {
 		clearSkyW * math.Cos(2*h),
 	}
 }
+
+// featureSemantics declares what the arguments to Features mean. It is the
+// half of the fingerprint a probe cannot derive: pass clear-sky irradiance
+// projected onto the array plane instead of the horizontal, or low-cloud
+// cover instead of total, and Features returns exactly the same numbers for
+// the same arguments while Beta is now fitted against a different physical
+// quantity.
+//
+// CHANGE THIS STRING in the commit that changes what a caller passes in.
+// Changes to the feature math itself need no edit here — featureProbe moves
+// the fingerprint on its own.
+const featureSemantics = "pvmodel/1 clearsky=horizontal_ghi_wm2 cloud=total_cover_pct hour=utc target=ac_w"
+
+// featureProbe evaluates Features across a fixed grid of inputs. Its output
+// is the automatic half of the fingerprint: add a harmonic, revive the dead
+// slot, reorder a term or change the cloud exponent, and these numbers move.
+//
+// The grid spans night and full sun, clear and overcast, and four times of
+// day chosen so both harmonics take distinct values — a probe that only
+// looked at noon would miss a change to the phase of either one.
+func featureProbe() []float64 {
+	times := []time.Time{
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, 6, 21, 5, 30, 0, 0, time.UTC),
+		time.Date(2024, 6, 21, 12, 0, 0, 0, time.UTC),
+		time.Date(2024, 12, 21, 17, 45, 0, 0, time.UTC),
+	}
+	clearSky := []float64{0, 137.5, 900}
+	cloud := []float64{0, 42.5, 100}
+	out := make([]float64, 0, len(times)*len(clearSky)*len(cloud)*NFeat)
+	for _, t := range times {
+		for _, cs := range clearSky {
+			for _, cc := range cloud {
+				x := Features(cs, cc, t)
+				out = append(out, x[:]...)
+			}
+		}
+	}
+	return out
+}
+
+var featureHash = sync.OnceValue(func() string {
+	return modelstate.Fingerprint(featureSemantics, featureProbe())
+})
+
+// FeatureHash fingerprints the feature space Beta is fitted against. Stored
+// coefficients are only restored when their recorded hash matches this one;
+// see internal/modelstate for why, and service.go for what happens when it
+// does not.
+func FeatureHash() string { return featureHash() }
 
 // Predict returns the expected AC output in W (non-negative). Cold-start
 // behavior: during the first WarmupSamples we blend the learned β with

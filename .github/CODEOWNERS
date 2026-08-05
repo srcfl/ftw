@@ -5,8 +5,7 @@
 #
 # This is about who gets asked, not who is allowed to contribute.
 
-# Dashboard, components and styling.
-/web/                       @erikarenhill
+# Web/UI changes require a human visual check; see AGENTS.md.
 
 # Drivers and the Lua host.
 /drivers/                   @frahlg

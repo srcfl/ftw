@@ -9,13 +9,13 @@ network.
 FTW **hosts its own CalDAV server**, in-process, and also runs a CalDAV
 **client** against it:
 
-- The **server** (`go/internal/caldavserver`) is pure-Go, built on
+- The **server** ([`go/internal/caldavserver`](../go/internal/caldavserver)) is pure-Go, built on
   [`emersion/go-webdav`](https://github.com/emersion/go-webdav) (MIT). It ships
   inside the single FTW binary — no sidecar, no second container — and persists
   calendar objects in `state.db`. It binds `:5232` on your LAN so your phone or
   desktop calendar app can subscribe. Because it's in-process it runs everywhere
   FTW does, **including a single-container Home Assistant add-on**.
-- The **client** (`go/internal/calendar`) polls a collection on that server and
+- The **client** ([`go/internal/calendar`](../go/internal/calendar)) polls a collection on that server and
   maps events onto planner machinery.
 
 ```
@@ -87,7 +87,7 @@ languages. What FTW parsed is visible at `GET /api/caldav/status`.
 
 **Recurring events work fully.** A weekly *Away* or a daily *Charge car* expands
 into its individual occurrences server-side (RFC 4791 `CALDAV:expand`, via
-`caldavserver/expand.go`), so the planner sees every occurrence inside its
+[`caldavserver/expand.go`](../go/internal/caldavserver/expand.go)), so the planner sees every occurrence inside its
 horizon — not just the first. RRULE, RDATE and EXDATE are all honoured, and if
 you edit or delete a single occurrence in your calendar app (a per-instance
 `RECURRENCE-ID` override or cancellation) that one occurrence is updated/removed
@@ -121,7 +121,7 @@ collections are kept distinct so FTW never re-reads its own output as input.
 
 ## Config
 
-See the `caldav:` block in `config.example.yaml`. The password is stored in
+See the `caldav:` block in [`config.example.yaml`](../config.example.yaml). The password is stored in
 `state.db` (key `caldav_password`), never written to `config.yaml`. URL,
 credentials, keywords and intervals hot-reload; toggling `enabled` needs a
 restart. `listen` (default `:5232`) sets the server's bind address.
@@ -135,7 +135,7 @@ deploy mode with nothing extra to install:
   server binds `:5232` directly on the host. Subscribe at
   `http://<host-ip>:5232/…`.
 - **docker-compose on macOS (bridge networking):** the main service publishes
-  `5232:5232` (see `docker-compose.macos.yml`) so phones reach it; keep
+  `5232:5232` (see [`docker-compose.macos.yml`](../docker-compose.macos.yml)) so phones reach it; keep
   `caldav.url: http://localhost:5232` (the in-container loopback).
 - **Home Assistant add-on (single container):** it just works — there is no
   sidecar at all, so no deploy-mode is gated off.

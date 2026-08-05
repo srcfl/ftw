@@ -34,6 +34,7 @@
 //	host.json_encode(t)             -- Lua table → JSON string
 //	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
 //	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.http_patch(url, body, headers) -- HTTP PATCH (write); needs capabilities.http.allow_write
 //	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
 //	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
 //	host.ws_messages()              -- drain inbound frames; "" entry = EOF
@@ -217,12 +218,18 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	}
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
-	attempts, successes, emitErr := d.Env.endPollEvidence(true)
+	_, _, emitErr := d.Env.endPollEvidence(true)
 	if emitErr != nil {
 		return 0, emitErr
 	}
-	if d.Env.requiresFreshModbusRead && attempts > successes {
-		return 0, fmt.Errorf("driver_poll: %d of %d modbus reads failed", attempts-successes, attempts)
+	// A poll that read nothing has nothing to report and nothing to fault:
+	// a driver may skip its reads during warmup, or hold off while a
+	// command is in flight. Its telemetry is already withheld by
+	// endPollEvidence; raising an error here would mark the driver failed
+	// for staying quiet on purpose.
+	if ev := d.Env.lastPollEvidence; d.Env.requiresFreshModbusRead &&
+		ev.Attempts > 0 && !ev.fresh() {
+		return 0, fmt.Errorf("driver_poll: %s", ev.describe())
 	}
 	// Driver may return an int number of milliseconds.
 	if n, ok := ret.(lua.LNumber); ok && n > 0 {
@@ -262,6 +269,14 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Legacy commands are allowed to write hardware before they return. Give
+	// the VM the caller's context so a cancelled request or a driver lifecycle
+	// stop can terminate a Lua loop and let the registry run the default path.
+	d.L.SetContext(ctx)
+	defer d.L.RemoveContext()
 	fn := d.L.GetGlobal("driver_command")
 	if fn == lua.LNil {
 		return nil
@@ -479,6 +494,18 @@ func containsEvidence(evidence []string, want string) bool {
 	return false
 }
 
+func (d *LuaDriver) setLuaCallContext(parent context.Context, timeout time.Duration) func() {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	d.L.SetContext(ctx)
+	return func() {
+		d.L.RemoveContext()
+		cancel()
+	}
+}
+
 func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Duration) func() {
 	if d.Env.RuntimePolicy == nil || !d.Env.RuntimePolicy.IsControlV2() {
 		return func() {}
@@ -511,7 +538,14 @@ func (d *LuaDriver) commandResult(cmd DriverCommandV1, now time.Time) DriverComm
 
 // Cleanup calls driver_cleanup() and closes the VM.
 func (d *LuaDriver) Cleanup() {
-	_ = d.call("driver_cleanup")
+	d.CleanupContext(context.Background())
+}
+
+// CleanupContext runs driver_cleanup with a bounded, cancellable VM context
+// before closing the state. The no-argument Cleanup method remains for tests
+// and direct embedders that do not have a lifecycle context.
+func (d *LuaDriver) CleanupContext(ctx context.Context) {
+	_ = d.call(ctx, "driver_cleanup")
 	d.mu.Lock()
 	d.L.Close()
 	d.mu.Unlock()
@@ -520,18 +554,36 @@ func (d *LuaDriver) Cleanup() {
 // DefaultMode calls driver_default_mode() — typically tells the device
 // to revert to autonomous self-consumption when the EMS is offline.
 func (d *LuaDriver) DefaultMode() error {
-	return d.call("driver_default_mode")
+	return d.DefaultModeContext(context.Background())
+}
+
+// DefaultModeContext calls driver_default_mode with a caller-owned context.
+// This is the safety path after an ambiguous or failed command, so it must
+// not leave a legacy Lua loop holding the VM lock forever.
+func (d *LuaDriver) DefaultModeContext(ctx context.Context) error {
+	return d.call(ctx, "driver_default_mode")
+}
+
+// hasEntrypoint reports whether the loaded driver defines a callable global.
+// Missing lifecycle hooks remain optional for reporting-only drivers, so the
+// registry uses this only when it has already established that an operator
+// control declaration makes the default hook a safety requirement.
+func (d *LuaDriver) hasEntrypoint(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.L.GetGlobal(name).(*lua.LFunction)
+	return ok
 }
 
 // call is a convenience for parameter-less void-returning lifecycle funcs.
-func (d *LuaDriver) call(name string) error {
+func (d *LuaDriver) call(ctx context.Context, name string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	fn := d.L.GetGlobal(name)
 	if fn == lua.LNil {
 		return nil
 	}
-	cleanup := d.setLifecycleContext(context.Background(), 5*time.Second)
+	cleanup := d.setLuaCallContext(ctx, 5*time.Second)
 	defer cleanup()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		return err
@@ -899,20 +951,20 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		count := L.CheckInt(2)
 		kindS := L.CheckString(3)
 		if !env.permissionAllowed("modbus.read") {
-			env.recordPollModbusRead(false)
+			env.recordPollModbusRead(errors.New("modbus.read: permission not granted"))
 			L.Push(lua.LNil)
 			L.Push(lua.LString("modbus.read: permission not granted by signed package"))
 			return 2
 		}
 		if env.Modbus == nil {
-			env.recordPollModbusRead(false)
+			env.recordPollModbusRead(ErrNoCapability)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("no modbus capability"))
 			return 2
 		}
 		kind, ok := modbusKindFromString(kindS)
 		if !ok {
-			env.recordPollModbusRead(false)
+			env.recordPollModbusRead(errors.New("unknown modbus kind: " + kindS))
 			L.Push(lua.LNil)
 			L.Push(lua.LString("unknown modbus kind: " + kindS))
 			return 2
@@ -1072,6 +1124,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// ---- HTTP capability ----
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string);
+	//   the mutating verb, gated by capabilities.http.allow_write (default off)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	rawTLSPin := strings.TrimSpace(env.HTTPTLSPinSHA256)
 	tlsPin := normalizeHexFingerprint(rawTLSPin)
@@ -1152,6 +1206,13 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		CheckRedirect: func(req *net_http.Request, via []*net_http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
+			}
+			// A redirected PATCH is unsafe: Go re-issues 301/302/303 as a
+			// body-less GET, so the device write silently never lands while the
+			// call still reports success. Refuse it — a write must reach the
+			// host it was checked against, or fail loudly.
+			if len(via) > 0 && via[0].Method == "PATCH" {
+				return fmt.Errorf("redirect not followed for PATCH (a redirected write cannot be verified)")
 			}
 			if ok, reason := hostAllowed(req.URL.String()); !ok {
 				return fmt.Errorf("redirect blocked: %s", reason)
@@ -1254,7 +1315,73 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("http: capability not granted"))
 			return 2
 		}
-		if err := env.allowWrite("http.post"); err != nil {
+		// A read-only driver signing in at the path its signed manifest
+		// declares is reading, not writing, so it skips the write phase and
+		// budget. Every other POST goes through allowWrite unchanged.
+		if !env.allowAuthPost(L.CheckString(1)) {
+			if err := env.allowWrite("http.post"); err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(err.Error()))
+				return 2
+			}
+		}
+		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
+		payload := L.CheckString(2)
+		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		req.Header.Set("Content-Type", "application/json")
+		applyHeaders(req, L, 3)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		if resp.StatusCode >= 400 {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
+			return 2
+		}
+		env.recordWriteEvidence("write_ack")
+		L.Push(lua.LString(string(body)))
+		return 1
+	}))
+
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string).
+	// The mutating verb REST device APIs use for state-changing writes (a NIBE
+	// heat pump's Solar PV surplus feed, srcfl/ftw#537). Unlike http_post it is
+	// gated by an explicit capabilities.http.allow_write beyond the plain HTTP
+	// grant, so granting HTTP for telemetry never implicitly grants the ability
+	// to mutate a device. Same allowlist, TLS pinning and 1MB response cap as
+	// the other verbs.
+	host.RawSetString("http_patch", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
+		if !env.HTTPAllowWrite {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: write not granted (set capabilities.http.allow_write)"))
+			return 2
+		}
+		if err := env.allowWrite("http.patch"); err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
 			return 2
@@ -1266,7 +1393,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		payload := L.CheckString(2)
-		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
+		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))

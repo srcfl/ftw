@@ -36,6 +36,12 @@ type RuntimePolicy struct {
 	Lease          RuntimeLeasePolicy
 	SiteEnabled    bool
 	MaxWrites      int
+	// AuthPostPath is the one URL path a read-only driver may POST to. Some
+	// read-only drivers read a vendor cloud and cannot read anything until
+	// they have exchanged a token, and a token exchange is a POST issued from
+	// init or poll -- the phases allowWrite refuses. Empty for every driver
+	// that does not declare one, which is all of them by default.
+	AuthPostPath string
 }
 
 type RuntimeCommand struct {

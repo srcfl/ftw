@@ -8,7 +8,7 @@ This bridge is an engineering integration, not a public remote-access path.
 
 ## Boundary
 
-`go/internal/nova` snapshots registered DER telemetry, maps it to the selected
+[`go/internal/nova`](../go/internal/nova) snapshots registered DER telemetry, maps it to the selected
 Nova schema and publishes over MQTT. An ES256 identity signs short-lived MQTT
 JWTs. Claim and provisioning use HTTPS.
 

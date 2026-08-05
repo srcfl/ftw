@@ -118,6 +118,12 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
+      # drivers/ is gitignored and fetched from the commit pinned in
+      # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,
+      # so it has to exist before either is built.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -236,14 +242,18 @@ jobs:
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
+      # drivers/ is gitignored and fetched from the pin; the image copies it.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to canonical GHCR namespace
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.5.2
         with:
           registry: ghcr.io
           username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
@@ -251,7 +261,7 @@ jobs:
 
       - name: Compute image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}
           tags: |
@@ -268,7 +278,7 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -289,7 +299,7 @@ jobs:
       # canonical namespace, then copy that exact multi-platform manifest to
       # the temporary compatibility namespace under its own credentials.
       - name: Login to compatibility GHCR namespace
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.5.2
         with:
           registry: ghcr.io
           username: frahlg

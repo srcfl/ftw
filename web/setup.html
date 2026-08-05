@@ -540,20 +540,21 @@
     </div>
 
     <div class="form-group">
+      <label for="price-country">Country</label>
+      <!-- Both lists are filled from /api/prices/zones on load; these
+           options are the fallback if that request fails. -->
+      <select id="price-country">
+        <option value="Sweden" selected>Sweden</option>
+      </select>
+    </div>
+
+    <div class="form-group">
       <label for="price-zone">Electricity price zone</label>
       <select id="price-zone">
-        <option value="SE1">SE1</option>
-        <option value="SE2">SE2</option>
-        <option value="SE3" selected>SE3</option>
-        <option value="SE4">SE4</option>
-        <option value="NO1">NO1</option>
-        <option value="NO2">NO2</option>
-        <option value="NO3">NO3</option>
-        <option value="NO4">NO4</option>
-        <option value="NO5">NO5</option>
-        <option value="DK1">DK1</option>
-        <option value="DK2">DK2</option>
-        <option value="FI">FI</option>
+        <option value="SE1">SE1 · Luleå</option>
+        <option value="SE2">SE2 · Sundsvall</option>
+        <option value="SE3" selected>SE3 · Stockholm</option>
+        <option value="SE4">SE4 · Malmö</option>
       </select>
     </div>
 
@@ -617,6 +618,18 @@
     </div>
 
     <div id="driver-description" class="driver-desc" style="display:none"></div>
+
+    <div id="driver-not-listed" class="driver-desc" style="display:none">
+      <p>This list is what's installed on this gateway. More drivers can be
+        installed from the signed driver repository after setup, in
+        <strong>Settings &rarr; Devices</strong>.</p>
+      <p style="margin-top:8px">No driver for your device anywhere? Ask for one in the
+        <a href="https://github.com/srcfl/device-drivers/issues" target="_blank" rel="noopener">driver
+        repository's issue tracker</a> &mdash; include the device make, model
+        and how it talks (Modbus, MQTT, HTTP&hellip;).</p>
+      <button class="btn-primary" style="margin-top:12px" onclick="skipUnlistedDevice()">Continue
+        without this device</button>
+    </div>
 
     <div class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(3)">Back</button>
@@ -815,6 +828,6 @@
      dashboard component catalogue (ftw-energy-flow etc.) — dead weight on
      the first setup paint. -->
 <script type="module" src="/components/ftw-update-check.js"></script>
-<script src="/setup.js"></script>
+<script src="/setup.js?v=zones1"></script>
 </body>
 </html>

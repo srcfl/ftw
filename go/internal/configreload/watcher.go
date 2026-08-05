@@ -122,22 +122,43 @@ func (w *Watcher) reload() {
 		slog.Warn("config reload failed", "err", err)
 		return
 	}
+	Apply(w.cfgMu, w.cfg, w.ctrlMu, w.ctrl, newCfg, w.applier)
+	slog.Info("config reload: applied")
+}
+
+// Apply is the single apply path for a changed config: diff newCfg
+// against the shared snapshot, hot-apply the control-level fields, swap
+// the shared config pointer, then run the applier callback with
+// (new, old). The fsnotify watcher calls it after loading the file, and
+// POST /api/config calls it directly with the config it just saved.
+//
+// It has to be one function. The API handler used to apply a hand-picked
+// subset of fields and swap the pointer itself, which left this
+// package's watcher diffing new against new when the fsnotify event
+// arrived — so everything the handler didn't copy, starting with the
+// site-meter designation, never reached the running controller until a
+// restart (#760).
+func Apply(
+	cfgMu *sync.RWMutex, cfg *config.Config,
+	ctrlMu *sync.Mutex, ctrl *control.State,
+	newCfg *config.Config, applier Applier,
+) {
 	// Snapshot old
-	w.cfgMu.RLock()
-	oldCfg := *w.cfg
-	w.cfgMu.RUnlock()
+	cfgMu.RLock()
+	oldCfg := *cfg
+	cfgMu.RUnlock()
 
 	// Apply control-level changes
-	w.ctrlMu.Lock()
+	ctrlMu.Lock()
 	if newCfg.Site.GridTargetW != oldCfg.Site.GridTargetW {
 		slog.Info("config reload: grid_target_w", "old", oldCfg.Site.GridTargetW, "new", newCfg.Site.GridTargetW)
-		w.ctrl.SetGridTarget(newCfg.Site.GridTargetW)
+		ctrl.SetGridTarget(newCfg.Site.GridTargetW)
 	}
 	if newCfg.Site.GridToleranceW != oldCfg.Site.GridToleranceW {
-		w.ctrl.GridToleranceW = newCfg.Site.GridToleranceW
+		ctrl.GridToleranceW = newCfg.Site.GridToleranceW
 	}
 	if newCfg.Site.SlewRateW != oldCfg.Site.SlewRateW {
-		w.ctrl.SlewRateW = newCfg.Site.SlewRateW
+		ctrl.SlewRateW = newCfg.Site.SlewRateW
 	}
 	newEnabled := true
 	if newCfg.Site.SlewEnabled != nil {
@@ -149,31 +170,31 @@ func (w *Watcher) reload() {
 	}
 	if newEnabled != oldEnabled {
 		slog.Info("config reload: slew_enabled", "old", oldEnabled, "new", newEnabled)
-		w.ctrl.SlewEnabled = newEnabled
+		ctrl.SlewEnabled = newEnabled
 	}
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
-		w.ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
+		ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
 	if newCfg.Site.PVSurplusAbsorbSoCCapPct != oldCfg.Site.PVSurplusAbsorbSoCCapPct {
 		slog.Info("config reload: pv_surplus_absorb_soc_cap_pct",
 			"old", oldCfg.Site.PVSurplusAbsorbSoCCapPct,
 			"new", newCfg.Site.PVSurplusAbsorbSoCCapPct)
-		w.ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
+		ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
 	}
 	if newCfg.Site.PVSurplusAbsorbThresholdW != oldCfg.Site.PVSurplusAbsorbThresholdW {
-		w.ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
+		ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	}
 	if newCfg.Site.DCLinkProtectionEnabled != oldCfg.Site.DCLinkProtectionEnabled {
 		slog.Info("config reload: dc_link_protection_enabled",
 			"old", oldCfg.Site.DCLinkProtectionEnabled,
 			"new", newCfg.Site.DCLinkProtectionEnabled)
-		w.ctrl.DCLinkProtectionEnabled = newCfg.Site.DCLinkProtectionEnabled
+		ctrl.DCLinkProtectionEnabled = newCfg.Site.DCLinkProtectionEnabled
 	}
 	if newCfg.Site.DCLinkProtectionSoCThreshold != oldCfg.Site.DCLinkProtectionSoCThreshold {
-		w.ctrl.DCLinkProtectionSoCThreshold = newCfg.Site.DCLinkProtectionSoCThreshold
+		ctrl.DCLinkProtectionSoCThreshold = newCfg.Site.DCLinkProtectionSoCThreshold
 	}
 	if newCfg.Site.DCLinkProtectionMarginW != oldCfg.Site.DCLinkProtectionMarginW {
-		w.ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
+		ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
 	}
 	// Site-meter swap (operator moved `is_site_meter: true` from one
 	// driver to another, or set it for the first time). Without this
@@ -188,18 +209,17 @@ func (w *Watcher) reload() {
 	if newCfg.SiteMeterDriver() != oldCfg.SiteMeterDriver() {
 		slog.Info("config reload: site_meter",
 			"old", oldCfg.SiteMeterDriver(), "new", newCfg.SiteMeterDriver())
-		w.ctrl.SiteMeterDriver = newCfg.SiteMeterDriver()
+		ctrl.SiteMeterDriver = newCfg.SiteMeterDriver()
 	}
-	w.ctrlMu.Unlock()
+	ctrlMu.Unlock()
 
 	// Swap global pointer
-	w.cfgMu.Lock()
-	*w.cfg = *newCfg
-	w.cfgMu.Unlock()
+	cfgMu.Lock()
+	*cfg = *newCfg
+	cfgMu.Unlock()
 
 	// Let caller handle driver registry etc.
-	if w.applier != nil {
-		w.applier(newCfg, &oldCfg)
+	if applier != nil {
+		applier(newCfg, &oldCfg)
 	}
-	slog.Info("config reload: applied")
 }

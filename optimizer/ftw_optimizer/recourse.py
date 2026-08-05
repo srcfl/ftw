@@ -9,7 +9,16 @@ import cvxpy as cp
 import numpy as np
 
 from . import SCHEMA_VERSION
-from .model import OPTIMAL_STATUSES, _export_price, _mode, _solver_options, _vector
+from .model import (
+    OPTIMAL_STATUSES,
+    _canonicalize_storage_payload,
+    _export_price,
+    _mode,
+    _solver_options,
+    _normalize_storage_specs,
+    _validate_storage_replay,
+    _vector,
+)
 from .protocol import ProtocolError, finite_number, positive_number, require_dict, require_list
 
 
@@ -30,6 +39,7 @@ def solve_storage_recourse(payload: dict[str, Any]) -> dict[str, Any]:
     its shared first-stage action is intended for execution before replanning.
     """
 
+    payload = _canonicalize_storage_payload(payload)
     started = time.perf_counter()
     settings = require_dict(payload.get("settings", {}), "settings")
     if require_list(payload.get("flex_loads", []), "flex_loads"):
@@ -100,10 +110,9 @@ def solve_storage_recourse(payload: dict[str, Any]) -> dict[str, Any]:
     force_milp = formulation == "milp"
     constraints: list[cp.Constraint] = []
     discrete = False
-    storage_specs = [
-        require_dict(raw, f"storages[{i}]")
-        for i, raw in enumerate(require_list(payload.get("storages", []), "storages"))
-    ]
+    storage_specs, storage_above_maximum = _normalize_storage_specs(
+        require_list(payload.get("storages", []), "storages")
+    )
     asset_ids: set[str] = set()
     for i, spec in enumerate(storage_specs):
         asset_id = spec.get("id")
@@ -177,7 +186,8 @@ def solve_storage_recourse(payload: dict[str, Any]) -> dict[str, Any]:
                 upper_recovery[1:] <= upper_recovery[:-1],
             ]
             scenario_service += cp.sum(lower_recovery[1:] + upper_recovery[1:]) / (capacity * n)
-            if force_milp or (formulation == "auto" and unsafe_cycle):
+            initial_above_max = storage_above_maximum[i]
+            if force_milp or initial_above_max or (formulation == "auto" and unsafe_cycle):
                 direction = cp.Variable(n, boolean=True, name=f"scenario_{si}_storage_{i}_charge_mode")
                 constraints += [charge <= max_charge * direction, discharge <= max_discharge * (1 - direction)]
                 discrete = True
@@ -370,6 +380,7 @@ def solve_storage_recourse(payload: dict[str, Any]) -> dict[str, Any]:
                 mip_gap = float(value)
                 break
     solve_ms = (time.perf_counter() - started) * 1000.0
+    _validate_storage_replay(actions, slots, storage_specs)
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": str(payload["request_id"]),

@@ -4,10 +4,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+func TestRemoteRuntimeStatusRedactsLocalErrorToFixedCode(t *testing.T) {
+	status := &RemoteRuntimeStatus{}
+	status.SetConnected(false, errors.New("connect Home Link uplink: relay rejected gateway identity"))
+
+	payload, err := json.Marshal(status.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(payload)
+	if !strings.Contains(got, `"last_error":"connection-failed"`) {
+		t.Fatalf("runtime payload = %s, want fixed public error code", got)
+	}
+	if strings.Contains(got, "relay rejected gateway identity") {
+		t.Fatalf("runtime payload leaked local error: %s", got)
+	}
+}
 
 func TestDisabledLocalAdminCanRevokeExistingCredential(t *testing.T) {
 	const siteID = "001122334455667788"

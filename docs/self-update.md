@@ -13,13 +13,14 @@ migrated to `beta`; no edge releases are published or accepted.
 ## Release progression
 
 User-visible changes land with a Changeset. The Changesets workflow opens the
-Version Packages PR and updates `package.json` plus `CHANGELOG.md`.
+Version Packages PR and updates [`package.json`](../package.json) plus
+[`CHANGELOG.md`](../CHANGELOG.md).
 
 After that PR merges:
 
-1. run `beta.yml` with `vX.Y.Z-beta.N`;
+1. run [`beta.yml`](../.github/workflows/beta.yml) with `vX.Y.Z-beta.N`;
 2. validate that immutable build on real sites;
-3. manually dispatch `release.yml` from that same commit;
+3. manually dispatch [`release.yml`](../.github/workflows/release.yml) from that same commit;
 4. stable promotion verifies that a matching beta tag resolves to the exact
    stable candidate commit;
 5. release assets publish `vX.Y.Z` and move the stable aliases.

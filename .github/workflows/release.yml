@@ -125,7 +125,7 @@ jobs:
 
       - name: Set up Docker Buildx for stable promotion validation
         if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Tag and create GitHub Release
         id: publish

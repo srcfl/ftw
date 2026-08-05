@@ -10,6 +10,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -282,6 +284,60 @@ func TestRunWithStatusReportsReadyAndDisconnected(t *testing.T) {
 	}
 	if !slices.Equal(states, []bool{true, false}) {
 		t.Fatalf("status states = %v", states)
+	}
+}
+
+func TestRunWithStatusLogsWrappedFailureWithRetryDelay(t *testing.T) {
+	identity := newUplinkTestIdentity(t)
+	client, err := newClient(identity, Endpoint, websocket.DefaultDialer, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wrappedErr := fmt.Errorf("connect Home Link uplink: %w",
+		errors.New("dial tcp 192.0.2.1:443: connection refused"))
+	err = client.runWithStatus(
+		ctx,
+		func(context.Context) (*Connection, error) { return nil, wrappedErr },
+		func(context.Context, *Connection) error {
+			t.Fatal("serve should not run after dial failure")
+			return nil
+		},
+		func(attempt int) (time.Duration, error) {
+			if attempt != 0 {
+				t.Fatalf("retry attempt = %d, want 0", attempt)
+			}
+			cancel()
+			return 1500 * time.Millisecond, nil
+		},
+		func(connected bool, statusErr error) {
+			if connected {
+				t.Fatal("failed dial reported connected")
+			}
+			if !errors.Is(statusErr, wrappedErr) {
+				t.Fatalf("status error = %v, want %v", statusErr, wrappedErr)
+			}
+		},
+	)
+	if err != context.Canceled {
+		t.Fatalf("run stop = %v", err)
+	}
+	line := logs.String()
+	for _, want := range []string{
+		"Home Link uplink failed; retrying",
+		"attempt=1",
+		"retry_delay=1.5s",
+		"connect Home Link uplink: dial tcp 192.0.2.1:443: connection refused",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log = %q, missing %q", line, want)
+		}
 	}
 }
 

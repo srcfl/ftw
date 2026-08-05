@@ -7,8 +7,7 @@
 package api
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -35,6 +34,21 @@ type driverDetailResp struct {
 	Readings []readingDTO               `json:"readings"`
 	Metrics  []telemetry.MetricSnapshot `json:"metrics"`
 	Identity driverIdentityDTO          `json:"identity"`
+	// Controls are what this driver says an operator may command. Absent
+	// for every driver that only reports.
+	Controls []drivers.CatalogControl `json:"controls,omitempty"`
+	// Hold is the operator setting in force, if any, and when it ends.
+	Hold *controlHold `json:"hold,omitempty"`
+	// ControlState says whether Core has confirmed autonomous default mode.
+	// It must not call a failed default safe or settled.
+	ControlState driverControlStateResp `json:"control_state"`
+}
+
+type driverControlStateResp struct {
+	State            string `json:"state"`
+	Blocked          bool   `json:"blocked"`
+	DefaultConfirmed bool   `json:"default_confirmed"`
+	RecoveryPending  bool   `json:"recovery_pending"`
 }
 
 type readingDTO struct {
@@ -102,7 +116,86 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 			resp.Identity = driverIdentityDTO{Make: make, SN: sn, MAC: mac, Endpoint: ep}
 		}
 	}
+	resp.Controls = s.driverControls(name)
+	resp.Hold = s.activeControlHold(name)
+	resp.ControlState = s.driverControlState(name, resp.Hold)
 	writeJSON(w, 200, resp)
+}
+
+func (s *Server) driverControlState(name string, hold *controlHold) driverControlStateResp {
+	if s.deps == nil || s.deps.Registry == nil {
+		return driverControlStateResp{State: "unknown"}
+	}
+	status, ok := s.deps.Registry.ControlStatus(name)
+	if !ok {
+		return driverControlStateResp{State: "unknown"}
+	}
+	state := "unknown"
+	switch {
+	case status.Blocked:
+		state = "default_recovery"
+	case hold != nil:
+		state = "held"
+	case status.DefaultConfirmed:
+		state = "default_confirmed"
+	}
+	return driverControlStateResp{
+		State:            state,
+		Blocked:          status.Blocked,
+		DefaultConfirmed: status.DefaultConfirmed,
+		RecoveryPending:  status.RecoveryPending,
+	}
+}
+
+// driverControls returns the controls the configured driver `name` declares.
+//
+// The lookup goes name → configured lua path → catalog entry. A driver that
+// is configured but whose file no longer parses returns nothing, which is the
+// same answer as a driver that declares nothing. That is deliberate: a parse
+// failure belongs in the catalog endpoint, where an operator is looking at
+// driver files, not here.
+func (s *Server) driverControls(name string) []drivers.CatalogControl {
+	cfg, ok := s.configuredDriver(name)
+	if !ok || cfg.Lua == "" {
+		return nil
+	}
+	lua := cfg.Lua
+	// Config.ResolveDriverPaths normally makes lua absolute. Read that exact
+	// file first when it is available: a local overlay may contain the same
+	// filename as a deliberately selected managed or bundled driver.
+	if info, err := os.Stat(lua); err == nil && !info.IsDir() {
+		entry, err := drivers.ParseCatalogFile(lua)
+		if err != nil {
+			return nil
+		}
+		return entry.Controls
+	}
+
+	dir := s.deps.DriverDir
+	if dir == "" {
+		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
+	}
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.managedDriverDir(), dir)
+	if err != nil {
+		return nil
+	}
+	return drivers.ControlsForDriver(entries, lua)
+}
+
+func (s *Server) configuredDriver(name string) (config.Driver, bool) {
+	if s.deps == nil || s.deps.Cfg == nil {
+		return config.Driver{}, false
+	}
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+		defer s.deps.CfgMu.RUnlock()
+	}
+	for _, d := range s.deps.Cfg.Drivers {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return config.Driver{}, false
 }
 
 // POST /api/drivers/test — start one short-lived driver instance from the
@@ -184,7 +277,7 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 	started := time.Now()
-	if err := reg.Add(ctx, cfg); err != nil {
+	if err := reg.AddProbe(ctx, cfg); err != nil {
 		writeJSON(w, 200, driverProbeResp{
 			Name:      displayName,
 			OK:        false,
@@ -318,11 +411,17 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/support/dump — gzipped tarball with everything a developer
-// needs to triage a support incident: redacted config, full driver
-// health JSON, recent global + per-driver logs, last 1 h of TS samples
-// per (driver, metric), and a manifest. SQLite is NOT included; the
-// dump is intended to be small enough to email or paste-link.
+// GET /api/support/dump — zip archive with everything a developer needs
+// to triage a support incident: redacted config, full driver health JSON,
+// recent global + per-driver logs, last 1 h of TS samples per
+// (driver, metric), and a manifest. SQLite is NOT included; the dump is
+// intended to be small enough to attach to a chat message — measured at
+// ~6 kB on a two-driver install.
+//
+// Zip rather than tar.gz because this file's whole purpose is to be
+// handed to somebody else. Windows and every chat client open a zip
+// without a second tool; a .tar.gz asks the person you need help from to
+// go find one first.
 func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	if s.deps.LogRing == nil {
 		writeJSON(w, 503, map[string]string{"error": "log ring not configured"})
@@ -330,28 +429,34 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	stamp := now.Format("20060102-150405")
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", `attachment; filename="ftw-support-`+stamp+`.tar.gz"`)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="ftw-support-`+stamp+`.zip"`)
 	w.Header().Set("Cache-Control", "no-store")
 
-	gz := gzip.NewWriter(w)
-	defer gz.Close()
-	tw := tar.NewWriter(gz)
-	defer tw.Close()
+	zw := zip.NewWriter(w)
+	defer zw.Close()
 
 	addFile := func(name string, body []byte) {
-		hdr := &tar.Header{
-			Name:    "ftw-support-" + stamp + "/" + name,
-			Mode:    0o644,
-			Size:    int64(len(body)),
-			ModTime: now,
+		hdr := &zip.FileHeader{
+			Name:     "ftw-support-" + stamp + "/" + name,
+			Method:   zip.Deflate,
+			Modified: now,
 		}
-		_ = tw.WriteHeader(hdr)
-		_, _ = tw.Write(body)
+		hdr.SetMode(0o644)
+		f, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return
+		}
+		_, _ = f.Write(body)
 	}
 
-	// Manifest first so a curious recipient can `tar -xOzf … manifest.json`
-	// and see what they've got without unpacking the whole bundle.
+	// The help report goes in first and is named to sort first, because it
+	// is the only file in here most recipients need to read. Everything
+	// below it is what you reach for when the report does not settle the
+	// question. Shipping them together means the person asking for help
+	// sends one file and never has to pick the right one.
+	addFile("00-help-report.md", []byte(s.buildSupportReport(r.Context(), time.Now())))
+
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
 		"version":      s.deps.Version,
@@ -359,7 +464,9 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 		"goos":         runtime.GOOS,
 		"goarch":       runtime.GOARCH,
 		"hostname":     hostnameOrEmpty(),
+		"read_first":   "00-help-report.md",
 		"contents": []string{
+			"00-help-report.md",
 			"config.redacted.yaml",
 			"drivers.json",
 			"logs/global.log",

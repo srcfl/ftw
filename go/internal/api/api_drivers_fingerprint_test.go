@@ -98,6 +98,15 @@ func TestHandleDriverFingerprintRequiresModbusFactory(t *testing.T) {
 	}
 }
 
+func TestFingerprintEndpointFormatsIPv6(t *testing.T) {
+	if got := fingerprintEndpoint("modbus", "fd00::5", 502); got != "modbus://[fd00::5]:502" {
+		t.Fatalf("Modbus endpoint = %q, want modbus://[fd00::5]:502", got)
+	}
+	if got := fingerprintEndpoint("http", "fd00::5", 80); got != "http://[fd00::5]:80" {
+		t.Fatalf("HTTP endpoint = %q, want http://[fd00::5]:80", got)
+	}
+}
+
 func TestHandleDriverFingerprintRanksMatches(t *testing.T) {
 	dir := t.TempDir()
 	// Two Modbus drivers — one claims the device, one declines — plus a

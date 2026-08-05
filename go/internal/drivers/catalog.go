@@ -38,6 +38,10 @@ type CatalogEntry struct {
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
+	// AuthPostPath is the URL path a read-only driver signs in at. A driver
+	// that reads a vendor cloud has to POST for a token before it can read,
+	// and that POST is not actuation. Only meaningful with ReadOnly.
+	AuthPostPath string `json:"auth_post_path,omitempty"`
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
 	// UI uses it to avoid presenting battery capacity as a control opt-in and
 	// to enable battery_telemetry_only for gateway-style drivers.
@@ -57,6 +61,10 @@ type CatalogEntry struct {
 	VerifiedAt         string   `json:"verified_at,omitempty"`         // ISO date of most recent entry
 	VerificationNotes  string   `json:"verification_notes,omitempty"`
 	TestedModels       []string `json:"tested_models,omitempty"` // e.g. ["Home", "Charge"]
+
+	// Controls are the operator-facing commands the driver declares. Empty
+	// for every driver that only reports. See catalog_controls.go.
+	Controls []CatalogControl `json:"controls,omitempty"`
 
 	// ConfigSecrets lists driver-specific config keys that the Settings
 	// UI / setup wizard should render as password inputs and store
@@ -194,6 +202,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.VerificationNotes = pickString(block, "verification_notes")
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
+	e.Controls = pickControls(block)
 	return e, nil
 }
 
@@ -269,7 +278,14 @@ func normalizeVerificationStatus(s string) string {
 	}
 }
 
-var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
+// Anchored to the start of a line, like driverAliasRe below. Without that,
+// `-- DRIVER = { ... }` in a comment or the same text inside a string
+// literal matches, and since the last match now wins, a commented-out
+// example placed after the real block would be read as the driver's
+// identity — enough to drop a valid driver out of the catalog or have an
+// install refused. Every bundled driver declares DRIVER at column 0, so
+// the anchor costs nothing real. Codex P2 on PR #754.
+var driverBlockRe = regexp.MustCompile(`(?ms)^[ \t]*DRIVER\s*=\s*\{(.*?)\n\}`)
 
 // Signed artifacts do not write the table inline. tools/ftw_repository.py
 // builds it as a local and assigns it twice -- once up front and once after
@@ -278,25 +294,38 @@ var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
 // pattern does not match.
 var driverAliasRe = regexp.MustCompile(`(?m)^\s*DRIVER\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`)
 
+// extractDriverBlock returns the body of the table DRIVER holds after the
+// chunk runs: the last assignment wins, exactly as Lua executes them. A
+// signed artifact wrapping an FTW-native source contains both forms — the
+// source's own inline table and the generator's trailing
+// `DRIVER = __sourceful_ftw_metadata` — and the trailing alias carries the
+// identity the artifact was signed under. Preferring the inline table here
+// made the installer reject valid signed drivers whose source block lagged
+// the catalog (myuplink@1.1.1 with an inline 1.0.0). A last alias that names
+// no parseable table yields empty rather than borrowing an earlier table's
+// identity; DRIVER is nil at runtime in that case too.
 func extractDriverBlock(src string) string {
-	if m := driverBlockRe.FindStringSubmatch(src); len(m) >= 2 {
-		return m[1]
+	inlinePos, inlineBlock := -1, ""
+	if ms := driverBlockRe.FindAllStringSubmatchIndex(src, -1); len(ms) > 0 {
+		m := ms[len(ms)-1]
+		inlinePos, inlineBlock = m[0], src[m[2]:m[3]]
 	}
-	// Follow the alias to the table it names. Without this, every signed
-	// driver parses as empty metadata, and the installer rejects it for an
-	// id/version mismatch it can never satisfy.
-	alias := driverAliasRe.FindStringSubmatch(src)
-	if len(alias) < 2 {
+	aliasPos, aliasName := -1, ""
+	if as := driverAliasRe.FindAllStringSubmatchIndex(src, -1); len(as) > 0 {
+		a := as[len(as)-1]
+		aliasPos, aliasName = a[0], src[a[2]:a[3]]
+	}
+	if aliasPos > inlinePos {
+		aliasBlockRe, err := regexp.Compile(`(?s)local\s+` + regexp.QuoteMeta(aliasName) + `\s*=\s*\{(.*?)\n\}`)
+		if err != nil {
+			return ""
+		}
+		if m := aliasBlockRe.FindStringSubmatch(src); len(m) >= 2 {
+			return m[1]
+		}
 		return ""
 	}
-	aliasBlockRe, err := regexp.Compile(`(?s)local\s+` + regexp.QuoteMeta(alias[1]) + `\s*=\s*\{(.*?)\n\}`)
-	if err != nil {
-		return ""
-	}
-	if m := aliasBlockRe.FindStringSubmatch(src); len(m) >= 2 {
-		return m[1]
-	}
-	return ""
+	return inlineBlock
 }
 
 // pickString matches `name = "value"` inside the block.

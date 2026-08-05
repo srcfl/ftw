@@ -144,3 +144,33 @@ describe("price provider defaults", () => {
     assert.match(PRICE_JS, /\["sourceful", "elprisetjustnu", "entsoe", "none"\], "sourceful"/);
   });
 });
+
+describe("setup wizard driver picker — not-listed escape hatch (#757)", () => {
+  it("appends the not-listed option after the catalog entries", () => {
+    assert.match(JS, /NOT_LISTED\s*=\s*['"]__not_listed__['"]/,
+      "the sentinel must be a value that can never parse as a catalog index");
+    assert.match(JS, /My device is not listed/,
+      "the picker must offer the escape hatch in its own words");
+  });
+
+  it("handles the sentinel before parsing a catalog index", () => {
+    assert.match(JS, /sel\.value\s*===\s*NOT_LISTED[\s\S]*?parseInt\(sel\.value,\s*10\)/,
+      "onDriverSelected must branch on the sentinel before parseInt runs on it");
+  });
+
+  it("ships the guidance panel with both forward paths", () => {
+    assert.match(HTML, /id=["']driver-not-listed["']/,
+      "the panel the sentinel reveals must exist in the markup");
+    assert.match(HTML, /Settings\s*&rarr;\s*Devices/,
+      "it must say where repository drivers install after setup");
+    assert.match(HTML, /device-drivers\/issues/,
+      "it must link to requesting a driver that does not exist yet");
+    assert.match(HTML, /skipUnlistedDevice\(\)/,
+      "it must let onboarding continue without the device");
+  });
+
+  it("skips to the devices summary only when a device already exists", () => {
+    assert.match(JS, /skipUnlistedDevice[\s\S]*?configuredDrivers\.length > 0 \? 6 : 7/,
+      "an empty summary step is a second dead-end; go straight to integrations");
+  });
+});

@@ -116,8 +116,16 @@ func TestProcessTransportHealthReportsMissingWorker(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := transport.Health(ctx); err == nil || !strings.Contains(err.Error(), "start optimizer") {
-		t.Fatalf("Health error = %v, want worker start failure", err)
+	// The interpreter is resolved before fork/exec, so an absent worker yields
+	// the actionable errOptimizerWorkerMissing (which names the ftw-optimizer
+	// sidecar) instead of a bare "start optimizer ... not found" that reads as a
+	// missing core dependency.
+	_, err = transport.Health(ctx)
+	if err == nil || !errors.Is(err, errOptimizerWorkerMissing) {
+		t.Fatalf("Health error = %v, want errOptimizerWorkerMissing", err)
+	}
+	if !strings.Contains(err.Error(), "ftw-optimizer sidecar") {
+		t.Fatalf("Health error should name the ftw-optimizer sidecar, got: %v", err)
 	}
 }
 
@@ -179,6 +187,59 @@ func TestAutoTransportFallsBackWhenFeatureIsMissing(t *testing.T) {
 	}
 }
 func (f *fakeTransport) Close() error { return nil }
+
+// A containerized core has no bundled Python interpreter, so the process
+// worker can never start. The error must name the remedy (run the sidecar),
+// not surface a bare "python3: not found in $PATH" that reads as a missing
+// core dependency. Regression guard for the masked-fallback bug.
+func TestProcessTransportReportsMissingWorkerActionably(t *testing.T) {
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{"ftw-nonexistent-optimizer-worker-xyz"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transport.Close() })
+
+	_, err = transport.RoundTrip(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected an error when the optimizer worker interpreter is absent")
+	}
+	if !errors.Is(err, errOptimizerWorkerMissing) {
+		t.Fatalf("error should wrap errOptimizerWorkerMissing, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ftw-optimizer sidecar") {
+		t.Fatalf("error should point operators at the ftw-optimizer sidecar, got: %v", err)
+	}
+}
+
+// With the `auto` transport (sidecar primary + process fallback), a down
+// sidecar on a core build that ships no Python must still surface the
+// actionable errOptimizerWorkerMissing through the auto layer — otherwise
+// service.go's FallbackReason would report a bare exec error. This pins the
+// missing-worker path all the way to the operator-facing reason string.
+func TestAutoTransportSurfacesMissingWorkerFromProcessFallback(t *testing.T) {
+	sidecar := &fakeTransport{healthErr: errors.New("dial optimizer socket: no such file")}
+	worker, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{"ftw-nonexistent-optimizer-worker-xyz"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = worker.Close() })
+
+	transport := NewAutoTransport(sidecar, worker)
+	_, err = transport.RoundTrip(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Fatal("expected an error when the sidecar is down and no worker interpreter exists")
+	}
+	if !errors.Is(err, errOptimizerWorkerMissing) {
+		t.Fatalf("auto transport should surface errOptimizerWorkerMissing from the process fallback, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ftw-optimizer sidecar") {
+		t.Fatalf("fallback reason should name the ftw-optimizer sidecar, got: %v", err)
+	}
+}
 
 func TestAutoTransportFallsBackWhenSidecarUnhealthy(t *testing.T) {
 	primary := &fakeTransport{healthErr: errors.New("socket down")}

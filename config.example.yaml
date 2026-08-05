@@ -105,7 +105,14 @@ drivers:
   # "fingeravtryck" shown in the myUplink app, or from `openssl s_client
   # -connect <ip>:8443 | openssl x509 -fingerprint -sha256`). The host then
   # trusts exactly that one cert — never a blanket insecure-skip-verify.
-  # Leave the pump in read-only mode (aidMode off); this driver never writes.
+  # Read-only by default: the driver issues no writes at all. (The pump-side
+  # write gate is the installer's read-only/read-write choice for the Local
+  # REST API, menu 7.5.15 — NOT "aid mode", which is a compressor-off fault
+  # state unrelated to API permissions.) One opt-in write path exists — the
+  # pump's native Solar PV surplus feed (srcfl/ftw#537, developed in
+  # srcfl/device-drivers). It needs BOTH the host capabilities.http.allow_write
+  # grant below AND write.solar_pv: true in the driver config; leave either off
+  # and the driver stays read-only.
   # - name: nibe
   #   lua: drivers/nibe_local.lua
   #   config:
@@ -113,10 +120,14 @@ drivers:
   #     port: 8443
   #     username: <local-api-username>
   #     password: <local-api-password>
+  #     # write:               # opt-in Solar PV feed (off unless present)
+  #     #   solar_pv: true
+  #     #   max_w: 9000         # REQUIRED clamp ceiling (site PV nameplate, W)
   #   capabilities:
   #     http:
   #       allowed_hosts: ["192.168.1.180:8443"]
   #       tls_pin_sha256: "<64-hex-char certificate fingerprint>"
+  #       # allow_write: true  # host gate for host.http_patch; default off
 
 api:
   port: 8080

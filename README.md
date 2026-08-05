@@ -45,13 +45,33 @@ The local catalog is generated from `DRIVER` metadata. The public
 [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
 editable source and FTW's default signed driver channel.
 
-[`drivers/*.lua`](drivers/) is FTW's offline recovery set, and it is a
-**generated snapshot** of that repository at the commit pinned in
-[`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json). It exists because
-startup is deliberately local: a gateway boots and runs without the network, so
-a remote refresh must never block it. Editing a `.lua` file here is not a way to
-change a driver — fix it upstream, move the pin, and run
-`scripts/sync-bundled-drivers.sh`. CI fails if the two drift.
+**This repository holds no driver source.** `drivers/*.lua` is gitignored and
+fetched from that repository at the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json):
+
+```bash
+make drivers
+```
+
+The files still ship. FTW's offline recovery set exists because startup is
+deliberately local — a gateway boots and runs without the network, so a remote
+refresh must never block it — so the image, the release tarballs and the tests
+all read `drivers/`. They are simply fetched rather than committed, which is
+why a driver cannot be edited here at all. There is no file to open a pull
+request against; fix it upstream and move the pin. CI fails if one is
+committed.
+
+Moving the pin is a driver release. `make driver-versions-across-pin` compares
+the drivers at the old pin against the drivers at the new one and fails when a
+file changed without its `DRIVER` version moving — the signed channel refuses to
+publish changed bytes under a version it already published, and a gateway
+offered the same version twice cannot tell them apart.
+
+The pin needs watching in both directions. Every pull request runs
+`--check`, which catches a driver edited here. A daily job runs `--behind`,
+which catches the opposite: the pin left in place while a fix lands upstream.
+It opens one issue and keeps it up to date, and stays quiet unless a bundled
+driver actually changed.
 
 ## Install on Linux
 
@@ -78,11 +98,14 @@ public relay.
 
 The official Home Assistant app repository is
 [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons).
-It has no published beta or stable app yet. The bootstrap version is not for
-normal or production use.
+Its first beta,
+[`ftw-v0.1.0-beta.1`](https://github.com/srcfl/home-assistant-addons/releases/tag/ftw-v0.1.0-beta.1),
+is published. There is no stable app yet — Home Assistant OS and Supervisor
+qualification has to finish first — so treat it as a beta rather than a
+production install.
 
-After the first beta is published, open **Settings → Apps → App store →
-Repositories** in Home Assistant and add:
+Open **Settings → Apps → App store → Repositories** in Home Assistant and
+add:
 
 ```text
 https://github.com/srcfl/home-assistant-addons
@@ -122,8 +145,8 @@ workflows.
 
 ## Configuration
 
-`config.example.yaml` and the validation types in `go/internal/config` are
-the configuration reference. Copy the example for a native development setup:
+[`config.example.yaml`](config.example.yaml) and the validation types in
+[`go/internal/config`](go/internal/config) are the configuration reference. Copy the example for a native development setup:
 
 ```bash
 cp config.local.example.yaml config.local.yaml
@@ -139,6 +162,13 @@ writing a driver.
 Drivers are plain Lua files and need no compilation. A driver declares its
 catalog metadata, lifecycle and required capabilities in one file. The Go host
 provides capability-scoped Modbus, MQTT, serial, HTTP, WebSocket and TCP access.
+
+Which devices are covered, and on what evidence, is published as a searchable
+catalog: **[Device driver catalog](https://srcfl.github.io/device-drivers/)**.
+It is generated from `srcfl/device-drivers` on every push to that repository's
+`main`, so the versions, tested models and per-target status it shows are the
+ones FTW installs. Listing is not an install claim: the page states which
+drivers have been confirmed against physical hardware and which have not.
 
 Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Send shared
 driver changes to `srcfl/device-drivers`. That repo publishes one signed,
@@ -170,12 +200,13 @@ metadata are the detailed reference.
 - [Operations and recovery](docs/operations.md)
 - [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)
+- [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)
 - [CalDAV](docs/caldav-integration.md)
 
-Other files under `docs/` are focused installation or external-integration
-guides.
+Other files under [`docs/`](docs/) are focused installation or
+external-integration guides.
 
 ## Contributing
 
