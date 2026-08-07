@@ -28,7 +28,7 @@
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
-import "./ftw-bar-chart.js";
+import "./ftw-bar-chart.js?v=strang1";
 
 const FIELD_BY_METRIC = {
   import:        "import_wh",
@@ -79,6 +79,36 @@ function fetchDailyEnergy(days) {
       throw err;
     });
   dailyFetchCache.set(days, { at: now, promise });
+  return promise;
+}
+
+// STRÅNG-based PV performance (expected-vs-actual). Only the "Produced"
+// (metric="pv") tile fetches this, to overlay the weather-expected line.
+// Tolerant: a disabled/absent service or any error resolves to
+// { enabled:false } so the bars still render without an overlay.
+const pvPerfFetchCache = new Map(); // days -> { at, data?, promise? }
+
+function fetchPVPerformance(days) {
+  const now = Date.now();
+  const cached = pvPerfFetchCache.get(days);
+  if (cached && cached.data && now - cached.at < DAILY_CACHE_TTL_MS) {
+    return Promise.resolve(cached.data);
+  }
+  if (cached && cached.promise && now - cached.at < DAILY_CACHE_TTL_MS) {
+    return cached.promise;
+  }
+  const promise = apiFetch("/api/pv/performance?days=" + days)
+    .then((r) => (r.ok ? r.json() : { enabled: false }))
+    .then((resp) => {
+      const data = resp || { enabled: false };
+      pvPerfFetchCache.set(days, { at: Date.now(), data });
+      return data;
+    })
+    .catch(() => {
+      pvPerfFetchCache.delete(days);
+      return { enabled: false };
+    });
+  pvPerfFetchCache.set(days, { at: now, promise });
   return promise;
 }
 
@@ -205,6 +235,27 @@ class FtwHistoryCard extends FtwElement {
       margin-left: 6px;
       letter-spacing: 0;
     }
+    /* STRÅNG expected-vs-actual caption under the Produced chart. Hidden
+       until the pv tile has a performance overlay to describe. The dashed
+       swatch mirrors the overlay line so the legend reads at a glance. */
+    .strang-note {
+      margin-top: 6px;
+      font-size: 0.72rem;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .strang-note[hidden] { display: none; }
+    .strang-note .swatch {
+      display: inline-block;
+      width: 16px;
+      height: 0;
+      border-top: 2px dashed #fcd34d;
+      flex: 0 0 auto;
+    }
+    .strang-note .pr { color: var(--fg-label); font-weight: 600; }
     @media (max-width: 900px) {
       .card-inner { padding: var(--card-pad-tight, 12px 14px); }
     }
@@ -302,6 +353,7 @@ class FtwHistoryCard extends FtwElement {
         </div>
         <div class="total" data-role="total">— kWh</div>
         <ftw-bar-chart data-role="chart" loading="true"></ftw-bar-chart>
+        <div class="strang-note" data-role="strang" hidden></div>
       </div>
     `;
   }
@@ -309,6 +361,7 @@ class FtwHistoryCard extends FtwElement {
   afterRender() {
     this._chart   = this.shadowRoot.querySelector('[data-role="chart"]');
     this._totalEl = this.shadowRoot.querySelector('[data-role="total"]');
+    this._strangEl = this.shadowRoot.querySelector('[data-role="strang"]');
     this._toggleEl = this.shadowRoot.querySelector('.toggle');
     if (this._chart) this._chart.setAttribute("accent", this._accent());
     if (this._toggleEl) {
@@ -387,6 +440,12 @@ class FtwHistoryCard extends FtwElement {
             this._totalEl.textContent = "— kWh";
           }
           this._chart.data = data;
+          // Produced tile: overlay the STRÅNG expected line. Fetched
+          // separately so a disabled/slow scoring service never holds up
+          // the bars. Aligned to the same day buckets by ISO date.
+          if (metric === "pv") {
+            this._loadOverlay(days, buckets.map((b) => b.day), seq);
+          }
         };
         // `?delay=N` — hold in the skeleton state for N ms after the
         // fetch resolves, for inspecting the loading→loaded transition.
@@ -400,6 +459,58 @@ class FtwHistoryCard extends FtwElement {
         this._chart.removeAttribute("loading");
         this._chart.data = [];
         this._totalEl.textContent = "failed to load";
+      });
+  }
+
+  // Fetch STRÅNG performance scores and overlay the expected-production
+  // line onto the Produced bars, aligned to `dayKeys` (ISO dates, same
+  // order as the bars). Hides the overlay + caption when scoring is
+  // unavailable. Guarded by `seq` so a stale response can't paint over a
+  // newer Week/Month selection.
+  _loadOverlay(days, dayKeys, seq) {
+    fetchPVPerformance(days)
+      .then((perf) => {
+        if (seq !== this._reqSeq || !this._chart) return;
+        if (!perf || perf.enabled === false || !Array.isArray(perf.items) || !perf.items.length) {
+          this._chart.overlay = null;
+          if (this._strangEl) this._strangEl.setAttribute("hidden", "");
+          return;
+        }
+        const expByDay = new Map();
+        for (const it of perf.items) {
+          if (it && it.day != null) expByDay.set(it.day, Number(it.expected_wh) || 0);
+        }
+        // kWh, index-aligned to the bars; null where no score exists so
+        // the dashed line breaks rather than dropping to zero.
+        const values = dayKeys.map((d) => {
+          const wh = expByDay.get(d);
+          return wh == null ? null : wh / 1000;
+        });
+        const hasAny = values.some((v) => v != null);
+        this._chart.overlay = hasAny ? { values, color: "#fcd34d" } : null;
+
+        if (this._strangEl) {
+          const pr = typeof perf.performance_ratio === "number" ? perf.performance_ratio : null;
+          const prTxt = pr != null ? `<span class="pr">${Math.round(pr * 100)}%</span> of expected` : "";
+          // Only announce the calibration once it is actually being applied to
+          // the forward forecast — reporting a factor we ignore would mislead.
+          const cal = perf.calibration;
+          const calTxt =
+            cal && cal.applied && typeof cal.factor === "number"
+              ? `calibrating forecast ×${cal.factor.toFixed(2)}`
+              : "";
+          this._strangEl.innerHTML =
+            `<span class="swatch"></span> expected (STRÅNG)` +
+            (prTxt ? " · " + prTxt : "") +
+            (calTxt ? " · " + calTxt : "");
+          if (hasAny) this._strangEl.removeAttribute("hidden");
+          else this._strangEl.setAttribute("hidden", "");
+        }
+      })
+      .catch(() => {
+        if (seq !== this._reqSeq || !this._chart) return;
+        this._chart.overlay = null;
+        if (this._strangEl) this._strangEl.setAttribute("hidden", "");
       });
   }
 }

@@ -71,7 +71,11 @@ node_modules/
 release-notes.md
 optimizer/.venv/
 optimizer/.pytest_cache/
-optimizer/**/__pycache__/
+# Python build artefacts from any module, not just the optimizer — roofmodel/
+# is a second one, and a third would otherwise repeat this again.
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
 
 # TLS material — never commit.
 *.pem

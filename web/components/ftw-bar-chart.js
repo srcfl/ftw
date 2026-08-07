@@ -188,6 +188,26 @@ class FtwBarChart extends FtwElement {
       opacity: 0.85;
       pointer-events: none;
     }
+    /* Optional dashed overlay line (e.g. STRÅNG-expected PV vs the
+       produced bars). An SVG stretched to fill .bar-area, plotted in a
+       0..100 viewBox so it needs no pixel math against the CSS grid;
+       non-scaling-stroke keeps the dash crisp despite the stretch. */
+    .overlay-line {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: visible;
+    }
+    .overlay-line polyline {
+      fill: none;
+      stroke: var(--ftw-overlay-color, var(--amber, #f59e0b));
+      stroke-width: 1.5;
+      stroke-dasharray: 4 3;
+      vector-effect: non-scaling-stroke;
+      opacity: 0.9;
+    }
   `;
 
   static get observedAttributes() {
@@ -197,6 +217,7 @@ class FtwBarChart extends FtwElement {
   constructor() {
     super();
     this._data = [];
+    this._overlay = null;
   }
 
   attributeChangedCallback() { this.update(); }
@@ -208,6 +229,16 @@ class FtwBarChart extends FtwElement {
     this.update();
   }
   get data() { return this._data; }
+
+  // Optional dashed overlay line, index-aligned with .data. Shape:
+  //   { values: (number|null)[], color?: string }
+  // values[i] is plotted above column i on the SAME axis as the bars
+  // (nulls / non-finite entries break the line). Set null to remove.
+  set overlay(o) {
+    this._overlay = o && Array.isArray(o.values) ? o : null;
+    this.update();
+  }
+  get overlay() { return this._overlay; }
 
   render() {
     const accent = this.getAttribute("accent");
@@ -262,6 +293,17 @@ class FtwBarChart extends FtwElement {
     }
     const avg = count > 0 ? sum / count : 0;
 
+    // Fold overlay values into the axis max so the expected line and the
+    // produced bars share one scale (an expected level above the tallest
+    // bar must still fit in-frame).
+    const overlayVals = this._overlay ? this._overlay.values : null;
+    if (overlayVals) {
+      for (const ov of overlayVals) {
+        const n = Number(ov);
+        if (isFinite(n) && n > max) max = n;
+      }
+    }
+
     const colsSvg = this._data.map((d) => {
       const v = Number(d.value) || 0;
       // 2% floor keeps tiny-but-nonzero values visible; gate on v>0 so
@@ -300,10 +342,34 @@ class FtwBarChart extends FtwElement {
         `title="average ${display}"></div>`;
     }
 
+    // Dashed overlay line (expected series). Plotted in a 0..100 viewBox
+    // stretched to fill .bar-area: x centers each column, y is the value
+    // as a percentage of the shared max (inverted — SVG y grows downward).
+    let overlayLine = "";
+    if (overlayVals && max > 0) {
+      const n = this._data.length;
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const val = Number(overlayVals[i]);
+        if (!isFinite(val)) continue;
+        const x = n > 1 ? (i + 0.5) / n * 100 : 50;
+        const y = Math.max(0, Math.min(100, 100 - (val / max) * 100));
+        pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+      }
+      if (pts.length >= 2) {
+        const color = this._overlay.color;
+        if (color) this.style.setProperty("--ftw-overlay-color", color);
+        overlayLine =
+          `<svg class="overlay-line" viewBox="0 0 100 100" ` +
+          `preserveAspectRatio="none" aria-hidden="true">` +
+          `<polyline points="${pts.join(" ")}"></polyline></svg>`;
+      }
+    }
+
     return `
       <div class="chart loaded">
         <div class="bars-slot">
-          <div class="bar-area">${colsSvg}${avgOverlay}</div>
+          <div class="bar-area">${colsSvg}${avgOverlay}${overlayLine}</div>
         </div>
         <div class="lbls">${lblsSvg}</div>
       </div>
