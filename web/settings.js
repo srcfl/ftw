@@ -65,6 +65,24 @@
     if (e.target === modal) modal.classList.add("hidden");
   });
 
+  // The help bubble is pure CSS and normally opens downward, but the modal
+  // body is the scroll container that clips it: a badge in the last section
+  // has less room below it than a long help text needs. Flip the bubble
+  // upward when the badge sits in the lower part of the visible modal, so it
+  // grows into space that exists. Measured on hover because scroll position,
+  // not the badge, decides which way is open.
+  modal.addEventListener("mouseover", function (e) {
+    var badge = e.target && e.target.closest && e.target.closest(".help");
+    if (!badge) return;
+    var scroller = badge.closest(".modal-body");
+    if (!scroller) return;
+    var box = scroller.getBoundingClientRect();
+    var at = badge.getBoundingClientRect();
+    badge.classList.toggle(
+      "help-up", at.top + at.height / 2 > box.top + box.height * 0.55
+    );
+  });
+
   tabsEl.addEventListener("click", function (e) {
     if (e.target.tagName === "BUTTON" && e.target.dataset.tab) {
       tabsEl.querySelectorAll("button").forEach(function (b) {
@@ -263,9 +281,17 @@
   }
 
   function escHtml(s) {
-    var div = document.createElement("div");
-    div.textContent = s == null ? "" : String(s);
-    return div.innerHTML;
+    // Plain string replaces rather than the textContent/innerHTML trick: that
+    // trick never escapes quotes, and every caller that builds an attribute
+    // (value="...", title="...", data-help="...") has its value cut short at
+    // the first embedded quote — the rest of the text silently becomes junk
+    // attribute names.
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function renderTab(tab) {

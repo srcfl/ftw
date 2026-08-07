@@ -62,6 +62,8 @@ import (
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/proxy"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
+	"github.com/srcfl/ftw/go/internal/pvperf"
+	"github.com/srcfl/ftw/go/internal/roofmodel"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
@@ -1041,6 +1043,30 @@ func main() {
 		defer forecastSvc.Stop()
 		slog.Info("forecast service started", "provider", forecastSvc.Provider.Name(),
 			"lat", forecastSvc.Lat, "lon", forecastSvc.Lon, "rated_pv_w", ratedPVW)
+	}
+
+	// ---- Start PV performance scoring (optional) ----
+	// Nightly backfill of SMHI STRÅNG historical irradiance + expected-vs-actual
+	// PV scoring. Nil when the site has no PV geometry to score against. This is
+	// read-only with respect to control: it only fetches weather data and writes
+	// the irradiance_history + pv_performance_daily tables.
+	// Optional roof-geometry module: nil unless explicitly enabled, and
+	// stateless — it only runs when an operator asks for a derive.
+	roofModelSvc := roofmodel.FromConfig(cfg.RoofModel)
+
+	pvPerfSvc := pvperf.FromConfig(cfg.Weather, ratedPVW, st,
+		"ftw/"+Version+" github.com/srcfl/ftw")
+	if pvPerfSvc != nil {
+		pvPerfSvc.Start(ctx)
+		defer pvPerfSvc.Stop()
+		// Close the loop: measured performance calibrates the forward
+		// forecast. The hook is read at fetch time, so it starts correcting
+		// as soon as enough days are scored — no restart needed.
+		if forecastSvc != nil {
+			forecastSvc.Calibration = pvPerfSvc.CalibrationFactor
+		}
+		slog.Info("pv performance scoring started",
+			"lat", pvPerfSvc.Lat, "lon", pvPerfSvc.Lon, "arrays", len(pvPerfSvc.Arrays))
 	}
 
 	// ---- Start PV digital twin (optional, requires weather config) ----
@@ -2182,6 +2208,8 @@ func main() {
 		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
+		PVPerf:           pvPerfSvc,
+		RoofModel:        roofModelSvc,
 		MPC:              mpcSvc,
 		PVModel:          pvSvc,
 		LoadModel:        loadSvc,
