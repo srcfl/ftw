@@ -885,13 +885,17 @@ type DriverControlOptIn struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT       *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus     *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	Serial     *SerialConfig   `yaml:"serial,omitempty" json:"serial,omitempty"`
-	HTTP       *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
-	WebSocket  *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
-	TCP        *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
-	Standalone bool            `yaml:"standalone,omitempty" json:"standalone,omitempty"`
+	// AllowUnverifiedLocal permits a driver to use an mDNS-resolved .local
+	// endpoint when the transport has no cryptographic server identity. The
+	// name allowlist is not identity, so the safe default is false.
+	AllowUnverifiedLocal bool            `yaml:"allow_unverified_local,omitempty" json:"allow_unverified_local,omitempty"`
+	MQTT                 *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus               *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	Serial               *SerialConfig   `yaml:"serial,omitempty" json:"serial,omitempty"`
+	HTTP                 *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket            *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	TCP                  *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	Standalone           bool            `yaml:"standalone,omitempty" json:"standalone,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -900,6 +904,10 @@ type MQTTConfig struct {
 	Port     int    `yaml:"port,omitempty" json:"port,omitempty"` // default 1883
 	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+	// AllowUnverifiedLocal is copied from capabilities.allow_unverified_local
+	// by the core before this config reaches the transport factory. It is
+	// runtime-only and never comes from this nested YAML block.
+	AllowUnverifiedLocal bool `yaml:"-" json:"-"`
 }
 
 // ModbusConfig grants access to one Modbus TCP endpoint.
@@ -907,6 +915,10 @@ type ModbusConfig struct {
 	Host   string `yaml:"host" json:"host"`
 	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`       // default 502
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
+	// AllowUnverifiedLocal is copied from capabilities.allow_unverified_local
+	// by the core before this config reaches the transport factory. It is
+	// runtime-only and never comes from this nested YAML block.
+	AllowUnverifiedLocal bool `yaml:"-" json:"-"`
 }
 
 // SerialConfig grants read-only access to one local serial device.
@@ -986,6 +998,9 @@ type HomeAssistant struct {
 	Username         string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password         string `yaml:"password,omitempty" json:"password,omitempty"`
 	PublishIntervalS int    `yaml:"publish_interval_s,omitempty" json:"publish_interval_s,omitempty"`
+	// AllowUnverifiedLocal permits the bridge to use an mDNS-resolved broker
+	// without a verified server identity. The default is fail-closed.
+	AllowUnverifiedLocal bool `yaml:"allow_unverified_local,omitempty" json:"allow_unverified_local,omitempty"`
 }
 
 // StateConf is the persistent state DB config.

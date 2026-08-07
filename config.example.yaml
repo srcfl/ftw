@@ -73,6 +73,9 @@ drivers:
   # - name: ambibox
   #   lua: drivers/ambibox_v2x.lua
   #   capabilities:
+  #     # Lets FTW resolve the name itself over mDNS. Without it the name is
+  #     # left to the system resolver, which answers on some platforms only.
+  #     allow_unverified_local: true
   #     mqtt:
   #       host: sid-os.local
   #       port: 1883
@@ -90,8 +93,12 @@ drivers:
   #   is_site_meter: true
   #   battery_telemetry_only: true
   #   capabilities:
+  #     # Lets FTW resolve zap.local itself. Without it the name is left to
+  #     # the system resolver — which answers under Home Assistant, but not on
+  #     # a plain Compose or Pi install.
+  #     allow_unverified_local: true
   #     http:
-  #       allowed_hosts: ["zap.local"]  # use the LAN IP if mDNS is unavailable
+  #       allowed_hosts: ["zap.local"]  # .local is resolved by FTW over mDNS
   #   config:
   #     host: zap.local
   #     # meter_serial: p1m-...          # optional; P1 is auto-selected
@@ -136,6 +143,7 @@ api:
 homeassistant:
   enabled: false
   broker: 192.168.1.1
+  # allow_unverified_local: true  # let FTW resolve broker.local over mDNS itself
   port: 1883
   username: homeems
   password: homeems

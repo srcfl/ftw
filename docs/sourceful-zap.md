@@ -76,6 +76,15 @@ go test ./internal/drivers -run 'Zap|zap'
 
 - not found: confirm Zap is on Wi-Fi and reachable at
   `http://zap.local/api/system` from the FTW host;
+- `.local` name does not resolve: FTW resolves `.local` itself — via the host's
+  `avahi-daemon` where its socket is mounted, otherwise by querying the LAN —
+  rather than through the OS resolver, so it needs to be on the same L2 segment
+  as the device. That is the case with the Linux Compose topology
+  (`network_mode: host`); under `docker-compose.macos.yml` the container is
+  bridged and multicast does not reach the LAN, so configure the device by IP
+  there. The log line naming the failure is `mDNS resolution failed`, and a
+  successful lookup logs `via=avahi` or `via=multicast`; see
+  [docs/operations.md](operations.md);
 - no meter: inspect Zap's `/api/devices` and pin `meter_serial` when needed;
 - duplicate PV/battery: disable the overlapping Zap DER;
 - visible battery is not controlled: expected for the telemetry-only driver.

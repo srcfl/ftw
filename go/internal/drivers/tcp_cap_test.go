@@ -97,6 +97,18 @@ func TestTCPCap_AllowedHosts(t *testing.T) {
 	}
 }
 
+func TestTCPAllowlistMatchesLocalNameBeforeResolution(t *testing.T) {
+	if ok, reason := tcpHostAllowed("inverter.local:502", []string{"inverter.local:502"}); !ok || reason != "" {
+		t.Fatalf("matching .local allowlist = (%v, %q), want (true, empty)", ok, reason)
+	}
+	if ok, reason := tcpHostAllowed("inverter.local:502", []string{"other.local:502"}); ok || !strings.Contains(reason, "not in allowed_hosts") {
+		t.Fatalf("different .local allowlist = (%v, %q), want a pre-resolution rejection", ok, reason)
+	}
+	if ok, reason := tcpHostAllowed("inverter.local:1883", []string{"inverter.local:502"}); ok || !strings.Contains(reason, "not in allowed_hosts") {
+		t.Fatalf("wrong port for .local allowlist = (%v, %q), want rejection", ok, reason)
+	}
+}
+
 // TestTCPCap_StalePumpDoesNotClobberLiveState exercises the readPump→Close
 // race. We open against listener A, close, open against listener B, then
 // force A's accepted connection to drop. The stale pump for A wakes from
@@ -207,11 +219,11 @@ func (f *fakeTCPCap) Close() error { f.closed = true; return nil }
 
 // Synthetic DSMR 5.0 telegram body. Values chosen so we can pin every emit:
 //
-//   import 1.234 kW, export 0.500 kW   → meter.w = +734 W
-//   per-phase voltages 230.1 / 230.2 / 230.3 V
-//   per-phase currents 5 / 3 / 7 A
-//   import T1 100.000 kWh + T2 200.000 kWh → import_wh = 300_000
-//   export T1 10.000 kWh + T2 20.000 kWh → export_wh = 30_000
+//	import 1.234 kW, export 0.500 kW   → meter.w = +734 W
+//	per-phase voltages 230.1 / 230.2 / 230.3 V
+//	per-phase currents 5 / 3 / 7 A
+//	import T1 100.000 kWh + T2 200.000 kWh → import_wh = 300_000
+//	export T1 10.000 kWh + T2 20.000 kWh → export_wh = 30_000
 //
 // CRC is computed at runtime via dsmrCRC16; tests build the full telegram
 // with dsmrWrap() so they exercise the same CRC path the live meter does.

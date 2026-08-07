@@ -73,6 +73,21 @@ services:
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
       - optimizer-ipc:/run/ftw-optimizer
+      # OPTIONAL — avahi-daemon's runtime directory. Host networking shares
+      # ports, not Unix sockets, so this is the only way in.
+      #
+      # With it, FTW asks the host's mDNS responder to resolve `.local` device
+      # names (and `getent hosts zap.local` works inside the container, via
+      # libnss-mdns). Without it FTW queries the LAN itself, which needs no
+      # host software and is why this stays commented out by default.
+      #
+      # Uncomment only if the host runs avahi-daemon — the Raspberry Pi image
+      # does. Mount the DIRECTORY, not the socket inside it: if the path is
+      # missing Docker creates it, and an empty directory there is harmless,
+      # whereas a directory created where the *socket* belongs stops
+      # avahi-daemon from ever starting. Restarting avahi after the container
+      # detaches the mount, so restart FTW too if you do.
+      # - /run/avahi-daemon:/run/avahi-daemon:ro
 
   ftw-optimizer:
     image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}

@@ -38,4 +38,19 @@ fi
 grep -q '^  ftw-optimizer:' docker-compose.yml
 grep -q 'FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock' docker-compose.yml
 
+# mDNS container contract: the static core resolves names itself, direct
+# multicast needs Linux host networking, and the optional Avahi bind is the
+# whole runtime directory. A socket-file bind is unsafe because Docker creates
+# a directory at a missing file mount point.
+grep -Eq '^    network_mode: host$' docker-compose.yml
+grep -q 'libnss-mdns' Dockerfile
+grep -q -- '# - /run/avahi-daemon:/run/avahi-daemon:ro' docker-compose.yml
+if grep -Eq '^[[:space:]]+-[[:space:]]*/run/avahi-daemon/socket' docker-compose.yml; then
+  echo "avahi must be mounted as a runtime directory, not a socket file" >&2
+  exit 1
+fi
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  docker compose -f docker-compose.yml config --quiet
+fi
+
 echo "container module boundaries verified"

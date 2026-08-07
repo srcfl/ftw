@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,6 +196,65 @@ func TestHTTPTestRigSelfCheck(t *testing.T) {
 	if atomic.LoadInt32(&hits) != 1 {
 		t.Errorf("rig sanity: server saw %d hits, want 1", atomic.LoadInt32(&hits))
 	}
+}
+
+func TestLuaHTTPProxyChecksLocalDestinationBeforeProxy(t *testing.T) {
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		if r.URL.Host == "" {
+			t.Errorf("proxy request lost absolute destination: %+v", r.URL)
+		}
+		_, _ = w.Write([]byte("proxy-ok"))
+	}))
+	defer proxy.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newRequest := func(method, target string) *http.Request {
+		req, err := http.NewRequest(method, target, strings.NewReader(`{"command":"start"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Basic dTpw")
+		return req
+	}
+
+	t.Run("no opt-in still goes through the proxy", func(t *testing.T) {
+		// allow_unverified_local gates *our own* mDNS answer. With a proxy
+		// configured FTW never resolves the name at all — the proxy does — so
+		// the flag has nothing to say here and a .local host must behave like
+		// any other. Refusing would break Home Assistant, where the platform
+		// resolves .local and always has.
+		proxyHits.Store(0)
+		client := &http.Client{Transport: newLuaHTTPTransport(false, http.ProxyURL(proxyURL))}
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch} {
+			resp, err := client.Do(newRequest(method, "http://inverter.local/api"))
+			if err != nil {
+				t.Errorf("%s failed: %v", method, err)
+				continue
+			}
+			_ = resp.Body.Close()
+		}
+		if got := proxyHits.Load(); got != 3 {
+			t.Fatalf(".local requests reached proxy %d times, want 3", got)
+		}
+	})
+
+	t.Run("ordinary host still uses the proxy without opt-in", func(t *testing.T) {
+		proxyHits.Store(0)
+		client := &http.Client{Transport: newLuaHTTPTransport(false, http.ProxyURL(proxyURL))}
+		resp, err := client.Do(newRequest(http.MethodGet, "http://ordinary.example/api"))
+		if err != nil {
+			t.Fatalf("ordinary host request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+		if got := proxyHits.Load(); got != 1 {
+			t.Fatalf("ordinary host reached proxy %d times, want 1", got)
+		}
+	})
 }
 
 // TLS pinning lets a driver reach a self-signed HTTPS endpoint (e.g. a

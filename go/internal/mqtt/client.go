@@ -4,12 +4,15 @@ package mqtt
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"sync"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 // Capability wraps a paho client to match drivers.MQTTCap.
@@ -46,11 +49,28 @@ type Capability struct {
 // the replay is what restores the subscription set the broker just
 // dropped.
 func Dial(host string, port int, username, password, clientID string) (*Capability, error) {
+	return DialWithOptions(host, port, username, password, clientID, false)
+}
+
+// DialWithOptions connects to an MQTT broker with the core's explicit policy
+// for unauthenticated mDNS names.
+func DialWithOptions(host string, port int, username, password, clientID string, allowUnverifiedLocal bool) (*Capability, error) {
 	cap := &Capability{
 		subs: make(map[string]struct{}),
 	}
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", host, port)).
+		// paho's built-in dialer goes through the stdlib resolver, which never
+		// answers a ".local" name. Every broker URL built here is tcp://, so a
+		// TCP-only replacement is complete; non-".local" hosts fall through to
+		// a plain dial inside mdnsresolve.
+		SetCustomOpenConnectionFn(func(uri *url.URL, o paho.ClientOptions) (net.Conn, error) {
+			d := mdnsresolve.Dialer{
+				Dialer:               net.Dialer{Timeout: o.ConnectTimeout},
+				AllowUnverifiedLocal: allowUnverifiedLocal,
+			}
+			return d.Dial("tcp", uri.Host)
+		}).
 		SetClientID(clientID).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).

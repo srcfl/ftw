@@ -120,6 +120,50 @@ func TestLoadMinimalYAML(t *testing.T) {
 	}
 }
 
+func TestAllowUnverifiedLocalDefaultsDenyAndParsesExplicitOptIn(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Drivers[0].Capabilities.AllowUnverifiedLocal {
+		t.Fatal("allow_unverified_local must default to false")
+	}
+
+	withOptIn := strings.Replace(minimalYAML,
+		"capabilities:\n      mqtt:",
+		"capabilities:\n      allow_unverified_local: true\n      mqtt:", 1)
+	optedIn, err := Parse([]byte(withOptIn), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !optedIn.Drivers[0].Capabilities.AllowUnverifiedLocal {
+		t.Fatal("explicit allow_unverified_local=true was not retained")
+	}
+}
+
+func TestHomeAssistantAllowUnverifiedLocalDefaultsDeny(t *testing.T) {
+	base := minimalYAML + `
+homeassistant:
+  enabled: true
+  broker: broker.local
+`
+	cfg, err := Parse([]byte(base), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HomeAssistant.AllowUnverifiedLocal {
+		t.Fatal("homeassistant allow_unverified_local must default to false")
+	}
+
+	optedIn, err := Parse([]byte(base+"  allow_unverified_local: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !optedIn.HomeAssistant.AllowUnverifiedLocal {
+		t.Fatal("homeassistant explicit local opt-in was not retained")
+	}
+}
+
 func TestParseIgnoresRetiredRemoteAccessKeys(t *testing.T) {
 	legacy := minimalYAML + `
 remote_access:
