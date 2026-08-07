@@ -29,6 +29,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/coverage"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
@@ -42,6 +43,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
+	"github.com/srcfl/ftw/go/internal/pvperf"
 	"github.com/srcfl/ftw/go/internal/scanner"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
@@ -129,6 +131,10 @@ type Deps struct {
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
 	Forecast *forecast.Service
+
+	// Optional: STRÅNG-based PV performance scoring. Nil when the site has no
+	// PV geometry to score against (surfaced as {enabled:false}).
+	PVPerf *pvperf.Service
 
 	// Optional: MPC planner. Nil if disabled.
 	MPC *mpc.Service
@@ -394,6 +400,8 @@ func (s *Server) routes() {
 	s.handle("POST /api/pv/manual_hold", s.handlePVManualHold)
 	s.handle("DELETE /api/pv/manual_hold", s.handlePVManualHoldClear)
 	s.handle("GET  /api/pv/manual_hold", s.handlePVManualHoldGet)
+	s.handle("GET  /api/pv/performance", s.handlePVPerformance)
+	s.handle("GET  /api/data-sources", s.handleDataSources)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
 	s.handle("POST /api/version/channel", s.handleVersionChannel)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
@@ -2085,6 +2093,141 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": rows, "enabled": true})
+}
+
+// ---- /api/data-sources ----
+//
+// Where each external data source works, and whether it covers this site.
+// Response: {latitude, longitude, sources:[{id, kind, label, area, countries,
+// worldwide, requires_key, license, note, covers}]}. `covers` is advisory: for
+// a bounded source it is a lat/lon box test, and STRÅNG's grid is rotated, so a
+// true near a corner still means "worth trying", not "guaranteed". False is
+// reliable — that location is definitely not served.
+//
+// This exists because several sources are regional (STRÅNG is Nordic-only,
+// every price provider is European) and nothing previously said so: a site
+// outside those areas got an empty result and no explanation. See #726.
+func (s *Server) handleDataSources(w http.ResponseWriter, r *http.Request) {
+	var lat, lon float64
+	var haveSite bool
+	// Weather is an optional config section, so it is nil on a site that has
+	// never configured one — which is exactly the site most likely to be
+	// looking at this endpoint.
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+		if s.deps.Cfg != nil && s.deps.Cfg.Weather != nil {
+			lat, lon = s.deps.Cfg.Weather.Latitude, s.deps.Cfg.Weather.Longitude
+			haveSite = lat != 0 || lon != 0
+		}
+		s.deps.CfgMu.RUnlock()
+	}
+
+	// An explicit ?lat=&lon= overrides the configured site so the Weather tab
+	// can preview coverage for a pin the operator is still dragging around,
+	// before they save it.
+	if v := r.URL.Query().Get("lat"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lat, haveSite = f, true
+		}
+	}
+	if v := r.URL.Query().Get("lon"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lon, haveSite = f, true
+		}
+	}
+
+	items := make([]map[string]any, 0, len(coverage.All()))
+	for _, src := range coverage.All() {
+		item := map[string]any{
+			"id":           src.ID,
+			"kind":         string(src.Kind),
+			"label":        src.Label,
+			"area":         src.Area,
+			"worldwide":    src.Worldwide(),
+			"requires_key": src.RequiresKey,
+		}
+		if len(src.Countries) > 0 {
+			item["countries"] = src.Countries
+		}
+		if src.License != "" {
+			item["license"] = src.License
+		}
+		if src.Note != "" {
+			item["note"] = src.Note
+		}
+		// Without a site location there is nothing to test against, so omit
+		// `covers` entirely rather than defaulting it to a misleading true.
+		if haveSite {
+			item["covers"] = src.Covers(lat, lon)
+		}
+		items = append(items, item)
+	}
+	resp := map[string]any{"sources": items}
+	if haveSite {
+		resp["latitude"], resp["longitude"] = lat, lon
+	}
+	writeJSON(w, 200, resp)
+}
+
+// ---- /api/pv/performance ----
+//
+// STRÅNG-based expected-vs-actual PV performance scoring. Query param days=N
+// (default 30, max 365) selects the lookback window. Response:
+// {enabled, items:[{day, expected_wh, actual_wh, pr, ...}], performance_ratio,
+// attribution}. Returns {enabled:false} when scoring is unavailable (no PV
+// geometry configured).
+func (s *Server) handlePVPerformance(w http.ResponseWriter, r *http.Request) {
+	if s.deps.PVPerf == nil {
+		writeJSON(w, 200, map[string]any{"items": []any{}, "enabled": false})
+		return
+	}
+	days := 30
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 365 {
+		days = 365
+	}
+	now := time.Now()
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	sinceDay := today.AddDate(0, 0, -days).Format("2006-01-02")
+	untilDay := today.Format("2006-01-02")
+	items, err := s.deps.PVPerf.Load(sinceDay, untilDay)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	// Energy-weighted overall performance ratio across the window — only days
+	// with a meaningful expected baseline (pr != null) contribute.
+	var sumExpected, sumActual float64
+	for _, it := range items {
+		if it.PR != nil {
+			sumExpected += it.ExpectedWh
+			sumActual += it.ActualWh
+		}
+	}
+	// The calibration is reported over its own fixed window rather than the
+	// caller's, so a short ?days= request cannot make the site look
+	// uncalibrated. "applied" is what actually reaches the forward forecast.
+	cal := s.deps.PVPerf.Calibration()
+	resp := map[string]any{
+		"items":       items,
+		"enabled":     true,
+		"attribution": "Irradiance: SMHI STRÅNG (CC BY 4.0)",
+		"calibration": map[string]any{
+			"factor":    cal.Factor,
+			"sigma_rel": cal.SigmaRel,
+			"days":      cal.Days,
+			"applied":   cal.Valid,
+		},
+	}
+	if sumExpected > 0 {
+		resp["performance_ratio"] = sumActual / sumExpected
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---- MPC planner ----
