@@ -98,3 +98,39 @@ func TestLoadCatalogMultiMissingDirSkipped(t *testing.T) {
 		t.Fatalf("want 1 entry from bundledDir, got %d", len(entries))
 	}
 }
+
+// A write path only reaches the Settings UI if the driver says it has one.
+// The alternative — FTW recognising "the NIBE driver can write" by filename
+// — puts vendor knowledge in the host and silently arms a write switch for
+// any file that happens to be named the same.
+func TestLoadCatalogReadsWriteCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	writer := "DRIVER = {\n  id = \"nibe-local\",\n  name = \"NIBE\",\n" +
+		"  write_capabilities = { \"solar_pv\" },\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "nibe_local.lua"), []byte(writer), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A driver that mentions writing in prose still declares nothing.
+	reader := "-- writes nothing; write_capabilities stays unset\n" +
+		"DRIVER = {\n  id = \"reader\",\n  name = \"Reader\",\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "reader.lua"), []byte(reader), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := LoadCatalog(dir)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	byID := make(map[string]CatalogEntry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+
+	got := byID["nibe-local"].WriteCapabilities
+	if len(got) != 1 || got[0] != "solar_pv" {
+		t.Errorf("nibe-local WriteCapabilities = %v, want [solar_pv]", got)
+	}
+	if len(byID["reader"].WriteCapabilities) != 0 {
+		t.Errorf("reader declared no write path but got %v", byID["reader"].WriteCapabilities)
+	}
+}

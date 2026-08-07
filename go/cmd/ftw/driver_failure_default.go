@@ -47,6 +47,10 @@ import (
 //     `curtail_disable` release, which does not. pv_curtail_dispatch.go.
 //   - The loadpoint sends the periodic `ev_set_current`, which counts, and
 //     four other things that do not. See loadpoint.DispatchOutcomeFunc.
+//   - The solar feed sends the `solar_pv` hint, which does not count: a
+//     refusal there says the owner has not opened the device-side gate
+//     (the pump's Solar PV enable), not that core cannot put power where
+//     it asked — no power was asked for. solar_feed_send.go.
 
 const (
 	// driverRefusalLimit is how many refused dispatch commands in a row

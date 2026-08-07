@@ -55,6 +55,14 @@ not enough, it also needs `capabilities.http.allow_write`. It refuses to follow
 redirects, because Go re-issues a redirected `PATCH` as a body-less GET and a
 device write that never landed would otherwise report success.
 
+A driver with an opt-in write path names it in its `DRIVER` block —
+`write_capabilities = { "solar_pv" }` for a driver that feeds a heat pump's
+own solar-surplus input. The Settings UI offers a switch for a path it
+recognises and nothing for a driver that declares none, so a write stays
+unreachable until the driver itself says it has one. Declaring a path is not
+enabling it: the switch is off until an operator turns it on, and
+`capabilities.http.allow_write` is still a separate grant.
+
 ## Capability grants
 
 A YAML driver entry grants only what the file needs. The resource keys are

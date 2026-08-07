@@ -809,6 +809,7 @@ func main() {
 		ctrlMu.Lock()
 		ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
 		ctrl.SupportsPVCurtail = supportsPVCurtailFrom(newCfg.Drivers)
+		ctrl.SolarFeedDrivers = solarFeedDriversFrom(newCfg.Drivers)
 		ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers, newCfg.Batteries)
 		// Fuse params + safety margin: previously startup-only.
 		// Hot-reload them so operators can tune the per-phase margin
@@ -2448,6 +2449,7 @@ func main() {
 	const evStopHigh = 100.0 // W — "was actually drawing"
 	const evStopLow = 50.0   // W — "now essentially zero"
 	var staleDefaults staleSiteDefaultTracker
+	solarFeed := newSolarFeedSender()
 	for {
 		select {
 		case <-sigc:
@@ -2761,6 +2763,26 @@ func main() {
 			// The cap is a dispatch command and its outcome is counted; the
 			// release is not. See pv_curtail_dispatch.go.
 			dispatchPVCurtail(ctx, reg, actuation, curtailTargets, driverCmdTimeout, tickNow)
+
+			// ---- Solar-surplus feed dispatch ----
+			// Per-tick hint to drivers whose operator armed a `solar_pv`
+			// write path (NIBE Solar PV surplus feed, #537): the live
+			// solar-attributable export, site-signed. Sent every tick —
+			// repetition is what feeds the driver's dead-man switch; the
+			// driver deadbands and rate-limits the actual device writes.
+			// Runs only on freshness-allowed ticks (the stale path above
+			// `continue`s), and a stale entry already walks every driver
+			// to its default mode, which clears the device-side feed.
+			ctrlMu.Lock()
+			feedTargets := control.ComputeSolarFeed(ctrl, tel)
+			ctrlMu.Unlock()
+			for _, f := range feedTargets {
+				if observeOnlySnap[f.Driver] {
+					continue
+				}
+				payload, _ := json.Marshal(map[string]any{"action": "solar_pv", "power_w": f.PowerW})
+				solarFeed.send(ctx, reg, f.Driver, payload, driverCmdTimeout)
+			}
 
 			// LP dispatch ran at the top of this tick — see the
 			// "EV dispatch first" block above.

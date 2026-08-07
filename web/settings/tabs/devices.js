@@ -19,6 +19,104 @@
     return caps.indexOf(capability) >= 0;
   }
 
+  // ---- Opt-in write path -------------------------------------------------
+  //
+  // Drivers read. One can also write, and only where its own catalog entry
+  // says so: `write_capabilities` in the driver's DRIVER block. Today the
+  // single member is "solar_pv" — the NIBE S-series surplus feed
+  // (srcfl/ftw#537), where FTW keeps the pump's own "available power" input
+  // updated and the pump's firmware decides what to do with the number, so a
+  // wrong value costs comfort rather than safety.
+  //
+  // Two switches must agree before a write can leave the host: the host
+  // grant (`capabilities.http.allow_write`, which is what unlocks
+  // host.http_patch) and the driver opt-in (`config.write.solar_pv`).
+  // Holding one without the other does nothing, so one checkbox sets both —
+  // splitting them across two boxes would only invent a half-armed state to
+  // explain. What the pump needs at its own end is stated in the panel,
+  // because nothing here can check it.
+  //
+  // Lives at module scope, and fills a slot rather than rendering inline, for
+  // two reasons: the catalog resolves after the first render, and an inert
+  // hidden fieldset would still have its inputs read on save — writing a
+  // write-block into the config of every driver that has no write path.
+  function fillWriteSlot(slot, driver, entry, opts) {
+    var writes = (entry && entry.write_capabilities) || [];
+    if (writes.indexOf("solar_pv") < 0) return false;
+    var idx = opts.idx, help = opts.help, escHtml = opts.escHtml;
+    var wcfg = (driver.config && driver.config.write) || {};
+    var httpCap = (driver.capabilities && driver.capabilities.http) || {};
+    // Armed means both switches are on. A config carrying only one of them
+    // has never written anything — the host refuses the verb without the
+    // grant, and the driver disables the feed when host.http_patch is
+    // absent — so rendering it as off, and saving it off, changes nothing.
+    var armed = wcfg.solar_pv === true && httpCap.allow_write === true;
+    var ceilingW = Number(wcfg.max_w);
+    var ceilingValue = Number.isFinite(ceilingW) && ceilingW > 0 ? String(ceilingW) : "";
+    slot.innerHTML = '<fieldset><legend>Solar PV surplus feed</legend>' +
+      '<label style="display:flex;align-items:center;gap:6px;font-weight:normal">' +
+      '<input type="checkbox" class="drv-write-toggle" ' +
+      'data-checkbox-path="drivers.' + idx + '.config.write.solar_pv"' +
+      (armed ? ' checked' : '') + '>' +
+      'Send solar surplus to this device ' +
+      help('Writes your solar surplus into the heat pump\'s own Solar PV input, so the pump soaks up production you would otherwise export. This is the only value FTW ever writes to the pump — everything else stays read-only.') +
+      '</label>' +
+      // The host grant rides along with the switch above rather than being a
+      // second box: same decision, and nobody wants the feed without the
+      // verb it needs.
+      '<input type="checkbox" class="drv-write-grant" hidden ' +
+      'data-checkbox-path="drivers.' + idx + '.capabilities.http.allow_write"' +
+      (armed ? ' checked' : '') + '>' +
+      '<label style="margin-top:8px">Maximum surplus to report (W) ' +
+      help('The ceiling on every value FTW sends — normally your PV nameplate power. It is what stops a sign error or a telemetry spike from telling the pump there are 100 kW going spare, so the feed stays off until it is above 0.') +
+      '</label>' +
+      '<input type="number" min="0" step="100" class="drv-write-max" ' +
+      'data-path="drivers.' + idx + '.config.write.max_w" value="' + escHtml(ceilingValue) + '" ' +
+      'placeholder="e.g. 9000">' +
+      '<p class="drv-write-warning" style="color:var(--red-e);font-size:0.78rem;margin:6px 0 0" hidden></p>' +
+      '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
+      'On the pump itself: set the Local REST API to <strong>read/write</strong> (installer menu 7.5.15) and turn on the external Solar PV source — ' +
+      '“<strong>Modbus TCP/IP Ext. (Solar PV)</strong>”, register 2107, in the pump’s <strong>solar electricity</strong> settings (menu 4.2.2; a plus function, added from installer menu 7.2.1 if the menu is missing). ' +
+      'FTW cannot check either from here — a pump left read-only answers every write with “read only value”.' +
+      '</p>' +
+      '<p style="color:var(--text-dim);font-size:0.75rem;margin:6px 0 0">' +
+      'Turning this off clears the feed to 0 W. Before removing FTW altogether, turn the Solar PV input off on the pump as well (menu 4.2.2): ' +
+      'once FTW is gone nothing is left to clear a stale value.' +
+      '</p>' +
+      '</fieldset>';
+
+    var toggle = slot.querySelector(".drv-write-toggle");
+    var grant = slot.querySelector(".drv-write-grant");
+    var ceiling = slot.querySelector(".drv-write-max");
+    var warning = slot.querySelector(".drv-write-warning");
+    if (!toggle || !grant || !ceiling || !warning) return true;
+    function syncWriteFeed() {
+      var w = parseFloat(ceiling.value);
+      var hasCeiling = Number.isFinite(w) && w > 0;
+      if (toggle.checked && !hasCeiling) {
+        // The driver refuses a feed with no ceiling too, but it does so in a
+        // log line an hour later. Refusing where the operator is already
+        // looking is the same rule, findable.
+        warning.textContent = "Set a maximum above 0 W first — it bounds every value FTW can send.";
+        warning.hidden = false;
+        toggle.checked = false;
+      } else {
+        warning.textContent = "";
+        warning.hidden = true;
+      }
+      grant.checked = toggle.checked;
+    }
+    toggle.addEventListener("change", syncWriteFeed);
+    ceiling.addEventListener("input", syncWriteFeed);
+    // Run once so a hand-written config that is armed without a valid ceiling
+    // shows as off with the reason, instead of looking armed and saving back
+    // a state the driver would refuse anyway.
+    syncWriteFeed();
+    return true;
+  }
+
+  S.writeFeed = { fill: fillWriteSlot };
+
   // Some drivers expose more than one fixed register map. Keep these choices
   // in the UI until the signed driver catalog grows a general config-schema
   // field. Version gating prevents an older bundled GoodWe driver from being
@@ -960,7 +1058,7 @@
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
-              '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the local-API account you set up in the myUplink app.') + '</label>' +
+              '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the account the pump generates on its own screen when you enable the Local REST API (installer menu 7.5) — no myUplink account and no app are involved.') + '</label>' +
               '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.config.username" value="' + escHtml(lcfg.username || '') + '" placeholder="local-api-user">' +
             '</div>' +
             '<label class="drv-disable-pv" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
@@ -976,7 +1074,7 @@
               help('Turn this on when another driver reports the same physical battery. It removes the duplicate battery and prevents Combined from counting its power twice.') +
             '</label>' +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
-              '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint (the "fingeravtryck" in the myUplink app, or from "openssl x509 -fingerprint -sha256"). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
+              '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint. Read it off the device itself: openssl s_client -connect <ip>:8443 | openssl x509 -noout -fingerprint -sha256 (the myUplink app shows the same value as "fingeravtryck", if you happen to use it). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
               '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.capabilities.http.tls_pin_sha256" value="' + escHtml(pin) + '" placeholder="73d1ac81…bd9bf4eb (64 hex)" style="font-family:var(--mono);font-size:0.78rem">' +
             '</div>' +
             '</fieldset>';
@@ -1041,6 +1139,12 @@
         // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
         // Filled by the after() pass once /api/drivers/catalog has resolved.
         html += '<div class="drv-secrets-slot" data-driver-idx="' + idx + '"></div>';
+        // Slot for a catalog-declared opt-in write path. Empty markup until
+        // the after() pass sees the driver declare one, which is deliberate:
+        // an inert hidden fieldset would still have its inputs captured on
+        // save, writing a write-block into the config of every driver that
+        // has no write path at all.
+        html += '<div class="drv-write-slot" data-driver-idx="' + idx + '"></div>';
         if (isCloudDriver) {
           var cfg = d.config || {};
           var hasPw = d.has_password === true;
@@ -1086,6 +1190,7 @@
       var config = ctx.config;
       var bodyEl = ctx.bodyEl;
       var escHtml = ctx.escHtml;
+      var help = ctx.help;
 
       function fmtW(v) {
         if (!Number.isFinite(v)) return "—";
@@ -1482,6 +1587,14 @@
           });
           fs += '</fieldset>';
           slot.innerHTML = fs;
+        });
+        // Opt-in write paths the installed driver declares. See
+        // fillWriteSlot: nothing is rendered for a driver that declares none.
+        bodyEl.querySelectorAll(".drv-write-slot").forEach(function (slot) {
+          var dIdx = parseInt(slot.getAttribute("data-driver-idx"), 10);
+          var d = config.drivers[dIdx];
+          if (!d || !d.lua) return;
+          fillWriteSlot(slot, d, byLua[d.lua], {idx: dIdx, help: help, escHtml: escHtml});
         });
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
           var lua = lbl.getAttribute("data-drv-lua");

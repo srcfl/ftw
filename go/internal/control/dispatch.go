@@ -530,6 +530,13 @@ type State struct {
 	// hot-swappable via the config-reload watcher.
 	SupportsPVCurtail map[string]bool
 
+	// SolarFeedDrivers flags drivers whose operator armed an opt-in
+	// `solar_pv` write path (e.g. the NIBE S-series Solar PV surplus
+	// feed). ComputeSolarFeed sends only to flagged drivers. Populated
+	// from the per-driver write gates by main.go's solarFeedDriversFrom;
+	// hot-swappable via the config-reload watcher like SupportsPVCurtail.
+	SolarFeedDrivers map[string]bool
+
 	// DCLinkProtectionEnabled opts into a live-state curtail trigger
 	// that fires INDEPENDENTLY of the planner directive when the
 	// inverter's DC link is most exposed to a load-step fault: SoC

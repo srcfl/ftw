@@ -74,6 +74,19 @@ type CatalogEntry struct {
 	// reads `config.<key>` like any other entry — this is purely a
 	// hint for the UI layer.
 	ConfigSecrets []string `json:"config_secrets,omitempty"`
+
+	// WriteCapabilities names the opt-in write paths a driver implements,
+	// so the Settings UI can offer a switch for one instead of leaving it
+	// to hand-edited YAML. Each entry is a stable identifier the UI knows
+	// how to render a control for (today: "solar_pv" — the NIBE S-series
+	// surplus feed behind `config.write.solar_pv` + `capabilities.http.
+	// allow_write`).
+	//
+	// A driver that declares nothing gets no write UI, which is the point:
+	// the switch appears only where the installed driver states it has a
+	// write path, rather than FTW matching on a filename or vendor name.
+	// Read-only remains the default for every driver in the catalog.
+	WriteCapabilities []string `json:"write_capabilities,omitempty"`
 }
 
 // LoadCatalog scans dir (and any direct sub-directories) for .lua driver
@@ -202,6 +215,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.VerificationNotes = pickString(block, "verification_notes")
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
+	e.WriteCapabilities = pickList(block, "write_capabilities")
 	e.Controls = pickControls(block)
 	return e, nil
 }

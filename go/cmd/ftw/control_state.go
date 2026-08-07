@@ -18,6 +18,7 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
+	ctrl.SolarFeedDrivers = solarFeedDriversFrom(cfg.Drivers)
 	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers, cfg.Batteries)
 	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
 	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
