@@ -32,6 +32,49 @@
     return leafletLoading;
   }
 
+  // Terra Draw (MIT) supplies the drawing. Both bundles are UMD, so unlike an
+  // ES module they can carry a real integrity hash: one self-contained file
+  // each, with no sub-imports for SRI to silently miss.
+  var TERRA_DRAW = {
+    src: "https://unpkg.com/terra-draw@1.32.2/dist/terra-draw.umd.js",
+    integrity: "sha384-TYV8O/5VLLcJCLall6+2ipTEOgCQ0Fy4YkAoL3AU15s0qmNqs20zeWGiIJyMiztH",
+  };
+  var TERRA_DRAW_LEAFLET = {
+    src: "https://unpkg.com/terra-draw-leaflet-adapter@1.3.0/dist/terra-draw-leaflet-adapter.umd.js",
+    integrity: "sha384-ynliNmmpIbn8Cwh1eYvXemMxJbdMJtdN/czSOHWWCiF9vp7ZiFu8WRdfTUUNYiA5",
+  };
+
+  function loadScript(spec) {
+    return new Promise(function (resolve, reject) {
+      var script = document.createElement("script");
+      script.src = spec.src;
+      script.integrity = spec.integrity;
+      script.crossOrigin = "anonymous";
+      script.async = true;
+      script.onload = function () { resolve(); };
+      script.onerror = function () { reject(new Error("could not load " + spec.src)); };
+      document.head.appendChild(script);
+    });
+  }
+
+  var terraDrawLoading = null;
+  function loadTerraDraw() {
+    if (window.terraDrawLeafletAdapter) return Promise.resolve();
+    if (terraDrawLoading) return terraDrawLoading;
+    terraDrawLoading = loadLeaflet()
+      .then(function () {
+        // The adapter's UMD captures window.leaflet as it evaluates and uses
+        // it for its own vertex markers. Leaflet itself only ever defines
+        // window.L, so without this alias the adapter loads and then throws
+        // the first time a vertex is drawn.
+        if (!window.leaflet) window.leaflet = window.L;
+        return loadScript(TERRA_DRAW);
+      })
+      .then(function () { return loadScript(TERRA_DRAW_LEAFLET); })
+      .catch(function (e) { terraDrawLoading = null; throw e; });
+    return terraDrawLoading;
+  }
+
   var pvArraysModulePromise = null;
   var pvArraysModuleFailed = false;
   function ensurePvArraysComponent() {
@@ -110,6 +153,104 @@
     };
   }
 
+  // --- drawing arrays on the map -------------------------------------------
+  // A drawn rectangle answers two of the three questions an array asks: how
+  // big it is, and which way it is turned. Tilt is the one thing an overhead
+  // outline cannot show, so it is typed once before drawing and used to turn
+  // the outline into real panel area.
+  var drawInstance = null;
+  var drawGeometry = null;
+  var drawHandled = {};
+  var lastDrawnArray = null;
+
+  function drawStatus(html) {
+    var el = document.getElementById("pv-draw-status");
+    if (el) el.innerHTML = html;
+  }
+
+  function drawnTiltDeg() {
+    var el = document.getElementById("pv-draw-tilt");
+    var v = el ? parseFloat(el.value) : NaN;
+    return isNaN(v) ? drawGeometry.DEFAULT_TILT_DEG : Math.min(Math.max(v, 0), 90);
+  }
+
+  function onRectangleFinished(ctx, id) {
+    if (drawHandled[id]) return;
+    drawHandled[id] = true;
+    var snapshot = drawInstance.getSnapshot() || [];
+    var feature = null;
+    for (var i = 0; i < snapshot.length; i++) {
+      if (snapshot[i] && snapshot[i].id === id) feature = snapshot[i];
+    }
+    if (!feature || !feature.geometry || feature.geometry.type !== "Polygon") return;
+    var weather = ctx.config.weather;
+    var derived = drawGeometry.arrayFromRing(feature.geometry.coordinates[0], {
+      latitude: weather.latitude,
+      tiltDeg: drawnTiltDeg(),
+    });
+    if (!derived) {
+      drawStatus("That outline enclosed no area — draw it again.");
+      return;
+    }
+    weather.pv_arrays.push(derived.array);
+    lastDrawnArray = derived.array;
+    renderPVArrays(ctx);
+    drawStatus(
+      "<strong>" + ctx.escHtml(derived.array.name) + "</strong> added: " +
+      derived.planAreaM2 + " m² outline is " + derived.slopeAreaM2 + " m² of roof at " +
+      derived.array.tilt_deg + "°, about " + derived.array.kwp + " kWp. " +
+      "Facing " + derived.array.azimuth_deg + "° — the outline fits " +
+      derived.azimuthCandidates.join("° and ") + "° equally well. " +
+      '<button type="button" id="pv-draw-flip">Flip 180°</button> ' +
+      "Draw another, or edit the numbers below."
+    );
+  }
+
+  function startArrayDrawing(ctx) {
+    var map = window._weatherMap;
+    if (!map) {
+      drawStatus("The map has to finish loading before you can draw on it.");
+      return;
+    }
+    drawStatus("Loading the drawing tools…");
+    Promise.all([loadTerraDraw(), import("/components/pv-array-geometry.js")])
+      .then(function (loaded) {
+        drawGeometry = loaded[1];
+        if (!drawInstance) {
+          drawInstance = new window.terraDraw.TerraDraw({
+            adapter: new window.terraDrawLeafletAdapter.TerraDrawLeafletAdapter({
+              lib: window.L,
+              map: map,
+            }),
+            modes: [new window.terraDraw.TerraDrawAngledRectangleMode()],
+          });
+          drawInstance.start();
+          drawInstance.on("finish", function (id) { onRectangleFinished(ctx, id); });
+        }
+        drawInstance.setMode("angled-rectangle");
+        var container = document.getElementById("weather-map");
+        if (container && container.scrollIntoView) {
+          container.scrollIntoView({ block: "nearest" });
+        }
+        drawStatus(
+          "Click one corner of your panels, click along the ridge to set the " +
+          "angle, then click again to finish the rectangle."
+        );
+      })
+      .catch(function (e) {
+        drawStatus("Drawing is unavailable (" + ctx.escHtml(e.message) +
+          "). The numbers below still work.");
+      });
+  }
+
+  function stopArrayDrawing() {
+    if (!drawInstance) return;
+    // "static" keeps what has been drawn on the map while stopping new
+    // drawing; stop() would take the outlines with it.
+    try { drawInstance.setMode("static"); } catch (e) { /* stays in draw mode */ }
+    drawStatus("Drawing finished. The arrays below are yours to edit.");
+  }
+
   function mountMap(ctx, container) {
     if (!window.L) return;
     var bodyEl = ctx.bodyEl;
@@ -184,8 +325,19 @@
           'Optional. Open-Meteo uses these per-plane values to project shortwave radiation onto each array. ' +
           'Forecast.Solar uses them for its site-calibrated forecast. Leave empty for the safe flat estimate or the provider default.') + '</legend>' +
         '<div id="pv-arrays-list"></div>' +
-        '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
+        '<div class="field-row" style="gap:8px;align-items:flex-end;margin-top:4px">' +
+          '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
+          '<button class="btn-add" id="pv-array-draw" type="button">✎ Draw on the map</button>' +
+          '<button class="btn-add" id="pv-array-draw-done" type="button">Done drawing</button>' +
+          '<div style="flex:0 0 7rem"><label>Roof tilt °</label>' +
+            '<input type="number" step="1" min="0" max="90" id="pv-draw-tilt" value="35">' +
+          '</div>' +
+        '</div>' +
+        '<p id="pv-draw-status" style="color:var(--text-dim);font-size:0.75rem;margin:6px 0 0"></p>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
+        'Drawing gives the size and the direction; tilt is the one thing an overhead ' +
+        'outline cannot show, so set it above before you draw — a 35° roof holds about ' +
+        '22 % more panel than its outline suggests. ' +
         'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W.' +
         '</p>' +
         '</fieldset>';
@@ -197,6 +349,21 @@
       if (addBtn) addBtn.addEventListener("click", function () {
         ctx.config.weather.pv_arrays.push({ name: "", kwp: 0, tilt_deg: 35, azimuth_deg: 180 });
         renderPVArrays(ctx);
+      });
+      var drawBtn = document.getElementById("pv-array-draw");
+      if (drawBtn) drawBtn.addEventListener("click", function () { startArrayDrawing(ctx); });
+      var doneBtn = document.getElementById("pv-array-draw-done");
+      if (doneBtn) doneBtn.addEventListener("click", stopArrayDrawing);
+      var status = document.getElementById("pv-draw-status");
+      if (status) status.addEventListener("click", function (e) {
+        if (!e.target || e.target.id !== "pv-draw-flip" || !lastDrawnArray) return;
+        // Flip the object, not an index: removing another row above it would
+        // otherwise silently turn a different roof around.
+        lastDrawnArray.azimuth_deg = drawGeometry.flipAzimuthDeg(lastDrawnArray.azimuth_deg);
+        lastDrawnArray.name = drawGeometry.compassName(
+          lastDrawnArray.azimuth_deg, lastDrawnArray.tilt_deg);
+        renderPVArrays(ctx);
+        drawStatus("Now facing " + lastDrawnArray.azimuth_deg + "°.");
       });
     },
   };
