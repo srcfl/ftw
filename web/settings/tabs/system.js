@@ -52,6 +52,24 @@
     };
   }
 
+  // In a single-image bundle (the Home Assistant add-on) Core and the
+  // Optimizer ship and update together under one bundled FTW release, and
+  // the host platform owns update and rollback. Showing per-container
+  // versions and update buttons there would only mislead.
+  function bundleDisplay(d) {
+    d = d || {};
+    var bundle = d.bundle || {};
+    if (bundle.kind !== "home_assistant_addon") return null;
+    var ftwVersion = (d.core || {}).version || "dev";
+    return {
+      ftwVersion: ftwVersion,
+      bundleVersion: bundle.version || "",
+      note: "FTW " + ftwVersion + " is bundled with the Home Assistant add-on" +
+        (bundle.version ? " " + bundle.version : "") +
+        ". Home Assistant manages updates and rollback.",
+    };
+  }
+
   function bar(percent) {
     var p = Math.max(0, Math.min(100, Number(percent) || 0));
     return '<div class="sys-bar"><div class="sys-bar-fill" style="width:' + p.toFixed(1) + '%"></div></div>';
@@ -225,17 +243,34 @@
           var planTime = optimizerState.lastPlanAtMs
             ? " Last plan: " + new Date(optimizerState.lastPlanAtMs).toLocaleString() + "."
             : "";
-          el.innerHTML =
-            '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
-              ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
-            '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
-              '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
-              ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
-            (optimizerState.warning ? '<div class="sys-alert" role="alert"><strong>' + escHtml(optimizerState.warning) + '</strong>' + escHtml(planTime) + '</div>' : '') +
+          var bundled = bundleDisplay(d);
+          var warningHTML = optimizerState.warning
+            ? '<div class="sys-alert" role="alert"><strong>' + escHtml(optimizerState.warning) + '</strong>' + escHtml(planTime) + '</div>'
+            : '';
+          var driversHTML =
             '<div class="sys-row"><span class="sys-label">Drivers</span><span>host API ' +
               escHtml(drivers.driver_host_api || drivers.host_api || 1) + ' · ' + active +
-              ' managed</span><button class="btn-add" id="sys-refresh-drivers" type="button">Refresh</button></div>' +
-            '<div class="sys-meta" id="sys-component-action" style="grid-column:1/-1"></div>';
+              ' managed</span><button class="btn-add" id="sys-refresh-drivers" type="button">Refresh</button></div>';
+          var actionHTML = '<div class="sys-meta" id="sys-component-action" style="grid-column:1/-1"></div>';
+          if (bundled) {
+            el.innerHTML =
+              '<div class="sys-row"><span class="sys-label">FTW</span><span>' + escHtml(bundled.ftwVersion) +
+                '</span><span class="sys-value">bundled</span></div>' +
+              warningHTML +
+              driversHTML +
+              '<div class="sys-meta" style="grid-column:1/-1">' + escHtml(bundled.note) + '</div>' +
+              actionHTML;
+          } else {
+            el.innerHTML =
+              '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
+                ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
+              '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
+                '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
+                ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
+              warningHTML +
+              driversHTML +
+              actionHTML;
+          }
           var status = document.getElementById("sys-component-action");
           var optimizerBtn = document.getElementById("sys-update-optimizer");
           if (optimizerBtn) optimizerBtn.onclick = function () {
@@ -275,5 +310,5 @@
       window._systemStatusTimer = setInterval(refresh, 5000);
     },
   };
-  S.tabs.system._pure = { optimizerStatus: optimizerStatus };
+  S.tabs.system._pure = { optimizerStatus: optimizerStatus, bundleDisplay: bundleDisplay };
 })();

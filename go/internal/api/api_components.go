@@ -66,6 +66,9 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 	if s.deps.DriverRepository != nil {
 		result["drivers"] = s.deps.DriverRepository.Status()
 	}
+	if s.deps.Bundle != nil {
+		result["bundle"] = s.deps.Bundle
+	}
 	if s.deps.SelfUpdate != nil {
 		result["updates"] = map[string]any{
 			"release": s.deps.SelfUpdate.Info(),

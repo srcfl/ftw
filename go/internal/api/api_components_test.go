@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/mpc"
 )
 
@@ -63,5 +64,50 @@ func TestComponentsReportsWorkerHealthFailure(t *testing.T) {
 	}
 	if body.Optimizer.Healthy || !body.Optimizer.Degraded || body.Optimizer.HealthError != "worker unavailable" {
 		t.Fatalf("optimizer status = %+v", body.Optimizer)
+	}
+}
+
+func TestComponentsReportsBundlePackaging(t *testing.T) {
+	srv := New(&Deps{
+		Version: "v1.10.0-beta.1",
+		Bundle:  &components.Bundle{Kind: "home_assistant_addon", Version: "0.1.0-beta.1"},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/components", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Core struct {
+			Version string `json:"version"`
+		} `json:"core"`
+		Bundle *components.Bundle `json:"bundle"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Bundle == nil || body.Bundle.Kind != "home_assistant_addon" || body.Bundle.Version != "0.1.0-beta.1" {
+		t.Fatalf("bundle = %+v, want home_assistant_addon 0.1.0-beta.1", body.Bundle)
+	}
+	if body.Core.Version != "v1.10.0-beta.1" {
+		t.Fatalf("core version = %q, want the bundled FTW version", body.Core.Version)
+	}
+}
+
+func TestComponentsOmitsBundleForNativeInstalls(t *testing.T) {
+	srv := New(&Deps{Version: "v1.10.0-beta.1"})
+	req := httptest.NewRequest(http.MethodGet, "/api/components", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["bundle"]; ok {
+		t.Fatalf("bundle key present for native install: %s", rr.Body.String())
 	}
 }
