@@ -174,3 +174,26 @@ describe("setup wizard driver picker — not-listed escape hatch (#757)", () => 
       "an empty summary step is a second dead-end; go straight to integrations");
   });
 });
+
+describe("setup wizard — mDNS-first device addressing", () => {
+  it("carries the discovered hostname into the selected device", () => {
+    assert.match(JS, /hostname:\s*dev\.hostname/,
+      "useScanDevice must not drop the scan's mDNS/DNS hostname");
+  });
+
+  it("prefers a self-broadcast .local name over the raw IP when prefilling", () => {
+    assert.match(JS, /isMDNSName\(selectedDevice\.hostname\)\s*\?\s*selectedDevice\.hostname\s*:\s*selectedDevice\.ip/,
+      "the host field must prefill the mDNS name when the device broadcasts one");
+    assert.match(JS, /\\\.local\\\.\?\$/,
+      "only RFC 6762 .local names qualify — other DNS names depend on the router");
+  });
+
+  it("tells the operator to reserve a raw IP in the router's DHCP pool", () => {
+    assert.match(HTML, /id=["']drv-host-hint["']/,
+      "the addressing hint element must exist under the host field");
+    assert.match(JS, /Reserve it for the device in your router/,
+      "an IP-literal host must surface the DHCP-reservation warning");
+    assert.match(JS, /addEventListener\(['"]input['"],\s*updateHostHint\)/,
+      "the hint must track manual edits of the host field");
+  });
+});

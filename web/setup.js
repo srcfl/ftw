@@ -9,7 +9,7 @@
 
   // Collected state
   var configuredDrivers = [];    // array of driver objects ready for config.drivers
-  var selectedDevice = null;     // { ip, port, protocol } from scan or manual entry
+  var selectedDevice = null;     // { ip, port, protocol, hostname } from scan or manual entry
   var selectedCatalog = null;    // CatalogEntry from /api/drivers/catalog
   var driverCatalog = [];        // full catalog cache
 
@@ -106,7 +106,7 @@
             '<td>' + identity + '</td>' +
             '<td><button class="btn-use">Use this device</button></td>';
           tr.querySelector('.btn-use').addEventListener('click', function () {
-            useScanDevice(d.ip, d.port, proto, match && match.driver);
+            useScanDevice(d, proto, match && match.driver);
           });
           tbody.appendChild(tr);
         });
@@ -123,16 +123,22 @@
     document.getElementById('manual-ip-toggle').style.display = 'none';
   };
 
-  function useScanDevice(ip, port, protocol, matchedFilename) {
-    selectedDevice = { ip: ip, port: port, protocol: protocol, matchedFilename: matchedFilename || '' };
+  function useScanDevice(dev, protocol, matchedFilename) {
+    selectedDevice = {
+      ip: dev.ip,
+      port: dev.port,
+      protocol: protocol,
+      hostname: dev.hostname || '',
+      matchedFilename: matchedFilename || ''
+    };
     goStep(4);
   }
 
   window.useManualDevice = function () {
-    var ip = document.getElementById('manual-ip').value.trim();
+    var host = document.getElementById('manual-ip').value.trim();
     var port = parseInt(document.getElementById('manual-port').value, 10) || 502;
-    if (!ip) return;
-    selectedDevice = { ip: ip, port: port, protocol: guessProtocol(port) };
+    if (!host) return;
+    selectedDevice = { ip: host, port: port, protocol: guessProtocol(port), hostname: '' };
     goStep(4);
   };
 
@@ -318,9 +324,15 @@
     document.getElementById('drv-name').value = name;
 
     if (selectedDevice) {
-      document.getElementById('drv-ip').value = selectedDevice.ip;
+      // Prefer the device's self-broadcast mDNS (.local) name over the raw
+      // IP: the name follows the device across DHCP lease changes, the IP
+      // doesn't. Other reverse-DNS names stay display-only — resolving them
+      // at runtime depends on the router, so the IP is the safer default.
+      var host = isMDNSName(selectedDevice.hostname) ? selectedDevice.hostname : selectedDevice.ip;
+      document.getElementById('drv-ip').value = host;
       document.getElementById('drv-port').value = selectedDevice.port;
     }
+    updateHostHint();
 
     // Show/hide unit ID for modbus
     var isModbus = !selectedCatalog.protocols || selectedCatalog.protocols.length === 0 ||
@@ -367,11 +379,51 @@
     });
   }
 
+  // A self-broadcast mDNS name (RFC 6762 .local). Only these are safe to
+  // prefer over the IP — any other hostname needs the router's DNS to
+  // resolve, which FTW can't verify from here.
+  function isMDNSName(host) {
+    return /\.local\.?$/i.test(host || '');
+  }
+
+  function isIPv4Literal(host) {
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(host || '');
+  }
+
+  // Addressing hint under the host field: a .local name survives DHCP
+  // lease changes; a raw IP only stays valid if the operator reserves it
+  // for the device in the router's DHCP pool. Tracks user edits live.
+  function updateHostHint() {
+    var el = document.getElementById('drv-host-hint');
+    var input = document.getElementById('drv-ip');
+    if (!el || !input) return;
+    var host = input.value.trim();
+    el.style.display = 'none';
+    el.className = 'host-hint';
+    if (isMDNSName(host)) {
+      var discovered = '';
+      if (selectedDevice && selectedDevice.ip &&
+          host.toLowerCase() === (selectedDevice.hostname || '').toLowerCase()) {
+        discovered = ' (discovered at ' + selectedDevice.ip + ')';
+      }
+      el.textContent = 'Connecting by the device’s mDNS name' + discovered +
+        ' — it keeps working even if your router assigns the device a new IP address.';
+      el.className = 'host-hint mdns';
+      el.style.display = 'block';
+    } else if (isIPv4Literal(host)) {
+      el.textContent = 'No mDNS (.local) name in use — FTW will connect to this fixed IP address. ' +
+        'Reserve it for the device in your router’s DHCP settings so a new ' +
+        'DHCP lease can’t move the device and break the connection.';
+      el.className = 'host-hint dhcp';
+      el.style.display = 'block';
+    }
+  }
+
   window.saveDriver = function () {
     var name = document.getElementById('drv-name').value.trim();
     if (!name) { alert('Driver name is required.'); return; }
 
-    var ip = document.getElementById('drv-ip').value.trim();
+    var host = document.getElementById('drv-ip').value.trim();
     var port = parseInt(document.getElementById('drv-port').value, 10);
     var unitId = parseInt(document.getElementById('drv-unitid').value, 10) || 1;
     var isSiteMeter = document.getElementById('drv-site-meter').checked;
@@ -387,7 +439,7 @@
       ? (parseFloat(document.getElementById('drv-battery-kwh').value) || 0)
       : 0;
 
-    if (!ip) { alert('IP address is required.'); return; }
+    if (!host) { alert('IP address or hostname is required.'); return; }
 
     // Determine protocol from catalog entry
     var protocol = 'modbus';
@@ -413,11 +465,11 @@
     }
 
     if (protocol === 'modbus') {
-      driver.capabilities.modbus = { host: ip, port: port, unit_id: unitId };
+      driver.capabilities.modbus = { host: host, port: port, unit_id: unitId };
     } else if (protocol === 'mqtt') {
-      driver.capabilities.mqtt = { host: ip, port: port };
+      driver.capabilities.mqtt = { host: host, port: port };
     } else if (protocol === 'http') {
-      driver.capabilities.http = { allowed_hosts: [ip] };
+      driver.capabilities.http = { allowed_hosts: [host] };
       // connection_defaults.host is declared only by drivers that take a
       // user-configurable local endpoint — seed config.host from the IP the
       // user just entered. Cloud drivers (Easee etc.) declare http_hosts
@@ -430,7 +482,7 @@
       // Cloud drivers don't declare it and key off email/password.
       if (Object.prototype.hasOwnProperty.call(connDefaults, 'host')) {
         driver.config = driver.config || {};
-        driver.config.host = ip;
+        driver.config.host = host;
       }
     }
 
@@ -918,6 +970,8 @@
     if (n > TOTAL_STEPS) return TOTAL_STEPS;
     return n;
   }
+
+  document.getElementById('drv-ip').addEventListener('input', updateHostHint);
 
   renderDots();
   loadPriceZones();
