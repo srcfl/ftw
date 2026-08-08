@@ -52,12 +52,13 @@ func TestSendReturnsAtDeadlineWhileDriverIsWedged(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	rd := &runningDriver{
-		driver: rt,
-		env:    rt.env,
-		cfg:    config.Driver{Name: "d1"},
-		cmdCh:  make(chan driverCmd, 1),
-		stop:   make(chan bool, 1),
-		done:   make(chan struct{}),
+		driver:    rt,
+		env:       rt.env,
+		cfg:       config.Driver{Name: "d1"},
+		cmdCh:     make(chan driverCmd, 1),
+		defaultCh: make(chan driverCmd, 1),
+		stop:      make(chan bool, 1),
+		done:      make(chan struct{}),
 	}
 	r.rec["d1"] = rd
 	go r.runLoop(rd)
