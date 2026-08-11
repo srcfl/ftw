@@ -639,6 +639,15 @@ type State struct {
 	// leave the inverter capped after a slot rolls over.
 	LastCurtailedDrivers map[string]bool
 
+	// PVExportGuardActive says fresh meter data showed solar-attributable
+	// export above the effective site ceiling on this tick.
+	// PVExportResidualW is the part of that overage which Core could not
+	// remove with safe, positive caps on online curtail-capable PV. It stays
+	// non-zero when PV is unsupported or when clearing the overage would
+	// require the still-ambiguous zero-watt curtail command.
+	PVExportGuardActive bool
+	PVExportResidualW   float64
+
 	// FuseEVMaxW is the joint allocator's verdict for the EV's allowed
 	// wattage this tick. Only meaningful when FuseSaturated is true.
 	// Read by the loadpoint controller (via a hook) to curtail the EV
@@ -3072,13 +3081,16 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		}
 	}
 
+	guard := computePVExportGuard(state, store)
+
 	// Decide which drivers should be curtailed this tick. A hold with
 	// LimitW == 0 is still a valid cap (force PV off on the scoped
 	// surface) — only release entirely when there is no active hold AND
 	// the planner isn't asking for curtail.
 	next := map[string]float64{}
-	wantCurtail := holdActive || limit > 0
-	if wantCurtail && store != nil && len(state.SupportsPVCurtail) > 0 {
+	baseCurtailActive := holdActive || limit > 0
+	wantCurtail := baseCurtailActive || guard.active
+	if baseCurtailActive && store != nil && len(state.SupportsPVCurtail) > 0 {
 		if scopedDriver != "" {
 			// Driver-scoped hold: cap that one driver only, regardless
 			// of its live |PV| (operator may want to force a verified-
@@ -3132,6 +3144,28 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		if caps, ok := plannedPVCaps(state, store, *plannedCap, limit); ok {
 			next = caps
 		}
+	}
+	// The live export guard is a safety overlay, not another planner. Merge
+	// its per-driver caps after the economic/manual allocation and keep the
+	// tighter positive cap. An existing zero cannot win here: it is not an
+	// active zero cap in today's wire contract and would be filtered below.
+	for driver, limitW := range guard.caps {
+		current, ok := next[driver]
+		if !ok || current <= 0 || limitW < current {
+			next[driver] = limitW
+		}
+	}
+	guard.residualW = pvExportResidualAfterCaps(guard.overageW, state, store, next)
+	previousResidualW := state.PVExportResidualW
+	state.PVExportGuardActive = guard.active
+	state.PVExportResidualW = guard.residualW
+	if guard.residualW > 0 && previousResidualW <= 0 {
+		slog.Warn("pv export guard left an uncontrollable residual",
+			"pv_export_w", guard.exportW,
+			"export_ceiling_w", guard.ceilingW,
+			"residual_w", guard.residualW)
+	} else if guard.residualW <= 0 && previousResidualW > 0 {
+		slog.Info("pv export guard residual cleared")
 	}
 
 	// Release path. A previously-curtailed driver gets an explicit
