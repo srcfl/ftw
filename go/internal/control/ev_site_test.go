@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 )
 
@@ -30,7 +31,7 @@ func TestEVSiteSurplusOnlyTakesLeftoverPVWhileBatteryGridCharges(t *testing.T) {
 	// treated battery charge as already-claimed PV and offered the car
 	// −grid+ev < 0 while Pixii imported, so the EV never moved.
 	start := evComboSiteStart()
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start: start,
 		Plan:  injectedChargePlan(evComboSlotStart(), 15, evComboBatW, 0, evComboLoadW, evComboPVW),
 		LP:    surplusOnlyGarage(),
@@ -39,14 +40,14 @@ func TestEVSiteSurplusOnlyTakesLeftoverPVWhileBatteryGridCharges(t *testing.T) {
 	})
 	site.run(12)
 	got := site.requireCombo(4)
-	if got.EVW > site.leftoverW()+50 {
+	if got.EVW > site.leftoverW()+loadpoint.SitePowerEpsW {
 		t.Errorf("EV %.0f W exceeded leftover %.0f W", got.EVW, site.leftoverW())
 	}
 }
 
 func TestEVSitePlannedSurplusEVChargesBesideBatteryGridCharge(t *testing.T) {
 	start := evComboSiteStart()
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start: start,
 		Plan:  injectedChargePlan(evComboSlotStart(), 15, evComboBatW, 4140, evComboLoadW, evComboPVW),
 		LP:    surplusOnlyGarage(),
@@ -97,7 +98,7 @@ func TestEVSiteOptimizeThenDispatchChargesEVFromPVBesideBatteryImport(t *testing
 			NoBatteryToEV:    true,
 		},
 	}
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start:          evComboSiteStart(),
 		OptimizeSlots:  slots,
 		OptimizeParams: params,
@@ -106,8 +107,8 @@ func TestEVSiteOptimizeThenDispatchChargesEVFromPVBesideBatteryImport(t *testing
 		PVW:            evComboPVW,
 		BatMaxCharge:   10000,
 	})
-	if site.plan.Actions[0].BatteryW < 500 {
-		t.Fatalf("cheap slot should charge the home battery, got %+v", site.plan.Actions[0])
+	if site.plan().Actions[0].BatteryW < 500 {
+		t.Fatalf("cheap slot should charge the home battery, got %+v", site.plan().Actions[0])
 	}
 	site.run(12)
 	site.requireCombo(4)
@@ -117,7 +118,7 @@ func TestEVSiteIdleSurplusOnlyEVDoesNotBlockNightGridCharge(t *testing.T) {
 	// #953: plugged idle surplus-only car, no PV, cheap night.
 	start := time.Date(2026, 8, 18, 2, 0, 1, 0, time.UTC)
 	slot := time.Date(2026, 8, 18, 2, 0, 0, 0, time.UTC)
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start: start,
 		Plan:  injectedChargePlan(slot, 15, 5000, 0, 500, 0),
 		LP:    surplusOnlyGarage(),
@@ -143,7 +144,7 @@ func TestEVSiteSurplusOnlyPausesWhenLeftoverCannotHold3Phase(t *testing.T) {
 	// rather than import the gap. Battery may still buy from the grid.
 	start := evComboSiteStart()
 	const loadW, pvW = 500.0, -1800.0 // leftover 1300 W
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start: start,
 		Plan:  injectedChargePlan(evComboSlotStart(), 15, 5000, 11000, loadW, pvW),
 		LP:    surplusOnlyGarage(),
@@ -159,7 +160,7 @@ func TestEVSiteScheduledEVMayImportOnCheapNight(t *testing.T) {
 	slot := time.Date(2026, 8, 18, 2, 0, 0, 0, time.UTC)
 	lp := surplusOnlyGarage()
 	lp.SurplusOnly = false
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start: start,
 		Plan:  injectedChargePlan(slot, 15, 4000, 4140, 500, 0),
 		LP:    lp,
@@ -181,7 +182,7 @@ func TestEVSiteScheduledEVMayImportOnCheapNight(t *testing.T) {
 
 func TestEVSiteBatteryDoesNotDischargeIntoSurplusOnlyEV(t *testing.T) {
 	start := evComboSiteStart()
-	site := newEVSite(t, evSiteConfig{
+	site := newSiteClock(t, evSiteConfig{
 		Start:        start,
 		Plan:         injectedChargePlan(evComboSlotStart(), 15, -4000, 4000, 500, 0),
 		LP:           surplusOnlyGarage(),
@@ -192,10 +193,10 @@ func TestEVSiteBatteryDoesNotDischargeIntoSurplusOnlyEV(t *testing.T) {
 	})
 	site.run(8)
 	for _, rec := range site.ticks {
-		if rec.EVW > 50 && rec.BatW < -50 {
+		if rec.EVW > loadpoint.SitePowerEpsW && rec.BatW < -loadpoint.SitePowerEpsW {
 			t.Fatalf("tick %d: surplus-only EV %.0f W with battery discharge %.0f W", rec.N, rec.EVW, rec.BatW)
 		}
-		if rec.EVW > 50 {
+		if rec.EVW > loadpoint.SitePowerEpsW {
 			t.Fatalf("tick %d: surplus-only EV charged without PV: %.0f W", rec.N, rec.EVW)
 		}
 	}

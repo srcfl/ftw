@@ -1,5 +1,7 @@
 package mpc
 
+import "github.com/srcfl/ftw/go/internal/loadpoint"
+
 // LoadpointSpec tells the DP how to extend its state space with an EV
 // loadpoint. Set `Params.Loadpoint` to a non-nil spec to have the
 // optimizer treat charging the EV as a decision variable alongside
@@ -64,20 +66,10 @@ type LoadpointSpec struct {
 
 	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
 	// true (operator's default), the home battery's discharge MUST NOT
-	// end up at the EV. The DP feasibility check enforces this by
-	// rejecting any (battW, evW) combination where battery discharge
-	// exceeds the PV-residual house demand — i.e. where some of the
-	// battery's energy must, by conservation, have flowed into the EV
-	// or out to grid (and the existing battery-export-vs-EV rule
-	// already covers the export case). The runtime dispatch in
-	// control/dispatch.go has the canonical clamp using identical
-	// accounting (search "CANONICAL \"battery may not feed EV\""); the
-	// DP rule here stops the planner from emitting infeasible
-	// allocations that dispatch then has to censor, removing the
-	// plan↔reality divergence operators were seeing on
-	// planner_arbitrage slots. A future refactor should extract the
-	// shared houseResidualW + feasibility predicate into a helper so
-	// the two sites can't drift.
+	// end up at the EV. Enforced by loadpoint.BatteryDischargeFeedsEV
+	// in the DP and in ValidatePlan; the runtime clamp in
+	// control/dispatch.go (search CANONICAL "battery may not feed EV")
+	// is the same conservation check.
 	NoBatteryToEV bool
 }
 
@@ -85,24 +77,11 @@ func (l *LoadpointSpec) blocksBatteryToEV() bool {
 	return l != nil && (l.NoBatteryToEV || l.SurplusOnly)
 }
 
-// surplusOnlyEpsW matches the neighbouring DP / ValidatePlan float dither
-// (modeTolW, battery-to-EV residual, export-vs-EV).
-const surplusOnlyEpsW = 50
-
-// pvLeftoverAfterHouseW is the watts of PV remaining after house load.
-// PVW is site-signed (negative generation).
-func pvLeftoverAfterHouseW(loadW, pvW float64) float64 {
-	leftover := -(loadW + pvW)
-	if leftover < 0 {
-		return 0
-	}
-	return leftover
-}
-
-// surplusOnlyExceedsHousePV reports whether evW would have to come from
-// the grid or the home battery rather than from leftover PV.
+// surplusOnlyExceedsHousePV is the planner name for the site-power
+// leftover check. Surplus-only is an EV policy: leftover PV after the
+// house, not a ban on site import while the car is charging.
 func surplusOnlyExceedsHousePV(evW, loadW, pvW float64) bool {
-	return evW > pvLeftoverAfterHouseW(loadW, pvW)+surplusOnlyEpsW
+	return loadpoint.SurplusOnlyExceedsHousePV(evW, loadW, pvW)
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

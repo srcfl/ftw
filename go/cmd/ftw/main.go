@@ -135,24 +135,6 @@ func decimalDigits(s string) bool {
 	return s != ""
 }
 
-// controlSlotDirectiveFromMPC keeps the import-cycle bridge explicit. The
-// decision ID is report metadata; control does not use it for dispatch math.
-func controlSlotDirectiveFromMPC(d mpc.SlotDirective) control.SlotDirective {
-	return control.SlotDirective{
-		DecisionID:             d.DecisionID,
-		SlotStart:              d.SlotStart,
-		SlotEnd:                d.SlotEnd,
-		BatteryEnergyWh:        d.BatteryEnergyWh,
-		SoCTargetPct:           d.SoCTargetPct,
-		Strategy:               string(d.Strategy),
-		PVLimitW:               d.PVLimitW,
-		PlannedGridW:           d.GridW,
-		HasPlannedGridW:        true,
-		LivePVSurplusSoCCapPct: d.LivePVSurplusSoCCapPct,
-		LoadpointEnergyWh:      d.LoadpointEnergyWh,
-	}
-}
-
 // siteIdentityLoad is the machine's own identity, not a user's.
 //
 // Bound is set when nova.key has been adopted into a hardware-protected
@@ -1529,7 +1511,9 @@ func main() {
 			if !ok {
 				return control.SlotDirective{}, false
 			}
-			return controlSlotDirectiveFromMPC(d), true
+			// SlotDirectiveFromMPC lives in package control so tests
+			// and main share the plan→EMS field map.
+			return control.SlotDirectiveFromMPC(d), true
 		}
 		// Default to the energy-allocation path. The plan is a
 		// scheduler (decides WHEN each strategy applies); the EMS is
@@ -1608,11 +1592,7 @@ func main() {
 			if !ok {
 				return loadpoint.Directive{}, false
 			}
-			return loadpoint.Directive{
-				SlotStart:         d.SlotStart,
-				SlotEnd:           d.SlotEnd,
-				LoadpointEnergyWh: d.LoadpointEnergyWh,
-			}, true
+			return d.LoadpointDirective(), true
 		}
 		telAdapter := func(driver string) (loadpoint.EVSample, bool) {
 			r := tel.Get(driver, telemetry.DerEV)
@@ -1947,50 +1927,21 @@ func main() {
 		// 3Φ minimum but day-peak is, we'd rather charge 1Φ now and
 		// switch to 3Φ later than sit idle waiting.
 		//
-		// "Surplus" here is what the EV can claim, not the raw PV
-		// excess. The MPC has already allocated battery_w out of PV;
-		// the EV gets only what's left after PV - Load - Battery. A
-		// borderline-PV day where MPC reserves 4.5 kW for battery
-		// charging while raw -PV - Load = 5 kW would otherwise pin
-		// the gate to 3Φ-only based on a peak the battery is going
-		// to consume — leaving the EV stuck at 0 W in 3Φ-only step
-		// land because real-time room is below 4140 W.
+		// "Surplus" here is leftover PV after house load, minus
+		// planned PV-soak battery charge. Grid-funded battery
+		// charge does not consume leftover the car can take. A
+		// borderline-PV day where the battery soaks 4.5 kW of a
+		// 5 kW leftover would otherwise pin the gate to 3Φ based
+		// on a peak the battery is about to eat.
 		lpController.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
 			if mpcSvc == nil {
 				return 0, false
 			}
 			plan := mpcSvc.Latest()
-			if plan == nil || len(plan.Actions) == 0 {
+			if plan == nil {
 				return 0, false
 			}
-			now := time.Now()
-			horizon := now.Add(window)
-			var peak float64
-			any := false
-			for _, a := range plan.Actions {
-				slotEnd := time.UnixMilli(a.SlotStartMs).Add(
-					time.Duration(a.SlotLenMin) * time.Minute)
-				if slotEnd.Before(now) {
-					continue
-				}
-				if time.UnixMilli(a.SlotStartMs).After(horizon) {
-					break
-				}
-				// Net PV headroom for non-battery loads: positive when
-				// PV export exceeds load + planned PV-soak battery charge.
-				// Grid-funded battery charge does not consume leftover PV
-				// a surplus-only EV can take.
-				plannedChargeW := loadpoint.PlannedPVSoakW(a.BatteryW, a.GridW)
-				surplus := -a.PVW - a.LoadW - plannedChargeW
-				if !any || surplus > peak {
-					peak = surplus
-					any = true
-				}
-			}
-			if !any {
-				return 0, false
-			}
-			return peak, true
+			return mpc.PeakPlannedSurplusForEV(plan.Actions, time.Now(), window)
 		})
 
 		lpController.SetSiteSurplusForEV(func() (float64, bool) {

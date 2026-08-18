@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
 
@@ -697,14 +698,11 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if powerW > 0 && a.BatteryW < 0 && a.GridW < -50 {
 				return fmt.Errorf("slot %d loadpoint %s charges during battery-driven export", i, lp.ID)
 			}
-			if lp.blocksBatteryToEV() && powerW > 0 && a.BatteryW < 0 {
-				houseResidualW := math.Max(0, slot.LoadW+effectivePVW)
-				if -a.BatteryW > houseResidualW+50 {
-					return fmt.Errorf("slot %d battery discharge feeds loadpoint %s", i, lp.ID)
-				}
+			if lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEV(a.BatteryW, powerW, slot.LoadW, effectivePVW) {
+				return fmt.Errorf("slot %d battery discharge feeds loadpoint %s", i, lp.ID)
 			}
 		}
-		wantGridW := slot.LoadW + effectivePVW + a.BatteryW + totalLoadpointW
+		wantGridW := loadpoint.GridW(slot.LoadW, effectivePVW, a.BatteryW, totalLoadpointW)
 		if math.Abs(a.GridW-wantGridW) > 2 {
 			return fmt.Errorf("slot %d grid balance %.3f, want %.3f", i, a.GridW, wantGridW)
 		}

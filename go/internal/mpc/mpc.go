@@ -17,9 +17,10 @@
 //	battery > 0 → charging (load on site)
 //	battery < 0 → discharging (source on site)
 //
-// Power balance per slot (from the grid meter's point of view):
+// Power balance per slot (from the grid meter's point of view). EV
+// charge is a site load; the identity lives in loadpoint.GridW:
 //
-//	grid_w = load_w + pv_w + battery_w
+//	grid_w = load_w + pv_w + battery_w + ev_w
 //
 // Battery efficiency: the `battery_w` we command is measured at the AC
 // terminals (site-facing). Due to conversion losses, only a fraction
@@ -41,6 +42,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/gridcost"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
 // Mode selects how aggressively the planner uses the battery.
@@ -709,8 +711,7 @@ func Optimize(slots []Slot, p Params) Plan {
 							}
 						}
 						// EV appears as a site load (+ site-signed).
-						// GridW = load + PV + battery + EV.
-						gridW := slot.LoadW + slot.PVW + battW + evW
+						gridW := loadpoint.GridW(slot.LoadW, slot.PVW, battW, evW)
 
 						// Surplus-only EV: take at most leftover PV
 						// after house load. Site import caused by a
@@ -724,8 +725,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						// appear on the same site. evW = 0 is always
 						// feasible, so a no-PV day degrades to "miss
 						// the deadline" rather than an infeasible
-						// plan. 50 W epsilon matches the neighbouring
-						// EV feasibility rules.
+						// plan. Epsilon is loadpoint.SitePowerEpsW.
 						if evActive && lp.SurplusOnly && surplusOnlyExceedsHousePV(evW, slot.LoadW, slot.PVW) {
 							continue
 						}
@@ -759,41 +759,19 @@ func Optimize(slots []Slot, p Params) Plan {
 						}
 
 						// Battery-to-EV block: operator has BatteryCoversEV=false
-						// (the default), or this loadpoint is surplus-only. In
-						// both cases, the home battery's energy may cover house
-						// load but must not become synthetic EV surplus.
-						// Reject any allocation where the battery's
-						// discharge exceeds the PV-residual house demand
-						// — i.e. where, by conservation, some of the
-						// battery's energy must have flowed into the EV.
-						// houseResidualW = max(0, load - pv_gen) is how
-						// much house demand is left after PV has covered
-						// what it can; the battery can supply up to that
-						// much and still be claimed as "house only".
-						// Anything beyond it must go to EV (illegal here)
-						// or grid (covered by the rule above).
-						// Matches the canonical runtime safety clamp in
-						// control/dispatch.go (search "CANONICAL
-						// \"battery may not feed EV\"") — keep them
-						// aligned. 50 W epsilon mirrors the surrounding
-						// constraints. TODO(refactor): the
-						// houseResidualW math + feasibility predicate
-						// is duplicated; extract a shared helper.
-						if evActive && lp.blocksBatteryToEV() && evW > 0 && battW < 0 {
-							houseResidualW := slot.LoadW + slot.PVW // PVW is negative
-							if houseResidualW < 0 {
-								houseResidualW = 0
-							}
-							if (-battW) > houseResidualW+50 {
-								continue
-							}
+						// (the default), or this loadpoint is surplus-only. Same
+						// conservation check as ValidatePlan and the runtime
+						// clamp in control/dispatch.go (search CANONICAL
+						// "battery may not feed EV"): loadpoint.BatteryDischargeFeedsEV.
+						if evActive && lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEV(battW, evW, slot.LoadW, slot.PVW) {
+							continue
 						}
 
 						// Mode-based feasibility. Baseline includes
 						// EV so the mode check asks "is the extra
 						// battery action pulling the grid further
 						// into import/export than baseline?".
-						baseGridW := slot.LoadW + slot.PVW + evW
+						baseGridW := loadpoint.GridW(slot.LoadW, slot.PVW, 0, evW)
 						if !modeAllows(p.Mode, baseGridW, gridW, battW) {
 							continue
 						}
@@ -1048,7 +1026,7 @@ func Optimize(slots []Slot, p Params) Plan {
 				evSoc2 = lp.MaxPct
 			}
 		}
-		gridW := slot.LoadW + slot.PVW + actW + evW
+		gridW := loadpoint.GridW(slot.LoadW, slot.PVW, actW, evW)
 		gridKWh := gridW * dtH / 1000.0
 		// Report the ACTUAL expected cost using the raw (un-blended)
 		// prices so the UI summary reflects "what we'd actually pay

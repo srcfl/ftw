@@ -3,6 +3,8 @@ package mpc
 import (
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
 // TestSlotDirectiveCarriesLoadpointEnergyWh asserts that when the DP
@@ -68,12 +70,8 @@ func TestSlotDirectiveCarriesLoadpointEnergyWh(t *testing.T) {
 		t.Fatalf("DP never scheduled EV charging; actions: %+v", plan.Actions)
 	}
 
-	svc := &Service{
-		Zone:            "SE3",
-		Defaults:        Params{Mode: ModeCheapCharge},
-		last:            &plan,
-		lastLoadpointID: "garage",
-	}
+	svc := &Service{Zone: "SE3", Defaults: Params{Mode: ModeCheapCharge}}
+	svc.InstallPlan(plan, p, "garage")
 	// Query inside the charged slot.
 	queryAt := time.UnixMilli(plan.Actions[chargedSlotIdx].SlotStartMs).Add(1 * time.Minute)
 	d, ok := svc.SlotDirectiveAt(queryAt)
@@ -285,11 +283,7 @@ func TestSurplusOnlyForbidsBatteryFeedingEVEvenWhenCoverEVEnabled(t *testing.T) 
 
 	plan := Optimize(slots, mkParams(true))
 	for i, a := range plan.Actions {
-		houseResidualW := slots[i].LoadW + slots[i].PVW
-		if houseResidualW < 0 {
-			houseResidualW = 0
-		}
-		if a.LoadpointW > 100 && a.BatteryW < -(houseResidualW+50) {
+		if loadpoint.BatteryDischargeFeedsEV(a.BatteryW, a.LoadpointW, slots[i].LoadW, slots[i].PVW) {
 			t.Errorf("slot %d: surplus_only used battery as EV surplus — battW=%.0f loadpointW=%.0f gridW=%.0f",
 				i, a.BatteryW, a.LoadpointW, a.GridW)
 		}
@@ -433,7 +427,7 @@ func TestSurplusOnlyEVCannotImportEvenWithDeadline(t *testing.T) {
 	a := plan.Actions[0]
 	if surplusOnlyExceedsHousePV(a.LoadpointW, slots[0].LoadW, slots[0].PVW) {
 		t.Errorf("surplus-only EV exceeded leftover PV: evW=%.0f leftover=%.0f gridW=%.0f",
-			a.LoadpointW, pvLeftoverAfterHouseW(slots[0].LoadW, slots[0].PVW), a.GridW)
+			a.LoadpointW, loadpoint.PVLeftoverAfterHouseW(slots[0].LoadW, slots[0].PVW), a.GridW)
 	}
 }
 
@@ -488,6 +482,40 @@ func TestArbitrageChargesSurplusOnlyEVFromPVWhileBatteryGridCharges(t *testing.T
 		t.Errorf("battery charge past leftover PV must import: %+v", a)
 	}
 	if surplusOnlyExceedsHousePV(a.LoadpointW, slots[0].LoadW, slots[0].PVW) {
-		t.Errorf("EV %.0f W exceeded leftover %.0f W", a.LoadpointW, pvLeftoverAfterHouseW(slots[0].LoadW, slots[0].PVW))
+		t.Errorf("EV %.0f W exceeded leftover %.0f W", a.LoadpointW, loadpoint.PVLeftoverAfterHouseW(slots[0].LoadW, slots[0].PVW))
+	}
+}
+
+func TestInstallPlanPublishesLoadpointEnergyToSlotDirectiveAt(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	plan := Plan{
+		GeneratedAtMs: now.UnixMilli(),
+		Mode:          ModeArbitrage,
+		Actions: []Action{{
+			SlotStartMs: now.UnixMilli(),
+			SlotLenMin:  15,
+			BatteryW:    10000,
+			LoadpointW:  4140,
+			LoadW:       500,
+			PVW:         -8000,
+			GridW:       loadpoint.GridW(500, -8000, 10000, 4140),
+		}},
+	}
+	svc := &Service{}
+	svc.InstallPlan(plan, Params{Mode: ModeArbitrage}, "garage")
+	d, ok := svc.SlotDirectiveAt(now.Add(time.Second))
+	if !ok {
+		t.Fatal("fresh InstallPlan must be visible to SlotDirectiveAt")
+	}
+	wantEV := 4140.0 * 15 / 60
+	if d.LoadpointEnergyWh["garage"] != wantEV {
+		t.Fatalf("EV budget = %+v, want garage=%.0f Wh", d.LoadpointEnergyWh, wantEV)
+	}
+	if d.Strategy != ModeArbitrage {
+		t.Fatalf("Strategy = %q, want %q", d.Strategy, ModeArbitrage)
+	}
+	lp := d.LoadpointDirective()
+	if lp.LoadpointEnergyWh["garage"] != wantEV {
+		t.Fatalf("LoadpointDirective dropped EV budget: %+v", lp.LoadpointEnergyWh)
 	}
 }

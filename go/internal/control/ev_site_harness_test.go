@@ -10,21 +10,30 @@ package control
 //     SlotDirective and a pre-baked EVChargingW — no loadpoint controller
 //   - go/test/e2e has Ferroamp / Sungrow batteries and no EV charger
 //
-// This harness is the missing seam. One pinned clock runs:
+// This is not a parallel mapper. The site clock holds an mpc.Service,
+// publishes the plan with InstallPlan, and reads it the same way
+// go/cmd/ftw/main.go does:
 //
-//	Optimize (optional) → map Action to SlotDirective + loadpoint.Directive
-//	→ loadpoint.Controller.Tick → ComputeDispatch → site identity
+//	SlotDirectiveAt → control.SlotDirectiveFromMPC → ComputeDispatch
+//	SlotDirectiveAt → LoadpointDirective → loadpoint.Controller
+//	Latest + PeakPlannedSurplusForEV → 3Φ gate
+//	SurplusAvailableForEVW → surplus clamp
 //
-// Tick order matches go/cmd/ftw/main.go: charger first, then battery
-// dispatch, then the next meter sample sees both commands. Surplus-only
-// leftover uses loadpoint.SurplusAvailableForEVW, the same helper main.go
-// wires into SetSiteSurplusForEV.
+// Tick order matches main.go: charger first, then battery dispatch,
+// then the next meter sample sees both commands.
+//
+// SlotDirectiveAt ages GeneratedAtMs on the wall clock (MaxPlanAge),
+// not the pinned site clock. Injected noon slots still stamp
+// GeneratedAtMs with time.Now(). The 3Φ gate is the one legitimate
+// test difference: it scans with the pinned clock so a 12:00 slot is
+// "now", matching what main.go does with time.Now() on a live site.
 //
 // Run: go test -run 'TestEVSite' ./go/internal/control
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -98,7 +107,9 @@ func (s *evCmdSender) Send(_ context.Context, _ string, payload []byte) error {
 	return nil
 }
 
-type evSite struct {
+// siteClock is the joined plant: pinned time, live flows, and the same
+// mpc.Service cache main.go reads.
+type siteClock struct {
 	t   *testing.T
 	cfg evSiteConfig
 	now time.Time
@@ -110,20 +121,20 @@ type evSite struct {
 	evEnergyWh       float64
 	sessionWh        float64
 	surplusOnly      bool
-	plan             mpc.Plan
 
-	store  *telemetry.Store
-	st     *State
-	mgr    *loadpoint.Manager
-	lp     *loadpoint.Controller
-	sender *evCmdSender
-	caps   map[string]float64
-	fuseW  float64
+	planner *mpc.Service
+	store   *telemetry.Store
+	st      *State
+	mgr     *loadpoint.Manager
+	lp      *loadpoint.Controller
+	sender  *evCmdSender
+	caps    map[string]float64
+	fuseW   float64
 
 	ticks []evSiteTick
 }
 
-func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
+func newSiteClock(t *testing.T, cfg evSiteConfig) *siteClock {
 	t.Helper()
 	if cfg.Start.IsZero() {
 		cfg.Start = time.Date(2026, 8, 18, 12, 0, 1, 0, time.UTC)
@@ -163,8 +174,10 @@ func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
 	}
 
 	plan := cfg.Plan
+	params := mpc.Params{Mode: mpc.ModeArbitrage}
 	if len(cfg.OptimizeSlots) > 0 {
-		plan = mpc.Optimize(cfg.OptimizeSlots, cfg.OptimizeParams)
+		params = cfg.OptimizeParams
+		plan = mpc.Optimize(cfg.OptimizeSlots, params)
 		if len(plan.Actions) == 0 {
 			t.Fatalf("Optimize returned no actions")
 		}
@@ -172,8 +185,13 @@ func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
 	if len(plan.Actions) == 0 {
 		t.Fatal("ev site needs an injected plan or OptimizeSlots")
 	}
+	// SlotDirectiveAt ages GeneratedAtMs on the wall clock.
+	plan.GeneratedAtMs = time.Now().UnixMilli()
 
-	s := &evSite{
+	planner := &mpc.Service{Defaults: mpc.Params{Mode: params.Mode}}
+	planner.InstallPlan(plan, params, cfg.LP.ID)
+
+	s := &siteClock{
 		t:           t,
 		cfg:         cfg,
 		now:         cfg.Start,
@@ -183,13 +201,13 @@ func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
 		batEnergyWh: cfg.BatEnergyWh,
 		evEnergyWh:  cfg.EVEnergyWh,
 		surplusOnly: cfg.LP.SurplusOnly,
-		plan:        plan,
+		planner:     planner,
 		store:       telemetry.NewStore(),
 		sender:      &evCmdSender{},
 		caps:        map[string]float64{evSiteBattery: cfg.BatCapWh},
 		fuseW:       cfg.FuseMaxW,
 	}
-	s.gridW = s.loadW + s.pvW + s.batW + s.evW
+	s.gridW = loadpoint.GridW(s.loadW, s.pvW, s.batW, s.evW)
 
 	st := NewState(0, 0, evSiteMeter)
 	st.Mode = ModePlannerArbitrage
@@ -203,8 +221,11 @@ func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
 	}
 	st.clock = func() time.Time { return s.now }
 	st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
-		d, _, ok := s.directives(now)
-		return d, ok
+		d, ok := s.planner.SlotDirectiveAt(now)
+		if !ok {
+			return SlotDirective{}, false
+		}
+		return SlotDirectiveFromMPC(d), true
 	}
 	s.st = st
 
@@ -214,8 +235,11 @@ func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
 
 	lp := loadpoint.NewController(mgr,
 		func(now time.Time) (loadpoint.Directive, bool) {
-			_, d, ok := s.directives(now)
-			return d, ok
+			d, ok := s.planner.SlotDirectiveAt(now)
+			if !ok {
+				return loadpoint.Directive{}, false
+			}
+			return d.LoadpointDirective(), true
 		},
 		func(driver string) (loadpoint.EVSample, bool) {
 			if driver != cfg.LP.DriverName {
@@ -233,62 +257,32 @@ func newEVSite(t *testing.T, cfg evSiteConfig) *evSite {
 	lp.SetSiteSurplusForEV(func() (float64, bool) {
 		return loadpoint.SurplusAvailableForEVW(s.gridW, s.batW, s.evW, lp.AnyLoadpointSurplusActive()), true
 	})
-	lp.SetNearTermPeakSurplusW(func(time.Duration) (float64, bool) {
-		leftover := -(s.loadW + s.pvW)
-		if leftover < 0 {
-			leftover = 0
+	lp.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
+		plan := s.planner.Latest()
+		if plan == nil {
+			return 0, false
 		}
-		return leftover, true
+		return mpc.PeakPlannedSurplusForEV(plan.Actions, s.now, window)
 	})
 	s.lp = lp
 	s.publish()
 	return s
 }
 
-func (s *evSite) directives(now time.Time) (SlotDirective, loadpoint.Directive, bool) {
+func (s *siteClock) plan() mpc.Plan {
 	s.t.Helper()
-	nowMs := now.UnixMilli()
-	for _, a := range s.plan.Actions {
-		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs < a.SlotStartMs || nowMs >= endMs {
-			continue
-		}
-		hours := float64(a.SlotLenMin) / 60.0
-		lpWh := map[string]float64{}
-		if a.LoadpointW != 0 {
-			lpWh[s.cfg.LP.ID] = a.LoadpointW * hours
-		}
-		start := time.UnixMilli(a.SlotStartMs)
-		end := time.UnixMilli(endMs)
-		return SlotDirective{
-				SlotStart:         start,
-				SlotEnd:           end,
-				BatteryEnergyWh:   a.BatteryW * hours,
-				Strategy:          "arbitrage",
-				PlannedGridW:      a.GridW,
-				HasPlannedGridW:   true,
-				LoadpointEnergyWh: lpWh,
-			}, loadpoint.Directive{
-				SlotStart:         start,
-				SlotEnd:           end,
-				LoadpointEnergyWh: lpWh,
-			}, true
+	p := s.planner.Latest()
+	if p == nil {
+		s.t.Fatal("planner has no plan")
 	}
-	return SlotDirective{}, loadpoint.Directive{}, false
+	return *p
 }
 
-func (s *evSite) actionAt(now time.Time) (mpc.Action, bool) {
-	nowMs := now.UnixMilli()
-	for _, a := range s.plan.Actions {
-		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < endMs {
-			return a, true
-		}
-	}
-	return mpc.Action{}, false
+func (s *siteClock) slotDirective() (mpc.SlotDirective, bool) {
+	return s.planner.SlotDirectiveAt(s.now)
 }
 
-func (s *evSite) publish() {
+func (s *siteClock) publish() {
 	s.t.Helper()
 	soc := s.batEnergyWh / s.cfg.BatCapWh
 	if soc < 0 {
@@ -297,29 +291,36 @@ func (s *evSite) publish() {
 	if soc > 1 {
 		soc = 1
 	}
-	// Kalman first-sample is exact; repeats settle after a step so
-	// ComputeDispatch sees approximately the physics, not a lag that
-	// would hide the combo under test.
-	for i := 0; i < 8; i++ {
-		s.store.Update(evSiteMeter, telemetry.DerMeter, s.gridW, nil, nil)
-		s.store.Update(evSiteBattery, telemetry.DerBattery, s.batW, &soc, nil)
-		s.store.Update(evSitePV, telemetry.DerPV, s.pvW, nil, nil)
-		s.store.Update(evSiteCharger, telemetry.DerEV, s.evW, nil, nil)
-	}
+	s.store.Update(evSiteMeter, telemetry.DerMeter, s.gridW, nil, nil)
+	s.store.Update(evSiteBattery, telemetry.DerBattery, s.batW, &soc, nil)
+	s.store.Update(evSitePV, telemetry.DerPV, s.pvW, nil, nil)
+	s.store.Update(evSiteCharger, telemetry.DerEV, s.evW, nil, nil)
 	s.store.DriverHealthMut(evSiteMeter).RecordSuccess()
 	s.store.DriverHealthMut(evSiteBattery).RecordSuccess()
 	s.store.DriverHealthMut(evSitePV).RecordSuccess()
 	s.store.DriverHealthMut(evSiteCharger).RecordSuccess()
 }
 
-func (s *evSite) tick() evSiteTick {
+func (s *siteClock) tick() evSiteTick {
 	s.t.Helper()
 	s.publish()
+
+	d, ok := s.slotDirective()
+	if !ok {
+		s.t.Fatalf("tick %d: SlotDirectiveAt(%s) empty — GeneratedAtMs ages on the wall clock (MaxPlanAge), not the site clock",
+			len(s.ticks), s.now.Format(time.RFC3339))
+	}
+	hours := d.SlotEnd.Sub(d.SlotStart).Hours()
+	planBatW, planEVW := 0.0, 0.0
+	if hours > 0 {
+		planBatW = d.BatteryEnergyWh / hours
+		planEVW = d.LoadpointEnergyWh[s.cfg.LP.ID] / hours
+	}
+
 	surplus := loadpoint.SurplusAvailableForEVW(s.gridW, s.batW, s.evW, s.lp.AnyLoadpointSurplusActive())
-	planA, _ := s.actionAt(s.now)
 
 	s.sender.lastSet = false
-	s.lp.Tick(context.Background(), s.now)
+	s.lp.TickWithDispatch(context.Background(), s.now, true)
 	evCmd := 0.0
 	if s.sender.lastSet {
 		evCmd = s.sender.lastW
@@ -338,34 +339,26 @@ func (s *evSite) tick() evSiteTick {
 		}
 	}
 
-	hours := s.dt.Hours()
+	dtH := s.dt.Hours()
 	s.evW = evCmd
 	if s.evW < 0 {
 		s.evW = 0
 	}
 	s.batW = batCmd
-	headroomWh := s.cfg.BatCapWh*0.95 - s.batEnergyWh
-	if s.batW > 0 && s.batW*hours > headroomWh && hours > 0 {
-		s.batW = headroomWh / hours
-		if s.batW < 0 {
-			s.batW = 0
-		}
-	}
-	floorWh := s.cfg.BatCapWh * 0.10
-	if s.batW < 0 && s.batEnergyWh+s.batW*hours/0.95 < floorWh && hours > 0 {
-		s.batW = -(s.batEnergyWh - floorWh) * 0.95 / hours
-		if s.batW > 0 {
-			s.batW = 0
-		}
-	}
-	s.gridW = s.loadW + s.pvW + s.batW + s.evW
+	s.gridW = loadpoint.GridW(s.loadW, s.pvW, s.batW, s.evW)
 	if s.batW >= 0 {
-		s.batEnergyWh += s.batW * hours * 0.95
+		s.batEnergyWh += s.batW * dtH * 0.95
 	} else {
-		s.batEnergyWh += s.batW * hours / 0.95
+		s.batEnergyWh += s.batW * dtH / 0.95
 	}
-	s.evEnergyWh += s.evW * hours * 0.90
-	s.sessionWh += s.evW * hours
+	if s.batEnergyWh < 0 {
+		s.batEnergyWh = 0
+	}
+	if s.batEnergyWh > s.cfg.BatCapWh {
+		s.batEnergyWh = s.cfg.BatCapWh
+	}
+	s.evEnergyWh += s.evW * dtH * 0.90
+	s.sessionWh += s.evW * dtH
 
 	rec := evSiteTick{
 		N:         len(s.ticks),
@@ -378,9 +371,9 @@ func (s *evSite) tick() evSiteTick {
 		BatCmdW:   batCmd,
 		EVCmdW:    evCmd,
 		SurplusW:  surplus,
-		PlanBatW:  planA.BatteryW,
-		PlanEVW:   planA.LoadpointW,
-		PlanGridW: planA.GridW,
+		PlanBatW:  planBatW,
+		PlanEVW:   planEVW,
+		PlanGridW: d.GridW,
 	}
 	s.checkInvariants(rec)
 	s.ticks = append(s.ticks, rec)
@@ -388,7 +381,7 @@ func (s *evSite) tick() evSiteTick {
 	return rec
 }
 
-func (s *evSite) run(n int) []evSiteTick {
+func (s *siteClock) run(n int) []evSiteTick {
 	s.t.Helper()
 	out := make([]evSiteTick, 0, n)
 	for i := 0; i < n; i++ {
@@ -397,42 +390,32 @@ func (s *evSite) run(n int) []evSiteTick {
 	return out
 }
 
-func (s *evSite) leftoverW() float64 {
-	v := -(s.loadW + s.pvW)
-	if v < 0 {
-		return 0
-	}
-	return v
+func (s *siteClock) leftoverW() float64 {
+	return loadpoint.PVLeftoverAfterHouseW(s.loadW, s.pvW)
 }
 
-func (s *evSite) checkInvariants(rec evSiteTick) {
+func (s *siteClock) checkInvariants(rec evSiteTick) {
 	s.t.Helper()
-	ident := rec.LoadW + rec.PVW + rec.BatW + rec.EVW
+	ident := loadpoint.GridW(rec.LoadW, rec.PVW, rec.BatW, rec.EVW)
 	if math.Abs(rec.GridW-ident) > 1 {
 		s.t.Fatalf("tick %d: grid identity %.1f != load+pv+bat+ev %.1f", rec.N, rec.GridW, ident)
 	}
-	if rec.GridW > s.fuseW+50 {
+	if rec.GridW > s.fuseW+loadpoint.SitePowerEpsW {
 		s.t.Fatalf("tick %d: grid %.0f W over fuse %.0f W", rec.N, rec.GridW, s.fuseW)
 	}
-	if s.surplusOnly && rec.EVW > 50 {
-		if rec.EVW > s.leftoverW()+50 {
+	if s.surplusOnly && rec.EVW > loadpoint.SitePowerEpsW {
+		if loadpoint.SurplusOnlyExceedsHousePV(rec.EVW, rec.LoadW, rec.PVW) {
 			s.t.Fatalf("tick %d: surplus-only EV %.0f W exceeds leftover PV after house %.0f W (grid=%.0f bat=%.0f)",
 				rec.N, rec.EVW, s.leftoverW(), rec.GridW, rec.BatW)
 		}
-		if rec.BatW < -50 {
-			house := rec.LoadW + rec.PVW
-			if house < 0 {
-				house = 0
-			}
-			if -rec.BatW > house+50 {
-				s.t.Fatalf("tick %d: battery discharge %.0f W feeds surplus-only EV %.0f W (house residual %.0f W)",
-					rec.N, rec.BatW, rec.EVW, house)
-			}
+		if loadpoint.BatteryDischargeFeedsEV(rec.BatW, rec.EVW, rec.LoadW, rec.PVW) {
+			s.t.Fatalf("tick %d: battery discharge %.0f W feeds surplus-only EV %.0f W (house residual %.0f W)",
+				rec.N, rec.BatW, rec.EVW, loadpoint.HouseResidualW(rec.LoadW, rec.PVW))
 		}
 	}
 }
 
-func (s *evSite) requireCombo(afterTicks int) evSiteTick {
+func (s *siteClock) requireCombo(afterTicks int) evSiteTick {
 	s.t.Helper()
 	for _, rec := range s.ticks {
 		if rec.N < afterTicks {
@@ -447,50 +430,38 @@ func (s *evSite) requireCombo(afterTicks int) evSiteTick {
 	return evSiteTick{}
 }
 
-func (s *evSite) requireIdleEV(afterTicks int) {
+func (s *siteClock) requireIdleEV(afterTicks int) {
 	s.t.Helper()
 	for _, rec := range s.ticks {
 		if rec.N < afterTicks {
 			continue
 		}
-		if rec.EVW > 50 {
+		if rec.EVW > loadpoint.SitePowerEpsW {
 			s.t.Fatalf("tick %d: surplus-only EV imported without leftover PV: ev=%.0f grid=%.0f bat=%.0f pv=%.0f; ticks=%s",
 				rec.N, rec.EVW, rec.GridW, rec.BatW, rec.PVW, s.dumpTicks())
 		}
 	}
 }
 
-func (s *evSite) dumpTicks() string {
+func (s *siteClock) dumpTicks() string {
 	b := make([]byte, 0, 256)
 	for _, rec := range s.ticks {
-		b = append(b, []byte(
-			rec.At.Format("15:04:05")+" ev="+itoa(rec.EVW)+" bat="+itoa(rec.BatW)+" grid="+itoa(rec.GridW)+" surplus="+itoa(rec.SurplusW)+"\n",
-		)...)
+		b = append(b, []byte(fmt.Sprintf("%s ev=%.0f bat=%.0f grid=%.0f surplus=%.0f\n",
+			rec.At.Format("15:04:05"), rec.EVW, rec.BatW, rec.GridW, rec.SurplusW))...)
 	}
 	return string(b)
 }
 
-func itoa(w float64) string {
-	return jsonNumber(w)
-}
-
-func jsonNumber(w float64) string {
-	b, _ := json.Marshal(math.Round(w))
-	return string(b)
-}
-
 func injectedChargePlan(start time.Time, slotMin int, batW, evW, loadW, pvW float64) mpc.Plan {
-	gridW := loadW + pvW + batW + evW
 	return mpc.Plan{
-		GeneratedAtMs: start.UnixMilli(),
-		Mode:          mpc.ModeArbitrage,
-		HorizonSlots:  1,
+		Mode:         mpc.ModeArbitrage,
+		HorizonSlots: 1,
 		Actions: []mpc.Action{{
 			SlotStartMs: start.UnixMilli(),
 			SlotLenMin:  slotMin,
 			BatteryW:    batW,
 			LoadpointW:  evW,
-			GridW:       gridW,
+			GridW:       loadpoint.GridW(loadW, pvW, batW, evW),
 			LoadW:       loadW,
 			PVW:         pvW,
 		}},

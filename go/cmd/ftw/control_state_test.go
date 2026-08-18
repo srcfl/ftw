@@ -37,7 +37,7 @@ func TestControlSlotDirectiveFromMPCPreservesDecisionIdentity(t *testing.T) {
 		LoadpointEnergyWh: loadpoints,
 	}
 
-	got := controlSlotDirectiveFromMPC(in)
+	got := control.SlotDirectiveFromMPC(in)
 	if got.DecisionID != in.DecisionID || !got.SlotStart.Equal(in.SlotStart) || !got.SlotEnd.Equal(in.SlotEnd) {
 		t.Fatalf("identity or timing changed across adapter: %+v", got)
 	}
