@@ -691,8 +691,8 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if len(a.LoadpointPowerW) == 0 && lpIdx == 0 {
 				powerW = a.LoadpointW
 			}
-			if lp.SurplusOnly && powerW > 0 && a.GridW > 50 {
-				return fmt.Errorf("slot %d surplus-only loadpoint %s imports from grid", i, lp.ID)
+			if lp.SurplusOnly && surplusOnlyExceedsHousePV(powerW, slot.LoadW, effectivePVW) {
+				return fmt.Errorf("slot %d surplus-only loadpoint %s exceeds PV leftover after house load", i, lp.ID)
 			}
 			if powerW > 0 && a.BatteryW < 0 && a.GridW < -50 {
 				return fmt.Errorf("slot %d loadpoint %s charges during battery-driven export", i, lp.ID)

@@ -2087,6 +2087,41 @@ def test_surplus_only_ev_does_not_block_home_battery_grid_charge() -> None:
     assert actions[0]["grid_w"] > 100
 
 
+def test_surplus_only_ev_takes_pv_while_battery_grid_charges() -> None:
+    """Leftover PV may go to the car while the home battery buys from the grid.
+
+    Forbidding site import whenever the EV was active idled the car on
+    every cheap slot the battery wanted to charge.
+    """
+
+    request = base_request()
+    request["slots"][0]["pv_w"] = -6500
+    request["slots"][0]["max_import_w"] = 16000
+    request["storages"][0]["max_charge_w"] = 10000
+    request["flex_loads"] = [
+        {
+            "id": "surplus-car",
+            "capacity_wh": 40000,
+            "initial_energy_wh": 8000,
+            "max_energy_wh": 40000,
+            "target_energy_wh": 16000,
+            "target_slot": 1,
+            "charge_efficiency": 1,
+            "allowed_steps_w": [0, 3000],
+            "surplus_only": True,
+            "no_storage_to_load": True,
+        }
+    ]
+    response = handle(request)
+    assert response["ok"], response
+    action = response["plan"]["actions"][0]
+    assert action["flex_power_w"]["surplus-car"] > 100
+    assert action["battery_w"] > 100
+    assert action["grid_w"] > 100
+    leftover = max(0.0, 6500 - 500)
+    assert action["flex_power_w"]["surplus-car"] <= leftover + 50 + 1e-5
+
+
 def test_surplus_only_ev_still_cannot_import() -> None:
     request = base_request()
     request["slots"] = [request["slots"][1]]  # expensive slot only

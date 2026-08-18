@@ -430,8 +430,64 @@ func TestSurplusOnlyEVCannotImportEvenWithDeadline(t *testing.T) {
 	if len(plan.Actions) != 1 {
 		t.Fatalf("got %d actions, want 1", len(plan.Actions))
 	}
-	if plan.Actions[0].LoadpointW > 50 && plan.Actions[0].GridW > 50 {
-		t.Errorf("surplus-only EV imported from grid: evW=%.0f gridW=%.0f",
-			plan.Actions[0].LoadpointW, plan.Actions[0].GridW)
+	a := plan.Actions[0]
+	if surplusOnlyExceedsHousePV(a.LoadpointW, slots[0].LoadW, slots[0].PVW) {
+		t.Errorf("surplus-only EV exceeded leftover PV: evW=%.0f leftover=%.0f gridW=%.0f",
+			a.LoadpointW, pvLeftoverAfterHouseW(slots[0].LoadW, slots[0].PVW), a.GridW)
+	}
+}
+
+func TestArbitrageChargesSurplusOnlyEVFromPVWhileBatteryGridCharges(t *testing.T) {
+	// Cheap sun + empty battery + expensive evening. Surplus-only may
+	// take leftover PV after the house; the battery may still buy from
+	// the grid in the same slot. The old feasibility rule rejected any
+	// (evW>0 AND gridW>50) pair and forced "car sits / Pixii never buys".
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 20, SpotOre: 10, LoadW: 500, PVW: -6500, Confidence: 1},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 240, LoadW: 2500, PVW: 0, Confidence: 1},
+	}
+	plan := Optimize(slots, Params{
+		Mode:                ModeArbitrage,
+		SoCLevels:           11,
+		CapacityWh:          20000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       20,
+		ActionLevels:        11,
+		MaxChargeW:          10000,
+		MaxDischargeW:       10000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    150,
+		Loadpoint: &LoadpointSpec{
+			ID:               "garage",
+			CapacityWh:       40000,
+			Levels:           11,
+			InitialSoCPct:    20,
+			PluggedIn:        true,
+			TargetSoCPct:     40,
+			TargetSlotIdx:    1,
+			MaxChargeW:       4140,
+			AllowedStepsW:    []float64{0, 4140},
+			ChargeEfficiency: 1.0,
+			SurplusOnly:      true,
+			NoBatteryToEV:    true,
+		},
+	})
+	if len(plan.Actions) != 2 {
+		t.Fatalf("got %d actions, want 2", len(plan.Actions))
+	}
+	a := plan.Actions[0]
+	if a.LoadpointW < 1000 {
+		t.Errorf("cheap PV slot should charge the surplus-only EV from leftover PV, got %+v", a)
+	}
+	if a.BatteryW < 500 {
+		t.Errorf("cheap slot should still grid-charge the home battery, got %+v", a)
+	}
+	if a.GridW < 100 {
+		t.Errorf("battery charge past leftover PV must import: %+v", a)
+	}
+	if surplusOnlyExceedsHousePV(a.LoadpointW, slots[0].LoadW, slots[0].PVW) {
+		t.Errorf("EV %.0f W exceeded leftover %.0f W", a.LoadpointW, pvLeftoverAfterHouseW(slots[0].LoadW, slots[0].PVW))
 	}
 }

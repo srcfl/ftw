@@ -55,12 +55,11 @@ type LoadpointSpec struct {
 	ChargeEfficiency float64
 
 	// SurplusOnly forbids EV actions that need grid import or home-battery
-	// discharge into the car. The loadpoint may use real site surplus only:
-	// PV already covering house load, or PV left after the battery's own
-	// planned charge. It must not treat battery discharge as synthetic PV
-	// surplus, even when the global BatteryCoversEV opt-in is enabled.
-	// The home battery itself may still grid-charge for house load or
-	// arbitrage — surplus-only is an EV policy, not a site import ban.
+	// discharge into the car. The loadpoint may take at most the PV leftover
+	// after house load. Site import caused by a simultaneous home-battery
+	// grid-charge does not count as the car importing — surplus-only is an
+	// EV policy, not a site import ban. Battery discharge still cannot be
+	// treated as synthetic PV surplus, even when BatteryCoversEV is on.
 	SurplusOnly bool
 
 	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
@@ -84,6 +83,26 @@ type LoadpointSpec struct {
 
 func (l *LoadpointSpec) blocksBatteryToEV() bool {
 	return l != nil && (l.NoBatteryToEV || l.SurplusOnly)
+}
+
+// surplusOnlyEpsW matches the neighbouring DP / ValidatePlan float dither
+// (modeTolW, battery-to-EV residual, export-vs-EV).
+const surplusOnlyEpsW = 50
+
+// pvLeftoverAfterHouseW is the watts of PV remaining after house load.
+// PVW is site-signed (negative generation).
+func pvLeftoverAfterHouseW(loadW, pvW float64) float64 {
+	leftover := -(loadW + pvW)
+	if leftover < 0 {
+		return 0
+	}
+	return leftover
+}
+
+// surplusOnlyExceedsHousePV reports whether evW would have to come from
+// the grid or the home battery rather than from leftover PV.
+func surplusOnlyExceedsHousePV(evW, loadW, pvW float64) bool {
+	return evW > pvLeftoverAfterHouseW(loadW, pvW)+surplusOnlyEpsW
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

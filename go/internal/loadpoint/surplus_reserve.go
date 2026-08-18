@@ -26,6 +26,11 @@ package loadpoint
 // real site.
 const EVRampHeadroomW = 2000
 
+// GridChargeImportW is the live/plan grid band that means the site is
+// deliberately importing, not soaking PV. Matches control's
+// coverLoadChargeSlot / energy-path grid-charge skip.
+const GridChargeImportW = 100.0
+
 // SurplusReserveW returns the aggregate PV headroom that must be
 // preserved for surplus_only loadpoints. For each surplus_only +
 // plugged_in LP it reserves min(MaxChargeW, CurrentPowerW +
@@ -214,4 +219,47 @@ func SurplusPotentialW(states []State) float64 {
 		sum += head
 	}
 	return sum
+}
+
+// PlannerTreatsLoadpointAsSurplusOnly is the SurplusOnly flag the MPC spec
+// should carry. The bat-SoC unlock is a this-tick opportunistic clamp;
+// putting it on the 48 h spec forbids night-time grid EV in a plan that
+// was computed while the sun was still up. Battery→EV is already blocked
+// by NoBatteryToEV.
+func PlannerTreatsLoadpointAsSurplusOnly(operatorSurplusOnly, deferGridPlan bool) bool {
+	return operatorSurplusOnly || deferGridPlan
+}
+
+// SurplusAvailableForEVW is the live PV leftover the surplus-only clamp
+// may offer the charger this tick, in watts.
+//
+// Site identity: -gridW + batW + evW = -pvW - loadW (house leftover).
+//
+// The EV controller runs before battery dispatch on the same tick. If the
+// home battery is soaking PV (charging while the site is not importing),
+// counting that charge as EV-available would command the charger on
+// before the battery has yielded and leak into import. Grid-funded
+// battery charge is different: the battery is already importing, so the
+// leftover PV is the car's to take without waiting for a yield.
+func SurplusAvailableForEVW(gridW, batW, evW float64, surplusOnlyActive bool) float64 {
+	leftover := -gridW + batW + evW
+	if surplusOnlyActive && batW > 0 && gridW <= GridChargeImportW {
+		leftover = -gridW + evW
+	}
+	if leftover < 0 {
+		return 0
+	}
+	return leftover
+}
+
+// PlannedPVSoakW is the portion of a planned battery charge that is
+// soaking leftover PV rather than buying from the grid. The near-term
+// 3Φ gate subtracts this from forecast surplus so the EV does not wait
+// for a 3Φ window the battery is about to eat. A grid-charge slot
+// (PlannedGridW above the import band) does not consume that leftover.
+func PlannedPVSoakW(batteryW, gridW float64) float64 {
+	if batteryW <= 0 || gridW > GridChargeImportW {
+		return 0
+	}
+	return batteryW
 }
