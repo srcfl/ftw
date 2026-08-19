@@ -208,7 +208,7 @@ func TestDeriveParsesAModel(t *testing.T) {
 	doc := `{"schema_version":1,"planes_found":3,` +
 		`"site":{"latitude":59.33,"longitude":18.07,"radius_m":40},` +
 		`"source":{"provider":"lantmateriet","item_count":2,"dataset_datetime":"2018-03-01T00:00:00+00:00"},` +
-		`"arrays":[{"name":"Roof south","kwp":7.2,"tilt_deg":35,"azimuth_deg":180,"area_m2":51.4,"segment_id":"seg-0"}],` +
+		`"arrays":[{"name":"Roof south","rated_w":7200,"tilt_deg":35,"azimuth_deg":180,"area_m2":51.4,"segment_id":"seg-0"}],` +
 		`"captured_at_ms":1519862400000,"derived_at_ms":1785456000000}`
 	cmd := stubModule(t, "stdout", doc)
 	s := svc(t, &config.RoofModel{Enabled: true, Command: cmd, GeotorgetUsername: "u", GeotorgetToken: "t"})
@@ -482,8 +482,8 @@ func TestDeriveIsTimeBoxed(t *testing.T) {
 
 func TestToPVArraysMatchesConfigShape(t *testing.T) {
 	m := &Model{Arrays: []Array{
-		{Name: "Roof south", KWp: 7.2, TiltDeg: 35, AzimuthDeg: 180, AreaM2: 51.4},
-		{Name: "Roof west", KWp: 4.1, TiltDeg: 35, AzimuthDeg: 270, AreaM2: 29.3},
+		{Name: "Roof south", RatedW: 7200, TiltDeg: 35, AzimuthDeg: 180, AreaM2: 51.4},
+		{Name: "Roof west", RatedW: 4100, TiltDeg: 35, AzimuthDeg: 270, AreaM2: 29.3},
 	}}
 	got := m.ToPVArrays()
 	if len(got) != 2 {
@@ -492,7 +492,7 @@ func TestToPVArraysMatchesConfigShape(t *testing.T) {
 	if got[0].TiltDeg == nil || got[0].AzimuthDeg == nil {
 		t.Fatalf("derived array must carry both angles, got %+v", got[0])
 	}
-	if got[0].Name != "Roof south" || got[0].KWp != 7.2 ||
+	if got[0].Name != "Roof south" || got[0].RatedW != 7200 ||
 		*got[0].TiltDeg != 35 || *got[0].AzimuthDeg != 180 {
 		t.Errorf("array 0 = %+v tilt=%v az=%v", got[0], *got[0].TiltDeg, *got[0].AzimuthDeg)
 	}

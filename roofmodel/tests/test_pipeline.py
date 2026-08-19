@@ -188,8 +188,8 @@ def test_array_json_matches_the_config_field_names():
     """The document pre-fills weather.pv_arrays, so the keys must line up."""
     planes = [RoofPlane(tilt_deg=35, azimuth_deg=180, area_m2=60, point_count=200, mean_height_m=6)]
     payload = planes_to_arrays(planes)[0].to_json()
-    assert set(payload) >= {"name", "kwp", "tilt_deg", "azimuth_deg"}
-    assert payload["kwp"] > 0
+    assert set(payload) >= {"name", "rated_w", "tilt_deg", "azimuth_deg"}
+    assert payload["rated_w"] > 0
 
 
 # --- end to end ------------------------------------------------------------
@@ -221,7 +221,7 @@ def test_derive_produces_a_versioned_document(monkeypatch):
     south = model["arrays"][0]
     assert south["azimuth_deg"] == pytest.approx(180.0, abs=3.0)
     assert south["tilt_deg"] == pytest.approx(35.0, abs=3.0)
-    assert south["kwp"] > 0
+    assert south["rated_w"] > 0
     # Must be JSON-serialisable for the subprocess contract.
     json.dumps(model)
 

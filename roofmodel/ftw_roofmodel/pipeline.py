@@ -64,7 +64,7 @@ class RoofModelError(RuntimeError):
 @dataclasses.dataclass
 class DerivedArray:
     name: str
-    kwp: float
+    rated_w: float
     tilt_deg: float
     azimuth_deg: float
     area_m2: float
@@ -73,7 +73,7 @@ class DerivedArray:
     def to_json(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "kwp": round(self.kwp, 2),
+            "rated_w": round(self.rated_w),
             "tilt_deg": round(self.tilt_deg, 1),
             "azimuth_deg": round(self.azimuth_deg, 1),
             "area_m2": round(self.area_m2, 1),
@@ -122,7 +122,7 @@ def planes_to_arrays(
         arrays.append(
             DerivedArray(
                 name=name,
-                kwp=plane.kwp(packing_factor, module_w_per_m2),
+                rated_w=plane.rated_w(packing_factor, module_w_per_m2),
                 tilt_deg=plane.tilt_deg,
                 azimuth_deg=plane.azimuth_deg,
                 area_m2=plane.area_m2,

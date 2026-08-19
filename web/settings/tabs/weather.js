@@ -477,8 +477,12 @@
         // Fill the form rather than saving: the operator sees the numbers and
         // presses Save, so the panel config never changes behind their back.
         ctx.config.weather.pv_arrays = arrays.map(function (a) {
+          var rated = Number(a.rated_w);
+          if (!(rated > 0) && Number(a.kwp) > 0) {
+            rated = ratedWattsFromLegacyKwp(a.kwp);
+          }
           return {
-            name: a.name || "", kwp: a.kwp,
+            name: a.name || "", rated_w: rated || 0,
             tilt_deg: a.tilt_deg, azimuth_deg: a.azimuth_deg,
           };
         });

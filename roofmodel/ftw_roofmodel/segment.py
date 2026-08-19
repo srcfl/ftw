@@ -53,13 +53,21 @@ class RoofPlane:
     point_count: int
     mean_height_m: float
 
+    def rated_w(
+        self,
+        packing_factor: float = DEFAULT_PACKING_FACTOR,
+        module_w_per_m2: float = DEFAULT_MODULE_W_PER_M2,
+    ) -> float:
+        """Installable DC capacity for this surface, in watts."""
+        return self.area_m2 * packing_factor * module_w_per_m2
+
     def kwp(
         self,
         packing_factor: float = DEFAULT_PACKING_FACTOR,
         module_w_per_m2: float = DEFAULT_MODULE_W_PER_M2,
     ) -> float:
-        """Installable DC capacity for this surface, in kWp."""
-        return self.area_m2 * packing_factor * module_w_per_m2 / 1000.0
+        """Installable DC capacity for this surface, in kWp (test helper)."""
+        return self.rated_w(packing_factor, module_w_per_m2) / 1000.0
 
 
 def _fit_plane(points: np.ndarray) -> np.ndarray:

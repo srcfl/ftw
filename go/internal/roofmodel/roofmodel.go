@@ -53,7 +53,7 @@ const (
 // the document can pre-fill weather.pv_arrays directly.
 type Array struct {
 	Name       string  `json:"name"`
-	KWp        float64 `json:"kwp"`
+	RatedW     float64 `json:"rated_w"`
 	TiltDeg    float64 `json:"tilt_deg"`
 	AzimuthDeg float64 `json:"azimuth_deg"`
 	AreaM2     float64 `json:"area_m2"`
@@ -285,7 +285,7 @@ func (m *Model) ToPVArrays() []config.PVArray {
 		tiltDeg, azimuthDeg := a.TiltDeg, a.AzimuthDeg
 		out = append(out, config.PVArray{
 			Name:       a.Name,
-			KWp:        a.KWp,
+			RatedW:     a.RatedW,
 			TiltDeg:    &tiltDeg,
 			AzimuthDeg: &azimuthDeg,
 		})
