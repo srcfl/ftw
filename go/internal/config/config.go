@@ -31,6 +31,7 @@ type Config struct {
 	State            *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
 	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
+	RoofModel        *RoofModel         `yaml:"roofmodel,omitempty" json:"roofmodel,omitempty"`
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
@@ -1068,6 +1069,48 @@ type Price struct {
 	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
 }
 
+// RoofModel configures the optional Lantmäteriet roof-geometry module.
+//
+// Off by default and off the control tick entirely: it runs only when an
+// operator asks for a derive during setup, in its own time-boxed subprocess,
+// and its output only ever pre-fills the editable weather.pv_arrays. Absent or
+// disabled, everything else behaves normally.
+//
+// GeotorgetToken is the operator's own credential. It is redacted in API
+// responses by the existing sensitive-key rule (any key containing "token").
+type RoofModel struct {
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Command is the interpreter used for the module; defaults to "python3".
+	Command   string `yaml:"command,omitempty" json:"command,omitempty"`
+	ModuleDir string `yaml:"module_dir,omitempty" json:"module_dir,omitempty"`
+
+	GeotorgetUsername string `yaml:"geotorget_username,omitempty" json:"geotorget_username,omitempty"`
+	GeotorgetToken    string `yaml:"geotorget_token,omitempty" json:"geotorget_token,omitempty"`
+	// HasGeotorgetToken is set only on the masked copy the API returns, so the
+	// UI can show that a token is stored without ever receiving it. Never
+	// written to YAML and never read from an incoming config.
+	HasGeotorgetToken bool `yaml:"-" json:"has_geotorget_token,omitempty"`
+
+	// RadiusM is how far around the site to pull LiDAR (default 40 m).
+	RadiusM float64 `yaml:"radius_m,omitempty" json:"radius_m,omitempty"`
+	// PackingFactor is the usable fraction of a roof face after ridges, eaves,
+	// chimneys and walkways (default 0.70).
+	PackingFactor float64 `yaml:"packing_factor,omitempty" json:"packing_factor,omitempty"`
+	// TimeoutS bounds a derive. LiDAR tiles are large and this runs on a Pi,
+	// so an unbounded run could sit on memory indefinitely (default 600).
+	TimeoutS int `yaml:"timeout_s,omitempty" json:"timeout_s,omitempty"`
+
+	// VostokBinary optionally enables shadow-aware irradiance, giving each roof
+	// face a shading factor from neighbouring buildings and trees.
+	//
+	// vostok is GPL-3.0 and is NOT shipped with FTW: the operator installs it
+	// themselves and points this at it. FTW invokes it at arm's length as a
+	// separate process, never links it, and never installs it. Empty means
+	// shading is not evaluated — which is reported as unknown, not as
+	// unobstructed.
+	VostokBinary string `yaml:"vostok_binary,omitempty" json:"vostok_binary,omitempty"`
+}
+
 // Weather is the weather-forecast source config.
 type Weather struct {
 	Provider  string  `yaml:"provider" json:"provider"` // met_no | openweather | open_meteo | forecast_solar | none
@@ -1179,6 +1222,15 @@ func (c Config) MaskSecrets() Config {
 		cp.APIKey = ""
 		out.Weather = &cp
 	}
+	if out.RoofModel != nil {
+		cp := *out.RoofModel
+		// The UI has to distinguish "no credential stored" from "one is stored
+		// but masked", or an operator cannot tell whether they still need to
+		// paste their Geotorget token in.
+		cp.HasGeotorgetToken = strings.TrimSpace(cp.GeotorgetToken) != ""
+		cp.GeotorgetToken = ""
+		out.RoofModel = &cp
+	}
 	if out.Notifications != nil {
 		cp := *out.Notifications
 		if cp.Ntfy != nil {
@@ -1249,6 +1301,9 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.Weather != nil && existing.Weather != nil && incoming.Weather.APIKey == "" {
 		incoming.Weather.APIKey = existing.Weather.APIKey
+	}
+	if incoming.RoofModel != nil && existing.RoofModel != nil && incoming.RoofModel.GeotorgetToken == "" {
+		incoming.RoofModel.GeotorgetToken = existing.RoofModel.GeotorgetToken
 	}
 	if incoming.Notifications != nil && existing.Notifications != nil &&
 		incoming.Notifications.Ntfy != nil && existing.Notifications.Ntfy != nil {
