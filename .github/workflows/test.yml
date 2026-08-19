@@ -22,6 +22,7 @@ jobs:
     outputs:
       core: ${{ steps.paths.outputs.core }}
       optimizer: ${{ steps.paths.outputs.optimizer }}
+      roofmodel: ${{ steps.paths.outputs.roofmodel }}
       web: ${{ steps.paths.outputs.web }}
       drivers: ${{ steps.paths.outputs.drivers }}
       compose: ${{ steps.paths.outputs.compose }}
@@ -43,6 +44,7 @@ jobs:
           set -euo pipefail
           core=false
           optimizer=false
+          roofmodel=false
           web=false
           drivers=false
           compose=false
@@ -60,6 +62,7 @@ jobs:
               case "${key}" in
                 core) core="${value}" ;;
                 optimizer) optimizer="${value}" ;;
+                roofmodel) roofmodel="${value}" ;;
                 web) web="${value}" ;;
                 drivers) drivers="${value}" ;;
                 compose) compose="${value}" ;;
@@ -70,6 +73,7 @@ jobs:
           {
             echo "core=${core}"
             echo "optimizer=${optimizer}"
+            echo "roofmodel=${roofmodel}"
             echo "web=${web}"
             echo "drivers=${drivers}"
             echo "compose=${compose}"
@@ -130,6 +134,28 @@ jobs:
         run: >-
           go test -count=1 ./internal/mpc
           -run 'TestExternalOptimizer(EndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$'
+
+  # The roof-geometry module is optional at runtime but not optional to verify:
+  # it decides the tilt and azimuth every PV forecast is then built on, and a
+  # silently wrong plane fit looks exactly like a working one. Installed without
+  # the `geo` extra on purpose -- LAZ decoding pulls a compiled backend, and
+  # everything except the point-cloud read is exercised without it.
+  roofmodel:
+    name: roofmodel (Python)
+    needs: changes
+    if: needs.changes.outputs.roofmodel == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: roofmodel/pyproject.toml
+      - name: Install
+        run: pip install -e 'roofmodel[test]'
+      - name: Python tests
+        run: pytest -q roofmodel/tests
 
   web:
     name: web
@@ -480,12 +506,13 @@ jobs:
     name: go test + vet
     if: always()
     needs:
-      [changes, core, optimizer, web, drivers, device-support-contract, compose, e2e, contract]
+      [changes, core, optimizer, roofmodel, web, drivers, device-support-contract, compose, e2e, contract]
     runs-on: ubuntu-latest
     env:
       RESULTS: >-
         ${{ needs.changes.result }} ${{ needs.core.result }}
-        ${{ needs.optimizer.result }} ${{ needs.web.result }}
+        ${{ needs.optimizer.result }} ${{ needs.roofmodel.result }}
+        ${{ needs.web.result }}
         ${{ needs.drivers.result }} ${{ needs.device-support-contract.result }}
         ${{ needs.compose.result }}
         ${{ needs.e2e.result }} ${{ needs.contract.result }}
