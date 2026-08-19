@@ -265,11 +265,20 @@ type Service struct {
 	Lat, Lon float64
 	RatedPVW float64 // total rated PV across all arrays (used for estimate)
 
-	// Arrays holds per-plane geometry (tilt/azimuth/kWp) mirrored from the
+	// Arrays holds per-plane geometry (tilt/azimuth/rated_w) mirrored from the
 	// weather config. When set, a radiation-bearing provider's horizontal
 	// GHI is projected onto each plane via sunpos and summed, instead of the
 	// orientation-blind flat rated×(W/m²/1000) estimate. Empty → flat estimate.
 	Arrays []Array
+
+	// Calibration optionally supplies a measured site correction factor,
+	// wired to the STRÅNG performance scorer. The irradiance-derived
+	// estimates below are deliberately loss-free (no inverter, wiring or
+	// temperature derate), so a site settles at a stable ratio slightly under
+	// 1; feeding that measured ratio back closes the gap. The second return
+	// is false whenever the factor must not be applied, and nil means the
+	// scorer isn't wired at all — both leave the estimate untouched.
+	Calibration func() (float64, bool)
 
 	stop chan struct{}
 	done chan struct{}
@@ -367,6 +376,15 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		return
 	}
 	nowMs := time.Now().UnixMilli()
+
+	// Resolved once per fetch so every point in a batch shares one factor.
+	calibration, calibrated := 1.0, false
+	if s.Calibration != nil {
+		if f, ok := s.Calibration(); ok && f > 0 {
+			calibration, calibrated = f, true
+		}
+	}
+
 	points := make([]state.ForecastPoint, 0, len(rows))
 	for _, r := range rows {
 		// A negative irradiance is not physical; retain the row with a
@@ -386,18 +404,34 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		// radiation we turn into watts via rated × W/m²/1000; met.no only has
 		// cloud fraction, so we fall through to the naive cloud-derated prior.
 		var pvW float64
+		// Only the two irradiance-derived branches are calibrated. They share
+		// the loss-free "irradiance × nameplate" baseline the performance ratio
+		// was measured against, so the correction is the same quantity. A
+		// provider-native figure is already site-calibrated upstream and the
+		// cloud-derated prior carries its own empirical derate; scaling either
+		// would double-count.
+		applyCalibration := false
 		switch {
 		case r.PVWEstimated != nil:
 			pvW = *r.PVWEstimated
 		case solarWm2 != nil:
+			// Irradiance-derived: orientation-aware when per-plane geometry
+			// exists, flat rated×(W/m²/1000) otherwise. Either way it is the
+			// loss-free baseline the performance ratio was measured against.
 			var ok bool
 			pvW, ok = pvWFromGHI(s.Lat, s.Lon, r.HourStart, *solarWm2, s.RatedPVW, s.Arrays)
 			if !ok {
 				slog.Warn("forecast row skipped", "reason", "non-finite irradiance", "provider", s.Provider.Name(), "slot", r.HourStart)
 				continue
 			}
+			applyCalibration = true
 		default:
 			pvW = EstimatePVW(s.Lat, s.Lon, r.HourStart, r.CloudCoverPct, s.RatedPVW)
+		}
+		// Calibrate before the finiteness guard so the stored value is the one
+		// that was checked, not the one before scaling.
+		if applyCalibration && calibrated {
+			pvW *= calibration
 		}
 		if math.IsNaN(pvW) || math.IsInf(pvW, 0) {
 			slog.Warn("forecast row skipped", "reason", "non-finite PV estimate", "provider", s.Provider.Name(), "slot", r.HourStart)
@@ -430,7 +464,8 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		slog.Warn("forecast save failed", "err", err)
 		return
 	}
-	slog.Info("forecast fetched", "count", len(points), "provider", s.Provider.Name())
+	slog.Info("forecast fetched", "count", len(points), "provider", s.Provider.Name(),
+		"pv_calibration", calibration, "calibrated", calibrated)
 }
 
 func arrayFromConfig(a config.PVArray) (Array, bool) {

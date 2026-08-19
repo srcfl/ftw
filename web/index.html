@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FTW</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <!-- Leaflet is lazy-loaded by settings.js when the Weather tab opens
-       the OSM picker — it's not needed on the main dashboard and
-       shipping ~150 KB of JS + CSS to every /status-poll tab is a
-       waste. See web/settings.js::loadLeaflet(). -->
+  <!-- MapLibre GL JS is lazy-loaded by the Weather tab when the OSM picker
+       opens — it's not needed on the main dashboard and shipping ~1 MB of
+       JS + CSS to every /status-poll tab is a waste. See
+       web/settings/tabs/weather.js::loadMapLibre(). -->
   <!-- Type: Inter preferred for UI, JetBrains Mono for tabular numerics.
        No external font CDN — the Pi has to boot + render even without
        internet; theme.css's --sans / --mono stacks fall back to the OS's
@@ -938,7 +938,7 @@
   <script src="/settings/tabs/devices.js?v=catcards2"></script>
   <script src="/settings/tabs/loadpoints.js?v=lp2"></script>
   <script src="/settings/tabs/price.js?v=zones1"></script>
-  <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/weather.js?v=coverage1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
   <script src="/settings/tabs/planner.js?v=cvxpy1"></script>
   <script src="/settings/tabs/ha.js?v=tabsplit2"></script>

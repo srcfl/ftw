@@ -1,31 +1,53 @@
 // Settings → Weather tab: forecast provider + location + PV arrays.
-// Owns its own Leaflet loader + PV-array editor + 3D preview loader
+// Owns its own MapLibre loader + PV-array editor + 3D preview loader
 // so the Settings shell stays weather-agnostic.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  var leafletLoading = null;
-  function loadLeaflet() {
-    if (window.L) return Promise.resolve();
-    if (leafletLoading) return leafletLoading;
-    leafletLoading = new Promise(function (resolve, reject) {
-      var css = document.createElement("link");
-      css.rel = "stylesheet";
-      css.href = "/vendor/leaflet/leaflet.css";
-      document.head.appendChild(css);
+  // MapLibre GL JS (BSD-3), pinned and loaded on demand exactly the way this
+  // tab already lazy-loads its other heavy optional dependency — the picker is
+  // ~1 MB and only the Weather tab needs it.
+  //
+  // v6 ships ESM only and is code-split (the entry pulls in
+  // maplibre-gl-shared.mjs), so it is loaded with a dynamic import() rather
+  // than a <script> tag. That means no integrity hash on the JS: SRI does not
+  // propagate to a module's own imports, so hashing the entry point would
+  // leave the larger shared chunk unverified regardless. The stylesheet is a
+  // single file and keeps its hash. The version is pinned so an upstream
+  // republish cannot silently change what loads.
+  //
+  // MapLibre detects that it is being served cross-origin and routes its
+  // worker through a blob, so a CSP would need `worker-src blob:` here; FTW
+  // sets no CSP today. The numeric lat/lon fields stay authoritative, so a CDN
+  // or WebGL failure costs the picker and nothing else.
+  var MAPLIBRE_VERSION = "6.0.0";
+  var MAPLIBRE_BASE = "https://unpkg.com/maplibre-gl@" + MAPLIBRE_VERSION + "/dist/";
+  var maplibreLoading = null;
+  function loadMapLibre() {
+    if (window.maplibregl) return Promise.resolve();
+    if (maplibreLoading) return maplibreLoading;
 
-      var script = document.createElement("script");
-      script.src = "/vendor/leaflet/leaflet.js";
-      script.async = true;
-      script.onload = function () { resolve(); };
-      script.onerror = function () {
-        leafletLoading = null;
-        reject(new Error("Leaflet failed to load"));
-      };
-      document.head.appendChild(script);
-    });
-    return leafletLoading;
+    if (!document.getElementById("maplibre-css")) {
+      var css = document.createElement("link");
+      css.id = "maplibre-css";
+      css.rel = "stylesheet";
+      css.href = MAPLIBRE_BASE + "maplibre-gl.css";
+      css.integrity = "sha256-lGfssQQWd25OyIDWYsILvB0epOQ5rDrtpFkBvfEktgk=";
+      css.crossOrigin = "anonymous";
+      document.head.appendChild(css);
+    }
+
+    // v6 removed the default export, so the module namespace is the API.
+    maplibreLoading = import(MAPLIBRE_BASE + "maplibre-gl.mjs")
+      .then(function (mod) {
+        window.maplibregl = mod.default || mod;
+      })
+      .catch(function (e) {
+        maplibreLoading = null;
+        throw new Error("MapLibre GL JS failed to load: " + (e && e.message ? e.message : e));
+      });
+    return maplibreLoading;
   }
 
   var pvArraysModulePromise = null;
@@ -123,8 +145,28 @@
     };
   }
 
+  // Raster style assembled inline from the same OpenStreetMap tiles the old
+  // Leaflet picker used: swapping the renderer changes neither the tile source
+  // nor the attribution. Raster-only also means no glyph or sprite server is
+  // needed, so the picker has exactly one external origin to reach.
+  function osmRasterStyle() {
+    return {
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: "© OpenStreetMap",
+        },
+      },
+      layers: [{ id: "osm", type: "raster", source: "osm" }],
+    };
+  }
+
   function mountMap(ctx, container) {
-    if (!window.L) return;
+    if (!window.maplibregl) return;
     var bodyEl = ctx.bodyEl;
     var setByPath = ctx.setByPath;
     var latInput = bodyEl.querySelector('[data-path="weather.latitude"]');
@@ -135,43 +177,103 @@
     if (isNaN(lat)) lat = 59.3293;
     if (isNaN(lon)) lon = 18.0686;
     if (window._weatherMap) { try { window._weatherMap.remove(); } catch (e) {} window._weatherMap = null; }
-    var map = L.map(container, { zoomControl: true }).setView([lat, lon], 11);
+    // MapLibre takes coordinates as [lng, lat] — the reverse of Leaflet's
+    // [lat, lng]. Every call below is ordered accordingly.
+    var map = new maplibregl.Map({
+      container: container,
+      style: osmRasterStyle(),
+      center: [lon, lat],
+      zoom: 11,
+      attributionControl: { compact: true },
+    });
     window._weatherMap = map;
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 18,
-      attribution: "© OpenStreetMap",
-    }).addTo(map);
-    var marker = L.marker([lat, lon], { draggable: true }).addTo(map);
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    var marker = new maplibregl.Marker({ draggable: true }).setLngLat([lon, lat]).addTo(map);
     function setCoord(la, lo) {
       latInput.value = la.toFixed(4);
       lonInput.value = lo.toFixed(4);
       setByPath(ctx.config, "weather.latitude", la);
       setByPath(ctx.config, "weather.longitude", lo);
+      renderCoverage(ctx, la, lo);
     }
     marker.on("dragend", function () {
-      var ll = marker.getLatLng();
+      var ll = marker.getLngLat();
       setCoord(ll.lat, ll.lng);
     });
     map.on("click", function (e) {
-      marker.setLatLng(e.latlng);
-      setCoord(e.latlng.lat, e.latlng.lng);
+      marker.setLngLat(e.lngLat);
+      setCoord(e.lngLat.lat, e.lngLat.lng);
     });
     function syncFromInputs() {
       var la = parseFloat(latInput.value), lo = parseFloat(lonInput.value);
       if (!isNaN(la) && !isNaN(lo)) {
-        marker.setLatLng([la, lo]);
-        map.panTo([la, lo]);
+        marker.setLngLat([lo, la]);
+        map.panTo([lo, la]);
+        renderCoverage(ctx, la, lo);
       }
     }
     latInput.addEventListener("change", syncFromInputs);
     lonInput.addEventListener("change", syncFromInputs);
-    setTimeout(function () { map.invalidateSize(); }, 150);
+    setTimeout(function () { map.resize(); }, 150);
+  }
+
+  // Data-source coverage for the current pin. Several sources are regional
+  // (STRÅNG is Nordic-only, every price provider is European) and until now
+  // nothing said so — a site outside them just got empty results. Rendered
+  // from GET /api/data-sources, which answers for a specific lat/lon.
+  var coverageSeq = 0;
+  function renderCoverage(ctx, lat, lon) {
+    var host = document.getElementById("data-coverage");
+    if (!host) return;
+    // Coordinates change on every marker drag; keep only the newest response
+    // so a slow early request cannot overwrite a fast later one.
+    var seq = ++coverageSeq;
+    var q = lat != null && lon != null
+      ? "?lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
+      : "";
+    fetch("/api/data-sources" + q)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (seq !== coverageSeq || !d || !Array.isArray(d.sources)) return;
+        var esc = ctx.escHtml;
+        var unavailable = d.sources.filter(function (s) { return s.covers === false; });
+        var kinds = { forecast: "Forecast", irradiance: "Irradiance", price: "Price" };
+        var rows = ["forecast", "irradiance", "price"].map(function (kind) {
+          var list = d.sources.filter(function (s) { return s.kind === kind; });
+          if (!list.length) return "";
+          var names = list.map(function (s) {
+            var ok = s.covers !== false;
+            var mark = ok ? "✓" : "✕";
+            var col = ok ? "var(--text-dim)" : "var(--warn, #f59e0b)";
+            return '<span style="color:' + col + '" title="' + esc(s.area + (s.note ? " — " + s.note : "")) + '">' +
+              mark + " " + esc(s.label) + "</span>";
+          }).join('<span style="color:var(--text-dim)"> · </span>');
+          return '<div style="margin:2px 0"><span style="display:inline-block;min-width:74px;color:var(--text-dim)">' +
+            kinds[kind] + "</span>" + names + "</div>";
+        }).join("");
+        var warn = unavailable.length
+          ? '<p style="color:var(--warn, #f59e0b);font-size:0.72rem;margin:6px 0 0">' +
+            esc(unavailable.length === 1
+              ? unavailable[0].label + " does not cover this location."
+              : unavailable.length + " sources do not cover this location.") +
+            " Hover for details." +
+            '</p>'
+          : "";
+        host.innerHTML =
+          '<div style="font-size:0.72rem;font-family:var(--mono);border:1px solid var(--line);' +
+          'border-radius:6px;padding:8px 10px;background:var(--ink-sunken)">' +
+          '<div style="color:var(--text-dim);margin-bottom:4px">Data sources available here</div>' +
+          rows + warn + "</div>";
+      })
+      .catch(function () { /* coverage is advisory; never break the tab */ });
   }
 
   function initWeatherMap(ctx) {
     var container = document.getElementById("weather-map");
     if (!container) return;
-    loadLeaflet().then(function () { mountMap(ctx, container); })
+    // mountMap throws on hosts without WebGL; the same catch that handles a CDN
+    // failure degrades those to the numeric fields.
+    loadMapLibre().then(function () { mountMap(ctx, container); })
       .catch(function (e) { container.textContent = "map unavailable: " + e.message; });
   }
 
@@ -190,6 +292,7 @@
         '</div></div>' +
         '<div id="weather-map" style="height:260px;border-radius:6px;margin:6px 0;background:var(--ink-sunken)"></div>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:-2px 0 8px">Click or drag the marker to set your location.</p>' +
+        '<div id="data-coverage" style="margin:0 0 10px"></div>' +
         field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +
         '</fieldset>' +
@@ -207,6 +310,10 @@
     after: function (ctx) {
       initWeatherMap(ctx);
       renderPVArrays(ctx);
+      // The map may fail (no WebGL, CDN blocked); coverage must still render,
+      // so drive it from the numeric fields rather than from the map.
+      var w = (ctx.config && ctx.config.weather) || {};
+      renderCoverage(ctx, w.latitude, w.longitude);
       var addBtn = document.getElementById("pv-array-add");
       if (addBtn) addBtn.addEventListener("click", function () {
         ctx.config.weather.pv_arrays.push({ name: "", rated_w: 0, tilt_deg: 35, azimuth_deg: 180 });

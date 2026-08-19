@@ -10,6 +10,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/pvperf"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 	"github.com/srcfl/ftw/go/internal/units"
 	"github.com/srcfl/ftw/go/internal/v2x"
@@ -40,6 +41,16 @@ func TestForecastArrayHasNoKWp(t *testing.T) {
 	}
 	if _, ok := typ.FieldByName("RatedW"); !ok {
 		t.Fatal("forecast.Array must store RatedW (watts)")
+	}
+}
+
+func TestPVPerfArrayHasNoKWp(t *testing.T) {
+	typ := reflect.TypeOf(pvperf.Array{})
+	if _, ok := typ.FieldByName("KWp"); ok {
+		t.Fatal("pvperf.Array must not have KWp; store RatedW")
+	}
+	if _, ok := typ.FieldByName("RatedW"); !ok {
+		t.Fatal("pvperf.Array must store RatedW (watts)")
 	}
 }
 
@@ -243,6 +254,7 @@ func TestCoreBannedSoCPercentFieldNames(t *testing.T) {
 		reflect.TypeOf(mpc.Plan{}),
 		reflect.TypeOf(mpc.SlotDirective{}),
 		reflect.TypeOf(forecast.Array{}),
+		reflect.TypeOf(pvperf.Array{}),
 	}
 	banned := []string{"CurrentSoCPct", "TargetSoCPct", "PluginSoCPct", "VehicleSoCPct", "SoCPct", "SoCMinPct", "SoCMaxPct", "SoCTargetPct", "LivePVSurplusSoCCapPct", "LoadpointSoCTargetPct", "KWp"}
 	for _, typ := range types {
