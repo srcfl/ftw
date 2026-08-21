@@ -47,6 +47,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/notifications"
+	"github.com/srcfl/ftw/go/internal/ocpp"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
 	"github.com/srcfl/ftw/go/internal/scanner"
@@ -155,6 +156,11 @@ type Deps struct {
 	// install a temporary override that bypasses the MPC budget
 	// path until expiry. Nil disables the endpoint.
 	LoadpointCtrl *loadpoint.Controller
+
+	// OCPPChargers snapshots the OCPP central system's charger map for
+	// GET /api/ocpp/chargers. Nil when the OCPP server is disabled or
+	// failed to start; the endpoint then reports an empty list.
+	OCPPChargers func() map[string]ocpp.ChargerView
 
 	// Optional: CalDAV calendar-constraints client (#498). Nil when the
 	// feature is disabled; GET /api/caldav/status then reports disabled.
@@ -419,6 +425,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers/{name}/logs", Local, s.handleDriverLogs)
 	s.handle("GET  /api/logs", Local, s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", Local, s.handleSupportDump)
+	s.handle("GET  /api/ocpp/chargers", Local, s.handleOCPPChargers)
 	s.handle("GET  /api/support/report", Local, s.handleSupportReport)
 	s.handle("POST   /api/drivers/{name}/control", Actuate, s.handleDriverControl)
 	s.handle("DELETE /api/drivers/{name}/control", Actuate, s.handleDriverControlRelease)

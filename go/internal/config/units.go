@@ -37,6 +37,11 @@ func (c *Config) NormalizeUnits() {
 		lp.PluginSoC = pickFraction(lp.PluginSoC, lp.PluginSoCPct)
 		lp.PluginSoCPct = 0
 	}
+	for i := range c.Vehicles {
+		v := &c.Vehicles[i]
+		v.TargetSoC = pickFraction(v.TargetSoC, v.TargetSoCPct)
+		v.TargetSoCPct = 0
+	}
 	c.Site.PVSurplusAbsorbSoCCap = pickFraction(c.Site.PVSurplusAbsorbSoCCap, c.Site.PVSurplusAbsorbSoCCapPct)
 	c.Site.PVSurplusAbsorbSoCCapPct = 0
 }

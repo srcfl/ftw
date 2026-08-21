@@ -17,6 +17,11 @@ signed channel is FTW's default source:
 - [device driver catalog](https://srcfl.github.io/device-drivers/) — which
   devices are already covered, and on what evidence.
 
+> **An EV charger that speaks OCPP does not need a driver.** FTW has a built-in
+> OCPP Central System serving 1.6J and 2.0.1, and one server in core handles
+> every charger that speaks the protocol. Point the charger at FTW and it
+> registers itself. See [ocpp.md](ocpp.md) before writing anything.
+
 This page is the other half: what FTW's host gives a driver, how FTW grants it,
 where FTW loads it from, and how to test one against a running instance. It is
 deliberately not a second authoring guide — two of those drift, and the one

@@ -105,10 +105,10 @@
     vehicle_unplugged: 'Vehicle unplugged',
     ev_target_reached: 'EV target reached',
     departure_reached: 'Departure time reached',
-    operator_hold: 'Loadpoint hold took priority',
+    operator_hold: 'Charger hold took priority',
     surplus_only: 'Surplus-only policy took priority',
     site_safety_block: 'Site meter safety stopped boost',
-    loadpoint_driver_unavailable: 'Loadpoint driver unavailable',
+    loadpoint_driver_unavailable: 'Charger driver unavailable',
     battery_unavailable: 'Home battery unavailable',
     battery_reserve_reached: 'Home battery reserve reached',
     battery_hold: 'Battery hold took priority',
@@ -133,7 +133,7 @@
     const blocked = !lp.plugged_in || lp.manual_active || lp.surplus_only;
     let why = '';
     if (!lp.plugged_in) why = 'Plug in a vehicle first.';
-    else if (lp.manual_active) why = 'Release the loadpoint hold first.';
+    else if (lp.manual_active) why = 'Release the charger hold first.';
     else if (lp.surplus_only) why = 'Turn off surplus-only first.';
     return '<div class="lp-boost">' +
       '<div class="lp-boost-title">Battery boost</div>' +
@@ -222,13 +222,13 @@
     const planLpId = plan.plan.loadpoint_id || null;
     const isOurs = !planLpId || planLpId === lp.id;
     if (!isOurs) {
-      return `<div class="lp-empty">Plan is scheduling <code>${escapeHtml(planLpId)}</code>, not this loadpoint.</div>`;
+      return `<div class="lp-empty">Plan is scheduling <code>${escapeHtml(planLpId)}</code>, not this charger.</div>`;
     }
     const slots = plan.plan.actions
       .filter(a => a.loadpoint_w != null || a.loadpoint_soc != null)
       .slice(0, SCHEDULE_SLOTS);
     if (slots.length === 0) {
-      return '<div class="lp-empty">Planner did not allocate this loadpoint in the current horizon ' +
+      return '<div class="lp-empty">Planner did not allocate this charger in the current horizon ' +
              '(no target SoC + no surplus_only opportunistic slots).</div>';
     }
     const rows = slots.map(a => {
@@ -295,7 +295,7 @@
     });
 
     if (!lps || lps.length === 0) {
-      grid.innerHTML = '<div class="lp-empty">No loadpoints configured.</div>';
+      grid.innerHTML = '<div class="lp-empty">No chargers configured.</div>';
     } else {
       grid.innerHTML = lps.map(lp => loadpointCard(lp, plan)).join('');
     }
@@ -318,7 +318,7 @@
     const sub = document.getElementById('loadpoints-subtitle');
     if (sub) {
       const planMode = plan && plan.plan ? plan.plan.mode : 'no plan';
-      sub.textContent = `${lps.length} loadpoint${lps.length === 1 ? '' : 's'} · planner: ${planMode}`;
+      sub.textContent = `${lps.length} charger${lps.length === 1 ? '' : 's'} · planner: ${planMode}`;
     }
   }
 

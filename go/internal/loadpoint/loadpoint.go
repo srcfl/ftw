@@ -143,6 +143,9 @@ type State struct {
 	VehicleDriver        string  `json:"vehicle_driver,omitempty"`
 	VehicleStale         bool    `json:"vehicle_stale,omitempty"`
 	SoCSource            string  `json:"soc_source,omitempty"`
+	// VehicleName is the vehicle profile the session identified (via the
+	// charging transaction's idTag/idToken), empty when none matched.
+	VehicleName string `json:"vehicle_name,omitempty"`
 
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
 	// UI has everything for rendering in one fetch.
@@ -269,6 +272,14 @@ type loadpointRuntime struct {
 	// every plug-in transition (prev !pluggedIn → now pluggedIn).
 	sessionPluginSoC float64
 
+	// vehicleName is the vehicle profile applied for this session after
+	// the charging transaction identified the car (Manager.
+	// ApplyVehicleProfile); baseCapacityWh remembers the capacity to
+	// restore on plug-out — the profile is session-scoped, the next car
+	// may be a different one.
+	vehicleName    string
+	baseCapacityWh float64
+
 	// schedule carries the operator's persistent intent. Empty when
 	// none is set. Survives config hot-reload because Load() copies
 	// it across from the previous runtime row.
@@ -392,6 +403,16 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.chargingSteadySince = existing.chargingSteadySince
 			lp.stoppedSince = existing.stoppedSince
 			lp.steadyRunArmed = existing.steadyRunArmed
+			lp.vehicleName = existing.vehicleName
+			if existing.vehicleName != "" {
+				// An identified car survives config hot-reload: keep the
+				// session's applied capacity, but re-base the plug-out
+				// restore on the NEW config's value.
+				lp.baseCapacityWh = c.VehicleCapacityWh
+				if existing.VehicleCapacityWh > 0 {
+					lp.Config.VehicleCapacityWh = existing.VehicleCapacityWh
+				}
+			}
 		}
 		newByID[c.ID] = lp
 		newOrder = append(newOrder, c.ID)
@@ -515,6 +536,13 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.notRequestingSince = time.Time{}
 		lp.sessionComplete = false
 		lp.socSource = ""
+		if lp.vehicleName != "" {
+			// The identified car left with its session — the next one may
+			// be different, so restore the loadpoint's own capacity.
+			lp.VehicleCapacityWh = lp.baseCapacityWh
+			lp.vehicleName = ""
+			lp.baseCapacityWh = 0
+		}
 	}
 	lp.pluggedIn = pluggedIn
 	lp.currentPowerW = powerW
@@ -725,6 +753,31 @@ func (m *Manager) HydrateSurplusOnly(load func(id string) (bool, bool)) {
 	}
 }
 
+// ApplyVehicleProfile switches the loadpoint to an identified car for the
+// rest of the session: capacityWh (when > 0) replaces the configured
+// vehicle capacity so SoC inference and planner energy sizing follow the
+// car actually plugged in. Reverted on plug-out; survives config
+// hot-reloads (Load carries it across). The caller applies the profile's
+// policy fields (surplus_only, target) through the ordinary setters.
+// Returns false for an unknown loadpoint id.
+func (m *Manager) ApplyVehicleProfile(id, vehicleName string, capacityWh float64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	if lp.vehicleName == "" {
+		lp.baseCapacityWh = lp.VehicleCapacityWh
+	}
+	lp.vehicleName = vehicleName
+	if capacityWh > 0 {
+		lp.VehicleCapacityWh = capacityWh
+	}
+	lp.updatedAtMs = m.now().UnixMilli()
+	return true
+}
+
 // SetCurrentSoC lets an operator correct the inferred vehicle SoC
 // mid-session. Chargers like Easee don't report the vehicle's actual
 // BMS state, so the manager defaults to
@@ -818,6 +871,7 @@ func (lp *loadpointRuntime) snapshot() State {
 		SurplusOnly:        lp.Config.SurplusOnly,
 		Schedule:           lp.schedule,
 		SoCSource:          lp.socSource,
+		VehicleName:        lp.vehicleName,
 	}
 }
 

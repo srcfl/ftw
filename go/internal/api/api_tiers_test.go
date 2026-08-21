@@ -193,6 +193,9 @@ func TestNoSecretBearingReadCrossesTheSession(t *testing.T) {
 		"/api/support/dump",
 		"/api/oauth/myuplink/start",
 		"/api/oauth/myuplink/callback",
+		// vehicle_id is the RFID idTag the card presented, which is what
+		// authorizes a charge at the charger itself.
+		"/api/ocpp/chargers",
 	}
 
 	rig := newTieredSession(t, apiauth.RoleViewer)

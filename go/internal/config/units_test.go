@@ -13,8 +13,9 @@ func TestNormalizeUnitsFoldsLegacyKWpAndPercent(t *testing.T) {
 				{Name: "south", KWp: 6, TiltDeg: &tilt, AzimuthDeg: &az},
 			},
 		},
-		CalDAV: &CalDAV{Enabled: true, EVDefaultTargetSoCPct: 80},
-		Site:   Site{PVSurplusAbsorbSoCCapPct: 88},
+		CalDAV:   &CalDAV{Enabled: true, EVDefaultTargetSoCPct: 80},
+		Site:     Site{PVSurplusAbsorbSoCCapPct: 88},
+		Vehicles: []Vehicle{{ID: "leaf", TargetSoCPct: 80}},
 	}
 	c.NormalizeUnits()
 	if c.Planner.SoCMin != 0.10 || c.Planner.SoCMax != 0.90 {
@@ -31,5 +32,8 @@ func TestNormalizeUnitsFoldsLegacyKWpAndPercent(t *testing.T) {
 	}
 	if c.Site.PVSurplusAbsorbSoCCap != 0.88 {
 		t.Fatalf("absorb cap = %v, want 0.88", c.Site.PVSurplusAbsorbSoCCap)
+	}
+	if c.Vehicles[0].TargetSoC != 0.80 || c.Vehicles[0].TargetSoCPct != 0 {
+		t.Fatalf("vehicle target SoC = %+v, want 0.80 with legacy pct cleared", c.Vehicles[0])
 	}
 }
