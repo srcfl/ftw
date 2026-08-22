@@ -1,0 +1,45 @@
+{
+  "name": "flatten-equal-price-charge",
+  "request": {
+    "schema_version": 1,
+    "request_id": "flatten-equal-price-charge",
+    "settings": {
+      "mode": "arbitrage",
+      "solver": "HIGHS",
+      "formulation": "relaxed",
+      "time_limit_s": 2,
+      "mip_rel_gap": 0.001,
+      "flatten_peaks": true,
+      "export_bonus_ore_kwh": 0,
+      "export_fee_ore_kwh": 0
+    },
+    "slots": [
+      {"start_ms": 1, "len_min": 60, "price_ore": 20, "spot_ore": 0, "confidence": 1, "pv_w": 0, "load_w": 0, "max_import_w": 8000, "max_export_w": 8000},
+      {"start_ms": 3600001, "len_min": 60, "price_ore": 20, "spot_ore": 0, "confidence": 1, "pv_w": 0, "load_w": 0, "max_import_w": 8000, "max_export_w": 8000},
+      {"start_ms": 7200001, "len_min": 60, "price_ore": 300, "spot_ore": 0, "confidence": 1, "pv_w": 0, "load_w": 4000, "max_import_w": 8000, "max_export_w": 8000}
+    ],
+    "storages": [
+      {
+        "id": "home",
+        "capacity_wh": 10000,
+        "initial_energy_wh": 1000,
+        "min_energy_wh": 1000,
+        "max_energy_wh": 9500,
+        "max_charge_w": 5000,
+        "max_discharge_w": 5000,
+        "charge_efficiency": 1,
+        "discharge_efficiency": 1,
+        "terminal_price_ore_kwh": 0,
+        "cycle_cost_ore_kwh": 0
+      }
+    ],
+    "flex_loads": [],
+    "thermal_loads": [],
+    "commercial_constraints": {}
+  },
+  "expect": {
+    "ok": true,
+    "preference_stage": "flattened",
+    "max_import_peak_w": 2100
+  }
+}

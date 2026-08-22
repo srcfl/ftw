@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -430,5 +431,23 @@ func TestExternalOptimizerPlansAndValidatesMultipleStorages(t *testing.T) {
 	plan.Actions[0].StorageEnergyWh["battery-a"] += 100
 	if err := ValidatePlan(slots, p, &plan); err == nil {
 		t.Fatal("ValidatePlan accepted a corrupted per-storage energy trajectory")
+	}
+}
+
+func TestSolverInfoUnmarshalsPreferenceAndServiceReport(t *testing.T) {
+	raw := []byte(`{
+		"engine":"cvxpy","backend":"highs","status":"optimal",
+		"preference_stage":"flattened","import_peak_w":2000,"export_peak_w":250,
+		"service_report":{"flex_shortfall_wh":{"car":1200}}
+	}`)
+	var info SolverInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.PreferenceStage != "flattened" || info.ImportPeakW != 2000 || info.ExportPeakW != 250 {
+		t.Fatalf("peaks = %+v", info)
+	}
+	if info.ServiceReport == nil || info.ServiceReport.FlexShortfallWh["car"] != 1200 {
+		t.Fatalf("service report = %+v", info.ServiceReport)
 	}
 }

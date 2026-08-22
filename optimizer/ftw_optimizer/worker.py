@@ -39,6 +39,7 @@ FEATURES = [
     "multistage",
     "commercial_constraints_v1",
     "cancel_request",
+    "preference_flatten_peaks",
 ]
 
 

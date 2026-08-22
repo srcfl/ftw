@@ -15,6 +15,22 @@ from .model import (
     _solver_options,
     _storage_starts_above_maximum,
 )
+from .preference import (
+    COST_BOUND_TOLERANCE_ORE,
+    INTEGRALITY_TOLERANCE,
+    MIN_PREFERENCE_TIME_S,
+    STAGE_DISABLED,
+    STAGE_FLAT,
+    STAGE_KEPT,
+    STAGE_NO_TIME,
+    STAGE_SINGLE_SLOT,
+    cost_bound_slack_ore,
+    flatten_horizon_has_choice,
+    flatten_peaks_enabled,
+    named_shortfalls,
+    peaks_from_grid,
+    preference_time_limit_s,
+)
 from .protocol import finite_number
 
 if TYPE_CHECKING:
@@ -59,6 +75,7 @@ class DirectSharedStorageVars:
     total_discharge: list[list[int]]
     service: dict[int, float]
     economic: dict[int, float]
+    shortfalls: dict[str, int]
 
 
 class SparseModel:
@@ -225,6 +242,9 @@ def solve_direct_highs(
         )
         service = dict(shared_storage.service) if shared_storage is not None else {}
         economic = dict(shared_storage.economic) if shared_storage is not None else {}
+        shortfalls = (
+            dict(shared_storage.shortfalls) if shared_storage is not None else {}
+        )
         # Shared charge and discharge make storage state deterministic across
         # scenarios. Reuse its variables and rows; only meter flow varies.
         storages_to_build = () if shared_storage is not None else prepared.storages
@@ -304,6 +324,7 @@ def solve_direct_highs(
                     target,
                 )
                 _add(service, shortfall, 1.0 / capacity)
+                shortfalls[str(spec.get("id", f"storage-{storage_index}"))] = shortfall
 
             cycle_coefficient = spread + max(0.0, float(spec.get("cycle_cost_ore_kwh", 0)))
             throughput_coefficient = (
@@ -342,6 +363,7 @@ def solve_direct_highs(
                 total_discharge,
                 dict(service),
                 dict(economic),
+                dict(shortfalls),
             )
         scenario_grid_cost: dict[int, float] = {}
 
@@ -636,6 +658,20 @@ def solve_direct_highs(
     solution = np.asarray(highs.getSolution().col_value, dtype=np.float64)
     if len(solution) != len(model.lower) or not np.all(np.isfinite(solution)):
         raise DirectHighsError("HiGHS returned a non-finite solution")
+    economic_objective = float(highs.getObjectiveValue())
+    flatten_started = time.perf_counter()
+    flatten_stage, solution, import_peak_w, export_peak_w = _apply_direct_flatten(
+        highs,
+        model,
+        prepared,
+        scenario_vars,
+        economic_costs,
+        economic_objective,
+        solution,
+        deadline,
+        shared=shared,
+    )
+    solver_ms += (time.perf_counter() - flatten_started) * 1000.0
     if shared:
         try:
             _validate_shared_baseline_solution(
@@ -655,7 +691,7 @@ def solve_direct_highs(
         prepared,
         scenario_vars,
         solution,
-        float(highs.getObjectiveValue()),
+        economic_objective,
         best_service,
         started,
         prepare_ms,
@@ -667,6 +703,10 @@ def solve_direct_highs(
         len(model.integer),
         mip_gap,
         shared,
+        flatten_stage,
+        import_peak_w,
+        export_peak_w,
+        _direct_storage_service_report(shared_storage, solution),
     )
 
 
@@ -686,6 +726,10 @@ def _response(
     integer_variables: int,
     mip_gap: float | None,
     shared: bool,
+    preference_stage: str = "",
+    import_peak_w: float = 0.0,
+    export_peak_w: float = 0.0,
+    service_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scenarios = prepared.scenario_set.scenarios
     base_index = next((i for i, scenario in enumerate(scenarios) if scenario.id == "base"), 0)
@@ -770,7 +814,12 @@ def _response(
         "non_anticipative_slots": prepared.first_stage_slots,
         "model_variables": variables,
         "model_constraints": constraints,
+        "preference_stage": preference_stage,
+        "import_peak_w": import_peak_w,
+        "export_peak_w": export_peak_w,
     }
+    if service_report:
+        solver["service_report"] = service_report
     if shared:
         probabilities = np.asarray([scenario.probability for scenario in scenarios])
         energy_cost = 0.0
@@ -858,6 +907,183 @@ def _response(
             "actions": actions,
         },
     }
+
+
+def _direct_storage_service_report(
+    shared_storage: DirectSharedStorageVars | None,
+    solution: np.ndarray,
+) -> dict[str, Any]:
+    if shared_storage is None:
+        return {}
+    values: dict[str, float] = {}
+    for asset_id, index in shared_storage.shortfalls.items():
+        if 0 <= index < len(solution):
+            values[str(asset_id)] = float(solution[index])
+    named = named_shortfalls(values)
+    if not named:
+        return {}
+    return {"storage_shortfall_wh": named}
+
+
+def _direct_peaks(
+    scenario_vars: list[DirectScenarioVars],
+    solution: np.ndarray,
+    prepared: "PreparedMultistage",
+) -> tuple[float, float]:
+    scenarios = prepared.scenario_set.scenarios
+    base_index = next(
+        (i for i, scenario in enumerate(scenarios) if scenario.id == "base"),
+        0,
+    )
+    base_vars = scenario_vars[base_index]
+    grid_import = np.asarray(
+        [solution[base_vars.grid_import[t]] for t in range(prepared.n)],
+        dtype=float,
+    )
+    grid_export = np.asarray(
+        [solution[base_vars.grid_export[t]] for t in range(prepared.n)],
+        dtype=float,
+    )
+    return peaks_from_grid(grid_import, grid_export)
+
+
+def _add_highs_row(
+    highs: highspy.Highs,
+    coefficients: dict[int, float],
+    lower: float,
+    upper: float,
+) -> None:
+    columns = np.asarray(sorted(coefficients), dtype=np.int32)
+    values = np.asarray([coefficients[int(index)] for index in columns], dtype=np.float64)
+    starts = np.asarray([0, len(columns)], dtype=np.int32)
+    _require_ok(
+        highs.addRows(
+            1,
+            np.asarray([lower], dtype=np.float64),
+            np.asarray([upper], dtype=np.float64),
+            len(columns),
+            starts,
+            columns,
+            values,
+        ),
+        "add preference row",
+    )
+
+
+def _direct_solution_is_integral(model: SparseModel, solution: np.ndarray) -> bool:
+    for index in model.integer:
+        if index >= len(solution):
+            return False
+        value = float(solution[index])
+        if not math.isfinite(value):
+            return False
+        if abs(value - round(value)) > INTEGRALITY_TOLERANCE:
+            return False
+    return True
+
+
+def _apply_direct_flatten(
+    highs: highspy.Highs,
+    model: SparseModel,
+    prepared: "PreparedMultistage",
+    scenario_vars: list[DirectScenarioVars],
+    economic_costs: np.ndarray,
+    economic_objective: float,
+    solution: np.ndarray,
+    deadline: SolveDeadline | float,
+    *,
+    shared: bool,
+) -> tuple[str, np.ndarray, float, float]:
+    peaks = _direct_peaks(scenario_vars, solution, prepared)
+    if not shared or not flatten_peaks_enabled(prepared.settings):
+        return STAGE_DISABLED, solution, peaks[0], peaks[1]
+    if not flatten_horizon_has_choice(prepared.n):
+        return STAGE_SINGLE_SLOT, solution, peaks[0], peaks[1]
+    if not isinstance(deadline, SolveDeadline):
+        return STAGE_DISABLED, solution, peaks[0], peaks[1]
+    try:
+        time_limit = preference_time_limit_s(prepared.settings, deadline)
+    except SolveCancelled:
+        raise
+    except SolveDeadlineExceeded:
+        return STAGE_NO_TIME, solution, peaks[0], peaks[1]
+    if time_limit < MIN_PREFERENCE_TIME_S:
+        return STAGE_NO_TIME, solution, peaks[0], peaks[1]
+
+    incumbent = np.array(solution, copy=True)
+    n_orig = len(model.lower)
+    slack = cost_bound_slack_ore(economic_objective)
+    scenarios = prepared.scenario_set.scenarios
+    base_index = next(
+        (i for i, scenario in enumerate(scenarios) if scenario.id == "base"),
+        0,
+    )
+    base_vars = scenario_vars[base_index]
+    try:
+        _require_ok(
+            highs.addVars(
+                2,
+                np.asarray([0.0, 0.0], dtype=np.float64),
+                np.asarray([highspy.kHighsInf, highspy.kHighsInf], dtype=np.float64),
+            ),
+            "add preference peak variables",
+        )
+        import_peak = n_orig
+        export_peak = n_orig + 1
+        for t in range(prepared.n):
+            _add_highs_row(
+                highs,
+                {base_vars.grid_import[t]: 1.0, import_peak: -1.0},
+                -highspy.kHighsInf,
+                0.0,
+            )
+            _add_highs_row(
+                highs,
+                {base_vars.grid_export[t]: 1.0, export_peak: -1.0},
+                -highspy.kHighsInf,
+                0.0,
+            )
+        cost_coeffs = {
+            index: float(value)
+            for index, value in enumerate(economic_costs[:n_orig])
+            if abs(value) > 1e-14
+        }
+        _add_highs_row(
+            highs,
+            cost_coeffs,
+            -highspy.kHighsInf,
+            economic_objective + slack,
+        )
+        preference_costs = np.zeros(n_orig + 2, dtype=np.float64)
+        preference_costs[import_peak] = 1.0
+        preference_costs[export_peak] = 1.0
+        column_indices = np.arange(n_orig + 2, dtype=np.int32)
+        _require_ok(
+            highs.changeColsCost(n_orig + 2, column_indices, preference_costs),
+            "set preference objective",
+        )
+        _require_ok(
+            highs.setOptionValue("time_limit", time_limit),
+            "set preference time limit",
+        )
+        _run_optimal(highs, "preference", deadline)
+        candidate = np.asarray(highs.getSolution().col_value, dtype=np.float64)
+        if (
+            len(candidate) < n_orig
+            or not np.all(np.isfinite(candidate[:n_orig]))
+            or (model.integer and not _direct_solution_is_integral(model, candidate))
+        ):
+            return STAGE_KEPT, incumbent, peaks[0], peaks[1]
+        kept = min(n_orig, len(economic_costs), len(candidate))
+        spent = float(np.dot(economic_costs[:kept], candidate[:kept]))
+        if spent > economic_objective + slack + COST_BOUND_TOLERANCE_ORE:
+            return STAGE_KEPT, incumbent, peaks[0], peaks[1]
+        new_peaks = _direct_peaks(scenario_vars, candidate, prepared)
+        return STAGE_FLAT, candidate, new_peaks[0], new_peaks[1]
+    except SolveCancelled:
+        raise
+    except (SolveDeadlineExceeded, DirectHighsError):
+        return STAGE_KEPT, incumbent, peaks[0], peaks[1]
 
 
 def _add(coefficients: dict[int, float], index: int, value: float) -> None:

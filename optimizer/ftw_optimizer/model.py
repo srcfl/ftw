@@ -10,6 +10,11 @@ import numpy as np
 
 from . import SCHEMA_VERSION
 from .deadline import SolveDeadline, SolveDeadlineExceeded
+from .preference import (
+    apply_cvxpy_flatten,
+    build_service_report,
+    flatten_peaks_enabled,
+)
 from .protocol import ProtocolError, finite_number, positive_number, require_dict, require_list
 
 
@@ -314,6 +319,7 @@ def solve(
     started = time.perf_counter() if _started is None else _started
     payload = _canonicalize_storage_payload(payload)
     settings = require_dict(payload.get("settings", {}), "settings")
+    flatten_peaks_enabled(settings)
     if deadline is None:
         deadline = SolveDeadline.from_payload(payload, started_at=started)
     deadline.check("optimizer model build")
@@ -1024,6 +1030,22 @@ def solve(
     base_scenario_index = next((i for i, s in enumerate(scenarios) if s["id"] == "base"), 0)
     base_scenario = scenarios[base_scenario_index]
     base_vars = scenario_vars[base_scenario_index]
+    flatten = apply_cvxpy_flatten(
+        cost_problem=cost_problem,
+        cost_objective=cost_objective,
+        constraints=constraints,
+        grid_import=base_vars["import"],
+        grid_export=base_vars["export"],
+        settings=settings,
+        deadline=deadline,
+        discrete=discrete,
+        solve_problem=lambda problem: run_problem(problem, solver_used),
+    )
+    service_report = build_service_report(
+        flex_loads=flex_loads,
+        thermal_loads=thermal_loads,
+        storages=storages,
+    )
     total_capacity = sum(float(s.spec["capacity_wh"]) for s in storages)
     initial_total = sum(float(s.spec["initial_energy_wh"]) for s in storages)
     actions: list[dict[str, Any]] = []
@@ -1119,6 +1141,9 @@ def solve(
             "non_anticipative_slots": n,
             "cvar_weight": risk_weight,
             "cvar_alpha": finite_number(settings.get("cvar_alpha", 0.9), "settings.cvar_alpha"),
+            "preference_stage": flatten.stage,
+            "import_peak_w": flatten.import_peak_w,
+            "export_peak_w": flatten.export_peak_w,
             "objective_breakdown_ore": {
                 "energy": float(expected_cost.value),
                 "demand_charge_increment": float(demand_cost.value),
@@ -1135,6 +1160,8 @@ def solve(
             "actions": actions,
         },
     }
+    if service_report:
+        response["solver"]["service_report"] = service_report
     if direct_fallback_reason:
         response["solver"]["fallback"] = True
         response["solver"]["fallback_reason"] = direct_fallback_reason
