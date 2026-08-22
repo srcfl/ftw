@@ -530,19 +530,42 @@
           </dl>
         </section>
 
-        <!-- Strategy — the operator-facing knob that drives plan
-             behaviour. Lives inside the Plan card because that's what
-             it controls; the standalone "controls row" above
-             previously felt disconnected (operator note 2026-05-25).
-             Two-tier: planner strategies first, manual fallbacks
-             behind a "Manual…" toggle. -->
+        <!-- Household planner prefs — forecast trust + battery export.
+             Passive/Active are no longer primary buttons (HA/app keep
+             those keys). Manual fallbacks stay behind Manual…. -->
         <div class="plan-strategy">
-          <span class="card-label plan-strategy-label">Strategy</span>
-          <!-- Buttons are populated from GET /api/modes at load (see
-               renderModeCatalog in app.js) so the dashboard, the
-               /api/mode validator, and Home Assistant discovery all derive
-               from the same canonical control mode set and can't drift. -->
-          <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary"></div>
+          <span class="card-label plan-strategy-label">Follow the forecast</span>
+          <div class="forecast-trust">
+            <input type="range" id="forecast-trust-slider" min="0" max="2" step="1" value="1"
+                   aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
+                   aria-label="Follow the forecast">
+            <div class="forecast-trust-labels">
+              <span>Hold reserve</span>
+              <span>Trust forecast</span>
+            </div>
+            <div id="forecast-trust-hedge" class="forecast-trust-hedge" hidden></div>
+            <p class="forecast-trust-help">Left keeps more in the battery if the sun might miss — closer to using the battery only for the house. Right follows the forecast fully. If the forecast is right, right earns more.</p>
+            <p id="forecast-trust-yaml" class="forecast-trust-yaml" hidden>Forecast haircut is set in config.yaml — that value wins over this slider.</p>
+          </div>
+          <div class="plan-export">
+            <div id="plan-export-banner" class="plan-export-banner" hidden>
+              <p>FTW used to sell from the battery on high-price hours. Allow that to continue?</p>
+              <div class="plan-export-banner-actions">
+                <button type="button" id="plan-export-allow">Allow</button>
+                <button type="button" id="plan-export-deny" class="btn-link">Keep off</button>
+              </div>
+            </div>
+            <label id="plan-export-row" class="plan-export-row" hidden>
+              <input type="checkbox" id="plan-export-check">
+              <span>Allow the battery to sell to the grid when the plan expects a worthwhile sale.</span>
+            </label>
+            <p class="plan-export-help">Solar can still export when this is off. Check your electricity contract.</p>
+            <p id="plan-export-unknown" class="plan-export-unknown" hidden>Not checked — battery export stays off.</p>
+          </div>
+          <p id="plan-export-sentence" class="plan-export-sentence"></p>
+          <!-- Remaining /api/modes entries (manual) still render here.
+               Planner keys are skipped in renderModeCatalog. -->
+          <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary" hidden></div>
           <div class="strategy-hint" id="strategy-hint"></div>
           <div class="mode-advanced-toggle advanced-only">
             <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>

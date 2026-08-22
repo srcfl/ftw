@@ -579,6 +579,12 @@ type OptimizerMultistage struct {
 type Planner struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Mode    string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// ForecastTrust is the first-boot household slider: cautious | balanced | bold.
+	// After first boot the live value lives in SQLite (forecast_trust), like mode.
+	ForecastTrust string `yaml:"forecast_trust,omitempty" json:"forecast_trust,omitempty"`
+	// BatteryExport is the first-boot battery-sale permission:
+	// unknown | not_allowed | allowed. Live value is SQLite battery_export.
+	BatteryExport string `yaml:"battery_export,omitempty" json:"battery_export,omitempty"`
 	// Engine selects the primary optimizer: "python" (default) runs the
 	// CVXPY/HiGHS worker; "dp" is the legacy in-process rollback engine.
 	Engine string `yaml:"engine,omitempty" json:"engine,omitempty"`
@@ -1911,6 +1917,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Planner != nil {
 		p := c.Planner
+		if p.ForecastTrust != "" {
+			if _, ok := ParseForecastTrust(p.ForecastTrust); !ok {
+				return fmt.Errorf("planner.forecast_trust must be cautious, balanced, or bold, got %q", p.ForecastTrust)
+			}
+		}
+		if p.BatteryExport != "" {
+			if _, ok := ParseBatteryExport(p.BatteryExport); !ok {
+				return fmt.Errorf("planner.battery_export must be unknown, not_allowed, or allowed, got %q", p.BatteryExport)
+			}
+		}
 		switch p.Engine {
 		case "", "python", "dp":
 		default:

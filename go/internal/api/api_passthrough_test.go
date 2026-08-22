@@ -602,6 +602,8 @@ func TestRouteTierIgnoresTheMethod(t *testing.T) {
 		{"POST", "/api/self_tune/start", apiauth.TierActuate, "it drives every battery through a step pattern"},
 		{"POST", "/api/notifications/test", apiauth.TierConfigure, "a late test message is the same message"},
 		{"POST", "/api/mode", apiauth.TierActuate, ""},
+		{"GET", "/api/planner/prefs", apiauth.TierRead, "household planner prefs are status"},
+		{"POST", "/api/planner/prefs", apiauth.TierActuate, "prefs change dispatch"},
 		{"DELETE", "/api/battery/manual_hold", apiauth.TierActuate, ""},
 
 		// Sibling routes priced apart on purpose: a charging schedule is a

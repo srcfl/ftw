@@ -650,6 +650,18 @@ func (s *Service) SetMode(ctx context.Context, mode Mode) {
 	s.runReplan(request)
 }
 
+// SetSafetyK updates the downside-PV haircut scale and replans.
+func (s *Service) SetSafetyK(ctx context.Context, k float64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.PVForecastSafetyK = k
+	request := s.beginReplanLocked(ctx, "safety_k_changed")
+	s.mu.Unlock()
+	s.runReplan(request)
+}
+
 // Start runs the planner in a goroutine. Does an initial plan immediately.
 func (s *Service) Start(ctx context.Context) {
 	if s == nil {

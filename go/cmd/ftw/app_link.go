@@ -191,6 +191,7 @@ type appModes struct {
 	ctrlMu *sync.Mutex
 	state  *state.Store
 	mpc    *mpc.Service
+	prefs  *config.PlannerPrefs
 }
 
 func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
@@ -205,6 +206,13 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 		if err := a.state.SaveConfig("mode", string(m)); err != nil {
 			slog.Warn("app uplink could not persist the mode", "err", err)
 		}
+	}
+	if a.prefs != nil {
+		var save func(string, string) error
+		if a.state != nil {
+			save = a.state.SaveConfig
+		}
+		a.prefs.ApplyExportFromMode(string(m), save)
 	}
 	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
 		// Forced replan, off this goroutine. mpc.SetMode replans before it
@@ -464,6 +472,7 @@ func startAppLink(
 	priceSvc *prices.Service,
 	ctrl *control.State,
 	ctrlMu *sync.Mutex,
+	prefs *config.PlannerPrefs,
 	revision *control.Revision,
 	siteMeterStale time.Duration,
 	gateway *lateAPI,
@@ -489,7 +498,7 @@ func startAppLink(
 		started: processStarted, siteMeterStale: siteMeterStale,
 	}
 	info := appBoxInfo{id: boxID, build: build, tz: tz}
-	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner}
+	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner, prefs: prefs}
 	plans := &appPlans{planner: planner, ctrl: ctrl, ctrlMu: ctrlMu}
 
 	// History rides on the energy ledger, so it exists exactly when state

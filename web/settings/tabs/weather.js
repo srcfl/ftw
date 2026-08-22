@@ -67,7 +67,7 @@
     var arrays = (config.weather && config.weather.pv_arrays) || [];
     arrays.forEach(migrateArrayRatedW);
     if (arrays.length === 0) {
-      host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined — model will learn orientation from telemetry.</p>';
+      host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined. The model learns the production pattern from measured solar.</p>';
       return;
     }
     var previewHtml = '<div class="pv-arrays-3d-slot" ' +
@@ -120,6 +120,7 @@
       if (idx == null || idx === "") return;
       config.weather.pv_arrays.splice(parseInt(idx, 10), 1);
       renderPVArrays(ctx);
+      refreshArraysSummary(config);
     };
   }
 
@@ -168,6 +169,21 @@
     setTimeout(function () { map.invalidateSize(); }, 150);
   }
 
+  function arraysSummary(n) {
+    var count = Number(n) || 0;
+    if (count > 0) {
+      return count === 1 ? "1 array set in config" : count + " arrays set in config";
+    }
+    return "The solar production pattern is learned from measured solar.";
+  }
+
+  function refreshArraysSummary(config) {
+    var el = document.getElementById("pv-arrays-summary");
+    if (!el) return;
+    var n = ((config.weather && config.weather.pv_arrays) || []).length;
+    el.textContent = arraysSummary(n);
+  }
+
   function initWeatherMap(ctx) {
     var container = document.getElementById("weather-map");
     if (!container) return;
@@ -180,9 +196,10 @@
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
       if (!config.weather) config.weather = { latitude: 59.3293, longitude: 18.0686 };
       if (!Array.isArray(config.weather.pv_arrays)) config.weather.pv_arrays = [];
+      var n = config.weather.pv_arrays.length;
       return '<fieldset><legend>Weather forecast &amp; PV</legend>' +
         selectField("Provider", "weather.provider", ["met_no", "openweather", "open_meteo", "forecast_solar", "none"], "met_no",
-          "met_no + openweather: cloud-cover only. open_meteo: direct shortwave radiation (better day-one forecast). forecast_solar: site-calibrated watts using the panel geometry below (best with multi-array setups).") +
+          "met_no + openweather: cloud-cover only. open_meteo: direct shortwave radiation (better day-one forecast). forecast_solar: site-calibrated watts. The production pattern is learned from measured solar.") +
         '<div class="field-row"><div>' +
         field("Latitude", "weather.latitude", "number", 59.3293) +
         '</div><div>' +
@@ -193,25 +210,33 @@
         field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +
         '</fieldset>' +
+        '<p id="pv-arrays-summary" style="color:var(--text-dim);font-size:0.8rem;margin:8px 0">' +
+        arraysSummary(n) + '</p>' +
+        '<details class="engine-details" id="pv-arrays-advanced">' +
+        '<summary>Advanced array geometry — leave this unless you are debugging.</summary>' +
         '<fieldset><legend>PV arrays ' + help(
           'Optional. Open-Meteo uses these per-plane values to project shortwave radiation onto each array. ' +
-          'Forecast.Solar uses them for its site-calibrated forecast. Leave empty for the safe flat estimate or the provider default.') + '</legend>' +
+          'Forecast.Solar uses them for its site-calibrated forecast. Leave empty unless you are debugging a multi-plane site.') + '</legend>' +
         '<div id="pv-arrays-list"></div>' +
         '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
         'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W. ' +
         'Rated (W) is watts, same unit as PV rated.' +
         '</p>' +
-        '</fieldset>';
+        '</fieldset></details>';
     },
     after: function (ctx) {
       initWeatherMap(ctx);
       renderPVArrays(ctx);
+      refreshArraysSummary(ctx.config);
       var addBtn = document.getElementById("pv-array-add");
       if (addBtn) addBtn.addEventListener("click", function () {
         ctx.config.weather.pv_arrays.push({ name: "", rated_w: 0, tilt_deg: 35, azimuth_deg: 180 });
         renderPVArrays(ctx);
+        refreshArraysSummary(ctx.config);
       });
     },
   };
+
+  S.tabs.weather._pure = { arraysSummary: arraysSummary };
 })();

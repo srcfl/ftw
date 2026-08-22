@@ -88,7 +88,39 @@ describe("render", () => {
     const html = tab.render(stubCtx());
     assert.ok(html.includes('id="planner-active-strategy"'));
     assert.ok(html.includes('id="planner-hedge-line"'));
-    assert.ok(html.includes("Set from the Plan card on the dashboard"));
+  });
+
+  it("puts enabled, house reserve, and soc_max above a closed engine disclosure", () => {
+    const html = tab.render(stubCtx());
+    const detailsAt = html.indexOf("<details");
+    assert.ok(detailsAt > 0);
+    const top = html.slice(0, detailsAt);
+    const rest = html.slice(detailsAt);
+    assert.ok(top.includes('data-checkbox-path="planner.enabled"'));
+    assert.ok(top.includes("[field:planner.soc_min]"));
+    assert.ok(top.includes("[field:planner.soc_max]"));
+    assert.ok(!top.includes("[select:planner.engine]"));
+    assert.ok(!top.includes("CLARABEL"));
+    assert.ok(!top.includes("[select:planner.optimizer_solver]"));
+    assert.match(rest, /<details class="engine-details">/);
+    assert.doesNotMatch(html, /<details[^>]*\sopen\b/);
+    assert.ok(rest.includes("Engine controls — leave these unless you are debugging."));
+    assert.ok(rest.includes("[select:planner.engine]"));
+    assert.ok(rest.includes("[select:planner.optimizer_solver]"));
+    assert.ok(rest.includes("[field:planner.optimizer_cvar_weight]"));
+  });
+
+  it("does not bind pv_forecast_safety_k when YAML left it unset", () => {
+    const html = tab.render(stubCtx());
+    assert.ok(!html.includes("[field:planner.pv_forecast_safety_k]"));
+  });
+
+  it("binds pv_forecast_safety_k inside engine details when YAML set it", () => {
+    const ctx = stubCtx();
+    ctx.config.planner = { pv_forecast_safety_k: 0.25 };
+    const html = tab.render(ctx);
+    const rest = html.slice(html.indexOf("<details"));
+    assert.ok(rest.includes("[field:planner.pv_forecast_safety_k]"));
   });
 
   it("renders mathematical optimizer controls", () => {

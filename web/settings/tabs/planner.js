@@ -62,14 +62,33 @@
       }
       delete planner.soc_min_pct;
       delete planner.soc_max_pct;
+      var kHtml;
+      if (planner.pv_forecast_safety_k != null) {
+        kHtml = field("PV forecast safety (k)", "planner.pv_forecast_safety_k", "number", 1.0,
+          "How much the planner trusts the solar forecast. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k = trust the forecast less: the battery holds more reserve and charges earlier, drifting toward self-consumption behaviour. 0 = trust the forecast fully (no hedge). On clear, stable days σ shrinks toward zero and k has little effect.") +
+          '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
+      } else {
+        kHtml = '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 8px">PV forecast safety k is not set in YAML. The Plan card slider maps cautious / balanced / bold to 2 / 1 / 0.</p>' +
+          '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
+      }
       return '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
-        '<label>Active strategy ' +
-        help("The strategy the planner is running right now. It is chosen with the Strategy buttons on the dashboard Plan card and persists across restarts. The config file's planner.mode is only the first-boot default and is not editable here.") +
+        '<div class="field-row"><div>' +
+        field("House reserve (min SoC, 0–1)", "planner.soc_min", "number", 0.10,
+          "Lowest SoC the planner will discharge to, so the house keeps a reserve. 0.10 = 10%.") +
+        '</div><div>' +
+        field("Max SoC (0–1)", "planner.soc_max", "number", 0.90,
+          "Highest SoC the planner will charge to. 0.90 = 90%.") +
+        '</div></div>' +
+        '</fieldset>' +
+        '<details class="engine-details">' +
+        '<summary>Engine controls — leave these unless you are debugging.</summary>' +
+        '<fieldset><legend>Engine</legend>' +
+        '<label>Mapped strategy ' +
+        help("The planner mode currently mapped from battery-export permission. Forecast trust and export live on the Plan card.") +
         '</label>' +
-        '<div id="planner-active-strategy" style="font-family:var(--mono);margin:2px 0 0">—</div>' +
-        '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 12px">Set from the Plan card on the dashboard — not editable here.</p>' +
+        '<div id="planner-active-strategy" style="font-family:var(--mono);margin:2px 0 12px">—</div>' +
         '<div class="field-row"><div>' +
         selectField("Engine", "planner.engine", ["python", "dp"], "python",
           "Python runs the CVXPY mathematical optimizer. DP is the emergency rollback engine.") +
@@ -128,18 +147,7 @@
         field("Decomposition threshold", "planner.optimizer_multistage.decomposition_threshold", "number", 20,
           "Scenario count above which auto mode uses eligible Progressive Hedging or reduces to the exact extensive budget.") +
         '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("Min SoC (0–1)", "planner.soc_min", "number", 0.10,
-          "Lowest SoC the planner will discharge to. 0.10 = 10%.") +
-        '</div><div>' +
-        field("Max SoC (0–1)", "planner.soc_max", "number", 0.90,
-          "Highest SoC the planner will charge to. 0.90 = 90%.") +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("PV forecast safety (k)", "planner.pv_forecast_safety_k", "number", 1.0,
-          "How much the planner trusts the solar forecast. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k = trust the forecast less: the battery holds more reserve and charges earlier, drifting toward self-consumption behaviour. 0 = trust the forecast fully (no hedge). On clear, stable days σ shrinks toward zero and k has little effect — the hedge sizes itself to the real risk.") +
-        '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>' +
-        '</div></div>' +
+        '<div class="field-row"><div>' + kHtml + '</div></div>' +
         '<div class="field-row"><div>' +
         field("Base load (W)", "planner.base_load_w", "number", 0,
           "Constant household load estimate used when the load twin has no data yet.") +
@@ -166,6 +174,7 @@
           "The battery won't cycle for grid arbitrage unless the price gain beats this many öre/kWh, on top of round-trip losses. 0 = off. Higher = fewer, deeper cycles. Self-consumption is never affected. Tune empirically.") +
         '</div></div>' +
         '</fieldset>' +
+        '</details>' +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
         'The planner requires working price + weather forecasts. When disabled the system runs in the manual mode set on the Control page.' +
         '</p>';

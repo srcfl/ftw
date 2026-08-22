@@ -2434,6 +2434,9 @@
         var frags = { primary: document.createDocumentFragment(), advanced: document.createDocumentFragment() };
         modes.forEach(function (m) {
           if (m.tier !== "primary" && m.tier !== "advanced") return; // skip hidden
+          // Household prefs on the Plan card replaced Passive/Active as
+          // the primary knobs. Catalog keys stay primary for HA/app.
+          if (String(m.key || "").indexOf("planner_") === 0) return;
           var btn = document.createElement("button");
           btn.dataset.mode = m.key;
           btn.textContent = m.label;
@@ -2443,6 +2446,7 @@
         });
         primary.replaceChildren(frags.primary);
         advanced.replaceChildren(frags.advanced);
+        primary.hidden = !primary.childElementCount;
         modeCatalogRendered = true;
         return true;
       })

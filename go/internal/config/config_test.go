@@ -94,6 +94,37 @@ planner:
 	}
 }
 
+func TestPlannerForecastTrustAndExportValidate(t *testing.T) {
+	base := `
+site:
+  name: Test
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+planner:
+  mode: passive_arbitrage
+`
+	if _, err := Parse([]byte(base+"  forecast_trust: spicy\n"), "/tmp"); err == nil {
+		t.Fatal("expected error for junk forecast_trust")
+	}
+	if _, err := Parse([]byte(base+"  battery_export: maybe\n"), "/tmp"); err == nil {
+		t.Fatal("expected error for junk battery_export")
+	}
+	c, err := Parse([]byte(base+"  forecast_trust: cautious\n  battery_export: not_allowed\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Planner.ForecastTrust != "cautious" || c.Planner.BatteryExport != "not_allowed" {
+		t.Fatalf("got trust=%q export=%q", c.Planner.ForecastTrust, c.Planner.BatteryExport)
+	}
+}
+
 func TestLoadMinimalYAML(t *testing.T) {
 	c, err := Parse([]byte(minimalYAML), "/tmp")
 	if err != nil {

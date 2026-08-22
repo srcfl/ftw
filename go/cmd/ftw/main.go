@@ -533,6 +533,29 @@ func main() {
 			ctrl.Mode = m
 		}
 	}
+	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
+	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
+	yamlTrust, yamlExport := "", ""
+	if cfg.Planner != nil {
+		yamlTrust = cfg.Planner.ForecastTrust
+		yamlExport = cfg.Planner.BatteryExport
+	}
+	trust, export, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, string(ctrl.Mode), yamlTrust, yamlExport)
+	plannerPrefs := config.NewPlannerPrefs(trust, export)
+	if missingPrefs {
+		if err := st.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {
+			slog.Warn("failed to persist forecast_trust", "err", err)
+		}
+		if err := st.SaveConfig(config.StateKeyBatteryExport, string(export)); err != nil {
+			slog.Warn("failed to persist battery_export", "err", err)
+		}
+	}
+	if ctrl.Mode == control.ModePlannerArbitrage && export != config.BatteryExportAllowed {
+		ctrl.Mode = control.ModePlannerPassiveArbitrage
+		if err := st.SaveConfig("mode", string(ctrl.Mode)); err != nil {
+			slog.Warn("failed to persist mode after export migration", "err", err)
+		}
+	}
 	if v, ok := st.LoadConfig("grid_target_w"); ok {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			ctrl.SetGridTarget(f)
@@ -1031,7 +1054,7 @@ func main() {
 			deps.HA = nil
 			slog.Info("HA bridge stopped (disabled in config)")
 		case haBridge == nil && haEnabled:
-			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
+			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
 				slog.Warn("HA bridge start failed", "err", err)
 			} else {
 				haBridge = bridge
@@ -1287,7 +1310,7 @@ func main() {
 		}
 		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
 		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.
-		mpcSvc.PVForecastSafetyK = cfg.Planner.PVSafetyK()
+		mpcSvc.PVForecastSafetyK = cfg.Planner.EffectiveSafetyK(trust)
 		if cfg.Planner != nil {
 			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
 		}
@@ -2251,7 +2274,7 @@ func main() {
 	appAPI := &lateAPI{}
 	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
-		st, tel, mpcSvc, lpMgr, lpController, priceSvc, ctrl, ctrlMu,
+		st, tel, mpcSvc, lpMgr, lpController, priceSvc, ctrl, ctrlMu, plannerPrefs,
 		controlRev, appLinkWatchdog, appAPI, webPush,
 	)
 	switch {
@@ -2322,6 +2345,7 @@ func main() {
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
 		MPC:              mpcSvc,
+		PlannerPrefs:     plannerPrefs,
 		PVModel:          pvSvc,
 		LoadModel:        loadSvc,
 		Loadpoints:       lpMgr,
@@ -2497,7 +2521,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc), haEnergySource(st))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -4116,7 +4140,7 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 // path can share the exact same wiring — drift between them would mean
 // HA commands behave one way after boot and a different way after a
 // hot-reload, which is the kind of silent skew that's hardest to debug.
-func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service) ha.CommandCallbacks {
+func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service, prefs *config.PlannerPrefs) ha.CommandCallbacks {
 	return ha.CommandCallbacks{
 		SetMode: func(m string) error {
 			mode := control.Mode(m)
@@ -4138,6 +4162,9 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 			ctrlMu.Unlock()
 			if err := st.SaveConfig("mode", m); err != nil {
 				return err
+			}
+			if prefs != nil {
+				prefs.ApplyExportFromMode(m, st.SaveConfig)
 			}
 			if mm, ok := control.PlannerMPCMode(mode); ok && mpcSvc != nil {
 				mpcSvc.SetMode(ctx, mm)

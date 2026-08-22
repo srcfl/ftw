@@ -235,6 +235,8 @@ fleet_ping:
 #   enabled: true
 #   engine: python
 #   mode: passive_arbitrage
+#   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
+#   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)
 #   horizon_hours: 48
 #   interval_min: 15
 #   soc_min: 0.10

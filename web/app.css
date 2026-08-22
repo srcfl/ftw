@@ -1025,6 +1025,126 @@ body.ftw-app .strategy-hint {
   color: var(--fg);
   line-height: 1.5;
 }
+body.ftw-app .forecast-trust {
+  margin: 0 0 12px;
+}
+body.ftw-app .forecast-trust input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent-e);
+  margin: 0;
+}
+body.ftw-app .forecast-trust input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+body.ftw-app .forecast-trust-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+}
+body.ftw-app .forecast-trust-hedge {
+  margin-top: 8px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+body.ftw-app .forecast-trust-help,
+body.ftw-app .forecast-trust-yaml,
+body.ftw-app .plan-export-help,
+body.ftw-app .plan-export-unknown {
+  margin: 8px 0 0;
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.45;
+}
+body.ftw-app .plan-export {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+body.ftw-app .plan-export-banner {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ink-sunken);
+}
+body.ftw-app .plan-export-banner p {
+  margin: 0 0 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+}
+body.ftw-app .plan-export-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+body.ftw-app #plan-export-allow {
+  background: var(--accent-e);
+  border: 1px solid var(--accent-e);
+  border-radius: 6px;
+  color: var(--on-accent);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 12px;
+}
+body.ftw-app .plan-export-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+}
+body.ftw-app .plan-export-row input {
+  margin-top: 3px;
+  accent-color: var(--accent-e);
+}
+body.ftw-app .plan-export-sentence {
+  margin: 10px 0 0;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+}
+body.ftw-app .engine-details {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+body.ftw-app .engine-details > summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  list-style: none;
+}
+body.ftw-app .engine-details > summary::-webkit-details-marker {
+  display: none;
+}
+body.ftw-app .engine-details > summary::before {
+  content: "› ";
+  color: var(--fg-muted);
+}
+body.ftw-app .engine-details[open] > summary::before {
+  content: "▾ ";
+}
+body.ftw-app .engine-details > fieldset {
+  margin-top: 10px;
+}
 body.ftw-app .slider-group-compact {
   gap: 10px;
 }
@@ -2503,6 +2623,15 @@ body.ftw-app .diagnose-detail {
   }
   body.ftw-app .plan-actions { align-items: stretch; flex-wrap: wrap; }
   body.ftw-app .more-actions { grid-template-columns: 1fr; }
+  body.ftw-app .forecast-trust-help,
+  body.ftw-app .plan-export-help,
+  body.ftw-app .plan-export-sentence {
+    font-size: 12px;
+  }
+  body.ftw-app .plan-export-banner-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
