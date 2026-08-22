@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.2
+
+### Patch Changes
+
+- 31742d7: Harden SI units and charging identities: SoC doors fold NaN/overflow instead of leaking percent or Inf, HA discovery slugs illegal driver names with a collision tag while leaving already-legal mixed-case ids unchanged, and synthetic history stores 0–1 SoC.
+
 ## 2.2.1
 
 ### Patch Changes
