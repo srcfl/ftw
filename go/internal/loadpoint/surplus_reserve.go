@@ -26,6 +26,11 @@ package loadpoint
 // real site.
 const EVRampHeadroomW = 2000
 
+// GridChargeImportW is the live/plan grid band that means the site is
+// deliberately importing, not soaking PV. Matches control's
+// coverLoadChargeSlot / energy-path grid-charge skip.
+const GridChargeImportW = 100.0
+
 // SurplusReserveW returns the aggregate PV headroom that must be
 // preserved for surplus_only loadpoints. For each surplus_only +
 // plugged_in LP it reserves min(MaxChargeW, CurrentPowerW +
@@ -214,4 +219,48 @@ func SurplusPotentialW(states []State) float64 {
 		sum += head
 	}
 	return sum
+}
+
+// PlannerTreatsLoadpointAsSurplusOnly is the SurplusOnly flag the MPC spec
+// should carry. The bat-SoC unlock is a this-tick opportunistic clamp;
+// putting it on the 48 h spec forbids night-time grid EV in a plan that
+// was computed while the sun was still up. Battery→EV is already blocked
+// by NoBatteryToEV.
+func PlannerTreatsLoadpointAsSurplusOnly(operatorSurplusOnly, deferGridPlan bool) bool {
+	return operatorSurplusOnly || deferGridPlan
+}
+
+// SurplusAvailableForEVW is the live PV leftover the surplus-only clamp
+// may offer the charger this tick, in watts.
+//
+// Site identity: -gridW + batW + evW = -pvW - loadW (house leftover).
+//
+// The EV controller runs before battery dispatch on the same tick. If the
+// home battery is soaking PV, counting that charge as EV-available would
+// command the charger on before the battery has yielded and leak into
+// import. Meter import is not enough to call the charge grid-funded:
+// soak plus EV can import together while the battery is still taking
+// leftover PV. Import beyond the car (gridW − evW) is the battery
+// buying; that leftover is the car's without waiting for a yield.
+func SurplusAvailableForEVW(gridW, batW, evW float64, surplusOnlyActive bool) float64 {
+	leftover := -gridW + batW + evW
+	if surplusOnlyActive {
+		leftover -= PlannedPVSoakW(batW, gridW-evW)
+	}
+	if leftover < 0 {
+		return 0
+	}
+	return leftover
+}
+
+// PlannedPVSoakW is the portion of a battery charge that is soaking
+// leftover PV rather than buying from the grid. gridW is the grid
+// flow attributed to house+battery (live meter minus EV, or planned
+// GridW minus LoadpointW). A reading above the import band means the
+// battery is buying, so soak is zero and leftover PV stays with the car.
+func PlannedPVSoakW(batteryW, gridW float64) float64 {
+	if batteryW <= 0 || gridW > GridChargeImportW {
+		return 0
+	}
+	return batteryW
 }

@@ -917,8 +917,15 @@ def solve(
             zero_idx = steps.index(0.0)
             active = 1 - flex.selection[zero_idx, :]
         if bool(flex.spec.get("surplus_only", False)):
-            for sv in scenario_vars:
-                constraints.append(sv["import"] <= max_site_power * (1 - active))
+            # Leftover PV after house load. Site import from a simultaneous
+            # home-battery grid-charge is not the car importing; forbidding
+            # import whenever the EV is active forced the solver to idle the
+            # car on every cheap slot the battery wanted to buy.
+            house_surplus = np.maximum(0.0, -base_pv - base_load)
+            # Base forecast leftover. Robust low-PV scenarios are not a
+            # tighter leftover here; Core ValidatePlan rejects a plan
+            # that exceeds the slot's actual leftover.
+            constraints.append(flex.power <= house_surplus + 50.0)
         if bool(flex.spec.get("no_storage_to_load", False)) and storages:
             house_residual = np.maximum(0.0, base_load + base_pv)
             constraints.append(total_discharge <= house_residual + max_site_power * (1 - active))

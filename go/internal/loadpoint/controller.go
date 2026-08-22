@@ -76,13 +76,11 @@ type Controller struct {
 	fusePhaseCapA map[string]float64
 
 	// siteSurplusForEVW returns the live PV surplus that this loadpoint
-	// could legally claim under surplus_only — i.e. *what's left of PV
-	// after house load*, regardless of what the home battery is
-	// currently absorbing. The arithmetic lives in main.go because
-	// it depends on per-site telemetry layout (pv driver, load driver,
-	// battery drivers, site-meter driver). Returns (_, false) when any
-	// of the inputs are stale; the controller then pauses rather than
-	// guess, which is the conservative default for "never import".
+	// could legally claim under surplus_only: leftover PV after house
+	// load, minus home-battery PV-soak. Grid-funded battery charge is
+	// not soak. Wired from main.go via SurplusAvailableForEVW.
+	// Returns (_, false) when any of the inputs are stale; the
+	// controller then pauses rather than guess.
 	siteSurplusForEVW func() (float64, bool)
 
 	// site is the grid-boundary fuse. Its values are passed through
@@ -649,11 +647,10 @@ func (c *Controller) SetPerPhaseMeterAmps(f func() (l1, l2, l3 float64, ok bool)
 }
 
 // SetSiteSurplusForEV wires a per-tick "PV surplus available to the
-// EV" reader for the surplus_only clamp. The function returns total
-// W the EV could safely claim without forcing site import — typically
-// `(-pvW - houseLoadW)` since that's PV-minus-load regardless of how
-// the home battery is currently splitting it. Called once at startup
-// from main.go. Pass nil to disable, in which case surplus_only is
+// EV" reader for the surplus_only clamp. The function returns watts
+// the EV may claim this tick: leftover after house load, minus
+// PV-soak (SurplusAvailableForEVW). Called once at startup from
+// main.go. Pass nil to disable, in which case surplus_only is
 // enforced only by the MPC plan (no live clamp).
 func (c *Controller) SetSiteSurplusForEV(f func() (float64, bool)) {
 	if c == nil {
