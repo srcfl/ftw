@@ -293,13 +293,15 @@ type Action struct {
 	EMSMode    string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
-	// 0 = no curtailment. Set by post-processing when exporting would
-	// cost money (negative export revenue after fees). Includes house
-	// load + battery charge + any planned EV loadpoint charge so that
-	// curtailment does not starve loads the plan itself scheduled.
-	// Consumed by the control loop only when the driver advertises
-	// `supports_pv_curtail`.
-	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+	// When PVCurtailActive is false, 0 means no cap (a dispatch hint may
+	// still use a positive PVLimitW without rewriting GridW). When
+	// PVCurtailActive is true, 0 is a real zero cap already applied to
+	// GridW. Includes house load + battery charge + any planned EV
+	// loadpoint charge so that curtailment does not starve loads the
+	// plan itself scheduled. Consumed by the control loop only when
+	// the driver advertises `supports_pv_curtail`.
+	PVLimitW        float64 `json:"pv_limit_w,omitempty"`
+	PVCurtailActive bool    `json:"pv_curtail_active,omitempty"`
 
 	// LoadpointW is the EV charger power (W, positive = charging) the
 	// DP picked for this slot. Zero when no loadpoint was in Params
@@ -685,12 +687,7 @@ func Optimize(slots []Slot, p Params) Plan {
 					battW := actionAt(ba)
 
 					// Battery SoC transition (independent of EV).
-					var dBattWh float64
-					if battW >= 0 {
-						dBattWh = +battW * dtH * p.ChargeEfficiency
-					} else {
-						dBattWh = +battW * dtH / p.DischargeEfficiency
-					}
+					dBattWh := loadpoint.BatteryEnergyDeltaWh(battW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)
 					battSoc2 := soc + dBattWh/p.CapacityWh*100.0
 					if battSoc2 < p.SoCMinPct-1e-9 || battSoc2 > p.SoCMaxPct+1e-9 {
 						continue
@@ -971,7 +968,18 @@ func Optimize(slots []Slot, p Params) Plan {
 		InitialSoCPct: p.InitialSoCPct,
 		Actions:       make([]Action, 0, N),
 	}
-	fIdx := (p.InitialSoCPct - p.SoCMinPct) / socStep
+	// Policy is stored on the SoC grid; energy is not. Start from the
+	// real initial SoC so reported trajectories replay. Lookup still uses
+	// the nearest grid index. The Go DP cannot represent recovery outside
+	// the operating band, so clamp the start onto that band.
+	soc := p.InitialSoCPct
+	if soc < p.SoCMinPct {
+		soc = p.SoCMinPct
+	}
+	if soc > p.SoCMaxPct {
+		soc = p.SoCMaxPct
+	}
+	fIdx := (soc - p.SoCMinPct) / socStep
 	si := int(math.Round(fIdx))
 	if si < 0 {
 		si = 0
@@ -979,12 +987,17 @@ func Optimize(slots []Slot, p Params) Plan {
 	if si >= S {
 		si = S - 1
 	}
-	soc := socAt(si)
-	// Initial EV SoC index.
 	ei := 0
 	var evSoc float64
 	if evActive {
-		f := (lp.InitialSoCPct - lp.MinPct) / evSocStep
+		evSoc = lp.InitialSoCPct
+		if evSoc < lp.MinPct {
+			evSoc = lp.MinPct
+		}
+		if evSoc > lp.MaxPct {
+			evSoc = lp.MaxPct
+		}
+		f := (evSoc - lp.MinPct) / evSocStep
 		ei = int(math.Round(f))
 		if ei < 0 {
 			ei = 0
@@ -992,7 +1005,6 @@ func Optimize(slots []Slot, p Params) Plan {
 		if ei >= EL {
 			ei = EL - 1
 		}
-		evSoc = evSocAt(ei)
 	}
 	var totalCost float64
 	for t := 0; t < N; t++ {
@@ -1004,27 +1016,13 @@ func Optimize(slots []Slot, p Params) Plan {
 		actW := actionAt(ba)
 		evW := evActionW(ea)
 		// Battery SoC transition.
-		var dSoCWh float64
-		if actW >= 0 {
-			dSoCWh = +actW * dtH * p.ChargeEfficiency
-		} else {
-			dSoCWh = +actW * dtH / p.DischargeEfficiency
-		}
+		dSoCWh := loadpoint.BatteryEnergyDeltaWh(actW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)
 		soc2 := soc + dSoCWh/p.CapacityWh*100.0
-		if soc2 < p.SoCMinPct {
-			soc2 = p.SoCMinPct
-		}
-		if soc2 > p.SoCMaxPct {
-			soc2 = p.SoCMaxPct
-		}
 		// EV SoC transition (no-op when !evActive since evW = 0).
 		var evSoc2 float64
 		if evActive {
 			dEvWh := evW * dtH * evChargeEff
 			evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
-			if evSoc2 > lp.MaxPct {
-				evSoc2 = lp.MaxPct
-			}
 		}
 		gridW := loadpoint.GridW(slot.LoadW, slot.PVW, actW, evW)
 		gridKWh := gridW * dtH / 1000.0

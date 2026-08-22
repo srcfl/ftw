@@ -14,6 +14,8 @@ from .model import (
     OPTIMAL_STATUSES,
     ReplayConsistencyError,
     _arbitrage_spread_ore_kwh,
+    _pv_charge_bonus_ore_kwh,
+    _pv_curtail_output,
     _canonicalize_storage_payload,
     _export_price,
     _mode,
@@ -152,7 +154,7 @@ def solve_storage_recourse(
     expected_pv_bonus: cp.Expression = cp.Constant(0.0)
     strict_sc_penalty: cp.Expression = cp.Constant(0.0)
     worst_service_slack = cp.Variable(nonneg=True, name="worst_service_slack")
-    bonus_ore = max(0.0, finite_number(settings.get("pv_charge_bonus_ore_kwh", 0), "settings.pv_charge_bonus_ore_kwh"))
+    bonus_ore = _pv_charge_bonus_ore_kwh(settings, mode)
     arbitrage_spread = _arbitrage_spread_ore_kwh(settings, mode)
     unsafe_cycle = _storage_relaxation_is_unsafe(
         eff_import,
@@ -383,6 +385,7 @@ def solve_storage_recourse(
         raw_cost = price[t] * max(grid_kwh, 0.0) - export_price[t] * max(-grid_kwh, 0.0)
         raw_total_cost += raw_cost
         curtailed_w = max(0.0, float(base_vars["curtail"].value[t]))
+        pv_limit_w, pv_curtail_active = _pv_curtail_output(base["pv"][t], curtailed_w)
         actions.append(
             {
                 "slot_start_ms": int(slot.get("start_ms", 0)),
@@ -391,7 +394,8 @@ def solve_storage_recourse(
                 "grid_w": grid_w,
                 "soc_pct": (stored_wh / total_capacity * 100.0) if total_capacity > 0 else 0.0,
                 "cost_ore": raw_cost,
-                "pv_limit_w": max(0.0, -base["pv"][t] - curtailed_w) if curtailed_w > 1e-5 else 0.0,
+                "pv_limit_w": pv_limit_w,
+                "pv_curtail_active": pv_curtail_active,
                 "storage_power_w": storage_power,
                 "storage_energy_wh": storage_energy,
                 "flex_power_w": {},

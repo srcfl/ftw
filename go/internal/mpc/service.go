@@ -1473,6 +1473,19 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"err", err)
 		return s.Latest()
 	}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		engine := "go-dp"
+		if plan.Solver != nil && plan.Solver.Engine != "" {
+			engine = plan.Solver.Engine
+		}
+		slog.Error("mpc: rejected plan that failed physical replay",
+			"generation", request.generation,
+			"mode", p.Mode,
+			"reason", request.reason,
+			"engine", engine,
+			"err", err)
+		return s.Latest()
+	}
 
 	// Tag each action with the effective EMS mode so the UI can render
 	// a mode-band showing which strategy drives each slot.

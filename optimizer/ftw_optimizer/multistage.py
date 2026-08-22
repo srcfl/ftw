@@ -17,6 +17,8 @@ from .model import (
     ReplayConsistencyError,
     _STORAGE_INITIAL_ABOVE_MAXIMUM_KEY,
     _arbitrage_spread_ore_kwh,
+    _pv_charge_bonus_ore_kwh,
+    _pv_curtail_output,
     _canonicalize_storage_payload,
     _export_price,
     _mode,
@@ -137,13 +139,7 @@ class CompiledMultistage:
         self.import_coeff.value = prepared.effective_import * prepared.dt_h / 1000.0
         self.export_coeff.value = prepared.effective_export * prepared.dt_h / 1000.0
         self.strict_coeff.value = 2.0 * np.maximum(prepared.effective_import, 0.0) * prepared.dt_h / 1000.0
-        self.pv_bonus.value = max(
-            0.0,
-            finite_number(
-                prepared.settings.get("pv_charge_bonus_ore_kwh", 0),
-                "settings.pv_charge_bonus_ore_kwh",
-            ),
-        )
+        self.pv_bonus.value = _pv_charge_bonus_ore_kwh(prepared.settings, prepared.mode)
         spread = _arbitrage_spread_ore_kwh(prepared.settings, prepared.mode)
         for i, spec in enumerate(prepared.storages):
             initial = finite_number(spec.get("initial_energy_wh"), f"storages[{i}].initial_energy_wh")
@@ -420,13 +416,7 @@ def _prepare(payload: dict[str, Any]) -> PreparedMultistage:
     formulation = str(settings.get("formulation", "auto"))
     if formulation not in {"auto", "milp", "relaxed"}:
         raise ProtocolError("settings.formulation must be auto, milp, or relaxed")
-    pv_charge_bonus = max(
-        0.0,
-        finite_number(
-            settings.get("pv_charge_bonus_ore_kwh", 0),
-            "settings.pv_charge_bonus_ore_kwh",
-        ),
-    )
+    pv_charge_bonus = _pv_charge_bonus_ore_kwh(settings, mode)
     unsafe_meter_split = bool(np.any(effective_import < effective_export - 1e-9))
     base_load = np.asarray(
         [finite_number(slot.get("load_w", 0), f"slots[{i}].load_w") for i, slot in enumerate(slots)]
@@ -986,6 +976,7 @@ def _response(
         raw_cost = prepared.price[t] * max(grid_kwh, 0.0) - prepared.export_price[t] * max(-grid_kwh, 0.0)
         raw_total_cost += raw_cost
         curtailed_w = max(0.0, float(curtail_values[t]))
+        pv_limit_w, pv_curtail_active = _pv_curtail_output(base.pv[t], curtailed_w)
         actions.append(
             {
                 "slot_start_ms": int(slot.get("start_ms", 0)),
@@ -994,7 +985,8 @@ def _response(
                 "grid_w": grid_w,
                 "soc_pct": stored_wh / total_capacity * 100.0,
                 "cost_ore": raw_cost,
-                "pv_limit_w": max(0.0, -base.pv[t] - curtailed_w) if curtailed_w > 1e-5 else 0.0,
+                "pv_limit_w": pv_limit_w,
+                "pv_curtail_active": pv_curtail_active,
                 "storage_power_w": storage_power,
                 "storage_energy_wh": storage_energy,
                 "flex_power_w": {},

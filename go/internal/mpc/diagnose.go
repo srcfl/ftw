@@ -36,13 +36,14 @@ type DiagnosticSlot struct {
 	WeatherRowAvailableAtMs int64  `json:"weather_row_available_at_ms,omitempty"`
 
 	// Outputs
-	BatteryW float64 `json:"battery_w"`
-	GridW    float64 `json:"grid_w"`
-	SoCPct   float64 `json:"soc_pct"`  // SoC at END of slot
-	CostOre  float64 `json:"cost_ore"` // raw (un-blended) slot cost
-	Reason   string  `json:"reason"`
-	EMSMode  string  `json:"ems_mode"`
-	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+	BatteryW        float64 `json:"battery_w"`
+	GridW           float64 `json:"grid_w"`
+	SoCPct          float64 `json:"soc_pct"`  // SoC at END of slot
+	CostOre         float64 `json:"cost_ore"` // raw (un-blended) slot cost
+	Reason          string  `json:"reason"`
+	EMSMode         string  `json:"ems_mode"`
+	PVLimitW        float64 `json:"pv_limit_w,omitempty"`
+	PVCurtailActive bool    `json:"pv_curtail_active,omitempty"`
 
 	// EV outputs — present only when the plan included a loadpoint.
 	// `omitempty` + the web renderer's `lpActive` gate mean plans
@@ -175,6 +176,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			Reason:                  action.Reason,
 			EMSMode:                 action.EMSMode,
 			PVLimitW:                action.PVLimitW,
+			PVCurtailActive:         action.PVCurtailActive,
 			LoadpointW:              action.LoadpointW,
 			LoadpointSoCPct:         action.LoadpointSoCPct,
 			LoadpointPowerW:         action.LoadpointPowerW,
@@ -391,6 +393,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			Reason:              ds.Reason,
 			EMSMode:             ds.EMSMode,
 			PVLimitW:            ds.PVLimitW,
+			PVCurtailActive:     ds.PVCurtailActive,
 			LoadpointW:          ds.LoadpointW,
 			LoadpointSoCPct:     ds.LoadpointSoCPct,
 			LoadpointPowerW:     ds.LoadpointPowerW,

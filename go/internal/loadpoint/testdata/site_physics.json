@@ -1,0 +1,85 @@
+{
+  "flows": [
+    {
+      "name": "pv leftover after house",
+      "load_w": 500,
+      "pv_w": -8000,
+      "battery_w": 0,
+      "ev_w": 0,
+      "grid_w": -7500,
+      "leftover_w": 7500,
+      "house_residual_w": 0,
+      "feeds_ev": false
+    },
+    {
+      "name": "house residual after weak pv",
+      "load_w": 2000,
+      "pv_w": -500,
+      "battery_w": 0,
+      "ev_w": 0,
+      "grid_w": 1500,
+      "leftover_w": 0,
+      "house_residual_w": 1500,
+      "feeds_ev": false
+    },
+    {
+      "name": "leftover pv into ev and grid into battery",
+      "load_w": 500,
+      "pv_w": -8000,
+      "battery_w": 10000,
+      "ev_w": 4140,
+      "grid_w": 6640,
+      "leftover_w": 7500,
+      "house_residual_w": 0,
+      "feeds_ev": false
+    },
+    {
+      "name": "battery discharge covers house only",
+      "load_w": 500,
+      "pv_w": 0,
+      "battery_w": -400,
+      "ev_w": 4000,
+      "grid_w": 4100,
+      "leftover_w": 0,
+      "house_residual_w": 500,
+      "feeds_ev": false
+    },
+    {
+      "name": "battery discharge feeds ev",
+      "load_w": 500,
+      "pv_w": 0,
+      "battery_w": -4000,
+      "ev_w": 4000,
+      "grid_w": 500,
+      "leftover_w": 0,
+      "house_residual_w": 500,
+      "feeds_ev": true
+    }
+  ],
+  "energy_steps": [
+    {
+      "name": "1 kW charge for 1 h at 0.95",
+      "power_w": 1000,
+      "dt_h": 1,
+      "charge_eff": 0.95,
+      "discharge_eff": 0.95,
+      "delta_wh": 950
+    },
+    {
+      "name": "1 kW discharge for 1 h at 0.95",
+      "power_w": -1000,
+      "dt_h": 1,
+      "charge_eff": 0.95,
+      "discharge_eff": 0.95,
+      "delta_wh": -1052.6315789473683
+    },
+    {
+      "name": "idle",
+      "power_w": 0,
+      "dt_h": 0.25,
+      "charge_eff": 0.95,
+      "discharge_eff": 0.95,
+      "delta_wh": 0
+    }
+  ]
+}
