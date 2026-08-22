@@ -159,6 +159,26 @@ dedicated secret, then rerun the same immutable version. Do not mint another
 beta tag to work around an access failure.
 `CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
 
+## Cursor Cloud specific instructions
+
+The Cloud Agent environment is a multi-repo FTW stack. `/workspace` is
+`srcfl/ftw`. Sibling checkouts live under `/agent/repos/`. Install and start
+run with cwd `/agent`, so `cd` into the repo you mean before `make`.
+
+| Repo | Role |
+|---|---|
+| [`srcfl/ftw`](https://github.com/srcfl/ftw) | Core. `make test`, `make e2e`, `make verify`. |
+| [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) | Editable driver source. Change Lua there, never in `ftw/drivers/*.lua`. |
+| [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated site FTW talks to over real protocols. |
+| [`srcfl/ftw-webapp`](https://github.com/srcfl/ftw-webapp) | Installable client. |
+| [`srcfl/ftwdb`](https://github.com/srcfl/ftwdb) | Embedded energy database. |
+
+`make e2e` and `make dev` still use the in-tree Go simulators
+(`sim-ferroamp`, `sim-sungrow`). For driver, protocol or site behaviour,
+run **device-simulator** as the house: Sungrow hybrid on Modbus plus a bound
+SDM630 as site meter. Its dashboard is `http://127.0.0.1:8762`; FTW is
+`http://127.0.0.1:8080` once `config.local.yaml` points at those ports.
+
 ## Useful source entry points
 
 | Concern | Source |
