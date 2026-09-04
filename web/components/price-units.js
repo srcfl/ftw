@@ -24,6 +24,10 @@ const UNITS = {
   CZK: { label: "Kč", perKwh: "Kč/kWh", axis: "Kč", scale: 0.01, decimals: 2 },
   HUF: { label: "Ft", perKwh: "Ft/kWh", axis: "Ft", scale: 0.01, decimals: 1 },
   RON: { label: "lei", perKwh: "lei/kWh", axis: "lei", scale: 0.01, decimals: 2 },
+  USD: { label: "¢", perKwh: "¢/kWh", axis: "¢", scale: 1, decimals: 1 },
+  GBP: { label: "p", perKwh: "p/kWh", axis: "p", scale: 1, decimals: 1 },
+  AUD: { label: "c", perKwh: "c/kWh", axis: "c", scale: 1, decimals: 1 },
+  CAD: { label: "¢", perKwh: "¢/kWh", axis: "¢", scale: 1, decimals: 1 },
 };
 
 // A currency with no entry above is shown in its major unit under its ISO

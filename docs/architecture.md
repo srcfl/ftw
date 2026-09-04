@@ -158,6 +158,12 @@ schema. The handlers registered in
 [`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
+External data sources do not all work everywhere. Weather and PV forecasts
+are worldwide; live day-ahead spot is European. A site outside ENTSO-E
+uses `price.provider: static` — a flat rate or time-of-use schedule —
+which is how price-driven planning works without a market feed. See
+[data-coverage.md](data-coverage.md).
+
 Some startup bindings cannot be hot-reloaded, including state paths, API
 listener and selected integration transports. Normal device and control
 configuration is reloaded through

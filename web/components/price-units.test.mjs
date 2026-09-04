@@ -15,7 +15,7 @@ import {
 
 describe("price units", () => {
   it("keeps minor units where households quote them", () => {
-    for (const [code, label] of [["SEK", "öre"], ["EUR", "cent"], ["NOK", "øre"], ["DKK", "øre"]]) {
+    for (const [code, label] of [["SEK", "öre"], ["EUR", "cent"], ["NOK", "øre"], ["DKK", "øre"], ["USD", "¢"], ["GBP", "p"]]) {
       const u = unitFor(code);
       assert.equal(u.label, label);
       assert.equal(u.scale, 1, `${code} should stay in minor units`);

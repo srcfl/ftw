@@ -1411,7 +1411,7 @@ type StateConf struct {
 
 // Price is the spot-price source config.
 type Price struct {
-	Provider         string  `yaml:"provider" json:"provider"` // sourceful | elprisetjustnu | entsoe | none
+	Provider         string  `yaml:"provider" json:"provider"` // sourceful | elprisetjustnu | entsoe | static | none
 	Zone             string  `yaml:"zone,omitempty" json:"zone,omitempty"`
 	GridTariffOreKwh float64 `yaml:"grid_tariff_ore_kwh,omitempty" json:"grid_tariff_ore_kwh,omitempty"`
 	VATPercent       float64 `yaml:"vat_percent,omitempty" json:"vat_percent,omitempty"`
@@ -1438,6 +1438,37 @@ type Price struct {
 	// most Swedish customer agreements pass through. Set to a pointer
 	// to 0.0 if you have a guaranteed-zero-floor agreement.
 	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
+
+	// StaticOreKwh is the default energy price in minor units per kWh when
+	// provider=static. Time-of-use windows below override matching hours;
+	// hours they miss keep this rate. Zero is a real price (free energy).
+	StaticOreKwh float64 `yaml:"static_ore_kwh,omitempty" json:"static_ore_kwh,omitempty"`
+	// StaticTOU is an optional time-of-use schedule in the box's local
+	// time. First matching window wins. An empty Days list means every day.
+	StaticTOU []TOUWindow `yaml:"static_tou,omitempty" json:"static_tou,omitempty"`
+}
+
+// TOUWindow is one time-of-use period for provider=static.
+type TOUWindow struct {
+	Start  string   `yaml:"start" json:"start"` // "HH:MM" local, inclusive
+	End    string   `yaml:"end" json:"end"`     // "HH:MM" local, exclusive; "24:00" allowed
+	OreKwh float64  `yaml:"ore_kwh" json:"ore_kwh"`
+	Days   []string `yaml:"days,omitempty" json:"days,omitempty"` // mon..sun; empty = every day
+}
+
+// Validate checks a static tariff's windows. Other providers are accepted
+// as-is: an unknown name currently disables fetching rather than failing
+// config load, and that behaviour stays.
+func (p *Price) Validate() error {
+	if p == nil || !strings.EqualFold(p.Provider, "static") {
+		return nil
+	}
+	for i, w := range p.StaticTOU {
+		if strings.TrimSpace(w.Start) == "" || strings.TrimSpace(w.End) == "" {
+			return fmt.Errorf("price.static_tou[%d]: start and end are required (HH:MM)", i)
+		}
+	}
+	return nil
 }
 
 // Weather is the weather-forecast source config.
@@ -1562,6 +1593,18 @@ func (c Config) MaskSecrets() Config {
 	if out.Price != nil {
 		cp := *out.Price
 		cp.APIKey = ""
+		if len(cp.StaticTOU) > 0 {
+			tou := make([]TOUWindow, len(cp.StaticTOU))
+			copy(tou, cp.StaticTOU)
+			for i := range tou {
+				if len(tou[i].Days) > 0 {
+					days := make([]string, len(tou[i].Days))
+					copy(days, tou[i].Days)
+					tou[i].Days = days
+				}
+			}
+			cp.StaticTOU = tou
+		}
 		out.Price = &cp
 	}
 	if out.Weather != nil {
@@ -2169,6 +2212,11 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Assistant.Validate(); err != nil {
 		return err
+	}
+	if c.Price != nil {
+		if err := c.Price.Validate(); err != nil {
+			return err
+		}
 	}
 	if err := c.validateVehicles(); err != nil {
 		return err

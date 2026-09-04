@@ -57,6 +57,13 @@ describe("price zone picker", () => {
     assert.match(priceTab, /FALLBACK/);
     assert.match(setupHtml, /<option value="SE3"/);
   });
+
+  it("offers a static tariff for markets with no day-ahead feed", () => {
+    assert.match(priceTab, /"static"/);
+    assert.match(priceTab, /price\.static_ore_kwh/);
+    assert.match(priceTab, /static_tou/);
+    assert.match(setupHtml, /value="static"/);
+  });
 });
 
 describe("price labels follow the currency", () => {

@@ -11,6 +11,8 @@
 //     hourly if the provider returns that.
 //   - entsoe — All EU, needs ENTSO-E transparency platform API key.
 //     Resolution varies per bidding zone (15m or 60m).
+//   - static — Operator-supplied flat rate or time-of-use schedule. No
+//     network. Works anywhere, including markets with no day-ahead feed.
 //
 // Consumer price = (spot + grid_tariff) × (1 + VAT/100). We store both
 // pure spot AND the consumer total so the UI can surface either.
@@ -563,7 +565,11 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 	}
 	zone := cfg.Zone
 	if zone == "" {
-		zone = "SE3"
+		if cfg.Provider == "static" {
+			zone = "STATIC"
+		} else {
+			zone = "SE3"
+		}
 	}
 	// An unset currency follows the zone: picking BE should not leave a
 	// Belgian household paying in öre. Unknown zones keep the old default.
@@ -588,6 +594,8 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 		ep.Currency = currency
 		ep.FX = fx
 		p = ep
+	case "static":
+		p = NewStatic(cfg)
 	default:
 		return nil
 	}

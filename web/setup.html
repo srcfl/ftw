@@ -809,12 +809,18 @@
           <option value="sourceful">Sourceful</option>
           <option value="elprisetjustnu">elprisetjustnu</option>
           <option value="entsoe">ENTSO-E</option>
+          <option value="static">Static / time-of-use</option>
           <option value="">None</option>
         </select>
       </div>
       <div class="form-group" id="price-zone-display">
         <label>Zone</label>
         <input type="text" id="price-zone-readonly" readonly>
+      </div>
+      <div class="form-group" id="price-static-rate" style="display:none">
+        <label for="price-static-ore">Energy price (minor units / kWh)</label>
+        <input type="number" id="price-static-ore" step="0.1" value="0">
+        <p class="hint">Flat commodity rate for a contract that is not European day-ahead. Grid tariff and VAT still apply. Time-of-use windows can be added later in Settings.</p>
       </div>
     </div>
 

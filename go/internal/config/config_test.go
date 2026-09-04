@@ -628,6 +628,40 @@ batteries:
 	}
 }
 
+func TestStaticPriceParsesTOU(t *testing.T) {
+	yaml := minimalYAML + `
+price:
+  provider: static
+  currency: USD
+  static_ore_kwh: 8
+  static_tou:
+    - start: "07:00"
+      end: "23:00"
+      ore_kwh: 22
+      days: [mon, tue, wed, thu, fri]
+`
+	c, err := Parse([]byte(yaml), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Price.Provider != "static" || c.Price.StaticOreKwh != 8 {
+		t.Fatalf("flat = %+v", c.Price)
+	}
+	if len(c.Price.StaticTOU) != 1 || c.Price.StaticTOU[0].Start != "07:00" {
+		t.Fatalf("tou = %+v", c.Price.StaticTOU)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStaticPriceRejectsEmptyTOUWindow(t *testing.T) {
+	p := &Price{Provider: "static", StaticTOU: []TOUWindow{{Start: "", End: "23:00"}}}
+	if err := p.Validate(); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestPVArrayGeometryDistinguishesMissingFromZero(t *testing.T) {
 	yaml := minimalYAML + `
 weather:

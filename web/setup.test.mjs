@@ -176,7 +176,7 @@ describe("price provider defaults", () => {
   });
 
   it("uses Sourceful as the Settings default while retaining alternatives", () => {
-    assert.match(PRICE_JS, /\["sourceful", "elprisetjustnu", "entsoe", "none"\], "sourceful"/);
+    assert.match(PRICE_JS, /\["sourceful", "elprisetjustnu", "entsoe", "static", "none"\], "sourceful"/);
   });
 });
 
