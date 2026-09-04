@@ -1,5 +1,7 @@
 package mpc
 
+import "github.com/srcfl/ftw/go/internal/loadpoint"
+
 // LoadpointSpec tells the DP how to extend its state space with an EV
 // loadpoint. Set `Params.Loadpoint` to a non-nil spec to have the
 // optimizer treat charging the EV as a decision variable alongside
@@ -37,11 +39,11 @@ type LoadpointSpec struct {
 
 	// Plan-start conditions.
 	InitialSoC float64 // EV SoC at the first slot
-	PluggedIn     bool    // when false, Optimize treats the loadpoint as absent
+	PluggedIn  bool    // when false, Optimize treats the loadpoint as absent
 
 	// User intent. A zero target means no deadline — charge
 	// opportunistically based on price/PV surplus only.
-	TargetSoC  float64
+	TargetSoC     float64
 	TargetSlotIdx int // zero-based slot by whose end the target must be met; ignored when target is zero
 
 	// Electrical constraints. AllowedStepsW MUST include 0 (off) and
@@ -55,35 +57,32 @@ type LoadpointSpec struct {
 	ChargeEfficiency float64
 
 	// SurplusOnly forbids EV actions that need grid import or home-battery
-	// discharge into the car. The loadpoint may use real site surplus only:
-	// PV already covering house load, or PV left after the battery's own
-	// planned charge. It must not treat battery discharge as synthetic PV
-	// surplus, even when the global BatteryCoversEV opt-in is enabled.
-	// The home battery itself may still grid-charge for house load or
-	// arbitrage — surplus-only is an EV policy, not a site import ban.
+	// discharge into the car. The loadpoint may take at most the PV leftover
+	// after house load. Site import caused by a simultaneous home-battery
+	// grid-charge does not count as the car importing — surplus-only is an
+	// EV policy, not a site import ban. Battery discharge still cannot be
+	// treated as synthetic PV surplus, even when BatteryCoversEV is on.
 	SurplusOnly bool
 
 	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
 	// true (operator's default), the home battery's discharge MUST NOT
-	// end up at the EV. The DP feasibility check enforces this by
-	// rejecting any (battW, evW) combination where battery discharge
-	// exceeds the PV-residual house demand — i.e. where some of the
-	// battery's energy must, by conservation, have flowed into the EV
-	// or out to grid (and the existing battery-export-vs-EV rule
-	// already covers the export case). The runtime dispatch in
-	// control/dispatch.go has the canonical clamp using identical
-	// accounting (search "CANONICAL \"battery may not feed EV\""); the
-	// DP rule here stops the planner from emitting infeasible
-	// allocations that dispatch then has to censor, removing the
-	// plan↔reality divergence operators were seeing on
-	// planner_arbitrage slots. A future refactor should extract the
-	// shared houseResidualW + feasibility predicate into a helper so
-	// the two sites can't drift.
+	// end up at the EV. Enforced by loadpoint.BatteryDischargeFeedsEV
+	// in the DP and in ValidatePlan. The runtime clamp in
+	// control/dispatch.go (search CANONICAL "battery may not feed EV")
+	// is the same conservation rule, not this helper — dispatch.go is
+	// owned by a separate PV-export PR.
 	NoBatteryToEV bool
 }
 
 func (l *LoadpointSpec) blocksBatteryToEV() bool {
 	return l != nil && (l.NoBatteryToEV || l.SurplusOnly)
+}
+
+// surplusOnlyExceedsHousePV is the planner name for the site-power
+// leftover check. Surplus-only is an EV policy: leftover PV after the
+// house, not a ban on site import while the car is charging.
+func surplusOnlyExceedsHousePV(evW, loadW, pvW float64) bool {
+	return loadpoint.SurplusOnlyExceedsHousePV(evW, loadW, pvW)
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

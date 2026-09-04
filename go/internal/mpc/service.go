@@ -395,6 +395,28 @@ func (s *Service) Latest() *Plan {
 	return s.last
 }
 
+// InstallPlan puts a plan in the cache SlotDirectiveAt and Latest read.
+// Optimize and RestoreDiagnostic already write that cache after a
+// successful solve. Tests that inject a known Action use the same seam
+// so the charger and battery cannot be given two different mappings of
+// one slot.
+//
+// GeneratedAtMs is aged against the wall clock (MaxPlanAge), not the
+// slot clock passed to SlotDirectiveAt. A simulated site clock must
+// still stamp GeneratedAtMs with time.Now().
+func (s *Service) InstallPlan(plan Plan, params Params, loadpointID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copied := plan
+	s.last = &copied
+	s.lastParams = params
+	s.lastLoadpointID = loadpointID
+	s.lastReplanAt = time.Now()
+}
+
 // MaxPlanAge is the staleness cutoff. Once a plan's `generated_at_ms`
 // is older than this, we consider it stale and the control loop falls
 // back to self_consumption. Picked to be ~2× the replan interval so a

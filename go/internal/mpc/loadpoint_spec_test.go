@@ -98,10 +98,10 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 			ID:              "garage",
 			CapacityWh:      60000, // 60 kWh
 			Levels:          11,
-			InitialSoC: 0.2,
+			InitialSoC:      0.2,
 			PluggedIn:       true,
-			TargetSoC: 0.3,   // need 10 % → 6 kWh
-			TargetSlotIdx:   3,    // deadline at end of horizon
+			TargetSoC:       0.3, // need 10 % → 6 kWh
+			TargetSlotIdx:   3,   // deadline at end of horizon
 			MaxChargeW:      11000,
 			AllowedStepsW:   []float64{0, 11000},
 			ChargeEfficiency: 0.9,

@@ -136,24 +136,6 @@ func decimalDigits(s string) bool {
 	return s != ""
 }
 
-// controlSlotDirectiveFromMPC keeps the import-cycle bridge explicit. The
-// decision ID is report metadata; control does not use it for dispatch math.
-func controlSlotDirectiveFromMPC(d mpc.SlotDirective) control.SlotDirective {
-	return control.SlotDirective{
-		DecisionID:          d.DecisionID,
-		SlotStart:           d.SlotStart,
-		SlotEnd:             d.SlotEnd,
-		BatteryEnergyWh:     d.BatteryEnergyWh,
-		SoCTarget:           d.SoCTarget,
-		Strategy:            string(d.Strategy),
-		PVLimitW:            d.PVLimitW,
-		PlannedGridW:        d.GridW,
-		HasPlannedGridW:     true,
-		LivePVSurplusSoCCap: d.LivePVSurplusSoCCap,
-		LoadpointEnergyWh:   d.LoadpointEnergyWh,
-	}
-}
-
 // siteIdentityLoad is the machine's own identity, not a user's.
 //
 // Bound is set when nova.key has been adopted into a hardware-protected
@@ -1694,31 +1676,12 @@ func main() {
 				if lpController != nil {
 					lpController.SetGridDeferred(st.ID, deferGridPlan)
 				}
-				// Surplus-only sources, in order of precedence:
-				//   1. Operator's explicit surplus_only flag on the LP
-				//   2. MPC grid-funded planning deferral (target past
-				//      published prices)
-				//   3. Runtime bat-SoC unlock arming — when the home
-				//      battery is at/above the schedule's threshold AND
-				//      live PV surplus is available, the dispatch layer
-				//      already treats the LP as surplus-only. Without
-				//      threading it into the MPC spec here, the plan
-				//      would prescribe battery→EV transfers that
-				//      dispatch then has to censor — producing
-				//      misleading slot entries the operator sees in
-				//      /api/mpc/plan that never actually execute.
-				batSoCArmed := false
-				if lpController != nil {
-					batSoCArmed = lpController.IsBatSoCArmed(st.ID)
-				}
-				// NoBatteryToEV mirrors the site-wide ctrl.BatteryCoversEV
-				// flag (inverted). Plumbing the constraint into the DP
-				// here means the planner stops scheduling battery→EV
-				// transfers that dispatch's safety net would just clamp
-				// at runtime; this closes the plan↔reality divergence
-				// where operators saw "plan: 7 kW discharge + 11 kW EV"
-				// while live execution held the battery at house-only
-				// levels. Take ctrlMu for the bool read.
+				// Surplus-only on the 48 h spec is the operator flag or
+				// the "deadline is past published prices" deferral.
+				// The bat-SoC unlock is a this-tick opportunistic clamp
+				// and must not poison night-time grid EV in a plan
+				// computed while the sun is still up. Battery→EV is
+				// already blocked by NoBatteryToEV below.
 				ctrlMu.Lock()
 				noBatteryToEV := !(ctrl.BatteryCoversEV || boostActive)
 				ctrlMu.Unlock()
@@ -1735,7 +1698,7 @@ func main() {
 					MaxChargeW:       st.MaxChargeW,
 					AllowedStepsW:    st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
-					SurplusOnly:      st.SurplusOnly || deferGridPlan || batSoCArmed,
+					SurplusOnly:      loadpoint.PlannerTreatsLoadpointAsSurplusOnly(st.SurplusOnly, deferGridPlan),
 					NoBatteryToEV:    noBatteryToEV,
 				})
 			}
@@ -1771,7 +1734,9 @@ func main() {
 			if !ok {
 				return control.SlotDirective{}, false
 			}
-			return controlSlotDirectiveFromMPC(d), true
+			// SlotDirectiveFromMPC lives in package control so tests
+			// and main share the plan→EMS field map.
+			return control.SlotDirectiveFromMPC(d), true
 		}
 		// Default to the energy-allocation path. The plan is a
 		// scheduler (decides WHEN each strategy applies); the EMS is
@@ -1869,11 +1834,7 @@ func main() {
 			if !ok {
 				return loadpoint.Directive{}, false
 			}
-			return loadpoint.Directive{
-				SlotStart:         d.SlotStart,
-				SlotEnd:           d.SlotEnd,
-				LoadpointEnergyWh: d.LoadpointEnergyWh,
-			}, true
+			return d.LoadpointDirective(), true
 		}
 		telAdapter := func(driver string) (loadpoint.EVSample, bool) {
 			r := tel.Get(driver, telemetry.DerEV)
@@ -2213,60 +2174,21 @@ func main() {
 		// 3Φ minimum but day-peak is, we'd rather charge 1Φ now and
 		// switch to 3Φ later than sit idle waiting.
 		//
-		// "Surplus" here is what the EV can claim, not the raw PV
-		// excess. The MPC has already allocated battery_w out of PV;
-		// the EV gets only what's left after PV - Load - Battery. A
-		// borderline-PV day where MPC reserves 4.5 kW for battery
-		// charging while raw -PV - Load = 5 kW would otherwise pin
-		// the gate to 3Φ-only based on a peak the battery is going
-		// to consume — leaving the EV stuck at 0 W in 3Φ-only step
-		// land because real-time room is below 4140 W.
+		// "Surplus" here is leftover PV after house load, minus
+		// planned PV-soak battery charge. Grid-funded battery
+		// charge does not consume leftover the car can take. A
+		// borderline-PV day where the battery soaks 4.5 kW of a
+		// 5 kW leftover would otherwise pin the gate to 3Φ based
+		// on a peak the battery is about to eat.
 		lpController.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
 			if mpcSvc == nil {
 				return 0, false
 			}
 			plan := mpcSvc.Latest()
-			if plan == nil || len(plan.Actions) == 0 {
+			if plan == nil {
 				return 0, false
 			}
-			now := time.Now()
-			horizon := now.Add(window)
-			var peak float64
-			any := false
-			for _, a := range plan.Actions {
-				slotEnd := time.UnixMilli(a.SlotStartMs).Add(
-					time.Duration(a.SlotLenMin) * time.Minute)
-				if slotEnd.Before(now) {
-					continue
-				}
-				if time.UnixMilli(a.SlotStartMs).After(horizon) {
-					break
-				}
-				// Net PV headroom for non-battery loads: positive when
-				// PV export exceeds load + planned battery charge.
-				// BatteryW is site-signed: positive = charge (import),
-				// negative = discharge (export). Only subtract planned
-				// CHARGE — planned discharge is already earmarked to
-				// cover house load (or grid export in arbitrage), not
-				// available room for the EV to claim. Counting it would
-				// route plan-discharge → EV → re-charge cycles: the EV
-				// takes power the plan reserved for load coverage, then
-				// the dispatch has to re-import or further discharge to
-				// keep the original balance.
-				plannedChargeW := a.BatteryW
-				if plannedChargeW < 0 {
-					plannedChargeW = 0
-				}
-				surplus := -a.PVW - a.LoadW - plannedChargeW
-				if !any || surplus > peak {
-					peak = surplus
-					any = true
-				}
-			}
-			if !any {
-				return 0, false
-			}
-			return peak, true
+			return mpc.PeakPlannedSurplusForEV(plan.Actions, time.Now(), window)
 		})
 
 		lpController.SetSiteSurplusForEV(func() (float64, bool) {
@@ -2304,42 +2226,17 @@ func main() {
 				batW += r.SmoothedW
 			}
 			evW := tel.SumOnlineEVW()
-			// Surplus-only EV priority: when any loadpoint is in
-			// surplus-only mode, battery charging power is NOT
-			// available for the EV. The original formula assumed
-			// "if I told the battery to stop, that surplus would
-			// free up for the EV" — but the MPC may still
-			// legitimately charge the battery from PV surplus
-			// (and, in active arbitrage, from the grid). If we
-			// hand that power back to the EV, the controller
-			// commands the EV on, the battery loses its share,
-			// the planner re-budgets the EV down → flap. The
-			// truthful surplus for an EV under surplus-only is
-			// what's left AFTER the battery has taken its share:
-			// -gridW + max(0, -batW) (battery counts only if
-			// it's discharging, contributing to site supply).
-			// A bat-SoC-armed loadpoint is just as much a "PV-priority"
-			// claimant as a configured surplus_only LP — both want PV
-			// routed to the EV ahead of the home battery. Counting
-			// either via the controller's combined view (configured OR
-			// armed) keeps the flap-avoidance protection symmetric and
-			// closes the loophole where an armed LP would inflate the
-			// apparent surplus by the battery's PV-charge rate.
+			// Surplus-only EV may take leftover PV after house load.
+			// When the battery is soaking PV, that charge is not offered
+			// this tick (EV dispatch runs first). When the battery is
+			// already importing, leftover PV is the car's — surplus-only
+			// is an EV policy, not a site import ban. See
+			// loadpoint.SurplusAvailableForEVW.
 			surplusOnlyActive := false
 			if lpController != nil && lpController.AnyLoadpointSurplusActive() {
 				surplusOnlyActive = true
 			}
-			if surplusOnlyActive && batW > 0 {
-				batW = 0
-			}
-			// Open follow-up: in self-consumption / planner_self mode,
-			// the dispatch PI absorbs PV into the battery before the
-			// EV controller sees it, defeating surplus-only priority.
-			// The MPC arbitrage path is covered by the new mpc.go
-			// feasibility constraint; the self-consumption fallback
-			// needs a battery-charge cap in control/dispatch.go to
-			// match. Tracked separately to keep this change focused.
-			return -gridW + batW + evW, true
+			return loadpoint.SurplusAvailableForEVW(gridW, batW, evW, surplusOnlyActive), true
 		})
 
 		// Bat-SoC surplus-unlock: feed the controller a live home-battery

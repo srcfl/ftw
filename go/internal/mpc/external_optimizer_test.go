@@ -351,6 +351,61 @@ func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
 	}
 }
 
+func TestValidatePlanAllowsEVPVWithBatteryGridCharge(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 4140,
+			AllowedStepsW: []float64{0, 4140}, ChargeEfficiency: 1,
+			SurplusOnly: true, NoBatteryToEV: true,
+		},
+	}
+	// leftover PV after house = 6000 W. EV 4140 + battery 5000 →
+	// grid = 500-6500+5000+4140 = 3140 import. Battery SoC: 0.20 + 0.475 = 0.675.
+	// EV SoC: 0.25 + 4140/40000 = 0.3535.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
+		TotalCostOre: 62.8, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 5000, GridW: 3140, SoC: 0.675,
+			LoadpointW: 4140, LoadpointSoC: 0.3535, CostOre: 62.8,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected leftover-PV EV beside battery grid-charge: %v", err)
+	}
+}
+
+func TestValidatePlanRejectsSurplusOnlyEVAboveLeftoverPV(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 11000,
+			AllowedStepsW: []float64{0, 7000}, ChargeEfficiency: 1,
+			SurplusOnly: true, NoBatteryToEV: true,
+		},
+	}
+	// leftover after house = 6000 W. EV 7000 exceeds it even though
+	// the home battery is the one importing.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
+		TotalCostOre: 120, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 5000, GridW: 6000, SoC: 0.675,
+			LoadpointW: 7000, LoadpointSoC: 0.425, CostOre: 120,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err == nil {
+		t.Fatal("ValidatePlan accepted surplus-only EV above leftover PV")
+	}
+}
+
 func TestExternalOptimizerEndToEnd(t *testing.T) {
 	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
 	if python == "" {
