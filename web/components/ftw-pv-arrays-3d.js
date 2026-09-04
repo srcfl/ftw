@@ -1,6 +1,6 @@
 // <ftw-pv-arrays-3d> — tiny 3D preview of a site's PV-array config.
 //
-// Purpose: the settings Weather tab lets the operator list each PV
+// Purpose: the settings Control tab lets the operator list each PV
 // plane (name + rated_w + tilt_deg + azimuth_deg). Those four numbers
 // fully specify a panel's orientation but they are hard to cross-
 // check by eye on a phone in the shed. This component turns the
@@ -12,7 +12,7 @@
 //
 // The component is self-contained: Three.js loads via the importmap
 // declared in index.html ("three" + "three/addons/"); this file is
-// lazy-imported from settings.js the first time the Weather tab
+// lazy-imported from settings.js the first time the Control tab
 // opens, so the dashboard's main thread never pays for three.js on
 // pages that don't touch the settings modal.
 //

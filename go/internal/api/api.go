@@ -36,6 +36,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/coverage"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
@@ -50,6 +51,8 @@ import (
 	"github.com/srcfl/ftw/go/internal/ocpp"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
+	"github.com/srcfl/ftw/go/internal/pvperf"
+	"github.com/srcfl/ftw/go/internal/roofmodel"
 	"github.com/srcfl/ftw/go/internal/scanner"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
@@ -138,6 +141,14 @@ type Deps struct {
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
 	Forecast *forecast.Service
+
+	// Optional: STRÅNG-based PV performance scoring. Nil when the site has no
+	// PV geometry to score against (surfaced as {enabled:false}).
+	PVPerf *pvperf.Service
+
+	// RoofModel is the optional Lantmäteriet roof-geometry module. nil when the
+	// module is absent or disabled, which is the normal case outside Sweden.
+	RoofModel *roofmodel.Service
 
 	// Optional: MPC planner. Nil if disabled or a buildMPC gate skipped it.
 	MPC *mpc.Service
@@ -495,6 +506,11 @@ func (s *Server) routes() {
 	s.handle("GET  /api/prices", Read, s.handlePrices)
 	s.handle("GET  /api/prices/zones", Read, s.handlePriceZones)
 	s.handle("GET  /api/forecast", Read, s.handleForecast)
+	s.handle("GET  /api/pv/performance", Read, s.handlePVPerformance)
+	s.handle("GET  /api/data-sources", Read, s.handleDataSources)
+	s.handle("GET  /api/roofmodel", Read, s.handleRoofModel)
+	s.handle("GET  /api/roofmodel/buildings", Read, s.handleRoofModelBuildings)
+	s.handle("POST /api/roofmodel/derive", Configure, s.handleRoofModelDerive)
 	s.handle("GET  /api/mpc/plan", Read, s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", Configure, s.handleMPCReplan)
 	s.handle("GET  /api/mpc/diagnose", Read, s.handleMPCDiagnose)
@@ -2420,6 +2436,292 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"items": rows, "enabled": true})
 }
 
+// ---- /api/roofmodel ----
+//
+// GET reports whether roof derivation is available for this site and why not
+// when it is unavailable. GET /api/roofmodel/buildings lists footprints to pick
+// from; POST /api/roofmodel/derive fits the roof of the picked one.
+//
+// The derived arrays are returned, never written. The settings form fills
+// itself in with them and the operator saves -- so the panel config still
+// changes only when someone looks at the numbers and agrees. Derivation is a
+// best guess from a point cloud that may be years old.
+func (s *Server) handleRoofModel(w http.ResponseWriter, r *http.Request) {
+	lat, lon, haveSite := s.siteLocation()
+	resp := map[string]any{"enabled": s.deps.RoofModel.Enabled()}
+	if haveSite {
+		resp["covers"] = coverage.Covers("lantmateriet", lat, lon)
+		resp["latitude"], resp["longitude"] = lat, lon
+	}
+	resp["has_credentials"] = s.roofModelHasCredentials()
+	if src, ok := coverage.ByID("lantmateriet"); ok {
+		resp["area"] = src.Area
+		resp["license"] = src.License
+		resp["note"] = src.Note
+	}
+	writeJSON(w, 200, resp)
+}
+
+func (s *Server) handleRoofModelDerive(w http.ResponseWriter, r *http.Request) {
+	if !s.deps.RoofModel.Enabled() {
+		writeJSON(w, 200, map[string]any{
+			"enabled": false,
+			"error":   "roof model module is not enabled",
+		})
+		return
+	}
+	lat, lon, haveSite := s.siteLocation()
+	// Optional: which footprint to clip the LiDAR to. An absent or empty body
+	// keeps the old behaviour of segmenting the whole search radius. The
+	// coordinates mirror the buildings endpoint: the map lets you drag the
+	// pin before saving, and the derive must search where the picker
+	// searched, or the picked id is "not found near this site".
+	var body struct {
+		BuildingID string      `json:"building_id"`
+		Latitude   *float64    `json:"latitude"`
+		Longitude  *float64    `json:"longitude"`
+		Footprint  [][]float64 `json:"footprint"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
+	}
+	if body.Latitude != nil && body.Longitude != nil {
+		lat, lon, haveSite = *body.Latitude, *body.Longitude, true
+	}
+	if !haveSite {
+		writeJSON(w, 400, map[string]any{"error": "site latitude/longitude is not configured"})
+		return
+	}
+	// A hand-drawn footprint replaces the picked building where the catalog
+	// has no building dataset. Shape errors are the operator's to fix.
+	if n := len(body.Footprint); n > 0 && n < 3 {
+		writeJSON(w, 400, map[string]any{"error": "a drawn footprint needs at least three [lon, lat] corners"})
+		return
+	}
+
+	// A derive downloads and segments LiDAR tiles; the service time-boxes it,
+	// but the request should also die with the client rather than outliving it.
+	model, err := s.deps.RoofModel.Derive(r.Context(), lat, lon, body.BuildingID, body.Footprint)
+	if err != nil {
+		writeJSON(w, roofModelErrorStatus(err), map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled":         true,
+		"model":           model,
+		"proposed_arrays": model.ToPVArrays(),
+	})
+}
+
+// handleRoofModelBuildings lists building footprints near the site for the
+// picker. Read-only and cheap relative to a derive: it is one STAC search with
+// no LiDAR download behind it.
+func (s *Server) handleRoofModelBuildings(w http.ResponseWriter, r *http.Request) {
+	if !s.deps.RoofModel.Enabled() {
+		writeJSON(w, 200, map[string]any{
+			"enabled": false,
+			"error":   "roof model module is not enabled",
+		})
+		return
+	}
+	lat, lon, haveSite := s.siteLocation()
+	// The map lets you drag the pin before saving, so honour an explicit
+	// coordinate over the stored one.
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("lat"), 64); err == nil {
+		if w2, err2 := strconv.ParseFloat(r.URL.Query().Get("lon"), 64); err2 == nil {
+			lat, lon, haveSite = v, w2, true
+		}
+	}
+	if !haveSite {
+		writeJSON(w, 400, map[string]any{"error": "site latitude/longitude is not configured"})
+		return
+	}
+
+	list, err := s.deps.RoofModel.Buildings(r.Context(), lat, lon)
+	if err != nil {
+		writeJSON(w, roofModelErrorStatus(err), map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled":   true,
+		"latitude":  lat,
+		"longitude": lon,
+		"buildings": list.Buildings,
+	})
+}
+
+// roofModelErrorStatus separates "you asked for something impossible" from
+// "the module or Lantmateriet failed", so the UI can tell the operator to fix
+// their input rather than to retry.
+func roofModelErrorStatus(err error) int {
+	if errors.Is(err, roofmodel.ErrOutsideCoverage) || errors.Is(err, roofmodel.ErrNoCredentials) {
+		return 400
+	}
+	return 502
+}
+
+// roofModelHasCredentials reports whether the configured STAC catalog can be
+// asked, without revealing any secret: credentials are stored, or a custom
+// catalog is configured — open catalogs need none, and the module goes
+// anonymous. The default Lantmäteriet catalog always needs credentials.
+func (s *Server) roofModelHasCredentials() bool {
+	if s.deps.CfgMu == nil {
+		return false
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if s.deps.Cfg == nil || s.deps.Cfg.RoofModel == nil {
+		return false
+	}
+	rm := s.deps.Cfg.RoofModel
+	if rm.StacBaseURL != "" {
+		return true
+	}
+	return rm.StacUser() != "" && rm.StacPass() != ""
+}
+
+// siteLocation returns the configured site coordinates.
+func (s *Server) siteLocation() (lat, lon float64, ok bool) {
+	if s.deps.CfgMu == nil {
+		return 0, 0, false
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if s.deps.Cfg == nil || s.deps.Cfg.Weather == nil {
+		return 0, 0, false
+	}
+	lat, lon = s.deps.Cfg.Weather.Latitude, s.deps.Cfg.Weather.Longitude
+	return lat, lon, lat != 0 || lon != 0
+}
+
+// ---- /api/data-sources ----
+//
+// Where each external data source works, and whether it covers this site.
+// Response: {latitude, longitude, sources:[{id, kind, label, area, countries,
+// worldwide, requires_key, license, note, covers}]}. `covers` is advisory: for
+// a bounded source it is a lat/lon box test, and STRÅNG's grid is rotated, so a
+// true near a corner still means "worth trying", not "guaranteed". False is
+// reliable — that location is definitely not served.
+//
+// This exists because several sources are regional (STRÅNG is Nordic-only,
+// every price provider is European) and nothing previously said so: a site
+// outside those areas got an empty result and no explanation. See #726.
+func (s *Server) handleDataSources(w http.ResponseWriter, r *http.Request) {
+	var lat, lon float64
+	var haveSite bool
+	// Weather is an optional config section, so it is nil on a site that has
+	// never configured one — which is exactly the site most likely to be
+	// looking at this endpoint.
+	lat, lon, haveSite = s.siteLocation()
+
+	// An explicit ?lat=&lon= overrides the configured site so the Weather tab
+	// can preview coverage for a pin the operator is still dragging around,
+	// before they save it.
+	if v := r.URL.Query().Get("lat"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lat, haveSite = f, true
+		}
+	}
+	if v := r.URL.Query().Get("lon"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lon, haveSite = f, true
+		}
+	}
+
+	items := make([]map[string]any, 0, len(coverage.All()))
+	for _, src := range coverage.All() {
+		item := map[string]any{
+			"id":           src.ID,
+			"kind":         string(src.Kind),
+			"label":        src.Label,
+			"area":         src.Area,
+			"worldwide":    src.Worldwide(),
+			"requires_key": src.RequiresKey,
+		}
+		if len(src.Countries) > 0 {
+			item["countries"] = src.Countries
+		}
+		if src.License != "" {
+			item["license"] = src.License
+		}
+		if src.Note != "" {
+			item["note"] = src.Note
+		}
+		// Without a site location there is nothing to test against, so omit
+		// `covers` entirely rather than defaulting it to a misleading true.
+		if haveSite {
+			item["covers"] = src.Covers(lat, lon)
+		}
+		items = append(items, item)
+	}
+	resp := map[string]any{"sources": items}
+	if haveSite {
+		resp["latitude"], resp["longitude"] = lat, lon
+	}
+	writeJSON(w, 200, resp)
+}
+
+// ---- /api/pv/performance ----
+//
+// STRÅNG-based expected-vs-actual PV performance scoring. Query param days=N
+// (default 30, max 365) selects the lookback window. Response:
+// {enabled, items:[{day, expected_wh, actual_wh, pr, ...}], performance_ratio,
+// attribution}. Returns {enabled:false} when scoring is unavailable (no PV
+// geometry configured).
+func (s *Server) handlePVPerformance(w http.ResponseWriter, r *http.Request) {
+	if s.deps.PVPerf == nil {
+		writeJSON(w, 200, map[string]any{"items": []any{}, "enabled": false})
+		return
+	}
+	days := 30
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 365 {
+		days = 365
+	}
+	now := time.Now()
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	sinceDay := today.AddDate(0, 0, -days).Format("2006-01-02")
+	untilDay := today.Format("2006-01-02")
+	items, err := s.deps.PVPerf.Load(sinceDay, untilDay)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	// Energy-weighted overall performance ratio across the window — only days
+	// with a meaningful expected baseline (pr != null) contribute.
+	var sumExpected, sumActual float64
+	for _, it := range items {
+		if it.PR != nil {
+			sumExpected += it.ExpectedWh
+			sumActual += it.ActualWh
+		}
+	}
+	// The calibration is reported over its own fixed window rather than the
+	// caller's, so a short ?days= request cannot make the site look
+	// uncalibrated. "applied" is what actually reaches the forward forecast.
+	cal := s.deps.PVPerf.Calibration()
+	resp := map[string]any{
+		"items":       items,
+		"enabled":     true,
+		"attribution": "Irradiance: SMHI STRÅNG (CC BY 4.0)",
+		"calibration": map[string]any{
+			"factor":    cal.Factor,
+			"sigma_rel": cal.SigmaRel,
+			"days":      cal.Days,
+			"applied":   cal.Valid,
+		},
+	}
+	if sumExpected > 0 {
+		resp["performance_ratio"] = sumActual / sumExpected
+	}
+	writeJSON(w, 200, resp)
+}
+
 // ---- MPC planner ----
 
 func (s *Server) mpcDisabledPayload() map[string]any {
@@ -2960,6 +3262,23 @@ func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 
 // ---- static ----
 
+// staticContentTypes pins the Content-Type of every asset kind the web tree
+// ships. Without it, http.ServeFile asks the operating system's MIME table —
+// the registry on Windows — and a host that maps .mjs (or .js) to text/plain
+// does not merely mislabel the file: the app sends X-Content-Type-Options:
+// nosniff, so the browser is required to refuse it, and the vendored MapLibre
+// dies with "failed to fetch dynamically imported module". ES modules are the
+// strictest case; the rest are pinned so no asset depends on host state.
+var staticContentTypes = map[string]string{
+	".html": "text/html; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".js":   "text/javascript; charset=utf-8",
+	".mjs":  "text/javascript; charset=utf-8",
+	".svg":  "image/svg+xml",
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+}
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if path == "/" {
@@ -2978,6 +3297,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	// Always-revalidate so version bumps land immediately
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(clean))]; ok {
+		w.Header().Set("Content-Type", ct)
+	}
 	http.ServeFile(w, r, clean)
 }
 

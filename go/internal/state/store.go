@@ -991,6 +991,22 @@ func (s *Store) migrate() error {
 			ts_ms      INTEGER NOT NULL,
 			PRIMARY KEY(asset_id, flow, cursor_kind)
 		) WITHOUT ROWID, STRICT`,
+		// Persistent per-day PV performance score: the DC energy the
+		// configured arrays should have produced under measured STRÅNG
+		// irradiance (expected_wh) versus what the site actually generated
+		// (actual_wh, from history), and their ratio. Precious like
+		// energy_daily — closed days are immutable, so a computed score is
+		// cached here forever and never recomputed. pr is null when expected
+		// production was below a meaningful floor (polar-night / near-dark).
+		// strang_data_date_ms records the STRÅNG fetch time for provenance.
+		`CREATE TABLE IF NOT EXISTS pv_performance_daily (
+			day                 TEXT PRIMARY KEY,
+			expected_wh         REAL NOT NULL,
+			actual_wh           REAL NOT NULL,
+			pr                  REAL,
+			strang_data_date_ms INTEGER,
+			computed_at_ms      INTEGER NOT NULL
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -1036,6 +1052,18 @@ func (s *Store) migrate() error {
 			temp_c REAL,
 			solar_wm2 REAL,
 			pv_w_estimated REAL,
+			source TEXT NOT NULL,
+			fetched_at_ms INTEGER NOT NULL
+		)`,
+		// Historical solar irradiance — one row per hour. Backfilled from
+		// SMHI STRÅNG (an analysis product, ~1-day lag) to score realised PV
+		// performance against a weather-expected baseline. Disposable and
+		// re-fetchable, so it lives in cache.db alongside forecasts. dhi_wm2
+		// (diffuse) is null when the source doesn't provide it.
+		`CREATE TABLE IF NOT EXISTS irradiance_history (
+			slot_ts_ms INTEGER PRIMARY KEY,
+			ghi_wm2 REAL NOT NULL,
+			dhi_wm2 REAL,
 			source TEXT NOT NULL,
 			fetched_at_ms INTEGER NOT NULL
 		)`,

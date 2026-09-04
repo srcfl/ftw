@@ -1969,6 +1969,16 @@ footer {
   position: absolute;
   left: 20px;
   top: -4px;
+}
+/* Flipped variant: settings.js adds .help-up when the badge sits low in the
+   scrollable modal body, so the bubble grows into room that exists instead
+   of into the clip edge below. */
+.help.help-up:hover::after {
+  top: auto;
+  bottom: -4px;
+}
+.help:hover::after,
+.help.help-up:hover::after {
   background: var(--ink-elevated);
   border: 1px solid var(--line);
   border-radius: 4px;

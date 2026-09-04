@@ -32,6 +32,7 @@ type Config struct {
 	State            *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
 	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
+	RoofModel        *RoofModel         `yaml:"roofmodel,omitempty" json:"roofmodel,omitempty"`
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
@@ -1440,6 +1441,84 @@ type Price struct {
 	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
 }
 
+// RoofModel configures the optional Lantmäteriet roof-geometry module.
+//
+// Off by default and off the control tick entirely: it runs only when an
+// operator asks for a derive during setup, in its own time-boxed subprocess,
+// and its output only ever pre-fills the editable weather.pv_arrays. Absent or
+// disabled, everything else behaves normally.
+//
+// StacPassword (and its legacy alias GeotorgetToken) is the operator's own
+// credential. It is redacted in API responses.
+type RoofModel struct {
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Command is the interpreter used for the module; defaults to "python3".
+	Command   string `yaml:"command,omitempty" json:"command,omitempty"`
+	ModuleDir string `yaml:"module_dir,omitempty" json:"module_dir,omitempty"`
+
+	// StacUsername/StacPassword authenticate against the STAC catalog as HTTP
+	// Basic auth. Lantmäteriet provides no OAuth for its STAC download APIs,
+	// so for the default Geotorget catalog these are the operator's own
+	// account username and password.
+	StacUsername string `yaml:"stac_username,omitempty" json:"stac_username,omitempty"`
+	StacPassword string `yaml:"stac_password,omitempty" json:"stac_password,omitempty"`
+	// HasStacPassword is set only on the masked copy the API returns, so the
+	// UI can show that a password is stored without ever receiving it. Never
+	// written to YAML and never read from an incoming config.
+	HasStacPassword bool `yaml:"-" json:"has_stac_password,omitempty"`
+
+	// GeotorgetUsername/GeotorgetToken are legacy aliases from when the
+	// credential was assumed to be an issued token rather than the account
+	// password. Still read and still masked; the stac_* keys win if both are
+	// set, and a config saved through the API migrates to the stac_* keys.
+	GeotorgetUsername string `yaml:"geotorget_username,omitempty" json:"geotorget_username,omitempty"`
+	GeotorgetToken    string `yaml:"geotorget_token,omitempty" json:"geotorget_token,omitempty"`
+
+	// StacBaseURL is the root of a STAC API; empty means Lantmäteriet's
+	// catalog. The search and download protocol is standard STAC, so any
+	// catalog that publishes building footprints and LiDAR behind Basic auth
+	// (or none) can be pointed at. Setting a custom URL also lifts the
+	// Sweden-only coverage gate, since FTW cannot know what a third-party
+	// catalog covers.
+	StacBaseURL string `yaml:"stac_base_url,omitempty" json:"stac_base_url,omitempty"`
+	// StacBuildingsCollection / StacLidarCollection name the catalog's
+	// building-footprint and LiDAR collections; empty means the two Geotorget
+	// products.
+	StacBuildingsCollection string `yaml:"stac_buildings_collection,omitempty" json:"stac_buildings_collection,omitempty"`
+	StacLidarCollection     string `yaml:"stac_lidar_collection,omitempty" json:"stac_lidar_collection,omitempty"`
+	// StacBboxEPSG is the CRS of the bbox sent to STAC search. The STAC spec
+	// mandates WGS84 (4326), but Lantmäteriet's catalog expects SWEREF 99 TM
+	// (3006), which is the default here.
+	StacBboxEPSG int `yaml:"stac_bbox_epsg,omitempty" json:"stac_bbox_epsg,omitempty"`
+
+	// RadiusM is how far around the site to pull LiDAR (default 40 m).
+	RadiusM float64 `yaml:"radius_m,omitempty" json:"radius_m,omitempty"`
+	// PackingFactor is the usable fraction of a roof face after ridges, eaves,
+	// chimneys and walkways (default 0.70).
+	PackingFactor float64 `yaml:"packing_factor,omitempty" json:"packing_factor,omitempty"`
+	// TimeoutS bounds a derive. LiDAR tiles are large and this runs on a Pi,
+	// so an unbounded run could sit on memory indefinitely (default 600).
+	TimeoutS int `yaml:"timeout_s,omitempty" json:"timeout_s,omitempty"`
+}
+
+// StacUser returns the catalog username, whichever key it was configured
+// under.
+func (r *RoofModel) StacUser() string {
+	if r.StacUsername != "" {
+		return r.StacUsername
+	}
+	return r.GeotorgetUsername
+}
+
+// StacPass returns the catalog Basic-auth password. The legacy
+// geotorget_token key holds the same secret under an older name.
+func (r *RoofModel) StacPass() string {
+	if r.StacPassword != "" {
+		return r.StacPassword
+	}
+	return r.GeotorgetToken
+}
+
 // Weather is the weather-forecast source config.
 type Weather struct {
 	Provider  string  `yaml:"provider" json:"provider"` // met_no | openweather | open_meteo | forecast_solar | none
@@ -1575,6 +1654,20 @@ func (c Config) MaskSecrets() Config {
 		cp.APIKey = ""
 		out.Assistant = &cp
 	}
+	if out.RoofModel != nil {
+		cp := *out.RoofModel
+		// The UI has to distinguish "no credential stored" from "one is stored
+		// but masked", or an operator cannot tell whether they still need to
+		// paste their Geotorget password in. The masked copy is also folded to
+		// the canonical stac_* keys so the UI reads a single shape however old
+		// the YAML is.
+		cp.StacUsername = cp.StacUser()
+		cp.HasStacPassword = strings.TrimSpace(cp.StacPass()) != ""
+		cp.StacPassword = ""
+		cp.GeotorgetUsername = ""
+		cp.GeotorgetToken = ""
+		out.RoofModel = &cp
+	}
 	if out.Notifications != nil {
 		cp := *out.Notifications
 		if cp.Ntfy != nil {
@@ -1669,6 +1762,13 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.Assistant != nil && existing.Assistant != nil && incoming.Assistant.APIKey == "" {
 		incoming.Assistant.APIKey = existing.Assistant.APIKey
+	}
+	if incoming.RoofModel != nil && existing.RoofModel != nil &&
+		incoming.RoofModel.StacPassword == "" && incoming.RoofModel.GeotorgetToken == "" {
+		// Restore under the canonical key wherever the existing secret lives;
+		// this is also what migrates an old geotorget_token config to
+		// stac_password on its first save through the API.
+		incoming.RoofModel.StacPassword = existing.RoofModel.StacPass()
 	}
 	if incoming.Notifications != nil && existing.Notifications != nil &&
 		incoming.Notifications.Ntfy != nil && existing.Notifications.Ntfy != nil {

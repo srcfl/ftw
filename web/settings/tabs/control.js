@@ -1,4 +1,6 @@
-// Settings → Control tab: site + fuse scalars that feed the PI loop.
+// Settings → Control tab: site + fuse scalars that feed the PI loop,
+// plus the forecast inputs (location, weather source, PV arrays, roof
+// geometry) rendered via tabs/weather.js.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
@@ -81,7 +83,16 @@
           "Headroom below max amps so the inverter's own per-phase limiter doesn't trip first. Defaults to 0.5 A.",
           "0.1") +
         '</div></div>' +
-        '</fieldset>';
+        '</fieldset>' +
+        // The forecast inputs — location, weather source, PV arrays, roof
+        // geometry. The sections are owned by tabs/weather.js, which no
+        // longer has a tab button of its own.
+        ((S.tabs.weather && S.tabs.weather.render) ? S.tabs.weather.render(ctx) : "");
+    },
+    after: function (ctx) {
+      // Wire the forecast-input sections rendered above (map, PV arrays,
+      // roof derivation) — weather.js owns their behaviour.
+      if (S.tabs.weather && S.tabs.weather.after) S.tabs.weather.after(ctx);
     },
   };
 })();

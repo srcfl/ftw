@@ -496,8 +496,9 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 				if p.PVRelativeUncertainty > 0 {
 					spread = relSpread * generation
 				}
-				downsidePV[i] = -math.Max(0, generation-spread)
-				upsidePV[i] = -(generation + spread)
+				// PVBand owns the site-sign mapping: "low" is more negative
+				// (more generation, optimistic), "high" is nearer zero.
+				upsidePV[i], downsidePV[i] = PVBand(slot.PVW, spread)
 			}
 		}
 		if hasDaylight {

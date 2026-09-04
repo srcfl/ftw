@@ -1,4 +1,6 @@
-// Settings → Planner tab: MPC planner scalars.
+// Settings → Planner tab: MPC planner scalars. The forecast inputs the
+// planner consumes (location, weather source, PV arrays, roof geometry)
+// render on the Control tab via tabs/weather.js.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
@@ -71,7 +73,7 @@
         kHtml = '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 8px">PV forecast safety k is not set in YAML. The Plan card slider owns it, anywhere from 0 to 2 in steps of 0.05.</p>' +
           '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
       }
-      return '<fieldset><legend>MPC Planner</legend>' +
+      var mpcHtml = '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
         '<div class="field-row"><div>' +
@@ -81,8 +83,8 @@
         field("Max SoC (0–1)", "planner.soc_max", "number", 0.90,
           "Highest SoC the planner will charge to. 0.90 = 90%.") +
         '</div></div>' +
-        '</fieldset>' +
-        '<details class="engine-details">' +
+        '</fieldset>';
+      var engineHtml = '<details class="engine-details">' +
         '<summary>Engine controls — leave these unless you are debugging.</summary>' +
         '<fieldset><legend>Engine</legend>' +
         '<label>Mapped strategy ' +
@@ -174,9 +176,10 @@
           "The battery won't cycle for grid arbitrage unless the price gain beats this many öre/kWh, on top of round-trip losses. 0 = off. Higher = fewer, deeper cycles. Self-consumption is never affected. Tune empirically.") +
         '</div></div>' +
         '</fieldset>' +
-        '</details>' +
+        '</details>';
+      return mpcHtml + engineHtml +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
-        'The planner requires working price + weather forecasts. When disabled the system runs in the manual mode set on the Control page.' +
+        'The planner reads its forecast inputs — location, weather source, PV arrays, roof geometry — from the Control tab, and needs a working price forecast from the Price tab. When disabled the system runs in the manual mode set on the Control page.' +
         '</p>';
     },
     after: function (ctx) {
@@ -221,6 +224,7 @@
           })
           .catch(function () {}); // unreachable → line stays hidden
       }
+
     },
   };
 

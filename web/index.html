@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FTW</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <!-- Leaflet is lazy-loaded by settings.js when the Weather tab opens
-       the OSM picker — it's not needed on the main dashboard and
-       shipping ~150 KB of JS + CSS to every /status-poll tab is a
-       waste. See web/settings.js::loadLeaflet(). -->
+  <!-- MapLibre GL JS is lazy-loaded by the Control tab when the OSM picker
+       opens — it's not needed on the main dashboard and shipping ~1 MB of
+       JS + CSS to every /status-poll tab is a waste. See
+       web/settings/tabs/weather.js::loadMapLibre(). -->
   <!-- Type: Inter preferred for UI, JetBrains Mono for tabular numerics.
        No external font CDN — the Pi has to boot + render even without
        internet; theme.css's --sans / --mono stacks fall back to the OS's
@@ -37,7 +37,7 @@
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
        themselves are only fetched when something imports
-       them (today: the Settings Weather tab's 3D PV-array preview
+       them (today: the Settings Control tab's 3D PV-array preview
        via ftw-pv-arrays-3d.js, lazy-imported from settings.js).
        Declared here because importmaps must land before any
        <script type="module">. -->
@@ -97,7 +97,6 @@
         <button data-tab="devices">Devices</button>
         <button data-tab="loadpoints">Chargers</button>
         <button data-tab="price">Price</button>
-        <button data-tab="weather">Weather</button>
         <button data-tab="batteries">Batteries</button>
         <button data-tab="planner">Planner</button>
         <button data-tab="app">FTW app</button>
@@ -990,14 +989,14 @@
   <script src="/lan-auth.js?v=lan1"></script>
   <script src="/app.js?v=zones1"></script>
   <script src="/settings.js?v=diag3"></script>
-  <script src="/settings/tabs/control.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/control.js?v=inputs2"></script>
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
   <script src="/settings/tabs/devices.js?v=catcards2"></script>
   <script src="/settings/tabs/loadpoints.js?v=lp7"></script>
   <script src="/settings/tabs/price.js?v=zones1"></script>
-  <script src="/settings/tabs/weather.js?v=osmref1"></script>
+  <script src="/settings/tabs/weather.js?v=arraydraw5"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/planner.js?v=cvxpy1"></script>
+  <script src="/settings/tabs/planner.js?v=inputs2"></script>
   <script src="/settings/tabs/ha.js?v=tabsplit2"></script>
   <script src="/settings/tabs/caldav.js?v=caldav498g"></script>
   <script src="/settings/tabs/app.js?v=applink2"></script>
