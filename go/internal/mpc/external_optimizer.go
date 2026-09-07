@@ -302,19 +302,20 @@ type externalPlan struct {
 }
 
 type externalAction struct {
-	SlotStartMs   int64              `json:"slot_start_ms"`
-	SlotLenMin    int                `json:"slot_len_min"`
-	BatteryW      float64            `json:"battery_w"`
-	GridW         float64            `json:"grid_w"`
-	SoCPct        float64            `json:"soc_pct"`
-	CostOre       float64            `json:"cost_ore"`
-	PVLimitW      float64            `json:"pv_limit_w"`
-	StoragePowerW map[string]float64 `json:"storage_power_w"`
-	StorageEnergy map[string]float64 `json:"storage_energy_wh"`
-	FlexPowerW    map[string]float64 `json:"flex_power_w"`
-	FlexEnergyWh  map[string]float64 `json:"flex_energy_wh"`
-	ThermalPowerW map[string]float64 `json:"thermal_power_w"`
-	ThermalState  map[string]float64 `json:"thermal_state"`
+	SlotStartMs     int64              `json:"slot_start_ms"`
+	SlotLenMin      int                `json:"slot_len_min"`
+	BatteryW        float64            `json:"battery_w"`
+	GridW           float64            `json:"grid_w"`
+	SoCPct          float64            `json:"soc_pct"`
+	CostOre         float64            `json:"cost_ore"`
+	PVLimitW        float64            `json:"pv_limit_w"`
+	PVCurtailActive bool               `json:"pv_curtail_active,omitempty"`
+	StoragePowerW   map[string]float64 `json:"storage_power_w"`
+	StorageEnergy   map[string]float64 `json:"storage_energy_wh"`
+	FlexPowerW      map[string]float64 `json:"flex_power_w"`
+	FlexEnergyWh    map[string]float64 `json:"flex_energy_wh"`
+	ThermalPowerW   map[string]float64 `json:"thermal_power_w"`
+	ThermalState    map[string]float64 `json:"thermal_state"`
 }
 
 func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
@@ -536,6 +537,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
 			SoC: candidate.SoCPct / 100, CostOre: candidate.CostOre,
 			PVLimitW:        candidate.PVLimitW,
+			PVCurtailActive: candidate.PVCurtailActive,
 			StoragePowerW:   candidate.StoragePowerW,
 			StorageEnergyWh: candidate.StorageEnergy,
 		}
@@ -571,12 +573,20 @@ func (o *ExternalOptimizer) Health(ctx context.Context) (OptimizerRuntimeInfo, e
 	return o.transport.Health(ctx)
 }
 
+// solverGridLimitToleranceW admits only sub-watt feasibility residue from the
+// mathematical optimizer. The Go planner still observes the exact slot limits,
+// and dispatch keeps its separate fuse guard.
+const solverGridLimitToleranceW = 0.1
+
 // ValidatePlan independently replays a candidate plan against the canonical
 // site sign convention and current constraints. Solver output is untrusted at
 // this boundary: NaN, stale slot alignment, energy drift, illegal EV steps, or
 // mode/grid-limit violations reject the entire plan.
 func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
-	if plan == nil || len(plan.Actions) != len(slots) {
+	if plan == nil {
+		return errors.New("nil plan")
+	}
+	if len(plan.Actions) != len(slots) {
 		return fmt.Errorf("action count %d, want %d", len(plan.Actions), len(slots))
 	}
 	if len(slots) == 0 {
@@ -614,7 +624,7 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			return fmt.Errorf("slot %d battery_w %.3f exceeds bounds", i, a.BatteryW)
 		}
 		dtH := float64(slot.LenMin) / 60
-		if len(p.Storages) > 0 {
+		if len(p.Storages) > 0 && len(a.StoragePowerW) > 0 {
 			var totalPowerW, totalEnergyWh float64
 			for _, storage := range p.Storages {
 				powerW, powerOK := a.StoragePowerW[storage.ID]
@@ -628,12 +638,8 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				if powerW > storage.MaxChargeW+2 || powerW < -storage.MaxDischargeW-2 {
 					return fmt.Errorf("slot %d storage %s power %.3f exceeds bounds", i, storage.ID, powerW)
 				}
-				energyWh := storageEnergy[storage.ID]
-				if powerW >= 0 {
-					energyWh += powerW * dtH * storage.ChargeEfficiency
-				} else {
-					energyWh += powerW * dtH / storage.DischargeEfficiency
-				}
+				energyWh := storageEnergy[storage.ID] + loadpoint.BatteryEnergyDeltaWh(
+					powerW, dtH, storage.ChargeEfficiency, storage.DischargeEfficiency)
 				energyToleranceWh := math.Max(1, storage.CapacityWh*0.0002)
 				if energyWh < -energyToleranceWh || energyWh > storage.CapacityWh+energyToleranceWh || math.Abs(reportedEnergyWh-energyWh) > energyToleranceWh {
 					return fmt.Errorf("slot %d storage %s energy %.3f inconsistent with replay %.3f", i, storage.ID, reportedEnergyWh, energyWh)
@@ -653,10 +659,14 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				return fmt.Errorf("slot %d aggregate battery_w %.3f, want %.3f", i, a.BatteryW, totalPowerW)
 			}
 			soc = totalEnergyWh / p.CapacityWh
-		} else if a.BatteryW >= 0 {
-			soc += a.BatteryW * dtH * p.ChargeEfficiency / p.CapacityWh
 		} else {
-			soc += a.BatteryW * dtH / p.DischargeEfficiency / p.CapacityWh
+			// Go DP publishes an aggregate trajectory. Replay that fleet
+			// as one battery; per-storage maps are required only when present.
+			if p.CapacityWh <= 0 {
+				return fmt.Errorf("slot %d capacity_wh must be positive to replay aggregate energy", i)
+			}
+			soc += loadpoint.BatteryEnergyDeltaWh(
+				a.BatteryW, dtH, p.ChargeEfficiency, p.DischargeEfficiency) / p.CapacityWh
 		}
 		lowerRecovery := math.Max(0, p.SoCMin-soc)
 		upperRecovery := math.Max(0, soc-p.SoCMax)
@@ -684,17 +694,45 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				eff = 0.9
 			}
 			evSoC[lp.ID] += powerW * dtH * eff / lp.CapacityWh
+			maxSoC := lp.SoCMax
+			if maxSoC <= lp.SoCMin {
+				maxSoC = 1
+			}
+			if evSoC[lp.ID] < -0.0002 || evSoC[lp.ID] > maxSoC+0.0002 {
+				return fmt.Errorf("slot %d loadpoint %s energy exceeds capacity", i, lp.ID)
+			}
 			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.0002 {
 				return fmt.Errorf("slot %d loadpoint %s SoC %.4f inconsistent with replay %.4f", i, lp.ID, reportedSoC, evSoC[lp.ID])
 			}
 			totalLoadpointW += powerW
 		}
+		if a.PVLimitW < 0 || (a.PVLimitW > 0 && a.PVLimitW > -slot.PVW+2) {
+			return fmt.Errorf("slot %d pv_limit_w %.3f exceeds forecast generation %.3f", i, a.PVLimitW, -slot.PVW)
+		}
 		effectivePVW := slot.PVW
-		if a.PVLimitW > 0 {
-			if a.PVLimitW > -slot.PVW+2 {
-				return fmt.Errorf("slot %d pv_limit_w %.3f exceeds forecast generation %.3f", i, a.PVLimitW, -slot.PVW)
+		if a.PVCurtailActive {
+			// Applied cap, including a true zero. GridW must already
+			// include it; this is the optimizer encoding.
+			effectivePVW = loadpoint.EffectivePVW(slot.PVW, a.PVLimitW, true)
+			wantGridW := loadpoint.GridW(slot.LoadW, effectivePVW, a.BatteryW, totalLoadpointW)
+			if math.Abs(a.GridW-wantGridW) > 2 {
+				return fmt.Errorf("slot %d grid balance %.3f, want %.3f", i, a.GridW, wantGridW)
 			}
-			effectivePVW = -a.PVLimitW
+		} else {
+			// Go DP writes a positive PVLimitW as a dispatch hint and
+			// leaves GridW on the uncurtailed identity. An optimizer
+			// that applied a positive cap (legacy, no flag) matches
+			// the curtailed identity instead.
+			uncurtailedGridW := loadpoint.GridW(slot.LoadW, slot.PVW, a.BatteryW, totalLoadpointW)
+			if math.Abs(a.GridW-uncurtailedGridW) > 2 {
+				if a.PVLimitW > 0 {
+					effectivePVW = loadpoint.EffectivePVW(slot.PVW, a.PVLimitW, true)
+				}
+				wantGridW := loadpoint.GridW(slot.LoadW, effectivePVW, a.BatteryW, totalLoadpointW)
+				if math.Abs(a.GridW-wantGridW) > 2 {
+					return fmt.Errorf("slot %d grid balance %.3f, want %.3f", i, a.GridW, wantGridW)
+				}
+			}
 		}
 		for lpIdx, lp := range activeLoadpoints {
 			powerW := a.LoadpointPowerW[lp.ID]
@@ -711,26 +749,13 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				return fmt.Errorf("slot %d battery discharge feeds loadpoint %s", i, lp.ID)
 			}
 		}
-		wantGridW := loadpoint.GridW(slot.LoadW, effectivePVW, a.BatteryW, totalLoadpointW)
-		if math.Abs(a.GridW-wantGridW) > 2 {
-			return fmt.Errorf("slot %d grid balance %.3f, want %.3f", i, a.GridW, wantGridW)
-		}
-		baseGridW := slot.LoadW + effectivePVW + totalLoadpointW
+		baseGridW := loadpoint.GridW(slot.LoadW, effectivePVW, 0, totalLoadpointW)
 		if !modeAllows(p.Mode, baseGridW, a.GridW, a.BatteryW) {
 			return fmt.Errorf("slot %d violates mode %s: baseline_grid_w=%.9f grid_w=%.9f battery_w=%.9f",
 				i, p.Mode, baseGridW, a.GridW, a.BatteryW)
 		}
-		// gridLimitTolW gives the limit check the same ±2 W slack the
-		// battery-power, grid-balance and aggregate-storage checks
-		// carry. A MILP constrained to import ≤ limit legitimately
-		// returns a plan riding the cap, and solver float noise lands
-		// it ~1e-9 W over. Rejection discards the whole plan and
-		// silently degrades the site to the fallback planner — seen in
-		// the field as "slot 34 grid_w 11040.000 violates grid limits"
-		// on an 11 040 W fuse. Validation only: the DP's feasibility
-		// loop generates its own actions and keeps the exact bound.
-		const gridLimitTolW = 2.0
-		if !slot.Limits.allowsImport(a.GridW-gridLimitTolW) || !slot.Limits.allowsExport(a.GridW+gridLimitTolW) {
+		if (slot.Limits.MaxImportW > 0 && a.GridW > slot.Limits.MaxImportW+solverGridLimitToleranceW) ||
+			(slot.Limits.MaxExportW > 0 && a.GridW < -slot.Limits.MaxExportW-solverGridLimitToleranceW) {
 			return fmt.Errorf("slot %d grid_w %.3f violates grid limits", i, a.GridW)
 		}
 		gridKWh := a.GridW * dtH / 1000

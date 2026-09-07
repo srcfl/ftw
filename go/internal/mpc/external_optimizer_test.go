@@ -151,6 +151,48 @@ func TestValidatePlanAcceptsSubWattSolverResidueInPassiveMode(t *testing.T) {
 	}
 }
 
+func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
+	const limitW = 11040.0
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	tests := []struct {
+		name    string
+		gridW   float64
+		wantErr bool
+	}{
+		{name: "import solver residue", gridW: limitW + 0.000001},
+		{name: "export solver residue", gridW: -limitW - 0.000001},
+		{name: "import real violation", gridW: limitW + 1, wantErr: true},
+		{name: "export real violation", gridW: -limitW - 1, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			slot := Slot{
+				StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 50, Confidence: 1,
+				Limits: PowerLimits{MaxImportW: limitW, MaxExportW: limitW},
+			}
+			if tc.gridW > 0 {
+				slot.LoadW = tc.gridW
+			} else {
+				slot.PVW = tc.gridW
+			}
+			costOre := SlotGridCostOre(slot, tc.gridW*0.25/1000, p)
+			plan := Plan{TotalCostOre: costOre, Actions: []Action{{
+				SlotStartMs: 1, SlotLenMin: 15, GridW: tc.gridW,
+				SoC: 0.5, CostOre: costOre,
+			}}}
+			err := ValidatePlan([]Slot{slot}, p, &plan)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidatePlan() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
 	p := Params{

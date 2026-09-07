@@ -18,3 +18,5 @@
 ^Makefile:.*-C "\$\$stage" ftw ftw-backup forty-two-watts.*$
 ^scripts/restore-full-backup\.sh:for candidate in ftw forty-two-watts; do$
 ^README\.md:Existing Forty Two Watts or older FTW deployments must use the$
+# Rust's upstream runtime notices describe third-party licenses, not FTW's license.
+^optimizer/native/bundle/rust-runtime/COPYRIGHT-library\.html:[[:space:]]*This project is triple-licensed under the MIT License, the Apache$

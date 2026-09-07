@@ -1,0 +1,31 @@
+name: native energy worker
+
+on:
+  pull_request:
+    paths:
+      - 'optimizer/native/**'
+      - 'go/internal/mpc/**'
+      - 'Makefile'
+      - '.github/workflows/native-solver.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'optimizer/native/**'
+      - 'go/internal/mpc/**'
+      - 'Makefile'
+      - '.github/workflows/native-solver.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-solver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+      - name: Verify the binary bundle and Core integration
+        run: make native-solver-test

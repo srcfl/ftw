@@ -1,0 +1,4 @@
+# Keep upstream runtime license notices byte for byte.
+bundle/ftw-solver-* binary
+bundle/rust-runtime/** -whitespace linguist-vendored=true
+bundle/THIRD-PARTY-NOTICES.txt linguist-vendored=true

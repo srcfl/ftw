@@ -10,7 +10,13 @@ import numpy as np
 
 from . import SCHEMA_VERSION
 from .deadline import SolveDeadline
-from .model import OPTIMAL_STATUSES, _arbitrage_spread_ore_kwh, _solver_options
+from .model import (
+    OPTIMAL_STATUSES,
+    _arbitrage_spread_ore_kwh,
+    _pv_charge_bonus_ore_kwh,
+    _pv_curtail_output,
+    _solver_options,
+)
 from .protocol import ProtocolError, finite_number
 
 if TYPE_CHECKING:
@@ -53,7 +59,7 @@ def ph_eligible(prepared: "PreparedMultistage") -> tuple[bool, str]:
         return False, "mode is not unconstrained arbitrage"
     if prepared.economic_cvar_weight > 0:
         return False, "economic CVaR couples scenario subproblems"
-    if finite_number(settings.get("pv_charge_bonus_ore_kwh", 0), "settings.pv_charge_bonus_ore_kwh") != 0:
+    if _pv_charge_bonus_ore_kwh(settings, prepared.mode) != 0:
         return False, "PV charge bonus can incentivize simultaneous cycling"
     if np.any(prepared.effective_import < -1e-9):
         return False, "negative import prices require a discrete cycling guard"
@@ -358,6 +364,7 @@ def _response(
         raw_cost = prepared.price[t] * max(grid_kwh, 0.0) - prepared.export_price[t] * max(-grid_kwh, 0.0)
         raw_total_cost += raw_cost
         curtailed_w = max(0.0, float(base_problem.curtail.value[t]))
+        pv_limit_w, pv_curtail_active = _pv_curtail_output(base.pv[t], curtailed_w)
         actions.append(
             {
                 "slot_start_ms": int(slot.get("start_ms", 0)),
@@ -366,7 +373,8 @@ def _response(
                 "grid_w": grid_w,
                 "soc_pct": stored_wh / total_capacity * 100.0,
                 "cost_ore": raw_cost,
-                "pv_limit_w": max(0.0, -base.pv[t] - curtailed_w) if curtailed_w > 1e-5 else 0.0,
+                "pv_limit_w": pv_limit_w,
+                "pv_curtail_active": pv_curtail_active,
                 "storage_power_w": storage_power,
                 "storage_energy_wh": storage_energy,
                 "flex_power_w": {},

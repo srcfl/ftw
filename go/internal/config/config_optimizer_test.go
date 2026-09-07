@@ -87,13 +87,14 @@ func TestPlannerOptimizerConfigValidation(t *testing.T) {
 // and the spellings existing configs already carry still resolve.
 func TestPlannerEngineDefaultsToCore(t *testing.T) {
 	tests := map[string]string{
-		"":       PlannerEngineCore,
-		"core":   PlannerEngineCore,
-		"go":     PlannerEngineCore,
-		"dp":     PlannerEngineCore,
-		"Core":   PlannerEngineCore,
-		"python": PlannerEnginePython,
-		"PYTHON": PlannerEnginePython,
+		"":           PlannerEngineCore,
+		"core":       PlannerEngineCore,
+		"go":         PlannerEngineCore,
+		"dp":         PlannerEngineCore,
+		"Core":       PlannerEngineCore,
+		"python":     PlannerEnginePython,
+		"PYTHON":     PlannerEnginePython,
+		"Energyplan": PlannerEngineEnergyplan,
 	}
 	for value, want := range tests {
 		p := &Planner{Enabled: true, Engine: value}

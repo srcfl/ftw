@@ -35,7 +35,7 @@
     if (!optimizer.configured) {
       return { label: "Core planner", degraded: false, warning: "", lastPlanAtMs: 0 };
     }
-    var runtimeLabel = (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
+    var runtimeLabel = (optimizer.bundled_with_core ? "Energyplan " : "") + (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
     if (optimizer.role === "shadow") runtimeLabel += " · shadow";
     var solverLabel = [solver.engine, solver.backend].filter(Boolean).join(" / ");
     var reason = optimizer.fallback_reason || solver.fallback_reason || optimizer.health_error || optimizer.error || "";
@@ -322,8 +322,9 @@
               '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
                 ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
               '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
-                '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
-                ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
+                '</span><span>' + (optimizer.bundled_with_core ? 'Updates with Core' :
+                '<button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
+                ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '')) + '</span></div>' +
               warningHTML +
               driversHTML +
               actionHTML;

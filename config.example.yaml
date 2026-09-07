@@ -287,7 +287,7 @@ fleet_ping:
 # worker in either role, champion or shadow.
 # planner:
 #   enabled: true
-#   engine: core        # core (default) | python (legacy external champion)
+#   # engine: energyplan # beta default; core or python select those explicitly
 #   shadow_python: true # run the external optimizer after each Core replan on
 #                       # the same inputs and log the terminal-corrected cost
 #                       # difference. Measurement only — never dispatched.

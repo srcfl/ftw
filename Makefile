@@ -153,7 +153,7 @@ ci-hw-pi:
 # verify-all adds cross-compile checks for all release targets, catching
 # platform-specific syscall/import mistakes before push.
 
-verify: test compose-migration-test container-boundary-test release-workflow-test
+verify: test compose-migration-test container-boundary-test release-workflow-test native-solver-test
 	cd go && go vet ./...
 	cd go && go build ./...
 	@echo "verify: vet + test + build clean"
@@ -222,7 +222,7 @@ release: drivers-present build-arm64 build-amd64 build-windows-amd64
 		ln -sf ftw                              "$$stage/forty-two-watts"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
 			-C "$$stage" ftw ftw-backup forty-two-watts \
-			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
+			-C ../.. drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
@@ -235,7 +235,7 @@ release: drivers-present build-arm64 build-amd64 build-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
 	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe ftw-backup.exe forty-two-watts.exe
-	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
+	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
 	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd release && for f in \
 		ftw-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz \
@@ -286,3 +286,12 @@ clean:
 docs:
 	@echo "see docs/ for:"
 	@ls -1 docs/
+
+# Optional proprietary worker: verify bundled artifacts and the Core boundary.
+.PHONY: native-solver-check native-solver-test
+native-solver-check:
+	python3 optimizer/native/verify.py
+	python3 -m unittest discover -s optimizer/native -p verify_test.py
+
+native-solver-test: native-solver-check
+	cd go && FTW_NATIVE_SOLVER="$$(python3 ../optimizer/native/verify.py --host-binary)" go test -count=1 ./internal/mpc -run '^TestNative'
