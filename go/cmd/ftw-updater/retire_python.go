@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -327,10 +326,8 @@ func replaceRetiredCompose(path string, data []byte) error {
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	if stat, ok := st.Sys().(*syscall.Stat_t); ok {
-		if err = f.Chown(int(stat.Uid), int(stat.Gid)); err != nil {
-			return err
-		}
+	if err = preserveFileOwner(f, st); err != nil {
+		return err
 	}
 	if err = f.Chmod(st.Mode().Perm()); err != nil {
 		return err
