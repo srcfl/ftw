@@ -530,7 +530,7 @@ Upstream: https://github.com/Specy/microlp
 Vendored from crates.io microlp 0.6.0.
 Upstream source commit: 22f625e4112967946e9dcd2bc87378424b2d265e
 Crate SHA256: a8f19803f918039a07f3c32b23716824d8f073543417bdac5b1b8619817e3674
-Sourceful modification: simplex deadline polling every 16 instead of 1000 pivots; opt-in diagnostic phase spans.
+Sourceful modification: simplex deadline polling every 16 instead of 1000 pivots; opt-in diagnostic phase spans; a continuous-relaxation clone and fixed-variable bounds; direct adoption of complete warm starts after full bounds/domain/constraint validation.
 The upstream Apache-2.0 license and copyright notices remain in this package.
 
 
