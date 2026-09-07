@@ -16,7 +16,7 @@ never stop local measurement or make dispatch unsafe.
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
-integrations such as Home Assistant, CalDAV, notifications and Nova attach at
+integrations such as Home Assistant, notifications and Nova attach at
 core's API, state or telemetry boundaries; they do not own dispatch safety.
 
 A future module belongs outside core only when it has:

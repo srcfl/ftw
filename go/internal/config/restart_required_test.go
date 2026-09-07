@@ -86,9 +86,6 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"ocpp enabled", func(c *Config) {
 			c.OCPP = &OCPP{Enabled: true, Port: 8887, Username: "ftw", Password: "long-random-string"}
 		}, "ocpp"},
-		{"caldav credentials changed", func(c *Config) {
-			c.CalDAV = &CalDAV{Enabled: true, Username: "calendar-user", Password: "rotated"}
-		}, "caldav"},
 		{"weather provider change", func(c *Config) {
 			c.Weather = &Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18}
 		}, "weather"},

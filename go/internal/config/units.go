@@ -22,10 +22,6 @@ func (c *Config) NormalizeUnits() {
 		p.SoCMinPct = 0
 		p.SoCMaxPct = 0
 	}
-	if c.CalDAV != nil {
-		c.CalDAV.EVDefaultTargetSoC = pickFraction(c.CalDAV.EVDefaultTargetSoC, c.CalDAV.EVDefaultTargetSoCPct)
-		c.CalDAV.EVDefaultTargetSoCPct = 0
-	}
 	if c.V2X != nil {
 		c.V2X.MinReserveSoC = pickFraction(c.V2X.MinReserveSoC, c.V2X.MinReserveSoCPct)
 		c.V2X.DepartureTargetSoC = pickFraction(c.V2X.DepartureTargetSoC, c.V2X.DepartureTargetSoCPct)
