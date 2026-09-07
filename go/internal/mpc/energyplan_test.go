@@ -261,3 +261,18 @@ func TestNativeEnergyplanUsesBoundedFleetBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBatterylessEVBudgetDoesNotInventStorage(t *testing.T) {
+	slots, p := topologyFixture(0, 2)
+	horizon := make([]Slot, 193)
+	for i := range horizon {
+		horizon[i] = slots[0]
+	}
+	if got := energyplanTimeBudget(horizon, p); got != 500*time.Millisecond {
+		t.Fatalf("batteryless EV budget=%v", got)
+	}
+	p.CapacityWh = 20000
+	if got := energyplanTimeBudget(horizon, p); got != 5*time.Second {
+		t.Fatalf("real aggregate battery budget=%v", got)
+	}
+}

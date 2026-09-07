@@ -26,7 +26,11 @@ func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 }
 
 func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
-	assets := 3*max(1, len(p.Storages)) + 2*len(p.activeLoadpoints())
+	batteries := len(p.Storages)
+	if batteries == 0 && p.CapacityWh > 0 {
+		batteries = 1
+	}
+	assets := 3*batteries + 2*len(p.activeLoadpoints())
 	if len(slots)*assets >= 193*6 || p.PVCurtailment.MinW > 0 || p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0 {
 		return 5 * time.Second
 	}
