@@ -1537,6 +1537,7 @@
           fs += '</select></fieldset>';
           slot.innerHTML = fs;
           var select = slot.querySelector(".drv-profile-select");
+          if (select) ctx.rememberFieldValue(select);
           if (select) select.addEventListener("change", function () {
             var selected = profileByValue(profiles, select.value);
             var unitInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.capabilities.modbus.unit_id"]');
