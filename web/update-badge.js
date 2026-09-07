@@ -641,9 +641,8 @@
     _pendingUpdates() {
       const info = this._info || {};
       const core = !!(info.update_available && !info.skipped);
-      const optimizer = false;
       const drivers = this._driverEntries().filter((entry) => entry.pending_update).length;
-      return { core, optimizer, drivers, total: (core ? 1 : 0) + (optimizer ? 1 : 0) + drivers };
+      return { core, drivers, total: (core ? 1 : 0) + drivers };
     }
 
     _render() {
@@ -796,9 +795,7 @@
       `;
     }
 
-    // _channelSectionHTML puts both channel controls side by side. They used
-    // to sit in different parts of the dialog, which left the operator no way
-    // to see that Core and Optimizer can track different channels.
+    // Core's channel includes the bundled Energyplan worker.
     _channelSectionHTML() {
       const info = this._info || {};
       const channels = Array.isArray(info.channels) && info.channels.length
@@ -944,7 +941,6 @@
       const payload = this._components;
       if (!payload) return "";
       const optimizer = payload.optimizer || {};
-      const optimizerCurrent = (optimizer.runtime || {}).version || "";
       const activeSolver = optimizer.active_solver || {};
       const optimizerFallbackActive = !!activeSolver.fallback;
       const optimizerReason = optimizer.fallback_reason || optimizer.health_error || optimizer.error || "";
@@ -998,7 +994,6 @@
       const coreStatus = info.update_available
         ? `<span class="status-pending">${escapeHTML(info.latest || "update")} available</span>`
         : `<span class="dim">up to date</span>`;
-      const optimizerStatus = `<span class="dim">${!optimizer.configured ? "Core DP selected" : optimizer.healthy === false ? "unavailable" : "ready"}</span>`;
 
       // One table listing every component, whether or not it has work waiting.
       // Rows only ever change their status and action cells, so the operator
@@ -1016,12 +1011,6 @@
               <td class="dim mono">${escapeHTML(payload.core && payload.core.version || info.current || "?")}</td>
               <td class="component-status">${coreStatus}</td>
               <td class="component-actions"></td>
-            </tr>
-            <tr class="optimizer-row">
-              <th scope="row">Optimizer</th>
-              <td class="dim mono">${escapeHTML(optimizerCurrent || "not running")}</td>
-              <td class="component-status">${optimizerStatus}</td>
-              <td class="component-actions">Updates with Core</td>
             </tr>
             ${driverRows}
           </tbody>

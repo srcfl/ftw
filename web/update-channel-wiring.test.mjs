@@ -13,7 +13,7 @@ test("update dialog exposes stable and beta as a segmented channel control", () 
 });
 
 test("Energyplan follows Core's update channel", () => {
-  assert.match(badge, /Updates with Core/);
+  assert.doesNotMatch(badge, /optimizer-row|<th scope="row">Optimizer<\/th>/);
   assert.doesNotMatch(badge, /set-optimizer-channel|optimizer-update|optimizer-rollback/);
 });
 
@@ -44,7 +44,6 @@ test("every component keeps a row whether or not it has an update", () => {
   assert.match(badge, /<table class="inventory-table">/);
   assert.match(badge, /<th scope="col">Component<\/th><th scope="col">Version<\/th><th scope="col">Status<\/th>/);
   assert.match(badge, /const coreStatus = info\.update_available/);
-  assert.match(badge, /const optimizerStatus =/);
   // Internal wording that told the operator nothing they could act on.
   assert.doesNotMatch(badge, /safety authority · updated with updater/);
 });

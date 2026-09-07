@@ -16,7 +16,7 @@ func TestRetirePythonPreservesCoreAndCustomServices(t *testing.T) {
 				deps = "      - ftw-optimizer\n      - mqtt"
 			}
 			input := []byte(`services:
-  forty-two-watts:
+  ` + legacyMainServiceName + `:
     image: ghcr.io/srcfl/ftw:v2.15.2-beta.1
     environment:
 ` + env + `

@@ -321,8 +321,6 @@
             el.innerHTML =
               '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
                 ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
-              '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
-                '</span><span>Updates with Core</span></div>' +
               warningHTML +
               driversHTML +
               actionHTML;

@@ -65,7 +65,7 @@ func retiredPythonCompose(data []byte) ([]byte, bool, error) {
 				if name == "ftw-optimizer" {
 					return true
 				}
-				if name != "ftw" && name != "forty-two-watts" {
+				if name != canonicalMainServiceName && name != legacyMainServiceName {
 					return false
 				}
 				prune(service, func(field string, value *yaml.Node) bool {
