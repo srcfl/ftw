@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -92,6 +94,8 @@ func (s *Server) handleDeviceRepositoryInstall(w http.ResponseWriter, r *http.Re
 		return
 	}
 	defer s.driverUpdateMu.Unlock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	started := time.Now()
 	fromVersion := s.activeManagedDriverVersion(r.PathValue("id"))
 	var installed state.DriverRepoInstall
@@ -132,8 +136,8 @@ func (s *Server) handleDeviceRepositoryInstall(w http.ResponseWriter, r *http.Re
 		writeJSON(w, 502, map[string]string{"error": message})
 		return
 	}
-	s.recordDriverUpdate(r.PathValue("id"), "install", fromVersion, installed.Version, "succeeded", "driver restarted with fresh telemetry", started)
-	writeJSON(w, 200, map[string]any{"status": "installed", "artifact": installed})
+	s.recordDriverUpdate(r.PathValue("id"), "install", fromVersion, installed.Version, "succeeded", restartState.message(), started)
+	writeJSON(w, 200, restartState.response("installed", installed))
 }
 
 func (s *Server) handleDeviceRepositoryRollback(w http.ResponseWriter, r *http.Request) {
@@ -150,16 +154,21 @@ func (s *Server) handleDeviceRepositoryRollback(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	if body.LogicalPath == "" {
-		body.LogicalPath = "drivers/" + filepath.Base(r.PathValue("id")) + ".lua"
-	}
 	if !s.driverUpdateMu.TryLock() {
 		writeJSON(w, 409, map[string]string{"error": "another driver update is in progress"})
 		return
 	}
 	defer s.driverUpdateMu.Unlock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	started := time.Now()
 	fromVersion := s.activeManagedDriverVersion(r.PathValue("id"))
+	logicalPath, pathErr := s.activeDriverLogicalPath(r.PathValue("id"), body.LogicalPath)
+	if pathErr != nil {
+		writeJSON(w, 422, map[string]string{"error": pathErr.Error()})
+		return
+	}
+	body.LogicalPath = logicalPath
 	rolledBack, err := s.deps.DriverRepository.Rollback(body.LogicalPath)
 	if err != nil {
 		s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "", "failed", err.Error(), started)
@@ -183,8 +192,8 @@ func (s *Server) handleDeviceRepositoryRollback(w http.ResponseWriter, r *http.R
 		writeJSON(w, 502, map[string]string{"error": message})
 		return
 	}
-	s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, rolledBack.Version, "succeeded", "driver restarted with fresh telemetry", started)
-	writeJSON(w, 200, map[string]any{"status": "rolled_back", "artifact": rolledBack})
+	s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, rolledBack.Version, "succeeded", restartState.message(), started)
+	writeJSON(w, 200, restartState.response("rolled_back", rolledBack))
 }
 
 // Back to the copy that shipped with this build. Rollback steps between
@@ -205,17 +214,26 @@ func (s *Server) handleDeviceRepositoryUseBundled(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	if body.LogicalPath == "" {
-		body.LogicalPath = "drivers/" + filepath.Base(r.PathValue("id")) + ".lua"
-	}
 	if !s.driverUpdateMu.TryLock() {
 		writeJSON(w, 409, map[string]string{"error": "another driver update is in progress"})
 		return
 	}
 	defer s.driverUpdateMu.Unlock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	started := time.Now()
 	fromVersion := s.activeManagedDriverVersion(r.PathValue("id"))
-	bundledPath := filepath.Join(s.deps.DriverDir, filepath.FromSlash(strings.TrimPrefix(body.LogicalPath, "drivers/")))
+	logicalPath, pathErr := s.activeDriverLogicalPath(r.PathValue("id"), body.LogicalPath)
+	if pathErr != nil {
+		writeJSON(w, 422, map[string]string{"error": pathErr.Error()})
+		return
+	}
+	body.LogicalPath = logicalPath
+	bundledPath, err := s.bundledDriverPath(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, 422, map[string]string{"error": err.Error()})
+		return
+	}
 	replaced, err := s.deps.DriverRepository.UseBundled(body.LogicalPath, bundledPath)
 	if err != nil {
 		s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "", "failed", err.Error(), started)
@@ -241,8 +259,8 @@ func (s *Server) handleDeviceRepositoryUseBundled(w http.ResponseWriter, r *http
 		writeJSON(w, 502, map[string]string{"error": message})
 		return
 	}
-	s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "bundled", "succeeded", "bundled driver restarted with fresh telemetry", started)
-	writeJSON(w, 200, map[string]any{"status": "using_bundled"})
+	s.recordDriverUpdate(r.PathValue("id"), "rollback", fromVersion, "bundled", "succeeded", restartState.message(), started)
+	writeJSON(w, 200, restartState.response("using_bundled", nil))
 }
 
 func (s *Server) handleDeviceRepositoryVersions(w http.ResponseWriter, r *http.Request) {
@@ -281,6 +299,8 @@ func (s *Server) handleDeviceRepositoryActivate(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer s.driverUpdateMu.Unlock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	driverID := r.PathValue("id")
 	started := time.Now()
 	fromVersion := s.activeManagedDriverVersion(driverID)
@@ -322,8 +342,8 @@ func (s *Server) handleDeviceRepositoryActivate(w http.ResponseWriter, r *http.R
 		writeJSON(w, 502, map[string]string{"error": message})
 		return
 	}
-	s.recordDriverUpdate(driverID, "activate", fromVersion, activated.Version, "succeeded", "driver restarted with fresh telemetry", started)
-	writeJSON(w, 200, map[string]any{"status": "activated", "artifact": activated})
+	s.recordDriverUpdate(driverID, "activate", fromVersion, activated.Version, "succeeded", restartState.message(), started)
+	writeJSON(w, 200, restartState.response("activated", activated))
 }
 
 func (s *Server) activeManagedDriverVersion(driverID string) string {
@@ -342,66 +362,173 @@ func (s *Server) activeManagedDriverVersion(driverID string) string {
 	return ""
 }
 
-type managedDriverRestartState struct {
-	Originals   []config.Driver
-	ExpectedIDs map[string]string
+// A card may still carry the bundled filename after its first install.
+// Accept that exact alias only when its metadata declares the requested ID.
+func (s *Server) activeDriverLogicalPath(id, requested string) (string, error) {
+	versions, err := s.deps.DriverRepository.InstalledVersions(id)
+	if err != nil {
+		return "", err
+	}
+	for _, version := range versions {
+		if !version.Active {
+			continue
+		}
+		if requested == "" || requested == version.LogicalPath {
+			return version.LogicalPath, nil
+		}
+		if bundled, err := s.bundledDriverPath(id); err == nil {
+			rel, _ := filepath.Rel(s.deps.DriverDir, bundled)
+			if requested == "drivers/"+filepath.ToSlash(rel) {
+				return version.LogicalPath, nil
+			}
+		}
+		return "", fmt.Errorf("path %s does not belong to active driver %s", requested, id)
+	}
+	return "", fmt.Errorf("no active managed artifact for driver %s", id)
 }
 
-// restartManagedDrivers updates only config entries using the activated
-// logical Lua filename. Registry.Restart sends DefaultMode before replacing the
-// VM. The stable active symlink means config remains portable.
+type managedDriverRestartState struct {
+	Originals     []config.Driver
+	ExpectedIDs   map[string]string
+	Restarted     []string
+	LogicalPath   string
+	ConfigChanged bool
+}
+
+func (r managedDriverRestartState) message() string {
+	if len(r.Restarted) == 0 {
+		return "driver artifact selected; no running instances updated"
+	}
+	return fmt.Sprintf("%d driver instances restarted with fresh telemetry", len(r.Restarted))
+}
+
+func (r managedDriverRestartState) response(status string, artifact any) map[string]any {
+	names := append([]string{}, r.Restarted...)
+	return map[string]any{"status": status, "artifact": artifact,
+		"runtime_verified": len(names) > 0, "restarted_drivers": names, "logical_path": r.LogicalPath, "config_changed": r.ConfigChanged}
+}
+
+// The repository verifies DRIVER.id against its signed manifest. Bundled
+// filenames can differ from that ID; punctuation is not an identity mapping.
+func (s *Server) bundledDriverPath(id string) (string, error) {
+	var found string
+	err := filepath.Walk(s.deps.DriverDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || filepath.Ext(path) != ".lua" {
+			return nil
+		}
+		entry, err := drivers.ParseCatalogFile(path)
+		if err != nil || id == "" || entry.ID != id {
+			return nil
+		}
+		if found != "" {
+			return fmt.Errorf("multiple bundled files declare driver %s", id)
+		}
+		found = path
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if found == "" {
+		return "", fmt.Errorf("no bundled file declares driver %s", id)
+	}
+	return found, nil
+}
+
 func (s *Server) restartManagedDrivers(ctx context.Context, artifact state.DriverRepoInstall) (managedDriverRestartState, error) {
 	return s.restartManagedDriversExpected(ctx, artifact, nil)
 }
 
 func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact state.DriverRepoInstall, expectedIDs map[string]string) (managedDriverRestartState, error) {
+	restartState := managedDriverRestartState{ExpectedIDs: expectedIDs, LogicalPath: artifact.LogicalPath}
 	rel := filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/"))
-	activePath := filepath.Join(s.deps.DriverRepository.ActiveDir(), rel)
-	// Rolling back the first managed install removes the entry rather than
-	// swapping it, so there is no artifact and no symlink left to point at.
-	// The driver goes back to the bundled copy, which is where it ran before.
+	activePath := filepath.Join(s.managedDriverDir(), rel)
 	targetPath := activePath
 	if artifact.InstalledPath == "" {
-		targetPath = filepath.Join(s.deps.DriverDir, rel)
+		var err error
+		targetPath, err = s.bundledDriverPath(artifact.DriverID)
+		if err != nil {
+			return restartState, err
+		}
+		rel, _ := filepath.Rel(s.deps.DriverDir, targetPath)
+		restartState.LogicalPath = "drivers/" + filepath.ToSlash(rel)
 	}
-	s.deps.CfgMu.Lock()
+	s.deps.CfgMu.RLock()
+	next := *s.deps.Cfg
+	next.Drivers = append([]config.Driver(nil), next.Drivers...)
+	s.deps.CfgMu.RUnlock()
+	if restartState.ExpectedIDs == nil {
+		restartState.ExpectedIDs = make(map[string]string)
+	}
 	var affected []config.Driver
-	var originals []config.Driver
-	for i := range s.deps.Cfg.Drivers {
-		if filepath.Base(s.deps.Cfg.Drivers[i].Lua) != filepath.Base(activePath) {
+	changed := false
+	for i, current := range next.Drivers {
+		// Files outside the bundled and active roots belong to the operator.
+		if !pathWithin(s.deps.DriverDir, current.Lua) && !pathWithin(s.managedDriverDir(), current.Lua) {
 			continue
 		}
-		// A custom/local absolute path owns its file and always shadows the
-		// repository. Only switch bundled or already-managed copies.
-		current := s.deps.Cfg.Drivers[i].Lua
-		if !pathWithin(s.deps.DriverDir, current) && !pathWithin(s.deps.DriverRepository.ActiveDir(), current) {
+		// UseBundled has removed this exact active link. Its verified install
+		// record still binds the path to the ID; all other files need metadata.
+		if filepath.Clean(current.Lua) != filepath.Clean(activePath) {
+			entry, err := drivers.ParseCatalogFile(current.Lua)
+			if err != nil || artifact.DriverID == "" || entry.ID != artifact.DriverID {
+				continue
+			}
+		}
+		restartState.Originals = append(restartState.Originals, current)
+		next.Drivers[i].Lua = targetPath
+		changed = changed || current.Lua != targetPath
+		if current.Disabled {
 			continue
 		}
-		originals = append(originals, s.deps.Cfg.Drivers[i])
-		s.deps.Cfg.Drivers[i].Lua = targetPath
-		affected = append(affected, s.deps.Cfg.Drivers[i])
-	}
-	s.deps.CfgMu.Unlock()
-	if expectedIDs == nil {
-		expectedIDs = make(map[string]string, len(affected))
-		for _, driver := range affected {
-			expectedIDs[driver.Name] = s.runningDriverIdentity(driver.Name)
+		// Recovery retains the original recipients even if failed init left
+		// one absent from the registry. An initial install does not start a
+		// stopped or disabled instance just to produce a success claim.
+		if expectedIDs == nil {
+			if s.deps.Registry.Env(current.Name) == nil {
+				continue
+			}
+			restartState.ExpectedIDs[current.Name] = s.runningDriverIdentity(current.Name)
+		} else if _, ok := expectedIDs[current.Name]; !ok {
+			continue
 		}
+		affected = append(affected, next.Drivers[i])
 	}
-	restartState := managedDriverRestartState{Originals: originals, ExpectedIDs: expectedIDs}
 	for _, driver := range affected {
 		if err := s.deps.Registry.Restart(ctx, driver); err != nil {
 			return restartState, fmt.Errorf("restart driver %s: %w", driver.Name, err)
 		}
-		if err := s.awaitDriverTelemetry(ctx, driver.Name, expectedIDs[driver.Name]); err != nil {
+		if err := s.awaitDriverTelemetry(ctx, driver.Name, restartState.ExpectedIDs[driver.Name]); err != nil {
 			return restartState, err
 		}
+		restartState.Restarted = append(restartState.Restarted, driver.Name)
+	}
+	// Keep the old config until every recipient has recovered. A save error
+	// follows the same artifact/runtime recovery path as an init error.
+	if changed {
+		if s.deps.SaveConfig == nil {
+			return restartState, errors.New("config persistence unavailable")
+		}
+		if err := s.deps.SaveConfig(s.deps.ConfigPath, &next); err != nil {
+			return restartState, fmt.Errorf("save driver selection: %w", err)
+		}
+		s.deps.CfgMu.Lock()
+		s.deps.Cfg.Drivers = next.Drivers
+		s.deps.Cfg.Revision = next.Revision
+		s.deps.CfgMu.Unlock()
+		restartState.ConfigChanged = true
 	}
 	return restartState, nil
 }
 
 func (s *Server) restoreDriverConfigs(ctx context.Context, originals []config.Driver, expectedIDs map[string]string) error {
 	for _, original := range originals {
+		if _, running := expectedIDs[original.Name]; !running || original.Disabled {
+			continue
+		}
 		s.deps.CfgMu.Lock()
 		for i := range s.deps.Cfg.Drivers {
 			if s.deps.Cfg.Drivers[i].Name == original.Name {
@@ -439,7 +566,7 @@ func pathWithin(root, path string) bool {
 func (s *Server) awaitDriverTelemetry(ctx context.Context, name, expectedID string) error {
 	interval, ok := s.deps.Registry.PollInterval(name)
 	if !ok {
-		return nil
+		return fmt.Errorf("driver %s is not running", name)
 	}
 	window := 2 * interval
 	if window < 30*time.Second {
