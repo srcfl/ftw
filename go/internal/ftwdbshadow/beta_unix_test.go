@@ -115,15 +115,19 @@ func TestBetaMissingSidecarAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitBeta(t, b, func(s BetaStatus) bool { return s.Errors > 0 })
+	started := time.Now()
 	b.Close()
-	if b.Status().Acknowledged != 0 {
-		t.Fatal("missing sidecar reported success")
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("missing sidecar delayed shutdown by %v", elapsed)
+	}
+	if s := b.Status(); s.Acknowledged != 0 || s.Pending != 1 || s.Queued != 0 || s.LastError == "" {
+		t.Fatalf("missing sidecar hid unconfirmed work: %+v", s)
 	}
 }
 
 // The proxy loses one acknowledgement after Rust has made it durable. It keeps
 // the exact Go commit frames so Rust can reconcile the copied points offline.
-func shadowProxy(t *testing.T, target string) (string, func() [][]byte) {
+func shadowProxy(t *testing.T, target string, beforeLostACK ...func()) (string, func() [][]byte) {
 	t.Helper()
 	listener := listenUnix(t)
 	var mu sync.Mutex
@@ -168,6 +172,9 @@ func shadowProxy(t *testing.T, target string) (string, func() [][]byte) {
 					atLimit := len(frames) == 1
 					mu.Unlock()
 					if lose {
+						for _, hook := range beforeLostACK {
+							hook()
+						}
 						return
 					}
 					if health, ok := reply.(HealthResponse); ok && atLimit {

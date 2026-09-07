@@ -8,8 +8,11 @@ models, schedules and control continue to use their current stores.
 
 This is a bounded session recording. It does not copy old data, driver samples,
 SQL imports, retention deletes, the energy ledger or forecast archives. It is
-not a complete replica or a backup. Each Core start has a new session ID. Pending
-memory work can be lost on restart; the SQLite source remains available.
+not a complete replica or a backup. Each Core start has a new session ID. On a
+normal shutdown or update, Core stops hardware before draining pending memory
+work within a two-second I/O budget. An absent or failed sidecar, an exhausted
+budget or an abrupt exit can still leave gaps; SQLite keeps the source data.
+The shutdown log records acknowledged, dropped and still unconfirmed ticks.
 
 ## Enable on a beta test box
 

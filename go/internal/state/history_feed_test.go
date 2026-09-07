@@ -55,3 +55,29 @@ func TestLiveHistoryFeedHasBoundedMemoryAndNoBackpressure(t *testing.T) {
 		t.Fatalf("shadow overload lost SQLite data: %d %v", len(rows), err)
 	}
 }
+
+func TestLiveHistoryFeedStopKeepsQueueAndDoesNotStopSQLite(t *testing.T) {
+	s := freshStore(t)
+	feed := s.ObserveLiveHistory()
+	if err := s.RecordTick(HistoryPoint{TsMs: 1, GridW: 42}, nil); err != nil {
+		t.Fatal(err)
+	}
+	feed.Stop()
+	feed.Stop()
+	for i := 2; i <= 400; i++ {
+		if err := s.RecordTick(HistoryPoint{TsMs: int64(i)}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := feed.Stats(); got.Offered != 1 || got.Queued != 1 || got.Dropped != 0 {
+		t.Fatalf("stopped session changed: %+v", got)
+	}
+	tick := <-feed.Events()
+	if tick.Sequence != 1 || tick.Point.GridW != 42 {
+		t.Fatalf("stop discarded the queue: %+v", tick)
+	}
+	rows, err := s.LoadHistory(0, 500, 0)
+	if err != nil || len(rows) != 400 {
+		t.Fatalf("stopping feed changed SQLite: %d %v", len(rows), err)
+	}
+}

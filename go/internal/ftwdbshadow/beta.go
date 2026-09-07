@@ -16,14 +16,17 @@ import (
 )
 
 const (
-	betaBatchTicks    = 128
-	betaInterval      = 30 * time.Second
-	betaMaxStoreBytes = 512 * 1024 * 1024
+	betaBatchTicks      = 128
+	betaInterval        = 30 * time.Second
+	betaMaxStoreBytes   = 512 * 1024 * 1024
+	betaShutdownTimeout = 2 * time.Second
+	betaShutdownRetry   = 50 * time.Millisecond
 )
 
 // Beta copies numeric site history from successful live SQLite ticks. Each
 // process has a new source ID: this is a measured session, never a full replica.
-// The memory queue may lose work on overload or restart; SQLite keeps the data.
+// Shutdown drains the memory queue within a fixed budget. Overload, failed
+// drains and abrupt exits can leave gaps; SQLite keeps the data.
 type Beta struct {
 	feed   *state.HistoryFeed
 	mu     sync.Mutex
@@ -77,6 +80,8 @@ func Start(ctx context.Context, st *state.Store, socket, siteID, version string)
 	return b
 }
 
+// Close drains the session within a two-second I/O budget. Call after stopping
+// hardware: this optional copy must never delay the safety shutdown path.
 func (b *Beta) Close() {
 	if b.cancel != nil {
 		b.cancel()
@@ -115,6 +120,7 @@ func (b *Beta) failure(err error) {
 func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, interval time.Duration) {
 	timer := time.NewTicker(interval)
 	defer timer.Stop()
+	defer b.logShutdown()
 	var client *Client
 	defer func() {
 		if client != nil {
@@ -123,11 +129,33 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 	}()
 	var pending *PreparedCommit
 	pendingTicks := 0
+	draining, retry := false, false
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
+		if !draining {
+			select {
+			case <-ctx.Done():
+			case <-timer.C:
+			}
+			if ctx.Err() != nil {
+				b.feed.Stop()
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(context.Background(), betaShutdownTimeout)
+				defer cancel()
+				draining, retry = true, false
+			}
+		} else {
+			if err := ctx.Err(); err != nil {
+				b.failure(err)
+				return
+			}
+			if retry {
+				select {
+				case <-ctx.Done():
+					b.failure(ctx.Err())
+					return
+				case <-time.After(betaShutdownRetry):
+				}
+			}
 		}
 		if pending == nil {
 			ticks := make([]state.CommittedHistory, 0, betaBatchTicks)
@@ -141,6 +169,9 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 				}
 			}
 			if len(ticks) == 0 {
+				if draining {
+					return
+				}
 				continue
 			}
 			prepared, err := prepareHistory(config.SourceID, siteID, ticks)
@@ -160,6 +191,10 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 			client, _, err = Connect(ctx, config)
 			if err != nil {
 				b.failure(err)
+				if draining && !ShouldRetry(err) {
+					return
+				}
+				retry = true
 				continue
 			}
 		}
@@ -186,6 +221,10 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 			_ = client.Close()
 			client = nil
 			b.failure(err)
+			if draining && !ShouldRetry(err) {
+				return
+			}
+			retry = true
 			continue
 		}
 		started := time.Now()
@@ -194,6 +233,10 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 			_ = client.Close()
 			client = nil
 			b.failure(err)
+			if draining && !ShouldRetry(err) {
+				return
+			}
+			retry = true
 			continue
 		}
 		now := time.Now()
@@ -208,11 +251,25 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 		b.status.Pending = 0
 		b.mu.Unlock()
 		pending = nil
+		retry = false
 		// The sidecar's idle deadline is shorter than the batch interval.
 		// Start the next batch with a new connection and HELLO.
 		_ = client.Close()
 		client = nil
 	}
+}
+
+func (b *Beta) logShutdown() {
+	s := b.Status()
+	level := slog.LevelInfo
+	if s.Pending != 0 || s.Queued != 0 || s.Dropped != 0 {
+		level = slog.LevelWarn
+	}
+	slog.Log(context.Background(), level, "FTWDB shadow session stopped",
+		"session", s.Session, "offered_ticks", s.Offered,
+		"acknowledged_ticks", s.Acknowledged, "dropped_ticks", s.Dropped,
+		"pending_ticks", s.Pending, "queued_ticks", s.Queued,
+		"unconfirmed_ticks", s.Pending+s.Queued, "last_error", s.LastError)
 }
 
 func historyID(parts ...string) ID128 {
