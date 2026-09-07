@@ -12,7 +12,7 @@ make dispatch unsafe.
 |---|---|---|---|
 | Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
 | Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Optional Python service/process | Solve the long-horizon mathematical plan |
+| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Compiled worker or optional Python service/process | Solve the long-horizon mathematical plan |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
@@ -96,19 +96,17 @@ artifact, while activation remains explicit and atomic. See
 
 ## Optimizer
 
-Core plans. Its DP solves the same problem the Python/CVXPY optimizer does, in
-process, against the per-slot PV downside — measured within öre per plan of the
-external MILP on replayed site snapshots (#1020).
+Beta releases use the bundled Energyplan worker when `planner.engine` is unset
+on a supported host. It solves Core's downside PV forecast. Core validates its
+plan before publishing it, then runs a bounded Core DP shadow on the same input.
+A worker error, timeout or rejected plan invokes Core DP fallback. Core validates
+fallback plans too; a failed validation leaves the prior plan in place.
 
-The Python/CVXPY optimizer is optional and separately deployable. By default it
-runs behind Core as a comparison shadow: after each replan it solves the same
-inputs, and the terminal-corrected cost difference is logged and recorded on
-the diagnostic. Shadow output never reaches dispatch, never delays a replan and
-cannot fail one. `planner.engine: python` restores it as the champion during
-the transition; then core sends a versioned planning request, accepts only a
-complete valid trajectory, and falls back to its own DP if the socket/process
-fails, times out or returns invalid output.
-
+`planner.engine: core`, `python`, or `energyplan` selects an engine explicitly.
+Stable and development builds default to Core. The optional Python worker runs
+as a shadow behind Core unless `planner.shadow_python: false` disables it.
+Energyplan ships as compiled binaries with its own license; source and builds
+stay in the private Energyplan repository. It updates with the Core image.
 The optimizer never reads hardware or issues commands, so its deployment and
 dependency churn do not enlarge the safety-critical runtime.
 

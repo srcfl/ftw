@@ -583,7 +583,10 @@ const solverGridLimitToleranceW = 0.1
 // this boundary: NaN, stale slot alignment, energy drift, illegal EV steps, or
 // mode/grid-limit violations reject the entire plan.
 func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
-	if plan == nil || len(plan.Actions) != len(slots) {
+	if plan == nil {
+		return errors.New("nil plan")
+	}
+	if len(plan.Actions) != len(slots) {
 		return fmt.Errorf("action count %d, want %d", len(plan.Actions), len(slots))
 	}
 	if len(slots) == 0 {
@@ -691,6 +694,13 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				eff = 0.9
 			}
 			evSoC[lp.ID] += powerW * dtH * eff / lp.CapacityWh
+			maxSoC := lp.SoCMax
+			if maxSoC <= lp.SoCMin {
+				maxSoC = 1
+			}
+			if evSoC[lp.ID] < -0.0002 || evSoC[lp.ID] > maxSoC+0.0002 {
+				return fmt.Errorf("slot %d loadpoint %s energy exceeds capacity", i, lp.ID)
+			}
 			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.0002 {
 				return fmt.Errorf("slot %d loadpoint %s SoC %.4f inconsistent with replay %.4f", i, lp.ID, reportedSoC, evSoC[lp.ID])
 			}

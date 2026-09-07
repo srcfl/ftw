@@ -408,12 +408,16 @@ func (t *UnixTransport) cancelRequest(requestID string) error {
 }
 
 func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeInfo, error) {
+	return decodeOptimizerHandshakeFor(line, transport, "ftw-optimizer")
+}
+
+func decodeOptimizerHandshakeFor(line []byte, transport, name string) (OptimizerRuntimeInfo, error) {
 	var info OptimizerRuntimeInfo
 	if err := json.Unmarshal(line, &info); err != nil {
 		return OptimizerRuntimeInfo{}, fmt.Errorf("decode optimizer handshake: %w", err)
 	}
-	if info.Name != "ftw-optimizer" {
-		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer handshake name %q, want %q", info.Name, "ftw-optimizer")
+	if info.Name != name {
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer handshake name %q, want %q", info.Name, name)
 	}
 	// Both mismatches below mean the same thing in the field: the Optimizer
 	// image is older than this Core. Core updates do not touch Optimizer — it

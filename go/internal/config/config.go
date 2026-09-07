@@ -918,10 +918,9 @@ type Planner struct {
 	// BatteryExport is the first-boot battery-sale permission:
 	// unknown | not_allowed | allowed. Live value is SQLite battery_export.
 	BatteryExport string `yaml:"battery_export,omitempty" json:"battery_export,omitempty"`
-	// Engine selects the planner that produces the active plan: "core"
-	// (default) solves in process with the Go DP; "python" hands the
-	// champion role to the CVXPY/HiGHS worker. "go" and "dp" are accepted
-	// spellings of "core". Read it through EngineName.
+	// Engine selects core, python, or energyplan. An unset value uses
+	// Energyplan in beta releases on supported hosts and Core otherwise.
+	// go and dp are aliases for core. The launcher resolves release defaults.
 	Engine string `yaml:"engine,omitempty" json:"engine,omitempty"`
 	// ShadowPython runs the Python/HiGHS worker after each Core replan, on
 	// the inputs the champion solved, and records the terminal-corrected
@@ -1020,19 +1019,21 @@ type Planner struct {
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
-// PlannerEngineCore and PlannerEnginePython are the two planners that can hold
-// the champion role.
+// Planner engines accepted by configuration.
 const (
-	PlannerEngineCore   = "core"
-	PlannerEnginePython = "python"
+	PlannerEngineCore       = "core"
+	PlannerEnginePython     = "python"
+	PlannerEngineEnergyplan = "energyplan"
 )
 
-// EngineName resolves planner.engine to one of the two champions. Unset means
-// core: the Go DP measured within öre of the external MILP on replayed site
-// snapshots, and it needs no sidecar to be running to produce a plan.
+// EngineName resolves an explicit engine. The launcher applies beta defaults
+// before calling this method; an unset value here keeps Core for other callers.
 func (p *Planner) EngineName() string {
 	if p == nil {
 		return PlannerEngineCore
+	}
+	if strings.EqualFold(strings.TrimSpace(p.Engine), PlannerEngineEnergyplan) {
+		return PlannerEngineEnergyplan
 	}
 	if strings.EqualFold(strings.TrimSpace(p.Engine), PlannerEnginePython) {
 		return PlannerEnginePython
@@ -2383,10 +2384,10 @@ func (c *Config) Validate() error {
 			}
 		}
 		switch strings.ToLower(strings.TrimSpace(p.Engine)) {
-		case "", PlannerEngineCore, "go", "dp", PlannerEnginePython:
+		case "", PlannerEngineCore, "go", "dp", PlannerEnginePython, PlannerEngineEnergyplan:
 		default:
-			return fmt.Errorf("planner.engine must be %q or %q, got %q",
-				PlannerEngineCore, PlannerEnginePython, p.Engine)
+			return fmt.Errorf("planner.engine must be %q, %q or %q, got %q",
+				PlannerEngineCore, PlannerEnginePython, PlannerEngineEnergyplan, p.Engine)
 		}
 		switch strings.ToUpper(p.OptimizerSolver) {
 		case "", "HIGHS", "CLARABEL":

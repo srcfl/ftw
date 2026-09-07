@@ -1263,6 +1263,9 @@ func (s *Service) beginReplanLocked(ctx context.Context, reason string) replanRe
 	if s.activeReplanCancel != nil {
 		s.activeReplanCancel()
 	}
+	if usesDownsidePV(s.Optimizer) && s.shadowCancel != nil {
+		s.shadowCancel()
+	}
 	canceledByService := &atomic.Bool{}
 	serviceCancel := func() {
 		canceledByService.Store(true)
@@ -1598,6 +1601,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	var shadowError string
 	publishShadow := false
 	coreChampion := s.Optimizer == nil
+	downsidePrimary := usesDownsidePV(s.Optimizer)
+	if downsidePrimary {
+		slots = fallbackSlots
+	}
 	if coreChampion {
 		// Core is the planner. It solves the downside-PV slots — forecast
 		// minus k·σ per slot — so the plan it publishes is the one that does
@@ -1612,11 +1619,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			return s.canceledReplan(request, "primary-solve")
 		}
 		if err == nil {
-			if recoveryRequired {
+			if recoveryRequired || downsidePrimary {
 				candidate.DPEvaluationShadow = nil
 				candidate.DPShadow = nil
 				candidate.Baselines = nil
-				slog.Info("mpc: skipping Go DP shadows while battery state recovers into operating bounds",
+				slog.Debug("mpc: deferring Core DP comparison",
+					"background", downsidePrimary,
 					"soc_start", p.InitialSoC,
 					"soc_min", p.SoCMin,
 					"soc_max", p.SoCMax)
@@ -1722,7 +1730,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
 			}
-			if recoveryRequired {
+			if recoveryRequired && !downsidePrimary {
 				slog.Error("mpc: primary optimizer failed and Go DP cannot model operating-bound recovery; keeping previous plan",
 					"err", err,
 					"soc_start", p.InitialSoC,
@@ -1885,6 +1893,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// and its actions are read-only from here on.
 	if coreChampion {
 		s.startPythonShadow(plan, slots, p, reason, replanAtMs)
+	} else if downsidePrimary && !plan.Solver.Fallback {
+		s.startCoreDPShadow(plan, slots, p, reason, replanAtMs)
 	}
 	return &plan
 }

@@ -771,12 +771,17 @@ import {
         }
         if (plan.dp_shadow) {
           const shadow = plan.dp_shadow;
-          const deltaSek = (shadow.active_minus_shadow_ore || 0) / 100;
-          const comparison = deltaSek <= 0
+          const energyplan = plan.solver?.backend === 'value_curve_rust';
+          const deltaSek = ((energyplan ? shadow.active_minus_shadow_terminal_corrected_ore : shadow.active_minus_shadow_ore) || 0) / 100;
+          const comparison = shadow.solver?.status === 'rejected' || !shadow.compared_slots
+            ? 'unavailable'
+            : deltaSek <= 0
             ? `${Math.abs(deltaSek).toFixed(2)} ${state.currency} below DP`
             : `${deltaSek.toFixed(2)} ${state.currency} above DP`;
           const shadowTitle =
-            `Legacy DP shadow over ${shadow.compared_slots || 0} slots; ` +
+            `Core DP shadow over ${shadow.compared_slots || 0} slots; ` +
+            (shadow.solver?.fallback_reason ? `${shadow.solver.fallback_reason}; ` : '') +
+            (energyplan ? 'cost includes end-of-horizon stored energy value; ' : '') +
             `mean battery difference ${(shadow.mean_abs_battery_delta_w || 0).toFixed(0)} W; ` +
             `direction disagreements ${shadow.direction_disagreements || 0}; ` +
             `basis: ${shadow.forecast_basis || 'unknown'}. DP does not drive dispatch.`;

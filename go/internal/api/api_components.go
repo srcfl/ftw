@@ -37,6 +37,7 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 		optimizer := map[string]any{
 			"configured":           true,
 			"role":                 role,
+			"bundled_with_core":    s.deps.MPC.OptimizerBundledWithCore(),
 			"protocol_version":     components.OptimizerProtocolVersion,
 			"protocol_min_version": components.OptimizerProtocolMinVersion,
 		}
@@ -52,13 +53,13 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 			} else {
 				optimizer["healthy"] = true
 				optimizer["runtime"] = info
-				if s.deps.OptimizerUpdate != nil {
+				if s.deps.OptimizerUpdate != nil && !s.deps.MPC.OptimizerBundledWithCore() {
 					s.deps.OptimizerUpdate.SetCurrentVersion(info.Version)
 				}
 			}
 		}
 		applyLatestOptimizerPlanStatus(optimizer, s.deps.MPC.Latest())
-		if s.deps.OptimizerUpdate != nil {
+		if s.deps.OptimizerUpdate != nil && !s.deps.MPC.OptimizerBundledWithCore() {
 			if r.URL.Query().Get("force") == "1" {
 				if info, err := s.deps.OptimizerUpdate.Check(r.Context(), true); err != nil {
 					info.Err = err.Error()

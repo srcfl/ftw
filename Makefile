@@ -222,7 +222,7 @@ release: drivers-present build-arm64 build-amd64 build-windows-amd64
 		ln -sf ftw                              "$$stage/forty-two-watts"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
 			-C "$$stage" ftw ftw-backup forty-two-watts \
-			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
+			-C ../.. drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
@@ -235,7 +235,7 @@ release: drivers-present build-arm64 build-amd64 build-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
 	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe ftw-backup.exe forty-two-watts.exe
-	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
+	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
 	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd release && for f in \
 		ftw-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz \

@@ -35,6 +35,7 @@
 package mpc
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"sort"
@@ -593,10 +594,19 @@ func sanitizeOptimizeSlots(slots []Slot) []Slot {
 // For a 96-slot (24h × 15m) horizon with 41 SoC × 21 action levels, that's
 // ~82k evaluations — well under 10ms.
 func Optimize(slots []Slot, p Params) Plan {
+	plan, _ := OptimizeContext(context.Background(), slots, p)
+	return plan
+}
+
+// OptimizeContext bounds background DP work and discards a cancelled solve.
+func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) {
+	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
 	now := time.Now().UnixMilli()
 	slots = sanitizeOptimizeSlots(slots)
 	if len(slots) == 0 || p.CapacityWh <= 0 {
-		return Plan{GeneratedAtMs: now, Mode: p.Mode}
+		return Plan{GeneratedAtMs: now, Mode: p.Mode}, nil
 	}
 	if p.Mode == "" {
 		p.Mode = ModeSelfConsumption
@@ -754,6 +764,9 @@ func Optimize(slots []Slot, p Params) Plan {
 
 	// Backwards induction.
 	for t := N - 1; t >= 0; t-- {
+		if err := ctx.Err(); err != nil {
+			return Plan{}, err
+		}
 		slot := slots[t]
 		dtH := float64(slot.LenMin) / 60.0
 		for si := 0; si < S; si++ {
@@ -1122,7 +1135,7 @@ func Optimize(slots []Slot, p Params) Plan {
 	}
 	plan.TotalCostOre = totalCost
 	annotateCurtailment(&plan, p)
-	return plan
+	return plan, ctx.Err()
 }
 
 // horizonMeans returns the horizon's mean import price and mean export

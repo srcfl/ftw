@@ -2252,31 +2252,33 @@ func main() {
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
-		// Empty means "not known yet", which is the honest answer when the
-		// optimizer is still starting or its handshake is rejected. Claiming
-		// "dev" here made the checker treat the optimizer as older than every
-		// release and light the update badge on an up-to-date stable site.
-		// /api/components calls SetCurrentVersion once a handshake succeeds.
-		optimizerCurrent := ""
-		if worker := mpcSvc.ConfiguredOptimizer(); worker != nil {
-			if health, ok := worker.(interface {
-				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
-			}); ok {
-				healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
-				if runtime, err := health.Health(healthCtx); err == nil && runtime.Version != "" {
-					optimizerCurrent = runtime.Version
+		if !mpcSvc.OptimizerBundledWithCore() {
+			// Empty means "not known yet", which is the honest answer when the
+			// optimizer is still starting or its handshake is rejected. Claiming
+			// "dev" here made the checker treat the optimizer as older than every
+			// release and light the update badge on an up-to-date stable site.
+			// /api/components calls SetCurrentVersion once a handshake succeeds.
+			optimizerCurrent := ""
+			if worker := mpcSvc.ConfiguredOptimizer(); worker != nil {
+				if health, ok := worker.(interface {
+					Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
+				}); ok {
+					healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
+					if runtime, err := health.Health(healthCtx); err == nil && runtime.Version != "" {
+						optimizerCurrent = runtime.Version
+					}
+					healthCancel()
 				}
-				healthCancel()
 			}
+			optimizerUpdater = selfupdate.New(selfupdate.Config{
+				Repo: "srcfl/ftw", Image: "srcfl/ftw-optimizer",
+				ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
+				CurrentVersion: optimizerCurrent,
+				SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+				StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			}, st)
+			optimizerUpdater.Start(ctx)
 		}
-		optimizerUpdater = selfupdate.New(selfupdate.Config{
-			Repo: "srcfl/ftw", Image: "srcfl/ftw-optimizer",
-			ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
-			CurrentVersion: optimizerCurrent,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
-		}, st)
-		optimizerUpdater.Start(ctx)
 		slog.Info("selfupdate enabled",
 			"socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			"channel", selfUpdater.Info().Channel)
@@ -3912,11 +3914,19 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	}
 	svc := mpc.New(st, tel, zone, params)
 	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
-	// Core is the champion (#1020). The external optimizer keeps two roles:
-	// planner.engine: python restores it as champion for the transition, and
-	// planner.shadow_python runs it behind Core as a measurement.
-	engine := pl.EngineName()
-	if engine == config.PlannerEnginePython || pl.ShadowPythonEnabled() {
+	// Release defaults select the beta worker. An explicit engine wins;
+	// the Python comparison only runs behind an explicit/default Core plan.
+	engine := plannerEngine(pl, Version)
+	if engine == config.PlannerEngineEnergyplan {
+		binary := resolveEnergyplanBinary()
+		ext, err := mpc.NewEnergyplanOptimizer(binary)
+		if err != nil {
+			slog.Error("mpc: configure Energyplan failed", "err", err)
+		} else {
+			svc.Optimizer = ext
+			slog.Info("mpc: Energyplan primary with Core DP shadow and fallback", "binary", binary)
+		}
+	} else if engine == config.PlannerEnginePython || pl.ShadowPythonEnabled() {
 		transportMode := pl.OptimizerTransport
 		if fromEnv := os.Getenv("FTW_OPTIMIZER_TRANSPORT"); fromEnv != "" {
 			transportMode = fromEnv
