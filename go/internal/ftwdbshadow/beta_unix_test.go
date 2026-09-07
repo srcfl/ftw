@@ -230,6 +230,57 @@ func startRustShadow(t *testing.T, binary, store, socket string) func(os.Signal)
 	return stop
 }
 
+func TestRustSidecarInteropIdleBetweenLiveBatches(t *testing.T) {
+	binary := os.Getenv("FTWDB_SHADOW_BIN")
+	if binary == "" {
+		t.Skip("set FTWDB_SHADOW_BIN for the pinned Rust gate")
+	}
+	root, err := os.MkdirTemp("/tmp", "ftw-beta-idle-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "run", "shadow.sock")
+	startRustShadow(t, binary, filepath.Join(root, "shadow"), socket)
+	st, err := state.Open(filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	b := runTestBeta(t, st, socket)
+	if err := st.RecordTick(state.HistoryPoint{TsMs: 1000, GridW: 42}, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := waitBeta(t, b, func(s BetaStatus) bool { return s.Acknowledged == 1 })
+	if first.Errors != 0 {
+		t.Fatalf("first batch failed: %+v", first)
+	}
+	// Rust closes idle connections after two seconds. Production batches arrive
+	// every thirty seconds; leave the real server idle beyond its deadline.
+	time.Sleep(3 * time.Second)
+	if err := st.RecordTick(state.HistoryPoint{TsMs: 2000, GridW: 43}, nil); err != nil {
+		t.Fatal(err)
+	}
+	status := waitBeta(t, b, func(s BetaStatus) bool { return s.Acknowledged == 2 })
+	if status.Errors != 0 || status.State != "ok" || status.DurableThrough != 2 || status.Pending != 0 || status.Dropped != 0 {
+		t.Fatalf("idle time caused a failed batch: %+v", status)
+	}
+	b.Close()
+	source := mustID(t, "00112233445566778899aabbccddeeff")
+	client, _, err := Connect(context.Background(), ClientConfig{SocketPath: socket, SourceID: source, NodeID: "check", ClientVersion: "test", IOTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	health, err := client.Health(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.Ops == nil || health.Ops.DatabasePoints != 10 || health.Ops.ProtocolErrorCount != 0 {
+		t.Fatalf("unexpected sidecar health after idle batches: %+v", health.Ops)
+	}
+}
+
 func TestRustSidecarInteropLiveHistory(t *testing.T) {
 	binary := os.Getenv("FTWDB_SHADOW_BIN")
 	reconcile := os.Getenv("FTWDB_RECONCILE_BIN")
