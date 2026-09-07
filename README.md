@@ -220,6 +220,7 @@ metadata are the detailed reference.
 - [Product roadmap](docs/roadmap.md)
 - [Power sign convention](docs/site-convention.md)
 - [Safety invariants](docs/safety.md)
+- [Geographic coverage of external data](docs/data-coverage.md)
 - [Operations and recovery](docs/operations.md)
 - [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)

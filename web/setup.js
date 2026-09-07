@@ -638,16 +638,26 @@
     }
   }
 
+  function syncPriceProviderFields() {
+    var prov = document.getElementById('price-provider').value;
+    var staticEl = document.getElementById('price-static-rate');
+    var zoneEl = document.getElementById('price-zone-display');
+    if (staticEl) staticEl.style.display = prov === 'static' ? 'block' : 'none';
+    if (zoneEl) zoneEl.style.display = prov === 'static' ? 'none' : 'block';
+  }
+
   function prepareIntegrations() {
     var zone = document.getElementById('price-zone').value;
     document.getElementById('price-zone-readonly').value = zone;
 
     populateEVProviders();
     syncEVFields();
+    syncPriceProviderFields();
 
     if (!integrationListenersBound) {
       integrationListenersBound = true;
       document.getElementById('ev-provider').addEventListener('change', syncEVFields);
+      document.getElementById('price-provider').addEventListener('change', syncPriceProviderFields);
       document.getElementById('ha-enabled').addEventListener('change', function () {
         document.getElementById('ha-fields').style.display = this.checked ? 'block' : 'none';
       });
@@ -790,7 +800,11 @@
     var priceProv = document.getElementById('price-provider').value;
     if (priceProv) {
       html += '<div class="review-section"><h3>Price</h3><div class="review-item">';
-      html += esc(priceProv) + ' / ' + esc(zone);
+      if (priceProv === 'static') {
+        html += 'static / ' + esc(document.getElementById('price-static-ore').value);
+      } else {
+        html += esc(priceProv) + ' / ' + esc(zone);
+      }
       html += '</div></div>';
     }
 
@@ -872,10 +886,15 @@
     if (priceProv) {
       cfg.price = {
         provider: priceProv,
-        zone: zone
+        zone: priceProv === 'static' ? 'STATIC' : zone
       };
-      var cur = currencyForZone(zone);
-      if (cur) cfg.price.currency = cur;
+      if (priceProv === 'static') {
+        var rate = parseFloat(document.getElementById('price-static-ore').value);
+        if (!isNaN(rate)) cfg.price.static_ore_kwh = rate;
+      } else {
+        var cur = currencyForZone(zone);
+        if (cur) cfg.price.currency = cur;
+      }
     }
 
     // EV Charger — shape the block to match the provider's transport
