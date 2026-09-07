@@ -8,6 +8,8 @@
 ^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
 ^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
 ^go/cmd/ftw-updater/main\.go:.*legacyMainServiceName.*= "forty-two-watts"$
+# Published compatibility updater image remains supported during migration.
+^go/cmd/ftw-updater/self_replace\.go:.*legacyUpdaterImage.*= "ghcr.io/frahlg/forty-two-watts-updater"$
 ^go/cmd/ftw/main\.go:// caldavUsername resolves the CalDAV username \(default fortytwowatts\)\.$
 ^go/internal/ha/bridge\.go:.*topicPrefix string // stable wire ID, e\.g\. "forty-two-watts"$
 ^scripts/deploy-go\.sh:.*ln -sf ftw forty-two-watts$
