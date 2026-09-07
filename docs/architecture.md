@@ -186,6 +186,11 @@ holds `config_database`, a path relative to that file. Settings saves commit
 the document and credential rows together with SQLite `synchronous=FULL`
 before applying them through [`go/internal/configreload`](../go/internal/configreload).
 The file watcher has been removed; editing the seed does not change live settings.
+The first import keeps older YAML fields so a failed update can return to its
+previous Core image. If that older Core later saves settings, it removes the
+unknown database locator. The next upgrade detects that changed source and
+imports the newer save. An interrupted import with unchanged source bytes
+reuses the committed document.
 An unreadable settings database stops startup instead of restoring old seed values.
 
 The first import needs write access to the seed file so Core can record which

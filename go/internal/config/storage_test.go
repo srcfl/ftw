@@ -1,15 +1,97 @@
 package config
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/state"
+	"gopkg.in/yaml.v3"
 )
+
+func TestImportPreservesLegacySettingsForImageRollback(t *testing.T) {
+	dir := t.TempDir()
+	path, database := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.db")
+	raw := []byte(minimalYAML + "\ncaldav:\n  enabled: true\n  calendar_path: /house/energy/\n  poll_interval_s: 300\n")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := InitializeStorage(path, database, cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous, migrated map[string]any
+	if err := yaml.Unmarshal(raw, &previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(after, &migrated); err != nil {
+		t.Fatal(err)
+	}
+	delete(migrated, "config_database")
+	if !reflect.DeepEqual(previous, migrated) {
+		t.Fatalf("image rollback lost the original YAML settings: before=%v after=%v", previous, migrated)
+	}
+}
+
+func TestUpgradeRetryImportsSettingsSavedByTheRolledBackCore(t *testing.T) {
+	dir := t.TempDir()
+	path, database := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.db")
+	if err := os.WriteFile(path, []byte(minimalYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	first, err := InitializeStorage(path, database, cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Site.Name = "Saved in SQLite"
+	if err := SaveStored(st, path, first); err != nil {
+		t.Fatal(err)
+	}
+	// Older Core ignores config_database, then removes it when saving its own
+	// typed YAML. Its explicit Settings save must survive the next upgrade.
+	oldSave := "site:\n  name: Saved after rollback\nfuse:\n  max_amps: 20\n"
+	if err := os.WriteFile(path, []byte(oldSave), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := InitializeStorage(path, database, legacy, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Site.Name != "Saved after rollback" || retried.Fuse.MaxAmps != 20 || retried.Revision <= first.Revision {
+		t.Fatalf("retry reused stale imported settings: site=%s amps=%v revision=%d", retried.Site.Name, retried.Fuse.MaxAmps, retried.Revision)
+	}
+}
 
 func TestSQLiteImportPreservesConfigAndRuntimeState(t *testing.T) {
 	dir := t.TempDir()
@@ -114,6 +196,9 @@ func TestSQLiteAuthorityNeverFallsBackToYAML(t *testing.T) {
 func TestInterruptedImportReusesCommittedConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(minimalYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
 	database := filepath.Join(dir, "state.db")
 	st, err := state.Open(database)
 	if err != nil {
@@ -126,7 +211,7 @@ func TestInterruptedImportReusesCommittedConfig(t *testing.T) {
 	}
 	cfg.ConfigDatabase = database
 	cfg.Site.Name = "Already committed"
-	if err := SaveStored(st, path, cfg); err != nil {
+	if err := saveStored(st, path, cfg, fmt.Sprintf("%x", sha256.Sum256([]byte(minimalYAML)))); err != nil {
 		t.Fatal(err)
 	}
 	old, err := Parse([]byte(minimalYAML), dir)

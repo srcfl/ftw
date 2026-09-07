@@ -2374,6 +2374,10 @@ func saveAtomic(w durableWriter, path string, c *Config) error {
 	if out.ConfigDatabase != "" {
 		data = append([]byte("# Settings live in SQLite. Use FTW Settings to change them.\n# This file locates the database. The values below are a recovery export.\n"), data...)
 	}
+	return writeConfigAtomic(w, path, data)
+}
+
+func writeConfigAtomic(w durableWriter, path string, data []byte) error {
 	saveMu.Lock()
 	defer saveMu.Unlock()
 
