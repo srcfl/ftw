@@ -430,6 +430,27 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
+	return s.backupToCompressed(dstPath, report, nil)
+}
+
+// BackupWithConfiguration returns settings from the same SQLite snapshot as
+// the archive, so its YAML export remains correct even for an older Core.
+func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	var configuration Configuration
+	var found bool
+	err := s.backupToCompressed(dstPath, report, func(rawPath string) error {
+		var err error
+		configuration, err = ReadConfiguration(rawPath)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		found = err == nil
+		return err
+	})
+	return configuration, found, err
+}
+
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -448,6 +469,11 @@ func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(Backu
 		return fmt.Errorf("backup to %s: %w", rawPath, err)
 	}
 
+	if capture != nil {
+		if err := capture(rawPath); err != nil {
+			return fmt.Errorf("backup settings: %w", err)
+		}
+	}
 	in, err := os.Open(rawPath)
 	if err != nil {
 		return fmt.Errorf("open backup temp: %w", err)

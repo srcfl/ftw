@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -70,6 +71,7 @@ type Manifest struct {
 }
 
 type CreateOptions struct {
+	ConfigPath  string // Defaults to config.yaml inside DataDir.
 	State       *state.Store
 	StatePath   string
 	DataDir     string
@@ -168,7 +170,8 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	defer os.RemoveAll(stageDir)
 	databaseGzip := filepath.Join(stageDir, "database.gz")
-	if err := opts.State.BackupToCompressed(databaseGzip); err != nil {
+	stored, hasStored, err := opts.State.BackupWithConfiguration(databaseGzip, nil)
+	if err != nil {
 		return Info{}, err
 	}
 
@@ -181,6 +184,36 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	sources, err := collectSources(dataDir, statePath, outputDir)
 	if err != nil {
 		return Info{}, err
+	}
+	if hasStored {
+		configPath := opts.ConfigPath
+		if configPath == "" {
+			configPath = filepath.Join(dataDir, "config.yaml")
+		}
+		configPath, err = filepath.Abs(configPath)
+		if err != nil {
+			return Info{}, err
+		}
+		configFile, err := filepath.Rel(dataDir, configPath)
+		if err != nil || configFile == ".." || strings.HasPrefix(configFile, ".."+string(filepath.Separator)) {
+			return Info{}, errors.New("backup config is outside data directory")
+		}
+		databaseRef, err := filepath.Rel(filepath.Dir(configPath), filepath.Join(dataDir, databaseFile))
+		if err != nil {
+			return Info{}, err
+		}
+		exported := filepath.Join(stageDir, "config.yaml")
+		if err := config.ExportStored(exported, stored, databaseRef); err != nil {
+			return Info{}, err
+		}
+		archivePath := "data/" + filepath.ToSlash(configFile)
+		filtered := sources[:0]
+		for _, source := range sources {
+			if source.archivePath != archivePath {
+				filtered = append(filtered, source)
+			}
+		}
+		sources = append(filtered, sourceEntry{archivePath: archivePath, sourcePath: exported})
 	}
 	sources = append(sources, sourceEntry{
 		archivePath: databaseEntry,

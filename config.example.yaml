@@ -1,3 +1,5 @@
+# First boot imports this file into SQLite. After import, use FTW Settings.
+# Core records config_database here; later edits to these values do not reload.
 # FTW config example
 # Copy to config.yaml and edit for your site.
 

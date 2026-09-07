@@ -41,7 +41,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
-	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
@@ -362,7 +361,7 @@ func main() {
 
 	// Route "drivers/<name>.lua" path resolution through the drivers dir
 	// (from -drivers). Picked up by both the initial Load below and every
-	// subsequent reload via the file watcher.
+	// subsequent config load.
 	config.DriversDirOverride = resolveDriverDir()
 	// UserDriversDirOverride is the persistent overlay — probed first.
 	// Empty when -user-drivers is not supplied (back-compat).
@@ -396,6 +395,9 @@ func main() {
 		if cfg.State.ColdDir != "" {
 			coldDir = cfg.State.ColdDir
 		}
+	}
+	if cfg.ConfigDatabase != "" {
+		statePath = cfg.ConfigDatabase
 	}
 	// Resolve to absolute so paths derived via filepath.Dir(statePath)
 	// (SnapshotDir, nova.key) don't end up cwd-relative on native installs
@@ -454,6 +456,11 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	cfg, err = config.InitializeStorage(*configPath, statePath, cfg, st)
+	if err != nil {
+		slog.Error("initialize config database", "err", err)
+		os.Exit(1)
+	}
 
 	// The repository is entirely local on startup: existing active symlinks are
 	// usable offline and remote refresh never blocks core boot.
@@ -485,13 +492,6 @@ func main() {
 		slog.Warn("failed to persist startup event", "err", err)
 	}
 
-	// ---- Restore EV charger password from state.db (not stored in YAML) ----
-	if cfg.EVCharger != nil {
-		if pw, ok := st.LoadConfig("ev_charger_password"); ok {
-			cfg.EVCharger.Password = pw
-		}
-	}
-
 	// ---- Telemetry store ----
 	tel := telemetry.NewStore()
 
@@ -519,14 +519,13 @@ func main() {
 	trust, export, safetyK, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, storedSafetyK, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
 	plannerPrefs := config.NewPlannerPrefs(trust, export, safetyK)
 	if missingPrefs {
-		if err := st.SaveConfig(config.StateKeySafetyK, config.FormatSafetyK(safetyK)); err != nil {
-			slog.Warn("failed to persist planner_safety_k", "err", err)
-		}
-		if err := st.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {
-			slog.Warn("failed to persist forecast_trust", "err", err)
-		}
-		if err := st.SaveConfig(config.StateKeyBatteryExport, string(export)); err != nil {
-			slog.Warn("failed to persist battery_export", "err", err)
+		if err := st.SaveConfigValues(map[string]string{
+			config.StateKeySafetyK:       config.FormatSafetyK(safetyK),
+			config.StateKeyForecastTrust: string(trust),
+			config.StateKeyBatteryExport: string(export),
+		}); err != nil {
+			slog.Error("save planner preferences", "err", err)
+			os.Exit(1)
 		}
 	}
 	if ctrl.Mode == control.ModePlannerArbitrage && export != config.BatteryExportAllowed {
@@ -692,15 +691,9 @@ func main() {
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
 
-	// Durable secret write-back for drivers (rotated OAuth refresh tokens).
-	// Drivers call host.persist_secret(key, value); the registry routes it
-	// here with the driver's name. We write to the state KV store — NOT
-	// config.yaml — on purpose: config.yaml is watched by configreload, and
-	// rewriting it on every token rotation would restart the driver, which
-	// re-auths, rotates again, and loops. SecretOverride then layers these
-	// KV values back over config.yaml at driver_init, so the freshest token
-	// always reaches the driver while config.yaml keeps the bootstrap seed
-	// the UI renders as "saved".
+	// Rotated driver tokens keep their own KV rows. Rotation must not apply the
+	// whole config or restart a driver that just refreshed its credential.
+	// SecretOverride supplies the newest token when the driver next starts.
 	driverSecretKey := func(driverName, key string) string {
 		return "driver_secret:" + driverName + ":" + key
 	}
@@ -714,8 +707,7 @@ func main() {
 	// Pre-declare services that the hot-reload Applier needs to touch.
 	// The Applier closure captures these by reference; they're assigned
 	// further down when their packages are wired, and the Applier only
-	// ever fires after `watcher.Start()` — by which point everything is
-	// in place.
+	// receives requests after the runtime is ready.
 	var pvSvc *pvmodel.Service
 	var forecastSvc *forecast.Service
 	var forecastConfigMu sync.RWMutex
@@ -886,24 +878,16 @@ func main() {
 	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
 
-	// Forward-declared before the reload watcher so the reload callback
+	// Forward-declared so the saved-config callback
 	// can keep the loadpoint controller's per-phase EV fuse clamp in sync
 	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
 	var lpController *loadpoint.Controller
 
-	// ---- Config hot-reload watcher ----
-	// Named because two callers share it: the fsnotify watcher created
-	// below and POST /api/config (Deps.ConfigApplier), so a config saved
-	// through the API is applied exactly like an edit of the file (#760).
+	// ---- Apply saved configuration ----
+	// Settings commit to SQLite before this callback applies them.
 	applyConfigChange := func(newCfg, oldCfg *config.Config) {
 		forecastConfigMu.Lock()
 		defer forecastConfigMu.Unlock()
-		// Restore EV charger password from state.db (not in YAML).
-		if newCfg.EVCharger != nil {
-			if pw, ok := st.LoadConfig("ev_charger_password"); ok {
-				newCfg.EVCharger.Password = pw
-			}
-		}
 		// Driver paths are already resolved by config.Load; no extra
 		// work needed here. Re-apply the battery SoC-window → driver
 		// config mapping so a hot-edited soc_max reaches the driver too.
@@ -992,7 +976,7 @@ func main() {
 			})
 		}
 
-		// Site-meter swap propagation. The configreload watcher
+		// Site-meter swap propagation. The config apply callback
 		// already updated ctrl.SiteMeterDriver under ctrlMu before
 		// this applier ran, so the dispatch loop reads from the
 		// right driver from the next tick. Two more sites cached
@@ -1114,13 +1098,6 @@ func main() {
 		applyForecastModelBinding()
 
 	}
-	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl, applyConfigChange)
-	if err != nil {
-		slog.Warn("could not start config watcher", "err", err)
-	} else {
-		defer watcher.Stop()
-	}
-
 	// ---- Spot prices + weather forecast (optional, nil if not configured) ----
 	// ---- FX rates (ECB, daily) — harmless to run even for SE-only users ----
 	fxSvc := currency.New(st)
@@ -2374,7 +2351,7 @@ func main() {
 		Models:              models, ModelsMu: modelsMu,
 		SelfTune:          selfTune,
 		DtS:               float64(cfg.Site.ControlIntervalS),
-		SaveConfig:        config.SaveAtomic,
+		SaveConfig:        func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
 		WebDir:            *webDir,
 		ColdDir:           coldDir,
 		DataDir:           dataDir,
@@ -2385,7 +2362,7 @@ func main() {
 		// docker-compose deploys only need one bind (./data). Derived
 		// from the state.db path rather than the config path because
 		// `state.db` is always in the main data volume; the config
-		// can legitimately live elsewhere (e.g. mounted RO from /etc).
+		// can live elsewhere after its one-time migration.
 		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
@@ -2632,7 +2609,7 @@ func main() {
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
 	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
-	// the configreload watcher updates those fields directly, so a
+	// the config apply callback updates those fields directly, so a
 	// startup snapshot here would go stale on the first hot-reload.
 	dtS := float64(cfg.Site.ControlIntervalS)
 	// Every dispatch command carries its own deadline — see
@@ -2645,10 +2622,6 @@ func main() {
 	// Graceful shutdown
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
-
-	if watcher != nil {
-		watcher.Start()
-	}
 
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
@@ -3595,7 +3568,7 @@ func activeBatteryBoostTotals(controller *loadpoint.Controller, states []loadpoi
 
 // buildLoadpointConfigs adapts YAML-facing config.Loadpoint entries
 // into the internal loadpoint.Config shape. Shared between initial
-// boot and the hot-reload watcher so the two paths can't drift.
+// boot and config saves so the two paths cannot drift.
 func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 	out := make([]loadpoint.Config, 0, len(src))
 	for _, lp := range src {

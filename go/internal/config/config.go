@@ -52,7 +52,10 @@ type Config struct {
 	// Validate directly and stays strict. Never serialized.
 	LoadWarnings []string `yaml:"-" json:"-"`
 	// Used once at startup to end an old calendar's persisted away selection.
-	RetiredCalendarEnabled bool `yaml:"-" json:"-"`
+	RetiredCalendarEnabled bool   `yaml:"-" json:"-"`
+	ConfigDatabase         string `yaml:"config_database,omitempty" json:"-"`
+	Revision               int64  `yaml:"-" json:"-"`
+	LANPasswordHash        string `yaml:"-" json:"-"`
 }
 
 // OCPP configures the built-in OCPP 1.6J and 2.0.1 Central System. Chargers connect to
@@ -1418,6 +1421,9 @@ func (c Config) MaskSecrets() Config {
 // wherever the incoming value is empty (the UI sends "" for masked fields).
 // Call this before saving a config received from the API.
 func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
+	incoming.ConfigDatabase = existing.ConfigDatabase
+	incoming.Revision = existing.Revision
+	incoming.LANPasswordHash = existing.LANPasswordHash
 	if incoming.EVCharger != nil && existing.EVCharger != nil && incoming.EVCharger.Password == "" {
 		incoming.EVCharger.Password = existing.EVCharger.Password
 	}
@@ -1495,6 +1501,23 @@ func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var source struct {
+		Database string `yaml:"config_database"`
+	}
+	if err := yaml.Unmarshal(data, &source); err != nil {
+		return nil, fmt.Errorf("config source: %w", err)
+	}
+	if source.Database != "" {
+		database := source.Database
+		if !filepath.IsAbs(database) {
+			database = filepath.Join(filepath.Dir(path), database)
+		}
+		database, err = filepath.Abs(database)
+		if err != nil {
+			return nil, err
+		}
+		return loadStored(database, filepath.Dir(path))
 	}
 	return Parse(data, filepath.Dir(path))
 }
@@ -2347,6 +2370,9 @@ func saveAtomic(w durableWriter, path string, c *Config) error {
 	data, err := yaml.Marshal(&out)
 	if err != nil {
 		return fmt.Errorf("yaml marshal: %w", err)
+	}
+	if out.ConfigDatabase != "" {
+		data = append([]byte("# Settings live in SQLite. Use FTW Settings to change them.\n# This file locates the database. The values below are a recovery export.\n"), data...)
 	}
 	saveMu.Lock()
 	defer saveMu.Unlock()
