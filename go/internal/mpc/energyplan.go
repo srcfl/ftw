@@ -2,7 +2,6 @@ package mpc
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"time"
 )
@@ -26,9 +25,6 @@ func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 }
 
 func (o *EnergyplanOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
-	if planningParamsRequireRecovery(p) {
-		return Plan{}, errors.New("Energyplan is waiting for battery SoC to return to its operating band; Core DP plans recovery")
-	}
 	// Service has already applied the risk margin to these slots. Do not
 	// construct a second scenario model for this deterministic solver.
 	p.PVUncertaintyW, p.PVRelativeUncertainty, p.PVForecastSafetyK = 0, 0, 0

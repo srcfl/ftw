@@ -3,6 +3,7 @@ package mpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"sync/atomic"
@@ -57,7 +58,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.1.1" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.1.2" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
 	}
 	svc.PVUncertaintyW = func() float64 { return 200 }
@@ -119,20 +120,27 @@ func TestCoreDPShadowDoesNotAttachToNewerPlan(t *testing.T) {
 }
 
 func TestNativeEnergyplanRecoveryKeepsRealBatteryEnergy(t *testing.T) {
-	o := nativeWorker(t, 500*time.Millisecond)
-	t.Cleanup(func() { o.Close() })
-	svc := shadowTestService(t)
-	svc.Defaults.InitialSoC = .025
-	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
-	plan := svc.Replan(context.Background())
-	if plan == nil || !plan.Solver.Fallback || plan.InitialSoC != .025 {
-		t.Fatalf("recovery must keep real SoC and report fallback: %+v", plan)
-	}
-	if err := ValidatePlan(svc.lastSlots, svc.lastParams, plan); err != nil {
-		t.Fatal(err)
-	}
-	if plan.Actions[0].BatteryW < 0 {
-		t.Fatal("recovery discharged below floor")
+	for _, initial := range []float64{0, .025, .975, 1} {
+		t.Run(fmt.Sprint(initial), func(t *testing.T) {
+			o := nativeWorker(t, 500*time.Millisecond)
+			t.Cleanup(func() { o.Close() })
+			svc := shadowTestService(t)
+			svc.Defaults.InitialSoC = initial
+			svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
+			plan := svc.Replan(context.Background())
+			if plan == nil || plan.Solver.Fallback || plan.Solver.Backend != "value_curve_rust" || plan.InitialSoC != initial {
+				t.Fatalf("Energyplan must plan from real SoC without fallback: %+v", plan)
+			}
+			if err := ValidatePlan(svc.lastSlots, svc.lastParams, plan); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "recovery Core DP shadow", func() bool { return svc.Latest().DPShadow != nil })
+			svc.shadowWG.Wait()
+			shadow := svc.Latest().DPShadow
+			if shadow.Solver.Engine != "core" || shadow.ComparedSlots != len(plan.Actions) {
+				t.Fatalf("recovery shadow unavailable: %+v", shadow)
+			}
+		})
 	}
 }
 
@@ -144,6 +152,29 @@ func TestNativeEnergyplanRejectsUnsafeFallback(t *testing.T) {
 	svc.BaseLoad, svc.FuseMaxW = 20000, 1000
 	if plan := svc.Replan(context.Background()); plan != nil {
 		t.Fatalf("infeasible worker and unsafe DP fallback published: %+v", plan)
+	}
+}
+
+func TestNativeEnergyplanRecoveryWithEV(t *testing.T) {
+	o := nativeWorker(t, 500*time.Millisecond)
+	t.Cleanup(func() { o.Close() })
+	for _, mode := range []Mode{ModeArbitrage, ModeSelfConsumption, ModePassiveArbitrage, ModeCheapCharge} {
+		for _, initial := range []float64{.025, .975} {
+			slots, p := nativeFixture()
+			p.Mode, p.InitialSoC = mode, initial
+			slots[0].PVW = -4500
+			slots[0].PriceOre, slots[0].SpotOre = -10, -30
+			plan, err := o.Optimize(context.Background(), slots, p)
+			if err != nil {
+				t.Fatalf("mode=%s soc=%f: %v", mode, initial, err)
+			}
+			if err := ValidatePlan(slots, p, &plan); err != nil {
+				t.Fatalf("mode=%s soc=%f: %v", mode, initial, err)
+			}
+			if plan.InitialSoC != initial || plan.Solver.Fallback || plan.Actions[1].LoadpointSoC < p.Loadpoint.TargetSoC {
+				t.Fatalf("recovery lost real energy or EV target: %+v", plan)
+			}
+		}
 	}
 }
 

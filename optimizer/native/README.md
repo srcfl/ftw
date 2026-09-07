@@ -41,10 +41,11 @@ plan, one Core DP shadow runs with a 10 s limit. Its result appears in
 Both plans use Core's grid cost model, with a separate terminal-energy-adjusted
 comparison. A failed comparison reports `rejected`, without a cost verdict.
 
-Core validates fallback plans too. A battery outside its operating band uses
-Core recovery with a visible Energyplan fallback reason until it returns to the
-band. The compiled worker updates with Core; Python sidecar updates do not
-replace it.
+Energyplan plans from the measured battery energy, including starts below the
+reserve or above the charge limit. Each action must hold or reduce any existing
+violation; after recovery the plan must stay within the configured limits.
+Core independently checks that recovery and validates fallback plans too.
+The compiled worker updates with Core; Python sidecar updates do not replace it.
 
 Supported requests contain one battery and at most one EV per site, with the
 four existing modes, physical limits, negative tariffs and an EV deadline.
