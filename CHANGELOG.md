@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.16.1
+
+### Patch Changes
+
+- 63185d0: Keep complete errors and backup paths visible when retiring Python, and find the installed updater even when its Compose service has a custom name.
+
 ## 2.16.0
 
 ### Minor Changes
