@@ -45,10 +45,7 @@ type forecastCandidate interface {
 }
 
 type forecastJob struct {
-	issue          forecasting.Issue
-	site           forecastSite
-	candidateState json.RawMessage
-	away           map[int64]bool
+	issue forecasting.Issue
 }
 
 type forecastTracker struct {
@@ -118,8 +115,8 @@ func (f *forecastTracker) run(ctx context.Context) {
 		f.mu.Lock()
 		f.stopped = true
 		f.mu.Unlock()
-		// Finish archiving already issued champion forecasts under a fresh bounded
-		// context. Candidate work can be recreated; issued inputs cannot.
+		// Finish archiving the already issued primary and shadow together under
+		// a fresh bounded context. Their frozen inputs cannot be recreated.
 		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		save := func(job forecastJob) {
@@ -160,22 +157,6 @@ func (f *forecastTracker) run(ctx context.Context) {
 				continue
 			}
 			pending = nil
-			if f.candidate != nil {
-				workCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				candidate, err := f.candidate.Predict(workCtx, job.site, job.issue, job.candidateState, job.away)
-				cancel()
-				if err != nil {
-					slog.Debug("forecast candidate unavailable", "err", err)
-					continue
-				}
-				f.applyBands(&candidate)
-				writeCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
-				err = f.store.SaveForecastIssue(writeCtx, candidate)
-				cancel()
-				if err != nil {
-					slog.Warn("forecast archive: candidate not saved", "err", err)
-				}
-			}
 		case now := <-tick.C:
 			f.observe(ctx, now)
 		}
@@ -441,8 +422,7 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 		}
 		return m.Predict(t, temp)
 	}
-	in := mpc.ForecastInputs{PV: pvFn, PVResidualCorrect: pv.ResidualCorrect, Load: loadFn,
-		PVUncertaintyW: pv.ResidualStdW(origin), PVRelativeUncertainty: pv.RelativeUncertainty(), Weather: frozen}
+	in := mpc.ForecastInputs{PV: pvFn, PVResidualCorrect: pv.ResidualCorrect, Load: loadFn, Weather: frozen}
 	in.PVWeight = func(t time.Time) float64 {
 		if !site.HasPVScale {
 			return 1
@@ -494,32 +474,9 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 			latest = max(latest, e.AvailableAtMS)
 		}
 	}
-	// Calibrated net error uses the same issued champion, including its actual
-	// blend. Prior uncertainty remains explicit until held-out evidence exists.
-	in.Risk = func(base, planning []mpc.Slot, k float64) {
-		if k <= 0 || math.IsNaN(k) || math.IsInf(k, 0) {
-			return
-		}
-		for i, s := range base {
-			net := s.LoadW + s.PVW
-			end := s.StartMs + int64(s.LenMin)*time.Minute.Milliseconds()
-			band := calibrator.BandForInterval("champion", "net", s.StartMs, end, net)
-			if band.Method == forecasting.BandMethodEmpirical {
-				extra := math.Max(0, k*(band.HighW-net))
-				pvLoss := math.Min(-s.PVW, extra)
-				planning[i].PVW = s.PVW + pvLoss
-				planning[i].LoadW = s.LoadW + extra - pvLoss
-			} else if pv.RelativeUncertainty() <= 0 && pv.ResidualStdW(origin) <= 0 {
-				// An empty residual window is not certainty. This prior only
-				// reduces existing generation; it never creates solar at night.
-				loss := math.Min(-s.PVW, k*.5*(-s.PVW))
-				planning[i].PVW = s.PVW + loss
-			}
-		}
-	}
-	in.Record = func(base, planning []mpc.Slot, decisionID string, issued int64) {
-		issue := forecasting.Issue{Schema: forecasting.Schema, ID: uuid.NewString(), DecisionID: decisionID,
-			OriginMS: origin.UnixMilli(), IssuedAtMS: issued, LatestInputMS: latest, ConfigVersion: site.Revision, Site: forecastSiteContext(site), Models: cloneForecastModels(models)}
+	makeIssue := func(base []mpc.Slot, issued int64) forecasting.Issue {
+		issue := forecasting.Issue{Schema: forecasting.Schema, ID: uuid.NewString(),
+			OriginMS: origin.UnixMilli(), IssuedAtMS: max(issued, origin.UnixMilli()), LatestInputMS: latest, ConfigVersion: site.Revision, Site: forecastSiteContext(site), Models: cloneForecastModels(models)}
 		for i := 0; i < 193; i++ {
 			at := start.Add(time.Duration(i) * 15 * time.Minute).UnixMilli()
 			issue.Occupancy = append(issue.Occupancy, forecasting.Occupancy{StartMS: at, EndMS: at + 900000, AvailableAtMS: issue.OriginMS, Home: !away[at]})
@@ -541,10 +498,131 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 				AvailableAtMS: r.FetchedAtMs, Source: r.Source, GHIWm2: r.SolarWm2, CloudPct: r.CloudCoverPct, TempC: r.TempC, DirectPVW: directPV, EstimatedPVW: r.PVWEstimated})
 		}
 		issue.Series = append(issue.Series, forecasting.Series{Name: "champion", ModelVersion: forecastModelRevision(models), Points: forecastPoints(base, frozen, site, origin, load)})
-		issue.Series = append(issue.Series, forecasting.Series{Name: "planning", ModelVersion: forecastModelRevision(models), Points: forecastPoints(planning, frozen, site, origin, load)})
+		return issue
+	}
+	candidate := f.candidate
+	var legacy []mpc.Slot
+	var prediction *forecasting.Issue
+	var selected []forecasting.Point
+	in.Resolve = func(ctx context.Context, base []mpc.Slot) []mpc.Slot {
+		legacy = append([]mpc.Slot(nil), base...)
+		issued := makeIssue(base, origin.UnixMilli())
+		selected = append([]forecasting.Point(nil), issued.Series[0].Points...)
+		for i := range selected {
+			selected[i].PVSource, selected[i].LoadSource = "legacy", "legacy"
+		}
+		prediction = nil
+		if candidate == nil {
+			return append([]mpc.Slot(nil), base...)
+		}
+		workCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		out, err := candidate.Predict(workCtx, site, issued, candidateState, away)
+		if err == nil {
+			err = workCtx.Err()
+		}
+		if err != nil {
+			slog.Debug("primary forecast unavailable; using legacy", "err", err)
+			return append([]mpc.Slot(nil), base...)
+		}
+		// The worker client validates its wire response. The host also binds the
+		// completed forecast to this capture before it can alter planner inputs.
+		if out.OriginMS != issued.OriginMS || out.ConfigVersion != issued.ConfigVersion || out.LatestInputMS > issued.OriginMS || len(out.Series) != 1 || out.Series[0].Name != "energyplan" {
+			slog.Warn("primary forecast binding invalid; using legacy")
+			return append([]mpc.Slot(nil), base...)
+		}
+		applyForecastBandsWith(&out, calibrator)
+		if err := out.Validate(); err != nil {
+			slog.Warn("primary forecast invalid; using legacy", "err", err)
+			return append([]mpc.Slot(nil), base...)
+		}
+		prediction = &out
+		resolved := append([]mpc.Slot(nil), base...)
+		byStart := make(map[int64]forecasting.Point, len(out.Series[0].Points))
+		for _, point := range out.Series[0].Points {
+			byStart[point.StartMS] = point
+		}
+		for i, slot := range base {
+			point, ok := byStart[slot.StartMs]
+			if !ok || point.EndMS != slot.StartMs+int64(slot.LenMin)*60000 {
+				continue
+			}
+			if point.StartMS < issued.OriginMS && point.PredictionStartMS != issued.OriginMS {
+				continue
+			}
+			selected[i].PredictionStartMS = point.PredictionStartMS
+			if usablePrimaryForecast(point.PVKnown, point.PVQuality, point.PVW) {
+				resolved[i].PVW = -point.PVW
+				selected[i].PVW, selected[i].PVKnown, selected[i].PVQuality = point.PVW, true, point.PVQuality
+				selected[i].PVSource, selected[i].ModelPV = "energyplan", point.ModelPV
+			}
+			if usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
+				resolved[i].LoadW = point.LoadW
+				selected[i].LoadW, selected[i].LoadKnown, selected[i].LoadQuality = point.LoadW, true, point.LoadQuality
+				selected[i].LoadSource, selected[i].ModelLoad = "energyplan", point.ModelLoad
+			}
+		}
+		return resolved
+	}
+	// Calibrate the actual composed primary. A Rust prediction does not inherit
+	// the old model's residual spread or its training trust threshold.
+	in.Risk = func(base, planning []mpc.Slot, k float64) {
+		if k <= 0 || math.IsNaN(k) || math.IsInf(k, 0) {
+			return
+		}
+		for i, s := range base {
+			net := s.LoadW + s.PVW
+			end := s.StartMs + int64(s.LenMin)*time.Minute.Milliseconds()
+			band := calibrator.BandForInterval("champion", "net", max(s.StartMs, origin.UnixMilli()), end, net)
+			if band.Method == forecasting.BandMethodEmpirical {
+				extra := math.Max(0, k*(band.HighW-net))
+				pvLoss := math.Min(-s.PVW, extra)
+				planning[i].PVW = s.PVW + pvLoss
+				planning[i].LoadW = s.LoadW + extra - pvLoss
+			} else if i < len(selected) && selected[i].PVSource == "energyplan" {
+				loss := .5 * (-s.PVW)
+				if evidence := selected[i].ModelPV; evidence != nil {
+					loss = math.Max(0, -s.PVW-evidence.LowerW)
+				}
+				planning[i].PVW = s.PVW + math.Min(-s.PVW, k*loss)
+			} else {
+				loss := .5 * (-s.PVW)
+				if relative := pv.RelativeUncertainty(); relative > 0 {
+					loss = relative * (-s.PVW)
+				} else if absolute := pv.ResidualStdW(origin); absolute > 0 {
+					loss = absolute
+				}
+				planning[i].PVW = s.PVW + math.Min(-s.PVW, k*loss)
+			}
+		}
+	}
+	in.Record = func(base, planning []mpc.Slot, decisionID string, issued int64) {
+		issue := makeIssue(base, issued)
+		issue.DecisionID = decisionID
+		if prediction != nil {
+			issue.Models = append(issue.Models, cloneForecastModels(prediction.Models)...)
+			issue.LatestInputMS = max(issue.LatestInputMS, prediction.LatestInputMS)
+		}
+		version := forecastModelRevision(issue.Models)
+		issue.Series[0].ModelVersion = version
+		issue.Series[0].Points = primaryForecastPoints(base, issue.Series[0].Points, selected)
+		issue.Series = append(issue.Series, forecasting.Series{Name: "planning", ModelVersion: version,
+			Points: primaryForecastPoints(planning, forecastPoints(planning, frozen, site, origin, load), selected)})
+		shadow := legacy
+		if shadow == nil {
+			shadow = base // Compatibility with callers that only archive legacy.
+		}
+		shadowPoints := forecastPoints(shadow, frozen, site, origin, load)
+		for i := range shadowPoints {
+			shadowPoints[i].PVSource, shadowPoints[i].LoadSource = "legacy", "legacy"
+		}
+		issue.Series = append(issue.Series, forecasting.Series{Name: "legacy_shadow", ModelVersion: forecastModelRevision(models), Points: shadowPoints})
+		if prediction != nil {
+			issue.Series = append(issue.Series, prediction.Series...)
+		}
 		issue.Series = append(issue.Series, forecastBaselines(base, frozen, observations, site, origin)...)
 		applyForecastBandsWith(&issue, calibrator)
-		job := forecastJob{issue: issue, site: site, candidateState: candidateState, away: away}
+		job := forecastJob{issue: issue}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.stopped {
@@ -558,6 +636,23 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 		}
 	}
 	return in
+}
+
+func usablePrimaryForecast(known bool, quality string, watts float64) bool {
+	return known && (quality == "cold_start" || quality == "learning" || quality == "ready") && watts >= 0 && !math.IsNaN(watts) && !math.IsInf(watts, 0)
+}
+
+// Preserve the source and quality used for each signal, while recording the
+// actual capped or risk-adjusted watts passed through MPC.
+func primaryForecastPoints(slots []mpc.Slot, fallback, selected []forecasting.Point) []forecasting.Point {
+	for i, slot := range slots {
+		fallback[i].PVSource, fallback[i].LoadSource = "legacy", "legacy"
+		if i < len(selected) && selected[i].StartMS == slot.StartMs && selected[i].EndMS == slot.StartMs+int64(slot.LenMin)*60000 {
+			fallback[i] = selected[i]
+		}
+		fallback[i].PVW, fallback[i].LoadW = math.Max(0, -slot.PVW), math.Max(0, slot.LoadW)
+	}
+	return fallback
 }
 
 func usableTrackingWeather(rows []state.ForecastPoint, origin int64) []state.ForecastPoint {
@@ -656,7 +751,11 @@ func forecastPoints(slots []mpc.Slot, weather []state.ForecastPoint, site foreca
 				}
 			}
 		}
-		out = append(out, forecasting.Point{StartMS: s.StartMs, EndMS: s.StartMs + int64(s.LenMin)*60000,
+		predictionStart := int64(0)
+		if s.StartMs < origin.UnixMilli() && origin.UnixMilli() < s.StartMs+int64(s.LenMin)*60000 {
+			predictionStart = origin.UnixMilli()
+		}
+		out = append(out, forecasting.Point{PredictionStartMS: predictionStart, StartMS: s.StartMs, EndMS: s.StartMs + int64(s.LenMin)*60000,
 			PVW: math.Max(0, -s.PVW), LoadW: math.Max(0, s.LoadW), PVKnown: known, LoadKnown: true,
 			PVQuality: quality, LoadQuality: loadQuality})
 	}
@@ -730,6 +829,9 @@ func forecastBaselines(slots []mpc.Slot, weather []state.ForecastPoint, obs []fo
 		series := forecasting.Series{Name: name, ModelVersion: "baseline-v2-local-interval"}
 		for _, s := range slots {
 			p := forecasting.Point{StartMS: s.StartMs, EndMS: s.StartMs + int64(s.LenMin)*60000, PVQuality: "missing", LoadQuality: "missing"}
+			if p.StartMS < origin.UnixMilli() && origin.UnixMilli() < p.EndMS {
+				p.PredictionStartMS = origin.UnixMilli()
+			}
 			switch name {
 			case "weather_prior":
 				if row := forecastRow(weather, p.StartMS, origin.UnixMilli()); forecastPVKnown(row, site) && forecastFinite(row.PVWEstimated) {
@@ -779,20 +881,15 @@ func applyForecastBandsWith(issue *forecasting.Issue, calibrator *forecasting.Ca
 		s := &issue.Series[i]
 		for j := range s.Points {
 			p := &s.Points[j]
-			p.PVBand = calibrator.BandForInterval(s.Name, "pv", p.StartMS, p.EndMS, p.PVW)
-			p.LoadBand = calibrator.BandForInterval(s.Name, "load", p.StartMS, p.EndMS, p.LoadW)
-			p.NetBand = calibrator.BandForInterval(s.Name, "net", p.StartMS, p.EndMS, p.LoadW-p.PVW)
+			start := max(p.StartMS, p.PredictionStartMS)
+			p.PVBand = calibrator.BandForInterval(s.Name, "pv", start, p.EndMS, p.PVW)
+			p.LoadBand = calibrator.BandForInterval(s.Name, "load", start, p.EndMS, p.LoadW)
+			p.NetBand = calibrator.BandForInterval(s.Name, "net", start, p.EndMS, p.LoadW-p.PVW)
 		}
 	}
 }
 func applyForecastBands(issue *forecasting.Issue, history []forecasting.ErrorSample) {
 	applyForecastBandsWith(issue, forecasting.NewCalibrator(history, issue.ConfigVersion, issue.OriginMS))
-}
-func (f *forecastTracker) applyBands(issue *forecasting.Issue) {
-	f.mu.RLock()
-	history := f.errors
-	f.mu.RUnlock()
-	applyForecastBands(issue, history)
 }
 
 func forecastSiteContext(site forecastSite) *forecasting.SiteContext {

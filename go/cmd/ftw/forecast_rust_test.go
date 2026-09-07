@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -90,11 +91,11 @@ func TestRustForecastHostQuarterEnergyAndPartialHour(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(captured.Horizon) != 7 {
-		t.Fatalf("future full quarters=%d want7", len(captured.Horizon))
+	if len(captured.Horizon) != 8 {
+		t.Fatalf("remaining quarter parts=%d want8", len(captured.Horizon))
 	}
 	for _, slot := range captured.Horizon {
-		if slot.ValidStartMs < issue.OriginMS || slot.ValidStartMs%900000 != 0 || slot.ValidEndMs-slot.ValidStartMs != 900000 {
+		if slot.ValidStartMs < issue.OriginMS || slot.ValidEndMs-slot.ValidStartMs > 900000 || slot.ValidStartMs/900000 != (slot.ValidEndMs-1)/900000 {
 			t.Fatalf("invalid candidate quarter: %+v", slot)
 		}
 		if slot.Home == nil || *slot.Home == away[slot.ValidStartMs] {
@@ -105,10 +106,14 @@ func TestRustForecastHostQuarterEnergyAndPartialHour(t *testing.T) {
 		}
 	}
 	points := got.Series[0].Points
-	if len(points) != 1 || points[0].StartMS != start.Add(time.Hour).UnixMilli() {
-		t.Fatalf("partial current hour was published: %+v", points)
+	if len(points) != 2 || points[0].PredictionStartMS != issue.OriginMS || points[1].PredictionStartMS != 0 {
+		t.Fatalf("remaining current hour not explicit: %+v", points)
 	}
-	p := points[0]
+	wantPartial := float64(100*8+200*15+300*15+400*15) / 53
+	if math.Abs(points[0].PVW-wantPartial) > 1e-9 || math.Abs(points[0].LoadW-(wantPartial+1000)) > 1e-9 {
+		t.Fatalf("partial hour not weighted by remaining minutes: %+v", points[0])
+	}
+	p := points[1]
 	if p.PVW != 250 || p.LoadW != 1250 {
 		t.Fatalf("quarter power not energy mean: PV=%v load=%v", p.PVW, p.LoadW)
 	}

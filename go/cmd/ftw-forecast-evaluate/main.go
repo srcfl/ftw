@@ -25,6 +25,8 @@ type report struct {
 	Since              string                         `json:"since"`
 	IssueCount         int                            `json:"issue_count"`
 	TruthCount         int                            `json:"truth_count"`
+	PrimarySeries      string                         `json:"primary_series"`
+	ReferenceSeries    string                         `json:"reference_series"`
 	PerLead            []forecasting.Metric           `json:"per_lead"`
 	BandCoverage       []bandCoverage                 `json:"band_coverage"`
 	PairedMetrics      []forecasting.PairMetric       `json:"paired_metrics"`
@@ -68,11 +70,16 @@ func run(ctx context.Context, args []string, output io.Writer, now time.Time) er
 	statePath := fs.String("state", "state.db", "path to state.db")
 	sinceText := fs.String("since", "", "first issue time, RFC3339 (default: 30 days before until)")
 	untilText := fs.String("until", "", "last issue and truth time, RFC3339 (default: now)")
+	primary := fs.String("primary", "champion", "actual primary series to compare")
+	reference := fs.String("reference", "legacy_shadow", "frozen reference series from the same issue")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
+	}
+	if *primary == "" || *reference == "" || len(*primary) > 80 || len(*reference) > 80 || *primary == *reference {
+		return errors.New("-primary and -reference must be distinct nonempty series names of at most 80 bytes")
 	}
 	until, err := parseBound(*untilText, now.UTC())
 	if err != nil {
@@ -145,9 +152,11 @@ func run(ctx context.Context, args []string, output io.Writer, now time.Time) er
 		Since:              since.UTC().Format(time.RFC3339),
 		IssueCount:         issues,
 		TruthCount:         len(observations),
+		PrimarySeries:      *primary,
+		ReferenceSeries:    *reference,
 		PerLead:            forecasting.Metrics(pointSamples),
 		BandCoverage:       summarizeBands(pointSamples),
-		PairedMetrics:      forecasting.CompareSeries(pointSamples, "champion", "energyplan"),
+		PairedMetrics:      forecasting.CompareFrozenSeries(pointSamples, *primary, *reference),
 		CumulativeNetError: forecasting.CumulativeMetrics(cumulativeSamples),
 	}
 	encoder := json.NewEncoder(output)
@@ -248,6 +257,9 @@ func summarizeBands(samples []forecasting.ErrorSample) []bandCoverage {
 	}
 	all := make(map[key]*acc)
 	for _, sample := range samples {
+		if sample.Validate() != nil {
+			continue
+		}
 		for _, signal := range []string{"pv", "load", "net"} {
 			actual, known, band, evidence := bandInputs(sample, signal)
 			if !known {

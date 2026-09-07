@@ -3,8 +3,8 @@
 FTW is a local-first home energy management system. Its architecture has
 three explicit modules: **core**, **drivers**, and **optimizer**. Core is the
 safety boundary. Drivers translate hardware protocols. The optimizer proposes
-plans. A failure or upgrade outside core must never stop local measurement or
-make dispatch unsafe.
+plans and supplies primary forecasts. A failure or upgrade outside core must
+never stop local measurement or make dispatch unsafe.
 
 ## Module boundaries
 
@@ -12,7 +12,7 @@ make dispatch unsafe.
 |---|---|---|---|
 | Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
 | Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Compiled Energyplan worker | Solve the long-horizon mathematical plan |
+| Optimizer | [`optimizer`](../optimizer), contracts in [`go/internal/mpc`](../go/internal/mpc) and [`go/internal/energyforecast`](../go/internal/energyforecast) | Compiled Energyplan worker | Solve the long-horizon plan and supply primary PV and household-load forecasts |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
@@ -110,6 +110,30 @@ Energyplan ships as compiled binaries with its own license; source and builds
 stay in the private Energyplan repository. It updates with the Core image.
 The optimizer never reads hardware or issues commands, so its deployment and
 dependency churn do not enlarge the safety-critical runtime.
+
+The same worker also supplies the primary PV and household-load forecast through
+a separate versioned contract. At the start of each replan, Core freezes the
+legacy forecast, weather, occupancy and saved model state. It calls the forecast
+worker once under a deadline, outside control and dispatch locks. Core accepts
+PV and load independently for each covered interval. If either signal is
+missing, late, partial or invalid, Core retains the matching legacy value. The
+resulting `champion` can therefore contain Energyplan PV with legacy load, or
+the reverse. `legacy_shadow` keeps both legacy signals from the same frozen
+capture for a fair later comparison.
+
+Complete qualified 15-minute observations update the local models outside
+dispatch. SQLite stores the latest Energyplan state under
+`forecast/energyplan_state_v1`; an update becomes visible only after its full
+state has been saved, and startup restores that saved state. The learning
+revision binds state to forecast inputs and stable hardware identities. A
+binding or input change starts fresh learning, while a compatible program
+upgrade can reuse the state. Issued forecasts use a stricter revision that also
+includes the Core build, worker bytes and pipeline policy.
+
+Core keeps issued forecasts, frozen inputs, model-state references and qualified
+truth in a bounded local archive. The read-only `ftw-forecast-evaluate` source
+command defaults to matched `champion` versus `legacy_shadow` results from the
+same issue. It does not treat missing or censored truth as evidence.
 
 ## Versioning a module contract
 

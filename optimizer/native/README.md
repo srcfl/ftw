@@ -58,19 +58,46 @@ through its existing fallback path.
 can also use an absolute path supplied in `FTW_NATIVE_SOLVER`. Ordinary Go tests
 skip these optional process tests when that variable is unset.
 
-## Forecast candidates and evaluation
+## Forecast primary, fallback and evaluation
 
-Energyplan 0.2.0 also accepts forecasting protocol v1. The public request and
-response schemas are in `bundle/forecast-v1.schema.json` and
-`bundle/forecast-v1.response.schema.json`. Core runs a separate local process
-with a 2 s deadline for each model update and prediction. Forecast failure
-does not replace the active planner inputs. These PV and load models gather
-evidence as candidates; Core does not promote them automatically.
+A verified worker that advertises forecasting protocol v1 supplies the primary
+PV and household-load forecast. The public request and response schemas are in
+`bundle/forecast-v1.schema.json` and `bundle/forecast-v1.response.schema.json`.
+Core calls a separate local worker with a 2 s deadline for each model update
+and prediction. Prediction runs during replanning, outside the control and
+dispatch locks.
 
-PV requires the site's location and qualified PV measurements, but no panel
-angles or rated power. Core saves each issued horizon with its available
-weather, occupancy, model state and site binding in a bounded local archive.
-Measured errors calibrate forecast intervals by horizon. The worker's own
+One replan freezes the legacy forecast, weather, occupancy and model state
+before it calls the worker. The returned PV and load values must match that
+capture and cover the planner interval. Core selects each signal separately:
+a valid Energyplan PV value can run with legacy load, or a valid Energyplan load
+value can run with legacy PV. A missing, late, partial or invalid value falls
+back to the matching legacy signal for that slot. The `champion` archive series
+records the values used by the planner and names each signal's source. The
+`legacy_shadow` series records the unchanged legacy forecast from the same
+capture. Forecast work can change planner inputs, but it never sends a hardware
+command; Core still validates the resulting plan before dispatch.
+
+PV learning requires the site's location and qualified PV measurements, but no
+panel angles or rated power. Core forms qualified PV and household-load labels
+from complete 15-minute measurements. It excludes missing or unsafe evidence,
+including PV intervals affected by commanded curtailment. Model updates run
+outside dispatch and do not alter an issued forecast.
+
+The latest Energyplan forecast state is stored locally in SQLite under
+`forecast/energyplan_state_v1`. Core saves the complete update atomically before
+it exposes the new state to planning, then loads it on restart. A change to the
+model input configuration or stable hardware binding starts a new learning
+revision and an empty model. A compatible Core or worker program upgrade keeps
+the learning revision and can reuse the saved state. The issued-forecast
+revision still records the exact Core version, worker bytes and pipeline policy,
+so evaluation does not join results from different program builds.
+
+Core saves each issued horizon with the same frozen weather, occupancy, model
+state and site binding in a bounded 30-day local archive. Large model snapshots
+are stored once by content hash and referenced by each issue. Row counts,
+expanded sizes and compressed storage all have hard limits. Measured errors
+calibrate forecast intervals by horizon and interval length. The worker's own
 provisional ranges remain distinct from calibrated intervals.
 
 To score an archive, run this from `go/`, preferably against a box backup:
@@ -80,12 +107,13 @@ go run ./cmd/ftw-forecast-evaluate -state /path/to/state.db
 ```
 
 The command opens SQLite read-only and writes JSON. Optional `-since` and
-`-until` take RFC3339 timestamps within a 30-day window. The report compares
-issued forecasts on matched outcomes, includes daylight PV errors and net
-energy errors over 1/3/6/12/24 hours, and separates measured interval coverage
-from cold-start and provisional ranges. Missing history cannot yield an
-accuracy or savings claim. This command is a source tool; release archives
-do not include a separate evaluation executable.
+`-until` take RFC3339 timestamps within a 30-day window. By default it compares
+`champion` with `legacy_shadow` only where both came from the same frozen issue
+and have the same truth. The report includes per-lead PV, load and net errors,
+daylight PV errors, net energy errors over 1/3/6/12/24 hours, measured interval
+coverage, and separate cold-start and provisional ranges. Missing, late or
+censored truth cannot yield an accuracy or savings claim. This command is a
+source tool; release archives do not include a separate evaluation executable.
 
 `make native-solver-test` exercises both protocols and the Go forecast adapter
 against the bundled host worker. Direct Go forecast tests use
@@ -94,7 +122,11 @@ against the bundled host worker. Direct Go forecast tests use
 ## Update the bundle
 
 Build and test a new version in the private repository. Copy only the complete
-output of its binary packaging tool into `bundle/`, then run
+output of its binary packaging tool into `bundle/`. Before changing the pin,
+verify that every target has the same declared worker version and forecast
+protocol, and that the manifest pins the source commit, size and SHA-256 of each
+binary. The integration checks must cover a partly elapsed first forecast
+interval and a fresh model with no saved state. Then run
 `make native-solver-test` and `make verify`. Submit the binaries, manifest,
 license and notices together. Never add Rust source, Cargo files, source
 archives or build tools to this public directory.

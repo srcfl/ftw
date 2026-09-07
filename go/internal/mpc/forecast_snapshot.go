@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"context"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/state"
@@ -16,6 +17,10 @@ type ForecastInputs struct {
 	PVWeight              func(time.Time) float64
 	PVUncertaintyW        float64
 	PVRelativeUncertainty float64
+	// Resolve selects primary forecasts for the complete price horizon. It runs
+	// once during replanning, outside the service lock, under a bounded context.
+	// Only PVW and LoadW may change; the host retains a frozen legacy shadow.
+	Resolve func(context.Context, []Slot) []Slot
 	// Risk may replace the legacy PV margin using calibrated joint net errors.
 	// It must preserve slot times/prices/limits and never add forecast PV.
 	Risk func(base, planning []Slot, k float64)

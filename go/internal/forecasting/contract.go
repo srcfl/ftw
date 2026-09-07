@@ -49,20 +49,27 @@ type ModelEstimateEvidence struct {
 // Point contains interval mean power in W. PV is available AC generation,
 // positive here; Load excludes independently planned EV and battery flows.
 // Net load is LoadW-PVW. This contract never contains hardware commands.
+// PredictionStartMS is set when watts describe only the remaining part of a
+// planner interval. Such points are excluded from full-interval evaluation.
 type Point struct {
-	StartMS     int64                  `json:"valid_start_ms"`
-	EndMS       int64                  `json:"valid_end_ms"`
-	PVW         float64                `json:"pv_available_w"`
-	LoadW       float64                `json:"household_load_w"`
-	PVKnown     bool                   `json:"pv_known"`
-	LoadKnown   bool                   `json:"load_known"`
-	PVQuality   string                 `json:"pv_quality"`
-	LoadQuality string                 `json:"load_quality"`
-	PVBand      Band                   `json:"pv_band"`
-	LoadBand    Band                   `json:"load_band"`
-	NetBand     Band                   `json:"net_band"`
-	ModelPV     *ModelEstimateEvidence `json:"model_pv,omitempty"`
-	ModelLoad   *ModelEstimateEvidence `json:"model_load,omitempty"`
+	PredictionStartMS int64   `json:"prediction_start_ms,omitempty"`
+	StartMS           int64   `json:"valid_start_ms"`
+	EndMS             int64   `json:"valid_end_ms"`
+	PVW               float64 `json:"pv_available_w"`
+	LoadW             float64 `json:"household_load_w"`
+	PVKnown           bool    `json:"pv_known"`
+	LoadKnown         bool    `json:"load_known"`
+	PVQuality         string  `json:"pv_quality"`
+	LoadQuality       string  `json:"load_quality"`
+	// Sources identify the selected model per signal, including fallback.
+	// Empty sources remain valid for archives written before provenance existed.
+	PVSource   string                 `json:"pv_source,omitempty"`
+	LoadSource string                 `json:"load_source,omitempty"`
+	PVBand     Band                   `json:"pv_band"`
+	LoadBand   Band                   `json:"load_band"`
+	NetBand    Band                   `json:"net_band"`
+	ModelPV    *ModelEstimateEvidence `json:"model_pv,omitempty"`
+	ModelLoad  *ModelEstimateEvidence `json:"model_load,omitempty"`
 }
 
 type Series struct {
@@ -195,8 +202,10 @@ func validBand(b Band) bool {
 
 func validPoint(p Point) bool {
 	return validInterval(p.StartMS, p.EndMS) &&
+		(p.PredictionStartMS == 0 || (p.PredictionStartMS > p.StartMS && p.PredictionStartMS < p.EndMS)) &&
 		finite(p.PVW) && finite(p.LoadW) && p.PVW >= 0 && p.LoadW >= 0 &&
 		p.PVQuality != "" && p.LoadQuality != "" &&
+		len(p.PVSource) <= 80 && len(p.LoadSource) <= 80 &&
 		validBand(p.PVBand) && validBand(p.LoadBand) && validBand(p.NetBand) &&
 		validModelEstimate(p.ModelPV) && validModelEstimate(p.ModelLoad)
 }
@@ -232,7 +241,7 @@ func (r Issue) Validate() error {
 		names[s.Name] = true
 		var end int64
 		for _, p := range s.Points {
-			if !validPoint(p) || p.StartMS < end {
+			if !validPoint(p) || p.StartMS < end || (p.PredictionStartMS != 0 && p.PredictionStartMS < r.OriginMS) {
 				return fmt.Errorf("invalid interval in %s", s.Name)
 			}
 			end = p.EndMS

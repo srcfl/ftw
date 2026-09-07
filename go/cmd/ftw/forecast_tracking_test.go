@@ -201,10 +201,6 @@ func TestForecastOriginFollowsCandidateCapture(t *testing.T) {
 	if job.issue.OriginMS != clock.UnixMilli() {
 		t.Fatal("origin preceded candidate snapshot")
 	}
-	c.snapshot[0] = 'x'
-	if !json.Valid(job.candidateState) {
-		t.Fatal("candidate snapshot aliased")
-	}
 }
 func TestForecastIndependentPVIntervalsAndCurtailment(t *testing.T) {
 	f := &forecastTracker{}

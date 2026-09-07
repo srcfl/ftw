@@ -139,9 +139,11 @@ func TestEvaluateDeduplicatesOriginsAndReportsAllEnergyHorizons(t *testing.T) {
 		}
 	}
 	older := forecastIssue("older", start.Add(-2*time.Hour-10*time.Minute).UnixMilli(), olderPoints)
-	older.Series = append(older.Series, forecasting.Series{Name: "energyplan", ModelVersion: "v1", Points: olderPoints})
+	older.Series = append(older.Series, forecasting.Series{Name: "legacy_shadow", ModelVersion: "v1", Points: olderPoints})
 	newer := forecastIssue("newer", start.Add(-2*time.Hour).UnixMilli(), newerPoints)
-	newer.Series = append(newer.Series, forecasting.Series{Name: "energyplan", ModelVersion: "v1", Points: energyplanPoints})
+	newer.Series = append(newer.Series,
+		forecasting.Series{Name: "legacy_shadow", ModelVersion: "v1", Points: olderPoints},
+		forecasting.Series{Name: "energyplan", ModelVersion: "v1", Points: energyplanPoints})
 	if err := store.SaveForecastIssue(ctx, newer); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +186,18 @@ func TestEvaluateDeduplicatesOriginsAndReportsAllEnergyHorizons(t *testing.T) {
 		}
 	}
 	if len(got.PairedMetrics) == 0 {
-		t.Fatal("matched champion/energyplan targets produced no paired metrics")
+		t.Fatal("matched primary/legacy shadow targets produced no paired metrics")
+	}
+	if got.PrimarySeries != "champion" || got.ReferenceSeries != "legacy_shadow" {
+		t.Fatalf("unexpected comparison roles: %+v", got)
+	}
+	for _, metric := range got.PairedMetrics {
+		if metric.Champion != "champion" || metric.Candidate != "legacy_shadow" {
+			t.Fatalf("raw Rust diagnostic replaced the frozen reference: %+v", metric)
+		}
+		if metric.Signal == "pv" && (metric.ChampionMAEW != 100 || metric.CandidateMAEW != 200 || metric.DeltaMAEW != 100) {
+			t.Fatalf("composed primary/reference scores incorrect: %+v", metric)
+		}
 	}
 }
 
@@ -198,5 +211,81 @@ func TestEvaluateRejectsMoreThanRetentionAndBadRFC3339(t *testing.T) {
 		"-since", now.Add(-31 * 24 * time.Hour).Format(time.RFC3339), "-until", now.Format(time.RFC3339),
 	}, &output, now); err == nil {
 		t.Fatal("window beyond retention was accepted")
+	}
+}
+
+func TestEvaluateDoesNotPairLaterPrimaryWithOlderShadow(t *testing.T) {
+	path, store := openArchive(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Hour)
+	start := now.Add(-2 * time.Hour)
+	point := forecastPoint(start.UnixMilli(), 0, 600)
+	point.PVSource, point.LoadSource = "energyplan", "legacy"
+	point.PVQuality, point.LoadQuality = "cold_start", "cold_start"
+	older := forecastIssue("older", start.Add(-2*time.Hour).UnixMilli(), []forecasting.Point{point})
+	older.Series = append(older.Series, forecasting.Series{Name: "legacy_shadow", ModelVersion: "v1", Points: []forecasting.Point{point}})
+	newer := forecastIssue("newer", start.Add(-time.Hour).UnixMilli(), []forecasting.Point{point})
+	for _, issue := range []forecasting.Issue{older, newer} {
+		if err := store.SaveForecastIssue(ctx, issue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SaveForecastObservation(ctx, observation(start.UnixMilli(), start.Add(time.Hour).UnixMilli(), 0, 800)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := runReport(t, path, start.Add(-3*time.Hour), now, now)
+	if len(got.PerLead) == 0 || len(got.PairedMetrics) != 0 {
+		t.Fatalf("latest primary must retain standalone scores without stale pair: %+v", got)
+	}
+}
+
+func TestEvaluateCanSelectHistoricalReferenceExplicitly(t *testing.T) {
+	path, store := openArchive(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Hour)
+	start := now.Add(-2 * time.Hour)
+	point := forecastPoint(start.UnixMilli(), 100, 600)
+	issue := forecastIssue("historical", start.Add(-time.Hour).UnixMilli(), []forecasting.Point{point})
+	issue.Series = append(issue.Series, forecasting.Series{Name: "energyplan", ModelVersion: "v1", Points: []forecasting.Point{point}})
+	if err := store.SaveForecastIssue(ctx, issue); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveForecastObservation(ctx, observation(start.UnixMilli(), start.Add(time.Hour).UnixMilli(), 0, 800)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got := runReport(t, path, start.Add(-2*time.Hour), now, now)
+	if len(got.PairedMetrics) != 0 {
+		t.Fatalf("historical raw Rust silently treated as legacy reference: %+v", got)
+	}
+	var output bytes.Buffer
+	if err := run(ctx, []string{"-state", path, "-reference", "energyplan"}, &output, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ReferenceSeries != "energyplan" || len(got.PairedMetrics) != 3 {
+		t.Fatalf("explicit historical reference ignored: %+v", got)
+	}
+}
+
+func TestBandReportExcludesRemainingInterval(t *testing.T) {
+	start := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	point := forecastPoint(start, 100, 600)
+	sample := forecasting.ErrorSample{Series: "champion", ConfigVersion: "cfg", IssueID: "i",
+		OriginMS: start - testHourMS, IssuedAtMS: start - testHourMS, StartMS: start, EndMS: start + testHourMS,
+		AvailableAtMS: start + testHourMS, Lead: 1, PVKnown: true, LoadKnown: true, Prediction: point}
+	if got := summarizeBands([]forecasting.ErrorSample{sample}); len(got) != 3 {
+		t.Fatalf("whole interval lost from band report: %+v", got)
+	}
+	sample.Prediction.PredictionStartMS = start + 60000
+	if got := summarizeBands([]forecasting.ErrorSample{sample}); len(got) != 0 {
+		t.Fatalf("partial interval received band coverage credit: %+v", got)
 	}
 }

@@ -41,13 +41,16 @@ type RequestContext struct {
 	State          json.RawMessage `json:"state,omitempty"`
 }
 
+// Interval is a full UTC quarter for observations. Predictions may cover a
+// future portion within one UTC quarter, including the remainder after origin.
 type Interval struct {
 	ValidStartMs int64 `json:"valid_start_ms"`
 	ValidEndMs   int64 `json:"valid_end_ms"`
 }
 
 // Features describe the civil schedule and the weather available at origin.
-// LocalDay counts civil dates since 1970; Monday is weekday zero.
+// LocalDay counts civil dates since 1970; Monday is weekday zero. Calendar
+// features describe the containing quarter, including for partial predictions.
 type Features struct {
 	LocalDay             int64    `json:"local_day"`
 	LocalWeekday         int      `json:"local_weekday"`

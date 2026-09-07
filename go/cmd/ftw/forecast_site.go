@@ -44,6 +44,7 @@ type forecastIdentityReceipt struct {
 }
 
 const forecastIdentityReceiptKey = "forecast/live_identity_v1"
+const forecastPipelinePolicy = "energyplan-primary-v1"
 
 func newForecastSiteConfig(st *state.Store) *forecastSiteConfig {
 	id, _ := st.LoadConfig("forecast/site_id")
@@ -199,7 +200,7 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 	}
 	data, _ := json.Marshal(ids)
 	learning := fmt.Sprintf("site-v2:%x", sha256.Sum256([]byte(s.baseRevision+"/"+string(data))))
-	cohort := learning + "/" + Version + "/" + s.engineVersion
+	cohort := learning + "/" + Version + "/" + s.engineVersion + "/" + forecastPipelinePolicy
 	revision := fmt.Sprintf("forecast-v1:%x", sha256.Sum256([]byte(cohort)))
 	opts := s.baseOptions
 	if pending && opts.HouseholdInvalidReason == "" {

@@ -55,7 +55,7 @@ func (e ErrorSample) Validate() error {
 		e.IssueID == "" || len(e.IssueID) > 128 || e.OriginMS <= 0 || e.IssuedAtMS < e.OriginMS ||
 		e.IssuedAtMS > e.StartMS || !validInterval(e.StartMS, e.EndMS) || e.AvailableAtMS < e.EndMS ||
 		e.Lead != LeadBucket(e.OriginMS, e.StartMS) || !finite(e.PVErrorW) || !finite(e.LoadErrorW) ||
-		!validPoint(e.Prediction) || e.Prediction.StartMS != e.StartMS || e.Prediction.EndMS != e.EndMS {
+		!validPoint(e.Prediction) || e.Prediction.PredictionStartMS != 0 || e.Prediction.StartMS != e.StartMS || e.Prediction.EndMS != e.EndMS {
 		return errors.New("invalid forecast error sample")
 	}
 	return nil
@@ -156,7 +156,9 @@ func scoreAll(issues []Issue, observations []Observation, asOf int64) []ErrorSam
 		}
 		for _, series := range issue.Series {
 			for _, p := range series.Points {
-				if p.StartMS < issue.IssuedAtMS || p.EndMS > asOf {
+				// A remaining-interval mean cannot be scored against whole-interval
+				// truth, even if an imported issue has an earlier origin or receipt.
+				if p.PredictionStartMS != 0 || p.StartMS < issue.IssuedAtMS || p.EndMS > asOf {
 					continue
 				}
 				coverage, ok := coverPoint(index, issue.ConfigVersion, p)
@@ -663,6 +665,8 @@ func CumulativeMetrics(samples []CumulativeEnergySample) []CumulativeMetric {
 	return out
 }
 
+// PairMetric retains its original JSON names. Champion and Candidate identify
+// the selected series, not fixed model implementations or promotion status.
 type PairMetric struct {
 	Champion         string  `json:"champion"`
 	Candidate        string  `json:"candidate"`
@@ -691,6 +695,17 @@ func sameActual(a, b ErrorSample, signal string) bool {
 // CompareSeries scores champion and candidate only on common targets with the
 // same config and lead bucket. Mismatched outcomes are excluded.
 func CompareSeries(samples []ErrorSample, champion, candidate string) []PairMetric {
+	return compareSeries(samples, champion, candidate, false)
+}
+
+// CompareFrozenSeries compares the primary with a shadow captured in the same
+// issue. A newer primary without a matching shadow is omitted, never compared
+// with a shadow made from older inputs. Series names carry no model assumption.
+func CompareFrozenSeries(samples []ErrorSample, primary, shadow string) []PairMetric {
+	return compareSeries(samples, primary, shadow, true)
+}
+
+func compareSeries(samples []ErrorSample, champion, candidate string, sameIssue bool) []PairMetric {
 	type targetKey struct {
 		config     string
 		start, end int64
@@ -720,6 +735,10 @@ func CompareSeries(samples []ErrorSample, champion, candidate string) []PairMetr
 	for key, championSample := range championByTarget {
 		candidateSample, ok := candidateByTarget[key]
 		if !ok {
+			continue
+		}
+		if sameIssue && (championSample.IssueID != candidateSample.IssueID ||
+			championSample.OriginMS != candidateSample.OriginMS || championSample.IssuedAtMS != candidateSample.IssuedAtMS) {
 			continue
 		}
 		for _, signal := range []string{"pv", "pv_daylight", "load", "net"} {

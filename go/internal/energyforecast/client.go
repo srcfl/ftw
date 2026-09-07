@@ -45,7 +45,7 @@ func (c *Client) Update(ctx context.Context, request UpdateRequest) (UpdateReply
 		if err := validateInterval(o.Interval); err != nil {
 			return reply, fmt.Errorf("observation %d: %w", i, err)
 		}
-		if o.ValidEndMs-o.ValidStartMs != 900000 {
+		if o.ValidEndMs-o.ValidStartMs != 900000 || o.ValidStartMs%900000 != 0 {
 			return reply, errors.New("forecast observation must cover a complete quarter-hour")
 		}
 		if i > 0 && o.ValidStartMs < previousEnd {
@@ -320,7 +320,7 @@ func validateState(state json.RawMessage, required bool) error {
 }
 
 func validateInterval(i Interval) error {
-	if i.ValidStartMs < 0 || i.ValidEndMs <= i.ValidStartMs || i.ValidEndMs-i.ValidStartMs != 900000 || i.ValidStartMs%900000 != 0 {
+	if i.ValidStartMs < 0 || i.ValidEndMs <= i.ValidStartMs || i.ValidEndMs-i.ValidStartMs > 900000 || i.ValidStartMs/900000 != (i.ValidEndMs-1)/900000 {
 		return errors.New("invalid forecast interval")
 	}
 	return nil

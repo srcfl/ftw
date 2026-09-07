@@ -176,8 +176,9 @@ func (r *rustForecast) Predict(ctx context.Context, site forecastSite, issued fo
 	base := issued.Series[0].Points
 	horizon := make([]energyforecast.HorizonSlot, 0)
 	for _, p := range base {
-		for at := p.StartMS; at < p.EndMS; at += 900000 {
-			if at < issued.OriginMS || at%900000 != 0 || at+900000 > p.EndMS {
+		for at := p.StartMS / 900000 * 900000; at < p.EndMS; at += 900000 {
+			partStart, partEnd := max(at, p.StartMS, issued.OriginMS), min(at+900000, p.EndMS)
+			if partStart >= partEnd {
 				continue
 			}
 			home, knownHome := homeByQuarter[at]
@@ -196,12 +197,12 @@ func (r *rustForecast) Predict(ctx context.Context, site forecastSite, issued fo
 					break
 				}
 			}
-			horizon = append(horizon, energyforecast.HorizonSlot{Interval: energyforecast.Interval{ValidStartMs: at, ValidEndMs: at + 900000},
+			horizon = append(horizon, energyforecast.HorizonSlot{Interval: energyforecast.Interval{ValidStartMs: partStart, ValidEndMs: partEnd},
 				Features: rustFeatures(time.UnixMilli(at), site, home, weather)})
 		}
 	}
 	if len(horizon) == 0 {
-		return forecasting.Issue{}, errors.New("no future full quarter for candidate")
+		return forecasting.Issue{}, errors.New("no remaining forecast interval")
 	}
 	reply, err := r.client.Predict(ctx, energyforecast.PredictRequest{RequestContext: energyforecast.RequestContext{
 		RequestID: uuid.NewString(), SiteID: site.SiteID, ConfigRevision: rustConfigRevision(site), OriginMs: issued.OriginMS,
@@ -241,14 +242,18 @@ func (r *rustForecast) Predict(ctx context.Context, site forecastSite, issued fo
 	out.Models = append(out.Models, forecasting.ModelState{Name: "energyplan_metadata", Version: version,
 		UpdatedAtMS: saved.LatestAvailableMS, Quality: quality, State: metadata})
 	series := forecasting.Series{Name: "energyplan", ModelVersion: version}
-	// Preserve the planner's interval duration. Rust v1 only predicts quarters;
-	// four quarters form an hourly energy mean, never an hourly maximum.
+	// Preserve planner slot bounds while averaging only the remaining duration.
+	// Complete quarters and the current partial quarter contribute by energy.
 	for _, p := range base {
-		if p.StartMS < issued.OriginMS {
+		predictionStart := max(p.StartMS, issued.OriginMS)
+		if predictionStart >= p.EndMS {
 			continue
 		}
-		got := forecasting.Point{StartMS: p.StartMS, EndMS: p.EndMS, PVKnown: site.HasLocation, LoadKnown: true, PVQuality: "ready", LoadQuality: "ready"}
-		cursor := p.StartMS
+		got := forecasting.Point{StartMS: p.StartMS, EndMS: p.EndMS, PVKnown: site.HasLocation, LoadKnown: true, PVQuality: "ready", LoadQuality: "ready", PVSource: "energyplan", LoadSource: "energyplan"}
+		if predictionStart > p.StartMS {
+			got.PredictionStartMS = predictionStart
+		}
+		cursor := predictionStart
 		parts, pvEvidence, loadEvidence := 0, 0, 0
 		for _, v := range reply.Predictions {
 			if v.ValidStartMs < cursor {
@@ -257,7 +262,7 @@ func (r *rustForecast) Predict(ctx context.Context, site forecastSite, issued fo
 			if v.ValidStartMs != cursor || v.ValidEndMs > p.EndMS {
 				break
 			}
-			fraction := float64(v.ValidEndMs-v.ValidStartMs) / float64(p.EndMS-p.StartMS)
+			fraction := float64(v.ValidEndMs-v.ValidStartMs) / float64(p.EndMS-predictionStart)
 			parts++
 			if addModelEvidence(&got.ModelPV, v.PV, fraction) {
 				pvEvidence++
@@ -295,7 +300,7 @@ func (r *rustForecast) Predict(ctx context.Context, site forecastSite, issued fo
 		}
 	}
 	if len(series.Points) == 0 {
-		return forecasting.Issue{}, errors.New("candidate did not cover a complete planner interval")
+		return forecasting.Issue{}, errors.New("candidate did not cover a remaining planner interval")
 	}
 	out.Series = []forecasting.Series{series}
 	return out, nil

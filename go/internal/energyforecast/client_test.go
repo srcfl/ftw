@@ -282,3 +282,43 @@ func TestClientBoundsAndTimeout(t *testing.T) {
 		}
 	})
 }
+
+func TestClientPredictionAcceptsOnlyCausalQuarterPortions(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		startDelta, endDelta int64
+		valid                bool
+	}{
+		{"remainder", 7 * 60000, 900000, true},
+		{"millisecond remainder", 899999, 900000, true},
+		{"future portion", 900000 + 120000, 1800000, true},
+		{"before origin", 0, 900000, false},
+		{"crosses quarter", 7 * 60000, 900001, false},
+		{"longer than quarter", 7 * 60000, 1800000, false},
+		{"empty", 900000, 900000, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := predictionRequest()
+			start := r.OriginMs
+			r.OriginMs += 7 * 60000
+			r.Horizon[0].Interval = Interval{start + tc.startDelta, start + tc.endDelta}
+			_, err := replying(nil).Predict(context.Background(), r)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestClientNeverTrainsOnPartialObservation(t *testing.T) {
+	r := updateRequest()
+	r.Observations[0].ValidStartMs += 7 * 60000
+	called := false
+	c := NewClient(exchangeFunc(func(context.Context, []byte) ([]byte, error) {
+		called = true
+		return nil, nil
+	}))
+	if _, err := c.Update(context.Background(), r); err == nil || called {
+		t.Fatal("partial observation reached training worker")
+	}
+}

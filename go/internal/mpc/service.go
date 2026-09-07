@@ -1389,6 +1389,33 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		}
 	}
 	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
+	// Resolve receives the complete legacy forecast, including verified limits,
+	// so its frozen shadow matches what the previous pipeline would have used.
+	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
+	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	if captured.Resolve != nil && len(slots) > 0 {
+		if request.wasCanceledByService() {
+			return s.canceledReplan(request, "forecast-start")
+		}
+		forecastCtx, cancelForecast := context.WithTimeout(ctx, 2*time.Second)
+		resolved := captured.Resolve(forecastCtx, append([]Slot(nil), slots...))
+		cancelForecast()
+		if request.wasCanceledByService() {
+			return s.canceledReplan(request, "forecast-resolve")
+		}
+		if len(resolved) != len(slots) {
+			slog.Error("mpc: forecast changed horizon length; keeping previous plan")
+			return s.Latest()
+		}
+		for i := range slots {
+			if resolved[i].StartMs != slots[i].StartMs || resolved[i].LenMin != slots[i].LenMin {
+				slog.Error("mpc: forecast changed interval; keeping previous plan", "slot", i)
+				return s.Latest()
+			}
+			// Forecast selection cannot replace market data or physical limits.
+			slots[i].PVW, slots[i].LoadW = resolved[i].PVW, resolved[i].LoadW
+		}
+	}
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
 	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
 	// Qualified load models own their level. Unqualified historic daily
@@ -1473,6 +1500,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if captured.Risk != nil {
 		captured.Risk(slots, fallbackSlots, p.PVForecastSafetyK)
 	}
+	// Keep the point forecast distinct from the downside inputs passed to the
+	// solver. Calibrating point errors against the risk adjustment biases them.
+	baseForecastSlots := append([]Slot(nil), slots...)
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
@@ -1736,7 +1766,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// timestamps buildSlots used. forecasts cloud lookup mirrors the
 	// path buildSlots takes for the PV predictor so the snapshot is
 	// apples-to-apples with what's re-sampled later.
-	pp := s.snapshotPredictions(slots, forecasts, pv, load)
+	var pp *plannedPredictions
+	if captured.Resolve == nil {
+		pp = s.snapshotPredictions(slots, forecasts, pv, load)
+	}
+	// The legacy shadow must not trigger drift replans for a primary forecast
+	// it did not produce. Scheduled and live-power replan triggers still apply.
 
 	s.mu.Lock()
 	if s.stopping || request.wasCanceledByService() {
@@ -1769,7 +1804,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	saveDiag := s.SaveDiag
 	s.mu.Unlock()
 	if captured.Record != nil {
-		captured.Record(slots, fallbackSlots, plan.DecisionID, replanAtMs)
+		captured.Record(baseForecastSlots, fallbackSlots, plan.DecisionID, replanAtMs)
 	}
 	// Horizon statistics — surfaced in logs so operators can
 	// reconstruct "what did the DP know?" without pulling the full

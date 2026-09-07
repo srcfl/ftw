@@ -1475,7 +1475,8 @@ func main() {
 	}
 
 	// Archive observations even when price planning is disabled. The Rust
-	// candidate runs on a separate worker and never delays physical dispatch.
+	// primary forecast runs on a separate worker during replanning, outside
+	// physical dispatch. The previous forecast remains its shadow and fallback.
 	forecastTrackerSvc := &forecastTracker{refreshIdentity: refreshForecastIdentity, configMu: &forecastConfigMu, store: st, tele: tel, pv: pvSvc, load: loadSvc,
 		site: func() forecastSite {
 			site := forecastSettings.Snapshot()
@@ -1492,9 +1493,10 @@ func main() {
 	}
 	if energyplanSupported(runtime.GOOS, runtime.GOARCH) {
 		if candidate, err := newRustForecast(st, resolveEnergyplanBinary()); err != nil {
-			slog.Warn("forecast candidate unavailable", "err", err)
+			slog.Warn("primary forecast worker unavailable; using legacy fallback", "err", err)
 		} else {
 			forecastTrackerSvc.candidate = candidate
+			slog.Info("forecast pipeline configured", "primary", "energyplan", "shadow", "legacy", "policy", forecastPipelinePolicy)
 		}
 	}
 	if err := forecastTrackerSvc.Start(ctx); err != nil {
