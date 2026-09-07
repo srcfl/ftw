@@ -45,8 +45,16 @@
   var configETag = null;
   var currentTab = "control";
   var fieldValues = new WeakMap();
+  var returnFocus = null;
+
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-label", "Settings");
 
   openBtn.addEventListener("click", function () {
+    // More delegates to the header button, so remember the focused opener
+    // before the async config request instead of using the click target.
+    var opener = document.activeElement;
     apiFetch("/api/config")
       .then(function (r) {
         configETag = r.headers && r.headers.get ? r.headers.get("ETag") : null;
@@ -57,17 +65,54 @@
         modal.classList.remove("hidden");
         renderTab(currentTab);
         setStatus("");
+        returnFocus = opener;
+        closeBtn.focus();
       })
       .catch(function (e) {
         setStatus("Failed to load config: " + e, "error");
       });
   });
 
-  closeBtn.addEventListener("click", function () {
+  function closeSettings() {
     modal.classList.add("hidden");
-  });
+    if (returnFocus && returnFocus.isConnected && returnFocus.getClientRects().length) {
+      returnFocus.focus();
+    }
+    returnFocus = null;
+  }
+
+  closeBtn.addEventListener("click", closeSettings);
   modal.addEventListener("click", function (e) {
-    if (e.target === modal) modal.classList.add("hidden");
+    if (e.target === modal) closeSettings();
+  });
+  // Scope this to Settings so a separate dialog can own its keyboard input.
+  modal.addEventListener("keydown", function (e) {
+    if (modal.classList.contains("hidden") || e.defaultPrevented) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettings();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    var controls = Array.from(modal.querySelectorAll("button, a[href], input, select, textarea, summary, [tabindex]"))
+      .filter(function (el) {
+        // Closed details can still report layout boxes for their contents.
+        for (var parent = el.parentElement; parent && parent !== modal; parent = parent.parentElement) {
+          if (parent.tagName === "DETAILS" && !parent.open) {
+            var summary = parent.querySelector(":scope > summary");
+            if (!summary || !summary.contains(el)) return false;
+          }
+        }
+        return el.tabIndex >= 0 && !el.matches(":disabled") && el.getClientRects().length &&
+          getComputedStyle(el).visibility !== "hidden";
+      });
+    var first = controls[0], last = controls[controls.length - 1];
+    if (first && ((e.shiftKey && document.activeElement === first) ||
+        (!e.shiftKey && document.activeElement === last))) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
   });
 
   tabsEl.addEventListener("click", function (e) {
@@ -138,6 +183,15 @@
     var progressEl = document.getElementById("restart-progress");
     var progressTextEl = document.getElementById("restart-progress-text");
     if (!modalEl || !listEl || !laterBtn || !nowBtn) return;
+    // A second save response must not reset an open or pending prompt.
+    if (!modalEl.classList.contains("hidden")) return;
+
+    var dialogEl = modalEl.querySelector(".modal-content");
+    dialogEl.setAttribute("role", "dialog");
+    dialogEl.setAttribute("aria-modal", "true");
+    dialogEl.setAttribute("aria-label", "Restart required");
+    dialogEl.setAttribute("tabindex", "-1");
+    progressEl.setAttribute("role", "status");
 
     listEl.innerHTML = "";
     if (reasons.length === 0) {
@@ -159,15 +213,46 @@
     laterBtn.disabled = false;
     modalEl.classList.remove("hidden");
 
-    laterBtn.onclick = function () { modalEl.classList.add("hidden"); };
-    nowBtn.onclick = function () { triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl); };
+    var restartOpener = document.activeElement;
+    // The restart prompt sits above Settings. Keep all other body children
+    // out of keyboard navigation and the accessibility tree until it closes.
+    var background = Array.from(document.body.children).filter(function (el) {
+      return el !== modalEl && !el.contains(modalEl) && !el.inert;
+    });
+    background.forEach(function (el) { el.inert = true; });
+    laterBtn.focus();
+    function closeRestart() {
+      if (laterBtn.disabled) return;
+      modalEl.classList.add("hidden");
+      modalEl.onkeydown = null;
+      background.forEach(function (el) { el.inert = false; });
+      if (restartOpener && restartOpener.isConnected) restartOpener.focus();
+    }
+    laterBtn.onclick = closeRestart;
+    modalEl.onkeydown = function (e) {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRestart();
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        var buttons = [laterBtn, nowBtn].filter(function (button) { return !button.disabled; });
+        var index = buttons.indexOf(document.activeElement);
+        var next = index < 0 ? (e.shiftKey ? buttons.length - 1 : 0) :
+          (index + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+        (buttons[next] || dialogEl).focus();
+      }
+    };
+    nowBtn.onclick = function () { triggerRestart(dialogEl, nowBtn, laterBtn, progressEl, progressTextEl); };
   }
 
-  function triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl) {
+  function triggerRestart(dialogEl, nowBtn, laterBtn, progressEl, progressTextEl) {
     nowBtn.disabled = true;
     laterBtn.disabled = true;
     progressEl.classList.remove("hidden");
     progressTextEl.textContent = "Restarting…";
+    dialogEl.focus();
 
     apiFetch("/api/restart", { method: "POST" })
       .then(function (r) {
@@ -186,6 +271,7 @@
         laterBtn.disabled = false;
         progressEl.classList.add("hidden");
         alert("Restart failed: " + e.message);
+        laterBtn.focus();
       });
   }
 
@@ -300,6 +386,7 @@
   }
 
   function renderTab(tab) {
+    var hadBodyFocus = bodyEl.contains(document.activeElement);
     saveBtn.hidden = tab === "loadpoints" || (tab === "devices" && !!S.chargerSetup);
     saveBtn.style.display = saveBtn.hidden ? "none" : "";
     var def = S.tabs[tab];
@@ -343,6 +430,10 @@
 
     if (def.after) {
       try { def.after(ctx); } catch (e) { console.error("tab after:", tab, e); }
+    }
+    // In-tab actions can replace their own focused button while rendering.
+    if (hadBodyFocus && !modal.contains(document.activeElement)) {
+      (tabsEl.querySelector("button.active") || closeBtn).focus();
     }
   }
 })();
