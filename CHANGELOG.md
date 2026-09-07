@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.17.1
+
+### Patch Changes
+
+- 336969a: Keep fresh measurements that arrive during a control tick in history and the household energy ledger. Check their age when taking the snapshot while preserving the tick timestamp.
+
 ## 2.17.0
 
 ### Minor Changes
