@@ -28,7 +28,7 @@ Unix socket volume is shared with Core. Both processes use UID 100, GID 101.
 There is no startup or health dependency from Core to FTWDB.
 
 For a native Linux install, use the pinned
-[systemd service example](https://github.com/srcfl/ftwdb/blob/6a2f6c88cb89200307487e864e79d622e803e956/packaging/systemd/ftwdb-shadow.service)
+[systemd service example](https://github.com/srcfl/ftwdb/blob/7bbae63532f695b10aca548bf4ee58c6d7ebb3a8/packaging/systemd/ftwdb-shadow.service)
 with the same user as Core. That service listens on
 `/run/ftwdb-shadow/ftwdb-shadow.sock`. Pass that path with
 `-ftwdb-shadow-socket` or `FTWDB_SHADOW_SOCKET` to Core.
