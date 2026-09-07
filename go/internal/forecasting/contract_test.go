@@ -2,6 +2,7 @@ package forecasting
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -23,6 +24,33 @@ func testIssue(id, config, series string, origin, issued int64, points []Point) 
 	return Issue{
 		Schema: Schema, ID: id, OriginMS: origin, IssuedAtMS: issued, LatestInputMS: origin,
 		ConfigVersion: config, Series: []Series{{Name: series, ModelVersion: "v1", Points: points}},
+	}
+}
+
+func TestIssueBoundsFullPlanningHorizon(t *testing.T) {
+	start := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC).UnixMilli()
+	origin := start + 7*time.Minute.Milliseconds()
+	for _, field := range []string{"series", "weather"} {
+		for _, count := range []int{192, 193, 194} {
+			t.Run(fmt.Sprintf("%s_%d", field, count), func(t *testing.T) {
+				issue := testIssue("horizon", "cfg", "champion", origin, origin, []Point{testPoint(start, start+900000, 100, 1000)})
+				for i := 0; i < count; i++ {
+					at := start + int64(i)*900000
+					if field == "series" {
+						if i == 0 {
+							issue.Series[0].Points = nil
+						}
+						issue.Series[0].Points = append(issue.Series[0].Points, testPoint(at, at+900000, 100, 1000))
+					} else {
+						issue.Weather = append(issue.Weather, Weather{StartMS: at, EndMS: at + 900000, AvailableAtMS: origin, Source: "open_meteo"})
+					}
+				}
+				issue.Series[0].Points[0].PredictionStartMS = origin
+				if err := issue.Validate(); (err == nil) != (count <= 193) {
+					t.Fatalf("%d %s intervals: %v", count, field, err)
+				}
+			})
+		}
 	}
 }
 
