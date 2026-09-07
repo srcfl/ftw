@@ -48,6 +48,7 @@ func run(args []string) error {
 func create(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	statePath := fs.String("state", "state.db", "path to state.db")
+	configPath := fs.String("config", "", "config seed path (default: <data>/config.yaml)")
 	dataDir := fs.String("data", "", "persistent data directory (default: state.db directory)")
 	outputDir := fs.String("output", "", "backup destination (default: <data>/backups)")
 	coreVersion := fs.String("core-version", Version, "core version recorded in component inventory")
@@ -71,6 +72,7 @@ func create(args []string) error {
 	defer st.Close()
 	info, err := backup.Create(context.Background(), backup.CreateOptions{
 		State: st, StatePath: absState, DataDir: *dataDir, OutputDir: *outputDir,
+		ConfigPath: *configPath,
 		Components: backup.ComponentInventory{Core: backup.ComponentVersion{Version: *coreVersion}},
 	})
 	if err != nil {

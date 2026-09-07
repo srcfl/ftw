@@ -42,11 +42,15 @@
   S.tabs = S.tabs || {};
 
   var currentConfig = null;
+  var configETag = null;
   var currentTab = "control";
 
   openBtn.addEventListener("click", function () {
     apiFetch("/api/config")
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        configETag = r.headers && r.headers.get ? r.headers.get("ETag") : null;
+        return r.json();
+      })
       .then(function (cfg) {
         currentConfig = cfg;
         modal.classList.remove("hidden");
@@ -85,13 +89,16 @@
   function saveSettings() {
     captureCurrentTab();
     setStatus("Saving...");
+    var headers = { "Content-Type": "application/json" };
+    if (configETag) headers["If-Match"] = configETag;
     return apiFetch("/api/config", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers,
       body: JSON.stringify(currentConfig),
     })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+        configETag = r.headers && r.headers.get ? r.headers.get("ETag") : configETag;
         return r.json();
       })
       .then(function (res) {

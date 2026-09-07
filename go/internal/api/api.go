@@ -232,8 +232,9 @@ type Deps struct {
 // Server wraps the http.ServeMux and adds shared middleware (logging,
 // no-cache headers on static assets).
 type Server struct {
-	deps *Deps
-	mux  *http.ServeMux
+	configWriteMu sync.Mutex // Covers persistence and apply for every config writer.
+	deps          *Deps
+	mux           *http.ServeMux
 
 	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
 	// Past days are immutable once the day ends, so we only ever recompute
@@ -1323,19 +1324,23 @@ func siteMeterPhasePowers(tel *telemetry.Store, siteMeter string) []float64 {
 
 // ---- /api/config ----
 
+func configETag(revision int64) string { return fmt.Sprintf("\"%d\"", revision) }
+
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	cfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
+	w.Header().Set("ETag", configETag(cfg.Revision))
+	w.Header().Set("Cache-Control", "no-store")
 	masked := cfg.MaskSecrets()
 	// Strip resolved driver paths back to config-relative form so the UI
 	// doesn't display (and round-trip) paths like "../drivers/foo.lua".
 	masked.UnresolveDriverPaths(filepath.Dir(s.deps.ConfigPath))
-	// EV charger password lives in state.db, not YAML. Signal to the UI
+	// Signal a saved EV charger password to the UI
 	// that a password is set by using a masked placeholder (MaskSecrets
 	// blanked it to "").
 	if masked.EVCharger != nil {
-		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok && pw != "" {
+		if cfg.EVCharger.Password != "" {
 			cp := *masked.EVCharger
 			cp.Password = maskedPlaceholder
 			masked.EVCharger = &cp
@@ -1564,6 +1569,8 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 }
 
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	var posted struct {
 		config.Config
 		AppLink json.RawMessage `json:"app_link"`
@@ -1581,8 +1588,16 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if newCfg.EVCharger != nil && newCfg.EVCharger.Password == maskedPlaceholder {
+		newCfg.EVCharger.Password = ""
+	}
 	// Preserve secrets the UI sent back as empty (masked) values.
 	s.deps.CfgMu.RLock()
+	if match := r.Header.Get("If-Match"); match != "" && match != configETag(s.deps.Cfg.Revision) {
+		s.deps.CfgMu.RUnlock()
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Settings changed. Close and reopen Settings before saving."})
+		return
+	}
 	newCfg.PreserveMaskedSecrets(s.deps.Cfg)
 	// Restore catalog-declared driver secrets (api_token etc.) the UI
 	// returned as maskedPlaceholder or empty. Same semantics as
@@ -1591,25 +1606,6 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	// catalog-agnostic.
 	restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
 	s.deps.CfgMu.RUnlock()
-
-	// EV charger password lives in state.db instead of config.yaml. Empty
-	// or the masked placeholder means "keep existing"; a new value means
-	// the user typed a real password. Defer the state write until after
-	// validation + config save succeed so a rejected config cannot rotate
-	// credentials behind the operator's back.
-	var evPasswordToPersist string
-	var persistEVPassword bool
-	if newCfg.EVCharger != nil {
-		pw := newCfg.EVCharger.Password
-		if pw != "" && pw != maskedPlaceholder {
-			evPasswordToPersist = pw
-			persistEVPassword = true
-		} else if stored, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
-			// Restore the real password into the candidate config so the
-			// config-reload watcher sees it on the next apply.
-			newCfg.EVCharger.Password = stored
-		}
-	}
 
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
@@ -1634,16 +1630,7 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
 	}
-	if persistEVPassword {
-		if err := s.deps.State.SaveConfig(evPasswordKey, evPasswordToPersist); err != nil {
-			slog.Warn("failed to persist ev_charger_password", "err", err)
-		}
-	}
-	// One apply path, shared with the file watcher. Hand-applying a
-	// subset here and swapping the shared pointer is what #760 was: the
-	// watcher then diffed new against new, so everything this handler
-	// didn't copy — starting with the site-meter designation — never
-	// reached the running controller until a restart.
+	// Apply the committed config through the same path as all Settings writers.
 	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
 		&newCfg, s.deps.ConfigApplier)
 	if s.deps.ConfigApplier == nil && s.deps.Registry != nil {
@@ -1651,6 +1638,7 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		// new driver set running.
 		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
 	}
+	w.Header().Set("ETag", configETag(newCfg.Revision))
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
@@ -1933,31 +1921,32 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 		writeJSON(w, 400, map[string]string{"error": "missing driver name"})
 		return
 	}
-	s.deps.CfgMu.Lock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	s.deps.CfgMu.RLock()
+	cfgCopy := *s.deps.Cfg
+	cfgCopy.Drivers = append([]config.Driver(nil), s.deps.Cfg.Drivers...)
+	s.deps.CfgMu.RUnlock()
 	found := false
-	for i := range s.deps.Cfg.Drivers {
-		if s.deps.Cfg.Drivers[i].Name == name {
-			s.deps.Cfg.Drivers[i].Disabled = disabled
+	for i := range cfgCopy.Drivers {
+		if cfgCopy.Drivers[i].Name == name {
+			cfgCopy.Drivers[i].Disabled = disabled
 			found = true
 			break
 		}
 	}
 	if !found {
-		s.deps.CfgMu.Unlock()
 		writeJSON(w, 404, map[string]string{"error": "driver not found in config"})
 		return
 	}
-	cfgCopy := *s.deps.Cfg
-	s.deps.CfgMu.Unlock()
-
-	// Persist to disk so the change survives restart.
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &cfgCopy); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
 	}
-	// Apply immediately via Reload — it filters disabled drivers and
-	// stops running ones, or re-adds the newly-enabled one.
-	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
+	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl, &cfgCopy, s.deps.ConfigApplier)
+	if s.deps.ConfigApplier == nil {
+		s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
+	}
 
 	action := "disabled"
 	if !disabled {
