@@ -12,6 +12,7 @@ from . import SCHEMA_VERSION
 from .deadline import SolveCancelled, SolveDeadline, SolveDeadlineExceeded
 from .model import (
     _arbitrage_spread_ore_kwh,
+    _pv_curtail_output,
     _solver_options,
     _storage_starts_above_maximum,
 )
@@ -724,6 +725,7 @@ def _response(
         raw_total_cost += raw_cost
         curtailed_w = max(0.0, float(solution[base_vars.curtail[t]]))
         pv_forecast = prepared.base_pv if shared else base.pv
+        pv_limit_w, pv_curtail_active = _pv_curtail_output(pv_forecast[t], curtailed_w)
         actions.append(
             {
                 "slot_start_ms": int(slot.get("start_ms", 0)),
@@ -732,9 +734,8 @@ def _response(
                 "grid_w": grid_w,
                 "soc_pct": stored_wh / total_capacity * 100.0,
                 "cost_ore": raw_cost,
-                "pv_limit_w": max(0.0, -pv_forecast[t] - curtailed_w)
-                if curtailed_w > 1e-5
-                else 0.0,
+                "pv_limit_w": pv_limit_w,
+                "pv_curtail_active": pv_curtail_active,
                 "storage_power_w": storage_power,
                 "storage_energy_wh": storage_energy,
                 "flex_power_w": {},

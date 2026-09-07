@@ -301,13 +301,15 @@ type Action struct {
 	EMSMode    string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
-	// 0 = no curtailment. Set by post-processing when exporting would
-	// cost money (negative export revenue after fees). Includes house
-	// load + battery charge + any planned EV loadpoint charge so that
-	// curtailment does not starve loads the plan itself scheduled.
-	// Consumed by the control loop only when the driver advertises
-	// `supports_pv_curtail`.
-	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+	// When PVCurtailActive is false, 0 means no cap (a dispatch hint may
+	// still use a positive PVLimitW without rewriting GridW). When
+	// PVCurtailActive is true, 0 is a real zero cap already applied to
+	// GridW. Includes house load + battery charge + any planned EV
+	// loadpoint charge so that curtailment does not starve loads the
+	// plan itself scheduled. Consumed by the control loop only when
+	// the driver advertises `supports_pv_curtail`.
+	PVLimitW        float64 `json:"pv_limit_w,omitempty"`
+	PVCurtailActive bool    `json:"pv_curtail_active,omitempty"`
 
 	// LoadpointW is the EV charger power (W, positive = charging) the
 	// DP picked for this slot. Zero when no loadpoint was in Params
@@ -506,6 +508,52 @@ func exportPricingFromParams(p Params) gridcost.ExportPricing {
 
 func finite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func gridIndex(value, min, step float64, n int) int {
+	if n <= 1 || step <= 0 {
+		return 0
+	}
+	i := int(math.Round((value - min) / step))
+	if i < 0 {
+		return 0
+	}
+	if i >= n {
+		return n - 1
+	}
+	return i
+}
+
+func operatingBoundWorsens(from, to, min, max float64) bool {
+	const eps = 1e-9
+	return math.Max(0, min-to) > math.Max(0, min-from)+eps ||
+		math.Max(0, to-max) > math.Max(0, from-max)+eps
+}
+
+// clipBatteryPowerToBand reduces a DP action so continuous SoC does not
+// worsen operating-bound recovery. Policy is looked up on the grid; energy
+// is not, so a charge that lands on max from the nearest grid point can
+// overshoot from the real SoC.
+func clipBatteryPowerToBand(soc, powerW, dtH, capacityWh, etaC, etaD, min, max float64) float64 {
+	if capacityWh <= 0 || dtH <= 0 {
+		return 0
+	}
+	delta := loadpoint.BatteryEnergyDeltaWh(powerW, dtH, etaC, etaD) / capacityWh
+	if !operatingBoundWorsens(soc, soc+delta, min, max) {
+		return powerW
+	}
+	if powerW > 0 {
+		headroom := max - soc
+		if headroom <= 0 || etaC <= 0 {
+			return 0
+		}
+		return headroom * capacityWh / (dtH * etaC)
+	}
+	headroom := soc - min
+	if headroom <= 0 || etaD <= 0 {
+		return 0
+	}
+	return -headroom * capacityWh * etaD / dtH
 }
 
 func sanitizeOptimizeSlots(slots []Slot) []Slot {
@@ -718,12 +766,7 @@ func Optimize(slots []Slot, p Params) Plan {
 					battW := actionAt(ba)
 
 					// Battery SoC transition (independent of EV).
-					var dBattWh float64
-					if battW >= 0 {
-						dBattWh = +battW * dtH * p.ChargeEfficiency
-					} else {
-						dBattWh = +battW * dtH / p.DischargeEfficiency
-					}
+					dBattWh := loadpoint.BatteryEnergyDeltaWh(battW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)
 					battSoc2 := soc + dBattWh/p.CapacityWh
 					if battSoc2 < p.SoCMin-1e-9 || battSoc2 > p.SoCMax+1e-9 {
 						continue
@@ -1009,45 +1052,16 @@ func Optimize(slots []Slot, p Params) Plan {
 		InitialSoC:    p.InitialSoC,
 		Actions:       make([]Action, 0, N),
 	}
-	fIdx := (p.InitialSoC - p.SoCMin) / socStep
-	si := int(math.Round(fIdx))
-	if si < 0 {
-		si = 0
-	}
-	if si >= S {
-		si = S - 1
-	}
-	// The POLICY is looked up on the grid, but the simulated SoC starts
-	// at the real initial value, clamped to the band — snapping it to
-	// the grid created up to ½ step of phantom or lost energy at t=0
-	// (parity fix, #1020). The rest of the loop already propagates
-	// continuous SoC; only the lookup index rounds.
+	// Policy is stored on the SoC grid; energy is not. Integrate from
+	// the actual initial SoC so reported trajectories replay. Clamp
+	// only the policy lookup index onto the operating grid.
 	soc := p.InitialSoC
-	if soc < p.SoCMin {
-		soc = p.SoCMin
-	}
-	if soc > p.SoCMax {
-		soc = p.SoCMax
-	}
-	// Initial EV SoC index.
+	si := gridIndex(soc, p.SoCMin, socStep, S)
 	ei := 0
 	var evSoc float64
 	if evActive {
-		f := (lp.InitialSoC - lp.SoCMin) / evSocStep
-		ei = int(math.Round(f))
-		if ei < 0 {
-			ei = 0
-		}
-		if ei >= EL {
-			ei = EL - 1
-		}
 		evSoc = lp.InitialSoC
-		if evSoc < lp.SoCMin {
-			evSoc = lp.SoCMin
-		}
-		if evSoc > lp.SoCMax {
-			evSoc = lp.SoCMax
-		}
+		ei = gridIndex(evSoc, lp.SoCMin, evSocStep, EL)
 	}
 	var totalCost float64
 	for t := 0; t < N; t++ {
@@ -1056,29 +1070,21 @@ func Optimize(slots []Slot, p Params) Plan {
 		pol := Policy[t][si][ei]
 		ba := pol / EA
 		ea := pol % EA
-		actW := actionAt(ba)
+		actW := clipBatteryPowerToBand(soc, actionAt(ba), dtH, p.CapacityWh,
+			p.ChargeEfficiency, p.DischargeEfficiency, p.SoCMin, p.SoCMax)
 		evW := evActionW(ea)
-		// Battery SoC transition.
-		var dSoCWh float64
-		if actW >= 0 {
-			dSoCWh = +actW * dtH * p.ChargeEfficiency
-		} else {
-			dSoCWh = +actW * dtH / p.DischargeEfficiency
+		soc2 := soc + loadpoint.BatteryEnergyDeltaWh(actW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)/p.CapacityWh
+		if operatingBoundWorsens(soc, soc2, p.SoCMin, p.SoCMax) {
+			actW = 0
+			soc2 = soc
 		}
-		soc2 := soc + dSoCWh/p.CapacityWh
-		if soc2 < p.SoCMin {
-			soc2 = p.SoCMin
-		}
-		if soc2 > p.SoCMax {
-			soc2 = p.SoCMax
-		}
-		// EV SoC transition (no-op when !evActive since evW = 0).
 		var evSoc2 float64
 		if evActive {
 			dEvWh := evW * dtH * evChargeEff
 			evSoc2 = evSoc + dEvWh/lp.CapacityWh
-			if evSoc2 > lp.SoCMax {
-				evSoc2 = lp.SoCMax
+			if evSoc2 > lp.SoCMax+1e-9 {
+				evW = 0
+				evSoc2 = evSoc
 			}
 		}
 		gridW := loadpoint.GridW(slot.LoadW, slot.PVW, actW, evW)
@@ -1108,24 +1114,10 @@ func Optimize(slots []Slot, p Params) Plan {
 		}
 		plan.Actions = append(plan.Actions, a)
 		soc = soc2
-		fIdx = (soc - p.SoCMin) / socStep
-		si = int(math.Round(fIdx))
-		if si < 0 {
-			si = 0
-		}
-		if si >= S {
-			si = S - 1
-		}
+		si = gridIndex(soc, p.SoCMin, socStep, S)
 		if evActive {
 			evSoc = evSoc2
-			f := (evSoc - lp.SoCMin) / evSocStep
-			ei = int(math.Round(f))
-			if ei < 0 {
-				ei = 0
-			}
-			if ei >= EL {
-				ei = EL - 1
-			}
+			ei = gridIndex(evSoc, lp.SoCMin, evSocStep, EL)
 		}
 	}
 	plan.TotalCostOre = totalCost

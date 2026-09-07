@@ -232,6 +232,25 @@ def _arbitrage_spread_ore_kwh(settings: dict[str, Any], mode: str) -> float:
     return spread
 
 
+def _pv_charge_bonus_ore_kwh(settings: dict[str, Any], mode: str) -> float:
+    """Return the PV-charge bonus only for passive_arbitrage.
+
+    Parse in every mode so a malformed value still fails at the contract
+    boundary. Go DP applies this bias only in passive_arbitrage.
+    """
+
+    bonus = max(
+        0.0,
+        finite_number(
+            settings.get("pv_charge_bonus_ore_kwh", 0),
+            "settings.pv_charge_bonus_ore_kwh",
+        ),
+    )
+    if mode != "passive_arbitrage":
+        return 0.0
+    return bonus
+
+
 def _requires_direction_binary(formulation: str, relaxation_unsafe: bool) -> bool:
     """Keep mutually exclusive physical flows when a relaxation can profit."""
 
@@ -262,6 +281,19 @@ def _storage_relaxation_is_unsafe(
         or pv_charge_bonus_ore > 0
         or negative_terminal_value
     )
+
+
+def _pv_curtail_output(forecast_pv_w: float, curtailed_w: float) -> tuple[float, bool]:
+    """Return (pv_limit_w, pv_curtail_active) for one slot.
+
+    Active with pv_limit_w = 0 is a true zero cap. Inactive with 0 is
+    release. The two must not share a sentinel.
+    """
+
+    curtailed_w = max(0.0, float(curtailed_w))
+    if curtailed_w <= 1e-5:
+        return 0.0, False
+    return max(0.0, -float(forecast_pv_w) - curtailed_w), True
 
 
 def _export_price(slot: dict[str, Any], settings: dict[str, Any]) -> float:
@@ -509,13 +541,7 @@ def solve(
     formulation = settings.get("formulation", "auto")
     if formulation not in {"auto", "milp", "relaxed"}:
         raise ProtocolError("settings.formulation must be auto, milp, or relaxed")
-    pv_charge_bonus_ore = max(
-        0.0,
-        finite_number(
-            settings.get("pv_charge_bonus_ore_kwh", 0),
-            "settings.pv_charge_bonus_ore_kwh",
-        ),
-    )
+    pv_charge_bonus_ore = _pv_charge_bonus_ore_kwh(settings, mode)
     constraints: list[cp.Constraint] = []
     discrete = False
 
@@ -927,8 +953,9 @@ def solve(
             # that exceeds the slot's actual leftover.
             constraints.append(flex.power <= house_surplus + 50.0)
         if bool(flex.spec.get("no_storage_to_load", False)) and storages:
-            house_residual = np.maximum(0.0, base_load + base_pv)
-            constraints.append(total_discharge <= house_residual + max_site_power * (1 - active))
+            for scenario in scenarios:
+                house_residual = np.maximum(0.0, scenario["load"] + scenario["pv"])
+                constraints.append(total_discharge <= house_residual + max_site_power * (1 - active))
         if storage_discharge_active is not None:
             # EV charging may coexist with house-covering discharge, but not
             # with battery-driven site export.
@@ -1065,6 +1092,7 @@ def solve(
         raw_cost = price[t] * max(grid_kwh, 0.0) - export_price[t] * max(-grid_kwh, 0.0)
         raw_total_cost += raw_cost
         curtailed_w = max(0.0, float(curtail.value[t]))
+        pv_limit_w, pv_curtail_active = _pv_curtail_output(base_pv[t], curtailed_w)
         actions.append(
             {
                 "slot_start_ms": int(slot.get("start_ms", 0)),
@@ -1073,7 +1101,8 @@ def solve(
                 "grid_w": grid_w,
                 "soc_pct": (stored_wh / total_capacity * 100.0) if total_capacity > 0 else 0.0,
                 "cost_ore": raw_cost,
-                "pv_limit_w": max(0.0, -base_pv[t] - curtailed_w) if curtailed_w > 1e-5 else 0.0,
+                "pv_limit_w": pv_limit_w,
+                "pv_curtail_active": pv_curtail_active,
                 "storage_power_w": storage_power,
                 "storage_energy_wh": storage_energy,
                 "flex_power_w": flex_power,

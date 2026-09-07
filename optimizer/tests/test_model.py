@@ -17,6 +17,8 @@ from ftw_optimizer.model import (
     OPTIMAL_STATUSES,
     _arbitrage_spread_ore_kwh,
     _canonicalize_storage_payload,
+    _pv_charge_bonus_ore_kwh,
+    _pv_curtail_output,
     _requires_direction_binary,
     _storage_relaxation_is_unsafe,
 )
@@ -28,6 +30,25 @@ from ftw_optimizer.scenario_tree import (
     reduce_scenarios,
 )
 from ftw_optimizer.worker import handle, handshake
+
+
+def test_pv_charge_bonus_matches_go_dp_mode_gate() -> None:
+    settings = {"pv_charge_bonus_ore_kwh": 30}
+    assert _pv_charge_bonus_ore_kwh(settings, "passive_arbitrage") == 30
+    assert _pv_charge_bonus_ore_kwh(settings, "arbitrage") == 0
+    assert _pv_charge_bonus_ore_kwh(settings, "self_consumption") == 0
+    assert _pv_charge_bonus_ore_kwh(settings, "cheap_charge") == 0
+
+
+def test_pv_curtail_output_distinguishes_zero_cap_from_release() -> None:
+    limit, active = _pv_curtail_output(-5000, 0)
+    assert (limit, active) == (0.0, False)
+    limit, active = _pv_curtail_output(-5000, 5000)
+    assert active is True
+    assert limit == 0.0
+    limit, active = _pv_curtail_output(-5000, 2000)
+    assert active is True
+    assert limit == 3000.0
 
 
 def test_cvxpy_user_limit_is_not_an_accepted_solution() -> None:
@@ -602,6 +623,7 @@ def test_shared_direct_highs_matches_strict_pv_surplus_and_limit() -> None:
     assert math.isclose(action["battery_w"], 0, abs_tol=1e-6)
     assert math.isclose(action["grid_w"], -100, abs_tol=1e-6)
     assert math.isclose(action["pv_limit_w"], 600, abs_tol=1e-6)
+    assert action["pv_curtail_active"] is True
     assert_storage_replays(request, direct)
     assert_storage_replays(reference_request, reference)
 
@@ -799,7 +821,9 @@ def test_shared_auto_falls_back_at_each_direct_eligibility_boundary() -> None:
     cases.append(("unsafe-cycle", negative_import))
 
     pv_charge_bonus = base_request()
-    pv_charge_bonus["settings"]["pv_charge_bonus_ore_kwh"] = 1
+    pv_charge_bonus["settings"].update(
+        {"mode": "passive_arbitrage", "pv_charge_bonus_ore_kwh": 1}
+    )
     cases.append(("pv-charge-bonus", pv_charge_bonus))
 
     meter_split = base_request()
@@ -1579,14 +1603,20 @@ def test_multistage_auto_keeps_binary_guards_for_unsafe_incentives() -> None:
     assert response["solver"]["formulation"] == "multistage-milp"
 
     shared_bonus = base_request()
-    shared_bonus["settings"]["pv_charge_bonus_ore_kwh"] = 1
+    shared_bonus["settings"].update(
+        {"mode": "passive_arbitrage", "pv_charge_bonus_ore_kwh": 1}
+    )
     response = handle(shared_bonus)
     assert response["ok"], response
     assert response["solver"]["formulation"] == "milp"
 
     recourse_bonus = base_request()
     recourse_bonus["settings"].update(
-        {"scenario_policy": "recourse", "pv_charge_bonus_ore_kwh": 1}
+        {
+            "mode": "passive_arbitrage",
+            "scenario_policy": "recourse",
+            "pv_charge_bonus_ore_kwh": 1,
+        }
     )
     response = handle(recourse_bonus)
     assert response["ok"], response
@@ -1594,7 +1624,11 @@ def test_multistage_auto_keeps_binary_guards_for_unsafe_incentives() -> None:
 
     pv_bonus = base_request()
     pv_bonus["settings"].update(
-        {"scenario_policy": "multistage", "pv_charge_bonus_ore_kwh": 1}
+        {
+            "mode": "passive_arbitrage",
+            "scenario_policy": "multistage",
+            "pv_charge_bonus_ore_kwh": 1,
+        }
     )
     response = handle(pv_bonus)
     assert response["ok"], response
@@ -1748,6 +1782,7 @@ def test_relaxed_formulation_guards_pv_bonus_storage_cycles(
 ) -> None:
     request = _relaxed_flow_guard_request(scenario_policy)
     request["slots"][0].update({"price_ore": 0, "spot_ore": 0, "pv_w": -5000})
+    request["settings"]["mode"] = "passive_arbitrage"
     request["settings"]["pv_charge_bonus_ore_kwh"] = 100
 
     response = handle(request)

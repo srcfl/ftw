@@ -61,3 +61,27 @@ func BatteryDischargeFeedsEV(batteryW, evW, loadW, pvW float64) bool {
 func PlannedSurplusForEVW(loadW, pvW, batteryW, gridW float64) float64 {
 	return -pvW - loadW - PlannedPVSoakW(batteryW, gridW)
 }
+
+// BatteryEnergyDeltaWh is the cell-side energy change for a site-signed
+// AC battery power over dtH hours. Charge (powerW > 0) lands ηc of the
+// AC energy in the cells. Discharge (powerW < 0) draws AC / ηd from the
+// cells, so a 1000 W discharge at 0.95 efficiency removes ~1053 Wh/h.
+func BatteryEnergyDeltaWh(powerW, dtH, chargeEff, dischargeEff float64) float64 {
+	if powerW >= 0 {
+		return powerW * dtH * chargeEff
+	}
+	return powerW * dtH / dischargeEff
+}
+
+// EffectivePVW is the site-signed PV used in grid replay after an
+// optional curtailment cap. Inactive means the forecast stands.
+// Active with pvLimitW = 0 is a true zero cap (no generation this slot).
+func EffectivePVW(pvW, pvLimitW float64, curtailActive bool) float64 {
+	if !curtailActive {
+		return pvW
+	}
+	if pvLimitW < 0 {
+		pvLimitW = 0
+	}
+	return -pvLimitW
+}

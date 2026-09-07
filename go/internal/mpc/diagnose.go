@@ -36,13 +36,14 @@ type DiagnosticSlot struct {
 	WeatherRowAvailableAtMs int64  `json:"weather_row_available_at_ms,omitempty"`
 
 	// Outputs
-	BatteryW float64 `json:"battery_w"`
-	GridW    float64 `json:"grid_w"`
-	SoC   float64 `json:"soc"`  // SoC at END of slot
-	CostOre  float64 `json:"cost_ore"` // raw (un-blended) slot cost
-	Reason   string  `json:"reason"`
-	EMSMode  string  `json:"ems_mode"`
-	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+	BatteryW        float64 `json:"battery_w"`
+	GridW           float64 `json:"grid_w"`
+	SoC             float64 `json:"soc"` // 0–1 at END of slot
+	CostOre         float64 `json:"cost_ore"`
+	Reason          string  `json:"reason"`
+	EMSMode         string  `json:"ems_mode"`
+	PVLimitW        float64 `json:"pv_limit_w,omitempty"`
+	PVCurtailActive bool    `json:"pv_curtail_active,omitempty"`
 
 	// EV outputs — present only when the plan included a loadpoint.
 	// `omitempty` + the web renderer's `lpActive` gate mean plans
@@ -53,27 +54,27 @@ type DiagnosticSlot struct {
 	// against `LOAD 1.6 kW` and reasonably assumed the battery was
 	// exporting — reality was `LOAD 1.6 + EV 4.0 = 5.6 kW covered`,
 	// grid ≈ 0. See issue #174.
-	LoadpointW          float64            `json:"loadpoint_w,omitempty"`
+	LoadpointW       float64            `json:"loadpoint_w,omitempty"`
 	LoadpointSoC     float64            `json:"loadpoint_soc,omitempty"`
-	LoadpointPowerW     map[string]float64 `json:"loadpoint_power_w,omitempty"`
+	LoadpointPowerW  map[string]float64 `json:"loadpoint_power_w,omitempty"`
 	LoadpointSoCByID map[string]float64 `json:"loadpoint_soc_by_id,omitempty"`
-	StoragePowerW       map[string]float64 `json:"storage_power_w,omitempty"`
-	StorageEnergyWh     map[string]float64 `json:"storage_energy_wh,omitempty"`
+	StoragePowerW    map[string]float64 `json:"storage_power_w,omitempty"`
+	StorageEnergyWh  map[string]float64 `json:"storage_energy_wh,omitempty"`
 }
 
 // DiagnosticParams is a JSON-friendly subset of the Params struct —
 // enough for operators to verify the DP was parameterized correctly
 // without pulling the whole internal struct.
 type DiagnosticParams struct {
-	Mode                Mode     `json:"mode"`
-	InitialSoC       float64  `json:"initial_soc"`
+	Mode       Mode    `json:"mode"`
+	InitialSoC float64 `json:"initial_soc"`
 	// InitialSoCUnclamped is the SoC the site reported when it sat outside
 	// soc_min…soc_max and InitialSoC above was pulled onto the band edge to
 	// let Core plan. Absent on every ordinary replan. The solve used
 	// InitialSoC; this is what the battery actually read.
-	InitialSoCUnclamped float64 `json:"initial_soc_unclamped,omitempty"`
-	SoCMin           float64  `json:"soc_min"`
-	SoCMax           float64  `json:"soc_max"`
+	InitialSoCUnclamped float64  `json:"initial_soc_unclamped,omitempty"`
+	SoCMin              float64  `json:"soc_min"`
+	SoCMax              float64  `json:"soc_max"`
 	PVChargeBonusOreKwh float64  `json:"pv_charge_bonus_ore_kwh,omitempty"`
 	SoCLevels           int      `json:"soc_levels"`
 	ActionLevels        int      `json:"action_levels"`
@@ -196,15 +197,16 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			WeatherRowAvailableAtMs: slot.WeatherRowAvailableAtMs,
 			BatteryW:                action.BatteryW,
 			GridW:                   action.GridW,
-			SoC:                  action.SoC,
+			SoC:                     action.SoC,
 			CostOre:                 action.CostOre,
 			Reason:                  action.Reason,
 			EMSMode:                 action.EMSMode,
 			PVLimitW:                action.PVLimitW,
+			PVCurtailActive:         action.PVCurtailActive,
 			LoadpointW:              action.LoadpointW,
-			LoadpointSoC:         action.LoadpointSoC,
+			LoadpointSoC:            action.LoadpointSoC,
 			LoadpointPowerW:         action.LoadpointPowerW,
-			LoadpointSoCByID:     action.LoadpointSoCByID,
+			LoadpointSoCByID:        action.LoadpointSoCByID,
 			StoragePowerW:           action.StoragePowerW,
 			StorageEnergyWh:         action.StorageEnergyWh,
 		}
@@ -228,10 +230,10 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		OptimizerInput:        append(json.RawMessage(nil), plan.OptimizerInput...),
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
-			InitialSoC:              p.InitialSoC,
+			InitialSoC:                 p.InitialSoC,
 			InitialSoCUnclamped:        p.InitialSoCUnclamped,
-			SoCMin:                  p.SoCMin,
-			SoCMax:                  p.SoCMax,
+			SoCMin:                     p.SoCMin,
+			SoCMax:                     p.SoCMax,
 			PVChargeBonusOreKwh:        p.PVChargeBonusOreKwh,
 			SoCLevels:                  p.SoCLevels,
 			ActionLevels:               p.ActionLevels,
@@ -359,10 +361,10 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 	}
 	params := Params{
 		Mode:                d.Params.Mode,
-		InitialSoC:       d.Params.InitialSoC,
+		InitialSoC:          d.Params.InitialSoC,
 		InitialSoCUnclamped: d.Params.InitialSoCUnclamped,
-		SoCMin:           d.Params.SoCMin,
-		SoCMax:           d.Params.SoCMax,
+		SoCMin:              d.Params.SoCMin,
+		SoCMax:              d.Params.SoCMax,
 		PVChargeBonusOreKwh: d.Params.PVChargeBonusOreKwh,
 		SoCLevels:           d.Params.SoCLevels,
 		ActionLevels:        d.Params.ActionLevels,
@@ -418,26 +420,27 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			WeatherRowAvailableAtMs: ds.WeatherRowAvailableAtMs,
 		})
 		action := Action{
-			SlotStartMs:         ds.SlotStartMs,
-			SlotLenMin:          lenMin,
-			PriceOre:            ds.PriceOre,
-			SpotOre:             ds.SpotOre,
-			PVW:                 ds.PVW,
-			LoadW:               ds.LoadW,
-			BatteryW:            ds.BatteryW,
-			GridW:               ds.GridW,
+			SlotStartMs:      ds.SlotStartMs,
+			SlotLenMin:       lenMin,
+			PriceOre:         ds.PriceOre,
+			SpotOre:          ds.SpotOre,
+			PVW:              ds.PVW,
+			LoadW:            ds.LoadW,
+			BatteryW:         ds.BatteryW,
+			GridW:            ds.GridW,
 			SoC:              ds.SoC,
-			CostOre:             ds.CostOre,
-			Confidence:          ds.Confidence,
-			Reason:              ds.Reason,
-			EMSMode:             ds.EMSMode,
-			PVLimitW:            ds.PVLimitW,
-			LoadpointW:          ds.LoadpointW,
+			CostOre:          ds.CostOre,
+			Confidence:       ds.Confidence,
+			Reason:           ds.Reason,
+			EMSMode:          ds.EMSMode,
+			PVLimitW:         ds.PVLimitW,
+			PVCurtailActive:  ds.PVCurtailActive,
+			LoadpointW:       ds.LoadpointW,
 			LoadpointSoC:     ds.LoadpointSoC,
-			LoadpointPowerW:     ds.LoadpointPowerW,
+			LoadpointPowerW:  ds.LoadpointPowerW,
 			LoadpointSoCByID: ds.LoadpointSoCByID,
-			StoragePowerW:       ds.StoragePowerW,
-			StorageEnergyWh:     ds.StorageEnergyWh,
+			StoragePowerW:    ds.StoragePowerW,
+			StorageEnergyWh:  ds.StorageEnergyWh,
 		}
 		if identified && ds.SlotEndMs > 0 {
 			slotEndMs, err := checkedSlotEndMs(action.SlotStartMs, action.SlotLenMin)
@@ -465,7 +468,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		Mode:               params.Mode,
 		HorizonSlots:       horizon,
 		CapacityWh:         params.CapacityWh,
-		InitialSoC:      params.InitialSoC,
+		InitialSoC:         params.InitialSoC,
 		TotalCostOre:       d.TotalCostOre,
 		Actions:            actions,
 		Solver:             d.Solver,
