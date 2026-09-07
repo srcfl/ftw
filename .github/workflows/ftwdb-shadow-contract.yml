@@ -1,0 +1,46 @@
+name: FTWDB shadow contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ftwdb-shadow-contract.yml"
+      - "docker-compose.ftwdb-shadow.yml"
+      - "go/internal/ftwdbshadow/**"
+      - "go/internal/state/history_feed*"
+      - "go/internal/state/store_ts.go"
+      - "go/cmd/ftw/main.go"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-rust-contract:
+    name: Go to Rust contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out pinned FTWDB
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: srcfl/ftwdb
+          ref: 4927c1cda891941e77f22122dd225a2dde1d43e3
+          path: .ftwdb-contract
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+      - name: Check the frozen v1 contract
+        run: diff -ru .ftwdb-contract/testdata/shadow-protocol-v1 go/internal/ftwdbshadow/testdata/shadow-protocol-v1
+      - name: Build the pinned sidecar and reconcile tool
+        run: cargo build --locked --manifest-path .ftwdb-contract/Cargo.toml --bin ftwdb-shadow --bin ftwdb-shadow-reconcile
+      - name: Exercise live copy, lost ACK, limits, SIGKILL, restart and reconcile
+        working-directory: go
+        env:
+          FTWDB_SHADOW_BIN: ${{ github.workspace }}/.ftwdb-contract/target/debug/ftwdb-shadow
+          FTWDB_RECONCILE_BIN: ${{ github.workspace }}/.ftwdb-contract/target/debug/ftwdb-shadow-reconcile
+          FTWDB_SHADOW_FIXTURES: ${{ github.workspace }}/.ftwdb-contract/testdata/shadow-protocol-v1
+        run: go test -race ./internal/ftwdbshadow ./internal/state -run 'TestBeta|TestHistoryMapping|TestRustSidecarInterop|TestLiveHistory|TestHealthOps|TestV1Golden|TestVendored' -count=1 -v

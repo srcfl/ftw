@@ -46,6 +46,9 @@ const (
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
+	historyFeedMu sync.RWMutex
+	historyFeed   *HistoryFeed
+
 	db    *sql.DB
 	cache *sql.DB
 	ts    *internCache

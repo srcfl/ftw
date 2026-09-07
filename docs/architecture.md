@@ -65,6 +65,11 @@ The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
 
+The optional [FTWDB beta candidate](ftwdb-shadow.md) copies committed numeric
+site history through a bounded memory queue to a local sidecar. It reports
+session gaps and durable receipts. SQLite and Parquet keep serving all reads;
+the candidate has no role in control, config or forecasting.
+
 ## Drivers
 
 The public `srcfl/device-drivers` repo owns editable driver source, versions,
