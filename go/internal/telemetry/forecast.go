@@ -49,6 +49,25 @@ type ForecastReading struct {
 // does not invalidate a fresh meter. Missing configured flows invalidate the
 // balance, including devices that have never emitted. No fuse limits house W.
 func (s *Store) ForecastMeasurement(now time.Time, siteMeter string, opts ForecastOptions) ForecastReading {
+	if s != nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
+	return s.forecastMeasurementLocked(now, siteMeter, opts)
+}
+
+// ForecastMeasurementNow captures the time after acquiring the telemetry lock.
+// A poll already in progress can finish before the snapshot without appearing
+// to come from the future. Explicit forecast origins still use ForecastMeasurement.
+func (s *Store) ForecastMeasurementNow(siteMeter string, opts ForecastOptions) ForecastReading {
+	if s != nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
+	return s.forecastMeasurementLocked(time.Now(), siteMeter, opts)
+}
+
+func (s *Store) forecastMeasurementLocked(now time.Time, siteMeter string, opts ForecastOptions) ForecastReading {
 	out := ForecastReading{At: now, Valid: true, PVValid: true}
 	if s == nil {
 		out.Valid = false
@@ -63,8 +82,6 @@ func (s *Store) ForecastMeasurement(now time.Time, siteMeter string, opts Foreca
 	if opts.MaxSkew <= 0 {
 		opts.MaxSkew = 30 * time.Second
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	flows := map[string]ForecastFlow{}
 	key := func(f ForecastFlow) string { return f.Driver + ":" + f.DerType.String() }
 	fail := func(reason string, pv bool) {
