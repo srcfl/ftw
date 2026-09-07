@@ -3,6 +3,8 @@ package telemetry
 import (
 	"encoding/json"
 	"math"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,6 +22,73 @@ func forecastStore(now time.Time, grid, pv, bat float64) *Store {
 	}
 	return s
 }
+
+func TestForecastMeasurementNowCapturesCutoffAfterConcurrentWriter(t *testing.T) {
+	s := forecastStore(time.Now().Add(-time.Second), 4000, 0, 3000)
+	s.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
+	result := make(chan ForecastReading, 1)
+	go func() { result <- s.ForecastMeasurementNow("site", ForecastOptions{}) }()
+
+	// A start channel alone would not prove the reader reached RLock before
+	// this writer publishes. Observe that blocked stack so an implementation
+	// that captures time before RLock deterministically retains an old cutoff.
+	stack := make([]byte, 128<<10)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		blocked := false
+		for _, goroutine := range strings.Split(string(stack[:runtime.Stack(stack, true)]), "\n\n") {
+			if strings.Contains(goroutine, "(*Store).ForecastMeasurementNow(") && strings.Contains(goroutine, "sync.(*RWMutex).RLock(") {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("current measurement did not wait on the active writer")
+		}
+		runtime.Gosched()
+	}
+	published := time.Now()
+	for _, reading := range s.readings {
+		reading.UpdatedAt = published
+	}
+	s.readings["site:meter"].RawW = 4200
+	s.mu.Unlock()
+	locked = false
+
+	select {
+	case reading := <-result:
+		if !reading.Valid || !reading.PVValid || reading.HouseholdW != 1200 {
+			t.Fatalf("fresh writer update rejected or missed: %+v", reading)
+		}
+		if reading.At.Before(published) || !reading.Latest.Equal(published) {
+			t.Fatalf("cutoff %s precedes published reading %s (latest %s)", reading.At, published, reading.Latest)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("current measurement did not finish after writer released lock")
+	}
+}
+
+func TestForecastExplicitOriginStillRejectsLaterPublishedMeasurement(t *testing.T) {
+	origin := time.Now().Add(-time.Second)
+	s := forecastStore(origin, 4000, 0, 3000)
+	s.mu.Lock()
+	s.readings["site:meter"].UpdatedAt = origin.Add(time.Millisecond)
+	s.mu.Unlock()
+	reading := s.ForecastMeasurement(origin, "site", ForecastOptions{})
+	if reading.Valid || reading.Reason != "future:site:meter" || !reading.At.Equal(origin) {
+		t.Fatalf("explicit causal origin was replaced with current time: %+v", reading)
+	}
+}
+
 func TestForecastCompleteBalance(t *testing.T) {
 	now := time.Now()
 	s := forecastStore(now, 4000, 0, 3000)

@@ -4088,11 +4088,13 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, h
 		opts = options[0]
 		opts.MaxAge = historyMaxAge
 	}
-	now := time.UnixMilli(nowMs).Add(time.Millisecond - time.Nanosecond)
-	balance := tel.ForecastMeasurement(now, ctrl.SiteMeterDriver, opts)
+	// Polls can update telemetry while dispatch runs. Keep the tick's history
+	// timestamp, but judge reading freshness when this snapshot is captured.
+	balance := tel.ForecastMeasurementNow(ctrl.SiteMeterDriver, opts)
 	if !balance.Valid {
 		return unavailable, false
 	}
+	now := balance.At
 	gridW, pvW, batW := balance.GridW, balance.PVW, balance.BatteryW
 	evW, v2xW, loadW := balance.EVW, balance.V2XW, balance.HouseholdW
 	readingUsable := func(driver string, updatedAt time.Time) bool {
