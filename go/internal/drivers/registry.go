@@ -490,10 +490,9 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	env := NewHostEnv(cfg.Name, r.tel)
 	env.BatteryCapacityWh = cfg.BatteryCapacityWh
 	env.BatteryTelemetryOnly = cfg.BatteryTelemetryOnly
-	// Wire durable secret write-back (rotated OAuth tokens). The closure
-	// reads r.SecretPersister lazily at call time so main.go may set it
-	// either before or after the initial Add loop; persists only ever
-	// happen at runtime poll, long after wiring completes.
+	// Wire secret write-back (rotated OAuth tokens). The host must install
+	// SecretPersister and SecretOverride before Add: init may persist a
+	// secret, and the poll loop starts before Add returns.
 	driverName := cfg.Name
 	env.PersistSecret = func(key, value string) error {
 		if r.SecretPersister == nil {

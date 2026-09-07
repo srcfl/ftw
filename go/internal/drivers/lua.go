@@ -969,15 +969,22 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}))
 
 	// host.persist_secret(key, value) -> ok, err
-	// Durably writes a config secret back into the driver's own config
-	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
+	// Writes a secret into the driver's own persisted KV namespace.
+	// Managed read-only OAuth drivers need a signed config_secrets entry.
+	// Keys use at most 64 lowercase letters, digits or underscores; values
+	// are capped at 1 MiB, matching the host's HTTP response limit.
 	// Returns ok=false + an error string when the capability isn't wired.
 	host.RawSetString("persist_secret", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckString(1)
 		val := L.CheckString(2)
-		if env.RuntimePolicy != nil || env.PersistSecret == nil {
+		if env.PersistSecret == nil || !env.RuntimePolicy.allowsSecretPersistence(key) {
 			L.Push(lua.LBool(false))
 			L.Push(lua.LString("persist_secret: capability not granted"))
+			return 2
+		}
+		if !validPersistSecretKey(key) || len(val) > 1<<20 {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString("persist_secret: invalid key or value exceeds 1 MiB"))
 			return 2
 		}
 		if err := env.PersistSecret(key, val); err != nil {
@@ -1389,6 +1396,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			if len(via) > 0 && via[0].Method == "PATCH" {
 				return fmt.Errorf("redirect not followed for PATCH (a redirected write cannot be verified)")
 			}
+			// The managed read-only OAuth exception authorizes one exact path.
+			// A 307/308 must not carry its POST body to a device write endpoint.
+			if len(via) > 0 && via[0].Method == "POST" && env.allowAuthPost(via[0].URL.String()) {
+				return fmt.Errorf("redirect not followed for managed OAuth POST")
+			}
 			if ok, reason := hostAllowed(req.URL.String()); !ok {
 				return fmt.Errorf("redirect blocked: %s", reason)
 			}
@@ -1758,10 +1770,13 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		// Do not leave these functions reachable in a v2 VM even when local
 		// YAML happens to configure those legacy capabilities.
 		for _, name := range []string{
-			"persist_secret", "ws_open", "ws_send", "ws_messages", "ws_is_open", "ws_close",
+			"ws_open", "ws_send", "ws_messages", "ws_is_open", "ws_close",
 			"tcp_open", "tcp_recv", "tcp_is_open", "tcp_close",
 		} {
 			host.RawSetString(name, lua.LNil)
+		}
+		if !env.RuntimePolicy.IsReadOnly() {
+			host.RawSetString("persist_secret", lua.LNil)
 		}
 	}
 	L.SetGlobal("host", host)

@@ -324,6 +324,9 @@ func TestSourcefulIndexPackageInstallAndOfflineCache(t *testing.T) {
 	if err != nil || policy == nil || !policy.IsReadOnly() || !policy.Permissions["modbus.read"] || policy.Permissions["modbus.write"] {
 		t.Fatalf("signed read-only runtime policy = %+v, %v", policy, err)
 	}
+	if len(policy.ConfigSecrets) != 0 || policy.AuthPostPath != "" {
+		t.Fatalf("package without signed OAuth metadata received secret grants: %+v", policy)
+	}
 
 	// A failed refresh cannot replace the last-good in-memory or on-disk view.
 	fixture.mu.Lock()

@@ -590,6 +590,11 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 			break
 		}
 	}
+	// InstallChannel uses this pinned trust source without adding it to the
+	// stable config list. Bind only its exact recorded repository identity.
+	if repo == nil && m.betaRepo.ID != "" && installed.RepoID == m.betaRepo.ID {
+		repo = &m.betaRepo
+	}
 	if repo == nil {
 		if cfg.Control != nil && cfg.Control.Enabled {
 			return nil, errors.New("control opt-in requires a configured Device Support trust root")
@@ -761,7 +766,8 @@ func (m *Manager) directManifestRuntimePolicy(
 		// Only a read-only driver can have one, and only the path the signed
 		// manifest names. An unsigned or absent value leaves it empty, which
 		// is the same as having no exemption at all.
-		AuthPostPath: matched.Metadata.AuthPostPath,
+		AuthPostPath:  matched.Metadata.AuthPostPath,
+		ConfigSecrets: append([]string(nil), matched.Metadata.ConfigSecrets...),
 	}, nil
 }
 
