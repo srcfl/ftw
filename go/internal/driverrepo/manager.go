@@ -594,6 +594,24 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 	if err == nil && retained.RepositoryFormat != "" && retained.RepositoryFormat != repositoryFormat(repo) {
 		return state.DriverRepoInstall{}, errors.New("retained driver metadata format cannot change")
 	}
+	if repositoryFormat(repo) == config.DriverRepositoryFormatFTWManifestV1 {
+		// Older activation rows do not record a format. A retained envelope
+		// still rules out direct-manifest operation, even if it is damaged.
+		_, packageErr := os.Lstat(filepath.Join(filepath.Dir(installPath), sourcefulInstalledPackageEnvelope))
+		if packageErr == nil {
+			return state.DriverRepoInstall{}, errors.New("retained signed package cannot be reinstalled as a direct-manifest driver")
+		}
+		if !errors.Is(packageErr, os.ErrNotExist) {
+			return state.DriverRepoInstall{}, fmt.Errorf("inspect retained signed package envelope: %w", packageErr)
+		}
+		if err == nil && retained.RepositoryFormat == "" {
+			// Missing metadata does not prove v1. Recover the old format only
+			// from signed metadata bound to that install's source and artifact.
+			if err := m.recordDirectManifestFormat(repo, retained); err != nil {
+				return state.DriverRepoInstall{}, err
+			}
+		}
+	}
 	if err := atomicWrite(installPath, raw, 0o600); err != nil {
 		return state.DriverRepoInstall{}, err
 	}
