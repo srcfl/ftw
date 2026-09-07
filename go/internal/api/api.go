@@ -41,6 +41,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
+	"github.com/srcfl/ftw/go/internal/ftwdbshadow"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -71,6 +72,8 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
+	FTWDBShadow *ftwdbshadow.Beta
+
 	// MutationPolicy protects every state-changing route at the shared
 	// Handler boundary. Production requires tokens for non-local hostnames;
 	// the zero value retains local/test embedding compatibility.
@@ -699,6 +702,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			storage["detail"] = ev.Detail
 		}
 		resp["storage"] = storage
+	}
+	if s.deps.FTWDBShadow != nil {
+		resp["ftwdb_shadow"] = s.deps.FTWDBShadow.Status()
 	}
 	writeJSON(w, 200, resp)
 }

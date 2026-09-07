@@ -1,0 +1,31 @@
+# Optional beta overlay. Core and SQLite keep their normal lifecycle.
+# Pin matches .github/workflows/ftwdb-shadow-contract.yml.
+services:
+  ftw:
+    environment:
+      FTWDB_SHADOW_SOCKET: /run/ftwdb-shadow/shadow.sock
+    volumes:
+      - ftwdb-shadow-run:/run/ftwdb-shadow
+
+  ftwdb-shadow:
+    profiles: [ftwdb-shadow]
+    build:
+      context: https://github.com/srcfl/ftwdb.git#7bbae63532f695b10aca548bf4ee58c6d7ebb3a8
+    image: ftwdb-shadow:7bbae63532f695b10aca548bf4ee58c6d7ebb3a8
+    user: "100:101"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 0.25
+    mem_limit: 256m
+    pids_limit: 64
+    restart: "no"
+    stop_grace_period: 30s
+    volumes:
+      - ftwdb-shadow-data:/var/lib/ftwdb-shadow
+      - ftwdb-shadow-run:/run/ftwdb-shadow
+
+volumes:
+  ftwdb-shadow-data:
+  ftwdb-shadow-run:
