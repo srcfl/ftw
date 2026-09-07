@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.3
+
+### Patch Changes
+
+- 48013fd: Restore and save rotated OAuth tokens before drivers start so myUplink can stay connected across Core restarts and updates.
+  
+  Apply signed OAuth rules to managed drivers, including official beta installs. Allow token exchange only at the declared path, block redirects, and let each driver save only its declared secret keys with bounded keys and values.
+- d6da557: Close the FTWDB shadow connection after each durable batch so the next batch does not reuse a socket closed by the sidecar's idle timeout. This avoids repeated transport errors and delayed shadow copies during normal beta collection.
+- 76f811b: Keep unchanged form defaults out of saved settings. Opening Planner and saving
+  now preserves an unset SoC limit, including when saving from another tab.
+  Show the planner's 95% default maximum instead of 90%.
+  Keep an untouched driver profile absent when its choices arrive after the form.
+
 ## 3.0.2
 
 ### Patch Changes
