@@ -27,9 +27,12 @@ volume, no network, a 256 MiB memory limit and a quarter CPU. Only the private
 Unix socket volume is shared with Core. Both processes use UID 100, GID 101.
 There is no startup or health dependency from Core to FTWDB.
 
-For a native install, use the FTWDB service example with the same user as Core.
-Pass `-ftwdb-shadow-socket /run/ftwdb-shadow/ftwdb-shadow.sock` to Core or set
-`FTWDB_SHADOW_SOCKET` to that path. An empty value disables the candidate.
+For a native Linux install, use the pinned
+[systemd service example](https://github.com/srcfl/ftwdb/blob/6a2f6c88cb89200307487e864e79d622e803e956/packaging/systemd/ftwdb-shadow.service)
+with the same user as Core. That service listens on
+`/run/ftwdb-shadow/ftwdb-shadow.sock`. Pass that path with
+`-ftwdb-shadow-socket` or `FTWDB_SHADOW_SOCKET` to Core.
+An empty value disables the candidate.
 This is an install option; household Settings do not expose an experimental
 storage switch.
 
