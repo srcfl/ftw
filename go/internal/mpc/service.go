@@ -232,6 +232,7 @@ type Service struct {
 
 	mu              sync.RWMutex
 	last            *Plan
+	executionPlan   *Plan  // Set only by publication with current physical inputs.
 	lastSlots       []Slot // inputs that went into the most recent Optimize call
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
@@ -403,15 +404,16 @@ func (s *Service) PlanSnapshot() PlanSnapshot {
 	s.mu.RLock()
 	outdated := s.publishedReplanGeneration != s.latestReplanGeneration
 	proof := s.lastParams.PVCurtailment
+	currentContract := s.executionPlan == s.last
 	out := PlanSnapshot{
 		Plan: s.last, ReplanAt: s.lastReplanAt, Reason: s.lastReason,
 		Pending: outdated && s.activeReplanCancel != nil, Outdated: outdated,
 		loadpointID: s.lastLoadpointID,
 	}
 	s.mu.RUnlock()
-	if !s.pvExecutionAllowed(proof) {
+	if !s.planExecutionAllowed(out.Plan, proof, currentContract) {
 		out.Outdated = true
-		out.Reason = "PV generation control changed or is stale"
+		out.Reason = "Plan requires fresh physical inputs or PV control"
 	}
 	return out
 }
@@ -433,6 +435,7 @@ func (s *Service) InstallPlan(plan Plan, params Params, loadpointID string) {
 	defer s.mu.Unlock()
 	copied := plan
 	s.last = &copied
+	s.executionPlan = s.last
 	s.lastParams = params
 	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
@@ -520,6 +523,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	// plan under one lock so a concurrent replan cannot mix generations.
 	s.mu.RLock()
 	p := s.last
+	currentContract := s.executionPlan == p
 	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	lpID := s.lastLoadpointID
 	params := s.lastParams
@@ -529,7 +533,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil || failedReplacement || !s.pvExecutionAllowed(params.PVCurtailment) {
+	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return SlotDirective{}, false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -728,13 +732,14 @@ func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	}
 	s.mu.RLock()
 	p := s.last
+	currentContract := s.executionPlan == p
 	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	params := s.lastParams
 	if params.Mode == "" {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil || failedReplacement || !s.pvExecutionAllowed(params.PVCurtailment) {
+	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return "", 0, "", false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -1827,6 +1832,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	capPlanLoad(&plan, 0, s.LoadMaxW)
 	plan.DecisionID = s.nextDecisionIDLocked()
 	s.last = &plan
+	s.executionPlan = s.last
 	s.lastSlots = slots
 	s.lastParams = p
 	s.lastLoadpointID = loadpointID

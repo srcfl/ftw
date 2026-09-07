@@ -185,3 +185,18 @@ func TestPVCurtailmentProofCannotSurviveDiagnosticRestore(t *testing.T) {
 		t.Fatal("stored diagnostics granted a new process a control capability")
 	}
 }
+
+func TestRestoredPVPlanWithoutCapabilityCannotExecute(t *testing.T) {
+	now := time.Now()
+	s := &Service{}
+	s.InstallPlan(Plan{GeneratedAtMs: now.UnixMilli(), Actions: []Action{{SlotStartMs: now.Add(-time.Minute).UnixMilli(), SlotLenMin: 15, PVCurtailActive: true, PVLimitW: 100}}}, Params{Mode: ModeArbitrage}, "")
+	if _, ok := s.SlotDirectiveAt(now); ok {
+		t.Fatal("missing proof permitted EV/battery execution")
+	}
+	if _, _, _, ok := s.SlotAt(now); ok {
+		t.Fatal("missing proof permitted legacy execution")
+	}
+	if !s.PlanSnapshot().Outdated {
+		t.Fatal("missing proof was shown as executable")
+	}
+}

@@ -27,7 +27,24 @@ func (p PVCurtailment) Covers(slots []Slot) bool {
 	return true
 }
 
-func (s *Service) pvExecutionAllowed(p PVCurtailment) bool {
+func (s *Service) planExecutionAllowed(plan *Plan, p PVCurtailment, currentContract bool) bool {
+	// Old diagnostic schemas omit physical parameters. Their archived maps
+	// cannot become a live aggregate directive merely because the fields are
+	// absent. A new solve must restore the complete contract in this process.
+	if plan != nil && !currentContract {
+		for _, a := range plan.Actions {
+			if len(a.StoragePowerW) > 0 || len(a.LoadpointPowerW) > 0 || a.PVCurtailActive {
+				return false
+			}
+		}
+	}
+	if plan != nil && !p.Valid() {
+		for _, a := range plan.Actions {
+			if a.PVCurtailActive {
+				return false
+			}
+		}
+	}
 	if p.MinW == 0 && p.Proof == "" {
 		return true
 	}
