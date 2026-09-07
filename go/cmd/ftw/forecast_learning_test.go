@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +27,44 @@ func learningTracker(st *state.Store, site *forecastSite, at time.Time, r *rustF
 		f.candidate = r
 	}
 	return f
+}
+
+func TestForecastLearningSerializesIdentityAcrossIntentAndApply(t *testing.T) {
+	st := hostForecastDB(t)
+	site := hostForecastSite()
+	at := time.Date(2026, 6, 15, 12, 22, 0, 0, time.UTC)
+	f := learningTracker(st, &site, at, nil)
+	f.configMu = &sync.RWMutex{}
+
+	var siteReads int
+	var identityWriteCouldInterleave bool
+	f.site = func() forecastSite {
+		siteReads++
+		if f.configMu.TryLock() {
+			identityWriteCouldInterleave = true
+			f.configMu.Unlock()
+		}
+		return site
+	}
+	f.requestReplan = func(string) {
+		if f.configMu.TryLock() {
+			identityWriteCouldInterleave = true
+			f.configMu.Unlock()
+		}
+	}
+
+	if err := f.RestartLearning(context.Background(), "pv"); err != nil {
+		t.Fatal(err)
+	}
+	if identityWriteCouldInterleave {
+		t.Fatal("site identity write could interleave with learning restart")
+	}
+	if siteReads != 2 {
+		t.Fatalf("site reads=%d want2", siteReads)
+	}
+	if got := f.pv.LearningStartedMS(); got != at.UnixMilli() {
+		t.Fatalf("PV learning start=%d want%d", got, at.UnixMilli())
+	}
 }
 
 func TestForecastLearningNativePendingExchangeRecoversOnlySelectedSignal(t *testing.T) {
