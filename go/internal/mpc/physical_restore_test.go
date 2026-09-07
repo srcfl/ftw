@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 func physicalRestoreFixture(t *testing.T, batteries, evs int, pvSlot int) (Plan, Params, *Diagnostic, time.Time) {
@@ -111,6 +113,21 @@ func TestNativeShadowPreservesCurrentExecutionButCannotActivateArchive(t *testin
 	o := nativeWorker(t, 500*time.Millisecond)
 	t.Cleanup(func() { o.Close() })
 	svc := shadowTestService(t)
+	// Hourly fixtures can fall outside Service's 15-minute lookback. Keep a
+	// current slot so this test checks execution permission at any wall time.
+	if _, err := svc.Store.ClearPrices(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(-time.Minute).Truncate(time.Minute)
+	for i := 0; i < 4; i++ {
+		if err := svc.Store.SavePrices([]state.PricePoint{{
+			Zone: svc.Zone, SlotTsMs: start.Add(time.Duration(i) * 15 * time.Minute).UnixMilli(),
+			SlotLenMin: 15, SpotOreKwh: 50 + float64(i)*40, TotalOreKwh: 100 + float64(i)*80,
+			Source: "test", FetchedAtMs: time.Now().UnixMilli(),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
 	plan := svc.Replan(context.Background())
 	if plan == nil || plan.Solver == nil || plan.Solver.Fallback || len(plan.Actions[0].StoragePowerW) == 0 {

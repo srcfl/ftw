@@ -31,7 +31,9 @@ func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
 		batteries = 1
 	}
 	assets := 3*batteries + 2*len(p.activeLoadpoints())
-	if len(slots)*assets >= 193*6 || p.PVCurtailment.MinW > 0 || p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0 {
+	// Core already adjusts PV to one downside horizon. That margin does not
+	// add worker scenarios or change this model's size.
+	if len(slots)*assets >= 193*6 || p.PVCurtailment.MinW > 0 {
 		return 5 * time.Second
 	}
 	return 500 * time.Millisecond

@@ -55,3 +55,35 @@ func TestBuildMPCWithoutHomeBattery(t *testing.T) {
 		defer svc.Optimizer.Close()
 	}
 }
+
+func TestBuildMPCBatterylessEngineAdmission(t *testing.T) {
+	old := Version
+	t.Cleanup(func() { Version = old })
+	for _, tc := range []struct {
+		name, version, engine string
+		want                  bool
+	}{
+		{"explicit Core in beta", "v3.1.0-beta.1", "core", false},
+		{"stable default", "v3.1.0", "", false},
+		{"development default", "dev", "", false},
+		{"invalid beta default", "dev-beta.invalid", "", false},
+		{"explicit Energyplan", "v3.1.0", "energyplan", true},
+		{"beta default", "v3.1.0-beta.1", "", energyplanSupported(runtime.GOOS, runtime.GOARCH)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			Version = tc.version
+			cfg, _ := plannerEngineConfig(&config.Planner{Enabled: true, Engine: tc.engine})
+			cfg.Drivers = nil
+			svc := buildMPC(cfg, nil, nil, nil)
+			if svc != nil && svc.Optimizer != nil {
+				defer svc.Optimizer.Close()
+			}
+			if (svc != nil) != tc.want {
+				t.Fatalf("batteryless admission=%v, want %v", svc != nil, tc.want)
+			}
+			if svc != nil && (!svc.OptimizerBundledWithCore() || svc.Defaults.CapacityWh != 0) {
+				t.Fatal("batteryless admission requires Energyplan without invented storage")
+			}
+		})
+	}
+}
