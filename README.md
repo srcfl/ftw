@@ -39,7 +39,6 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - EV charging, V2X and thermal planning;
 - local web UI, SQLite history and Parquet rolloff;
 - Home Assistant MQTT discovery;
-- CalDAV planning intents and published schedules;
 - hot-reloadable, independently released Lua drivers;
 - a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
 
@@ -227,7 +226,7 @@ metadata are the detailed reference.
 - [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)
-- [CalDAV](docs/caldav-integration.md)
+- [Calendar removal and existing schedules](docs/caldav-integration.md)
 
 Other files under [`docs/`](docs/) are focused installation or
 external-integration guides.

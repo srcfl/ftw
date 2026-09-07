@@ -39,11 +39,8 @@ import (
 	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
-	"github.com/srcfl/ftw/go/internal/caldavserver"
-	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
-	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
@@ -364,7 +361,7 @@ func main() {
 
 	// Route "drivers/<name>.lua" path resolution through the drivers dir
 	// (from -drivers). Picked up by both the initial Load below and every
-	// subsequent reload via the file watcher.
+	// subsequent config load.
 	config.DriversDirOverride = resolveDriverDir()
 	// UserDriversDirOverride is the persistent overlay — probed first.
 	// Empty when -user-drivers is not supplied (back-compat).
@@ -374,7 +371,7 @@ func main() {
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		if isConfigMissing(err) {
+		if isConfigMissing(*configPath) {
 			runBootstrap(*configPath, *webDir, resolveDriverDir())
 			return
 		}
@@ -398,6 +395,9 @@ func main() {
 		if cfg.State.ColdDir != "" {
 			coldDir = cfg.State.ColdDir
 		}
+	}
+	if cfg.ConfigDatabase != "" {
+		statePath = cfg.ConfigDatabase
 	}
 	// Resolve to absolute so paths derived via filepath.Dir(statePath)
 	// (SnapshotDir, nova.key) don't end up cwd-relative on native installs
@@ -450,6 +450,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	if cfg.RetiredCalendarEnabled {
+		if err := st.RetireCalendarProfile(); err != nil {
+			slog.Error("retire calendar profile", "err", err)
+			os.Exit(1)
+		}
+	}
+	cfg, err = config.InitializeStorage(*configPath, statePath, cfg, st)
+	if err != nil {
+		slog.Error("initialize config database", "err", err)
+		os.Exit(1)
+	}
 
 	// The repository is entirely local on startup: existing active symlinks are
 	// usable offline and remote refresh never blocks core boot.
@@ -481,34 +492,6 @@ func main() {
 		slog.Warn("failed to persist startup event", "err", err)
 	}
 
-	// ---- Restore EV charger password from state.db (not stored in YAML) ----
-	if cfg.EVCharger != nil {
-		if pw, ok := st.LoadConfig("ev_charger_password"); ok {
-			cfg.EVCharger.Password = pw
-		}
-	}
-
-	// ---- Restore CalDAV password from state.db (not stored in YAML) ----
-	if cfg.CalDAV != nil {
-		if pw, ok := st.LoadConfig("caldav_password"); ok {
-			cfg.CalDAV.Password = pw
-		}
-	}
-	// Managed credential (#498): mint a random password on first enable so the
-	// operator never sets one by hand. Persisted to state.db; the in-process
-	// CalDAV server authenticates against it and the Settings tab shows it (with
-	// a QR) to paste into a calendar app.
-	if cfg.CalDAV.ManageCredentialsEnabled() && cfg.CalDAV.Password == "" {
-		if tok, err := calendar.GenerateToken(18); err != nil {
-			slog.Warn("caldav: failed to generate managed credential", "err", err)
-		} else if err := st.SaveConfig("caldav_password", tok); err != nil {
-			slog.Warn("caldav: failed to persist managed credential", "err", err)
-		} else {
-			cfg.CalDAV.Password = tok
-			slog.Info("caldav: generated managed credential")
-		}
-	}
-
 	// ---- Telemetry store ----
 	tel := telemetry.NewStore()
 
@@ -536,14 +519,13 @@ func main() {
 	trust, export, safetyK, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, storedSafetyK, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
 	plannerPrefs := config.NewPlannerPrefs(trust, export, safetyK)
 	if missingPrefs {
-		if err := st.SaveConfig(config.StateKeySafetyK, config.FormatSafetyK(safetyK)); err != nil {
-			slog.Warn("failed to persist planner_safety_k", "err", err)
-		}
-		if err := st.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {
-			slog.Warn("failed to persist forecast_trust", "err", err)
-		}
-		if err := st.SaveConfig(config.StateKeyBatteryExport, string(export)); err != nil {
-			slog.Warn("failed to persist battery_export", "err", err)
+		if err := st.SaveConfigValues(map[string]string{
+			config.StateKeySafetyK:       config.FormatSafetyK(safetyK),
+			config.StateKeyForecastTrust: string(trust),
+			config.StateKeyBatteryExport: string(export),
+		}); err != nil {
+			slog.Error("save planner preferences", "err", err)
+			os.Exit(1)
 		}
 	}
 	if ctrl.Mode == control.ModePlannerArbitrage && export != config.BatteryExportAllowed {
@@ -709,15 +691,9 @@ func main() {
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
 
-	// Durable secret write-back for drivers (rotated OAuth refresh tokens).
-	// Drivers call host.persist_secret(key, value); the registry routes it
-	// here with the driver's name. We write to the state KV store — NOT
-	// config.yaml — on purpose: config.yaml is watched by configreload, and
-	// rewriting it on every token rotation would restart the driver, which
-	// re-auths, rotates again, and loops. SecretOverride then layers these
-	// KV values back over config.yaml at driver_init, so the freshest token
-	// always reaches the driver while config.yaml keeps the bootstrap seed
-	// the UI renders as "saved".
+	// Rotated driver tokens keep their own KV rows. Rotation must not apply the
+	// whole config or restart a driver that just refreshed its credential.
+	// SecretOverride supplies the newest token when the driver next starts.
 	driverSecretKey := func(driverName, key string) string {
 		return "driver_secret:" + driverName + ":" + key
 	}
@@ -731,8 +707,7 @@ func main() {
 	// Pre-declare services that the hot-reload Applier needs to touch.
 	// The Applier closure captures these by reference; they're assigned
 	// further down when their packages are wired, and the Applier only
-	// ever fires after `watcher.Start()` — by which point everything is
-	// in place.
+	// receives requests after the runtime is ready.
 	var pvSvc *pvmodel.Service
 	var forecastSvc *forecast.Service
 	var forecastConfigMu sync.RWMutex
@@ -903,36 +878,16 @@ func main() {
 	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
 
-	// Forward-declared before the reload watcher so the reload callback
+	// Forward-declared so the saved-config callback
 	// can keep the loadpoint controller's per-phase EV fuse clamp in sync
 	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
 	var lpController *loadpoint.Controller
 
-	// Forward-declared before the reload watcher so the callback can
-	// hot-reload the calendar client (#498). Assigned later (calendar.New).
-	var calSvc *calendar.Service
-
-	// ---- Config hot-reload watcher ----
-	// Named because two callers share it: the fsnotify watcher created
-	// below and POST /api/config (Deps.ConfigApplier), so a config saved
-	// through the API is applied exactly like an edit of the file (#760).
+	// ---- Apply saved configuration ----
+	// Settings commit to SQLite before this callback applies them.
 	applyConfigChange := func(newCfg, oldCfg *config.Config) {
 		forecastConfigMu.Lock()
 		defer forecastConfigMu.Unlock()
-		// Restore EV charger password from state.db (not in YAML).
-		if newCfg.EVCharger != nil {
-			if pw, ok := st.LoadConfig("ev_charger_password"); ok {
-				newCfg.EVCharger.Password = pw
-			}
-		}
-		// Restore CalDAV password from state.db (not in YAML). Any CalDAV
-		// change is restart-gated because the native server and client must
-		// switch credentials, paths, and listeners atomically.
-		if newCfg.CalDAV != nil {
-			if pw, ok := st.LoadConfig("caldav_password"); ok {
-				newCfg.CalDAV.Password = pw
-			}
-		}
 		// Driver paths are already resolved by config.Load; no extra
 		// work needed here. Re-apply the battery SoC-window → driver
 		// config mapping so a hot-edited soc_max reaches the driver too.
@@ -1021,7 +976,7 @@ func main() {
 			})
 		}
 
-		// Site-meter swap propagation. The configreload watcher
+		// Site-meter swap propagation. The config apply callback
 		// already updated ctrl.SiteMeterDriver under ctrlMu before
 		// this applier ran, so the dispatch loop reads from the
 		// right driver from the next tick. Two more sites cached
@@ -1143,13 +1098,6 @@ func main() {
 		applyForecastModelBinding()
 
 	}
-	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl, applyConfigChange)
-	if err != nil {
-		slog.Warn("could not start config watcher", "err", err)
-	} else {
-		defer watcher.Stop()
-	}
-
 	// ---- Spot prices + weather forecast (optional, nil if not configured) ----
 	// ---- FX rates (ECB, daily) — harmless to run even for SE-only users ----
 	fxSvc := currency.New(st)
@@ -1279,37 +1227,6 @@ func main() {
 	loadSvc.Start(ctx)
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
-
-	// ---- Calendar (CalDAV) planner constraints (#498) ----
-	// FTW hosts its own in-process, pure-Go CalDAV server (internal/caldavserver,
-	// emersion/go-webdav, MIT) and runs a CalDAV *client* against it: it maps
-	// "away" events onto the load model's away profile and EV
-	// "charged-by-departure" events onto loadpoint targets. Opt-in + fail-soft;
-	// enable/disable is restart-gated (config.RestartRequiredFor), so the runtime
-	// block only ever exists while enabled. Single-container friendly — runs in a
-	// Home Assistant add-on with no sidecar.
-	var caldavSrv *caldavserver.Server
-	if cfg.CalDAV != nil && cfg.CalDAV.Enabled {
-		// Host CalDAV in-process; the client below talks to it over localhost, so
-		// the inbound/outbound intent logic is the same regardless. Objects
-		// persist in state.db so they survive restarts.
-		principal, calPaths, feeds := nativeCalDAVLayout(cfg.CalDAV)
-		caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths, st, caldavserver.WithFeeds(feeds))
-		caldavSrv.Start()
-		defer caldavSrv.Stop()
-
-		calSvc = calendar.New(*cfg.CalDAV, lpMgr, loadSvc, firstLoadpointID(cfg.Loadpoints))
-		// Outbound EVSE history: feed live EV charge-point readings so the
-		// service can author a calendar event per completed session.
-		calSvc.SetEVSource(func() []calendar.EVSample { return evSamplesFromTelemetry(tel) })
-		// Outbound plan publishing: feed the current MPC plan so the service
-		// can render forward-looking charge/discharge windows. mpcSvc is built
-		// just below; the closure reads it at call time (nil-safe until then).
-		calSvc.SetPlanSource(func() []calendar.PlanSlot { return planSlotsFromMPC(mpcSvc) })
-		calSvc.Start(ctx)
-		defer calSvc.Stop()
-		slog.Info("caldav started", "listen", cfg.CalDAV.ListenAddr(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
-	}
 
 	// ---- Start OCPP 1.6J Central System (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
@@ -1488,9 +1405,7 @@ func main() {
 		},
 		curtailed: func(time.Time) bool { return forecastCurtail.Active() },
 	}
-	if calSvc != nil {
-		forecastTrackerSvc.away = calSvc.IsAwayAt
-	}
+	// No live occupancy source: forecasts keep the established home default.
 	if energyplanSupported(runtime.GOOS, runtime.GOARCH) {
 		if candidate, err := newRustForecast(st, resolveEnergyplanBinary()); err != nil {
 			slog.Warn("primary forecast worker unavailable; using legacy fallback", "err", err)
@@ -1563,21 +1478,7 @@ func main() {
 		if cfg.Planner != nil {
 			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
 		}
-		// Away-aware load predictor (#498): for slots inside a calendar
-		// "away" interval, predict with the load model's away profile so the
-		// DP conserves battery over exactly those slots. Outside any away
-		// window (and whenever CalDAV is off), this is identical to
-		// loadSvc.Predict.
-		if calSvc != nil {
-			mpcSvc.Load = func(t time.Time) float64 {
-				if calSvc.IsAwayAt(t) {
-					return loadSvc.PredictWith(t, loadmodel.ProfileAway)
-				}
-				return loadSvc.PredictWith(t, loadmodel.ProfileHome)
-			}
-		} else {
-			mpcSvc.Load = loadSvc.Predict
-		}
+		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
 		// The mathematical planner co-optimizes every scheduled loadpoint.
@@ -2451,7 +2352,7 @@ func main() {
 		Models:              models, ModelsMu: modelsMu,
 		SelfTune:          selfTune,
 		DtS:               float64(cfg.Site.ControlIntervalS),
-		SaveConfig:        config.SaveAtomic,
+		SaveConfig:        func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
 		WebDir:            *webDir,
 		ColdDir:           coldDir,
 		DataDir:           dataDir,
@@ -2462,7 +2363,7 @@ func main() {
 		// docker-compose deploys only need one bind (./data). Derived
 		// from the state.db path rather than the config path because
 		// `state.db` is always in the main data volume; the config
-		// can legitimately live elsewhere (e.g. mounted RO from /etc).
+		// can live elsewhere after its one-time migration.
 		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
@@ -2475,7 +2376,6 @@ func main() {
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,
 		EVSend:           evSend,
-		CalDAV:           calSvc,
 		HA:               haBridge,
 		Registry:         reg,
 		DriverRepository: driverRepository,
@@ -2711,7 +2611,7 @@ func main() {
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
 	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
-	// the configreload watcher updates those fields directly, so a
+	// the config apply callback updates those fields directly, so a
 	// startup snapshot here would go stale on the first hot-reload.
 	dtS := float64(cfg.Site.ControlIntervalS)
 	// Every dispatch command carries its own deadline — see
@@ -2724,10 +2624,6 @@ func main() {
 	// Graceful shutdown
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
-
-	if watcher != nil {
-		watcher.Start()
-	}
 
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
@@ -3662,111 +3558,6 @@ func warnIfEVHasBatteryCapacity(drvList []config.Driver, loadpoints []config.Loa
 	}
 }
 
-// firstLoadpointID returns the ID of the first configured loadpoint, or "".
-// Used as the fallback target for a calendar EV event whose title names no
-// specific loadpoint and when caldav.ev_loadpoint_id is unset.
-func firstLoadpointID(src []config.Loadpoint) string {
-	if len(src) > 0 {
-		return src[0].ID
-	}
-	return ""
-}
-
-// caldavUsername resolves the configured CalDAV username. The runtime fallback
-// remains the former default so an existing config that omitted the field does
-// not silently move its principal; fresh UI/example configs write `ftw`.
-func caldavUsername(cv *config.CalDAV) string {
-	if cv != nil && strings.TrimSpace(cv.Username) != "" {
-		return strings.TrimSpace(cv.Username)
-	}
-	return config.DefaultCalDAVUsername
-}
-
-// nativeCalDAVLayout derives the principal path + the collections the
-// in-process CalDAV server (#498) should expose, from config (with defaults).
-func nativeCalDAVLayout(cv *config.CalDAV) (principal string, calendarPaths []string, feeds map[string]string) {
-	principal = "/" + caldavUsername(cv) + "/"
-	calPath := config.DefaultCalDAVCalendarPath
-	histPath := config.DefaultCalDAVHistoryPath
-	planPath := config.DefaultCalDAVPlanPath
-	if cv != nil {
-		if strings.TrimSpace(cv.CalendarPath) != "" {
-			calPath = cv.CalendarPath
-		}
-		if strings.TrimSpace(cv.HistoryPath) != "" {
-			histPath = cv.HistoryPath
-		}
-		if strings.TrimSpace(cv.PlanPath) != "" {
-			planPath = cv.PlanPath
-		}
-	}
-	// Only the read-only collections get a one-tap webcal:// feed; the
-	// read-write "energy" collection is where the user *writes* intents, so a
-	// read-only subscription would be the wrong tool for it.
-	feeds = map[string]string{"plan": planPath, "history": histPath}
-	return principal, []string{calPath, histPath, planPath}, feeds
-}
-
-// evSamplesFromTelemetry projects current DerEV readings into the shape the
-// calendar service's history writer consumes (#498). One sample per EV
-// charge-point driver; the writer turns charge→idle transitions into events.
-func evSamplesFromTelemetry(tel *telemetry.Store) []calendar.EVSample {
-	readings := tel.ReadingsByType(telemetry.DerEV)
-	out := make([]calendar.EVSample, 0, len(readings))
-	for _, r := range readings {
-		var d struct {
-			Connected *bool    `json:"connected"`
-			Charging  *bool    `json:"charging"`
-			SessionWh *float64 `json:"session_wh"`
-		}
-		if len(r.Data) > 0 {
-			_ = json.Unmarshal(r.Data, &d)
-		}
-		var sessionWh float64
-		if d.SessionWh != nil {
-			sessionWh = *d.SessionWh
-		}
-		out = append(out, calendar.EVSample{
-			ID:        r.Driver,
-			Connected: d.Connected != nil && *d.Connected,
-			Charging:  d.Charging != nil && *d.Charging,
-			SessionWh: sessionWh,
-			PowerW:    r.SmoothedW,
-		})
-	}
-	return out
-}
-
-// planSlotsFromMPC projects the latest MPC plan into the shape the calendar
-// service's plan publisher consumes. Nil-safe: returns nil
-// when the planner is disabled or has no plan yet.
-func planSlotsFromMPC(mpcSvc *mpc.Service) []calendar.PlanSlot {
-	if mpcSvc == nil {
-		return nil
-	}
-	plan := mpcSvc.Latest()
-	if plan == nil {
-		return nil
-	}
-	out := make([]calendar.PlanSlot, 0, len(plan.Actions))
-	for _, a := range plan.Actions {
-		start := time.UnixMilli(a.SlotStartMs)
-		ln := a.SlotLenMin
-		if ln <= 0 {
-			ln = 15
-		}
-		out = append(out, calendar.PlanSlot{
-			Start:      start,
-			End:        start.Add(time.Duration(ln) * time.Minute),
-			BatteryW:   a.BatteryW,
-			GridW:      a.GridW,
-			SoC:        a.SoC,
-			Confidence: a.Confidence,
-		})
-	}
-	return out
-}
-
 // activeBatteryBoostTotals keeps the core dispatch tick safe when the optional
 // planner is disabled. The loadpoint controller currently shares the planner's
 // lifecycle, so no controller means there can be no active boost permission.
@@ -3779,7 +3570,7 @@ func activeBatteryBoostTotals(controller *loadpoint.Controller, states []loadpoi
 
 // buildLoadpointConfigs adapts YAML-facing config.Loadpoint entries
 // into the internal loadpoint.Config shape. Shared between initial
-// boot and the hot-reload watcher so the two paths can't drift.
+// boot and config saves so the two paths cannot drift.
 func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 	out := make([]loadpoint.Config, 0, len(src))
 	for _, lp := range src {
@@ -4027,18 +3818,11 @@ func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Man
 	}
 }
 
-// isConfigMissing checks whether the error from config.Load indicates the
-// config file does not exist (as opposed to a parse or validation error).
-// config.Load wraps the os error with fmt.Errorf, so we use errors.Is to
-// unwrap through the chain.
-func isConfigMissing(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return true
-	}
-	return strings.Contains(err.Error(), "no such file")
+// Only a missing seed starts setup. A missing SQLite authority is a recovery
+// error and must never offer a new household configuration over existing data.
+func isConfigMissing(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (int, error) {

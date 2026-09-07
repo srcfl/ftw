@@ -20,21 +20,14 @@ import (
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/battery"
-	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// caldavPassword is the credential the reviewer walked away with. It is a
-// literal on purpose: the assertion is that these bytes never cross the
-// session, and matching on them is the only way to say that.
-const caldavPassword = "S3CRET-CALDAV-PASSWORD"
-
-// tieredRig is a session onto a box that has the two subsystems these tests
-// are about. The other passthrough tests use a bare box; a bare box has no
-// credential to leak and no battery to drive, which is why they missed both.
+// tieredRig includes a battery so refusal tests also check that no control
+// action runs.
 type tieredRig struct {
 	*appRig
 	srv      *Server
@@ -50,11 +43,6 @@ func newTieredSession(t *testing.T, role string) *tieredRig {
 
 	cfg := &config.Config{
 		Drivers: []config.Driver{{Name: "pixii-1", BatteryCapacityWh: 16000}},
-		CalDAV: &config.CalDAV{
-			Enabled:  true,
-			Username: "ftw",
-			Password: caldavPassword,
-		},
 	}
 	coordinator := selftune.NewCoordinator()
 
@@ -62,7 +50,6 @@ func newTieredSession(t *testing.T, role string) *tieredRig {
 		Ctrl: ctrl, CtrlMu: &sync.Mutex{},
 		Tel: tel, LogRing: telemetry.NewLogRing(), Version: "test",
 		CfgMu: &sync.RWMutex{}, Cfg: cfg,
-		CalDAV:   calendar.New(*cfg.CalDAV, nil, nil, "lp1"),
 		SelfTune: coordinator,
 		Models:   map[string]*battery.Model{"pixii-1": battery.New("pixii-1")},
 		ModelsMu: &sync.Mutex{},
@@ -106,88 +93,14 @@ func newTieredSession(t *testing.T, role string) *tieredRig {
 	}
 }
 
-// carried is every byte the session sent back, head, chunks and all. What a
-// leak test needs is the wire, not one message.
-func (r *tieredRig) carried(t *testing.T) string {
-	t.Helper()
-	var out strings.Builder
-	for _, env := range r.frames.snapshot() {
-		if env.T == appproto.MsgAPIChunk {
-			out.Write(decode[appproto.APIChunk](t, env).Data)
-		}
-	}
-	return out.String()
-}
-
 // --------------------------------------------------------------------------
 // A read that hands out a credential is not a read
 // --------------------------------------------------------------------------
-
-// The CalDAV credential is a write channel into dispatch: the calendar it
-// unlocks is what tells this box when the house is away and when the car has
-// to be full. A family member given read-only access to watch the house walked
-// away able to drive it.
-func TestAViewerCannotReadACredential(t *testing.T) {
-	rig := newTieredSession(t, apiauth.RoleViewer)
-
-	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
-		Method: appproto.APIGet, Path: "/api/caldav/credentials",
-	})
-	refusal := decode[appproto.ErrorBody](t, rig.frames.await(t, appproto.MsgError))
-
-	if refusal.Code != appproto.ErrLocalOnly {
-		t.Fatalf("refusal = %+v, want E_LOCAL_ONLY", refusal)
-	}
-	if rig.frames.has(appproto.MsgAPIHead) {
-		t.Fatal("the credential handler answered an app session")
-	}
-	if body := rig.carried(t); strings.Contains(body, caldavPassword) {
-		t.Fatalf("the CalDAV password crossed the session: %q", body)
-	}
-}
-
-// An owner is refused too, and that is the point of the tier rather than a
-// role check. The credential is the same credential whoever asks for it, and
-// the box's own page — which needs somebody at home — is where it is shown.
-func TestAnOwnerCannotReadACredentialEither(t *testing.T) {
-	rig := newTieredSession(t, apiauth.RoleOwner)
-
-	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
-		Method: appproto.APIGet, Path: "/api/caldav/credentials", StepUp: true,
-	})
-	refusal := decode[appproto.ErrorBody](t, rig.frames.await(t, appproto.MsgError))
-
-	if refusal.Code != appproto.ErrLocalOnly {
-		t.Fatalf("refusal = %+v, want E_LOCAL_ONLY", refusal)
-	}
-	if body := rig.carried(t); strings.Contains(body, caldavPassword) {
-		t.Fatalf("the CalDAV password crossed the session: %q", body)
-	}
-}
-
-// The LAN still serves it. The claim being made is "only from your box's own
-// page, from home" — if the box's page could not show it either, the sentence
-// the app says would be a lie and the calendar feature would be unusable.
-func TestTheBoxsOwnPageStillShowsTheCredential(t *testing.T) {
-	rig := newTieredSession(t, apiauth.RoleOwner)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/caldav/credentials", nil)
-	rec := httptest.NewRecorder()
-	rig.srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("the LAN got %d for the credential", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), caldavPassword) {
-		t.Fatalf("the LAN no longer sees the credential: %s", rec.Body.String())
-	}
-}
 
 // Every route whose answer carries a reusable secret, or a whole file this box
 // cannot vouch for, swept as a viewer. None of them reaches a handler.
 func TestNoSecretBearingReadCrossesTheSession(t *testing.T) {
 	secretBearing := []string{
-		"/api/caldav/credentials",
 		"/api/config",
 		"/api/backups/x",
 		"/api/support/dump",
@@ -271,8 +184,7 @@ func TestSelfTuneIsRefusedWithoutStepUpAsWell(t *testing.T) {
 	}
 }
 
-// The box's own page still starts one. Same reason as the credential: a tier
-// that made the feature unreachable everywhere would be a different change.
+// The box's own page can still start a self-tune run.
 func TestTheBoxsOwnPageStillStartsSelfTune(t *testing.T) {
 	rig := newTieredSession(t, apiauth.RoleOwner)
 

@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,8 @@ import (
 	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
+	"github.com/srcfl/ftw/go/internal/appuplink"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // --------------------------------------------------------------------------
@@ -148,13 +151,136 @@ func (r *appRig) call(t *testing.T, id uint32, req appproto.APIReq) (int, string
 	}
 
 	head := decode[appproto.APIHeadMsg](t, env)
+	end := decode[appproto.APIEnd](t, awaitIDType(t, r.frames, id, appproto.MsgAPIEnd))
 	var body []byte
 	for _, e := range r.frames.snapshot() {
 		if e.T == appproto.MsgAPIChunk && e.ID != nil && *e.ID == id {
 			body = append(body, decode[appproto.APIChunk](t, e).Data...)
 		}
 	}
+	if end.Truncated || end.Bytes != int64(len(body)) {
+		t.Fatalf("incomplete answer to request %d: end=%+v body_bytes=%d", id, end, len(body))
+	}
 	return head.Status, "", body
+}
+
+func awaitIDType(t *testing.T, frames *appFrames, id uint32, msgType string) appproto.Envelope {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, env := range frames.snapshot() {
+			if env.T == msgType && env.ID != nil && *env.ID == id {
+				return env
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("no %s answer to request %d", msgType, id)
+	return appproto.Envelope{}
+}
+
+type appReplyGateway struct{}
+
+func (appReplyGateway) Route(*http.Request) apiauth.RouteFacts {
+	return apiauth.RouteFacts{Tier: apiauth.TierRead}
+}
+
+func (appReplyGateway) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+}
+
+type headPausingSender struct {
+	frames  *appFrames
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (s *headPausingSender) Send(raw []byte) error {
+	frame, err := appuplink.Codec().DecodeFrame(raw)
+	if err != nil {
+		return err
+	}
+	if err := s.frames.Send(raw); err != nil {
+		return err
+	}
+	if frame.Envelope.T == appproto.MsgAPIHead {
+		close(s.reached)
+		<-s.release
+	}
+	return nil
+}
+
+func TestAppRigCallWaitsForTheCompleteResponse(t *testing.T) {
+	frames := &appFrames{}
+	sender := &headPausingSender{frames: frames, reached: make(chan struct{}), release: make(chan struct{})}
+	ctrl := control.NewState(0, 50, "meter")
+	box := &appBox{ctrl: ctrl}
+	handler, err := appproto.New(appproto.Config{
+		Clock:  appproto.SystemClock{StartedAt: time.Now(), Source: "ntp"},
+		Site:   box,
+		Info:   box,
+		Modes:  box,
+		Plans:  box,
+		Codec:  appuplink.Codec(),
+		Sender: sender,
+		API:    appReplyGateway{},
+		Caller: apiauth.Caller{
+			Subject: apiauth.KindApp + ":aBcD1234",
+			Kind:    apiauth.KindApp,
+			Role:    apiauth.RoleOwner,
+			Scopes:  appproto.ScopesForRole(apiauth.RoleOwner),
+			Epoch:   1,
+		},
+		Grants:     stillEnrolled{role: apiauth.RoleOwner},
+		SrcGrid:    "meter",
+		SrcPV:      "meter",
+		SrcBattery: "meter",
+		Logger:     slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(handler.Close)
+	rig := &appRig{handler: handler, frames: frames}
+	released := false
+	defer func() {
+		if !released {
+			close(sender.release)
+		}
+	}()
+
+	type result struct {
+		status  int
+		refusal string
+		body    []byte
+	}
+	done := make(chan result, 1)
+	go func() {
+		status, refusal, body := rig.call(t, 1, appproto.APIReq{Method: appproto.APIGet, Path: "/api/test"})
+		done <- result{status: status, refusal: refusal, body: body}
+	}()
+	select {
+	case <-sender.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("response did not reach api.head")
+	}
+	select {
+	case <-done:
+		t.Fatal("call returned after api.head while the response was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(sender.release)
+	released = true
+	select {
+	case got := <-done:
+		if got.status != http.StatusForbidden || got.refusal != "" || string(got.body) != `{"error":"forbidden"}` {
+			t.Fatalf("call returned %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("call did not return after api.end")
+	}
 }
 
 // pairingCodeIn digs the code out of a QR payload, the way a guest's phone
@@ -275,7 +401,6 @@ func TestARoleInTheQueryStringMintsNothing(t *testing.T) {
 // who is already on the list.
 func TestTheAppCannotMakeAnotherOwner(t *testing.T) {
 	enrol := newEnrolment(t)
-	rig := newAppSession(t, apiauth.RoleOwner, withEnrolment(enrol))
 
 	// A guest to try to promote, admitted the way a guest is.
 	code, _, err := enrol.id.MintPairingCode(apiauth.RoleViewer, appenroll.InviteTTL)
@@ -301,6 +426,7 @@ func TestTheAppCannotMakeAnotherOwner(t *testing.T) {
 			Method: appproto.APIPatch, Path: "/api/app-link/devices/" + guest.DeviceID,
 			Body: []byte(`{"role":"owner"}`), StepUp: true}},
 	} {
+		rig := newAppSession(t, apiauth.RoleOwner, withEnrolment(enrol))
 		status, refusal, body := rig.call(t, uint32(i+1), c.req)
 		if status != http.StatusForbidden {
 			t.Fatalf("%s answered %d %q %s, want 403", c.name, status, refusal, body)
@@ -394,7 +520,6 @@ func TestAnInviteFromTheAppCarriesNoLANHint(t *testing.T) {
 // scope is what stops it. A viewer's grant carries neither members scope.
 func TestAGuestCannotSeeOrChangeWhoHasAccess(t *testing.T) {
 	enrol := newEnrolment(t)
-	rig := newAppSession(t, apiauth.RoleViewer, withEnrolment(enrol))
 
 	for i, c := range []struct {
 		name string
@@ -409,6 +534,7 @@ func TestAGuestCannotSeeOrChangeWhoHasAccess(t *testing.T) {
 			Method: appproto.APIDelete, Path: "/api/app-link/devices/aaaa1111",
 			StepUp: true}},
 	} {
+		rig := newAppSession(t, apiauth.RoleViewer, withEnrolment(enrol))
 		status, refusal, body := rig.call(t, uint32(i+1), c.req)
 		if status == http.StatusOK {
 			t.Fatalf("a guest read or changed %s: %s", c.name, body)
@@ -499,7 +625,6 @@ func TestAnOwnerRevokesAPhoneThroughTheApp(t *testing.T) {
 // at once rather than of whichever one somebody remembered.
 func TestTheLastOwnerCannotRemoveThemselvesThroughTheApp(t *testing.T) {
 	enrol := newEnrolment(t)
-	rig := newAppSession(t, apiauth.RoleOwner, withEnrolment(enrol))
 
 	rows := enrol.Devices()
 	if len(rows) != 1 {
@@ -518,6 +643,7 @@ func TestTheLastOwnerCannotRemoveThemselvesThroughTheApp(t *testing.T) {
 			Method: appproto.APIPatch, Path: "/api/app-link/devices/" + me,
 			Body: []byte(`{"role":"viewer"}`), StepUp: true}},
 	} {
+		rig := newAppSession(t, apiauth.RoleOwner, withEnrolment(enrol))
 		status, refusal, body := rig.call(t, uint32(i+1), c.req)
 		if status != http.StatusConflict {
 			t.Fatalf("%s answered %d %q, want 409", c.name, status, refusal)

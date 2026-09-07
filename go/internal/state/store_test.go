@@ -40,7 +40,7 @@ func freshStore(t *testing.T) *Store {
 
 func TestNewStoreDoesNotCreateRetiredOwnerTables(t *testing.T) {
 	s := freshStore(t)
-	for _, table := range []string{"trusted_devices", "owner_sessions", "trusted_device_pubkeys"} {
+	for _, table := range []string{"trusted_devices", "owner_sessions", "trusted_device_pubkeys", "caldav_objects", "caldav_calendars"} {
 		var count int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
 			t.Fatal(err)

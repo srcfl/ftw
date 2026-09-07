@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +27,7 @@ const (
 	// SchemaVersion identifies the on-disk state format for update rollback.
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
-	SchemaVersion = 1
+	SchemaVersion = 2
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -146,8 +145,7 @@ func OpenBackupSource(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", readOnlyDatabaseURI(abs))
 	if err != nil {
 		return nil, err
 	}
@@ -430,6 +428,27 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
+	return s.backupToCompressed(dstPath, report, nil)
+}
+
+// BackupWithConfiguration returns settings from the same SQLite snapshot as
+// the archive, so its YAML export remains correct even for an older Core.
+func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	var configuration Configuration
+	var found bool
+	err := s.backupToCompressed(dstPath, report, func(rawPath string) error {
+		var err error
+		configuration, err = ReadConfiguration(rawPath)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		found = err == nil
+		return err
+	})
+	return configuration, found, err
+}
+
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -448,6 +467,11 @@ func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(Backu
 		return fmt.Errorf("backup to %s: %w", rawPath, err)
 	}
 
+	if capture != nil {
+		if err := capture(rawPath); err != nil {
+			return fmt.Errorf("backup settings: %w", err)
+		}
+	}
 	in, err := os.Open(rawPath)
 	if err != nil {
 		return fmt.Errorf("open backup temp: %w", err)
@@ -766,24 +790,6 @@ func (s *Store) migrate() error {
 			horizon_slots  INTEGER NOT NULL,
 			json           TEXT    NOT NULL
 		) STRICT`,
-
-		// CalDAV objects + collections for the native in-process CalDAV server
-		// (#498). One row per calendar object (.ics),
-		// keyed by its full path; `collection` is the parent collection path so
-		// listing a calendar is an indexed scan. `data` is the raw iCalendar.
-		`CREATE TABLE IF NOT EXISTS caldav_calendars (
-			path        TEXT PRIMARY KEY NOT NULL,
-			name        TEXT NOT NULL DEFAULT '',
-			description TEXT NOT NULL DEFAULT ''
-		) STRICT`,
-		`CREATE TABLE IF NOT EXISTS caldav_objects (
-			path        TEXT PRIMARY KEY NOT NULL,
-			collection  TEXT NOT NULL,
-			etag        TEXT NOT NULL,
-			data        TEXT NOT NULL,
-			modified_ms INTEGER NOT NULL
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_caldav_objects_collection ON caldav_objects(collection)`,
 
 		// Ask why conversations. One row per thread; the turns are JSON
 		// because a thread is read and written whole and is never queried

@@ -13,7 +13,6 @@ func TestNormalizeUnitsFoldsLegacyKWpAndPercent(t *testing.T) {
 				{Name: "south", KWp: 6, TiltDeg: &tilt, AzimuthDeg: &az},
 			},
 		},
-		CalDAV:   &CalDAV{Enabled: true, EVDefaultTargetSoCPct: 80},
 		Site:     Site{PVSurplusAbsorbSoCCapPct: 88},
 		Vehicles: []Vehicle{{ID: "leaf", TargetSoCPct: 80}},
 	}
@@ -26,9 +25,6 @@ func TestNormalizeUnitsFoldsLegacyKWpAndPercent(t *testing.T) {
 	}
 	if c.Weather.PVArrays[1].RatedW != 6000 {
 		t.Fatalf("6 kWp → %v W, want 6000", c.Weather.PVArrays[1].RatedW)
-	}
-	if c.CalDAV.EVDefaultTargetSoC != 0.80 {
-		t.Fatalf("caldav default SoC = %v, want 0.80", c.CalDAV.EVDefaultTargetSoC)
 	}
 	if c.Site.PVSurplusAbsorbSoCCap != 0.88 {
 		t.Fatalf("absorb cap = %v, want 0.88", c.Site.PVSurplusAbsorbSoCCap)
