@@ -44,6 +44,7 @@
   var currentConfig = null;
   var configETag = null;
   var currentTab = "control";
+  var fieldValues = new WeakMap();
 
   openBtn.addEventListener("click", function () {
     apiFetch("/api/config")
@@ -220,9 +221,16 @@
     statusEl.className = "settings-status" + (kind ? " " + kind : "");
   }
 
+  function fieldValue(input, defaultValue) {
+    // Inputs added after render keep their DOM default until the user edits them.
+    return fieldValues.has(input) ? fieldValues.get(input) : defaultValue;
+  }
+
   function captureCurrentTab() {
     var inputs = bodyEl.querySelectorAll("[data-path]");
     inputs.forEach(function (input) {
+      // A displayed default must not become a saved setting on an unchanged form.
+      if (fieldValue(input, input.defaultValue) === input.value) return;
       var path = input.dataset.path;
       var val = input.type === "number" ? parseFloat(input.value) : input.value;
       if (input.type === "number" && isNaN(val)) val = 0;
@@ -232,9 +240,12 @@
       // Preserve a stored password when the user hasn't typed over it.
       if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
+      fieldValues.set(input, input.value);
     });
     bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (input) {
+      if (fieldValue(input, input.defaultChecked) === input.checked) return;
       setByPath(currentConfig, input.dataset.checkboxPath, input.checked);
+      fieldValues.set(input, input.checked);
     });
   }
 
@@ -314,9 +325,13 @@
       console.error("tab render:", tab, e);
     }
     bodyEl.innerHTML = html;
+    bodyEl.querySelectorAll("[data-path]").forEach(function (input) {
+      fieldValues.set(input, input.value);
+    });
 
     // Generic handler for data-checkbox-path — shared across every tab.
     bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (cb) {
+      fieldValues.set(cb, cb.checked);
       cb.addEventListener("change", function () {
         setByPath(currentConfig, cb.dataset.checkboxPath, cb.checked);
       });
