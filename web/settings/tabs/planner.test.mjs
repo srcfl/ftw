@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 globalThis.window = {};
 await import("./planner.js");
 const tab = globalThis.window.FTWSettings.tabs.planner;
-const { strategyLabel, hedgeLine } = tab._pure;
+const { strategyLabel, hedgeLine, engineSelect } = tab._pure;
 
 describe("strategyLabel", () => {
   it("maps every planner mode via the local fallback", () => {
@@ -99,13 +99,13 @@ describe("render", () => {
     assert.ok(top.includes('data-checkbox-path="planner.enabled"'));
     assert.ok(top.includes("[field:planner.soc_min]"));
     assert.ok(top.includes("[field:planner.soc_max]"));
-    assert.ok(!top.includes("[select:planner.engine]"));
+    assert.ok(!top.includes('data-path="planner.engine"'));
     assert.ok(!top.includes("CLARABEL"));
     assert.ok(!top.includes("[select:planner.optimizer_solver]"));
     assert.match(rest, /<details class="engine-details">/);
     assert.doesNotMatch(html, /<details[^>]*\sopen\b/);
     assert.ok(rest.includes("Engine controls — leave these unless you are debugging."));
-    assert.ok(rest.includes("[select:planner.engine]"));
+    assert.ok(rest.includes('data-path="planner.engine"'));
     assert.ok(rest.includes("[select:planner.optimizer_solver]"));
     assert.ok(rest.includes("[field:planner.optimizer_cvar_weight]"));
   });
@@ -125,7 +125,7 @@ describe("render", () => {
 
   it("renders mathematical optimizer controls", () => {
     const html = tab.render(stubCtx());
-    assert.ok(html.includes("[select:planner.engine]"));
+    assert.ok(html.includes('data-path="planner.engine"'));
     assert.ok(html.includes("[select:planner.optimizer_solver]"));
     assert.ok(html.includes("[select:planner.optimizer_formulation]"));
     assert.ok(html.includes("[field:planner.optimizer_timeout_s]"));
@@ -164,4 +164,18 @@ describe("render", () => {
     assert.equal(ctx.config.planner.soc_min, 0.15);
     assert.equal(ctx.config.planner.soc_max, 0.92);
   });
+});
+
+// Exercise the rendered values that captureCurrentTab saves, including old aliases.
+describe("engine selection", () => {
+  for (const engine of [undefined, null, "", " ", "core", "go", "dp", "python", "energyplan"]) {
+    it("preserves the configured choice on save: " + String(engine), () => {
+      const html = engineSelect(engine, () => "");
+      const selected = [...html.matchAll(/<option value="([^"]*)" selected>/g)].map(m => m[1]);
+      const expected = ["go", "dp"].includes(engine) ? "core" : String(engine ?? "").trim();
+      assert.deepEqual(selected, [expected]);
+      assert.match(html, /value="energyplan"/);
+      assert.match(html, /Automatic \(release default\)/);
+    });
+  }
 });
