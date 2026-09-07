@@ -58,6 +58,7 @@ type Bucket struct {
 
 type Model struct {
 	ConfigRevision    string          `json:"config_revision,omitempty"`
+	LearningStartedMS int64           `json:"learning_started_ms,omitempty"`
 	Timezone          string          `json:"timezone,omitempty"`
 	LastTemperatureC  float64         `json:"last_temperature_c"`
 	HasTemperature    bool            `json:"has_temperature"`

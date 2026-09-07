@@ -51,13 +51,14 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 // Model is the learned PV predictor.
 type Model struct {
-	ConfigRevision string                `json:"config_revision,omitempty"`
-	Beta           [NFeat]float64        `json:"beta"`
-	P              [NFeat][NFeat]float64 `json:"p"` // covariance
-	Forgetting     float64               `json:"forgetting"`
-	Samples        int64                 `json:"samples"`
-	LastMs         int64                 `json:"last_ms"`
-	MAE            float64               `json:"mae"` // EMA of |err| (W)
+	ConfigRevision    string                `json:"config_revision,omitempty"`
+	LearningStartedMS int64                 `json:"learning_started_ms,omitempty"`
+	Beta              [NFeat]float64        `json:"beta"`
+	P                 [NFeat][NFeat]float64 `json:"p"` // covariance
+	Forgetting        float64               `json:"forgetting"`
+	Samples           int64                 `json:"samples"`
+	LastMs            int64                 `json:"last_ms"`
+	MAE               float64               `json:"mae"` // EMA of |err| (W)
 	// RelMAE is MAE expressed as a share of the prediction it belongs to
 	// (0..1), over the same EMA window. The planner sizes each slot's PV
 	// downside against that slot's own expected generation, which a watt

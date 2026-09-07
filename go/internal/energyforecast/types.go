@@ -100,6 +100,14 @@ type PredictRequest struct {
 	Horizon []HorizonSlot `json:"horizon"`
 }
 
+// ResetRequest starts a new learning period for one signal. OriginMs is the
+// current request time; LearningStartedMs also permits replay of a saved intent.
+type ResetRequest struct {
+	RequestContext
+	Signal            string `json:"signal"`
+	LearningStartedMs int64  `json:"learning_started_ms"`
+}
+
 type ReplyContext struct {
 	Op                  string          `json:"op"`
 	Version             int             `json:"version"`
@@ -128,6 +136,12 @@ type UpdateReply struct {
 	ReplyContext
 	State   json.RawMessage `json:"state"`
 	Updates UpdateCounts    `json:"updates"`
+}
+type ResetReply struct {
+	ReplyContext
+	State             json.RawMessage `json:"state"`
+	Signal            string          `json:"signal"`
+	LearningStartedMs int64           `json:"learning_started_ms"`
 }
 type LatestInput struct {
 	PV   *int64 `json:"pv,omitempty"`

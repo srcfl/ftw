@@ -39,7 +39,7 @@ type ForecastOptions struct {
 // Valid describes the household balance. PVValid only describes the PV sources.
 // Neither flag claims that the instantaneous sample covers a time interval.
 type ForecastReading struct {
-	At, Earliest, Latest, PVLatest              time.Time
+	At, Earliest, Latest, PVEarliest, PVLatest  time.Time
 	GridW, PVW, BatteryW, EVW, V2XW, HouseholdW float64
 	Valid, PVValid                              bool
 	Reason, PVReason                            string
@@ -208,7 +208,7 @@ func (s *Store) forecastMeasurementLocked(now time.Time, siteMeter string, opts 
 	if out.Latest.Sub(out.Earliest) > opts.MaxSkew {
 		fail("time_skew", false)
 	}
-	out.PVLatest = pvLast
+	out.PVEarliest, out.PVLatest = pvFirst, pvLast
 	if pvLast.Sub(pvFirst) > opts.MaxSkew {
 		fail("pv_time_skew", true)
 	}
