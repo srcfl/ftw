@@ -34,6 +34,7 @@ import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
 import {
   buildCompactPriceView,
+  buildPriceSummary,
   formatPriceSlotLabel,
 } from "./price-summary.js";
 import { bestBlock, consumerTotalOre, priceParts } from "./price-math.js";
@@ -637,31 +638,17 @@ class FtwPriceChart extends FtwElement {
     }
     // Compute stats over the visible window using the resolved öre/kWh for
     // whichever toggle is active, so the numbers in the subtitle line up
-    // exactly with what the chart bars are showing. `current` is the slot
-    // covering wall-clock
-    // now if it's in the window, else the nearest. Empty horizon → no
-    // stats row, falls through to the existing "no data" message.
+    // exactly with what the chart bars are showing. Only an interval that
+    // contains now has a current price. A future window or gap has none.
     let statsHtml = "";
     if (visible.length > 0) {
       const prices = visible.map(it => this._priceFor(it));
-      const now = Date.now();
-      let curIdx = visible.findIndex(it => {
-        const start = (it.tsMs || 0);
-        const end   = start + 60 * 60 * 1000;
-        return now >= start && now < end;
+      const { current } = buildPriceSummary(visible, {
+        totalOn: this._totalOn,
+        gridTariffOre: this._gridTariff,
+        vatPercent: this._vatPct,
       });
-      if (curIdx < 0) {
-        // Nearest by absolute time delta (used when "Tomorrow" tab is
-        // active and the wall clock is still in today, etc.).
-        let best = -1, bestD = Infinity;
-        for (let i = 0; i < visible.length; i++) {
-          const start = new Date(visible[i].starts_at || visible[i].ts || 0).getTime();
-          const d = Math.abs(start - now);
-          if (d < bestD) { bestD = d; best = i; }
-        }
-        curIdx = best;
-      }
-      const cur = curIdx >= 0 ? prices[curIdx] : null;
+      const cur = current ? current.ore : null;
       const lo = Math.min(...prices);
       const hi = Math.max(...prices);
       const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
