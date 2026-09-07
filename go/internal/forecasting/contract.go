@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	Schema             = 1
-	MaxPoints          = 192
+	Schema = 1
+	// A rolling 48-hour forecast includes 193 quarters when the current one
+	// is already underway. Keep that partial interval and the final quarter.
+	MaxPoints          = 48*4 + 1
 	MaxSeries          = 8
 	MaxPayloadBytes    = 1 << 20
 	MaxModelStateBytes = 1 << 20
