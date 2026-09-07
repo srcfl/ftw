@@ -171,7 +171,11 @@ func retiredPythonCompose(data []byte) ([]byte, bool, error) {
 // The running updater mounts Compose read-only. Use its exact local image in
 // a short-lived helper with a writable project mount, as self-replacement does.
 func (s *server) retirePythonViaHelper(ctx context.Context) error {
-	image, err := s.imageID(ctx, "ftw-updater")
+	service, err := s.updaterServiceName()
+	if err != nil {
+		return err
+	}
+	image, err := s.imageID(ctx, service)
 	if err != nil {
 		return fmt.Errorf("current updater image: %w", err)
 	}
@@ -186,6 +190,16 @@ func (s *server) retirePythonViaHelper(ctx context.Context) error {
 	args = append(args, "--entrypoint", "/usr/local/bin/ftw-updater", image,
 		"-retire-python", "-compose", s.composeFile, "-main-service", s.mainServiceName)
 	return s.runner(ctx, nil, args...)
+}
+
+func dockerStreaming(ctx context.Context, extraEnv []string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func (s *server) retiredPythonContainers(ctx context.Context) ([]string, error) {
@@ -259,6 +273,10 @@ func (s *server) retirePythonOptimizer(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(changes) == 0 && len(ids) == 0 {
+		fmt.Println("Compose has no retired Python wiring and no Python service remains.")
+		return nil
+	}
 	suffix := ".before-python-removal-" + time.Now().UTC().Format("20060102T150405.000000000")
 	for _, c := range changes {
 		if err := os.WriteFile(c.path+suffix, c.before, c.mode); err != nil {
@@ -286,7 +304,11 @@ func (s *server) retirePythonOptimizer(ctx context.Context) error {
 			return restore(fmt.Errorf("remove retired container: %w", err))
 		}
 	}
-	fmt.Println("Python optimizer removed. Compose backups:", suffix, "Recreate Core at its pinned version to release the old IPC mount.")
+	fmt.Println("Python optimizer removed.")
+	if len(changes) > 0 {
+		fmt.Println("Compose backups:", suffix)
+	}
+	fmt.Println("Recreate Core at its pinned version to release the old IPC mount.")
 	return nil
 }
 

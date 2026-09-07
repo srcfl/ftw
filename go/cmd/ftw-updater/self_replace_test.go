@@ -253,6 +253,9 @@ func TestIsUpdaterImage(t *testing.T) {
 	}{
 		{"ghcr.io/srcfl/ftw-updater:latest", true},
 		{"ghcr.io/srcfl/ftw-updater", true},
+		{legacyUpdaterImage + ":v2.16.0-beta.1", true},
+		{legacyUpdaterImage + ":${FTW_UPDATER_IMAGE_TAG:-latest}", true},
+		{legacyUpdaterImage + "@sha256:abc", true},
 		// Compose images reach us unexpanded; the default's own colon must not
 		// be mistaken for the tag separator.
 		{"ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}", true},

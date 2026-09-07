@@ -278,6 +278,9 @@ func main() {
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
 	if *retirePython {
+		// This is an interactive command. Preserve the helper's complete output,
+		// including the final error or backup path after its startup messages.
+		srv.runner = dockerStreaming
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		retire := srv.retirePythonViaHelper
