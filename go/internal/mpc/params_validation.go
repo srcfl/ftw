@@ -83,6 +83,9 @@ func validateBatteryFleetMembers(fleet []BatteryFleetMember) error {
 // from an out-of-band start plans from energy the site does not have (or
 // discards energy it does have).
 func planningParamsRequireRecovery(p Params) bool {
+	if p.CapacityWh == 0 && len(p.Storages) == 0 {
+		return false
+	}
 	if p.InitialSoC < p.SoCMin || p.InitialSoC > p.SoCMax {
 		return true
 	}
@@ -159,6 +162,12 @@ func clampParamsIntoOperatingBand(p *Params) (clamped, ok bool) {
 // been applied, so an invalid value cannot reach either the external optimizer
 // or the Go fallback with different defaulting or failure semantics.
 func validatePlanningParams(p Params) error {
+	if err := requireNonNegativePlanningValue("pv_curtailment_min_w", p.PVCurtailment.MinW); err != nil {
+		return err
+	}
+	if p.PVCurtailment.MinW > 0 && !p.PVCurtailment.Valid() {
+		return fmt.Errorf("pv_curtailment requires identified drivers")
+	}
 	switch p.Mode {
 	case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage, ModeArbitrage:
 	default:
@@ -171,8 +180,11 @@ func validatePlanningParams(p Params) error {
 	if p.ActionLevels < 3 {
 		return fmt.Errorf("action_levels must be at least 3, got %d", p.ActionLevels)
 	}
-	if err := requirePositivePlanningValue("capacity_wh", p.CapacityWh); err != nil {
+	if err := requireNonNegativePlanningValue("capacity_wh", p.CapacityWh); err != nil {
 		return err
+	}
+	if p.CapacityWh == 0 && (len(p.Storages) != 0 || p.MaxChargeW != 0 || p.MaxDischargeW != 0 || p.InitialSoC != 0) {
+		return fmt.Errorf("zero capacity_wh requires no physical storage, battery power or initial energy")
 	}
 	if !finite(p.SoCMin) || !finite(p.SoCMax) ||
 		p.SoCMin < 0 || p.SoCMin >= p.SoCMax || p.SoCMax > 1 {
@@ -290,11 +302,6 @@ func validateStorageSpecs(p Params, assetIDs map[string]string) error {
 		if err := requirePlanningEfficiency(field+".discharge_efficiency", storage.DischargeEfficiency, false); err != nil {
 			return err
 		}
-		if !planningValuesEqual(storage.ChargeEfficiency, p.ChargeEfficiency) ||
-			!planningValuesEqual(storage.DischargeEfficiency, p.DischargeEfficiency) {
-			return fmt.Errorf("%s efficiencies must match aggregate fallback efficiencies", field)
-		}
-
 		totalCapacityWh += storage.CapacityWh
 		totalInitialWh += storage.InitialEnergyWh
 		totalMinWh += storage.MinEnergyWh

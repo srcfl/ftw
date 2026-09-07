@@ -14,14 +14,23 @@ type EnergyplanOptimizer struct {
 
 func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 	external, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{binary, "--time-limit=500ms"},
-		ModuleDir: filepath.Dir(binary), Timeout: 2 * time.Second,
+		Command:   []string{binary, "--time-limit=2s"},
+		ModuleDir: filepath.Dir(binary), Timeout: 3 * time.Second,
 		IdleTimeout: 2 * time.Minute,
 	})
 	if err != nil {
 		return nil, err
 	}
+	external.timeBudget = energyplanTimeBudget
 	return &EnergyplanOptimizer{ExternalOptimizer: external}, nil
+}
+
+func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
+	assets := max(1, len(p.Storages)) + 2*len(p.activeLoadpoints())
+	if len(slots)*assets > 193*6 || p.PVCurtailment.MinW > 0 || p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0 {
+		return 2 * time.Second
+	}
+	return 500 * time.Millisecond
 }
 
 func (o *EnergyplanOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {

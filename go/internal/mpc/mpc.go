@@ -140,7 +140,8 @@ type Slot struct {
 
 // Params bounds the optimization. All fields are required.
 type Params struct {
-	Mode Mode
+	PVCurtailment PVCurtailment
+	Mode          Mode
 
 	// SoC grid
 	SoCLevels  int     // e.g. 41 (2.5% steps)
@@ -442,6 +443,9 @@ type SolverInfo struct {
 	SoCLevels              int      `json:"soc_levels,omitempty"`
 	ActionLevels           int      `json:"action_levels,omitempty"`
 	ObjectiveOre           float64  `json:"objective_ore,omitempty"`
+	LowerBoundOre          *float64 `json:"lower_bound_ore,omitempty"`
+	AbsoluteGapOre         *float64 `json:"absolute_gap_ore,omitempty"`
+	SearchNodes            int64    `json:"search_nodes,omitempty"`
 	ServiceSlack           float64  `json:"service_slack,omitempty"`
 	SolveMs                float64  `json:"solve_ms,omitempty"`
 	PrepareMs              float64  `json:"prepare_ms,omitempty"`
@@ -601,6 +605,9 @@ func Optimize(slots []Slot, p Params) Plan {
 // OptimizeContext bounds background DP work and discards a cancelled solve.
 func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) {
 	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
+	if err := coreDPModelError(p); err != nil {
 		return Plan{}, err
 	}
 	now := time.Now().UnixMilli()

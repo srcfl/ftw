@@ -18,6 +18,9 @@ type coreDPShadowRequest struct {
 // startCoreDPShadow runs at most one bounded comparison, after publication.
 // Results belong to a decision ID and can never replace the active actions.
 func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reason string, replanAtMs int64) {
+	if coreDPModelError(p) != nil {
+		return
+	}
 	s.mu.Lock()
 	if s.stopping || s.last == nil || s.last.DecisionID != champion.DecisionID {
 		s.mu.Unlock()

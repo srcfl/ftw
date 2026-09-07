@@ -18,7 +18,7 @@ func UnavailableReason(plannerEnabled bool, priceProvider string, totalCapacityW
 	if priceProvider == "" || priceProvider == "none" {
 		return ReasonNoPriceProvider
 	}
-	if totalCapacityWh <= 0 {
+	if totalCapacityWh < 0 {
 		return ReasonNoBatteryCapacity
 	}
 	return ""

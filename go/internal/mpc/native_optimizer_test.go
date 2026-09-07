@@ -65,8 +65,8 @@ func TestNativeProcessCoreContract(t *testing.T) {
 		}
 	}
 	p.PVForecastSafetyK, p.PVUncertaintyW = 1, 300
-	if _, err := o.Optimize(context.Background(), slots, p); err == nil {
-		t.Fatal("worker accepted unsupported scenarios")
+	if plan, err := o.Optimize(context.Background(), slots, p); err != nil || plan.Solver.ScenarioCount != 3 {
+		t.Fatalf("scenario model failed: plan=%+v err=%v", plan.Solver, err)
 	}
 	p.PVForecastSafetyK = 0
 	if _, err := o.Optimize(context.Background(), slots, p); err != nil {
