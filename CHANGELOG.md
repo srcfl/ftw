@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.0.0
+
+### Major Changes
+
+- faad896: BREAKING CHANGE: Remove the built-in CalDAV server, its API endpoints, calendar settings and calendar-driven charging and away events.
+  
+  Use loadpoint targets and ready-by schedules for future charging. Existing goals, calendar data, learned models and forecast archives remain in place. Older config files still load and warn when calendar support was enabled.
+
+### Minor Changes
+
+- 92ff96c: Add an optional FTWDB beta sidecar that copies committed live site history through a bounded memory queue. Keep SQLite and Parquet authoritative and report candidate gaps, errors and durable acknowledgements in health.
+- ab1431f: Store settings and credentials together in SQLite, with durable commits before applying changes. Import YAML once and retain it as a database locator and recovery export. Remove background YAML reloads. Reject stale Settings forms and preserve the previous live settings on a failed write. Capture current settings in backups and keep forecast learning state unchanged.
+  
+  Mark the migration as state schema 2 so upgrades take a full backup. Returning to a YAML-only Core requires a matching backup restore.
+
+### Patch Changes
+
+- d8a9a2e: Restart solar-production or household-consumption learning after a lasting site change. Each action resets the selected primary model, its legacy fallback and error calibration, preserves measured history and the other model, and shows the new learning period. Saved reset intent survives a restart and prevents old observations from restoring the previous model.
+
 ## 2.17.1
 
 ### Patch Changes
