@@ -1,6 +1,6 @@
 name: test
 
-# Heavy suites run independently so Go, Python and browser work do not queue
+# Heavy suites run independently so Go, driver and browser work do not queue
 # behind one another. The final job keeps the historical required-check name.
 on:
   pull_request:

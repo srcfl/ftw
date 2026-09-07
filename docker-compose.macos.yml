@@ -63,8 +63,7 @@ services:
       # Optional Bearer token for mutations through public/FQDN hostnames.
       # Store it in .env so updater-driven recreates retain it.
       FTW_API_TOKEN: ${FTW_API_TOKEN:-}
-      # The Core image has no local Python worker. A sidecar failure falls
-      # straight back to Core's safe Go DP planner.
+      # Core bundles Energyplan and validates its plans, with Go DP as fallback.
 
     # Bridge networking + a published port. The dashboard is reachable at
     # http://localhost:8080/ on the Mac itself and http://<mac-ip>:8080/
