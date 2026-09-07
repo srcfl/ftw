@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -167,6 +168,49 @@ func retiredPythonCompose(data []byte) ([]byte, bool, error) {
 	return out.Bytes(), true, nil
 }
 
+// The running updater mounts Compose read-only. Use its exact local image in
+// a short-lived helper with a writable project mount, as self-replacement does.
+func (s *server) retirePythonViaHelper(ctx context.Context) error {
+	image, err := s.imageID(ctx, "ftw-updater")
+	if err != nil {
+		return fmt.Errorf("current updater image: %w", err)
+	}
+	projectDir := filepath.Dir(s.composeFile)
+	args := []string{"run", "--rm", "--pull", "never", "--network", "none",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", projectDir + ":" + projectDir + ":rw", "-w", projectDir,
+		"-e", "FTW_RETIRE_PYTHON_HELPER=1"}
+	if project := os.Getenv("COMPOSE_PROJECT_NAME"); project != "" {
+		args = append(args, "-e", "COMPOSE_PROJECT_NAME="+project)
+	}
+	args = append(args, "--entrypoint", "/usr/local/bin/ftw-updater", image,
+		"-retire-python", "-compose", s.composeFile, "-main-service", s.mainServiceName)
+	return s.runner(ctx, nil, args...)
+}
+
+func (s *server) retiredPythonContainers(ctx context.Context) ([]string, error) {
+	coreID, err := s.serviceContainerID(ctx, s.mainServiceName)
+	if err != nil {
+		return nil, err
+	}
+	label, err := exec.CommandContext(ctx, "docker", "inspect", "--format", `{{ index .Config.Labels "com.docker.compose.project" }}`, coreID).Output()
+	if err != nil {
+		return nil, err
+	}
+	project := strings.TrimSpace(string(label))
+	if project == "" || project == "<no value>" {
+		return nil, fmt.Errorf("Core has no Compose project label")
+	}
+	// Labels find orphaned containers too, without touching another project.
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--quiet",
+		"--filter", "label=com.docker.compose.project="+project,
+		"--filter", "label=com.docker.compose.service=ftw-optimizer").Output()
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(string(out)), nil
+}
+
 func (s *server) retirePythonOptimizer(ctx context.Context) error {
 	// This command is explicit and runs only once the replacement is healthy.
 	out, err := exec.CommandContext(ctx, "docker", s.composeArgs("exec", "-T", s.mainServiceName, "wget", "-qO-", "http://127.0.0.1:8080/api/components")...).Output()
@@ -211,12 +255,7 @@ func (s *server) retirePythonOptimizer(ctx context.Context) error {
 			changes = append(changes, change{path, before, after, st.Mode().Perm()})
 		}
 	}
-	if len(changes) == 0 {
-		return nil
-	}
-	// Capture the service ID while its definition still exists. Never remove a
-	// same-named container belonging to another Compose project.
-	ids, err := exec.CommandContext(ctx, "docker", s.composeArgs("ps", "--all", "--quiet", "ftw-optimizer")...).Output()
+	ids, err := s.retiredPythonContainers(ctx)
 	if err != nil {
 		return err
 	}
@@ -226,25 +265,25 @@ func (s *server) retirePythonOptimizer(ctx context.Context) error {
 			return err
 		}
 	}
-	restore := func() {
+	restore := func(cause error) error {
 		for _, c := range changes {
-			_ = replaceRetiredCompose(c.path, c.before)
+			if err := replaceRetiredCompose(c.path, c.before); err != nil {
+				cause = errors.Join(cause, fmt.Errorf("restore %s: %w", c.path, err))
+			}
 		}
+		return cause
 	}
 	for _, c := range changes {
 		if err := replaceRetiredCompose(c.path, c.after); err != nil {
-			restore()
-			return err
+			return restore(err)
 		}
 	}
 	if err := s.runner(ctx, nil, s.composeArgs("config", "--quiet")...); err != nil {
-		restore()
-		return fmt.Errorf("Compose validation failed; restored originals: %w", err)
+		return restore(fmt.Errorf("Compose validation failed: %w", err))
 	}
-	for _, id := range strings.Fields(string(ids)) {
+	for _, id := range ids {
 		if err := s.runner(ctx, nil, "rm", "--force", id); err != nil {
-			restore()
-			return fmt.Errorf("remove retired container: %w", err)
+			return restore(fmt.Errorf("remove retired container: %w", err))
 		}
 	}
 	fmt.Println("Python optimizer removed. Compose backups:", suffix, "Recreate Core at its pinned version to release the old IPC mount.")

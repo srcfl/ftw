@@ -276,16 +276,20 @@ func main() {
 		os.Exit(1)
 	}
 	srv.mainServiceName = selectedService
+	srv.imageID = srv.currentServiceImageID
 	if *retirePython {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := srv.retirePythonOptimizer(ctx); err != nil {
+		retire := srv.retirePythonViaHelper
+		if os.Getenv("FTW_RETIRE_PYTHON_HELPER") == "1" {
+			retire = srv.retirePythonOptimizer
+		}
+		if err := retire(ctx); err != nil {
 			slog.Error("retire Python", "err", err)
 			os.Exit(1)
 		}
 		return
 	}
-	srv.imageID = srv.currentServiceImageID
 	srv.imageRef = srv.currentServiceImageRef
 	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth

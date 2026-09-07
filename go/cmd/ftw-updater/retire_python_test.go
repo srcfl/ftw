@@ -1,9 +1,13 @@
 package main
 
 import (
-	"gopkg.in/yaml.v3"
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestRetirePythonPreservesCoreAndCustomServices(t *testing.T) {
@@ -63,5 +67,50 @@ func TestUpdaterRejectsRetiredOptimizer(t *testing.T) {
 	s, _ := newTestServer(t)
 	if _, err := s.componentSpec("optimizer"); err == nil {
 		t.Fatal("optimizer still updatable")
+	}
+}
+
+func TestRetirePythonHelperUsesLocalImageAndWritableProject(t *testing.T) {
+	s, runner := newTestServer(t)
+	t.Setenv("COMPOSE_PROJECT_NAME", "existing-site")
+	if err := s.retirePythonViaHelper(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	call := runner.snapshot()[0]
+	joined := strings.Join(call, " ")
+	for _, want := range []string{
+		"--pull never", "--network none", "sha256:current", "FTW_RETIRE_PYTHON_HELPER=1",
+		"COMPOSE_PROJECT_NAME=existing-site", filepath.Dir(s.composeFile) + ":" + filepath.Dir(s.composeFile) + ":rw",
+		"-compose " + s.composeFile, "-main-service " + s.mainServiceName,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in %s", want, joined)
+		}
+	}
+}
+
+func TestRetirePythonRemovesOrphanWithCleanCompose(t *testing.T) {
+	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: ftw:test\n")
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$*" in
+  *"/api/components"*) printf '%s\n' '{"optimizer":{"bundled_with_core":true,"healthy":true}}' ;;
+  "compose "*" ps -q --all ftw") printf '%s\n' 'abcdef012345' ;;
+  "inspect "*" abcdef012345") printf '%s\n' 'existing-site' ;;
+  "ps --all --quiet --filter label=com.docker.compose.project=existing-site --filter label=com.docker.compose.service=ftw-optimizer") printf '%s\n' 'orphan-id' ;;
+  *) exit 31 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := s.retirePythonOptimizer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	calls := runner.snapshot()
+	if len(calls) != 2 || strings.Join(calls[1], " ") != "rm --force orphan-id" {
+		t.Fatalf("orphan was not removed: %v", calls)
 	}
 }

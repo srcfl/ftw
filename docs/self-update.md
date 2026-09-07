@@ -162,9 +162,11 @@ tested locally.
 
 After installing this Core/updater pair and checking that Energyplan is healthy,
 run the updater binary with `-retire-python` and the installation's `-compose`
-path. It backs up each changed Compose file, removes only the old planner service
+path. The command starts a short-lived helper from the exact running updater
+image, with the project mounted writable. It backs up each changed Compose file, removes only the old planner service
 and FTW socket wiring, validates the merged files, and removes the retired
-container from the same Compose project. Custom services and persistent data
+container from the same Compose project, including an orphan left by an earlier
+Compose edit. Custom services and persistent data
 stay intact. Recreate Core at its pinned image to release the old socket mount.
 An older updater can install this release while Python still runs; retire the
 service only after the new updater is installed.

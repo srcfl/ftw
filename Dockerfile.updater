@@ -28,8 +28,8 @@ RUN cd go && \
     -o /out/ftw-updater ./cmd/ftw-updater
 
 # --- Runtime ---------------------------------------------------------------
-# Same debian:trixie-slim rootfs as Dockerfile and Dockerfile.optimizer, so
-# the whole stack pulls one base layer instead of three. docker:27-cli is
+# Same debian:trixie-slim rootfs as Dockerfile, so
+# Core and updater share a base layer. docker:27-cli is
 # alpine-based and was the last thing keeping a second libc in the deployment.
 #
 # The docker CLI and the compose plugin are copied straight out of the official
