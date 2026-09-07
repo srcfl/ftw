@@ -144,6 +144,60 @@ func TestBuildHistoryPointRequiresFreshEVAndV2X(t *testing.T) {
 
 }
 
+func TestPersistTelemetryTickUsesPersistenceFreshness(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sampleAge time.Duration
+		wantSaved bool
+	}{
+		{"poll after tick start", 0, true},
+		{"stale reading", -2 * time.Minute, false},
+		{"future reading", time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			tickMS := time.Now().Add(-5 * time.Second).UnixMilli()
+			tel := telemetry.NewStore()
+			tel.EnsureDriverHealth("meter")
+			tel.Update("meter", telemetry.DerMeter, 1200, nil, nil)
+			tel.RecordDriverSuccess("meter")
+			sampleAt := time.Now().Add(tc.sampleAge)
+			tel.Get("meter", telemetry.DerMeter).UpdatedAt = sampleAt
+			ctrl := &control.State{SiteMeterDriver: "meter"}
+			if _, err := persistTelemetryTick(st, tel, ctrl, tickMS, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			history, err := st.LoadHistory(tickMS-1, tickMS+1, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(history) == 1) != tc.wantSaved {
+				t.Fatalf("history = %+v, want saved=%v", history, tc.wantSaved)
+			}
+			if tc.wantSaved && (history[0].TsMs != tickMS || history[0].LoadW != 1200) {
+				t.Fatalf("tick timestamp or household power changed: %+v", history[0])
+			}
+			assets, err := st.EnergyAssets()
+			if err != nil {
+				t.Fatal(err)
+			}
+			consumerSaved := false
+			for _, asset := range assets {
+				if asset.AssetID == observedConsumerAssetID {
+					consumerSaved = asset.LastSeenMS == sampleAt.UnixMilli()
+				}
+			}
+			if consumerSaved != tc.wantSaved {
+				t.Fatalf("consumer ledger assets = %+v, want saved=%v", assets, tc.wantSaved)
+			}
+		})
+	}
+}
+
 func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
