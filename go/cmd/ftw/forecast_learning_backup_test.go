@@ -62,7 +62,9 @@ planner:
 			if site.IdentityPending || !site.HasLocation || site.LearningRevision == "" {
 				t.Fatalf("invalid forecast fixture site: %+v", site)
 			}
-			start := time.Now().UTC().Truncate(15 * time.Minute).Add(-30 * time.Minute)
+			// PV training requires sunlight; keep both fixture observations in
+			// Stockholm daytime so this native regression does not depend on the clock.
+			start := time.Date(2026, time.June, 1, 10, 0, 0, 0, time.UTC)
 			seedForecastGoModels(t, st, site, start)
 
 			native := learningNative(t, st)
