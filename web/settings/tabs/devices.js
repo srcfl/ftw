@@ -286,6 +286,7 @@
   }
 
   S.driverVersions = {
+    runtimeVerified: runtimeVerified,
     runningSummary: runningSummary,
     verificationLabel: verificationLabel,
     versionRows: versionRows,
@@ -336,6 +337,26 @@
     }
   }
 
+  function configReloadNote(body) {
+    return body && body.config_changed
+      ? " Settings changed. Close and reopen Settings before saving."
+      : "";
+  }
+
+  function runtimeVerified(body, opts) {
+    var names = body && body.restarted_drivers;
+    return !!(body && body.runtime_verified === true && Array.isArray(names) &&
+      names.length > 0 && (!opts || !opts.driverName || names.indexOf(opts.driverName) >= 0));
+  }
+
+  function applyRuntimeResult(opts, body) {
+    if (!opts || !runtimeVerified(body, opts)) return;
+    if (body.logical_path) {
+      if (opts.onPathChanged) opts.onPathChanged(opts.logicalPath, body.logical_path);
+      opts.logicalPath = body.logical_path;
+    }
+  }
+
   function renderVersionRow(panel, driverID, row, rows, opts, overridden) {
     var line = document.createElement("div");
     line.style.display = "flex";
@@ -351,7 +372,7 @@
     var detail = document.createElement("span");
     detail.className = "drv-version-detail";
     var facts = [];
-    if (row.active && !overridden) facts.push("running now");
+    if (row.active && !overridden) facts.push("selected");
     else if (row.downloaded) facts.push("on disk");
     if (row.verification) facts.push(row.verification);
     detail.textContent = facts.join(" · ");
@@ -387,7 +408,7 @@
             if (!r.ok) throw new Error(b.error || "could not switch version");
             return b;
           });
-        }).then(function () {
+        }).then(function (body) {
           // It came down from the channel and is kept on disk now. Without
           // this the next attempt would fetch it again, which fails offline
           // for a file that is already there.
@@ -398,7 +419,14 @@
             action.disabled = true;
             return;
           }
-          status.textContent = "v" + row.version + " is running.";
+          if (!runtimeVerified(body, opts)) {
+            status.textContent = "Installed. No running instance was verified for this device." + configReloadNote(body);
+            action.textContent = "Use this";
+            action.disabled = false;
+            return;
+          }
+          applyRuntimeResult(opts, body);
+          status.textContent = "v" + row.version + " is running; fresh telemetry verified." + configReloadNote(body);
           // The line above the panel still named the old version, and the
           // other rows still claimed to be running, so all three contradicted
           // each other until the tab was re-rendered.
@@ -451,8 +479,14 @@
     action.addEventListener("click", function () {
       action.disabled = true;
       status.textContent = "Switching…";
-      useBundled(driverID, opts).then(function () {
-        status.textContent = "The bundled driver is running.";
+      useBundled(driverID, opts).then(function (body) {
+        if (!runtimeVerified(body, opts)) {
+          status.textContent = "Bundled driver selected. No running instance was verified for this device." + configReloadNote(body);
+          action.disabled = false;
+          return;
+        }
+        applyRuntimeResult(opts, body);
+        status.textContent = "The bundled driver is running." + configReloadNote(body);
         refreshSummary(opts, driverID);
         markRunning(panel, null);
         action.textContent = "Running";
@@ -501,6 +535,11 @@
         entries.forEach(function (e) { if (e && e.path === opts.logicalPath) entry = e; });
         if (!entry) return;
         var summary = runningSummary(entry);
+        if (opts.versionsEl) {
+          opts.versionsEl.dataset.logicalPath = entry.path;
+          opts.versionsEl.dataset.source = entry.source || "bundled";
+          opts.versionsEl.dataset.runningVersion = entry.installed_version || entry.version || "";
+        }
         badge.textContent = summary.headline;
         if (opts.detailEl) opts.detailEl.textContent = summary.detail;
         if (opts.readOnlyEl) opts.readOnlyEl.style.display = entry.read_only ? "" : "none";
@@ -526,7 +565,7 @@
       var detail = line.querySelector ? line.querySelector(".drv-version-detail") : null;
       if (!label || !detail) return;
       var facts = detail.textContent.split(" · ").filter(function (fact) {
-        return fact !== "running now";
+        return fact !== "running now" && fact !== "selected";
       });
       if (label.textContent === wanted) facts.unshift("running now");
       detail.textContent = facts.join(" · ");
@@ -869,10 +908,16 @@
       var call = wasBundled
         ? useBundled(driverID, opts)
         : switchBack(driverID, previousVersion, onDisk, opts);
-      call.then(function () {
-        status.textContent = wasBundled
+      call.then(function (body) {
+        if (!runtimeVerified(body, opts)) {
+          status.textContent = "Previous driver selected. No running instance was verified for this device." + configReloadNote(body);
+          undo.disabled = false;
+          return;
+        }
+        applyRuntimeResult(opts, body);
+        status.textContent = (wasBundled
           ? "The bundled driver is running again."
-          : "v" + previousVersion + " is running again.";
+          : "v" + previousVersion + " is running again.") + configReloadNote(body);
         refreshSummary(opts, driverID);
         markRunning(panel, wasBundled ? null : previousVersion);
         undo.remove();
@@ -964,7 +1009,7 @@
           '<div class="device-item-header">' +
           '<strong>' + escHtml(d.name) + '</strong>' +
           '<span class="device-meta">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
-          '<span class="driver-module-status" data-drv-lua="' + escHtml(d.lua || '') + '"></span>' +
+          '<span class="driver-module-status" data-driver-name="' + escHtml(d.name) + '" data-drv-lua="' + escHtml(d.lua || '') + '"></span>' +
           '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
           '</div>' +
           '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
@@ -1210,6 +1255,33 @@
       var bodyEl = ctx.bodyEl;
       var escHtml = ctx.escHtml;
       var help = ctx.help;
+
+      function moduleOptions(slot) {
+        var versions = slot.querySelector(".drv-module-versions");
+        return {
+          driverName: slot.dataset.driverName,
+          overridden: versions && versions.dataset.source === "local",
+          runningSource: versions && versions.dataset.source,
+          runningVersion: versions && versions.dataset.runningVersion,
+          logicalPath: versions && versions.dataset.logicalPath,
+          versionsEl: versions,
+          headlineEl: slot.querySelector(".drv-module-headline"),
+          detailEl: slot.querySelector(".drv-module-detail"),
+          updateEl: slot.querySelector(".drv-module-update"),
+          readOnlyEl: slot.querySelector(".drv-module-readonly"),
+          onPathChanged: function (previous, next) {
+            config.drivers.forEach(function (driver, idx) {
+              if (driver.name !== slot.dataset.driverName || driver.lua !== previous) return;
+              driver.lua = next;
+              var input = bodyEl.querySelector('[data-path="drivers.' + idx + '.lua"]');
+              if (input && input.value === previous) input.value = next;
+            });
+            var meta = slot.parentElement.querySelector(".device-meta");
+            if (meta && previous) meta.textContent = meta.textContent.replace(previous, next);
+            slot.dataset.drvLua = next;
+          }
+        };
+      }
 
       function fmtW(v) {
         if (!Number.isFinite(v)) return "—";
@@ -1464,7 +1536,18 @@
               method: "POST", headers: {"Content-Type":"application/json"},
               body: JSON.stringify({repository_id: btn.dataset.repositoryId, version: btn.dataset.version})
             }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "install failed"); return body; }); })
-              .then(function () { if (status) status.textContent = " Updated; fresh telemetry verified."; btn.remove(); })
+              .then(function (body) {
+                var opts = moduleOptions(btn.parentElement);
+                if (!runtimeVerified(body, opts)) {
+                  if (status) status.textContent = " Installed. No running instance was verified for this device." + configReloadNote(body);
+                  btn.disabled = false;
+                  return;
+                }
+                applyRuntimeResult(opts, body);
+                if (status) status.textContent = " Updated; fresh telemetry verified." + configReloadNote(body);
+                refreshSummary(opts, btn.dataset.driverId);
+                btn.remove();
+              })
               .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
           });
         });
@@ -1484,18 +1567,7 @@
                 });
               })
               .then(function (body) {
-                renderVersionPicker(panel, id, body, {
-                  overridden: btn.dataset.source === "local",
-                  runningSource: btn.dataset.source,
-                  runningVersion: btn.dataset.runningVersion,
-                  logicalPath: btn.dataset.logicalPath,
-                  // So a switch can correct the summary line above without
-                  // re-rendering the tab, which would close this panel.
-                  headlineEl: btn.parentElement.querySelector(".drv-module-headline"),
-                  detailEl: btn.parentElement.querySelector(".drv-module-detail"),
-                  updateEl: btn.parentElement.querySelector(".drv-module-update"),
-                  readOnlyEl: btn.parentElement.querySelector(".drv-module-readonly")
-                });
+                renderVersionPicker(panel, id, body, moduleOptions(btn.parentElement));
               })
               .catch(function (err) { panel.textContent = err.message; });
           });
