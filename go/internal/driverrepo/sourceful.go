@@ -604,7 +604,12 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		repo = &m.betaRepo
 	}
 	if repo == nil {
-		return nil, errors.New("active managed driver has no trusted repository source")
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in requires a configured Device Support trust root")
+		}
+		// Preserve legacy v1 startup and its autonomous default after a source
+		// is removed. Official provenance already selected pinned trust above.
+		return nil, nil
 	}
 	if repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1 {
 		return m.directManifestRuntimePolicy(cfg, *repo, installed)
