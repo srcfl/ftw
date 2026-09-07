@@ -343,7 +343,11 @@ func (s *Store) RecordTickWithOptionalHistory(p *HistoryPoint, samples []Sample,
 	if err := recordEnergyObservationsTx(tx, observations); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.offerCommittedHistory(p)
+	return nil
 }
 
 // LoadSeries returns one metric's history for one driver in [sinceMs, untilMs].

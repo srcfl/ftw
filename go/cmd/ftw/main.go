@@ -49,6 +49,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/forecast"
+	"github.com/srcfl/ftw/go/internal/ftwdbshadow"
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -318,6 +319,7 @@ func main() {
 	}
 
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
+	shadowSocket := flag.String("ftwdb-shadow-socket", os.Getenv("FTWDB_SHADOW_SOCKET"), "Optional local FTWDB beta socket; empty disables the candidate")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
 	userDriversDirFlag := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory (overlay on top of -drivers). Searched first; falls back to -drivers when a file isn't found here. Designed for docker deploys.")
@@ -713,6 +715,8 @@ func main() {
 	var forecastConfigMu sync.RWMutex
 	var ocppSrv *ocpp.Server
 	forecastSettings := newForecastSiteConfig(st)
+	shadow := ftwdbshadow.Start(ctx, st, *shadowSocket, forecastSettings.Snapshot().SiteID, Version)
+	defer shadow.Close()
 	forecastSettings.identity = func(name string) (string, bool) {
 		if id, ok := runningDeviceID(reg, name); ok {
 			return id, true
@@ -2356,6 +2360,7 @@ func main() {
 		ColdDir:           coldDir,
 		DataDir:           dataDir,
 		StatePath:         statePath,
+		FTWDBShadow:       shadow,
 		BackupDir:         backupDir,
 		DataMaintenanceMu: dataMaintenanceMu,
 		// Snapshots live next to the rest of the persistent data so
