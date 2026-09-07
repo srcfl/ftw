@@ -183,6 +183,15 @@
     var progressEl = document.getElementById("restart-progress");
     var progressTextEl = document.getElementById("restart-progress-text");
     if (!modalEl || !listEl || !laterBtn || !nowBtn) return;
+    // A second save response must not reset an open or pending prompt.
+    if (!modalEl.classList.contains("hidden")) return;
+
+    var dialogEl = modalEl.querySelector(".modal-content");
+    dialogEl.setAttribute("role", "dialog");
+    dialogEl.setAttribute("aria-modal", "true");
+    dialogEl.setAttribute("aria-label", "Restart required");
+    dialogEl.setAttribute("tabindex", "-1");
+    progressEl.setAttribute("role", "status");
 
     listEl.innerHTML = "";
     if (reasons.length === 0) {
@@ -205,19 +214,45 @@
     modalEl.classList.remove("hidden");
 
     var restartOpener = document.activeElement;
+    // The restart prompt sits above Settings. Keep all other body children
+    // out of keyboard navigation and the accessibility tree until it closes.
+    var background = Array.from(document.body.children).filter(function (el) {
+      return el !== modalEl && !el.contains(modalEl) && !el.inert;
+    });
+    background.forEach(function (el) { el.inert = true; });
     laterBtn.focus();
-    laterBtn.onclick = function () {
+    function closeRestart() {
+      if (laterBtn.disabled) return;
       modalEl.classList.add("hidden");
+      modalEl.onkeydown = null;
+      background.forEach(function (el) { el.inert = false; });
       if (restartOpener && restartOpener.isConnected) restartOpener.focus();
+    }
+    laterBtn.onclick = closeRestart;
+    modalEl.onkeydown = function (e) {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRestart();
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        var buttons = [laterBtn, nowBtn].filter(function (button) { return !button.disabled; });
+        var index = buttons.indexOf(document.activeElement);
+        var next = index < 0 ? (e.shiftKey ? buttons.length - 1 : 0) :
+          (index + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+        (buttons[next] || dialogEl).focus();
+      }
     };
-    nowBtn.onclick = function () { triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl); };
+    nowBtn.onclick = function () { triggerRestart(dialogEl, nowBtn, laterBtn, progressEl, progressTextEl); };
   }
 
-  function triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl) {
+  function triggerRestart(dialogEl, nowBtn, laterBtn, progressEl, progressTextEl) {
     nowBtn.disabled = true;
     laterBtn.disabled = true;
     progressEl.classList.remove("hidden");
     progressTextEl.textContent = "Restarting…";
+    dialogEl.focus();
 
     apiFetch("/api/restart", { method: "POST" })
       .then(function (r) {
@@ -236,6 +271,7 @@
         laterBtn.disabled = false;
         progressEl.classList.add("hidden");
         alert("Restart failed: " + e.message);
+        laterBtn.focus();
       });
   }
 

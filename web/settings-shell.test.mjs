@@ -60,12 +60,15 @@ function loadShell(saveResponse, ok = true) {
 
   const requests = [];
   const responses = {};
+  const alerts = [];
   const sandbox = {
     window: { FTWSettings: { tabs: {} } },
     document,
     getComputedStyle: element => ({ visibility: element.visibility || "visible" }),
+    alert: message => alerts.push(message),
     fetch(path, opts) {
       requests.push({ path, opts });
+      if (typeof responses[path] === "function") return responses[path](opts);
       return Promise.resolve({ ok, status: ok ? 200 : 400, headers: { get: () => '"config-7"' }, json: () => Promise.resolve(responses[path] ?? saveResponse) });
     },
     // The shell only uses timers to clear the "Saved" status and to poll after
@@ -76,7 +79,7 @@ function loadShell(saveResponse, ok = true) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
-  return { elements, document, requests, responses, tabs: sandbox.window.FTWSettings.tabs,
+  return { elements, document, requests, responses, alerts, tabs: sandbox.window.FTWSettings.tabs,
     loadTab: file => vm.runInContext(readFileSync(new URL(file, import.meta.url), "utf8"), sandbox) };
 }
 
@@ -209,19 +212,97 @@ describe("Settings dialog keyboard access", () => {
     assert.equal(rig.document.activeElement, button, "keep explicit focus from the new tab's hook");
   });
 
-  it("hands focus to Restart later and returns it to Save when that dialog closes", async () => {
+  async function restartShell() {
     const rig = loadShell({ restart_required: true });
     for (const id of ["restart-modal", "restart-reasons", "restart-later", "restart-now", "restart-progress", "restart-progress-text"])
       rig.elements[id] = stubElement(rig.document);
+    rig.elements["restart-modal"].classList.add("hidden");
+    const dialog = stubElement(rig.document), background = stubElement(rig.document), alreadyInert = stubElement(rig.document);
+    alreadyInert.inert = true;
+    rig.elements["restart-modal"].querySelector = () => dialog;
+    rig.document.body = { children: [rig.elements["settings-modal"], background, alreadyInert, rig.elements["restart-modal"]] };
     await open(rig);
     rig.elements["settings-save"].focus();
     rig.elements["settings-save"].handlers.click();
     await settled();
+    return { ...rig, dialog, background, alreadyInert };
+  }
+
+  function restartKey(rig, name, properties = {}) {
+    const event = { key: name, preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.stopped = true; }, ...properties };
+    rig.elements["restart-modal"].onkeydown?.(event);
+    return event;
+  }
+
+  it("hands focus to Restart later and returns it to Save when that dialog closes", async () => {
+    const rig = await restartShell();
     assert.equal(rig.document.activeElement, rig.elements["restart-later"]);
     rig.elements["restart-later"].onclick();
     assert.equal(rig.document.activeElement, rig.elements["settings-save"]);
     assert.equal(rig.elements["settings-modal"].classList.contains("hidden"), false);
     assert.equal(rig.requests.some(request => request.path === "/api/restart"), false);
+  });
+
+  it("keeps the restart prompt modal and wraps focus until Escape chooses Later", async () => {
+    const rig = await restartShell();
+    assert.equal(rig.dialog.attributes.role, "dialog");
+    assert.equal(rig.dialog.attributes["aria-modal"], "true");
+    assert.equal(rig.dialog.attributes["aria-label"], "Restart required");
+    assert.equal(rig.background.inert, true);
+    assert.equal(rig.elements["settings-modal"].inert, true);
+    assert.notEqual(rig.elements["restart-modal"].inert, true);
+    rig.elements["settings-save"].handlers.click();
+    await settled();
+    assert.equal(rig.document.activeElement, rig.elements["restart-later"]);
+    for (const shiftKey of [false, true]) {
+      assert.ok(restartKey(rig, "Tab", { shiftKey }).defaultPrevented);
+      assert.equal(rig.document.activeElement, rig.elements["restart-now"]);
+      restartKey(rig, "Tab", { shiftKey });
+      assert.equal(rig.document.activeElement, rig.elements["restart-later"]);
+    }
+    restartKey(rig, "Escape", { defaultPrevented: true });
+    assert.equal(rig.elements["restart-modal"].classList.contains("hidden"), false);
+    assert.ok(restartKey(rig, "Escape").stopped);
+    assert.equal(rig.elements["restart-modal"].classList.contains("hidden"), true);
+    assert.equal(rig.elements["settings-modal"].classList.contains("hidden"), false);
+    assert.equal(rig.document.activeElement, rig.elements["settings-save"]);
+    assert.equal(rig.background.inert, false);
+    assert.equal(rig.elements["settings-modal"].inert, false);
+    assert.equal(rig.alreadyInert.inert, true, "leave pre-existing inert state alone");
+    assert.equal(rig.elements["restart-modal"].onkeydown, null);
+  });
+
+  it("keeps pending restart focus in the prompt and permits Later after a failure", async () => {
+    const rig = await restartShell();
+    let finish;
+    rig.responses["/api/restart"] = () => new Promise(resolve => { finish = resolve; });
+    rig.elements["restart-now"].onclick();
+    assert.equal(rig.document.activeElement, rig.dialog);
+    assert.equal(rig.elements["restart-later"].disabled, true);
+    assert.equal(rig.elements["restart-now"].disabled, true);
+    assert.equal(rig.elements["restart-progress"].classList.contains("hidden"), false);
+    rig.elements["settings-save"].handlers.click();
+    await settled();
+    assert.equal(rig.elements["restart-later"].disabled, true, "a late save response must not unlock the pending prompt");
+    assert.equal(rig.document.activeElement, rig.dialog);
+    for (const shiftKey of [false, true]) {
+      assert.ok(restartKey(rig, "Tab", { shiftKey }).defaultPrevented);
+      assert.equal(rig.document.activeElement, rig.dialog);
+    }
+    restartKey(rig, "Escape");
+    rig.elements["restart-later"].onclick();
+    assert.equal(rig.elements["restart-modal"].classList.contains("hidden"), false);
+    assert.equal(rig.background.inert, true);
+    finish({ ok: false, status: 500, json: async () => ({ error: "offline" }) });
+    await settled();
+    assert.deepEqual(rig.alerts, ["Restart failed: offline"]);
+    assert.equal(rig.document.activeElement, rig.elements["restart-later"]);
+    assert.equal(rig.elements["restart-progress"].classList.contains("hidden"), true);
+    restartKey(rig, "Escape");
+    assert.equal(rig.document.activeElement, rig.elements["settings-save"]);
+    assert.equal(rig.background.inert, false);
+    assert.equal(rig.requests.filter(request => request.path === "/api/restart").length, 1);
   });
 });
 
