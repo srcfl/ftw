@@ -208,6 +208,10 @@ func (b *Beta) run(ctx context.Context, config ClientConfig, siteID string, inte
 		b.status.Pending = 0
 		b.mu.Unlock()
 		pending = nil
+		// The sidecar's idle deadline is shorter than the batch interval.
+		// Start the next batch with a new connection and HELLO.
+		_ = client.Close()
+		client = nil
 	}
 }
 
