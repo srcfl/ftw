@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,8 +145,7 @@ func OpenBackupSource(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", readOnlyDatabaseURI(abs))
 	if err != nil {
 		return nil, err
 	}

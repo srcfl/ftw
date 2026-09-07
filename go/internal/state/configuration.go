@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -36,8 +37,7 @@ func decodeConfiguration(raw string) (Configuration, error) {
 // ReadConfiguration opens the existing database without creating, migrating or
 // healing it. A missing or unreadable authority must never fall back to YAML.
 func ReadConfiguration(path string) (Configuration, error) {
-	u := url.URL{Scheme: "file", Path: path}
-	db, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", readOnlyDatabaseURI(path))
 	if err != nil {
 		return Configuration{}, err
 	}
@@ -47,6 +47,21 @@ func ReadConfiguration(path string) (Configuration, error) {
 		return Configuration{}, fmt.Errorf("read stored settings: %w", err)
 	}
 	return decodeConfiguration(raw)
+}
+
+func readOnlyDatabaseURI(path string) string {
+	path = filepath.ToSlash(path)
+	if strings.HasPrefix(path, "//?/UNC/") {
+		path = "//" + strings.TrimPrefix(path, "//?/UNC/")
+	} else {
+		path = strings.TrimPrefix(path, "//?/")
+	}
+	// A Windows drive is part of the URI path, never its authority.
+	if len(path) > 1 && path[1] == ':' {
+		path = "/" + path
+	}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	return u.String()
 }
 
 func (s *Store) Configuration() (Configuration, bool, error) {

@@ -55,6 +55,9 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 	if err != nil {
 		return nil, err
 	}
+	if err := protectSettingsDatabase(database); err != nil {
+		return nil, err
+	}
 	doc, found, err := st.Configuration()
 	if err != nil {
 		return nil, err
@@ -71,11 +74,7 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 			return nil, err
 		}
 	} else {
-		for _, file := range []string{database, database + "-wal", database + "-shm"} {
-			if err := os.Chmod(file, 0600); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
-		}
+
 		if cfg.EVCharger != nil {
 			password, _, err := st.ConfigValue("ev_charger_password")
 			if err != nil {
@@ -107,6 +106,9 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 func SaveStored(st *state.Store, path string, cfg *Config) error {
 	if cfg.ConfigDatabase == "" {
 		return errors.New("settings database is not initialized")
+	}
+	if err := protectSettingsDatabase(cfg.ConfigDatabase); err != nil {
+		return err
 	}
 	// Moving history is an offline operation, not a settings save that starts a
 	// new, empty database on the next boot.
@@ -186,4 +188,13 @@ func ExportStored(path string, configuration state.Configuration, database strin
 	}
 	doc.Config.ConfigDatabase = database
 	return SaveAtomic(path, doc.Config)
+}
+
+func protectSettingsDatabase(database string) error {
+	for _, path := range []string{database, database + "-wal", database + "-shm"} {
+		if err := restrictConfigFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("protect settings database: %w", err)
+		}
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ ev_charger:
 		}
 	}
 	for _, file := range []string{path, database} {
-		if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0600 {
+		if fi, err := os.Stat(file); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0600) {
 			t.Fatalf("owner-only config: %s %v", file, err)
 		}
 	}

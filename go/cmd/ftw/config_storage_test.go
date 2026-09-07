@@ -80,3 +80,19 @@ drivers:
 		t.Fatal("explicit zero became the default")
 	}
 }
+
+func TestMissingDatabaseDoesNotStartSetup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if !isConfigMissing(path) {
+		t.Fatal("first boot must offer setup")
+	}
+	if err := os.WriteFile(path, []byte("config_database: missing.db\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err == nil {
+		t.Fatal("missing authority did not fail")
+	}
+	if isConfigMissing(path) {
+		t.Fatal("database loss offered destructive first-run setup")
+	}
+}

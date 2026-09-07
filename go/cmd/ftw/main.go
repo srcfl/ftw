@@ -371,7 +371,7 @@ func main() {
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		if isConfigMissing(err) {
+		if isConfigMissing(*configPath) {
 			runBootstrap(*configPath, *webDir, resolveDriverDir())
 			return
 		}
@@ -3816,18 +3816,11 @@ func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Man
 	}
 }
 
-// isConfigMissing checks whether the error from config.Load indicates the
-// config file does not exist (as opposed to a parse or validation error).
-// config.Load wraps the os error with fmt.Errorf, so we use errors.Is to
-// unwrap through the chain.
-func isConfigMissing(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return true
-	}
-	return strings.Contains(err.Error(), "no such file")
+// Only a missing seed starts setup. A missing SQLite authority is a recovery
+// error and must never offer a new household configuration over existing data.
+func isConfigMissing(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (int, error) {
