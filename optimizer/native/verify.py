@@ -66,9 +66,7 @@ def verify_bundle(root):
 def host_key():
     machine = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}.get(platform.machine().lower())
     key = f"{platform.system().lower()}-{machine}"
-    if key not in PLATFORMS:
-        raise ValueError(f"No bundled Energyplan worker for {key}")
-    return key
+    return key if key in PLATFORMS else None
 
 
 def check_public_tree():
@@ -90,7 +88,12 @@ def main():
     check_public_tree()
     root = HERE / "bundle"
     manifest = verify_bundle(root)
-    binary = root / manifest["artifacts"][host_key()]["path"]
+    host = host_key()
+    if host is None:
+        if not args.host_binary:
+            print(f"Verified Energyplan {manifest['version']}: bundle integrity passed; no worker for this host, execution skipped")
+        return
+    binary = root / manifest["artifacts"][host]["path"]
     if args.host_binary:
         print(binary)
         return

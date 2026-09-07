@@ -13,7 +13,7 @@ func plannerEngine(pl *config.Planner, version string) string {
 	if pl != nil && strings.TrimSpace(pl.Engine) != "" {
 		return pl.EngineName()
 	}
-	if base, valid := releaseVersionBase(version); valid && base != version && runtime.GOOS != "windows" {
+	if base, valid := releaseVersionBase(version); valid && base != version && energyplanSupported(runtime.GOOS, runtime.GOARCH) {
 		return config.PlannerEngineEnergyplan
 	}
 	return config.PlannerEngineCore
@@ -39,4 +39,8 @@ func resolveEnergyplanBinary() string {
 	// Keep an unavailable primary attached: its failure produces an explicit
 	// fallback reason instead of silently changing the configured engine.
 	return filepath.Join("/app/optimizer/native/bundle", name)
+}
+
+func energyplanSupported(goos, goarch string) bool {
+	return (goos == "linux" && (goarch == "amd64" || goarch == "arm64")) || (goos == "darwin" && goarch == "arm64")
 }

@@ -49,6 +49,19 @@
     return "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
   }
 
+  function engineSelect(engine, help) {
+    var selected = String(engine == null ? "" : engine).trim().toLowerCase();
+    if (selected === "go" || selected === "dp") selected = "core";
+    var options = [["", "Automatic (release default)"], ["energyplan", "Energyplan"],
+      ["core", "Core DP"], ["python", "Python"]];
+    return '<label for="planner-engine">Engine ' +
+      help("Automatic uses Energyplan in supported beta builds and Core DP elsewhere. Energyplan runs Core DP as a shadow and uses it as fallback. Changing the engine requires a restart.") +
+      '</label><select id="planner-engine" data-path="planner.engine">' +
+      options.map(function (option) {
+        return '<option value="' + option[0] + '"' + (selected === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';
+      }).join("") + '</select>';
+  }
+
   S.tabs.planner = {
     render: function (ctx) {
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
@@ -90,12 +103,12 @@
         '</label>' +
         '<div id="planner-active-strategy" style="font-family:var(--mono);margin:2px 0 12px">—</div>' +
         '<div class="field-row"><div>' +
-        selectField("Engine", "planner.engine", ["python", "dp"], "python",
-          "Python runs the CVXPY mathematical optimizer. DP is the emergency rollback engine.") +
+        engineSelect(planner.engine, help) +
         '</div><div>' +
-        selectField("Solver", "planner.optimizer_solver", ["HIGHS", "CLARABEL"], "HIGHS",
+        selectField("Python solver", "planner.optimizer_solver", ["HIGHS", "CLARABEL"], "HIGHS",
           "HiGHS handles LP and MILP. CLARABEL is available only for continuous convex formulations.") +
         '</div></div>' +
+        '<p style="color:var(--text-dim);font-size:0.8rem">The solver and scenario controls below apply to Python. Energyplan uses a fixed 500 ms solve limit.</p>' +
         '<div class="field-row"><div>' +
         selectField("Formulation", "planner.optimizer_formulation", ["auto", "milp", "relaxed"], "auto",
           "Auto introduces integer variables only when physics or discrete asset steps require them.") +
@@ -225,5 +238,5 @@
   };
 
   // Escape hatch for node --test (planner.test.mjs); not a public API.
-  S.tabs.planner._pure = { strategyLabel: strategyLabel, hedgeLine: hedgeLine };
+  S.tabs.planner._pure = { strategyLabel: strategyLabel, hedgeLine: hedgeLine, engineSelect: engineSelect };
 })();

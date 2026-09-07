@@ -94,7 +94,7 @@ func TestValidatePlanRejectsFuseViolatingIdle(t *testing.T) {
 	}
 }
 
-func TestValidatePlanAcceptsActiveZeroPVCap(t *testing.T) {
+func TestValidatePlanRejectsUndispatchableZeroPVCap(t *testing.T) {
 	slots := []Slot{{
 		StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: -100, Confidence: 1,
 		LoadW: 0, PVW: -5000,
@@ -109,8 +109,8 @@ func TestValidatePlanAcceptsActiveZeroPVCap(t *testing.T) {
 			PVLimitW: 0, PVCurtailActive: true,
 		}},
 	}
-	if err := ValidatePlan(slots, p, &plan); err != nil {
-		t.Fatalf("active zero cap: %v", err)
+	if err := ValidatePlan(slots, p, &plan); err == nil {
+		t.Fatal("accepted a zero PV cap that dispatch cannot execute")
 	}
 
 	plan.Actions[0].PVCurtailActive = false

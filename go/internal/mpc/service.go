@@ -259,6 +259,7 @@ type Service struct {
 	shadowWG            sync.WaitGroup
 	lastPythonShadow    *ShadowPlan
 	lastPythonShadowFor string
+	pendingCoreShadow   *coreDPShadowRequest
 	shadowErrWindows    map[string]shadowErrWindow
 
 	stop chan struct{}

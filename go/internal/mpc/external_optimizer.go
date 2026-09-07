@@ -706,6 +706,11 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			}
 			totalLoadpointW += powerW
 		}
+		// Dispatch currently uses a positive limit to activate PV curtailment.
+		// A true zero cap cannot execute yet, so it must not become a plan.
+		if a.PVCurtailActive && a.PVLimitW == 0 {
+			return fmt.Errorf("slot %d active zero PV cap cannot be dispatched", i)
+		}
 		if a.PVLimitW < 0 || (a.PVLimitW > 0 && a.PVLimitW > -slot.PVW+2) {
 			return fmt.Errorf("slot %d pv_limit_w %.3f exceeds forecast generation %.3f", i, a.PVLimitW, -slot.PVW)
 		}

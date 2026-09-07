@@ -233,11 +233,7 @@ def _arbitrage_spread_ore_kwh(settings: dict[str, Any], mode: str) -> float:
 
 
 def _pv_charge_bonus_ore_kwh(settings: dict[str, Any], mode: str) -> float:
-    """Return the PV-charge bonus only for passive_arbitrage.
-
-    Parse in every mode so a malformed value still fails at the contract
-    boundary. Go DP applies this bias only in passive_arbitrage.
-    """
+    """Return the configured PV-charge bonus in every mode, matching Core."""
 
     bonus = max(
         0.0,
@@ -246,8 +242,6 @@ def _pv_charge_bonus_ore_kwh(settings: dict[str, Any], mode: str) -> float:
             "settings.pv_charge_bonus_ore_kwh",
         ),
     )
-    if mode != "passive_arbitrage":
-        return 0.0
     return bonus
 
 
