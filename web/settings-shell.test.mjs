@@ -19,7 +19,8 @@ const ELEMENT_IDS = [
   "settings-save", "settings-status", "settings-tabs", "settings-body",
 ];
 
-function stubElement() {
+function stubElement(ownerDocument = {}) {
+  const classes = new Set();
   return {
     textContent: "",
     className: "",
@@ -27,7 +28,21 @@ function stubElement() {
     dataset: {},
     style: {},
     handlers: {},
-    classList: { add() {}, remove() {}, toggle() {} },
+    attributes: {},
+    isConnected: true,
+    tabIndex: 0,
+    classList: {
+      add: name => classes.add(name), remove: name => classes.delete(name),
+      contains: name => classes.has(name), toggle() {},
+    },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    focus() { ownerDocument.activeElement = this; },
+    getClientRects() { return this.hidden ? [] : [{}]; },
+    matches(selector) { return selector === ":disabled" && !!this.disabled; },
+    contains(el) {
+      for (; el; el = el.parentElement) if (el === this) return true;
+      return false;
+    },
     addEventListener(type, fn) { this.handlers[type] = fn; },
     querySelectorAll: () => [],
     appendChild() {},
@@ -36,16 +51,19 @@ function stubElement() {
 
 function loadShell(saveResponse, ok = true) {
   const elements = {};
-  for (const id of ELEMENT_IDS) elements[id] = stubElement();
+  const document = {
+    getElementById: id => elements[id] || null,
+    createElement: () => stubElement(document),
+  };
+  for (const id of ELEMENT_IDS) elements[id] = stubElement(document);
+  elements["settings-modal"].classList.add("hidden");
 
   const requests = [];
   const responses = {};
   const sandbox = {
     window: { FTWSettings: { tabs: {} } },
-    document: {
-      getElementById: (id) => elements[id] || null,
-      createElement: () => stubElement(),
-    },
+    document,
+    getComputedStyle: element => ({ visibility: element.visibility || "visible" }),
     fetch(path, opts) {
       requests.push({ path, opts });
       return Promise.resolve({ ok, status: ok ? 200 : 400, headers: { get: () => '"config-7"' }, json: () => Promise.resolve(responses[path] ?? saveResponse) });
@@ -58,12 +76,154 @@ function loadShell(saveResponse, ok = true) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
-  return { elements, requests, responses, tabs: sandbox.window.FTWSettings.tabs,
+  return { elements, document, requests, responses, tabs: sandbox.window.FTWSettings.tabs,
     loadTab: file => vm.runInContext(readFileSync(new URL(file, import.meta.url), "utf8"), sandbox) };
 }
 
 // One turn of the event loop, which is all the save chain needs to settle.
 const settled = () => new Promise((resolve) => setImmediate(resolve));
+
+describe("Settings dialog keyboard access", () => {
+  async function open(rig, opener = rig.elements["settings-btn"]) {
+    opener.focus();
+    rig.elements["settings-btn"].handlers.click();
+    await settled();
+  }
+
+  function key(rig, name, properties = {}) {
+    const event = { key: name, preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.stopped = true; }, ...properties };
+    rig.elements["settings-modal"].handlers.keydown?.(event);
+    return event;
+  }
+
+  it("focuses the dialog after loading and Escape returns to the actual opener", async () => {
+    const rig = loadShell({});
+    const more = stubElement(rig.document);
+    more.focus();
+    rig.elements["settings-btn"].handlers.click();
+    assert.equal(rig.document.activeElement, more, "loading does not focus the hidden dialog");
+    stubElement(rig.document).focus();
+    await settled();
+    assert.equal(rig.document.activeElement, rig.elements["settings-close"]);
+    assert.deepEqual(rig.elements["settings-modal"].attributes,
+      { role: "dialog", "aria-modal": "true", "aria-label": "Settings" });
+    const event = key(rig, "Escape");
+    assert.equal(rig.elements["settings-modal"].classList.contains("hidden"), true);
+    assert.equal(rig.document.activeElement, more, "More delegates a click to the hidden header button");
+    assert.ok(event.defaultPrevented && event.stopped);
+  });
+
+  it("returns focus after close or backdrop click and keeps inside clicks open", async () => {
+    const rig = loadShell({});
+    const modal = rig.elements["settings-modal"];
+    await open(rig);
+    modal.handlers.click({ target: rig.elements["settings-body"] });
+    assert.equal(modal.classList.contains("hidden"), false);
+    rig.elements["settings-close"].handlers.click();
+    assert.equal(rig.document.activeElement, rig.elements["settings-btn"]);
+    const nextOpener = stubElement(rig.document);
+    await open(rig, nextOpener);
+    modal.handlers.click({ target: modal });
+    assert.equal(modal.classList.contains("hidden"), true);
+    assert.equal(rig.document.activeElement, nextOpener);
+  });
+
+  it("wraps Tab in both directions and skips hidden, disabled and untabbable controls", async () => {
+    const rig = loadShell({});
+    const first = rig.elements["settings-close"], last = stubElement(rig.document);
+    const unavailable = [{ hidden: true }, { disabled: true }, { tabIndex: -1 }, { visibility: "hidden" }]
+      .map(properties => Object.assign(stubElement(rig.document), properties));
+    rig.elements["settings-modal"].querySelectorAll = () => [first, last, ...unavailable];
+    await open(rig);
+    assert.ok(key(rig, "Tab", { shiftKey: true }).defaultPrevented);
+    assert.equal(rig.document.activeElement, last);
+    assert.ok(key(rig, "Tab").defaultPrevented);
+    assert.equal(rig.document.activeElement, first);
+    assert.equal(key(rig, "Tab").defaultPrevented, undefined, "ordinary Tab stays native");
+    assert.equal(key(rig, "Enter").defaultPrevented, undefined);
+  });
+
+  it("leaves a handled Escape alone and stops handling keys when closed", async () => {
+    const rig = loadShell({});
+    await open(rig);
+    key(rig, "Escape", { defaultPrevented: true });
+    assert.equal(rig.elements["settings-modal"].classList.contains("hidden"), false);
+    rig.elements["settings-close"].handlers.click();
+    assert.equal(key(rig, "Tab").defaultPrevented, undefined);
+  });
+
+  it("uses summaries of closed details and includes their controls after opening", async () => {
+    const rig = loadShell({}), modal = rig.elements["settings-modal"], first = rig.elements["settings-close"];
+    const summary = stubElement(rig.document), innerSummary = stubElement(rig.document), field = stubElement(rig.document);
+    const details = { tagName: "DETAILS", open: false, parentElement: modal, querySelector: () => summary };
+    const nested = { tagName: "DETAILS", open: false, parentElement: details, querySelector: () => innerSummary };
+    summary.parentElement = details;
+    summary.contains = el => el === summary;
+    innerSummary.parentElement = nested;
+    innerSummary.contains = el => el === innerSummary;
+    field.parentElement = details;
+    modal.querySelectorAll = () => [first, summary, innerSummary, field];
+    await open(rig);
+    key(rig, "Tab", { shiftKey: true });
+    assert.equal(rig.document.activeElement, summary);
+    key(rig, "Tab");
+    assert.equal(rig.document.activeElement, first);
+    details.open = true;
+    key(rig, "Tab", { shiftKey: true });
+    assert.equal(rig.document.activeElement, field, "recompute controls on each keypress");
+    key(rig, "Tab");
+    assert.equal(rig.document.activeElement, first);
+  });
+
+  it("does not focus an opener that was removed or hidden", async () => {
+    for (const properties of [{ isConnected: false }, { hidden: true }]) {
+      const rig = loadShell({}), opener = stubElement(rig.document);
+      await open(rig, opener);
+      Object.assign(opener, properties);
+      key(rig, "Escape");
+      assert.notEqual(rig.document.activeElement, opener);
+      assert.equal(rig.elements["settings-modal"].classList.contains("hidden"), true);
+    }
+  });
+
+  it("keeps focus in Settings when an in-tab action replaces its own button", async () => {
+    const rig = loadShell({}), body = rig.elements["settings-body"], button = stubElement(rig.document);
+    const selectedTab = stubElement(rig.document);
+    body.parentElement = selectedTab.parentElement = rig.elements["settings-modal"];
+    button.parentElement = body;
+    let context;
+    rig.tabs.control = { render: ctx => { context = ctx; return ""; } };
+    rig.tabs.devices = { render: () => "" };
+    rig.elements["settings-tabs"].querySelector = () => selectedTab;
+    Object.defineProperty(body, "innerHTML", { set() {
+      if (body.contains(rig.document.activeElement)) rig.document.activeElement = null;
+    } });
+    await open(rig);
+    button.focus();
+    context.navigateTab("devices");
+    assert.equal(rig.document.activeElement, selectedTab);
+    rig.tabs.devices.after = () => button.focus();
+    button.focus();
+    context.renderTab("devices");
+    assert.equal(rig.document.activeElement, button, "keep explicit focus from the new tab's hook");
+  });
+
+  it("hands focus to Restart later and returns it to Save when that dialog closes", async () => {
+    const rig = loadShell({ restart_required: true });
+    for (const id of ["restart-modal", "restart-reasons", "restart-later", "restart-now", "restart-progress", "restart-progress-text"])
+      rig.elements[id] = stubElement(rig.document);
+    await open(rig);
+    rig.elements["settings-save"].focus();
+    rig.elements["settings-save"].handlers.click();
+    await settled();
+    assert.equal(rig.document.activeElement, rig.elements["restart-later"]);
+    rig.elements["restart-later"].onclick();
+    assert.equal(rig.document.activeElement, rig.elements["settings-save"]);
+    assert.equal(rig.elements["settings-modal"].classList.contains("hidden"), false);
+    assert.equal(rig.requests.some(request => request.path === "/api/restart"), false);
+  });
+});
 
 async function formShell(original = { site: { name: "Home" }, planner: { enabled: true }, hidden: { keep: 17 } }) {
   const rig = loadShell(structuredClone(original));

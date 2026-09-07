@@ -1367,6 +1367,10 @@ footer {
   display: none;
 }
 
+#restart-progress.hidden {
+  display: none;
+}
+
 .modal-content {
   background: var(--surface);
   border: 1px solid var(--border);

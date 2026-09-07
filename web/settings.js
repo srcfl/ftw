@@ -45,8 +45,16 @@
   var configETag = null;
   var currentTab = "control";
   var fieldValues = new WeakMap();
+  var returnFocus = null;
+
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-label", "Settings");
 
   openBtn.addEventListener("click", function () {
+    // More delegates to the header button, so remember the focused opener
+    // before the async config request instead of using the click target.
+    var opener = document.activeElement;
     apiFetch("/api/config")
       .then(function (r) {
         configETag = r.headers && r.headers.get ? r.headers.get("ETag") : null;
@@ -57,17 +65,54 @@
         modal.classList.remove("hidden");
         renderTab(currentTab);
         setStatus("");
+        returnFocus = opener;
+        closeBtn.focus();
       })
       .catch(function (e) {
         setStatus("Failed to load config: " + e, "error");
       });
   });
 
-  closeBtn.addEventListener("click", function () {
+  function closeSettings() {
     modal.classList.add("hidden");
-  });
+    if (returnFocus && returnFocus.isConnected && returnFocus.getClientRects().length) {
+      returnFocus.focus();
+    }
+    returnFocus = null;
+  }
+
+  closeBtn.addEventListener("click", closeSettings);
   modal.addEventListener("click", function (e) {
-    if (e.target === modal) modal.classList.add("hidden");
+    if (e.target === modal) closeSettings();
+  });
+  // Scope this to Settings so a separate dialog can own its keyboard input.
+  modal.addEventListener("keydown", function (e) {
+    if (modal.classList.contains("hidden") || e.defaultPrevented) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettings();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    var controls = Array.from(modal.querySelectorAll("button, a[href], input, select, textarea, summary, [tabindex]"))
+      .filter(function (el) {
+        // Closed details can still report layout boxes for their contents.
+        for (var parent = el.parentElement; parent && parent !== modal; parent = parent.parentElement) {
+          if (parent.tagName === "DETAILS" && !parent.open) {
+            var summary = parent.querySelector(":scope > summary");
+            if (!summary || !summary.contains(el)) return false;
+          }
+        }
+        return el.tabIndex >= 0 && !el.matches(":disabled") && el.getClientRects().length &&
+          getComputedStyle(el).visibility !== "hidden";
+      });
+    var first = controls[0], last = controls[controls.length - 1];
+    if (first && ((e.shiftKey && document.activeElement === first) ||
+        (!e.shiftKey && document.activeElement === last))) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
   });
 
   tabsEl.addEventListener("click", function (e) {
@@ -159,7 +204,12 @@
     laterBtn.disabled = false;
     modalEl.classList.remove("hidden");
 
-    laterBtn.onclick = function () { modalEl.classList.add("hidden"); };
+    var restartOpener = document.activeElement;
+    laterBtn.focus();
+    laterBtn.onclick = function () {
+      modalEl.classList.add("hidden");
+      if (restartOpener && restartOpener.isConnected) restartOpener.focus();
+    };
     nowBtn.onclick = function () { triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl); };
   }
 
@@ -300,6 +350,7 @@
   }
 
   function renderTab(tab) {
+    var hadBodyFocus = bodyEl.contains(document.activeElement);
     saveBtn.hidden = tab === "loadpoints" || (tab === "devices" && !!S.chargerSetup);
     saveBtn.style.display = saveBtn.hidden ? "none" : "";
     var def = S.tabs[tab];
@@ -343,6 +394,10 @@
 
     if (def.after) {
       try { def.after(ctx); } catch (e) { console.error("tab after:", tab, e); }
+    }
+    // In-tab actions can replace their own focused button while rendering.
+    if (hadBodyFocus && !modal.contains(document.activeElement)) {
+      (tabsEl.querySelector("button.active") || closeBtn).focus();
     }
   }
 })();
