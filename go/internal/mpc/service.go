@@ -2,7 +2,6 @@ package mpc
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"math"
 	"sort"
@@ -99,21 +98,6 @@ type Service struct {
 	// non-nil, any engine/process/validation failure falls back to the DP for
 	// this replan and is recorded in Plan.Solver.
 	Optimizer PlanOptimizer
-	// ShadowOptimizer runs the external optimizer AFTER a Core plan is
-	// published, on the same slots and params, and records the
-	// terminal-corrected cost difference. It is never consulted for dispatch,
-	// never promoted to champion, and never allowed to fail or delay a replan.
-	// Ignored while Optimizer is set — the external engine cannot shadow
-	// itself.
-	ShadowOptimizer PlanOptimizer
-	// EnableRecourseShadow runs a storage-only stochastic recourse challenger
-	// after each successful champion solve. It shares the primary worker and is
-	// diagnostic-only: no challenger action is ever read by SlotDirectiveAt.
-	EnableRecourseShadow         bool
-	RecourseNonAnticipativeSlots int
-	// ChallengerPolicy selects "recourse" (two-stage reference) or
-	// "multistage" (scenario tree + move blocking). Both remain shadow-only.
-	ChallengerPolicy string
 
 	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
@@ -248,19 +232,11 @@ type Service struct {
 	lastSlots       []Slot // inputs that went into the most recent Optimize call
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
-	shadowEvaluator *StatefulShadowEvaluator
 
-	// Python field shadow, all guarded by mu. lastPythonShadow belongs to the
-	// decision named by lastPythonShadowFor and is dropped once a newer plan
-	// takes over; shadowBusy keeps at most one challenger solve in flight so a
-	// slow worker cannot pile up behind a 15-minute replan interval.
-	shadowBusy          bool
-	shadowCancel        context.CancelFunc
-	shadowWG            sync.WaitGroup
-	lastPythonShadow    *ShadowPlan
-	lastPythonShadowFor string
-	pendingCoreShadow   *coreDPShadowRequest
-	shadowErrWindows    map[string]shadowErrWindow
+	shadowBusy        bool
+	shadowCancel      context.CancelFunc
+	shadowWG          sync.WaitGroup
+	pendingCoreShadow *coreDPShadowRequest
 
 	stop chan struct{}
 	done chan struct{}
@@ -320,17 +296,16 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		// Pi 4 (51 SoC × 21 action × 193 slots DP, sub-1 % CPU) — being
 		// stingy was leaving stale plans in place every time the cover-
 		// load reactive carve-out fired (PR #378).
-		MinReplanGap:                 30 * time.Second,
-		PVDivergenceWh:               250, // 250 Wh sustained gap over ~8 min
-		LoadDivergenceWh:             200,
-		TwinDriftPVW:                 250,
-		TwinDriftLoadW:               200,
-		TwinDriftHorizonSlots:        16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
-		RecourseNonAnticipativeSlots: 1,
-		decisionIDFactory:            uuid.NewString,
-		stop:                         make(chan struct{}),
-		done:                         make(chan struct{}),
-		stopped:                      make(chan struct{}),
+		MinReplanGap:          30 * time.Second,
+		PVDivergenceWh:        250, // 250 Wh sustained gap over ~8 min
+		LoadDivergenceWh:      200,
+		TwinDriftPVW:          250,
+		TwinDriftLoadW:        200,
+		TwinDriftHorizonSlots: 16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
+		decisionIDFactory:     uuid.NewString,
+		stop:                  make(chan struct{}),
+		done:                  make(chan struct{}),
+		stopped:               make(chan struct{}),
 	}
 }
 
@@ -841,25 +816,16 @@ func (s *Service) Stop() {
 	// beginReplanLocked performs Add while holding the same lock that set
 	// stopping, so no new Add can race with this Wait.
 	s.replanWG.Wait()
-	// startPythonShadow adds under the same lock that set stopping, so no new
+	// startCoreDPShadow adds under the same lock that set stopping, so no new
 	// challenger can start after this point; closing the worker before its
 	// in-flight call returned would only manufacture a shadow error.
 	s.shadowWG.Wait()
 	if s.Optimizer != nil {
 		_ = s.Optimizer.Close()
 	}
-	if s.ShadowOptimizer != nil {
-		_ = s.ShadowOptimizer.Close()
-	}
 	close(s.stopped)
 }
 
-// ConfiguredOptimizer returns the external optimizer attached to this service
-// in either role, champion or shadow. Health, version and update surfaces use
-// it: the sidecar has to stay visible and updatable while it runs as a
-// measurement, or the soak that justifies retiring it cannot be maintained.
-// Which engine actually produced the active plan is a separate question, and
-// Plan.Solver answers it.
 func (s *Service) ConfiguredOptimizer() PlanOptimizer {
 	if s == nil {
 		return nil
@@ -867,7 +833,7 @@ func (s *Service) ConfiguredOptimizer() PlanOptimizer {
 	if s.Optimizer != nil {
 		return s.Optimizer
 	}
-	return s.ShadowOptimizer
+	return nil
 }
 
 // OptimizerIsChampion reports whether the external optimizer produces the
@@ -882,7 +848,7 @@ func (s *Service) loop(ctx context.Context) {
 	t := time.NewTicker(s.Interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
-	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.EnableRecourseShadow) {
+	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
 		rt := time.NewTicker(s.ReactiveInterval)
 		defer rt.Stop()
 		reactiveTick = rt.C
@@ -896,7 +862,6 @@ func (s *Service) loop(ctx context.Context) {
 		case <-t.C:
 			s.replan(ctx, "scheduled")
 		case <-reactiveTick:
-			s.observeShadow(time.Now())
 			s.checkDivergence(ctx)
 			s.checkTwinDrift(ctx)
 		}
@@ -1598,9 +1563,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.canceledReplan(request, "build-input")
 	}
 	var plan Plan
-	var shadowRecoursePlan *Plan
-	var shadowError string
-	publishShadow := false
 	coreChampion := s.Optimizer == nil
 	downsidePrimary := usesDownsidePV(s.Optimizer)
 	if downsidePrimary {
@@ -1672,60 +1634,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 				return s.canceledReplan(request, "dp-shadow")
 			}
 
-			if s.EnableRecourseShadow {
-				publishShadow = true
-				if len(p.activeLoadpoints()) > 0 {
-					shadowError = "recourse shadow skipped while flexible loads are active"
-				} else {
-					policy := s.ChallengerPolicy
-					if policy == "" {
-						policy = "recourse"
-					}
-					var recourse Plan
-					var recourseErr error
-					switch policy {
-					case "multistage":
-						challenger, ok := s.Optimizer.(MultistageOptimizer)
-						if !ok {
-							recourseErr = errors.New("primary optimizer does not implement multistage")
-						} else {
-							recourse, recourseErr = challenger.OptimizeMultistage(ctx, slots, p, s.RecourseNonAnticipativeSlots)
-						}
-					default:
-						challenger, ok := s.Optimizer.(RecourseOptimizer)
-						if !ok {
-							recourseErr = errors.New("primary optimizer does not implement recourse")
-						} else {
-							recourse, recourseErr = challenger.OptimizeRecourse(ctx, slots, p, s.RecourseNonAnticipativeSlots)
-						}
-					}
-					if request.wasCanceledByService() {
-						return s.canceledReplan(request, "recourse-shadow")
-					}
-					if recourseErr != nil {
-						slog.Warn("mpc: stochastic challenger failed", "policy", policy, "err", recourseErr)
-						shadowError = recourseErr.Error()
-					} else {
-						shadowRecoursePlan = &recourse
-						candidate.RecourseShadow = compareDPShadow(candidate, recourse)
-						candidate.RecourseShadow.ForecastBasis = "same stochastic scenario input; conditional decisions after non-anticipative prefix"
-						candidate.RecourseShadow.Solver = recourse.Solver
-						candidate.RecourseShadow.TotalCostOre = recourse.TotalCostOre
-						candidate.RecourseShadow.ActiveMinusShadowOre = candidate.TotalCostOre - recourse.TotalCostOre
-						if candidate.RecourseShadow.FirstAction != nil {
-							mode, _, _ := actionToSlot(*candidate.RecourseShadow.FirstAction, p.Mode)
-							candidate.RecourseShadow.FirstAction.EMSMode = mode
-						}
-					}
-				}
-			}
-			if candidate.RecourseShadow != nil {
-				slog.Info("mpc: champion vs stochastic shadow",
-					"champion_cost_ore", candidate.TotalCostOre,
-					"recourse_cost_ore", candidate.RecourseShadow.TotalCostOre,
-					"champion_minus_recourse_ore", candidate.RecourseShadow.ActiveMinusShadowOre,
-					"recourse_solve_ms", candidate.RecourseShadow.Solver.SolveMs)
-			}
 			plan = candidate
 		} else {
 			if request.wasCanceledByService() {
@@ -1817,16 +1725,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	capPlanPVToNameplate(&plan, s.PVNameplateW)
 	capPlanLoad(&plan, 0, s.LoadMaxW)
 	plan.DecisionID = s.nextDecisionIDLocked()
-	if publishShadow {
-		if s.shadowEvaluator == nil {
-			s.shadowEvaluator = newStatefulShadowEvaluator()
-		}
-		if shadowError != "" {
-			s.shadowEvaluator.SetError(shadowError, now)
-		}
-		s.shadowEvaluator.SetPlans(&plan, shadowRecoursePlan, slots, p, time.Now())
-		plan.ShadowEvaluation = s.shadowEvaluator.Snapshot()
-	}
 	s.last = &plan
 	s.lastSlots = slots
 	s.lastParams = p
@@ -1892,9 +1790,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// The plan is published and persisted before the challenger starts, so the
 	// shadow can only ever add a measurement to it. `plan` is copied by value
 	// and its actions are read-only from here on.
-	if coreChampion {
-		s.startPythonShadow(plan, slots, p, reason, replanAtMs)
-	} else if downsidePrimary && !plan.Solver.Fallback {
+	if downsidePrimary && !plan.Solver.Fallback {
 		s.startCoreDPShadow(plan, slots, p, reason, replanAtMs)
 	}
 	return &plan
@@ -1931,52 +1827,6 @@ func (s *Service) nextDecisionIDLocked() string {
 		}
 	}
 	return uuid.NewString()
-}
-
-// observeShadow samples realized exogenous power for closed-loop scoring. It
-// deliberately derives house load without battery or vehicle power so both
-// virtual policies receive the same uncontrollable input.
-func (s *Service) observeShadow(now time.Time) {
-	if s == nil || !s.EnableRecourseShadow || s.Tele == nil {
-		return
-	}
-	s.mu.RLock()
-	evaluator := s.shadowEvaluator
-	siteMeter := s.SiteMeter
-	s.mu.RUnlock()
-	if evaluator == nil || siteMeter == "" || !s.driverOnline(siteMeter) {
-		return
-	}
-	meter := s.Tele.Get(siteMeter, telemetry.DerMeter)
-	if meter == nil {
-		return
-	}
-	var pvW, batteryW float64
-	for _, reading := range s.Tele.ReadingsByType(telemetry.DerPV) {
-		if s.driverOnline(reading.Driver) {
-			pvW += reading.SmoothedW
-		}
-	}
-	for _, reading := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-		if s.driverOnline(reading.Driver) {
-			batteryW += reading.SmoothedW
-		}
-	}
-	loadW := meter.SmoothedW - pvW - batteryW - s.Tele.SumOnlineEVW() - s.Tele.SumOnlineV2XW()
-	if loadW < 0 {
-		loadW = 0
-	}
-	summary := evaluator.Observe(now, loadW, pvW)
-	s.mu.Lock()
-	if s.last != nil {
-		// Latest returns a plan pointer after dropping s.mu, so published plans
-		// must remain immutable. Replace the plan snapshot instead of mutating
-		// the object an API handler may currently be marshaling.
-		updated := *s.last
-		updated.ShadowEvaluation = &summary
-		s.last = &updated
-	}
-	s.mu.Unlock()
 }
 
 func compareDPShadow(active, shadow Plan) *ShadowPlan {

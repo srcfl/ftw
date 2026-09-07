@@ -184,10 +184,9 @@ func TestCoreUpdateStaysDoneWhenUpdaterReplacementFails(t *testing.T) {
 	}
 }
 
-func TestSelfReplaceSkipsRestartAndOptimizer(t *testing.T) {
+func TestSelfReplaceSkipsRestart(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"restart", `{"action":"restart"}`},
-		{"optimizer", `{"action":"update","target":"v1.3.2","component":"optimizer"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newTestServer(t)

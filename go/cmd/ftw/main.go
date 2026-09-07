@@ -2222,7 +2222,6 @@ func main() {
 	// disabled, which makes every /api/version/* handler return 503 and the
 	// UI hide the badge.
 	var selfUpdater *selfupdate.Checker
-	var optimizerUpdater *selfupdate.Checker
 	// Implicitly enable for dev binaries (Version=="dev") so `make dev`
 	// users can click the version label and exercise the probe + modal
 	// without setting FTW_SELFUPDATE_ENABLED=1. Production builds (real
@@ -2252,33 +2251,6 @@ func main() {
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
-		if !mpcSvc.OptimizerBundledWithCore() {
-			// Empty means "not known yet", which is the honest answer when the
-			// optimizer is still starting or its handshake is rejected. Claiming
-			// "dev" here made the checker treat the optimizer as older than every
-			// release and light the update badge on an up-to-date stable site.
-			// /api/components calls SetCurrentVersion once a handshake succeeds.
-			optimizerCurrent := ""
-			if worker := mpcSvc.ConfiguredOptimizer(); worker != nil {
-				if health, ok := worker.(interface {
-					Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
-				}); ok {
-					healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
-					if runtime, err := health.Health(healthCtx); err == nil && runtime.Version != "" {
-						optimizerCurrent = runtime.Version
-					}
-					healthCancel()
-				}
-			}
-			optimizerUpdater = selfupdate.New(selfupdate.Config{
-				Repo: "srcfl/ftw", Image: "srcfl/ftw-optimizer",
-				ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
-				CurrentVersion: optimizerCurrent,
-				SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-				StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
-			}, st)
-			optimizerUpdater.Start(ctx)
-		}
 		slog.Info("selfupdate enabled",
 			"socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			"channel", selfUpdater.Info().Channel)
@@ -2431,7 +2403,6 @@ func main() {
 		Events:           bus,
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
-		OptimizerUpdate:  optimizerUpdater,
 		Restart: func(reqCtx context.Context) error {
 			// Restart the existing container through the updater.
 			// An old updater refuses this action before touching Docker.
@@ -3915,7 +3886,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	svc := mpc.New(st, tel, zone, params)
 	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 	// Release defaults select the beta worker. An explicit engine wins;
-	// the Python comparison only runs behind an explicit/default Core plan.
+	// Core DP remains available as an explicit choice and as fallback.
 	engine := plannerEngine(pl, Version)
 	if engine == config.PlannerEngineEnergyplan {
 		binary := resolveEnergyplanBinary()
@@ -3926,99 +3897,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			svc.Optimizer = ext
 			slog.Info("mpc: Energyplan primary with Core DP shadow and fallback", "binary", binary)
 		}
-	} else if engine == config.PlannerEnginePython || pl.ShadowPythonEnabled() {
-		transportMode := pl.OptimizerTransport
-		if fromEnv := os.Getenv("FTW_OPTIMIZER_TRANSPORT"); fromEnv != "" {
-			transportMode = fromEnv
-		}
-		if transportMode == "" {
-			transportMode = "process"
-		}
-		socketPath := pl.OptimizerSocket
-		if fromEnv := os.Getenv("FTW_OPTIMIZER_SOCKET"); fromEnv != "" {
-			socketPath = fromEnv
-		}
-		if socketPath == "" {
-			socketPath = "/run/ftw-optimizer/optimizer.sock"
-		}
-		python := pl.OptimizerCommand
-		if python == "" {
-			python = envOr("FTW_OPTIMIZER_PYTHON", "python3")
-		}
-		moduleDir := pl.OptimizerDir
-		if fromEnv := os.Getenv("FTW_OPTIMIZER_DIR"); fromEnv != "" {
-			moduleDir = fromEnv
-		}
-		if moduleDir == "" {
-			moduleDir = resolveOptimizerDir()
-		}
-		timeout := pl.OptimizerTimeout()
-		idleTimeout := time.Duration(pl.OptimizerIdleTimeoutS * float64(time.Second))
-		if idleTimeout <= 0 {
-			idleTimeout = 2 * time.Minute
-		}
-		cvarWeight := 0.15
-		if pl.OptimizerCVaRWeight != nil {
-			cvarWeight = *pl.OptimizerCVaRWeight
-		}
-		var multistage mpc.MultistageOptimizerConfig
-		if ms := pl.OptimizerMultistage; ms != nil {
-			multistage = mpc.MultistageOptimizerConfig{
-				ScenarioLimit: ms.ScenarioLimit, BranchIntervalSlots: ms.BranchIntervalSlots,
-				BranchHorizonSlots: ms.BranchHorizonSlots, MaxBranching: ms.MaxBranching,
-				NearHorizonSlots: ms.NearHorizonSlots, MidHorizonSlots: ms.MidHorizonSlots,
-				MidBlockSlots: ms.MidBlockSlots, FarBlockSlots: ms.FarBlockSlots,
-				ServiceCVaRWeight: ms.ServiceCVaRWeight, ServiceCVaRAlpha: ms.ServiceCVaRAlpha,
-				EconomicCVaRWeight: ms.EconomicCVaRWeight, EconomicCVaRAlpha: ms.EconomicCVaRAlpha,
-				DecompositionThreshold: ms.DecompositionThreshold, DecompositionMethod: ms.DecompositionMethod,
-				PHMaxIterations: ms.PHMaxIterations, PHRho: ms.PHRho, PHToleranceW: ms.PHToleranceW,
-			}
-		}
-		ext, err := mpc.NewExternalOptimizer(mpc.ExternalOptimizerConfig{
-			Command:   []string{python, "-m", "ftw_optimizer.worker"},
-			ModuleDir: moduleDir, Timeout: timeout,
-			TransportMode: transportMode, SocketPath: socketPath,
-			Solver: pl.OptimizerSolver, Formulation: pl.OptimizerFormulation,
-			MIPRelGap:  pl.OptimizerMIPRelGap,
-			CVaRWeight: cvarWeight, CVaRAlpha: pl.OptimizerCVaRAlpha,
-			IdleTimeout: idleTimeout,
-			Multistage:  multistage,
-		})
-		switch {
-		case err != nil && engine == config.PlannerEnginePython:
-			slog.Error("mpc: configure primary optimizer failed; using Core DP", "err", err)
-		case err != nil:
-			slog.Info("mpc: python shadow unavailable; Core plans without a comparison",
-				"err", err)
-		case engine == config.PlannerEnginePython:
-			svc.Optimizer = ext
-			svc.EnableRecourseShadow = pl.OptimizerRecourseShadow
-			svc.RecourseNonAnticipativeSlots = pl.OptimizerRecourseNonAnticipativeSlots
-			svc.ChallengerPolicy = pl.OptimizerChallengerPolicy
-			if svc.ChallengerPolicy == "" {
-				svc.ChallengerPolicy = "recourse"
-			}
-			if svc.RecourseNonAnticipativeSlots <= 0 {
-				svc.RecourseNonAnticipativeSlots = 1
-			}
-			slog.Warn("mpc: Python optimizer holds the champion role (planner.engine: python)",
-				"python", python,
-				"module_dir", moduleDir, "transport", transportMode, "socket", socketPath,
-				"timeout", timeout, "idle_timeout", idleTimeout,
-				"recourse_shadow", svc.EnableRecourseShadow,
-				"challenger_policy", svc.ChallengerPolicy,
-				"recourse_non_anticipative_slots", svc.RecourseNonAnticipativeSlots)
-		default:
-			// Shadow only. The recourse/multistage challengers stay off: they
-			// exist to challenge the external champion, and there isn't one.
-			svc.ShadowOptimizer = ext
-			slog.Info("mpc: Core planner with Python comparison shadow",
-				"python", python, "module_dir", moduleDir,
-				"transport", transportMode, "socket", socketPath,
-				"timeout", timeout, "idle_timeout", idleTimeout)
-		}
 	} else {
-		slog.Info("mpc: Core planner, no comparison shadow (planner.shadow_python: false)")
+		slog.Info("mpc: Core DP planner")
 	}
 	svc.BaseLoad = pl.BaseLoadW
 	if pl.HorizonHours > 0 {
@@ -4028,19 +3908,6 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
 	}
 	return svc
-}
-
-func resolveOptimizerDir() string {
-	candidates := []string{"optimizer", "../optimizer", "/app/optimizer"}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append([]string{filepath.Join(filepath.Dir(exe), "optimizer")}, candidates...)
-	}
-	for _, candidate := range candidates {
-		if st, err := os.Stat(filepath.Join(candidate, "ftw_optimizer")); err == nil && st.IsDir() {
-			return candidate
-		}
-	}
-	return "optimizer"
 }
 
 func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Manager, intervalHours int) {

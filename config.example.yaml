@@ -280,17 +280,11 @@ fleet_ping:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
-# The planner. Core solves it in process; the Python/HiGHS optimizer is the
-# legacy external engine, still shipped as the independently updatable
-# ftw-optimizer service (native installs point optimizer_command at their
-# venv's Python executable). Every optimizer_* setting below applies to that
-# worker in either role, champion or shadow.
+# Energyplan ships with Core and runs first in supported beta builds.
+# Core DP provides shadow comparisons and validated fallback plans.
 # planner:
 #   enabled: true
-#   # engine: energyplan # beta default; core or python select those explicitly
-#   shadow_python: true # run the external optimizer after each Core replan on
-#                       # the same inputs and log the terminal-corrected cost
-#                       # difference. Measurement only — never dispatched.
+#   # engine: energyplan # beta default; core selects the Go planner
 #   mode: passive_arbitrage
 #   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
 #   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)
@@ -298,33 +292,3 @@ fleet_ping:
 #   interval_min: 15
 #   soc_min: 0.10
 #   soc_max: 0.95
-#   optimizer_solver: HIGHS
-#   optimizer_formulation: auto
-#   optimizer_transport: process # process | auto | unix; official Compose sets unix
-#   optimizer_socket: /run/ftw-optimizer/optimizer.sock
-#   optimizer_timeout_s: 30
-#   optimizer_idle_timeout_s: 120 # release Python/CVXPY memory between planning bursts
-#   optimizer_mip_rel_gap: 0.005
-#   optimizer_cvar_weight: 0.15
-#   optimizer_cvar_alpha: 0.90
-#   optimizer_recourse_shadow: false # diagnostic only; never controls dispatch
-#   optimizer_recourse_non_anticipative_slots: 1
-#   optimizer_challenger_policy: multistage # recourse | multistage
-#   optimizer_multistage:
-#     scenario_limit: 12
-#     branch_interval_slots: 4
-#     branch_horizon_slots: 48
-#     max_branching: 2
-#     near_horizon_slots: 16
-#     mid_horizon_slots: 96
-#     mid_block_slots: 2
-#     far_block_slots: 4
-#     service_cvar_weight: 1.0
-#     service_cvar_alpha: 0.95
-#     economic_cvar_weight: 0
-#     economic_cvar_alpha: 0.90
-#     decomposition_threshold: 20
-#     decomposition_method: auto # auto | extensive | progressive_hedging
-#     ph_max_iterations: 8
-#     ph_rho: 50
-#     ph_tolerance_w: 5

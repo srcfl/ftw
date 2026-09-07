@@ -20,5 +20,3 @@ go/**/*_test.go
 **/state.db-*
 **/cold/
 **/.DS_Store
-optimizer/.venv/
-optimizer/tests/

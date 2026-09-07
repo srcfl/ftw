@@ -1,6 +1,5 @@
 # FTW core container — static Go host plus bundled Lua drivers and web assets.
-# The optional Python/CVXPY optimizer ships as its own independently updatable
-# image from Dockerfile.optimizer. Core falls back safely when it is absent.
+# The compiled Energyplan worker ships with Core; Core DP provides fallback.
 #
 # Multi-arch: linux/amd64 + linux/arm64 via docker buildx TARGETOS /
 # TARGETARCH when available. Plain `docker build` falls back to the
@@ -40,8 +39,7 @@ RUN cd go && \
     -o /out/ftw-backup ./cmd/ftw-backup
 # --- Runtime ---------------------------------------------------------------
 # Debian trixie-slim — current Debian stable (13), and the same suite as
-# Dockerfile.updater and Dockerfile.optimizer's python:3.12-slim-trixie. One
-# rootfs blob is pulled once and shared by all three images, so the extra bytes
+# Dockerfile.updater. Both images share the rootfs blob, so the extra bytes
 # over alpine are paid a single time per host rather than per image, and there
 # is one libc and one security stream to track. It also matches the Raspberry Pi
 # OS release the SD image is built from (deploy/pi-gen/config: RELEASE=trixie).
@@ -98,8 +96,8 @@ COPY --chown=100:101 optimizer/native/bundle/ /app/optimizer/native/bundle/
 COPY LICENSE NOTICE /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
-    mkdir -p /app/data /app/data/drivers /run/ftw-update /run/ftw-optimizer && \
-    chown 100:101 /app/data /app/data/drivers /run/ftw-update /run/ftw-optimizer
+    mkdir -p /app/data /app/data/drivers /run/ftw-update && \
+    chown 100:101 /app/data /app/data/drivers /run/ftw-update
 
 ENV HOME=/app/data
 
@@ -119,7 +117,7 @@ EXPOSE 8080
 # and none is needed, which is why ENV HOME above is load-bearing. Verified on
 # this base: uid 100 and gid 101 have no passwd/group entry, so ownership simply
 # renders numerically. Do not renumber: gid 101 is what grants access to the
-# optimizer's 0660 socket, and existing installs (and every flashed SD card)
+# updater socket, and existing installs (and every flashed SD card)
 # already own their data dir as 100:101.
 # Named docker volumes inherit ownership from the image
 # automatically and just work. For HOST BIND MOUNTS, the host

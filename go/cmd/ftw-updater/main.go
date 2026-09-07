@@ -41,8 +41,6 @@ const (
 	canonicalMainServiceName = "ftw"
 	legacyMainServiceName    = "forty-two-watts"
 	canonicalMainImage       = "ghcr.io/srcfl/ftw"
-	optimizerServiceName     = "ftw-optimizer"
-	canonicalOptimizerImage  = "ghcr.io/srcfl/ftw-optimizer"
 )
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
@@ -126,7 +124,6 @@ type server struct {
 	// Injectable so the ordering — only after a verified Core update, never able
 	// to fail one — is testable without Docker. See self_replace.go.
 	selfReplace       func(target string) error
-	optimizerPin      func(target string) error
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
@@ -237,6 +234,7 @@ func main() {
 	compose := flag.String("compose", envOr("FTW_UPDATER_COMPOSE", "/compose/docker-compose.yml"), "Path to docker-compose.yml")
 	mainService := flag.String("main-service", envOr("FTW_UPDATER_MAIN_SERVICE", ""), "Compose service for FTW (auto-detected when empty)")
 	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
+	retirePython := flag.Bool("retire-python", false, "Remove the retired optimizer from Compose after Energyplan is healthy")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -278,6 +276,15 @@ func main() {
 		os.Exit(1)
 	}
 	srv.mainServiceName = selectedService
+	if *retirePython {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := srv.retirePythonOptimizer(ctx); err != nil {
+			slog.Error("retire Python", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	srv.imageID = srv.currentServiceImageID
 	srv.imageRef = srv.currentServiceImageRef
 	srv.containerID = srv.serviceContainerID
@@ -287,7 +294,6 @@ func main() {
 		defer cancel()
 		return srv.replaceUpdater(ctx, target)
 	}
-	srv.optimizerPin = srv.persistOptimizerPin
 	srv.chownFile = os.Chown
 	srv.checkSnapshotFile = func(ctx context.Context, containerID, snapshotID, file string) error {
 		return srv.runner(ctx, nil, "exec", containerID, "test", "-f", "/app/data/snapshots/"+snapshotID+"/"+file)
@@ -356,12 +362,8 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if body.Component == "" {
 		body.Component = "core"
 	}
-	if body.Component != "core" && body.Component != "optimizer" {
-		http.Error(w, "component must be core or optimizer", 400)
-		return
-	}
-	if body.Component == "optimizer" && body.Action != "update" && body.Action != "restart" && body.Action != "component_rollback" {
-		http.Error(w, "optimizer component supports update, restart, or component_rollback", 400)
+	if body.Component != "core" {
+		http.Error(w, "component must be core", 400)
 		return
 	}
 	switch body.Action {
@@ -415,17 +417,8 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rollback and safety snapshots must include state.db.gz", 400)
 			return
 		}
-	case "component_rollback":
-		if body.Component != "optimizer" {
-			http.Error(w, "component_rollback is only available for optimizer", 400)
-			return
-		}
-		if s.previousImageID(body.Component) == "" {
-			http.Error(w, "no previous optimizer image is available", 409)
-			return
-		}
 	default:
-		http.Error(w, "action must be update, restart, rollback, or component_rollback", 400)
+		http.Error(w, "action must be update, restart, or rollback", 400)
 		return
 	}
 	if !s.runMu.TryLock() {
@@ -439,8 +432,6 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		defer s.runMu.Unlock()
 		if body.Action == "rollback" {
 			s.runRollback(body.Snapshot, body.Files, body.SafetySnapshot, body.SafetyFiles)
-		} else if body.Action == "component_rollback" {
-			s.runComponentRollback(body.Component, body.StartedAt)
 		} else {
 			s.runComponentJob(body.Action, body.Target, body.Component, body.StartedAt)
 		}
@@ -509,20 +500,6 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	if action == "restart" {
 		s.restartExisting(spec, now)
 		return
-	}
-	if action == "update" && spec.name == "optimizer" {
-		if err := s.validateOptimizerPinLayout(); err != nil {
-			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "optimizer update blocked: " + err.Error()})
-			return
-		}
-	}
-	if action == "update" && spec.name == "core" {
-		if err := s.requireHealthyOptimizer(); err != nil {
-			msg := "core update blocked: " + err.Error()
-			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
-			slog.Error("core update blocked", "err", err)
-			return
-		}
 	}
 	totalSteps := 3
 	pullStep := 1
@@ -662,13 +639,6 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		}
 	}
 
-	if spec.name == "optimizer" {
-		if err := s.saveOptimizerPin(target); err != nil {
-			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "optimizer is ready, but its image pin was not saved: " + err.Error(), PreviousImageID: previousImageID})
-			return
-		}
-	}
-
 	// The main container is now being recreated. The brand-new replica
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
@@ -688,62 +658,6 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	}
 }
 
-// requireHealthyOptimizer keeps a Core image without embedded Python from
-// replacing a legacy image before its optimizer sidecar works. It only reads
-// the merged Compose files and running container state. In particular, it
-// never rewrites an operator-owned override file.
-func (s *server) requireHealthyOptimizer() error {
-	spec, err := s.componentSpec("optimizer")
-	if err != nil {
-		return fmt.Errorf("a healthy %s service is required; add the optimizer sidecar with scripts/migrate-legacy-compose.sh or follow docs/upgrade-from-legacy.md: %w", optimizerServiceName, err)
-	}
-	if s.healthCheck == nil {
-		return fmt.Errorf("cannot verify that %s is healthy", optimizerServiceName)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
-	defer cancel()
-	if err := s.healthCheck(ctx, spec.service); err != nil {
-		return fmt.Errorf("%s must be running and healthy before Core can update: %w", optimizerServiceName, err)
-	}
-	return nil
-}
-
-func (s *server) runComponentRollback(component string, startedAt time.Time) {
-	now := startedAt
-	if now.IsZero() {
-		now = time.Now()
-	}
-	previous := s.previousImageID(component)
-	spec, err := s.componentSpec(component)
-	if err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
-		return
-	}
-	cleanup, err := s.prepareComponentImagePin(spec)
-	if err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error(), PreviousImageID: previous})
-		return
-	}
-	defer cleanup()
-	if err := s.validateComponentImagePin(spec); err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error(), PreviousImageID: previous})
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	current, currentErr := s.imageID(ctx, spec.service)
-	cancel()
-	if currentErr != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: currentErr.Error(), PreviousImageID: previous})
-		return
-	}
-	s.writeState(State{State: "restoring", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "restoring previous component image", PreviousImageID: previous})
-	if err := s.restorePreviousComponentImage(previous, spec); err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
-		return
-	}
-	s.writeState(State{State: "done", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "previous component image restored", PreviousImageID: current})
-}
-
 type componentSpec struct {
 	name, service, image, tagEnv, tagVariable string
 }
@@ -752,13 +666,6 @@ func (s *server) componentSpec(component string) (componentSpec, error) {
 	switch component {
 	case "", "core":
 		return componentSpec{name: "core", service: s.mainServiceName, image: canonicalMainImage, tagEnv: "FTW_IMAGE_TAG", tagVariable: "FTW_IMAGE_TAG"}, nil
-	case "optimizer":
-		if _, ok, err := serviceImageFromComposeFiles(s.composeFiles(), optimizerServiceName); err != nil {
-			return componentSpec{}, err
-		} else if !ok {
-			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", optimizerServiceName)
-		}
-		return componentSpec{name: "optimizer", service: optimizerServiceName, image: canonicalOptimizerImage, tagEnv: "FTW_OPTIMIZER_IMAGE_TAG", tagVariable: "FTW_OPTIMIZER_IMAGE_TAG"}, nil
 	default:
 		return componentSpec{}, fmt.Errorf("unsupported component %q", component)
 	}
@@ -777,11 +684,6 @@ func (s *server) restorePreviousComponentImage(imageID string, spec componentSpe
 }
 
 func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag string, spec componentSpec) error {
-	if spec.name == "optimizer" {
-		if err := s.validateOptimizerPinLayout(); err != nil {
-			return err
-		}
-	}
 	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
 	if err != nil {
 		return err
@@ -814,11 +716,6 @@ func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag strin
 	if s.healthCheck != nil {
 		if err := s.healthCheck(ctx, spec.service); err != nil {
 			return fmt.Errorf("previous image health check: %w", err)
-		}
-	}
-	if spec.name == "optimizer" {
-		if err := s.saveOptimizerPin(rollbackTag); err != nil {
-			return fmt.Errorf("previous optimizer is ready, but its image pin was not saved: %w", err)
 		}
 	}
 	return nil

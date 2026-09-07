@@ -487,47 +487,6 @@
         });
     }
 
-    _setOptimizerChannel(channel) {
-      const updates = this._components && this._components.optimizer && this._components.optimizer.updates;
-      if (!channel || (updates && updates.channel === channel)) return;
-      this._postJSON("/api/components/optimizer/channel", { channel })
-        .then((resp) => {
-          if (!resp.ok) throw new Error((resp.body && resp.body.error) || "failed to change optimizer channel");
-          this._refreshComponents(true);
-        })
-        .catch((err) => window.alert("Optimizer channel failed: " + err.message));
-    }
-
-    _beginOptimizerUpdate(rollback) {
-      const optimizer = this._components && this._components.optimizer;
-      const updates = optimizer && optimizer.updates;
-      const action = rollback ? "component_rollback" : "update";
-      const target = rollback ? "" : ((updates && updates.latest) || "");
-      this._phase = "updating";
-      this._updateStartedAt = Date.now();
-      this._updateOriginalVersion = updates ? updates.current : null;
-      this._expectedRun = { action, target, snapshot: "", component: "optimizer" };
-      this._sidecarState = { state: "starting", action, component: "optimizer", target };
-      this._render();
-      this._startElapsedTicker();
-      this._startStatusPolling();
-      const url = rollback ? "/api/components/optimizer/rollback" : "/api/components/optimizer/update";
-      const body = rollback ? null : { target };
-      this._postJSON(url, body)
-        .then((resp) => {
-          if (!resp.ok) {
-            this._sidecarState = { state: "failed", action, component: "optimizer", message: (resp.body && resp.body.error) || "failed to start" };
-            this._stopUpdateTimers();
-            this._render();
-          }
-        })
-        .catch((e) => {
-          this._sidecarState = { state: "failed", action, component: "optimizer", message: String(e) };
-          this._stopUpdateTimers();
-          this._render();
-        });
-    }
-
     _beginUpdate(action) {
       this._phase = "updating";
       this._updateStartedAt = Date.now();
@@ -681,9 +640,8 @@
 
     _pendingUpdates() {
       const info = this._info || {};
-      const optimizerUpdates = this._components && this._components.optimizer && this._components.optimizer.updates;
       const core = !!(info.update_available && !info.skipped);
-      const optimizer = !!(optimizerUpdates && optimizerUpdates.update_available);
+      const optimizer = false;
       const drivers = this._driverEntries().filter((entry) => entry.pending_update).length;
       return { core, optimizer, drivers, total: (core ? 1 : 0) + (optimizer ? 1 : 0) + drivers };
     }
@@ -857,42 +815,14 @@
         ? "Beta receives prereleases and promoted stable releases."
         : "Stable receives production releases only.";
 
-      const optimizerUpdates = (this._components && this._components.optimizer && this._components.optimizer.updates) || {};
-      const optimizerConfigured = !!(this._components && this._components.optimizer && this._components.optimizer.configured);
-      const optimizerChannels = Array.isArray(optimizerUpdates.channels) && optimizerUpdates.channels.length
-        ? optimizerUpdates.channels
-        : ["stable", "beta"];
-      const optimizerChannel = optimizerUpdates.channel || "stable";
-      const optimizerButtons = optimizerConfigured
-        ? optimizerChannels.map((channel) => `
-            <button class="channel-option${optimizerChannel === channel ? " active" : ""}"
-                    data-action="set-optimizer-channel" data-channel="${escapeHTML(channel)}"
-                    aria-pressed="${optimizerChannel === channel ? "true" : "false"}">
-              ${escapeHTML(channel)}
-            </button>`).join("")
-        : "";
-      const optimizerRow = optimizerConfigured
-        ? `<div class="channel-row">
-             <span class="channel-label">Optimizer</span>
-             <div class="channel-options" role="group" aria-label="Optimizer update channel">${optimizerButtons}</div>
-           </div>
-           ${optimizerChannel !== selectedChannel
-             ? `<p class="channel-note">Optimizer tracks ${escapeHTML(optimizerChannel)} while Core tracks ${escapeHTML(selectedChannel)}.</p>`
-             : ""}`
-        : "";
-
-      // Only Core and the optimizer subscribe to a channel. A driver is
-      // pinned to an exact version, and "stable"/"beta" only says where that
-      // artifact came from — so these buttons must not appear to govern it.
       return `<details class="snapshots channels">
-        <summary>Update channel · Core ${escapeHTML(selectedChannel)}${optimizerConfigured && optimizerChannel !== selectedChannel ? ` · Optimizer ${escapeHTML(optimizerChannel)}` : ""}</summary>
+        <summary>Update channel · Core ${escapeHTML(selectedChannel)}</summary>
         <div class="channel-body">
           <div class="channel-row">
             <span class="channel-label">Core</span>
             <div class="channel-options" role="group" aria-label="Update channel">${channelButtons}</div>
           </div>
           <p class="channel-note">${escapeHTML(channelNote)}</p>
-          ${optimizerRow}
           <p class="channel-note">Drivers follow no channel. Each one is pinned to a version you pick per driver above, from either stream.</p>
         </div>
       </details>`;
@@ -1014,26 +944,7 @@
       const payload = this._components;
       if (!payload) return "";
       const optimizer = payload.optimizer || {};
-      const optimizerUpdates = optimizer.updates || {};
-      const optimizerRuntime = optimizer.runtime || {};
-      const sharedUpdateStatus = payload.updates && payload.updates.status;
-      const previousImages = (sharedUpdateStatus && sharedUpdateStatus.previous_images) || {};
-      const optimizerCurrent = optimizerUpdates.current || optimizerRuntime.version || "";
-      // Only claim a pending version when it actually differs. The old row
-      // printed "v1.3.2 → v1.3.2" next to the words "up to date".
-      const optimizerTarget = optimizerUpdates.latest && optimizerUpdates.latest !== optimizerCurrent
-        ? optimizerUpdates.latest
-        : "";
-      const optimizerAction = optimizerUpdates.update_available
-        ? `<button class="btn btn-small" data-action="optimizer-update">Update to ${escapeHTML(optimizerUpdates.latest || "")}</button>`
-        : "";
-      // Rolling back stays available whenever a previous image exists — that
-      // is exactly the state you are in right after an update goes wrong. It
-      // sits in the action column so it no longer competes with the status
-      // text for the eye.
-      const optimizerRollback = previousImages.optimizer
-        ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback" title="Restore the previous optimizer image">Roll back</button>`
-        : "";
+      const optimizerCurrent = (optimizer.runtime || {}).version || "";
       const activeSolver = optimizer.active_solver || {};
       const optimizerFallbackActive = !!activeSolver.fallback;
       const optimizerReason = optimizer.fallback_reason || optimizer.health_error || optimizer.error || "";
@@ -1087,11 +998,7 @@
       const coreStatus = info.update_available
         ? `<span class="status-pending">${escapeHTML(info.latest || "update")} available</span>`
         : `<span class="dim">up to date</span>`;
-      const optimizerStatus = !optimizer.configured
-        ? `<span class="dim">not configured</span>`
-        : optimizerUpdates.update_available
-        ? `<span class="status-pending">${escapeHTML(optimizerTarget || "update")} available</span>`
-        : `<span class="dim">up to date</span>`;
+      const optimizerStatus = `<span class="dim">${!optimizer.configured ? "Core DP selected" : optimizer.healthy === false ? "unavailable" : "ready"}</span>`;
 
       // One table listing every component, whether or not it has work waiting.
       // Rows only ever change their status and action cells, so the operator
@@ -1114,7 +1021,7 @@
               <th scope="row">Optimizer</th>
               <td class="dim mono">${escapeHTML(optimizerCurrent || "not running")}</td>
               <td class="component-status">${optimizerStatus}</td>
-              <td class="component-actions">${optimizerAction}${optimizerRollback}</td>
+              <td class="component-actions">Updates with Core</td>
             </tr>
             ${driverRows}
           </tbody>
@@ -1180,8 +1087,7 @@
       switch (action) {
         case "restart":  title = "Restarting service"; break;
         case "rollback": title = "Rolling back"; break;
-        case "component_rollback": title = "Rolling back optimizer"; break;
-        default:         title = st.component === "optimizer" ? "Updating optimizer" : "Updating service";
+        default:         title = "Updating service";
       }
 
       return `
@@ -1247,17 +1153,6 @@
               break;
             case "set-channel":
               this._setChannel(e.currentTarget.dataset.channel);
-              break;
-            case "set-optimizer-channel":
-              this._setOptimizerChannel(e.currentTarget.dataset.channel);
-              break;
-            case "optimizer-update":
-              this._beginOptimizerUpdate(false);
-              break;
-            case "optimizer-rollback":
-              if (window.confirm("Roll back only the optimizer to its previous healthy image? Core and drivers stay unchanged.")) {
-                this._beginOptimizerUpdate(true);
-              }
               break;
             case "driver-versions":
               this._loadDriverVersions(e.currentTarget.dataset.id);

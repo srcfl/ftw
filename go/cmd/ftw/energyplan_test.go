@@ -14,7 +14,7 @@ func TestEnergyplanBetaSelection(t *testing.T) {
 		{"dev", "", "core"},
 		{"dev-beta.invalid", "", "core"},
 		{"v2.15.0-beta.1", "core", "core"},
-		{"v2.15.0-beta.1", "python", "python"},
+		{"v2.15.0-beta.1", "python", "energyplan"},
 		{"dev", "Energyplan", "energyplan"},
 	} {
 		if !energyplanSupported(runtime.GOOS, runtime.GOARCH) && tc.engine == "" {
@@ -38,7 +38,7 @@ func TestBuildMPCBetaStartsBundledEnergyplan(t *testing.T) {
 	t.Setenv("FTW_OPTIMIZER_SOCKET", "/missing/python.sock")
 	cfg, capacities := plannerEngineConfig(&config.Planner{Enabled: true})
 	svc := buildMPC(cfg, nil, nil, capacities)
-	if svc == nil || !svc.OptimizerBundledWithCore() || svc.ShadowOptimizer != nil || svc.EnableRecourseShadow {
+	if svc == nil || !svc.OptimizerBundledWithCore() {
 		t.Fatalf("wrong beta wiring: %+v", svc)
 	}
 	t.Cleanup(func() { svc.Optimizer.Close() })

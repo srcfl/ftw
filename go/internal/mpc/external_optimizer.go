@@ -58,7 +58,7 @@ type MultistageOptimizerConfig struct {
 	PHToleranceW           float64
 }
 
-// ExternalOptimizerConfig controls the local Python worker. The command is an
+// ExternalOptimizerConfig controls a compiled worker. The command is an
 // argv array rather than a shell string, so configuration cannot accidentally
 // acquire shell expansion semantics.
 type ExternalOptimizerConfig struct {
@@ -80,8 +80,7 @@ type ExternalOptimizerConfig struct {
 }
 
 // ExternalOptimizer owns one warm JSON-lines worker process. Calls are
-// serialized because CVXPY problem construction and warm-start state live in
-// that process. An optional idle timeout releases the worker's solver memory
+// serialized to keep request and response ownership unambiguous. An optional idle timeout releases the worker's solver memory
 // between planning bursts.
 type ExternalOptimizer struct {
 	cfg       ExternalOptimizerConfig

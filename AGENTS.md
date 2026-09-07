@@ -1,7 +1,7 @@
 # FTW project guide
 
 FTW is a local-first home energy management system written in Go, with Lua
-drivers and an optional Python/CVXPY optimizer.
+drivers and a compiled Energyplan worker.
 
 ## Architecture
 
@@ -102,7 +102,7 @@ PR description, where it is read during review and then archived.
 ## Build and test
 
 ```bash
-make test         # Go and Python suites; independent work runs in parallel
+make test         # Go suites; independent work runs in parallel
 make verify       # tests, compose migration, vet and build
 make e2e          # full local stack
 make dev          # simulators + app

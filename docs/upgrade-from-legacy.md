@@ -40,10 +40,7 @@ migreringen. Skriptet letar annars i aktuell katalog, `~/ftw` och
    samma data-bind. Core måste både vara frisk på `/api/health` och helt
    startklar på `/api/status`; annars återställs Compose, tidigare
    oföränderliga image-ID:n och containrar automatiskt.
-3. **Optimizer.** Optimizern hämtas och hälsokontrolleras separat. Om den
-   misslyckas ligger den friska Core kvar och använder sin säkra Go-fallback;
-   tidigare Optimizer återstartas när den finns.
-4. **Drivers.** Endast det signerade katalogmanifestet uppdateras. Ingen driver
+3. **Drivers.** Endast det signerade katalogmanifestet uppdateras. Ingen driver
    installeras, aktiveras eller startas om under migreringen. Senare driverbyte
    sker en driver i taget i Update Center.
 
@@ -61,7 +58,7 @@ curl -fsS http://127.0.0.1:8080/api/status
 ```
 
 Core och updater ska vara igång på `ghcr.io/srcfl/ftw` respektive
-`ghcr.io/srcfl/ftw-updater`. Optimizern kan repareras senare utan att Core eller
+`ghcr.io/srcfl/ftw-updater`. Energyplan följer med Core. Felsökning kräver inte att data eller
 data rullas tillbaka. Det är normalt att en migrerad installation behåller
 katalogen `~/forty-two-watts` och servicenamnet `forty-two-watts`.
 
@@ -106,10 +103,7 @@ script can also discover the current directory, `~/ftw`, or
    bind and must pass both `/api/health` and full readiness on `/api/status`.
    Failure restores Compose, the prior immutable image IDs, and the previous
    containers automatically.
-3. **Optimizer.** Optimizer is pulled and health-checked separately. Failure
-   leaves healthy Core online on its safe Go fallback and restores the prior
-   Optimizer when possible.
-4. **Drivers.** Only signed catalog metadata is refreshed. No driver is
+3. **Drivers.** Only signed catalog metadata is refreshed. No driver is
    installed, activated, or restarted during migration; later changes happen
    one driver at a time in Update Center.
 
@@ -127,7 +121,7 @@ curl -fsS http://127.0.0.1:8080/api/status
 ```
 
 Core and updater must be running from `ghcr.io/srcfl/ftw` and
-`ghcr.io/srcfl/ftw-updater`. Optimizer can be repaired independently without
+`ghcr.io/srcfl/ftw-updater`. Energyplan ships with Core. Troubleshooting does not require
 rolling back Core or persistent data. Keeping a legacy directory or the
 `forty-two-watts` service name is intentional.
 
