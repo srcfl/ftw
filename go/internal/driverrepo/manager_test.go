@@ -270,7 +270,7 @@ func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
 		unknown := New(configured, dir, store)
 		unknown.betaRepo = manager.betaRepo
 		unknown.betaRepo.ID = "other-beta-source"
-		if policy, err := unknown.RuntimePolicy(driverCfg); err != nil || policy != nil {
+		if policy, err := unknown.RuntimePolicy(driverCfg); err == nil || policy != nil {
 			t.Fatalf("unknown installed repository gained a policy: %+v, %v", policy, err)
 		}
 	})
