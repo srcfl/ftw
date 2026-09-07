@@ -3,10 +3,12 @@ package mpc
 import "math"
 
 // PVCurtailment is Core's proof for one control domain covering all site PV.
-// The worker sees only the executable minimum; proof stays inside Core.
+// The worker sees the executable bounds; proof stays inside Core.
 type PVCurtailment struct {
-	Driver, Proof string
-	MinW, MaxW    float64
+	Driver string
+	// A restored diagnostic cannot grant control permission to a new process.
+	Proof      string `json:"-"`
+	MinW, MaxW float64
 }
 
 func (p PVCurtailment) Valid() bool {

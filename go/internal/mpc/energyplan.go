@@ -14,8 +14,8 @@ type EnergyplanOptimizer struct {
 
 func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 	external, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{binary, "--time-limit=2s"},
-		ModuleDir: filepath.Dir(binary), Timeout: 3 * time.Second,
+		Command:   []string{binary, "--time-limit=5s"},
+		ModuleDir: filepath.Dir(binary), Timeout: 7 * time.Second,
 		IdleTimeout: 2 * time.Minute,
 	})
 	if err != nil {
@@ -26,9 +26,9 @@ func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 }
 
 func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
-	assets := max(1, len(p.Storages)) + 2*len(p.activeLoadpoints())
-	if len(slots)*assets > 193*6 || p.PVCurtailment.MinW > 0 || p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0 {
-		return 2 * time.Second
+	assets := 3*max(1, len(p.Storages)) + 2*len(p.activeLoadpoints())
+	if len(slots)*assets >= 193*6 || p.PVCurtailment.MinW > 0 || p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0 {
+		return 5 * time.Second
 	}
 	return 500 * time.Millisecond
 }

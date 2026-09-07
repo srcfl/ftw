@@ -3,7 +3,7 @@
   "product": "energyplan",
   "version": "0.3.0",
   "source_repository": "srcfl/energyplan",
-  "source_commit": "7e20a4101acdebcf688303eec56063d61db5d0cc",
+  "source_commit": "6211cf10d4672d629b06cce77b3e267943da927b",
   "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
   "protocol_version": 1,
   "forecast_protocol_version": 1,
@@ -39,16 +39,16 @@
       "bytes": 15377
     },
     "ftw-solver-darwin-arm64": {
-      "sha256": "1095bdf3c05a702ce7b13592ea22b830b3e137293c3fa324b1ac67df1ad2e472",
-      "bytes": 1091440
+      "sha256": "a91005daefa3dc22f23935b2de5049f5a0f3f166f7dcbe82df401e3dc574adb5",
+      "bytes": 1107968
     },
     "ftw-solver-linux-amd64": {
-      "sha256": "b968a9f6c6a72ce7344a21f4666badd612139ef0f19f9eda0db0fdef9f7449e1",
-      "bytes": 1395176
+      "sha256": "858909d134601772d4e3f91ddcbeb9f6932796b13733e3b248d5e2ecc3ef8581",
+      "bytes": 1415368
     },
     "ftw-solver-linux-arm64": {
-      "sha256": "457013448c85933100af6b593a81532d844c06cde9c7e1f068e992700179d17a",
-      "bytes": 1138448
+      "sha256": "626a75471eb262be57f8cb62a6ef589f60045f4ed02bf586f70d1eeef803a40f",
+      "bytes": 1153480
     },
     "rust-runtime/COPYRIGHT-library.html": {
       "sha256": "90567e2718bf7fd65a71a3a43c5596488e80e5f51ed02bfea6fec54458b5f3d1",

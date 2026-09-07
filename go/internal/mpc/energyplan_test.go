@@ -230,3 +230,34 @@ func TestCoreDPShadowCancellationPreservesPreviousComparison(t *testing.T) {
 		t.Fatal("cancellation replaced a comparison with rejection")
 	}
 }
+
+func TestNativeEnergyplanUsesBoundedFleetBudget(t *testing.T) {
+	template := nativeWorker(t, time.Second)
+	defer template.Close()
+	engine, err := NewEnergyplanOptimizer(template.cfg.Command[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	slots, params := topologyFixture(2, 2)
+	first := slots[0]
+	slots = make([]Slot, 193)
+	for i := range slots {
+		slots[i] = first
+		slots[i].StartMs = first.StartMs + int64(i*first.LenMin)*60000
+	}
+	plan, err := engine.Optimize(context.Background(), slots, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request externalRequest
+	if err := json.Unmarshal(plan.OptimizerInput, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Settings.TimeLimitS != 5 {
+		t.Fatalf("fleet request has wrong budget: %v", request.Settings.TimeLimitS)
+	}
+	if err := ValidatePlan(slots, params, &plan); err != nil {
+		t.Fatal(err)
+	}
+}

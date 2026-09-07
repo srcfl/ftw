@@ -170,3 +170,18 @@ func TestSharedPVAndStorageMapValidation(t *testing.T) {
 		t.Fatal("physical storages disappeared")
 	}
 }
+
+func TestPVCurtailmentProofCannotSurviveDiagnosticRestore(t *testing.T) {
+	p := PVCurtailment{Driver: "pv", Proof: "runtime-only", MinW: 2, MaxW: 15000}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored PVCurtailment
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.Valid() || restored.Proof != "" {
+		t.Fatal("stored diagnostics granted a new process a control capability")
+	}
+}
