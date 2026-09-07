@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.15.0
+
+### Minor Changes
+
+- e005853: Use the compiled Energyplan worker first in beta releases when no planner engine
+  is set. Core validates its plan, then runs Core DP as a background shadow on the
+  same downside PV input. Core DP remains the validated fallback, with a visible
+  reason when it takes over. The worker and its license ship and update with Core;
+  source stays private. Explicit core and python settings keep their roles.
+  
+  Reject EV plans above the battery limit and clip DP power at the operating band
+  so fallback energy matches the power it schedules.
+
+### Patch Changes
+
+- f4cc89f: Accept sub-watt solver residue at a slot's grid limit so an optimizer plan at the configured fuse ceiling does not trigger Go planner fallback. Larger import and export violations still fail validation.
+- 533179a: Go fallback plans are replayed against the same site-power and battery-energy identities as the mathematical optimizer before they can become the live plan. A true zero PV cap is now a distinct `pv_curtail_active` flag, so full curtailment is no longer serialized as “no cap”. A trajectory that cannot be reconstructed from the request is kept off dispatch.
+
 ## 2.14.1
 
 ### Patch Changes
