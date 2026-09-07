@@ -18,7 +18,7 @@
 //
 // ctx is built fresh on each render and exposes the shell's helpers
 // (field, selectField, help, escHtml, getByPath, setByPath,
-// captureCurrentTab, renderTab, bodyEl, config).
+// captureCurrentTab, rememberFieldValue, renderTab, bodyEl, config).
 (function () {
   "use strict";
 
@@ -221,8 +221,13 @@
     statusEl.className = "settings-status" + (kind ? " " + kind : "");
   }
 
+  // Async tabs register a field when they insert it, before the user can edit it.
+  function rememberFieldValue(input) {
+    fieldValues.set(input, input.dataset.checkboxPath ? input.checked : input.value);
+  }
+
   function fieldValue(input, defaultValue) {
-    // Inputs added after render keep their DOM default until the user edits them.
+    // Late inputs can also use their DOM default; selects have no defaultValue.
     return fieldValues.has(input) ? fieldValues.get(input) : defaultValue;
   }
 
@@ -312,6 +317,7 @@
       getByPath: getByPath,
       setByPath: setByPath,
       captureCurrentTab: captureCurrentTab,
+      rememberFieldValue: rememberFieldValue,
       renderTab: renderTab,
       navigateTab: navigateTab,
       saveConfig: saveSettings,
@@ -325,13 +331,11 @@
       console.error("tab render:", tab, e);
     }
     bodyEl.innerHTML = html;
-    bodyEl.querySelectorAll("[data-path]").forEach(function (input) {
-      fieldValues.set(input, input.value);
-    });
+    bodyEl.querySelectorAll("[data-path]").forEach(rememberFieldValue);
 
     // Generic handler for data-checkbox-path — shared across every tab.
     bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (cb) {
-      fieldValues.set(cb, cb.checked);
+      rememberFieldValue(cb);
       cb.addEventListener("change", function () {
         setByPath(currentConfig, cb.dataset.checkboxPath, cb.checked);
       });

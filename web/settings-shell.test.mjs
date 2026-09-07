@@ -39,6 +39,7 @@ function loadShell(saveResponse, ok = true) {
   for (const id of ELEMENT_IDS) elements[id] = stubElement();
 
   const requests = [];
+  const responses = {};
   const sandbox = {
     window: { FTWSettings: { tabs: {} } },
     document: {
@@ -47,7 +48,7 @@ function loadShell(saveResponse, ok = true) {
     },
     fetch(path, opts) {
       requests.push({ path, opts });
-      return Promise.resolve({ ok, status: ok ? 200 : 400, headers: { get: () => '"config-7"' }, json: () => Promise.resolve(saveResponse) });
+      return Promise.resolve({ ok, status: ok ? 200 : 400, headers: { get: () => '"config-7"' }, json: () => Promise.resolve(responses[path] ?? saveResponse) });
     },
     // The shell only uses timers to clear the "Saved" status and to poll after
     // a restart; neither is what these tests are about.
@@ -57,14 +58,14 @@ function loadShell(saveResponse, ok = true) {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
-  return { elements, requests, tabs: sandbox.window.FTWSettings.tabs };
+  return { elements, requests, responses, tabs: sandbox.window.FTWSettings.tabs,
+    loadTab: file => vm.runInContext(readFileSync(new URL(file, import.meta.url), "utf8"), sandbox) };
 }
 
 // One turn of the event loop, which is all the save chain needs to settle.
 const settled = () => new Promise((resolve) => setImmediate(resolve));
 
-async function formShell() {
-  const original = { site: { name: "Home" }, planner: { enabled: true }, hidden: { keep: 17 } };
+async function formShell(original = { site: { name: "Home" }, planner: { enabled: true }, hidden: { keep: 17 } }) {
   const rig = loadShell(structuredClone(original));
   const field = (path, type, value) => Object.assign(stubElement(), { dataset: { path }, type, value });
   const fields = {
@@ -127,6 +128,64 @@ describe("unchanged settings fields", () => {
     secret.value = "local-test-value";
     await rig.context.saveConfig();
     assert.equal(rig.saved().device.secret, "local-test-value");
+  });
+});
+
+// Run the real asynchronous Devices catalog callback. The shim parses the
+// select it inserts; like HTMLSelectElement, it has no defaultValue property.
+async function profileShell() {
+  const original = { site: { name: "Home" }, drivers: [{ name: "GoodWe", lua: "drivers/goodwe.lua",
+    capabilities: { modbus: { unit_id: 1 } }, config: {} }] };
+  const rig = await formShell(original);
+  rig.loadTab("./settings/tabs/devices.js");
+  rig.responses["/api/drivers/catalog"] = { entries: [{ id: "goodwe", path: "drivers/goodwe.lua", version: "1.0.2" }] };
+  const unit = Object.assign(stubElement(), { dataset: { path: "drivers.0.capabilities.modbus.unit_id" },
+    type: "number", defaultValue: "1", value: "1" });
+  rig.addField(unit);
+  let select;
+  const slot = {
+    getAttribute: () => "0",
+    set innerHTML(html) {
+      const options = [...html.matchAll(/<option value="([^"]*)"([^>]*)>/g)]
+        .map(([, value, attrs]) => ({ value, defaultSelected: /\bselected\b/.test(attrs) }));
+      select = Object.assign(stubElement(), { type: "select-one", options,
+        dataset: { path: html.match(/data-path="([^"]*)"/)[1] },
+        value: (options.find(option => option.defaultSelected) || options[0]).value });
+      rig.addField(select);
+    },
+    querySelector: () => select,
+  };
+  const body = rig.elements["settings-body"];
+  const fields = body.querySelectorAll;
+  body.querySelectorAll = selector => selector === ".drv-profile-slot" ? [slot] : fields(selector);
+  body.querySelector = selector => selector === '[data-path="drivers.0.capabilities.modbus.unit_id"]' ? unit : null;
+  rig.tabs.devices.after({ ...rig.context, escHtml: String, help: () => "" });
+  assert.equal(select, undefined, "the catalog has not arrived during render");
+  await settled();
+  assert.equal("defaultValue" in select, false);
+  return { ...rig, select, unit };
+}
+
+describe("late driver profile fields", () => {
+  for (const switchTab of [false, true]) {
+    it("keeps an untouched profile absent, switch tab=" + switchTab, async () => {
+      const rig = await profileShell();
+      if (switchTab) rig.context.navigateTab("control");
+      await rig.context.saveConfig();
+      assert.deepEqual(rig.saved(), rig.original);
+    });
+  }
+
+  it("saves an explicit profile and its programmatic Unit ID, including a later return", async () => {
+    const rig = await profileShell();
+    for (const [profile, unitID] of [["gw8kn-et-hk3000", 247], ["community-v1", 1]]) {
+      rig.select.value = profile;
+      rig.select.handlers.change();
+      assert.equal(rig.unit.value, String(unitID));
+      await rig.context.saveConfig();
+      assert.deepEqual(rig.saved().drivers[0], { ...rig.original.drivers[0],
+        capabilities: { modbus: { unit_id: unitID } }, config: { profile } });
+    }
   });
 });
 
