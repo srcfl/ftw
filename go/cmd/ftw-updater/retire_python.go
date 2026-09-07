@@ -273,6 +273,10 @@ func (s *server) retirePythonOptimizer(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(changes) == 0 && len(ids) == 0 {
+		fmt.Println("Compose has no retired Python wiring and no Python service remains.")
+		return nil
+	}
 	suffix := ".before-python-removal-" + time.Now().UTC().Format("20060102T150405.000000000")
 	for _, c := range changes {
 		if err := os.WriteFile(c.path+suffix, c.before, c.mode); err != nil {
@@ -300,7 +304,11 @@ func (s *server) retirePythonOptimizer(ctx context.Context) error {
 			return restore(fmt.Errorf("remove retired container: %w", err))
 		}
 	}
-	fmt.Println("Python optimizer removed. Compose backups:", suffix, "Recreate Core at its pinned version to release the old IPC mount.")
+	fmt.Println("Python optimizer removed.")
+	if len(changes) > 0 {
+		fmt.Println("Compose backups:", suffix)
+	}
+	fmt.Println("Recreate Core at its pinned version to release the old IPC mount.")
 	return nil
 }
 
