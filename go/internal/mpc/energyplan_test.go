@@ -55,10 +55,15 @@ func TestCoreDPShadowCancellation(t *testing.T) {
 }
 
 func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
-	o := nativeWorker(t, 500*time.Millisecond)
+	template := nativeWorker(t, 500*time.Millisecond)
+	defer template.Close()
+	o, err := NewEnergyplanOptimizer(template.cfg.Command[0])
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { o.Close() })
 	svc := shadowTestService(t)
-	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
+	svc.Optimizer = o
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
 	if err != nil || info.Name != "ftw-solver" || info.Version != "0.3.0" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
@@ -72,6 +77,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 		}
 	}
 	svc.PVUncertaintyW = func() float64 { return 200 }
+	svc.PVRelativeUncertainty = func() float64 { return .1 }
 	svc.PVForecastSafetyK = 1
 	svc.PV = func(time.Time, float64) float64 { return 1500 }
 	var published atomic.Bool
@@ -110,12 +116,16 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, slot := range input.Slots {
-		if math.Abs(slot.PVW-(-1300)) > .001 {
+		// The learned relative error replaces the absolute fallback: 1500 - 10%.
+		if math.Abs(slot.PVW-(-1350)) > .001 {
 			t.Fatalf("wrong downside PV: %f", slot.PVW)
 		}
 	}
 	if len(input.Scenarios) != 0 || input.Settings.CVaRWeight != 0 {
 		t.Fatal("Energyplan received scenarios")
+	}
+	if input.Settings.TimeLimitS != .5 {
+		t.Fatalf("deterministic downside request budget=%g, want 0.5", input.Settings.TimeLimitS)
 	}
 }
 
@@ -264,6 +274,7 @@ func TestNativeEnergyplanUsesBoundedFleetBudget(t *testing.T) {
 
 func TestBatterylessEVBudgetDoesNotInventStorage(t *testing.T) {
 	slots, p := topologyFixture(0, 2)
+	p.PVUncertaintyW, p.PVRelativeUncertainty = 200, .1
 	horizon := make([]Slot, 193)
 	for i := range horizon {
 		horizon[i] = slots[0]

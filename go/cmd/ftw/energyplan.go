@@ -4,19 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/srcfl/ftw/go/internal/config"
 )
 
 func plannerEngine(pl *config.Planner, version string) string {
-	if pl != nil && strings.TrimSpace(pl.Engine) != "" {
-		return pl.EngineName()
-	}
-	if base, valid := releaseVersionBase(version); valid && base != version && energyplanSupported(runtime.GOOS, runtime.GOARCH) {
-		return config.PlannerEngineEnergyplan
-	}
-	return config.PlannerEngineCore
+	return pl.EngineForBuild(version, runtime.GOOS, runtime.GOARCH)
 }
 
 func resolveEnergyplanBinary() string {
@@ -42,5 +35,5 @@ func resolveEnergyplanBinary() string {
 }
 
 func energyplanSupported(goos, goarch string) bool {
-	return (goos == "linux" && (goarch == "amd64" || goarch == "arm64")) || (goos == "darwin" && goarch == "arm64")
+	return config.SupportsBundledEnergyplan(goos, goarch)
 }

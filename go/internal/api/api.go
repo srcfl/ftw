@@ -18,6 +18,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -2420,12 +2421,14 @@ func (s *Server) mpcUnavailableReason() string {
 		return ""
 	}
 	var plannerOn bool
+	var supportsBatteryless bool
 	var priceProvider string
 	if s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
 	}
 	if s.deps.Cfg != nil {
 		plannerOn = s.deps.Cfg.Planner != nil && s.deps.Cfg.Planner.Enabled
+		supportsBatteryless = s.deps.Cfg.Planner.EngineForBuild(s.deps.Version, runtime.GOOS, runtime.GOARCH) == config.PlannerEngineEnergyplan
 		if s.deps.Cfg.Price != nil {
 			priceProvider = s.deps.Cfg.Price.Provider
 		}
@@ -2445,7 +2448,7 @@ func (s *Server) mpcUnavailableReason() string {
 	if s.deps.CapMu != nil {
 		s.deps.CapMu.RUnlock()
 	}
-	return mpc.UnavailableReason(plannerOn, priceProvider, totalCap)
+	return mpc.UnavailableReason(plannerOn, priceProvider, totalCap, supportsBatteryless)
 }
 
 func (s *Server) handleMPCPlan(w http.ResponseWriter, r *http.Request) {

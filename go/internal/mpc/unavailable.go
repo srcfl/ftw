@@ -11,14 +11,14 @@ const (
 
 // UnavailableReason is the skip gate buildMPC already logs. Empty means
 // the planner should have been constructed.
-func UnavailableReason(plannerEnabled bool, priceProvider string, totalCapacityWh float64) string {
+func UnavailableReason(plannerEnabled bool, priceProvider string, totalCapacityWh float64, supportsBatteryless bool) string {
 	if !plannerEnabled {
 		return ReasonPlannerDisabled
 	}
 	if priceProvider == "" || priceProvider == "none" {
 		return ReasonNoPriceProvider
 	}
-	if totalCapacityWh < 0 {
+	if totalCapacityWh < 0 || (totalCapacityWh == 0 && !supportsBatteryless) {
 		return ReasonNoBatteryCapacity
 	}
 	return ""

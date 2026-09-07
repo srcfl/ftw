@@ -3694,7 +3694,7 @@ func aggregateBatteryFleetLimits(cfg *config.Config, fleet []mpc.BatteryFleetMem
 }
 
 // buildMPC constructs a planner from config. Returns nil if disabled,
-// or if prices aren't configured. EV planning also works without home storage.
+// or if prices aren't configured. Energyplan also supports sites without storage.
 // The skip reason is the same vocabulary /api/mpc/diagnose exposes.
 func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
 	plannerOn := cfg.Planner != nil && cfg.Planner.Enabled
@@ -3704,7 +3704,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	}
 	fleet := mpcBatteryFleetFromConfig(cfg, capacities)
 	totalCap, maxChg, maxDis := aggregateBatteryFleetLimits(cfg, fleet)
-	switch mpc.UnavailableReason(plannerOn, priceProvider, totalCap) {
+	engine := plannerEngine(cfg.Planner, Version)
+	switch mpc.UnavailableReason(plannerOn, priceProvider, totalCap, engine == config.PlannerEngineEnergyplan) {
 	case mpc.ReasonPlannerDisabled:
 		return nil
 	case mpc.ReasonNoPriceProvider:
@@ -3787,7 +3788,6 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 	// Release defaults select the beta worker. An explicit engine wins;
 	// Core DP remains available as an explicit choice and as fallback.
-	engine := plannerEngine(pl, Version)
 	if engine == config.PlannerEngineEnergyplan {
 		binary := resolveEnergyplanBinary()
 		ext, err := mpc.NewEnergyplanOptimizer(binary)

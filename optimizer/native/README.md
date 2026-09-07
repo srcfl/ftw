@@ -35,7 +35,9 @@ explicitly, or `core` to select Core DP. Stable and development
 builds keep Core as the unset default; Windows has no bundled worker.
 
 Energyplan uses the same downside PV forecast as Core. Small requests get a
-500 ms solve budget; larger fleets and PV-control or risk requests get 5 s.
+500 ms solve budget; larger fleets and PV-control requests get 5 s.
+Core applies PV uncertainty once when forming the downside horizon. This does
+not add worker scenarios or extend the solve budget by itself.
 The transport timeout is 7 s. After Core validates and publishes a plan, one
 Core DP shadow runs with a 10 s limit when Core DP can represent the site.
 Its result appears in
@@ -58,6 +60,8 @@ A time limit can return a feasible plan with a remaining cost gap. An unknown
 bound is null; without a feasible candidate the worker returns a budget error.
 Core DP fallback cannot represent every fleet. In that case Core keeps the
 previous plan for diagnosis and withholds execution until a new plan succeeds.
+Selecting Core DP, including the stable/development default, requires positive
+home-battery capacity. Energyplan permits sites without home storage.
 
 Core only permits a planned PV generation cap when it verifies the loaded
 driver and current telemetry for the site's complete PV control domain. A

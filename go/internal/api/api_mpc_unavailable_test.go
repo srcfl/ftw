@@ -33,6 +33,37 @@ func TestMPCDisabledEndpointsNameTheSkipReason(t *testing.T) {
 			},
 			want: mpc.ReasonNoPriceProvider,
 		},
+		{
+			name: "batteryless explicit Core in beta",
+			deps: &Deps{Version: "v3.1.0-beta.1", Cfg: &config.Config{
+				Planner: &config.Planner{Enabled: true, Engine: "core"},
+				Price:   &config.Price{Provider: "elprisetjustnu"},
+			}},
+			want: mpc.ReasonNoBatteryCapacity,
+		},
+		{
+			name: "batteryless stable default",
+			deps: &Deps{Version: "v3.1.0", Cfg: &config.Config{
+				Planner: &config.Planner{Enabled: true},
+				Price:   &config.Price{Provider: "elprisetjustnu"},
+			}},
+			want: mpc.ReasonNoBatteryCapacity,
+		},
+		{
+			name: "batteryless development default",
+			deps: &Deps{Cfg: &config.Config{
+				Planner: &config.Planner{Enabled: true},
+				Price:   &config.Price{Provider: "elprisetjustnu"},
+			}},
+			want: mpc.ReasonNoBatteryCapacity,
+		},
+		{
+			name: "batteryless explicit Energyplan has no capacity gate",
+			deps: &Deps{Version: "v3.1.0", Cfg: &config.Config{
+				Planner: &config.Planner{Enabled: true, Engine: "energyplan"},
+				Price:   &config.Price{Provider: "elprisetjustnu"},
+			}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
