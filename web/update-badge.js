@@ -43,6 +43,9 @@
     constructor() {
       super();
       this._shadow = this.attachShadow({ mode: "open" });
+      this._dialogHost = null;
+      this._dialogRoot = null;
+      this._storageOpen = false;
       this._info = null;              // last /api/version/check payload
       this._phase = "idle";           // idle | dialog | updating
       this._sidecarState = null;      // last /api/version/update/status
@@ -106,6 +109,7 @@
     }
 
     disconnectedCallback() {
+      this._removeDialog();
       clearInterval(this._checkTimer);
       clearTimeout(this._errorRetryTimer);
       clearInterval(this._statusTimer);
@@ -392,6 +396,7 @@
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
       this._shadow.innerHTML = "";
+      this._removeDialog();
       this.hidden = true;
       this.dispatchEvent(new CustomEvent("ftw-selfupdate-disabled", { bubbles: true }));
     }
@@ -652,6 +657,7 @@
       // controls that open() will refuse to use.
       if (this._disabled) {
         this._shadow.innerHTML = "";
+        this._removeDialog();
         this.hidden = true;
         return;
       }
@@ -697,15 +703,43 @@
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
         <span class="marks">${marks.join("")}</span>
-        ${this._phase !== "idle" ? this._modalHTML() : ""}
       `;
 
       this._shadow.querySelectorAll("button.mark").forEach((btn) => {
         btn.addEventListener("click", () => this.open());
       });
 
-      const modal = this._shadow.querySelector(".modal");
-      if (modal) this._wireModal(modal);
+      this._renderDialog();
+    }
+
+    _removeDialog() {
+      if (this._dialogHost) this._dialogHost.remove();
+      this._dialogHost = null;
+      this._dialogRoot = null;
+      this._storageOpen = false;
+    }
+
+    _renderDialog() {
+      if (!this.isConnected || this._phase === "idle") {
+        this._removeDialog();
+        return;
+      }
+      const storage = this._dialogRoot && this._dialogRoot.querySelector("details.storage");
+      if (storage) this._storageOpen = storage.open;
+      const previous = this._dialogRoot && this._dialogRoot.querySelector(".modal");
+      const scrollTop = previous && this._phase === "dialog" ? previous.scrollTop : 0;
+
+      if (!this._dialogHost) {
+        // The mobile menu hides the badge's ancestors. Keep the dialog at page level.
+        this._dialogHost = document.createElement("div");
+        this._dialogHost.className = "ftw-update-dialog";
+        this._dialogRoot = this._dialogHost.attachShadow({ mode: "open" });
+        document.body.appendChild(this._dialogHost);
+      }
+      this._dialogRoot.innerHTML = `<style>${this._styles()}</style>${this._modalHTML()}`;
+      this._wireModal(this._dialogRoot);
+      const modal = this._dialogRoot.querySelector(".modal");
+      if (modal) modal.scrollTop = scrollTop;
     }
 
     _modalHTML() {
@@ -837,7 +871,9 @@
       const parts = [];
       if (snapshotList) parts.push(`${snapshotList.length} rollback point${snapshotList.length === 1 ? "" : "s"}`);
       if (backupList) parts.push(`${backupList.length} full backup${backupList.length === 1 ? "" : "s"}`);
-      return `<details class="snapshots storage">
+      const open = this._storageOpen || this._creatingSnapshot || this._creatingBackup ||
+        this._deletingSnapshot || this._deletingBackup || this._verifyingBackup;
+      return `<details class="snapshots storage"${open ? " open" : ""}>
         <summary>Backups · ${escapeHTML(parts.join(" · "))}</summary>
         ${this._snapshotsSectionHTML()}
         ${this._backupsSectionHTML()}
@@ -1113,9 +1149,9 @@
       }
     }
 
-    _wireModal(modal) {
-      // Delegate: one listener on the shadow root, dispatch by data-action.
-      this._shadow.querySelectorAll("[data-action]").forEach((el) => {
+    _wireModal(root) {
+      // Bind the dialog controls and its sibling backdrop.
+      root.querySelectorAll("[data-action]").forEach((el) => {
         el.addEventListener("click", (e) => {
           const action = e.currentTarget.dataset.action;
           switch (action) {
@@ -1645,6 +1681,11 @@
             padding-top: 0.3rem;
           }
           .component-actions > * { margin: 0 0.3rem 0.3rem 0; }
+          .snapshots-intro { flex-direction: column; align-items: stretch; }
+          .backup-intro p { max-width: none; }
+          .snapshots-table th,
+          .snapshots-table td { padding: 0.3rem 0.4rem; }
+          .snapshots-table .nowrap { white-space: normal; }
           .channel-row { grid-template-columns: minmax(0, 1fr); gap: 0.25rem; }
         }
       `;
