@@ -1,5 +1,40 @@
 # Changelog
 
+## 3.1.0
+
+### Minor Changes
+
+- a7f8f70: Plan sites with no home battery, several batteries or several EVs with the bundled Energyplan worker. Keep each asset's limits and energy target, validate worker identities and deadlines, and carry each battery's energy budget through Core control. Only count verified PV generation control, and stop using its plan when the driver or its health changes. Keep the previous plan for diagnosis when the fallback cannot represent the site.
+
+### Patch Changes
+
+- 522f29f: Drain queued FTWDB shadow history for up to two seconds on normal shutdown and update, after hardware stops. Retry lost acknowledgements with the same commit and report any unconfirmed ticks when the sidecar cannot complete the copy.
+- d30576c: Show Updates from the mobile More page while the header menu is closed.
+  Keep the backup section open and preserve its scroll position during creation,
+  verification and completion.
+  Let backup controls and timestamps fit the mobile dialog.
+- a45fda4: Keep sites without a home battery unavailable when Core DP is selected, and report the same reason in planner diagnostics. Keep Energyplan available for those sites. Match the documented worker budget to the request: Core's PV downside adjustment does not add scenarios or extend the budget on its own.
+- f9cb680: Keep official driver signature checks and read-only limits after repository names change. Use the trust recorded at installation and verify the saved manifest again; refuse an official driver if its saved manifest cannot be verified.
+- a001d50: Keep each managed driver's metadata format through restarts and rollback. A
+  Device Support package now requires its verified runtime policy even when
+  control is not selected, its repository is removed, or its envelope is missing.
+  Verified legacy installs retain their normal autonomous default. Older installs
+  with no recorded format need matching verified metadata; restore their repository
+  or reinstall them if that metadata is unavailable.
+- fed3695: Check retained package metadata before reinstalling a driver from an older
+  database. Reject a change to direct-manifest format while a package envelope
+  remains, and require signed legacy metadata when its format is unknown.
+  A rejected reinstall preserves the active artifact and rollback record.
+- 2e77a0f: Restore startup and autonomous default mode for retained legacy v1 drivers after their configured repository is removed. Keep official signature checks and control-v2 trust requirements unchanged.
+- 0a98614: Move focus into Settings when it opens, keep Tab within its visible controls,
+  and let Escape close it. Closing Settings returns focus to its opening button,
+  including the shortcut in More. The restart prompt keeps focus while open,
+  blocks the background, and returns focus when Restart later or Escape closes
+  the prompt. During a pending restart, focus stays in the prompt and Escape
+  does not close it.
+  Show restart progress only after Restart now starts the request.
+- f2ae6c6: Match signed driver updates to the configured driver ID when bundled and repository filenames differ. Save the selected path, restore the bundled file by ID, and report fresh telemetry only for instances that actually restarted. Tell an open Settings dialog when it must reload the saved config before saving again.
+
 ## 3.0.3
 
 ### Patch Changes
