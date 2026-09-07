@@ -584,10 +584,18 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		return nil, nil
 	}
 	var repo *config.DriverRepositorySource
-	for i := range m.cfg.Repositories {
-		if m.cfg.Repositories[i].ID == installed.RepoID {
-			repo = &m.cfg.Repositories[i]
-			break
+	if installed.FTWSigned && installed.RepoURL == "https://github.com/srcfl/device-drivers" {
+		// The installer recorded this trust identity before config aliases
+		// could change. Keep the historical ID only to locate its cache.
+		pinned := m.betaRepo
+		pinned.ID = installed.RepoID
+		repo = &pinned
+	} else {
+		for i := range m.cfg.Repositories {
+			if m.cfg.Repositories[i].ID == installed.RepoID {
+				repo = &m.cfg.Repositories[i]
+				break
+			}
 		}
 	}
 	// InstallChannel uses this pinned trust source without adding it to the
@@ -596,10 +604,7 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		repo = &m.betaRepo
 	}
 	if repo == nil {
-		if cfg.Control != nil && cfg.Control.Enabled {
-			return nil, errors.New("control opt-in requires a configured Device Support trust root")
-		}
-		return nil, nil
+		return nil, errors.New("active managed driver has no trusted repository source")
 	}
 	if repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1 {
 		return m.directManifestRuntimePolicy(cfg, *repo, installed)
@@ -698,7 +703,23 @@ func (m *Manager) directManifestRuntimePolicy(
 	if cfg.Control != nil && cfg.Control.Enabled {
 		return nil, errors.New("control opt-in requires a signed Device Support control package")
 	}
-	manifest, err := m.manifestFor(repo)
+	var manifest Manifest
+	var err error
+	if installed.FTWSigned && installed.RepoURL == "https://github.com/srcfl/device-drivers" {
+		// The in-memory cache is keyed only by a configurable repository ID.
+		// Another source may now own that ID. Reverify the saved envelope
+		// against the pinned official key before applying its runtime policy.
+		var raw []byte
+		raw, err = readLimitedFile(filepath.Join(m.root, "cache", safeSegment(installed.RepoID)+".json"), maxManifestBytes)
+		if err == nil {
+			manifest, _, err = verifyManifest(raw, repo)
+		}
+		if err == nil {
+			err = validateManifest(manifest, repo.AllowInsecure)
+		}
+	} else {
+		manifest, err = m.manifestFor(repo)
+	}
 	if err != nil {
 		if installed.RepoURL != "https://github.com/srcfl/device-drivers" {
 			return nil, nil
