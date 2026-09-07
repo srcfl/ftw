@@ -37,8 +37,8 @@ ev_charger:
 		t.Fatal(err)
 	}
 	defer st.Close()
-	runtime := map[string]string{"ev_charger_password": "old-ev-secret", "lan_auth_password": "old-hash", "forecast/site_id": "stable-site", "forecast/energyplan_state_v1": "{ \"opaque\": true }", "loadmodel/state_utc:home": "learned"}
-	for k, v := range runtime {
+	runtimeValues := map[string]string{"ev_charger_password": "old-ev-secret", "lan_auth_password": "old-hash", "forecast/site_id": "stable-site", "forecast/energyplan_state_v1": "{ \"opaque\": true }", "loadmodel/state_utc:home": "learned"}
+	for k, v := range runtimeValues {
 		if err := st.SaveConfig(k, v); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +60,7 @@ ev_charger:
 	if reloaded.LANPasswordHash != "old-hash" || reloaded.Revision != 1 {
 		t.Fatal("missing private credential or revision")
 	}
-	for k, want := range runtime {
+	for k, want := range runtimeValues {
 		if got, _ := st.LoadConfig(k); got != want {
 			t.Fatalf("runtime %s changed", k)
 		}
