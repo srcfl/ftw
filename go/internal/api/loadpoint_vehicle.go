@@ -3,15 +3,10 @@ package api
 import (
 	"math"
 	"net/http"
-	"sync"
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
 )
-
-// Keep two capacity edits from saving different copies of the same config.
-// FTW runs one API server; the mutex spans the save and shared apply callback.
-var loadpointVehicleWrites sync.Mutex
 
 // handleLoadpointVehicle changes only the usual car's battery capacity. The
 // runtime may still prefer a capacity reported by the car for this session.
@@ -28,8 +23,8 @@ func (s *Server) handleLoadpointVehicle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
-	loadpointVehicleWrites.Lock()
-	defer loadpointVehicleWrites.Unlock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 
 	// Copy only the slice we edit. Hold the read lock through serialization so
 	// another config writer cannot change referenced fields while they save.

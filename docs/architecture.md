@@ -16,7 +16,7 @@ never stop local measurement or make dispatch unsafe.
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
-integrations such as Home Assistant, CalDAV, notifications and Nova attach at
+integrations such as Home Assistant, notifications and Nova attach at
 core's API, state or telemetry boundaries; they do not own dispatch safety.
 
 A future module belongs outside core only when it has:
@@ -186,10 +186,35 @@ schema. The handlers registered in
 [`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
-Some startup bindings cannot be hot-reloaded, including state paths, API
-listener and selected integration transports. Normal device and control
-configuration is reloaded through
-[`go/internal/configreload`](../go/internal/configreload).
+Core imports YAML into a versioned document in SQLite once. The seed file then
+holds `config_database`, a path relative to that file. Settings saves commit
+the document and credential rows together with SQLite `synchronous=FULL`
+before applying them through [`go/internal/configreload`](../go/internal/configreload).
+The file watcher has been removed; editing the seed does not change live settings.
+The first import keeps older YAML fields so a failed update can return to its
+previous Core image. If that older Core later saves settings, it removes the
+unknown database locator. The next upgrade detects that changed source and
+imports the newer save. An interrupted import with unchanged source bytes
+reuses the committed document.
+An unreadable settings database stops startup instead of restoring old seed values.
+
+The first import needs write access to the seed file so Core can record which
+database owns it. For a read-only mount, copy the seed into the data directory
+and point `-config` there before upgrading. Keep a full backup before migration.
+Use Settings for later edits. Moving the state database is an offline operation;
+API listener and selected integration changes still need a restart.
+
+State schema 2 marks this settings migration, so an update from older Core
+versions takes a full backup first. To return to a Core that reads YAML, stop
+Core and restore a full backup with its matching Core version. An image-only
+downgrade to state schema 1 is refused; the import seed can be older than the
+settings saved in SQLite.
+
+
+Document revisions only prevent stale Settings forms from overwriting a newer
+save. They do not change forecast learning revisions, hardware identity, model
+weights or the exact bytes of stored forecast snapshots. Backups export YAML
+from the same SQLite snapshot so older Core versions also read current settings.
 
 ## Remote access boundary
 

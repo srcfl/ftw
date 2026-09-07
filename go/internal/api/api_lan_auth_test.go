@@ -346,19 +346,24 @@ func TestLANAuthNilVerifyIsOff(t *testing.T) {
 
 func newLANAuthServer(t *testing.T) *Server {
 	t.Helper()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	st, err := state.Open(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	cfg := &config.Config{API: config.API{Port: 8080}}
+	cfg := &config.Config{API: config.API{Port: 8080}, Site: config.Site{SmoothingAlpha: .3}, Fuse: config.Fuse{MaxAmps: 16, Phases: 3, Voltage: 230}}
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err = config.InitializeStorage(cfgPath, statePath, cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := New(&Deps{
 		State:      st,
 		Cfg:        cfg,
 		CfgMu:      &sync.RWMutex{},
 		ConfigPath: cfgPath,
-		SaveConfig: config.SaveAtomic,
+		SaveConfig: func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
 		WebDir:     t.TempDir(),
 		MutationPolicy: MutationPolicy{
 			LANAuthEnabled: func() bool {

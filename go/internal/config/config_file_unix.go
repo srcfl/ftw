@@ -21,3 +21,7 @@ func syncDir(dir string) error {
 	defer d.Close()
 	return d.Sync()
 }
+
+func restrictConfigFile(path string) error {
+	return os.Chmod(path, configFileMode)
+}

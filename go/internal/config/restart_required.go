@@ -16,7 +16,7 @@ import "reflect"
 //     {pv_rated_w, latitude, longitude}, fleet_ping.enabled, and
 //     home_assistant.* reload live.
 //   - Everything else (api.port, state.path, price.*, planner.*, nova.*,
-//     ev_charger.*, caldav.*, weather.provider/arrays,
+//     ev_charger.*, weather.provider/arrays,
 //     site.control_interval_s, site.watchdog_timeout_s, site.smoothing_alpha,
 //     site.gain) needs the binary restarted to take effect.
 //
@@ -87,9 +87,6 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")
-	}
-	if !pointerEqual(oldCfg.CalDAV, newCfg.CalDAV) {
-		reasons = append(reasons, "caldav — native server, credentials, collections, and polling are wired at startup")
 	}
 
 	// Weather: PVRatedW, Latitude, Longitude reload live; everything else
