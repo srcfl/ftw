@@ -232,7 +232,7 @@ type Service struct {
 
 	mu              sync.RWMutex
 	last            *Plan
-	executionPlan   *Plan  // Set only by publication with current physical inputs.
+	executionPlan   *Plan  // Current physical inputs; preserved by metadata copies.
 	lastSlots       []Slot // inputs that went into the most recent Optimize call
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
@@ -419,8 +419,8 @@ func (s *Service) PlanSnapshot() PlanSnapshot {
 }
 
 // InstallPlan puts a plan in the cache SlotDirectiveAt and Latest read.
-// Optimize and RestoreDiagnostic already write that cache after a
-// successful solve. Tests that inject a known Action use the same seam
+// A successful solve publishes with current inputs; restored diagnostics
+// remain archives. Tests that inject a known Action use the same seam
 // so the charger and battery cannot be given two different mappings of
 // one slot.
 //

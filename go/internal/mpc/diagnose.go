@@ -249,12 +249,10 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 	}
 }
 
-// RestoreDiagnostic promotes a persisted diagnostic snapshot back into
-// the active in-memory plan cache. Diagnostics are already the exact
-// plan+slot JSON the UI uses for time travel; restoring them avoids a
-// restart/update gap where Diagnose can show a valid plan from SQLite
-// while dispatch sees nil and falls into missing-plan behaviour until
-// the next successful replan.
+// RestoreDiagnostic loads a persisted snapshot into the in-memory plan cache.
+// Plans with physical device maps or PV control remain visible archives until
+// a new solve validates current inputs. Legacy aggregate plans can execute
+// while fresh; restore alone never grants a physical plan execution permission.
 func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string) bool {
 	if s == nil || d == nil || len(d.Slots) == 0 {
 		return false

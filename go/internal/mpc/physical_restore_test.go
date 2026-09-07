@@ -106,3 +106,49 @@ func TestNativeRestoreFuturePVDependencyRequiresNewPlan(t *testing.T) {
 		t.Fatal("new validated plan did not restore execution")
 	}
 }
+
+func TestNativeShadowPreservesCurrentExecutionButCannotActivateArchive(t *testing.T) {
+	o := nativeWorker(t, 500*time.Millisecond)
+	t.Cleanup(func() { o.Close() })
+	svc := shadowTestService(t)
+	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
+	plan := svc.Replan(context.Background())
+	if plan == nil || plan.Solver == nil || plan.Solver.Fallback || len(plan.Actions[0].StoragePowerW) == 0 {
+		t.Fatalf("fixture needs a native physical plan: %+v", plan)
+	}
+	svc.shadowWG.Wait()
+	if svc.Latest().DPShadow == nil {
+		t.Fatal("Core DP shadow did not finish")
+	}
+	assertExecution := func(want bool) {
+		t.Helper()
+		_, active := svc.SlotDirectiveAt(time.Now())
+		_, _, _, legacy := svc.SlotAt(time.Now())
+		if active != want || legacy != want || svc.PlanSnapshot().Outdated == want {
+			t.Fatalf("execution=%v legacy=%v outdated=%v, want execution=%v", active, legacy, svc.PlanSnapshot().Outdated, want)
+		}
+	}
+	assertExecution(true)
+	encoded, err := json.Marshal(svc.Diagnose())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archive Diagnostic
+	if err := json.Unmarshal(encoded, &archive); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.RestoreDiagnostic(&archive, time.Now(), "restart") {
+		t.Fatal("archive was not retained")
+	}
+	assertExecution(false)
+	// The same decision ID may finish its shadow after an archive is restored.
+	// Comparison data must not grant execution to that archive.
+	svc.recordCoreDPShadow(*plan, nil, Params{}, "late shadow", time.Now().UnixMilli(), &ShadowPlan{})
+	assertExecution(false)
+	fresh := svc.Replan(context.Background())
+	svc.shadowWG.Wait()
+	if fresh == nil || fresh.DecisionID == plan.DecisionID {
+		t.Fatal("fresh replan did not publish a new decision")
+	}
+	assertExecution(true)
+}

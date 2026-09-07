@@ -106,6 +106,11 @@ func (s *Service) recordCoreDPShadow(champion Plan, slots []Slot, p Params, reas
 	if current {
 		updated := *s.last
 		updated.DPShadow = block
+		// Preserve existing permission when adding comparison data. A late
+		// shadow with the same decision ID cannot activate a restored archive.
+		if s.executionPlan == s.last {
+			s.executionPlan = &updated
+		}
 		s.last = &updated
 	}
 	saveDiag, zone := s.SaveDiag, s.Zone
