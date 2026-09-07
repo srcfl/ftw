@@ -39,8 +39,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
-	"github.com/srcfl/ftw/go/internal/caldavserver"
-	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
@@ -450,6 +448,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	if cfg.RetiredCalendarEnabled {
+		if err := st.RetireCalendarProfile(); err != nil {
+			slog.Error("retire calendar profile", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	// The repository is entirely local on startup: existing active symlinks are
 	// usable offline and remote refresh never blocks core boot.
@@ -485,27 +489,6 @@ func main() {
 	if cfg.EVCharger != nil {
 		if pw, ok := st.LoadConfig("ev_charger_password"); ok {
 			cfg.EVCharger.Password = pw
-		}
-	}
-
-	// ---- Restore CalDAV password from state.db (not stored in YAML) ----
-	if cfg.CalDAV != nil {
-		if pw, ok := st.LoadConfig("caldav_password"); ok {
-			cfg.CalDAV.Password = pw
-		}
-	}
-	// Managed credential (#498): mint a random password on first enable so the
-	// operator never sets one by hand. Persisted to state.db; the in-process
-	// CalDAV server authenticates against it and the Settings tab shows it (with
-	// a QR) to paste into a calendar app.
-	if cfg.CalDAV.ManageCredentialsEnabled() && cfg.CalDAV.Password == "" {
-		if tok, err := calendar.GenerateToken(18); err != nil {
-			slog.Warn("caldav: failed to generate managed credential", "err", err)
-		} else if err := st.SaveConfig("caldav_password", tok); err != nil {
-			slog.Warn("caldav: failed to persist managed credential", "err", err)
-		} else {
-			cfg.CalDAV.Password = tok
-			slog.Info("caldav: generated managed credential")
 		}
 	}
 
@@ -908,10 +891,6 @@ func main() {
 	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
 	var lpController *loadpoint.Controller
 
-	// Forward-declared before the reload watcher so the callback can
-	// hot-reload the calendar client (#498). Assigned later (calendar.New).
-	var calSvc *calendar.Service
-
 	// ---- Config hot-reload watcher ----
 	// Named because two callers share it: the fsnotify watcher created
 	// below and POST /api/config (Deps.ConfigApplier), so a config saved
@@ -923,14 +902,6 @@ func main() {
 		if newCfg.EVCharger != nil {
 			if pw, ok := st.LoadConfig("ev_charger_password"); ok {
 				newCfg.EVCharger.Password = pw
-			}
-		}
-		// Restore CalDAV password from state.db (not in YAML). Any CalDAV
-		// change is restart-gated because the native server and client must
-		// switch credentials, paths, and listeners atomically.
-		if newCfg.CalDAV != nil {
-			if pw, ok := st.LoadConfig("caldav_password"); ok {
-				newCfg.CalDAV.Password = pw
 			}
 		}
 		// Driver paths are already resolved by config.Load; no extra
@@ -1280,37 +1251,6 @@ func main() {
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
-	// ---- Calendar (CalDAV) planner constraints (#498) ----
-	// FTW hosts its own in-process, pure-Go CalDAV server (internal/caldavserver,
-	// emersion/go-webdav, MIT) and runs a CalDAV *client* against it: it maps
-	// "away" events onto the load model's away profile and EV
-	// "charged-by-departure" events onto loadpoint targets. Opt-in + fail-soft;
-	// enable/disable is restart-gated (config.RestartRequiredFor), so the runtime
-	// block only ever exists while enabled. Single-container friendly — runs in a
-	// Home Assistant add-on with no sidecar.
-	var caldavSrv *caldavserver.Server
-	if cfg.CalDAV != nil && cfg.CalDAV.Enabled {
-		// Host CalDAV in-process; the client below talks to it over localhost, so
-		// the inbound/outbound intent logic is the same regardless. Objects
-		// persist in state.db so they survive restarts.
-		principal, calPaths, feeds := nativeCalDAVLayout(cfg.CalDAV)
-		caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths, st, caldavserver.WithFeeds(feeds))
-		caldavSrv.Start()
-		defer caldavSrv.Stop()
-
-		calSvc = calendar.New(*cfg.CalDAV, lpMgr, loadSvc, firstLoadpointID(cfg.Loadpoints))
-		// Outbound EVSE history: feed live EV charge-point readings so the
-		// service can author a calendar event per completed session.
-		calSvc.SetEVSource(func() []calendar.EVSample { return evSamplesFromTelemetry(tel) })
-		// Outbound plan publishing: feed the current MPC plan so the service
-		// can render forward-looking charge/discharge windows. mpcSvc is built
-		// just below; the closure reads it at call time (nil-safe until then).
-		calSvc.SetPlanSource(func() []calendar.PlanSlot { return planSlotsFromMPC(mpcSvc) })
-		calSvc.Start(ctx)
-		defer calSvc.Stop()
-		slog.Info("caldav started", "listen", cfg.CalDAV.ListenAddr(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
-	}
-
 	// ---- Start OCPP 1.6J Central System (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
 	// driver involved. A charge point whose identity (the last segment of the
@@ -1488,9 +1428,7 @@ func main() {
 		},
 		curtailed: func(time.Time) bool { return forecastCurtail.Active() },
 	}
-	if calSvc != nil {
-		forecastTrackerSvc.away = calSvc.IsAwayAt
-	}
+	// No live occupancy source: forecasts keep the established home default.
 	if energyplanSupported(runtime.GOOS, runtime.GOARCH) {
 		if candidate, err := newRustForecast(st, resolveEnergyplanBinary()); err != nil {
 			slog.Warn("primary forecast worker unavailable; using legacy fallback", "err", err)
@@ -1563,21 +1501,7 @@ func main() {
 		if cfg.Planner != nil {
 			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
 		}
-		// Away-aware load predictor (#498): for slots inside a calendar
-		// "away" interval, predict with the load model's away profile so the
-		// DP conserves battery over exactly those slots. Outside any away
-		// window (and whenever CalDAV is off), this is identical to
-		// loadSvc.Predict.
-		if calSvc != nil {
-			mpcSvc.Load = func(t time.Time) float64 {
-				if calSvc.IsAwayAt(t) {
-					return loadSvc.PredictWith(t, loadmodel.ProfileAway)
-				}
-				return loadSvc.PredictWith(t, loadmodel.ProfileHome)
-			}
-		} else {
-			mpcSvc.Load = loadSvc.Predict
-		}
+		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
 		// The mathematical planner co-optimizes every scheduled loadpoint.
@@ -2473,7 +2397,6 @@ func main() {
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,
 		EVSend:           evSend,
-		CalDAV:           calSvc,
 		HA:               haBridge,
 		Registry:         reg,
 		DriverRepository: driverRepository,
@@ -3658,111 +3581,6 @@ func warnIfEVHasBatteryCapacity(drvList []config.Driver, loadpoints []config.Loa
 			"lua", d.Lua,
 			"battery_capacity_wh", d.BatteryCapacityWh)
 	}
-}
-
-// firstLoadpointID returns the ID of the first configured loadpoint, or "".
-// Used as the fallback target for a calendar EV event whose title names no
-// specific loadpoint and when caldav.ev_loadpoint_id is unset.
-func firstLoadpointID(src []config.Loadpoint) string {
-	if len(src) > 0 {
-		return src[0].ID
-	}
-	return ""
-}
-
-// caldavUsername resolves the configured CalDAV username. The runtime fallback
-// remains the former default so an existing config that omitted the field does
-// not silently move its principal; fresh UI/example configs write `ftw`.
-func caldavUsername(cv *config.CalDAV) string {
-	if cv != nil && strings.TrimSpace(cv.Username) != "" {
-		return strings.TrimSpace(cv.Username)
-	}
-	return config.DefaultCalDAVUsername
-}
-
-// nativeCalDAVLayout derives the principal path + the collections the
-// in-process CalDAV server (#498) should expose, from config (with defaults).
-func nativeCalDAVLayout(cv *config.CalDAV) (principal string, calendarPaths []string, feeds map[string]string) {
-	principal = "/" + caldavUsername(cv) + "/"
-	calPath := config.DefaultCalDAVCalendarPath
-	histPath := config.DefaultCalDAVHistoryPath
-	planPath := config.DefaultCalDAVPlanPath
-	if cv != nil {
-		if strings.TrimSpace(cv.CalendarPath) != "" {
-			calPath = cv.CalendarPath
-		}
-		if strings.TrimSpace(cv.HistoryPath) != "" {
-			histPath = cv.HistoryPath
-		}
-		if strings.TrimSpace(cv.PlanPath) != "" {
-			planPath = cv.PlanPath
-		}
-	}
-	// Only the read-only collections get a one-tap webcal:// feed; the
-	// read-write "energy" collection is where the user *writes* intents, so a
-	// read-only subscription would be the wrong tool for it.
-	feeds = map[string]string{"plan": planPath, "history": histPath}
-	return principal, []string{calPath, histPath, planPath}, feeds
-}
-
-// evSamplesFromTelemetry projects current DerEV readings into the shape the
-// calendar service's history writer consumes (#498). One sample per EV
-// charge-point driver; the writer turns charge→idle transitions into events.
-func evSamplesFromTelemetry(tel *telemetry.Store) []calendar.EVSample {
-	readings := tel.ReadingsByType(telemetry.DerEV)
-	out := make([]calendar.EVSample, 0, len(readings))
-	for _, r := range readings {
-		var d struct {
-			Connected *bool    `json:"connected"`
-			Charging  *bool    `json:"charging"`
-			SessionWh *float64 `json:"session_wh"`
-		}
-		if len(r.Data) > 0 {
-			_ = json.Unmarshal(r.Data, &d)
-		}
-		var sessionWh float64
-		if d.SessionWh != nil {
-			sessionWh = *d.SessionWh
-		}
-		out = append(out, calendar.EVSample{
-			ID:        r.Driver,
-			Connected: d.Connected != nil && *d.Connected,
-			Charging:  d.Charging != nil && *d.Charging,
-			SessionWh: sessionWh,
-			PowerW:    r.SmoothedW,
-		})
-	}
-	return out
-}
-
-// planSlotsFromMPC projects the latest MPC plan into the shape the calendar
-// service's plan publisher consumes. Nil-safe: returns nil
-// when the planner is disabled or has no plan yet.
-func planSlotsFromMPC(mpcSvc *mpc.Service) []calendar.PlanSlot {
-	if mpcSvc == nil {
-		return nil
-	}
-	plan := mpcSvc.Latest()
-	if plan == nil {
-		return nil
-	}
-	out := make([]calendar.PlanSlot, 0, len(plan.Actions))
-	for _, a := range plan.Actions {
-		start := time.UnixMilli(a.SlotStartMs)
-		ln := a.SlotLenMin
-		if ln <= 0 {
-			ln = 15
-		}
-		out = append(out, calendar.PlanSlot{
-			Start:      start,
-			End:        start.Add(time.Duration(ln) * time.Minute),
-			BatteryW:   a.BatteryW,
-			GridW:      a.GridW,
-			SoC:        a.SoC,
-			Confidence: a.Confidence,
-		})
-	}
-	return out
 }
 
 // activeBatteryBoostTotals keeps the core dispatch tick safe when the optional

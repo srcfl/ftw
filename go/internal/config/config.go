@@ -34,7 +34,6 @@ type Config struct {
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
-	CalDAV           *CalDAV            `yaml:"caldav,omitempty" json:"caldav,omitempty"`
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	Vehicles         []Vehicle          `yaml:"vehicles,omitempty" json:"vehicles,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
@@ -52,6 +51,8 @@ type Config struct {
 	// write path (Settings save, bootstrap) never populates this — it calls
 	// Validate directly and stays strict. Never serialized.
 	LoadWarnings []string `yaml:"-" json:"-"`
+	// Used once at startup to end an old calendar's persisted away selection.
+	RetiredCalendarEnabled bool `yaml:"-" json:"-"`
 }
 
 // OCPP configures the built-in OCPP 1.6J and 2.0.1 Central System. Chargers connect to
@@ -674,148 +675,6 @@ type EVChargerModbus struct {
 	Host   string `yaml:"host" json:"host"`
 	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"`
-}
-
-// CalDAV configures the calendar-constraints feature (issue #498). FTW hosts
-// its own in-process, pure-Go CalDAV server (emersion/go-webdav, MIT — see
-// internal/caldavserver) and runs a CalDAV *client* against it that polls the
-// calendar collection and maps events into planner intents:
-//
-//   - an "away"/vacation event switches the load model to its away profile
-//     for the interval, so the planner conserves battery while the house is
-//     empty;
-//   - an EV "charged-by-departure" event sets the matching loadpoint's
-//     target SoC + deadline, which the MPC already honours.
-//
-// Events are classified by case-insensitive keyword match on the event
-// title (SUMMARY). Keyword lists are configurable so non-English calendars
-// work. The whole feature is opt-in (Enabled) and fail-soft: an unreachable
-// server never blocks control.
-//
-// Password is stored in state.db (key "caldav_password"), NOT in config.yaml,
-// mirroring EVCharger.Password.
-type CalDAV struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
-
-	// URL is the base URL of the CalDAV server. Defaults to the in-process
-	// native server at http://localhost:5232.
-	URL string `yaml:"url,omitempty" json:"url,omitempty"`
-
-	Username string `yaml:"username,omitempty" json:"username,omitempty"`
-	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
-
-	// CalendarPath is the collection path polled for events, relative to URL
-	// (e.g. "/ftw/energy/" for new configs). The runtime fallback below keeps
-	// the former path for configs that omitted this field before the rebrand.
-	CalendarPath string `yaml:"calendar_path,omitempty" json:"calendar_path,omitempty"`
-
-	// PollIntervalS is how often the collection is re-fetched. Default 300s.
-	PollIntervalS int `yaml:"poll_interval_s,omitempty" json:"poll_interval_s,omitempty"`
-
-	// HorizonDays bounds the calendar-query time range (recurrences are
-	// expanded server-side within it). Default 7.
-	HorizonDays int `yaml:"horizon_days,omitempty" json:"horizon_days,omitempty"`
-
-	// EVLoadpointID is the loadpoint an EV event targets when the title
-	// names no specific one. Empty = the first/only configured loadpoint.
-	EVLoadpointID string `yaml:"ev_loadpoint_id,omitempty" json:"ev_loadpoint_id,omitempty"`
-
-	EVDefaultTargetSoC    float64 `yaml:"ev_default_target_soc,omitempty" json:"ev_default_target_soc,omitempty"`
-	EVDefaultTargetSoCPct float64 `yaml:"ev_default_target_soc_pct,omitempty" json:"ev_default_target_soc_pct,omitempty"`
-
-	// AwayKeywords / EVKeywords classify an event by its title. Matching is
-	// case-insensitive substring. Empty lists fall back to the built-in
-	// defaults (see DefaultAwayKeywords / DefaultEVKeywords).
-	AwayKeywords []string `yaml:"away_keywords,omitempty" json:"away_keywords,omitempty"`
-	EVKeywords   []string `yaml:"ev_keywords,omitempty" json:"ev_keywords,omitempty"`
-
-	// EVSEHistory (default ON when enabled) makes FTW *write* a calendar
-	// event for each completed EV charging session into HistoryPath. This is
-	// an outbound capability — the user subscribes to HistoryPath to see when
-	// the charger was used. HistoryPath MUST differ from CalendarPath so FTW
-	// never re-reads its own history events as inbound intents.
-	EVSEHistory *bool  `yaml:"evse_history,omitempty" json:"evse_history,omitempty"`
-	HistoryPath string `yaml:"history_path,omitempty" json:"history_path,omitempty"`
-
-	// PublishPlan (default ON when enabled) makes FTW write its forward-looking
-	// plan — upcoming battery charge/discharge windows from the MPC — as
-	// read-only events into PlanPath (a SEPARATE collection), so you can see
-	// what FTW intends to do. Reconciled each publish so stale events are
-	// removed rather than piling up.
-	PublishPlan          *bool  `yaml:"publish_plan,omitempty" json:"publish_plan,omitempty"`
-	PlanPath             string `yaml:"plan_path,omitempty" json:"plan_path,omitempty"`
-	PlanPublishIntervalS int    `yaml:"plan_publish_interval_s,omitempty" json:"plan_publish_interval_s,omitempty"`
-
-	// ManageCredentials (default ON when enabled) makes FTW generate a random
-	// password on first enable, which the in-process CalDAV server then
-	// authenticates against. The credential is shown in the Settings → Calendar
-	// tab (with a QR) to paste into a calendar app, so the operator never has to
-	// set one by hand.
-	ManageCredentials *bool `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
-
-	// Listen is the bind address for the in-process CalDAV server. Default
-	// ":5232". FTW binds it on the LAN.
-	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
-}
-
-// ListenAddr returns the native CalDAV server bind address (default ":5232").
-func (cv *CalDAV) ListenAddr() string {
-	if cv != nil && strings.TrimSpace(cv.Listen) != "" {
-		return strings.TrimSpace(cv.Listen)
-	}
-	return ":5232"
-}
-
-// ManageCredentialsEnabled reports whether FTW should auto-generate the managed
-// CalDAV credential. Nil-safe; defaults ON when the feature is on.
-func (cv *CalDAV) ManageCredentialsEnabled() bool {
-	return cv != nil && cv.Enabled && (cv.ManageCredentials == nil || *cv.ManageCredentials)
-}
-
-// EVSEHistoryEnabled reports whether FTW should write EV-session history
-// events. Nil-safe; defaults ON when the feature is enabled.
-func (cv *CalDAV) EVSEHistoryEnabled() bool {
-	return cv != nil && cv.Enabled && (cv.EVSEHistory == nil || *cv.EVSEHistory)
-}
-
-// PublishPlanEnabled reports whether FTW should publish its forward-looking
-// plan calendar. Nil-safe; defaults ON when the feature is enabled.
-func (cv *CalDAV) PublishPlanEnabled() bool {
-	return cv != nil && cv.Enabled && (cv.PublishPlan == nil || *cv.PublishPlan)
-}
-
-// CalDAV defaults. Keyword identifiers are English; operators may override
-// with localised terms via config (the values are user-facing).
-var (
-	DefaultCalDAVURL          = "http://localhost:5232"
-	DefaultCalDAVCalendarPath = "/fortytwowatts/energy/"
-	DefaultCalDAVHistoryPath  = "/fortytwowatts/history/"
-	DefaultCalDAVPlanPath     = "/fortytwowatts/plan/"
-	DefaultCalDAVPlanPublishS = 900
-	DefaultCalDAVUsername     = "fortytwowatts"
-	DefaultCalDAVPollS        = 300
-	DefaultCalDAVHorizonDays  = 7
-	DefaultCalDAVEVTargetSoC  = 0.8
-	DefaultAwayKeywords       = []string{"away", "vacation", "holiday"}
-	DefaultEVKeywords         = []string{"ev", "car", "charge"}
-)
-
-// Validate enforces range rules. Defaults are applied by the calendar
-// service at construction time, so unset fields are legal here.
-func (cv *CalDAV) Validate() error {
-	if cv == nil || !cv.Enabled {
-		return nil
-	}
-	if cv.PollIntervalS < 0 {
-		return errors.New("caldav.poll_interval_s must be >= 0")
-	}
-	if cv.HorizonDays < 0 {
-		return errors.New("caldav.horizon_days must be >= 0")
-	}
-	if cv.EVDefaultTargetSoC < 0 || cv.EVDefaultTargetSoC > 1 {
-		return errors.New("caldav.ev_default_target_soc must be in [0, 1]")
-	}
-	return nil
 }
 
 // Normalize folds the legacy `email:` YAML key into Username and clears
@@ -1464,11 +1323,6 @@ func (c Config) MaskSecrets() Config {
 		cp.Password = ""
 		out.EVCharger = &cp
 	}
-	if out.CalDAV != nil {
-		cp := *out.CalDAV
-		cp.Password = ""
-		out.CalDAV = &cp
-	}
 	if out.HomeAssistant != nil {
 		cp := *out.HomeAssistant
 		cp.Password = ""
@@ -1567,9 +1421,6 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	if incoming.EVCharger != nil && existing.EVCharger != nil && incoming.EVCharger.Password == "" {
 		incoming.EVCharger.Password = existing.EVCharger.Password
 	}
-	if incoming.CalDAV != nil && existing.CalDAV != nil && incoming.CalDAV.Password == "" {
-		incoming.CalDAV.Password = existing.CalDAV.Password
-	}
 	// Masked out on the way to the UI, so an unchanged password comes back
 	// empty. Without this a save from the settings tab would blank it, and an
 	// enabled server would then fail validation on the next reload.
@@ -1657,6 +1508,17 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	var c Config
 	if err := doc.Decode(&c); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	// Old calendars no longer supply occupancy or charging targets. Read only
+	// the enable flag so obsolete settings cannot prevent an upgrade from booting.
+	var retired struct {
+		CalDAV struct {
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"caldav"`
+	}
+	if doc.Decode(&retired) == nil && retired.CalDAV.Enabled {
+		c.RetiredCalendarEnabled = true
+		c.LoadWarnings = append(c.LoadWarnings, "Calendar support has been removed. Set future charging targets under Loadpoints; calendar events no longer change charging or occupancy. Stored calendar data remains in state.db.")
 	}
 	// An omitted app_link section follows the new default. An explicit YAML
 	// null was a valid opt-out before that default changed, so retain it as an
@@ -2087,9 +1949,6 @@ func (c *Config) Validate() error {
 		if err := c.EVCharger.Validate(); err != nil {
 			return err
 		}
-	}
-	if err := c.CalDAV.Validate(); err != nil {
-		return err
 	}
 	if err := c.FleetPing.Validate(); err != nil {
 		return err

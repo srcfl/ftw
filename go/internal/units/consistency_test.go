@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -175,25 +174,6 @@ func TestVehiclePickSoCIsFraction(t *testing.T) {
 		if _, ok := typ.FieldByName(banned); ok {
 			t.Fatalf("telemetry.VehiclePick.%s must not exist; use SoC/ChargeLimit 0–1", banned)
 		}
-	}
-}
-
-func TestCalendarDeadlineSoCIsFraction(t *testing.T) {
-	typ := reflect.TypeOf(calendar.EVDeadline{})
-	if _, ok := typ.FieldByName("TargetSoCPct"); ok {
-		t.Fatal("calendar.EVDeadline.TargetSoCPct must not exist; store TargetSoC as 0–1")
-	}
-	d := calendar.EVDeadline{TargetSoC: 0.80}
-	raw, err := json.Marshal(d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := m["target_soc_pct"]; ok {
-		t.Fatalf("EVDeadline JSON still emits target_soc_pct: %s", raw)
 	}
 }
 

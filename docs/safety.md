@@ -89,7 +89,7 @@ failure and recovery.
 
 ## External systems
 
-Home Assistant, CalDAV, notifications, cloud drivers, price/weather services
+Home Assistant, notifications, cloud drivers, price/weather services
 and Nova fail soft. Their network I/O is outside the control tick, and their
 failure cannot disable local measurement or safety. Self-update snapshots state
 before replacement and uses immutable version targets.
