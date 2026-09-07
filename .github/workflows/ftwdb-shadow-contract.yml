@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: srcfl/ftwdb
-          ref: 4927c1cda891941e77f22122dd225a2dde1d43e3
+          ref: 1a74d62667ffe5d30d0ee58a1bcfdab8d7eabfb6
           path: .ftwdb-contract
       - uses: actions/setup-go@v7
         with:

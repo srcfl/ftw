@@ -10,8 +10,8 @@ services:
   ftwdb-shadow:
     profiles: [ftwdb-shadow]
     build:
-      context: https://github.com/srcfl/ftwdb.git#4927c1cda891941e77f22122dd225a2dde1d43e3
-    image: ftwdb-shadow:4927c1cda891941e77f22122dd225a2dde1d43e3
+      context: https://github.com/srcfl/ftwdb.git#1a74d62667ffe5d30d0ee58a1bcfdab8d7eabfb6
+    image: ftwdb-shadow:1a74d62667ffe5d30d0ee58a1bcfdab8d7eabfb6
     user: "100:101"
     network_mode: none
     read_only: true
