@@ -20,6 +20,7 @@ type HistoryFeed struct {
 	events  chan CommittedHistory
 	offered uint64
 	dropped uint64
+	stopped bool
 }
 
 type HistoryFeedStats struct {
@@ -52,6 +53,9 @@ func (s *Store) offerCommittedHistory(p *HistoryPoint) {
 	point.JSON = "" // The beta copies numeric site history only.
 	feed.mu.Lock()
 	defer feed.mu.Unlock()
+	if feed.stopped {
+		return
+	}
 	feed.offered++
 	select {
 	case feed.events <- CommittedHistory{Sequence: feed.offered, CommittedAtMicros: time.Now().UnixMicro(), Point: point}:
@@ -61,6 +65,14 @@ func (s *Store) offerCommittedHistory(p *HistoryPoint) {
 }
 
 func (f *HistoryFeed) Events() <-chan CommittedHistory { return f.events }
+
+// Stop ends the session without discarding its queue or blocking SQLite on I/O.
+// The consumer can still drain all ticks offered before Stop returns.
+func (f *HistoryFeed) Stop() {
+	f.mu.Lock()
+	f.stopped = true
+	f.mu.Unlock()
+}
 
 func (f *HistoryFeed) Stats() HistoryFeedStats {
 	f.mu.Lock()

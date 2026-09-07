@@ -650,6 +650,13 @@ func main() {
 			slog.Warn("failed to spawn driver", "name", d.Name, "err", err)
 		}
 	}
+	var shadow *ftwdbshadow.Beta
+	defer func() {
+		// Defers run in reverse order: hardware stops before this bounded drain.
+		if shadow != nil {
+			shadow.Close()
+		}
+	}()
 	defer reg.ShutdownAll()
 	batteryIdentity := func(name string) (string, bool) {
 		return runningDeviceID(reg, name)
@@ -702,8 +709,7 @@ func main() {
 	var forecastConfigMu sync.RWMutex
 	var ocppSrv *ocpp.Server
 	forecastSettings := newForecastSiteConfig(st)
-	shadow := ftwdbshadow.Start(ctx, st, *shadowSocket, forecastSettings.Snapshot().SiteID, Version)
-	defer shadow.Close()
+	shadow = ftwdbshadow.Start(ctx, st, *shadowSocket, forecastSettings.Snapshot().SiteID, Version)
 	forecastSettings.identity = func(name string) (string, bool) {
 		if id, ok := runningDeviceID(reg, name); ok {
 			return id, true
