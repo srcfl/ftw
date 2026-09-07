@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 func TestEVSettingsAcknowledgeWhilePlanIsBlocked(t *testing.T) {
@@ -21,6 +22,12 @@ func TestEVSettingsAcknowledgeWhilePlanIsBlocked(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, mgr, svc := newScheduleServer(t)
+			now := time.Now().UTC().Truncate(15 * time.Minute)
+			cloud := 0.0
+			if err := svc.Store.SaveForecasts([]state.ForecastPoint{{SlotTsMs: now.UnixMilli(), SlotLenMin: 60,
+				CloudCoverPct: &cloud, Source: "test", FetchedAtMs: now.UnixMilli()}}); err != nil {
+				t.Fatal(err)
+			}
 			mgr.SetSchedule("garage", loadpoint.Schedule{SoC: .7, TimeOfDayMinUTC: 360})
 			mgr.SetSurplusOnly("garage", true)
 			entered, release := make(chan struct{}), make(chan struct{})

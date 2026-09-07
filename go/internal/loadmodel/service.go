@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -65,9 +66,14 @@ type Service struct {
 	SampleInterval time.Duration
 	PersistEvery   int64
 
-	mu     sync.RWMutex
-	active Profile
-	models map[Profile]*Model
+	mu                sync.RWMutex
+	persistMu         sync.Mutex
+	generation        uint64
+	active            Profile
+	models            map[Profile]*Model
+	forecastOptions   telemetry.ForecastOptions
+	timezone          string
+	lastForecastInput time.Time
 
 	stop chan struct{}
 	done chan struct{}
@@ -85,10 +91,11 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW, 
 		done:           make(chan struct{}),
 		active:         ProfileHome,
 		models:         make(map[Profile]*Model),
+		timezone:       "UTC",
 	}
 	for _, profile := range Profiles() {
 		s.models[profile] = newProfileModel(peakW, profile)
-		s.models[profile].MaxPlausibleW = maxPlausibleW
+		s.models[profile].MaxPlausibleW = 0
 	}
 	if st != nil {
 		loadedProfiles := make(map[Profile]bool)
@@ -121,6 +128,26 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW, 
 			}
 		}
 	}
+	if st != nil {
+		if zone, ok := st.LoadConfig("loadmodel/timezone"); ok {
+			if _, err := time.LoadLocation(zone); err == nil {
+				s.timezone = zone
+			}
+		}
+		for _, profile := range Profiles() {
+			old := s.models[profile]
+			zone := old.Timezone
+			if zone == "" {
+				zone = "UTC"
+			}
+			if old.Samples > 0 && zone != s.timezone {
+				m := newProfileModel(old.PeakW, profile)
+				m.HeatingW_per_degC = old.HeatingW_per_degC
+				s.models[profile] = m
+			}
+			s.models[profile].Timezone = s.timezone
+		}
+	}
 	return s
 }
 
@@ -133,6 +160,8 @@ func (s *Service) SetSiteMeter(name string) {
 	}
 	s.mu.Lock()
 	s.SiteMeter = name
+	s.generation++
+	s.lastForecastInput = time.Time{}
 	s.mu.Unlock()
 }
 
@@ -159,13 +188,12 @@ func restoreModel(js string, peakW, maxPlausibleW float64, profile Profile) *Mod
 			"stored_hash", res.StoredHash, "current_hash", FeatureHash())
 		return nil
 	}
-	m.PeakW = peakW                 // config may have changed
-	m.MaxPlausibleW = maxPlausibleW // ditto — fuse size is editable
+	m.PeakW = peakW     // config may have changed
+	m.MaxPlausibleW = 0 // Grid fuse limits do not bound gross house load.
 	if m.PriorScale <= 0 {
 		m.PriorScale = newProfileModel(peakW, profile).PriorScale
 	}
-	// Repair any bucket means that were poisoned by the pre-guard bug where
-	// heating-subtracted samples were clamped to 0 and stored in the EMA.
+	// Repair nonfinite or negative stored means; retain valid low readings.
 	m.repairPoisonedBuckets()
 	return &m
 }
@@ -239,12 +267,12 @@ func (s *Service) activeModelLocked() *Model {
 
 // Predict is the MPC's integration point — expected load at time t.
 // If a temperature source is wired, the heating-gain correction is
-// included; otherwise we predict assuming indoor setpoint (no heating).
+// included; unknown weather retains the last known heat estimate.
 func (s *Service) Predict(t time.Time) float64 {
 	if s == nil {
 		return 0
 	}
-	temp := HeatingReferenceC
+	temp := math.NaN()
 	if s.Temp != nil {
 		if v, ok := s.Temp(t); ok {
 			temp = v
@@ -269,7 +297,7 @@ func (s *Service) PredictWith(t time.Time, profile Profile) float64 {
 	if !profile.valid() {
 		return s.Predict(t)
 	}
-	temp := HeatingReferenceC
+	temp := math.NaN()
 	if s.Temp != nil {
 		if v, ok := s.Temp(t); ok {
 			temp = v
@@ -324,85 +352,104 @@ func (s *Service) loop(ctx context.Context) {
 	}
 }
 
-func (s *Service) driverOnline(name string) bool {
-	if s == nil || s.Tele == nil {
-		return false
-	}
-	h := s.Tele.DriverHealth(name)
-	return h != nil && h.IsOnline()
-}
-
-// sample computes measured house load = grid_w - pv_w - bat_w - ev_w - v2x_w
-// and feeds it to the model. Skips when drivers haven't settled yet
-// (no site meter reading). EV is subtracted so the weekly-pattern
-// learner tracks house consumption, not "house + occasional 10 kWh
-// car session"; V2X is also subtracted because it is vehicle storage,
-// not household demand, whether charging or discharging.
-func (s *Service) sample() {
-	s.sampleAt(time.Now())
-}
-
-func (s *Service) sampleAt(now time.Time) {
-	s.mu.RLock()
-	siteMeter := s.SiteMeter
-	s.mu.RUnlock()
-	meter := s.Tele.Get(siteMeter, telemetry.DerMeter)
-	if meter == nil {
-		slog.Debug("loadmodel: skip (no site meter yet)")
-		return
-	}
-	if !s.driverOnline(siteMeter) {
-		slog.Debug("loadmodel: skip (site meter offline)", "driver", siteMeter)
-		return
-	}
-	gridW := meter.SmoothedW
-	var pvW, batW float64
-	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
-		if !s.driverOnline(r.Driver) {
-			continue
-		}
-		pvW += r.SmoothedW // site-sign: negative = generating
-	}
-	for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-		if !s.driverOnline(r.Driver) {
-			continue
-		}
-		batW += r.SmoothedW // site-sign: positive = charging
-	}
-	evW := s.Tele.SumOnlineEVW()   // online-only so stale readings don't poison load
-	v2xW := s.Tele.SumOnlineV2XW() // signed: +charging, -discharging
-	loadW := gridW - pvW - batW - evW - v2xW
-	if loadW < 0 {
-		// Almost always a transient — during a PI step the measured
-		// flow can briefly appear negative. Skip rather than train
-		// on a physically impossible value.
-		slog.Debug("loadmodel: skip (neg load)", "grid_w", gridW, "pv_w", pvW, "bat_w", batW, "ev_w", evW, "v2x_w", v2xW)
-		return
-	}
-
-	// Outdoor temp for heating-fit. HeatingReferenceC = "no contribution".
-	temp := HeatingReferenceC
-	if s.Temp != nil {
-		if v, ok := s.Temp(now); ok {
-			temp = v
-		}
-	}
-
+// SetForecastOptions supplies the configured electrical measurement topology.
+func (s *Service) SetForecastOptions(opts telemetry.ForecastOptions) {
 	s.mu.Lock()
-	profile := s.active
-	model := s.activeModelLocked()
-	updated := model.Update(now, loadW, temp)
-	samples := model.Samples
-	mae := model.MAE
-	heating := model.HeatingW_per_degC
+	defer s.mu.Unlock()
+	opts.ExpectedFlows = append([]telemetry.ForecastFlow(nil), opts.ExpectedFlows...)
+	s.forecastOptions = opts
+	s.generation++
+}
+
+// Reconfigure binds every profile to the same electrical and clock boundary.
+// The binding lives inside each saved model. A crash after saving only some
+// profiles leaves a mismatch, which causes a full cold start at the next bind.
+func (s *Service) Reconfigure(siteMeter string, opts telemetry.ForecastOptions, zone, revision string) error {
+	if s == nil {
+		return nil
+	}
+	if revision == "" {
+		return fmt.Errorf("loadmodel config revision is empty")
+	}
+	if _, err := time.LoadLocation(zone); err != nil {
+		return err
+	}
+	opts.ExpectedFlows = append([]telemetry.ForecastFlow(nil), opts.ExpectedFlows...)
+	s.mu.Lock()
+	changed := s.SiteMeter != siteMeter || s.timezone != zone
+	for _, p := range Profiles() {
+		if s.models[p] == nil || s.models[p].ConfigRevision != revision {
+			changed = true
+		}
+	}
+	s.SiteMeter, s.timezone, s.forecastOptions = siteMeter, zone, opts
+	s.generation++
+	s.lastForecastInput = time.Time{}
+	if changed {
+		peak := s.activeModelLocked().PeakW
+		for _, p := range Profiles() {
+			m := newProfileModel(peak, p)
+			m.Timezone, m.ConfigRevision = zone, revision
+			s.models[p] = m
+		}
+	}
 	s.mu.Unlock()
+	return s.persist()
+}
 
-	slog.Info("loadmodel: sample",
-		"profile", profile, "load_w", loadW, "temp_c", temp,
-		"samples", samples, "mae_w", mae,
-		"heat_w_per_c", heating, "updated", updated)
-
-	if updated && samples%s.PersistEvery == 0 {
+// SetTimezone uses one site clock for all model calls, independent of caller zones.
+// Changing the zone discards the old clock buckets; their meanings changed.
+func (s *Service) SetTimezone(zone string) error {
+	if _, err := time.LoadLocation(zone); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.timezone != zone {
+		s.timezone = zone
+		s.generation++
+		for _, p := range Profiles() {
+			old := s.models[p]
+			m := newProfileModel(old.PeakW, p)
+			m.Timezone = zone
+			m.HeatingW_per_degC = old.HeatingW_per_degC
+			s.models[p] = m
+		}
+	}
+	s.mu.Unlock()
+	if s.Store != nil {
+		return s.Store.SaveConfig("loadmodel/timezone", zone)
+	}
+	return nil
+}
+func (s *Service) sample() { s.sampleAt(time.Now()) }
+func (s *Service) sampleAt(now time.Time) {
+	if s.Tele == nil {
+		return
+	}
+	s.mu.RLock()
+	site, opts, profile, generation := s.SiteMeter, s.forecastOptions, s.active, s.generation
+	s.mu.RUnlock()
+	reading := s.Tele.ForecastMeasurement(now, site, opts)
+	temp := math.NaN()
+	if s.Temp != nil {
+		if value, ok := s.Temp(now); ok {
+			temp = value
+		}
+	}
+	s.mu.Lock()
+	if s.active != profile || s.SiteMeter != site || s.generation != generation {
+		s.mu.Unlock()
+		return
+	}
+	model := s.activeModelLocked()
+	updated := false
+	if reading.Valid && reading.Latest.After(s.lastForecastInput) {
+		s.lastForecastInput = reading.Latest
+		updated = model.Update(now, reading.HouseholdW, temp)
+	}
+	samples := model.Samples
+	s.mu.Unlock()
+	if updated && s.PersistEvery > 0 && samples%s.PersistEvery == 0 {
 		if err := s.persist(); err != nil {
 			slog.Warn("loadmodel persist", "err", err)
 		}
@@ -417,11 +464,14 @@ func (s *Service) persistProfile(profile Profile) error {
 }
 
 func (s *Service) persist() error {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	if s.Store == nil {
 		return nil
 	}
 	s.mu.RLock()
 	active := s.active
+	zone := s.timezone
 	models := make(map[Profile]string, len(s.models))
 	for _, profile := range Profiles() {
 		if s.models[profile] == nil {
@@ -435,6 +485,9 @@ func (s *Service) persist() error {
 		models[profile] = string(js)
 	}
 	s.mu.RUnlock()
+	if err := s.Store.SaveConfig("loadmodel/timezone", zone); err != nil {
+		return err
+	}
 	if err := s.Store.SaveConfig(profileStateKey, string(active)); err != nil {
 		return err
 	}
@@ -502,6 +555,10 @@ func (s *Service) Reset() {
 	heating := old.HeatingW_per_degC
 	s.models[profile] = newProfileModel(peak, profile)
 	s.models[profile].HeatingW_per_degC = heating
+	s.models[profile].Timezone = s.timezone
+	s.models[profile].ConfigRevision = old.ConfigRevision
+	s.generation++
+	s.lastForecastInput = time.Time{}
 	s.mu.Unlock()
 	if err := s.persist(); err != nil {
 		slog.Warn("loadmodel persist", "err", err)

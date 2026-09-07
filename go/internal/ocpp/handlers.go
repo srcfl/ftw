@@ -3,6 +3,7 @@ package ocpp
 import (
 	"encoding/json"
 	"log/slog"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -77,6 +78,8 @@ type chargerState struct {
 	sessionStartMeterWh float64
 	sessionMeterWh      float64
 	lastPowerW          float64
+	forecastPower       telemetry.ForecastPowerSample
+	powerConnectedAt    time.Time
 	// lastAmps is the most recent per-phase limit this charger accepted.
 	// A resume with no rate of its own restores it.
 	lastAmps float64
@@ -171,7 +174,7 @@ func (h *Handler) SetApprovedIDs(ids []string) {
 	}
 	h.mu.Unlock()
 	for _, id := range revoked {
-		blob, _ := json.Marshal(map[string]any{"type": "ev", "w": 0.0})
+		blob, _ := json.Marshal(map[string]any{"type": "ev", "w": 0.0, "forecast_power": telemetry.ForecastPowerSample{Version: 1}})
 		h.tel.Update(id, telemetry.DerEV, 0, nil, blob)
 	}
 }
@@ -382,10 +385,12 @@ func (h *Handler) OnConnect(id string) {
 	s := h.state(id)
 	h.mu.Lock()
 	s.online = true
+	s.powerConnectedAt = time.Now().Truncate(time.Second)
 	s.connectionGeneration++
 	s.connectedKnown = false
 	s.charging = false
 	s.lastPowerW = 0
+	s.forecastPower.Known = false
 	s.identityCurrent = false
 	s.featureProfiles = ""
 	s.steerable = nil
@@ -412,6 +417,7 @@ func (h *Handler) OnDisconnect(id string) {
 	s.connectedKnown = false
 	s.charging = false
 	s.lastPowerW = 0
+	s.forecastPower.Known = false
 	h.mu.Unlock()
 	// Push a zero so the dispatch clamp releases — otherwise the last known
 	// non-zero w would survive until staleness kicks in.
@@ -513,6 +519,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.MeterValuesConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	received := time.Now()
 	for _, mv := range req.MeterValue {
 		for _, sv := range mv.SampledValue {
 			measurand := sv.Measurand
@@ -530,6 +537,13 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 					val *= 1000
 				}
 				s.lastPowerW = val
+				if sv.Phase == "" && (sv.Unit == "" || sv.Unit == types.UnitOfMeasureW || sv.Unit == types.UnitOfMeasureKW) {
+					measured := received
+					if mv.Timestamp != nil {
+						measured = mv.Timestamp.Time
+					}
+					s.recordForecastPower(val, measured, received)
+				}
 			case types.MeasurandEnergyActiveImportRegister:
 				if sv.Unit == types.UnitOfMeasureKWh {
 					val *= 1000
@@ -580,6 +594,7 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 	s.transactionID = -1
 	s.charging = false
 	s.lastPowerW = 0
+	s.forecastPower.Known = false
 	s.sessionMeterWh = sessionWh
 	h.mu.Unlock()
 
@@ -610,11 +625,13 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 	h.mu.Lock()
 	approved := h.approved[id]
 	w := s.lastPowerW
+	s.forecastPower.Version = 1
 	data := map[string]any{
-		"type":       "ev",
-		"w":          w,
-		"charging":   s.charging,
-		"session_wh": s.sessionMeterWh,
+		"type":           "ev",
+		"w":              w,
+		"charging":       s.charging,
+		"session_wh":     s.sessionMeterWh,
+		"forecast_power": s.forecastPower,
 	}
 	data["connection_generation"] = s.connectionGeneration
 	if s.online && s.connectedKnown {
@@ -633,4 +650,15 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 	}
 	blob, _ := json.Marshal(data)
 	h.tel.Update(id, telemetry.DerEV, w, nil, blob)
+}
+
+// recordForecastPower is separate from the existing status/dispatch power.
+// Only a real aggregate power measurand may refresh it. Samples older than a
+// connection or the accepted sample, and future/nonfinite values, cannot revive
+// a stale or synthesized reading. The caller holds h.mu.
+func (s *chargerState) recordForecastPower(w float64, measured, received time.Time) {
+	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 || measured.IsZero() || measured.After(received) || measured.Before(s.powerConnectedAt) || measured.UnixMilli() <= s.forecastPower.MeasuredAtMS {
+		return
+	}
+	s.forecastPower = telemetry.ForecastPowerSample{Version: 1, Known: true, Watts: w, MeasuredAtMS: measured.UnixMilli(), ReceivedAtMS: received.UnixMilli()}
 }

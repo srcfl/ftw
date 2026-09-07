@@ -179,6 +179,7 @@ func TestService_PredictAnchorsOnLiveTelemetry(t *testing.T) {
 	tel := telemetry.NewStore()
 	// Site convention: PV is negative. 8000 W = -8000 stored.
 	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+	tel.RecordDriverSuccess("pv")
 
 	svc := &Service{
 		Tele:     tel,
@@ -223,6 +224,7 @@ func TestService_PredictFallsBackWhenNoTelemetry(t *testing.T) {
 func TestPredict_AppliesNowAnchor(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+	tel.RecordDriverSuccess("pv")
 
 	svc := &Service{
 		Tele:     tel,
@@ -249,6 +251,7 @@ func TestPredictStructural_DoesNotApplyNowAnchor(t *testing.T) {
 	tel := telemetry.NewStore()
 	// 8 kW live, but model predicts ~715 W from the prior.
 	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+	tel.RecordDriverSuccess("pv")
 
 	svc := &Service{
 		Tele:     tel,
@@ -286,16 +289,16 @@ func TestPredictStructural_StillRespectsRLS(t *testing.T) {
 	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
 	before := svc.PredictStructural(now, 20)
 
-	// Drive ~60 RLS updates against a synthetic "actual" that is well
+	// Drive RLS updates on 60 separate days against an actual value well
 	// above what the cold-start prior would predict. RLS should track
 	// the new operating point.
 	target := before * 1.6
 	for i := 0; i < 60; i++ {
 		svc.mu.Lock()
-		svc.model.Update(800, 20, now, target)
+		svc.model.Update(800, 20, now.Add(time.Duration(i)*24*time.Hour), target)
 		svc.mu.Unlock()
 	}
-	after := svc.PredictStructural(now, 20)
+	after := svc.PredictStructural(now.Add(60*24*time.Hour), 20)
 	if after <= before*1.1 {
 		t.Errorf("PredictStructural did not track RLS update: before=%.0f W, after=%.0f W (target was %.0f W)", before, after, target)
 	}
@@ -315,6 +318,7 @@ func TestPredictStructural_StillRespectsRLS(t *testing.T) {
 func TestResidualBufferSampler_UsesStructuralPrediction(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+	tel.RecordDriverSuccess("pv")
 
 	svc := &Service{
 		Tele:         tel,

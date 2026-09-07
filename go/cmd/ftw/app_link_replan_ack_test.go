@@ -23,6 +23,11 @@ func TestAppEVEditsConfirmWhilePlanIsBlocked(t *testing.T) {
 			if err := st.SavePrices([]state.PricePoint{{Zone: "SE4", SlotTsMs: now.UnixMilli(), SlotLenMin: 15, SpotOreKwh: 50, TotalOreKwh: 100}}); err != nil {
 				t.Fatal(err)
 			}
+			cloud := 0.0
+			if err := st.SaveForecasts([]state.ForecastPoint{{SlotTsMs: now.UnixMilli(), SlotLenMin: 15,
+				CloudCoverPct: &cloud, Source: "test", FetchedAtMs: now.UnixMilli()}}); err != nil {
+				t.Fatal(err)
+			}
 			svc := mpc.New(st, nil, "SE4", mpc.Params{Mode: mpc.ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5, CapacityWh: 10000, InitialSoC: .5, SoCMin: .1, SoCMax: .95, MaxChargeW: 3000, MaxDischargeW: 3000, ChargeEfficiency: .95, DischargeEfficiency: .95})
 			svc.Horizon = time.Hour
 			svc.BaseLoad = 500

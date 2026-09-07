@@ -22,6 +22,7 @@ def verify_bundle(root):
     manifest = json.loads((root / "manifest.json").read_text())
     if (manifest.get("schema_version") != 1 or manifest.get("product") != "energyplan"
             or manifest.get("protocol_version") != 1
+            or manifest.get("forecast_protocol_version") != 1
             or manifest.get("source_repository") != "srcfl/energyplan"
             or not re.fullmatch(r"[0-9a-f]{40}", manifest.get("source_commit", ""))
             or not re.fullmatch(r"\d+\.\d+\.\d+", manifest.get("version", ""))):
@@ -30,6 +31,7 @@ def verify_bundle(root):
     if set(artifacts) != PLATFORMS:
         raise ValueError("The bundle must contain every supported platform")
     expected = {f"ftw-solver-{name}" for name in PLATFORMS}
+    expected |= {"forecast-v1.schema.json", "forecast-v1.response.schema.json"}
     expected |= {"LICENSE.txt", "THIRD-PARTY-NOTICES.txt", "rust-runtime/COPYRIGHT-library.html"}
     expected |= {f"rust-runtime/licenses/{name}" for name in RUNTIME_LICENSES}
     if set(files) != expected:
@@ -100,7 +102,7 @@ def main():
     result = subprocess.run([str(binary)], input='{"type":"handshake"}\n', capture_output=True,
                             text=True, check=True, timeout=5)
     reply = json.loads(result.stdout)
-    if reply.get("protocol_version") != 1 or reply.get("version") != manifest["version"]:
+    if reply.get("protocol_version") != 1 or reply.get("version") != manifest["version"] or reply.get("forecast_protocol_version") != 1:
         raise ValueError("Worker handshake does not match the pinned version")
     print(f"Verified Energyplan {manifest['version']}: {len(manifest['artifacts'])} platforms; {host_key()} handshake passed")
 

@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
@@ -260,10 +261,14 @@ func EstimatePVW(lat, lon float64, t time.Time, cloudPct *float64, ratedW float6
 
 // Service wraps a provider + store + scheduler for forecasts.
 type Service struct {
-	Provider Provider
-	Store    *state.Store
-	Lat, Lon float64
-	RatedPVW float64 // total rated PV across all arrays (used for estimate)
+	mu         sync.RWMutex
+	generation uint64
+	refresh    chan struct{}
+	ACLimitW   float64 // verified inverter AC limit; zero means unknown
+	Provider   Provider
+	Store      *state.Store
+	Lat, Lon   float64
+	RatedPVW   float64 // total rated PV across all arrays (used for estimate)
 
 	// Arrays holds per-plane geometry (tilt/azimuth/kWp) mirrored from the
 	// weather config. When set, a radiation-bearing provider's horizontal
@@ -324,6 +329,7 @@ func FromConfig(cfg *config.Weather, ratedPVW float64, st *state.Store, userAgen
 		Lat: cfg.Latitude, Lon: cfg.Longitude,
 		RatedPVW: ratedPVW,
 		Arrays:   arrays,
+		refresh:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -340,35 +346,76 @@ func (s *Service) Stop() {
 	<-s.done
 }
 
+// Reconfigure invalidates cached forecasts and in-flight fetches from the old
+// location or provider. The replacement becomes visible as one generation.
+func (s *Service) Reconfigure(cfg *config.Weather, ratedPVW float64, userAgent string) {
+	next := FromConfig(cfg, ratedPVW, s.Store, userAgent)
+	s.mu.Lock()
+	s.generation++
+	if next == nil {
+		s.Provider = nil
+	} else {
+		s.Provider, s.Lat, s.Lon = next.Provider, next.Lat, next.Lon
+		s.RatedPVW, s.Arrays = next.RatedPVW, next.Arrays
+	}
+	if err := s.Store.InvalidateWeatherForecasts(); err != nil {
+		slog.Warn("forecast cache invalidation failed", "err", err)
+	}
+	s.mu.Unlock()
+	select {
+	case s.refresh <- struct{}{}:
+	default:
+	}
+}
+
 func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
-	s.fetchAndStore(ctx)
-	t := time.NewTicker(3 * time.Hour)
-	defer t.Stop()
+	retry := time.Minute
 	for {
+		delay := 3 * time.Hour
+		if !s.fetchAndStore(ctx) {
+			delay = retry
+			retry = min(15*time.Minute, 2*retry)
+		} else {
+			retry = time.Minute
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-s.stop:
+			timer.Stop()
 			return
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-t.C:
-			s.fetchAndStore(ctx)
+		case <-s.refresh:
+			timer.Stop()
+		case <-timer.C:
 		}
 	}
 }
 
-func (s *Service) fetchAndStore(ctx context.Context) {
-	rows, err := s.Provider.Fetch(ctx, s.Lat, s.Lon)
+func (s *Service) fetchAndStore(ctx context.Context) bool {
+	s.mu.RLock()
+	provider, lat, lon, rated, acLimit, generation := s.Provider, s.Lat, s.Lon, s.RatedPVW, s.ACLimitW, s.generation
+	arrays := append([]Array(nil), s.Arrays...)
+	s.mu.RUnlock()
+	if provider == nil {
+		return true
+	}
+	rows, err := provider.Fetch(ctx, lat, lon)
 	if err != nil {
-		slog.Warn("forecast fetch failed", "err", err, "provider", s.Provider.Name())
-		return
+		slog.Warn("forecast fetch failed", "err", err, "provider", provider.Name())
+		return false
 	}
 	if len(rows) == 0 {
-		return
+		return false
 	}
 	nowMs := time.Now().UnixMilli()
 	points := make([]state.ForecastPoint, 0, len(rows))
 	for _, r := range rows {
+		r.PVWEstimated = validWeatherNumber(r.PVWEstimated, 0, math.Inf(1))
+		r.CloudCoverPct = validWeatherNumber(r.CloudCoverPct, 0, 100)
+		r.TempC = validWeatherNumber(r.TempC, -100, 80)
 		// A negative irradiance is not physical; retain the row with a
 		// zero signal. Non-finite values are invalid provider data and must
 		// not reach SQLite, where they can become NULL silently.
@@ -376,7 +423,7 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		if r.SolarWm2 != nil {
 			ghi, ok := normalizeIrradiance(*r.SolarWm2)
 			if !ok {
-				slog.Warn("forecast row skipped", "reason", "non-finite irradiance", "provider", s.Provider.Name(), "slot", r.HourStart)
+				slog.Warn("forecast row skipped", "reason", "non-finite irradiance", "provider", provider.Name(), "slot", r.HourStart)
 				continue
 			}
 			solarWm2 = &ghi
@@ -391,30 +438,35 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 			pvW = *r.PVWEstimated
 		case solarWm2 != nil:
 			var ok bool
-			pvW, ok = pvWFromGHI(s.Lat, s.Lon, r.HourStart, *solarWm2, s.RatedPVW, s.Arrays)
+			pvW, ok = pvWFromGHI(lat, lon, r.HourStart.Add(30*time.Minute), *solarWm2, rated, arrays)
 			if !ok {
-				slog.Warn("forecast row skipped", "reason", "non-finite irradiance", "provider", s.Provider.Name(), "slot", r.HourStart)
+				slog.Warn("forecast row skipped", "reason", "non-finite irradiance", "provider", provider.Name(), "slot", r.HourStart)
 				continue
 			}
 		default:
-			pvW = EstimatePVW(s.Lat, s.Lon, r.HourStart, r.CloudCoverPct, s.RatedPVW)
+			pvW = EstimatePVW(lat, lon, r.HourStart.Add(30*time.Minute), r.CloudCoverPct, rated)
 		}
 		if math.IsNaN(pvW) || math.IsInf(pvW, 0) {
-			slog.Warn("forecast row skipped", "reason", "non-finite PV estimate", "provider", s.Provider.Name(), "slot", r.HourStart)
+			slog.Warn("forecast row skipped", "reason", "non-finite PV estimate", "provider", provider.Name(), "slot", r.HourStart)
 			continue
 		}
 		if pvW < 0 {
 			pvW = 0
 		}
-		if capW := s.nameplateW(); capW > 0 {
+		if capW := acLimit; capW > 0 {
 			if capped, ok := clampPVToNameplate(pvW, capW); ok {
-				slog.Warn("forecast PV capped to nameplate",
-					"provider", s.Provider.Name(), "slot", r.HourStart,
+				slog.Warn("forecast PV capped to verified AC limit",
+					"provider", provider.Name(), "slot", r.HourStart,
 					"raw_w", pvW, "capped_w", capped, "nameplate_w", capW)
 				pvW = capped
 			}
 		}
 		pvPtr := &pvW
+		// Missing capacity or weather is unknown, even when EstimatePVW's
+		// numeric fallback is zero. Direct production forecasts stand alone.
+		if r.PVWEstimated == nil && (NameplateW(rated, arrays) <= 0 || (solarWm2 == nil && r.CloudCoverPct == nil)) {
+			pvPtr = nil
+		}
 		points = append(points, state.ForecastPoint{
 			SlotTsMs:      r.HourStart.UnixMilli(),
 			SlotLenMin:    60,
@@ -422,15 +474,21 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 			TempC:         r.TempC,
 			SolarWm2:      solarWm2,
 			PVWEstimated:  pvPtr,
-			Source:        s.Provider.Name(),
+			Source:        provider.Name(),
 			FetchedAtMs:   nowMs,
 		})
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if generation != s.generation {
+		return false
+	}
 	if err := s.Store.SaveForecasts(points); err != nil {
 		slog.Warn("forecast save failed", "err", err)
-		return
+		return false
 	}
-	slog.Info("forecast fetched", "count", len(points), "provider", s.Provider.Name())
+	slog.Info("forecast fetched", "count", len(points), "provider", provider.Name())
+	return len(points) > 0
 }
 
 func arrayFromConfig(a config.PVArray) (Array, bool) {
@@ -445,7 +503,7 @@ func (s *Service) nameplateW() float64 {
 	return NameplateW(s.RatedPVW, s.Arrays)
 }
 
-// NameplateW is the site PV ceiling. Arrays store rated watts; the
+// NameplateW is the configured DC scale, not a verified AC limit. The
 // sum of those is the nameplate. pv_rated_w is the fallback when no
 // complete array geometry exists.
 func NameplateW(ratedPVW float64, arrays []Array) float64 {
@@ -479,7 +537,7 @@ func clampPVToNameplate(pvW, nameplateW float64) (float64, bool) {
 }
 
 func normalizeIrradiance(ghiWm2 float64) (float64, bool) {
-	if math.IsNaN(ghiWm2) || math.IsInf(ghiWm2, 0) {
+	if math.IsNaN(ghiWm2) || math.IsInf(ghiWm2, 0) || ghiWm2 > 3000 {
 		return 0, false
 	}
 	if ghiWm2 < 0 {
@@ -524,14 +582,17 @@ func poaPVWattsFromGHI(lat, lon float64, t time.Time, ghiWm2 float64, arrays []A
 	return total
 }
 
-// Load returns forecasts in [sinceMs, untilMs]. A last-resort
-// nameplate gate still clips a stored row that exceeds the roof.
+// Load returns forecasts in [sinceMs, untilMs], bounded by a verified AC
+// limit when one is known. A configured DC rating is only a prior.
 func (s *Service) Load(sinceMs, untilMs int64) ([]state.ForecastPoint, error) {
 	rows, err := s.Store.LoadForecasts(sinceMs, untilMs)
 	if err != nil {
 		return rows, err
 	}
-	return ClampForecasts(rows, s.nameplateW()), nil
+	s.mu.RLock()
+	limit := s.ACLimitW
+	s.mu.RUnlock()
+	return ClampForecasts(rows, limit), nil
 }
 
 // ClampForecasts copies any estimate above nameplate down onto that
@@ -550,4 +611,12 @@ func ClampForecasts(rows []state.ForecastPoint, nameplateW float64) []state.Fore
 		}
 	}
 	return rows
+}
+
+func validWeatherNumber(v *float64, low, high float64) *float64 {
+	if v == nil || math.IsNaN(*v) || math.IsInf(*v, 0) || *v < low || *v > high {
+		return nil
+	}
+	x := *v
+	return &x
 }

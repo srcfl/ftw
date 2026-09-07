@@ -88,29 +88,18 @@ func TestBuildHistoryPointExcludesUnavailableTelemetry(t *testing.T) {
 	tel.RecordDriverSuccess("site-meter")
 	point, available = buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
 		now.UnixMilli(), time.Minute)
-	if !available {
-		t.Fatalf("recovered site meter unavailable: %+v", point)
+	if available {
+		t.Fatalf("missing PV/battery treated as zero in household history: %+v", point)
 	}
-
-	livePV := tel.Get("live-pv", telemetry.DerPV).SmoothedW
-	liveBattery := tel.Get("live-battery", telemetry.DerBattery).SmoothedW
-	if point.PVW != livePV || point.BatW != liveBattery {
-		t.Errorf("recovered history point includes stale DER telemetry: %+v", point)
-	}
-
-	var detail struct {
-		Drivers map[string]map[string]float64 `json:"drivers"`
-	}
-	if err := json.Unmarshal([]byte(point.JSON), &detail); err != nil {
-		t.Fatal(err)
-	}
-	if len(detail.Drivers["stale-pv"]) != 0 ||
-		len(detail.Drivers["stale-battery"]) != 0 {
-		t.Fatalf("history JSON retained stale driver values: %+v", detail.Drivers)
-	}
-	if detail.Drivers["live-pv"]["pv_w"] != livePV ||
-		detail.Drivers["live-battery"]["bat_w"] != liveBattery {
-		t.Fatalf("history JSON lost live driver values: %+v", detail.Drivers)
+	// The aggregate becomes known only after every significant flow recovers.
+	tel.Update("stale-pv", telemetry.DerPV, -800, nil, nil)
+	tel.RecordDriverSuccess("stale-pv")
+	tel.Update("stale-battery", telemetry.DerBattery, 250, nil, nil)
+	tel.RecordDriverSuccess("stale-battery")
+	point, available = buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
+		time.Now().Add(time.Millisecond).UnixMilli(), time.Minute)
+	if !available || point.LoadW != 1600 || point.PVW != -1100 || point.BatW != 300 {
+		t.Fatalf("recovered complete raw balance = %+v, available=%v", point, available)
 	}
 
 	zeroTel := telemetry.NewStore()
@@ -118,13 +107,13 @@ func TestBuildHistoryPointExcludesUnavailableTelemetry(t *testing.T) {
 	zeroTel.Update("zero-meter", telemetry.DerMeter, 0, nil, nil)
 	zeroTel.RecordDriverSuccess("zero-meter")
 	zero, zeroAvailable := buildHistoryPoint(zeroTel,
-		&control.State{SiteMeterDriver: "zero-meter"}, time.Now().UnixMilli(), time.Minute)
+		&control.State{SiteMeterDriver: "zero-meter"}, time.Now().Add(time.Millisecond).UnixMilli(), time.Minute)
 	if !zeroAvailable || zero.GridW != 0 {
 		t.Fatalf("fresh 0 W site meter unavailable: point=%+v available=%v", zero, zeroAvailable)
 	}
 }
 
-func TestBuildHistoryPointExcludesAgedEVAndV2XFromTotals(t *testing.T) {
+func TestBuildHistoryPointRequiresFreshEVAndV2X(t *testing.T) {
 	tel := telemetry.NewStore()
 	for _, name := range []string{"site-meter", "stale-ev", "live-ev", "stale-v2x", "live-v2x"} {
 		tel.EnsureDriverHealth(name)
@@ -149,32 +138,10 @@ func TestBuildHistoryPointExcludesAgedEVAndV2XFromTotals(t *testing.T) {
 
 	point, available := buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
 		now.UnixMilli(), time.Minute)
-	if !available {
-		t.Fatal("fresh site meter did not produce history")
-	}
-	if point.LoadW != 4100 {
-		t.Fatalf("load includes aged EV/V2X readings: got %v W, want 4100 W", point.LoadW)
+	if available {
+		t.Fatalf("aged EV/V2X became zero household demand: %+v", point)
 	}
 
-	var detail struct {
-		Drivers    map[string]map[string]float64 `json:"drivers"`
-		EVW        float64                       `json:"ev_w"`
-		V2XW       float64                       `json:"v2x_w"`
-		LoadHouseW float64                       `json:"load_house_w"`
-	}
-	if err := json.Unmarshal([]byte(point.JSON), &detail); err != nil {
-		t.Fatal(err)
-	}
-	if detail.EVW != 600 || detail.V2XW != 300 || detail.LoadHouseW != point.LoadW {
-		t.Fatalf("top-level history disagrees with fresh readings: %+v", detail)
-	}
-	if len(detail.Drivers["stale-ev"]) != 0 || len(detail.Drivers["stale-v2x"]) != 0 {
-		t.Fatalf("per-driver history retained aged readings: %+v", detail.Drivers)
-	}
-	if detail.Drivers["live-ev"]["ev_w"] != detail.EVW ||
-		detail.Drivers["live-v2x"]["v2x_w"] != detail.V2XW {
-		t.Fatalf("top-level and per-driver history disagree: %+v", detail)
-	}
 }
 
 func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testing.T) {

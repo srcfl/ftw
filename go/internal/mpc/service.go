@@ -84,14 +84,14 @@ type Service struct {
 	Interval          time.Duration
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
-	// PVNameplateW is the site PV ceiling (W). Forecast and plan PV
-	// above this are cut to the nameplate so a kWp-as-watts paste
-	// cannot schedule megawatts. 0 disables the cut.
+	ForecastSnapshot  func(time.Time, []state.ForecastPoint) ForecastInputs
+	// PVNameplateW accepts a verified AC generation ceiling. A configured
+	// DC rating or learned scale is not a hard limit. Zero disables the cut.
 	PVNameplateW float64
 	Load         LoadPredictor // optional — overrides flat BaseLoad
-	// LoadMaxW is the site fuse ceiling (W). Slot and published load
-	// forecasts are hard-cut to this so a wild twin cannot plan 50 kW
-	// of house load. 0 disables the upper cut.
+	// LoadMaxW is an independently verified gross-load limit, not the
+	// grid fuse: local generation may supply load above grid import.
+	// Zero disables the upper cut.
 	LoadMaxW float64
 	// Optimizer is the external mathematical planning engine. Nil — the
 	// default since #1020 — makes the in-process Go DP the champion. When
@@ -252,6 +252,7 @@ type Service struct {
 // running on a forecast the twins have since corrected away from.
 type plannedPredictions struct {
 	pv        []float64   // per-slot W (magnitude, ≥ 0)
+	pvCovered []bool      // the issued plan had weather for this PV sample
 	load      []float64   // per-slot W (≥ 0)
 	slotStart []time.Time // slot-start timestamps for re-sampling
 	builtAt   time.Time
@@ -993,8 +994,8 @@ func (s *Service) checkDivergence(ctx context.Context) {
 // grid so the twin-drift detector can later re-sample at the same
 // timestamps and compute RMSE. Returns nil when neither predictor is
 // wired — twin-drift is a no-op in that case.
-func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPoint) *plannedPredictions {
-	if s == nil || (s.PV == nil && s.Load == nil) {
+func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPoint, pvFn PVPredictor, loadFn LoadPredictor) *plannedPredictions {
+	if s == nil || (pvFn == nil && loadFn == nil) {
 		return nil
 	}
 	horizon := s.TwinDriftHorizonSlots
@@ -1009,24 +1010,36 @@ func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPo
 		return nil
 	}
 	pp := &plannedPredictions{
-		pv:        make([]float64, n),
-		load:      make([]float64, n),
 		slotStart: make([]time.Time, n),
 		builtAt:   time.Now(),
+	}
+	if pvFn != nil {
+		pp.pv = make([]float64, n)
+		pp.pvCovered = make([]bool, n)
+	}
+	if loadFn != nil {
+		pp.load = make([]float64, n)
 	}
 	for i := 0; i < n; i++ {
 		ts := time.UnixMilli(slots[i].StartMs).UTC()
 		pp.slotStart[i] = ts
-		if s.PV != nil {
-			cloud := lookupCloud(forecasts, slots[i].StartMs)
-			pv := s.PV(ts, cloud)
-			if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
-				pv = 0
+		if pvFn != nil {
+			_, directInput := lookupPVInput(forecasts, slots[i].StartMs)
+			cloud, cloudInput := lookupCloudInput(forecasts, slots[i].StartMs)
+			if directInput == nil && cloudInput == nil {
+				// The plan did not call the twin without a covered weather
+				// interval, so this slot has no model-drift baseline either.
+			} else {
+				pp.pvCovered[i] = true
+				pv := pvFn(ts, cloud)
+				if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
+					pv = 0
+				}
+				pp.pv[i] = pv
 			}
-			pp.pv[i] = pv
 		}
-		if s.Load != nil {
-			ld := s.Load(ts)
+		if loadFn != nil {
+			ld := loadFn(ts)
 			if math.IsNaN(ld) || math.IsInf(ld, 0) || ld < 0 {
 				ld = 0
 			}
@@ -1082,17 +1095,20 @@ func (s *Service) checkTwinDrift(ctx context.Context) {
 	var pvSumSq, loadSumSq float64
 	pvCount, loadCount := 0, 0
 	for i, ts := range pp.slotStart {
-		if pvFn != nil && pvThresh > 0 {
-			cloud := lookupCloud(forecasts, ts.UnixMilli())
-			pv := pvFn(ts, cloud)
-			if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
-				pv = 0
+		if pvFn != nil && pvThresh > 0 && len(pp.pv) == len(pp.slotStart) {
+			covered := len(pp.pvCovered) == 0 || (len(pp.pvCovered) == len(pp.slotStart) && pp.pvCovered[i])
+			if covered {
+				cloud := lookupCloud(forecasts, ts.UnixMilli())
+				pv := pvFn(ts, cloud)
+				if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
+					pv = 0
+				}
+				d := pv - pp.pv[i]
+				pvSumSq += d * d
+				pvCount++
 			}
-			d := pv - pp.pv[i]
-			pvSumSq += d * d
-			pvCount++
 		}
-		if loadFn != nil && loadThresh > 0 {
+		if loadFn != nil && loadThresh > 0 && len(pp.load) == len(pp.slotStart) {
 			ld := loadFn(ts)
 			if math.IsNaN(ld) || math.IsInf(ld, 0) || ld < 0 {
 				ld = 0
@@ -1360,14 +1376,23 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		slog.Warn("mpc: load forecasts", "err", err)
 		// continue without PV forecast
 	}
+	forecasts = usableForecasts(forecasts, now.UnixMilli())
 	forecasts = clampForecastPV(forecasts, s.PVNameplateW)
 
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.PVResidualCorrect, s.Load)
+	pv, correct, load := s.PV, s.PVResidualCorrect, s.Load
+	var captured ForecastInputs
+	if s.ForecastSnapshot != nil {
+		captured = s.ForecastSnapshot(now, forecasts)
+		pv, correct, load = captured.PV, captured.PVResidualCorrect, captured.Load
+		if captured.Weather != nil {
+			forecasts = captured.Weather
+		}
+	}
+	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
 	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
-	if recent := recentDailyLoadWh(s.Store, now, loadRainCheckDays); recent > 0 {
-		slots = rainCheckLoadSlots(slots, recent, s.LoadMaxW)
-	}
+	// Qualified load models own their level. Unqualified historic daily
+	// totals must not impose a floor on a changed or low-load household.
 	if len(slots) == 0 {
 		return nil
 	}
@@ -1390,6 +1415,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 	if pvRelative != nil {
 		pvRelativeUncertainty = pvRelative()
+	}
+	if s.ForecastSnapshot != nil {
+		pvUncertaintyW, pvRelativeUncertainty = captured.PVUncertaintyW, captured.PVRelativeUncertainty
 	}
 
 	// Plumb the site fuse + export ceiling into per-slot limits so the DP
@@ -1434,14 +1462,17 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 	p.PVForecastSafetyK = s.PVForecastSafetyK
-	if pvUncertainty != nil {
+	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}
-	if pvRelative != nil {
+	if pvRelative != nil || s.ForecastSnapshot != nil {
 		p.PVRelativeUncertainty = pvRelativeUncertainty
 	}
 	applyPVDownsidePerSlot(fallbackSlots, p.PVForecastSafetyK,
 		p.PVRelativeUncertainty, p.PVUncertaintyW)
+	if captured.Risk != nil {
+		captured.Risk(slots, fallbackSlots, p.PVForecastSafetyK)
+	}
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
@@ -1705,7 +1736,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// timestamps buildSlots used. forecasts cloud lookup mirrors the
 	// path buildSlots takes for the PV predictor so the snapshot is
 	// apples-to-apples with what's re-sampled later.
-	pp := s.snapshotPredictions(slots, forecasts)
+	pp := s.snapshotPredictions(slots, forecasts, pv, load)
 
 	s.mu.Lock()
 	if s.stopping || request.wasCanceledByService() {
@@ -1737,6 +1768,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	replanAtMs := s.lastReplanAt.UnixMilli()
 	saveDiag := s.SaveDiag
 	s.mu.Unlock()
+	if captured.Record != nil {
+		captured.Record(slots, fallbackSlots, plan.DecisionID, replanAtMs)
+	}
 	// Horizon statistics — surfaced in logs so operators can
 	// reconstruct "what did the DP know?" without pulling the full
 	// Diagnostic JSON. Captures the three factors most likely to
@@ -1951,7 +1985,7 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 // that the forecast service stored at fetch time. This lets the model
 // learn system-specific orientation/shading/soiling and drive planning
 // off the better signal without re-fetching weather.
-func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, pvCorrect PVResidualCorrector, load LoadPredictor) []Slot {
+func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, pvCorrect PVResidualCorrector, load LoadPredictor, weights ...func(time.Time) float64) []Slot {
 	out := make([]Slot, 0, len(prices))
 	now := time.UnixMilli(nowMs).UTC()
 	for _, pr := range prices {
@@ -1976,20 +2010,30 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if pv != nil {
 			cloud, cloudInput := lookupCloudInput(forecasts, pr.SlotTsMs)
 			weatherInput = cloudInput
-			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
-			base := pv(slotT, cloud)
-			if pvCorrect != nil {
-				// Correction returns generation-positive W (same as `base`).
-				// Floor the corrected base at 0 — a residual large enough
-				// to push it negative is a sign-flip, not a plausible PV
-				// prediction.
-				corrected := base + pvCorrect(now, slotMidT, base)
-				if corrected < 0 {
-					corrected = 0
+			if forecastInput == nil && cloudInput == nil {
+				// A learned model may refine a covered weather row. It cannot
+				// turn a missing provider interval into valid forecast PV.
+				pvW = 0
+			} else {
+				radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
+				base := pv(slotT, cloud)
+				if pvCorrect != nil {
+					// Correction returns generation-positive W (same as `base`).
+					// Floor the corrected base at 0 — a residual large enough
+					// to push it negative is a sign-flip, not a plausible PV
+					// prediction.
+					corrected := base + pvCorrect(now, slotMidT, base)
+					if corrected < 0 {
+						corrected = 0
+					}
+					base = corrected
 				}
-				base = corrected
+				weight := PlannerRadiationWeight
+				if len(weights) > 0 && weights[0] != nil {
+					weight = weights[0](slotT)
+				}
+				pvW = selectPlannerPVWithWeight(forecastPVW, base, radiationBacked, weight)
 			}
-			pvW = selectPlannerPVW(forecastPVW, base, radiationBacked)
 		} else {
 			weatherInput = forecastInput
 			pvW = forecastPVW
@@ -2191,73 +2235,34 @@ func upperHalfMeanPrice(prices []state.PricePoint) float64 {
 // non-representative training data).
 const PlannerRadiationWeight = 0.3
 
-// PlannerForecastCapRatio caps how much the radiation-backed forecast may
-// exceed the twin's prediction before it's treated as a NWP error rather
-// than a calibration gap.
-//
-// When the NWP model is confidently wrong (e.g. predicts 1% cloud while
-// the site measures 300 W from a 13 kW array), the forecast can be 5–10×
-// higher than reality. The RLS twin — especially when its NowAnchor
-// correction has pulled it close to the live reading — is a more reliable
-// signal in those moments. Capping the forecast at this multiple prevents
-// the 70 % NWP weight from swamping the calibrated twin.
-//
-// 3× is chosen empirically: it covers a 2–3 string orientation difference
-// and a heavy soiling scenario, which are legitimate reasons for the twin
-// to under-predict relative to the NWP GHI × rated-kWp estimate. Beyond
-// 3× the NWP forecast is more likely wrong (cloud/shading mis-model) than
-// the twin is. This constant is intentionally conservative — tightening
-// it below ~2 risks degrading performance on normal sunny days where the
-// forecast is right and the twin is under-trained.
-const PlannerForecastCapRatio = 3.0
-
 func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
-	// Invalid predicted → fall back to forecast (unchanged).
-	switch {
-	case math.IsNaN(predictedPVW), math.IsInf(predictedPVW, 0), predictedPVW < 0:
-		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) {
-			return 0
-		}
+	return selectPlannerPVWithWeight(forecastPVW, predictedPVW, radiationBacked, PlannerRadiationWeight)
+}
+
+func selectPlannerPVWithWeight(forecastPVW, predictedPVW float64, radiationBacked bool, weight float64) float64 {
+	if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) || forecastPVW < 0 {
+		forecastPVW = 0
+	}
+	if math.IsNaN(predictedPVW) || math.IsInf(predictedPVW, 0) || predictedPVW < 0 {
 		return forecastPVW
 	}
-
-	// Radiation-backed forecasts (open_meteo, forecast_solar) have the
-	// correct diurnal shape and cloud response already. Blend the twin's
-	// prediction in as a thin per-site calibration instead of letting it
-	// override the forecast. Typical picture on homelab-rpi after the
-	// switch: forecast shows smooth bell curve 0–8 kW, an under-trained
-	// twin still spits random spikes from overfit feature vectors — and
-	// we want the smooth curve.
-	//
-	// Guard: if the forecast exceeds PlannerForecastCapRatio × the twin's
-	// prediction, and the twin has a meaningful signal (> 50 W — i.e. it
-	// is not night-gated or collapsed), cap the forecast before blending.
-	// This prevents a confidently-wrong NWP cloud-cover forecast from
-	// dominating the plan — the twin's NowAnchor-corrected value already
-	// reflects live irradiance conditions, and a 3–10× divergence between
-	// forecast and twin is a stronger signal of NWP error than calibration
-	// gap. Production incident T33 (2026-05-25) observed open_meteo predicting
-	// 154 W/m2 / 1% cloud while
-	// site measured ~22 W/m2 effective irradiance → 7× blend over-shoot).
-	if radiationBacked && forecastPVW > 0 {
-		cappedForecast := forecastPVW
-		if predictedPVW > 50 && forecastPVW > PlannerForecastCapRatio*predictedPVW {
-			cappedForecast = PlannerForecastCapRatio * predictedPVW
+	if radiationBacked {
+		if forecastPVW == 0 {
+			return 0
 		}
-		return (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*predictedPVW
+		if math.IsNaN(weight) || math.IsInf(weight, 0) {
+			weight = 0
+		}
+		weight = math.Max(0, math.Min(1, weight))
+		return (1-weight)*forecastPVW + weight*predictedPVW
 	}
-
-	// Cloud-only legacy path: prefer the twin when forecast is near zero
-	// (forecast probably missing), fall back to forecast when the twin
-	// collapsed to ~0 (twin probably broken).
 	if forecastPVW < plannerMinForecastPVFallbackW {
 		return predictedPVW
 	}
-	collapseCeil := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
-	if predictedPVW <= collapseCeil {
-		return forecastPVW
-	}
-	return predictedPVW
+	// Fade a collapsed cloud-only model into the provider continuously.
+	ceiling := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
+	trust := math.Min(1, predictedPVW/ceiling)
+	return (1-trust)*forecastPVW + trust*predictedPVW
 }
 
 // lookupHasRadiation reports whether the forecast row covering `ts` has
@@ -2273,15 +2278,14 @@ func lookupHasRadiation(forecasts []state.ForecastPoint, ts int64) bool {
 		}
 		end := f.SlotTsMs + int64(slotLen)*60*1000
 		if ts >= f.SlotTsMs && ts < end {
-			return f.SolarWm2 != nil
+			return f.PVWEstimated != nil && (f.SolarWm2 != nil || f.Source == "forecast_solar")
 		}
 	}
 	return false
 }
 
 // lookupCloud returns the cloud cover (%) for the forecast row covering
-// `ts`, falling back to the nearest neighbour. 50% is the neutral
-// prior if no forecast is available at all.
+// `ts`. 50% is the neutral prior if no forecast covers the interval.
 func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 	cloud, _ := lookupCloudInput(forecasts, ts)
 	return cloud
@@ -2309,24 +2313,10 @@ func lookupCloudInput(forecasts []state.ForecastPoint, ts int64) (float64, *stat
 			return 50, f
 		}
 		if ts < f.SlotTsMs {
-			if i == 0 {
-				if f.CloudCoverPct != nil {
-					return *f.CloudCoverPct, f
-				}
-				return 50, f
-			}
-			prev := &forecasts[i-1]
-			if prev.CloudCoverPct != nil {
-				return *prev.CloudCoverPct, prev
-			}
-			return 50, prev
+			return 50, nil
 		}
 	}
-	last := &forecasts[len(forecasts)-1]
-	if last.CloudCoverPct != nil {
-		return *last.CloudCoverPct, last
-	}
-	return 50, last
+	return 50, nil
 }
 
 // lookupPV finds the forecast row whose slot covers ts and returns its PV
@@ -2360,17 +2350,8 @@ func lookupPVInput(forecasts []state.ForecastPoint, ts int64) (float64, *state.F
 			}
 			return 0, f
 		}
-		// Fall back: if between rows, use the preceding row (interpolation
-		// within the forecast range only).
 		if ts < f.SlotTsMs {
-			if i == 0 {
-				return 0, nil
-			}
-			prev := &forecasts[i-1]
-			if prev.PVWEstimated != nil {
-				return *prev.PVWEstimated, prev
-			}
-			return 0, prev
+			return 0, nil
 		}
 	}
 	// After last row — return 0 (no forecast coverage).

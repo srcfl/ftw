@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 func TestValidatePlanRejectsEVOverCapacity(t *testing.T) {
@@ -58,8 +60,16 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.1.2" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.2.0" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
+	}
+	start := time.Now().UTC().Truncate(time.Hour)
+	cloud := 10.0
+	for i := 0; i < 4; i++ {
+		if err := svc.Store.SaveForecasts([]state.ForecastPoint{{SlotTsMs: start.Add(time.Duration(i) * time.Hour).UnixMilli(), SlotLenMin: 60,
+			FetchedAtMs: start.UnixMilli(), Source: "test", CloudCoverPct: &cloud}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	svc.PVUncertaintyW = func() float64 { return 200 }
 	svc.PVForecastSafetyK = 1
