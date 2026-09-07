@@ -32,12 +32,12 @@ from ftw_optimizer.scenario_tree import (
 from ftw_optimizer.worker import handle, handshake
 
 
-def test_pv_charge_bonus_matches_go_dp_mode_gate() -> None:
+def test_pv_charge_bonus_matches_go_dp_in_every_mode() -> None:
     settings = {"pv_charge_bonus_ore_kwh": 30}
     assert _pv_charge_bonus_ore_kwh(settings, "passive_arbitrage") == 30
-    assert _pv_charge_bonus_ore_kwh(settings, "arbitrage") == 0
-    assert _pv_charge_bonus_ore_kwh(settings, "self_consumption") == 0
-    assert _pv_charge_bonus_ore_kwh(settings, "cheap_charge") == 0
+    assert _pv_charge_bonus_ore_kwh(settings, "arbitrage") == 30
+    assert _pv_charge_bonus_ore_kwh(settings, "self_consumption") == 30
+    assert _pv_charge_bonus_ore_kwh(settings, "cheap_charge") == 30
 
 
 def test_pv_curtail_output_distinguishes_zero_cap_from_release() -> None:

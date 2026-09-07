@@ -4,8 +4,9 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from verify import HERE, verify_bundle
+from verify import HERE, verify_bundle, host_key
 
 
 class BundleBoundaryTest(unittest.TestCase):
@@ -14,6 +15,11 @@ class BundleBoundaryTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "bundle"
         shutil.copytree(HERE / "bundle", self.root)
+
+    def test_unsupported_host_keeps_integrity_checks(self):
+        with patch("verify.platform.system", return_value="Darwin"), patch("verify.platform.machine", return_value="x86_64"):
+            self.assertIsNone(host_key())
+            self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
 
     def test_valid_bundle(self):
         self.assertEqual(verify_bundle(self.root)["product"], "energyplan")

@@ -2,15 +2,29 @@ package mpc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
+
+type coreDPShadowRequest struct {
+	champion   Plan
+	slots      []Slot
+	params     Params
+	reason     string
+	replanAtMs int64
+}
 
 // startCoreDPShadow runs at most one bounded comparison, after publication.
 // Results belong to a decision ID and can never replace the active actions.
 func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reason string, replanAtMs int64) {
 	s.mu.Lock()
-	if s.stopping || s.shadowBusy {
+	if s.stopping || s.last == nil || s.last.DecisionID != champion.DecisionID {
+		s.mu.Unlock()
+		return
+	}
+	if s.shadowBusy {
+		s.pendingCoreShadow = &coreDPShadowRequest{champion, slots, p, reason, replanAtMs}
 		s.mu.Unlock()
 		return
 	}
@@ -25,12 +39,13 @@ func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reaso
 			if r := recover(); r != nil {
 				slog.Error("mpc: Core DP shadow panicked", "panic", r, "decision_id", champion.DecisionID)
 			}
-			s.mu.Lock()
-			s.shadowBusy, s.shadowCancel = false, nil
-			s.mu.Unlock()
+			s.finishCoreDPShadow()
 		}()
 		start := time.Now()
 		shadow, err := OptimizeContext(ctx, slots, p)
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		if err == nil {
 			err = ValidatePlan(slots, p, &shadow)
 		}
@@ -61,6 +76,17 @@ func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reaso
 		}
 		s.recordCoreDPShadow(champion, slots, p, reason, replanAtMs, block)
 	}()
+}
+
+func (s *Service) finishCoreDPShadow() {
+	s.mu.Lock()
+	s.shadowBusy, s.shadowCancel = false, nil
+	pending := s.pendingCoreShadow
+	s.pendingCoreShadow = nil
+	s.mu.Unlock()
+	if pending != nil {
+		s.startCoreDPShadow(pending.champion, pending.slots, pending.params, pending.reason, pending.replanAtMs)
+	}
 }
 
 func replayedGridCost(slots []Slot, p Params, plan Plan) float64 {

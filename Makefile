@@ -294,4 +294,6 @@ native-solver-check:
 	python3 -m unittest discover -s optimizer/native -p verify_test.py
 
 native-solver-test: native-solver-check
-	cd go && FTW_NATIVE_SOLVER="$$(python3 ../optimizer/native/verify.py --host-binary)" go test -count=1 ./internal/mpc -run '^TestNative'
+	@binary="$$(python3 optimizer/native/verify.py --host-binary)"; \
+	if [ -n "$$binary" ]; then cd go && FTW_NATIVE_SOLVER="$$binary" go test -count=1 ./internal/mpc -run '^TestNative'; \
+	else echo "Native execution tests skipped: no bundled worker for this host"; fi

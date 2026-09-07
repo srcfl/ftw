@@ -17,7 +17,7 @@ func TestEnergyplanBetaSelection(t *testing.T) {
 		{"v2.15.0-beta.1", "python", "python"},
 		{"dev", "Energyplan", "energyplan"},
 	} {
-		if runtime.GOOS == "windows" && tc.engine == "" {
+		if !energyplanSupported(runtime.GOOS, runtime.GOARCH) && tc.engine == "" {
 			tc.want = "core"
 		}
 		if got := plannerEngine(&config.Planner{Engine: tc.engine}, tc.version); got != tc.want {
@@ -27,7 +27,7 @@ func TestEnergyplanBetaSelection(t *testing.T) {
 }
 
 func TestBuildMPCBetaStartsBundledEnergyplan(t *testing.T) {
-	if runtime.GOOS == "windows" {
+	if !energyplanSupported(runtime.GOOS, runtime.GOARCH) {
 		t.Skip("no Windows worker")
 	}
 	old := Version

@@ -146,3 +146,46 @@ func TestNativeEnergyplanRejectsUnsafeFallback(t *testing.T) {
 		t.Fatalf("infeasible worker and unsafe DP fallback published: %+v", plan)
 	}
 }
+
+func TestCoreDPShadowKeepsNewestPendingComparison(t *testing.T) {
+	svc := shadowTestService(t)
+	base := svc.Replan(context.Background())
+	if base == nil {
+		t.Fatal("no base plan")
+	}
+	svc.shadowBusy = true
+	first := *base
+	first.DecisionID = "first"
+	svc.last = &first
+	svc.startCoreDPShadow(first, svc.lastSlots, svc.lastParams, "first", 1)
+	second := *base
+	second.DecisionID = "second"
+	svc.last = &second
+	svc.startCoreDPShadow(second, svc.lastSlots, svc.lastParams, "second", 2)
+	if svc.pendingCoreShadow == nil || svc.pendingCoreShadow.champion.DecisionID != "second" {
+		t.Fatal("newest comparison was not retained")
+	}
+	svc.finishCoreDPShadow()
+	svc.shadowWG.Wait()
+	latest := svc.Latest()
+	if latest.DecisionID != "second" || latest.DPShadow == nil || latest.DPShadow.ComparedSlots == 0 {
+		t.Fatalf("newest comparison did not finish: %+v", latest.DPShadow)
+	}
+}
+
+func TestCoreDPShadowCancellationPreservesPreviousComparison(t *testing.T) {
+	svc := shadowTestService(t)
+	slots, p := nativeBenchmarkFixture(true)
+	p.SoCLevels, p.ActionLevels = 101, 201
+	previous := &ShadowPlan{TotalCostOre: 123}
+	champion := Plan{DecisionID: "same", DPShadow: previous}
+	svc.last = &champion
+	svc.startCoreDPShadow(champion, slots, p, "cancel", 0)
+	svc.mu.Lock()
+	svc.shadowCancel()
+	svc.mu.Unlock()
+	svc.shadowWG.Wait()
+	if svc.Latest().DPShadow != previous {
+		t.Fatal("cancellation replaced a comparison with rejection")
+	}
+}
