@@ -22,17 +22,19 @@ import (
 )
 
 type forecastSite struct {
-	IdentityPending     bool
-	WeatherSinceMS      int64
-	LearningRevision    string
-	Revision            string
-	SiteID              string
-	Meter               string
-	Latitude, Longitude float64
-	HasLocation         bool
-	HasPVScale          bool
-	Timezone            string
-	Options             telemetry.ForecastOptions
+	IdentityPending       bool
+	WeatherSinceMS        int64
+	LearningRevision      string
+	Revision              string
+	SiteID                string
+	Meter                 string
+	Latitude, Longitude   float64
+	HasLocation           bool
+	HasPVScale            bool
+	Timezone              string
+	Options               telemetry.ForecastOptions
+	PVLearningStartedMS   int64
+	LoadLearningStartedMS int64
 }
 
 // forecastCandidate is a host adapter around the compiled model. State is
@@ -70,9 +72,16 @@ type forecastTracker struct {
 	pvAccumulator   telemetry.ForecastAccumulator
 	stopped         bool
 	clock           func() time.Time
+	learningMu      sync.RWMutex
+	learningPeriods forecastLearningPeriods
+	learningErrors  map[string]error
+	requestReplan   func(string)
 }
 
 func (f *forecastTracker) Start(ctx context.Context) error {
+	if err := f.restoreLearning(ctx); err != nil {
+		return err
+	}
 	initCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	err := f.store.InitForecastArchive(initCtx)
 	cancel()
@@ -167,6 +176,7 @@ func (f *forecastTracker) observe(ctx context.Context, now time.Time) {
 	if f.refreshIdentity != nil {
 		f.refreshIdentity()
 	}
+	f.reconcileLearning(ctx)
 	if f.configMu != nil {
 		f.configMu.RLock()
 	}
@@ -205,7 +215,10 @@ func (f *forecastTracker) observe(ctx context.Context, now time.Time) {
 			}
 			away := f.away != nil && f.away(time.UnixMilli(o.StartMS))
 			workCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			f.learningMu.RLock()
+			site = f.learningSiteLocked(site)
 			err = f.candidate.Update(workCtx, site, o, weather, away)
+			f.learningMu.RUnlock()
 			cancel()
 			if err != nil {
 				slog.Debug("forecast candidate update unavailable", "err", err)
@@ -356,12 +369,15 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 	if f.refreshIdentity != nil {
 		f.refreshIdentity()
 	}
+	f.reconcileLearning(context.Background())
 	if f.configMu != nil {
 		f.configMu.RLock()
 		defer f.configMu.RUnlock()
 	}
+	f.learningMu.RLock()
+	defer f.learningMu.RUnlock()
 	captureAt := f.now()
-	site := f.site()
+	site := f.learningSiteLocked(f.site())
 	if site.IdentityPending {
 		// Keep persisted learning untouched until the running hardware proves its
 		// binding. An explicit empty weather slice prevents fallback to old rows.
@@ -374,6 +390,7 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 	history := f.errors
 	observations := f.observations
 	f.mu.RUnlock()
+	history, observations = learningEvidence(history, observations, site.PVLearningStartedMS, site.LoadLearningStartedMS)
 	candidateState := json.RawMessage(nil)
 	if f.candidate != nil {
 		candidateState = append(json.RawMessage(nil), f.candidate.Snapshot()...)

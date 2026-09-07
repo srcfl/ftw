@@ -74,6 +74,7 @@ type Service struct {
 	forecastOptions   telemetry.ForecastOptions
 	timezone          string
 	lastForecastInput time.Time
+	configuredHeating *float64
 
 	stop chan struct{}
 	done chan struct{}
@@ -141,11 +142,24 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW, 
 				zone = "UTC"
 			}
 			if old.Samples > 0 && zone != s.timezone {
-				m := newProfileModel(old.PeakW, profile)
-				m.HeatingW_per_degC = old.HeatingW_per_degC
-				s.models[profile] = m
+				heating := old.HeatingW_per_degC
+				s.models[profile] = freshProfile(old, profile, s.timezone, old.LearningStartedMS, &heating)
 			}
 			s.models[profile].Timezone = s.timezone
+		}
+		var latestEpoch int64
+		for _, profile := range Profiles() {
+			if m := s.models[profile]; m != nil && m.LearningStartedMS > latestEpoch {
+				latestEpoch = m.LearningStartedMS
+			}
+		}
+		if latestEpoch > 0 {
+			for _, profile := range Profiles() {
+				old := s.models[profile]
+				if old != nil && old.LearningStartedMS < latestEpoch {
+					s.models[profile] = freshProfile(old, profile, s.timezone, latestEpoch, nil)
+				}
+			}
 		}
 	}
 	return s
@@ -387,9 +401,14 @@ func (s *Service) Reconfigure(siteMeter string, opts telemetry.ForecastOptions, 
 	s.lastForecastInput = time.Time{}
 	if changed {
 		peak := s.activeModelLocked().PeakW
+		epoch := s.learningStartedMSLocked()
 		for _, p := range Profiles() {
 			m := newProfileModel(peak, p)
 			m.Timezone, m.ConfigRevision = zone, revision
+			m.LearningStartedMS = epoch
+			if s.configuredHeating != nil {
+				m.HeatingW_per_degC = *s.configuredHeating
+			}
 			s.models[p] = m
 		}
 	}
@@ -412,6 +431,9 @@ func (s *Service) SetTimezone(zone string) error {
 			m := newProfileModel(old.PeakW, p)
 			m.Timezone = zone
 			m.HeatingW_per_degC = old.HeatingW_per_degC
+			m.LearningStartedMS = old.LearningStartedMS
+			m.ConfigRevision = old.ConfigRevision
+			m.MaxPlausibleW = old.MaxPlausibleW
 			s.models[p] = m
 		}
 	}
@@ -427,7 +449,7 @@ func (s *Service) sampleAt(now time.Time) {
 		return
 	}
 	s.mu.RLock()
-	site, opts, profile, generation := s.SiteMeter, s.forecastOptions, s.active, s.generation
+	site, opts, profile, generation, learningStartedMS := s.SiteMeter, s.forecastOptions, s.active, s.generation, s.learningStartedMSLocked()
 	s.mu.RUnlock()
 	reading := s.Tele.ForecastMeasurement(now, site, opts)
 	temp := math.NaN()
@@ -443,7 +465,7 @@ func (s *Service) sampleAt(now time.Time) {
 	}
 	model := s.activeModelLocked()
 	updated := false
-	if reading.Valid && reading.Latest.After(s.lastForecastInput) {
+	if reading.Valid && reading.Earliest.UnixMilli() >= learningStartedMS && reading.Latest.After(s.lastForecastInput) {
 		s.lastForecastInput = reading.Latest
 		updated = model.Update(now, reading.HouseholdW, temp)
 	}
@@ -466,6 +488,10 @@ func (s *Service) persistProfile(profile Profile) error {
 func (s *Service) persist() error {
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
+	return s.persistLocked()
+}
+
+func (s *Service) persistLocked() error {
 	if s.Store == nil {
 		return nil
 	}
@@ -510,6 +536,8 @@ func (s *Service) SetHeatingCoef(w float64) {
 		return
 	}
 	s.mu.Lock()
+	prior := w
+	s.configuredHeating = &prior
 	for _, model := range s.models {
 		model.HeatingW_per_degC = w
 	}
@@ -533,6 +561,8 @@ func (s *Service) SeedHeatingCoef(w float64) {
 		return
 	}
 	s.mu.Lock()
+	prior := w
+	s.configuredHeating = &prior
 	for _, model := range s.models {
 		if model.Samples > 0 {
 			continue
@@ -557,10 +587,77 @@ func (s *Service) Reset() {
 	s.models[profile].HeatingW_per_degC = heating
 	s.models[profile].Timezone = s.timezone
 	s.models[profile].ConfigRevision = old.ConfigRevision
+	s.models[profile].LearningStartedMS = old.LearningStartedMS
+	s.models[profile].MaxPlausibleW = old.MaxPlausibleW
 	s.generation++
 	s.lastForecastInput = time.Time{}
 	s.mu.Unlock()
 	if err := s.persist(); err != nil {
 		slog.Warn("loadmodel persist", "err", err)
 	}
+}
+
+// RestartLearning clears every profile and starts one shared learned-model
+// epoch. Replaying the same or an older cutoff persists the current models but
+// does not erase samples learned after the first reset.
+func (s *Service) RestartLearning(at time.Time) error {
+	if s == nil {
+		return nil
+	}
+	startedMS := at.UnixMilli()
+	if at.IsZero() || startedMS <= 0 {
+		return fmt.Errorf("loadmodel learning cutoff must be after the Unix epoch")
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.mu.Lock()
+	if startedMS > s.learningStartedMSLocked() {
+		for _, profile := range Profiles() {
+			s.models[profile] = freshProfile(s.models[profile], profile, s.timezone, startedMS, s.configuredHeating)
+		}
+		s.generation++
+		s.lastForecastInput = time.Time{}
+	}
+	s.mu.Unlock()
+	return s.persistLocked()
+}
+
+// LearningStartedMS returns the cutoff shared by all load profiles.
+func (s *Service) LearningStartedMS() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.learningStartedMSLocked()
+}
+
+func (s *Service) learningStartedMSLocked() int64 {
+	var startedMS int64
+	for _, profile := range Profiles() {
+		if m := s.models[profile]; m != nil && m.LearningStartedMS > startedMS {
+			startedMS = m.LearningStartedMS
+		}
+	}
+	return startedMS
+}
+
+func freshProfile(old *Model, profile Profile, zone string, startedMS int64, heating *float64) *Model {
+	peak := 0.0
+	revision := ""
+	maxPlausibleW := 0.0
+	if old != nil {
+		peak = old.PeakW
+		revision = old.ConfigRevision
+		maxPlausibleW = old.MaxPlausibleW
+	}
+	m := newProfileModel(peak, profile)
+	m.Timezone = zone
+	m.ConfigRevision = revision
+	m.MaxPlausibleW = maxPlausibleW
+	m.LearningStartedMS = startedMS
+	if heating != nil {
+		m.HeatingW_per_degC = *heating
+	}
+	return m
 }

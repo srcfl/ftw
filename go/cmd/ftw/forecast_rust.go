@@ -22,20 +22,27 @@ import (
 const forecastRustStateKey = "forecast/energyplan_state_v1"
 
 type savedForecastState struct {
-	SiteID            string          `json:"site_id"`
-	ConfigRevision    string          `json:"config_revision"`
-	ModelRevision     uint64          `json:"model_revision"`
-	LatestAvailableMS int64           `json:"latest_available_ms"`
-	State             json.RawMessage `json:"state"`
+	SiteID                string                     `json:"site_id"`
+	ConfigRevision        string                     `json:"config_revision"`
+	ModelRevision         uint64                     `json:"model_revision"`
+	LatestAvailableMS     int64                      `json:"latest_available_ms"`
+	LatestTraining        energyforecast.LatestInput `json:"latest_training_ms"`
+	PVLearningStartedMS   int64                      `json:"pv_learning_started_ms,omitempty"`
+	LoadLearningStartedMS int64                      `json:"load_learning_started_ms,omitempty"`
+	State                 json.RawMessage            `json:"state"`
 }
 
 type rustForecast struct {
-	version   string
-	client    *energyforecast.Client
-	transport interface{ Close() error }
-	store     *state.Store
-	mu        sync.RWMutex
-	saved     savedForecastState
+	version                string
+	client                 *energyforecast.Client
+	transport              interface{ Close() error }
+	store                  *state.Store
+	mu                     sync.RWMutex
+	updateMu               sync.Mutex // serialize complete update/reset exchanges and persistence
+	saved                  savedForecastState
+	resetSupported         bool
+	pvQuality, loadQuality string
+	predictedTraining      energyforecast.LatestInput
 }
 
 func newRustForecast(st *state.Store, binary string) (*rustForecast, error) {
@@ -47,9 +54,10 @@ func newRustForecast(st *state.Store, binary string) (*rustForecast, error) {
 	defer cancel()
 	line, err := transport.RoundTrip(ctx, []byte(`{"type":"handshake","protocol_version":1}`))
 	var info struct {
-		Name            string `json:"name"`
-		Version         string `json:"version"`
-		ForecastVersion int    `json:"forecast_protocol_version"`
+		Name            string   `json:"name"`
+		Version         string   `json:"version"`
+		ForecastVersion int      `json:"forecast_protocol_version"`
+		Features        []string `json:"features"`
 	}
 	if err == nil {
 		err = json.Unmarshal(line, &info)
@@ -59,6 +67,11 @@ func newRustForecast(st *state.Store, binary string) (*rustForecast, error) {
 		return nil, fmt.Errorf("Energyplan forecast v1 unavailable: name=%q version=%d: %v", info.Name, info.ForecastVersion, err)
 	}
 	r := &rustForecast{version: forecastBinaryIdentity(binary), client: energyforecast.NewClient(transport), transport: transport, store: st}
+	for _, feature := range info.Features {
+		if feature == "forecast_reset" {
+			r.resetSupported = true
+		}
+	}
 	if data, ok := st.LoadConfig(forecastRustStateKey); ok {
 		if len(data) <= energyforecast.MaxStateBytes+4096 {
 			var saved savedForecastState
@@ -106,14 +119,19 @@ func rustFeatures(t time.Time, site forecastSite, home bool, row *state.Forecast
 }
 
 func (r *rustForecast) Update(ctx context.Context, site forecastSite, o forecasting.Observation, weather *state.ForecastPoint, away bool) error {
+	r.updateMu.Lock()
+	defer r.updateMu.Unlock()
+	if err := r.applyLearningPeriodsLocked(ctx, site, max(time.Now().UnixMilli(), o.AvailableAtMS)); err != nil {
+		return err
+	}
 	r.mu.RLock()
 	saved := r.saved
 	r.mu.RUnlock()
 	if saved.SiteID != site.SiteID || saved.ConfigRevision != rustConfigRevision(site) {
 		saved = savedForecastState{SiteID: site.SiteID, ConfigRevision: rustConfigRevision(site)}
 	}
-	origin := o.AvailableAtMS
-	if weather != nil && weather.FetchedAtMs > origin {
+	origin := max(o.AvailableAtMS, saved.LatestAvailableMS)
+	if weather != nil && weather.FetchedAtMs > o.AvailableAtMS {
 		return errors.New("observation weather arrived after update origin")
 	}
 	input := energyforecast.Observation{Interval: energyforecast.Interval{ValidStartMs: o.StartMS, ValidEndMs: o.EndMS},
@@ -133,8 +151,9 @@ func (r *rustForecast) Update(ctx context.Context, site forecastSite, o forecast
 	if err != nil {
 		return err
 	}
-	next := savedForecastState{SiteID: site.SiteID, ConfigRevision: rustConfigRevision(site), ModelRevision: reply.ModelRevision,
-		LatestAvailableMS: origin, State: reply.State}
+	next := saved
+	next.ModelRevision, next.LatestAvailableMS, next.State = reply.ModelRevision, origin, reply.State
+	next.LatestTraining = reply.LatestTrainingMs
 	data, err := json.Marshal(next)
 	if err != nil {
 		return err
@@ -144,6 +163,10 @@ func (r *rustForecast) Update(ctx context.Context, site forecastSite, o forecast
 		return err
 	}
 	r.mu.Lock()
+	if r.saved.SiteID != next.SiteID || r.saved.ConfigRevision != next.ConfigRevision {
+		r.pvQuality, r.loadQuality = "", ""
+		r.predictedTraining = energyforecast.LatestInput{}
+	}
 	r.saved = next
 	r.mu.Unlock()
 	return nil
@@ -210,6 +233,17 @@ func (r *rustForecast) Predict(ctx context.Context, site forecastSite, issued fo
 	if err != nil {
 		return forecasting.Issue{}, err
 	}
+	// A durable reset intent can outlive a failed worker exchange. Until that
+	// signal has restarted, only its freshly reset legacy fallback may serve it.
+	for i := range reply.Predictions {
+		if saved.PVLearningStartedMS < site.PVLearningStartedMS {
+			reply.Predictions[i].PV = &energyforecast.Estimate{Quality: "cold_start", Uncertainty: "unknown"}
+		}
+		if saved.LoadLearningStartedMS < site.LoadLearningStartedMS {
+			reply.Predictions[i].Load = &energyforecast.Estimate{Quality: "cold_start", Uncertainty: "unknown"}
+		}
+	}
+	r.recordLearningQuality(saved, reply)
 	now := time.Now().UnixMilli()
 	out := forecasting.Issue{Schema: forecasting.Schema, ID: uuid.NewString(), DecisionID: issued.DecisionID,
 		OriginMS: issued.OriginMS, IssuedAtMS: now, ConfigVersion: issued.ConfigVersion, Site: forecastSiteContext(site), Weather: issued.Weather,

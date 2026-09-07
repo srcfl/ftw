@@ -1698,6 +1698,7 @@ func main() {
 		}
 		if forecastTrackerSvc != nil {
 			mpcSvc.ForecastSnapshot = forecastTrackerSvc.Snapshot
+			forecastTrackerSvc.setReplan(mpcSvc.RequestReplan)
 		}
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
@@ -2375,6 +2376,7 @@ func main() {
 		PlannerPrefs:     plannerPrefs,
 		PVModel:          pvSvc,
 		LoadModel:        loadSvc,
+		ForecastLearning: forecastTrackerSvc,
 		Loadpoints:       lpMgr,
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,

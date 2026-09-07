@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:sourceful:energyplan:forecast:1",
   "title": "Energyplan forecasting request v1",
-  "description": "One JSON object per stdin line, at most 2 MiB including the newline. The caller must split update batches by encoded byte size, not just count; a larger line terminates the worker. Update consumes complete UTC-aligned 15-minute means available by origin_ms and returns an opaque model snapshot. Predict uses an immutable snapshot. Each requested future segment lasts 1..900000 ms and stays within one UTC quarter-hour; full aligned quarters remain valid. Returned bounds are the actual requested segment. For prediction, site-local clock, weather and occupancy fields refer to the containing quarter-hour start. The caller splits longer spans at each UTC quarter boundary and handles timezone or DST changes. Site/config identity, interval order, state bounds and causal availability are checked at runtime. Household load excludes EV, battery and V2X. PV denotes nonnegative available AC generation, distinct from signed planner pv_w. The caller records actual completion/issue time and persists the snapshot. See forecast-v1.response.schema.json for responses.",
+  "description": "One JSON object per stdin line, at most 2 MiB including the newline. The caller must split update batches by encoded byte size, not just count; a larger line terminates the worker. Update consumes complete UTC-aligned 15-minute means available by origin_ms and returns an opaque model snapshot. Predict uses an immutable snapshot. Reset starts a new learning period for exactly one enabled signal while retaining the other signal's state. Each requested future segment lasts 1..900000 ms and stays within one UTC quarter-hour; full aligned quarters remain valid. Returned bounds are the actual requested segment. For prediction, site-local clock, weather and occupancy fields refer to the containing quarter-hour start. The caller splits longer spans at each UTC quarter boundary and handles timezone or DST changes. Site/config identity, interval order, state bounds and causal availability are checked at runtime. Household load excludes EV, battery and V2X. PV denotes nonnegative available AC generation, distinct from signed planner pv_w. The caller records actual completion/issue time and persists the snapshot. See forecast-v1.response.schema.json for responses.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -15,7 +15,8 @@
     "action": {
       "enum": [
         "update",
-        "predict"
+        "predict",
+        "reset"
       ]
     },
     "request_id": {
@@ -175,6 +176,18 @@
       "items": {
         "$ref": "#/$defs/horizon"
       }
+    },
+    "signal": {
+      "enum": [
+        "pv",
+        "load"
+      ],
+      "description": "The one enabled model whose learned state reset replaces. Only valid for action reset."
+    },
+    "learning_started_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Durable start cutoff for the selected signal. It must not be later than origin_ms; runtime validates that relation. A replay may return a later already-applied cutoff. Only valid for action reset."
     }
   },
   "required": [
@@ -201,8 +214,22 @@
           "observations"
         ],
         "not": {
-          "required": [
-            "horizon"
+          "anyOf": [
+            {
+              "required": [
+                "horizon"
+              ]
+            },
+            {
+              "required": [
+                "signal"
+              ]
+            },
+            {
+              "required": [
+                "learning_started_ms"
+              ]
+            }
           ]
         }
       }
@@ -220,8 +247,51 @@
           "horizon"
         ],
         "not": {
-          "required": [
-            "observations"
+          "anyOf": [
+            {
+              "required": [
+                "observations"
+              ]
+            },
+            {
+              "required": [
+                "signal"
+              ]
+            },
+            {
+              "required": [
+                "learning_started_ms"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "reset"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "signal",
+          "learning_started_ms"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "observations"
+              ]
+            },
+            {
+              "required": [
+                "horizon"
+              ]
+            }
           ]
         }
       }

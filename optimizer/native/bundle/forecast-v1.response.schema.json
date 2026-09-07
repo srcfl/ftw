@@ -177,6 +177,85 @@
     },
     {
       "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "forecast"
+        },
+        "version": {
+          "const": 1
+        },
+        "action": {
+          "const": "reset"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "site_id": {
+          "type": "string"
+        },
+        "config_revision": {
+          "type": "string"
+        },
+        "origin_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ok": {
+          "const": true
+        },
+        "model_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615,
+          "description": "Increments when reset applies a newer cutoff. Replaying an already-applied cutoff keeps the revision."
+        },
+        "latest_input_ms": {
+          "$ref": "#/$defs/watermarks"
+        },
+        "latest_training_ms": {
+          "$ref": "#/$defs/watermarks"
+        },
+        "latest_available_at_ms": {
+          "$ref": "#/$defs/watermarks"
+        },
+        "state": {
+          "type": "object",
+          "description": "Opaque snapshot after the selected signal reset. Persist unchanged."
+        },
+        "signal": {
+          "enum": [
+            "pv",
+            "load"
+          ],
+          "description": "The selected model signal."
+        },
+        "learning_started_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Applied learning cutoff for signal. It is no later than origin_ms and can be later than a replayed request cutoff."
+        }
+      },
+      "required": [
+        "op",
+        "version",
+        "action",
+        "request_id",
+        "site_id",
+        "config_revision",
+        "origin_ms",
+        "ok",
+        "model_revision",
+        "latest_input_ms",
+        "latest_training_ms",
+        "latest_available_at_ms",
+        "state",
+        "signal",
+        "learning_started_ms"
+      ]
+    },
+    {
+      "type": "object",
       "required": [
         "ok",
         "error"

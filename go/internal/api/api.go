@@ -149,7 +149,8 @@ type Deps struct {
 	PVModel *pvmodel.Service
 
 	// Optional: load digital-twin self-learner.
-	LoadModel *loadmodel.Service
+	LoadModel        *loadmodel.Service
+	ForecastLearning ForecastLearning
 
 	// Optional: EV loadpoint state consumed by the API and MPC.
 	Loadpoints *loadpoint.Manager
@@ -2935,16 +2936,12 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 		"pv_residual_mean_w":         rd.MeanW,
 		"pv_residual_std_w":          rd.StdW,
 		"pv_residual_window_minutes": rd.WindowMinutes,
+		"learning":                   s.forecastLearningStatus("pv"),
 	})
 }
 
 func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
-	if s.deps.PVModel == nil {
-		writeJSON(w, 400, map[string]string{"error": "pvmodel disabled"})
-		return
-	}
-	s.deps.PVModel.Reset()
-	writeJSON(w, 200, map[string]string{"status": "reset"})
+	s.handleForecastLearningReset(w, r, "pv")
 }
 
 // ---- static ----

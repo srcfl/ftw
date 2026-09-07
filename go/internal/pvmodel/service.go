@@ -2,6 +2,7 @@ package pvmodel
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -344,14 +345,19 @@ func (s *Service) liveActualPV() (float64, bool) {
 }
 
 func (s *Service) liveActualPVAt(now time.Time) (float64, bool) {
+	pvW, _, valid := s.livePVMeasurementAt(now)
+	return pvW, valid
+}
+
+func (s *Service) livePVMeasurementAt(now time.Time) (float64, time.Time, bool) {
 	if s.Tele == nil || (s.CurtailmentActive != nil && s.CurtailmentActive()) {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	s.mu.RLock()
 	options := s.forecastOptions
 	s.mu.RUnlock()
 	m := s.Tele.ForecastMeasurement(now, "", options)
-	return -m.PVW, m.PVValid
+	return -m.PVW, m.PVEarliest, m.PVValid
 }
 
 // PredictNow returns the twin's prediction for right now using the
@@ -416,7 +422,7 @@ func (s *Service) sample() {
 
 func (s *Service) sampleAt(now time.Time) {
 	s.mu.RLock()
-	clearSky, generation := s.ClearSky, s.generation
+	clearSky, generation, learningStartedMS := s.ClearSky, s.generation, s.model.LearningStartedMS
 	s.mu.RUnlock()
 	if clearSky == nil {
 		return
@@ -434,8 +440,11 @@ func (s *Service) sampleAt(now time.Time) {
 	}
 	// Aggregate PV across all drivers. PV telemetry is stored as
 	// site-sign (negative = generating), so flip to positive.
-	pvW, valid := s.liveActualPVAt(now)
+	pvW, earliest, valid := s.livePVMeasurementAt(now)
 	if !valid {
+		return
+	}
+	if learningStartedMS > 0 && earliest.UnixMilli() < learningStartedMS {
 		return
 	}
 
@@ -470,24 +479,31 @@ func (s *Service) sampleAt(now time.Time) {
 	}
 }
 
-func (s *Service) persist() {
-	if s.Store == nil {
-		return
-	}
+func (s *Service) persist() error {
 	// Serialise the entire marshal+save so a sample-loop persist that
 	// started before a Reset cannot finish after Reset's persist and
 	// clobber the clean state with stale coefficients.
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
+	return s.persistLocked()
+}
+
+// persistLocked writes one snapshot while persistMu is held.
+func (s *Service) persistLocked() error {
+	if s.Store == nil {
+		return nil
+	}
 	s.mu.RLock()
 	js, err := modelstate.Wrap(FeatureHash(), s.model)
 	s.mu.RUnlock()
 	if err != nil {
-		return
+		return err
 	}
 	if err := s.Store.SaveConfig(stateKey, string(js)); err != nil {
 		slog.Warn("pvmodel persist", "err", err)
+		return err
 	}
+	return nil
 }
 
 // Reset clears the model to a fresh prior (useful after a system change
@@ -501,18 +517,54 @@ func (s *Service) Reset() {
 	s.mu.Lock()
 	s.resetLocked()
 	s.mu.Unlock()
-	s.persist()
+	if err := s.persist(); err != nil {
+		slog.Warn("pvmodel persist", "err", err)
+	}
 }
 
 func (s *Service) resetLocked() {
 	rated := s.model.RatedW
 	ac := s.model.ACLimitW
 	revision := s.model.ConfigRevision
+	learningStartedMS := s.model.LearningStartedMS
 	s.model = NewModel(rated)
 	s.model.ACLimitW = ac
 	s.model.ConfigRevision = revision
+	s.model.LearningStartedMS = learningStartedMS
 	s.Residuals = NewResidualBuffer()
 	s.generation++
+}
+
+// RestartLearning starts a new learned-model epoch. A replay of the same or an
+// older cutoff only persists the current state, so a boot-time retry repairs a
+// failed write without erasing samples learned after the reset.
+func (s *Service) RestartLearning(at time.Time) error {
+	if s == nil {
+		return nil
+	}
+	startedMS := at.UnixMilli()
+	if at.IsZero() || startedMS <= 0 {
+		return fmt.Errorf("pvmodel learning cutoff must be after the Unix epoch")
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.mu.Lock()
+	if startedMS > s.model.LearningStartedMS {
+		s.resetLocked()
+		s.model.LearningStartedMS = startedMS
+	}
+	s.mu.Unlock()
+	return s.persistLocked()
+}
+
+// LearningStartedMS returns the current learned-model epoch cutoff.
+func (s *Service) LearningStartedMS() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.model.LearningStartedMS
 }
 
 // ResidualCorrect is the integration point for the MPC. Returns the
