@@ -27,7 +27,9 @@ func runTestBeta(t *testing.T, st *state.Store, socket string) *Beta {
 	id := mustID(t, "00112233445566778899aabbccddeeff")
 	go func() {
 		defer close(b.done)
-		b.run(ctx, ClientConfig{SocketPath: socket, SourceID: id, NodeID: "test", ClientVersion: "test", IOTimeout: 100 * time.Millisecond}, "test-site", 20*time.Millisecond)
+		// Keep Start's I/O budget for real Rust fsync and CI scheduling delays.
+		// Only the polling interval is shortened; failures must still surface.
+		b.run(ctx, ClientConfig{SocketPath: socket, SourceID: id, NodeID: "test", ClientVersion: "test", IOTimeout: 2 * time.Second}, "test-site", 20*time.Millisecond)
 	}()
 	t.Cleanup(b.Close)
 	return b
