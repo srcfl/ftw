@@ -136,6 +136,17 @@ describe("render", () => {
     assert.ok(!html.includes("planner.soc_max_pct"));
   });
 
+  it("shows Core's default bounds without adding a planner config", () => {
+    const ctx = stubCtx();
+    ctx.config = {};
+    const defaults = {};
+    ctx.field = (label, path, type, value) => { defaults[path] = value; return ""; };
+    tab.render(ctx);
+    assert.equal(defaults["planner.soc_min"], 0.1);
+    assert.equal(defaults["planner.soc_max"], 0.95);
+    assert.deepEqual(ctx.config, {});
+  });
+
   it("promotes legacy soc_min_pct / soc_max_pct into 0–1 fields", () => {
     const ctx = stubCtx();
     ctx.config.planner = { soc_min_pct: 10, soc_max_pct: 90 };

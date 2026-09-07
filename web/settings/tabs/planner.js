@@ -66,8 +66,7 @@
   S.tabs.planner = {
     render: function (ctx) {
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
-      if (!config.planner) config.planner = {};
-      var planner = config.planner;
+      var planner = config.planner || {};
       if (planner.soc_min == null && planner.soc_min_pct != null) {
         planner.soc_min = planner.soc_min_pct / 100;
       }
@@ -86,14 +85,14 @@
           '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
       }
       return '<fieldset><legend>MPC Planner</legend>' +
-        '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
+        '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
         '<div class="field-row"><div>' +
         field("House reserve (min SoC, 0–1)", "planner.soc_min", "number", 0.10,
           "Lowest SoC the planner will discharge to, so the house keeps a reserve. 0.10 = 10%.") +
         '</div><div>' +
-        field("Max SoC (0–1)", "planner.soc_max", "number", 0.90,
-          "Highest SoC the planner will charge to. 0.90 = 90%.") +
+        field("Max SoC (0–1)", "planner.soc_max", "number", 0.95,
+          "Highest SoC the planner will charge to. The default is 0.95 = 95%.") +
         '</div></div>' +
         '</fieldset>' +
         '<details class="engine-details">' +
