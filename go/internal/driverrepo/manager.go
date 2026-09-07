@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -586,6 +587,13 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 		return state.DriverRepoInstall{}, fmt.Errorf("driver size %d, want %d", len(raw), entry.SizeBytes)
 	}
 	installPath := filepath.Join(m.root, "installed", safeSegment(repo.ID), safeSegment(entry.ID), entry.Version, strings.ToLower(entry.SHA256), entry.Filename)
+	retained, err := m.store.DriverRepoInstallByPath(installPath)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return state.DriverRepoInstall{}, err
+	}
+	if err == nil && retained.RepositoryFormat != "" && retained.RepositoryFormat != repositoryFormat(repo) {
+		return state.DriverRepoInstall{}, errors.New("retained driver metadata format cannot change")
+	}
 	if err := atomicWrite(installPath, raw, 0o600); err != nil {
 		return state.DriverRepoInstall{}, err
 	}
@@ -608,7 +616,8 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 	logical := filepath.ToSlash(entry.Path)
 	installed := state.DriverRepoInstall{
 		RepoURL: manifest.Repository, RepoID: repo.ID, DriverID: entry.ID,
-		LogicalPath: logical, Version: entry.Version, SHA256: strings.ToLower(entry.SHA256), InstalledPath: installPath,
+		RepositoryFormat: repositoryFormat(repo),
+		LogicalPath:      logical, Version: entry.Version, SHA256: strings.ToLower(entry.SHA256), InstalledPath: installPath,
 		// Recorded here and nowhere else, because here is where it happened.
 		FTWSigned: ftwSigned(repo),
 	}
