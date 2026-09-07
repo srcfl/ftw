@@ -113,7 +113,7 @@ func (t *ProcessTransport) RoundTrip(ctx context.Context, payload []byte) ([]byt
 		t.scheduleIdleStopLocked()
 		return nil, err
 	}
-	if _, err := t.stdin.Write(append(append([]byte(nil), payload...), '\n')); err != nil {
+	if err := t.writeLocked(ctx, payload); err != nil {
 		t.stopLocked()
 		return nil, fmt.Errorf("write optimizer request: %w", err)
 	}
@@ -143,7 +143,7 @@ func (t *ProcessTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, er
 		"type":             "handshake",
 		"protocol_version": OptimizerProtocolVersion,
 	})
-	if _, err := t.stdin.Write(append(payload, '\n')); err != nil {
+	if err := t.writeLocked(ctx, payload); err != nil {
 		t.stopLocked()
 		return OptimizerRuntimeInfo{}, fmt.Errorf("write optimizer handshake: %w", err)
 	}
@@ -159,6 +159,33 @@ func (t *ProcessTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, er
 	}
 	t.scheduleIdleStopLocked()
 	return info, nil
+}
+
+// writeLocked keeps a worker that stops reading stdin inside the caller's
+// deadline. Closing and killing the process releases a blocked pipe write; we
+// then wait for the writer so no request buffer or goroutine survives the call.
+func (t *ProcessTransport) writeLocked(ctx context.Context, payload []byte) error {
+	frame := make([]byte, len(payload)+1)
+	copy(frame, payload)
+	frame[len(payload)] = '\n'
+	stdin := t.stdin
+	written := make(chan error, 1)
+	go func() {
+		n, err := stdin.Write(frame)
+		if err == nil && n != len(frame) {
+			err = io.ErrShortWrite
+		}
+		written <- err
+	}()
+
+	select {
+	case err := <-written:
+		return err
+	case <-ctx.Done():
+		t.stopLocked()
+		<-written
+		return ctx.Err()
+	}
 }
 
 // errOptimizerWorkerMissing marks the absence of the bundled Python worker

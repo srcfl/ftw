@@ -5,6 +5,9 @@ on:
     paths:
       - 'optimizer/native/**'
       - 'go/internal/mpc/**'
+      - 'go/internal/energyforecast/**'
+      - 'go/cmd/ftw/forecast*.go'
+      - 'go/cmd/ftw/main.go'
       - 'Makefile'
       - '.github/workflows/native-solver.yml'
   push:
@@ -12,6 +15,9 @@ on:
     paths:
       - 'optimizer/native/**'
       - 'go/internal/mpc/**'
+      - 'go/internal/energyforecast/**'
+      - 'go/cmd/ftw/forecast*.go'
+      - 'go/cmd/ftw/main.go'
       - 'Makefile'
       - '.github/workflows/native-solver.yml'
 

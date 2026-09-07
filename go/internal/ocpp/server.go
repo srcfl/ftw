@@ -175,7 +175,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		// layer up, in authorizer.checkClient, which refuses the handshake
 		// for a connection that arrived somewhere else.
 		// cs.Start blocks until cs.Stop is called.
-		s.cs.Start(cfg.Port, fmt.Sprintf("%s{ws}", cfg.Path))
+		cs.Start(cfg.Port, fmt.Sprintf("%s{ws}", cfg.Path))
 	}()
 	go func() {
 		<-ctx.Done()

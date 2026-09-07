@@ -1382,11 +1382,9 @@ type Weather struct {
 	Longitude float64 `yaml:"longitude" json:"longitude"`
 	APIKey    string  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
 
-	// PVRatedW is the system's nameplate PV output (W) — used as the
-	// initial twin prior AND the ceiling for naive PV estimates. If 0,
-	// we fall back to a heuristic (sum of battery_capacity_wh / 3),
-	// which is only roughly right for homes where PV and storage were
-	// sized together. Set explicitly for accurate day-1 forecasts.
+	// PVRatedW is an optional DC nameplate prior for weather conversion and
+	// cold start. Zero leaves scale unknown until telemetry establishes it.
+	// It is not a verified inverter AC limit.
 	PVRatedW float64 `yaml:"pv_rated_w,omitempty" json:"pv_rated_w,omitempty"`
 
 	// PVTiltDeg / PVAzimuthDeg describe the physical orientation of a

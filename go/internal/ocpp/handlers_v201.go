@@ -23,6 +23,7 @@ package ocpp
 
 import (
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
@@ -102,6 +103,7 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 		s.connected = false
 		s.charging = false
 		s.lastPowerW = 0
+		s.forecastPower.Known = false
 	case availability.ConnectorStatusOccupied, availability.ConnectorStatusReserved:
 		s.connected = true
 		s.connectedKnown = true
@@ -112,6 +114,7 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 		s.connectedKnown = true
 		s.charging = false
 		s.lastPowerW = 0
+		s.forecastPower.Known = false
 	}
 	faulted := req.ConnectorStatus == availability.ConnectorStatusFaulted
 	h.mu.Unlock()
@@ -172,12 +175,14 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		s.transactionRef = ""
 		s.charging = false
 		s.lastPowerW = 0
+		s.forecastPower.Known = false
 		powerW = 0
 	}
 
 	if req.EventType != transactions.TransactionEventEnded {
 		s.lastPowerW = powerW
 	}
+	s.recordForecastPowerV201(req.MeterValue, time.Now())
 	sessionWh := s.sessionMeterWh
 	ended := req.EventType == transactions.TransactionEventEnded
 	h.mu.Unlock()
@@ -209,6 +214,7 @@ func (h *handlerV201) OnMeterValues(id string, req *meter.MeterValuesRequest) (*
 
 	h.mu.Lock()
 	s.lastPowerW = powerW
+	s.recordForecastPowerV201(req.MeterValue, time.Now())
 	if hasEnergy && s.transactionID >= 0 {
 		s.sessionMeterWh = energyWh - s.sessionStartMeterWh
 	}
@@ -271,5 +277,32 @@ func unitIsKilo(u *types201.UnitOfMeasure) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (s *chargerState) recordForecastPowerV201(values []types201.MeterValue, received time.Time) {
+	for _, mv := range values {
+		for _, sv := range mv.SampledValue {
+			if sv.Measurand != types201.MeasurandPowerActiveImport || sv.Phase != "" {
+				continue
+			}
+			w := sv.Value
+			if unit := sv.UnitOfMeasure; unit != nil {
+				if unit.Unit != "" && unit.Unit != "W" && unit.Unit != "kW" {
+					continue
+				}
+				if unit.Unit == "kW" {
+					w *= 1000
+				}
+				if unit.Multiplier != nil {
+					w *= math.Pow10(*unit.Multiplier)
+				}
+			}
+			measured := mv.Timestamp.Time
+			if measured.IsZero() {
+				measured = received
+			}
+			s.recordForecastPower(w, measured, received)
+		}
 	}
 }

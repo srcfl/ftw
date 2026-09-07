@@ -273,5 +273,5 @@ native-solver-check:
 
 native-solver-test: native-solver-check
 	@binary="$$(python3 optimizer/native/verify.py --host-binary)"; \
-	if [ -n "$$binary" ]; then cd go && FTW_NATIVE_SOLVER="$$binary" go test -count=1 ./internal/mpc -run '^TestNative'; \
+	if [ -n "$$binary" ]; then cd go && FTW_NATIVE_SOLVER="$$binary" FTW_FORECAST_WORKER="$$binary" go test -count=1 ./internal/mpc ./internal/energyforecast ./cmd/ftw -run 'Native|RustForecastHost'; \
 	else echo "Native execution tests skipped: no bundled worker for this host"; fi
