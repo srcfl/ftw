@@ -869,7 +869,8 @@ func (s *Store) migrate() error {
 			previous_installed_path TEXT NOT NULL DEFAULT '',
 			installed_at_ms INTEGER NOT NULL,
 			active INTEGER NOT NULL DEFAULT 0,
-			ftw_signed INTEGER NOT NULL DEFAULT 0
+			ftw_signed INTEGER NOT NULL DEFAULT 0,
+			repository_format TEXT NOT NULL DEFAULT ''
 		) STRICT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_artifact
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
@@ -1014,6 +1015,10 @@ func (s *Store) migrate() error {
 	// out of the fleet ping until it is installed again.
 	if err := s.addColumn("driver_repo_installs", "ftw_signed",
 		"INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.addColumn("driver_repo_installs", "repository_format",
+		"TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureEnergyLedgerVersion(); err != nil {

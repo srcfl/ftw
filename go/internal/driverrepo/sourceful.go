@@ -578,10 +578,7 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		return nil, fmt.Errorf("resolve managed driver activation: %w", err)
 	}
 	if !installed.Active {
-		if cfg.Control != nil && cfg.Control.Enabled {
-			return nil, errors.New("control opt-in requires the active managed artifact")
-		}
-		return nil, nil
+		return nil, errors.New("managed driver runtime requires the active artifact")
 	}
 	var repo *config.DriverRepositorySource
 	if installed.FTWSigned && installed.RepoURL == "https://github.com/srcfl/device-drivers" {
@@ -603,23 +600,50 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 	if repo == nil && m.betaRepo.ID != "" && installed.RepoID == m.betaRepo.ID {
 		repo = &m.betaRepo
 	}
+	packagePath := filepath.Join(filepath.Dir(resolved), sourcefulInstalledPackageEnvelope)
+	_, packageErr := os.Lstat(packagePath)
+	if packageErr != nil && !errors.Is(packageErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect installed signed package envelope: %w", packageErr)
+	}
+	// An envelope can rule out legacy operation even on an old install. Its
+	// presence never grants trust; only signed metadata can do that.
+	if packageErr == nil && (installed.RepositoryFormat == config.DriverRepositoryFormatFTWManifestV1 ||
+		(repo != nil && repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1)) {
+		return nil, errors.New("installed signed package requires its Device Support repository format")
+	}
+	switch installed.RepositoryFormat {
+	case "", config.DriverRepositoryFormatFTWManifestV1, config.DriverRepositoryFormatSourcefulIndexV1:
+	default:
+		return nil, errors.New("installed driver metadata format is unsupported")
+	}
 	if repo == nil {
 		if cfg.Control != nil && cfg.Control.Enabled {
 			return nil, errors.New("control opt-in requires a configured Device Support trust root")
 		}
-		// Preserve legacy v1 startup and its autonomous default after a source
-		// is removed. Official provenance already selected pinned trust above.
+		if installed.RepositoryFormat != config.DriverRepositoryFormatFTWManifestV1 || packageErr == nil {
+			return nil, errors.New("installed driver requires its repository to verify runtime metadata; restore the repository or reinstall the driver")
+		}
+		// Only a recorded direct-manifest install can retain legacy startup
+		// after its source is removed. An absent opt-in does not identify v1.
 		return nil, nil
+	}
+	if installed.RepositoryFormat != "" && installed.RepositoryFormat != repositoryFormat(*repo) {
+		return nil, errors.New("configured repository format does not match the installed driver")
 	}
 	if repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1 {
+		if installed.RepositoryFormat == "" {
+			if err := m.recordDirectManifestFormat(*repo, installed); err != nil {
+				return nil, err
+			}
+		}
 		return m.directManifestRuntimePolicy(cfg, *repo, installed)
 	}
-	packageRaw, err := readLimitedFile(filepath.Join(filepath.Dir(resolved), sourcefulInstalledPackageEnvelope), maxManifestBytes)
+	if installed.RepoURL != repo.ManifestURL {
+		return nil, errors.New("configured Device Support repository does not match the installed source")
+	}
+	packageRaw, err := readLimitedFile(packagePath, maxManifestBytes)
 	if err != nil {
-		if cfg.Control != nil && cfg.Control.Enabled {
-			return nil, fmt.Errorf("read installed signed package envelope: %w", err)
-		}
-		return nil, nil
+		return nil, fmt.Errorf("read installed signed package envelope: %w", err)
 	}
 	payloadRaw, _, err := verifySourcefulEnvelope(packageRaw, *repo, sourcefulPackageEnvelopeSchema, sourcefulPackagePayloadType)
 	if err != nil {
@@ -640,13 +664,15 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		return nil, fmt.Errorf("validate installed signed package: %w", err)
 	}
 	if !compatible {
-		if cfg.Control != nil && cfg.Control.Enabled {
-			return nil, errors.New("control opt-in targets an artifact without an enabled FTW v2 control target")
-		}
-		return nil, nil
+		return nil, errors.New("installed signed package is incompatible with this FTW runtime")
 	}
 	if !strings.EqualFold(entry.SHA256, installed.SHA256) || entry.Version != installed.Version || entry.ID != installed.DriverID {
 		return nil, errors.New("installed artifact does not match its signed package envelope")
+	}
+	if installed.RepositoryFormat == "" {
+		if err := m.store.RecordDriverRepoInstallFormat(installed.ID, config.DriverRepositoryFormatSourcefulIndexV1); err != nil {
+			return nil, fmt.Errorf("record installed signed package format: %w", err)
+		}
 	}
 	permissions := make(map[string]bool, len(entry.Permissions))
 	for _, permission := range entry.Permissions {
@@ -663,10 +689,7 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		}, nil
 	}
 	if !entry.ControlEnabled {
-		if cfg.Control != nil && cfg.Control.Enabled {
-			return nil, errors.New("control opt-in targets an artifact without an enabled FTW v2 control target")
-		}
-		return nil, nil
+		return nil, errors.New("installed signed package lacks an enabled FTW control target")
 	}
 
 	siteEnabled := false
@@ -698,6 +721,43 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 		},
 		SiteEnabled: siteEnabled, MaxWrites: 128,
 	}, nil
+}
+
+func (m *Manager) recordDirectManifestFormat(repo config.DriverRepositorySource, installed state.DriverRepoInstall) error {
+	if repositoryFormat(repo) != config.DriverRepositoryFormatFTWManifestV1 {
+		return errors.New("installed driver metadata format is unsupported")
+	}
+	// Do not infer an older install's format from a config alias or an
+	// in-memory manifest. Reverify the saved bytes against the resolved trust
+	// source and match the recorded origin and exact artifact.
+	raw, err := readLimitedFile(filepath.Join(m.root, "cache", safeSegment(installed.RepoID)+".json"), maxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("verify older installed driver format: %w", err)
+	}
+	// An unsigned source can still perform an explicit new install. It
+	// cannot supply missing historical provenance during startup.
+	repo.AllowUnsigned = false
+	manifest, _, err := verifyManifest(raw, repo)
+	if err != nil {
+		return fmt.Errorf("verify older installed driver format: %w", err)
+	}
+	if err := validateManifest(manifest, repo.AllowInsecure); err != nil {
+		return fmt.Errorf("validate older installed driver format: %w", err)
+	}
+	if manifest.Repository != installed.RepoURL {
+		return errors.New("older installed driver source does not match its verified manifest")
+	}
+	for _, entry := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
+		if entry.ID != installed.DriverID || entry.Version != installed.Version || !strings.EqualFold(entry.SHA256, installed.SHA256) {
+			continue
+		}
+		if entry.PackageID != "" || (entry.RuntimeABI != "" && entry.RuntimeABI != sourcefulFTWABIV1) ||
+			(entry.HostAPIProfile != "" && entry.HostAPIProfile != sourcefulFTWHostAPIProfileV1) {
+			return errors.New("older installed driver is not a legacy direct-manifest artifact")
+		}
+		return m.store.RecordDriverRepoInstallFormat(installed.ID, config.DriverRepositoryFormatFTWManifestV1)
+	}
+	return errors.New("older installed driver is absent from its verified manifest; reinstall the driver")
 }
 
 func (m *Manager) directManifestRuntimePolicy(
