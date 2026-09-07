@@ -145,3 +145,56 @@ func TestInterruptedImportReusesCommittedConfig(t *testing.T) {
 		t.Fatalf("authority pointer: %v", err)
 	}
 }
+
+func TestRecoveryCannotSubstituteAnotherConfigAtTheSameRevision(t *testing.T) {
+	root := t.TempDir()
+	var first *Config
+	var firstSeed, firstDatabase string
+	for _, name := range []string{"first", "different"} {
+		dir := filepath.Join(root, name)
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		database := filepath.Join(dir, "state.db")
+		seed := filepath.Join(dir, "config.yaml")
+		st, err := state.Open(database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Parse([]byte(minimalYAML), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Site.Name = name
+		if _, err := InitializeStorage(seed, database, cfg, st); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if name == "first" {
+			first, err = Load(seed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstSeed, firstDatabase = seed, database
+		} else {
+			// Simulate recovery replacing the file after Load but before open.
+			raw, err := os.ReadFile(database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(firstDatabase, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	recovered, err := state.Open(firstDatabase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if _, err := InitializeStorage(firstSeed, firstDatabase, first, recovered); err == nil {
+		t.Fatal("different config with the same revision replaced the loaded settings")
+	}
+}

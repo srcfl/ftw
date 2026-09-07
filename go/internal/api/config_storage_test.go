@@ -118,3 +118,13 @@ func TestFailedPlannerSaveLeavesLivePreferencesAndModeAlone(t *testing.T) {
 		t.Fatalf("failed prefs save changed runtime: status=%d k=%v export=%s mode=%s", rec.Code, k, export, ctrl.Mode)
 	}
 }
+
+func TestSQLiteSettingsBlockImageOnlyDowngrade(t *testing.T) {
+	srv, _, _ := storedConfigServer(t)
+	srv.deps.SelfUpdate = newCheckerAgainstOptions(t, "v1.5.0", "v1.6.0", filepath.Join(t.TempDir(), "status.json"), "", "<!-- ftw-state-schema:1 -->", 2)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/update", nil))
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "matching Core version") {
+		t.Fatalf("unsafe downgrade: %d %s", rr.Code, rr.Body.String())
+	}
+}

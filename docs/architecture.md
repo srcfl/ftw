@@ -194,6 +194,13 @@ and point `-config` there before upgrading. Keep a full backup before migration.
 Use Settings for later edits. Moving the state database is an offline operation;
 API listener and selected integration changes still need a restart.
 
+State schema 2 marks this settings migration, so an update from older Core
+versions takes a full backup first. To return to a Core that reads YAML, stop
+Core and restore a full backup with its matching Core version. An image-only
+downgrade to state schema 1 is refused; the import seed can be older than the
+settings saved in SQLite.
+
+
 Document revisions only prevent stale Settings forms from overwriting a newer
 save. They do not change forecast learning revisions, hardware identity, model
 weights or the exact bytes of stored forecast snapshots. Backups export YAML

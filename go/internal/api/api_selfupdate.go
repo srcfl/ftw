@@ -139,6 +139,16 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := s.deps.SelfUpdate.Info()
+	if info.TargetStateSchema > 0 && info.TargetStateSchema < 2 && s.deps.Cfg != nil && s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+		storedSettings := s.deps.Cfg.ConfigDatabase != ""
+		s.deps.CfgMu.RUnlock()
+		if storedSettings {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "This older Core reads settings from a file. Stop Core and restore a full backup with the matching Core version instead of changing only the image."})
+			return
+		}
+	}
+
 	if !info.SidecarReady {
 		writeJSON(w, 502, map[string]string{"error": "selfupdate: sidecar socket not ready"})
 		return

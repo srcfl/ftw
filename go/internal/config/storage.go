@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/srcfl/ftw/go/internal/state"
 )
@@ -65,6 +66,13 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 	if cfg.ConfigDatabase != "" {
 		if !found || doc.Revision != cfg.Revision {
 			return nil, errors.New("database recovery lost current settings; restore a full backup")
+		}
+		current, err := decodeStored(doc, database, filepath.Dir(path))
+		if err != nil {
+			return nil, err
+		}
+		if !reflect.DeepEqual(cfg, current) {
+			return nil, errors.New("database recovery changed current settings; restore a full backup")
 		}
 		return cfg, nil
 	}
