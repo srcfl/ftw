@@ -76,27 +76,14 @@ These bounded points remain on the same disk and are deliberately labelled
 **Local rollback points**, not full backups. Older incomplete snapshots are
 visible but cannot be restored.
 
-The updater also requires a running, healthy `ftw-optimizer` service before it
-updates Core. If the merged Compose files lack that service, or its health
-check fails, the update stops before pulling or replacing Core. The updater
-does not edit operator override files; use the
-[legacy upgrade guide](upgrade-from-legacy.md) to add the sidecar safely.
+Core updates include the compiled Energyplan worker. They require no Python
+service. Core DP remains available if the worker fails or returns an invalid plan.
 
 Portable `.ftwbak` archives include the complete persistent directory, cold
 history, custom/managed drivers and component inventory. They are independently
 verified before publication and can be downloaded off-device. Safe restore
 retains the pre-restore directory and automatically reactivates it when the
 restored Core fails health. See [backup-and-restore.md](backup-and-restore.md).
-
-Optimizer-only updates use `optimizer-vX.Y.Z[-beta.N]`, recreate and
-health-check only `ftw-optimizer`, and never replace Core. Failure restores the
-previous Optimizer image while Core continues on its Go fallback. After health
-succeeds, both update and rollback save `FTW_OPTIMIZER_IMAGE_TAG` in the host
-project's `.env` and check it before reporting success. Other settings, file
-owner and mode stay intact. A pin write failure is reported as a failed
-operation even if the optimizer is healthy; repair the host project and retry.
-The host Compose image must use `${FTW_OPTIMIZER_IMAGE_TAG}` (an optional default
-is allowed), or the operation stops before replacing the optimizer.
 
 A Driver update downloads one signed artifact, verifies hash, metadata and host
 API compatibility, then atomically activates exactly that version. Core puts
@@ -164,10 +151,22 @@ tested locally.
 ## Independent release progression
 
 - Core and the updater sidecar are built from Core `vX.Y.Z[-beta.N]` releases.
-- Optimizer uses its own `optimizer-vX.Y.Z[-beta.N]` GitHub tags and
-  `ftw-optimizer:vX.Y.Z[-beta.N]` images. Stable promotion requires the exact
-  beta commit.
+- Energyplan updates and rolls back with the Core image. There is no separate
+  optimizer channel, image update or rollback.
 - Signed Lua drivers are versioned independently in `srcfl/device-drivers`.
   Main publishes `drivers-beta`; `drivers-stable` promotes the exact signed
   beta commit and retains per-driver version history. See
   [device-repository.md](device-repository.md).
+
+## Retiring the Python service
+
+After installing this Core/updater pair and checking that Energyplan is healthy,
+run the updater binary with `-retire-python` and the installation's `-compose`
+path. The command starts a short-lived helper from the exact running updater
+image, with the project mounted writable. It backs up each changed Compose file, removes only the old planner service
+and FTW socket wiring, validates the merged files, and removes the retired
+container from the same Compose project, including an orphan left by an earlier
+Compose edit. Custom services and persistent data
+stay intact. Recreate Core at its pinned image to release the old socket mount.
+An older updater can install this release while Python still runs; retire the
+service only after the new updater is installed.

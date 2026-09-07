@@ -116,9 +116,9 @@ func TestReplanCallsSaveDiag(t *testing.T) {
 		Mode:                ModeSelfConsumption,
 		SoCLevels:           11,
 		CapacityWh:          10000,
-		SoCMin: 0.1,
-		SoCMax: 0.95,
-		InitialSoC: 0.5,
+		SoCMin:              0.1,
+		SoCMax:              0.95,
+		InitialSoC:          0.5,
 		ActionLevels:        5,
 		MaxChargeW:          3000,
 		MaxDischargeW:       3000,
@@ -496,86 +496,5 @@ func TestReplanLoadsHourlyWeatherCoveringCurrentPriceSlot(t *testing.T) {
 	}
 	if got := plan.Actions[0].PVW; got != -pvW {
 		t.Fatalf("current slot PVW = %.1f, want %.1f from covering hourly row", got, -pvW)
-	}
-}
-
-func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
-	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	now := time.Now().UTC().Truncate(time.Hour)
-	for i := 0; i < 4; i++ {
-		_ = st.SavePrices([]state.PricePoint{{
-			Zone: "SE3", SlotTsMs: now.Add(time.Duration(i) * time.Hour).UnixMilli(),
-			SlotLenMin: 60, SpotOreKwh: 50, TotalOreKwh: 100,
-			Source: "test", FetchedAtMs: now.UnixMilli(),
-		}})
-	}
-	svc := New(st, nil, "SE3", Params{
-		Mode: ModePassiveArbitrage, SoCLevels: 11, CapacityWh: 10000,
-		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
-		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
-		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
-	})
-	svc.BaseLoad = 500
-	svc.Optimizer = testPrimaryOptimizer{}
-	svc.EnableRecourseShadow = true
-	plan := svc.Replan(context.Background())
-	if plan == nil || plan.Solver == nil || plan.Solver.Engine != "cvxpy" {
-		t.Fatalf("primary plan not active: %+v", plan)
-	}
-	if plan.DPShadow == nil || plan.DPShadow.Solver == nil || plan.DPShadow.Solver.Engine != "core" {
-		t.Fatalf("DP shadow missing: %+v", plan.DPShadow)
-	}
-	if plan.DPShadow.ComparedSlots != len(plan.Actions) || plan.DPShadow.FirstAction == nil {
-		t.Fatalf("shadow comparison incomplete: %+v", plan.DPShadow)
-	}
-	if plan.DPEvaluationShadow == nil || plan.DPEvaluationShadow.ForecastBasis != "same base forecast input" {
-		t.Fatalf("same-input DP evaluation shadow missing: %+v", plan.DPEvaluationShadow)
-	}
-	if plan.RecourseShadow == nil || plan.RecourseShadow.Solver == nil || plan.RecourseShadow.Solver.ScenarioPolicy != "recourse" {
-		t.Fatalf("recourse shadow missing: %+v", plan.RecourseShadow)
-	}
-	if plan.ShadowEvaluation == nil || plan.ShadowEvaluation.Status != "running" {
-		t.Fatalf("stateful shadow evaluation missing: %+v", plan.ShadowEvaluation)
-	}
-	if d := svc.Diagnose(); d == nil || d.DPShadow == nil || d.DPEvaluationShadow == nil || d.RecourseShadow == nil || d.ShadowEvaluation == nil {
-		t.Fatal("persisted diagnostic omitted a DP shadow")
-	}
-}
-
-func TestPrimaryOptimizerCanSelectMultistageShadow(t *testing.T) {
-	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	now := time.Now().UTC().Truncate(time.Hour)
-	for i := 0; i < 4; i++ {
-		_ = st.SavePrices([]state.PricePoint{{
-			Zone: "SE3", SlotTsMs: now.Add(time.Duration(i) * time.Hour).UnixMilli(),
-			SlotLenMin: 60, SpotOreKwh: 50, TotalOreKwh: 100,
-			Source: "test", FetchedAtMs: now.UnixMilli(),
-		}})
-	}
-	svc := New(st, nil, "SE3", Params{
-		Mode: ModePassiveArbitrage, SoCLevels: 11, CapacityWh: 10000,
-		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
-		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
-		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
-	})
-	svc.BaseLoad = 500
-	svc.Optimizer = testPrimaryOptimizer{}
-	svc.EnableRecourseShadow = true
-	svc.ChallengerPolicy = "multistage"
-	svc.RecourseNonAnticipativeSlots = 1
-	plan := svc.Replan(context.Background())
-	if plan == nil || plan.Solver == nil || plan.Solver.ScenarioPolicy == "multistage" {
-		t.Fatalf("challenger replaced active champion: %+v", plan)
-	}
-	if plan.RecourseShadow == nil || plan.RecourseShadow.Solver == nil || plan.RecourseShadow.Solver.ScenarioPolicy != "multistage" {
-		t.Fatalf("multistage shadow missing: %+v", plan.RecourseShadow)
 	}
 }

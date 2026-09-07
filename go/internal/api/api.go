@@ -195,9 +195,6 @@ type Deps struct {
 	// Optional: background version-check + updater-sidecar dispatch.
 	// Nil disables every /api/version/* endpoint (returns 503).
 	SelfUpdate *selfupdate.Checker
-	// OptimizerUpdate resolves independently tagged optimizer releases. The
-	// privileged mutation still crosses SelfUpdate's shared updater socket.
-	OptimizerUpdate *selfupdate.Checker
 
 	// Events is the shared pub/sub bus. Nil is a safe no-op for
 	// handlers that publish (e.g. /api/notifications/test).
@@ -466,9 +463,6 @@ func (s *Server) routes() {
 	s.handle("POST /api/device_repository/drivers/{id}/activate", Configure, s.handleDeviceRepositoryActivate)
 	s.handle("GET  /api/components", Read, s.handleComponents)
 	s.handle("GET  /api/components/history", Read, s.handleComponentHistory)
-	s.handle("POST /api/components/optimizer/update", Configure, s.handleOptimizerComponentUpdate)
-	s.handle("POST /api/components/optimizer/rollback", Configure, s.handleOptimizerComponentRollback)
-	s.handle("POST /api/components/optimizer/channel", Configure, s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", Read, s.handleHAStatus)
 	s.handle("GET  /api/caldav/status", Read, s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", Local, s.handleCalDAVCredentials)

@@ -329,7 +329,7 @@ jobs:
             cp "bin/${BINARY}" "${STAGE}/forty-two-watts.exe"
             (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe ftw-backup.exe forty-two-watts.exe)
             zip -qr "release/ftw-${PLATFORM}.zip" \
-              drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
+              drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE
             cp "release/ftw-${PLATFORM}.zip" "release/forty-two-watts-${PLATFORM}.zip"
           else
             cp "bin/${BINARY}" "${STAGE}/ftw"
@@ -337,7 +337,7 @@ jobs:
             ln -s ftw "${STAGE}/forty-two-watts"
             tar czf "release/ftw-${PLATFORM}.tar.gz" \
               -C "${STAGE}" ftw ftw-backup forty-two-watts \
-              -C ../.. drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
+              -C ../.. drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE
             cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
           fi
           (

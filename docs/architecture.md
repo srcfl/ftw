@@ -12,7 +12,7 @@ make dispatch unsafe.
 |---|---|---|---|
 | Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
 | Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Compiled worker or optional Python service/process | Solve the long-horizon mathematical plan |
+| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Compiled Energyplan worker | Solve the long-horizon mathematical plan |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
@@ -102,9 +102,10 @@ plan before publishing it, then runs a bounded Core DP shadow on the same input.
 A worker error, timeout or rejected plan invokes Core DP fallback. Core validates
 fallback plans too; a failed validation leaves the prior plan in place.
 
-`planner.engine: core`, `python`, or `energyplan` selects an engine explicitly.
-Stable and development builds default to Core. The optional Python worker runs
-as a shadow behind Core unless `planner.shadow_python: false` disables it.
+`planner.engine: core` or `energyplan` selects an engine explicitly.
+Stable and development builds default to Core. Older `engine: python` values
+migrate to Energyplan; retired optimizer settings are ignored and omitted
+when the configuration is saved.
 Energyplan ships as compiled binaries with its own license; source and builds
 stay in the private Energyplan repository. It updates with the Core image.
 The optimizer never reads hardware or issues commands, so its deployment and
@@ -112,8 +113,8 @@ dependency churn do not enlarge the safety-critical runtime.
 
 ## Versioning a module contract
 
-Drivers and the optimizer release on their own schedules, so core cannot assume
-the version on the other side of either contract. Both use the same rule.
+Drivers release independently. Energyplan ships with Core, but Core still
+checks the worker contract before accepting plans.
 
 Each side declares the **window** of contract versions it speaks — core in
 [`go/internal/components`](../go/internal/components) and
@@ -462,8 +463,8 @@ There are two channels:
 - `beta`: every new release candidate, used for real-site validation;
 - `stable`: promotion of the exact commit already published and tested as beta.
 
-Core, Optimizer and signed Drivers may release independently, but all use the
-same beta-to-stable progression. Core and its privileged updater remain a
+Core includes Energyplan. Core and signed Drivers use the same
+beta-to-stable progression. Core and its privileged updater remain a
 paired control plane; optional components negotiate compatibility with Core.
 There is no edge channel. See [self-update.md](self-update.md).
 

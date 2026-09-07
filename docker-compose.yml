@@ -55,11 +55,6 @@ services:
       # fully-qualified hostname. Keep it in .env so updater-driven recreates
       # retain it. Local LAN addresses continue to work without a token.
       FTW_API_TOKEN: ${FTW_API_TOKEN:-}
-      # Use the independently versioned optimizer sidecar. Core falls straight
-      # back to its safe Go DP planner if the socket is unavailable or invalid;
-      # the Core image never starts a hidden local Python worker.
-      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}
-      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
 
     # Host networking is required for:
     #   - Modbus TCP to inverters / meters on the LAN
@@ -76,7 +71,6 @@ services:
       # Shared volume with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
-      - optimizer-ipc:/run/ftw-optimizer
       # OPTIONAL — avahi-daemon's runtime directory. Host networking shares
       # ports, not Unix sockets, so this is the only way in.
       #
@@ -92,16 +86,6 @@ services:
       # avahi-daemon from ever starting. Restarting avahi after the container
       # detaches the mount, so restart FTW too if you do.
       # - /run/avahi-daemon:/run/avahi-daemon:ro
-
-  ftw-optimizer:
-    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
-    container_name: ftw-optimizer
-    restart: unless-stopped
-    network_mode: none
-    environment:
-      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
-    volumes:
-      - optimizer-ipc:/run/ftw-optimizer
 
   ftw-updater:
     # Normally follows :latest. The separate variable is only needed for
@@ -197,5 +181,4 @@ services:
 
 volumes:
   update-ipc:
-  optimizer-ipc:
   mosquitto-data:

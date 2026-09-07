@@ -1,7 +1,7 @@
 # Top-level build for FTW (pure Go + Lua drivers).
 #
 # Common targets:
-#   make test                 — Go + Python suites (full-stack e2e is separate)
+#   make test                 — Go suites (full-stack e2e is separate)
 #   make build                — native binaries for this machine
 #   make build-arm64          — cross-compile for linux/arm64 (RPi)
 #   make build-amd64          — cross-compile for linux/amd64 (x86_64 server)
@@ -11,21 +11,19 @@
 #   make dev                  — start sims + main app (hot-reload workflow)
 #   make clean                — remove all build artifacts
 
-.PHONY: help test optimizer-install optimizer-test compose-migration-test container-boundary-test release-workflow-test build build-arm64 build-amd64 build-windows-amd64 release \
+.PHONY: help test compose-migration-test container-boundary-test release-workflow-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions \
         drivers drivers-present driver-versions-across-pin
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
-OPTIMIZER_PYTHON := $(CURDIR)/optimizer/.venv/bin/python
-PYTHON ?= python3
 
 help:
 	@echo "FTW — Go + Lua EMS"
 	@echo ""
 	@echo "Targets:"
-	@echo "  test                 run Go + Python suites"
+	@echo "  test                 run Go suites"
 	@echo "  build                native binaries into bin/"
 	@echo "  build-arm64          cross-compile for linux/arm64"
 	@echo "  build-amd64          cross-compile for linux/amd64"
@@ -79,25 +77,8 @@ drivers-present:
 
 # ---- Testing ----
 
-test: optimizer/.venv/.installed drivers-present
-	@status=0; \
-	optimizer/.venv/bin/pytest -q optimizer/tests & py_pid=$$!; \
-	(cd go && go test ./...) & go_pid=$$!; \
-	wait $$py_pid || status=1; \
-	wait $$go_pid || status=1; \
-	exit $$status
-	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./internal/mpc \
-		-run 'TestExternalOptimizer(EndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$$'
-
-# The interpreter is chosen in the script, not here: the optimizer needs
-# Python 3.11+ and PEP 660, and the python3 macOS ships is 3.9 with pip 21.2.
-# PYTHON still overrides the choice.
-optimizer-install:
-	PYTHON="$(PYTHON)" bash scripts/optimizer-venv.sh
-	@touch optimizer/.venv/.installed
-
-optimizer-test: optimizer/.venv/.installed
-	optimizer/.venv/bin/pytest -q optimizer/tests
+test: drivers-present
+	cd go && go test ./...
 
 compose-migration-test:
 	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh scripts/check-debian-base.sh
@@ -115,9 +96,6 @@ release-workflow-test:
 	bash scripts/test-github-release-by-id.sh
 	bash scripts/test-ghcr-write-access.sh
 	bash scripts/test-promote-paired-latest.sh
-
-optimizer/.venv/.installed: optimizer/pyproject.toml
-	$(MAKE) optimizer-install
 
 e2e: drivers-present
 	cd go && FTW_E2E=1 go test ./test/e2e -v -timeout 180s
@@ -222,7 +200,7 @@ release: drivers-present build-arm64 build-amd64 build-windows-amd64
 		ln -sf ftw                              "$$stage/forty-two-watts"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
 			-C "$$stage" ftw ftw-backup forty-two-watts \
-			-C ../.. drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
+			-C ../.. drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
@@ -235,7 +213,7 @@ release: drivers-present build-arm64 build-amd64 build-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
 	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe ftw-backup.exe forty-two-watts.exe
-	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/native/bundle optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
+	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE
 	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd release && for f in \
 		ftw-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz \
@@ -261,14 +239,14 @@ run-sim:
 	(cd go && go run ./cmd/sim-pcs) & \
 	wait
 
-dev: optimizer/.venv/.installed config.local.yaml
+dev: config.local.yaml
 	@mkdir -p dev-data
 	@echo "Starting sims + main app (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
 	(cd go && go run ./cmd/sim-ferroamp) & \
 	(cd go && go run ./cmd/sim-sungrow) & \
 	sleep 2 && \
-	(cd go && FTW_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) FTW_OPTIMIZER_DIR=../optimizer go run ./cmd/ftw -config ../config.local.yaml -web ../web) & \
+	(cd go && go run ./cmd/ftw -config ../config.local.yaml -web ../web) & \
 	wait
 
 # ---- Hygiene ----

@@ -1,7 +1,7 @@
 # Operations
 
 FTW is normally deployed with Docker Compose on Linux. The core control loop
-remains local; the Python optimizer is optional and core falls back safely when
+remains local; Energyplan ships with Core and Core falls back safely when
 it is unavailable.
 
 ## Install
@@ -219,7 +219,7 @@ nothing.
 
 ```bash
 docker compose logs --tail=200 ftw
-docker compose logs -f ftw ftw-optimizer
+docker compose logs -f ftw ftw-updater
 curl -fsS http://localhost:8080/api/health
 ```
 
@@ -258,8 +258,8 @@ limit until the physical installation and configuration agree.
 
 ### Optimizer unavailable
 
-Inspect `ftw-optimizer` logs and the shared socket volume. Core continues with
-the Go fallback; optimizer recovery does not require a core data reset.
+Inspect Core logs and `/api/components` for the Energyplan worker status.
+Core uses its Go fallback when needed; recovery needs no data reset.
 
 ### MQTT device missing
 
@@ -389,8 +389,8 @@ conventional layout is:
 /var/lib/ftw/             state, history, custom/managed drivers
 ```
 
-Run the binary with `-help` for its current flags. Native installs that omit
-Python use the Go planner fallback and normally leave container self-update
+Run the binary with `-help` for its current flags. Native installs without a supported
+Energyplan worker use the Go planner fallback and normally leave container self-update
 disabled.
 
 ## Release recovery

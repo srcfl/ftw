@@ -121,12 +121,6 @@ type Diagnostic struct {
 	LoadpointID           string            `json:"loadpoint_id,omitempty"`
 	LastReplanAtMs        int64             `json:"last_replan_at_ms"`
 	LastReason            string            `json:"last_reason"`
-
-	// PythonShadow is the external optimizer solved on the inputs a Core
-	// champion planned from. It arrives after the replan returns, so a
-	// snapshot written before the challenger finished — or on a site with no
-	// worker — carries the plan without it.
-	PythonShadow *ShadowPlan `json:"python_shadow,omitempty"`
 }
 
 // Diagnose returns the inputs + outputs of the most recent Optimize
@@ -149,12 +143,6 @@ func (s *Service) Diagnose() *Diagnostic {
 	}
 	d := buildDiagnostic(s.last, s.lastSlots, s.lastParams, s.Zone,
 		s.lastReplanAt.UnixMilli(), s.lastReason)
-	// The Python field shadow lands after its replan returned, so it is held
-	// beside the plan rather than on it — a published Plan is read without
-	// this lock and must not be written to afterwards.
-	if d != nil && s.lastPythonShadow != nil && s.lastPythonShadowFor == d.DecisionID {
-		d.PythonShadow = s.lastPythonShadow
-	}
 	return d
 }
 
@@ -324,16 +312,6 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	s.lastLoadpointID = d.LoadpointID
 	s.lastReplanAt = replanAt
 	s.lastReason = reason
-	if d.PythonShadow != nil && d.DecisionID != "" {
-		s.lastPythonShadow = d.PythonShadow
-		s.lastPythonShadowFor = d.DecisionID
-	}
-	if s.EnableRecourseShadow && d.ShadowEvaluation != nil {
-		if s.shadowEvaluator == nil {
-			s.shadowEvaluator = newStatefulShadowEvaluator()
-		}
-		s.shadowEvaluator.Restore(d.ShadowEvaluation)
-	}
 	return true
 }
 

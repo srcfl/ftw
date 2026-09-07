@@ -88,7 +88,7 @@ func mergeEnvFile(existing string, tags map[string]string) string {
 
 	// Appending in a fixed order keeps the file stable across runs; map order
 	// would otherwise reshuffle it and make every update look like a change.
-	for _, key := range []string{mainTagEnv, updaterTagEnv, optimizerTagEnv} {
+	for _, key := range []string{mainTagEnv, updaterTagEnv} {
 		if value, ok := remaining[key]; ok {
 			out = append(out, key+"="+value)
 		}

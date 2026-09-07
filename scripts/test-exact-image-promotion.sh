@@ -5,13 +5,12 @@ root="${FTW_RELEASE_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 beta="${root}/.github/workflows/beta.yml"
 release="${root}/.github/workflows/release.yml"
 assets="${root}/.github/workflows/release-assets.yml"
-optimizer_release="${root}/.github/workflows/optimizer-release.yml"
 compose="${root}/docker-compose.yml"
 compose_macos="${root}/docker-compose.macos.yml"
 dockerfile="${root}/Dockerfile"
 release_guard="${root}/scripts/check-stable-release.py"
 
-for workflow in "${beta}" "${release}" "${assets}" "${optimizer_release}"; do
+for workflow in "${beta}" "${release}" "${assets}"; do
   if grep -Eq 'SOURCEFUL_GHCR_(USER|TOKEN)' "${workflow}"; then
     echo "canonical GHCR writes must use the workflow GITHUB_TOKEN: ${workflow}" >&2
     exit 1
@@ -21,22 +20,6 @@ grep -Fq 'username: ${{ github.actor }}' "${beta}"
 grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${beta}"
 grep -Fq 'CANONICAL_GHCR_USER: ${{ github.actor }}' "${assets}"
 grep -Fq 'CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}"
-grep -Fq 'username: ${{ github.actor }}' "${optimizer_release}"
-grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
-if grep -Fq 'LEGACY_GHCR_TOKEN' "${optimizer_release}"; then
-  echo "canonical optimizer writes must not use the personal namespace credential" >&2
-  exit 1
-fi
-grep -Fq 'bash scripts/check-ghcr-write-access.sh srcfl/ftw-optimizer' "${optimizer_release}"
-grep -Fq 'GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
-grep -A3 '^  validate:$' "${optimizer_release}" | grep -Fq 'needs: registry'
-grep -A5 '^      dry_run:$' "${optimizer_release}" | grep -Fq 'default: true'
-grep -A5 '^  publish:$' "${optimizer_release}" | \
-  grep -Fq 'if: ${{ !inputs.dry_run && needs.validate.outputs.image_exists != '\''true'\'' }}'
-grep -A9 '^  release:$' "${optimizer_release}" | grep -Fq '!inputs.dry_run &&'
-grep -A1 '^permissions:$' "${optimizer_release}" | grep -Fq 'contents: read'
-grep -A7 '^  registry:$' "${optimizer_release}" | grep -Fq 'packages: write'
-grep -A5 '^  dry-run:$' "${optimizer_release}" | grep -Fq 'needs: [registry, validate, test]'
 grep -Fq 'LEGACY_GHCR_TOKEN' "${beta}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${assets}"

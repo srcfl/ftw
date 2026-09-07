@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,7 +77,6 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
 		containerID:     func(context.Context, string) (string, error) { return "ftw-container", nil },
 		chownFile:       func(string, int, int) error { return nil },
-		optimizerPin:    func(string) error { return nil },
 	}
 	s.checkSnapshotFile = func(_ context.Context, _ string, snapshotID, file string) error {
 		_, err := os.Stat(filepath.Join(dir, "data", "snapshots", snapshotID, file))
@@ -150,40 +148,6 @@ func TestRunWithStateHeartbeatRefreshesLongPhase(t *testing.T) {
 	}
 }
 
-func TestOptimizerUpdateTargetsOnlyOptimizerService(t *testing.T) {
-	s, runner := newTestServer(t)
-	s.skipPull = true
-	writeCompose(t, s.composeFile, `services:
-  ftw:
-    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
-    volumes: ["./data:/app/data"]
-  ftw-optimizer:
-    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
-`)
-	started := time.Date(2026, 7, 18, 9, 30, 0, 123000000, time.UTC)
-	body := fmt.Sprintf(`{"action":"update","component":"optimizer","target":"v1.2.3","started_at":%q}`, started.Format(time.RFC3339Nano))
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
-	}
-	state := waitForState(t, s, "done")
-	if state.Component != "optimizer" {
-		t.Fatalf("component = %q", state.Component)
-	}
-	if !state.StartedAt.Equal(started) {
-		t.Fatalf("started_at = %s, want preserved audit time %s", state.StartedAt, started)
-	}
-	calls, envs := runner.snapshot(), runner.envSnapshot()
-	if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "up -d ftw-optimizer") {
-		t.Fatalf("unexpected calls: %v", calls)
-	}
-	if len(envs) != 1 || len(envs[0]) != 1 || envs[0][0] != "FTW_OPTIMIZER_IMAGE_TAG=v1.2.3" {
-		t.Fatalf("unexpected env: %v", envs)
-	}
-}
-
 func TestComponentRollbackHistorySurvivesOtherComponentUpdates(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.writeState(State{
@@ -244,55 +208,7 @@ func TestHandleUpdate_HappyPath(t *testing.T) {
 	}
 }
 
-func TestHandleUpdate_BlocksCoreUpdateWithoutOptimizer(t *testing.T) {
-	s, runner := newTestServer(t)
-	writeCompose(t, s.composeFile, `services:
-  ftw:
-    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
-    volumes:
-      - ./data:/app/data
-`)
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
-	}
-	state := waitForState(t, s, "failed")
-	if !strings.Contains(state.Message, "core update blocked") ||
-		!strings.Contains(state.Message, optimizerServiceName) ||
-		!strings.Contains(state.Message, "migrate-legacy-compose.sh") {
-		t.Fatalf("missing migration guidance: %+v", state)
-	}
-	if calls := runner.snapshot(); len(calls) != 0 {
-		t.Fatalf("blocked update must not call Docker: %v", calls)
-	}
-}
-
-func TestHandleUpdate_BlocksCoreUpdateWhenOptimizerIsUnhealthy(t *testing.T) {
-	s, runner := newTestServer(t)
-	s.healthCheck = func(_ context.Context, service string) error {
-		if service == optimizerServiceName {
-			return errors.New("container status is unhealthy")
-		}
-		return nil
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	state := waitForState(t, s, "failed")
-	if !strings.Contains(state.Message, "must be running and healthy") ||
-		!strings.Contains(state.Message, "container status is unhealthy") {
-		t.Fatalf("optimizer health failure is unclear: %+v", state)
-	}
-	if calls := runner.snapshot(); len(calls) != 0 {
-		t.Fatalf("blocked update must not call Docker: %v", calls)
-	}
-}
-
-func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) {
+func TestHandleUpdate_WithoutOptimizerPreservesUserOverride(t *testing.T) {
 	s, _ := newTestServer(t)
 	writeCompose(t, s.composeFile, `services:
   ftw:
@@ -310,7 +226,7 @@ func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
-	waitForState(t, s, "failed")
+	waitForState(t, s, "done")
 	got, err := os.ReadFile(override)
 	if err != nil {
 		t.Fatal(err)
@@ -697,29 +613,6 @@ func TestValidateComponentImagePinRequiresExactVariable(t *testing.T) {
 	}
 }
 
-func TestComponentRollbackRejectsNonPersistentOptimizerImages(t *testing.T) {
-	for _, image := range []string{
-		"ghcr.io/srcfl/ftw-optimizer:latest",
-		"ghcr.io/srcfl/ftw-optimizer:${MY_TAG:-latest}",
-	} {
-		t.Run(image, func(t *testing.T) {
-			s, runner := newTestServer(t)
-			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}\n  ftw-optimizer:\n    image: "+image+"\n")
-			s.writeState(State{State: "done", Component: "optimizer", PreviousImageID: "sha256:optimizer-old"})
-
-			s.runComponentRollback("optimizer", time.Now())
-			state := s.readState()
-			if state.State != "failed" || !strings.Contains(state.Message, "must use ${FTW_OPTIMIZER_IMAGE_TAG}") {
-				t.Fatalf("rollback must reject a pin Compose cannot use: %+v", state)
-			}
-			if len(runner.snapshot()) != 0 {
-				t.Fatalf("unsupported rollback changed an image: %v", runner.snapshot())
-			}
-
-		})
-	}
-}
-
 func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
 	s, _ := newTestServer(t)
 	userOverride := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")
@@ -1095,58 +988,6 @@ func TestSelectMainServiceRejectsAmbiguousDataOwners(t *testing.T) {
 `)
 	if _, err := selectMainService([]string{path}, ""); err == nil {
 		t.Fatal("ambiguous main services should be rejected")
-	}
-}
-
-func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
-	s, runner := newTestServer(t)
-	writeCompose(t, s.composeFile, `services:
-  forty-two-watts:
-    image: forty-two-watts:optimizer-champion-recourse-b10acacd
-    volumes:
-      - ./data:/app/data
-  ftw-optimizer:
-    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
-`)
-	s.mainServiceName = legacyMainServiceName
-	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
-	s.imageRef = func(context.Context, string) (string, error) {
-		return "ghcr.io/srcfl/ftw:v1.2.2-beta.4", nil
-	}
-	checks := 0
-	s.healthCheck = func(_ context.Context, service string) error {
-		if service == optimizerServiceName {
-			return nil
-		}
-		checks++
-		if checks == 1 {
-			return errors.New("unhealthy")
-		}
-		return nil
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	st := waitForState(t, s, "failed")
-	if !strings.Contains(st.Message, "previous image restored") {
-		t.Fatalf("state should report automatic rollback, got %+v", st)
-	}
-	calls := runner.snapshot()
-	if len(calls) != 4 {
-		t.Fatalf("want pull, new up, image tag, rollback up; got %v", calls)
-	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, "image tag sha256:previous") {
-		t.Fatalf("third call should tag previous image, got %q", got)
-	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, canonicalMainImage+":v1.2.2-beta.4") {
-		t.Fatalf("previous legacy beta should keep its exact tag, got %q", got)
-	}
-	if got := strings.Join(calls[3], " "); !strings.Contains(got, "ftw-compose-update-") || calls[3][len(calls[3])-1] != legacyMainServiceName {
-		t.Fatalf("rollback must reuse transient pin and legacy service identity, got %q", got)
-	}
-	if got := runner.envSnapshot()[3]; len(got) != 1 || got[0] != "FTW_IMAGE_TAG=v1.2.2-beta.4" {
-		t.Fatalf("rollback env = %v", got)
 	}
 }
 

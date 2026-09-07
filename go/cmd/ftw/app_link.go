@@ -216,7 +216,7 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 	}
 	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
 		// Forced replan, off this goroutine. mpc.SetMode replans before it
-		// returns, and the Python optimizer can take longer than the app
+		// returns, and planning can take longer than the app
 		// waits for a command result — so a mode change that had already
 		// been applied and read back was reported "unconfirmed" purely
 		// because the planner was slow. The mode itself is already set and

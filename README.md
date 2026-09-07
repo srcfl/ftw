@@ -7,8 +7,8 @@
 FTW is a local-first home energy management system (EMS). It coordinates
 solar, batteries, grid power, EV charging and thermal assets on a Raspberry Pi
 or Linux host. The safety-critical runtime is one Go binary,
-hardware integrations are sandboxed Lua drivers, and an optional Python/CVXPY
-optimizer handles long-horizon planning.
+hardware integrations are sandboxed Lua drivers, and a compiled Energyplan
+worker handles long-horizon planning.
 
 The control path stays on the local network. Cloud price, weather and device
 integrations degrade independently; they are not required for safe local
@@ -84,7 +84,7 @@ curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh
 ```
 
 It installs Docker when needed, creates `~/ftw`, downloads the Compose file
-and starts core, optimizer, updater and the local MQTT broker. Open
+and starts core, updater and the local MQTT broker. Open
 `http://<host>:8080/setup` on the LAN.
 
 Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
@@ -128,8 +128,8 @@ faults to [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers/issue
 
 ## Local development
 
-Requirements are Go, Python 3 and Node.js. The optimizer environment is cached
-after its first install.
+Requirements are Go and Node.js. Python 3 verifies release artifacts during
+development; no Python interpreter or service runs the planner.
 
 ```bash
 git clone https://github.com/srcfl/ftw.git
@@ -140,7 +140,7 @@ make dev
 Useful checks:
 
 ```bash
-make test      # Go + Python, parallel where independent
+make test      # Go tests
 npm test       # web
 make verify    # fast test, compose, vet and build checks
 make e2e       # simulator-backed full stack
