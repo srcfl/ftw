@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:sourceful:energyplan:forecast:1",
   "title": "Energyplan forecasting request v1",
-  "description": "One JSON object per stdin line, at most 2 MiB including the newline. The caller must split update batches by encoded byte size, not just count; a larger line terminates the worker. Update consumes complete UTC-aligned 15-minute means available by origin_ms and returns an opaque model snapshot. Predict uses an immutable snapshot and returns the same 15-minute intervals. The caller supplies site-local clock fields and aggregates quarters across time-zone or DST changes. Site/config identity, interval order, state bounds and causal availability are checked at runtime. Household load excludes EV, battery and V2X. PV denotes nonnegative available AC generation, distinct from signed planner pv_w. The caller records actual completion/issue time and persists the snapshot. See forecast-v1.response.schema.json for responses.",
+  "description": "One JSON object per stdin line, at most 2 MiB including the newline. The caller must split update batches by encoded byte size, not just count; a larger line terminates the worker. Update consumes complete UTC-aligned 15-minute means available by origin_ms and returns an opaque model snapshot. Predict uses an immutable snapshot. Each requested future segment lasts 1..900000 ms and stays within one UTC quarter-hour; full aligned quarters remain valid. Returned bounds are the actual requested segment. For prediction, site-local clock, weather and occupancy fields refer to the containing quarter-hour start. The caller splits longer spans at each UTC quarter boundary and handles timezone or DST changes. Site/config identity, interval order, state bounds and causal availability are checked at runtime. Household load excludes EV, battery and V2X. PV denotes nonnegative available AC generation, distinct from signed planner pv_w. The caller records actual completion/issue time and persists the snapshot. See forecast-v1.response.schema.json for responses.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -362,14 +362,12 @@
         "valid_start_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 253402300799999,
-          "multipleOf": 900000
+          "maximum": 253402300799999
         },
         "valid_end_ms": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 253402300799999,
-          "multipleOf": 900000
+          "maximum": 253402300799999
         },
         "ghi_w_m2": {
           "type": [
@@ -407,7 +405,7 @@
           "type": "integer",
           "minimum": -1,
           "maximum": 3000000,
-          "description": "Civil date as days since local 1970-01-01, independent of UTC date."
+          "description": "Civil date at the containing quarter-hour start, as days since local 1970-01-01."
         },
         "local_weekday": {
           "type": "integer",
@@ -420,7 +418,7 @@
           "minimum": 0,
           "maximum": 1439,
           "multipleOf": 15,
-          "description": "Minute of interval start in local civil time. The caller resolves timezone and DST."
+          "description": "Minute of the containing quarter-hour start in local civil time, including for a partial first segment. The caller resolves timezone and DST."
         },
         "home": {
           "type": [
@@ -436,7 +434,7 @@
         "local_weekday",
         "local_minute"
       ],
-      "description": "Exactly 900000 ms, UTC start divisible by 900000. Slots are sorted and do not overlap. Local fields describe the interval start in the site time zone."
+      "description": "Future segment of 1..900000 ms contained in one UTC quarter-hour: floor(valid_start_ms/900000) equals floor((valid_end_ms-1)/900000). Segments are sorted, do not overlap and start at or after origin_ms. Local clock, weather and occupancy describe the containing quarter-hour start. Duration and containment are checked at runtime."
     },
     "identifier": {
       "type": "string",

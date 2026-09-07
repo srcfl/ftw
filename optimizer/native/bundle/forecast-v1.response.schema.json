@@ -299,7 +299,7 @@
             "unavailable",
             "provisional"
           ],
-          "description": "Provisional bands are error heuristics, not calibrated quantiles or a confidence level. Null bounds mean uncertainty is unavailable."
+          "description": "Provisional bands are paired error heuristics, not calibrated quantiles or a confidence level. Unavailable means both lower_w and upper_w are null."
         },
         "coverage": {
           "type": "number",
@@ -346,6 +346,48 @@
             }
           }
         }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "uncertainty": {
+                "const": "unavailable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lower_w": {
+                "type": "null"
+              },
+              "upper_w": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "uncertainty": {
+                "const": "provisional"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "lower_w": {
+                "type": "number",
+                "minimum": 0
+              },
+              "upper_w": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        }
       ]
     },
     "prediction": {
@@ -360,13 +402,11 @@
       "properties": {
         "valid_start_ms": {
           "type": "integer",
-          "minimum": 0,
-          "multipleOf": 900000
+          "minimum": 0
         },
         "valid_end_ms": {
           "type": "integer",
-          "minimum": 900000,
-          "multipleOf": 900000
+          "minimum": 1
         },
         "pv": {
           "anyOf": [
@@ -390,7 +430,8 @@
           ],
           "description": "Null when this model is disabled."
         }
-      }
+      },
+      "description": "Power estimates over the actual requested future segment, which stays within one UTC quarter-hour. Segment energy in Wh is point_w times its actual duration in hours."
     }
   }
 }
