@@ -615,7 +615,7 @@ func main() {
 	if cfg.DeviceRepository != nil && cfg.DeviceRepository.Enabled {
 		go driverRepositoryRefreshLoop(ctx, driverRepository, cfg.DeviceRepository.RefreshIntervalH)
 	}
-	reg := drivers.NewRegistry(tel)
+	reg := newDriverRegistry(tel, st)
 	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
 	reg.RuntimePolicyResolver = driverRepository.RuntimePolicy
 	reg.CommandResultSink = func(driverName string, result drivers.DriverCommandResultV1) {
@@ -692,19 +692,6 @@ func main() {
 	capMu := &sync.RWMutex{}
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
-
-	// Rotated driver tokens keep their own KV rows. Rotation must not apply the
-	// whole config or restart a driver that just refreshed its credential.
-	// SecretOverride supplies the newest token when the driver next starts.
-	driverSecretKey := func(driverName, key string) string {
-		return "driver_secret:" + driverName + ":" + key
-	}
-	reg.SecretPersister = func(driverName, key, value string) error {
-		return st.SaveConfig(driverSecretKey(driverName, key), value)
-	}
-	reg.SecretOverride = func(driverName, key string) (string, bool) {
-		return st.LoadConfig(driverSecretKey(driverName, key))
-	}
 
 	// Pre-declare services that the hot-reload Applier needs to touch.
 	// The Applier closure captures these by reference; they're assigned
