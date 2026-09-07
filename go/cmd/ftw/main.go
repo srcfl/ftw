@@ -1443,6 +1443,20 @@ func main() {
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
+		pvProofLookup := func(name string) mpc.PVCurtailment {
+			proof := reg.PVGenerationLimit(name)
+			return mpc.PVCurtailment{Driver: name, Proof: proof.Token, MinW: proof.MinW, MaxW: proof.MaxW}
+		}
+		ctrl.PVGenerationLimit = pvProofLookup
+		mpcSvc.PVExecutionAllowed = func(proof mpc.PVCurtailment) bool {
+			return control.PVGenerationProofValid(tel, time.Now(), proof, pvProofLookup)
+		}
+		mpcSvc.PVCurtailmentProbe = func() mpc.PVCurtailment {
+			options := forecastSettings.Snapshot().Options
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			return control.PlanningPVCurtailment(ctrl, tel, options)
+		}
 		// Plumb the site fuse so the DP joint-plans battery + EV under
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
@@ -1708,7 +1722,8 @@ func main() {
 			}
 			// SlotDirectiveFromMPC lives in package control so tests
 			// and main share the plan→EMS field map.
-			return control.SlotDirectiveFromMPC(d), true
+			dir := control.SlotDirectiveFromMPC(d)
+			return dir, control.PlanningPVDirectiveValid(ctrl, tel, dir)
 		}
 		// Default to the energy-allocation path. The plan is a
 		// scheduler (decides WHEN each strategy applies); the EMS is
@@ -3679,7 +3694,7 @@ func aggregateBatteryFleetLimits(cfg *config.Config, fleet []mpc.BatteryFleetMem
 }
 
 // buildMPC constructs a planner from config. Returns nil if disabled,
-// if prices aren't configured, or if there are no batteries with capacity.
+// or if prices aren't configured. EV planning also works without home storage.
 // The skip reason is the same vocabulary /api/mpc/diagnose exposes.
 func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
 	plannerOn := cfg.Planner != nil && cfg.Planner.Enabled
@@ -3764,6 +3779,9 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		ChargeEfficiency:    chgEff,
 		DischargeEfficiency: disEff,
 		ExportOrePerKWh:     pl.ExportOrePerKWh,
+	}
+	if totalCap == 0 {
+		params.InitialSoC = 0
 	}
 	svc := mpc.New(st, tel, zone, params)
 	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)

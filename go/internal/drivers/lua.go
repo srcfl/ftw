@@ -81,6 +81,12 @@ type LuaDriver struct {
 	mu sync.Mutex
 	L  *lua.LState
 
+	// Proof has its own short lock; readers never wait behind Lua/network I/O.
+	pvProofMu          sync.RWMutex
+	pvProof            PVGenerationLimit
+	pvProofEpoch       uint64
+	loadedSourceSHA256 string
+
 	restricted bool
 	initConfig map[string]any
 	// sawModbusRead is true only after a poll that successfully read a
@@ -120,7 +126,7 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 	if restricted {
 		openRestrictedLibraries(L)
 	}
-	d := &LuaDriver{Env: env, Path: path, L: L, restricted: restricted}
+	d := &LuaDriver{Env: env, Path: path, L: L, restricted: restricted, loadedSourceSHA256: fmt.Sprintf("%x", sha256.Sum256(src))}
 	registerHost(L, env)
 	var loadCancel context.CancelFunc
 	if restricted {
@@ -201,8 +207,13 @@ func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
 func (d *LuaDriver) Init(ctx context.Context, config map[string]any) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.clearPVGenerationLimit()
 	d.initConfig = cloneStringAnyMap(config)
-	return d.callInitLocked(ctx)
+	if err := d.callInitLocked(ctx); err != nil {
+		return err
+	}
+	d.refreshPVGenerationLimit()
+	return nil
 }
 
 func (d *LuaDriver) callInitLocked(ctx context.Context) error {
@@ -312,6 +323,7 @@ func (d *LuaDriver) notePollModbusActivity() {
 // before the swap: a failed driver_init keeps the previous state so
 // default-mode still has its locals.
 func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
+	d.clearPVGenerationLimit()
 	src, err := os.ReadFile(d.Path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", d.Path, err)
@@ -344,6 +356,8 @@ func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
 		return err
 	}
 	old.Close()
+	d.loadedSourceSHA256 = fmt.Sprintf("%x", sha256.Sum256(src))
+	d.refreshPVGenerationLimit()
 	d.Env.requiresFreshModbusRead = driverRequiresFreshModbusRead(L, d.Env.Modbus != nil)
 	if driverDeclaresReadOnlyBattery(L) {
 		d.Env.BatteryTelemetryOnly = true
@@ -675,6 +689,7 @@ func (d *LuaDriver) Cleanup() {
 // before closing the state. The no-argument Cleanup method remains for tests
 // and direct embedders that do not have a lifecycle context.
 func (d *LuaDriver) CleanupContext(ctx context.Context) {
+	d.clearPVGenerationLimit()
 	_ = d.call(ctx, "driver_cleanup")
 	d.mu.Lock()
 	d.L.Close()

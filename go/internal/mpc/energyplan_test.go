@@ -60,7 +60,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.2.2" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.3.0" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
 	}
 	start := time.Now().UTC().Truncate(time.Hour)
@@ -228,5 +228,51 @@ func TestCoreDPShadowCancellationPreservesPreviousComparison(t *testing.T) {
 	svc.shadowWG.Wait()
 	if svc.Latest().DPShadow != previous {
 		t.Fatal("cancellation replaced a comparison with rejection")
+	}
+}
+
+func TestNativeEnergyplanUsesBoundedFleetBudget(t *testing.T) {
+	template := nativeWorker(t, time.Second)
+	defer template.Close()
+	engine, err := NewEnergyplanOptimizer(template.cfg.Command[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	slots, params := topologyFixture(2, 2)
+	first := slots[0]
+	slots = make([]Slot, 193)
+	for i := range slots {
+		slots[i] = first
+		slots[i].StartMs = first.StartMs + int64(i*first.LenMin)*60000
+	}
+	plan, err := engine.Optimize(context.Background(), slots, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request externalRequest
+	if err := json.Unmarshal(plan.OptimizerInput, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Settings.TimeLimitS != 5 {
+		t.Fatalf("fleet request has wrong budget: %v", request.Settings.TimeLimitS)
+	}
+	if err := ValidatePlan(slots, params, &plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBatterylessEVBudgetDoesNotInventStorage(t *testing.T) {
+	slots, p := topologyFixture(0, 2)
+	horizon := make([]Slot, 193)
+	for i := range horizon {
+		horizon[i] = slots[0]
+	}
+	if got := energyplanTimeBudget(horizon, p); got != 500*time.Millisecond {
+		t.Fatalf("batteryless EV budget=%v", got)
+	}
+	p.CapacityWh = 20000
+	if got := energyplanTimeBudget(horizon, p); got != 5*time.Second {
+		t.Fatalf("real aggregate battery budget=%v", got)
 	}
 }

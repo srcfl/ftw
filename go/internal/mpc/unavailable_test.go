@@ -14,7 +14,7 @@ func TestUnavailableReasonOrder(t *testing.T) {
 		{"disabled wins even with price and battery", false, "nordpool", 10000, ReasonPlannerDisabled},
 		{"no provider", true, "", 10000, ReasonNoPriceProvider},
 		{"provider none", true, "none", 10000, ReasonNoPriceProvider},
-		{"no battery", true, "nordpool", 0, ReasonNoBatteryCapacity},
+		{"without storage is supported", true, "nordpool", 0, ""},
 		{"negative capacity is empty pool", true, "nordpool", -1, ReasonNoBatteryCapacity},
 		{"ready", true, "nordpool", 9600, ""},
 	}

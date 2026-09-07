@@ -261,7 +261,6 @@ func TestValidatePlanningParamsRejectsInvalidStoragePhysics(t *testing.T) {
 		{"zero efficiency", ".charge_efficiency", func(p *Params) { p.Storages[0].ChargeEfficiency = 0 }},
 		{"nan efficiency", ".charge_efficiency", func(p *Params) { p.Storages[0].ChargeEfficiency = math.NaN() }},
 		{"high efficiency", ".discharge_efficiency", func(p *Params) { p.Storages[0].DischargeEfficiency = 1.01 }},
-		{"different fallback efficiency", "fallback efficiencies", func(p *Params) { p.Storages[0].ChargeEfficiency = 0.9 }},
 		{"capacity aggregate mismatch", "aggregate capacity", func(p *Params) { p.Storages[0].CapacityWh += 10 }},
 		{"initial aggregate mismatch", "aggregate initial", func(p *Params) { p.Storages[0].InitialEnergyWh += 10 }},
 		{"minimum aggregate mismatch", "aggregate min", func(p *Params) { p.Storages[0].MinEnergyWh += 10 }},
@@ -435,8 +434,8 @@ func (o *physicsGateRecoveryOptimizer) Optimize(_ context.Context, slots []Slot,
 		GeneratedAtMs: time.Now().UnixMilli(), Mode: p.Mode,
 		HorizonSlots: len(slots), CapacityWh: p.CapacityWh,
 		InitialSoC: p.InitialSoC,
-		Actions:       make([]Action, len(slots)),
-		Solver:        &SolverInfo{Engine: "test", Backend: "recovery", Status: "optimal"},
+		Actions:    make([]Action, len(slots)),
+		Solver:     &SolverInfo{Engine: "test", Backend: "recovery", Status: "optimal"},
 	}
 	for i, slot := range slots {
 		gridW := slot.LoadW + slot.PVW
@@ -446,6 +445,14 @@ func (o *physicsGateRecoveryOptimizer) Optimize(_ context.Context, slots []Slot,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
 			GridW: gridW, SoC: p.InitialSoC, CostOre: cost,
+		}
+		if len(p.Storages) > 0 {
+			plan.Actions[i].StoragePowerW = make(map[string]float64)
+			plan.Actions[i].StorageEnergyWh = make(map[string]float64)
+			for _, b := range p.Storages {
+				plan.Actions[i].StoragePowerW[b.ID] = 0
+				plan.Actions[i].StorageEnergyWh[b.ID] = b.InitialEnergyWh
+			}
 		}
 		plan.TotalCostOre += cost
 	}

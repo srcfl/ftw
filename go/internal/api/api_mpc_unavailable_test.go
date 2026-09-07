@@ -33,16 +33,6 @@ func TestMPCDisabledEndpointsNameTheSkipReason(t *testing.T) {
 			},
 			want: mpc.ReasonNoPriceProvider,
 		},
-		{
-			name: "no battery capacity",
-			deps: &Deps{
-				Cfg: &config.Config{
-					Planner: &config.Planner{Enabled: true},
-					Price:   &config.Price{Provider: "nordpool"},
-				},
-			},
-			want: mpc.ReasonNoBatteryCapacity,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -34,9 +34,11 @@ is unset on a supported host. Set `planner.engine: energyplan` to select it
 explicitly, or `core` to select Core DP. Stable and development
 builds keep Core as the unset default; Windows has no bundled worker.
 
-Energyplan uses the same downside PV forecast as Core. The worker gets a 500 ms
-solve budget and a 2 s transport timeout. After Core validates and publishes a
-plan, one Core DP shadow runs with a 10 s limit. Its result appears in
+Energyplan uses the same downside PV forecast as Core. Small requests get a
+500 ms solve budget; larger fleets and PV-control or risk requests get 5 s.
+The transport timeout is 7 s. After Core validates and publishes a plan, one
+Core DP shadow runs with a 10 s limit when Core DP can represent the site.
+Its result appears in
 `dp_shadow`, tied to the same decision ID. It cannot change the active actions.
 Both plans use Core's grid cost model, with a separate terminal-energy-adjusted
 comparison. A failed comparison reports `rejected`, without a cost verdict.
@@ -47,12 +49,21 @@ violation; after recovery the plan must stay within the configured limits.
 Core independently checks that recovery and validates fallback plans too.
 The compiled worker updates with Core.
 
-Supported requests contain one battery and at most one EV per site, with the
-four existing modes, physical limits, negative tariffs and an EV deadline.
-Unsupported scenarios, thermal/commercial models and multiple assets return
-an error. A time limit can return a feasible plan with a remaining cost gap;
-without a feasible candidate it returns a budget error. Core handles errors
-through its existing fallback path.
+Supported requests can contain zero, one or several batteries and EVs, with
+each device's own physical limits and EV deadline. The worker supports the
+four existing modes, negative tariffs and shared scenarios with CVaR. Request
+limits are 512 slots, 64 total devices and 32 scenarios; bounded planning may
+stop earlier. Thermal, commercial and recourse inputs return explicit errors.
+A time limit can return a feasible plan with a remaining cost gap. An unknown
+bound is null; without a feasible candidate the worker returns a budget error.
+Core DP fallback cannot represent every fleet. In that case Core keeps the
+previous plan for diagnosis and withholds execution until a new plan succeeds.
+
+Core only permits a planned PV generation cap when it verifies the loaded
+driver and current telemetry for the site's complete PV control domain. A
+restored diagnostic containing physical device maps or PV control stays an
+archive until a new plan validates current inputs. It does not restore device
+budgets or PV permission from saved JSON alone.
 
 `make verify` includes the binary and integration checks. Go integration tests
 can also use an absolute path supplied in `FTW_NATIVE_SOLVER`. Ordinary Go tests

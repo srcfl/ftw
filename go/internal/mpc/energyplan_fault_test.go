@@ -57,7 +57,7 @@ func TestNativeEnergyplanEVRecoveryFallbackFaults(t *testing.T) {
 				t.Cleanup(func() { _ = external.Close() })
 				wrapper := &EnergyplanOptimizer{ExternalOptimizer: external}
 				health, err := wrapper.Health(context.Background())
-				if err != nil || health.Version != "0.2.2" {
+				if err != nil || health.Version != "0.3.0" {
 					t.Fatalf("bundle health=%+v err=%v", health, err)
 				}
 				svc := shadowTestService(t)

@@ -76,15 +76,18 @@ type BatteryFleetMember struct {
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
-	Store             *state.Store
-	Tele              *telemetry.Store
-	Zone              string
-	BaseLoad          float64 // baseline household load (W). 0 disables load assumption.
-	Horizon           time.Duration
-	Interval          time.Duration
-	PV                PVPredictor         // optional — overrides stored pv_w_estimated
-	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
-	ForecastSnapshot  func(time.Time, []state.ForecastPoint) ForecastInputs
+	Store              *state.Store
+	Tele               *telemetry.Store
+	Zone               string
+	BaseLoad           float64 // baseline household load (W). 0 disables load assumption.
+	Horizon            time.Duration
+	Interval           time.Duration
+	PV                 PVPredictor         // optional — overrides stored pv_w_estimated
+	PVResidualCorrect  PVResidualCorrector // optional — additive short-horizon bias on top of PV
+	ForecastSnapshot   func(time.Time, []state.ForecastPoint) ForecastInputs
+	PVCurtailmentProbe func() PVCurtailment
+	// Set before Start. Called without s.mu; must not acquire the control lock.
+	PVExecutionAllowed func(PVCurtailment) bool
 	// PVNameplateW accepts a verified AC generation ceiling. A configured
 	// DC rating or learned scale is not a hard limit. Zero disables the cut.
 	PVNameplateW float64
@@ -229,6 +232,7 @@ type Service struct {
 
 	mu              sync.RWMutex
 	last            *Plan
+	executionPlan   *Plan  // Current physical inputs; preserved by metadata copies.
 	lastSlots       []Slot // inputs that went into the most recent Optimize call
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
@@ -341,6 +345,9 @@ func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) 
 	s.Defaults.CapacityWh = totalCapWh
 	s.Defaults.MaxChargeW = maxChargeW
 	s.Defaults.MaxDischargeW = maxDischargeW
+	if totalCapWh == 0 {
+		s.Defaults.InitialSoC = 0
+	}
 	s.mu.Unlock()
 }
 
@@ -363,6 +370,9 @@ func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, max
 	s.Defaults.CapacityWh = totalCapWh
 	s.Defaults.MaxChargeW = maxChargeW
 	s.Defaults.MaxDischargeW = maxDischargeW
+	if totalCapWh == 0 && len(cp) == 0 {
+		s.Defaults.InitialSoC = 0
+	}
 	s.mu.Unlock()
 }
 
@@ -392,18 +402,25 @@ func (s *Service) PlanSnapshot() PlanSnapshot {
 		return PlanSnapshot{}
 	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	outdated := s.publishedReplanGeneration != s.latestReplanGeneration
-	return PlanSnapshot{
+	proof := s.lastParams.PVCurtailment
+	currentContract := s.executionPlan == s.last
+	out := PlanSnapshot{
 		Plan: s.last, ReplanAt: s.lastReplanAt, Reason: s.lastReason,
 		Pending: outdated && s.activeReplanCancel != nil, Outdated: outdated,
 		loadpointID: s.lastLoadpointID,
 	}
+	s.mu.RUnlock()
+	if !s.planExecutionAllowed(out.Plan, proof, currentContract) {
+		out.Outdated = true
+		out.Reason = "Plan requires fresh physical inputs or PV control"
+	}
+	return out
 }
 
 // InstallPlan puts a plan in the cache SlotDirectiveAt and Latest read.
-// Optimize and RestoreDiagnostic already write that cache after a
-// successful solve. Tests that inject a known Action use the same seam
+// A successful solve publishes with current inputs; restored diagnostics
+// remain archives. Tests that inject a known Action use the same seam
 // so the charger and battery cannot be given two different mappings of
 // one slot.
 //
@@ -418,6 +435,7 @@ func (s *Service) InstallPlan(plan Plan, params Params, loadpointID string) {
 	defer s.mu.Unlock()
 	copied := plan
 	s.last = &copied
+	s.executionPlan = s.last
 	s.lastParams = params
 	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
@@ -447,16 +465,19 @@ type SlotDirective struct {
 	DecisionID      string
 	SlotStart       time.Time
 	SlotEnd         time.Time
-	BatteryEnergyWh float64 // total energy for the slot (site-signed)
-	SoCTarget       float64 // plan's SoC at SlotEnd — used by divergence detector
-	Strategy        Mode    // echoed for logging + API
+	BatteryEnergyWh float64            // total energy for the slot (site-signed)
+	StorageEnergyWh map[string]float64 // per physical storage, site-signed AC Wh
+	SoCTarget       float64            // plan's SoC at SlotEnd — used by divergence detector
+	Strategy        Mode               // echoed for logging + API
 
 	// PVLimitW is the recommended cap on aggregate PV inverter output
 	// for this slot (W, positive). 0 means "no curtailment". Set by
 	// annotateCurtailment when exporting at zero / negative revenue
 	// would lose money — the dispatch layer divides this across the
 	// site's PV-supporting drivers and sends `curtail` commands.
-	PVLimitW float64
+	PVLimitW        float64
+	PVCurtailActive bool
+	PVCurtailment   PVCurtailment
 
 	// GridW is the plan's forecast of slot-average grid power given the
 	// planned battery / load / PV mix (site-signed: + = import). The
@@ -502,6 +523,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	// plan under one lock so a concurrent replan cannot mix generations.
 	s.mu.RLock()
 	p := s.last
+	currentContract := s.executionPlan == p
 	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	lpID := s.lastLoadpointID
 	params := s.lastParams
@@ -511,7 +533,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil || failedReplacement {
+	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return SlotDirective{}, false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -534,8 +556,16 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			SoCTarget:           a.SoC,
 			Strategy:            params.Mode,
 			PVLimitW:            a.PVLimitW,
+			PVCurtailActive:     a.PVCurtailActive,
+			PVCurtailment:       params.PVCurtailment,
 			GridW:               a.GridW,
 			LivePVSurplusSoCCap: livePVSurplusSoCCap(p.Actions, i, params),
+		}
+		if len(params.Storages) > 0 && len(a.StoragePowerW) > 0 {
+			d.StorageEnergyWh = make(map[string]float64, len(a.StoragePowerW))
+			for id, w := range a.StoragePowerW {
+				d.StorageEnergyWh[id] = w * float64(a.SlotLenMin) / 60
+			}
 		}
 		if len(a.LoadpointPowerW) > 0 {
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
@@ -702,13 +732,14 @@ func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	}
 	s.mu.RLock()
 	p := s.last
+	currentContract := s.executionPlan == p
 	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	params := s.lastParams
 	if params.Mode == "" {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil || failedReplacement {
+	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return "", 0, "", false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -1461,6 +1492,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	clampSlotGridLimits(fallbackSlots, fuseMaxW, maxExportW)
 
 	p := request.params
+	if s.PVCurtailmentProbe != nil {
+		p.PVCurtailment = s.PVCurtailmentProbe()
+	}
 	if p.Mode == "" {
 		p.Mode = ModeSelfConsumption
 	}
@@ -1476,8 +1510,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			slog.Warn("mpc: no online battery capacity with SoC — keeping previous plan")
 			return s.Latest()
 		}
-	} else {
+	} else if p.CapacityWh > 0 {
 		p.InitialSoC = currentSoC(s.Tele, p.InitialSoC)
+	} else {
+		p.InitialSoC = 0
 	}
 
 	// Export pricing is per-slot now: pass bonus/fee into Params so
@@ -1643,7 +1679,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			return s.canceledReplan(request, "primary-solve")
 		}
 		if err == nil {
-			if recoveryRequired || downsidePrimary {
+			if recoveryRequired || downsidePrimary || coreDPModelError(p) != nil {
 				candidate.DPEvaluationShadow = nil
 				candidate.DPShadow = nil
 				candidate.Baselines = nil
@@ -1708,6 +1744,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 					"soc_max", p.SoCMax)
 				return s.Latest()
 			}
+			if modelErr := coreDPModelError(p); modelErr != nil {
+				slog.Error("mpc: primary failed and fallback cannot represent this site; keeping previous plan", "err", err, "fallback", modelErr)
+				return s.Latest()
+			}
 			slog.Error("mpc: primary optimizer failed; using Core DP fallback", "err", err)
 			slots = fallbackSlots
 			solveStart := time.Now()
@@ -1755,7 +1795,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired {
+	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}
@@ -1792,6 +1832,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	capPlanLoad(&plan, 0, s.LoadMaxW)
 	plan.DecisionID = s.nextDecisionIDLocked()
 	s.last = &plan
+	s.executionPlan = s.last
 	s.lastSlots = slots
 	s.lastParams = p
 	s.lastLoadpointID = loadpointID

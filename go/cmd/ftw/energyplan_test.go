@@ -43,3 +43,15 @@ func TestBuildMPCBetaStartsBundledEnergyplan(t *testing.T) {
 	}
 	t.Cleanup(func() { svc.Optimizer.Close() })
 }
+
+func TestBuildMPCWithoutHomeBattery(t *testing.T) {
+	cfg, _ := plannerEngineConfig(&config.Planner{Enabled: true, Engine: "energyplan"})
+	cfg.Drivers = nil
+	svc := buildMPC(cfg, nil, nil, nil)
+	if svc == nil || svc.Defaults.CapacityWh != 0 || svc.Defaults.InitialSoC != 0 || svc.Defaults.MaxChargeW != 0 || len(svc.BatteryFleet) != 0 {
+		t.Fatalf("batteryless site invented storage: %+v", svc)
+	}
+	if svc.Optimizer != nil {
+		defer svc.Optimizer.Close()
+	}
+}

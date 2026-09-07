@@ -122,10 +122,13 @@ type SlotDirective struct {
 	DecisionID      string
 	SlotStart       time.Time
 	SlotEnd         time.Time
-	BatteryEnergyWh float64 // site-signed: + = charge, − = discharge
+	BatteryEnergyWh float64            // site-signed: + = charge, − = discharge
+	StorageEnergyWh map[string]float64 // validated per-storage AC energy budgets
 	SoCTarget       float64
 	Strategy        string  // echoed for logging / API; mirrors mpc.Mode
 	PVLimitW        float64 // 0 = no curtail; > 0 = cap aggregate PV output
+	PVCurtailActive bool
+	PVCurtailment   mpc.PVCurtailment
 
 	// PlannedGridW is the plan's forecast of slot-average gridW given the
 	// planned battery / load / PV mix (site-signed: + = import). The
@@ -533,6 +536,7 @@ type State struct {
 	// accounting. Reset when the slot rolls over (by SlotStart equality).
 	// Zero-valued until UseEnergyDispatch fires its first cycle.
 	currentDirective SlotDirective
+	storageDelivery  storageSlotDelivery
 	slotDelivered    float64   // Wh delivered to batteries since slot start
 	lastTickTs       time.Time // for ∫ battery_w dt
 	// controlSlotDecisionID is the accepted plan used to choose the last
@@ -592,6 +596,7 @@ type State struct {
 	// Populated from config.Driver.SupportsPVCurtail in main.go;
 	// hot-swappable via the config-reload watcher.
 	SupportsPVCurtail map[string]bool
+	PVGenerationLimit func(string) mpc.PVCurtailment
 
 	// SolarFeedDrivers flags drivers whose operator armed an opt-in
 	// `solar_pv` write path (e.g. the NIBE S-series Solar PV surplus
@@ -2431,6 +2436,8 @@ func ComputeDispatch(
 	var raw []DispatchTarget
 	if manualHoldActive && manualHold.Driver != "" {
 		raw = distributeScopedManualHold(onlineBats, manualHold.Driver, currentTotal+totalCorrection)
+	} else if allocated, ok := distributePlannedStorages(state, onlineBats, currentTotal+totalCorrection, manualHoldActive); ok {
+		raw = allocated
 	} else {
 		switch effectiveMode {
 		case ModeSelfConsumption, ModePeakShaving:
@@ -2959,6 +2966,7 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	}
 
 	now := state.now()
+	var plannedCap *SlotDirective
 
 	// Operator-installed manual hold takes precedence over the planner
 	// directive. Driver-scoped → cap only that driver. Site-aggregate
@@ -2982,7 +2990,7 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		// headroom, EVs on PV charging mode). When live absorbable W
 		// covers everything PV can produce, the curtail effectively
 		// suppresses itself.
-		if dir, ok := state.SlotDirective(now); ok {
+		if dir, ok := state.SlotDirective(now); ok && PlanningPVDirectiveValid(state, store, dir) {
 			if dir.PVLimitW > 0 {
 				if live, ok := liveCurtailLimitW(state, store); ok {
 					limit = live
@@ -2990,6 +2998,10 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 					// Live state incomplete (e.g. meter offline) — fall
 					// back to the planner's static cap.
 					limit = dir.PVLimitW
+				}
+				if dir.PVCurtailActive {
+					limit = dir.PVLimitW
+					plannedCap = &dir
 				}
 			}
 		}
@@ -3067,6 +3079,12 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 					next[d.name] = limit * (d.abs / total)
 				}
 			}
+		}
+	}
+
+	if plannedCap != nil && !holdActive {
+		if caps, ok := plannedPVCaps(state, store, *plannedCap, limit); ok {
+			next = caps
 		}
 	}
 

@@ -83,8 +83,9 @@ type ExternalOptimizerConfig struct {
 // serialized to keep request and response ownership unambiguous. An optional idle timeout releases the worker's solver memory
 // between planning bursts.
 type ExternalOptimizer struct {
-	cfg       ExternalOptimizerConfig
-	transport OptimizerTransport
+	cfg        ExternalOptimizerConfig
+	transport  OptimizerTransport
+	timeBudget func([]Slot, Params) time.Duration
 }
 
 func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, error) {
@@ -203,6 +204,8 @@ type externalRequest struct {
 }
 
 type externalSettings struct {
+	PVCurtailmentMinW        *float64 `json:"pv_curtailment_min_w,omitempty"`
+	PVCurtailmentMaxW        *float64 `json:"pv_curtailment_max_w,omitempty"`
 	Mode                     Mode     `json:"mode"`
 	Solver                   string   `json:"solver"`
 	Formulation              string   `json:"formulation"`
@@ -391,6 +394,9 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 		}
 		return Plan{}, fmt.Errorf("optimizer %s: %s", response.Error.Code, response.Error.Message)
 	}
+	if err := validateExternalAssets(request, response.Plan); err != nil {
+		return Plan{}, fmt.Errorf("optimizer contract rejected: %w", err)
+	}
 	plan := response.toPlan(slots, p)
 	plan.OptimizerInput = append(json.RawMessage(nil), payload...)
 	if err := ValidatePlan(slots, p, &plan); err != nil {
@@ -422,6 +428,9 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		FlexLoads:    []externalFlexLoad{},
 		ThermalLoads: []map[string]any{},
 	}
+	if o.timeBudget != nil {
+		req.Settings.TimeLimitS = math.Min(req.Settings.TimeLimitS, o.timeBudget(slots, p).Seconds())
+	}
 	for i, slot := range slots {
 		req.Slots[i] = externalSlot{
 			StartMs: slot.StartMs, LenMin: slot.LenMin,
@@ -429,6 +438,12 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			Confidence: slot.Confidence, PVW: slot.PVW, LoadW: slot.LoadW,
 			MaxImportW: slot.Limits.MaxImportW, MaxExportW: slot.Limits.MaxExportW,
 		}
+	}
+	if p.PVCurtailment.Covers(slots) {
+		value := p.PVCurtailment.MinW
+		req.Settings.PVCurtailmentMinW = &value
+		maxValue := p.PVCurtailment.MaxW
+		req.Settings.PVCurtailmentMaxW = &maxValue
 	}
 	if len(p.Storages) > 0 {
 		for _, storage := range p.Storages {
@@ -530,7 +545,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 		}
 		slot := slots[i]
 		action := Action{
-			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin,
+			SlotStartMs: candidate.SlotStartMs, SlotLenMin: candidate.SlotLenMin,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
@@ -610,6 +625,9 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 	totalCost := 0.0
 	for i, slot := range slots {
 		a := plan.Actions[i]
+		if err := validateAssetMaps(p, a); err != nil {
+			return fmt.Errorf("slot %d: %w", i, err)
+		}
 		values := []float64{a.BatteryW, a.GridW, a.SoC, a.CostOre, a.LoadpointW, a.LoadpointSoC, a.PVLimitW}
 		for _, value := range values {
 			if math.IsNaN(value) || math.IsInf(value, 0) {
@@ -658,6 +676,9 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				return fmt.Errorf("slot %d aggregate battery_w %.3f, want %.3f", i, a.BatteryW, totalPowerW)
 			}
 			soc = totalEnergyWh / p.CapacityWh
+		} else if p.CapacityWh == 0 {
+			// No storage is a real site topology. Its energy and power stay zero.
+			soc = 0
 		} else {
 			// Go DP publishes an aggregate trajectory. Replay that fleet
 			// as one battery; per-storage maps are required only when present.
@@ -710,7 +731,7 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 		if a.PVCurtailActive && a.PVLimitW == 0 {
 			return fmt.Errorf("slot %d active zero PV cap cannot be dispatched", i)
 		}
-		if a.PVLimitW < 0 || (a.PVLimitW > 0 && a.PVLimitW > -slot.PVW+2) {
+		if a.PVLimitW < 0 || (!a.PVCurtailActive && a.PVLimitW > 0 && a.PVLimitW > -slot.PVW+2) {
 			return fmt.Errorf("slot %d pv_limit_w %.3f exceeds forecast generation %.3f", i, a.PVLimitW, -slot.PVW)
 		}
 		effectivePVW := slot.PVW
@@ -738,10 +759,14 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				}
 			}
 		}
+		totalSurplusOnlyW := 0.0
 		for lpIdx, lp := range activeLoadpoints {
 			powerW := a.LoadpointPowerW[lp.ID]
 			if len(a.LoadpointPowerW) == 0 && lpIdx == 0 {
 				powerW = a.LoadpointW
+			}
+			if lp.SurplusOnly {
+				totalSurplusOnlyW += powerW
 			}
 			if lp.SurplusOnly && surplusOnlyExceedsHousePV(powerW, slot.LoadW, effectivePVW) {
 				return fmt.Errorf("slot %d surplus-only loadpoint %s exceeds PV leftover after house load", i, lp.ID)
@@ -752,6 +777,9 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEV(a.BatteryW, powerW, slot.LoadW, effectivePVW) {
 				return fmt.Errorf("slot %d battery discharge feeds loadpoint %s", i, lp.ID)
 			}
+		}
+		if surplusOnlyExceedsHousePV(totalSurplusOnlyW, slot.LoadW, effectivePVW) {
+			return fmt.Errorf("slot %d surplus-only EVs exceed shared leftover PV", i)
 		}
 		baseGridW := loadpoint.GridW(slot.LoadW, effectivePVW, 0, totalLoadpointW)
 		if !modeAllows(p.Mode, baseGridW, a.GridW, a.BatteryW) {

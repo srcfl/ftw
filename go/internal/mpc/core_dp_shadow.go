@@ -18,6 +18,9 @@ type coreDPShadowRequest struct {
 // startCoreDPShadow runs at most one bounded comparison, after publication.
 // Results belong to a decision ID and can never replace the active actions.
 func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reason string, replanAtMs int64) {
+	if coreDPModelError(p) != nil {
+		return
+	}
 	s.mu.Lock()
 	if s.stopping || s.last == nil || s.last.DecisionID != champion.DecisionID {
 		s.mu.Unlock()
@@ -103,6 +106,11 @@ func (s *Service) recordCoreDPShadow(champion Plan, slots []Slot, p Params, reas
 	if current {
 		updated := *s.last
 		updated.DPShadow = block
+		// Preserve existing permission when adding comparison data. A late
+		// shadow with the same decision ID cannot activate a restored archive.
+		if s.executionPlan == s.last {
+			s.executionPlan = &updated
+		}
 		s.last = &updated
 	}
 	saveDiag, zone := s.SaveDiag, s.Zone
