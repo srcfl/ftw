@@ -171,7 +171,11 @@ func retiredPythonCompose(data []byte) ([]byte, bool, error) {
 // The running updater mounts Compose read-only. Use its exact local image in
 // a short-lived helper with a writable project mount, as self-replacement does.
 func (s *server) retirePythonViaHelper(ctx context.Context) error {
-	image, err := s.imageID(ctx, "ftw-updater")
+	service, err := s.updaterServiceName()
+	if err != nil {
+		return err
+	}
+	image, err := s.imageID(ctx, service)
 	if err != nil {
 		return fmt.Errorf("current updater image: %w", err)
 	}
@@ -186,6 +190,16 @@ func (s *server) retirePythonViaHelper(ctx context.Context) error {
 	args = append(args, "--entrypoint", "/usr/local/bin/ftw-updater", image,
 		"-retire-python", "-compose", s.composeFile, "-main-service", s.mainServiceName)
 	return s.runner(ctx, nil, args...)
+}
+
+func dockerStreaming(ctx context.Context, extraEnv []string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func (s *server) retiredPythonContainers(ctx context.Context) ([]string, error) {

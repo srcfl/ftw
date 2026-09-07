@@ -72,6 +72,13 @@ func TestUpdaterRejectsRetiredOptimizer(t *testing.T) {
 
 func TestRetirePythonHelperUsesLocalImageAndWritableProject(t *testing.T) {
 	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, "services:\n  renamed-updater:\n    image: mirror.example/team/ftw-updater:v2.16.0-beta.1\n")
+	s.imageID = func(_ context.Context, service string) (string, error) {
+		if service != "renamed-updater" {
+			t.Fatalf("looked up %q instead of the installed updater", service)
+		}
+		return "sha256:current", nil
+	}
 	t.Setenv("COMPOSE_PROJECT_NAME", "existing-site")
 	if err := s.retirePythonViaHelper(context.Background()); err != nil {
 		t.Fatal(err)
