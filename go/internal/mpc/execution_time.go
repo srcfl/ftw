@@ -15,6 +15,17 @@ func (s Slot) DurationHours() float64 {
 	return float64(s.StartMs+int64(s.LenMin)*60000-s.ExecutionStart()) / 3600000
 }
 
+func remainingFirstSlot(slots []Slot) time.Duration {
+	if len(slots) == 0 {
+		return 0
+	}
+	rem := slots[0].StartMs + int64(slots[0].LenMin)*60000 - slots[0].ExecutionStart()
+	if rem <= 0 {
+		return 0
+	}
+	return time.Duration(rem) * time.Millisecond
+}
+
 func (a Action) ExecutionStart() int64 {
 	if a.ExecutionStartMs != 0 {
 		return a.ExecutionStartMs

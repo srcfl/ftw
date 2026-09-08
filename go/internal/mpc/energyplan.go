@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
 )
@@ -25,6 +26,13 @@ func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 	return &EnergyplanOptimizer{ExternalOptimizer: external}, nil
 }
 
+const (
+	energyplanSmallBudget = 500 * time.Millisecond
+	energyplanFleetBudget = 5 * time.Second
+	// Leave time for ValidatePlan and publication before firstSlotExpired.
+	energyplanPublishMargin = 50 * time.Millisecond
+)
+
 func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
 	batteries := len(p.Storages)
 	if batteries == 0 && p.CapacityWh > 0 {
@@ -33,16 +41,34 @@ func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
 	assets := 3*batteries + 2*len(p.activeLoadpoints())
 	// Core already adjusts PV to one downside horizon. That margin does not
 	// add worker scenarios or change this model's size.
+	budget := energyplanSmallBudget
 	if len(slots)*assets >= 193*6 || p.PVCurtailment.MinW > 0 {
-		return 5 * time.Second
+		budget = energyplanFleetBudget
 	}
-	return 500 * time.Millisecond
+	remaining := remainingFirstSlot(slots)
+	if remaining < energyplanSmallBudget {
+		return 0
+	}
+	available := remaining - energyplanPublishMargin
+	if available < budget {
+		return available
+	}
+	return budget
 }
 
 func (o *EnergyplanOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
 	// Service has already applied the risk margin to these slots. Do not
 	// construct a second scenario model for this deterministic solver.
 	p.PVUncertaintyW, p.PVRelativeUncertainty, p.PVForecastSafetyK = 0, 0, 0
+	budget := energyplanTimeBudget(slots, p)
+	if budget <= 0 {
+		return Plan{}, fmt.Errorf("remaining first-slot time %s is below the Energyplan budget", remainingFirstSlot(slots))
+	}
+	if wait := remainingFirstSlot(slots) - energyplanPublishMargin; o.cfg.Timeout > 0 && wait > 0 && wait < o.cfg.Timeout {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
 	return o.ExternalOptimizer.Optimize(ctx, slots, p)
 }
 
