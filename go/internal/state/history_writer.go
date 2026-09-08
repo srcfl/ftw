@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	duckdb "github.com/duckdb/duckdb-go/v2"
 	"github.com/google/uuid"
 )
 
@@ -190,6 +191,15 @@ func (w *historyWriter) run() {
 				w.maintainHistory(rows)
 				break
 			}
+			var dbErr *duckdb.Error
+			if errors.As(err, &dbErr) && dbErr.Type == duckdb.ErrorTypeOutOfMemory {
+				// recordHistoryBatch has released its transaction and SQL lease.
+				// Waiting for a successful commit can never recover retained native
+				// buffers: the importer also waits for this pending tick to commit.
+				// Keep the same batch/receipt and bound maintenance with its backoff.
+				w.maintenanceDue = time.Time{}
+				w.maintainHistory(0)
+			}
 			timer := time.NewTimer(time.Second)
 			select {
 			case <-w.ctx.Done():
@@ -201,7 +211,7 @@ func (w *historyWriter) run() {
 	}
 }
 
-// Maintenance follows a durable commit. It never holds a catalog/write/status
+// Maintenance follows a durable commit or an OOM rollback. It never holds a catalog/write/status
 // lock, and admission can continue into the bounded queue. A long read only
 // postpones maintenance; its transaction and the new committed data stay intact.
 func (w *historyWriter) maintainHistory(rows int) {
@@ -213,11 +223,13 @@ func (w *historyWriter) maintainHistory(rows int) {
 	ctx, cancel := context.WithTimeout(w.ctx, 2*time.Second)
 	err := w.store.CheckpointHistory(ctx)
 	cancel()
+	// A successful rotation may still leave the same tick too large. Back off
+	// every actual attempt; skipped calls above must not extend this deadline.
+	w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)
 	if err == nil {
 		w.maintenanceRows = 0
 		w.maintenanceDue = time.Now().Add(time.Hour)
 	} else {
-		w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)
 		slog.Warn("history maintenance postponed; committed data retained", "err", err)
 	}
 	w.mu.Lock()
