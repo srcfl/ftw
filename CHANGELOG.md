@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.2.4
+
+### Patch Changes
+
+- ac005c5: Use the running device's identity for energy counters. Wait for its known
+  serial at startup so a temporary MAC or endpoint alias cannot count the same
+  energy twice. Continue saving raw measurements while identity is pending.
+- 9f6ed6c: Show database write errors in the history import banner. Explain that new
+  history readings are not being saved and hide the import time estimate until
+  writes recover.
+- 9f6ed6c: Prevent history writes from exhausting database memory when several energy counters return after a long gap. Write each interval's five-minute buckets in one SQL statement while keeping history, samples, energy, cursor updates and retry receipts in the same transaction.
+
 ## 3.2.3
 
 ### Patch Changes
