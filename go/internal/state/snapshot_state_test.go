@@ -131,9 +131,16 @@ func TestMarkerSkipThenBackgroundVerifyHealsNextBoot(t *testing.T) {
 	if err := st.SnapshotState(); err != nil {
 		t.Fatalf("SnapshotState: %v", err)
 	}
+	var eventPage, pageSize int64
+	if err := st.db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name='events'`).Scan(&eventPage); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		t.Fatal(err)
+	}
 	st.Close() // Open armed the marker; it persists across Close
 
-	corruptAt(t, statePath, 8192) // SD-rot after the DB was last verified good
+	corruptAt(t, statePath, (eventPage-1)*pageSize) // SD-rot after the DB was last verified good
 
 	// Boot 1: marker present → boot check skipped → no heal yet (Open re-arms it).
 	st1, err := Open(statePath)

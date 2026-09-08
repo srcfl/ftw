@@ -139,6 +139,10 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := s.deps.SelfUpdate.Info()
+	if info.CurrentStateSchema >= 3 && info.TargetStateSchema < 3 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "This Core stores history in DuckDB. Stop Core and restore a verified full backup with the matching older Core version; changing only the image would omit new history."})
+		return
+	}
 	if info.TargetStateSchema > 0 && info.TargetStateSchema < 2 && s.deps.Cfg != nil && s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
 		storedSettings := s.deps.Cfg.ConfigDatabase != ""
@@ -382,6 +386,10 @@ func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(meta.Files) == 0 {
 		writeJSON(w, 400, map[string]string{"error": "snapshot has no files recorded; cannot restore safely"})
+		return
+	}
+	if s.deps.SelfUpdate.Info().CurrentStateSchema >= 3 && meta.DatabaseSchema < 3 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "This snapshot predates DuckDB history. Restore its verified full backup offline with the matching Core version."})
 		return
 	}
 	if !snapshotMetaRestorable(meta) {
