@@ -72,6 +72,9 @@ receipt in one transaction. Admission to memory is separate from durable
 commit. A full queue returns a collection error; health reports pending,
 committed and rejected ticks. Queries use separate connections to the same
 database instance. They do not hold the writer's lock.
+The serial writer retires a previous retry receipt only after it has observed
+that commit succeed. The current receipt survives an uncertain commit and a
+retry; receipts do not grow with every tick for the lifetime of the box.
 
 On first boot, Core imports a fixed SQLite snapshot and the existing daily
 sample Parquet files. It checks row counts and values before it accepts the

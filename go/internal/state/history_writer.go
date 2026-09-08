@@ -139,13 +139,14 @@ func (w *historyWriter) signal() { close(w.changed); w.changed = make(chan struc
 
 func (w *historyWriter) run() {
 	defer close(w.done)
+	var acknowledgedSequence int64
 	for b := range w.queue {
 		for {
 			if w.ctx.Err() != nil {
 				return
 			}
 			ctx, cancel := context.WithTimeout(w.ctx, 30*time.Second)
-			seq, err := w.store.recordHistoryBatch(ctx, b.id, b.hash, b.payload.Point, b.payload.Samples, b.payload.Observations)
+			seq, err := w.store.recordHistoryBatch(ctx, b.id, b.hash, b.payload.Point, b.payload.Samples, b.payload.Observations, acknowledgedSequence)
 			cancel()
 			w.mu.Lock()
 			if err == nil {
@@ -170,6 +171,7 @@ func (w *historyWriter) run() {
 			w.signal()
 			w.mu.Unlock()
 			if err == nil {
+				acknowledgedSequence = seq
 				break
 			}
 			timer := time.NewTimer(time.Second)

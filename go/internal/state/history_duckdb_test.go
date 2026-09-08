@@ -15,15 +15,15 @@ func TestHistoryPrimaryAndRetryReceipt(t *testing.T) {
 	s := freshStore(t)
 	p := HistoryPoint{TsMs: 1000, GridW: 42, JSON: `{"source":"meter"}`}
 	samples := []Sample{{Driver: "meter", Metric: "grid_w", TsMs: 1000, Value: 42, Unit: "W"}}
-	seq, err := s.recordHistoryBatch(context.Background(), "batch-a", "hash-a", &p, samples, nil)
+	seq, err := s.recordHistoryBatch(context.Background(), "batch-a", "hash-a", &p, samples, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.recordHistoryBatch(context.Background(), "batch-a", "hash-a", &p, samples, nil)
+	again, err := s.recordHistoryBatch(context.Background(), "batch-a", "hash-a", &p, samples, nil, 0)
 	if err != nil || seq != again || seq == 0 {
 		t.Fatalf("retry seq=%d/%d err=%v", seq, again, err)
 	}
-	if _, err := s.recordHistoryBatch(context.Background(), "batch-a", "hash-b", &p, samples, nil); err == nil {
+	if _, err := s.recordHistoryBatch(context.Background(), "batch-a", "hash-b", &p, samples, nil, 0); err == nil {
 		t.Fatal("accepted changed payload with an existing receipt")
 	}
 	p.GridW = 84
@@ -95,6 +95,47 @@ func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 		if sm.Value != 17 {
 			t.Fatal("queued payload changed with caller memory")
 		}
+	}
+	var receipts int
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&receipts); err != nil || receipts != 1 {
+		t.Fatalf("serial writer retained %d receipts: %v", receipts, err)
+	}
+}
+
+func TestHistoryReceiptRetirementPreservesUncertainCommit(t *testing.T) {
+	s := freshStore(t)
+	ctx := context.Background()
+	first, err := s.recordHistoryBatch(ctx, "first", "first-hash", &HistoryPoint{TsMs: 1}, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.recordHistoryBatch(ctx, "second", "second-hash", &HistoryPoint{TsMs: 2}, nil, nil, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The writer has not observed the second result. Retrying the same payload
+	// must return its original sequence even though the first receipt is gone.
+	again, err := s.recordHistoryBatch(ctx, "second", "second-hash", &HistoryPoint{TsMs: 2}, nil, nil, first)
+	if err != nil || again != second {
+		t.Fatalf("uncertain commit retry=%d, want %d: %v", again, second, err)
+	}
+	if _, err := s.recordHistoryBatch(ctx, "second", "changed", nil, nil, nil, first); err == nil {
+		t.Fatal("uncertain receipt accepted a changed payload")
+	}
+	var count int
+	var batch string
+	if err := s.history.QueryRow(`SELECT COUNT(*),MIN(batch_id) FROM history_receipts`).Scan(&count, &batch); err != nil || count != 1 || batch != "second" {
+		t.Fatalf("receipts=%d %q: %v", count, batch, err)
+	}
+	// Invalid acknowledgement rolls back both the new data and its receipt.
+	if _, err := s.recordHistoryBatch(ctx, "invalid", "invalid-hash", &HistoryPoint{TsMs: 3}, nil, nil, math.MaxInt64); err == nil {
+		t.Fatal("accepted an acknowledgement beyond the current commit")
+	}
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_hot WHERE ts_ms=3`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed batch left data behind: %d %v", count, err)
+	}
+	if _, err := s.recordHistoryBatch(ctx, "second", "second-hash", nil, nil, nil, first); err != nil {
+		t.Fatalf("failed batch removed uncertain receipt: %v", err)
 	}
 }
 

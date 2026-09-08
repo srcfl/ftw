@@ -304,13 +304,16 @@ func (s *Store) RecordTickWithEnergy(p HistoryPoint, samples []Sample, observati
 func (s *Store) RecordTickWithOptionalHistory(p *HistoryPoint, samples []Sample, observations []EnergyObservation) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := s.recordHistoryBatch(ctx, "", "", p, samples, observations)
+	_, err := s.recordHistoryBatch(ctx, "", "", p, samples, observations, 0)
 	return err
 }
 
 // recordHistoryBatch commits data and its retry receipt together. A receipt
 // identifies the payload, not its newest timestamp: corrections may be old.
-func (s *Store) recordHistoryBatch(ctx context.Context, batchID, payloadHash string, p *HistoryPoint, samples []Sample, observations []EnergyObservation) (int64, error) {
+// Only the serial writer supplies acknowledgedSequence: it has observed that
+// commit succeed and will never retry it again. Its current, possibly uncertain
+// commit retains its receipt until a later batch succeeds.
+func (s *Store) recordHistoryBatch(ctx context.Context, batchID, payloadHash string, p *HistoryPoint, samples []Sample, observations []EnergyObservation, acknowledgedSequence int64) (int64, error) {
 	if err := validateHistorySamples(samples); err != nil {
 		return 0, err
 	}
@@ -392,6 +395,14 @@ func (s *Store) recordHistoryBatch(ctx context.Context, batchID, payloadHash str
 	if batchID != "" {
 		if err := tx.QueryRowContext(ctx, `INSERT INTO history_receipts(batch_id,payload_hash) VALUES (?,?) RETURNING sequence`, batchID, payloadHash).Scan(&seq); err != nil {
 			return 0, err
+		}
+		if acknowledgedSequence > 0 {
+			if acknowledgedSequence >= seq {
+				return 0, errors.New("history acknowledgement must precede the current commit")
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM history_receipts WHERE sequence<=?`, acknowledgedSequence); err != nil {
+				return 0, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
