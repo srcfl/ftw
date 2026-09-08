@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,10 +170,10 @@ func TestCoreUpdateStaysDoneWhenUpdaterReplacementFails(t *testing.T) {
 		return errors.New("no updater service in compose")
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	s.handleUpdate(httptest.NewRecorder(), req)
-
-	done := waitForState(t, s, "done")
+	// Terminal state precedes sidecar replacement. Wait for the whole job,
+	// not merely "done", before checking the callback and its failure result.
+	s.runJob("update", "v1.2.3")
+	done := s.readState()
 	if done.State != "done" {
 		t.Fatalf("failed sidecar replacement must not reopen a finished update: %+v", done)
 	}
@@ -185,22 +183,15 @@ func TestCoreUpdateStaysDoneWhenUpdaterReplacementFails(t *testing.T) {
 }
 
 func TestSelfReplaceSkipsRestart(t *testing.T) {
-	for _, tc := range []struct{ name, body string }{
-		{"restart", `{"action":"restart"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, _ := newTestServer(t)
-			called := false
-			s.selfReplace = func(string) error { called = true; return nil }
-
-			req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(tc.body))
-			s.handleUpdate(httptest.NewRecorder(), req)
-			waitForState(t, s, "done")
-
-			if called {
-				t.Fatalf("%s must not replace the updater sidecar", tc.name)
-			}
-		})
+	s, _ := newTestServer(t)
+	called := false
+	s.selfReplace = func(string) error { called = true; return nil }
+	s.runJob("restart", "")
+	if done := s.readState(); done.State != "done" {
+		t.Fatalf("restart did not finish: %+v", done)
+	}
+	if called {
+		t.Fatal("restart must not replace the updater sidecar")
 	}
 }
 
