@@ -1,9 +1,5 @@
-// Package state is SQLite-backed persistent storage for config overrides,
-// event log, history snapshots, and battery models.
-//
-// History uses one table per tier (hot/warm/cold) like the Rust version, but
-// the aggregation from hot → warm → cold is pure SQL instead of custom
-// bucketing code. See Prune() for the aggregation queries.
+// Package state stores configuration, models and cache in SQLite, and all
+// time-series history and energy accounting in embedded DuckDB.
 package state
 
 import (
@@ -27,7 +23,7 @@ const (
 	// SchemaVersion identifies the on-disk state format for update rollback.
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
-	SchemaVersion = 2
+	SchemaVersion = 3
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -38,15 +34,17 @@ const (
 	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
-// Store is the persistent state DB. It wraps two SQLite files:
-//   - db:    precious state.db (models, history, devices, config, telemetry)
-//   - cache: disposable cache.db (prices, forecasts) — re-fetchable, so it can
-//     be quarantined and rebuilt on corruption without losing anything.
+// Store owns one DuckDB history database and two SQLite databases:
+//   - history: primary samples, site history and energy ledger
+//   - db: state.db configuration, devices and learned state
+//   - cache: cache.db prices and forecasts, which can be rebuilt
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
-	historyFeedMu sync.RWMutex
-	historyFeed   *HistoryFeed
+	history        *sql.DB
+	historyPath    string
+	historyWriteMu sync.Mutex
+	historyWriter  *historyWriter
 
 	db    *sql.DB
 	cache *sql.DB
@@ -135,6 +133,12 @@ func Open(path string) (*Store, error) {
 	// persists across restarts and crashes — it does NOT depend on a clean Close.
 	// Only VerifyInBackground finding corruption removes it, which forces the next
 	// boot to run the full check + heal. This is what makes restarts reliably fast.
+	if err := s.openHistory(); err != nil {
+		db.Close()
+		cache.Close()
+		return nil, err
+	}
+	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
 	return s, nil
 }
@@ -157,10 +161,41 @@ func OpenBackupSource(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db, mainDBPath: abs, historyPath: historyDatabasePath(abs)}
+	// Offline helpers must export the primary database, never frozen legacy rows.
+	var configTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='config'`).Scan(&configTable); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if configTable != 0 {
+		active, err := s.historyConfig("history_duckdb_generation")
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if active != "" {
+			if _, err := os.Stat(s.historyPath); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("backup primary history: %w", err)
+			}
+			s.history, err = sql.Open("duckdb", s.historyPath+"?access_mode=read_only&threads=1&memory_limit=128MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
+			if err != nil {
+				db.Close()
+				return nil, err
+			}
+			var generation string
+			err = s.history.QueryRow(`SELECT name FROM history_migrations WHERE name=?`, "generation:"+active).Scan(&generation)
+			if err != nil {
+				s.Close()
+				return nil, fmt.Errorf("open primary history for backup; stop Core first: %w", err)
+			}
+		}
+	}
+	return s, nil
 }
 
-// Close releases both DB files. Safe to call multiple times. The verified-good
+// Close drains accepted history ticks and releases the databases. Safe to call multiple times. The verified-good
 // marker is NOT managed here — it is armed by Open and removed only by a
 // background verify that finds corruption, so fast restarts never depend on this
 // running cleanly (a SIGKILLed shutdown still leaves a fast next boot).
@@ -181,8 +216,14 @@ func (s *Store) Close() error {
 	s.verifyWG.Wait()
 
 	var err error
+	if s.historyWriter != nil {
+		err = s.historyWriter.close()
+	}
+	if s.history != nil {
+		err = errors.Join(err, s.history.Close())
+	}
 	if s.cache != nil {
-		err = s.cache.Close()
+		err = errors.Join(err, s.cache.Close())
 	}
 	if s.db != nil {
 		if e := s.db.Close(); e != nil {
@@ -468,6 +509,10 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 	escaped := strings.ReplaceAll(rawPath, "'", "''")
 	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
 		return fmt.Errorf("backup to %s: %w", rawPath, err)
+	}
+
+	if err := s.exportHistoryToSQLite(rawPath); err != nil {
+		return fmt.Errorf("backup history: %w", err)
 	}
 
 	if capture != nil {
@@ -1021,9 +1066,7 @@ func (s *Store) migrate() error {
 		"TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureEnergyLedgerVersion(); err != nil {
-		return err
-	}
+
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
 	// separate file so its corruption (or a deliberate flush) never risks the
 	// precious state.db — and recovery is just "rebuild empty + re-fetch".
@@ -1321,7 +1364,14 @@ type HistoryPoint struct {
 
 // RecordHistory inserts a new hot-tier entry.
 func (s *Store) RecordHistory(p HistoryPoint) error {
-	_, err := s.db.Exec(
+	var normalizeErr error
+	p, normalizeErr = normalizeHistoryPoint(p)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	_, err := s.history.Exec(
 		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
@@ -1329,32 +1379,42 @@ func (s *Store) RecordHistory(p HistoryPoint) error {
 	return err
 }
 
-// BulkRecordHistory writes many HistoryPoints in a single transaction.
-// Used by backfill / migration tooling where per-row implicit-commit
-// overhead dominates (SQLite on slow filesystems).
+// BulkRecordHistory writes bounded transactions of at most 2048 points.
+// A retry is safe: the last history point for each timestamp wins.
 func (s *Store) BulkRecordHistory(pts []HistoryPoint) error {
-	if len(pts) == 0 {
-		return nil
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	stmt, err := tx.Prepare(
-		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-	)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
 	for _, p := range pts {
-		if _, err := stmt.Exec(p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON); err != nil {
+		if _, err := normalizeHistoryPoint(p); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	for len(pts) > 0 {
+		n := min(len(pts), 2048)
+		if err := s.bulkHistoryChunk(pts[:n]); err != nil {
+			return err
+		}
+		pts = pts[n:]
+	}
+	return nil
+}
+
+func (s *Store) bulkHistoryChunk(pts []HistoryPoint) error {
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	ctx := context.Background()
+	conn, err := s.history.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, `BEGIN`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `ROLLBACK`)
+	if err := appendHistoryRows(conn, pts); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `COMMIT`)
+	return err
 }
 
 // LoadHistory returns points from ALL tiers in [sinceMs, untilMs], merged + sorted.
@@ -1365,6 +1425,15 @@ func (s *Store) BulkRecordHistory(pts []HistoryPoint) error {
 // Downsampling used to fetch every row into Go and keep every Nth — a month
 // view materialized >1M rows per request once the hot tier grew.
 func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
+	return s.LoadHistoryContext(context.Background(), sinceMs, untilMs, maxPoints)
+}
+
+func (s *Store) LoadHistoryContext(ctx context.Context, sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Union across all three tiers. Dedupe on ts_ms preferring hot over warm over cold.
 	// COALESCE to 0 so NULL columns (from partial aggregations) scan cleanly.
 	const tierUnion = `
@@ -1380,8 +1449,7 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		),
 		deduped AS (
 			SELECT * FROM all_rows
-			GROUP BY ts_ms
-			HAVING tier = MIN(tier)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier) = 1
 		)
 	`
 	var (
@@ -1389,23 +1457,21 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		err  error
 	)
 	if maxPoints > 0 && untilMs >= sinceMs {
-		// Ceil so the bucket count never exceeds maxPoints. MAX(ts_ms) is an
-		// aggregate, so SQLite's bare-column rule makes the un-aggregated
-		// json column come from that same newest row.
+		// Ceil the bucket width; arg_max selects JSON from its newest row.
 		bucketMs := (untilMs - sinceMs + int64(maxPoints)) / int64(maxPoints)
 		if bucketMs < 1 {
 			bucketMs = 1
 		}
-		rows, err = s.db.Query(tierUnion+`
+		rows, err = s.history.QueryContext(ctx, tierUnion+`
 			SELECT MAX(ts_ms),
 			       AVG(COALESCE(grid_w, 0)), AVG(COALESCE(pv_w, 0)), AVG(COALESCE(bat_w, 0)),
-			       AVG(COALESCE(load_w, 0)), AVG(COALESCE(bat_soc, 0)), json
+			       AVG(COALESCE(load_w, 0)), AVG(COALESCE(bat_soc, 0)), arg_max(json, ts_ms)
 			FROM deduped
-			GROUP BY (ts_ms - ?) / ?
+			GROUP BY (ts_ms - ?) // ?
 			ORDER BY 1 ASC
 		`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
 	} else {
-		rows, err = s.db.Query(tierUnion+`
+		rows, err = s.history.QueryContext(ctx, tierUnion+`
 			SELECT ts_ms,
 			       COALESCE(grid_w, 0), COALESCE(pv_w, 0), COALESCE(bat_w, 0),
 			       COALESCE(load_w, 0), COALESCE(bat_soc, 0), json
@@ -1486,7 +1552,7 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 		WHERE prev_ts IS NOT NULL
 	`
 	var d DayEnergy
-	err := s.db.QueryRow(q,
+	err := s.history.QueryRow(q,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
@@ -1513,7 +1579,7 @@ func (s *Store) LoadDailyEnergy(day string) (DayEnergy, bool, error) {
 		FROM energy_daily WHERE day = ?
 	`
 	var d DayEnergy
-	err := s.db.QueryRow(q, day).Scan(
+	err := s.history.QueryRow(q, day).Scan(
 		&d.ImportWh, &d.ExportWh, &d.PVWh,
 		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
 	)
@@ -1531,6 +1597,8 @@ func (s *Store) LoadDailyEnergy(day string) (DayEnergy, bool, error) {
 // persisted via this method (the day is still accumulating); callers
 // should gate on "is closed day" before saving.
 func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
 	const q = `
 		INSERT INTO energy_daily(
 			day, import_wh, export_wh, pv_wh, bat_charged_wh, bat_discharged_wh, load_wh, computed_at_ms
@@ -1544,7 +1612,7 @@ func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
 			load_wh           = excluded.load_wh,
 			computed_at_ms    = excluded.computed_at_ms
 	`
-	_, err := s.db.Exec(q, day,
+	_, err := s.history.Exec(q, day,
 		de.ImportWh, de.ExportWh, de.PVWh,
 		de.BatChargedWh, de.BatDischargedWh, de.LoadWh,
 		time.Now().UnixMilli(),
@@ -1558,12 +1626,12 @@ func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
 func (s *Store) CountHistoryWithoutMarker(marker string) (int, error) {
 	const q = `
 		SELECT
-			(SELECT COUNT(*) FROM history_hot  WHERE json IS NOT ?) +
-			(SELECT COUNT(*) FROM history_warm WHERE json IS NOT ?) +
-			(SELECT COUNT(*) FROM history_cold WHERE json IS NOT ?)
+			(SELECT COUNT(*) FROM history_hot  WHERE json IS DISTINCT FROM ?) +
+			(SELECT COUNT(*) FROM history_warm WHERE json IS DISTINCT FROM ?) +
+			(SELECT COUNT(*) FROM history_cold WHERE json IS DISTINCT FROM ?)
 	`
 	var n int
-	if err := s.db.QueryRow(q, marker, marker, marker).Scan(&n); err != nil {
+	if err := s.history.QueryRow(q, marker, marker, marker).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -1571,7 +1639,7 @@ func (s *Store) CountHistoryWithoutMarker(marker string) (int, error) {
 
 // HistoryCounts returns the number of rows in (hot, warm, cold) tiers.
 func (s *Store) HistoryCounts() (hot, warm, cold int, err error) {
-	row := s.db.QueryRow(`SELECT
+	row := s.history.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM history_hot),
 		(SELECT COUNT(*) FROM history_warm),
 		(SELECT COUNT(*) FROM history_cold)`)
@@ -1638,7 +1706,7 @@ func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucket
 			return aged, chunks, err
 		}
 		var minTs sql.NullInt64
-		if err := s.db.QueryRowContext(ctx,
+		if err := s.history.QueryRowContext(ctx,
 			`SELECT MIN(ts_ms) FROM `+src).Scan(&minTs); err != nil {
 			return aged, chunks, err
 		}
@@ -1687,7 +1755,9 @@ var pruneChunkPause = 250 * time.Millisecond
 // pruneChunk aggregates+deletes src rows in [fromMs, toMs) in one short
 // transaction.
 func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, bucketMs int64) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -1698,13 +1768,13 @@ func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, b
 	q := fmt.Sprintf(`
 		INSERT OR REPLACE INTO %s (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		SELECT b_ts, a_grid, a_pv, a_bat, a_load, a_soc, json FROM (
-			SELECT (ts_ms / %d) * %d + %d AS b_ts,
+			SELECT (ts_ms // %d) * %d + %d AS b_ts,
 			       AVG(grid_w) AS a_grid, AVG(pv_w) AS a_pv, AVG(bat_w) AS a_bat,
 			       AVG(load_w) AS a_load, AVG(bat_soc) AS a_soc,
-			       json, MAX(ts_ms) AS newest
+			       arg_max(json, ts_ms) AS json, MAX(ts_ms) AS newest
 			FROM %s
 			WHERE ts_ms >= ? AND ts_ms < ?
-			GROUP BY ts_ms / %d
+			GROUP BY ts_ms // %d
 		)`, dst, bucketMs, bucketMs, bucketMs/2, src, bucketMs)
 	if _, err := tx.ExecContext(ctx, q, fromMs, toMs); err != nil {
 		return 0, fmt.Errorf("aggregate: %w", err)
