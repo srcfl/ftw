@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -1048,8 +1047,7 @@ func verifyCompressedDatabase(src string) error {
 }
 
 func verifyDatabase(dbPath string) error {
-	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", state.ReadOnlyDatabaseURI(dbPath))
 	if err != nil {
 		return err
 	}

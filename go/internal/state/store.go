@@ -152,7 +152,7 @@ func OpenBackupSource(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", readOnlyDatabaseURI(abs))
+	db, err := sql.Open("sqlite", ReadOnlyDatabaseURI(abs))
 	if err != nil {
 		return nil, err
 	}
