@@ -498,7 +498,7 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 		affected = append(affected, next.Drivers[i])
 	}
 	for _, driver := range affected {
-		if err := s.deps.Registry.Restart(ctx, driver); err != nil {
+		if err := s.restartDriverWithBatterySoCBounds(ctx, driver); err != nil {
 			return restartState, fmt.Errorf("restart driver %s: %w", driver.Name, err)
 		}
 		if err := s.awaitDriverTelemetry(ctx, driver.Name, restartState.ExpectedIDs[driver.Name]); err != nil {
@@ -524,6 +524,15 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 	return restartState, nil
 }
 
+// Match startup and normal reload without persisting derived battery limits.
+// Recovery uses this path too; Originals must remain the raw config.
+func (s *Server) restartDriverWithBatterySoCBounds(ctx context.Context, driver config.Driver) error {
+	s.deps.CfgMu.RLock()
+	runtimeDriver := config.WithBatterySoCBounds([]config.Driver{driver}, s.deps.Cfg.Batteries)[0]
+	s.deps.CfgMu.RUnlock()
+	return s.deps.Registry.Restart(ctx, runtimeDriver)
+}
+
 func (s *Server) restoreDriverConfigs(ctx context.Context, originals []config.Driver, expectedIDs map[string]string) error {
 	for _, original := range originals {
 		if _, running := expectedIDs[original.Name]; !running || original.Disabled {
@@ -537,7 +546,7 @@ func (s *Server) restoreDriverConfigs(ctx context.Context, originals []config.Dr
 			}
 		}
 		s.deps.CfgMu.Unlock()
-		if err := s.deps.Registry.Restart(ctx, original); err != nil {
+		if err := s.restartDriverWithBatterySoCBounds(ctx, original); err != nil {
 			return err
 		}
 		if err := s.awaitDriverTelemetry(ctx, original.Name, expectedIDs[original.Name]); err != nil {
