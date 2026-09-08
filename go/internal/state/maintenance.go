@@ -36,12 +36,27 @@ func DiskAvail(dir string) (int64, error) {
 // under <coldDir>/diagnostics/). retentionDays <= 0 keeps everything.
 // Empty month/year directories left behind are removed opportunistically.
 func PruneColdParquet(coldDir string, retentionDays int, now time.Time) (removed []string, err error) {
-	if retentionDays <= 0 || coldDir == "" {
+	return pruneParquetRoots(retentionDays, now, coldDir, filepath.Join(coldDir, "diagnostics"))
+}
+
+// PruneDiagnosticsParquet retains legacy sample files as migration evidence.
+func PruneDiagnosticsParquet(coldDir string, retentionDays int, now time.Time) ([]string, error) {
+	if coldDir == "" {
+		return nil, nil
+	}
+	return pruneParquetRoots(retentionDays, now, filepath.Join(coldDir, "diagnostics"))
+}
+
+func pruneParquetRoots(retentionDays int, now time.Time, roots ...string) (removed []string, err error) {
+	if retentionDays <= 0 {
 		return nil, nil
 	}
 	cutoff := now.UTC().AddDate(0, 0, -retentionDays)
 
-	for _, root := range []string{coldDir, filepath.Join(coldDir, "diagnostics")} {
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
 		matches, err := filepath.Glob(filepath.Join(root,
 			"[0-9][0-9][0-9][0-9]", "[0-9][0-9]", "[0-9][0-9].parquet"))
 		if err != nil {

@@ -5,8 +5,8 @@
 # Install: make install-hooks
 # Bypass:  git push --no-verify
 #
-# Cross-compile check catches platform-specific build breakage (e.g. a Linux
-# syscall field that doesn't exist on Windows) before it lands in CI.
+# Check Linux targets locally on Unix, or native Windows commands in UCRT64.
+# Windows CI verifies the Windows builds and ACL/storage tests on every Go PR.
 
 set -euo pipefail
 

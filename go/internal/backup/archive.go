@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -181,7 +180,11 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	databaseFile = filepath.ToSlash(databaseFile)
 	databaseEntry := "data/" + databaseFile + ".gz"
-	sources, err := collectSources(dataDir, statePath, outputDir)
+	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
+	if err != nil {
+		return Info{}, err
+	}
+	sources, err := collectSources(dataDir, statePath, outputDir, importedHistory)
 	if err != nil {
 		return Info{}, err
 	}
@@ -268,7 +271,7 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	return Info{ID: id, Path: finalPath, CreatedAt: created, SizeBytes: info.Size(), SHA256: sum, Verified: true}, nil
 }
 
-func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error) {
+func collectSources(dataDir, statePath, outputDir string, importedHistory map[string]bool) ([]sourceEntry, error) {
 	stateRel, _ := filepath.Rel(dataDir, statePath)
 	outputRel, outputInside := filepath.Rel(dataDir, outputDir)
 	if outputInside != nil || outputRel == ".." || strings.HasPrefix(outputRel, ".."+string(filepath.Separator)) {
@@ -292,6 +295,18 @@ func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error)
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Primary history is exported from one read transaction into the
+		// SQLite backup above. Never copy a live DuckDB file or WAL.
+		historyRel, _ := filepath.Rel(dataDir, state.HistoryDatabasePath(statePath))
+		if rel == historyRel || strings.HasPrefix(rel, historyRel+".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if importedHistory[p] {
 			return nil
 		}
 		if rel == stateRel || rel == stateRel+"-wal" || rel == stateRel+"-shm" {
@@ -1032,8 +1047,7 @@ func verifyCompressedDatabase(src string) error {
 }
 
 func verifyDatabase(dbPath string) error {
-	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", state.ReadOnlyDatabaseURI(dbPath))
 	if err != nil {
 		return err
 	}
@@ -1138,13 +1152,4 @@ func pathInside(root, candidate string) bool {
 	}
 	rel, err := filepath.Rel(rootAbs, candidateAbs)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
 }

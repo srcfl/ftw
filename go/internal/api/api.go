@@ -42,7 +42,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
-	"github.com/srcfl/ftw/go/internal/ftwdbshadow"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -73,7 +72,6 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
-	FTWDBShadow *ftwdbshadow.Beta
 
 	// MutationPolicy protects every state-changing route at the shared
 	// Handler boundary. Production requires tokens for non-local hostnames;
@@ -704,8 +702,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["storage"] = storage
 	}
-	if s.deps.FTWDBShadow != nil {
-		resp["ftwdb_shadow"] = s.deps.FTWDBShadow.Status()
+	if s.deps.State != nil {
+		resp["history_storage"] = s.deps.State.HistoryBackend()
+		writer := s.deps.State.HistoryWriterStatus()
+		if writer.LastError != "" || writer.MaintenanceError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
+			resp["status"] = "degraded"
+		}
 	}
 	writeJSON(w, 200, resp)
 }
@@ -2137,7 +2139,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	windowMs := parseRange(rangeStr)
 	nowMs := time.Now().UnixMilli()
 	since := nowMs - windowMs
-	rows, err := s.deps.State.LoadHistory(since, nowMs, points)
+	rows, err := s.deps.State.LoadHistoryContext(r.Context(), since, nowMs, points)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -2695,7 +2697,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		if m == "" {
 			continue
 		}
-		pts, err := s.loadSeriesWithCold(driver, m, since, until, points)
+		pts, err := s.deps.State.LoadSeriesBucketsOrRawContext(r.Context(), driver, m, since, until, points)
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
@@ -2739,87 +2741,6 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// loadSeriesWithCold returns one series over [since, until], merging the
-// SQLite recent tier with cold Parquet days when the window reaches past
-// RecentRetention. Cold samples are bucketed in Go on the same boundaries
-// LoadSeriesBuckets uses, so the merged chart has one consistent resolution.
-func (s *Server) loadSeriesWithCold(driver, metric string, since, until int64, points int) ([]state.SeriesPoint, error) {
-	recent, err := s.deps.State.LoadSeriesBucketsOrRaw(driver, metric, since, until, points)
-	if err != nil {
-		return nil, err
-	}
-
-	coldCutoff := time.Now().Add(-state.RecentRetention).UnixMilli()
-	if s.deps.ColdDir == "" || since >= coldCutoff {
-		return recent, nil
-	}
-	coldUntil := until
-	if coldUntil > coldCutoff {
-		coldUntil = coldCutoff
-	}
-	coldRaw, err := s.deps.State.LoadSeriesFromParquet(s.deps.ColdDir, driver, metric, since, coldUntil)
-	if err != nil {
-		return nil, err
-	}
-	if len(coldRaw) == 0 {
-		return recent, nil
-	}
-
-	var cold []state.SeriesPoint
-	if points > 0 {
-		bucketMs := state.BucketWidthMs(since, until, points)
-		for _, sm := range coldRaw {
-			idx := (sm.TsMs - since) / bucketMs
-			if n := len(cold); n > 0 && (cold[n-1].TsMs-since)/bucketMs == idx {
-				b := &cold[n-1]
-				if sm.Value < b.Min {
-					b.Min = sm.Value
-				}
-				if sm.Value > b.Max {
-					b.Max = sm.Value
-				}
-				b.V = (b.V*float64(b.N) + sm.Value) / float64(b.N+1)
-				b.N++
-				if sm.TsMs > b.TsMs {
-					b.TsMs = sm.TsMs
-				}
-			} else {
-				cold = append(cold, state.SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1})
-			}
-		}
-	} else {
-		cold = make([]state.SeriesPoint, len(coldRaw))
-		for i, sm := range coldRaw {
-			cold[i] = state.SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1}
-		}
-	}
-
-	// Cold strictly precedes recent (rolloff deletes what it exports), but a
-	// boundary bucket can exist on both sides — merge rather than duplicate.
-	if len(cold) > 0 && len(recent) > 0 && points > 0 {
-		bucketMs := state.BucketWidthMs(since, until, points)
-		last, first := &cold[len(cold)-1], recent[0]
-		if (last.TsMs-since)/bucketMs == (first.TsMs-since)/bucketMs {
-			total := last.N + first.N
-			last.V = (last.V*float64(last.N) + first.V*float64(first.N)) / float64(total)
-			if first.Min < last.Min {
-				last.Min = first.Min
-			}
-			if first.Max > last.Max {
-				last.Max = first.Max
-			}
-			last.N = total
-			if first.TsMs > last.TsMs {
-				last.TsMs = first.TsMs
-			}
-			recent = recent[1:]
-		}
-	}
-	return append(cold, recent...), nil
-}
-
-// metricUnits returns the persisted unit per metric name (empty map on error
-// — units are display sugar, never worth failing a data request over).
 func (s *Server) metricUnits() map[string]string {
 	catalog, err := s.deps.State.MetricsCatalog()
 	if err != nil {

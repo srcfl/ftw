@@ -53,22 +53,44 @@ device
 Lua driver                 optional optimizer
   ↕ site-convention data       ↓ proposed trajectory
 telemetry → control/planner → core validation and safety → driver command
-     ↘ SQLite/history       ↘ API/UI and integrations
+     ↘ DuckDB history       ↘ API/UI and integrations
 ```
 
-The in-memory telemetry store owns latest readings and driver health. SQLite
-owns durable configuration state, history, forecasts, prices, device identity
-and learned model state. Database access stays in
+The in-memory telemetry store owns latest readings and driver health. DuckDB
+owns time-series samples, site history and the energy ledger. SQLite owns
+configuration, forecasts, prices, device identity and learned model state.
+Database access stays in
 [`go/internal/state`](../go/internal/state).
 
 The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
 
-The optional [FTWDB beta candidate](ftwdb-shadow.md) copies committed numeric
-site history through a bounded memory queue to a local sidecar. It reports
-session gaps and durable receipts. SQLite and Parquet keep serving all reads;
-the candidate has no role in control, config or forecasting.
+Core embeds DuckDB in the Go process. A bounded queue copies each telemetry
+tick before the writer commits its history, samples, energy ledger and retry
+receipt in one transaction. Admission to memory is separate from durable
+commit. A full queue returns a collection error; health reports pending,
+committed and rejected ticks. Queries use separate connections to the same
+database instance. They do not hold the writer's lock.
+The serial writer retires a previous retry receipt only after it has observed
+that commit succeed. The current receipt survives an uncertain commit and a
+retry; receipts do not grow with every tick for the lifetime of the box.
+
+On first boot, Core imports a fixed SQLite snapshot and the existing daily
+sample Parquet files. It checks row counts and values before it accepts the
+new history generation. Samples keep their first value for a key; history
+snapshots keep their last value. Signed zero becomes zero; all other finite
+floating-point values keep their precision. Invalid values stop the import.
+Original files remain available as migration evidence. Live reads and writes
+use DuckDB after migration. The [FTWDB experiment is retired](ftwdb-shadow.md).
+
+State schema 3 requires a full backup on upgrade. Full backups export one
+DuckDB read snapshot into portable SQLite, with counts and hashes checked.
+They omit imported sample Parquet files to prevent duplicate reads by an
+older Core. A config-only snapshot cannot restore a missing history database.
+To return to an older Core, stop Core and restore a verified full backup with
+its matching version. Changing only the image would use frozen SQLite history
+and is refused.
 
 ## Drivers
 
