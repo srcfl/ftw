@@ -25,8 +25,9 @@ func confirmedEnergyDeviceID(current state.Device, known []state.Device) string 
 	macID := state.ResolveDeviceID("", "", current.MAC, "")
 	for _, previous := range known {
 		if macID != "" {
+			previousMAC := state.ResolveDeviceID("", "", previous.MAC, "")
 			if state.ResolveDeviceID(previous.Make, previous.Serial, "", "") != "" &&
-				state.ResolveDeviceID("", "", previous.MAC, "") == macID {
+				(previousMAC == macID || (previousMAC == "" && current.Endpoint != "" && previous.Endpoint == current.Endpoint)) {
 				return ""
 			}
 		} else if previous.Endpoint == current.Endpoint &&

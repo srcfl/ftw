@@ -36,6 +36,11 @@ func TestEnergyIdentityWaitsForSerialWithoutReusingItForAReplacement(t *testing.
 	if got := confirmedEnergyDeviceID(state.Device{MAC: old.MAC}, nil); got != "mac:aabbccddeeff" {
 		t.Fatalf("new MAC-only device = %q", got)
 	}
+	withoutARP := old
+	withoutARP.MAC = ""
+	if got := confirmedEnergyDeviceID(state.Device{MAC: old.MAC, Endpoint: old.Endpoint}, []state.Device{withoutARP}); got != "" {
+		t.Fatalf("unknown prior MAC cannot prove a replacement at the same endpoint: %q", got)
+	}
 }
 
 func TestStartupAliasCannotReplayCountersWhileRawHistoryKeepsWriting(t *testing.T) {
