@@ -41,21 +41,34 @@ func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
 	if err := s.bindLegacyParquetSources(coldDir); err != nil {
 		return err
 	}
-	rows, err := s.history.QueryContext(ctx, `SELECT m.path,COALESCE(s.rows,0) FROM history_parquet_manifest m LEFT JOIN history_parquet_sources s ON s.path=m.path ORDER BY m.path`)
+	rows, err := s.history.QueryContext(ctx, `SELECT m.path,COALESCE(s.rows,0),s.path IS NOT NULL FROM history_parquet_manifest m LEFT JOIN history_parquet_sources s ON s.path=m.path ORDER BY m.path`)
 	if err != nil {
 		return err
 	}
 	paths := []string{}
 	var completedRows int64
+	var totalBytes, completedBytes int64
+	bytesKnown := true
 	for rows.Next() {
 		var path string
 		var count int64
-		if err := rows.Scan(&path, &count); err != nil {
+		var complete bool
+		if err := rows.Scan(&path, &count, &complete); err != nil {
 			rows.Close()
 			return err
 		}
 		paths = append(paths, path)
 		completedRows += count
+		if info, err := os.Stat(path); err == nil {
+			totalBytes += info.Size()
+			if complete {
+				completedBytes += info.Size()
+			}
+		} else {
+			// A verified source may already have been removed. Its old compressed
+			// size is unknown; do not present a partial inventory as the total.
+			bytesKnown = false
+		}
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return err
@@ -63,11 +76,15 @@ func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
 	if s.historyMigration != nil {
 		s.historyMigration.update(func(st *HistoryMigrationStatus) {
 			st.Phase = "parquet"
+			st.Activity = "checking"
 			st.FilesTotal = len(paths)
 			st.CurrentSource = ""
 			st.RowsDone += completedRows
 			st.RowsTotal = 0
 		})
+		if bytesKnown {
+			s.historyMigration.startSourceBytes(&totalBytes, &completedBytes)
+		}
 	}
 	for _, path := range paths {
 		if err := s.yieldHistoryImport(ctx); err != nil {
@@ -122,6 +139,14 @@ func (s *Store) bindLegacyParquetSources(coldDir string) error {
 }
 
 func (s *Store) importHistoryFile(ctx context.Context, path, coldDir string) error {
+	if s.historyMigration != nil {
+		name, _ := filepath.Rel(coldDir, path)
+		s.historyMigration.update(func(st *HistoryMigrationStatus) {
+			st.CurrentSource = filepath.ToSlash(name)
+			st.Activity = "checking"
+			st.CurrentSourceRowsDone, st.CurrentSourceRowsTotal = 0, 0
+		})
+	}
 	digest, err := historyFileHash(path)
 	if err != nil {
 		// A verified file may have been removed after a complete backup. Its
@@ -157,7 +182,12 @@ func (s *Store) importHistoryFile(ctx context.Context, path, coldDir string) err
 			st.RowsTotal = 0
 		})
 	}
-	if err := s.rotateHistory(ctx); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	sourceBytes := info.Size()
+	if err := s.checkpointHistoryImport(ctx); err != nil {
 		return err
 	}
 	// This instance owns all file-sized buffers and may spill to disk. Closing
@@ -225,8 +255,10 @@ func (s *Store) importHistoryFile(ctx context.Context, path, coldDir string) err
 			st.CurrentSourceRowsTotal = count
 			st.RowsDone += offset
 		})
+		s.historyMigration.addSourceBytes(estimatedSourceBytes(sourceBytes, offset, count), offset > 0, false)
 	}
 	for offset < count {
+		s.historyActivity("importing")
 		if err := s.yieldHistoryImport(ctx); err != nil {
 			return err
 		}
@@ -259,14 +291,16 @@ func (s *Store) importHistoryFile(ctx context.Context, path, coldDir string) err
 		}
 		if s.historyMigration != nil {
 			s.historyMigration.update(func(st *HistoryMigrationStatus) { st.CurrentSourceRowsDone = end; st.RowsDone += end - offset })
+			s.historyMigration.addSourceBytes(estimatedSourceBytes(sourceBytes, end, count)-estimatedSourceBytes(sourceBytes, offset, count), true, true)
 		}
 		offset = end
 		if offset%(64*historyImportRows) == 0 {
-			if err := s.CheckpointHistory(ctx); err != nil {
+			if err := s.checkpointHistoryImport(ctx); err != nil {
 				return err
 			}
 		}
 	}
+	s.historyActivity("checking")
 	if after, err := historyFileHash(path); err != nil || after != digest {
 		return errors.Join(err, errors.New("Parquet changed during import; restore the original source"))
 	}
@@ -289,8 +323,18 @@ func (s *Store) importHistoryFile(ctx context.Context, path, coldDir string) err
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	if s.historyMigration != nil {
+		s.historyMigration.addSourceBytes(sourceBytes-estimatedSourceBytes(sourceBytes, offset, count), false, true)
+	}
 	slog.Info("history: verified Parquet import", "file", filepath.Base(path), "rows", count, "sha256", digest)
 	return nil
+}
+
+func estimatedSourceBytes(size, rows, totalRows int64) int64 {
+	if totalRows <= 0 {
+		return 0
+	}
+	return int64(float64(size) * float64(min(rows, totalRows)) / float64(totalRows))
 }
 
 func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string, progress ...func(int64)) (int64, error) {
