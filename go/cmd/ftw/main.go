@@ -719,6 +719,18 @@ func main() {
 	var forecastSvc *forecast.Service
 	var forecastConfigMu sync.RWMutex
 	var ocppSrv *ocpp.Server
+	energyIdentity := func(name string) state.Device {
+		if env := reg.Env(name); env != nil {
+			make, serial, mac, endpoint := env.FullIdentity()
+			return state.Device{DriverName: name, Make: make, Serial: serial, MAC: mac, Endpoint: endpoint}
+		}
+		if ocppSrv != nil {
+			if ident, ok := ocppSrv.Handler().CurrentIdentity(name); ok {
+				return state.Device{DriverName: name, Make: ident.Vendor, Serial: ident.Serial, Endpoint: "ocpp://" + ident.ID}
+			}
+		}
+		return state.Device{}
+	}
 	forecastSettings := newForecastSiteConfig(st)
 	forecastSettings.identity = func(name string) (string, bool) {
 		if id, ok := runningDeviceID(reg, name); ok {
@@ -2830,7 +2842,7 @@ func main() {
 				// ctrl, so the stored tick has to show the hold already
 				// released rather than one the blocked tick never executed.
 				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
-				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, forecastSettings.Snapshot().Options)
+				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
@@ -3085,7 +3097,7 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, forecastSettings.Snapshot().Options)
+			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 			if err != nil {
 				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
@@ -3824,7 +3836,7 @@ func isConfigMissing(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (int, error) {
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
 	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge, options...)
 	samples := tel.FlushSamples()
 	stSamples := make([]state.Sample, len(samples))
@@ -3834,7 +3846,7 @@ func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.S
 			Value: sm.Value, Unit: sm.Unit,
 		}
 	}
-	energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
+	energyObservations := buildEnergyObservations(st, tel, ctrl, hp, identity)
 	filtered := energyObservations[:0]
 	for _, observation := range energyObservations {
 		if !historyAvailable && observation.AssetKind == state.AssetObservedConsumer {
