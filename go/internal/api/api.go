@@ -649,9 +649,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+const maxJSONBody = 1 << 20
+
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB cap
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxJSONBody))
 	if err != nil {
 		return err
 	}

@@ -179,6 +179,16 @@ func (h *Handler) SetApprovedIDs(ids []string) {
 	}
 }
 
+// IsApproved reports whether a charger id is on the site allowlist and may
+// therefore feed telemetry and accept commands. Pending connectors stay
+// visible in Snapshot but are not adopted.
+func (h *Handler) IsApproved(id string) bool {
+	if h == nil {
+		return false
+	}
+	return h.isApproved(id)
+}
+
 // isApproved reports whether a charger id is named by a charger entry
 // (loadpoint) and therefore allowed to feed the site model.
 func (h *Handler) isApproved(id string) bool {
