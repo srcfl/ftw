@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -50,6 +51,20 @@ func loadStored(database, baseDir string) (*Config, error) {
 	return decodeStored(doc, database, baseDir)
 }
 
+// loadSettingsBesideSeed reads live Settings from state.db next to the seed.
+// Schema 2 stores Settings in SQLite; a missing leftover YAML is not first-run.
+func loadSettingsBesideSeed(seedPath string) (*Config, bool) {
+	database, err := filepath.Abs(filepath.Join(filepath.Dir(seedPath), "state.db"))
+	if err != nil {
+		return nil, false
+	}
+	cfg, err := loadStored(database, filepath.Dir(seedPath))
+	if err != nil {
+		return nil, false
+	}
+	return cfg, true
+}
+
 // InitializeStorage imports YAML once, then records the database location in
 // the seed file. If a crash interrupted this last step, reuse the committed
 // document instead of importing the old YAML again. A recovered database must
@@ -77,6 +92,14 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 		if !reflect.DeepEqual(cfg, current) {
 			return nil, errors.New("database recovery changed current settings; restore a full backup")
 		}
+		if _, err := os.Lstat(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("stat config seed: %w", err)
+			}
+			if err := writeSettingsLocator(path, database, current, nil); err != nil {
+				return nil, err
+			}
+		}
 		return cfg, nil
 	}
 	rawSeed, readErr := os.ReadFile(path)
@@ -96,11 +119,15 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 	// A rolled-back Core removes the unknown locator when it saves YAML.
 	// Distinguish that new save from an import interrupted before publication:
 	// the latter still has the exact source bytes committed with the document.
-	legacySave := found && saved.YAMLSourceHash != "" && sourceHash != "" && saved.YAMLSourceHash != sourceHash
+	// A wizard or leftover seed is not that save — keep live Settings.
+	legacySave := found && saved.YAMLSourceHash != "" && sourceHash != "" && saved.YAMLSourceHash != sourceHash && legacyCoreSave(rawSeed)
 	if found && !legacySave {
 		cfg, err = decodeStored(doc, database, filepath.Dir(path))
 		if err != nil {
 			return nil, err
+		}
+		if wizardOrDefaultSeed(rawSeed) {
+			rawSeed = nil
 		}
 	} else {
 		if cfg.EVCharger != nil {
@@ -122,16 +149,56 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 			return nil, err
 		}
 	}
-	// Preserve fields understood by the old Core so an automatic image rollback
-	// can still read its original settings. The new Core only reads the locator.
+	if err := writeSettingsLocator(path, database, cfg, rawSeed); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func writeSettingsLocator(path, database string, cfg *Config, rawSeed []byte) error {
 	seed := *cfg
 	if relative, err := filepath.Rel(filepath.Dir(path), database); err == nil {
 		seed.ConfigDatabase = relative
 	}
 	if err := recordSettingsDatabase(path, &seed, rawSeed); err != nil {
-		return nil, fmt.Errorf("record settings database: %w", err)
+		return fmt.Errorf("record settings database: %w", err)
 	}
-	return cfg, nil
+	return nil
+}
+
+// leftoverSeedHeader is written onto the import seed so operators and an older
+// Core can tell the file is a locator, not live Settings.
+const leftoverSeedHeader = "# Settings live in SQLite. Use FTW Settings to change them.\n# This file keeps the original import for an older Core after rollback.\n"
+
+func legacyCoreSave(raw []byte) bool {
+	if len(raw) == 0 || bytes.Contains(raw, []byte("Settings live in SQLite")) {
+		return false
+	}
+	var source struct {
+		Database string `yaml:"config_database"`
+	}
+	if err := yaml.Unmarshal(raw, &source); err != nil || source.Database != "" {
+		return false
+	}
+	return !wizardOrDefaultSeed(raw)
+}
+
+func wizardOrDefaultSeed(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var probe struct {
+		Site struct {
+			ControlIntervalS     int     `yaml:"control_interval_s"`
+			SlewRateW            float64 `yaml:"slew_rate_w"`
+			MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s"`
+		} `yaml:"site"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	// setup.js buildConfig hardcodes these; applyDefaults uses 2 / 3000 / 2.
+	return probe.Site.ControlIntervalS == 5 && probe.Site.SlewRateW == 500 && probe.Site.MinDispatchIntervalS == 5
 }
 
 func SaveStored(st *state.Store, path string, cfg *Config) error {
@@ -245,7 +312,9 @@ func recordSettingsDatabase(path string, cfg *Config, raw []byte) error {
 	if err != nil {
 		return err
 	}
-	data = append([]byte("# Settings live in SQLite. Use FTW Settings to change them.\n# This file keeps the original import for an older Core after rollback.\n"), data...)
+	if !bytes.Contains(data, []byte("Settings live in SQLite")) {
+		data = append([]byte(leftoverSeedHeader), data...)
+	}
 	return writeConfigAtomic(defaultDurableWriter, path, data)
 }
 
