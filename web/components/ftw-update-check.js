@@ -32,6 +32,7 @@
 
 import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
+import { migrationHTML } from "../history-migration.js";
 import "./ftw-modal.js";
 
 const STATUS_POLL_MS = 2000;
@@ -193,6 +194,9 @@ class FtwUpdateCheck extends FtwElement {
     this._statusTimer = null;
     this._pollAbort = null;  // AbortController for in-flight status fetches
     this._updateStartedAt = 0;
+    this._bootHealth = null;
+    this._bootConnected = true;
+    this._healthInFlight = false;
     this.classList.add("hidden");
   }
 
@@ -236,6 +240,12 @@ class FtwUpdateCheck extends FtwElement {
       .then((r) => r.json().then((b) => ({ ok: r.ok, body: b })))
       .then((res) => {
         if (!res.ok) {
+          if (res.body?.error === "starting") {
+            this._bootHealth = { status:"starting", migration:res.body.migration };
+            this._startPolling();
+            this.update();
+            return;
+          }
           this._fail((res.body && res.body.error) || "failed to start");
           return;
         }
@@ -274,6 +284,23 @@ class FtwUpdateCheck extends FtwElement {
 
   _tick() {
     const signal = this._pollAbort ? this._pollAbort.signal : undefined;
+    if (!this._healthInFlight) {
+      this._healthInFlight = true;
+      apiFetch("/api/health", { cache:"no-store", signal:AbortSignal.timeout(8000) })
+        .then(r => r.ok ? r.json() : null)
+        .then(health => {
+          if (signal?.aborted || this._phase !== "updating") return;
+          this._bootConnected = !!health;
+          if (health) this._bootHealth = health.status === "starting" ? health : null;
+          this.update();
+        })
+        .catch(() => {
+          if (signal?.aborted || this._phase !== "updating") return;
+          this._bootConnected = false;
+          this.update();
+        })
+        .finally(() => { this._healthInFlight = false; });
+    }
     apiFetch("/api/version/update/status", { signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((st) => {
@@ -309,7 +336,7 @@ class FtwUpdateCheck extends FtwElement {
     const timeout = this._status && this._status.state === "snapshotting"
       ? SNAPSHOT_SOFT_TIMEOUT_MS
       : UPDATE_SOFT_TIMEOUT_MS;
-    if (Date.now() - timeoutStartedAt > timeout && this._phase === "updating") {
+    if (!this._bootHealth && Date.now() - timeoutStartedAt > timeout && this._phase === "updating") {
       this._status = Object.assign({}, this._status, { timed_out: true });
       this.update();
     }
@@ -411,6 +438,13 @@ class FtwUpdateCheck extends FtwElement {
   }
 
   _overlayHTML() {
+    if (this._bootHealth) {
+      return `<ftw-modal open class="busy"><span slot="title">Starting FTW</span><div class="progress">
+        ${migrationHTML(this._bootHealth.migration, {boot:true, connected:this._bootConnected}) || '<p>Core is preparing to start. Control has not started yet. Keep the box powered.</p>'}
+        <p class="hint">${this._bootConnected ? "The box is responding." : "Cannot reach the box. The last report may be out of date."}</p></div>
+        <div class="overlay-actions" slot="footer"><button class="btn-primary" data-action="reload">Reload status</button>
+        <span>Reloading this page does not restart the box.</span></div></ftw-modal>`;
+    }
     const st = this._status || { state: "starting" };
     const busy = this._phase === "updating";
     const failed = this._phase === "failed";
