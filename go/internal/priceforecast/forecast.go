@@ -22,9 +22,9 @@
 // The model is zone-aware: each bidding zone trains independently
 // because SE3 and SE4 behave very differently at peak hours.
 //
-// Confidence: we track sample count per bucket + global MAE. The MPC
-// can downweight these estimates vs. real day-ahead prices by looking
-// at the confidence flag on each forecasted slot.
+// Counts and MAE are diagnostics for refit logs and Model() snapshots.
+// Predict returns the blended climatology; the MPC blends toward it
+// with a time e-folding, not via these fields.
 package priceforecast
 
 import (
@@ -42,6 +42,10 @@ import (
 	"sync"
 	"time"
 
+	// Embedded zoneinfo so hour-of-week buckets cannot silently fall
+	// back to UTC when the host has no tzdata (tests, stripped images).
+	_ "time/tzdata"
+
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -56,14 +60,14 @@ const MinTrustSamples = 4
 // Derived from the ZoneModel at refit time — NOT persisted as separate
 // state, recomputed from bucket data.
 type ZoneModel struct {
-	Zone    string             `json:"zone"`
-	Bucket  [Buckets]float64   `json:"bucket"`  // EMA öre/kWh (raw spot)
-	Counts  [Buckets]int64     `json:"counts"`
-	Month   [12]float64        `json:"month"`   // monthly multiplier (normalized)
-	Samples int64              `json:"samples"`
-	MAE     float64            `json:"mae"`     // EMA of |actual − predicted|
-	Alpha   float64            `json:"alpha"`   // EMA coefficient
-	FittedAt int64             `json:"fitted_at"`
+	Zone     string           `json:"zone"`
+	Bucket   [Buckets]float64 `json:"bucket"` // EMA öre/kWh (raw spot)
+	Counts   [Buckets]int64   `json:"counts"`
+	Month    [12]float64      `json:"month"` // monthly multiplier (normalized)
+	Samples  int64            `json:"samples"`
+	MAE      float64          `json:"mae"`   // EMA of |actual − predicted|
+	Alpha    float64          `json:"alpha"` // EMA coefficient
+	FittedAt int64            `json:"fitted_at"`
 }
 
 // bakedPrior returns the typical-Nordic hour-of-week prior shape for a
@@ -135,13 +139,13 @@ func NewZoneModel(zone string) *ZoneModel {
 // value is already prior-blended via FitFromHistory, so we just apply
 // the monthly seasonality.
 //
-// Coerces t to UTC so hour-of-week + month indexing is stable across
-// DST transitions. FitFromHistory does the same (see line 183), so Fit
-// and Predict agree on bucket addressing.
+// Indexes hour-of-week and month on the Europe/Stockholm civil clock
+// so the baked Nordic prior (evening 17–20 local) lines up with CET/CEST
+// peaks. FitFromHistory uses the same conversion, and the same instant
+// always hits the same bucket regardless of t's attached Location.
 func (m ZoneModel) Predict(t time.Time) float64 {
-	u := t.UTC()
-	idx := hourOfWeek(u)
-	return m.Bucket[idx] * m.Month[int(u.Month())-1]
+	c := civil(t)
+	return m.Bucket[hourOfWeek(t)] * m.Month[int(c.Month())-1]
 }
 
 // overallMean across buckets weighted by counts.
@@ -185,7 +189,7 @@ func (m *ZoneModel) FitFromHistory(pts []state.PricePoint) {
 	var monthSum [12]float64
 	var monthCnt [12]int64
 	for _, p := range pts {
-		t := time.UnixMilli(p.SlotTsMs).UTC()
+		t := civil(time.UnixMilli(p.SlotTsMs))
 		idx := hourOfWeek(t)
 		sum[idx] += p.SpotOreKwh
 		cnt[idx]++
@@ -229,7 +233,7 @@ func (m *ZoneModel) FitFromHistory(pts []state.PricePoint) {
 	// MAE: fit quality on history itself.
 	var abserr float64
 	for _, p := range pts {
-		t := time.UnixMilli(p.SlotTsMs).UTC()
+		t := time.UnixMilli(p.SlotTsMs)
 		abserr += math.Abs(p.SpotOreKwh - m.Predict(t))
 	}
 	m.MAE = abserr / float64(len(pts))
@@ -237,14 +241,29 @@ func (m *ZoneModel) FitFromHistory(pts []state.PricePoint) {
 	m.FittedAt = time.Now().UnixMilli()
 }
 
-// hourOfWeek: Mon=0..Sun=6 × 24. Coerces to UTC so the bucket index is
-// deterministic across DST transitions — without this, a wall-clock
-// 19:00 call returns a different bucket in summer than in winter,
-// silently misaligning the learned EMA against Fit's UTC-indexed data.
+// bucketTZ is the civil clock for hour-of-week and month buckets.
+// The baked prior is a Nordic local-hour shape; UTC indexing put CEST
+// evening peaks two hours late (19:00 CEST = 17:00 UTC). Stockholm is
+// CET/CEST, matching SE1–SE4 / DK / NO / DE.
+var bucketTZ = mustLoadTZ("Europe/Stockholm")
+
+func mustLoadTZ(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+func civil(t time.Time) time.Time { return t.In(bucketTZ) }
+
+// hourOfWeek: Mon=0..Sun=6 × 24 on the Europe/Stockholm civil clock.
+// 19:00 CET and 19:00 CEST share a bucket, matching the baked evening
+// peak. The same instant presented as UTC or local still agrees.
 func hourOfWeek(t time.Time) int {
-	u := t.UTC()
-	wd := (int(u.Weekday()) + 6) % 7
-	return wd*24 + u.Hour()
+	c := civil(t)
+	wd := (int(c.Weekday()) + 6) % 7
+	return wd*24 + c.Hour()
 }
 
 // ---- Service ----
