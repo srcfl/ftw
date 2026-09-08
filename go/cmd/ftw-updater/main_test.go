@@ -740,9 +740,7 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	}
 	writeGzipFile(t, filepath.Join(snapDir, "state.db.gz"), []byte("target database"))
 	writeGzipFile(t, filepath.Join(safetyDir, "state.db.gz"), []byte("safety database"))
-	if err := os.WriteFile(filepath.Join(snapDir, "config.yaml"), []byte("fake"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRollbackConfig(t, filepath.Join(snapDir, "config.yaml"), "state.db")
 
 	body := `{"action":"rollback","snapshot":"` + snapID + `","files":["state.db.gz","config.yaml"],"safety_snapshot":"` + safetyID + `","safety_files":["state.db.gz"]}`
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
@@ -826,9 +824,7 @@ func TestHandleUpdate_RollbackHealthFailureRestoresSafetyBackup(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
-		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(id), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRollbackConfig(t, filepath.Join(dir, "config.yaml"), "state.db")
 	}
 	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
@@ -872,6 +868,226 @@ func TestHandleUpdate_RollbackRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestHandleUpdate_RollbackRestoresConfiguredDatabasePath(t *testing.T) {
+	s, runner := newTestServer(t)
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	for _, id := range []string{"target", "safety"} {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
+		writeRollbackConfig(t, filepath.Join(dir, "config.yaml"), "site.db")
+	}
+
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+
+	calls := runner.snapshot()
+	if len(calls) != 5 {
+		t.Fatalf("want 5 docker calls, got %d: %v", len(calls), calls)
+	}
+	copied := strings.Join(calls[1], " ")
+	if !strings.HasPrefix(copied, "cp -a ") || !strings.Contains(copied, "ftw-container:/app/data/site.db") {
+		t.Fatalf("database restore must target configured path: %v", calls[1])
+	}
+	if strings.Contains(copied, "/app/data/state.db") {
+		t.Fatalf("database restore still used hardcoded state.db: %v", calls[1])
+	}
+	wal := strings.Join(calls[3], " ")
+	if !strings.Contains(wal, "/app/data/site.db-wal") || !strings.Contains(wal, "/app/data/site.db-shm") {
+		t.Fatalf("WAL delete must match configured database: %v", calls[3])
+	}
+	if strings.Contains(wal, "/app/data/state.db-wal") {
+		t.Fatalf("WAL delete still used hardcoded state.db: %v", calls[3])
+	}
+}
+
+func TestHandleUpdate_RollbackUsesLiveConfigDatabasePath(t *testing.T) {
+	s, runner := newTestServer(t)
+	liveConfig := filepath.Join(filepath.Dir(s.composeFile), "data", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(liveConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRollbackConfig(t, liveConfig, "live.db")
+	orig := s.runner
+	s.runner = func(ctx context.Context, env []string, args ...string) error {
+		if len(args) >= 4 && args[0] == "cp" && strings.HasSuffix(args[2], "/app/data/config.yaml") {
+			data, err := os.ReadFile(liveConfig)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(args[3], data, 0o600)
+		}
+		return orig(ctx, env, args...)
+	}
+
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	for _, id := range []string{"target", "safety"} {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
+	}
+
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz"],"safety_snapshot":"safety","safety_files":["state.db.gz"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+
+	var copied, wal string
+	for _, call := range runner.snapshot() {
+		joined := strings.Join(call, " ")
+		if strings.HasPrefix(joined, "cp -a ") && strings.Contains(joined, "ftw-container:/app/data/live.db") {
+			copied = joined
+		}
+		if strings.Contains(joined, "live.db-wal") {
+			wal = joined
+		}
+	}
+	if copied == "" {
+		t.Fatalf("state-only rollback must restore onto live config_database: %v", runner.snapshot())
+	}
+	if wal == "" {
+		t.Fatalf("state-only rollback must delete live.db WAL: %v", runner.snapshot())
+	}
+}
+
+func TestHandleUpdate_RollbackRejectsTruncatedGzip(t *testing.T) {
+	s, _ := newTestServer(t)
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	target := filepath.Join(root, "target")
+	safety := filepath.Join(root, "safety")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(safety, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gz := filepath.Join(target, "state.db.gz")
+	writeGzipFile(t, gz, []byte("target database"))
+	data, err := os.ReadFile(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 8 {
+		t.Fatal("gzip fixture too small to truncate")
+	}
+	if err := os.WriteFile(gz, data[:len(data)-8], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRollbackConfig(t, filepath.Join(target, "config.yaml"), "state.db")
+	writeGzipFile(t, filepath.Join(safety, "state.db.gz"), []byte("safety database"))
+	writeRollbackConfig(t, filepath.Join(safety, "config.yaml"), "state.db")
+
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	st := waitForState(t, s, "failed")
+	if !strings.Contains(st.Message, "decompress state.db.gz") {
+		t.Fatalf("truncated gzip should fail decompress: %+v", st)
+	}
+	if !strings.Contains(st.Message, "pre-rollback state restored and service recovered") {
+		t.Fatalf("safety recovery after truncated gzip = %+v", st)
+	}
+}
+
+func TestConfiguredDatabaseName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", yaml: "site:\n  name: x\n", want: "state.db"},
+		{name: "config_database", yaml: "config_database: site.db\n", want: "site.db"},
+		{name: "state path", yaml: "state:\n  path: telemetry.db\n", want: "telemetry.db"},
+		{name: "config_database wins", yaml: "config_database: settings.db\nstate:\n  path: telemetry.db\n", want: "settings.db"},
+		{name: "absolute data volume", yaml: "config_database: /app/data/custom.db\n", want: "custom.db"},
+		{name: "rejects escape", yaml: "config_database: ../escape.db\n", wantErr: true},
+		{name: "rejects other volume", yaml: "config_database: /var/lib/ftw/state.db\n", wantErr: true},
+		{name: "rejects nested", yaml: "config_database: sub/dir.db\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := configuredDatabaseName([]byte(tc.yaml))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("got %q, want error", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecompressGzipFileChecksCRC(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "valid.gz")
+	writeGzipFile(t, valid, []byte("restored sqlite"))
+	dst := filepath.Join(dir, "ok.db")
+	if err := decompressGzipFile(valid, dst); err != nil {
+		t.Fatalf("valid gzip: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "restored sqlite" {
+		t.Fatalf("round-trip = %q, %v", got, err)
+	}
+
+	truncated := filepath.Join(dir, "truncated.gz")
+	data, err := os.ReadFile(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(truncated, data[:len(data)-8], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	truncDst := filepath.Join(dir, "truncated.db")
+	if err := decompressGzipFile(truncated, truncDst); err == nil {
+		t.Fatal("truncated gzip should fail")
+	}
+	if _, err := os.Stat(truncDst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("truncated gzip must not leave a destination file")
+	}
+
+	corrupt := filepath.Join(dir, "corrupt.gz")
+	bad := append([]byte{}, data...)
+	bad[len(bad)-1] ^= 0xff
+	if err := os.WriteFile(corrupt, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corruptDst := filepath.Join(dir, "corrupt.db")
+	err = decompressGzipFile(corrupt, corruptDst)
+	if err == nil {
+		t.Fatal("checksum-mismatched gzip should fail")
+	}
+	if !errors.Is(err, gzip.ErrChecksum) {
+		t.Fatalf("corrupt gzip error = %v, want gzip.ErrChecksum", err)
+	}
+	if _, err := os.Stat(corruptDst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("corrupt gzip must not leave a destination file")
+	}
+}
+
 func writeGzipFile(t *testing.T, path string, body []byte) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -886,6 +1102,13 @@ func writeGzipFile(t *testing.T, path string, body []byte) {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRollbackConfig(t *testing.T, path, database string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("config_database: "+database+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1007,9 +1230,10 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeGzipFile(t, filepath.Join(safetyDir, "state.db.gz"), []byte("current state"))
+	writeRollbackConfig(t, filepath.Join(safetyDir, "config.yaml"), "state.db")
 	s.writeState(State{
 		State: "restoring", Action: "rollback", Snapshot: "target",
-		SafetySnapshot: "safety", SafetyFiles: []string{"state.db.gz"},
+		SafetySnapshot: "safety", SafetyFiles: []string{"state.db.gz", "config.yaml"},
 		StartedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now(),
 	})
 
@@ -1019,7 +1243,7 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 		t.Fatalf("crashed rollback recovery = %+v", state)
 	}
 	calls := runner.snapshot()
-	if len(calls) != 4 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[3], " ") != "start ftw-container" {
+	if len(calls) != 5 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[4], " ") != "start ftw-container" {
 		t.Fatalf("crashed rollback recovery calls = %v", calls)
 	}
 }

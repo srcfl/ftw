@@ -985,34 +985,58 @@ func hasRollbackState(files []string) bool {
 	return false
 }
 
+type stagedRollbackFile struct {
+	name string
+	path string
+}
+
 // restoreSnapshotFiles copies only allowlisted backup files into the stopped
 // container. docker cp defaults container-side ownership to root, which made
 // the uid-100 FTW process unable to write a restored database. Archive mode
 // preserves uid/gid; compressed databases are materialised with uid 100:101
 // first so the same rule applies.
+//
+// Core opens ConfigDatabase, then State.Path, then state.db. The gzip snapshot
+// is always named state.db.gz; restore writes that file to the configured
+// name and deletes that name's WAL/SHM so leftover sidecars cannot replay
+// over the restored main file.
 func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, files []string, containerID, imageRef string) error {
+	staged := make([]stagedRollbackFile, 0, len(files))
+	defer func() {
+		for _, file := range staged {
+			_ = os.Remove(file.path)
+		}
+	}()
 	for _, file := range files {
 		if !validRollbackFile(file) {
 			return fmt.Errorf("unsupported rollback file %q", file)
 		}
-		staged, err := os.CreateTemp("", "ftw-rollback-source-*")
+		tmp, err := os.CreateTemp("", "ftw-rollback-source-*")
 		if err != nil {
 			return fmt.Errorf("create snapshot staging file: %w", err)
 		}
-		stagedPath := staged.Name()
-		_ = staged.Close()
+		stagedPath := tmp.Name()
+		_ = tmp.Close()
 		_ = os.Remove(stagedPath)
-		defer os.Remove(stagedPath)
 		if s.stageSnapshotFile == nil {
 			return errors.New("snapshot staging unavailable")
 		}
 		if err := s.stageSnapshotFile(ctx, containerID, snapshotID, file, stagedPath); err != nil {
 			return fmt.Errorf("stage %s: %w", file, err)
 		}
-		copySrc := stagedPath
-		dstName := file
-		if file == "state.db.gz" {
-			dstName = "state.db"
+		staged = append(staged, stagedRollbackFile{name: file, path: stagedPath})
+	}
+
+	dbName, err := s.rollbackDatabaseName(ctx, containerID, staged)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range staged {
+		copySrc := file.path
+		dstName := file.name
+		if file.name == "state.db.gz" {
+			dstName = dbName
 			tmp, err := os.CreateTemp("", "ftw-rollback-state-*.db")
 			if err != nil {
 				return fmt.Errorf("create rollback temp: %w", err)
@@ -1021,7 +1045,7 @@ func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, fi
 			_ = tmp.Close()
 			_ = os.Remove(tmpPath)
 			defer os.Remove(tmpPath)
-			if err := decompressGzipFile(stagedPath, tmpPath); err != nil {
+			if err := decompressGzipFile(file.path, tmpPath); err != nil {
 				return fmt.Errorf("decompress state.db.gz: %w", err)
 			}
 			if s.chownFile == nil {
@@ -1036,16 +1060,98 @@ func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, fi
 			copySrc = tmpPath
 		}
 		if err := s.runner(ctx, nil, "cp", "-a", copySrc, containerID+":/app/data/"+dstName); err != nil {
-			return fmt.Errorf("docker cp %s: %w", file, err)
+			return fmt.Errorf("docker cp %s: %w", file.name, err)
 		}
 	}
-	// A clean stop normally removes SQLite's WAL sidecars. Remove any stale
-	// remnants explicitly so pages from the pre-rollback database cannot be
-	// replayed over the restored main file.
-	if err := s.runner(ctx, nil, "run", "--rm", "--network", "none", "--user", "0:0", "--volumes-from", containerID, "--entrypoint", "rm", imageRef, "-f", "/app/data/state.db-wal", "/app/data/state.db-shm"); err != nil {
+	wal := "/app/data/" + dbName + "-wal"
+	shm := "/app/data/" + dbName + "-shm"
+	if err := s.runner(ctx, nil, "run", "--rm", "--network", "none", "--user", "0:0", "--volumes-from", containerID, "--entrypoint", "rm", imageRef, "-f", wal, shm); err != nil {
 		return fmt.Errorf("remove stale SQLite WAL files: %w", err)
 	}
 	return nil
+}
+
+func (s *server) rollbackDatabaseName(ctx context.Context, containerID string, staged []stagedRollbackFile) (string, error) {
+	for _, file := range staged {
+		if file.name != "config.yaml" {
+			continue
+		}
+		name, err := databaseNameFromConfigFile(file.path)
+		if err != nil {
+			return "", fmt.Errorf("configured database path: %w", err)
+		}
+		return name, nil
+	}
+	return s.liveDatabaseName(ctx, containerID)
+}
+
+func (s *server) liveDatabaseName(ctx context.Context, containerID string) (string, error) {
+	tmp, err := os.CreateTemp("", "ftw-rollback-live-config-*")
+	if err != nil {
+		return "", fmt.Errorf("create live config staging file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+	if err := s.runner(ctx, nil, "cp", "-a", containerID+":/app/data/config.yaml", tmpPath); err != nil {
+		return "state.db", nil
+	}
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		return "state.db", nil
+	}
+	name, err := configuredDatabaseName(data)
+	if err != nil {
+		return "", fmt.Errorf("live config.yaml: %w", err)
+	}
+	return name, nil
+}
+
+func databaseNameFromConfigFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return configuredDatabaseName(data)
+}
+
+// configuredDatabaseName matches Core: ConfigDatabase overrides State.Path,
+// and both default to state.db. Only a single file under /app/data is
+// restorable through the data volume.
+func configuredDatabaseName(data []byte) (string, error) {
+	var doc struct {
+		ConfigDatabase string `yaml:"config_database"`
+		State          *struct {
+			Path string `yaml:"path"`
+		} `yaml:"state"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("parse config.yaml: %w", err)
+	}
+	path := "state.db"
+	if doc.State != nil && strings.TrimSpace(doc.State.Path) != "" {
+		path = strings.TrimSpace(doc.State.Path)
+	}
+	if strings.TrimSpace(doc.ConfigDatabase) != "" {
+		path = strings.TrimSpace(doc.ConfigDatabase)
+	}
+	return dataVolumeDatabaseName(path)
+}
+
+func dataVolumeDatabaseName(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "state.db", nil
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(cleaned, "/app/data/") {
+		cleaned = strings.TrimPrefix(cleaned, "/app/data/")
+	}
+	if cleaned == "" || cleaned == "." || cleaned == ".." || strings.Contains(cleaned, "/") || strings.Contains(cleaned, "\\") || cleaned != filepath.Base(cleaned) {
+		return "", fmt.Errorf("database path %q must be a file in /app/data", path)
+	}
+	return cleaned, nil
 }
 
 func decompressGzipFile(src, dst string) error {
@@ -1058,7 +1164,12 @@ func decompressGzipFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer zr.Close()
+	closeReader := true
+	defer func() {
+		if closeReader {
+			_ = zr.Close()
+		}
+	}()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -1071,6 +1182,10 @@ func decompressGzipFile(src, dst string) error {
 		}
 	}()
 	if _, err := io.Copy(out, zr); err != nil {
+		return err
+	}
+	closeReader = false
+	if err := zr.Close(); err != nil {
 		return err
 	}
 	if err := out.Sync(); err != nil {
