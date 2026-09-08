@@ -1,4 +1,4 @@
-# FTW core container — static Go host plus bundled Lua drivers and web assets.
+# FTW core container — Go host with DuckDB, Lua drivers and web assets.
 # The compiled Energyplan worker ships with Core; Core DP provides fallback.
 #
 # Multi-arch: linux/amd64 + linux/arm64 via docker buildx TARGETOS /
@@ -6,11 +6,19 @@
 # native Go arch inside the builder image.
 
 # --- Builder ---------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
 
-# git is needed by `go build` to resolve VCS info baked into the binary
-# via -X main.Version. Everything else is in the base image.
-RUN apk add --no-cache git
+# DuckDB ships glibc static libraries. Build against bookworm to keep the
+# libc requirement below the trixie runtime, using native cross compilers.
+ARG TARGETARCH
+RUN apt-get update && \
+    case "$TARGETARCH" in \
+      amd64) compiler=g++-x86-64-linux-gnu ;; \
+      arm64) compiler=g++-aarch64-linux-gnu ;; \
+      *) echo "Unsupported DuckDB target: $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    apt-get install -y --no-install-recommends git "$compiler" && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
@@ -20,23 +28,18 @@ COPY go/go.mod go/go.sum ./go/
 RUN cd go && go mod download
 
 COPY go/ ./go/
+COPY scripts/build-core.sh ./scripts/build-core.sh
 
-# Cross-compile by mapping TARGETARCH → GOARCH. CGO stays off: the binary is
-# fully static, so it is the runtime's *userland* we are choosing below, not a
-# libc the binary depends on. Keeping CGO off is what lets the toolchain run
-# natively on the build platform instead of under emulation.
 ARG TARGETOS=linux
-ARG TARGETARCH
 ARG VERSION=dev
 ARG CANDIDATE_TAG
-RUN cd go && \
-    target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
-    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION} -X main.CandidateTag=${CANDIDATE_TAG}" \
-    -o /out/ftw ./cmd/ftw && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
-    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
-    -o /out/ftw-backup ./cmd/ftw-backup
+ARG BUILD_ALL=0
+RUN FTW_BUILD_ALL="$BUILD_ALL" bash scripts/build-core.sh "$TARGETOS" "$TARGETARCH" /out
+
+# Release archives and local cross builds use exactly the image's toolchain.
+FROM scratch AS binaries
+COPY --from=builder /out/ /
+
 # --- Runtime ---------------------------------------------------------------
 # Debian trixie-slim — current Debian stable (13), and the same suite as
 # Dockerfile.updater. Both images share the rootfs blob, so the extra bytes
@@ -53,6 +56,7 @@ RUN cd go && \
 FROM debian:trixie-slim
 
 # ca-certificates  — HTTPS integrations.
+# libstdc++6       — C++ runtime for the statically linked DuckDB library.
 # tzdata           — timezone-aware price/plan windows. Without a zoneinfo tree
 #                    time.Local silently degrades to UTC and mis-times plan
 #                    boundaries with no error, so this is load-bearing.
@@ -68,11 +72,10 @@ FROM debian:trixie-slim
 #                    install. At run time it forwards to avahi-daemon over
 #                    /run/avahi-daemon/socket, which must be bind-mounted; see
 #                    docs/operations.md. It does nothing for the FTW binary
-#                    itself, which is CGO_ENABLED=0 and therefore never consults
-#                    NSS — see the note on the builder stage above.
+#                    itself: netgo/osusergo retain Go's name and user lookup.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates tzdata wget libnss-mdns && \
+        ca-certificates tzdata wget libnss-mdns libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
 # Image layout:
@@ -93,7 +96,7 @@ COPY --from=builder --chown=100:101 /out/ftw-backup /app/ftw-backup
 COPY --chown=100:101 drivers/ /app/drivers/
 COPY --chown=100:101 web/     /app/web/
 COPY --chown=100:101 optimizer/native/bundle/ /app/optimizer/native/bundle/
-COPY LICENSE NOTICE /usr/share/doc/ftw/
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
     mkdir -p /app/data /app/data/drivers /run/ftw-update && \

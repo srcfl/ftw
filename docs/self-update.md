@@ -122,15 +122,82 @@ newer updater, update Core and updater together using the paired commands below.
 A normal Core update also asks the updater to replace itself with the same tag
 after Core passes its health check.
 
-For manual Core + updater operation, first set `FTW_IMAGE_TAG` and
-`FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the same published immutable
-tag. Run these commands with the Core service name from your Compose file:
+For manual updates, install the updater first while the existing Core still
+runs. Set `FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the published
+immutable release tag. Keep the current `FTW_IMAGE_TAG` until the updater is
+installed. Use your installation's Compose project and override files:
 
 ```bash
 cd ~/ftw
-docker compose pull ftw ftw-updater
-docker compose up -d --no-deps ftw ftw-updater
+docker compose pull ftw-updater
+docker compose up -d --no-deps ftw-updater
+docker compose images ftw-updater
+docker compose logs --tail 20 ftw-updater
 ```
+
+Check that the running updater uses the intended release image and has started
+its socket listener. Then use Update Center to update Core. A manual Core
+replacement must first create and verify a full backup; pin `FTW_IMAGE_TAG` to
+the same tag, then pull and recreate only the Core service.
+
+### First DuckDB upgrade
+
+The updater shipped before the fix for [#1164](https://github.com/srcfl/ftw/issues/1164)
+waits only 30 minutes and can revert the Core image without its matching data.
+It replaces itself only after Core becomes ready. **Installing a new Core does
+not fix the old updater before that first upgrade.** Install an updater release
+that contains the fix using the updater-only steps above before starting the
+DuckDB upgrade. `v3.2.0-beta.1` does not contain this fix.
+
+When `FTW_SELFUPDATE_ENABLED=1`, the new Core checks `GET /capabilities` on the
+updater Unix socket before loading config or opening state. It requires protocol
+1 and `preserve_core_on_readiness_failure: true`. It waits up to 30 seconds for
+the socket to start. An old, unknown or unavailable updater makes Core exit with
+`update ftw-updater first`, before it changes any data. The old updater can then
+revert that refused image safely. This guard cannot protect a Core already
+running `v3.2.0-beta.1`; use the stopped-updater procedure below for that case.
+Native installations with self-update disabled do not need an updater.
+
+Core first imports the catalog, site history and energy accounting, including
+the latest counters. It then starts live collection and serves its API while
+the large SQLite sample table and older Parquet files import in the background.
+The startup page and history status show progress. Historical coverage stays
+incomplete until all sources pass verification; a missing sample during this
+phase does not mean zero consumption. Unknown time bounds apply to the whole
+historical view. New writes go to DuckDB throughout the background import.
+
+An interrupted import resumes from committed progress on the next Core start.
+An import error leaves live collection running and reports incomplete history.
+Keep the original sources and the verified pre-update full backup. Core rejects
+a new full-history export until import finishes. Fix the reported source or
+storage problem before restarting Core to resume the import.
+
+Raw-history retention waits until the full import passes. Site-history rollups
+remain available after the initial seed. Import scratch directories belong to
+the importer; it removes leftovers on resume while keeping original sources.
+
+The fixed updater allows six hours for Core startup. This is a waiting budget,
+not a promise that every migration will finish within it. Core still needs a
+working `/api/status` before the updater reports success. A failed readiness
+check leaves the new container and data in place and reports failure. To return
+to an older version, stop Core and restore a verified full backup with its
+matching image; changing only the image can lose history.
+
+### An updater stopped during migration
+
+Leave the running Core alone until its import and API readiness have been
+checked. Save the updater's existing `state.json`, the pre-update full backup,
+snapshot directory and verified previous Core image identity before starting
+the updater again. Older updaters hold the current job's previous image ID only
+in memory until success; a saved `previous_image_id` may belong to an earlier
+update. Use the backup inventory and pre-update Docker evidence to resolve it.
+
+After readiness, start or replace **only** `ftw-updater` with `--no-deps` using
+the fixed release. Its startup recovery marks an interrupted update as failed;
+it does not restart Core or replay an image rollback. This records the lost
+supervision honestly even if Core has since finished. Keep that record and
+check Core's installed image and history status separately. Do not repeat the
+Core update or overwrite the job as `done` merely to clear its failed status.
 
 Manage Optimizer and Drivers independently in Update Center. A blanket
 `docker compose pull` is intentionally not the documented upgrade procedure.

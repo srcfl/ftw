@@ -124,7 +124,7 @@ func TestHandleSeriesAbsoluteWindowAndCSV(t *testing.T) {
 	}
 }
 
-func TestHandleSeriesMergesColdParquet(t *testing.T) {
+func TestHandleSeriesReadsImportedParquet(t *testing.T) {
 	srv, st, coldDir := newSeriesTestServer(t)
 
 	// Old samples: destined for cold storage.
@@ -137,7 +137,11 @@ func TestHandleSeriesMergesColdParquet(t *testing.T) {
 	if _, _, err := st.RolloffToParquet(context.Background(), coldDir); err != nil {
 		t.Fatal(err)
 	}
-	// Fresh sample stays in SQLite.
+	// Import the legacy file before serving requests, as Core does at startup.
+	if err := st.ImportLegacyParquet(context.Background(), coldDir); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh samples use the same DuckDB database.
 	nowTs := time.Now().UnixMilli()
 	if err := st.RecordSamples([]state.Sample{
 		{Driver: "meter", Metric: "grid_w", TsMs: nowTs, Value: 222},

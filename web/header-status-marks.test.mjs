@@ -69,11 +69,11 @@ function renderBadge({ update = false, degraded = false, connected = true, lates
 }
 
 describe("header status marks", () => {
-  it("stays disabled when slower component requests finish after the 503 gate", async () => {
+  it("stays disabled when slower component requests finish after the explicit feature gate", async () => {
     const delayed = new Map();
     const fetchImpl = (url) => {
       if (url === "/api/version/check") {
-        return Promise.resolve({ status: 503, ok: false });
+        return Promise.resolve({ status: 503, ok: false, json:async () => ({error:"self-update disabled"}) });
       }
       if (url === "/api/version/update/status") {
         return Promise.resolve({ status: 503, ok: false });

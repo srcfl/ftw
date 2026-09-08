@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -171,6 +172,9 @@ func TestPersistTelemetryTickUsesPersistenceFreshness(t *testing.T) {
 			if _, err := persistTelemetryTick(st, tel, ctrl, tickMS, time.Minute); err != nil {
 				t.Fatal(err)
 			}
+			if err := st.FlushHistory(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 			history, err := st.LoadHistory(tickMS-1, tickMS+1, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -242,6 +246,9 @@ func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testin
 		t.Fatal(err)
 	}
 
+	if err := st.FlushHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	history, err := st.LoadHistory(base.UnixMilli(), now.Add(time.Second).UnixMilli(), 0)
 	if err != nil {
 		t.Fatal(err)

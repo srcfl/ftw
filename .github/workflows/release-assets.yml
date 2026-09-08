@@ -246,7 +246,10 @@ jobs:
 
   binaries:
     name: build + upload release binaries
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     needs: meta
     permissions:
       contents: write  # upload assets to the release
@@ -260,14 +263,23 @@ jobs:
             goarch: amd64
             ext: ""
             archive: tar.gz
+            runner: ubuntu-latest
+            shell: bash
+            build_target: build-amd64
           - goos: linux
             goarch: arm64
             ext: ""
             archive: tar.gz
+            runner: ubuntu-latest
+            shell: bash
+            build_target: build-arm64
           - goos: windows
             goarch: amd64
             ext: ".exe"
             archive: zip
+            runner: windows-latest
+            shell: 'msys2 {0}'
+            build_target: build-windows-amd64
     steps:
       - name: Checkout tag
         uses: actions/checkout@v7
@@ -287,6 +299,27 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
+      - name: Set up Windows build tools
+        if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: make zip
+
+      - name: Match DuckDB's MinGW compiler
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          # DuckDB v1.5.5 BundleStaticLibs.yml uses this exact toolchain.
+          choco upgrade mingw --version=14.2.0 --allow-downgrade --force --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compilerDir = 'C:/ProgramData/mingw64/mingw64/bin'
+          if ((& "$compilerDir/gcc.exe" -dumpfullversion) -ne '14.2.0') { throw 'Unexpected MinGW version' }
+          "CC=$compilerDir/gcc.exe" >> $env:GITHUB_ENV
+          "CXX=$compilerDir/g++.exe" >> $env:GITHUB_ENV
+          $compilerDir >> $env:GITHUB_PATH
+
       # drivers/ is gitignored and fetched from the commit pinned in
       # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,
       # so it has to exist before either is built.
@@ -295,22 +328,13 @@ jobs:
 
       - name: Build
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
           VERSION: ${{ needs.meta.outputs.tag }}
-        working-directory: go
+          FTW_BUILD_DOCKER: ${{ matrix.goos == 'linux' && '1' || '0' }}
         run: |
-          mkdir -p ../bin
-          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/ftw
-          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/ftw-backup-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/ftw-backup
+          make ${{ matrix.build_target }}
           ls -la \
-            "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            "../bin/ftw-backup-${GOOS}-${GOARCH}${{ matrix.ext }}"
+            "bin/ftw-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" \
+            "bin/ftw-backup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
 
       - name: Package
         env:
@@ -323,13 +347,18 @@ jobs:
           STAGE="bin/stage-${PLATFORM}"
           rm -rf "${STAGE}"
           mkdir -p "${STAGE}"
+          # Stable draft recovery can still package an older immutable tag.
+          notices=(LICENSE NOTICE)
+          if [[ -f THIRD-PARTY-NOTICES.txt ]]; then
+            notices+=(THIRD-PARTY-NOTICES.txt)
+          fi
           if [[ "${ARCHIVE}" == "zip" ]]; then
             cp "bin/${BINARY}" "${STAGE}/ftw.exe"
             cp "bin/ftw-backup-${PLATFORM}.exe" "${STAGE}/ftw-backup.exe"
             cp "bin/${BINARY}" "${STAGE}/forty-two-watts.exe"
             (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe ftw-backup.exe forty-two-watts.exe)
             zip -qr "release/ftw-${PLATFORM}.zip" \
-              drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE
+              drivers web optimizer/native/bundle config.example.yaml "${notices[@]}"
             cp "release/ftw-${PLATFORM}.zip" "release/forty-two-watts-${PLATFORM}.zip"
           else
             cp "bin/${BINARY}" "${STAGE}/ftw"
@@ -337,7 +366,7 @@ jobs:
             ln -s ftw "${STAGE}/forty-two-watts"
             tar czf "release/ftw-${PLATFORM}.tar.gz" \
               -C "${STAGE}" ftw ftw-backup forty-two-watts \
-              -C ../.. drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE
+              -C ../.. drivers web optimizer/native/bundle config.example.yaml "${notices[@]}"
             cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
           fi
           (
