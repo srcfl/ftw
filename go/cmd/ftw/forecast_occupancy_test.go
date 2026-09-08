@@ -167,7 +167,7 @@ func TestForecastPendingIdentityCannotUseSavedModels(t *testing.T) {
 	// Pending startup must not touch live telemetry or the archive either.
 	f.tele = nil
 	f.store = nil
-	f.observe(context.Background(), at)
+	f.observe(context.Background())
 	if refreshes != 2 {
 		t.Fatalf("identity refreshes=%d want2", refreshes)
 	}

@@ -166,8 +166,8 @@ func (f *forecastTracker) run(ctx context.Context) {
 				continue
 			}
 			pending = nil
-		case now := <-tick.C:
-			f.observe(ctx, now)
+		case <-tick.C:
+			f.observe(ctx)
 		}
 	}
 }
@@ -220,7 +220,7 @@ func forecastArchiveRetryable(err error) bool {
 	return false
 }
 
-func (f *forecastTracker) observe(ctx context.Context, now time.Time) {
+func (f *forecastTracker) observe(ctx context.Context) {
 	if f.refreshIdentity != nil {
 		f.refreshIdentity()
 	}
@@ -239,7 +239,10 @@ func (f *forecastTracker) observe(ctx context.Context, now time.Time) {
 		return
 	}
 
-	r := f.tele.ForecastMeasurement(now, site.Meter, site.Options)
+	// A delayed tick only wakes the observer. Capture time under the telemetry
+	// lock so fresh polls are not compared with an old scheduled timestamp.
+	r := f.tele.ForecastMeasurementNow(site.Meter, site.Options)
+	now := r.At.UTC()
 	if f.configMu != nil {
 		f.configMu.RUnlock()
 	}
