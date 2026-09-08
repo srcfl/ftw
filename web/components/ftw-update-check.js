@@ -209,6 +209,15 @@ class FtwUpdateCheck extends FtwElement {
     this._stopPolling();
   }
 
+  update() {
+    const action = this.shadowRoot.activeElement?.dataset?.action;
+    super.update();
+    if (action) {
+      const button = [...this.shadowRoot.querySelectorAll("[data-action]")].find(el => el.dataset.action === action);
+      if (button && !button.disabled) button.focus({ preventScroll:true });
+    }
+  }
+
   // ---- data ----
   _check() {
     apiFetch("/api/version/check")

@@ -9,7 +9,7 @@ test("unknown totals stay indeterminate and incomplete history stays explicit", 
   assert.match(view.details, /6,000 readings.*3 of 12/);
   assert.match(view.coverage, /not complete yet/);
   assert.equal(view.activity, "Last import report 30 seconds ago.");
-  assert.match(migrationHTML(running), /<progress aria-label="History import progress"><\/progress>/);
+  assert.match(migrationHTML(running), /<progress(?![^>]*\bvalue=)[^>]*><\/progress>/);
 });
 test("completed history, not a row percentage, removes the notice", () => {
   assert.ok(migrationView({...running, rows_total:6000}));

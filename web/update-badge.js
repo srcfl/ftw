@@ -782,6 +782,7 @@
       if (storage) this._storageOpen = storage.open;
       const previous = this._dialogRoot && this._dialogRoot.querySelector(".modal");
       const scrollTop = previous && this._phase === "dialog" ? previous.scrollTop : 0;
+      const focusedAction = this._dialogRoot?.activeElement?.dataset?.action;
 
       if (!this._dialogHost) {
         // The mobile menu hides the badge's ancestors. Keep the dialog at page level.
@@ -794,6 +795,10 @@
       this._wireModal(this._dialogRoot);
       const modal = this._dialogRoot.querySelector(".modal");
       if (modal) modal.scrollTop = scrollTop;
+      if (focusedAction) {
+        const button = [...this._dialogRoot.querySelectorAll("[data-action]")].find(el => el.dataset.action === focusedAction);
+        if (button && !button.disabled) button.focus({ preventScroll:true });
+      }
     }
 
     _modalHTML() {

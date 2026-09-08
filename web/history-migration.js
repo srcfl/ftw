@@ -42,9 +42,10 @@ export function migrationView(migration, { boot = false, connected = true, now =
 export function migrationHTML(migration, options) {
   const view = migrationView(migration, options);
   if (!view) return "";
+  const style = 'style="width:100%;accent-color:var(--accent-e,#fbbf24)"';
   const progress = view.progress
-    ? `<progress aria-label="${view.progress.label}" max="${view.progress.max}" value="${view.progress.value}"></progress>`
-    : `<progress aria-label="History import progress"></progress>`;
+    ? `<progress aria-label="${view.progress.label}" max="${view.progress.max}" value="${view.progress.value}" ${style}></progress>`
+    : `<progress aria-label="History import progress" ${style}></progress>`;
   const heading = options?.boot ? "h1" : "h3";
   return `<section class="history-import" aria-label="History import">
     <${heading} role="status">${escape(view.title)}</${heading}><p>${escape(view.description)}</p>
