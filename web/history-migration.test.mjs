@@ -15,6 +15,11 @@ test("completed history, not a row percentage, removes the notice", () => {
   assert.ok(migrationView({...running, rows_total:6000}));
   assert.equal(migrationView({...running, history_complete:true}), null);
 });
+test("startup uses the current seed step count before overall totals exist", () => {
+  const view = migrationView({state:"starting", phase:"seed", history_complete:false, rows_done:0, current_source_rows_done:65536}, {boot:true});
+  assert.equal(view.details, "65,536 saved items copied in this step");
+  assert.equal(view.progress, null);
+});
 test("startup, live background import and lost contact make distinct claims", () => {
   assert.match(migrationView(running, {boot:true}).description, /Control has not started/);
   assert.match(migrationView(running).description, /Core is running/);

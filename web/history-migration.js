@@ -9,11 +9,13 @@ export function migrationView(migration, { boot = false, connected = true, now =
   if (!migration || migration.history_complete === true) return null;
   const failed = migration.state === "failed";
   const archive = migration.phase === "parquet";
-  const total = count(archive ? migration.current_source_rows_total : migration.rows_total);
-  const done = count(archive ? migration.current_source_rows_done : migration.rows_done);
-  const progress = total > 0 ? { value: Math.min(done, total), max: total, label: archive ? "Current archive file" : "History import progress" } : null;
+  const seed = migration.phase === "seed";
+  const total = count(archive || seed ? migration.current_source_rows_total : migration.rows_total);
+  const done = count(archive || seed ? migration.current_source_rows_done : migration.rows_done);
+  const progress = total > 0 ? { value: Math.min(done, total), max: total, label: archive ? "Current archive file" : seed ? "Current preparation step" : "History import progress" } : null;
   const details = [];
-  if (total > 0) details.push(`${archive ? "Current archive: " : ""}${number(done)} of ${number(total)} readings imported`);
+  if (seed && done > 0) details.push(`${number(done)}${total > 0 ? ` of ${number(total)}` : ""} saved items copied in this step`);
+  else if (total > 0) details.push(`${archive ? "Current archive: " : ""}${number(done)} of ${number(total)} readings imported`);
   if ((archive || !total) && count(migration.rows_done) > 0) details.push(`${number(migration.rows_done)} readings imported in total`);
   if (count(migration.files_total) > 0) details.push(`${number(migration.files_done)} of ${number(migration.files_total)} archive files complete`);
   const from = Number(migration.incomplete_from_ms), until = Number(migration.incomplete_until_ms);
