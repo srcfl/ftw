@@ -41,6 +41,10 @@ func TestEnergyIdentityWaitsForSerialWithoutReusingItForAReplacement(t *testing.
 	if got := confirmedEnergyDeviceID(state.Device{MAC: old.MAC, Endpoint: old.Endpoint}, []state.Device{withoutARP}); got != "" {
 		t.Fatalf("unknown prior MAC cannot prove a replacement at the same endpoint: %q", got)
 	}
+	alias := state.Device{MAC: old.MAC, Endpoint: old.Endpoint}
+	if got := confirmedEnergyDeviceID(state.Device{MAC: old.MAC, Endpoint: "tcp://new-address"}, []state.Device{withoutARP, alias}); got != "" {
+		t.Fatalf("split serial/MAC records lost their binding after an address change: %q", got)
+	}
 }
 
 func TestStartupAliasCannotReplayCountersWhileRawHistoryKeepsWriting(t *testing.T) {

@@ -26,8 +26,17 @@ func confirmedEnergyDeviceID(current state.Device, known []state.Device) string 
 	for _, previous := range known {
 		if macID != "" {
 			previousMAC := state.ResolveDeviceID("", "", previous.MAC, "")
+			sameEndpoint := current.Endpoint != "" && previous.Endpoint == current.Endpoint
+			// ARP and serial discovery can leave their evidence in separate rows.
+			// Follow the known MAC's old endpoint even after an address change.
+			for _, alias := range known {
+				if previous.Endpoint != "" && alias.Endpoint == previous.Endpoint &&
+					state.ResolveDeviceID("", "", alias.MAC, "") == macID {
+					sameEndpoint = true
+				}
+			}
 			if state.ResolveDeviceID(previous.Make, previous.Serial, "", "") != "" &&
-				(previousMAC == macID || (previousMAC == "" && current.Endpoint != "" && previous.Endpoint == current.Endpoint)) {
+				(previousMAC == macID || (previousMAC == "" && sameEndpoint)) {
 				return ""
 			}
 		} else if previous.Endpoint == current.Endpoint &&
