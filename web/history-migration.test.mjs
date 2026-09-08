@@ -73,3 +73,22 @@ test("all bytes processed still means verification is pending until Core confirm
   assert.equal(view.step, "Saving database progress");
   assert.doesNotMatch(view.metrics, /Speed:|Estimated time remaining: about/);
 });
+
+test("a failed live write explains the blocked import and clears after recovery", () => {
+  const writer = {pending_ticks:64, last_error:'Out of memory <database>\nSQL tuning advice'};
+  const options = {now:110000, writer};
+  const view = migrationView(measured, options);
+  assert.equal(view.title, "History import blocked by a database error");
+  assert.match(view.description, /New history readings are not being saved/);
+  assert.equal(view.error, 'Out of memory <database>');
+  assert.equal(view.step, "");
+  assert.match(view.metrics, /300 MB remaining.*Time remaining unavailable/);
+  assert.doesNotMatch(view.metrics, /Speed:|estimating|Estimated time/);
+  assert.match(migrationHTML(measured, options), /Out of memory &lt;database&gt;/);
+  for (const recovered of [{...writer, last_error:""}, {...writer, pending_ticks:0}]) {
+    assert.equal(migrationView(measured, {...options, writer:recovered}).title, "Importing older history");
+  }
+  const disconnected = migrationView(measured, {...options, connected:false});
+  assert.equal(disconnected.title, "History import status unavailable");
+  assert.equal(disconnected.error, "");
+});

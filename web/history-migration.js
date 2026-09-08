@@ -14,9 +14,10 @@ const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[c]);
 
-export function migrationView(migration, { boot = false, connected = true, now = Date.now() } = {}) {
+export function migrationView(migration, { boot = false, connected = true, writer = null, now = Date.now() } = {}) {
   if (!migration || migration.history_complete === true) return null;
   const failed = migration.state === "failed";
+  const writeBlocked = connected && count(writer?.pending_ticks) > 0 && !!writer?.last_error;
   const archive = migration.phase === "parquet";
   const seed = migration.phase === "seed";
   const total = count(archive || seed ? migration.current_source_rows_total : migration.rows_total);
@@ -46,11 +47,11 @@ export function migrationView(migration, { boot = false, connected = true, now =
     waiting_for_live: "Waiting for new measurements to be saved",
     checkpointing: "Saving database progress",
   };
-  const step = !connected ? "" : steps[migration.activity] || "";
+  const step = !connected || writeBlocked ? "" : steps[migration.activity] || "";
   const metrics = [];
   if (byteTotal > 0) metrics.push(`${migration.bytes_estimated ? "About " : ""}${megabytes(byteDone)} of ${megabytes(byteTotal)} processed · ${megabytes(byteTotal - byteDone)} remaining`);
   const rate = count(migration.bytes_per_second);
-  const moving = connected && !failed && (age === null || age <= 30) && migration.activity === "importing";
+  const moving = connected && !failed && !writeBlocked && (age === null || age <= 30) && migration.activity === "importing";
   if (byteTotal > 0 && moving && rate > 0) metrics.push(`Speed: ${rate >= 1e6 ? megabytes(rate) : `${decimal(rate / 1e3)} KB`}/s of archive data`);
   const started = count(migration.started_at_ms);
   const elapsedMS = migration.elapsed_ms == null
@@ -58,22 +59,24 @@ export function migrationView(migration, { boot = false, connected = true, now =
     : count(migration.elapsed_ms);
   if (started > 0 || migration.elapsed_ms != null) metrics.push(`Elapsed: ${duration(elapsedMS / 1000)}`);
   const eta = Number(migration.eta_seconds);
-  const estimate = !connected || failed ? "Time remaining unavailable"
+  const estimate = !connected || failed || writeBlocked ? "Time remaining unavailable"
     : byteTotal > 0 && moving && rate > 0 && migration.eta_seconds != null && Number.isFinite(eta) && eta >= 0
       ? `Estimated time remaining: about ${duration(Math.max(1, eta))}`
       : "Time remaining: estimating…";
   metrics.push(estimate);
   return {
-    title: !connected ? "History import status unavailable" : failed ? "History import paused" : boot ? "Preparing FTW" : "Importing older history",
+    title: !connected ? "History import status unavailable" : writeBlocked ? "History import blocked by a database error" : failed ? "History import paused" : boot ? "Preparing FTW" : "Importing older history",
     description: !connected ? "The box is not responding. Showing its last import report."
+      : writeBlocked ? "New history readings are not being saved. Import is waiting for database writes to recover."
       : failed ? "The import needs attention. Your original history files are still kept."
       : boot ? "FTW is preparing the data it needs to start. Control has not started yet."
       : "Core is running while FTW imports older readings in the background.",
     details: details.join(" · "), coverage, activity, progress, step,
     metrics: metrics.join(" · "),
     sizeNote: byteTotal > 0 ? `Sizes refer to compressed archive files${migration.bytes_estimated ? "; the current file is estimated" : ""}.` : "",
-    error: failed ? migration.last_error || "The box could not finish importing history." : "",
-    guidance: failed || !connected ? "Keep the original data and backup. Reload this page to check the current status."
+    error: writeBlocked ? String(writer.last_error).split("\n")[0] : failed ? migration.last_error || "The box could not finish importing history." : "",
+    guidance: writeBlocked ? "FTW is retrying the failed write. Keep the box powered and keep the original data and backup. If this error persists, report it with the version shown in Settings."
+      : failed || !connected ? "Keep the original data and backup. Reload this page to check the current status."
       : "Keep the box powered. You can close this page and return later. Import progress is saved so it can resume after a restart.",
   };
 }
@@ -102,7 +105,7 @@ export function updateMigrationBanner(health) {
   const current = health?.history_storage?.migration || health?.migration;
   if (current && (current.history_complete === true || !lastMigration || count(current.updated_at_ms) >= count(lastMigration.updated_at_ms))) lastMigration = current;
   if (health) lastHealth = health;
-  const view = migrationView(lastMigration, { boot: lastHealth?.status === "starting", connected: !!health });
+  const view = migrationView(lastMigration, { boot: lastHealth?.status === "starting", connected: !!health, writer: health?.history_storage?.writer });
   let banner = document.getElementById("history-import-banner");
   if (!view) { banner?.remove(); return; }
   if (!banner) {
