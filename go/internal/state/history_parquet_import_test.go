@@ -50,6 +50,25 @@ func TestOpenImportsLegacyHistoryBeforeTelemetryStarts(t *testing.T) {
 	}
 }
 
+func TestOpenWithLegacyHistoryRejectsPendingImportWithoutDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.history.Exec(`INSERT INTO history_parquet_imports VALUES ('missing.parquet','original-hash')`); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := OpenWithLegacyHistory(path, ""); err == nil {
+		reopened.Close()
+		t.Fatal("started with a pending import and no original directory")
+	}
+}
+
 func TestHistoryParquetResumesCommittedChunkAndRejectsChangedSource(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
