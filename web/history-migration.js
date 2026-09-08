@@ -28,7 +28,7 @@ export function migrationView(migration, { boot = false, connected = true, now =
   const details = [];
   if (seed && done > 0) details.push(`${number(done)}${total > 0 ? ` of ${number(total)}` : ""} saved items copied in this step`);
   else if (total > 0) details.push(`${archive ? "Current archive: " : ""}${number(done)} of ${number(total)} readings imported`);
-  if ((archive || !total) && count(migration.rows_done) > 0) details.push(`${number(migration.rows_done)} readings imported in total`);
+  if (!byteTotal && (archive || !total) && count(migration.rows_done) > 0) details.push(`${number(migration.rows_done)} readings imported in total`);
   if (count(migration.files_total) > 0) details.push(`${number(migration.files_done)} of ${number(migration.files_total)} archive files complete`);
   const from = Number(migration.incomplete_from_ms), until = Number(migration.incomplete_until_ms);
   const coverage = Number.isFinite(from) && Number.isFinite(until) && from > 0 && until >= from
