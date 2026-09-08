@@ -88,7 +88,7 @@ func TestRolloffToParquetMultiDayBacklog(t *testing.T) {
 	}
 	// SQLite side must be empty below the cutoff.
 	var remaining int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&remaining); err != nil {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&remaining); err != nil {
 		t.Fatal(err)
 	}
 	if remaining != 0 {

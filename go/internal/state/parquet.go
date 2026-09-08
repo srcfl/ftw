@@ -114,8 +114,11 @@ func (s *Store) deleteSamplesChunked(ctx context.Context, fromMs, toMs int64) er
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx,
-			`DELETE FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ?`, start, end); err != nil {
+		s.historyWriteMu.Lock()
+		_, err := s.history.ExecContext(ctx,
+			`DELETE FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ?`, start, end)
+		s.historyWriteMu.Unlock()
+		if err != nil {
 			return err
 		}
 		// Writer-fairness gap — see pruneChunkPause for why bounded

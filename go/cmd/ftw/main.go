@@ -49,7 +49,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/forecast"
-	"github.com/srcfl/ftw/go/internal/ftwdbshadow"
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -319,7 +318,7 @@ func main() {
 	}
 
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
-	shadowSocket := flag.String("ftwdb-shadow-socket", os.Getenv("FTWDB_SHADOW_SOCKET"), "Optional local FTWDB beta socket; empty disables the candidate")
+	retiredShadowSocket := flag.String("ftwdb-shadow-socket", os.Getenv("FTWDB_SHADOW_SOCKET"), "Retired; DuckDB now owns time-series storage")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
 	userDriversDirFlag := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory (overlay on top of -drivers). Searched first; falls back to -drivers when a file isn't found here. Designed for docker deploys.")
@@ -446,12 +445,19 @@ func main() {
 		}
 	}()
 
-	st, err := state.Open(statePath)
+	st, err := state.OpenWithLegacyHistory(statePath, coldDir)
 	if err != nil {
 		slog.Error("open state", "err", err)
 		os.Exit(1)
 	}
-	defer st.Close()
+	defer func() {
+		if err := st.Close(); err != nil {
+			slog.Error("state shutdown failed", "err", err)
+		}
+	}()
+	if *retiredShadowSocket != "" {
+		slog.Warn("FTWDB shadow has been retired; remove its service and socket setting")
+	}
 	if cfg.RetiredCalendarEnabled {
 		if err := st.RetireCalendarProfile(); err != nil {
 			slog.Error("retire calendar profile", "err", err)
@@ -650,13 +656,6 @@ func main() {
 			slog.Warn("failed to spawn driver", "name", d.Name, "err", err)
 		}
 	}
-	var shadow *ftwdbshadow.Beta
-	defer func() {
-		// Defers run in reverse order: hardware stops before this bounded drain.
-		if shadow != nil {
-			shadow.Close()
-		}
-	}()
 	defer reg.ShutdownAll()
 	batteryIdentity := func(name string) (string, bool) {
 		return runningDeviceID(reg, name)
@@ -709,7 +708,6 @@ func main() {
 	var forecastConfigMu sync.RWMutex
 	var ocppSrv *ocpp.Server
 	forecastSettings := newForecastSiteConfig(st)
-	shadow = ftwdbshadow.Start(ctx, st, *shadowSocket, forecastSettings.Snapshot().SiteID, Version)
 	forecastSettings.identity = func(name string) (string, bool) {
 		if id, ok := runningDeviceID(reg, name); ok {
 			return id, true
@@ -2369,7 +2367,6 @@ func main() {
 		ColdDir:           coldDir,
 		DataDir:           dataDir,
 		StatePath:         statePath,
-		FTWDBShadow:       shadow,
 		BackupDir:         backupDir,
 		DataMaintenanceMu: dataMaintenanceMu,
 		// Snapshots live next to the rest of the persistent data so
@@ -3189,9 +3186,7 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 	}
 }
 
-// rolloffLoop runs the SQLite → Parquet roll-off once per hour. Cheap when
-// nothing is due (a single SELECT returns 0 rows); only does real work once
-// data crosses the 14-day boundary into cold storage.
+// rolloffLoop maintains diagnostic archives and history retention hourly.
 func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldRetentionDays int, dataMaintenanceMu *sync.Mutex) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
@@ -3202,12 +3197,15 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldReten
 			defer dataMaintenanceMu.Unlock()
 		}
 		doRolloff(ctx, st, coldDir)
+		if err := st.PruneHistorySamples(ctx, coldRetentionDays, time.Now()); err != nil {
+			slog.Warn("history retention failed", "err", err)
+		}
 
 		// The bulk DELETEs above just generated a WAL burst; reclaim it now
 		// instead of letting the -wal file ratchet upward on the SD card.
 		st.CheckpointWAL()
 
-		if removed, err := state.PruneColdParquet(coldDir, coldRetentionDays, time.Now()); err != nil {
+		if removed, err := state.PruneDiagnosticsParquet(coldDir, coldRetentionDays, time.Now()); err != nil {
 			slog.Warn("cold parquet retention prune failed", "err", err)
 		} else if len(removed) > 0 {
 			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", coldRetentionDays)
@@ -3219,7 +3217,7 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldReten
 			const lowWater = 500 << 20 // 500 MB
 			if avail < lowWater && time.Since(lastDiskWarn) > 24*time.Hour {
 				lastDiskWarn = time.Now()
-				slog.Error("disk space low — history rolloff and SQLite writes are at risk",
+				slog.Error("disk space low — database writes are at risk",
 					"avail_mb", avail>>20)
 				if err := st.RecordEvent(fmt.Sprintf(
 					"disk space low: %d MB available — consider state.cold_retention_days", avail>>20)); err != nil {
@@ -3254,12 +3252,6 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "expired_rows", expired)
 	}
 
-	rows, files, err := st.RolloffToParquet(ctx, coldDir)
-	if err != nil {
-		slog.Warn("parquet rolloff failed", "err", err)
-	} else if rows > 0 {
-		slog.Info("parquet rolloff", "rows", rows, "files", len(files))
-	}
 	// Planner diagnostics roll off on the same cadence but keep a
 	// longer hot tier (30 d vs. the 14 d of ts_samples) — they're
 	// sparse enough (~100/day) that the extra month in SQLite
@@ -3877,7 +3869,7 @@ func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.S
 	if historyAvailable {
 		historyPoint = &hp
 	}
-	return len(samples), st.RecordTickWithOptionalHistory(historyPoint, stSamples, energyObservations)
+	return len(samples), st.EnqueueTelemetryTick(historyPoint, stSamples, energyObservations)
 }
 
 func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
