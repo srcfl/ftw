@@ -11,10 +11,10 @@ import (
 // what the house actually used on recent days. Days can differ a lot, so
 // this only lifts a collapsed forecast — it never force-fits the shape.
 const (
-	loadRainCheckDays        = 3
-	loadRainCheckMinFraction = 0.2 // lift only when forecast Wh < 20% of recent mean
-	loadRainCheckMaxScale    = 1.5
-	loadRecentMeanFloorFrac  = 0.2 // no slot below 20% of recent mean watts
+	loadRainCheckDays         = 3
+	loadRainCheckMinFraction  = 0.2 // lift only when forecast Wh < 20% of recent mean
+	loadRainCheckMaxScale     = 1.5
+	loadRecentMeanFloorFrac   = 0.2 // no slot below 20% of recent mean watts
 	loadRecentDayMinIntervals = 50
 	loadRecentDayMinWh        = 500
 )
@@ -57,11 +57,7 @@ func capPlanLoad(plan *Plan, minW, maxW float64) {
 func forecastLoadWh(slots []Slot) float64 {
 	var wh float64
 	for _, s := range slots {
-		min := s.LenMin
-		if min <= 0 {
-			min = 60
-		}
-		wh += math.Max(0, s.LoadW) * float64(min) / 60.0
+		wh += math.Max(0, s.LoadW) * math.Max(0, s.DurationHours())
 	}
 	return wh
 }
