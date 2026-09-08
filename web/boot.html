@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FTW is starting</title>
+<style>
+  :root { color-scheme:dark; font-family:system-ui,sans-serif; color:#f0eee8; background:#121211; }
+  body { margin:0; min-height:100svh; display:grid; place-items:center; }
+  main { box-sizing:border-box; width:min(92vw,620px); padding:32px; margin:32px 0; border:1px solid #393832; border-radius:16px; background:#1b1b18; }
+  .brand { color:#fbbf24; font-size:14px; font-weight:700; letter-spacing:.12em; }
+  h1 { font-size:28px; font-weight:600; line-height:1.2; }
+  h3 { font-size:22px; } p { line-height:1.6; } .dim { color:#b8b6ac; font-size:14px; }
+  progress { width:100%; height:12px; accent-color:#fbbf24; } .err { color:#ffbead; }
+  a { color:#fbbf24; } .connection { border-top:1px solid #393832; margin-top:24px; padding-top:16px; }
+</style>
+<main>
+  <div class="brand">FTW</div>
+  <div id="progress"><h1>FTW is starting</h1><p>Preparing your site. Control has not started yet.</p><p>Keep the box powered. This page checks progress automatically.</p></div>
+  <p id="connection" class="connection dim" role="status">Connecting to the box…</p>
+  <p class="dim"><a href="">Reload status</a> · Reloading this page does not restart the box.</p>
+</main>
+<script type="module">
+  import { migrationHTML } from "/history-migration.js";
+  const content = document.getElementById("progress"), connection = document.getElementById("connection");
+  let lastMigration = null;
+  async function poll() {
+    try {
+      const response = await fetch("/api/health", { cache:"no-store", signal:AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error("health unavailable");
+      const health = await response.json();
+      lastMigration = health.migration || health.history_storage?.migration || lastMigration;
+      const html = migrationHTML(lastMigration, { boot:health.status === "starting" });
+      if (html) content.innerHTML = html;
+      connection.textContent = "Box responding · checked " + new Date().toLocaleTimeString();
+      // Health alone never proves that the full API has started.
+      if (health.status !== "starting") {
+        const ready = await fetch("/api/status", { cache:"no-store", signal:AbortSignal.timeout(8000) });
+        if (ready.ok) { location.reload(); return; }
+      }
+    } catch {
+      connection.textContent = "Cannot reach the box. Retrying automatically; the last progress report may be out of date.";
+      const html = migrationHTML(lastMigration, { boot:true, connected:false });
+      if (html) content.innerHTML = html;
+    }
+    setTimeout(poll, 2000);
+  }
+  poll();
+</script>
+</html>

@@ -36,7 +36,7 @@ Read [docs/architecture.md](docs/architecture.md) for the system map and
 - A failed/stale driver receives its autonomous default mode.
 - Every clamp protects a quantified hardware or control risk.
 - Persistent device state is keyed by stable hardware identity, not a YAML name.
-- SQLite queries stay in [`go/internal/state`](go/internal/state).
+- Database queries stay in [`go/internal/state`](go/internal/state).
 
 ## Drivers
 

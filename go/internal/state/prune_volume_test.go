@@ -99,7 +99,7 @@ func TestPruneLargeBacklogWithConcurrentWriter(t *testing.T) {
 	}
 	// Averages must be preserved: every seeded row had grid_w=100.
 	var avg float64
-	if err := s.db.QueryRow(`SELECT AVG(grid_w) FROM history_warm`).Scan(&avg); err != nil {
+	if err := s.history.QueryRow(`SELECT AVG(grid_w) FROM history_warm`).Scan(&avg); err != nil {
 		t.Fatal(err)
 	}
 	if avg != 100 {
@@ -116,8 +116,8 @@ func TestPruneNeverSplitsBuckets(t *testing.T) {
 	// Rows exactly straddling the aligned cutoff's bucket.
 	cutoff := time.Now().UnixMilli() - HotRetention.Milliseconds()
 	alignedCutoff := (cutoff / WarmBucketMS) * WarmBucketMS
-	inBucketBefore := alignedCutoff - 1    // last row of the fully-aged bucket
-	inBucketAfter := alignedCutoff + 1     // first row of the partial bucket
+	inBucketBefore := alignedCutoff - 1 // last row of the fully-aged bucket
+	inBucketAfter := alignedCutoff + 1  // first row of the partial bucket
 	for _, ts := range []int64{inBucketBefore - 60_000, inBucketBefore, inBucketAfter} {
 		if err := s.RecordHistory(HistoryPoint{TsMs: ts, GridW: 50, JSON: "{}"}); err != nil {
 			t.Fatal(err)
@@ -127,14 +127,14 @@ func TestPruneNeverSplitsBuckets(t *testing.T) {
 		t.Fatal(err)
 	}
 	var hotLeft int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM history_hot`).Scan(&hotLeft); err != nil {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_hot`).Scan(&hotLeft); err != nil {
 		t.Fatal(err)
 	}
 	if hotLeft != 1 {
 		t.Fatalf("hot rows left = %d, want exactly the partial-bucket row", hotLeft)
 	}
 	var maxWarm int64
-	if err := s.db.QueryRow(`SELECT MAX(ts_ms) FROM history_warm`).Scan(&maxWarm); err != nil {
+	if err := s.history.QueryRow(`SELECT MAX(ts_ms) FROM history_warm`).Scan(&maxWarm); err != nil {
 		t.Fatal(err)
 	}
 	if maxWarm >= alignedCutoff {

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,11 +31,11 @@ func TestCompactIfBloated(t *testing.T) {
 		blob[i] = 'x'
 	}
 	for i := 0; i < 2000; i++ {
-		if err := s.RecordHistory(HistoryPoint{TsMs: int64(i), JSON: string(blob)}); err != nil {
+		if err := s.SaveConfig(fmt.Sprintf("bulk-%d", i), string(blob)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.db.Exec(`DELETE FROM history_hot`); err != nil {
+	if _, err := s.db.Exec(`DELETE FROM config`); err != nil {
 		t.Fatal(err)
 	}
 	// Move the WAL into the main file so freelist_count reflects the deletes.

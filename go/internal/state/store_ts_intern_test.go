@@ -25,19 +25,11 @@ func TestInternAllocationDoesNotBlockReaders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Take SQLite's write lock and keep it. Any INSERT on another connection
-	// now waits on busy_timeout instead of returning.
-	tx, err := s.db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO ts_drivers (name) VALUES ('lock-holder')`); err != nil {
-		t.Fatal(err)
-	}
-
+	// Hold the serialized writer path while allocations queue. Readers must
+	// remain free to use their own connection and the published intern maps.
+	s.historyWriteMu.Lock()
 	const held = 750 * time.Millisecond
-	release := time.AfterFunc(held, func() { tx.Rollback() })
+	release := time.AfterFunc(held, s.historyWriteMu.Unlock)
 	defer release.Stop()
 
 	allocDone := make(chan error, 2)
@@ -129,7 +121,7 @@ func TestInternConcurrentSameNameYieldsOneID(t *testing.T) {
 				}
 			}
 			var rows int
-			if err := s.db.QueryRow(`SELECT COUNT(*) FROM ` + tc.table).Scan(&rows); err != nil {
+			if err := s.history.QueryRow(`SELECT COUNT(*) FROM ` + tc.table).Scan(&rows); err != nil {
 				t.Fatal(err)
 			}
 			if rows != 1 {
@@ -259,7 +251,7 @@ func TestInternUnderConcurrentReadersAndWriters(t *testing.T) {
 		`SELECT COUNT(*) FROM (SELECT name FROM ts_metrics GROUP BY name HAVING COUNT(*) > 1)`,
 	} {
 		var dupes int
-		if err := s.db.QueryRow(q).Scan(&dupes); err != nil {
+		if err := s.history.QueryRow(q).Scan(&dupes); err != nil {
 			t.Fatal(err)
 		}
 		if dupes != 0 {
@@ -267,10 +259,10 @@ func TestInternUnderConcurrentReadersAndWriters(t *testing.T) {
 		}
 	}
 	var drivers, metrics int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ts_drivers`).Scan(&drivers); err != nil {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM ts_drivers`).Scan(&drivers); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ts_metrics`).Scan(&metrics); err != nil {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM ts_metrics`).Scan(&metrics); err != nil {
 		t.Fatal(err)
 	}
 	if drivers != driversPer {

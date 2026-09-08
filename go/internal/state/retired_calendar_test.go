@@ -63,7 +63,8 @@ func TestRetiredCalendarSurvivesUpgradeAndBackup(t *testing.T) {
 	if err := upgraded.SnapshotTo(backupPath); err != nil {
 		t.Fatal(err)
 	}
-	backup, err := Open(backupPath)
+	backupDB, err := openRaw(backupPath)
+	backup := &Store{db: backupDB}
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -128,3 +128,15 @@ func TestSQLiteSettingsBlockImageOnlyDowngrade(t *testing.T) {
 		t.Fatalf("unsafe downgrade: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestDuckDBHistoryBlocksImageOnlyDowngrade(t *testing.T) {
+	for _, body := range []string{"<!-- ftw-state-schema:2 -->", ""} {
+		srv, _, _ := storedConfigServer(t)
+		srv.deps.SelfUpdate = newCheckerAgainstOptions(t, "v3.1.3-beta.1", "v3.2.0-beta.1", filepath.Join(t.TempDir(), "status.json"), "", body, 3)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/update", nil))
+		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "DuckDB") {
+			t.Fatalf("unsafe history downgrade: %d %s", rr.Code, rr.Body.String())
+		}
+	}
+}

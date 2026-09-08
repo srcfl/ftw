@@ -1,7 +1,6 @@
 // Package state — snapshot_state.go: periodic recovery snapshot of state.db.
 //
-// state.db holds precious, hard-to-recreate data (trained models, energy
-// history, device identity). If the SD card corrupts it, openChecked restores
+// state.db holds trained models, configuration and device identity. If the SD card corrupts it, openChecked restores
 // from the snapshot this file maintains. cache.db needs no snapshot — it's
 // re-fetchable, so corruption there just rebuilds empty.
 package state
@@ -38,8 +37,8 @@ func (s *Store) statePath() (string, error) {
 // SnapshotState writes a fresh "<state.db>.snapshot" recovery copy atomically:
 // snapshot to a temp file, verify it with quick_check, then rename over the
 // previous snapshot. Reuses SnapshotTo, which already excludes the bulky
-// time-series tables (recoverable from cold Parquet), so the snapshot stays
-// small and fast.
+// time-series tables. The snapshot retains the DuckDB generation binding;
+// recovering a missing history file requires a full backup.
 func (s *Store) SnapshotState() error {
 	main, err := s.statePath()
 	if err != nil {

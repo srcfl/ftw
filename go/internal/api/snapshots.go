@@ -27,6 +27,7 @@ const snapshotKeepCount = 5
 // lets future code read older snapshots without a guessing game.
 type SnapshotMeta struct {
 	SchemaVersion    int       `json:"schema_version"`
+	DatabaseSchema   int       `json:"database_schema,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	FromVersion      string    `json:"from_version,omitempty"`
 	ToVersion        string    `json:"to_version,omitempty"`
@@ -140,6 +141,7 @@ func (s *Server) createPreUpdateSnapshotWithProgress(
 	// 3. meta.json — the pointer the UI/rollback flow reads first.
 	meta := SnapshotMeta{
 		SchemaVersion:    snapshotSchemaVersion,
+		DatabaseSchema:   state.SchemaVersion,
 		CreatedAt:        time.Now().UTC(),
 		FromVersion:      fromVersion,
 		ToVersion:        toVersion,
