@@ -47,12 +47,14 @@ func (s *Store) openHistory() error {
 	if _, err := os.Stat(s.historyPath); errors.Is(err, os.ErrNotExist) && active != "" && restore == "" {
 		return errors.New("primary DuckDB history is missing; restore a full backup")
 	}
-	db, err := sql.Open("duckdb", s.historyPath+"?threads=2&memory_limit=128MB&max_temp_directory_size=512MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
+	connector, err := newHistoryConnector(s.historyPath + "?threads=2&memory_limit=128MB&max_temp_directory_size=512MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
 	if err != nil {
 		return fmt.Errorf("open DuckDB history: %w", err)
 	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
+	db.SetMaxIdleConns(0)
+	s.historyConnector = connector
 	s.history = db
 	ok := false
 	defer func() {
@@ -70,14 +72,21 @@ func (s *Store) openHistory() error {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-v1'`).Scan(&complete); err != nil {
 		return err
 	}
+	var seeded int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-seed-v1'`).Scan(&seeded); err != nil {
+		return err
+	}
+	if seeded != 0 && complete == 0 && s.historyMigration == nil {
+		return errors.New("raw history migration is pending; start Core to resume it before using offline history tools")
+	}
 	var generation string
-	if complete != 0 {
+	if complete != 0 || seeded != 0 {
 		if err := db.QueryRow(`SELECT name FROM history_migrations WHERE name LIKE 'generation:%'`).Scan(&generation); err != nil {
 			return err
 		}
 		generation = strings.TrimPrefix(generation, "generation:")
 	}
-	if restore != "" && complete != 0 && generation != restore {
+	if restore != "" && (complete != 0 || seeded != 0) && generation != restore {
 		// A restore explicitly selects its SQLite snapshot as the source.
 		// Preserve the previous DuckDB files; never silently reuse old history.
 		db.Close()
@@ -91,10 +100,10 @@ func (s *Store) openHistory() error {
 		ok = true
 		return s.openHistory()
 	}
-	if complete != 0 && active == "" && restore == "" && intent != generation {
+	if (complete != 0 || seeded != 0) && active == "" && restore == "" && intent != generation {
 		return errors.New("unbound DuckDB history beside SQLite; restore a full backup before starting")
 	}
-	if complete == 0 {
+	if complete == 0 && seeded == 0 {
 		if active != "" && restore == "" {
 			return errors.New("primary DuckDB history is incomplete; restore a full backup")
 		}
@@ -150,6 +159,15 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 	}
 	defer conn.Close()
 	for _, table := range historyTables {
+		if s.historyMigration != nil && table == "ts_samples" {
+			continue
+		}
+		if s.historyMigration != nil {
+			s.historyMigration.update(func(st *HistoryMigrationStatus) {
+				st.CurrentSource = table
+				st.CurrentSourceRowsDone, st.CurrentSourceRowsTotal = 0, 0
+			})
+		}
 		// The destination stays inactive until every table passes verification.
 		// Bounded commits keep migration memory independent of source row count.
 		if _, err := conn.ExecContext(ctx, `DELETE FROM `+table); err != nil {
@@ -173,7 +191,7 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 				return err
 			}
 			err = conn.Raw(func(raw any) error {
-				app, err := duckdb.NewAppenderFromConn(raw.(driver.Conn), "", table)
+				app, err := duckdb.NewAppenderFromConn(nativeHistoryConn(raw), "", table)
 				if err != nil {
 					return err
 				}
@@ -219,6 +237,9 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 				rows.Close()
 				return fmt.Errorf("migrate history table %s: %w", table, err)
 			}
+			if s.historyMigration != nil {
+				s.historyMigration.update(func(st *HistoryMigrationStatus) { st.CurrentSourceRowsDone = count })
+			}
 		}
 		rows.Close()
 		actualHash := sha256.New()
@@ -236,8 +257,9 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 		return err
 	}
 	defer conn.ExecContext(context.Background(), `ROLLBACK`)
-	// Seed generated IDs above the imported IDs. Sequences are deliberately
-	// not relied on for rollback; gaps in IDs have no semantic meaning.
+	// Seed IDs above the imported IDs. Inserts select these sequences explicitly:
+	// ALTER COLUMN SET DEFAULT nextval cannot replay safely from DuckDB's WAL.
+	// Gaps in IDs have no semantic meaning.
 	for _, table := range []string{"ts_drivers", "ts_metrics"} {
 		var next int64
 		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0)+1 FROM `+table).Scan(&next); err != nil {
@@ -246,14 +268,15 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`CREATE OR REPLACE SEQUENCE %s_next_id START %d`, table, next)); err != nil {
 			return err
 		}
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN id SET DEFAULT nextval('%s_next_id')`, table, table)); err != nil {
-			return err
-		}
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?)`, "generation:"+generation); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES ('sqlite-v1')`); err != nil {
+	marker := "sqlite-v1"
+	if s.historyMigration != nil {
+		marker = "sqlite-seed-v1"
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?)`, marker); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
@@ -319,6 +342,7 @@ func historyFloatBits(value float64) uint64 {
 
 func (s *Store) HistoryBackend() map[string]any {
 	info := map[string]any{"engine": "duckdb", "version": "1.5.5", "role": "primary", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus()}
+	info["migration"] = s.HistoryMigrationStatus()
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + ".wal"} {
 		if stat, err := os.Stat(path); err == nil {
 			info[key] = stat.Size()
@@ -333,6 +357,12 @@ func (s *Store) HistoryBackend() map[string]any {
 func (s *Store) CheckpointHistory(ctx context.Context) error {
 	if s.history == nil {
 		return nil
+	}
+	if s.historyConnector != nil {
+		// A checkpoint alone does not evict all native index/table buffers.
+		// Wait for a gap between active connections, then reopen the native
+		// instance while retaining the public SQL pool and durable primary.
+		return s.rotateHistory(ctx)
 	}
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()
@@ -434,8 +464,15 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		return err
 	}
 	defer src.Rollback()
+	var sqliteComplete int
+	if err := src.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-v1'`).Scan(&sqliteComplete); err != nil {
+		return err
+	}
+	if sqliteComplete == 0 || !s.HistoryMigrationStatus().HistoryComplete {
+		return errors.New("finish historical import before exporting a full backup; keep the verified pre-update backup")
+	}
 	var pending int
-	if err := src.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_imports`).Scan(&pending); err != nil {
+	if err := src.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM history_parquet_imports) + (SELECT COUNT(*) FROM history_migrations WHERE name='legacy-import-pending')`).Scan(&pending); err != nil {
 		return err
 	}
 	if pending != 0 {
@@ -503,7 +540,7 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 
 func appendHistoryRows(conn *sql.Conn, points []HistoryPoint) error {
 	return conn.Raw(func(raw any) error {
-		app, err := duckdb.NewTableAppender(raw.(driver.Conn), `INSERT OR REPLACE INTO history_hot SELECT * FROM appended_data`, "", "", "history_hot", nil)
+		app, err := duckdb.NewTableAppender(nativeHistoryConn(raw), `INSERT OR REPLACE INTO history_hot SELECT * FROM appended_data`, "", "", "history_hot", nil)
 		if err != nil {
 			return err
 		}

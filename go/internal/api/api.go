@@ -705,7 +705,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State != nil {
 		resp["history_storage"] = s.deps.State.HistoryBackend()
 		writer := s.deps.State.HistoryWriterStatus()
-		if writer.LastError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
+		if writer.LastError != "" || writer.MaintenanceError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
 			resp["status"] = "degraded"
 		}
 	}

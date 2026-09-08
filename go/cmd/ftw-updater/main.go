@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/srcfl/ftw/go/internal/updateipc"
 )
 
 const (
@@ -111,13 +113,9 @@ type server struct {
 	// pins to the requested version. nil/empty means "inherit only".
 	runner func(ctx context.Context, env []string, args ...string) error
 	// imageID captures the image backing the running service before an update.
-	// imageRef captures the exact image reference used to create it so an
-	// automatic rollback can restore a beta's runtime identity as well as its
-	// bytes.
-	// healthCheck waits for the recreated service to become healthy. Both are
-	// injectable so the rollback path is testable without Docker.
+	// healthCheck waits for the recreated service to become ready.
+	// These hooks let tests exercise recovery without Docker.
 	imageID     func(ctx context.Context, service string) (string, error)
-	imageRef    func(ctx context.Context, service string) (string, error)
 	containerID func(ctx context.Context, service string) (string, error)
 	healthCheck func(ctx context.Context, service string) error
 	// selfReplace brings the updater sidecar to the release Core just moved to.
@@ -293,7 +291,6 @@ func main() {
 		}
 		return
 	}
-	srv.imageRef = srv.currentServiceImageRef
 	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth
 	srv.selfReplace = func(target string) error {
@@ -317,6 +314,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /update", srv.handleUpdate)
 	mux.HandleFunc("GET /status", srv.handleStatus)
+	mux.HandleFunc("GET "+updateipc.CapabilitiesPath, updateipc.ServeCapabilities)
 
 	// Remove a stale socket — common pattern; the listener would EADDRINUSE otherwise.
 	_ = os.Remove(*socket)
@@ -546,26 +544,21 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		}
 	}
 
-	// Capture the current immutable image ID before pulling. Docker retains the
-	// old image object after the tag moves, which lets us retag and recreate it
-	// if the new container never becomes healthy.
-	var previousImageID, previousImageTag string
+	// Keep the previous image in durable job history before replacing Core.
+	// Starting it again also requires its matching full backup: the new Core
+	// may have changed the data before its API becomes ready.
+	var previousImageID string
 	if action == "update" && s.imageID != nil {
 		inspectCtx, cancelInspect := context.WithTimeout(context.Background(), 30*time.Second)
 		var err error
 		previousImageID, err = s.imageID(inspectCtx, spec.service)
-		if err == nil && s.imageRef != nil {
-			if previousRef, refErr := s.imageRef(inspectCtx, spec.service); refErr == nil {
-				previousImageTag, _ = imageTagFromReference(previousRef)
-			} else {
-				slog.Warn("cannot capture current image tag; rollback will use a synthetic tag", "service", spec.service, "err", refErr)
-			}
-		}
 		cancelInspect()
 		if err != nil {
 			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot capture current image for rollback: " + err.Error()})
 			return
 		}
+		pullState.PreviousImageID = previousImageID
+		s.writeState(pullState)
 	}
 
 	if !s.skipPull {
@@ -633,15 +626,10 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		})
 		cancelHealth()
 		if healthErr != nil {
-			if action == "update" && previousImageID != "" {
-				if rollbackErr := s.restorePreviousComponentImageWithTag(previousImageID, previousImageTag, spec); rollbackErr == nil {
-					s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "new image failed health check; previous image restored: " + healthErr.Error()})
-					return
-				} else {
-					healthErr = fmt.Errorf("%v; automatic image rollback failed: %w", healthErr, rollbackErr)
-				}
-			}
-			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "health check failed: " + healthErr.Error()})
+			checkState.State = "failed"
+			checkState.UpdatedAt = time.Now()
+			checkState.Message = "Core readiness failed: " + healthErr.Error() + ". Core and data were left in place; migration may still be running. Check Core status before retrying. To return to an older release, stop Core and restore a verified full backup with its matching image."
+			s.writeState(checkState)
 			return
 		}
 	}
@@ -676,56 +664,6 @@ func (s *server) componentSpec(component string) (componentSpec, error) {
 	default:
 		return componentSpec{}, fmt.Errorf("unsupported component %q", component)
 	}
-}
-
-func (s *server) restorePreviousImage(imageID string) error {
-	spec, err := s.componentSpec("core")
-	if err != nil {
-		return err
-	}
-	return s.restorePreviousComponentImage(imageID, spec)
-}
-
-func (s *server) restorePreviousComponentImage(imageID string, spec componentSpec) error {
-	return s.restorePreviousComponentImageWithTag(imageID, "", spec)
-}
-
-func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag string, spec componentSpec) error {
-	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("service %q has no image", spec.service)
-	}
-	repository, ok := composeImageRepositoryForTag(image, spec.tagVariable)
-	if !ok {
-		return fmt.Errorf("service %q image %q does not reference %s", spec.service, image, spec.tagVariable)
-	}
-	rollbackTag := previousTag
-	if rollbackTag == "" {
-		rollbackTag = fmt.Sprintf("ftw-rollback-%d", time.Now().Unix())
-	}
-	rollbackRef := repository + ":" + rollbackTag
-	timeout := 10 * time.Minute
-	if spec.name == "core" {
-		timeout = 35 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
-		return fmt.Errorf("tag previous image: %w", err)
-	}
-	env := []string{spec.tagEnv + "=" + rollbackTag}
-	if err := s.runner(ctx, env, s.composeArgs("up", "-d", spec.service)...); err != nil {
-		return fmt.Errorf("recreate previous image: %w", err)
-	}
-	if s.healthCheck != nil {
-		if err := s.healthCheck(ctx, spec.service); err != nil {
-			return fmt.Errorf("previous image health check: %w", err)
-		}
-	}
-	return nil
 }
 
 // prepareUpdateImagePin makes old Compose layouts safe for immutable updates.
@@ -1312,6 +1250,8 @@ func (s *server) recoverCrashedState() {
 			return
 		}
 		st.Message = fmt.Sprintf("updater restarted during rollback; safety recovery unavailable: container=%v image=%v", containerErr, imageErr)
+	} else if st.Action == "update" {
+		st.Message = "Updater stopped before it confirmed Core readiness. Core and data were left in place; check Core status before retrying. Keep the pre-update full backup and matching image for recovery."
 	} else if st.Message == "" {
 		st.Message = "updater process restarted while in-flight"
 	}
@@ -1444,39 +1384,6 @@ func (s *server) currentServiceImageID(ctx context.Context, service string) (str
 	return imageID, nil
 }
 
-func (s *server) currentServiceImageRef(ctx context.Context, service string) (string, error) {
-	containerID, err := s.serviceContainerID(ctx, service)
-	if err != nil {
-		return "", err
-	}
-	out, err := dockerOutput(ctx, "inspect", "--format", "{{.Config.Image}}", containerID)
-	if err != nil {
-		return "", err
-	}
-	imageRef := strings.TrimSpace(out)
-	if imageRef == "" {
-		return "", errors.New("running container has no image reference")
-	}
-	return imageRef, nil
-}
-
-func imageTagFromReference(imageRef string) (string, bool) {
-	imageRef = strings.TrimSpace(imageRef)
-	if imageRef == "" || strings.Contains(imageRef, "@") {
-		return "", false
-	}
-	lastSlash := strings.LastIndexByte(imageRef, '/')
-	lastColon := strings.LastIndexByte(imageRef, ':')
-	if lastColon <= lastSlash || lastColon == len(imageRef)-1 {
-		return "", false
-	}
-	tag := imageRef[lastColon+1:]
-	if !isImmutableImageTag(tag) {
-		return "", false
-	}
-	return tag, true
-}
-
 func (s *server) waitForServiceHealth(ctx context.Context, service string) error {
 	containerID, err := s.serviceContainerID(ctx, service)
 	if err != nil {
@@ -1520,7 +1427,9 @@ func (s *server) waitForServiceHealth(ctx context.Context, service string) error
 
 func componentHealthTimeout(component string) time.Duration {
 	if component == "core" {
-		return 30 * time.Minute
+		// First-start imports on microSD can take hours. The finite deadline
+		// reports failure without stopping Core or reverting its image.
+		return 6 * time.Hour
 	}
 	return 3 * time.Minute
 }
