@@ -11,6 +11,7 @@ import (
 func SlotDirectiveFromMPC(d mpc.SlotDirective) SlotDirective {
 	return SlotDirective{
 		DecisionID:          d.DecisionID,
+		PriceSlotStart:      d.PriceSlotStart,
 		SlotStart:           d.SlotStart,
 		SlotEnd:             d.SlotEnd,
 		BatteryEnergyWh:     d.BatteryEnergyWh,

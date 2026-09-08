@@ -95,7 +95,7 @@ func (s *Service) finishCoreDPShadow() {
 func replayedGridCost(slots []Slot, p Params, plan Plan) float64 {
 	total := 0.0
 	for i, slot := range slots {
-		total += SlotGridCostOre(slot, plan.Actions[i].GridW*float64(slot.LenMin)/60000, p)
+		total += SlotGridCostOre(slot, plan.Actions[i].GridW*slot.DurationHours()/1000, p)
 	}
 	return total
 }

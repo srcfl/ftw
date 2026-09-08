@@ -12,10 +12,11 @@ import (
 // containing "now". The UI renders this as the per-slot explainability
 // table so operators can answer "why did the planner charge at 21:00?".
 type DiagnosticSlot struct {
-	Idx         int   `json:"idx"`
-	SlotStartMs int64 `json:"slot_start_ms"`
-	SlotEndMs   int64 `json:"slot_end_ms"`
-	LenMin      int   `json:"len_min"`
+	ExecutionStartMs int64 `json:"execution_start_ms,omitempty"`
+	Idx              int   `json:"idx"`
+	SlotStartMs      int64 `json:"slot_start_ms"`
+	SlotEndMs        int64 `json:"slot_end_ms"`
+	LenMin           int   `json:"len_min"`
 
 	// Inputs
 	PriceOre   float64 `json:"price_ore"`  // consumer total (spot + tariff + VAT)
@@ -174,6 +175,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			SlotStartMs:             slot.StartMs,
 			SlotEndMs:               slot.StartMs + int64(slot.LenMin)*60*1000,
 			LenMin:                  slot.LenMin,
+			ExecutionStartMs:        slot.ExecutionStartMs,
 			PriceOre:                slot.PriceOre,
 			SpotOre:                 slot.SpotOre,
 			Confidence:              slot.Confidence,
@@ -271,7 +273,7 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	inWindow := false
 	for _, a := range plan.Actions {
 		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < endMs {
+		if nowMs >= a.ExecutionStart() && nowMs < endMs {
 			inWindow = true
 			break
 		}
@@ -384,6 +386,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		slots = append(slots, Slot{
 			StartMs:                 ds.SlotStartMs,
 			LenMin:                  lenMin,
+			ExecutionStartMs:        ds.ExecutionStartMs,
 			PriceOre:                ds.PriceOre,
 			SpotOre:                 ds.SpotOre,
 			PVW:                     ds.PVW,
@@ -398,6 +401,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		action := Action{
 			SlotStartMs:      ds.SlotStartMs,
 			SlotLenMin:       lenMin,
+			ExecutionStartMs: ds.ExecutionStartMs,
 			PriceOre:         ds.PriceOre,
 			SpotOre:          ds.SpotOre,
 			PVW:              ds.PVW,

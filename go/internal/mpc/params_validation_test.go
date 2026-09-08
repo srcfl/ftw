@@ -439,9 +439,9 @@ func (o *physicsGateRecoveryOptimizer) Optimize(_ context.Context, slots []Slot,
 	}
 	for i, slot := range slots {
 		gridW := slot.LoadW + slot.PVW
-		cost := SlotGridCostOre(slot, gridW*float64(slot.LenMin)/60/1000, p)
+		cost := SlotGridCostOre(slot, gridW*slot.DurationHours()/1000, p)
 		plan.Actions[i] = Action{
-			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin,
+			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin, ExecutionStartMs: slot.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
 			GridW: gridW, SoC: p.InitialSoC, CostOre: cost,

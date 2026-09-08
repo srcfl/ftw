@@ -76,6 +76,7 @@ type BatteryFleetMember struct {
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
+	now                func() time.Time // nil uses the wall clock
 	Store              *state.Store
 	Tele               *telemetry.Store
 	Zone               string
@@ -458,6 +459,7 @@ const MaxPlanAge = 30 * time.Minute
 // = discharge. Magnitude is the total energy expected to move into (or
 // out of) the battery fleet across the slot.
 type SlotDirective struct {
+	PriceSlotStart time.Time // original price interval; SlotStart is execution start
 	// DecisionID pairs this slot instruction with the accepted plan that
 	// produced it. DecisionID plus SlotStart identifies the planned action;
 	// later control and command layers can carry that pair without relying on
@@ -543,14 +545,15 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	for i, a := range p.Actions {
 		slotLenMs := int64(a.SlotLenMin) * 60 * 1000
 		endMs := a.SlotStartMs + slotLenMs
-		if nowMs < a.SlotStartMs || nowMs >= endMs {
+		if nowMs < a.ExecutionStart() || nowMs >= endMs {
 			continue
 		}
-		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
-		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
+		// Only the modeled execution interval contributes energy.
+		energyWh := a.BatteryW * a.DurationHours()
 		d := SlotDirective{
 			DecisionID:          p.DecisionID,
-			SlotStart:           time.UnixMilli(a.SlotStartMs),
+			SlotStart:           time.UnixMilli(a.ExecutionStart()),
+			PriceSlotStart:      time.UnixMilli(a.SlotStartMs),
 			SlotEnd:             time.UnixMilli(endMs),
 			BatteryEnergyWh:     energyWh,
 			SoCTarget:           a.SoC,
@@ -564,18 +567,18 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		if len(params.Storages) > 0 && len(a.StoragePowerW) > 0 {
 			d.StorageEnergyWh = make(map[string]float64, len(a.StoragePowerW))
 			for id, w := range a.StoragePowerW {
-				d.StorageEnergyWh[id] = w * float64(a.SlotLenMin) / 60
+				d.StorageEnergyWh[id] = w * a.DurationHours()
 			}
 		}
 		if len(a.LoadpointPowerW) > 0 {
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
 			d.LoadpointSoCTarget = make(map[string]float64, len(a.LoadpointPowerW))
 			for id, powerW := range a.LoadpointPowerW {
-				d.LoadpointEnergyWh[id] = powerW * float64(a.SlotLenMin) / 60.0
+				d.LoadpointEnergyWh[id] = powerW * a.DurationHours()
 				d.LoadpointSoCTarget[id] = a.LoadpointSoCByID[id]
 			}
 		} else if a.LoadpointW > 0 && lpID != "" {
-			lpEnergyWh := a.LoadpointW * float64(a.SlotLenMin) / 60.0
+			lpEnergyWh := a.LoadpointW * a.DurationHours()
 			d.LoadpointEnergyWh = map[string]float64{
 				lpID: lpEnergyWh,
 			}
@@ -637,9 +640,10 @@ func (snapshot PlanSnapshot) LoadpointPlanWindows(id string, now time.Time, max 
 		if powerW <= 0 {
 			continue
 		}
-		wh := powerW * float64(a.SlotLenMin) / 60.0
+		startMs := a.ExecutionStart()
+		wh := powerW * float64(endMs-startMs) / 3600000
 		totalWh += wh
-		start := time.UnixMilli(a.SlotStartMs)
+		start := time.UnixMilli(startMs)
 		end := time.UnixMilli(endMs)
 		if n := len(windows); n > 0 && windows[n-1].End.Equal(start) {
 			windows[n-1].End = end
@@ -704,7 +708,7 @@ func livePVSurplusSoCCap(actions []Action, current int, p Params) float64 {
 			a.SlotLenMin <= 0 {
 			continue
 		}
-		replaceableStoredWh += gridFundedChargeW * float64(a.SlotLenMin) / 60.0 * chargeEfficiency
+		replaceableStoredWh += gridFundedChargeW * a.DurationHours() * chargeEfficiency
 	}
 	if replaceableStoredWh <= 0 {
 		return 0
@@ -748,7 +752,7 @@ func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	nowMs := now.UnixMilli()
 	for _, a := range p.Actions {
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < end {
+		if nowMs >= a.ExecutionStart() && nowMs < end {
 			mode, gridW, ok := actionToSlot(a, params.Mode)
 			return mode, gridW, p.DecisionID, ok
 		}
@@ -922,7 +926,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < end {
+		if nowMs >= a.ExecutionStart() && nowMs < end {
 			slot = a
 			break
 		}
@@ -1371,7 +1375,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"err", err)
 		return s.Latest()
 	}
-	now := time.Now()
+	now := s.planningNow()
 	untilMs := now.Add(s.Horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
 
@@ -1514,6 +1518,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		p.InitialSoC = currentSoC(s.Tele, p.InitialSoC)
 	} else {
 		p.InitialSoC = 0
+	}
+
+	executionNow := s.planningNow()
+	if !trimFirstExecutionSlot(slots, executionNow) {
+		return s.expiredReplan(request)
+	}
+	if len(fallbackSlots) > 0 {
+		fallbackSlots[0].ExecutionStartMs = slots[0].ExecutionStartMs
 	}
 
 	// Export pricing is per-slot now: pass bonus/fee into Params so
@@ -1828,6 +1840,11 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"reason", request.reason)
 		return s.Latest()
 	}
+	if firstSlotExpired(plan.Actions, s.planningNow()) {
+		s.mu.Unlock()
+		return s.expiredReplan(request)
+	}
+
 	capPlanPVToNameplate(&plan, s.PVNameplateW)
 	capPlanLoad(&plan, 0, s.LoadMaxW)
 	plan.DecisionID = s.nextDecisionIDLocked()

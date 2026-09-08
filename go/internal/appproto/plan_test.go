@@ -186,3 +186,19 @@ func TestMeanPriceIsWeightedBySlotLength(t *testing.T) {
 		t.Fatalf("mean = %v, want %v", got, want)
 	}
 }
+
+func TestPlanProjectsOnlyRemainingExecutionInterval(t *testing.T) {
+	start := time.Date(2026, 9, 8, 4, 45, 0, 0, time.UTC)
+	p := samplePlan(start)
+	p.Actions[0].ExecutionStartMs = start.Add(748939 * time.Millisecond).UnixMilli()
+	out := planFrom(p, 1, nil, 0, start.Add(13*time.Minute))
+	if out.Slots[0].StartMs != p.Actions[0].ExecutionStartMs || out.Slots[0].DurationMs != 151061 {
+		t.Fatalf("whole price slot projected as execution: %+v", out.Slots[0])
+	}
+	if out.Slots[1].StartMs != p.Actions[1].SlotStartMs || out.Slots[1].DurationMs != 900000 {
+		t.Fatal("future price intervals changed")
+	}
+	if p.Actions[0].SlotStartMs != start.UnixMilli() || p.Actions[0].SlotLenMin != 15 {
+		t.Fatal("projection changed price identity")
+	}
+}
