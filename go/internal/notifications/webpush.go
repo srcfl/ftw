@@ -112,8 +112,17 @@ func NewWebPush(key VAPIDKey, store SubscriptionStore) (*WebPush, error) {
 	return &WebPush{
 		key:   key,
 		store: store,
-		http:  &http.Client{Timeout: 10 * time.Second},
-		now:   time.Now,
+		http: &http.Client{
+			Timeout: 10 * time.Second,
+			// Push services do not need redirects. A 307 or 308 would
+			// resend this body, so refuse every hop: a stored https
+			// endpoint must not bounce the encrypted payload onto the
+			// LAN or loopback.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		now: time.Now,
 	}, nil
 }
 
