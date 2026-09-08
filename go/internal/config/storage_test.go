@@ -394,12 +394,20 @@ func TestRecoveryCannotSubstituteAnotherConfigAtTheSameRevision(t *testing.T) {
 			}
 			firstSeed, firstDatabase = seed, database
 		} else {
-			// Simulate recovery replacing the file after Load but before open.
+			// Simulate recovery replacing both databases after Load but before open.
+			// A config-only replacement now fails even earlier on the history binding.
 			raw, err := os.ReadFile(database)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(firstDatabase, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			history, err := os.ReadFile(state.HistoryDatabasePath(database))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(state.HistoryDatabasePath(firstDatabase), history, 0600); err != nil {
 				t.Fatal(err)
 			}
 		}

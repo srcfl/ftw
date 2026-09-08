@@ -12,3 +12,8 @@ All contributions accepted during that period were submitted under the MIT
 License, which permits this relicensing. Those contributions remain available
 under the MIT License in the project's git history; their respective authors
 retain copyright in their contributions.
+
+Third-party software
+--------------------
+DuckDB and its linked native libraries carry separate license terms and
+notices. See THIRD-PARTY-NOTICES.txt in this distribution.

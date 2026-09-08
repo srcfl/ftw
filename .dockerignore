@@ -8,6 +8,10 @@
 !.dockerignore
 !LICENSE
 !NOTICE
+!THIRD-PARTY-NOTICES.txt
+!scripts/
+scripts/*
+!scripts/build-core.sh
 !go/
 !drivers/
 !web/

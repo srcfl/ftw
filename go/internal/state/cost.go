@@ -222,7 +222,7 @@ func (s *Store) loadPriceSlotsForRange(ctx context.Context, zone string, sinceMs
 // caller (DailyCostBreakdown applies the day's avg import).
 func (s *Store) integrateHistoryRange(ctx context.Context, sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
 	historyStartMs := sinceMs - maxCostIntegrationGap.Milliseconds()
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.history.QueryContext(ctx, `
 		WITH all_rows AS (
 			SELECT ts_ms,
 			       COALESCE(grid_w, 0) AS grid_w,
