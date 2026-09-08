@@ -389,8 +389,7 @@ func (h *Handler) OnConnect(id string) {
 	s.connectionGeneration++
 	s.connectedKnown = false
 	s.charging = false
-	s.lastPowerW = 0
-	s.forecastPower.Known = false
+	s.clearMeasuredPower()
 	s.identityCurrent = false
 	s.featureProfiles = ""
 	s.steerable = nil
@@ -416,8 +415,7 @@ func (h *Handler) OnDisconnect(id string) {
 	h.cancelIdentityProbeLocked(s)
 	s.connectedKnown = false
 	s.charging = false
-	s.lastPowerW = 0
-	s.forecastPower.Known = false
+	s.clearMeasuredPower()
 	h.mu.Unlock()
 	// Push a zero so the dispatch clamp releases — otherwise the last known
 	// non-zero w would survive until staleness kicks in.
@@ -488,6 +486,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 	case core.ChargePointStatusAvailable, core.ChargePointStatusUnavailable:
 		s.connected = false
 		s.charging = false
+		s.clearMeasuredPower()
 	case core.ChargePointStatusPreparing,
 		core.ChargePointStatusFinishing,
 		core.ChargePointStatusSuspendedEV,
@@ -501,6 +500,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 	case core.ChargePointStatusFaulted:
 		s.connected = true
 		s.charging = false
+		s.clearMeasuredPower()
 	}
 	h.mu.Unlock()
 
@@ -521,6 +521,11 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 	h.mu.Lock()
 	received := time.Now()
 	for _, mv := range req.MeterValue {
+		measured := received
+		if mv.Timestamp != nil {
+			measured = mv.Timestamp.Time
+		}
+		var samples []powerSample
 		for _, sv := range mv.SampledValue {
 			measurand := sv.Measurand
 			// OCPP 1.6 default measurand if unspecified.
@@ -533,17 +538,13 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 			}
 			switch measurand {
 			case types.MeasurandPowerActiveImport:
+				if sv.Unit != "" && sv.Unit != types.UnitOfMeasureW && sv.Unit != types.UnitOfMeasureKW {
+					continue
+				}
 				if sv.Unit == types.UnitOfMeasureKW {
 					val *= 1000
 				}
-				s.lastPowerW = val
-				if sv.Phase == "" && (sv.Unit == "" || sv.Unit == types.UnitOfMeasureW || sv.Unit == types.UnitOfMeasureKW) {
-					measured := received
-					if mv.Timestamp != nil {
-						measured = mv.Timestamp.Time
-					}
-					s.recordForecastPower(val, measured, received)
-				}
+				samples = append(samples, powerSample{w: val, phase: string(sv.Phase)})
 			case types.MeasurandEnergyActiveImportRegister:
 				if sv.Unit == types.UnitOfMeasureKWh {
 					val *= 1000
@@ -552,6 +553,9 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 					s.sessionMeterWh = val - s.sessionStartMeterWh
 				}
 			}
+		}
+		if w, ok := meterPowerW(samples); ok {
+			s.recordPower(w, measured, received)
 		}
 	}
 	h.mu.Unlock()
@@ -593,8 +597,7 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 	sessionWh := float64(req.MeterStop) - s.sessionStartMeterWh
 	s.transactionID = -1
 	s.charging = false
-	s.lastPowerW = 0
-	s.forecastPower.Known = false
+	s.clearMeasuredPower()
 	s.sessionMeterWh = sessionWh
 	h.mu.Unlock()
 
@@ -652,13 +655,54 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 	h.tel.Update(id, telemetry.DerEV, w, nil, blob)
 }
 
-// recordForecastPower is separate from the existing status/dispatch power.
-// Only a real aggregate power measurand may refresh it. Samples older than a
-// connection or the accepted sample, and future/nonfinite values, cannot revive
-// a stale or synthesized reading. The caller holds h.mu.
-func (s *chargerState) recordForecastPower(w float64, measured, received time.Time) {
-	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 || measured.IsZero() || measured.After(received) || measured.Before(s.powerConnectedAt) || measured.UnixMilli() <= s.forecastPower.MeasuredAtMS {
-		return
+// powerSample is one Power.Active.Import after unit conversion. An empty phase
+// is the charger total; anything else is one phase of that total.
+type powerSample struct {
+	w     float64
+	phase string
+}
+
+// meterPowerW picks one watts value for a MeterValue: the unphased total when
+// present, otherwise the sum of finite, non-negative phase samples.
+func meterPowerW(samples []powerSample) (float64, bool) {
+	var total, sum float64
+	hasTotal, hasPhase := false, false
+	for _, s := range samples {
+		if math.IsNaN(s.w) || math.IsInf(s.w, 0) || s.w < 0 {
+			continue
+		}
+		if s.phase == "" {
+			total = s.w
+			hasTotal = true
+		} else {
+			sum += s.w
+			hasPhase = true
+		}
 	}
+	if hasTotal {
+		return total, true
+	}
+	if hasPhase {
+		return sum, true
+	}
+	return 0, false
+}
+
+// recordPower is the shared accept rule for forecast and dispatch lastPowerW.
+// Present, unphased-or-summed, finite, >= 0, and not older than the last
+// accepted timestamp. Samples from before this socket or in the future cannot
+// revive a stale or synthesized reading. The caller holds h.mu.
+func (s *chargerState) recordPower(w float64, measured, received time.Time) bool {
+	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 || measured.IsZero() || measured.After(received) || measured.Before(s.powerConnectedAt) || measured.UnixMilli() <= s.forecastPower.MeasuredAtMS {
+		return false
+	}
+	s.lastPowerW = w
 	s.forecastPower = telemetry.ForecastPowerSample{Version: 1, Known: true, Watts: w, MeasuredAtMS: measured.UnixMilli(), ReceivedAtMS: received.UnixMilli()}
+	return true
+}
+
+// clearMeasuredPower zeros dispatch watts without recording a measured sample.
+func (s *chargerState) clearMeasuredPower() {
+	s.lastPowerW = 0
+	s.forecastPower.Known = false
 }

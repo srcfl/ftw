@@ -102,8 +102,7 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 	case availability.ConnectorStatusAvailable, availability.ConnectorStatusUnavailable:
 		s.connected = false
 		s.charging = false
-		s.lastPowerW = 0
-		s.forecastPower.Known = false
+		s.clearMeasuredPower()
 	case availability.ConnectorStatusOccupied, availability.ConnectorStatusReserved:
 		s.connected = true
 		s.connectedKnown = true
@@ -113,8 +112,7 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 		s.connected = true
 		s.connectedKnown = true
 		s.charging = false
-		s.lastPowerW = 0
-		s.forecastPower.Known = false
+		s.clearMeasuredPower()
 	}
 	faulted := req.ConnectorStatus == availability.ConnectorStatusFaulted
 	h.mu.Unlock()
@@ -140,9 +138,13 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 	s := h.state(id)
 
 	// Meter samples ride along with every event type.
-	powerW, energyWh, hasEnergy := sampledValuesV201(req.MeterValue)
+	energyWh, hasEnergy := sampledEnergyV201(req.MeterValue)
 
 	h.mu.Lock()
+	acceptedPower := false
+	if req.EventType != transactions.TransactionEventEnded {
+		acceptedPower = s.recordPowerV201(req.MeterValue, time.Now())
+	}
 	switch req.EventType {
 	case transactions.TransactionEventStarted:
 		// 2.0.1 transaction ids are strings; the shared state keeps an int for
@@ -164,8 +166,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 			s.sessionMeterWh = energyWh - s.sessionStartMeterWh
 		}
 		// A zero power sample during a live transaction is a genuine pause,
-		// not a missing reading, so it is taken at face value.
-		s.charging = powerW > 0
+		// not a missing reading. Energy/current without power keeps last watts.
+		if acceptedPower {
+			s.charging = s.lastPowerW > 0
+		}
 
 	case transactions.TransactionEventEnded:
 		if hasEnergy {
@@ -174,15 +178,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		s.transactionID = -1
 		s.transactionRef = ""
 		s.charging = false
-		s.lastPowerW = 0
-		s.forecastPower.Known = false
-		powerW = 0
+		s.clearMeasuredPower()
 	}
 
-	if req.EventType != transactions.TransactionEventEnded {
-		s.lastPowerW = powerW
-	}
-	s.recordForecastPowerV201(req.MeterValue, time.Now())
+	powerW := s.lastPowerW
 	sessionWh := s.sessionMeterWh
 	ended := req.EventType == transactions.TransactionEventEnded
 	h.mu.Unlock()
@@ -210,11 +209,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 
 func (h *handlerV201) OnMeterValues(id string, req *meter.MeterValuesRequest) (*meter.MeterValuesResponse, error) {
 	s := h.state(id)
-	powerW, energyWh, hasEnergy := sampledValuesV201(req.MeterValue)
+	energyWh, hasEnergy := sampledEnergyV201(req.MeterValue)
 
 	h.mu.Lock()
-	s.lastPowerW = powerW
-	s.recordForecastPowerV201(req.MeterValue, time.Now())
+	s.recordPowerV201(req.MeterValue, time.Now())
 	if hasEnergy && s.transactionID >= 0 {
 		s.sessionMeterWh = energyWh - s.sessionStartMeterWh
 	}
@@ -237,33 +235,29 @@ func (h *handlerV201) OnAuthorize(id string, _ *authorization.AuthorizeRequest) 
 	}), nil
 }
 
-// sampledValuesV201 pulls active-import power and energy out of a 2.0.1 meter
-// value set, normalising kW/kWh to W/Wh.
+// sampledEnergyV201 pulls active-import energy out of a 2.0.1 meter value set,
+// normalising kWh to Wh. Power goes through recordPowerV201 so a missing
+// measurand cannot write 0 W.
 //
 // 2.0.1 always states the measurand, so unlike 1.6 there is no default to
 // assume. hasEnergy distinguishes "no energy sample in this batch" from a
 // genuine zero reading, which matters because session energy is a difference
 // against the transaction's starting register.
-func sampledValuesV201(values []types201.MeterValue) (powerW, energyWh float64, hasEnergy bool) {
+func sampledEnergyV201(values []types201.MeterValue) (energyWh float64, hasEnergy bool) {
 	for _, mv := range values {
 		for _, sv := range mv.SampledValue {
-			val := sv.Value
-			switch sv.Measurand {
-			case types201.MeasurandPowerActiveImport:
-				if unitIsKilo(sv.UnitOfMeasure) {
-					val *= 1000
-				}
-				powerW = val
-			case types201.MeasurandEnergyActiveImportRegister:
-				if unitIsKilo(sv.UnitOfMeasure) {
-					val *= 1000
-				}
-				energyWh = val
-				hasEnergy = true
+			if sv.Measurand != types201.MeasurandEnergyActiveImportRegister {
+				continue
 			}
+			val := sv.Value
+			if unitIsKilo(sv.UnitOfMeasure) {
+				val *= 1000
+			}
+			energyWh = val
+			hasEnergy = true
 		}
 	}
-	return powerW, energyWh, hasEnergy
+	return energyWh, hasEnergy
 }
 
 // unitIsKilo reports whether a sample is expressed in kW or kWh. An absent unit
@@ -280,10 +274,12 @@ func unitIsKilo(u *types201.UnitOfMeasure) bool {
 	}
 }
 
-func (s *chargerState) recordForecastPowerV201(values []types201.MeterValue, received time.Time) {
+func (s *chargerState) recordPowerV201(values []types201.MeterValue, received time.Time) bool {
+	accepted := false
 	for _, mv := range values {
+		var samples []powerSample
 		for _, sv := range mv.SampledValue {
-			if sv.Measurand != types201.MeasurandPowerActiveImport || sv.Phase != "" {
+			if sv.Measurand != types201.MeasurandPowerActiveImport {
 				continue
 			}
 			w := sv.Value
@@ -298,11 +294,19 @@ func (s *chargerState) recordForecastPowerV201(values []types201.MeterValue, rec
 					w *= math.Pow10(*unit.Multiplier)
 				}
 			}
-			measured := mv.Timestamp.Time
-			if measured.IsZero() {
-				measured = received
-			}
-			s.recordForecastPower(w, measured, received)
+			samples = append(samples, powerSample{w: w, phase: string(sv.Phase)})
+		}
+		w, ok := meterPowerW(samples)
+		if !ok {
+			continue
+		}
+		measured := mv.Timestamp.Time
+		if measured.IsZero() {
+			measured = received
+		}
+		if s.recordPower(w, measured, received) {
+			accepted = true
 		}
 	}
+	return accepted
 }
