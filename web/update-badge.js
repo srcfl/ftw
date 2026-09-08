@@ -71,6 +71,11 @@
       this._driverVersions = {};
       this._componentAction = "";
       this._connected = true;         // header liveness light; see setConnected()
+      this._bootHealth = null;
+      this._bootConnected = true;
+      this._migrationHTML = "";
+      this._checkingCurrentRun = false;
+      this._resumeGeneration = 0;
       this._render();
     }
 
@@ -87,9 +92,11 @@
     }
 
     _resumeUpdateStatus() {
-      apiFetch("/api/version/update/status", { cache: "no-store" })
+      const generation = this._resumeGeneration;
+      return apiFetch("/api/version/update/status", { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
+          if (!this.isConnected || generation !== this._resumeGeneration) return;
           if (!st || !isUpdateInFlight(st.state) || this._phase === "updating") return;
           const started = st.started_at ? Date.parse(st.started_at) : 0;
           this._phase = "updating";
@@ -109,6 +116,7 @@
     }
 
     disconnectedCallback() {
+      this._resumeGeneration += 1;
       this._removeDialog();
       clearInterval(this._checkTimer);
       clearTimeout(this._errorRetryTimer);
@@ -131,13 +139,52 @@
       this._render();
     }
 
+    setBootHealth(health) {
+      const wasStarting = !!this._bootHealth;
+      this._bootConnected = !!health;
+      if (health && health.status !== "starting") {
+        this._bootHealth = null;
+        this._migrationHTML = "";
+        if (wasStarting) {
+          if (!this._expectedRun && this._phase === "updating") {
+            this._phase = "dialog";
+            this._stopUpdateTimers();
+          }
+          this._refresh(false);
+          this._render();
+        }
+        return;
+      }
+      if (health) this._bootHealth = health;
+      if (!this._bootHealth) return;
+      const snapshot = this._bootHealth;
+      const connected = this._bootConnected;
+      import("/history-migration.js").then(({ migrationHTML }) => {
+        if (this._bootHealth !== snapshot || this._bootConnected !== connected) return;
+        this._migrationHTML = migrationHTML(snapshot.migration, { boot: true, connected });
+        this._render();
+      }).catch(() => {});
+      this._render();
+    }
+
     // Public: called by the header #version click handler in index.html so
     // the operator can open the modal without aiming at the tiny dot. No-op
     // when the backend has told us the feature is gated off.
     open() {
       if (this._disabled) return;
+      if (this._phase === "updating" || this._bootHealth) {
+        this._phase = "updating";
+        this._render();
+        this._startStatusPolling();
+        return;
+      }
       this._phase = "dialog";
+      this._checkingCurrentRun = true;
       this._render();
+      this._resumeUpdateStatus().finally(() => {
+        this._checkingCurrentRun = false;
+        this._render();
+      });
       this._refresh(false); // surface the freshest info when opened
       this._refreshSnapshots(); // pull the list for the Snapshots accordion
       this._refreshBackups();
@@ -386,9 +433,8 @@
 
     // Permanently shut the element down: stop polling, clear shadow DOM, hide
     // from layout, and fire an event so the #version bridge can drop its
-    // cursor/pointer affordance. Called when the backend returns 503, which
-    // means the feature is gated off (FTW_SELFUPDATE_ENABLED unset) — not a
-    // transient error, so we don't ever retry.
+    // cursor/pointer affordance. Only an explicit feature-disabled response
+    // does this; the same 503 status also occurs during normal startup.
     _disable() {
       if (this._disabled) return;
       this._disabled = true;
@@ -406,16 +452,17 @@
       if (this._disabled) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
       apiFetch(url)
-        .then((r) => {
-          // 503 = feature disabled by the backend. Stop polling and get out
-          // of the way entirely — this is deployment config, not a bug.
-          if (r.status === 503) {
+        .then(async (r) => {
+          const body = await r.json().catch(() => null);
+          if (r.status === 503 && body?.error === "starting") {
+            this.setBootHealth({ status: "starting", migration: body.migration });
+            return null;
+          }
+          if (r.status === 503 && body?.error === "self-update disabled") {
             this._disable();
             return null;
           }
-          return r.json()
-            .then((body) => ({ ok: r.ok, body }))
-            .catch(() => ({ ok: r.ok, body: null }));
+          return { ok: r.ok, body };
         })
         .then((result) => {
           if (!result) return; // disabled, nothing to render
@@ -493,6 +540,7 @@
     }
 
     _beginUpdate(action) {
+      if (this._phase === "updating" || this._checkingCurrentRun || this._bootHealth) return;
       this._phase = "updating";
       this._updateStartedAt = Date.now();
       this._updateOriginalVersion = this._info ? this._info.current : null;
@@ -510,6 +558,10 @@
       this._postJSON(url, null)
         .then((resp) => {
           if (!resp.ok) {
+            if (resp.body?.error === "starting") {
+              this.setBootHealth({ status: "starting", migration: resp.body.migration });
+              return;
+            }
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
             this._stopUpdateTimers();
             this._render();
@@ -566,6 +618,7 @@
       apiFetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
+          if (this._phase !== "updating" || !this.isConnected) return;
           if (st && this._statusMatchesCurrentRun(st)) {
             const keepTimeout = this._sidecarState && this._sidecarState.timedOut &&
               this._sidecarState.state === st.state &&
@@ -605,6 +658,7 @@
     }
 
     _markSoftTimeout() {
+      if (this._bootHealth) return false;
       const timeoutMs = this._sidecarState && this._sidecarState.state === "snapshotting"
         ? SNAPSHOT_SOFT_TIMEOUT_MS
         : UPDATE_SOFT_TIMEOUT_MS;
@@ -728,6 +782,7 @@
       if (storage) this._storageOpen = storage.open;
       const previous = this._dialogRoot && this._dialogRoot.querySelector(".modal");
       const scrollTop = previous && this._phase === "dialog" ? previous.scrollTop : 0;
+      const focusedAction = this._dialogRoot?.activeElement?.dataset?.action;
 
       if (!this._dialogHost) {
         // The mobile menu hides the badge's ancestors. Keep the dialog at page level.
@@ -740,6 +795,10 @@
       this._wireModal(this._dialogRoot);
       const modal = this._dialogRoot.querySelector(".modal");
       if (modal) modal.scrollTop = scrollTop;
+      if (focusedAction) {
+        const button = [...this._dialogRoot.querySelectorAll("[data-action]")].find(el => el.dataset.action === focusedAction);
+        if (button && !button.disabled) button.focus({ preventScroll:true });
+      }
     }
 
     _modalHTML() {
@@ -768,11 +827,11 @@
       const actions = hasUpdate
         ? `
             <button class="btn btn-ghost" data-action="skip">Skip this version</button>
-            <button class="btn btn-ghost" data-action="restart">Restart</button>
-            <button class="btn btn-primary" data-action="update">Update Core to ${escapeHTML(info.latest || "")}</button>
+            <button class="btn btn-ghost" data-action="restart" ${this._checkingCurrentRun ? "disabled" : ""}>Restart</button>
+            <button class="btn btn-primary" data-action="update" ${this._checkingCurrentRun ? "disabled" : ""}>Update Core to ${escapeHTML(info.latest || "")}</button>
           `
         : `
-            <button class="btn btn-ghost" data-action="restart">Restart</button>
+            <button class="btn btn-ghost" data-action="restart" ${this._checkingCurrentRun ? "disabled" : ""}>Restart</button>
             <button class="btn" data-action="check">Check for updates</button>
           `;
 
@@ -813,6 +872,7 @@
           </header>
           <div class="body">
             <div class="status-line">
+              ${this._checkingCurrentRun ? '<p role="status">Checking for work already in progress…</p>' : ""}
               <p class="subtitle">${escapeHTML(subtitle)}</p>
               <p class="checked-at">${escapeHTML(checkedLine)}</p>
             </div>
@@ -1072,6 +1132,14 @@
     }
 
     _updatingModalHTML() {
+      if (this._bootHealth) {
+        return `<div class="backdrop"></div><div class="modal" role="dialog" aria-modal="true" aria-labelledby="boot-title">
+          <header><h3 id="boot-title">Starting FTW</h3></header><div class="body">
+          ${this._migrationHTML || '<p>Core is preparing to start. Control has not started yet.</p><p>Keep the box powered. This page checks progress automatically.</p>'}
+          <p class="dim">${this._bootConnected ? "The box is responding." : "Cannot reach the box. The last report may be out of date."}</p>
+          </div><footer><button class="btn btn-primary" data-action="reload">Reload status</button>
+          <span class="dim">Reloading this page does not restart the box.</span></footer></div>`;
+      }
       const st = this._sidecarState || { state: "starting" };
       const action = st.action || "update";
       const elapsed = Math.round((Date.now() - this._updateStartedAt) / 1000);
@@ -1106,7 +1174,7 @@
       const footer = failed || timedOut
         ? `<button class="btn btn-primary" data-action="reload">Reload page</button>
            <button class="btn btn-ghost" data-action="close">Dismiss</button>`
-        : `<span class="dim">Don't close this tab.</span>`;
+        : `<span class="dim">Keep the box powered. You can reopen this page to check progress.</span>`;
 
       let title;
       switch (action) {
@@ -1156,6 +1224,7 @@
           const action = e.currentTarget.dataset.action;
           switch (action) {
             case "close":
+              this._resumeGeneration += 1;
               this._phase = "idle";
               this._stopUpdateTimers();
               this._render();

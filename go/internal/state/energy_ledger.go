@@ -128,7 +128,7 @@ func validEnergyFlow(flow EnergyFlow) bool {
 
 func (s *Store) ensureEnergyLedgerVersion() error {
 	var raw string
-	if err := s.db.QueryRow(`SELECT value FROM energy_ledger_meta WHERE key = 'schema_version'`).Scan(&raw); err != nil {
+	if err := s.history.QueryRow(`SELECT value FROM energy_ledger_meta WHERE key = 'schema_version'`).Scan(&raw); err != nil {
 		return fmt.Errorf("energy ledger schema version: %w", err)
 	}
 	version, err := strconv.Atoi(raw)
@@ -169,7 +169,7 @@ func recordEnergyObservationsTx(tx *sql.Tx, observations []EnergyObservation) er
 			device_id = CASE WHEN excluded.device_id <> '' THEN excluded.device_id ELSE energy_assets.device_id END,
 			kind = excluded.kind, label = excluded.label,
 			read_only = excluded.read_only,
-			last_seen_ms = MAX(energy_assets.last_seen_ms, excluded.last_seen_ms)`,
+			last_seen_ms = GREATEST(energy_assets.last_seen_ms, excluded.last_seen_ms)`,
 			o.AssetID, o.DeviceID, o.AssetKind, o.Label, readOnly, o.AtMs, o.AtMs); err != nil {
 			return fmt.Errorf("upsert energy asset: %w", err)
 		}
@@ -345,14 +345,14 @@ func upsertLedgerEntry(tx *sql.Tx, o EnergyObservation, bucketStart int64, energ
 	ON CONFLICT(schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, source, quality, provenance)
 	DO UPDATE SET energy_wh = energy_ledger_entries.energy_wh + excluded.energy_wh,
 		sample_count = energy_ledger_entries.sample_count + 1,
-		observed_at_ms = MAX(energy_ledger_entries.observed_at_ms, excluded.observed_at_ms)`,
+		observed_at_ms = GREATEST(energy_ledger_entries.observed_at_ms, excluded.observed_at_ms)`,
 		EnergyLedgerSchemaVersion, o.AssetID, o.Flow, bucketStart, EnergyLedgerBucketMS,
 		energyWh, source, quality, provenance, o.AtMs)
 	return err
 }
 
 func (s *Store) EnergyAssets() ([]EnergyAsset, error) {
-	rows, err := s.db.Query(`SELECT asset_id, device_id, kind, label, read_only,
+	rows, err := s.history.Query(`SELECT asset_id, device_id, kind, label, read_only,
 		first_seen_ms, last_seen_ms FROM energy_assets ORDER BY kind, asset_id`)
 	if err != nil {
 		return nil, err
@@ -385,13 +385,13 @@ func (s *Store) LoadEnergyHistoryContext(ctx context.Context, q EnergyHistoryQue
 		return nil, false, errors.New("invalid energy history bounds")
 	}
 	assetID := q.AssetID
-	rows, err := s.db.QueryContext(ctx, `WITH aggregated AS (
+	rows, err := s.history.QueryContext(ctx, `WITH aggregated AS (
 		SELECT
 			? AS schema_version,
 			CASE WHEN ? = '' THEN 'system' ELSE asset_id END AS result_asset_id,
 			flow,
 			CASE WHEN bucket_len_ms > ? THEN bucket_start_ms
-				ELSE ? + ((bucket_start_ms - ?) / ?) * ? END AS result_bucket_start,
+				ELSE ? + ((bucket_start_ms - ?) // ?) * ? END AS result_bucket_start,
 			CASE WHEN bucket_len_ms > ? THEN bucket_len_ms ELSE ? END AS result_bucket_len,
 			SUM(energy_wh) AS energy_wh,
 			source, quality, provenance, SUM(sample_count) AS sample_count
@@ -452,7 +452,7 @@ func (s *Store) PruneEnergyLedger(ctx context.Context, now time.Time) (rolled, e
 	rollupCutoff = (rollupCutoff / EnergyLedgerRollupBucketMS) * EnergyLedgerRollupBucketMS
 	for {
 		var minTS sql.NullInt64
-		if err := s.db.QueryRowContext(ctx, `SELECT MIN(bucket_start_ms)
+		if err := s.history.QueryRowContext(ctx, `SELECT MIN(bucket_start_ms)
 			FROM energy_ledger_entries
 			WHERE bucket_len_ms < ? AND bucket_start_ms < ?`,
 			EnergyLedgerRollupBucketMS, rollupCutoff).Scan(&minTS); err != nil {
@@ -476,7 +476,7 @@ func (s *Store) PruneEnergyLedger(ctx context.Context, now time.Time) (rolled, e
 	expireCutoff := now.UnixMilli() - EnergyLedgerRetention.Milliseconds()
 	for {
 		var minTS sql.NullInt64
-		if err := s.db.QueryRowContext(ctx, `SELECT MIN(bucket_start_ms)
+		if err := s.history.QueryRowContext(ctx, `SELECT MIN(bucket_start_ms)
 			FROM energy_ledger_entries WHERE bucket_start_ms < ?`, expireCutoff).Scan(&minTS); err != nil {
 			return rolled, expired, err
 		}
@@ -487,8 +487,10 @@ func (s *Store) PruneEnergyLedger(ctx context.Context, now time.Time) (rolled, e
 		if chunkEnd <= minTS.Int64 {
 			chunkEnd = minTS.Int64 + EnergyLedgerRollupBucketMS
 		}
-		res, err := s.db.ExecContext(ctx, `DELETE FROM energy_ledger_entries
+		s.historyWriteMu.Lock()
+		res, err := s.history.ExecContext(ctx, `DELETE FROM energy_ledger_entries
 			WHERE bucket_start_ms >= ? AND bucket_start_ms < ?`, minTS.Int64, chunkEnd)
+		s.historyWriteMu.Unlock()
 		if err != nil {
 			return rolled, expired, err
 		}
@@ -499,7 +501,9 @@ func (s *Store) PruneEnergyLedger(ctx context.Context, now time.Time) (rolled, e
 }
 
 func (s *Store) rollupEnergyLedgerChunk(ctx context.Context, fromMS, toMS int64) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -509,20 +513,19 @@ func (s *Store) rollupEnergyLedgerChunk(ctx context.Context, fromMS, toMS int64)
 		energy_wh, source, quality, provenance, sample_count, observed_at_ms
 	)
 	SELECT schema_version, asset_id, flow,
-		(bucket_start_ms / ?) * ?, ?, SUM(energy_wh), source, quality, provenance,
+		(bucket_start_ms // ?) * ?, ?, SUM(energy_wh), source, quality, provenance,
 		SUM(sample_count), MAX(observed_at_ms)
 	FROM energy_ledger_entries
 	WHERE bucket_len_ms < ? AND bucket_start_ms >= ? AND bucket_start_ms < ?
 	GROUP BY schema_version, asset_id, flow,
-		(bucket_start_ms / ?) * ?, source, quality, provenance
+		4, source, quality, provenance
 	ON CONFLICT(schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, source, quality, provenance)
 	DO UPDATE SET
 		energy_wh = energy_ledger_entries.energy_wh + excluded.energy_wh,
 		sample_count = energy_ledger_entries.sample_count + excluded.sample_count,
-		observed_at_ms = MAX(energy_ledger_entries.observed_at_ms, excluded.observed_at_ms)`,
+		observed_at_ms = GREATEST(energy_ledger_entries.observed_at_ms, excluded.observed_at_ms)`,
 		EnergyLedgerRollupBucketMS, EnergyLedgerRollupBucketMS, EnergyLedgerRollupBucketMS,
-		EnergyLedgerRollupBucketMS, fromMS, toMS,
-		EnergyLedgerRollupBucketMS, EnergyLedgerRollupBucketMS); err != nil {
+		EnergyLedgerRollupBucketMS, fromMS, toMS); err != nil {
 		return 0, err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM energy_ledger_entries

@@ -37,7 +37,7 @@ func decodeConfiguration(raw string) (Configuration, error) {
 // ReadConfiguration opens the existing database without creating, migrating or
 // healing it. A missing or unreadable authority must never fall back to YAML.
 func ReadConfiguration(path string) (Configuration, error) {
-	db, err := sql.Open("sqlite", readOnlyDatabaseURI(path))
+	db, err := sql.Open("sqlite", ReadOnlyDatabaseURI(path))
 	if err != nil {
 		return Configuration{}, err
 	}
@@ -49,7 +49,8 @@ func ReadConfiguration(path string) (Configuration, error) {
 	return decodeConfiguration(raw)
 }
 
-func readOnlyDatabaseURI(path string) string {
+// ReadOnlyDatabaseURI encodes a local SQLite path, including Windows drives.
+func ReadOnlyDatabaseURI(path string) string {
 	path = filepath.ToSlash(path)
 	if strings.HasPrefix(path, "//?/UNC/") {
 		path = "//" + strings.TrimPrefix(path, "//?/UNC/")

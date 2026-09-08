@@ -37,7 +37,7 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - multi-battery allocation with fuse, SoC, slew and stale-data protection;
 - price-, weather-, PV- and load-aware planning;
 - EV charging, V2X and thermal planning;
-- local web UI, SQLite history and Parquet rolloff;
+- local web UI, DuckDB history and SQLite configuration;
 - Home Assistant MQTT discovery;
 - hot-reloadable, independently released Lua drivers;
 - a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.

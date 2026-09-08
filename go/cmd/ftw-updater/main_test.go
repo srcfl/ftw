@@ -647,7 +647,7 @@ func TestHandleUpdate_RestartKeepsEveryRunningImage(t *testing.T) {
 			s, runner := newTestServer(t)
 			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: "+tc.image+"\n")
 			writeCompose(t, filepath.Join(filepath.Dir(s.composeFile), ".env"), "FTW_IMAGE_TAG=v2.0.0-beta.2\n")
-			s.imageRef = func(context.Context, string) (string, error) {
+			s.imageID = func(context.Context, string) (string, error) {
 				t.Error("restart must not resolve an image")
 				return "", errors.New("inspect unavailable")
 			}
@@ -1214,25 +1214,6 @@ func TestSelectMainServiceRejectsAmbiguousDataOwners(t *testing.T) {
 	}
 }
 
-func TestImageTagFromReferenceAcceptsOnlyImmutableReleaseTags(t *testing.T) {
-	for _, tc := range []struct {
-		ref  string
-		want string
-		ok   bool
-	}{
-		{ref: "ghcr.io/srcfl/ftw:v2.0.0-beta.7", want: "v2.0.0-beta.7", ok: true},
-		{ref: "ghcr.io/srcfl/ftw:v2.0.0", want: "v2.0.0", ok: true},
-		{ref: "ghcr.io/srcfl/ftw:latest"},
-		{ref: "ghcr.io/srcfl/ftw@sha256:deadbeef"},
-		{ref: "ghcr.io/srcfl/ftw"},
-	} {
-		got, ok := imageTagFromReference(tc.ref)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("imageTagFromReference(%q) = %q, %v; want %q, %v", tc.ref, got, ok, tc.want, tc.ok)
-		}
-	}
-}
-
 func TestRecoverCrashedState(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.writeState(State{State: "pulling", UpdatedAt: time.Now()})
@@ -1284,5 +1265,46 @@ func TestContainerIDsFromDockerPS_IgnoresNoiseAndDedupes(t *testing.T) {
 	// Single clean ID (common happy path).
 	if got := containerIDsFromDockerPS(id + "\n"); len(got) != 1 || got[0] != id {
 		t.Fatalf("clean id = %v", got)
+	}
+}
+
+func TestUpdateReadinessFailureNeverRevertsImage(t *testing.T) {
+	for _, healthErr := range []error{context.DeadlineExceeded, errors.New("container status is unhealthy")} {
+		t.Run(healthErr.Error(), func(t *testing.T) {
+			s, runner := newTestServer(t)
+			s.healthCheck = func(ctx context.Context, _ string) error {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) < 5*time.Hour {
+					t.Error("migration got less than the Core startup budget")
+				}
+				if st := s.readState(); st.State != "checking" || st.PreviousImageID != "sha256:current" {
+					t.Errorf("missing in-flight image history: %+v", st)
+				}
+				return healthErr
+			}
+			s.selfReplace = func(string) error { t.Error("replaced updater before Core became ready"); return nil }
+			s.runJob("update", "v3.2.0-beta.2")
+			st := s.readState()
+			if st.State != "failed" || st.Target != "v3.2.0-beta.2" || st.PreviousImageID != "sha256:current" || !strings.Contains(st.Message, "verified full backup") {
+				t.Fatalf("state=%+v", st)
+			}
+			calls := runner.snapshot()
+			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "pull ftw") || !strings.Contains(strings.Join(calls[1], " "), "up -d ftw") {
+				t.Fatalf("readiness failure changed the running image: %v", calls)
+			}
+		})
+	}
+}
+
+func TestInterruptedUpdateRetainsImageHistoryWithoutTouchingCore(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.writeState(State{State: "checking", Action: "update", Component: "core", Target: "v3.2.0-beta.2", PreviousImageID: "sha256:before", Message: "Waiting for the new service to become ready"})
+	s.recoverCrashedState()
+	st := s.readState()
+	if st.State != "failed" || st.PreviousImageID != "sha256:before" || !strings.Contains(st.Message, "Core and data were left in place") {
+		t.Fatalf("state=%+v", st)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("restart changed Core: %v", calls)
 	}
 }

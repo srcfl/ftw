@@ -4,6 +4,11 @@
   "use strict";
 
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
+  const historyMigrationUI = import("/history-migration.js").catch(function () { return null; });
+  function updateHistoryMigration(health) {
+    historyMigrationUI.then(function (ui) { if (ui) ui.updateMigrationBanner(health); }).catch(function () {});
+    if (updateBadge && typeof updateBadge.setBootHealth === "function") updateBadge.setBootHealth(health);
+  }
 
   // Prices arrive as minor units per kWh; what to call them depends on the
   // configured currency. window.FTWUnits is set when
@@ -2200,13 +2205,21 @@
   function fetchStatus() {
     return Promise.all([
       boundedApiRead("/api/status", function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          var error = new Error("HTTP " + r.status);
+          error.starting = body.error === "starting";
+          throw error;
+        });
         return r.json();
       }),
       boundedApiRead("/api/loadpoints", function (r) { return r.ok ? r.json() : null; })
         .catch(function () { return null; }),
       boundedApiRead("/api/health", function (r) { return r.ok ? r.json() : null; })
-        .catch(function () { return null; }),
+        .catch(function () { return null; })
+        .then(function (health) {
+          updateHistoryMigration(health);
+          return health;
+        }),
     ])
       .then(function (results) {
         var data = results[0];
@@ -2243,7 +2256,7 @@
         console.warn("status fetch failed:", e);
         updateChargingNotice(null);
         setConnected(false);
-        if (firstLoad) { showSetupBanner(); }
+        if (firstLoad && !e.starting) { showSetupBanner(); }
       });
   }
 

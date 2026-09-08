@@ -14,7 +14,7 @@ func TestDailyCostBreakdownContextCancelsWaitingRead(t *testing.T) {
 			s := freshStore(t)
 			db := s.cache
 			if database == "history" {
-				db = s.db
+				db = s.history
 			}
 			// Hold the whole pool, so the request must wait for an actual
 			// database connection rather than a timing-dependent SQLite lock.
