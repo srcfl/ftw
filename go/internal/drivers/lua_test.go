@@ -155,6 +155,44 @@ end
 	}
 }
 
+func TestLuaLegacyPollHonorsContextAndDefaultCanRunAfterCancel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "poll-loop.lua")
+	src := `
+function driver_poll()
+    host.emit_metric("poll_started", 1)
+    while true do end
+end
+function driver_default_mode()
+    host.emit_metric("default_called", 1)
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	d, err := NewLuaDriver(path, NewHostEnv("poll-loop", tel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, err = d.Poll(ctx)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("cancellable legacy poll error = %v, want context deadline exceeded", err)
+	}
+	if got, _, ok := tel.LatestMetric("poll-loop", "poll_started"); !ok || got != 1 {
+		t.Fatalf("poll started metric = %v/%v, want 1", got, ok)
+	}
+	if err := d.DefaultModeContext(context.Background()); err != nil {
+		t.Fatalf("default after cancelled poll: %v", err)
+	}
+	if got, _, ok := tel.LatestMetric("poll-loop", "default_called"); !ok || got != 1 {
+		t.Fatalf("default metric = %v/%v, want 1", got, ok)
+	}
+}
+
 type luaKindTestModbus struct {
 	called bool
 }
