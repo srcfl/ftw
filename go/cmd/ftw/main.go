@@ -446,11 +446,10 @@ func main() {
 	bootPolicy.VerifyLANSecret = lanAuth.Verify
 	boot := newBootPhaseHandler(*webDir)
 	apiHandler := newSwappableHandler(boot)
-	httpSrv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           api.WithSecurityHeaders(api.Authenticate(apiHandler, bootPolicy)),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	httpSrv := newHTTPServer(
+		fmt.Sprintf(":%d", cfg.API.Port),
+		api.WithSecurityHeaders(api.Authenticate(apiHandler, bootPolicy)),
+	)
 	go func() {
 		slog.Info("HTTP API listening (boot phase)", "addr", httpSrv.Addr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -1031,13 +1030,7 @@ func main() {
 		// a pending charger a new entry names is adopted on this save,
 		// and one whose entry was removed goes back to pending.
 		if ocppSrv != nil {
-			approved := make([]string, 0, len(newCfg.Loadpoints))
-			for _, lp := range newCfg.Loadpoints {
-				if lp.DriverName != "" {
-					approved = append(approved, lp.DriverName)
-				}
-			}
-			ocppSrv.Handler().SetApprovedIDs(approved)
+			ocppSrv.Handler().SetApprovedIDs(ocppApprovedIDs(newCfg))
 			// A charger adopted by this save booted long ago and will not
 			// boot again just because we changed our mind, so its device
 			// row has to be written here rather than waiting for one.
@@ -1245,12 +1238,7 @@ func main() {
 	// from telemetry — so a device that merely knows the shared password
 	// cannot inject EV load into dispatch.
 	if cfg.OCPP != nil && cfg.OCPP.Enabled {
-		approved := make([]string, 0, len(cfg.Loadpoints))
-		for _, lp := range cfg.Loadpoints {
-			if lp.DriverName != "" {
-				approved = append(approved, lp.DriverName)
-			}
-		}
+		approved := ocppApprovedIDs(cfg)
 		ocppCfg := &ocpp.Config{
 			Enabled:            cfg.OCPP.Enabled,
 			Bind:               cfg.OCPP.Bind,
@@ -1800,23 +1788,13 @@ func main() {
 	actuation := newDriverActuationTracker(tel)
 
 	// An OCPP charge point is not in the driver registry — it connected to us
-	// rather than being dialled — so route by name: if an online charger
-	// answers to it, command it over OCPP, otherwise fall through to the Lua
-	// driver registry. Everything above stays unaware of the difference.
-	//
-	// Hoisted out of the loadpoint controller below because the API needs the
-	// same routing: the dashboard's Pause / Resume / Force start post to
-	// /api/ev/command, and sending those straight to the registry finds no
-	// driver for a charger that has none.
-	evSend := reg.Send
-	if ocppSrv != nil {
-		evSend = func(ctx context.Context, name string, payload []byte) error {
-			if ocppSrv.Handler().IsOnline(name) {
-				return ocppSrv.Command(ctx, name, payload)
-			}
-			return reg.Send(ctx, name, payload)
-		}
-	}
+	// rather than being dialled — so route by name: if an online, adopted
+	// charger answers to it, command it over OCPP, otherwise fall through to
+	// the Lua driver registry. Periodic dispatch uses SendWithOutcome /
+	// SendCycle and must take this same path; wiring those straight to the
+	// registry is how planner ticks never reached an OCPP wallbox.
+	evRouter := newEVCommandRouter(ocppSrv, reg.Send, reg.SendWithOutcome, reg.SendEVContinuation)
+	evSend := evRouter.Send
 
 	// ---- EV loadpoint controller ----
 	// loadpoint.Controller owns per-tick EV dispatch, including the
@@ -1846,7 +1824,7 @@ func main() {
 				watchdog = health.WatchdogTimeoutOverride
 			}
 			deviceID, _ := runningDeviceID(reg, driver)
-			ocppOnline := ocppSrv != nil && ocppSrv.Handler().IsOnline(driver)
+			ocppOnline := ocppSrv != nil && ocppSrv.Handler().IsOnline(driver) && ocppSrv.Handler().IsApproved(driver)
 			if ocppOnline {
 				deviceID = currentOCPPDeviceID(ocppSrv.Handler(), driver)
 			}
@@ -1860,11 +1838,11 @@ func main() {
 		// current and the plan keeps counting the load. Only the periodic
 		// ev_set_current is reported — see loadpoint.DispatchOutcomeFunc
 		// for the sends that are deliberately not.
-		lpController.SetOutcomeSender(reg.SendWithOutcome)
-		lpController.SetCycleSender(reg.SendEVContinuation)
+		lpController.SetOutcomeSender(evRouter.SendWithOutcome)
+		lpController.SetCycleSender(evRouter.SendCycle)
 		lpController.SetDispatchOutcome(actuation.recordCommandOutcome)
 		lpController.SetDriverOnline(func(name string) bool {
-			if ocppSrv != nil && ocppSrv.Handler().IsOnline(name) {
+			if ocppSrv != nil && ocppSrv.Handler().IsOnline(name) && ocppSrv.Handler().IsApproved(name) {
 				return true
 			}
 			health := tel.DriverHealth(name)
