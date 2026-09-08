@@ -264,3 +264,42 @@ func TestHandleDriverTestRestoresMaskedSecrets(t *testing.T) {
 			live.Drivers[0].Capabilities.MQTT.Password)
 	}
 }
+
+func TestIsSensitiveKey(t *testing.T) {
+	sensitive := []string{
+		"password", "Password", "mqtt_password", "passwd", "client_secret",
+		"refresh_token", "access_token", "api_key", "apikey", "private_key",
+		"authorization", "Authorization", "credential", "credentials",
+		"auth", "AUTH", "auth_header", "x-auth",
+	}
+	for _, k := range sensitive {
+		if !isSensitiveKey(k) {
+			t.Errorf("isSensitiveKey(%q) = false, want true", k)
+		}
+	}
+	keep := []string{
+		"host", "username", "name", "oauth", "oauth_client_id", "client_id",
+		"port", "lua",
+	}
+	for _, k := range keep {
+		if isSensitiveKey(k) {
+			t.Errorf("isSensitiveKey(%q) = true, want false", k)
+		}
+	}
+}
+
+func TestRedactDumpLog(t *testing.T) {
+	in := `HTTP 400: {"refresh_token":"RT-secret-value","access_token":"AT-secret-value"} Bearer eyJabc.def password=hunter2 poll ok`
+	got := redactDumpLog(in)
+	for _, leak := range []string{"RT-secret-value", "AT-secret-value", "eyJabc.def", "hunter2"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("redactDumpLog leaked %q in %q", leak, got)
+		}
+	}
+	if !strings.Contains(got, "HTTP 400") {
+		t.Errorf("redactDumpLog dropped diagnostic context: %q", got)
+	}
+	if !strings.Contains(got, "poll ok") {
+		t.Errorf("redactDumpLog dropped benign text: %q", got)
+	}
+}
