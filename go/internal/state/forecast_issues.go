@@ -106,52 +106,91 @@ func gzipForecastModelState(state json.RawMessage) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func externalizeForecastModelStates(ctx context.Context, tx *sql.Tx, issue forecasting.Issue) (forecasting.Issue, error) {
+type preparedForecastModelState struct {
+	id            string
+	expandedBytes int
+	payload       []byte
+	inline        bool
+}
+
+type preparedForecastIssue struct {
+	issue       forecasting.Issue
+	payload     []byte
+	modelStates []preparedForecastModelState
+}
+
+func prepareForecastIssue(issue forecasting.Issue) (preparedForecastIssue, error) {
 	issue.Models = append([]forecasting.ModelState(nil), issue.Models...)
+	var prepared preparedForecastIssue
 	for i := range issue.Models {
 		model := &issue.Models[i]
 		model.State = append(json.RawMessage(nil), model.State...)
 		if len(model.State) == 0 {
-			if model.StateID == "" {
-				continue
-			}
-			var exists int
-			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM forecast_model_states WHERE id=?", model.StateID).Scan(&exists); err != nil {
-				return forecasting.Issue{}, err
-			}
-			if exists != 1 {
-				return forecasting.Issue{}, errors.New("forecast model state reference is missing")
+			if model.StateID != "" {
+				prepared.modelStates = append(prepared.modelStates, preparedForecastModelState{id: model.StateID})
 			}
 			continue
 		}
 		digest := sha256.Sum256(model.State)
 		stateID := hex.EncodeToString(digest[:])
 		if model.StateID != "" && model.StateID != stateID {
-			return forecasting.Issue{}, errors.New("forecast model state hash mismatch")
+			return preparedForecastIssue{}, errors.New("forecast model state hash mismatch")
 		}
 		compressed, err := gzipForecastModelState(model.State)
 		if err != nil {
-			return forecasting.Issue{}, err
+			return preparedForecastIssue{}, err
 		}
-		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO forecast_model_states(id,expanded_bytes,created_at_ms,payload)
- VALUES(?,?,?,?)`, stateID, len(model.State), issue.IssuedAtMS, compressed)
-		if err != nil {
-			return forecasting.Issue{}, err
-		}
-		if n, _ := result.RowsAffected(); n == 0 {
-			var expanded int
-			var old []byte
-			if err = tx.QueryRowContext(ctx, "SELECT expanded_bytes,payload FROM forecast_model_states WHERE id=?", stateID).Scan(&expanded, &old); err != nil {
-				return forecasting.Issue{}, err
-			}
-			if expanded != len(model.State) || !bytes.Equal(old, compressed) {
-				return forecasting.Issue{}, errors.New("forecast model state ID is immutable")
-			}
-		}
+		prepared.modelStates = append(prepared.modelStates, preparedForecastModelState{
+			id: stateID, expandedBytes: len(model.State), payload: compressed, inline: true,
+		})
 		model.StateID = stateID
 		model.State = nil
 	}
-	return issue, issue.Validate()
+	if err := issue.Validate(); err != nil {
+		return preparedForecastIssue{}, err
+	}
+	payload, err := gzipForecastIssue(issue)
+	if err != nil {
+		return preparedForecastIssue{}, err
+	}
+	prepared.issue = issue
+	prepared.payload = payload
+	return prepared, nil
+}
+
+func storePreparedForecastModelStates(ctx context.Context, tx *sql.Tx, prepared preparedForecastIssue) error {
+	for _, state := range prepared.modelStates {
+		if !state.inline {
+			var exists int
+			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM forecast_model_states WHERE id=?", state.id).Scan(&exists); err != nil {
+				return err
+			}
+			if exists != 1 {
+				return errors.New("forecast model state reference is missing")
+			}
+			continue
+		}
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO forecast_model_states(id,expanded_bytes,created_at_ms,payload)
+ VALUES(?,?,?,?)`, state.id, state.expandedBytes, prepared.issue.IssuedAtMS, state.payload)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			var expanded int
+			var old []byte
+			if err = tx.QueryRowContext(ctx, "SELECT expanded_bytes,payload FROM forecast_model_states WHERE id=?", state.id).Scan(&expanded, &old); err != nil {
+				return err
+			}
+			if expanded != state.expandedBytes || !bytes.Equal(old, state.payload) {
+				return errors.New("forecast model state ID is immutable")
+			}
+		}
+	}
+	return nil
 }
 
 func cleanForecastModelStateRefs(ctx context.Context, tx *sql.Tx) error {
@@ -196,57 +235,63 @@ func (s *Store) SaveForecastIssue(ctx context.Context, issue forecasting.Issue) 
 	if issue.IssuedAtMS > now+maxForecastFutureSkew.Milliseconds() {
 		return errors.New("forecast issue is from the future")
 	}
+	prepared, err := prepareForecastIssue(issue)
+	if err != nil {
+		return fmt.Errorf("prepare forecast issue: %w", err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin forecast issue transaction: %w", err)
 	}
 	defer tx.Rollback()
-	storedIssue, err := externalizeForecastModelStates(ctx, tx, issue)
-	if err != nil {
-		return err
-	}
-	data, err := gzipForecastIssue(storedIssue)
-	if err != nil {
-		return err
+	if err = storePreparedForecastModelStates(ctx, tx, prepared); err != nil {
+		return fmt.Errorf("store forecast model states: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO forecast_issues(id,origin_ms,issued_at_ms,config_version,payload) VALUES(?,?,?,?,?)",
-		storedIssue.ID, storedIssue.OriginMS, storedIssue.IssuedAtMS, storedIssue.ConfigVersion, data)
+		prepared.issue.ID, prepared.issue.OriginMS, prepared.issue.IssuedAtMS, prepared.issue.ConfigVersion, prepared.payload)
 	if err != nil {
-		return err
+		return fmt.Errorf("store forecast issue: %w", err)
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect forecast issue insert: %w", err)
+	}
+	if n == 0 {
 		var old []byte
-		if err = tx.QueryRowContext(ctx, "SELECT payload FROM forecast_issues WHERE id=?", storedIssue.ID).Scan(&old); err != nil {
-			return err
+		if err = tx.QueryRowContext(ctx, "SELECT payload FROM forecast_issues WHERE id=?", prepared.issue.ID).Scan(&old); err != nil {
+			return fmt.Errorf("read existing forecast issue: %w", err)
 		}
-		if !bytes.Equal(old, data) {
+		if !bytes.Equal(old, prepared.payload) {
 			return errors.New("forecast issue ID is immutable")
 		}
 	}
-	for _, model := range storedIssue.Models {
+	for _, model := range prepared.issue.Models {
 		if model.StateID == "" {
 			continue
 		}
-		if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO forecast_issue_model_states(issue_id,state_id) VALUES(?,?)", storedIssue.ID, model.StateID); err != nil {
-			return err
+		if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO forecast_issue_model_states(issue_id,state_id) VALUES(?,?)", prepared.issue.ID, model.StateID); err != nil {
+			return fmt.Errorf("store forecast model state reference: %w", err)
 		}
 	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM forecast_issues WHERE issued_at_ms < ?", now-ForecastIssueRetention.Milliseconds()); err != nil {
-		return err
+		return fmt.Errorf("prune expired forecast issues: %w", err)
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM forecast_issues WHERE id IN (
  SELECT id FROM (SELECT id,ROW_NUMBER() OVER (ORDER BY issued_at_ms DESC,id DESC) AS n,
  SUM(length(payload)) OVER (ORDER BY issued_at_ms DESC,id DESC) AS bytes FROM forecast_issues)
  WHERE n>? OR bytes>?)`, MaxForecastIssues, MaxForecastArchiveBytes); err != nil {
-		return err
+		return fmt.Errorf("prune forecast issue budget: %w", err)
 	}
 	if err = cleanForecastModelStateRefs(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("clean forecast model states: %w", err)
 	}
 	if err = enforceForecastModelStateBudget(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("enforce forecast model state budget: %w", err)
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit forecast issue: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) SaveForecastObservation(ctx context.Context, observation forecasting.Observation) error {
