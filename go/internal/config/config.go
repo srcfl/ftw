@@ -1500,6 +1500,11 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if cfg, ok := loadSettingsBesideSeed(path); ok {
+				return cfg, nil
+			}
+		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var source struct {

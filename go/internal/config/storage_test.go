@@ -231,6 +231,136 @@ func TestInterruptedImportReusesCommittedConfig(t *testing.T) {
 	}
 }
 
+func importedLiveSettings(t *testing.T) (path, database string, st *state.Store) {
+	t.Helper()
+	dir := t.TempDir()
+	path, database = filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.db")
+	if err := os.WriteFile(path, []byte(minimalYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err = state.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg, err = InitializeStorage(path, database, cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Site.Name = "Live Settings"
+	if err := SaveStored(st, path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	return path, database, st
+}
+
+func TestMissingSeedReloadsLiveSettingsAndRewritesLocator(t *testing.T) {
+	path, database, st := importedLiveSettings(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("missing seed started setup over live Settings: %v", err)
+	}
+	if loaded.Site.Name != "Live Settings" {
+		t.Fatalf("missing seed ignored SQLite: %q", loaded.Site.Name)
+	}
+	got, err := InitializeStorage(path, database, loaded, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Site.Name != "Live Settings" || got.Revision < 2 {
+		t.Fatalf("missing seed clobbered Settings: site=%q revision=%d", got.Site.Name, got.Revision)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), "config_database:") {
+		t.Fatalf("locator not rewritten: %s %v", raw, err)
+	}
+	reloaded, err := Load(path)
+	if err != nil || reloaded.Site.Name != "Live Settings" {
+		t.Fatalf("rewritten locator lost Settings: %v %v", reloaded, err)
+	}
+}
+
+func TestMissingSeedWithoutSettingsStillFailsLoad(t *testing.T) {
+	dir := t.TempDir()
+	path, database := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.db")
+	st, err := state.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("empty sibling database hid first-run setup")
+	}
+}
+
+func TestEditedLeftoverSeedDoesNotOverrideLiveSettings(t *testing.T) {
+	path, database, st := importedLiveSettings(t)
+	edited := "site:\n  name: Edited leftover\nfuse:\n  max_amps: 63\n# Settings live in SQLite. Use FTW Settings to change them.\n"
+	if err := os.WriteFile(path, []byte(edited), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := InitializeStorage(path, database, loaded, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Site.Name != "Live Settings" || got.Fuse.MaxAmps != 16 {
+		t.Fatalf("edited leftover overwrote Settings: site=%q amps=%v", got.Site.Name, got.Fuse.MaxAmps)
+	}
+	reloaded, err := Load(path)
+	if err != nil || reloaded.Site.Name != "Live Settings" {
+		t.Fatalf("locator rewrite lost Settings: %v %v", reloaded, err)
+	}
+}
+
+func TestWizardSeedDoesNotOverrideLiveSettings(t *testing.T) {
+	path, database, st := importedLiveSettings(t)
+	wizard := &Config{
+		Site: Site{
+			Name:                 "Wizard Home",
+			ControlIntervalS:     5,
+			GridToleranceW:       42,
+			WatchdogTimeoutS:     60,
+			SmoothingAlpha:       0.3,
+			Gain:                 0.5,
+			SlewRateW:            500,
+			MinDispatchIntervalS: 5,
+		},
+		Fuse: Fuse{MaxAmps: 25, Phases: 3, Voltage: 230},
+		API:  API{Port: 8080},
+	}
+	if err := SaveAtomic(path, wizard); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := InitializeStorage(path, database, loaded, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Site.Name != "Live Settings" || got.Fuse.MaxAmps != 16 {
+		t.Fatalf("wizard seed overwrote Settings: site=%q amps=%v", got.Site.Name, got.Fuse.MaxAmps)
+	}
+	reloaded, err := Load(path)
+	if err != nil || reloaded.Site.Name != "Live Settings" {
+		t.Fatalf("wizard locator lost Settings: %v %v", reloaded, err)
+	}
+}
+
 func TestRecoveryCannotSubstituteAnotherConfigAtTheSameRevision(t *testing.T) {
 	root := t.TempDir()
 	var first *Config
