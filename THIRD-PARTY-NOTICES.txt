@@ -2673,8 +2673,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ===============================================================================
 MinGW-w64 runtime portions (Windows builds)
-Version: 14.0.0.r353.g6df76fa52 (commit 6df76fa527c36e770217ddd763adaaf37bd2887f)
-Source: https://github.com/mingw-w64/mingw-w64/blob/6df76fa527c36e770217ddd763adaaf37bd2887f/COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt
+Version: MinGW-w64 runtime 12.0.0; MinGW-Builds GCC 14.2.0 rev0, UCRT
+Source: https://github.com/mingw-w64/mingw-w64/tree/v12.0.0
+Binary archive: https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev0.7z
+Binary archive SHA-256: 0f1afc3b48f66dda68fbfb7b8b0f1d22b831396fbe1e3dea776745f32d930b24
+License file: COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt
 -------------------------------------------------------------------------------
 MinGW-w64 runtime licensing
 ***************************
@@ -2897,31 +2900,6 @@ in MinGW runtime. At least on follow-up it is marked that debian sees the
 version a-like BSD one. As MinGW.org (where those cephes parts are coming
 from) distributes them now over 6 years, it should be fine.
 
-=================================================
-Some string, memory and time conversion functions
-=================================================
-
-Copyright © 2005-2020 Rich Felker, et al.
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
 ===================================
 Headers and IDLs imported from Wine
 ===================================
@@ -2944,8 +2922,11 @@ Lesser General Public License for more details.
 
 ===============================================================================
 MinGW-w64 winpthreads (Windows builds)
-Version: 14.0.0.r353.g6df76fa52 (commit 6df76fa527c36e770217ddd763adaaf37bd2887f)
-Source: https://github.com/mingw-w64/mingw-w64/blob/6df76fa527c36e770217ddd763adaaf37bd2887f/mingw-w64-libraries/winpthreads/COPYING
+Version: API 0.5.0; bundled with MinGW-w64 runtime 12.0.0
+Source: https://github.com/mingw-w64/mingw-w64/tree/v12.0.0
+Binary archive: https://github.com/niXman/mingw-builds-binaries/releases/download/14.2.0-rt_v12-rev0/x86_64-14.2.0-release-posix-seh-ucrt-rt_v12-rev0.7z
+Binary archive SHA-256: 0f1afc3b48f66dda68fbfb7b8b0f1d22b831396fbe1e3dea776745f32d930b24
+License file: mingw-w64-libraries/winpthreads/COPYING
 -------------------------------------------------------------------------------
 Copyright (c) 2011 mingw-w64 project
 
@@ -3007,8 +2988,9 @@ DEALINGS IN THE SOFTWARE.
 
 ===============================================================================
 GNU libstdc++ and libgcc runtime portions (Linux and Windows builds)
-Version: license text from GCC 14.3.0; the release build records its actual GCC version
-Source: https://gcc.gnu.org/git/?p=gcc.git;a=tree;h=refs/tags/releases/gcc-14.3.0
+Version: GCC 14.2.0 for Windows; the Linux release build records its actual GCC version
+Source: https://gcc.gnu.org/git/?p=gcc.git;a=tree;h=refs/tags/releases/gcc-14.2.0
+License files: COPYING3 and COPYING.RUNTIME
 -------------------------------------------------------------------------------
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
