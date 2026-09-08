@@ -87,8 +87,8 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 	// A bounded reader stages only this file. Its unique index detects duplicate
 	// keys across chunk boundaries before any of this file reaches the primary.
 	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE history_import_source (
-		ts_ms BIGINT NOT NULL, driver VARCHAR NOT NULL, metric VARCHAR NOT NULL,
-		value DOUBLE NOT NULL CHECK(isfinite(value)), PRIMARY KEY(driver,metric,ts_ms))`); err != nil {
+		ts_ms BIGINT NOT NULL, driver_id BIGINT NOT NULL, metric_id BIGINT NOT NULL,
+		value DOUBLE NOT NULL CHECK(isfinite(value)), PRIMARY KEY(driver_id,metric_id,ts_ms))`); err != nil {
 		return err
 	}
 	defer conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS history_import_source`)
@@ -166,6 +166,7 @@ func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string) (int6
 	reader := parquet.NewReader(pf)
 	defer reader.Close()
 	buffer := make([]parquet.Row, historyImportRows)
+	drivers, metrics := map[string]int64{}, map[string]int64{}
 	var count int64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -176,46 +177,77 @@ func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string) (int6
 			return count, readErr
 		}
 		if n > 0 {
+			staged := make([][]driver.Value, 0, n)
+			var writeErr error
+			for _, row := range buffer[:n] {
+				values := make([]driver.Value, 4)
+				seen := [4]bool{}
+				for _, v := range row {
+					p := positions[v.Column()]
+					if p < 0 {
+						continue
+					}
+					if v.IsNull() || seen[p] {
+						writeErr = errors.New("Parquet contains null or repeated sample fields")
+						break
+					}
+					seen[p] = true
+					switch {
+					case p == 0 && v.Kind() == parquet.Int64:
+						values[p] = v.Int64()
+					case (p == 1 || p == 2) && v.Kind() == parquet.ByteArray:
+						values[p] = string(v.ByteArray())
+					case p == 3 && v.Kind() == parquet.Double:
+						value := v.Double()
+						if math.IsNaN(value) || math.IsInf(value, 0) {
+							writeErr = errors.New("Parquet contains a non-finite sample")
+						}
+						values[p] = canonicalHistoryFloat(value)
+					default:
+						writeErr = errors.New("Parquet sample column has the wrong type")
+					}
+					if writeErr != nil {
+						break
+					}
+				}
+				if writeErr != nil {
+					break
+				}
+				for _, spec := range []struct {
+					pos   int
+					table string
+					ids   map[string]int64
+				}{{1, "ts_drivers", drivers}, {2, "ts_metrics", metrics}} {
+					name, ok := values[spec.pos].(string)
+					if !ok {
+						writeErr = errors.New("Parquet is missing an identity field")
+						break
+					}
+					id, ok := spec.ids[name]
+					if !ok {
+						writeErr = conn.QueryRowContext(ctx, `INSERT INTO `+spec.table+`(name) VALUES (?) ON CONFLICT(name) DO UPDATE SET name=excluded.name RETURNING id`, name).Scan(&id)
+						if writeErr != nil {
+							break
+						}
+						spec.ids[name] = id
+					}
+					values[spec.pos] = id
+				}
+				if writeErr != nil {
+					break
+				}
+				staged = append(staged, values)
+			}
+			if writeErr != nil {
+				return count, writeErr
+			}
 			err := conn.Raw(func(raw any) error {
 				app, err := duckdb.NewAppender(raw.(driver.Conn), "temp", "main", "history_import_source")
 				if err != nil {
 					return err
 				}
 				var writeErr error
-				for _, row := range buffer[:n] {
-					values := make([]driver.Value, 4)
-					seen := [4]bool{}
-					for _, v := range row {
-						p := positions[v.Column()]
-						if p < 0 {
-							continue
-						}
-						if v.IsNull() || seen[p] {
-							writeErr = errors.New("Parquet contains null or repeated sample fields")
-							break
-						}
-						seen[p] = true
-						switch {
-						case p == 0 && v.Kind() == parquet.Int64:
-							values[p] = v.Int64()
-						case (p == 1 || p == 2) && v.Kind() == parquet.ByteArray:
-							values[p] = string(v.ByteArray())
-						case p == 3 && v.Kind() == parquet.Double:
-							value := v.Double()
-							if math.IsNaN(value) || math.IsInf(value, 0) {
-								writeErr = errors.New("Parquet contains a non-finite sample")
-							}
-							values[p] = canonicalHistoryFloat(value)
-						default:
-							writeErr = errors.New("Parquet sample column has the wrong type")
-						}
-						if writeErr != nil {
-							break
-						}
-					}
-					if writeErr != nil {
-						break
-					}
+				for _, values := range staged {
 					if writeErr = app.AppendRow(values...); writeErr != nil {
 						break
 					}
@@ -246,23 +278,15 @@ func importHistoryChunk(ctx context.Context, conn *sql.Conn, offset, total int64
 	 SELECT * FROM history_import_source WHERE rowid>=? AND rowid<?`, offset, end); err != nil {
 		return err
 	}
-	for _, q := range []string{
-		`INSERT INTO ts_drivers(name) SELECT DISTINCT driver FROM import_points ON CONFLICT(name) DO NOTHING`,
-		`INSERT INTO ts_metrics(name) SELECT DISTINCT metric FROM import_points ON CONFLICT(name) DO NOTHING`,
-	} {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return err
-		}
-	}
 	var first, last int64
 	if err := tx.QueryRowContext(ctx, `SELECT MIN(ts_ms),MAX(ts_ms) FROM import_points`).Scan(&first, &last); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE import_expected AS
-	 SELECT d.id AS driver_id,m.id AS metric_id,p.ts_ms,p.value,COALESCE(s.value,p.value) AS expected_value
-	 FROM import_points p JOIN ts_drivers d ON d.name=p.driver JOIN ts_metrics m ON m.name=p.metric
+	 SELECT p.driver_id,p.metric_id,p.ts_ms,p.value,COALESCE(s.value,p.value) AS expected_value
+	 FROM import_points p
 	 LEFT JOIN (SELECT * FROM ts_samples WHERE ts_ms>=? AND ts_ms<=?) s
-	 ON s.driver_id=d.id AND s.metric_id=m.id AND s.ts_ms=p.ts_ms`, first, last); err != nil {
+	 ON s.driver_id=p.driver_id AND s.metric_id=p.metric_id AND s.ts_ms=p.ts_ms`, first, last); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO ts_samples SELECT driver_id,metric_id,ts_ms,value FROM import_expected ON CONFLICT DO NOTHING`); err != nil {
