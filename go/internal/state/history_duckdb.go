@@ -47,7 +47,7 @@ func (s *Store) openHistory() error {
 	if _, err := os.Stat(s.historyPath); errors.Is(err, os.ErrNotExist) && active != "" && restore == "" {
 		return errors.New("primary DuckDB history is missing; restore a full backup")
 	}
-	connector, err := newHistoryConnector(s.historyPath + "?threads=2&memory_limit=128MB&max_temp_directory_size=512MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
+	connector, err := newHistoryConnector(s.historyPath + "?threads=2&memory_limit=256MB&max_temp_directory_size=512MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
 	if err != nil {
 		return fmt.Errorf("open DuckDB history: %w", err)
 	}
