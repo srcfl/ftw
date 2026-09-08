@@ -666,7 +666,7 @@ func (s *Server) writeLogSection(b *strings.Builder) {
 		if g.Driver != "" {
 			fmt.Fprintf(b, "[%s] ", g.Driver)
 		}
-		b.WriteString(g.Msg)
+		b.WriteString(redactDumpLog(g.Msg))
 		if g.Count > 1 {
 			fmt.Fprintf(b, " ×%d", g.Count)
 			if span := g.Last.Sub(g.First); span > time.Second {
@@ -675,7 +675,7 @@ func (s *Server) writeLogSection(b *strings.Builder) {
 		}
 		if g.Attrs != "" {
 			b.WriteByte(' ')
-			b.WriteString(truncateReport(g.Attrs, 200))
+			b.WriteString(redactDumpLog(truncateReport(g.Attrs, 200)))
 		}
 		b.WriteByte('\n')
 	}
@@ -828,7 +828,7 @@ func (s *Server) collectFindings(
 				sev = sevProblem
 			}
 			detail := fmt.Sprintf("%q has been logged %d times",
-				worst.Msg, worst.Count)
+				redactDumpLog(worst.Msg), worst.Count)
 			if span := worst.Last.Sub(worst.First); span > time.Second {
 				detail += " in " + fmtReportAge(span)
 			}
