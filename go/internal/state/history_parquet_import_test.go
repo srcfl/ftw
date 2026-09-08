@@ -158,6 +158,35 @@ func TestHistoryParquetRejectsNullValue(t *testing.T) {
 	}
 }
 
+func TestHistoryParquetCrossesSegmentCheckpoint(t *testing.T) {
+	s := freshStore(t)
+	cold := t.TempDir()
+	day := filepath.Join(cold, "2026", "01")
+	if err := os.MkdirAll(day, 0700); err != nil {
+		t.Fatal(err)
+	}
+	points := make([]parquetSampleRow, 64*historyImportRows+17)
+	for i := range points {
+		points[i] = parquetSampleRow{TsMs: int64(len(points) - i), Driver: "meter", Metric: "power", Value: float64(i) / 7}
+	}
+	if err := writeParquetDay(filepath.Join(day, "01.parquet"), points); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ImportLegacyParquet(context.Background(), cold); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LoadSeries("meter", "power", 0, int64(len(points)), 0)
+	if err != nil || len(got) != len(points) {
+		t.Fatalf("rows=%d want=%d: %v", len(got), len(points), err)
+	}
+	for i, p := range got {
+		want := points[len(points)-1-i]
+		if p.TsMs != want.TsMs || math.Float64bits(p.Value) != math.Float64bits(want.Value) {
+			t.Fatalf("checkpoint changed row %d: %+v want %+v", i, p, want)
+		}
+	}
+}
+
 func TestHistoryTableReadbackCrossesPages(t *testing.T) {
 	s := freshStore(t)
 	points := make([]HistoryPoint, 2048*2+1)
