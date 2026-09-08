@@ -73,6 +73,10 @@ import (
 	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
+// maxDriverWatchdogTimeout is the longest a Lua driver may stretch the
+// per-driver staleness window. Tesla's 5-minute BLE proxy fits; a year does not.
+const maxDriverWatchdogTimeout = 15 * time.Minute
+
 // LuaDriver wraps a running Lua VM bound to a HostEnv.
 type LuaDriver struct {
 	Env  *HostEnv
@@ -87,7 +91,6 @@ type LuaDriver struct {
 	pvProofEpoch       uint64
 	loadedSourceSHA256 string
 
-	restricted bool
 	initConfig map[string]any
 	// sawModbusRead is true only after a poll that successfully read a
 	// register. Failed attempts do not count: a device that never answered
@@ -108,8 +111,8 @@ func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
 }
 
 // NewLuaDriverWithPolicy binds verified managed package permissions to the
-// host. Only control v2 also gets the restricted Lua library surface. Local,
-// bundled and legacy repository drivers keep the existing Lua 5.1 environment.
+// host. Every driver VM uses the restricted library surface (no io/load, no
+// os.execute). Control v2 also gets a bounded load timeout.
 func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*LuaDriver, error) {
 	if policy != nil {
 		if err := policy.validate(); err != nil {
@@ -121,21 +124,18 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	restricted := policy != nil && policy.IsControlV2()
-	L := lua.NewState(lua.Options{SkipOpenLibs: restricted})
-	if restricted {
-		openRestrictedLibraries(L)
-	}
-	d := &LuaDriver{Env: env, Path: path, L: L, restricted: restricted, loadedSourceSHA256: fmt.Sprintf("%x", sha256.Sum256(src))}
+	L := lua.NewState(lua.Options{SkipOpenLibs: true})
+	openRestrictedLibraries(L)
+	d := &LuaDriver{Env: env, Path: path, L: L, loadedSourceSHA256: fmt.Sprintf("%x", sha256.Sum256(src))}
 	registerHost(L, env)
 	var loadCancel context.CancelFunc
-	if restricted {
+	if policy != nil && policy.IsControlV2() {
 		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		loadCancel = cancel
 		L.SetContext(loadCtx)
 	}
 	err = L.DoString(string(src))
-	if restricted {
+	if loadCancel != nil {
 		L.RemoveContext()
 		loadCancel()
 	}
@@ -164,6 +164,7 @@ func openRestrictedLibraries(L *lua.LState) {
 		{lua.TabLibName, lua.OpenTable},
 		{lua.StringLibName, lua.OpenString},
 		{lua.MathLibName, lua.OpenMath},
+		{lua.OsLibName, lua.OpenOs},
 	} {
 		L.Push(L.NewFunction(lib.open))
 		L.Push(lua.LString(lib.name))
@@ -175,8 +176,13 @@ func openRestrictedLibraries(L *lua.LState) {
 	} {
 		L.SetGlobal(name, lua.LNil)
 	}
+	// os.time/date stay for MQTT timestamps; process/filesystem entry points do not.
+	if osTbl, ok := L.GetGlobal("os").(*lua.LTable); ok {
+		for _, name := range []string{"execute", "exit", "getenv", "remove", "rename", "setlocale", "tmpname"} {
+			osTbl.RawSetString(name, lua.LNil)
+		}
+	}
 	L.SetGlobal("package", lua.LNil)
-	L.SetGlobal("os", lua.LNil)
 	L.SetGlobal("io", lua.LNil)
 	L.SetGlobal("debug", lua.LNil)
 	L.SetGlobal("channel", lua.LNil)
@@ -328,19 +334,17 @@ func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", d.Path, err)
 	}
-	L := lua.NewState(lua.Options{SkipOpenLibs: d.restricted})
-	if d.restricted {
-		openRestrictedLibraries(L)
-	}
+	L := lua.NewState(lua.Options{SkipOpenLibs: true})
+	openRestrictedLibraries(L)
 	registerHost(L, d.Env)
 	var loadCancel context.CancelFunc
-	if d.restricted {
+	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
 		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		loadCancel = cancel
 		L.SetContext(loadCtx)
 	}
 	err = L.DoString(string(src))
-	if d.restricted {
+	if loadCancel != nil {
 		L.RemoveContext()
 		loadCancel()
 	}
@@ -651,17 +655,20 @@ func (d *LuaDriver) setLuaCallContext(parent context.Context, timeout time.Durat
 }
 
 func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Duration) func() {
-	if d.Env.RuntimePolicy == nil || !d.Env.RuntimePolicy.IsControlV2() {
-		return func() {}
-	}
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	d.L.SetContext(ctx)
+	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		d.L.SetContext(ctx)
+		return func() {
+			d.L.RemoveContext()
+			cancel()
+		}
+	}
+	d.L.SetContext(parent)
 	return func() {
 		d.L.RemoveContext()
-		cancel()
 	}
 }
 
@@ -918,11 +925,21 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// `seconds` since the last successful emit. Used by drivers whose
 	// natural poll cadence is too slow for the site-wide 60 s default
 	// (Tesla BLE proxy, cloud EV APIs). Calling with 0 clears the
-	// override and reverts to the default.
+	// override and reverts to the default. Negative values are rejected.
+	// Values above 15 minutes are capped so a driver cannot disable
+	// staleness indefinitely.
 	host.RawSetString("set_watchdog_timeout_s", L.NewFunction(func(L *lua.LState) int {
 		secs := L.CheckInt(1)
+		if secs < 0 {
+			L.Push(lua.LString("set_watchdog_timeout_s: timeout must be >= 0"))
+			return 1
+		}
+		d := time.Duration(secs) * time.Second
+		if d > maxDriverWatchdogTimeout {
+			d = maxDriverWatchdogTimeout
+		}
 		if env.Telemetry != nil {
-			env.Telemetry.SetDriverWatchdogTimeout(env.DriverName, time.Duration(secs)*time.Second)
+			env.Telemetry.SetDriverWatchdogTimeout(env.DriverName, d)
 		}
 		return 0
 	}))
@@ -1415,6 +1432,18 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			// A 307/308 must not carry its POST body to a device write endpoint.
 			if len(via) > 0 && via[0].Method == "POST" && env.allowAuthPost(via[0].URL.String()) {
 				return fmt.Errorf("redirect not followed for managed OAuth POST")
+			}
+			// Ordinary POST has the same 301/302/303 trap as PATCH: Go converts
+			// those to a body-less GET, then a 200 would be recorded as write_ack.
+			if len(via) > 0 && via[0].Method == "POST" {
+				status := 0
+				if req.Response != nil {
+					status = req.Response.StatusCode
+				}
+				if status == net_http.StatusMovedPermanently || status == net_http.StatusFound ||
+					status == net_http.StatusSeeOther || req.Method != "POST" {
+					return fmt.Errorf("redirect not followed for POST (a redirected write cannot be verified)")
+				}
 			}
 			if ok, reason := hostAllowed(req.URL.String()); !ok {
 				return fmt.Errorf("redirect blocked: %s", reason)

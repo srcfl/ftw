@@ -1031,7 +1031,12 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 		case <-timer.C:
 			pollFailed := false
-			if _, err := rd.driver.Poll(ctx); err != nil {
+			// Register the poll as the active Lua call so SendDefault can
+			// cancel it the same way it cancels an in-flight command.
+			pollCtx, finishPoll := rd.beginCommand(ctx)
+			_, err := rd.driver.Poll(pollCtx)
+			finishPoll()
+			if err != nil {
 				pollFailed = true
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
 				if r.tel != nil {
