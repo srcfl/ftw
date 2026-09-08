@@ -223,11 +223,13 @@ func (w *historyWriter) maintainHistory(rows int) {
 	ctx, cancel := context.WithTimeout(w.ctx, 2*time.Second)
 	err := w.store.CheckpointHistory(ctx)
 	cancel()
+	// A successful rotation may still leave the same tick too large. Back off
+	// every actual attempt; skipped calls above must not extend this deadline.
+	w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)
 	if err == nil {
 		w.maintenanceRows = 0
 		w.maintenanceDue = time.Now().Add(time.Hour)
 	} else {
-		w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)
 		slog.Warn("history maintenance postponed; committed data retained", "err", err)
 	}
 	w.mu.Lock()
