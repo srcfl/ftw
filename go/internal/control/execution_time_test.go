@@ -23,6 +23,34 @@ func TestPartialChargeKeepsIntentAndHasNoCatchupSpike(t *testing.T) {
 		if len(targets) != 1 || math.Abs(targets[0].TargetW-2000) > .001 {
 			t.Fatalf("remaining=%v targets=%+v", remaining, targets)
 		}
+		snapshot := st.SlotEnergy()
+		if math.Abs(snapshot.EnergyPathWh-2000./3600) > 1e-8 || snapshot.ActualWh != 0 || snapshot.PlannedSoFarWh != 0 {
+			t.Fatalf("elapsed-time credit entered observed energy: %+v", snapshot)
+		}
+	}
+}
+
+func TestPublicationDelayCreditStaysOutOfMeasuredEnergy(t *testing.T) {
+	start := time.Date(2026, 9, 8, 4, 45, 0, 0, time.UTC)
+	dir := SlotDirective{PriceSlotStart: start, SlotStart: start.Add(12 * time.Minute), SlotEnd: start.Add(15 * time.Minute), BatteryEnergyWh: 100, PlannedGridW: 2500, HasPlannedGridW: true}
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	now := dir.SlotStart.Add(30 * time.Second)
+	st.clock = func() time.Time { return now }
+	st.SlewEnabled = false
+	store := seedStore(500, []struct {
+		name          string
+		currentW, soc float64
+	}{{"battery", 900, .5}})
+	ComputeDispatch(store, st, caps(map[string]float64{"battery": 9600}), 11040)
+	first := st.SlotEnergy()
+	if math.Abs(first.EnergyPathWh-2000*30./3600) > 1e-8 || first.ActualWh != 0 || first.PlannedSoFarWh != 0 {
+		t.Fatalf("publication delay was counted as measured energy: %+v", first)
+	}
+	now = now.Add(6 * time.Second)
+	ComputeDispatch(store, st, caps(map[string]float64{"battery": 9600}), 11040)
+	next := st.SlotEnergy()
+	if math.Abs(next.ActualWh-900*6./3600) > 1e-8 || math.Abs(next.PlannedSoFarWh-2000*6./3600) > 1e-8 {
+		t.Fatalf("observed energy includes unobserved time: %+v", next)
 	}
 }
 
@@ -43,6 +71,11 @@ func TestSlotMetricsWeightsAcceptedDecisionsWithinPriceSlot(t *testing.T) {
 	}
 	if math.Abs(st.slotActualPlannedWh-(-400*750./3600+600*150./3600)) > 1e-8 {
 		t.Fatal("latest decision overwrote prior intervals", st.slotActualPlannedWh)
+	}
+	snapshot := st.SlotEnergy()
+	wantPast := -400*750./3600 + 600*120./3600
+	if math.Abs(snapshot.PlannedSoFarWh-wantPast) > 1e-8 || math.Abs(snapshot.ActualWh-wantPast) > 1e-8 {
+		t.Fatalf("snapshot did not preserve observed decisions: %+v", snapshot)
 	}
 	active = SlotDirective{SlotStart: start.Add(15 * time.Minute), SlotEnd: start.Add(30 * time.Minute), BatteryEnergyWh: -100}
 	updateSlotDeliveryMetrics(st, 600, start.Add(15*time.Minute))

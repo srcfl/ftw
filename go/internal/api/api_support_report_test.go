@@ -487,11 +487,12 @@ func TestSlotEnergyShortfallIsAFinding(t *testing.T) {
 	srv, ctrl, _ := reportTestServer(t)
 	now := time.Now()
 	slot := control.SlotEnergySnapshot{
-		HasSlot:   true,
-		PlannedWh: 1125, // 4.5 kW across a 15-minute slot
-		ActualWh:  20,   // the batteries are doing nothing
-		SlotStart: now.Add(-8 * time.Minute),
-		SlotEnd:   now.Add(7 * time.Minute),
+		HasSlot:        true,
+		PlannedWh:      1125, // 4.5 kW across a 15-minute slot
+		PlannedSoFarWh: 600,
+		ActualWh:       20, // the batteries are doing nothing
+		SlotStart:      now.Add(-8 * time.Minute),
+		SlotEnd:        now.Add(7 * time.Minute),
 	}
 	findings := srv.collectFindings(*ctrl,
 		liveSnapshot{HaveGrid: true, LoadW: 700, PredictedLd: 700},
@@ -512,8 +513,8 @@ func TestSlotEnergyShortfallIsAFinding(t *testing.T) {
 	if !strings.Contains(got.Detail, "1.12 kWh") {
 		t.Errorf("detail should quote the planned energy, got %q", got.Detail)
 	}
-	if !strings.Contains(got.Detail, "energy-allocation path has delivered nothing") {
-		t.Errorf("detail should call out the idle energy path, got %q", got.Detail)
+	if !strings.Contains(got.Detail, "expected 600 Wh") || strings.Contains(got.Detail, "reactive path is driving") {
+		t.Errorf("detail should compare observed energy without inferring a dispatch path, got %q", got.Detail)
 	}
 }
 
@@ -522,7 +523,8 @@ func TestSlotPaceShortfall(t *testing.T) {
 	slot := func(planned, actual float64, elapsed, total time.Duration) control.SlotEnergySnapshot {
 		return control.SlotEnergySnapshot{
 			HasSlot: true, PlannedWh: planned, ActualWh: actual,
-			SlotStart: now.Add(-elapsed), SlotEnd: now.Add(total - elapsed),
+			PlannedSoFarWh: planned * elapsed.Seconds() / total.Seconds(),
+			SlotStart:      now.Add(-elapsed), SlotEnd: now.Add(total - elapsed),
 		}
 	}
 	cases := []struct {
@@ -560,6 +562,35 @@ func TestSlotPaceShortfall(t *testing.T) {
 	}
 }
 
+func TestSlotPaceUsesObservedDecisionsAfterReplan(t *testing.T) {
+	start := time.Date(2026, 9, 8, 3, 15, 0, 0, time.UTC)
+	now := start.Add(750 * time.Second)
+	past := -400 * 750. / 3600
+	snapshot := control.SlotEnergySnapshot{
+		HasSlot: true, SlotStart: start, SlotEnd: start.Add(15 * time.Minute),
+		PlannedSoFarWh: past, ActualWh: past,
+		PlannedWh: past + 4800*150./3600,
+	}
+	if pace, shortfall := slotPaceShortfall(snapshot, now); shortfall {
+		t.Fatalf("future charge changed past discharge expectation: pace=%v", pace)
+	}
+	// A future charge that cancels the earlier discharge must not hide a
+	// failure to follow the earlier decisions.
+	snapshot.PlannedWh = 0
+	snapshot.ActualWh = 0
+	if _, shortfall := slotPaceShortfall(snapshot, now); !shortfall {
+		t.Fatal("a net-zero future plan hid missing observed discharge")
+	}
+	// A late first decision has no observed time yet, even if most of the
+	// price interval has passed and its execution budget already has credit.
+	snapshot.PlannedSoFarWh = 0
+	snapshot.PlannedWh = 200
+	snapshot.EnergyPathWh = 40
+	if _, shortfall := slotPaceShortfall(snapshot, now); shortfall {
+		t.Fatal("unobserved publication time produced a shortfall")
+	}
+}
+
 // The books have to be in the report even when nothing is wrong — that is
 // what lets somebody else check the reasoning rather than trust a verdict.
 func TestSlotEnergyBooksAreInTheReport(t *testing.T) {
@@ -569,12 +600,18 @@ func TestSlotEnergyBooksAreInTheReport(t *testing.T) {
 	writeRightNow(&b, *ctrl, liveSnapshot{HaveGrid: true}, nil, nil,
 		control.SlotEnergySnapshot{
 			HasSlot: true, PlannedWh: 1125, ActualWh: 560, EnergyPathWh: 545,
-			SlotStart: now.Add(-8 * time.Minute), SlotEnd: now.Add(7 * time.Minute),
+			PlannedSoFarWh: 600,
+			SlotStart:      now.Add(-8 * time.Minute), SlotEnd: now.Add(7 * time.Minute),
 		}, now)
 	out := b.String()
-	for _, want := range []string{"1.12 kWh", "560 Wh", "545 Wh", "Energy booked for this slot"} {
+	for _, want := range []string{"1.12 kWh", "expected **600 Wh**", "measured battery energy was **560 Wh**", "545 Wh", "Energy booked for this slot", "credit for replanning or elapsed time", "not a separate energy measurement"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Right now is missing %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"counts 545 Wh delivered", "only moves while", "run by a reactive path instead"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("report mislabels budget accounting: %s", out)
 		}
 	}
 }
