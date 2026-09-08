@@ -241,15 +241,16 @@ type externalSettings struct {
 }
 
 type externalSlot struct {
-	StartMs    int64   `json:"start_ms"`
-	LenMin     int     `json:"len_min"`
-	PriceOre   float64 `json:"price_ore"`
-	SpotOre    float64 `json:"spot_ore"`
-	Confidence float64 `json:"confidence"`
-	PVW        float64 `json:"pv_w"`
-	LoadW      float64 `json:"load_w"`
-	MaxImportW float64 `json:"max_import_w"`
-	MaxExportW float64 `json:"max_export_w"`
+	ExecutionStartMs int64   `json:"execution_start_ms,omitempty"`
+	StartMs          int64   `json:"start_ms"`
+	LenMin           int     `json:"len_min"`
+	PriceOre         float64 `json:"price_ore"`
+	SpotOre          float64 `json:"spot_ore"`
+	Confidence       float64 `json:"confidence"`
+	PVW              float64 `json:"pv_w"`
+	LoadW            float64 `json:"load_w"`
+	MaxImportW       float64 `json:"max_import_w"`
+	MaxExportW       float64 `json:"max_export_w"`
 }
 
 type externalStorage struct {
@@ -304,20 +305,21 @@ type externalPlan struct {
 }
 
 type externalAction struct {
-	SlotStartMs     int64              `json:"slot_start_ms"`
-	SlotLenMin      int                `json:"slot_len_min"`
-	BatteryW        float64            `json:"battery_w"`
-	GridW           float64            `json:"grid_w"`
-	SoCPct          float64            `json:"soc_pct"`
-	CostOre         float64            `json:"cost_ore"`
-	PVLimitW        float64            `json:"pv_limit_w"`
-	PVCurtailActive bool               `json:"pv_curtail_active,omitempty"`
-	StoragePowerW   map[string]float64 `json:"storage_power_w"`
-	StorageEnergy   map[string]float64 `json:"storage_energy_wh"`
-	FlexPowerW      map[string]float64 `json:"flex_power_w"`
-	FlexEnergyWh    map[string]float64 `json:"flex_energy_wh"`
-	ThermalPowerW   map[string]float64 `json:"thermal_power_w"`
-	ThermalState    map[string]float64 `json:"thermal_state"`
+	ExecutionStartMs int64              `json:"execution_start_ms,omitempty"`
+	SlotStartMs      int64              `json:"slot_start_ms"`
+	SlotLenMin       int                `json:"slot_len_min"`
+	BatteryW         float64            `json:"battery_w"`
+	GridW            float64            `json:"grid_w"`
+	SoCPct           float64            `json:"soc_pct"`
+	CostOre          float64            `json:"cost_ore"`
+	PVLimitW         float64            `json:"pv_limit_w"`
+	PVCurtailActive  bool               `json:"pv_curtail_active,omitempty"`
+	StoragePowerW    map[string]float64 `json:"storage_power_w"`
+	StorageEnergy    map[string]float64 `json:"storage_energy_wh"`
+	FlexPowerW       map[string]float64 `json:"flex_power_w"`
+	FlexEnergyWh     map[string]float64 `json:"flex_energy_wh"`
+	ThermalPowerW    map[string]float64 `json:"thermal_power_w"`
+	ThermalState     map[string]float64 `json:"thermal_state"`
 }
 
 func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
@@ -342,6 +344,9 @@ func (o *ExternalOptimizer) OptimizeMultistage(ctx context.Context, slots []Slot
 }
 
 func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params, scenarioPolicy string, nonAnticipativeSlots int) (Plan, error) {
+	if err := validatePartialSlots(slots); err != nil {
+		return Plan{}, err
+	}
 	request := o.buildRequest(slots, p)
 	request.Settings.ScenarioPolicy = scenarioPolicy
 	request.Settings.NonAnticipativeSlots = nonAnticipativeSlots
@@ -433,7 +438,7 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 	}
 	for i, slot := range slots {
 		req.Slots[i] = externalSlot{
-			StartMs: slot.StartMs, LenMin: slot.LenMin,
+			StartMs: slot.StartMs, LenMin: slot.LenMin, ExecutionStartMs: slot.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			Confidence: slot.Confidence, PVW: slot.PVW, LoadW: slot.LoadW,
 			MaxImportW: slot.Limits.MaxImportW, MaxExportW: slot.Limits.MaxExportW,
@@ -545,7 +550,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 		}
 		slot := slots[i]
 		action := Action{
-			SlotStartMs: candidate.SlotStartMs, SlotLenMin: candidate.SlotLenMin,
+			SlotStartMs: candidate.SlotStartMs, SlotLenMin: candidate.SlotLenMin, ExecutionStartMs: candidate.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
@@ -597,6 +602,9 @@ const solverGridLimitToleranceW = 0.1
 // this boundary: NaN, stale slot alignment, energy drift, illegal EV steps, or
 // mode/grid-limit violations reject the entire plan.
 func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
+	if err := validatePartialSlots(slots); err != nil {
+		return err
+	}
 	if plan == nil {
 		return errors.New("nil plan")
 	}
@@ -634,13 +642,13 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				return fmt.Errorf("slot %d contains non-finite output", i)
 			}
 		}
-		if a.SlotStartMs != slot.StartMs || a.SlotLenMin != slot.LenMin {
+		if a.SlotStartMs != slot.StartMs || a.SlotLenMin != slot.LenMin || a.ExecutionStartMs != slot.ExecutionStartMs {
 			return fmt.Errorf("slot %d timestamp/length mismatch", i)
 		}
 		if a.BatteryW > p.MaxChargeW+2 || a.BatteryW < -p.MaxDischargeW-2 {
 			return fmt.Errorf("slot %d battery_w %.3f exceeds bounds", i, a.BatteryW)
 		}
-		dtH := float64(slot.LenMin) / 60
+		dtH := slot.DurationHours()
 		if len(p.Storages) > 0 && len(a.StoragePowerW) > 0 {
 			var totalPowerW, totalEnergyWh float64
 			for _, storage := range p.Storages {

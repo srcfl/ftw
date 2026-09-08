@@ -93,7 +93,7 @@ func validateExternalAssets(req externalRequest, plan externalPlan) error {
 		} else if a.PVLimitW != 0 {
 			return fmt.Errorf("slot %d worker PV cap needs an active flag", i)
 		}
-		if a.SlotStartMs != req.Slots[i].StartMs || a.SlotLenMin != req.Slots[i].LenMin {
+		if a.SlotStartMs != req.Slots[i].StartMs || a.SlotLenMin != req.Slots[i].LenMin || a.ExecutionStartMs != req.Slots[i].ExecutionStartMs {
 			return fmt.Errorf("slot %d changed the requested timeline", i)
 		}
 		if len(a.StoragePowerW) != len(req.Storages) || len(a.StorageEnergy) != len(req.Storages) || len(a.FlexPowerW) != len(req.FlexLoads) || len(a.FlexEnergyWh) != len(req.FlexLoads) || len(a.ThermalPowerW) != 0 || len(a.ThermalState) != 0 {

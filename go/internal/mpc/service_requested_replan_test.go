@@ -42,7 +42,7 @@ func TestPlanSnapshotFailedRequestDoesNotMakeOldPlanCurrent(t *testing.T) {
 	if after.Pending || after.Outdated || after.Plan == nil || after.Plan == before.Plan || after.Reason != "retry-goal" {
 		t.Fatalf("successful retry freshness=%+v", after)
 	}
-	assertPlanDispatchAvailable(t, svc, time.UnixMilli(after.Plan.Actions[0].SlotStartMs), true)
+	assertPlanDispatchAvailable(t, svc, time.UnixMilli(after.Plan.Actions[0].ExecutionStart()), true)
 	// A caller that already captured the old snapshot keeps its own matching
 	// plan and legacy loadpoint ID even after the service publishes another.
 	if windows, wh := before.LoadpointPlanWindows("garage", now, 0); len(windows) != 1 || wh != 6000 {

@@ -106,12 +106,15 @@ const inputProvenanceSchemaVersion = 1
 
 // Slot is one input time slot for the optimizer.
 type Slot struct {
-	StartMs  int64
-	LenMin   int
-	PriceOre float64 // total consumer öre/kWh (incl. grid + VAT) — used for IMPORT cost
-	SpotOre  float64 // raw spot öre/kWh — used for EXPORT revenue (before bonus/fee)
-	PVW      float64 // negative (site sign). 0 if no forecast.
-	LoadW    float64 // positive (site sign). Defaults to a flat baseline.
+	// ExecutionStartMs trims the first price slot to the time still available.
+	// Zero means the full interval; StartMs/LenMin keep the price identity.
+	ExecutionStartMs int64 `json:",omitempty"`
+	StartMs          int64
+	LenMin           int
+	PriceOre         float64 // total consumer öre/kWh (incl. grid + VAT) — used for IMPORT cost
+	SpotOre          float64 // raw spot öre/kWh — used for EXPORT revenue (before bonus/fee)
+	PVW              float64 // negative (site sign). 0 if no forecast.
+	LoadW            float64 // positive (site sign). Defaults to a flat baseline.
 
 	// Input provenance is diagnostic metadata; it does not change optimizer
 	// math. AvailableAtMs is when Core fetched or created the row, not a
@@ -284,9 +287,10 @@ func (p Params) activeLoadpoints() []*LoadpointSpec {
 
 // Action is one scheduled battery target.
 type Action struct {
-	SlotStartMs int64   `json:"slot_start_ms"`
-	SlotLenMin  int     `json:"slot_len_min"`
-	PriceOre    float64 `json:"price_ore"`
+	ExecutionStartMs int64   `json:"execution_start_ms,omitempty"`
+	SlotStartMs      int64   `json:"slot_start_ms"`
+	SlotLenMin       int     `json:"slot_len_min"`
+	PriceOre         float64 `json:"price_ore"`
 	// SpotOre is the raw wholesale spot price (öre/kWh, ex grid tariff
 	// and VAT). Surfaced so the UI can break the price bar into
 	// components (spot + grid tariff + VAT) — pedagogical view of
@@ -611,6 +615,9 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		return Plan{}, err
 	}
 	now := time.Now().UnixMilli()
+	if err := validatePartialSlots(slots); err != nil {
+		return Plan{}, err
+	}
 	slots = sanitizeOptimizeSlots(slots)
 	if len(slots) == 0 || p.CapacityWh <= 0 {
 		return Plan{GeneratedAtMs: now, Mode: p.Mode}, nil
@@ -775,7 +782,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 			return Plan{}, err
 		}
 		slot := slots[t]
-		dtH := float64(slot.LenMin) / 60.0
+		dtH := slot.DurationHours()
 		for si := 0; si < S; si++ {
 			soc := socAt(si)
 			for ei := 0; ei < EL; ei++ {
@@ -1086,7 +1093,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 	var totalCost float64
 	for t := 0; t < N; t++ {
 		slot := slots[t]
-		dtH := float64(slot.LenMin) / 60.0
+		dtH := slot.DurationHours()
 		pol := Policy[t][si][ei]
 		ba := pol / EA
 		ea := pol % EA
@@ -1115,18 +1122,19 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		cost := SlotGridCostOre(slot, gridKWh, p)
 		totalCost += cost
 		a := Action{
-			SlotStartMs: slot.StartMs,
-			SlotLenMin:  slot.LenMin,
-			PriceOre:    slot.PriceOre,
-			SpotOre:     slot.SpotOre,
-			Confidence:  slot.Confidence,
-			PVW:         slot.PVW,
-			LoadW:       slot.LoadW,
-			BatteryW:    actW,
-			GridW:       gridW,
-			SoC:         soc2,
-			CostOre:     cost,
-			Reason:      reasonFor(slot, actW, gridW, meanPrice),
+			SlotStartMs:      slot.StartMs,
+			SlotLenMin:       slot.LenMin,
+			ExecutionStartMs: slot.ExecutionStartMs,
+			PriceOre:         slot.PriceOre,
+			SpotOre:          slot.SpotOre,
+			Confidence:       slot.Confidence,
+			PVW:              slot.PVW,
+			LoadW:            slot.LoadW,
+			BatteryW:         actW,
+			GridW:            gridW,
+			SoC:              soc2,
+			CostOre:          cost,
+			Reason:           reasonFor(slot, actW, gridW, meanPrice),
 		}
 		if evActive {
 			a.LoadpointW = evW
@@ -1158,7 +1166,7 @@ func horizonMeans(slots []Slot, p Params) (meanPriceOre, meanExportOre float64) 
 	}
 	var sumPrice, sumExport, sumLenMin float64
 	for _, s := range slots {
-		w := float64(s.LenMin)
+		w := s.DurationHours() * 60
 		sumPrice += s.PriceOre * w
 		sumExport += SlotExportPriceOre(s, p) * w
 		sumLenMin += w

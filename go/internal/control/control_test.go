@@ -6017,7 +6017,7 @@ func TestSlotMetricsAccumulatesActualWhAcrossTicks(t *testing.T) {
 //     the next slot's measurement.
 func TestSlotMetricsResetsOnSlotRollover(t *testing.T) {
 	now := time.Now()
-	slot1Start := now.Add(-30 * time.Second)
+	slot1Start := now.Add(-2 * time.Minute)
 	slot1 := SlotDirective{
 		SlotStart:       slot1Start,
 		SlotEnd:         slot1Start.Add(15 * time.Minute),
@@ -6089,6 +6089,7 @@ func TestSlotMetricsLogsOverDeliveryAtSlotEnd(t *testing.T) {
 	// Anchor slot 1.
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	// Force accumulator to -850 Wh (2 × planned magnitude → ratio 2.0).
+	st.slotPlannedPastWh = -425
 	st.slotActualWh = -850
 
 	// Rollover into slot 2 — should log + increment OverDeliveryCount.
@@ -6136,6 +6137,7 @@ func TestSlotMetricsDetectsSignMismatch(t *testing.T) {
 
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	// Same magnitude as planned, opposite direction.
+	st.slotPlannedPastWh = -425
 	st.slotActualWh = +425
 
 	active = slot2
@@ -6184,6 +6186,7 @@ func TestSlotMetricsLogsUnderDelivery(t *testing.T) {
 	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
 
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotPlannedPastWh = -425
 	st.slotActualWh = -100 // ratio = 100/425 ≈ 0.235 < 0.5
 
 	active = slot2
@@ -6265,6 +6268,7 @@ func TestSlotMetricsCounterSurvivesMultipleSlots(t *testing.T) {
 	// For each of slots 0,1,2: force over-delivery on the in-flight slot,
 	// then advance idx → next tick triggers rollover evaluation.
 	for i := 0; i < 3; i++ {
+		st.slotPlannedPastWh = -400
 		st.slotActualWh = -1000 // ratio = 1000/400 = 2.5 → over
 		idx++
 		_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
