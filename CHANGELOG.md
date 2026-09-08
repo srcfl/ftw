@@ -1,5 +1,37 @@
 # Changelog
 
+## 3.2.2
+
+### Patch Changes
+
+- 2cfad06: A missing leftover config.yaml no longer starts the setup wizard over live
+  Settings. Core reloads settings/config_v1 from the sibling state.db and rewrites
+  the locator YAML. An edited leftover seed or a wizard document cannot replace
+  Settings already stored in SQLite; only an old-Core rollback save is imported.
+- 83412d1: Release retained DuckDB buffers after a failed telemetry commit runs out of memory, then retry the same queued tick. This lets live collection recover before the normal maintenance threshold and lets background history import resume.
+  
+  Increase the primary DuckDB memory budget to 256 MB so a full telemetry tick can reconcile the observed startup gap while history queries run.
+- 3e2198c: Accept `FTW_API_TOKEN` on the LAN as the API token. With the house password on, a matching Bearer is no longer hashed as a password guess, and a mismatch no longer locks Settings for the household.
+- 234cb3a: Bound Lua driver safety so a stuck poll, a huge watchdog override, or a
+  redirected POST cannot leave hardware on its last setpoint. Every driver VM
+  now drops `os.execute`/`io`/`load`, poll can be cancelled so default mode
+  still runs, watchdog overrides cap at 15 minutes, and `http_post` refuses
+  301/302/303 redirects the same way PATCH already does.
+- de74740: Route periodic EV dispatch through OCPP, keep Lua loadpoint names off the OCPP allowlist, and bound HTTP read/write/idle time.
+- 27ddfe7: OCPP charger power uses one accept rule for dispatch and forecast, so a
+  stale, per-phase, negative, or energy-only sample cannot publish a phantom EV load.
+  1.6 Available/unplug now zeros last power like 2.0.1.
+- 7f734e6: Bind OCPP mTLS client certificates to the charge-point identity in the URL. A certificate signed by `client_ca_file` is no longer enough to claim another charger's id: the CN or DNS SAN must match, and a per-charger password remains an additional gate when one is configured.
+- 9d7bb6a: Price-forecast hour-of-week buckets use Europe/Stockholm civil hours, so
+  Nordic evening peaks land in the evening prior instead of 1–2 hours late
+  under UTC indexing.
+- 8e175ab: Score remaining slot time in the load rain-check and cap the Energyplan
+  worker budget so a late-in-slot replan cannot burn a full solve that
+  cannot be published.
+- 36c3f12: Redact secrets in support-dump logs the same way Ask why does, including OAuth JSON and Bearer tokens, and treat authorization, passwd, credential and a bare auth key as sensitive in the redacted config.
+- 7a43337: Restore soft rollback onto the configured database path, drop that file's WAL, and refuse a gzip snapshot whose CRC does not match.
+- f9d90c5: Do not follow Web Push redirects, so a stored https subscription cannot bounce a notification onto the LAN.
+
 ## 3.2.1
 
 ### Patch Changes
