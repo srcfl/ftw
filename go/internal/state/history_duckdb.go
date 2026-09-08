@@ -221,12 +221,9 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 			}
 		}
 		rows.Close()
-		actual, err := conn.QueryContext(ctx, `SELECT * FROM `+table+historyOrder(table))
-		if err != nil {
-			return err
-		}
-		got, gotCount, err := hashHistoryRows(actual)
-		actual.Close()
+		actualHash := sha256.New()
+		gotCount, err := scanHistoryTable(ctx, conn, table, func(values []any) error { return hashHistoryRow(actualHash, values) })
+		got := fmt.Sprintf("%x", actualHash.Sum(nil))
 		if err != nil {
 			return err
 		}
@@ -572,41 +569,26 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return err
 		}
-		rows, err := src.QueryContext(ctx, `SELECT * FROM `+table+historyOrder(table))
-		if err != nil {
-			return err
-		}
-		cols, err := rows.Columns()
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		marks := strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",")
-		stmt, err := tx.PrepareContext(ctx, `INSERT INTO `+table+` VALUES (`+marks+`)`)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
 		expected := sha256.New()
-		var count int64
-		for rows.Next() {
-			if err = rows.Scan(ptrs...); err != nil {
-				break
+		var stmt *sql.Stmt
+		count, err := scanHistoryTable(ctx, src, table, func(vals []any) error {
+			if stmt == nil {
+				marks := strings.TrimSuffix(strings.Repeat("?,", len(vals)), ",")
+				var prepareErr error
+				stmt, prepareErr = tx.PrepareContext(ctx, `INSERT INTO `+table+` VALUES (`+marks+`)`)
+				if prepareErr != nil {
+					return prepareErr
+				}
 			}
-			if err = hashHistoryRow(expected, vals); err != nil {
-				break
+			if err := hashHistoryRow(expected, vals); err != nil {
+				return err
 			}
-			count++
-			if _, err = stmt.ExecContext(ctx, vals...); err != nil {
-				break
-			}
+			_, err := stmt.ExecContext(ctx, vals...)
+			return err
+		})
+		if stmt != nil {
+			err = errors.Join(err, stmt.Close())
 		}
-		err = errors.Join(err, rows.Err(), rows.Close(), stmt.Close())
 		if err != nil {
 			return err
 		}
@@ -706,4 +688,124 @@ func normalizeHistoryPoint(p HistoryPoint) (HistoryPoint, error) {
 		*v = canonicalHistoryFloat(*v)
 	}
 	return p, nil
+}
+
+// The Go driver materializes each result in native memory. Bounded keyset
+// queries avoid retaining a whole table outside DuckDB's buffer budget.
+// The caller owns the read transaction when concurrent writes are possible.
+type historyQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func scanHistoryTable(ctx context.Context, db historyQueryer, table string, visit func([]any) error) (int64, error) {
+	if table != "ts_samples" {
+		return scanHistoryPages(ctx, db, table, "", nil, strings.Split(strings.TrimPrefix(historyOrder(table), " ORDER BY "), ", "), visit)
+	}
+	// Samples are physically grouped by series after migration. Equality on
+	// driver/metric plus a timestamp bound lets DuckDB prune row groups.
+	groups, err := db.QueryContext(ctx, `SELECT DISTINCT driver_id,metric_id FROM ts_samples ORDER BY driver_id,metric_id`)
+	if err != nil {
+		return 0, err
+	}
+	var series [][2]int64
+	for groups.Next() {
+		var pair [2]int64
+		if err := groups.Scan(&pair[0], &pair[1]); err != nil {
+			groups.Close()
+			return 0, err
+		}
+		series = append(series, pair)
+	}
+	err = errors.Join(groups.Err(), groups.Close())
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, pair := range series {
+		n, err := scanHistoryPages(ctx, db, table, "driver_id=? AND metric_id=?", []any{pair[0], pair[1]}, []string{"ts_ms"}, visit)
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+func scanHistoryPages(ctx context.Context, db historyQueryer, table, filter string, args []any, keys []string, visit func([]any) error) (int64, error) {
+	var total int64
+	var cursor []any
+	for {
+		predicate := filter
+		queryArgs := append([]any(nil), args...)
+		if cursor != nil {
+			if predicate != "" {
+				predicate += " AND "
+			}
+			if len(keys) == 1 {
+				predicate += keys[0] + " > ?"
+			} else {
+				predicate += "(" + strings.Join(keys, ",") + ") > (" + strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",") + ")"
+			}
+			queryArgs = append(queryArgs, cursor...)
+		}
+		q := `SELECT * FROM ` + table
+		if predicate != "" {
+			q += " WHERE " + predicate
+		}
+		q += " ORDER BY " + strings.Join(keys, ",") + " LIMIT 8192"
+		rows, err := db.QueryContext(ctx, q, queryArgs...)
+		if err != nil {
+			return total, err
+		}
+		cols, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return total, err
+		}
+		positions := make([]int, len(keys))
+		for k, key := range keys {
+			positions[k] = -1
+			for i, col := range cols {
+				if col == key {
+					positions[k] = i
+					break
+				}
+			}
+			if positions[k] < 0 {
+				rows.Close()
+				return total, fmt.Errorf("missing history key %s", key)
+			}
+		}
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		count := 0
+		for rows.Next() {
+			if err := rows.Scan(ptrs...); err != nil {
+				rows.Close()
+				return total, err
+			}
+			if err := visit(values); err != nil {
+				rows.Close()
+				return total, err
+			}
+			count++
+			total++
+		}
+		if count > 0 {
+			cursor = make([]any, len(keys))
+			for i, pos := range positions {
+				cursor[i] = values[pos]
+			}
+		}
+		err = errors.Join(rows.Err(), rows.Close())
+		if err != nil {
+			return total, err
+		}
+		if count < 8192 {
+			return total, nil
+		}
+	}
 }
