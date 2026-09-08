@@ -2,10 +2,20 @@ package ocpp
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -32,6 +42,24 @@ func requestFrom(t *testing.T, user, pass, arrivedOn string) *http.Request {
 		r = r.WithContext(ctx)
 	}
 	return r
+}
+
+func requestWithCert(t *testing.T, user, pass string, cert *x509.Certificate) *http.Request {
+	t.Helper()
+	r := requestFrom(t, user, pass, "")
+	if cert != nil {
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+	}
+	return r
+}
+
+func mtlsAuthorizer(secrets map[string]string) *authorizer {
+	return newAuthorizer(&Config{
+		Username:       "ftw",
+		Password:       "shared-secret",
+		ChargerSecrets: secrets,
+		TLS:            &TLSConfig{CertFile: "c.pem", KeyFile: "k.pem", ClientCAFile: "ca.pem"},
+	})
 }
 
 // A charger with a credential of its own cannot be impersonated by something
@@ -138,6 +166,69 @@ func TestNoCredentialsMeansNoBasicAuthHandler(t *testing.T) {
 	}
 }
 
+// A client CA is not enough: the certificate must name the identity in the
+// URL. Otherwise any cert from that CA can claim any adopted charger that
+// has no password of its own.
+func TestClientCertBindsIdentity(t *testing.T) {
+	a := mtlsAuthorizer(nil)
+	if !a.requireClientCert {
+		t.Fatal("ClientCAFile should require a client certificate")
+	}
+	if newAuthorizer(&Config{TLS: &TLSConfig{CertFile: "c.pem", KeyFile: "k.pem"}}).requireClientCert {
+		t.Error("TLS without a client CA must not demand a client certificate")
+	}
+
+	cn := &x509.Certificate{Subject: pkix.Name{CommonName: "garage"}}
+	sanOnly := &x509.Certificate{DNSNames: []string{"garage"}}
+	other := &x509.Certificate{Subject: pkix.Name{CommonName: "carport"}, DNSNames: []string{"carport"}}
+
+	t.Run("CN matching the URL is accepted", func(t *testing.T) {
+		if !a.checkClient("garage", requestWithCert(t, "ftw", "shared-secret", cn)) {
+			t.Error("refused a certificate whose CN is the claimed identity")
+		}
+	})
+	t.Run("DNS SAN matching the URL is accepted", func(t *testing.T) {
+		if !a.checkClient("garage", requestWithCert(t, "ftw", "shared-secret", sanOnly)) {
+			t.Error("refused a certificate whose DNS SAN is the claimed identity")
+		}
+	})
+	t.Run("another charger's cert is refused", func(t *testing.T) {
+		if a.checkClient("garage", requestWithCert(t, "ftw", "shared-secret", other)) {
+			t.Error("accepted a certificate that names a different charger")
+		}
+	})
+	t.Run("no certificate is refused", func(t *testing.T) {
+		if a.checkClient("garage", requestFrom(t, "ftw", "shared-secret", "")) {
+			t.Error("accepted a connection with no client certificate")
+		}
+	})
+	t.Run("without a client CA the cert is ignored", func(t *testing.T) {
+		plain := newAuthorizer(&Config{Username: "ftw", Password: "shared-secret"})
+		if !plain.checkClient("garage", requestWithCert(t, "ftw", "shared-secret", other)) {
+			t.Error("a client certificate must not be required when no CA is configured")
+		}
+	})
+}
+
+// A per-charger password stays in force when mTLS is on: matching the
+// certificate is not enough to skip it, and presenting the password is not
+// enough to skip the certificate.
+func TestClientCertAndPasswordAreBothRequired(t *testing.T) {
+	a := mtlsAuthorizer(map[string]string{"garage": "garage-only-secret"})
+	own := &x509.Certificate{Subject: pkix.Name{CommonName: "garage"}}
+	other := &x509.Certificate{Subject: pkix.Name{CommonName: "carport"}}
+
+	if !a.checkClient("garage", requestWithCert(t, "garage", "garage-only-secret", own)) {
+		t.Error("matching cert and password should be accepted")
+	}
+	if a.checkClient("garage", requestWithCert(t, "ftw", "shared-secret", own)) {
+		t.Error("a matching cert used the shared password to claim a charger that has its own")
+	}
+	if a.checkClient("garage", requestWithCert(t, "garage", "garage-only-secret", other)) {
+		t.Error("another charger's cert presented this charger's password")
+	}
+}
+
 // TLS has to fail loudly. An operator who asked for wss:// and silently got
 // ws:// would have no way to tell the link was never encrypted.
 func TestTLSMisconfigurationRefusesToStart(t *testing.T) {
@@ -214,6 +305,214 @@ func TestPerChargerCredentialOverTheWire(t *testing.T) {
 	// discarded and every impersonation attempt succeeds.
 	if err := connect(t, "garage", "ftw", "shared-secret"); err == nil {
 		t.Fatal("the shared password connected as a charger that has its own credential")
+	}
+}
+
+// Two client certificates from the same CA: connecting as the other
+// charger's id must fail. The TLS stack only checks the CA; the identity
+// bind in checkClient is what stops the swap.
+func TestClientCertCannotClaimAnotherIdentity(t *testing.T) {
+	bundle := issueMTLSBundle(t)
+	port := freePort(t)
+	cfg := &Config{
+		Enabled:            true,
+		Bind:               "127.0.0.1",
+		Port:               port,
+		HeartbeatIntervalS: 60,
+		Username:           "ftw",
+		Password:           "shared-secret",
+		TLS: &TLSConfig{
+			CertFile:     bundle.serverCertFile,
+			KeyFile:      bundle.serverKeyFile,
+			ClientCAFile: bundle.clientCAFile,
+		},
+	}
+	srv, err := Start(context.Background(), cfg, telemetry.NewStore())
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	waitForListener(t, port)
+
+	connect := func(t *testing.T, id string, clientCert tls.Certificate) error {
+		t.Helper()
+		tlsCfg := &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			RootCAs:      bundle.serverPool,
+			Certificates: []tls.Certificate{clientCert},
+			ServerName:   "127.0.0.1",
+		}
+		client := ws.NewTLSClient(tlsCfg)
+		client.SetBasicAuth("ftw", "shared-secret")
+		cp := ocpp16.NewChargePoint(id, nil, client)
+		err := cp.Start(fmt.Sprintf("wss://127.0.0.1:%d", port))
+		if err == nil {
+			// Drop the socket before the next attempt so a refused swap
+			// cannot be mistaken for the library's duplicate-id reject.
+			cp.Stop()
+		}
+		return err
+	}
+
+	if err := connect(t, "carport", bundle.garage); err == nil {
+		t.Fatal("garage's certificate connected as carport")
+	}
+	if err := connect(t, "garage", bundle.carport); err == nil {
+		t.Fatal("carport's certificate connected as garage")
+	}
+	if err := connect(t, "garage", bundle.garage); err != nil {
+		t.Fatalf("garage's own certificate was refused: %v", err)
+	}
+	if err := connect(t, "carport", bundle.carport); err != nil {
+		t.Fatalf("carport's own certificate was refused: %v", err)
+	}
+}
+
+type mtlsBundle struct {
+	serverCertFile string
+	serverKeyFile  string
+	clientCAFile   string
+	serverPool     *x509.CertPool
+	garage         tls.Certificate
+	carport        tls.Certificate
+}
+
+type issuedCert struct {
+	cert *x509.Certificate
+	der  []byte
+	key  *ecdsa.PrivateKey
+}
+
+func issueMTLSBundle(t *testing.T) mtlsBundle {
+	t.Helper()
+	dir := t.TempDir()
+
+	server := selfSigned(t, &x509.Certificate{
+		SerialNumber:          nextSerial(t),
+		Subject:               pkix.Name{CommonName: "ocpp-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:              []string{"localhost"},
+	})
+	ca := selfSigned(t, &x509.Certificate{
+		SerialNumber:          nextSerial(t),
+		Subject:               pkix.Name{CommonName: "ocpp-test-client-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	})
+	garage := signedBy(t, clientTmpl(t, "garage"), ca)
+	carport := signedBy(t, clientTmpl(t, "carport"), ca)
+
+	serverCertFile := filepath.Join(dir, "server.crt")
+	serverKeyFile := filepath.Join(dir, "server.key")
+	clientCAFile := filepath.Join(dir, "client-ca.crt")
+	writePEM(t, serverCertFile, "CERTIFICATE", server.der)
+	writePEM(t, serverKeyFile, "EC PRIVATE KEY", marshalKey(t, server.key))
+	writePEM(t, clientCAFile, "CERTIFICATE", ca.der)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(server.cert)
+	return mtlsBundle{
+		serverCertFile: serverCertFile,
+		serverKeyFile:  serverKeyFile,
+		clientCAFile:   clientCAFile,
+		serverPool:     pool,
+		garage:         tlsCert(garage),
+		carport:        tlsCert(carport),
+	}
+}
+
+func clientTmpl(t *testing.T, id string) *x509.Certificate {
+	t.Helper()
+	return &x509.Certificate{
+		SerialNumber:          nextSerial(t),
+		Subject:               pkix.Name{CommonName: id},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{id},
+	}
+}
+
+func selfSigned(t *testing.T, tmpl *x509.Certificate) issuedCert {
+	t.Helper()
+	key := mustKey(t)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issuedCert{cert: cert, der: der, key: key}
+}
+
+func signedBy(t *testing.T, tmpl *x509.Certificate, ca issuedCert) issuedCert {
+	t.Helper()
+	key := mustKey(t)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issuedCert{cert: cert, der: der, key: key}
+}
+
+func mustKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func nextSerial(t *testing.T) *big.Int {
+	t.Helper()
+	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Sign() == 0 {
+		return big.NewInt(1)
+	}
+	return n
+}
+
+func marshalKey(t *testing.T, key *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+func writePEM(t *testing.T, path, typ string, der []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tlsCert(issued issuedCert) tls.Certificate {
+	return tls.Certificate{
+		Certificate: [][]byte{issued.der},
+		PrivateKey:  issued.key,
+		Leaf:        issued.cert,
 	}
 }
 

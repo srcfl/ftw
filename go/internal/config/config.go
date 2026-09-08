@@ -103,9 +103,9 @@ type OCPPTLS struct {
 	KeyFile  string `yaml:"key_file,omitempty" json:"key_file,omitempty"`
 
 	// ClientCAFile turns on mutual TLS: every charge point must present a
-	// certificate signed by this CA. That is OCPP 2.0.1 security profile 3,
-	// and the only identity here that cannot be copied out of one charger's
-	// configuration and replayed by another device.
+	// certificate signed by this CA, and that cert's CN or DNS SAN must
+	// match the identity in the URL. That is OCPP 2.0.1 security profile 3.
+	// A per-charger password, if set, is an additional gate.
 	ClientCAFile string `yaml:"client_ca_file,omitempty" json:"client_ca_file,omitempty"`
 }
 

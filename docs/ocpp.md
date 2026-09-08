@@ -172,7 +172,11 @@ Whatever you set:
 2. **Identity binding.** A charger listed under `ocpp.chargers` has a password
    of its own and must present it under its own name. This is what closes
    impersonation: without it, identity is client-chosen and shared, so a device
-   that knows the password *and* an adopted charger's id can pose as it.
+   that knows the password *and* an adopted charger's id can pose as it. When
+   `client_ca_file` is set, the client certificate's CN or DNS SAN must also
+   match that name — any cert from the CA is not enough to claim another
+   charger's id. A per-charger password remains an additional gate, not a
+   substitute.
 3. **Bind.** As above.
 4. **Quarantine.** A charge point no charger entry names stays pending, outside
    telemetry and dispatch. A stolen password gets an attacker a row in the
@@ -214,10 +218,12 @@ Chargers then dial `wss://` instead of `ws://`. Without it, basic auth over
 read it.
 
 `client_ca_file` additionally requires every charge point to present a
-certificate signed by that CA — OCPP 2.0.1 security profile 3. It is the
-strongest identity available here: unlike a password, it cannot be copied out
-of one charger's configuration and replayed by another device unless the
-private key was copied too.
+certificate signed by that CA — OCPP 2.0.1 security profile 3 — and the
+certificate's CN or DNS SAN must match the identity in the URL. A cert from
+the same CA that names a different charger is refused. Unlike a password, the
+private key cannot be copied out of one charger's configuration and replayed
+by another device. A per-charger password, if configured, is an additional
+gate, not a substitute for the certificate name.
 
 Half a TLS section is refused at startup rather than quietly serving `ws://`.
 An operator who asked for `wss://` and silently got plaintext would have no way

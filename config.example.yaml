@@ -173,8 +173,8 @@ ocpp:
   password: ""                     # required when enabled; use a long random string
   heartbeat_interval_s: 60
   # Serve wss:// instead of ws://. client_ca_file additionally requires each
-  # charger to present a certificate signed by that CA — OCPP 2.0.1 security
-  # profile 3, and the only identity here that cannot be copied between devices.
+  # charger to present a certificate signed by that CA whose CN or DNS SAN
+  # matches the identity in the URL — OCPP 2.0.1 security profile 3.
   # tls:
   #   cert_file: /etc/ftw/ocpp/server.crt
   #   key_file: /etc/ftw/ocpp/server.key
