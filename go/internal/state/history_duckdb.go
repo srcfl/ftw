@@ -752,7 +752,7 @@ func scanHistoryPages(ctx context.Context, db historyQueryer, table, filter stri
 		if predicate != "" {
 			q += " WHERE " + predicate
 		}
-		q += " ORDER BY " + strings.Join(keys, ",") + " LIMIT 8192"
+		q += " ORDER BY " + strings.Join(keys, ",") + " LIMIT 2048"
 		rows, err := db.QueryContext(ctx, q, queryArgs...)
 		if err != nil {
 			return total, err
@@ -804,7 +804,7 @@ func scanHistoryPages(ctx context.Context, db historyQueryer, table, filter stri
 		if err != nil {
 			return total, err
 		}
-		if count < 8192 {
+		if count < 2048 {
 			return total, nil
 		}
 	}
