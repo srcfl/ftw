@@ -94,10 +94,10 @@ jobs:
 
       - name: Test
         working-directory: go
-        # -timeout is per package. The slowest one takes about 25s, so 120s
-        # leaves plenty of room while capping a hung package at two minutes
-        # instead of the ten-minute default.
-        run: go test -count=1 -timeout 120s ./...
+        # Embedded database fixtures make API/state packages exceed two
+        # minutes on shared runners. Keep a finite package deadline; focused
+        # tests still check queue latency, cancellation and operation limits.
+        run: go test -count=1 -timeout 300s ./...
 
   web:
     name: web

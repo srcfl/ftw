@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.2.1
+
+### Patch Changes
+
+- 715ec0f: Show startup and background history import progress, keep incomplete history visible, and resume the update view when another client starts the work.
+- 715ec0f: Start live collection after importing the catalog and energy accounting, then move large sample archives into DuckDB in the background. Resume verified progress after an interruption, preserve live writes, and report incomplete history until every source is checked. Release native database buffers only between active SQL connections.
+  
+  Give Core startup more time and leave its image and data in place if readiness fails. Preserve the previous image ID before replacement. Check the updater before opening data, and stop with a clear message when an older installation needs to update its updater first.
+  
+  Keep catalog ID allocation safe after an abrupt process exit, and defer raw-history retention until import finishes.
+
+## 3.2.0
+
+### Minor Changes
+
+- a62b082: Use embedded DuckDB for all time-series reads and writes, including the energy ledger. Keep SQLite for configuration and learned state, and retire the FTWDB shadow process.
+  
+  Core verifies the import of existing SQLite and Parquet history before starting control. Health separates queued ticks from durable commits. State schema 3 requires a full backup; returning to an older Core requires a verified full restore with the matching version.
+
+### Patch Changes
+
+- 6eadec3: Plan only the time left in the current price interval. Core, Energyplan 0.3.1,
+  EV budgets and plan projections now share the same execution interval. Reject
+  plans that cross a slot boundary before publication and retry from live state.
+  Compare measured slot energy with the decisions that applied during each part
+  of the interval so a late replan cannot rewrite the whole quarter's target.
+  Support reports use the same observed intervals and distinguish execution-budget
+  credits from measured battery energy.
+
 ## 3.1.3
 
 ### Patch Changes
