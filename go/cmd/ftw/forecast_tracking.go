@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/pvmodel"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	sqlite "modernc.org/sqlite/lib"
 )
 
 type forecastSite struct {
@@ -129,7 +131,7 @@ func (f *forecastTracker) run(ctx context.Context) {
 		drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		save := func(job forecastJob) {
-			if err := f.store.SaveForecastIssue(drainCtx, job.issue); err != nil {
+			if err := saveForecastIssueWithRetry(drainCtx, job.issue, f.store.SaveForecastIssue); err != nil {
 				slog.Warn("forecast archive: shutdown issue unavailable", "id", job.issue.ID, "err", err)
 			}
 		}
@@ -154,9 +156,7 @@ func (f *forecastTracker) run(ctx context.Context) {
 			return
 		case job := <-f.queue:
 			pending = &job
-			writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			err := f.store.SaveForecastIssue(writeCtx, job.issue)
-			cancel()
+			err := saveForecastIssueWithRetry(ctx, job.issue, f.store.SaveForecastIssue)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -170,6 +170,54 @@ func (f *forecastTracker) run(ctx context.Context) {
 			f.observe(ctx, now)
 		}
 	}
+}
+
+func saveForecastIssueWithRetry(ctx context.Context, issue forecasting.Issue, save func(context.Context, forecasting.Issue) error) error {
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Allow SQLite's five-second busy wait to finish. This worker is outside
+		// the planner, and its queue and retry count stay bounded.
+		writeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		err := save(writeCtx, issue)
+		writeErr := writeCtx.Err()
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// database/sql may report a rolled-back transaction after the deadline.
+		if writeErr != nil {
+			err = errors.Join(err, writeErr)
+		}
+		if attempt == attempts || !forecastArchiveRetryable(err) {
+			return fmt.Errorf("save forecast issue after %d attempt(s): %w", attempt, err)
+		}
+		slog.Warn("forecast archive: retrying issue", "id", issue.ID, "attempt", attempt+1, "err", err)
+		wait := time.NewTimer(time.Duration(attempt) * 250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return ctx.Err()
+		case <-wait.C:
+		}
+	}
+}
+
+func forecastArchiveRetryable(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var code interface{ Code() int }
+	if errors.As(err, &code) {
+		// Extended SQLite result codes retain the primary code in the low byte.
+		return code.Code()&0xff == sqlite.SQLITE_BUSY || code.Code()&0xff == sqlite.SQLITE_LOCKED
+	}
+	return false
 }
 
 func (f *forecastTracker) observe(ctx context.Context, now time.Time) {
