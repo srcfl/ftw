@@ -566,6 +566,35 @@ func (c *Controller) SetCommandTimeout(timeout time.Duration) {
 	c.commandTimeout = timeout
 }
 
+func previousCommanded(c *Controller, id string) (w float64, known bool) {
+	if c == nil || c.manager == nil {
+		return 0, false
+	}
+	st, ok := c.manager.State(id)
+	if !ok {
+		return 0, false
+	}
+	return st.CommandedW, st.CommandedKnown
+}
+
+// resumeAfterZeroOffer sends ev_resume when dispatch returns to a non-zero
+// offer after commanding 0 W. Cloud chargers that map 0 A to a sticky user
+// pause (Easee dynamicChargerCurrent) otherwise keep the contactor open
+// until the cable is unplugged, even after a later ev_set_current with amps.
+func (c *Controller) resumeAfterZeroOffer(ctx context.Context, lpCfg Config, prevW float64, prevKnown bool, offerW float64) {
+	if c == nil || !prevKnown || prevW > 0 || offerW <= 0 {
+		return
+	}
+	payload, err := json.Marshal(map[string]any{"action": "ev_resume"})
+	if err != nil {
+		return
+	}
+	if err := c.sendDispatchWithDeadline(ctx, lpCfg.DriverName, payload); err != nil {
+		slog.Warn("loadpoint resume after zero offer",
+			"lp", lpCfg.ID, "driver", lpCfg.DriverName, "err", err)
+	}
+}
+
 func (c *Controller) sendDispatchWithDeadline(ctx context.Context, driver string, payload []byte) error {
 	if c == nil || c.send == nil {
 		return nil
@@ -1901,7 +1930,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// The interruption latch reads this to keep a pause the box chose —
 	// plan slot, Stop hold, surplus clamp — from ever reading as a
 	// charge that failed.
+	prevW, prevKnown := previousCommanded(c, lpCfg.ID)
+	var offerW float64
+	var haveOffer bool
 	if w, ok := cmd["power_w"].(float64); ok {
+		offerW, haveOffer = w, true
 		c.manager.setCommandedForManual(lpCfg.ID, w, cmdReason, manualCommandUpdatedAt)
 	}
 	payload, err := json.Marshal(cmd)
@@ -1910,6 +1943,16 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	}
 	if c.send == nil {
 		return
+	}
+	// Easee (and similar cloud chargers) treat a 0 A dynamic limit as a
+	// user pause that stays until resume or unplug. Writing amps alone
+	// does not reopen the contactor — field report 2026-09-07, e-tron
+	// "no voltage" / Easee "user paused". Resume on the 0 W → offer edge
+	// so a later plan, surplus, Charge now, or safety recovery actually
+	// starts current. Skip the first command of a process (prevKnown
+	// false): that is not a standdown we issued.
+	if haveOffer {
+		c.resumeAfterZeroOffer(ctx, lpCfg, prevW, prevKnown, offerW)
 	}
 	// The one command whose outcome decides whether core can actuate this
 	// charger. A charger that answers every poll and refuses this holds
