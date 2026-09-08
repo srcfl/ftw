@@ -4,16 +4,18 @@ on:
   pull_request:
     branches: [master]
     paths:
-      - "go/internal/config/**"
-      - "go/go.mod"
-      - "go/go.sum"
+      - "go/**"
+      - "scripts/build-core.sh"
+      - "Makefile"
+      - ".github/workflows/release-assets.yml"
       - ".github/workflows/windows-config.yml"
   push:
     branches: [master]
     paths:
-      - "go/internal/config/**"
-      - "go/go.mod"
-      - "go/go.sum"
+      - "go/**"
+      - "scripts/build-core.sh"
+      - "Makefile"
+      - ".github/workflows/release-assets.yml"
       - ".github/workflows/windows-config.yml"
 
 permissions:
@@ -23,13 +25,38 @@ jobs:
   windows-config:
     name: Windows config ACL
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go/go.mod
           cache: false
-      - name: Test config package and Windows ACLs
+      - name: Set up UCRT64 compiler
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: make mingw-w64-ucrt-x86_64-gcc
+      - name: Test config, storage and backup on Windows
+        shell: msys2 {0}
         working-directory: go
-        run: go test -count=1 -timeout 2m ./internal/config
+        env:
+          CGO_ENABLED: "1"
+        run: go test -tags=netgo,osusergo -count=1 -timeout 2m ./internal/config ./internal/state ./internal/backup
+      - name: Build all Windows commands with the release flags
+        shell: msys2 {0}
+        run: FTW_BUILD_ALL=1 bash scripts/build-core.sh windows amd64 bin/windows-amd64
+      - name: Start Core and the backup tool
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # Exclude the compiler's DLL directories from the child process.
+          runtime_path="$(cygpath -u "$SYSTEMROOT")/System32"
+          PATH="$runtime_path" bin/windows-amd64/ftw.exe -h
+          set +e
+          output=$(PATH="$runtime_path" bin/windows-amd64/ftw-backup.exe 2>&1)
+          status=$?
+          set -e
+          test "$status" -eq 1
+          printf '%s\n' "$output" | grep -F 'usage: ftw-backup'
