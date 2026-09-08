@@ -74,6 +74,62 @@ func TestNativeProcessCoreContract(t *testing.T) {
 	}
 }
 
+func TestNativeProcessRejectsMaximumOnlyPVSettings(t *testing.T) {
+	o := nativeWorker(t, 500*time.Millisecond)
+	defer o.Close()
+	slots, p := externalTestFixture()
+	for _, tc := range []struct {
+		name    string
+		maximum float64
+		nullMin bool
+	}{
+		{"zero", 0, false},
+		{"positive", 1500, false},
+		{"zero with null minimum", 0, true},
+		{"positive with null minimum", 1500, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := o.buildRequest(slots, p)
+			encoded, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatal(err)
+			}
+			// Inject the invalid setting at the host/worker boundary. Core's
+			// normal request builder emits both verified capability bounds.
+			settings := payload["settings"].(map[string]any)
+			settings["pv_curtailment_max_w"] = tc.maximum
+			if tc.nullMin {
+				settings["pv_curtailment_min_w"] = nil
+			}
+			encoded, err = json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			raw, err := o.transport.RoundTrip(ctx, encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response externalResponse
+			if err := json.Unmarshal(raw, &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.RequestID != request.RequestID || response.OK || response.Error == nil || response.Error.Code != "invalid_request" || len(response.Plan.Actions) != 0 {
+				t.Errorf("maximum-only setting must return invalid_request without a plan: %s", raw)
+			}
+			// Reuse this transport and let Core validate the next valid plan.
+			if _, err := o.Optimize(ctx, slots, p); err != nil {
+				t.Fatalf("valid request after rejection failed: %v", err)
+			}
+		})
+	}
+}
+
 func TestNativeFullHorizonPhysicalBoundaries(t *testing.T) {
 	o := nativeWorker(t, 500*time.Millisecond)
 	defer o.Close()
