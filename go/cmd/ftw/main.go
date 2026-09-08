@@ -432,7 +432,8 @@ func main() {
 	bootPolicy := apiMutationPolicy()
 	bootPolicy.LANAuthEnabled = lanAuth.Enabled
 	bootPolicy.VerifyLANSecret = lanAuth.Verify
-	apiHandler := newSwappableHandler(bootPhaseHandler())
+	boot := newBootPhaseHandler(*webDir)
+	apiHandler := newSwappableHandler(boot)
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
 		Handler:           api.WithSecurityHeaders(api.Authenticate(apiHandler, bootPolicy)),
@@ -445,7 +446,7 @@ func main() {
 		}
 	}()
 
-	st, err := state.OpenWithLegacyHistory(statePath, coldDir)
+	st, err := state.OpenWithBackgroundHistory(statePath, coldDir, boot.setMigration)
 	if err != nil {
 		slog.Error("open state", "err", err)
 		os.Exit(1)
