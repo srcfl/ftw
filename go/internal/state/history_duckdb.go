@@ -262,127 +262,6 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 	return nil
 }
 
-// ImportLegacyParquet imports frozen daily files once. SQLite recent rows win
-// overlap, matching the old recent/cold ownership. No new Parquet files are
-// written after this cutover. The original files remain as rollback evidence.
-func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
-	if coldDir == "" {
-		return nil
-	}
-	paths, err := filepath.Glob(filepath.Join(coldDir, "[0-9][0-9][0-9][0-9]", "[0-9][0-9]", "[0-9][0-9].parquet"))
-	if err != nil {
-		return err
-	}
-	s.ts.allocMu.Lock()
-	defer s.ts.allocMu.Unlock()
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	for _, path := range paths {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return err
-		}
-		digest, err := historyFileHash(abs)
-		if err != nil {
-			return err
-		}
-		var prior string
-		err = s.history.QueryRowContext(ctx, `SELECT sha256 FROM history_parquet_sources WHERE path=?`, abs).Scan(&prior)
-		if err == nil {
-			if prior != digest {
-				return fmt.Errorf("previously imported Parquet changed: %s", abs)
-			}
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		tx, err := s.history.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			defer tx.Rollback()
-			// Capture each row's expected value before insertion. Existing SQLite
-			// samples keep precedence; a new row must round-trip at full precision.
-			if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE import_points AS
- SELECT p.*, COALESCE(s.value,p.value) AS expected_value
- FROM read_parquet(?) p
- LEFT JOIN ts_drivers d ON d.name=p.driver
- LEFT JOIN ts_metrics m ON m.name=p.metric
- LEFT JOIN ts_samples s ON s.driver_id=d.id AND s.metric_id=m.id AND s.ts_ms=p.ts_ms`, abs); err != nil {
-				return err
-			}
-			var count, unique, invalid int64
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(DISTINCT (driver,metric,ts_ms)),COUNT(*) FILTER (WHERE driver IS NULL OR metric IS NULL OR ts_ms IS NULL OR value IS NULL OR NOT isfinite(value)) FROM import_points`).Scan(&count, &unique, &invalid); err != nil {
-				return err
-			}
-			if count != unique || invalid != 0 {
-				return errors.New("Parquet contains duplicate keys or invalid samples")
-			}
-			for _, q := range []string{
-				`INSERT INTO ts_drivers(name) SELECT DISTINCT driver FROM import_points ON CONFLICT(name) DO NOTHING`,
-				`INSERT INTO ts_metrics(name) SELECT DISTINCT metric FROM import_points ON CONFLICT(name) DO NOTHING`,
-				`INSERT INTO ts_samples SELECT d.id,m.id,p.ts_ms,CASE WHEN p.value=0 THEN 0.0 ELSE p.value END FROM import_points p JOIN ts_drivers d ON d.name=p.driver JOIN ts_metrics m ON m.name=p.metric ON CONFLICT DO NOTHING`,
-			} {
-				if _, err := tx.ExecContext(ctx, q); err != nil {
-					return err
-				}
-			}
-			rows, err := tx.QueryContext(ctx, `SELECT p.expected_value,s.value FROM import_points p
- JOIN ts_drivers d ON d.name=p.driver JOIN ts_metrics m ON m.name=p.metric
- LEFT JOIN ts_samples s ON s.driver_id=d.id AND s.metric_id=m.id AND s.ts_ms=p.ts_ms`)
-			if err != nil {
-				return err
-			}
-			var verified int64
-			for rows.Next() {
-				var expected float64
-				var actual sql.NullFloat64
-				if err := rows.Scan(&expected, &actual); err != nil {
-					rows.Close()
-					return err
-				}
-				if !actual.Valid || historyFloatBits(expected) != historyFloatBits(actual.Float64) {
-					rows.Close()
-					return errors.New("Parquet sample verification failed")
-				}
-				verified++
-			}
-			err = errors.Join(rows.Err(), rows.Close())
-			if err != nil {
-				return err
-			}
-			if verified != count {
-				return errors.New("Parquet row-count verification failed")
-			}
-			after, err := historyFileHash(abs)
-			if err != nil {
-				return err
-			}
-			if after != digest {
-				return errors.New("Parquet changed during import")
-			}
-			if _, err := tx.ExecContext(ctx, `DROP TABLE import_points`); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO history_parquet_sources(path,sha256,rows) VALUES (?,?,?)`, abs, digest, count); err != nil {
-				return err
-			}
-			return tx.Commit()
-		}()
-		if err != nil {
-			return fmt.Errorf("import cold history %s: %w", abs, err)
-		}
-		slog.Info("history: verified Parquet import", "file", filepath.Base(abs), "sha256", digest)
-	}
-	// Startup precedes callers. Explicit imports must not leave stale catalogs.
-	s.ts.mu.Lock()
-	s.ts.loaded = false
-	s.ts.mu.Unlock()
-	return nil
-}
-
 func historyFileHash(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -555,6 +434,13 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		return err
 	}
 	defer src.Rollback()
+	var pending int
+	if err := src.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_imports`).Scan(&pending); err != nil {
+		return err
+	}
+	if pending != 0 {
+		return errors.New("finish the pending Parquet import before exporting a full backup")
+	}
 	dest, err := sql.Open("sqlite", path)
 	if err != nil {
 		return err
