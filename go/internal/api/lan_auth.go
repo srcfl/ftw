@@ -130,9 +130,20 @@ func setLANSessionCookie(w http.ResponseWriter, token string, maxAge int) {
 	})
 }
 
+// matchLANSecret reports whether secret is the house password without
+// touching the guess limiter. Authenticate uses this when the Bearer was
+// already compared to FTW_API_TOKEN; a token miss is not a house guess.
+func matchLANSecret(verify func(string) bool, secret string) bool {
+	return verify != nil && verify(secret)
+}
+
 // admitLANSecret is the process-global guess limiter for the house password.
 // Five failed VerifyLANSecret calls lock every further attempt, including
 // the right password, for 30s. The clock is swapped in tests.
+//
+// Call this for an explicit house-password guess (login, or a LAN Bearer
+// when no API token is configured). Do not call it for a Bearer that was
+// compared to FTW_API_TOKEN.
 func admitLANSecret(verify func(string) bool, secret string) bool {
 	lanGuessMu.Lock()
 	defer lanGuessMu.Unlock()

@@ -121,6 +121,10 @@ curl -X POST -H "Authorization: Bearer <same-random-secret>" \
   https://ftw.example.net/api/restart
 ```
 
+The same Bearer is accepted on the LAN when `api.lan_auth` is on. `FTW_API_TOKEN`
+and the house password are independent secrets: the token is not hashed as a
+password guess, and a mismatch does not lock Settings.
+
 The built-in browser UI does not store API tokens. For a public/FQDN browser
 deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
@@ -160,11 +164,13 @@ Do not treat that gateway as loopback: Desktop SNAT uses the same peer
 for every published-port client, including LAN visitors. A first enable
 from another LAN address is refused, so a visitor cannot set the
 password. `POST /api/config` cannot flip the flag. When on,
-protected LAN routes need the house password. `curl` sends
-`Authorization: Bearer <house-password>`. The browser login form
+protected LAN routes need the house password or `FTW_API_TOKEN`.
+`curl` sends `Authorization: Bearer <house-password>` or
+`Authorization: Bearer <FTW_API_TOKEN>`. The browser login form
 sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
 never asks. Live status stays readable without the password; a viewer
-caller is minted for those reads.
+caller is minted for those reads. The two secrets do not share a lockout:
+retrying the API token cannot lock the household out of Settings.
 
 An owner pairing QR is minted only from loopback or with the house
 password. Promoting a paired phone to owner uses the same gate. The

@@ -334,6 +334,77 @@ func TestLANAuthDoesNotOverrideRemoteToken(t *testing.T) {
 	}
 }
 
+func TestLANAuthAcceptsAPIToken(t *testing.T) {
+	resetLANGuesses(t)
+	policy := lanAuthPolicy(testHousePassword)
+	policy.Token = testMutationToken
+	var caller apiauth.Caller
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer "+testMutationToken)
+	rr := serveLANAuth(policy, req, func(r *http.Request) {
+		caller, _ = apiauth.FromRequest(r)
+	})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if caller.Kind != apiauth.KindLAN || caller.Role != apiauth.RoleOwner {
+		t.Fatalf("caller = %+v, want LAN owner", caller)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/restart", strings.NewReader(`{}`))
+	req.RemoteAddr = "192.168.1.10:43210"
+	req.Header.Set("Authorization", "Bearer "+testMutationToken)
+	req.Header.Set("Content-Type", "application/json")
+	rr = serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("mutation status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLANAuthAcceptsAPITokenWhenHousePasswordDoesNotMatch(t *testing.T) {
+	resetLANGuesses(t)
+	policy := MutationPolicy{
+		Token:          testMutationToken,
+		LANAuthEnabled: func() bool { return true },
+		VerifyLANSecret: func(string) bool {
+			t.Fatal("API token hashed as house password")
+			return false
+		},
+	}
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer "+testMutationToken)
+	rr := serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLANAuthWrongAPITokenDoesNotLockOwnerCookie(t *testing.T) {
+	resetLANGuesses(t)
+	policy := lanAuthPolicy(testHousePassword)
+	policy.Token = testMutationToken
+	cookie := mustIssueLANSession(t)
+
+	for i := 0; i < lanGuessLimit; i++ {
+		req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer wrong-api-token")
+		rr := serveLANAuth(policy, req, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong token %d status = %d, want 401", i+1, rr.Code)
+		}
+	}
+
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "")
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: cookie})
+	rr := serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("owner cookie after wrong API token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	req = lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer "+testHousePassword)
+	rr = serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("house password after wrong API token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestLANAuthNilVerifyIsOff(t *testing.T) {
 	resetLANGuesses(t)
 	policy := MutationPolicy{LANAuthEnabled: func() bool { return true }}
