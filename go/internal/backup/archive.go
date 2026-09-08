@@ -1153,12 +1153,3 @@ func pathInside(root, candidate string) bool {
 	rel, err := filepath.Rel(rootAbs, candidateAbs)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
-
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
-}

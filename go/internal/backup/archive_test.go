@@ -28,6 +28,7 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.SaveConfig("backup-test", "preserved"); err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +245,7 @@ func TestRestoreContentsAndRevertPreserveBothStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.SaveConfig("generation", "backup"); err != nil {
 		t.Fatal(err)
 	}
