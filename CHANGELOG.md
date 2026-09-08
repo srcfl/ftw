@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.1.1
+
+### Patch Changes
+
+- 0b4b39d: Preserve the configured battery SoC window when installing, switching or restoring a driver. Apply the same runtime limits as startup without saving derived values over the operator's config.
+- 8e6d090: Update the compiled planner to reject a PV maximum without a minimum control capability instead of silently ignoring the maximum. Valid requests keep their existing validation and planning behavior.
+
 ## 3.1.0
 
 ### Minor Changes
