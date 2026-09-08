@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.1.3
+
+### Patch Changes
+
+- e3076a4: Use the telemetry snapshot time for live forecast observations so delayed archive writes do not mistake fresh readings for future data.
+
 ## 3.1.2
 
 ### Patch Changes
