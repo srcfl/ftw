@@ -299,13 +299,26 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
-      - name: Set up Windows UCRT64 compiler
+      - name: Set up Windows build tools
         if: matrix.goos == 'windows'
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           path-type: inherit
-          install: make zip mingw-w64-ucrt-x86_64-gcc
+          install: make zip
+
+      - name: Match DuckDB's MinGW compiler
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          # DuckDB v1.5.5 BundleStaticLibs.yml uses this exact toolchain.
+          choco upgrade mingw --version=14.2.0 --allow-downgrade --force --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compilerDir = 'C:/ProgramData/mingw64/mingw64/bin'
+          if ((& "$compilerDir/gcc.exe" -dumpfullversion) -ne '14.2.0') { throw 'Unexpected MinGW version' }
+          "CC=$compilerDir/gcc.exe" >> $env:GITHUB_ENV
+          "CXX=$compilerDir/g++.exe" >> $env:GITHUB_ENV
+          $compilerDir >> $env:GITHUB_PATH
 
       # drivers/ is gitignored and fetched from the commit pinned in
       # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,

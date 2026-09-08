@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build Core and its offline backup tool with DuckDB's bundled static libraries.
-# Windows needs UCRT64 GCC, or a compatible cross compiler supplied as CC/CXX.
+# Windows uses DuckDB's MinGW GCC 14.2.0 toolchain, supplied as CC/CXX.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -42,7 +42,7 @@ fi
 
 if [[ "$target_os" == windows ]]; then
   if [[ "$host_os" != windows && -z "${CC:-}" ]]; then
-    echo "Windows builds need UCRT64 GCC. Build in an MSYS2 UCRT64 shell, or set CC/CXX to compatible cross compilers." >&2
+    echo "Windows builds need DuckDB's MinGW GCC 14.2.0 toolchain. Set CC/CXX to its compilers." >&2
     exit 1
   fi
   export CC=${CC:-gcc}
@@ -50,7 +50,7 @@ if [[ "$target_os" == windows ]]; then
   # The upstream libraries use UCRT's C++ ABI. An MSVCRT compiler can appear
   # to work until the final link, or produce a binary with mixed runtimes.
   if ! printf '#include <_mingw.h>\n#ifndef _UCRT\n#error UCRT64 required\n#endif\n' | "$CC" -E -x c - >/dev/null; then
-    echo "DuckDB's Windows libraries require an MSYS2 UCRT64-compatible GCC." >&2
+    echo "DuckDB's Windows libraries require a UCRT-compatible GCC." >&2
     exit 1
   fi
 fi

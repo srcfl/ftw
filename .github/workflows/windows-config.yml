@@ -26,18 +26,29 @@ jobs:
     name: Windows config ACL
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      CC: C:/ProgramData/mingw64/mingw64/bin/gcc.exe
+      CXX: C:/ProgramData/mingw64/mingw64/bin/g++.exe
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go/go.mod
           cache: false
-      - name: Set up UCRT64 compiler
+      - name: Set up Windows build tools
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           path-type: inherit
-          install: make mingw-w64-ucrt-x86_64-gcc
+          install: make
+      - name: Match DuckDB's MinGW compiler
+        shell: pwsh
+        run: |
+          # DuckDB v1.5.5 BundleStaticLibs.yml uses this exact toolchain.
+          choco upgrade mingw --version=14.2.0 --allow-downgrade --force --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((& $env:CC -dumpfullversion) -ne '14.2.0') { throw 'Unexpected MinGW version' }
+          'C:/ProgramData/mingw64/mingw64/bin' >> $env:GITHUB_PATH
       - name: Test config, storage and backup on Windows
         shell: msys2 {0}
         working-directory: go

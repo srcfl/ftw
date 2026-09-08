@@ -183,7 +183,7 @@ build-amd64:
 	@cp bin/linux-amd64/ftw-backup bin/ftw-backup-linux-amd64
 	@cp bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 
-# Run in an MSYS2 UCRT64 shell, or supply compatible CC/CXX cross compilers.
+# Set CC/CXX to DuckDB's MinGW GCC 14.2.0 compilers; CI installs that version.
 build-windows-amd64:
 	bash scripts/build-core.sh windows amd64 bin/windows-amd64
 	@cp bin/windows-amd64/ftw.exe bin/ftw-windows-amd64.exe
