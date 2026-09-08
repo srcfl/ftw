@@ -593,7 +593,9 @@ func TestBackgroundHistoryContinuesBetaOneReceiptsAndSequences(t *testing.T) {
 		t.Fatal("legacy import did not finish")
 	}
 	st := s.HistoryMigrationStatus()
-	if seedRepeated || !st.HistoryComplete || st.FilesDone != 2 || st.RowsDone != 20 {
+	// beta.1 has no saved SQLite row count. Resume must not scan that table
+	// just to fill a status counter; only the three known Parquet rows count.
+	if seedRepeated || !st.HistoryComplete || st.FilesDone != 2 || st.RowsDone != 3 {
 		t.Fatalf("seedRepeated=%v status=%+v", seedRepeated, st)
 	}
 	if got, err := s.historyConfig("history_duckdb_generation"); err != nil || got != generation {
