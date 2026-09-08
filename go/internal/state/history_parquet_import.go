@@ -121,6 +121,13 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 		if err := importHistoryChunk(ctx, conn, offset, count); err != nil {
 			return fmt.Errorf("import rows at %d: %w", offset, err)
 		}
+		// Committing alone does not move all new row segments out of memory.
+		// Bound that work within large files as well as between daily files.
+		if (offset+historyImportRows)%(64*historyImportRows) == 0 {
+			if _, err := conn.ExecContext(ctx, `CHECKPOINT`); err != nil {
+				return fmt.Errorf("checkpoint imported rows: %w", err)
+			}
+		}
 	}
 	if after, err := historyFileHash(path); err != nil || after != digest {
 		return errors.Join(err, errors.New("Parquet changed during import; restore the original source"))
