@@ -6,9 +6,49 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/parquet-go/parquet-go"
 )
+
+func TestOpenImportsLegacyHistoryBeforeTelemetryStarts(t *testing.T) {
+	dir := t.TempDir()
+	cold := filepath.Join(dir, "cold")
+	day := filepath.Join(cold, "2026", "01")
+	if err := os.MkdirAll(day, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeParquetDay(filepath.Join(day, "01.parquet"), []parquetSampleRow{{TsMs: 1, Driver: "meter", Metric: "power", Value: 42}}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenWithLegacyHistory(filepath.Join(dir, "state.db"), cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.LatestSample("meter", "power")
+	if err != nil || got.Value != 42 {
+		t.Fatalf("history unavailable after open: %+v %v", got, err)
+	}
+	primary := s.history
+	if err := s.ImportLegacyParquet(context.Background(), cold); err != nil {
+		t.Fatal(err)
+	}
+	if s.history != primary {
+		t.Fatal("verified files reopened the native database during an ordinary boot")
+	}
+	if err := s.EnqueueTelemetryTick(nil, []Sample{{TsMs: 2, Driver: "meter", Metric: "power", Value: 43}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.FlushHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ImportLegacyParquet(ctx, cold); err == nil {
+		t.Fatal("allowed native session replacement after telemetry had started")
+	}
+}
 
 func TestHistoryParquetResumesCommittedChunkAndRejectsChangedSource(t *testing.T) {
 	ctx := context.Background()

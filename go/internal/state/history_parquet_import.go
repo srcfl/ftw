@@ -20,7 +20,12 @@ const historyImportRows = 2048
 
 // ImportLegacyParquet imports frozen daily files once. Existing recent samples
 // win overlap. The source files remain as evidence after verification.
+// Call only during startup, before readers or telemetry producers can use the
+// Store. Production uses OpenWithLegacyHistory to enforce that lifecycle.
 func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
+	if s.HistoryWriterStatus().Accepted != 0 {
+		return errors.New("legacy history import must finish before telemetry starts")
+	}
 	if coldDir == "" {
 		var pending int
 		if err := s.history.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_imports`).Scan(&pending); err != nil {
@@ -45,11 +50,46 @@ func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() {
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+	reopen := func() error {
+		if conn != nil {
+			if err := conn.Close(); err != nil {
+				return err
+			}
+			conn = nil
+		}
+		if err := s.history.Close(); err != nil {
+			return err
+		}
+		s.history = nil
+		if err := s.openHistory(); err != nil {
+			return err
+		}
+		conn, err = s.history.Conn(ctx)
+		return err
+	}
+	imported := false
 	for _, path := range paths {
 		abs, err := filepath.Abs(path)
 		if err != nil {
 			return err
+		}
+		var complete int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_sources WHERE path=?`, abs).Scan(&complete); err != nil {
+			return err
+		}
+		if complete == 0 {
+			// CHECKPOINT releases dirty segments and ART buffers, but DuckDB
+			// can retain other table buffers for the native instance's life.
+			// Each new file starts a fresh session on the same durable primary.
+			if err := reopen(); err != nil {
+				return fmt.Errorf("reopen history before import: %w", err)
+			}
+			imported = true
 		}
 		if err := importHistoryFile(ctx, conn, abs); err != nil {
 			return fmt.Errorf("import cold history %s: %w", abs, err)
@@ -61,6 +101,9 @@ func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
 	}
 	if pending != 0 {
 		return errors.New("an interrupted Parquet source is missing; restore the original source before starting")
+	}
+	if imported {
+		return reopen()
 	}
 	return nil
 }

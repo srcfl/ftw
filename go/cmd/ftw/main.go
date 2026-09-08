@@ -445,7 +445,7 @@ func main() {
 		}
 	}()
 
-	st, err := state.Open(statePath)
+	st, err := state.OpenWithLegacyHistory(statePath, coldDir)
 	if err != nil {
 		slog.Error("open state", "err", err)
 		os.Exit(1)
@@ -457,10 +457,6 @@ func main() {
 	}()
 	if *retiredShadowSocket != "" {
 		slog.Warn("FTWDB shadow has been retired; remove its service and socket setting")
-	}
-	if err := st.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-		slog.Error("import legacy history", "err", err)
-		os.Exit(1)
 	}
 	if cfg.RetiredCalendarEnabled {
 		if err := st.RetireCalendarProfile(); err != nil {

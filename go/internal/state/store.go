@@ -76,6 +76,13 @@ type Store struct {
 // then runs all migrations. The connection pragmas (WAL, synchronous(NORMAL),
 // foreign_keys, busy_timeout) and a small pool live in openRaw — see heal.go.
 func Open(path string) (*Store, error) {
+	return OpenWithLegacyHistory(path, "")
+}
+
+// OpenWithLegacyHistory finishes the cold-history import before starting the
+// writer or returning a Store to readers. Native history sessions may reopen
+// during this one-time import to release buffers retained by DuckDB.
+func OpenWithLegacyHistory(path, coldDir string) (*Store, error) {
 	nowMs := time.Now().UnixMilli()
 	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
 
@@ -137,6 +144,16 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		cache.Close()
 		return nil, err
+	}
+	if coldDir != "" {
+		if err := s.ImportLegacyParquet(context.Background(), coldDir); err != nil {
+			if s.history != nil {
+				s.history.Close()
+			}
+			db.Close()
+			cache.Close()
+			return nil, err
+		}
 	}
 	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
