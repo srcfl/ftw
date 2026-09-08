@@ -146,6 +146,7 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(liveTmp, "spill.bin"), "transient history data")
+	writeTestFile(t, filepath.Join(state.HistoryDatabasePath(statePath)+".import-abandoned", "staging.duckdb"), "abandoned import staging")
 	writeTestFile(t, filepath.Join(coldDir, "diagnostics", "2026", "01", "01.parquet"), "diagnostic archive")
 	info, err := Create(context.Background(), CreateOptions{State: st, StatePath: statePath, DataDir: dataDir, OutputDir: filepath.Join(root, "backups")})
 	if err != nil {

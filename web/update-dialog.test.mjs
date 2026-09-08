@@ -6,7 +6,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8");
 const settled = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture() {
+function fixture({ get } = {}) {
   class Root {
     set innerHTML(html) {
       this.html = html;
@@ -42,6 +42,7 @@ function fixture() {
     fetch: (url, options) => {
       requests.push({ url, options });
       if (options?.method === "POST") return new Promise(resolve => { finish = resolve; });
+      if (get) return Promise.resolve(get(url));
       return Promise.resolve({ ok: true, json: async () => ({ enabled: true, backups: [], snapshots: [] }) });
     },
     setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {},
@@ -106,4 +107,45 @@ test("disabling or removing the badge leaves no detached dialog", () => {
     rig.badge._render();
     assert.equal(rig.body.children.length, 0, "a late response must not recreate a detached dialog");
   }
+});
+
+test("opening Updates adopts work started by another client and blocks a duplicate start", async () => {
+  const running = { state: "snapshotting", action: "update", target: "v3.2.1-beta.1", started_at: new Date().toISOString() };
+  const rig = fixture({ get: url => ({ ok: true, json: async () => url.endsWith("/update/status") ? running : {} }) });
+  rig.badge.open();
+  assert.equal(rig.badge._checkingCurrentRun, true);
+  rig.badge._beginUpdate("update");
+  assert.equal(rig.requests.filter(r => r.options?.method === "POST").length, 0);
+  await settled();
+  assert.equal(rig.badge._phase, "updating");
+  assert.equal(rig.badge._sidecarState.state, "snapshotting");
+  assert.equal(rig.badge._expectedRun.target, running.target);
+});
+
+test("a startup 503 keeps update progress available; only explicit disable hides it", async () => {
+  for (const error of ["starting", "self-update disabled"]) {
+    const rig = fixture({ get: () => ({ ok: false, status: 503, json: async () => ({ error }) }) });
+    rig.badge._refresh(false);
+    await settled();
+    assert.equal(rig.badge._disabled, error === "self-update disabled");
+    if (error === "starting") {
+      rig.badge.open();
+      assert.match(rig.root().innerHTML, /Control has not started yet/);
+      assert.doesNotMatch(rig.root().innerHTML, /Update failed/);
+    }
+  }
+});
+
+test("a late status response does not reopen a dismissed dialog", async () => {
+  let finishStatus;
+  const rig = fixture({ get: url => url.endsWith("/update/status")
+    ? new Promise(resolve => { finishStatus = resolve; })
+    : { ok:true, json:async () => ({}) } });
+  rig.badge.open();
+  const close = rig.root().actions.find(action => action.dataset.action === "close");
+  close.click({ currentTarget:close });
+  finishStatus({ ok:true, json:async () => ({state:"checking", action:"update", started_at:new Date().toISOString()}) });
+  await settled();
+  assert.equal(rig.badge._phase, "idle");
+  assert.equal(rig.body.children.length, 0);
 });

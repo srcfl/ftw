@@ -67,6 +67,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/updateipc"
 )
 
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
@@ -359,6 +360,17 @@ func main() {
 		slog.Warn("ignoring FTW_IMAGE_TAG that does not match a built release identity", "built_version", builtVersion, "built_candidate", CandidateTag, "image_tag", imageTag)
 	}
 	slog.Info("FTW starting", "version", Version, "config", *configPath)
+	// The previous updater may revert this image if startup fails. Confirm
+	// its failure behavior before config/bootstrap/state can write any data.
+	if envBool("FTW_SELFUPDATE_ENABLED") {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := updateipc.RequireSafeUpdater(ctx, envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
+		cancel()
+		if err != nil {
+			slog.Error("updater preflight", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	// Route "drivers/<name>.lua" path resolution through the drivers dir
 	// (from -drivers). Picked up by both the initial Load below and every
@@ -432,7 +444,8 @@ func main() {
 	bootPolicy := apiMutationPolicy()
 	bootPolicy.LANAuthEnabled = lanAuth.Enabled
 	bootPolicy.VerifyLANSecret = lanAuth.Verify
-	apiHandler := newSwappableHandler(bootPhaseHandler())
+	boot := newBootPhaseHandler(*webDir)
+	apiHandler := newSwappableHandler(boot)
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
 		Handler:           api.WithSecurityHeaders(api.Authenticate(apiHandler, bootPolicy)),
@@ -445,7 +458,7 @@ func main() {
 		}
 	}()
 
-	st, err := state.OpenWithLegacyHistory(statePath, coldDir)
+	st, err := state.OpenWithBackgroundHistory(statePath, coldDir, boot.setMigration)
 	if err != nil {
 		slog.Error("open state", "err", err)
 		os.Exit(1)

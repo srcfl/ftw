@@ -46,6 +46,9 @@ type HistoryWriterStatus struct {
 	LastRejectMS      int64  `json:"last_reject_ms,omitempty"`
 	LastRejectError   string `json:"last_reject_error,omitempty"`
 	Stopping          bool   `json:"stopping"`
+	MaintenanceError  string `json:"maintenance_error,omitempty"`
+	LastMaintenanceMS int64  `json:"last_maintenance_ms,omitempty"`
+	MaintenanceRuns   uint64 `json:"maintenance_runs"`
 }
 
 type historyWriter struct {
@@ -57,11 +60,19 @@ type historyWriter struct {
 	done    chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
+	// Owned by run, outside the short status mutex. Tests set limits before
+	// sending the first tick; production uses bounded rows, time and retries.
+	maintenanceRows       int
+	maintenanceRowsLimit  int
+	maintenanceDue        time.Time
+	maintenanceRetry      time.Time
+	maintenanceRetryDelay time.Duration
 }
 
 func newHistoryWriter(s *Store) *historyWriter {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := &historyWriter{store: s, queue: make(chan historyBatch, historyQueueTicks), changed: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
+	w := &historyWriter{store: s, queue: make(chan historyBatch, historyQueueTicks), changed: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel,
+		maintenanceRowsLimit: 64 * historyImportRows, maintenanceDue: time.Now().Add(time.Hour), maintenanceRetryDelay: 30 * time.Second}
 	go w.run()
 	return w
 }
@@ -172,6 +183,11 @@ func (w *historyWriter) run() {
 			w.mu.Unlock()
 			if err == nil {
 				acknowledgedSequence = seq
+				rows := len(b.payload.Samples) + len(b.payload.Observations)
+				if b.payload.Point != nil {
+					rows++
+				}
+				w.maintainHistory(rows)
 				break
 			}
 			timer := time.NewTimer(time.Second)
@@ -183,6 +199,37 @@ func (w *historyWriter) run() {
 			}
 		}
 	}
+}
+
+// Maintenance follows a durable commit. It never holds a catalog/write/status
+// lock, and admission can continue into the bounded queue. A long read only
+// postpones maintenance; its transaction and the new committed data stay intact.
+func (w *historyWriter) maintainHistory(rows int) {
+	w.maintenanceRows += rows
+	now := time.Now()
+	if now.Before(w.maintenanceRetry) || (w.maintenanceRows < w.maintenanceRowsLimit && now.Before(w.maintenanceDue)) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(w.ctx, 2*time.Second)
+	err := w.store.CheckpointHistory(ctx)
+	cancel()
+	if err == nil {
+		w.maintenanceRows = 0
+		w.maintenanceDue = time.Now().Add(time.Hour)
+	} else {
+		w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)
+		slog.Warn("history maintenance postponed; committed data retained", "err", err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err == nil {
+		w.status.MaintenanceError = ""
+		w.status.LastMaintenanceMS = time.Now().UnixMilli()
+		w.status.MaintenanceRuns++
+	} else {
+		w.status.MaintenanceError = "History maintenance could not finish; committed data is retained and maintenance will retry."
+	}
+	w.signal()
 }
 
 func (s *Store) HistoryWriterStatus() HistoryWriterStatus {
