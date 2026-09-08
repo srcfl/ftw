@@ -50,7 +50,10 @@
     clearInterval(refreshTimer);
     refreshTimer = null;
   }
-  function syncPolling() { if (advancedVisible()) startPolling(); else stopPolling(); }
+  function syncPolling() {
+    if (advancedVisible() && !document.hidden) startPolling();
+    else stopPolling();
+  }
 
   function fmtAge(ms) {
     if (!ms) return '—';
@@ -237,6 +240,7 @@
     const grid = document.getElementById('twins-grid');
     if (grid) grid.addEventListener('click', onGridClick);
     document.addEventListener('ftw-ui-mode-change', syncPolling);
+    document.addEventListener('visibilitychange', syncPolling);
     syncPolling();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

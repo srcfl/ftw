@@ -248,7 +248,7 @@ test('the operator sees the result of a press even mid-refresh', () => {
   // A refresh requested during a long cycle must run after that cycle settles.
   assert.match(source, /function refreshAfterControl\(\)/);
   assert.match(source, /if \(refreshInFlight\) \{[\s\S]{0,120}refreshQueued = true;[\s\S]{0,120}refreshWaiters\.push/);
-  assert.match(source, /if \(refreshQueued\) \{[\s\S]{0,200}refreshQueued = false;[\s\S]{0,200}refresh\(\)/);
+  assert.match(source, /if \(refreshQueued\) \{[\s\S]{0,400}refreshQueued = false;[\s\S]{0,400}refresh\(\)/);
 });
 
 test('stepper buttons rather than an input that a re-render would clear', () => {

@@ -501,6 +501,13 @@ class FtwEnergyFlow extends FtwElement {
     this._particles = [];
     this._bound = [];
     this._snapshot = null;
+    this._onVisibility = () => {
+      if (document.hidden) this._stopParticleLoop();
+      else this._startParticleLoop();
+    };
+    if (typeof document !== "undefined" && document.addEventListener) {
+      document.addEventListener("visibilitychange", this._onVisibility);
+    }
     // Anchored once at construction so `t = now - tickStart` is on the
     // same timeline for the entire component lifetime. Resetting it
     // each afterRender would make restored bornAt values (from the
@@ -539,8 +546,11 @@ class FtwEnergyFlow extends FtwElement {
   }
 
   disconnectedCallback() {
-    if (this._rafId) cancelAnimationFrame(this._rafId);
-    this._rafId = null;
+    this._stopParticleLoop();
+    if (this._onVisibility && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this._onVisibility);
+      this._onVisibility = null;
+    }
     this._particles = [];
     if (this._resizeRaf) {
       cancelAnimationFrame(this._resizeRaf);
@@ -703,10 +713,7 @@ class FtwEnergyFlow extends FtwElement {
   // every particle — cheaper than SMIL when you have hundreds of them,
   // and gives us per-frame noise terms SMIL can't express.
   afterRender() {
-    if (this._rafId) {
-      cancelAnimationFrame(this._rafId);
-      this._rafId = null;
-    }
+    this._stopParticleLoop();
     // Aggregation toggle — flipping the aria-checked attribute and
     // the svg's data-agg triggers the CSS opacity transition between
     // layers. Intentionally NOT calling this.update() here: a full
@@ -752,9 +759,15 @@ class FtwEnergyFlow extends FtwElement {
     }
     // Static means "not now": a cached view must hold still, because a
     // moving particle is a claim that power is flowing at this moment.
-    if (this.hasAttribute("static")) return;
+    if (this.hasAttribute("static")) {
+      this._bound = [];
+      return;
+    }
     const nodes = this.shadowRoot.querySelectorAll('.ef-p');
-    if (!nodes.length || !this._particles.length) return;
+    if (!nodes.length || !this._particles.length) {
+      this._bound = [];
+      return;
+    }
     // Wire each DOM node to its param slot. `render()` assigned indices
     // via `data-i`; we trust those rather than node order in case the
     // browser reorders subtree attribute-only nodes in the future.
@@ -790,48 +803,65 @@ class FtwEnergyFlow extends FtwElement {
       this._snapshot = null;
     }
     this._bound = bound;
-    const tick = (now) => {
-      const t = (now - this._tickStart) / 1000;
-      for (let k = 0; k < bound.length; k++) {
-        const b = bound[k];
-        const p = b.p;
-        let age = t - p.bornAt;
-        if (age >= p.life || p.life === 0) {
-          rollLife(p, t);
-          // First-ever spawn: backdate bornAt uniformly across the
-          // pool's lifetime so particles are spread evenly instead of
-          // bursting together. p._warmUpIdx is in (0, 1), so this
-          // seeds the fountain with a steady state.
-          if (p._warmUp) {
-            p.bornAt = t - p._warmUpIdx * p.life;
-            p._warmUp = false;
-          }
-          age = t - p.bornAt;
+    this._startParticleLoop();
+  }
+
+  _stopParticleLoop() {
+    if (this._rafId) {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
+  }
+
+  _startParticleLoop() {
+    if (this._rafId || document.hidden || this.hasAttribute("static") || !this._bound || !this._bound.length) return;
+    this._rafId = requestAnimationFrame((now) => this._pumpParticles(now));
+  }
+
+  _pumpParticles(now) {
+    this._rafId = null;
+    if (document.hidden) return;
+    const bound = this._bound;
+    if (!bound || !bound.length) return;
+    const t = (now - this._tickStart) / 1000;
+    for (let k = 0; k < bound.length; k++) {
+      const b = bound[k];
+      const p = b.p;
+      let age = t - p.bornAt;
+      if (age >= p.life || p.life === 0) {
+        rollLife(p, t);
+        // First-ever spawn: backdate bornAt uniformly across the
+        // pool's lifetime so particles are spread evenly instead of
+        // bursting together. p._warmUpIdx is in (0, 1), so this
+        // seeds the fountain with a steady state.
+        if (p._warmUp) {
+          p.bornAt = t - p._warmUpIdx * p.life;
+          p._warmUp = false;
         }
-        // Along-path progress: linear travel from spawn toward target.
-        // No easing — real electrons don't decelerate.
-        const along = p.vx * age;              // along-vector component
-        const alongY = p.vy * age;
-        // Perpendicular offset: damped harmonic oscillator. This is
-        // the "gravity circling the beam" effect — a spring pulls the
-        // particle toward the beam centerline with angular frequency
-        // omega, while γ damps amplitude over time so particles
-        // spiral IN as they approach the target.
-        //   perp(t) = A * e^(−γt) * cos(ωt + φ)
-        const envelope = Math.exp(-p.damp * age);
-        const wave = Math.cos(p.omega * age + p.phase);
-        const perp = p.amp * envelope * wave;
-        const x = p.sx + along + p.perpX * perp;
-        const y = p.sy + alongY + p.perpY * perp;
-        // Opacity is fixed — set at render time, never touched here.
-        // Size variance (per-particle `radius`) replaces the old
-        // opacity pulse as the "texture" cue.
-        b.el.setAttribute('cx', x.toFixed(1));
-        b.el.setAttribute('cy', y.toFixed(1));
+        age = t - p.bornAt;
       }
-      this._rafId = requestAnimationFrame(tick);
-    };
-    this._rafId = requestAnimationFrame(tick);
+      // Along-path progress: linear travel from spawn toward target.
+      // No easing — real electrons don't decelerate.
+      const along = p.vx * age;              // along-vector component
+      const alongY = p.vy * age;
+      // Perpendicular offset: damped harmonic oscillator. This is
+      // the "gravity circling the beam" effect — a spring pulls the
+      // particle toward the beam centerline with angular frequency
+      // omega, while γ damps amplitude over time so particles
+      // spiral IN as they approach the target.
+      //   perp(t) = A * e^(−γt) * cos(ωt + φ)
+      const envelope = Math.exp(-p.damp * age);
+      const wave = Math.cos(p.omega * age + p.phase);
+      const perp = p.amp * envelope * wave;
+      const x = p.sx + along + p.perpX * perp;
+      const y = p.sy + alongY + p.perpY * perp;
+      // Opacity is fixed — set at render time, never touched here.
+      // Size variance (per-particle `radius`) replaces the old
+      // opacity pulse as the "texture" cue.
+      b.el.setAttribute('cx', x.toFixed(1));
+      b.el.setAttribute('cy', y.toFixed(1));
+    }
+    this._rafId = requestAnimationFrame((ts) => this._pumpParticles(ts));
   }
 
   render() {

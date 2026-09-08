@@ -139,9 +139,47 @@
           el.textContent = "? status endpoint unreachable";
         });
       }
-      refresh();
-      if (window._evStatusTimer) clearInterval(window._evStatusTimer);
-      window._evStatusTimer = setInterval(refresh, 5000);
+      function settingsOpen() {
+        var modal = document.getElementById("settings-modal");
+        return !!(modal && !modal.classList.contains("hidden"));
+      }
+      function stopTimer() {
+        if (window._evStatusTimer) {
+          clearInterval(window._evStatusTimer);
+          window._evStatusTimer = null;
+        }
+      }
+      function shouldPoll() {
+        return !document.hidden && settingsOpen() && !!document.getElementById("ev-status-indicator");
+      }
+      function syncPolling() {
+        if (!shouldPoll()) {
+          stopTimer();
+          return;
+        }
+        refresh();
+        if (!window._evStatusTimer) {
+          window._evStatusTimer = setInterval(function () {
+            if (!shouldPoll()) {
+              stopTimer();
+              return;
+            }
+            refresh();
+          }, 5000);
+        }
+      }
+      if (window._evOnVisibility) {
+        document.removeEventListener("visibilitychange", window._evOnVisibility);
+      }
+      window._evOnVisibility = syncPolling;
+      document.addEventListener("visibilitychange", syncPolling);
+      if (window._evModalObserver) window._evModalObserver.disconnect();
+      var modal = document.getElementById("settings-modal");
+      if (modal && typeof MutationObserver === "function") {
+        window._evModalObserver = new MutationObserver(syncPolling);
+        window._evModalObserver.observe(modal, { attributes: true, attributeFilter: ["class"] });
+      }
+      syncPolling();
     },
   };
 })();

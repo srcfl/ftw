@@ -420,11 +420,49 @@
         });
       };
 
-      refresh();
+      function settingsOpen() {
+        var modal = document.getElementById("settings-modal");
+        return !!(modal && !modal.classList.contains("hidden"));
+      }
+      function stopTimer() {
+        if (window._systemStatusTimer) {
+          clearInterval(window._systemStatusTimer);
+          window._systemStatusTimer = null;
+        }
+      }
+      function shouldPoll() {
+        return !document.hidden && settingsOpen() && !!document.getElementById("sys-hostname");
+      }
+      function syncPolling() {
+        if (!shouldPoll()) {
+          stopTimer();
+          return;
+        }
+        refresh();
+        if (!window._systemStatusTimer) {
+          window._systemStatusTimer = setInterval(function () {
+            if (!shouldPoll()) {
+              stopTimer();
+              return;
+            }
+            refresh();
+          }, 5000);
+        }
+      }
+      if (window._systemOnVisibility) {
+        document.removeEventListener("visibilitychange", window._systemOnVisibility);
+      }
+      window._systemOnVisibility = syncPolling;
+      document.addEventListener("visibilitychange", syncPolling);
+      if (window._systemModalObserver) window._systemModalObserver.disconnect();
+      var modal = document.getElementById("settings-modal");
+      if (modal && typeof MutationObserver === "function") {
+        window._systemModalObserver = new MutationObserver(syncPolling);
+        window._systemModalObserver.observe(modal, { attributes: true, attributeFilter: ["class"] });
+      }
       refreshComponents();
       refreshLanAuth();
-      if (window._systemStatusTimer) clearInterval(window._systemStatusTimer);
-      window._systemStatusTimer = setInterval(refresh, 5000);
+      syncPolling();
     },
   };
   S.tabs.system._pure = { optimizerStatus: optimizerStatus, bundleDisplay: bundleDisplay };
