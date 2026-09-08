@@ -44,7 +44,7 @@ func TestHistoryParquetResumesCommittedChunkAndRejectsChangedSource(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE history_import_source (ts_ms BIGINT NOT NULL,driver_id BIGINT NOT NULL,metric_id BIGINT NOT NULL,value DOUBLE NOT NULL,PRIMARY KEY(driver_id,metric_id,ts_ms))`); err != nil {
+	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE history_import_source (ts_ms BIGINT NOT NULL,driver_id BIGINT NOT NULL,metric_id BIGINT NOT NULL,value DOUBLE NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	n, err := stageHistoryParquet(ctx, conn, file)

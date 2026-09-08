@@ -84,17 +84,30 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 			return err
 		}
 	}
-	// A bounded reader stages only this file. Its unique index detects duplicate
-	// keys across chunk boundaries before any of this file reaches the primary.
+	// Release buffers from prior committed files before staging another day.
+	if _, err := conn.ExecContext(ctx, `CHECKPOINT`); err != nil {
+		return fmt.Errorf("checkpoint before staging: %w", err)
+	}
+	// This table can spill to disk. A file-sized unique index cannot, so detect
+	// duplicate keys with a spillable ordered window before primary writes.
 	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE history_import_source (
 		ts_ms BIGINT NOT NULL, driver_id BIGINT NOT NULL, metric_id BIGINT NOT NULL,
-		value DOUBLE NOT NULL CHECK(isfinite(value)), PRIMARY KEY(driver_id,metric_id,ts_ms))`); err != nil {
+		value DOUBLE NOT NULL CHECK(isfinite(value)))`); err != nil {
 		return err
 	}
 	defer conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS history_import_source`)
 	count, err := stageHistoryParquet(ctx, conn, path)
 	if err != nil {
-		return err
+		return fmt.Errorf("stage source: %w", err)
+	}
+	var duplicates int64
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+	 SELECT ts_ms,LAG(ts_ms) OVER(PARTITION BY driver_id,metric_id ORDER BY ts_ms) AS previous
+	 FROM history_import_source) WHERE ts_ms=previous`).Scan(&duplicates); err != nil {
+		return fmt.Errorf("validate source keys: %w", err)
+	}
+	if duplicates != 0 {
+		return errors.New("Parquet contains duplicate sample keys")
 	}
 	if after, err := historyFileHash(path); err != nil || after != digest {
 		return errors.Join(err, errors.New("Parquet changed during staging"))
@@ -106,7 +119,7 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 	}
 	for offset := int64(0); offset < count; offset += historyImportRows {
 		if err := importHistoryChunk(ctx, conn, offset, count); err != nil {
-			return err
+			return fmt.Errorf("import rows at %d: %w", offset, err)
 		}
 	}
 	if after, err := historyFileHash(path); err != nil || after != digest {
