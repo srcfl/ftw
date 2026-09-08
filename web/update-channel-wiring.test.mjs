@@ -61,7 +61,7 @@ test("the inventory is one table so its columns line up across rows", () => {
 
 test("restart asks first because it drops dispatch", () => {
   assert.match(badge, /Restart the service\? Dispatch stops until Core is back and healthy\./);
-  assert.match(badge, /<button class="btn btn-ghost" data-action="restart">Restart<\/button>/);
+  assert.match(badge, /<button class="btn btn-ghost" data-action="restart"[^>]*>Restart<\/button>/);
   // Restart must not carry the same weight as the primary update action.
   assert.doesNotMatch(badge, /<button class="btn" data-action="restart">/);
 });

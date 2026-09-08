@@ -84,12 +84,12 @@ func TestOpenPreservesRetiredOwnerTables(t *testing.T) {
 	if err := reopened.SnapshotTo(snapshotPath); err != nil {
 		t.Fatalf("snapshot database containing retired owner state: %v", err)
 	}
-	snapshot, err := Open(snapshotPath)
+	snapshot, err := openRaw(snapshotPath)
 	if err != nil {
 		t.Fatalf("open snapshot containing retired owner state: %v", err)
 	}
 	t.Cleanup(func() { snapshot.Close() })
-	if err := snapshot.db.QueryRow(`SELECT friendly_name FROM trusted_devices WHERE credential_id = x'0102'`).Scan(&name); err != nil {
+	if err := snapshot.QueryRow(`SELECT friendly_name FROM trusted_devices WHERE credential_id = x'0102'`).Scan(&name); err != nil {
 		t.Fatalf("snapshot lost legacy owner state: %v", err)
 	}
 }
@@ -116,10 +116,10 @@ func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
 		t.Fatalf("record second store: %v", err)
 	}
 	var driverRows, metricRows int
-	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM ts_drivers`).Scan(&driverRows); err != nil {
+	if err := s2.history.QueryRow(`SELECT COUNT(*) FROM ts_drivers`).Scan(&driverRows); err != nil {
 		t.Fatal(err)
 	}
-	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM ts_metrics`).Scan(&metricRows); err != nil {
+	if err := s2.history.QueryRow(`SELECT COUNT(*) FROM ts_metrics`).Scan(&metricRows); err != nil {
 		t.Fatal(err)
 	}
 	if driverRows != 1 || metricRows != 1 {
@@ -616,13 +616,13 @@ func TestHistoryMultiTierMerge(t *testing.T) {
 	s := freshStore(t)
 	// Insert manually into each tier with overlapping timestamps
 	now := time.Now().UnixMilli()
-	if _, err := s.db.Exec(`INSERT INTO history_hot (ts_ms, json) VALUES (?, ?)`, now+1000, `{"t":"hot"}`); err != nil {
+	if _, err := s.history.Exec(`INSERT INTO history_hot (ts_ms, json) VALUES (?, ?)`, now+1000, `{"t":"hot"}`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO history_warm (ts_ms, json) VALUES (?, ?)`, now+1000, `{"t":"warm"}`); err != nil {
+	if _, err := s.history.Exec(`INSERT INTO history_warm (ts_ms, json) VALUES (?, ?)`, now+1000, `{"t":"warm"}`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO history_cold (ts_ms, json) VALUES (?, ?)`, now+2000, `{"t":"cold"}`); err != nil {
+	if _, err := s.history.Exec(`INSERT INTO history_cold (ts_ms, json) VALUES (?, ?)`, now+2000, `{"t":"cold"}`); err != nil {
 		t.Fatal(err)
 	}
 	pts, err := s.LoadHistory(now, now+10000, 0)
@@ -663,7 +663,8 @@ func TestSnapshotToCapturesLiveState(t *testing.T) {
 	}
 
 	// Snapshot DB opens cleanly and contains the seeded rows.
-	snap, err := Open(dst)
+	snapshotDB, err := openRaw(dst)
+	snap := &Store{db: snapshotDB}
 	if err != nil {
 		t.Fatalf("open snapshot: %v", err)
 	}
@@ -717,7 +718,8 @@ func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
 	if err := s.SnapshotTo(dst); err != nil {
 		t.Fatalf("SnapshotTo: %v", err)
 	}
-	snap, err := Open(dst)
+	snapshotDB, err := openRaw(dst)
+	snap := &Store{db: snapshotDB}
 	if err != nil {
 		t.Fatalf("open snapshot: %v", err)
 	}
@@ -727,20 +729,16 @@ func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
 	if v, ok := snap.LoadConfig("mode"); !ok || v != "passive_arbitrage" {
 		t.Errorf("snapshot dropped config row: got %q ok=%v", v, ok)
 	}
-	// Time-series excluded — tables exist (Open runs migrate()) but
-	// rows must NOT be present.
-	if hot, warm, cold, err := snap.HistoryCounts(); err != nil {
-		t.Errorf("HistoryCounts on snap: %v", err)
-	} else if hot+warm+cold != 0 {
-		t.Errorf("snapshot history rows = %d+%d+%d — want 0 (excluded)", hot, warm, cold)
+	// A compact configuration snapshot cannot stand in for a full restore.
+	var count int
+	if err := snap.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('history_hot','history_warm','history_cold','ts_samples')`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("compact snapshot retained history tables: %d %v", count, err)
 	}
-	// ts_samples: query directly since there's no public counter.
-	var nSamples int
-	if err := snap.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&nSamples); err != nil {
-		t.Errorf("count ts_samples: %v", err)
-	} else if nSamples != 0 {
-		t.Errorf("snapshot ts_samples rows = %d — want 0 (excluded)", nSamples)
+	if partial, err := Open(dst); err == nil {
+		partial.Close()
+		t.Fatal("compact snapshot offered empty history as a full restore")
 	}
+
 }
 
 func TestSnapshotToRefusesExistingFile(t *testing.T) {
@@ -815,7 +813,7 @@ func TestBackupToCompressedPreservesCompleteHistory(t *testing.T) {
 		t.Fatalf("backup history counts = %d+%d+%d, %v", hot, warm, cold, err)
 	}
 	var samples int
-	if err := backup.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&samples); err != nil || samples != 1 {
+	if err := backup.history.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&samples); err != nil || samples != 1 {
 		t.Fatalf("backup samples = %d, %v", samples, err)
 	}
 	if err := s.BackupToCompressed(dst); err == nil {

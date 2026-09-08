@@ -549,7 +549,7 @@ func TestDailyCostBreakdown_AcceptsWarmTierCadence(t *testing.T) {
 		t.Fatalf("save prices: %v", err)
 	}
 	for ts := int64(0); ts <= 60*60_000; ts += 15 * 60_000 {
-		if _, err := s.db.Exec(`INSERT INTO history_warm(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, ts, 1000, 1000); err != nil {
+		if _, err := s.history.Exec(`INSERT INTO history_warm(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, ts, 1000, 1000); err != nil {
 			t.Fatalf("seed warm history: %v", err)
 		}
 	}
@@ -633,7 +633,7 @@ func TestDailyCostBreakdown_DedupesHistoryTiersByResolution(t *testing.T) {
 		{"history_warm", 0, 2000}, {"history_warm", 5 * 60_000, 2000}, {"history_warm", 10 * 60_000, 2000},
 		{"history_cold", 0, 9000}, {"history_cold", 5 * 60_000, 9000}, {"history_cold", 10 * 60_000, 9000},
 	} {
-		if _, err := s.db.Exec(`INSERT INTO `+row.table+`(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, row.ts, row.w, row.w); err != nil {
+		if _, err := s.history.Exec(`INSERT INTO `+row.table+`(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, row.ts, row.w, row.w); err != nil {
 			t.Fatalf("seed %s: %v", row.table, err)
 		}
 	}
