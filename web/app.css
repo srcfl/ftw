@@ -279,6 +279,38 @@ body.ftw-app .overview-heading > div:first-child > p:last-child {
   max-width: 62ch;
   color: var(--fg-dim);
 }
+
+/* Direct child of the 12-column Overview grid: span the row or the
+   card occupies one column and the copy wraps a word per line. */
+body.ftw-app #charging-notices {
+  grid-column: 1 / -1;
+}
+body.ftw-app #charging-notices[hidden] {
+  display: none !important;
+}
+body.ftw-app #charging-notices .overview-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 14px 16px;
+}
+body.ftw-app #charging-notices .overview-card p {
+  flex: 1 1 16rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+body.ftw-app #charging-notices .overview-card button {
+  padding: 0.3rem 0;
+  border: 0;
+  background: none;
+  color: var(--accent-e);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
 body.ftw-app .overview-health {
   display: inline-flex;
   align-items: center;
@@ -2487,6 +2519,7 @@ body.ftw-app .diagnose-detail {
     padding-top: 4px;
   }
   body.ftw-app .power-now,
+  body.ftw-app #charging-notices,
   body.ftw-app .overview-outlook,
   body.ftw-app .overview-today,
   body.ftw-app .fuse-row {

@@ -19,6 +19,7 @@ const history = html.match(/<main id="view-history"[\s\S]*?<\/main>/)?.[0] || ""
 describe("simplified dashboard overview", () => {
   it("answers now, price, plan, today, and fuse in that order", () => {
     for (const id of [
+      "charging-notices",
       "power-now",
       "overview-price",
       "overview-plan-summary",
@@ -27,6 +28,11 @@ describe("simplified dashboard overview", () => {
     ]) {
       assert.match(overview, new RegExp(`id="${id}"`));
     }
+    assert.ok(
+      overview.indexOf('id="charging-notices"') <
+        overview.indexOf('id="power-now"'),
+      "the plugged-in car notice should precede Power now",
+    );
 
     const orderedIds = [
       "power-now",
@@ -42,6 +48,18 @@ describe("simplified dashboard overview", () => {
         `${orderedIds[index - 1]} should precede ${orderedIds[index]}`,
       );
     }
+  });
+
+  it("spans the plugged-in car notice across the Overview grid", () => {
+    // #view-overview is 12 columns. A direct child without a span occupies
+    // one column and wraps the notice a word per line, leaving the rest of
+    // the row empty (v3.1.3-beta.1 field report).
+    assert.match(
+      css,
+      /body\.ftw-app #charging-notices\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/,
+    );
+    assert.match(css, /body\.ftw-app #charging-notices\[hidden\]/);
+    assert.match(app, /getElementById\("charging-notices"\)/);
   });
 
   it("offers accessible Flow and Values panels around the existing diagram", () => {

@@ -95,10 +95,16 @@ func TestFailedGoalReplanStopsOldEVAllocationButKeepsManualControl(t *testing.T)
 		return loadpoint.EVSample{Connected: true, RequestActive: true, DeviceID: "easee:A", SessionID: "session-1"}, true
 	}, func(_ context.Context, _ string, payload []byte) error {
 		var command struct {
+			Action string  `json:"action"`
 			PowerW float64 `json:"power_w"`
 		}
 		if err := json.Unmarshal(payload, &command); err != nil {
 			return err
+		}
+		// ev_resume is a side effect of a 0 W → offer edge; this test
+		// is about the setpoint the charger is ordered to deliver.
+		if command.Action != "" && command.Action != "ev_set_current" {
+			return nil
 		}
 		sent = append(sent, command.PowerW)
 		return nil

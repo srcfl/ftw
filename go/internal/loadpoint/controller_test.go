@@ -27,6 +27,25 @@ type sentCommand struct {
 	sitePhases      int
 }
 
+func lastSetCurrent(calls []sentCommand) (sentCommand, bool) {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].action == "ev_set_current" {
+			return calls[i], true
+		}
+	}
+	return sentCommand{}, false
+}
+
+func countAction(calls []sentCommand, action string) int {
+	n := 0
+	for _, c := range calls {
+		if c.action == action {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) error {
 	var d struct {
 		Action          string  `json:"action"`
