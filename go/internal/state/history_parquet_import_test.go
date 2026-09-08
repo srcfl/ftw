@@ -45,8 +45,11 @@ func TestOpenImportsLegacyHistoryBeforeTelemetryStarts(t *testing.T) {
 	if err := s.FlushHistory(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ImportLegacyParquet(ctx, cold); err == nil {
-		t.Fatal("allowed native session replacement after telemetry had started")
+	if err := s.ImportLegacyParquet(ctx, cold); err != nil {
+		t.Fatal(err)
+	}
+	if s.history != primary {
+		t.Fatal("historical import replaced the live native database")
 	}
 }
 

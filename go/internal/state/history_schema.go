@@ -2,6 +2,9 @@ package state
 
 // HistorySchema is separate from SQLite configuration and model state.
 var historySchema = []string{
+	`CREATE TABLE IF NOT EXISTS history_parquet_manifest(path VARCHAR PRIMARY KEY)`,
+	`CREATE TABLE IF NOT EXISTS history_parquet_progress(path VARCHAR PRIMARY KEY, rows_done BIGINT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS history_sqlite_progress (source VARCHAR PRIMARY KEY, rows_done BIGINT NOT NULL, driver_id BIGINT NOT NULL, metric_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS history_parquet_imports (path VARCHAR PRIMARY KEY, sha256 VARCHAR NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS history_parquet_sources (path VARCHAR PRIMARY KEY, sha256 VARCHAR NOT NULL, rows BIGINT NOT NULL, imported_at TIMESTAMP DEFAULT current_timestamp)`,
 	`CREATE SEQUENCE IF NOT EXISTS history_commit_sequence START 1`,

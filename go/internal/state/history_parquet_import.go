@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
 	"github.com/parquet-go/parquet-go"
@@ -18,104 +19,124 @@ import (
 
 const historyImportRows = 2048
 
-// ImportLegacyParquet imports frozen daily files once. Existing recent samples
-// win overlap. The source files remain as evidence after verification.
-// Call only during startup, before readers or telemetry producers can use the
-// Store. Production uses OpenWithLegacyHistory to enforce that lifecycle.
+// ImportLegacyParquet imports frozen files while the primary remains open.
+// Native instances rotate only after all active connections have closed.
+// Existing primary samples win overlap.
 func (s *Store) ImportLegacyParquet(ctx context.Context, coldDir string) error {
-	if s.HistoryWriterStatus().Accepted != 0 {
-		return errors.New("legacy history import must finish before telemetry starts")
+	s.historyImportMu.Lock()
+	defer s.historyImportMu.Unlock()
+	// Only this importer owns these disposable directories. A killed process
+	// may leave one behind; it contains no authoritative rows or receipts.
+	entries, err := os.ReadDir(filepath.Dir(s.historyPath))
+	if err != nil {
+		return err
 	}
-	if coldDir == "" {
-		var pending int
-		if err := s.history.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_imports`).Scan(&pending); err != nil {
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), filepath.Base(s.historyPath)+".import-") {
+			if err := os.RemoveAll(filepath.Join(filepath.Dir(s.historyPath), entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.bindLegacyParquetSources(coldDir); err != nil {
+		return err
+	}
+	rows, err := s.history.QueryContext(ctx, `SELECT m.path,COALESCE(s.rows,0) FROM history_parquet_manifest m LEFT JOIN history_parquet_sources s ON s.path=m.path ORDER BY m.path`)
+	if err != nil {
+		return err
+	}
+	paths := []string{}
+	var completedRows int64
+	for rows.Next() {
+		var path string
+		var count int64
+		if err := rows.Scan(&path, &count); err != nil {
+			rows.Close()
 			return err
 		}
-		if pending != 0 {
-			return errors.New("an interrupted Parquet import requires its original cold directory")
+		paths = append(paths, path)
+		completedRows += count
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	if s.historyMigration != nil {
+		s.historyMigration.update(func(st *HistoryMigrationStatus) {
+			st.Phase = "parquet"
+			st.FilesTotal = len(paths)
+			st.CurrentSource = ""
+			st.RowsDone += completedRows
+			st.RowsTotal = 0
+		})
+	}
+	for _, path := range paths {
+		if err := s.yieldHistoryImport(ctx); err != nil {
+			return err
 		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if err := s.importHistoryFile(ctx, abs, coldDir); err != nil {
+			return fmt.Errorf("import cold history %s: %w", abs, err)
+		}
+		if s.historyMigration != nil {
+			s.historyMigration.update(func(st *HistoryMigrationStatus) { st.FilesDone++ })
+		}
+	}
+	var pending int
+	if err := s.history.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_imports`).Scan(&pending); err != nil {
+		return err
+	}
+	if pending != 0 {
+		return errors.New("an interrupted Parquet source is missing; restore its original source to resume historical import")
+	}
+	return nil
+}
+
+func (s *Store) bindLegacyParquetSources(coldDir string) error {
+	if coldDir == "" {
 		return nil
 	}
 	paths, err := filepath.Glob(filepath.Join(coldDir, "[0-9][0-9][0-9][0-9]", "[0-9][0-9]", "[0-9][0-9].parquet"))
 	if err != nil {
 		return err
 	}
-	s.ts.allocMu.Lock()
-	defer s.ts.allocMu.Unlock()
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()
-	// An interrupted import may have created new catalog entries too.
-	defer func() { s.ts.mu.Lock(); s.ts.loaded = false; s.ts.mu.Unlock() }()
-	conn, err := s.history.Conn(ctx)
+	tx, err := s.history.Begin()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if conn != nil {
-			conn.Close()
-		}
-	}()
-	reopen := func() error {
-		if conn != nil {
-			if err := conn.Close(); err != nil {
-				return err
-			}
-			conn = nil
-		}
-		if err := s.history.Close(); err != nil {
-			return err
-		}
-		s.history = nil
-		if err := s.openHistory(); err != nil {
-			return err
-		}
-		conn, err = s.history.Conn(ctx)
-		return err
-	}
-	imported := false
+	defer tx.Rollback()
 	for _, path := range paths {
 		abs, err := filepath.Abs(path)
 		if err != nil {
 			return err
 		}
-		var complete int
-		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_sources WHERE path=?`, abs).Scan(&complete); err != nil {
+		if _, err := tx.Exec(`INSERT INTO history_parquet_manifest VALUES (?) ON CONFLICT DO NOTHING`, abs); err != nil {
 			return err
 		}
-		if complete == 0 {
-			// CHECKPOINT releases dirty segments and ART buffers, but DuckDB
-			// can retain other table buffers for the native instance's life.
-			// Each new file starts a fresh session on the same durable primary.
-			if err := reopen(); err != nil {
-				return fmt.Errorf("reopen history before import: %w", err)
-			}
-			imported = true
-		}
-		if err := importHistoryFile(ctx, conn, abs); err != nil {
-			return fmt.Errorf("import cold history %s: %w", abs, err)
-		}
 	}
-	var pending int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_imports`).Scan(&pending); err != nil {
-		return err
-	}
-	if pending != 0 {
-		return errors.New("an interrupted Parquet source is missing; restore the original source before starting")
-	}
-	if imported {
-		return reopen()
-	}
-	return nil
+	return tx.Commit()
 }
 
-func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
+func (s *Store) importHistoryFile(ctx context.Context, path, coldDir string) error {
 	digest, err := historyFileHash(path)
 	if err != nil {
+		// A verified file may have been removed after a complete backup. Its
+		// receipt still proves coverage; unimported missing files stay errors.
+		if errors.Is(err, os.ErrNotExist) {
+			var complete int
+			if checkErr := s.history.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_parquet_sources WHERE path=?`, path).Scan(&complete); checkErr == nil && complete != 0 {
+				return nil
+			}
+		}
 		return err
 	}
 	for _, table := range []string{"history_parquet_sources", "history_parquet_imports"} {
 		var prior string
-		err := conn.QueryRowContext(ctx, `SELECT sha256 FROM `+table+` WHERE path=?`, path).Scan(&prior)
+		err := s.history.QueryRowContext(ctx, `SELECT sha256 FROM `+table+` WHERE path=?`, path).Scan(&prior)
 		if err == nil {
 			if prior != digest {
 				return errors.New("previously imported or pending Parquet source changed")
@@ -127,26 +148,56 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 			return err
 		}
 	}
-	// Release buffers from prior committed files before staging another day.
-	if _, err := conn.ExecContext(ctx, `CHECKPOINT`); err != nil {
-		return fmt.Errorf("checkpoint before staging: %w", err)
+	if s.historyMigration != nil {
+		name, _ := filepath.Rel(coldDir, path)
+		s.historyMigration.update(func(st *HistoryMigrationStatus) {
+			st.CurrentSource = filepath.ToSlash(name)
+			st.CurrentSourceRowsDone = 0
+			st.CurrentSourceRowsTotal = 0
+			st.RowsTotal = 0
+		})
 	}
-	// This table can spill to disk. A file-sized unique index cannot, so detect
-	// duplicate keys with a spillable ordered window before primary writes.
-	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE history_import_source (
-		ts_ms BIGINT NOT NULL, driver_id BIGINT NOT NULL, metric_id BIGINT NOT NULL,
-		value DOUBLE NOT NULL CHECK(isfinite(value)))`); err != nil {
+	if err := s.rotateHistory(ctx); err != nil {
 		return err
 	}
-	defer conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS history_import_source`)
-	count, err := stageHistoryParquet(ctx, conn, path)
+	// This instance owns all file-sized buffers and may spill to disk. Closing
+	// it cannot close the live database or any reader's connection.
+	dir, err := os.MkdirTemp(filepath.Dir(s.historyPath), filepath.Base(s.historyPath)+".import-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	db, err := sql.Open("duckdb", filepath.Join(dir, "staging.duckdb")+"?threads=1&memory_limit=64MB&max_temp_directory_size=512MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	for _, q := range []string{
+		`CREATE SEQUENCE ts_drivers_id START 1`, `CREATE SEQUENCE ts_metrics_id START 1`,
+		`CREATE TABLE ts_drivers(id BIGINT DEFAULT nextval('ts_drivers_id'),name VARCHAR UNIQUE)`,
+		`CREATE TABLE ts_metrics(id BIGINT DEFAULT nextval('ts_metrics_id'),name VARCHAR UNIQUE)`,
+		`CREATE TEMP TABLE history_import_source(ts_ms BIGINT NOT NULL,driver_id BIGINT NOT NULL,metric_id BIGINT NOT NULL,value DOUBLE NOT NULL CHECK(isfinite(value)))`,
+	} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	count, err := stageHistoryParquet(ctx, conn, path, func(int64) {
+		if s.historyMigration != nil {
+			s.historyMigration.update(func(*HistoryMigrationStatus) {})
+		}
+	})
 	if err != nil {
 		return fmt.Errorf("stage source: %w", err)
 	}
 	var duplicates int64
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
-	 SELECT ts_ms,LAG(ts_ms) OVER(PARTITION BY driver_id,metric_id ORDER BY ts_ms) AS previous
-	 FROM history_import_source) WHERE ts_ms=previous`).Scan(&duplicates); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT ts_ms,LAG(ts_ms) OVER(PARTITION BY driver_id,metric_id ORDER BY ts_ms) AS previous FROM history_import_source) WHERE ts_ms=previous`).Scan(&duplicates); err != nil {
 		return fmt.Errorf("validate source keys: %w", err)
 	}
 	if duplicates != 0 {
@@ -155,27 +206,73 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 	if after, err := historyFileHash(path); err != nil || after != digest {
 		return errors.Join(err, errors.New("Parquet changed during staging"))
 	}
-	// Bind every committed chunk to immutable source bytes. A retry rechecks
-	// all rows, retaining the values verified by an earlier completed chunk.
-	if _, err := conn.ExecContext(ctx, `INSERT INTO history_parquet_imports VALUES (?,?) ON CONFLICT DO NOTHING`, path, digest); err != nil {
+	var offset int64
+	if err := s.history.QueryRowContext(ctx, `SELECT rows_done FROM history_parquet_progress WHERE path=?`, path).Scan(&offset); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	for offset := int64(0); offset < count; offset += historyImportRows {
-		if err := importHistoryChunk(ctx, conn, offset, count); err != nil {
+	if offset > count {
+		return errors.New("Parquet source is shorter than its committed progress")
+	}
+	s.historyWriteMu.Lock()
+	_, err = s.history.ExecContext(ctx, `INSERT INTO history_parquet_imports VALUES (?,?) ON CONFLICT DO NOTHING`, path, digest)
+	s.historyWriteMu.Unlock()
+	if err != nil {
+		return err
+	}
+	if s.historyMigration != nil {
+		s.historyMigration.update(func(st *HistoryMigrationStatus) {
+			st.CurrentSourceRowsDone = offset
+			st.CurrentSourceRowsTotal = count
+			st.RowsDone += offset
+		})
+	}
+	for offset < count {
+		if err := s.yieldHistoryImport(ctx); err != nil {
+			return err
+		}
+		end := min(offset+historyImportRows, count)
+		rows, err := conn.QueryContext(ctx, `SELECT p.ts_ms,d.name,m.name,p.value FROM history_import_source p JOIN ts_drivers d ON d.id=p.driver_id JOIN ts_metrics m ON m.id=p.metric_id WHERE p.rowid>=? AND p.rowid<? ORDER BY p.rowid`, offset, end)
+		if err != nil {
+			return err
+		}
+		batch := make([]Sample, 0, historyImportRows)
+		for rows.Next() {
+			var sm Sample
+			if err := rows.Scan(&sm.TsMs, &sm.Driver, &sm.Metric, &sm.Value); err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, sm)
+		}
+		err = errors.Join(rows.Err(), rows.Close())
+		if err != nil {
+			return err
+		}
+		if int64(len(batch)) != end-offset {
+			return errors.New("staging row count changed")
+		}
+		if err := s.mergeHistoricalSamples(ctx, batch, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO history_parquet_progress VALUES (?,?) ON CONFLICT(path) DO UPDATE SET rows_done=excluded.rows_done`, path, end)
+			return err
+		}); err != nil {
 			return fmt.Errorf("import rows at %d: %w", offset, err)
 		}
-		// Committing alone does not move all new row segments out of memory.
-		// Bound that work within large files as well as between daily files.
-		if (offset+historyImportRows)%(64*historyImportRows) == 0 {
-			if _, err := conn.ExecContext(ctx, `CHECKPOINT`); err != nil {
-				return fmt.Errorf("checkpoint imported rows: %w", err)
+		if s.historyMigration != nil {
+			s.historyMigration.update(func(st *HistoryMigrationStatus) { st.CurrentSourceRowsDone = end; st.RowsDone += end - offset })
+		}
+		offset = end
+		if offset%(64*historyImportRows) == 0 {
+			if err := s.CheckpointHistory(ctx); err != nil {
+				return err
 			}
 		}
 	}
 	if after, err := historyFileHash(path); err != nil || after != digest {
 		return errors.Join(err, errors.New("Parquet changed during import; restore the original source"))
 	}
-	tx, err := conn.BeginTx(ctx, nil)
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -186,6 +283,9 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM history_parquet_imports WHERE path=?`, path); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_parquet_progress WHERE path=?`, path); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -193,7 +293,7 @@ func importHistoryFile(ctx context.Context, conn *sql.Conn, path string) error {
 	return nil
 }
 
-func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string) (int64, error) {
+func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string, progress ...func(int64)) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -305,7 +405,7 @@ func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string) (int6
 				return count, writeErr
 			}
 			err := conn.Raw(func(raw any) error {
-				app, err := duckdb.NewAppender(raw.(driver.Conn), "temp", "main", "history_import_source")
+				app, err := duckdb.NewAppender(nativeHistoryConn(raw), "temp", "main", "history_import_source")
 				if err != nil {
 					return err
 				}
@@ -321,6 +421,9 @@ func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string) (int6
 				return count, err
 			}
 			count += int64(n)
+			for _, notify := range progress {
+				notify(count)
+			}
 		}
 		if readErr == io.EOF {
 			return count, nil
@@ -329,6 +432,10 @@ func stageHistoryParquet(ctx context.Context, conn *sql.Conn, path string) (int6
 }
 
 func importHistoryChunk(ctx context.Context, conn *sql.Conn, offset, total int64) error {
+	return importHistoryChunkCommit(ctx, conn, offset, total, nil)
+}
+
+func importHistoryChunkCommit(ctx context.Context, conn *sql.Conn, offset, total int64, receipt func(*sql.Tx) error) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -384,6 +491,11 @@ func importHistoryChunk(ctx context.Context, conn *sql.Conn, offset, total int64
 	}
 	for _, table := range []string{"import_expected", "import_points"} {
 		if _, err := tx.ExecContext(ctx, `DROP TABLE `+table); err != nil {
+			return err
+		}
+	}
+	if receipt != nil {
+		if err := receipt(tx); err != nil {
 			return err
 		}
 	}

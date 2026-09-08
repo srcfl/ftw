@@ -41,10 +41,13 @@ const (
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
-	history        *sql.DB
-	historyPath    string
-	historyWriteMu sync.Mutex
-	historyWriter  *historyWriter
+	historyConnector *historyConnector
+	history          *sql.DB
+	historyPath      string
+	historyImportMu  sync.Mutex
+	historyWriteMu   sync.Mutex
+	historyWriter    *historyWriter
+	historyMigration *historyMigration
 
 	db    *sql.DB
 	cache *sql.DB
@@ -76,17 +79,30 @@ type Store struct {
 // then runs all migrations. The connection pragmas (WAL, synchronous(NORMAL),
 // foreign_keys, busy_timeout) and a small pool live in openRaw — see heal.go.
 func Open(path string) (*Store, error) {
-	return openStore(path, "", false)
+	return openStore(path, "", false, nil)
 }
 
-// OpenWithLegacyHistory finishes the cold-history import before starting the
-// writer or returning a Store to readers. Native history sessions may reopen
-// during this one-time import to release buffers retained by DuckDB.
+// OpenWithLegacyHistory is the synchronous entry point for offline tools.
+// Core uses OpenWithBackgroundHistory so raw history does not block startup.
 func OpenWithLegacyHistory(path, coldDir string) (*Store, error) {
-	return openStore(path, coldDir, true)
+	return openStore(path, coldDir, true, nil)
 }
 
-func openStore(path, coldDir string, importLegacy bool) (*Store, error) {
+// OpenWithBackgroundHistory seeds the catalog and energy accounting before
+// starting telemetry. Frozen raw samples and Parquet then import in bounded
+// transactions while the same primary database serves live readers and writers.
+func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigrationStatus)) (*Store, error) {
+	m := newHistoryMigration(onProgress)
+	s, err := openStore(path, coldDir, false, m)
+	if err != nil {
+		m.cancel()
+		return nil, err
+	}
+	go s.runHistoryMigration(coldDir)
+	return s, nil
+}
+
+func openStore(path, coldDir string, importLegacy bool, migration *historyMigration) (*Store, error) {
 	nowMs := time.Now().UnixMilli()
 	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
 
@@ -113,7 +129,7 @@ func openStore(path, coldDir string, importLegacy bool) (*Store, error) {
 	slog.Info("state: integrity gate complete", "elapsed", time.Since(tGate).Round(time.Millisecond))
 
 	s := &Store{
-		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath,
+		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath, historyMigration: migration,
 	}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
@@ -154,6 +170,22 @@ func openStore(path, coldDir string, importLegacy bool) (*Store, error) {
 			if s.history != nil {
 				s.history.Close()
 			}
+			db.Close()
+			cache.Close()
+			return nil, err
+		}
+	}
+	if migration != nil {
+		// Remember all source paths before live work starts. A file that goes
+		// missing before its first chunk must not disappear from coverage.
+		if err := s.bindLegacyParquetSources(coldDir); err != nil {
+			s.history.Close()
+			db.Close()
+			cache.Close()
+			return nil, err
+		}
+		if _, err := s.history.Exec(`INSERT INTO history_migrations(name) VALUES ('legacy-import-pending') ON CONFLICT DO NOTHING`); err != nil {
+			s.history.Close()
 			db.Close()
 			cache.Close()
 			return nil, err
@@ -235,6 +267,10 @@ func (s *Store) Close() error {
 		cancel()
 	}
 	s.verifyWG.Wait()
+	if s.historyMigration != nil {
+		s.historyMigration.cancel()
+		<-s.historyMigration.done
+	}
 
 	var err error
 	if s.historyWriter != nil {

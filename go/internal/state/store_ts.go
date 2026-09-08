@@ -163,7 +163,7 @@ func (s *Store) driverID(name string) (int64, error) {
 	// a caller that raced us before hydrate finished) resolves to the same
 	// id rather than failing the whole sample batch.
 	if _, err := s.history.Exec(
-		`INSERT INTO ts_drivers (name) VALUES (?) ON CONFLICT(name) DO NOTHING`, name,
+		`INSERT INTO ts_drivers (id, name) VALUES (nextval('ts_drivers_next_id'), ?) ON CONFLICT(name) DO NOTHING`, name,
 	); err != nil {
 		return 0, err
 	}
@@ -207,7 +207,7 @@ func (s *Store) metricID(name, unit string) (int64, error) {
 	// One statement covers both jobs: allocate the row, or relabel an
 	// existing one once the driver supplies a unit. An empty unit never
 	// erases a label already stored.
-	if _, err := s.history.Exec(`INSERT INTO ts_metrics (name, unit) VALUES (?, NULLIF(?, ''))
+	if _, err := s.history.Exec(`INSERT INTO ts_metrics (id, name, unit) VALUES (nextval('ts_metrics_next_id'), ?, NULLIF(?, ''))
 		ON CONFLICT(name) DO UPDATE SET unit = COALESCE(NULLIF(excluded.unit, ''), ts_metrics.unit)`,
 		name, unit,
 	); err != nil {
@@ -655,7 +655,9 @@ func (s *Store) DriverNames() ([]string, error) {
 // A nonpositive retention keeps all samples. The oldest hour is removed per
 // transaction, releasing the writer between batches.
 func (s *Store) PruneHistorySamples(ctx context.Context, retentionDays int, now time.Time) error {
-	if retentionDays <= 0 {
+	// Import receipts refer to committed source chunks. Do not delete their rows
+	// until every source has been verified, including after a failed import.
+	if retentionDays <= 0 || !s.HistoryMigrationStatus().HistoryComplete {
 		return nil
 	}
 	cutoff := now.UTC().AddDate(0, 0, -retentionDays)
