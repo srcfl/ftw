@@ -280,6 +280,8 @@ type externalDemandHour struct {
 	StartMs          int64   `json:"start_ms"`
 	EndMs            int64   `json:"end_ms"`
 	ElapsedImportKWh float64 `json:"elapsed_import_kwh,omitempty"`
+	Weight           float64 `json:"weight,omitempty"`
+	Group            string  `json:"group,omitempty"`
 }
 
 type externalFlexLoad struct {
@@ -518,6 +520,7 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		for _, hour := range charge.Hours {
 			wire.Hours = append(wire.Hours, externalDemandHour{
 				StartMs: hour.StartMs, EndMs: hour.EndMs, ElapsedImportKWh: hour.ElapsedImportKWh,
+				Weight: hour.Weight, Group: hour.Group,
 			})
 		}
 		req.DemandCharges = append(req.DemandCharges, wire)

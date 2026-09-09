@@ -1242,6 +1242,10 @@ type Price struct {
 	DemandPricePerKW float64 `yaml:"demand_price_per_kw,omitempty" json:"demand_price_per_kw,omitempty"`
 	// DemandTopN is how many highest hours are averaged. Zero means 3.
 	DemandTopN int `yaml:"demand_top_n,omitempty" json:"demand_top_n,omitempty"`
+	// DemandNightWeight, when > 0, uses Ellevio-style hours: every local
+	// clock hour, all days, with 22:00–06:00 multiplied by this weight.
+	// Zero keeps weekday 06–20 only.
+	DemandNightWeight float64 `yaml:"demand_night_weight,omitempty" json:"demand_night_weight,omitempty"`
 }
 
 func (p *Price) Validate() error {
@@ -1253,6 +1257,9 @@ func (p *Price) Validate() error {
 	}
 	if p.DemandTopN < 0 || p.DemandTopN > 64 {
 		return errors.New("price.demand_top_n must be 0..64")
+	}
+	if p.DemandNightWeight < 0 || p.DemandNightWeight > 1 || math.IsNaN(p.DemandNightWeight) || math.IsInf(p.DemandNightWeight, 0) {
+		return errors.New("price.demand_night_weight must be finite and 0..1")
 	}
 	return nil
 }
