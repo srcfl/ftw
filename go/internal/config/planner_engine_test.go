@@ -8,7 +8,7 @@ func TestPlannerEngineForBuild(t *testing.T) {
 	}{
 		{"v3.1.0-beta.1", "", "linux", "arm64", PlannerEngineEnergyplan},
 		{"v3.1.0-beta.1", "", "linux", "amd64", PlannerEngineEnergyplan},
-		{"v3.1.0-beta.1", "", "darwin", "arm64", PlannerEngineEnergyplan},
+		{"v3.1.0-beta.1", "", "darwin", "arm64", PlannerEngineCore},
 		{"v3.1.0-beta.1", "", "windows", "amd64", PlannerEngineCore},
 		{"v3.1.0-beta.1", "", "linux", "arm", PlannerEngineCore},
 		{"v3.1.0-beta.1", "core", "linux", "arm64", PlannerEngineCore},
