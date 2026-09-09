@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.3.0
+
+### Minor Changes
+
+- 9f4b6b9: Pin Energyplan 0.4.0 and send its planner contract without öre field names. Slot prices go as price_per_kwh / spot_per_kwh in the same minor currency units as before. When a weekday 06–20 demand charge is configured, Core expands local clock hours (including DST), applies VAT, and attaches already-measured month hours. Empty demand_price_per_kw leaves planning unchanged.
+
+### Patch Changes
+
+- 5d56af6: Overview no longer squeezes a plugged-in car notice into a one-word-wide column, and a charger paused at 0 W is resumed when FTW offers current again.
+
 ## 3.2.4
 
 ### Patch Changes
