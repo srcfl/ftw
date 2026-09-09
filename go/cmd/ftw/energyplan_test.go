@@ -28,7 +28,7 @@ func TestEnergyplanBetaSelection(t *testing.T) {
 
 func TestBuildMPCBetaStartsBundledEnergyplan(t *testing.T) {
 	if !energyplanSupported(runtime.GOOS, runtime.GOARCH) {
-		t.Skip("no Windows worker")
+		t.Skip("no bundled worker on this host")
 	}
 	old := Version
 	Version = "v2.15.0-beta.1"

@@ -17,12 +17,33 @@ class BundleBoundaryTest(unittest.TestCase):
         shutil.copytree(HERE / "bundle", self.root)
 
     def test_unsupported_host_keeps_integrity_checks(self):
-        with patch("verify.platform.system", return_value="Darwin"), patch("verify.platform.machine", return_value="x86_64"):
+        with patch("verify.platform.system", return_value="Darwin"), patch("verify.platform.machine", return_value="arm64"):
             self.assertIsNone(host_key())
             self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
 
     def test_valid_bundle(self):
         self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
+
+    def test_linux_only_bundle(self):
+        darwin = self.root / "ftw-solver-darwin-arm64"
+        if darwin.exists():
+            darwin.unlink()
+        manifest = self.root / "manifest.json"
+        data = json.loads(manifest.read_text())
+        data["artifacts"].pop("darwin-arm64", None)
+        data["files"].pop("ftw-solver-darwin-arm64", None)
+        manifest.write_text(json.dumps(data))
+        self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
+
+    def test_missing_required_linux_platform(self):
+        (self.root / "ftw-solver-linux-amd64").unlink()
+        manifest = self.root / "manifest.json"
+        data = json.loads(manifest.read_text())
+        del data["artifacts"]["linux-amd64"]
+        del data["files"]["ftw-solver-linux-amd64"]
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "required platform"):
+            verify_bundle(self.root)
 
     def test_modified_executable(self):
         file = self.root / "ftw-solver-linux-arm64"
