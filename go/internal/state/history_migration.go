@@ -56,13 +56,7 @@ type historyMigration struct {
 
 func newHistoryMigration(progress func(HistoryMigrationStatus)) *historyMigration {
 	ctx, cancel := context.WithCancel(context.Background())
-	m := &historyMigration{ctx: ctx, cancel: cancel, done: make(chan struct{}), progress: progress}
-	m.update(func(st *HistoryMigrationStatus) {
-		st.State, st.Phase = "starting", "seed"
-		st.Activity = "checking"
-		st.StartedAtMS = time.Now().UnixMilli()
-	})
-	return m
+	return &historyMigration{ctx: ctx, cancel: cancel, done: make(chan struct{}), progress: progress}
 }
 
 func (m *historyMigration) update(change func(*HistoryMigrationStatus)) {
@@ -173,6 +167,9 @@ func (s *Store) runHistoryMigration(coldDir string) {
 		st.IncompleteFromMS, st.IncompleteUntilMS = nil, nil
 	})
 	slog.Info("historical import complete; all source rows verified")
+	if err := s.retireLegacyHistorySources(); err != nil {
+		slog.Error("verified history import left legacy sources in place", "err", err)
+	}
 }
 
 // SQLite's legacy sample table is frozen after Core selects DuckDB. Each

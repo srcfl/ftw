@@ -164,6 +164,10 @@ func (s *Store) migrateSQLiteHistory(ctx context.Context, generation string) err
 		}
 		if s.historyMigration != nil {
 			s.historyMigration.update(func(st *HistoryMigrationStatus) {
+				if st.StartedAtMS == 0 {
+					st.StartedAtMS = time.Now().UnixMilli()
+				}
+				st.State, st.Phase, st.Activity = "starting", "seed", "checking"
 				st.CurrentSource = table
 				st.CurrentSourceRowsDone, st.CurrentSourceRowsTotal = 0, 0
 			})
@@ -449,7 +453,8 @@ func hashHistoryRows(rows *sql.Rows) (string, int64, error) {
 
 // exportHistoryToSQLite puts a coherent DuckDB read snapshot into the existing
 // portable full-backup format. Older Core releases can read this snapshot too.
-// The live SQLite history remains frozen; this writes only the backup copy.
+// Live SQLite history is dropped after a verified import; this recreates those
+// tables only in the backup copy.
 func (s *Store) exportHistoryToSQLite(path string) error {
 	if s.history == nil {
 		return nil
@@ -488,6 +493,12 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := ensureSqliteLegacyHistory(func(stmt string) error {
+		_, err := tx.ExecContext(ctx, stmt)
+		return err
+	}); err != nil {
+		return err
+	}
 	for _, table := range historyTables {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return err
@@ -529,7 +540,7 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		}
 
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM config WHERE key IN ('history_duckdb_generation','history_migration_generation')`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM config WHERE key IN ('history_duckdb_generation','history_migration_generation',?)`, historyLegacySourcesRetiredKey); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO config VALUES ('history_restore_generation',?)`, uuid.NewString()); err != nil {

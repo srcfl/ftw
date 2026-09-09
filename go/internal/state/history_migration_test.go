@@ -183,8 +183,11 @@ finished:
 	if newest, err := s.LatestSample("new meter", "new power"); err != nil || newest.Value != 902 {
 		t.Fatalf("live catalog/sample lost: %+v %v", newest, err)
 	}
-	if _, err := os.Stat(filepath.Join(day, "01.parquet")); err != nil {
-		t.Fatal("original Parquet source removed", err)
+	if _, err := os.Stat(filepath.Join(day, "01.parquet")); !os.IsNotExist(err) {
+		t.Fatalf("imported Parquet source kept: %v", err)
+	}
+	if n := sqliteLegacyHistoryTableCount(s); n != 0 {
+		t.Fatalf("sqlite still has %d leftover history tables", n)
 	}
 	if s.HistoryWriterStatus().Rejected != 0 {
 		t.Fatalf("writer=%+v", s.HistoryWriterStatus())
@@ -220,6 +223,9 @@ func TestBackgroundHistoryFailureKeepsCoreStoreUsable(t *testing.T) {
 	}
 	if got, err := s.LatestSample("live", "power"); err != nil || got.Value != 42 {
 		t.Fatalf("live store=%+v %v", got, err)
+	}
+	if n := sqliteLegacyHistoryTableCount(s); n != len(historyTables) {
+		t.Fatalf("failed import dropped sqlite history: %d tables", n)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -615,7 +621,7 @@ func TestBackgroundHistoryContinuesBetaOneReceiptsAndSequences(t *testing.T) {
 	if err := s.history.QueryRow(`SELECT driver_id,metric_id FROM ts_samples WHERE ts_ms=300`).Scan(&d, &m); err != nil || d <= 7 || m <= 9 {
 		t.Fatalf("reused seeded IDs: %d %d %v", d, m, err)
 	}
-	if got, err := historyFileHash(second); err != nil || got != digest {
-		t.Fatalf("changed original source: %s %v", got, err)
+	if _, err := os.Stat(second); !os.IsNotExist(err) {
+		t.Fatalf("imported Parquet source kept: %v", err)
 	}
 }
