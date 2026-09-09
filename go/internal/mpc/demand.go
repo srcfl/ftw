@@ -9,6 +9,8 @@ import (
 const (
 	weekdayPeakStartHour = 6
 	weekdayPeakEndHour   = 20
+	nightStartHour       = 22
+	nightEndHour         = 6
 	defaultDemandTopN    = 3
 	demandChargeID       = "weekday-high"
 	demandCoverageFloor  = 0.5
@@ -37,6 +39,11 @@ type DemandHour struct {
 
 type clockHour struct {
 	start, end time.Time
+	weight     float64
+}
+
+func nightHour(h int) bool {
+	return h >= nightStartHour || h < nightEndHour
 }
 
 func siteLocation(zone string) *time.Location {
@@ -66,7 +73,7 @@ func weekdayPeakClockHours(loc *time.Location, from, to time.Time) []clockHour {
 				if !closeHour.After(from) || !hour.Before(to) {
 					continue
 				}
-				out = append(out, clockHour{hour, closeHour})
+				out = append(out, clockHour{hour, closeHour, 0})
 			}
 		}
 		day = day.AddDate(0, 0, 1)
@@ -74,7 +81,28 @@ func weekdayPeakClockHours(loc *time.Location, from, to time.Time) []clockHour {
 	return out
 }
 
-func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent float64, loc *time.Location, now time.Time, importWh func([][2]int64) ([]float64, []int64)) []DemandCharge {
+func ellevioClockHours(loc *time.Location, from, to time.Time, nightWeight float64) []clockHour {
+	if loc == nil || !to.After(from) || nightWeight <= 0 {
+		return nil
+	}
+	from, to = from.In(loc), to.In(loc)
+	hour := time.Date(from.Year(), from.Month(), from.Day(), from.Hour(), 0, 0, 0, loc)
+	var out []clockHour
+	for hour.Before(to) {
+		closeHour := hour.Add(time.Hour)
+		if closeHour.After(from) && hour.Before(to) {
+			weight := 0.0
+			if nightHour(hour.Hour()) {
+				weight = nightWeight
+			}
+			out = append(out, clockHour{hour, closeHour, weight})
+		}
+		hour = closeHour
+	}
+	return out
+}
+
+func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent, nightWeight float64, loc *time.Location, now time.Time, importWh func([][2]int64) ([]float64, []int64)) []DemandCharge {
 	if pricePerKW <= 0 || !finite(pricePerKW) || len(slots) == 0 {
 		return nil
 	}
@@ -94,7 +122,11 @@ func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent fl
 		execStart = slots[0].ExecutionStartMs
 	}
 	monthStart := time.Date(now.In(loc).Year(), now.In(loc).Month(), 1, 0, 0, 0, 0, loc)
-	hours := weekdayPeakClockHours(loc, monthStart, time.UnixMilli(horizonEnd).In(loc))
+	until := time.UnixMilli(horizonEnd).In(loc)
+	hours := weekdayPeakClockHours(loc, monthStart, until)
+	if nightWeight > 0 {
+		hours = ellevioClockHours(loc, monthStart, until, nightWeight)
+	}
 	if len(hours) == 0 {
 		return nil
 	}
@@ -135,7 +167,8 @@ func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent fl
 			idx := len(m.hours)
 			m.hours = append(m.hours, DemandHour{
 				StartMs: startMs, EndMs: endMs,
-				Group: hour.start.Format("2006-01-02"),
+				Weight: hour.weight,
+				Group:  hour.start.Format("2006-01-02"),
 			})
 			if execStart > startMs && execStart < endMs {
 				m.elapsed = append(m.elapsed, [2]int64{startMs, execStart})
@@ -229,7 +262,7 @@ func (s *Service) demandChargesFor(slots []Slot, now time.Time) []DemandCharge {
 		return nil
 	}
 	loc := siteLocation(s.Timezone)
-	return bindDemandCharges(slots, s.DemandPricePerKW, s.DemandTopN, s.VATPercent, loc, now, s.importEnergy)
+	return bindDemandCharges(slots, s.DemandPricePerKW, s.DemandTopN, s.VATPercent, s.DemandNightWeight, loc, now, s.importEnergy)
 }
 
 func (s *Service) importEnergy(intervals [][2]int64) ([]float64, []int64) {

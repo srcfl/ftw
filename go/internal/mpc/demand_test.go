@@ -52,7 +52,7 @@ func TestBindDemandChargesExpandsWeekdayHoursAndElapsed(t *testing.T) {
 		}
 		return wh, cov
 	}
-	got := bindDemandCharges(slots, 7000, 3, 25, loc, now, importWh)
+	got := bindDemandCharges(slots, 7000, 3, 25, 0, loc, now, importWh)
 	if len(got) != 1 || got[0].ID != "weekday-high-2026-09" || got[0].TopN != 3 {
 		t.Fatalf("charges=%+v", got)
 	}
@@ -95,7 +95,7 @@ func TestBindDemandChargesGroupsHoursByLocalDay(t *testing.T) {
 		{StartMs: now.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
 		{StartMs: time.Date(2026, 9, 10, 6, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
 	}
-	got := bindDemandCharges(slots, 7000, 3, 0, loc, now, nil)
+	got := bindDemandCharges(slots, 7000, 3, 0, 0, loc, now, nil)
 	if len(got) != 1 || len(got[0].Hours) < 3 {
 		t.Fatalf("charges=%+v", got)
 	}
@@ -111,6 +111,51 @@ func TestBindDemandChargesGroupsHoursByLocalDay(t *testing.T) {
 	}
 }
 
+func TestEllevioNightWeightIncludesWeekendsAndHalvesNightHours(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 5, 10, 0, 0, 0, loc) // Saturday
+	slots := []Slot{
+		{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
+		{StartMs: time.Date(2026, 9, 5, 22, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 80, Confidence: 1},
+		{StartMs: time.Date(2026, 9, 5, 23, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 80, Confidence: 1},
+	}
+	without := bindDemandCharges(slots, 7000, 3, 0, 0, loc, now, nil)
+	if len(without) != 0 {
+		t.Fatalf("weekday-only window should skip Saturday, got %+v", without)
+	}
+	got := bindDemandCharges(slots, 7000, 3, 0, 0.5, loc, now, nil)
+	if len(got) != 1 || len(got[0].Hours) < 3 {
+		t.Fatalf("ellevio hours=%+v", got)
+	}
+	var day, night []DemandHour
+	for _, hour := range got[0].Hours {
+		start := time.UnixMilli(hour.StartMs).In(loc)
+		if start.Hour() == 10 {
+			day = append(day, hour)
+		}
+		if start.Hour() == 22 || start.Hour() == 23 {
+			night = append(night, hour)
+		}
+	}
+	if len(day) != 1 || day[0].Weight != 0 {
+		t.Fatalf("day hour should omit default weight 1, got %+v", day)
+	}
+	if len(night) != 2 {
+		t.Fatalf("night hours=%+v", night)
+	}
+	for _, hour := range night {
+		if hour.Weight != 0.5 {
+			t.Fatalf("night weight=%g, want 0.5, hour=%+v", hour.Weight, hour)
+		}
+		if hour.Group != "2026-09-05" {
+			t.Fatalf("night group=%q", hour.Group)
+		}
+	}
+}
+
 func TestBindDemandChargesSkipsUnalignedCurrentHour(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 9, 9, 10, 17, 0, 0, loc)
@@ -120,7 +165,7 @@ func TestBindDemandChargesSkipsUnalignedCurrentHour(t *testing.T) {
 		{StartMs: start.Add(15 * time.Minute).UnixMilli(), LenMin: 45, Confidence: 1},
 		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, Confidence: 1},
 	}
-	got := bindDemandCharges(slots, 7000, 1, 0, loc, now, nil)
+	got := bindDemandCharges(slots, 7000, 1, 0, 0, loc, now, nil)
 	if len(got) != 1 || len(got[0].Hours) == 0 {
 		t.Fatalf("charges=%+v", got)
 	}
