@@ -290,6 +290,17 @@ func TestBatterylessEVBudgetDoesNotInventStorage(t *testing.T) {
 	}
 }
 
+func TestVillaBatteryAndEVGetsFleetBudget(t *testing.T) {
+	slots, p := topologyFixture(1, 1)
+	horizon := make([]Slot, 193)
+	for i := range horizon {
+		horizon[i] = slots[0]
+	}
+	if got := energyplanTimeBudget(horizon, p); got != energyplanFleetBudget {
+		t.Fatalf("1b+1EV 193-slot budget=%v, want fleet", got)
+	}
+}
+
 func energyplanFleetHorizon() ([]Slot, Params) {
 	slots, params := topologyFixture(2, 2)
 	first := slots[0]
