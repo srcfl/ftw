@@ -66,8 +66,11 @@ func TestParquetByteProgressCountsCompressedSourcesAndPartialRows(t *testing.T) 
 	if err := writeParquetDay(first, []parquetSampleRow{{TsMs: 1, Driver: "meter", Metric: "power", Value: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := OpenWithLegacyHistory(path, cold)
+	s, err := Open(path)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ImportLegacyParquet(context.Background(), cold); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
