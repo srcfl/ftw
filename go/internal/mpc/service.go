@@ -231,6 +231,9 @@ type Service struct {
 	// minor units as slot prices, excluding VAT. Zero disables it.
 	DemandPricePerKW float64
 	DemandTopN       int
+	// DemandNightWeight, when > 0, includes every local hour (all days).
+	// Hours 22:00–06:00 are scaled by this factor (Ellevio uses 0.5).
+	DemandNightWeight float64
 	// Timezone is the household IANA zone used to expand weekday 06–20.
 	Timezone string
 

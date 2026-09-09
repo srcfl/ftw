@@ -1037,9 +1037,11 @@ func main() {
 				mpcSvc.VATPercent = newCfg.Price.VATPercent
 				mpcSvc.DemandPricePerKW = newCfg.Price.DemandPricePerKW
 				mpcSvc.DemandTopN = newCfg.Price.DemandTopN
+				mpcSvc.DemandNightWeight = newCfg.Price.DemandNightWeight
 			} else {
 				mpcSvc.DemandPricePerKW = 0
 				mpcSvc.DemandTopN = 0
+				mpcSvc.DemandNightWeight = 0
 			}
 			mpcSvc.Timezone = forecastTimezone()
 		}
@@ -1718,6 +1720,7 @@ func main() {
 			mpcSvc.VATPercent = cfg.Price.VATPercent
 			mpcSvc.DemandPricePerKW = cfg.Price.DemandPricePerKW
 			mpcSvc.DemandTopN = cfg.Price.DemandTopN
+			mpcSvc.DemandNightWeight = cfg.Price.DemandNightWeight
 		}
 		mpcSvc.Timezone = forecastTimezone()
 		// Persist every replan's Diagnostic so operators can inspect
