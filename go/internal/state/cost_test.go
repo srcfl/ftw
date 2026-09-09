@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"math"
 	"testing"
 )
@@ -675,5 +676,22 @@ func TestDailyCostBreakdown_EmptyRange(t *testing.T) {
 	}
 	if b.PriceSlotCount != 0 {
 		t.Errorf("PriceSlotCount = %d, want 0", b.PriceSlotCount)
+	}
+}
+
+func TestImportWhIntervalsBucketsClockHours(t *testing.T) {
+	s := freshStore(t)
+	if err := s.BulkRecordHistory(constantCostHistory(0, 2*60*60_000, 2000, 0, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	wh, cov, err := s.ImportWhIntervals(context.Background(), [][2]int64{{0, 3_600_000}, {3_600_000, 7_200_000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wh) != 2 || !approxEq(wh[0], 2000, 0.01) || !approxEq(wh[1], 2000, 0.01) {
+		t.Fatalf("wh=%v, want 2000, 2000", wh)
+	}
+	if cov[0] != 3_600_000 || cov[1] != 3_600_000 {
+		t.Fatalf("covered=%v", cov)
 	}
 }

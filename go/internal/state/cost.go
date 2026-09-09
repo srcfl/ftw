@@ -343,6 +343,82 @@ func (s *Store) integrateHistoryRange(ctx context.Context, sinceMs, untilMs int6
 	return out, rows.Err()
 }
 
+// ImportWhIntervals integrates grid import over each half-open interval in
+// one history scan. intervals must be sorted and non-overlapping.
+func (s *Store) ImportWhIntervals(ctx context.Context, intervals [][2]int64) ([]float64, []int64, error) {
+	wh := make([]float64, len(intervals))
+	covered := make([]int64, len(intervals))
+	if len(intervals) == 0 {
+		return wh, covered, nil
+	}
+	sinceMs, untilMs := intervals[0][0], intervals[len(intervals)-1][1]
+	if untilMs <= sinceMs {
+		return wh, covered, nil
+	}
+	historyStartMs := sinceMs - maxCostIntegrationGap.Milliseconds()
+	rows, err := s.history.QueryContext(ctx, `
+		WITH all_rows AS (
+			SELECT ts_ms, COALESCE(grid_w, 0) AS grid_w, 0 AS tier
+			FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
+			UNION ALL
+			SELECT ts_ms, COALESCE(grid_w, 0), 1
+			FROM history_warm WHERE ts_ms BETWEEN ? AND ?
+			UNION ALL
+			SELECT ts_ms, COALESCE(grid_w, 0), 2
+			FROM history_cold WHERE ts_ms BETWEEN ? AND ?
+		), ranked AS (
+			SELECT ts_ms, grid_w,
+			       ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier ASC) AS row_rank
+			FROM all_rows
+		)
+		SELECT ts_ms, grid_w
+		FROM ranked WHERE row_rank = 1 ORDER BY ts_ms ASC
+	`,
+		historyStartMs, untilMs,
+		historyStartMs, untilMs,
+		historyStartMs, untilMs,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var havePrev bool
+	var prevTs int64
+	idx := 0
+	for rows.Next() {
+		var ts int64
+		var gridW float64
+		if err := rows.Scan(&ts, &gridW); err != nil {
+			return nil, nil, err
+		}
+		if !havePrev {
+			prevTs, havePrev = ts, true
+			continue
+		}
+		rawDtMs := ts - prevTs
+		intervalStart := maxInt64(prevTs, sinceMs)
+		intervalEnd := minInt64(ts, untilMs)
+		prevTs = ts
+		if rawDtMs > maxCostIntegrationGap.Milliseconds() || intervalEnd <= intervalStart {
+			continue
+		}
+		dtMs := intervalEnd - intervalStart
+		midTs := intervalStart + dtMs/2
+		for idx < len(intervals) && intervals[idx][1] <= midTs {
+			idx++
+		}
+		if idx >= len(intervals) || intervals[idx][0] > midTs {
+			continue
+		}
+		covered[idx] += dtMs
+		if gridW > 0 {
+			wh[idx] += gridW * float64(dtMs) / 3600000.0
+		}
+	}
+	return wh, covered, rows.Err()
+}
+
 // avgSlotPricesForRange computes time-weighted import / export price metadata
 // over price slots overlapping [sinceMs, untilMs), including variable slot
 // lengths and partial edge slots.

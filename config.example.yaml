@@ -264,3 +264,9 @@ fleet_ping:
 #   interval_min: 15
 #   soc_min: 0.10
 #   soc_max: 0.95
+
+# Peak-power tariff (weekday 06–20 local time). Same minor units as
+# grid_tariff_ore_kwh, per kW, excluding VAT. 0 disables it.
+# price:
+#   demand_price_per_kw: 7000
+#   demand_top_n: 3

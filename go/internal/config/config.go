@@ -1235,6 +1235,26 @@ type Price struct {
 	// most Swedish customer agreements pass through. Set to a pointer
 	// to 0.0 if you have a guaranteed-zero-floor agreement.
 	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
+
+	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
+	// minor units per kW as grid_tariff_ore_kwh is per kWh, excluding VAT.
+	// Zero leaves demand charges off. Core expands local clock hours.
+	DemandPricePerKW float64 `yaml:"demand_price_per_kw,omitempty" json:"demand_price_per_kw,omitempty"`
+	// DemandTopN is how many highest hours are averaged. Zero means 3.
+	DemandTopN int `yaml:"demand_top_n,omitempty" json:"demand_top_n,omitempty"`
+}
+
+func (p *Price) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.DemandPricePerKW < 0 || math.IsNaN(p.DemandPricePerKW) || math.IsInf(p.DemandPricePerKW, 0) {
+		return errors.New("price.demand_price_per_kw must be finite and >= 0")
+	}
+	if p.DemandTopN < 0 || p.DemandTopN > 64 {
+		return errors.New("price.demand_top_n must be 0..64")
+	}
+	return nil
 }
 
 // Weather is the weather-forecast source config.
@@ -1988,6 +2008,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateVehicles(); err != nil {
+		return err
+	}
+	if err := c.Price.Validate(); err != nil {
 		return err
 	}
 

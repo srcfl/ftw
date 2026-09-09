@@ -1029,6 +1029,19 @@ func main() {
 			mpcSvc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 			slog.Info("mpc: capacity updated via hot-reload",
 				"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
+			if newCfg.Price != nil {
+				mpcSvc.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
+				mpcSvc.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
+				mpcSvc.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
+				mpcSvc.GridTariffOreKwh = newCfg.Price.GridTariffOreKwh
+				mpcSvc.VATPercent = newCfg.Price.VATPercent
+				mpcSvc.DemandPricePerKW = newCfg.Price.DemandPricePerKW
+				mpcSvc.DemandTopN = newCfg.Price.DemandTopN
+			} else {
+				mpcSvc.DemandPricePerKW = 0
+				mpcSvc.DemandTopN = 0
+			}
+			mpcSvc.Timezone = forecastTimezone()
 		}
 
 		// Hot-reload EV loadpoints so operators can add / remove /
@@ -1703,7 +1716,10 @@ func main() {
 			mpcSvc.ExportFloorOreKwh = cfg.Price.ExportFloorOreKwh
 			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
 			mpcSvc.VATPercent = cfg.Price.VATPercent
+			mpcSvc.DemandPricePerKW = cfg.Price.DemandPricePerKW
+			mpcSvc.DemandTopN = cfg.Price.DemandTopN
 		}
+		mpcSvc.Timezone = forecastTimezone()
 		// Persist every replan's Diagnostic so operators can inspect
 		// past decisions in the planner_diagnostics table.
 		mpcSvc.SaveDiag = func(d *mpc.Diagnostic, reason string) error {
