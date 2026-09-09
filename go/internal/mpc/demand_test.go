@@ -68,6 +68,12 @@ func TestBindDemandChargesExpandsWeekdayHoursAndElapsed(t *testing.T) {
 	if got[0].Hours[0].ElapsedImportKWh != 0.5 {
 		t.Fatalf("elapsed=%g, want 0.5 kWh", got[0].Hours[0].ElapsedImportKWh)
 	}
+	day := start.Format("2006-01-02")
+	for i, hour := range got[0].Hours {
+		if hour.Group != day {
+			t.Fatalf("hour %d group=%q, want %q", i, hour.Group, day)
+		}
+	}
 	if len(got[0].AlreadyKW) == 0 {
 		t.Fatal("expected already_kw from earlier weekday hours this month")
 	}
@@ -75,6 +81,33 @@ func TestBindDemandChargesExpandsWeekdayHoursAndElapsed(t *testing.T) {
 		if kw < 2.9 || kw > 3.1 {
 			t.Fatalf("already_kw=%v", got[0].AlreadyKW)
 		}
+	}
+}
+
+func TestBindDemandChargesGroupsHoursByLocalDay(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 9, 6, 0, 0, 0, loc)
+	slots := []Slot{
+		{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
+		{StartMs: now.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
+		{StartMs: time.Date(2026, 9, 10, 6, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
+	}
+	got := bindDemandCharges(slots, 7000, 3, 0, loc, now, nil)
+	if len(got) != 1 || len(got[0].Hours) < 3 {
+		t.Fatalf("charges=%+v", got)
+	}
+	groups := map[string]int{}
+	for _, hour := range got[0].Hours {
+		groups[hour.Group]++
+	}
+	if groups["2026-09-09"] < 2 {
+		t.Fatalf("want at least two hours on 2026-09-09, got %v", groups)
+	}
+	if groups["2026-09-10"] < 1 {
+		t.Fatalf("want Thursday hours grouped separately, got %v", groups)
 	}
 }
 

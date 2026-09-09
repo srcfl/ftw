@@ -31,6 +31,8 @@ type DemandHour struct {
 	StartMs          int64
 	EndMs            int64
 	ElapsedImportKWh float64
+	Weight           float64
+	Group            string
 }
 
 type clockHour struct {
@@ -131,7 +133,10 @@ func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent fl
 				continue
 			}
 			idx := len(m.hours)
-			m.hours = append(m.hours, DemandHour{StartMs: startMs, EndMs: endMs})
+			m.hours = append(m.hours, DemandHour{
+				StartMs: startMs, EndMs: endMs,
+				Group: hour.start.Format("2006-01-02"),
+			})
 			if execStart > startMs && execStart < endMs {
 				m.elapsed = append(m.elapsed, [2]int64{startMs, execStart})
 				m.elapsedI = append(m.elapsedI, idx)
