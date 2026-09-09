@@ -227,6 +227,12 @@ type Service struct {
 	// using s.Price. Mirrors prices.Applier semantics.
 	GridTariffOreKwh float64
 	VATPercent       float64
+	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
+	// minor units as slot prices, excluding VAT. Zero disables it.
+	DemandPricePerKW float64
+	DemandTopN       int
+	// Timezone is the household IANA zone used to expand weekday 06–20.
+	Timezone string
 
 	Defaults     Params
 	BatteryFleet []BatteryFleetMember
@@ -1537,6 +1543,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 	p.PVForecastSafetyK = s.PVForecastSafetyK
+	p.DemandCharges = s.demandChargesFor(slots, executionNow)
 	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}

@@ -193,14 +193,15 @@ func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, erro
 }
 
 type externalRequest struct {
-	SchemaVersion int                `json:"schema_version"`
-	RequestID     string             `json:"request_id"`
-	Settings      externalSettings   `json:"settings"`
-	Slots         []externalSlot     `json:"slots"`
-	Storages      []externalStorage  `json:"storages"`
-	FlexLoads     []externalFlexLoad `json:"flex_loads"`
-	ThermalLoads  []map[string]any   `json:"thermal_loads"`
-	Scenarios     []map[string]any   `json:"scenarios,omitempty"`
+	SchemaVersion int                    `json:"schema_version"`
+	RequestID     string                 `json:"request_id"`
+	Settings      externalSettings       `json:"settings"`
+	Slots         []externalSlot         `json:"slots"`
+	Storages      []externalStorage      `json:"storages"`
+	FlexLoads     []externalFlexLoad     `json:"flex_loads"`
+	ThermalLoads  []map[string]any       `json:"thermal_loads"`
+	Scenarios     []map[string]any       `json:"scenarios,omitempty"`
+	DemandCharges []externalDemandCharge `json:"demand_charges,omitempty"`
 }
 
 type externalSettings struct {
@@ -211,12 +212,12 @@ type externalSettings struct {
 	Formulation              string   `json:"formulation"`
 	TimeLimitS               float64  `json:"time_limit_s"`
 	MIPRelGap                float64  `json:"mip_rel_gap"`
-	ExportOrePerKWh          float64  `json:"export_ore_per_kwh"`
-	ExportBonusOreKwh        float64  `json:"export_bonus_ore_kwh"`
-	ExportFeeOreKwh          float64  `json:"export_fee_ore_kwh"`
-	ExportFloorOreKwh        *float64 `json:"export_floor_ore_kwh,omitempty"`
-	MinArbitrageSpreadOreKwh float64  `json:"min_arbitrage_spread_ore_kwh"`
-	PVChargeBonusOreKwh      float64  `json:"pv_charge_bonus_ore_kwh"`
+	ExportOrePerKWh          float64  `json:"export_price_per_kwh"`
+	ExportBonusOreKwh        float64  `json:"export_bonus_per_kwh"`
+	ExportFeeOreKwh          float64  `json:"export_fee_per_kwh"`
+	ExportFloorOreKwh        *float64 `json:"export_floor_per_kwh,omitempty"`
+	MinArbitrageSpreadOreKwh float64  `json:"min_arbitrage_spread_per_kwh"`
+	PVChargeBonusOreKwh      float64  `json:"pv_charge_bonus_per_kwh"`
 	CVaRWeight               float64  `json:"cvar_weight"`
 	CVaRAlpha                float64  `json:"cvar_alpha"`
 	ScenarioPolicy           string   `json:"scenario_policy,omitempty"`
@@ -244,8 +245,8 @@ type externalSlot struct {
 	ExecutionStartMs int64   `json:"execution_start_ms,omitempty"`
 	StartMs          int64   `json:"start_ms"`
 	LenMin           int     `json:"len_min"`
-	PriceOre         float64 `json:"price_ore"`
-	SpotOre          float64 `json:"spot_ore"`
+	PriceOre         float64 `json:"price_per_kwh"`
+	SpotOre          float64 `json:"spot_per_kwh"`
 	Confidence       float64 `json:"confidence"`
 	PVW              float64 `json:"pv_w"`
 	LoadW            float64 `json:"load_w"`
@@ -263,8 +264,22 @@ type externalStorage struct {
 	MaxDischargeW       float64 `json:"max_discharge_w"`
 	ChargeEfficiency    float64 `json:"charge_efficiency"`
 	DischargeEfficiency float64 `json:"discharge_efficiency"`
-	TerminalPriceOreKWh float64 `json:"terminal_price_ore_kwh"`
-	CycleCostOreKWh     float64 `json:"cycle_cost_ore_kwh"`
+	TerminalPriceOreKWh float64 `json:"terminal_price_per_kwh"`
+	CycleCostOreKWh     float64 `json:"cycle_cost_per_kwh"`
+}
+
+type externalDemandCharge struct {
+	ID         string               `json:"id"`
+	PricePerKW float64              `json:"price_per_kw"`
+	TopN       int                  `json:"top_n"`
+	AlreadyKW  []float64            `json:"already_kw,omitempty"`
+	Hours      []externalDemandHour `json:"hours,omitempty"`
+}
+
+type externalDemandHour struct {
+	StartMs          int64   `json:"start_ms"`
+	EndMs            int64   `json:"end_ms"`
+	ElapsedImportKWh float64 `json:"elapsed_import_kwh,omitempty"`
 }
 
 type externalFlexLoad struct {
@@ -494,6 +509,18 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			MaxChargeW: lp.MaxChargeW, AllowedStepsW: steps,
 			SurplusOnly: lp.SurplusOnly, NoStorageToLoad: lp.blocksBatteryToEV(),
 		})
+	}
+	for _, charge := range p.DemandCharges {
+		wire := externalDemandCharge{
+			ID: charge.ID, PricePerKW: charge.PricePerKW, TopN: charge.TopN,
+			AlreadyKW: charge.AlreadyKW,
+		}
+		for _, hour := range charge.Hours {
+			wire.Hours = append(wire.Hours, externalDemandHour{
+				StartMs: hour.StartMs, EndMs: hour.EndMs, ElapsedImportKWh: hour.ElapsedImportKWh,
+			})
+		}
+		req.DemandCharges = append(req.DemandCharges, wire)
 	}
 	if (p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0) && p.PVForecastSafetyK > 0 {
 		downsidePV := make([]float64, len(slots))
