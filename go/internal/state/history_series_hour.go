@@ -11,8 +11,16 @@ import (
 
 const (
 	seriesHourMs         int64 = 60 * 60 * 1000
+	seriesHourMinSpanMs        = 48 * seriesHourMs
 	seriesHoursMigration       = "ts-series-hour-v1"
 )
+
+func useSeriesHourRollup(sinceMs, untilMs int64) bool {
+	if untilMs < sinceMs {
+		return false
+	}
+	return untilMs-sinceMs+1 >= seriesHourMinSpanMs
+}
 
 type seriesHourKey struct {
 	driverID, metricID, hourMs int64
