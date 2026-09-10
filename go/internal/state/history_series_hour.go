@@ -73,7 +73,7 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 	if minTs.Valid {
 		start := seriesHourOf(minTs.Int64)
 		end := maxTs.Int64 + 1
-		const chunk = 31 * 24 * seriesHourMs
+		const chunk = 7 * 24 * seriesHourMs
 		for t := start; t < end; t += chunk {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -82,7 +82,8 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 			if tEnd > end {
 				tEnd = end
 			}
-			s.historyWriteMu.Lock()
+			// Do not take historyWriteMu: a month-scale aggregate on a
+			// physical box can exceed the live writer's 30s commit budget.
 			_, err := s.history.ExecContext(ctx, `
 				INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
 				SELECT driver_id, metric_id, (ts_ms // ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
@@ -91,7 +92,6 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 				GROUP BY 1, 2, 3
 				ON CONFLICT DO NOTHING`,
 				seriesHourMs, seriesHourMs, t, tEnd)
-			s.historyWriteMu.Unlock()
 			if err != nil {
 				return err
 			}
