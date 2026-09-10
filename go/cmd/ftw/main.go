@@ -719,6 +719,7 @@ func main() {
 	var forecastSvc *forecast.Service
 	var forecastConfigMu sync.RWMutex
 	var ocppSrv *ocpp.Server
+	var priceSvc *prices.Service
 	energyIdentity := func(name string) state.Device {
 		if env := reg.Env(name); env != nil {
 			make, serial, mac, endpoint := env.FullIdentity()
@@ -1044,6 +1045,36 @@ func main() {
 				mpcSvc.DemandNightWeight = 0
 			}
 			mpcSvc.Timezone = forecastTimezone()
+			mpcSvc.FuseMaxW = newCfg.Fuse.MaxPowerW()
+			mpcSvc.MaxExportW = newCfg.Site.MaxExportW
+			if newCfg.Planner != nil {
+				applyPlannerScalars(mpcSvc, newCfg.Planner)
+				ctrlMu.Lock()
+				ctrl.UseEnergyDispatch = !newCfg.Planner.LegacyDispatch
+				if newCfg.Planner.UseEnergyDispatch != nil {
+					ctrl.UseEnergyDispatch = *newCfg.Planner.UseEnergyDispatch
+				}
+				ctrlMu.Unlock()
+			}
+		}
+		if priceSvc != nil && newCfg.Price != nil {
+			vat := newCfg.Price.VATPercent
+			if vat == 0 {
+				vat = 25
+			}
+			priceSvc.Applier.GridTariffOreKwh = newCfg.Price.GridTariffOreKwh
+			priceSvc.Applier.VATPercent = vat
+		}
+		if deps != nil {
+			deps.DtS = float64(newCfg.Site.ControlIntervalS)
+			backup := filepath.Join(dataDir, "backups")
+			if newCfg.State != nil && newCfg.State.BackupDir != "" {
+				backup = newCfg.State.BackupDir
+				if !filepath.IsAbs(backup) {
+					backup = filepath.Join(dataDir, backup)
+				}
+			}
+			deps.BackupDir = backup
 		}
 
 		// Hot-reload EV loadpoints so operators can add / remove /
@@ -1132,7 +1163,7 @@ func main() {
 	fxSvc.Start(ctx)
 	defer fxSvc.Stop()
 
-	priceSvc := prices.FromConfig(cfg.Price, st, fxSvc)
+	priceSvc = prices.FromConfig(cfg.Price, st, fxSvc)
 
 	// ---- Price forecaster (fills in beyond day-ahead publication) ----
 	zones := []string{"SE3"}
@@ -2708,6 +2739,19 @@ func main() {
 			}
 			return
 		case <-ticker.C:
+			cfgMu.RLock()
+			nextInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
+			nextDtS := float64(cfg.Site.ControlIntervalS)
+			cfgMu.RUnlock()
+			if nextInterval > 0 && nextInterval != controlInterval {
+				ticker.Reset(nextInterval)
+				controlInterval = nextInterval
+				dtS = nextDtS
+				if lpController != nil {
+					lpController.SetCommandTimeout(driverCommandTimeout(nextInterval))
+				}
+				slog.Info("control interval updated", "interval", nextInterval)
+			}
 			tickNow := time.Now()
 			nowMs := tickNow.UnixMilli()
 
@@ -2754,13 +2798,13 @@ func main() {
 			}
 
 			// ---- Watchdog: mark stale drivers offline, revert them to autonomous ----
+			cfgMu.RLock()
 			watchdogTimeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			troubleshootingMode := cfg.Site.TroubleshootingMode
+			cfgMu.RUnlock()
 			if watchdogTimeout <= 0 {
 				watchdogTimeout = 60 * time.Second
 			}
-			cfgMu.RLock()
-			troubleshootingMode := cfg.Site.TroubleshootingMode
-			cfgMu.RUnlock()
 			capMu.RLock()
 			observeOnlySnap := observeOnly
 			capMu.RUnlock()
@@ -3831,14 +3875,54 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	} else {
 		slog.Info("mpc: Core DP planner")
 	}
-	svc.BaseLoad = pl.BaseLoadW
-	if pl.HorizonHours > 0 {
-		svc.Horizon = time.Duration(pl.HorizonHours) * time.Hour
-	}
-	if pl.IntervalMin > 0 {
-		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
-	}
+	applyPlannerScalars(svc, pl)
 	return svc
+}
+
+// applyPlannerScalars pushes SoC window, efficiency, export value, base
+// load, horizon and replan interval into a running planner. Engine and
+// optimizer path stay a restart; these fields are read on the next replan.
+func applyPlannerScalars(svc *mpc.Service, pl *config.Planner) {
+	if svc == nil || pl == nil {
+		return
+	}
+	socMin := pl.SoCMin
+	if socMin <= 0 {
+		socMin = 0.10
+	}
+	socMax := pl.SoCMax
+	if socMax <= 0 || socMax > 1 {
+		socMax = 0.95
+	}
+	chgEff := pl.ChargeEfficiency
+	if chgEff <= 0 {
+		chgEff = 0.95
+	}
+	disEff := pl.DischargeEfficiency
+	if disEff <= 0 {
+		disEff = 0.95
+	}
+	pvBonus := pl.PVChargeBonusOreKwh
+	if pvBonus < 0 {
+		pvBonus = 0
+	}
+	horizon := 48 * time.Hour
+	if pl.HorizonHours > 0 {
+		horizon = time.Duration(pl.HorizonHours) * time.Hour
+	}
+	interval := 15 * time.Minute
+	if pl.IntervalMin > 0 {
+		interval = time.Duration(pl.IntervalMin) * time.Minute
+	}
+	svc.UpdatePlannerScalars(mpc.Params{
+		SoCMin:              socMin,
+		SoCMax:              socMax,
+		ChargeEfficiency:    chgEff,
+		DischargeEfficiency: disEff,
+		PVChargeBonusOreKwh: pvBonus,
+		ExportOrePerKWh:     pl.ExportOrePerKWh,
+	}, pl.BaseLoadW, horizon, interval)
+	svc.MinArbitrageSpreadOreKwh = pl.MinArbitrageSpreadOreKwh
 }
 
 func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Manager, intervalHours int) {

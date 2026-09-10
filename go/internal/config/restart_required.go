@@ -7,61 +7,29 @@ import "reflect"
 // An empty slice means the running process can safely apply `new` without a
 // restart.
 //
-// The list mirrors what the applier in cmd/ftw/main.go already
-// hot-reloads:
-//
-//   - Site control scalars (grid_target, tolerance, slew, min_dispatch),
-//     fuse params, drivers, capacities, inverter groups, driver limits,
-//     loadpoints, notifications, assistant, MPC capacity, the Weather subset
-//     {pv_rated_w, latitude, longitude}, fleet_ping.enabled, and
-//     home_assistant.* reload live.
-//   - Everything else (api.port, state.path, price.*, planner.*, nova.*,
-//     ev_charger.*, weather.provider/arrays,
-//     site.control_interval_s, site.watchdog_timeout_s, site.smoothing_alpha,
-//     site.gain) needs the binary restarted to take effect.
-//
-// Keep this in sync with the applier whenever a section becomes
-// hot-reloadable. The cost of forgetting is benign: an unnecessary
-// "restart required" prompt to the operator. The cost of the inverse —
-// telling them no restart is needed when one is — leaves the process
-// running stale config silently, so when in doubt, list the section here.
+// Restart is only for process wiring that is constructed once: listen
+// sockets, database files, price/planner/nova/OCPP/EV clients. Ordinary
+// operator settings (retention, gain, tick rate, watchdog, weather
+// geometry, price tariff, planner SoC) apply live. Keep this in sync
+// with cmd/ftw/main.go's applier. When in doubt, list the section —
+// a stale silent process is worse than an extra prompt.
 func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg == nil || newCfg == nil {
 		return nil
 	}
 	var reasons []string
 
-	// Site: only the four control scalars + fuse-related fields are
-	// hot-reloaded. Anything else in Site changes the boot-time wiring.
-	if oldCfg.Site.ControlIntervalS != newCfg.Site.ControlIntervalS {
-		reasons = append(reasons, "site.control_interval_s — control loop tick rate is set at startup")
-	}
-	if oldCfg.Site.WatchdogTimeoutS != newCfg.Site.WatchdogTimeoutS {
-		reasons = append(reasons, "site.watchdog_timeout_s — watchdog interval is captured at startup")
-	}
-	if oldCfg.Site.SmoothingAlpha != newCfg.Site.SmoothingAlpha {
-		reasons = append(reasons, "site.smoothing_alpha — Kalman smoothing factor is fixed at startup")
-	}
-	if oldCfg.Site.Gain != newCfg.Site.Gain {
-		reasons = append(reasons, "site.gain — PI controller gain is fixed at startup")
-	}
-	if oldCfg.Site.Name != newCfg.Site.Name {
-		reasons = append(reasons, "site.name — used by HA discovery + logging at boot")
-	}
-
 	if oldCfg.API.Port != newCfg.API.Port {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")
 	}
-	// homeassistant.* is hot-reloadable via (*ha.Bridge).Reload; see the
-	// applier in cmd/ftw/main.go.
-	if !pointerEqual(oldCfg.State, newCfg.State) {
-		reasons = append(reasons, "state — SQLite database paths are opened at startup")
+	if stateNeedsRestart(oldCfg.State, newCfg.State) {
+		reasons = append(reasons, "state.path / state.cold_dir — database files are opened at startup")
 	}
-	if !pointerEqual(oldCfg.Price, newCfg.Price) {
-		reasons = append(reasons, "price — spot-price service is constructed once at startup")
+	if priceNeedsRestart(oldCfg.Price, newCfg.Price) {
+		reasons = append(reasons, "price.provider / zone / API key — spot-price client is constructed at startup")
 	}
-	if !pointerEqual(oldCfg.Planner, newCfg.Planner) {
-		reasons = append(reasons, "planner — MPC planner is constructed once at startup")
+	if plannerNeedsRestart(oldCfg.Planner, newCfg.Planner) {
+		reasons = append(reasons, "planner.enabled / engine — planner process is constructed at startup")
 	}
 	if !pointerEqual(oldCfg.Nova, newCfg.Nova) {
 		reasons = append(reasons, "nova — federation client is constructed once at startup")
@@ -69,69 +37,65 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg.AppLink.On() != newCfg.AppLink.On() {
 		reasons = append(reasons, "app_link — the app uplink is connected at startup")
 	}
-	// fleet_ping.enabled is read at each send, so the switch takes effect at
-	// once. The endpoint is resolved when the sender is built, so only that
-	// field is worth a prompt — and it is compared resolved, or a posted
-	// config with no fleet_ping section would look like a move away from the
-	// default and prompt for a restart that changes nothing.
 	if oldCfg.FleetPing.Resolved() != newCfg.FleetPing.Resolved() {
 		reasons = append(reasons, "fleet_ping.endpoint — the sender resolves its endpoint at startup")
 	}
-	// The OCPP central system is started once in main.go; the config
-	// applier neither starts, stops nor re-arms it. Without this entry
-	// the Chargers panel's enable toggle saved cleanly, reported no
-	// restart needed, and the listener never opened — the exact silent
-	// failure the comment at the top of this file warns about.
 	if !pointerEqual(oldCfg.OCPP, newCfg.OCPP) {
 		reasons = append(reasons, "ocpp — the central system listener is started at startup")
 	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")
 	}
-
-	// Weather: PVRatedW, Latitude, Longitude reload live; everything else
-	// (provider, arrays, tilt/azimuth, heating coefficient) is captured
-	// once when the forecast + PV-twin services are wired up.
 	if weatherNeedsRestart(oldCfg.Weather, newCfg.Weather) {
-		reasons = append(reasons, "weather (provider / pv_arrays / tilt / azimuth / heating) — forecast + PV-twin wiring is set at startup")
+		reasons = append(reasons, "weather.provider — forecast service is started when weather is first enabled")
 	}
 
 	return reasons
 }
 
 func pointerEqual(a, b any) bool {
-	// reflect.DeepEqual already handles nil-vs-nil and value comparisons
-	// correctly through interfaces, but two *T's pointing at zero-valued
-	// structs and one *T-nil are intentionally distinct here: an operator
-	// adding an empty `homeassistant: {}` block IS a change worth flagging.
 	return reflect.DeepEqual(a, b)
 }
 
-func weatherNeedsRestart(oldW, newW *Weather) bool {
-	if oldW == nil && newW == nil {
+func stateNeedsRestart(oldS, newS *StateConf) bool {
+	var oldPath, newPath, oldCold, newCold string
+	if oldS != nil {
+		oldPath, oldCold = oldS.Path, oldS.ColdDir
+	}
+	if newS != nil {
+		newPath, newCold = newS.Path, newS.ColdDir
+	}
+	return oldPath != newPath || oldCold != newCold
+}
+
+func priceNeedsRestart(oldP, newP *Price) bool {
+	oldOn := oldP != nil && oldP.Provider != "" && oldP.Provider != "none"
+	newOn := newP != nil && newP.Provider != "" && newP.Provider != "none"
+	if oldOn != newOn {
+		return true
+	}
+	if !oldOn {
 		return false
 	}
-	if oldW == nil || newW == nil {
-		// Toggling weather on/off requires re-wiring forecast + PV twin.
+	return oldP.Provider != newP.Provider || oldP.Zone != newP.Zone || oldP.APIKey != newP.APIKey || oldP.Currency != newP.Currency
+}
+
+func plannerNeedsRestart(oldP, newP *Planner) bool {
+	oldOn := oldP != nil && oldP.Enabled
+	newOn := newP != nil && newP.Enabled
+	if oldOn != newOn {
 		return true
 	}
-	if oldW.Provider != newW.Provider {
-		return true
+	if !oldOn {
+		return false
 	}
-	if oldW.PVTiltDeg != newW.PVTiltDeg || oldW.PVAzimuthDeg != newW.PVAzimuthDeg {
-		return true
-	}
-	if oldW.HeatingWPerDegC != newW.HeatingWPerDegC {
-		return true
-	}
-	if !reflect.DeepEqual(oldW.PVArrays, newW.PVArrays) {
-		return true
-	}
-	// APIKey doesn't strictly require restart — the forecast service
-	// reads it on each fetch — but mid-flight rotation is rare enough
-	// that we flag it conservatively only when it goes from set→unset.
-	if (oldW.APIKey != "") != (newW.APIKey != "") {
-		return true
-	}
-	return false
+	return oldP.EngineName() != newP.EngineName()
+}
+
+func weatherNeedsRestart(oldW, newW *Weather) bool {
+	oldOn := oldW != nil && oldW.Provider != "" && oldW.Provider != "none"
+	newOn := newW != nil && newW.Provider != "" && newW.Provider != "none"
+	// Off → on needs a Service that was never started. On → off and
+	// provider swaps go through forecast.Service.Reconfigure.
+	return !oldOn && newOn
 }
