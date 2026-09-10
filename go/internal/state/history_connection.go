@@ -93,7 +93,10 @@ func (c *historyConnector) Connect(ctx context.Context) (driver.Conn, error) {
 }
 
 func (c *historyConnector) rotate(ctx context.Context) error {
-	if err := c.lock(ctx, true); err != nil {
+	lockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err := c.lock(lockCtx, true)
+	cancel()
+	if err != nil {
 		return err
 	}
 	defer c.mu.Unlock()
@@ -117,7 +120,6 @@ func (c *historyConnector) rotate(ctx context.Context) error {
 		}
 		c.native = nil
 	}
-	var err error
 	c.native, err = duckdb.NewConnector(c.dsn, nil)
 	return err
 }

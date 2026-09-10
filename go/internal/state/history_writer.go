@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
@@ -15,9 +16,10 @@ import (
 )
 
 const (
-	historyQueueTicks = 64
-	historyQueueBytes = 16 << 20
-	historyBatchBytes = 1 << 20
+	historyQueueTicks         = 64
+	historyQueueBytes         = 16 << 20
+	historyBatchBytes         = 1 << 20
+	historyMaintenanceTimeout = 2 * time.Minute
 )
 
 type historyPayload struct {
@@ -68,6 +70,9 @@ type historyWriter struct {
 	maintenanceDue        time.Time
 	maintenanceRetry      time.Time
 	maintenanceRetryDelay time.Duration
+	maintenanceRunning    atomic.Bool
+	maintenanceMu         sync.Mutex
+	maintenanceWG         sync.WaitGroup
 }
 
 func newHistoryWriter(s *Store) *historyWriter {
@@ -188,7 +193,7 @@ func (w *historyWriter) run() {
 				if b.payload.Point != nil {
 					rows++
 				}
-				w.maintainHistory(rows)
+				w.scheduleMaintenance(rows)
 				break
 			}
 			var dbErr *duckdb.Error
@@ -214,13 +219,38 @@ func (w *historyWriter) run() {
 // Maintenance follows a durable commit or an OOM rollback. It never holds a catalog/write/status
 // lock, and admission can continue into the bounded queue. A long read only
 // postpones maintenance; its transaction and the new committed data stay intact.
+// Hourly rotation runs in the background so a multi-GB reopen cannot stall
+// live commits past the site watchdog.
+func (w *historyWriter) scheduleMaintenance(rows int) {
+	w.maintenanceRows += rows
+	now := time.Now()
+	if now.Before(w.maintenanceRetry) || (w.maintenanceRows < w.maintenanceRowsLimit && now.Before(w.maintenanceDue)) {
+		return
+	}
+	if !w.maintenanceRunning.CompareAndSwap(false, true) {
+		return
+	}
+	w.maintenanceWG.Add(1)
+	go func() {
+		defer w.maintenanceWG.Done()
+		defer w.maintenanceRunning.Store(false)
+		w.runMaintenance()
+	}()
+}
+
 func (w *historyWriter) maintainHistory(rows int) {
 	w.maintenanceRows += rows
 	now := time.Now()
 	if now.Before(w.maintenanceRetry) || (w.maintenanceRows < w.maintenanceRowsLimit && now.Before(w.maintenanceDue)) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(w.ctx, 2*time.Second)
+	w.runMaintenance()
+}
+
+func (w *historyWriter) runMaintenance() {
+	w.maintenanceMu.Lock()
+	defer w.maintenanceMu.Unlock()
+	ctx, cancel := context.WithTimeout(w.ctx, historyMaintenanceTimeout)
 	err := w.store.CheckpointHistory(ctx)
 	cancel()
 	// A successful rotation may still leave the same tick too large. Back off
@@ -293,6 +323,7 @@ func (w *historyWriter) close() error {
 		w.cancel()
 		<-w.done
 	}
+	w.maintenanceWG.Wait()
 	w.cancel()
 	w.mu.Lock()
 	defer w.mu.Unlock()

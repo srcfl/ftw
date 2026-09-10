@@ -366,7 +366,7 @@ func (s *Store) CheckpointHistory(ctx context.Context) error {
 		// A checkpoint alone does not evict all native index/table buffers.
 		// Wait for a gap between active connections, then reopen the native
 		// instance while retaining the public SQL pool and durable primary.
-		return s.rotateHistory(ctx)
+		return s.historyConnector.rotate(ctx)
 	}
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()

@@ -170,6 +170,7 @@ func (s *Store) runHistoryMigration(coldDir string) {
 	if err := s.retireLegacyHistorySources(); err != nil {
 		slog.Error("verified history import left legacy sources in place", "err", err)
 	}
+	s.startSeriesHourBackfill()
 }
 
 // SQLite's legacy sample table is frozen after Core selects DuckDB. Each

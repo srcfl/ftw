@@ -117,6 +117,9 @@ func (s *Store) deleteSamplesChunked(ctx context.Context, fromMs, toMs int64) er
 		s.historyWriteMu.Lock()
 		_, err := s.history.ExecContext(ctx,
 			`DELETE FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ?`, start, end)
+		if err == nil {
+			err = s.refreshSeriesHoursRange(ctx, start, end)
+		}
 		s.historyWriteMu.Unlock()
 		if err != nil {
 			return err

@@ -275,10 +275,21 @@ func (s *Store) RecordSamples(samples []Sample) error {
 		return err
 	}
 	defer stmt.Close()
+	hours := make([]seriesHourKey, 0, 8)
+	seenHours := make(map[seriesHourKey]struct{}, 8)
 	for _, r := range rs {
 		if _, err := stmt.Exec(r.dID, r.mID, r.ts, r.v); err != nil {
 			return err
 		}
+		k := seriesHourKey{r.dID, r.mID, seriesHourOf(r.ts)}
+		if _, ok := seenHours[k]; ok {
+			continue
+		}
+		seenHours[k] = struct{}{}
+		hours = append(hours, k)
+	}
+	if err := s.refreshSeriesHoursTx(context.Background(), tx, hours); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -382,10 +393,21 @@ func (s *Store) recordHistoryBatch(ctx context.Context, batchID, payloadHash str
 			return 0, err
 		}
 		defer stmt.Close()
+		hours := make([]seriesHourKey, 0, 8)
+		seenHours := make(map[seriesHourKey]struct{}, 8)
 		for _, r := range rs {
 			if _, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v); err != nil {
 				return 0, err
 			}
+			k := seriesHourKey{r.dID, r.mID, seriesHourOf(r.ts)}
+			if _, ok := seenHours[k]; ok {
+				continue
+			}
+			seenHours[k] = struct{}{}
+			hours = append(hours, k)
+		}
+		if err := s.refreshSeriesHoursTx(ctx, tx, hours); err != nil {
+			return 0, err
 		}
 	}
 	if err := recordEnergyObservationsTx(tx, observations); err != nil {
@@ -554,6 +576,9 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 	}
 
 	bucketMs := BucketWidthMs(sinceMs, untilMs, maxPoints)
+	if bucketMs >= seriesHourMs && s.seriesHoursReady() {
+		return s.loadSeriesBucketsFromHours(ctx, dID, mEnt.id, sinceMs, untilMs, maxPoints)
+	}
 	rows, err := s.history.QueryContext(ctx, `SELECT MAX(ts_ms), AVG(value), MIN(value), MAX(value), COUNT(*)
 		FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
