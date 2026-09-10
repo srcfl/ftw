@@ -2695,12 +2695,14 @@ func main() {
 		select {
 		case <-sigc:
 			slog.Info("shutting down")
+			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
 			}
 			return
 		case <-restartCh:
 			slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
+			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)
 			}
@@ -3294,6 +3296,14 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	if dRows > 0 {
 		slog.Info("diagnostics parquet rolloff",
 			"rows", dRows, "files", len(dFiles))
+	}
+}
+
+func flushHistoryOnStop(st *state.Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := st.FlushHistory(ctx); err != nil {
+		slog.Warn("history flush on shutdown", "err", err)
 	}
 }
 

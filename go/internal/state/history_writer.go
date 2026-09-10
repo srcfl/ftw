@@ -431,12 +431,14 @@ func (s *Store) FlushHistory(ctx context.Context) error {
 
 func (w *historyWriter) close() error {
 	w.mu.Lock()
+	target := w.status.Accepted
 	if !w.status.Stopping {
 		w.status.Stopping = true
 		close(w.queue)
 		w.signal()
 	}
 	w.mu.Unlock()
+	w.requestFlush(target)
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
 	select {

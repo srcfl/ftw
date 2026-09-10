@@ -641,10 +641,10 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 		return nil, nil
 	}
 
-	bucketMs := BucketWidthMs(sinceMs, untilMs, maxPoints)
-	if bucketMs >= seriesHourMs && s.seriesHoursReady() {
+	if s.seriesHoursReady() && useSeriesHourRollup(sinceMs, untilMs) {
 		return s.loadSeriesBucketsFromHours(ctx, dID, mEnt.id, sinceMs, untilMs, maxPoints)
 	}
+	bucketMs := BucketWidthMs(sinceMs, untilMs, maxPoints)
 	rows, err := s.history.QueryContext(ctx, `SELECT MAX(ts_ms), AVG(value), MIN(value), MAX(value), COUNT(*)
 		FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?

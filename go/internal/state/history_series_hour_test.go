@@ -109,6 +109,41 @@ func TestHourlySeriesRollupUpdatesAfterLiveWrite(t *testing.T) {
 	}
 }
 
+func TestHourlySeriesRollupServesMultiDayChartsBelowHourBuckets(t *testing.T) {
+	s := freshStore(t)
+	const hours = 48
+	samples := make([]Sample, 0, hours)
+	for i := 0; i < hours; i++ {
+		samples = append(samples, Sample{Driver: "meter", Metric: "pv_w", TsMs: int64(i) * seriesHourMs, Value: float64(i)})
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.ensureSeriesHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	until := int64(hours)*seriesHourMs - 1
+	if BucketWidthMs(0, until, 200) >= seriesHourMs {
+		t.Fatalf("test setup: bucket should be finer than one hour")
+	}
+	if !useSeriesHourRollup(0, until) {
+		t.Fatal("48h window should use the hour rollup")
+	}
+	got, err := s.LoadSeriesBuckets("meter", "pv_w", 0, until, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, p := range got {
+		n += p.N
+	}
+	if n != hours {
+		t.Fatalf("multi-day hour rollup n=%d want %d points=%+v", n, hours, got)
+	}
+}
+
 func TestHourlySeriesRollupIgnoresDuplicateSamples(t *testing.T) {
 	s := freshStore(t)
 	dup := Sample{Driver: "meter", Metric: "pv_w", TsMs: 5, Value: 10}
