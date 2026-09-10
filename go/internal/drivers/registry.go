@@ -453,12 +453,34 @@ func (r *Registry) AddProbe(ctx context.Context, cfg config.Driver) error {
 	return r.add(ctx, cfg, false)
 }
 
-func legacyDriverDeclaresControls(path string) (bool, error) {
+func actuationCapability(caps []string) bool {
+	for _, c := range caps {
+		switch strings.ToLower(strings.TrimSpace(c)) {
+		case "battery", "ev", "v2x", "v2x_charger", "vehicle", "heatpump":
+			return true
+		}
+	}
+	return false
+}
+
+// legacyDriverRequiresDefaultMode is the start-time safety gate for bundled
+// and local drivers. A driver that can receive commands and claims an
+// actuation capability (or declares operator controls) must implement
+// driver_default_mode so watchdog/shutdown have somewhere to hand the
+// hardware back. read_only drivers are reporting-only even if they stub
+// driver_command to refuse.
+func legacyDriverRequiresDefaultMode(path string, hasCommand bool) (bool, error) {
 	entry, err := ParseCatalogFile(path)
 	if err != nil {
 		return false, err
 	}
-	return len(entry.Controls) > 0, nil
+	if entry.ReadOnly {
+		return false, nil
+	}
+	if len(entry.Controls) > 0 {
+		return true, nil
+	}
+	return hasCommand && actuationCapability(entry.Capabilities), nil
 }
 
 // add is the shared driver construction path. The caller must hold the
@@ -595,14 +617,14 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		return fmt.Errorf("load lua: %w", err)
 	}
 	if !cfg.ObserveOnly && (policy == nil || !policy.IsControlV2()) {
-		declaresControls, catalogErr := legacyDriverDeclaresControls(cfg.Lua)
+		requiresDefault, catalogErr := legacyDriverRequiresDefaultMode(cfg.Lua, luaDrv.hasEntrypoint("driver_command"))
 		if catalogErr != nil {
 			luaDrv.CleanupContext(ctx)
 			return fmt.Errorf("validate legacy driver controls: %w", catalogErr)
 		}
-		if declaresControls && !luaDrv.hasEntrypoint("driver_default_mode") {
+		if requiresDefault && !luaDrv.hasEntrypoint("driver_default_mode") {
 			luaDrv.CleanupContext(ctx)
-			return fmt.Errorf("driver %q declares operator controls but is missing required driver_default_mode", cfg.Name)
+			return fmt.Errorf("driver %q can be commanded but is missing required driver_default_mode", cfg.Name)
 		}
 	}
 	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}

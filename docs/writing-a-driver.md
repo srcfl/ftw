@@ -116,7 +116,9 @@ fresh telemetry: age vendor data and stop emitting when it is stale, or core's
 watchdog cannot see the fault.
 
 `driver_fingerprint(target)` is an optional passive setup probe. It must never
-reconfigure the device.
+reconfigure the device. The host denies mutating verbs (`modbus_write`,
+`mqtt_pub`, `http_post`, `http_patch`) for that VM, including bundled drivers
+that otherwise have no signed write scope.
 
 Call `host.set_make` and `host.set_sn` as soon as stable identity is known.
 Core then keys durable device state by hardware identity rather than the YAML

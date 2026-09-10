@@ -215,6 +215,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
 	e.WriteCapabilities = pickList(block, "write_capabilities")
+	e.AuthPostPath = pickString(block, "auth_post_path")
 	e.Controls = pickControls(block)
 	return e, nil
 }

@@ -754,6 +754,63 @@ function driver_command(action, w, cmd) return true end
 	t.Cleanup(func() { r.Remove("d1") })
 }
 
+func TestLegacyBatteryCommandDriverRequiresDefaultMode(t *testing.T) {
+	src := `
+DRIVER = {
+    id = "battery_without_default",
+    capabilities = { "battery" },
+}
+function driver_init(config) host.set_poll_interval(1000) end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd) return true end
+`
+	path := writeTestDriver(t, src)
+	r := NewRegistry(telemetry.NewStore())
+	err := r.Add(context.Background(), config.Driver{Name: "d1", Lua: path})
+	if err == nil {
+		t.Fatal("battery driver with command and no driver_default_mode was accepted")
+	}
+	if !strings.Contains(err.Error(), "driver_default_mode") {
+		t.Fatalf("missing-default error = %v, want driver_default_mode", err)
+	}
+}
+
+func TestReadOnlyBatteryMayOmitDefaultMode(t *testing.T) {
+	src := `
+DRIVER = {
+    id = "ro_battery",
+    capabilities = { "battery" },
+    read_only = true,
+}
+function driver_init(config) host.set_poll_interval(1000) end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd) return false end
+`
+	path := writeTestDriver(t, src)
+	r := NewRegistry(telemetry.NewStore())
+	if err := r.Add(context.Background(), config.Driver{Name: "d1", Lua: path}); err != nil {
+		t.Fatalf("read-only battery without default = %v", err)
+	}
+	t.Cleanup(func() { r.Remove("d1") })
+}
+
+func TestBatteryTelemetryDriverWithoutCommandMayOmitDefaultMode(t *testing.T) {
+	src := `
+DRIVER = {
+    id = "sonnen_like",
+    capabilities = { "battery" },
+}
+function driver_init(config) host.set_poll_interval(1000) end
+function driver_poll() return 1000 end
+`
+	path := writeTestDriver(t, src)
+	r := NewRegistry(telemetry.NewStore())
+	if err := r.Add(context.Background(), config.Driver{Name: "d1", Lua: path}); err != nil {
+		t.Fatalf("telemetry battery without command = %v", err)
+	}
+	t.Cleanup(func() { r.Remove("d1") })
+}
+
 func TestObserveOnlyControlDriverMayOmitDefaultMode(t *testing.T) {
 	src := `
 DRIVER = {

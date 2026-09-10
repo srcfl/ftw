@@ -6,44 +6,27 @@
 //	driver_poll()          — called every N seconds; emit telemetry
 //	driver_command(c)      — receive a control command (JSON table)
 //	driver_cleanup()       — optional, called on shutdown
-//	driver_default_mode()  — optional, called when driver goes offline
+//	driver_default_mode()  — required for a non-read-only driver that
+//	                         declares controls or a battery/EV/V2X/heatpump
+//	                         command path; optional for reporting-only
 //
-// The host exposes a capability-gated API surfaced as a `host` global in
-// the Lua VM:
+// registerHost is the complete host API. writing-a-driver.md summarises it.
+// Canonical names plus Blixt L1 aliases (write, write_registers, now_ms):
 //
-//	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
-//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"|"v2x_charger"
-//	host.millis()                   -- ms since driver start
-//	host.sleep(ms)                  -- block driver goroutine for ms (inter-write pacing)
-//	host.set_poll_interval(ms)
-//	host.set_sn(s)                  -- device serial (metadata)
-//	host.set_make(s)                -- manufacturer name
-//	host.set_model(s)               -- device model name (metadata)
-//	host.set_rated_w(w)             -- rated AC power, watts (nameplate)
-//	host.set_warmup_s(s)            -- hold off the first poll for s seconds
-//	host.decode_string(regs, start, count) -- ASCII, 2 chars/register, hi byte first
-//	host.mqtt_sub(topic)            -- subscribe
-//	host.mqtt_pub(topic, payload)   -- publish
-//	host.mqtt_messages()            -- array of {topic, payload} since last call
-//	host.modbus_read(addr, count, kind)  -- kind: "coil"|"discrete"|"holding"|"input"
-//	host.modbus_write(addr, value)
-//	host.modbus_write_multi(addr, values)
-//	host.serial_read(max_bytes, timeout_ms) -- raw read-only serial bytes
-//	host.aes_gcm_decrypt(key, iv, ciphertext, aad, tag)
-//	host.json_decode(s)             -- convenience JSON → Lua table
-//	host.json_encode(t)             -- Lua table → JSON string
-//	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
-//	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
-//	host.http_patch(url, body, headers) -- HTTP PATCH (write); needs capabilities.http.allow_write
-//	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
-//	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
-//	host.ws_messages()              -- drain inbound frames; "" entry = EOF
-//	host.ws_is_open()               -- boolean
-//	host.ws_close()                 -- close + free
-//	host.tcp_open(addr)             -- open raw TCP socket "host:port"; (true, nil) or (nil, err)
-//	host.tcp_recv()                 -- drain inbound bytes as a Lua string ("" if nothing)
-//	host.tcp_is_open()              -- boolean
-//	host.tcp_close()                -- close + free
+//	host.log, host.emit, host.emit_metric
+//	host.millis / host.now_ms, host.sleep, host.set_poll_interval
+//	host.set_watchdog_timeout_s, host.set_device_fault
+//	host.set_sn, host.set_make, host.set_model, host.set_rated_w, host.set_warmup_s
+//	host.persist_secret
+//	host.decode_string, host.decode_i16, host.decode_{u,i}32_{be,le}
+//	host.mqtt_sub / mqtt_subscribe, host.mqtt_pub / mqtt_publish, host.mqtt_messages
+//	host.modbus_read, host.modbus_write / write, host.modbus_write_multi / write_registers
+//	host.serial_read, host.aes_gcm_decrypt, host.json_decode, host.json_encode
+//	host.http_get, host.http_post, host.http_patch
+//	host.ws_open, host.ws_send, host.ws_messages, host.ws_is_open, host.ws_close
+//	host.tcp_open, host.tcp_recv, host.tcp_is_open, host.tcp_close
+//
+// emit types: meter | pv | battery | ev | v2x_charger | vehicle
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -427,7 +410,7 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	defer d.L.RemoveContext()
 	fn := d.L.GetGlobal("driver_command")
 	if fn == lua.LNil {
-		return nil
+		return errors.New("driver_command is not defined")
 	}
 	var cmd map[string]any
 	if err := json.Unmarshal(cmdJSON, &cmd); err != nil {
