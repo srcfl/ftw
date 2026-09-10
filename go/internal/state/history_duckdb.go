@@ -363,15 +363,22 @@ func (s *Store) CheckpointHistory(ctx context.Context) error {
 		return nil
 	}
 	if s.historyConnector != nil {
-		// A checkpoint alone does not evict all native index/table buffers.
-		// Wait for a gap between active connections, then reopen the native
-		// instance while retaining the public SQL pool and durable primary.
-		return s.historyConnector.rotate(ctx)
+		return s.historyConnector.checkpoint(ctx)
 	}
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()
 	_, err := s.history.ExecContext(ctx, `CHECKPOINT`)
 	return err
+}
+
+// RotateHistory checkpoints, then reopens the native instance so DuckDB can
+// drop index buffers. Use after OOM or when process RSS is high. A checkpoint
+// alone does not evict those buffers.
+func (s *Store) RotateHistory(ctx context.Context) error {
+	if s.historyConnector == nil {
+		return s.CheckpointHistory(ctx)
+	}
+	return s.historyConnector.rotate(ctx)
 }
 
 // quoteDuckDBString is only for fixed administrative paths, never user SQL.

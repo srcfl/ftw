@@ -20,6 +20,8 @@ const (
 	historyQueueBytes         = 16 << 20
 	historyBatchBytes         = 1 << 20
 	historyMaintenanceTimeout = 2 * time.Minute
+	historyCommitInterval     = 15 * time.Second
+	historyCommitMaxTicks     = 32
 )
 
 type historyPayload struct {
@@ -73,12 +75,17 @@ type historyWriter struct {
 	maintenanceRunning    atomic.Bool
 	maintenanceMu         sync.Mutex
 	maintenanceWG         sync.WaitGroup
+	commitInterval        time.Duration
+	flushCh               chan struct{}
+	flushTarget           atomic.Uint64
+	forceRotate           atomic.Bool
 }
 
 func newHistoryWriter(s *Store) *historyWriter {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &historyWriter{store: s, queue: make(chan historyBatch, historyQueueTicks), changed: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel,
-		maintenanceRowsLimit: 64 * historyImportRows, maintenanceDue: time.Now().Add(time.Hour), maintenanceRetryDelay: 30 * time.Second}
+		maintenanceRowsLimit: 64 * historyImportRows, maintenanceDue: time.Now().Add(time.Hour), maintenanceRetryDelay: 30 * time.Second,
+		commitInterval: historyCommitInterval, flushCh: make(chan struct{}, 1)}
 	go w.run()
 	return w
 }
@@ -154,29 +161,52 @@ func (w *historyWriter) reject(message string) error {
 
 func (w *historyWriter) signal() { close(w.changed); w.changed = make(chan struct{}) }
 
+func (w *historyWriter) requestFlush(target uint64) {
+	for {
+		old := w.flushTarget.Load()
+		if target <= old || w.flushTarget.CompareAndSwap(old, target) {
+			break
+		}
+	}
+	select {
+	case w.flushCh <- struct{}{}:
+	default:
+	}
+}
+
 func (w *historyWriter) run() {
 	defer close(w.done)
 	var acknowledgedSequence int64
-	for b := range w.queue {
+	var held []historyBatch
+	var heldBytes int
+	var firstHeld time.Time
+	commitHeld := func() bool {
+		if len(held) == 0 {
+			return true
+		}
 		for {
 			if w.ctx.Err() != nil {
-				return
+				return false
 			}
 			ctx, cancel := context.WithTimeout(w.ctx, 30*time.Second)
-			seq, err := w.store.recordHistoryBatch(ctx, b.id, b.hash, b.payload.Point, b.payload.Samples, b.payload.Observations, acknowledgedSequence)
+			out, err := w.store.recordHistoryBatches(ctx, held, acknowledgedSequence)
 			cancel()
 			w.mu.Lock()
 			if err == nil {
-				w.status.Committed++
-				w.status.Pending--
-				w.status.PendingBytes -= b.bytes
-				w.status.Sequence = seq
-				w.status.LastCommitMS = time.Now().UnixMilli()
-				if b.payload.Point != nil {
-					w.status.LastMeasurementMS = max(w.status.LastMeasurementMS, b.payload.Point.TsMs)
+				w.status.Committed += uint64(out.committed)
+				w.status.Pending -= out.committed
+				w.status.PendingBytes -= heldBytes
+				if out.seq != 0 {
+					w.status.Sequence = out.seq
 				}
-				for _, sm := range b.payload.Samples {
-					w.status.LastMeasurementMS = max(w.status.LastMeasurementMS, sm.TsMs)
+				w.status.LastCommitMS = time.Now().UnixMilli()
+				for _, b := range held {
+					if b.payload.Point != nil {
+						w.status.LastMeasurementMS = max(w.status.LastMeasurementMS, b.payload.Point.TsMs)
+					}
+					for _, sm := range b.payload.Samples {
+						w.status.LastMeasurementMS = max(w.status.LastMeasurementMS, sm.TsMs)
+					}
 				}
 				w.status.LastError = ""
 			} else {
@@ -188,30 +218,112 @@ func (w *historyWriter) run() {
 			w.signal()
 			w.mu.Unlock()
 			if err == nil {
-				acknowledgedSequence = seq
-				rows := len(b.payload.Samples) + len(b.payload.Observations)
-				if b.payload.Point != nil {
-					rows++
+				if out.seq != 0 {
+					acknowledgedSequence = out.seq
 				}
-				w.scheduleMaintenance(rows)
-				break
+				w.scheduleMaintenance(out.rows)
+				held = held[:0]
+				heldBytes = 0
+				firstHeld = time.Time{}
+				return true
 			}
 			var dbErr *duckdb.Error
 			if errors.As(err, &dbErr) && dbErr.Type == duckdb.ErrorTypeOutOfMemory {
-				// recordHistoryBatch has released its transaction and SQL lease.
-				// Waiting for a successful commit can never recover retained native
-				// buffers: the importer also waits for this pending tick to commit.
-				// Keep the same batch/receipt and bound maintenance with its backoff.
 				w.maintenanceDue = time.Time{}
+				w.forceRotate.Store(true)
 				w.maintainHistory(0)
 			}
 			timer := time.NewTimer(time.Second)
 			select {
 			case <-w.ctx.Done():
 				timer.Stop()
-				return
+				return false
 			case <-timer.C:
 			}
+		}
+	}
+	drainQueue := func() {
+		for len(held) < historyCommitMaxTicks {
+			select {
+			case b, ok := <-w.queue:
+				if !ok {
+					return
+				}
+				held = append(held, b)
+				heldBytes += b.bytes
+			default:
+				return
+			}
+		}
+	}
+	shouldCommit := func() bool {
+		if len(held) == 0 {
+			return false
+		}
+		if len(held) >= historyCommitMaxTicks {
+			return true
+		}
+		w.mu.Lock()
+		committed := w.status.Committed
+		w.mu.Unlock()
+		if target := w.flushTarget.Load(); target > 0 && committed+uint64(len(held)) >= target {
+			return true
+		}
+		if w.commitInterval <= 0 {
+			return true
+		}
+		return !firstHeld.IsZero() && time.Since(firstHeld) >= w.commitInterval
+	}
+	for {
+		if len(held) == 0 {
+			select {
+			case b, ok := <-w.queue:
+				if !ok {
+					return
+				}
+				held = append(held, b)
+				heldBytes += b.bytes
+				firstHeld = time.Now()
+			case <-w.ctx.Done():
+				return
+			}
+			continue
+		}
+		if shouldCommit() {
+			drainQueue()
+			if !commitHeld() {
+				return
+			}
+			continue
+		}
+		wait := w.commitInterval - time.Since(firstHeld)
+		if wait < 0 {
+			wait = 0
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case b, ok := <-w.queue:
+			timer.Stop()
+			if !ok {
+				_ = commitHeld()
+				return
+			}
+			held = append(held, b)
+			heldBytes += b.bytes
+		case <-w.flushCh:
+			timer.Stop()
+			drainQueue()
+			if !commitHeld() {
+				return
+			}
+		case <-timer.C:
+			if !commitHeld() {
+				return
+			}
+		case <-w.ctx.Done():
+			timer.Stop()
+			_ = commitHeld()
+			return
 		}
 	}
 }
@@ -252,6 +364,13 @@ func (w *historyWriter) runMaintenance() {
 	defer w.maintenanceMu.Unlock()
 	ctx, cancel := context.WithTimeout(w.ctx, historyMaintenanceTimeout)
 	err := w.store.CheckpointHistory(ctx)
+	if err == nil && (w.forceRotate.Load() || shouldRotateNative()) {
+		if rotErr := w.store.RotateHistory(ctx); rotErr != nil {
+			err = rotErr
+		} else {
+			w.forceRotate.Store(false)
+		}
+	}
 	cancel()
 	// A successful rotation may still leave the same tick too large. Back off
 	// every actual attempt; skipped calls above must not extend this deadline.
@@ -293,6 +412,9 @@ func (s *Store) FlushHistory(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	target := w.status.Accepted
+	w.mu.Unlock()
+	w.requestFlush(target)
+	w.mu.Lock()
 	for w.status.Committed < target {
 		changed := w.changed
 		w.mu.Unlock()

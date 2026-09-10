@@ -106,6 +106,58 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 	return err
 }
 
+type seriesHourAcc struct {
+	n             int64
+	sum, min, max float64
+	last          int64
+}
+
+func addSeriesHourSample(acc map[seriesHourKey]*seriesHourAcc, driverID, metricID, tsMs int64, value float64) {
+	k := seriesHourKey{driverID, metricID, seriesHourOf(tsMs)}
+	a := acc[k]
+	if a == nil {
+		acc[k] = &seriesHourAcc{n: 1, sum: value, min: value, max: value, last: tsMs}
+		return
+	}
+	a.n++
+	a.sum += value
+	if value < a.min {
+		a.min = value
+	}
+	if value > a.max {
+		a.max = value
+	}
+	if tsMs > a.last {
+		a.last = tsMs
+	}
+}
+
+func (s *Store) upsertSeriesHoursTx(ctx context.Context, tx *sql.Tx, acc map[seriesHourKey]*seriesHourAcc) error {
+	if len(acc) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (driver_id, metric_id, hour_ms) DO UPDATE SET
+			sum_value = ts_series_hour.sum_value + excluded.sum_value,
+			min_value = LEAST(ts_series_hour.min_value, excluded.min_value),
+			max_value = GREATEST(ts_series_hour.max_value, excluded.max_value),
+			n = ts_series_hour.n + excluded.n,
+			last_ts_ms = GREATEST(ts_series_hour.last_ts_ms, excluded.last_ts_ms)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for k, a := range acc {
+		if _, err := stmt.ExecContext(ctx, k.driverID, k.metricID, k.hourMs, a.sum, a.min, a.max, a.n, a.last); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// refreshSeriesHoursTx rebuilds hour rows from ts_samples. Used after deletes.
 func (s *Store) refreshSeriesHoursTx(ctx context.Context, tx *sql.Tx, hours []seriesHourKey) error {
 	if len(hours) == 0 {
 		return nil

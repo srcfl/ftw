@@ -2631,11 +2631,14 @@ func main() {
 	}
 
 	// ---- Background: Parquet rolloff (>14d → cold dir) ----
-	coldRetentionDays := 0
-	if cfg.State != nil {
-		coldRetentionDays = cfg.State.ColdRetentionDays
-	}
-	go rolloffLoop(ctx, st, coldDir, coldRetentionDays, dataMaintenanceMu)
+	go rolloffLoop(ctx, st, coldDir, func() int {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		if cfg.State == nil {
+			return 0
+		}
+		return cfg.State.ColdRetentionDays
+	}, dataMaintenanceMu)
 
 	// ---- Background: daily state.db recovery snapshot ----
 	go snapshotLoop(ctx, st)
@@ -3209,7 +3212,7 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 }
 
 // rolloffLoop maintains diagnostic archives and history retention hourly.
-func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldRetentionDays int, dataMaintenanceMu *sync.Mutex) {
+func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retentionDays func() int, dataMaintenanceMu *sync.Mutex) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
 	var lastDiskWarn time.Time
@@ -3218,8 +3221,12 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldReten
 			dataMaintenanceMu.Lock()
 			defer dataMaintenanceMu.Unlock()
 		}
+		days := 0
+		if retentionDays != nil {
+			days = retentionDays()
+		}
 		doRolloff(ctx, st, coldDir)
-		if err := st.PruneHistorySamples(ctx, coldRetentionDays, time.Now()); err != nil {
+		if err := st.PruneHistorySamples(ctx, days, time.Now()); err != nil {
 			slog.Warn("history retention failed", "err", err)
 		}
 
@@ -3227,10 +3234,10 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldReten
 		// instead of letting the -wal file ratchet upward on the SD card.
 		st.CheckpointWAL()
 
-		if removed, err := state.PruneDiagnosticsParquet(coldDir, coldRetentionDays, time.Now()); err != nil {
+		if removed, err := state.PruneDiagnosticsParquet(coldDir, days, time.Now()); err != nil {
 			slog.Warn("cold parquet retention prune failed", "err", err)
 		} else if len(removed) > 0 {
-			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", coldRetentionDays)
+			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", days)
 		}
 
 		// Disk watch: an SD card that fills up takes SQLite down with it.

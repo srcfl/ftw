@@ -108,3 +108,26 @@ func TestHourlySeriesRollupUpdatesAfterLiveWrite(t *testing.T) {
 		t.Fatalf("live hour = %+v", got)
 	}
 }
+
+func TestHourlySeriesRollupIgnoresDuplicateSamples(t *testing.T) {
+	s := freshStore(t)
+	dup := Sample{Driver: "meter", Metric: "pv_w", TsMs: 5, Value: 10}
+	if err := s.RecordSamples([]Sample{dup}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSamples([]Sample{dup, {Driver: "meter", Metric: "pv_w", TsMs: 6, Value: 20}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.ensureSeriesHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LoadSeriesBuckets("meter", "pv_w", 0, seriesHourMs, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].N != 2 || got[0].V != 15 || got[0].Min != 10 || got[0].Max != 20 {
+		t.Fatalf("duplicate hour = %+v", got)
+	}
+}

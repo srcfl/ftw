@@ -97,7 +97,7 @@ func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 		}
 	}
 	var receipts int
-	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&receipts); err != nil || receipts != 1 {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&receipts); err != nil || receipts < 1 || receipts > historyCommitMaxTicks {
 		t.Fatalf("serial writer retained %d receipts: %v", receipts, err)
 	}
 }
@@ -141,6 +141,7 @@ func TestHistoryReceiptRetirementPreservesUncertainCommit(t *testing.T) {
 
 func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 	s := freshStore(t)
+	s.historyWriter.commitInterval = 0
 	if _, err := s.history.Exec(`ALTER TABLE history_hot RENAME TO history_unavailable`); err != nil {
 		t.Fatal(err)
 	}
