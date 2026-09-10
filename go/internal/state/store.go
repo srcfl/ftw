@@ -72,6 +72,8 @@ type Store struct {
 	corrupt      bool
 	verifyCancel context.CancelFunc
 	verifyWG     sync.WaitGroup
+
+	seriesHourWG sync.WaitGroup
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -90,6 +92,10 @@ func OpenWithLegacyHistory(path, coldDir string) (*Store, error) {
 		return nil, err
 	}
 	if err := s.retireLegacyHistorySources(); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.ensureSeriesHours(context.Background()); err != nil {
 		s.Close()
 		return nil, err
 	}
@@ -126,6 +132,7 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 			return nil, err
 		}
 		s.CompactIfBloated()
+		s.startSeriesHourBackfill()
 		return s, nil
 	}
 	go s.runHistoryMigration(coldDir)
@@ -310,6 +317,7 @@ func (s *Store) Close() error {
 		s.historyMigration.cancel()
 		<-s.historyMigration.done
 	}
+	s.seriesHourWG.Wait()
 
 	var err error
 	if s.historyWriter != nil {
