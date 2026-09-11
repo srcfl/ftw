@@ -44,7 +44,7 @@ type forecastIdentityReceipt struct {
 }
 
 const forecastIdentityReceiptKey = "forecast/live_identity_v1"
-const forecastPipelinePolicy = "energyplan-primary-v1"
+const forecastPipelinePolicy = "energyplan-primary-v2"
 
 func newForecastSiteConfig(st *state.Store) *forecastSiteConfig {
 	id, _ := st.LoadConfig("forecast/site_id")
