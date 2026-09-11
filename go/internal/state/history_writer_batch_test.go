@@ -104,10 +104,7 @@ func TestHistoryCommitInterrupted(t *testing.T) {
 	}
 }
 
-func TestHistoryRotatesNativeWhenThresholdIsZero(t *testing.T) {
-	prev := historyRotateMinRSS
-	historyRotateMinRSS = 0
-	t.Cleanup(func() { historyRotateMinRSS = prev })
+func TestLiveMaintenanceDoesNotTouchDuckDB(t *testing.T) {
 	s := freshStore(t)
 	s.historyWriter.maintenanceRowsLimit = 1
 	before := s.historyConnector.native
@@ -125,10 +122,18 @@ func TestHistoryRotatesNativeWhenThresholdIsZero(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	st := s.HistoryWriterStatus()
+	if st.MaintenanceError != "" || st.Committed != 1 {
+		t.Fatalf("live maintenance=%+v", st)
+	}
 	s.historyConnector.mu.RLock()
 	same := s.historyConnector.native == before
 	s.historyConnector.mu.RUnlock()
-	if same {
-		t.Fatal("forced rotation left the native instance in place")
+	if !same {
+		t.Fatal("live maintenance rotated the imported DuckDB file")
+	}
+	got, err := s.LoadSeries("live", "power", 0, 2, 0)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("series=%v %v", got, err)
 	}
 }
