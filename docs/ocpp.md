@@ -273,6 +273,23 @@ Two traps worth knowing:
 For the full commissioning and factory-reset detail per model, see the bench
 guide in the device-drivers repository.
 
+## Local simulation
+
+`go/cmd/sim-ocpp` dials the built-in Central System as every OCPP charger
+Evify currently stocks (Easee Charge Up/Max, Zaptec Go/Go 2, NexBlue Edge 2,
+go-e Gemini Flex 2.0, Charge Amps Luna/Halo/Aura/Dawn, Wallbox Pulsar Max,
+DEFA Power). Tesla Wall Connector is in that catalog but has no OCPP — FTW
+already talks to it over local HTTP.
+
+```bash
+make dev          # enable ocpp in config.local.yaml (the example template does)
+make sim-ocpp     # all OCPP models plug in and start metering
+```
+
+Vendor quirks FTW already defends against are encoded: Charge Amps ACK a
+remote stop and keep charging, Aura refuses a connector-0 profile, Zaptec
+dials as its serial. The e2e in `go/cmd/sim-ocpp/ocppcp` is the proof.
+
 ## Can this charger be steered?
 
 Not every OCPP charger accepts control. FTW asks each one, once, shortly after
