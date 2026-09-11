@@ -1652,6 +1652,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", configETag(newCfg.Revision))
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
+	if restartReasons == nil {
+		restartReasons = []string{}
+	}
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
 		"restart_required": len(restartReasons) > 0,

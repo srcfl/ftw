@@ -99,3 +99,17 @@ func TestApplySiteGainUpdatesPI(t *testing.T) {
 		t.Fatalf("shared cfg gain = %v, want 0.8", cfg.Site.Gain)
 	}
 }
+
+func TestApplyZeroGainKeepsDefaultKp(t *testing.T) {
+	var cfgMu sync.RWMutex
+	var ctrlMu sync.Mutex
+	cfg := &config.Config{Site: config.Site{Gain: 0.5}}
+	ctrl := control.NewState(0, 42, "")
+	newCfg := &config.Config{Site: config.Site{Gain: 0}}
+
+	Apply(&cfgMu, cfg, &ctrlMu, ctrl, newCfg, nil)
+
+	if ctrl.PI.Kp != 0.5 {
+		t.Fatalf("PI.Kp = %v, want default 0.5 when posted gain is 0", ctrl.PI.Kp)
+	}
+}

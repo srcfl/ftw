@@ -1062,11 +1062,17 @@ func main() {
 			if vat == 0 {
 				vat = 25
 			}
-			priceSvc.Applier.GridTariffOreKwh = newCfg.Price.GridTariffOreKwh
-			priceSvc.Applier.VATPercent = vat
+			priceSvc.SetApplier(prices.Applier{
+				GridTariffOreKwh: newCfg.Price.GridTariffOreKwh,
+				VATPercent:       vat,
+			})
 		}
 		if deps != nil {
-			deps.DtS = float64(newCfg.Site.ControlIntervalS)
+			dtS := float64(newCfg.Site.ControlIntervalS)
+			if dtS <= 0 {
+				dtS = 2
+			}
+			deps.DtS = dtS
 			backup := filepath.Join(dataDir, "backups")
 			if newCfg.State != nil && newCfg.State.BackupDir != "" {
 				backup = newCfg.State.BackupDir
@@ -2741,12 +2747,14 @@ func main() {
 		case <-ticker.C:
 			cfgMu.RLock()
 			nextInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
-			nextDtS := float64(cfg.Site.ControlIntervalS)
 			cfgMu.RUnlock()
-			if nextInterval > 0 && nextInterval != controlInterval {
+			if nextInterval <= 0 {
+				nextInterval = 2 * time.Second
+			}
+			if nextInterval != controlInterval {
 				ticker.Reset(nextInterval)
 				controlInterval = nextInterval
-				dtS = nextDtS
+				dtS = nextInterval.Seconds()
 				if lpController != nil {
 					lpController.SetCommandTimeout(driverCommandTimeout(nextInterval))
 				}

@@ -17,7 +17,10 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg == nil || newCfg == nil {
 		return nil
 	}
-	var reasons []string
+	// Empty must be a non-nil slice so JSON encodes [] rather than null.
+	// A save that needs no restart is the common path; clients type-assert
+	// restart_reasons as an array.
+	reasons := []string{}
 
 	if oldCfg.API.Port != newCfg.API.Port {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")

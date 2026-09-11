@@ -1429,7 +1429,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.Latest()
 	}
 	now := s.planningNow()
-	untilMs := now.Add(s.Horizon).UnixMilli()
+	s.mu.RLock()
+	horizon := s.Horizon
+	baseLoad := s.BaseLoad
+	s.mu.RUnlock()
+	if horizon <= 0 {
+		horizon = 48 * time.Hour
+	}
+	untilMs := now.Add(horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
 
 	prices, err := s.Store.LoadPrices(s.Zone, sinceMs, untilMs)
@@ -1476,7 +1483,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			forecasts = captured.Weather
 		}
 	}
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
+	slots := buildSlots(prices, forecasts, baseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
 	// Resolve receives the complete legacy forecast, including verified limits,
 	// so its frozen shadow matches what the previous pipeline would have used.
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)

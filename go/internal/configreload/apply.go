@@ -50,9 +50,13 @@ func Apply(
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
 		ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
-	if newCfg.Site.Gain != oldCfg.Site.Gain && ctrl.PI != nil {
-		slog.Info("config reload: site.gain", "old", oldCfg.Site.Gain, "new", newCfg.Site.Gain)
-		ctrl.PI.Kp = newCfg.Site.Gain
+	gain := newCfg.Site.Gain
+	if gain == 0 {
+		gain = 0.5
+	}
+	if ctrl.PI != nil && ctrl.PI.Kp != gain {
+		slog.Info("config reload: site.gain", "old", ctrl.PI.Kp, "new", gain)
+		ctrl.PI.Kp = gain
 	}
 	if newCfg.Site.PVSurplusAbsorbSoCCap != oldCfg.Site.PVSurplusAbsorbSoCCap {
 		slog.Info("config reload: pv_surplus_absorb_soc_cap",

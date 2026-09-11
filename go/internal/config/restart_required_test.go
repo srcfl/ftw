@@ -7,7 +7,11 @@ import (
 
 func TestRestartRequiredFor_NoChange(t *testing.T) {
 	cfg := baseCfg()
-	if r := RestartRequiredFor(cfg, cfg); len(r) != 0 {
+	r := RestartRequiredFor(cfg, cfg)
+	if r == nil {
+		t.Fatal("empty reasons must be a non-nil slice so JSON encodes []")
+	}
+	if len(r) != 0 {
 		t.Fatalf("expected no reasons, got %v", r)
 	}
 }
