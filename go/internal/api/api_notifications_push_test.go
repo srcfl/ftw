@@ -440,7 +440,10 @@ func TestRulesGetOffersKindsAddedAfterTheConfigWasSaved(t *testing.T) {
 		t.Fatalf("the stored rule was rewritten: %+v", stored)
 	}
 	// The kinds the release added are offered, disabled.
-	for _, kind := range []string{"charging.session_complete", "charging.interrupted", "update.installed"} {
+	for _, kind := range []string{
+		"charging.session_complete", "charging.interrupted", "update.installed",
+		"driver.offline", "fuse.over_limit",
+	} {
 		rule, ok := byType[kind]
 		if !ok {
 			t.Fatalf("kind %s is not offered to a box with a stored config", kind)

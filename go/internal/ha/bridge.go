@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/url"
@@ -26,6 +27,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // CommandCallbacks is how the bridge hands received commands back to the
@@ -365,7 +367,67 @@ func (b *Bridge) availTopic() string            { return b.topicPrefix + "/statu
 func (b *Bridge) stateTopic(name string) string { return b.topicPrefix + "/state/" + name }
 func (b *Bridge) cmdTopic(name string) string   { return b.topicPrefix + "/cmd/" + name }
 func (b *Bridge) driverTopic(driver, field string) string {
-	return fmt.Sprintf("%s/driver/%s/%s", b.topicPrefix, driver, field)
+	return fmt.Sprintf("%s/driver/%s/%s", b.topicPrefix, mqttObjectID(driver), mqttObjectID(field))
+}
+
+// mqttObjectID maps a free-form YAML driver name onto Home Assistant's
+// discovery object-id alphabet: [A-Za-z0-9_-].
+//
+// Names that are already legal are returned unchanged, including case, so an
+// existing Ev-Charger_1 entity is not duplicated as ev-charger_1 on upgrade.
+// Names that need slugging keep a readable stem and append an FNV-1a tag of
+// the original string so "Laddare, Garage" and "Laddare Garage" do not share
+// a topic. The discovery `name` field still uses the human YAML name.
+func mqttObjectID(name string) string {
+	if mqttIDLegal(name) {
+		return name
+	}
+	var b strings.Builder
+	lastSep := true
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if ok {
+			b.WriteRune(r)
+			lastSep = r == '_' || r == '-'
+			continue
+		}
+		if !lastSep {
+			b.WriteByte('_')
+			lastSep = true
+		}
+	}
+	s := strings.Trim(b.String(), "_-")
+	if s == "" {
+		s = "driver"
+	}
+	return s + "_" + mqttNameTag(name)
+}
+
+func mqttIDLegal(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mqttNameTag(name string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return fmt.Sprintf("%08x", h.Sum32())
+}
+
+func (b *Bridge) driverUniqueID(driver, suffix string) string {
+	return b.deviceID + "_" + mqttObjectID(driver) + suffix
+}
+
+func (b *Bridge) driverDiscoveryTopic(kind, driver, object string) string {
+	return fmt.Sprintf("%s/%s/%s/%s_%s/config", b.discoPrefix, kind, b.deviceID, mqttObjectID(driver), mqttObjectID(object))
 }
 
 // ---- Autodiscovery ----
@@ -617,22 +679,21 @@ func (b *Bridge) publishDiscovery() {
 		} {
 			msg := b.withAvail(map[string]any{
 				"name":                name + s.label,
-				"unique_id":           b.deviceID + "_" + name + s.id,
+				"unique_id":           b.driverUniqueID(name, s.id),
 				"state_topic":         b.driverTopic(name, s.id),
 				"unit_of_measurement": s.unit,
 				"device_class":        s.class,
 				"device":              dev,
 			})
 			d, _ := json.Marshal(msg)
-			topic := fmt.Sprintf("%s/sensor/%s/%s_%s/config", b.discoPrefix, b.deviceID, name, s.id)
-			b.publish(topic, d, true)
+			b.publish(b.driverDiscoveryTopic("sensor", name, s.id), d, true)
 		}
 		total += 6
 
 		// Health binary_sensor: online/offline with JSON attributes for rich diagnostics.
 		healthMsg := b.withAvail(map[string]any{
 			"name":                  name + " Online",
-			"unique_id":             b.deviceID + "_" + name + "_online",
+			"unique_id":             b.driverUniqueID(name, "_online"),
 			"state_topic":           b.driverTopic(name, "online"),
 			"json_attributes_topic": b.driverTopic(name, "health_json"),
 			"payload_on":            "true",
@@ -642,7 +703,7 @@ func (b *Bridge) publishDiscovery() {
 			"device":                dev,
 		})
 		d, _ := json.Marshal(healthMsg)
-		b.publish(fmt.Sprintf("%s/binary_sensor/%s/%s_online/config", b.discoPrefix, b.deviceID, name), d, true)
+		b.publish(b.driverDiscoveryTopic("binary_sensor", name, "online"), d, true)
 		total++
 
 		// Re-announce every live emit_metric sensor. Reading the snapshots here
@@ -676,10 +737,9 @@ func (b *Bridge) publishDiscovery() {
 // Called when a metric is seen for the first time and on every reconnect.
 func (b *Bridge) announceMetric(dev map[string]any, driver, metricName, explicitUnit string) {
 	unit, devClass := metricUnitAndClass(metricName, explicitUnit)
-	uid := b.deviceID + "_" + driver + "_" + metricName
 	msg := b.withAvail(map[string]any{
 		"name":        driver + " " + strings.ReplaceAll(metricName, "_", " "),
-		"unique_id":   uid,
+		"unique_id":   b.driverUniqueID(driver, "_"+metricName),
 		"state_topic": b.driverTopic(driver, metricName),
 		"device":      dev,
 	})
@@ -690,8 +750,7 @@ func (b *Bridge) announceMetric(dev map[string]any, driver, metricName, explicit
 		msg["device_class"] = devClass
 	}
 	d, _ := json.Marshal(msg)
-	topic := fmt.Sprintf("%s/sensor/%s/%s_%s/config", b.discoPrefix, b.deviceID, driver, metricName)
-	b.publish(topic, d, true)
+	b.publish(b.driverDiscoveryTopic("sensor", driver, metricName), d, true)
 }
 
 // metricUnitAndClass preserves a unit explicitly emitted by the driver and
@@ -867,7 +926,7 @@ func (b *Bridge) publishState() {
 	b.publishValue("ev_w", evW)
 	b.publishValue("v2x_w", v2xW)
 	b.publishValue("load_w", loadW)
-	b.publishValue("bat_soc_pct", avgSoC*100)
+	b.publishValue("bat_soc_pct", units.PercentFromFraction(avgSoC))
 	b.publishValue("grid_target_w", gridTarget)
 	b.publishValue("peak_limit_w", peakLimit)
 	b.publishValue("peak_import_ceiling_w", peakCeiling)
@@ -941,13 +1000,13 @@ func (b *Bridge) publishState() {
 		if r := b.tel.Get(name, telemetry.DerBattery); r != nil {
 			b.publishDriver(name, "bat_w", r.SmoothedW)
 			if r.SoC != nil {
-				b.publishDriver(name, "bat_soc_pct", *r.SoC*100)
+				b.publishDriver(name, "bat_soc_pct", units.PercentFromFraction(*r.SoC))
 			}
 		}
 		if r := b.tel.Get(name, telemetry.DerV2X); r != nil {
 			b.publishDriver(name, "v2x_w", r.SmoothedW)
 			if r.SoC != nil {
-				b.publishDriver(name, "v2x_vehicle_soc_pct", *r.SoC*100)
+				b.publishDriver(name, "v2x_vehicle_soc_pct", units.PercentFromFraction(*r.SoC))
 			}
 		}
 
@@ -1033,13 +1092,13 @@ func (b *Bridge) publishState() {
 			b.announceVehicleDriver(dev, name)
 		}
 		if r.SoC != nil {
-			b.publishDriver(name, "vehicle_soc_pct", *r.SoC*100)
+			b.publishDriver(name, "vehicle_soc_pct", units.PercentFromFraction(*r.SoC))
 		}
 		attrs := map[string]any{
 			"updated_at": r.UpdatedAt.UTC().Format(time.RFC3339),
 		}
 		if r.SoC != nil {
-			attrs["soc_pct"] = *r.SoC * 100
+			attrs["soc_pct"] = units.PercentFromFraction(*r.SoC)
 		}
 		if len(r.Data) > 0 {
 			var extra map[string]any
@@ -1059,7 +1118,7 @@ func (b *Bridge) publishState() {
 func (b *Bridge) announceEVDriver(dev map[string]any, driver string) {
 	msg := b.withAvail(map[string]any{
 		"name":                  driver + " EV Power",
-		"unique_id":             b.deviceID + "_" + driver + "_ev_w",
+		"unique_id":             b.driverUniqueID(driver, "_ev_w"),
 		"state_topic":           b.driverTopic(driver, "ev_w"),
 		"json_attributes_topic": b.driverTopic(driver, "ev_json"),
 		"unit_of_measurement":   "W",
@@ -1068,14 +1127,14 @@ func (b *Bridge) announceEVDriver(dev map[string]any, driver string) {
 		"device":                dev,
 	})
 	d, _ := json.Marshal(msg)
-	b.publish(fmt.Sprintf("%s/sensor/%s/%s_ev_w/config", b.discoPrefix, b.deviceID, driver), d, true)
+	b.publish(b.driverDiscoveryTopic("sensor", driver, "ev_w"), d, true)
 }
 
 // announceVehicleDriver publishes HA discovery for a vehicle SoC reader.
 func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
 	msg := b.withAvail(map[string]any{
 		"name":                  driver + " Vehicle SoC",
-		"unique_id":             b.deviceID + "_" + driver + "_vehicle_soc",
+		"unique_id":             b.driverUniqueID(driver, "_vehicle_soc"),
 		"state_topic":           b.driverTopic(driver, "vehicle_soc_pct"),
 		"json_attributes_topic": b.driverTopic(driver, "vehicle_json"),
 		"unit_of_measurement":   "%",
@@ -1084,7 +1143,7 @@ func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
 		"device":                dev,
 	})
 	d, _ := json.Marshal(msg)
-	b.publish(fmt.Sprintf("%s/sensor/%s/%s_vehicle_soc/config", b.discoPrefix, b.deviceID, driver), d, true)
+	b.publish(b.driverDiscoveryTopic("sensor", driver, "vehicle_soc"), d, true)
 }
 
 // publishPlan reads the current MPC plan and publishes:

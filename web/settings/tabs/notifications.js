@@ -104,7 +104,8 @@
         // driver_offline and fuse_over_limit. Others (driver_recovered,
         // update_available) would render a dead field — skip with a
         // clarifying note.
-        var usesThreshold = rule.type === "driver_offline" || rule.type === "fuse_over_limit";
+        var usesThreshold = rule.type === "driver_offline" || rule.type === "fuse_over_limit"
+          || rule.type === "driver.offline" || rule.type === "fuse.over_limit";
         var noThresholdNote = rule.type === "driver_recovered"
           ? "Fires within 30 s of telemetry resuming — no threshold configurable."
           : rule.type === "update_available"

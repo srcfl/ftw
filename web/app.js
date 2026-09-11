@@ -4,22 +4,16 @@
   "use strict";
 
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
-
-  // FLOW_IDLE_KW — magnitude below which a planet is treated as
-  // "idle / balanced" for label + colour purposes. Mirror of
-  // ftw-energy-flow.js's FLOW_IDLE_W (which sets window.FTW_FLOW_IDLE_W
-  // when its module loads). Read at use-time so the module-set value
-  // wins; literal `42` is the no-modules fallback. Inclusive
-  // comparison everywhere: |kW| <= threshold ⇒ idle.
-  function flowIdleKw() {
-    const w = (typeof window !== "undefined" && window.FTW_FLOW_IDLE_W) || 42;
-    return w / 1000;
+  const historyMigrationUI = import("/history-migration.js").catch(function () { return null; });
+  function updateHistoryMigration(health) {
+    historyMigrationUI.then(function (ui) { if (ui) ui.updateMigrationBanner(health); }).catch(function () {});
+    if (updateBadge && typeof updateBadge.setBootHealth === "function") updateBadge.setBootHealth(health);
   }
-  function isFlowIdle(kw) { return Math.abs(kw) <= flowIdleKw(); }
+
   // Prices arrive as minor units per kWh; what to call them depends on the
   // configured currency. window.FTWUnits is set when
   // components/price-units.js loads — same read-at-use-time pattern as
-  // flowIdleKw above, with öre as the no-modules fallback.
+  // the energy-flow idle threshold, with öre as the no-modules fallback.
   function fmtPricePerKwh(minorPerKwh) {
     const u = typeof window !== "undefined" && window.FTWUnits;
     if (!u) return minorPerKwh.toFixed(0) + " öre/kWh";
@@ -45,6 +39,9 @@
   const STATUS_DISPLAY_TAU_MS = 8 * 1000;
   let chartRange = "5m";             // current selected range
   let currentMode = null;
+  let lastRevealedMode = null;       // last mode the manual drawer auto-opened for
+  let pendingMode = null;            // mode tapped here, not yet confirmed by the server
+  let pendingModeUntil = 0;          // browser-clock deadline for that optimistic paint
   let animating = !document.hidden;  // 30fps redraw loop flag
   let lastDataTs = 0;                // browser-clock timestamp of newest pushed point
   let lastPushAt = 0;                // browser-clock timestamp of last push attempt — for dedupe (NEVER mix with server ts)
@@ -71,6 +68,22 @@
       return Promise.reject(err);
     }
     return request.then(decode).finally(function () { clearTimeout(timer); });
+  }
+
+  function evWrite(path, options) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 30000);
+    return apiFetch(path, Object.assign({}, options, { signal: controller.signal }))
+      .then(function (response) {
+        // Keep the deadline until the body arrives, including an error body.
+        return response.arrayBuffer().then(function (body) {
+          return new Response(response.status === 204 ? null : body, { status: response.status, statusText: response.statusText, headers: response.headers });
+        });
+      })
+      .catch(function (e) {
+        if (e && e.name === "AbortError") throw new Error("FTW has not confirmed the request. Check its current state before trying again");
+        throw e;
+      }).finally(function () { clearTimeout(timer); });
   }
 
   // ---- Chart data ----
@@ -286,12 +299,6 @@
   function writeLastPeakLimitW(w) {
     try { localStorage.setItem("ftw-peak-import-ceiling-w", String(w)); } catch (e) {}
   }
-  const evSlider = $("ev-slider");
-  const evValue = $("ev-value");
-  const evSend = $("ev-send");
-  const bceToggle = $("battery-covers-ev-toggle");
-  const bceLabel = $("battery-covers-ev-label");
-  const bceInfo = $("battery-covers-ev-info");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -471,8 +478,9 @@
     }
     if (out.grid_w != null) {
       out.load_w = Math.max(0, (out.grid_w || 0) - (out.bat_w || 0) - (out.pv_w || 0) - (out.ev_w || 0));
-    } else if (data.load_w != null) {
-      out.load_w = smoothDisplayNumber("site:load_w", data.load_w, now);
+    } else {
+      // No live meter: do not keep a previous load or treat JSON null as 0 W.
+      out.load_w = null;
     }
     return out;
   }
@@ -496,17 +504,6 @@
     return out;
   }
 
-  // Compact kWh — bubble lines that pack two arrows ("↓ 5.2 ↑ 12") need
-  // tighter formatting than the standalone tile reading. Drops the "kWh"
-  // unit (already implied by the bubble label "kWh today" elsewhere).
-  function fmtKwhShort(kwh) {
-    if (kwh == null || !isFinite(kwh)) return "—";
-    var v = Math.abs(kwh);
-    if (v >= 100) return kwh.toFixed(0);
-    if (v >= 10)  return kwh.toFixed(1);
-    return kwh.toFixed(2);
-  }
-
   function statusClass(status) {
     if (!status) return "status-offline";
     const s = status.toLowerCase();
@@ -518,10 +515,73 @@
   // The component registry loads as a deferred module while this classic
   // dashboard script starts immediately at the end of the document. A fast
   // first /api/status response can therefore arrive before <ftw-energy-flow>
-  // has upgraded. Cache the derived payload and replay it when the element is
-  // ready so switching to Flow never reveals placeholders for one poll cycle.
+  // has upgraded, and before energy-flow-readings.js has assigned the
+  // mapper. Cache the raw payload (not only the derived readings) and
+  // replay when either the mapper or the element is ready, so the hero
+  // does not sit in its loading skeleton until the next two-second poll.
+  var lastFlowStatus = null;
   var lastFlowReadings = null;
   var flowUpgradeReplayQueued = false;
+
+  window.ftwOnFlowMapperReady = function () {
+    if (lastFlowStatus) paintEnergyFlow(lastFlowStatus);
+  };
+
+  function energyFlowOpts(data) {
+    var byDriver = {};
+    (data.dispatch || []).forEach(function (d) {
+      if (d && d.driver) byDriver[d.driver] = Number(d.target_w) || 0;
+    });
+    return {
+      idleW: (typeof window.FTW_FLOW_IDLE_W === "number" && window.FTW_FLOW_IDLE_W) || 42,
+      batterySub: function (name, d) {
+        if (d.observe_only) return "observe only";
+        return batteryTargetLine(byDriver[name]);
+      },
+    };
+  }
+
+  function queueFlowReplay() {
+    if (flowUpgradeReplayQueued) return;
+    flowUpgradeReplayQueued = true;
+    if (window.customElements && typeof window.customElements.whenDefined === "function") {
+      window.customElements.whenDefined("ftw-energy-flow").then(function () {
+        if (lastFlowStatus) paintEnergyFlow(lastFlowStatus);
+      });
+    }
+  }
+
+  function paintEnergyFlow(data) {
+    lastFlowStatus = data;
+    var flowEl = document.getElementById("energy-flow");
+    if (!flowEl) return;
+    if (typeof window.ftwFlowReadingsFromStatus !== "function") {
+      queueFlowReplay();
+      return;
+    }
+    lastFlowReadings = window.ftwFlowReadingsFromStatus(data, energyFlowOpts(data));
+    (lastFlowReadings.planets || []).forEach(function (p) {
+      if (p.role !== "ev" || p.placeholder || !p.name) return;
+      var lpEv = loadpointsByDriver && loadpointsByDriver[p.name];
+      if (!lpEv) return;
+      if (lpEv.vehicle_soc > 0) {
+        p.soc = lpEv.vehicle_soc * 100;
+        p.socSource = "vehicle";
+      } else if (lpEv.current_soc > 0 && lpEv.soc_source !== "assumed") {
+        p.soc = lpEv.current_soc * 100;
+        p.socSource = lpEv.soc_source || "inferred";
+      }
+      if (lpEv.vehicle_charge_limit > 0) {
+        p.chargeLimit = lpEv.vehicle_charge_limit * 100;
+      }
+      p.socStale = !!lpEv.vehicle_stale;
+    });
+    if (typeof flowEl.setReadings === "function") {
+      flowEl.setReadings(lastFlowReadings);
+    } else {
+      queueFlowReplay();
+    }
+  }
 
   // ---- Render ----
   function render(data) {
@@ -582,17 +642,25 @@
     if (versionEl && data.version) {
       versionEl.textContent = data.version;
     }
-    // Grid + target indicator
-    gridW.textContent = formatW(data.grid_w);
-    if (data.grid_w > 10) {
-      gridDir.textContent = "importing";
-      gridW.className = "card-value val-import";
-    } else if (data.grid_w < -10) {
-      gridDir.textContent = "exporting";
-      gridW.className = "card-value val-export";
-    } else {
-      gridDir.textContent = "balanced";
+    // Grid + target indicator. A stale meter arrives as JSON null, not 0 —
+    // 0 W is a real balanced house and must not be used as a missing-data
+    // stand-in.
+    if (data.grid_w == null || !isFinite(data.grid_w)) {
+      gridW.textContent = "—";
+      gridDir.textContent = "no data";
       gridW.className = "card-value val-neutral";
+    } else {
+      gridW.textContent = formatW(data.grid_w);
+      if (data.grid_w > 10) {
+        gridDir.textContent = "importing";
+        gridW.className = "card-value val-import";
+      } else if (data.grid_w < -10) {
+        gridDir.textContent = "exporting";
+        gridW.className = "card-value val-export";
+      } else {
+        gridDir.textContent = "balanced";
+        gridW.className = "card-value val-neutral";
+      }
     }
     var targetDisp = document.getElementById("grid-target-display");
     if (targetDisp) {
@@ -621,12 +689,35 @@
     // PV — stored as negative (site convention) but displayed positive
     // so "SOLAR 5.3 kW" reads as generation magnitude without the minus.
     // Internal data (chart history, hero setReadings, plan math) stays
-    // on site convention — flip is for this tile only.
-    pvW.textContent = formatW(-data.pv_w);
-    pvW.className = "card-value val-generation";
+    // on site convention — flip is for this tile only. Configured-but-
+    // offline solar is "—", not a pretend 0 W of generation.
+    var pvLive = Object.keys(data.drivers || {}).some(function (name) {
+      var d = data.drivers[name] || {};
+      var online = window.ftwDriverOnline
+        ? window.ftwDriverOnline(d)
+        : d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      return online && d.pv_w != null;
+    });
+    var pvConfigured = Object.keys(data.drivers || {}).some(function (name) {
+      return (data.drivers[name] || {}).pv_w != null;
+    });
+    var pvDir = document.getElementById("pv-dir");
+    if (pvConfigured && !pvLive) {
+      pvW.textContent = "—";
+      pvW.className = "card-value val-neutral";
+      if (pvDir) pvDir.textContent = "no data";
+    } else {
+      pvW.textContent = formatW(-(data.pv_w || 0));
+      pvW.className = "card-value val-generation";
+      if (pvDir) pvDir.textContent = "generating";
+    }
 
     // Load
-    loadW.textContent = formatW(data.load_w || 0);
+    loadW.textContent = formatW(data.load_w);
+    var loadDir = document.getElementById("load-dir");
+    if (loadDir) {
+      loadDir.textContent = data.load_w == null || !isFinite(data.load_w) ? "no data" : "using now";
+    }
 
     // EV tile (tile-mode parity with the energy-flow's EV planet).
     // Reads ev_charging_w (post sub-watt floor in /api/status); the
@@ -641,22 +732,39 @@
       if (cardEvSubEl) cardEvSubEl.textContent = evWNow > 1 ? "charging" : "charger";
     }
 
-    // Battery — positive=charge, negative=discharge
-    batW.textContent = formatW(data.bat_w);
-    if (data.bat_w > 10) {
-      batDir.textContent = "charging";
-      batW.className = "card-value val-charging";
-    } else if (data.bat_w < -10) {
-      batDir.textContent = "discharging";
-      batW.className = "card-value val-discharging";
-    } else {
-      batDir.textContent = "idle";
+    // Battery — positive=charge, negative=discharge. Same honesty as solar:
+    // a configured pack that is not reporting is "—", not idle at 0 W.
+    var batLive = Object.keys(data.drivers || {}).some(function (name) {
+      var d = data.drivers[name] || {};
+      var online = window.ftwDriverOnline
+        ? window.ftwDriverOnline(d)
+        : d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      return online && d.bat_w != null;
+    });
+    var batConfigured = Object.keys(data.drivers || {}).some(function (name) {
+      return (data.drivers[name] || {}).bat_w != null;
+    });
+    if (batConfigured && !batLive) {
+      batW.textContent = "—";
+      batDir.textContent = "no data";
       batW.className = "card-value val-neutral";
+    } else {
+      batW.textContent = formatW(data.bat_w);
+      if (data.bat_w > 10) {
+        batDir.textContent = "charging";
+        batW.className = "card-value val-charging";
+      } else if (data.bat_w < -10) {
+        batDir.textContent = "discharging";
+        batW.className = "card-value val-discharging";
+      } else {
+        batDir.textContent = "idle";
+        batW.className = "card-value val-neutral";
+      }
     }
     if (batSoc) {
-      batSoc.textContent = Number.isFinite(data.bat_soc)
-        ? Math.round(data.bat_soc * 100) + "% SoC"
-        : "—";
+      batSoc.textContent = (batConfigured && !batLive) || !Number.isFinite(data.bat_soc)
+        ? "—"
+        : Math.round(data.bat_soc * 100) + "% SoC";
     }
     var batTargetDisp = document.getElementById("bat-target-display");
     if (batTargetDisp) {
@@ -668,210 +776,49 @@
     // the Plan card's information density. Each cell colours by sign
     // / direction so an operator scans the row and immediately sees
     // who's importing, exporting, charging, or idle.
+    // Same honesty as the Values tiles: site-level pv_w / bat_w / bat_soc
+    // become 0 when every reporter of that role is offline. 0 W here would
+    // undo the "—" those tiles just drew.
+    var pvStat = pvConfigured && !pvLive ? null : -(data.pv_w || 0);
+    var batStat = batConfigured && !batLive ? null : data.bat_w;
+    var socStat = batConfigured && !batLive ? null : data.bat_soc;
     updateLiveStat("grid", data.grid_w, signClass("grid", data.grid_w));
-    updateLiveStat("pv", -data.pv_w, "is-export"); // PV is site-signed negative; show as positive generation
+    updateLiveStat("pv", pvStat, pvStat == null ? "is-neutral" : "is-export");
     updateLiveStat("load", data.load_w, "is-neutral");
-    updateLiveStat("bat", data.bat_w, signClass("bat", data.bat_w));
-    updateLiveSocStat(data.bat_soc);
+    updateLiveStat("bat", batStat, batStat == null ? "is-neutral" : signClass("bat", batStat));
+    updateLiveSocStat(socStat);
 
-    // Hero energy-flow diagram — build a flat "planets" list where each
-    // entry declares which corner it orbits (top-left=PV, top-right=
-    // battery, bottom-left=grid, bottom-right=EV). The component knows
-    // nothing about driver roles — all role→color/sub-text/direction
-    // mapping lives here so the four corners stay a caller concern.
-    // setReadings() replaces `planets` atomically, so a transient
-    // /api/status error preserves the last good layout if we skip it.
-    var flowEl = document.getElementById("energy-flow");
-    if (flowEl) {
-      var planets = [];
-
-      // Today's totals are aggregate across all drivers; per-driver kWh split
-      // is not in the API. Mark them as aggregate-only so the energy-flow
-      // component can show them on folded bubbles without duplicating the
-      // same total on every individual inverter.
-      var todayE = (data.energy && data.energy.today) || {};
-      var importKwh   = (todayE.import_wh || 0) / 1000;
-      var exportKwh   = (todayE.export_wh || 0) / 1000;
-      var pvKwhTotal  = (todayE.pv_wh || 0) / 1000;
-      var loadKwhTotal = (todayE.load_wh || 0) / 1000;
-      var batChargedKwh    = (todayE.bat_charged_wh || 0) / 1000;
-      var batDischargedKwh = (todayE.bat_discharged_wh || 0) / 1000;
-      // Solar only flows one direction (production); the arrow would
-      // be redundant. Use the kWh unit instead so the line reads as
-      // a standalone total.
-      var pvDailyStr   = fmtKwhShort(pvKwhTotal) + " kWh";
-      // Grid daily totals are colour-coded: import red, export green,
-      // both bold so the polarity reads at a glance against the dark
-      // bubble. Other planets stay on the plain dimmed text style.
-      var gridDailyParts = [
-        { text: "↓ " + fmtKwhShort(importKwh), color: "var(--red-e)",   bold: true },
-        { text: "↑ " + fmtKwhShort(exportKwh), color: "var(--green-e)", bold: true },
-      ];
-      // Battery daily totals share the grid's colour discipline:
-      // charge (energy stored) green, discharge (energy spent) red.
-      // Reads at a glance whether the day was a net-fill or net-drain.
-      var batDailyParts = [
-        { text: "↑ " + fmtKwhShort(batChargedKwh),    color: "var(--green-e)", bold: true },
-        { text: "↓ " + fmtKwhShort(batDischargedKwh), color: "var(--red-e)",   bold: true },
-      ];
-
-      // Grid — single utility, bottom-left corner. Import = toward house.
-      var gkw = (data.grid_w || 0) / 1000;
-      var gIdle = isFlowIdle(gkw);
-      planets.push({
-        id: "grid", corner: "bottom-left", title: "GRID", role: "grid",
-        kw: gkw, toHub: gkw >= 0,
-        color: gIdle ? "var(--fg-muted)" :
-               (gkw >= 0 ? "var(--red-e)" : "var(--green-e)"),
-        sub: gIdle ? "balanced" :
-             (gkw >= 0 ? "importing" : "exporting"),
-        dailyKwhParts: gridDailyParts,
-      });
-
-      var drvs = data.drivers || {};
-      var pvDailyMembers = 0;
-      var batDailyMembers = 0;
-      Object.keys(drvs).forEach(function (name) {
-        var d = drvs[name] || {};
-        if (d.pv_w != null) pvDailyMembers++;
-        if (d.bat_w != null) batDailyMembers++;
-      });
-      Object.keys(drvs).forEach(function (name) {
-        var d = drvs[name] || {};
-        var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
-        if (!online) return;
-        // Solar — display positive kW when generating (site convention
-        // has pv_w negative for export into the house). All internal
-        // state (chart history, math) stays on site convention; the
-        // sign flip is display-only and lives in this function.
-        if (d.pv_w != null) {
-          var pvKw = -d.pv_w / 1000;
-          var pvGen = !isFlowIdle(pvKw);
-          planets.push({
-            id: "pv-" + name, corner: "top-left", title: "SOLAR", name: name, role: "pv",
-            kw: pvKw, toHub: true,
-            color: pvGen ? "var(--amber)" : "var(--fg-muted)",
-            // Solar is one-directional: the power value alone already
-            // shows whether it's generating or idle. The sub-label
-            // would just repeat the same fact in words.
-            sub: "",
-            dailyKwh: pvDailyStr,
-            dailyScope: "aggregate",
-            dailyAggregateMembers: pvDailyMembers,
-          });
-        }
-        // Battery — sign shows charge/discharge. Discharge flows toward
-        // the house; charge flows away from it.
-        if (d.bat_w != null) {
-          var bKw = d.bat_w / 1000;
-          var bIdle = isFlowIdle(bKw);
-          // Direction conveyed by colour of the power value: charge
-          // green (filling), discharge red (draining), idle stays
-          // neutral cyan (the battery's identity hue). Drops the
-          // wordy charging/discharging sub-label.
-          var bColor = bIdle ? "var(--cyan)" :
-                       (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
-          var bTargetLine = d.observe_only
-            ? "observe only"
-            : batteryTargetLine(batteryTargetsByDriver[name]);
-          planets.push({
-            id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
-            kw: bKw, toHub: bKw < 0,
-            color: bColor,
-            sub: bTargetLine,
-            soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
-            dailyKwhParts: batDailyParts,
-            dailyScope: "aggregate",
-            dailyAggregateMembers: batDailyMembers,
-            clickable: !d.observe_only,
-          });
-        }
-        // EV — always consumes from the house side. When a loadpoint
-        // maps to this driver AND a vehicle telemetry source is
-        // reporting (DerVehicle), inject the vehicle's own SoC +
-        // charge-limit so the bubble renders "24 / 50 %" — measured
-        // truth instead of session-Wh estimate.
-        if (d.ev_w != null) {
-          var eKw = d.ev_w / 1000;
-          var eActive = !isFlowIdle(eKw);
-          var lpEv = loadpointsByDriver && loadpointsByDriver[name];
-          var evSoc = null;
-          var evLimit = null;
-          var evSocStale = false;
-          var evSocSource = null;
-          if (lpEv) {
-            // Prefer vehicle-reported when present; fall back to
-            // the inferred SoC the manager computed from session_wh.
-            if (lpEv.vehicle_soc_pct > 0) {
-              evSoc = lpEv.vehicle_soc_pct;
-              evSocSource = "vehicle";
-            } else if (lpEv.current_soc_pct > 0) {
-              evSoc = lpEv.current_soc_pct;
-              evSocSource = lpEv.soc_source || "inferred";
-            }
-            if (lpEv.vehicle_charge_limit_pct > 0) {
-              evLimit = lpEv.vehicle_charge_limit_pct;
-            }
-            evSocStale = !!lpEv.vehicle_stale;
-          }
-          planets.push({
-            id: "ev-" + name, corner: "bottom-right", title: "EV CHARGER", name: name, role: "ev",
-            kw: eKw, toHub: false,
-            color: eActive ? "var(--green-e)" : "var(--white-s)",
-            sub: eActive ? "charging" : "idle",
-            soc: evSoc,
-            chargeLimit: evLimit,
-            socStale: evSocStale,
-            socSource: evSocSource,
-          });
-        }
-      });
-
-      // Self-powered today: share of recorded house consumption sourced
-      // from PV/battery over the whole day. Daily EV energy is not split
-      // into this aggregate yet, while the realtime component includes
-      // active EV load because it is visible in the live balance.
-      // Clamped 0..100 because metering glitches can briefly report
-      // import > load.
-      var selfPoweredPctToday = null;
-      if (loadKwhTotal > 0.001) {
-        selfPoweredPctToday = Math.max(0, Math.min(100,
-          (1 - importKwh / loadKwhTotal) * 100));
-      }
-      lastFlowReadings = {
-        load:    (data.load_w || 0) / 1000,
-        planets: planets,
-        selfPoweredPctToday: selfPoweredPctToday,
-      };
-      if (typeof flowEl.setReadings === "function") {
-        flowEl.setReadings(lastFlowReadings);
-      } else if (!flowUpgradeReplayQueued &&
-                 window.customElements &&
-                 typeof window.customElements.whenDefined === "function") {
-        flowUpgradeReplayQueued = true;
-        window.customElements.whenDefined("ftw-energy-flow").then(function () {
-          var readyFlow = document.getElementById("energy-flow");
-          if (readyFlow &&
-              typeof readyFlow.setReadings === "function" &&
-              lastFlowReadings) {
-            readyFlow.setReadings(lastFlowReadings);
-          }
-        });
-      }
-    }
+    // Hero energy-flow diagram. Mapping lives in energy-flow-readings.js
+    // so a stale meter cannot be drawn as 0 W "balanced" and a quiet
+    // hybrid inverter cannot vanish from the X. EV SoC is overlayed in
+    // paintEnergyFlow because it comes from the loadpoint table, not
+    // /api/status.
+    paintEnergyFlow(data);
 
     // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
     // Buttons come from GET /api/modes; if that hasn't landed yet (offline at
     // first paint), this confirmed-live poll is the retry trigger.
     if (!modeCatalogRendered) renderModeCatalog();
+    // A tap paints its button before the POST returns. A status read already
+    // in flight still answers with the old mode, so prefer the tapped one
+    // until the server confirms it or the short wait runs out.
+    if (pendingMode && (data.mode === pendingMode || Date.now() >= pendingModeUntil)) pendingMode = null;
+    var activeMode = pendingMode || data.mode;
     var allModeButtons = document.querySelectorAll("#mode-buttons-primary button, #mode-buttons button");
     allModeButtons.forEach(function (btn) {
-      if (btn.dataset.mode === data.mode) btn.classList.add("active");
+      if (btn.dataset.mode === activeMode) btn.classList.add("active");
       else btn.classList.remove("active");
     });
+    revealManualModes(activeMode);
     // When planner is driving, grey out the grid-target slider and show a hint.
     var plannerActive = (data.mode || "").indexOf("planner_") === 0;
+    // "Use the plan" is the way out of a manual mode. It has nothing to
+    // offer while the planner already drives, so it only shows when it does.
+    var planUseRow = document.getElementById("plan-use-row");
+    var planUseBtn = document.getElementById("plan-use-btn");
+    if (planUseBtn) planUseBtn.hidden = plannerActive;
+    if (planUseRow) planUseRow.hidden = plannerActive;
     var gridSlider = document.getElementById("grid-target-slider");
     var gridSend = document.getElementById("grid-target-send");
     var gridHint = document.getElementById("grid-target-hint");
@@ -927,19 +874,6 @@
       if (enabled) writeLastPeakLimitW(peakSrcW);
       if (peakLimitSend) peakLimitSend.disabled = true; // pristine
     }
-    if (evSlider && document.activeElement !== evSlider && data.ev_charging_w != null) {
-      evSlider.value = data.ev_charging_w;
-      evValue.textContent = formatW(data.ev_charging_w);
-    }
-    // Battery-covers-EV toggle — only update DOM when not mid-click,
-    // otherwise the user's change would get overwritten by the next
-    // status poll before the POST round-trip settles.
-    if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
-      bceToggle.checked = !!data.battery_covers_ev;
-      if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
-      if (bceInfo) bceInfo.hidden = !data.battery_covers_ev;
-    }
-
     // Energy today
     if (data.energy && data.energy.today) {
       var t = data.energy.today;
@@ -1062,7 +996,7 @@
         var d = data.drivers[n];
         var dot = d.status === "ok" ? "\u25cf" : d.status === "degraded" ? "\u25cb" : "\u2715";
         var cls = d.status === "ok" ? "sb-ok" : d.status === "degraded" ? "sb-warn" : "sb-err";
-        return '<span class="' + cls + '">' + dot + " " + n + "</span>";
+        return '<span class="' + cls + '">' + dot + " " + escHtml(n) + "</span>";
       });
       sbDrivers.innerHTML = parts.join("  ");
     }
@@ -1097,7 +1031,7 @@
 
     chartHistory.grid.push(data.grid_w);
     chartHistory.pv.push(data.pv_w);
-    chartHistory.load.push(data.load_w || 0);
+    chartHistory.load.push(data.load_w);
     chartHistory.timestamps.push(now);
     chartHistory.e_import.push(t.import_wh || 0);
     chartHistory.e_export.push(t.export_wh || 0);
@@ -1746,7 +1680,7 @@
       { name: "Load pred", val: a.load_w, color: "#fde68a" },
       { name: "Battery",   val: a.battery_w, color: "#f59e0b", showSign: true },
       { name: "Grid",      val: a.grid_w,    color: "#ef4444", showSign: true },
-      { name: "SoC",       val: a.soc_pct + "%", color: "#60a5fa", literal: true },
+      { name: "SoC",       val: a.soc != null ? Math.round(a.soc * 100) + "%" : "—", color: "#60a5fa", literal: true },
       { name: "Price",     val: fmtPricePerKwh(a.price_ore), color: "#fbbf24", literal: true },
     ];
 
@@ -2198,6 +2132,65 @@
   // entries mean "no loadpoint for this driver" and the planet
   // falls back to legacy kW-only rendering.
   var loadpointsByDriver = null;
+  var chargingNoticePoints = [];
+  var chargingNoticeRows = new Map();
+  var chargingNoticeTimer = null;
+  function updateChargingNotice(payload) {
+    var fresh = !!(payload && Array.isArray(payload.loadpoints));
+    if (fresh) {
+      chargingNoticePoints = payload.loadpoints.map(function (lp) {
+        var previous = chargingNoticePoints.find(function (old) { return old.id === lp.id; });
+        // Offline telemetry cannot establish that the cable was removed.
+        return previous && previous.plugged_in && lp.charger && !lp.charger.available
+          ? Object.assign({}, lp, { plugged_in: true }) : lp;
+      });
+      if (chargingNoticeTimer) clearTimeout(chargingNoticeTimer);
+      chargingNoticeTimer = setTimeout(function () { updateChargingNotice(null); }, 15000);
+    }
+    fresh = fresh && !document.hidden;
+    var host = document.getElementById("charging-notices");
+    var anchor = document.getElementById("power-now");
+    if (!anchor) return;
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "charging-notices";
+      anchor.parentNode.insertBefore(host, anchor);
+    }
+    var keep = new Set();
+    chargingNoticePoints.filter(function (lp) { return lp.plugged_in; }).forEach(function (lp) {
+      keep.add(lp.id);
+      var row = chargingNoticeRows.get(lp.id);
+      if (!row) {
+        var section = document.createElement("section");
+        section.className = "overview-card";
+        section.setAttribute("aria-label", "Car connection");
+        var title = document.createElement("strong");
+        var status = document.createElement("p");
+        status.setAttribute("role", "status");
+        var button = document.createElement("button");
+        button.type = "button";
+        section.append(title, status, button);
+        host.appendChild(section);
+        row = { section: section, title: title, status: status, button: button };
+        chargingNoticeRows.set(lp.id, row);
+      }
+      var available = fresh && (!lp.charger || lp.charger.available);
+      row.title.textContent = available ? "Car connected" : "Car status is out of date";
+      var message = available ? renderEvPlanStatus(lp, null) : null;
+      row.status.textContent = message ? message.textContent : "Waiting for current charger status. The last reading cannot confirm charging.";
+      row.button.textContent = "Check charging" + (lp.soc_source !== "vehicle" ? " and battery level" : "");
+      row.button.onclick = function () {
+        if (energyFlowEl) energyFlowEl.dispatchEvent(new CustomEvent("ftw-planet-click", { detail: { role: "ev", name: lp.driver_name } }));
+      };
+    });
+    chargingNoticeRows.forEach(function (row, id) {
+      if (!keep.has(id)) { row.section.remove(); chargingNoticeRows.delete(id); }
+    });
+    host.hidden = keep.size === 0;
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) updateChargingNotice(null);
+  });
   // Last successful /api/status payload — surfaced so secondary
   // consumers (e.g. the EV modal's 5 s refresh) can read derived
   // facts like siteHasPV() without re-fetching. `null` until the
@@ -2209,13 +2202,21 @@
   function fetchStatus() {
     return Promise.all([
       boundedApiRead("/api/status", function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
+        if (!r.ok) return r.json().catch(function () { return {}; }).then(function (body) {
+          var error = new Error("HTTP " + r.status);
+          error.starting = body.error === "starting";
+          throw error;
+        });
         return r.json();
       }),
       boundedApiRead("/api/loadpoints", function (r) { return r.ok ? r.json() : null; })
         .catch(function () { return null; }),
       boundedApiRead("/api/health", function (r) { return r.ok ? r.json() : null; })
-        .catch(function () { return null; }),
+        .catch(function () { return null; })
+        .then(function (health) {
+          updateHistoryMigration(health);
+          return health;
+        }),
     ])
       .then(function (results) {
         var data = results[0];
@@ -2233,6 +2234,7 @@
           });
           loadpointsByDriver = idx;
         }
+        updateChargingNotice(lp);
         setConnected(true);
         if (firstLoad) { firstLoad = false; }
         if (setupBannerShown) { hideSetupBanner(); }
@@ -2241,14 +2243,17 @@
         // Isolate render errors from connection state / timestamp
         try { render(data); }
         catch (e) { console.error("render error:", e); }
+        try { window.dispatchEvent(new CustomEvent("ftw-status", { detail: data })); }
+        catch (e3) { /* assistant chip is optional */ }
         // Show a subtle prompt when no drivers are configured
         try { updateNoDevicesPrompt(data.drivers); }
         catch (e2) { /* silent */ }
       })
       .catch(function (e) {
         console.warn("status fetch failed:", e);
+        updateChargingNotice(null);
         setConnected(false);
-        if (firstLoad) { showSetupBanner(); }
+        if (firstLoad && !e.starting) { showSetupBanner(); }
       });
   }
 
@@ -2389,6 +2394,10 @@
   }
 
   function setMode(mode) {
+    markModeActive(mode);
+    revealManualModes(mode);
+    pendingMode = mode;
+    pendingModeUntil = Date.now() + 4000;
     apiFetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2400,8 +2409,40 @@
         fetchStatus();
       })
       .catch(function () {
+        pendingMode = null; // the write failed — show server truth again
         setConnected(false);
       });
+  }
+
+  function markModeActive(mode) {
+    document.querySelectorAll("#mode-buttons-primary button, #mode-buttons button").forEach(function (btn) {
+      if (btn.dataset.mode === mode) btn.classList.add("active");
+      else btn.classList.remove("active");
+    });
+  }
+
+  // Open the manual drawer when the live mode lives there, so a reload
+  // (or a change made from the phone app / HA) never leaves the current
+  // setting with no button on screen.
+  //
+  // Only on a transition. The status poll repeats the same mode every couple
+  // of seconds; re-opening on every repeat would undo an explicit "Hide
+  // manual" a second after the user pressed it. A move to a *different*
+  // manual mode still opens the drawer — that button has to be on screen.
+  function revealManualModes(mode) {
+    if (!mode || mode === lastRevealedMode) return;
+    var panel = document.getElementById("mode-buttons");
+    if (!panel) return;
+    var match = panel.querySelector('button[data-mode="' + mode + '"]');
+    // Before the catalog paints, a missing button means "not rendered yet",
+    // not "not a manual mode" — don't record it, or the catalog's own call
+    // would come back as a repeat and never open the drawer.
+    if (!match && !modeCatalogRendered) return;
+    lastRevealedMode = mode;
+    if (!match) return;
+    panel.style.display = "flex";
+    var advBtn = document.getElementById("mode-advanced-btn");
+    if (advBtn) advBtn.textContent = "Hide manual";
   }
 
   // ---- Mode buttons, built from the server's canonical catalog ----
@@ -2434,6 +2475,9 @@
         var frags = { primary: document.createDocumentFragment(), advanced: document.createDocumentFragment() };
         modes.forEach(function (m) {
           if (m.tier !== "primary" && m.tier !== "advanced") return; // skip hidden
+          // Household prefs on the Plan card replaced Passive/Active as
+          // the primary knobs. Catalog keys stay primary for HA/app.
+          if (String(m.key || "").indexOf("planner_") === 0) return;
           var btn = document.createElement("button");
           btn.dataset.mode = m.key;
           btn.textContent = m.label;
@@ -2443,7 +2487,9 @@
         });
         primary.replaceChildren(frags.primary);
         advanced.replaceChildren(frags.advanced);
+        primary.hidden = !primary.childElementCount;
         modeCatalogRendered = true;
+        revealManualModes(currentMode);
         return true;
       })
       .catch(function () {
@@ -2473,17 +2519,13 @@
     return postJson("/api/peak_import_ceiling", { peak_import_ceiling_w: w });
   }
 
-  function setEvCharging(w) {
-    postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
-  }
-
   function setBatteryCoversEV(enabled) {
     postJson("/api/battery_covers_ev", { enabled: !!enabled }).catch(function () {});
   }
 
   function postJson(url, body) {
     // CONTROL write — strict (FIX-B). Covers /api/target, /api/peak_limit,
-    // /api/peak_import_ceiling, /api/ev_charging, /api/battery_covers_ev,
+    // /api/peak_import_ceiling, /api/battery_covers_ev,
     // /api/ev/command, … (every state-changing dashboard knob routes here).
     return apiFetch(url, {
       method: "POST",
@@ -2534,6 +2576,34 @@
       if (e.target.tagName === "BUTTON" && e.target.dataset.mode) {
         setMode(e.target.dataset.mode);
       }
+    });
+  }
+  // Permission to sell from the battery is a deliberate household answer, so
+  // a prefs read that fails or answers with nothing usable lands on the mode
+  // that never exports.
+  var PLANNER_FALLBACK_MODE = "planner_passive_arbitrage";
+  // "Use the plan" — the one control that hands a manually-driven house back
+  // to the planner. Which planner mode that is follows from the household's
+  // own prefs, and the server already maps them (mapped_mode), so the two
+  // surfaces cannot drift. setMode() from here on, so the optimistic paint,
+  // the pending-mode hold and the drawer all behave as they do for a tap.
+  var planUseBtn = document.getElementById("plan-use-btn");
+  if (planUseBtn) {
+    planUseBtn.addEventListener("click", function () {
+      apiFetch("/api/planner/prefs", { headers: { Accept: "application/json" } })
+        .then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then(function (prefs) {
+          var mapped = prefs && prefs.mapped_mode;
+          setMode(typeof mapped === "string" && mapped.indexOf("planner_") === 0
+            ? mapped
+            : PLANNER_FALLBACK_MODE);
+        })
+        .catch(function () {
+          setMode(PLANNER_FALLBACK_MODE);
+        });
     });
   }
   var advBtn = document.getElementById("mode-advanced-btn");
@@ -2610,14 +2680,6 @@
     });
   }
 
-  if (bceToggle) {
-    bceToggle.addEventListener("change", function () {
-      if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
-      if (bceInfo) bceInfo.hidden = !bceToggle.checked;
-      setBatteryCoversEV(bceToggle.checked);
-    });
-  }
-
   // EV detail modal — <ftw-modal> handles ESC / backdrop / close button;
   // we only drive open()/close() and refresh the body on a timer. Opened
   // by clicking an EV planet in the energy-flow hero (no card-ev tile).
@@ -2668,20 +2730,177 @@
     evModalBody.appendChild(p);
   }
 
-  // EV modal sub-elements held across refreshes. The status table is
-  // updated in place on every poll. The tabbed control (PV charging /
-  // Manual / Scheduled) is mounted exactly once per (modal-open × LP)
-  // and is NEVER detached on a poll — detaching+reattaching a focused
-  // <input> blurs it mid-keystroke and resets caret position. After a
-  // Save/Clear/Start/Stop we set the matching *NeedsRebuild flag so the
-  // next poll rebuilds from the new authoritative server state. The
-  // active tab persists across rebuilds via evActiveTab.
+  function evFmtClock(ms) {
+    // 24-hour clock, matching plan-brief.js's formatClock — the rest of
+    // the plan UI speaks 24 h regardless of browser locale.
+    var d = new Date(ms);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+
+  function evFmtElapsed(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 90) return s + " s";
+    var m = Math.round(s / 60);
+    if (m < 90) return m + " min";
+    return Math.round(m / 60) + " h";
+  }
+
+  // manualStatusText is the one sentence the Manual tab and the plan strip
+  // show while an operator hold runs. It follows the charger, not the
+  // request: sent, taken by the charger, charging, not drawing, stalled or
+  // limited by the fuse, each with the time elapsed. The box derives the
+  // state (loadpoint.manual); this only puts words on it. Returns null
+  // when no hold is active.
+  function manualStatusText(lp, d) {
+    if (lp && lp.manual_restore_unconfirmed) return "Confirm how to continue charging. FTW could not confirm the charger or connection.";
+    var m = lp && lp.manual;
+    if (!lp || !lp.manual_active || !m || !m.active) return null;
+    var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
+    var cmdA = m.commanded_a > 0 ? Math.round(m.commanded_a) + " A" : formatW(m.commanded_w || 0);
+    var since = m.since_ms > 0 ? evFmtElapsed(Date.now() - m.since_ms) : "";
+    var sinceP = since ? " (" + since + ")" : "";
+    var reason = m.charger_reason ? " Charger reports: " + m.charger_reason + "." : "";
+    var end = lp.manual_release_soc > 0
+      ? " Returns to the plan at the estimated " + Math.round(lp.manual_release_soc * 100) + " % target."
+      : " Continues until the car stops drawing, you return to the plan, or unplug.";
+    switch (m.state) {
+      case "pausing":
+        return "Pause requested. " + ((lp.current_power_w || 0) >= 100 ? formatW(lp.current_power_w) + " is still flowing. " : "") + "Waiting for the charger to stop.";
+      case "paused":
+        return "Paused by you. Charging stays off until you resume the plan, choose Charge now, or unplug.";
+      case "unavailable":
+        return "Charger status is out of date. FTW cannot confirm whether the car is charging.";
+      case "charging":
+        return ((lp.current_power_w || 0) >= 100
+          ? "Charging at " + formatW(lp.current_power_w) + " — " + reqA + " requested."
+          : "The charger reports charging. Waiting for a power reading.") + end;
+      case "sent":
+        return "FTW received " + reqA + ". Waiting for the charger to confirm the new limit." + sinceP + ((lp.current_power_w || 0) >= 100 ? " Still charging at " + formatW(lp.current_power_w) + "." : "") + end;
+      case "accepted":
+        return "Charger reports a " + cmdA + " limit. Waiting for the car to start drawing…" + sinceP + reason + end;
+      case "not_drawing":
+        return "Charger offers " + cmdA + " but the car is not drawing" + sinceP + "." +
+          (reason || " It may be full, or held by its own charge limit or schedule.");
+      case "stalled":
+        if (evIsPaused(lp)) return "The charger has not stopped after your pause request. Check the charger’s app.";
+        return "The charger has not acted on " + reqA + (since ? " after " + since : "") + "." +
+          ((lp.current_power_w || 0) >= 100 ? " Still charging at " + formatW(lp.current_power_w) + "." : "") +
+          (reason || " Check the car's own charge limit or schedule, then the charger's app.");
+      case "limited":
+        if (m.limit_reason === "charger_limit") return "The charger limits this request to " + cmdA + " (" + reqA + " requested).";
+        if (m.limit_reason === "fuse_cooldown") {
+          return "Paused: main-fuse protection — " + reqA + " requested; charging resumes on its own." + sinceP;
+        }
+        if (m.limit_reason === "site_meter_stale") {
+          return "Paused for safety: site-meter data is stale — " + reqA + " requested; charging resumes when telemetry recovers.";
+        }
+        return "Main fuse limits this charge to " + cmdA + " right now (" + reqA + " requested)." + sinceP;
+    }
+    return "FTW received " + reqA + ". Waiting for charger status." + end;
+  }
+
+  // renderEvPlanStatus answers the question the status table can't:
+  // "why isn't it charging right now, and when will it?" Field
+  // experience: a car plugged in against a schedule sits at 0 W until
+  // the cheap slots arrive, the modal looks dead, and the operator
+  // presses Start — which overrides the plan for the whole session.
+  // One honest sentence here is what prevents that. Returns null when
+  // there is nothing worth saying (no loadpoint, or unplugged — the
+  // schedule note covers that case).
+  function renderEvPlanStatus(lp, d) {
+    if (!lp || (!lp.plugged_in && !lp.manual_restore_unconfirmed)) return null;
+    var text = null;
+    var tone = "var(--text-dim)";
+    var kwPlanned = lp.plan_total_wh > 0 ? " ~" + (lp.plan_total_wh / 1000).toFixed(1) + " kWh planned." : "";
+    var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
+    var charging = (lp.current_power_w || 0) >= 100;
+    var hasSchedule = lp.schedule && lp.schedule.soc > 0;
+    if (lp.manual_restore_unconfirmed) {
+      text = manualStatusText(lp, d);
+    } else if (lp.charger && !lp.charger.available) {
+      text = lp.charger.known
+        ? "Charger status is out of date. FTW cannot confirm whether the car is charging."
+        : "Waiting for the charger's first status report.";
+      tone = "var(--text)";
+    } else if (lp.manual_active) {
+      // The same sentence as the charge controls, so the charger's own reason is
+      // never hidden behind "manual charge is running".
+      text = manualStatusText(lp, d) || "Manual charge requested. Waiting for charger status.";
+      if (lp.manual && (lp.manual.state === "not_drawing" || lp.manual.state === "stalled")) {
+        tone = "var(--text)";
+      }
+    } else if (charging) {
+      text = winActive
+        ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
+        : "Charging.";
+      if (lp.commanded_reason === "fuse_limit") {
+        text += " Rate is limited by the main fuse right now.";
+      }
+    } else if (lp.charging_declined) {
+      text = "The car stopped asking for charge. Check its charge limit or schedule. This does not confirm the battery is full.";
+    } else if (lp.commanded_known && lp.commanded_w > 0) {
+      text = "FTW requests " + formatW(lp.commanded_w) + ". Waiting for the car to draw power.";
+      var chargerReason = lp.charger && lp.charger.reason || d && d.reason_no_current_label;
+      if (chargerReason) text += " Charger reports: " + chargerReason + ".";
+      tone = "var(--text)";
+    } else if (lp.commanded_known && !lp.commanded_w &&
+        (lp.commanded_reason === "fuse_cooldown" || lp.commanded_reason === "fuse_limit")) {
+      // The specific pauses beat the generic branches — this is the
+      // line that stops an operator debugging cable and charger while
+      // the box is protecting the main fuse (#1009).
+      text = "Paused: main-fuse protection — the house is using the headroom; charging resumes on its own." + kwPlanned;
+      tone = "var(--text)";
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "site_meter_stale") {
+      text = "Paused for safety: site-meter data is stale — charging resumes when telemetry recovers.";
+      tone = "var(--text)";
+    } else if (lp.plan_pending) {
+      text = "Updating the charging plan…";
+    } else if (lp.plan_outdated) {
+      text = "Charging times are unavailable. Your settings are saved.";
+    } else if (lp.grid_deferred && hasSchedule) {
+      // Richer than the pv_surplus_pause reason it usually co-occurs
+      // with: it also says when normal planning resumes.
+      text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "pv_surplus_pause") {
+      text = "Paused: waiting for PV surplus — solar is below the charger's minimum step right now." + kwPlanned;
+    } else if (winActive) {
+      text = "Paused by the box — charging resumes on its own." + kwPlanned;
+    } else if (lp.plan_next_start_ms > Date.now()) {
+      text = "Charging planned " + evFmtClock(lp.plan_next_start_ms) + "–" +
+        evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned +
+        " The planner picks the cheapest hours before your target.";
+    } else if (lp.surplus_only) {
+      text = "PV surplus only — charges when solar exceeds house load.";
+    } else if (!hasSchedule) {
+      text = "No charging plan yet. Set a ready time, or choose Charge now.";
+      tone = "var(--text)";
+    } else {
+      text = "No charge window yet for this goal. Choose Charge now if you need to charge immediately.";
+    }
+    if (lp.plan_pending && !lp.manual_active && text && text.indexOf("Updating the charging plan") < 0) text += " Updating the charging plan…";
+    if (lp.manual_save_error) text = (text ? text + " " : "") + "This choice is active now, but could not be saved for restart. FTW is retrying.";
+    if (!text) return null;
+    var p = document.createElement("p");
+    p.style.color = tone;
+    p.style.margin = "0 0 0.6rem 0";
+    p.style.padding = "0.35rem 0.5rem";
+    p.style.borderLeft = "3px solid var(--accent, #888)";
+    p.style.background = "color-mix(in srgb, var(--accent, #888) 8%, transparent)";
+    p.textContent = text;
+    return p;
+  }
+
+  // Keep controls mounted while polling so editing never loses focus.
   var statusTableEl = null;
-  var evTabsEl = null;
-  var evTabsLpId = null;
+  var evPlanEl = null;   // { el, update } from buildEvPlanView
+  var evPlanLpId = null;
+  var evControlsEl = null;
+  var evControlsLpId = null;
+  var evBoostEl = null;  // { el, update } from buildEvBoostView
+  var evBoostLpId = null;
+  var evBoostDetails = null;
   var schedNeedsRebuild = false;
   var manualNeedsRebuild = false;
-  var evActiveTab = "pv"; // "pv" | "manual" | "scheduled"
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2697,7 +2916,13 @@
     return false;
   }
 
+  var evReading = false;
+  var evReadPromise = null;
+  var evLastLp = null;
   function refreshEvModal() {
+    if (evReading) return evReadPromise;
+    evReading = true;
+    var requestedDriver = evModalDriver;
     // Pass driver query if known so the backend can scope the response
     // to the clicked planet (multi-EV setups). Falls back to whatever
     // the backend returns when no driver filter is honored.
@@ -2706,11 +2931,15 @@
     // recent payload cached by fetchStatus() instead of issuing a
     // duplicate /api/status fetch on every 5 s modal tick. Falls back
     // to "no PV" until the dashboard's own fetchStatus lands once.
-    Promise.all([
+    evReadPromise = Promise.all([
       // Local API reads.
-      apiFetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      apiFetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      boundedApiRead(url, function (r) { if (!r.ok) throw new Error("Charger status unavailable"); return r.json(); }),
+      boundedApiRead("/api/loadpoints", function (r) { if (!r.ok) throw new Error("Charging settings unavailable"); return r.json(); }),
     ]).then(function (results) {
+      if (requestedDriver !== evModalDriver || evModal.classList.contains("hidden")) return;
+      var problem = evModalBody.querySelector('.ev-read-problem');
+      if (problem) problem.remove();
+      if (statusTableEl) statusTableEl.hidden = false;
       var d = results[0];
       var lps = results[1];
       var status = lastStatusPayload;
@@ -2725,8 +2954,12 @@
       if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
-        evTabsEl = null;
-        evTabsLpId = null;
+        evPlanEl = null;
+        evPlanLpId = null;
+        evBoostEl = null;
+        evBoostLpId = null;
+        evControlsEl = null;
+        evControlsLpId = null;
         return;
       }
       // Status table: replace in place so the rest of the modal body
@@ -2738,13 +2971,18 @@
       // the modal still has a header before the schedule editor.
       var freshStatus;
       if (carConnected) {
-        freshStatus = renderEvStatusTable(d);
+        freshStatus = document.createElement("details");
+        freshStatus.open = !!(statusTableEl && statusTableEl.open);
+        var detailsLabel = document.createElement("summary");
+        detailsLabel.textContent = "Charger details";
+        freshStatus.appendChild(detailsLabel);
+        freshStatus.appendChild(renderEvStatusTable(d));
       } else {
         freshStatus = document.createElement("p");
         freshStatus.style.color = "var(--text-dim)";
         freshStatus.style.fontStyle = "italic";
         freshStatus.style.margin = "0 0 0.6rem 0";
-        freshStatus.textContent = "No car connected — schedule below is saved to the loadpoint and applies on next plug-in.";
+        freshStatus.textContent = "No car connected. Set a ready time, or plug in and choose Charge now.";
       }
       if (statusTableEl && statusTableEl.parentNode === evModalBody) {
         evModalBody.replaceChild(freshStatus, statusTableEl);
@@ -2775,46 +3013,376 @@
         // schedule is persistent loadpoint state, not driver state, and
         // operators routinely want to set tomorrow morning's target
         // before plugging in tonight).
-        if (!matched) {
+        if (!matched && !evModalDriver) {
           for (var j = 0; j < lps.loadpoints.length; j++) {
             if (lps.loadpoints[j].plugged_in) { matched = lps.loadpoints[j]; break; }
           }
         }
-        if (!matched) {
+        if (!matched && !evModalDriver) {
           matched = lps.loadpoints[0];
         }
       }
+      if (!carConnected && matched && matched.schedule && matched.schedule.soc > 0) {
+        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
+      }
+      evLastLp = matched;
+      if (matched && matched.charger && !matched.charger.available) {
+        var oldReport = document.createElement("p");
+        oldReport.textContent = matched.charger.updated_at_ms
+          ? "Last charger report: " + evFmtClock(matched.charger.updated_at_ms) + " (out of date)."
+          : "Waiting for the charger's first status report.";
+        evModalBody.replaceChild(oldReport, statusTableEl);
+        statusTableEl = oldReport;
+      }
+      var setupNote = evModalBody.querySelector(".ev-setup-note");
+      if (!matched && lps) {
+        if (!setupNote) {
+          setupNote = document.createElement("p");
+          setupNote.className = "ev-setup-note";
+          setupNote.setAttribute("role", "status");
+          evModalBody.insertBefore(setupNote, statusTableEl.nextSibling);
+        }
+        setupNote.textContent = "FTW can read this charger, but charging control is not set up. Open Settings → Chargers and add the charger.";
+      } else if (setupNote) {
+        setupNote.remove();
+      }
+      // Plan view: what the box will do with this car (one sentence +
+      // the planned windows on a 24 h track) and the car's charge level,
+      // which the plan is built from. Mounted once per loadpoint so the
+      // slider survives polls; update() redraws the rest every tick.
       if (matched) {
-        // Build the tabbed control (PV charging / Manual / Scheduled)
-        // exactly once per LP. Polling never rebuilds it — inputs keep
-        // focus/value/caret and the active tab persists. Only a
-        // Save/Clear (schedNeedsRebuild) or Start/Stop/Set-SoC
-        // (manualNeedsRebuild), or switching LP (planet), forces a build.
-        var lpChanged = evTabsEl == null || evTabsLpId !== matched.id;
-        if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
-          if (evTabsEl && evTabsEl.parentNode === evModalBody) {
-            evModalBody.removeChild(evTabsEl);
+        if (evPlanEl == null || evPlanLpId !== matched.id) {
+          if (evPlanEl && evPlanEl.el.parentNode === evModalBody) {
+            evModalBody.removeChild(evPlanEl.el);
           }
-          evTabsEl = buildEvTabbedControl(matched, siteHasPV(status));
-          evTabsLpId = matched.id;
+          evPlanEl = buildEvPlanView(matched, d);
+          evPlanLpId = matched.id;
+          evModalBody.insertBefore(evPlanEl.el, statusTableEl);
+        } else {
+          evPlanEl.update(matched, d);
+          if (evPlanEl.el.parentNode !== evModalBody) {
+            evModalBody.insertBefore(evPlanEl.el, statusTableEl);
+          }
+        }
+      } else if (evPlanEl) {
+        if (evPlanEl.el.parentNode === evModalBody) {
+          evModalBody.removeChild(evPlanEl.el);
+        }
+        evPlanEl = null;
+        evPlanLpId = null;
+      }
+      if (matched) {
+        // Rebuild only for a changed charger or a removed goal.
+        var lpChanged = evControlsEl == null || evControlsLpId !== matched.id;
+        if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
+          if (evControlsEl && evControlsEl.parentNode === evModalBody) {
+            evModalBody.removeChild(evControlsEl);
+          }
+          evControlsEl = buildEvControls(matched, siteHasPV(status));
+          evControlsLpId = matched.id;
           schedNeedsRebuild = false;
           manualNeedsRebuild = false;
-          evModalBody.appendChild(evTabsEl);
-        } else if (evTabsEl.parentNode !== evModalBody) {
+          evModalBody.appendChild(evControlsEl);
+        } else if (evControlsEl.parentNode !== evModalBody) {
           // Modal was previously closed: body got wiped but our cached
           // section is still valid — re-attach.
-          evModalBody.appendChild(evTabsEl);
+          evModalBody.appendChild(evControlsEl);
         }
       } else {
-        if (evTabsEl && evTabsEl.parentNode === evModalBody) {
-          evModalBody.removeChild(evTabsEl);
+        if (evControlsEl && evControlsEl.parentNode === evModalBody) {
+          evModalBody.removeChild(evControlsEl);
         }
-        evTabsEl = null;
-        evTabsLpId = null;
+        evControlsEl = null;
+        evControlsLpId = null;
+      }
+      if (matched && evControlsEl && statusTableEl) evModalBody.appendChild(statusTableEl);
+      if (matched && evControlsEl && typeof evControlsEl.update === "function") {
+        evControlsEl.update(matched, d);
+      }
+      // Boost from the home battery: one control, below the goal, for
+      // whichever mode the loadpoint is in. Mounted once per loadpoint
+      // (the reserve slider keeps its value); update() redraws state
+      // every poll. Always kept last so a controls rebuild cannot land
+      // underneath it.
+      if (matched) {
+        if (evBoostEl == null || evBoostLpId !== matched.id) {
+          if (evBoostEl && evBoostEl.el.parentNode === evModalBody) {
+            evModalBody.removeChild(evBoostEl.el);
+          }
+          if (evBoostDetails && evBoostDetails.parentNode === evModalBody) evBoostDetails.remove();
+          evBoostEl = buildEvBoostView(matched, status);
+          evBoostLpId = matched.id;
+          evBoostDetails = document.createElement("details");
+          var boostSummary = document.createElement("summary");
+          boostSummary.textContent = "Use the home battery";
+          evBoostDetails.appendChild(boostSummary);
+          evBoostDetails.appendChild(evBoostEl.el);
+        } else {
+          evBoostEl.update(matched, status);
+        }
+        if (evModalBody.lastChild !== evBoostDetails) {
+          evModalBody.appendChild(evBoostDetails);
+        }
+      } else if (evBoostEl) {
+        if (evBoostDetails && evBoostDetails.parentNode === evModalBody) evBoostDetails.remove();
+        evBoostEl = null;
+        evBoostLpId = null;
       }
     }).catch(function () {
-      setEvModalMessage("Failed to load EV status");
+      if (requestedDriver !== evModalDriver || evModal.classList.contains("hidden")) return;
+      var problem = evModalBody.querySelector('.ev-read-problem');
+      if (!problem) {
+        problem = document.createElement("p");
+        problem.className = "ev-read-problem";
+        problem.setAttribute("role", "alert");
+        evModalBody.prepend(problem);
+      }
+      problem.textContent = "Waiting for current charger status. FTW cannot confirm whether the car is charging. Trying again…";
+      if (statusTableEl) statusTableEl.hidden = true;
+      if (evLastLp) {
+        var stale = Object.assign({}, evLastLp, {
+          charger: { known: true, available: false },
+          manual: Object.assign({}, evLastLp.manual, { state: "unavailable" }),
+        });
+        if (evControlsEl && evControlsEl.update) evControlsEl.update(stale, null);
+        if (evPlanEl) evPlanEl.update(stale, null);
+      }
+    }).finally(function () { evReading = false; });
+    return evReadPromise;
+  }
+
+  function refreshEvModalAfterWrite() {
+    if (evReading) return evReadPromise.then(function () { return refreshEvModal(); });
+    return refreshEvModal();
+  }
+
+  // Stop reasons the controller reports for a battery boost lease, in
+  // the operator's words. Unknown reasons fall back to the raw token.
+  var EV_BOOST_STOP_LABELS = {
+    cancelled: "stopped by you",
+    expired: "time limit reached",
+    vehicle_unplugged: "car unplugged",
+    ev_target_reached: "car target reached",
+    departure_reached: "departure time reached",
+    operator_hold: "a manual charge took priority",
+    surplus_only: "PV only took priority",
+    site_safety_block: "site-meter safety stopped it",
+    loadpoint_driver_unavailable: "charger driver unavailable",
+    battery_unavailable: "home battery unavailable",
+    battery_reserve_reached: "home battery reached its reserve",
+    battery_hold: "a battery hold took priority",
+    core_mode: "the site mode does not allow it",
+    fuse_safety_block: "fuse protection stopped it",
+    restart_lease_invalid: "the saved lease was no longer safe after a restart",
+  };
+
+  function evFmtRemaining(ms) {
+    var leftS = Math.max(0, Math.ceil((ms - Date.now()) / 1000));
+    var h = Math.floor(leftS / 3600);
+    var m = Math.ceil((leftS % 3600) / 60);
+    return h > 0 ? h + " h " + m + " min" : m + " min";
+  }
+
+  // buildEvBoostView — the one way to let the home battery help the car.
+  // A per-loadpoint, time-boxed lease with a reserve the house keeps
+  // (POST/DELETE /api/loadpoints/{id}/battery_boost); the controller ends
+  // it on its own with a reason the view names. Replaces the site-wide
+  // battery_covers_ev toggle that used to sit here: that setting had no
+  // time limit and no reserve. A site that still has it on sees one
+  // line about it here with a way to turn it off, so the state is never
+  // hidden. Mounted once per loadpoint; update() runs on every poll.
+  function buildEvBoostView(lp, status) {
+    var box = document.createElement("div");
+    box.style.marginTop = "0.9rem";
+    box.style.paddingTop = "0.6rem";
+    box.style.borderTop = "1px solid var(--line)";
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Boost from home battery";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.45rem";
+    box.appendChild(eyebrow);
+
+    // Active state.
+    var activeRow = document.createElement("div");
+    activeRow.style.display = "flex";
+    activeRow.style.alignItems = "center";
+    activeRow.style.gap = "0.6rem";
+    var activeText = document.createElement("div");
+    activeText.style.flex = "1";
+    activeText.style.fontSize = "0.9rem";
+    var stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop boost";
+    stopBtn.style.padding = "0.35rem 0.7rem";
+    stopBtn.style.border = "1px solid var(--line)";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.style.background = "transparent";
+    stopBtn.style.color = "var(--fg)";
+    activeRow.appendChild(activeText);
+    activeRow.appendChild(stopBtn);
+    box.appendChild(activeRow);
+
+    // Idle state: reserve + duration + start.
+    var form = document.createElement("div");
+    var copy = document.createElement("small");
+    copy.style.display = "block";
+    copy.style.color = "var(--text-dim)";
+    copy.style.marginBottom = "0.5rem";
+    copy.textContent = "Let the home battery feed the car for a while. Fuse, reserve and battery-health limits still apply.";
+    form.appendChild(copy);
+    var hdr = sliderHeader("Keep home battery above", "30%");
+    form.appendChild(hdr.row);
+    var reserve = fullWidthSlider(30, hdr.value);
+    reserve.min = "5";
+    reserve.setAttribute("aria-label", "Home battery reserve, percent");
+    form.appendChild(reserve);
+    var durRow = document.createElement("div");
+    durRow.style.display = "flex";
+    durRow.style.alignItems = "center";
+    durRow.style.gap = "0.6rem";
+    durRow.style.margin = "0.55rem 0";
+    var durLbl = document.createElement("span");
+    durLbl.textContent = "For";
+    durLbl.style.fontFamily = "var(--mono)";
+    durLbl.style.fontSize = "0.68rem";
+    durLbl.style.letterSpacing = "0.14em";
+    durLbl.style.textTransform = "uppercase";
+    durLbl.style.color = "var(--text-dim)";
+    var dur = document.createElement("select");
+    [["1800", "30 min"], ["3600", "1 h"], ["7200", "2 h"], ["14400", "4 h"]].forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o[0];
+      opt.textContent = o[1];
+      if (o[0] === "3600") opt.selected = true;
+      dur.appendChild(opt);
     });
+    dur.style.flex = "1";
+    var startBtn = document.createElement("button");
+    startBtn.type = "button";
+    startBtn.style.padding = "0.4rem 0.8rem";
+    startBtn.style.border = "none";
+    startBtn.style.borderRadius = "4px";
+    startBtn.style.cursor = "pointer";
+    startBtn.style.fontWeight = "600";
+    startBtn.style.background = "var(--accent-e)";
+    startBtn.style.color = "#0a0a0a";
+    function renderStartLabel() { startBtn.textContent = "Boost for " + dur.options[dur.selectedIndex].textContent; }
+    renderStartLabel();
+    dur.addEventListener("change", renderStartLabel);
+    durRow.appendChild(durLbl);
+    durRow.appendChild(dur);
+    durRow.appendChild(startBtn);
+    form.appendChild(durRow);
+    var blocked = document.createElement("small");
+    blocked.style.display = "block";
+    blocked.style.color = "var(--text-dim)";
+    form.appendChild(blocked);
+    box.appendChild(form);
+
+    var msg = document.createElement("small");
+    msg.style.display = "block";
+    msg.style.color = "var(--text-dim)";
+    msg.style.minHeight = "1em";
+    msg.style.marginTop = "0.3rem";
+    msg.setAttribute("aria-live", "polite");
+    box.appendChild(msg);
+
+    // Older site-wide setting, shown only while it is on.
+    var legacy = document.createElement("div");
+    legacy.style.display = "flex";
+    legacy.style.alignItems = "center";
+    legacy.style.gap = "0.6rem";
+    legacy.style.marginTop = "0.6rem";
+    legacy.style.padding = "0.4rem 0.5rem";
+    legacy.style.borderLeft = "3px solid var(--accent, #888)";
+    legacy.style.background = "color-mix(in srgb, var(--accent, #888) 8%, transparent)";
+    var legacyText = document.createElement("small");
+    legacyText.style.flex = "1";
+    legacyText.textContent = "Site-wide battery cover is on (older setting): the home battery feeds the car with no time limit and no reserve.";
+    var legacyOff = document.createElement("button");
+    legacyOff.type = "button";
+    legacyOff.textContent = "Turn off";
+    legacyOff.style.padding = "0.3rem 0.6rem";
+    legacyOff.style.border = "1px solid var(--line)";
+    legacyOff.style.borderRadius = "4px";
+    legacyOff.style.cursor = "pointer";
+    legacyOff.style.background = "transparent";
+    legacyOff.style.color = "var(--fg)";
+    legacy.appendChild(legacyText);
+    legacy.appendChild(legacyOff);
+    box.appendChild(legacy);
+
+    startBtn.addEventListener("click", function () {
+      var r = parseInt(reserve.value, 10);
+      if (!isFinite(r) || r < 5 || r > 100) { msg.textContent = "Reserve must be 5–100 %."; return; }
+      startBtn.disabled = true;
+      msg.textContent = "Starting boost…";
+      // CONTROL write — strict (FIX-B): time-boxed battery boost lease.
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          duration_s: parseInt(dur.value, 10),
+          min_battery_soc: r / 100,
+        }),
+      }).then(function (res) { return res.json().then(function (j) { return { ok: res.ok, body: j }; }); })
+        .then(function (res) {
+          startBtn.disabled = false;
+          if (res.ok) { msg.textContent = ""; refreshEvModalAfterWrite(); }
+          else { msg.textContent = (res.body && res.body.error) || "Boost could not start."; }
+        }).catch(function (e) { startBtn.disabled = false; msg.textContent = "Boost could not start: " + e.message; });
+    });
+
+    stopBtn.addEventListener("click", function () {
+      stopBtn.disabled = true;
+      msg.textContent = "Stopping boost…";
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", { method: "DELETE" })
+        .then(function (res) {
+          stopBtn.disabled = false;
+          if (res.ok) { msg.textContent = ""; refreshEvModalAfterWrite(); }
+          else { msg.textContent = "Boost could not be stopped."; }
+        }).catch(function (e) { stopBtn.disabled = false; msg.textContent = "Boost could not be stopped: " + e.message; });
+    });
+
+    legacyOff.addEventListener("click", function () {
+      legacyOff.disabled = true;
+      setBatteryCoversEV(false);
+      msg.textContent = "Site-wide battery cover turned off.";
+    });
+
+    function update(lpNow, statusNow) {
+      var boost = (lpNow && lpNow.battery_boost) || { state: "inactive", active: false };
+      var active = !!boost.active;
+      activeRow.style.display = active ? "flex" : "none";
+      form.hidden = active;
+      if (active) {
+        activeText.textContent = "Active · " + evFmtRemaining(boost.expires_at_ms) + " left · home battery kept above " +
+          Math.round((boost.min_battery_soc || 0) * 100) + " %.";
+      } else {
+        var why = "";
+        if (!lpNow.plugged_in) why = "Plug in the car first.";
+        else if (lpNow.manual_active) why = "Stop the manual charge first — it already takes what it needs.";
+        else if (lpNow.surplus_only) why = "Turn off PV only first.";
+        startBtn.disabled = !!why;
+        startBtn.style.opacity = why ? "0.5" : "1";
+        var last = boost.stop_reason
+          ? "Last boost ended: " + (EV_BOOST_STOP_LABELS[boost.stop_reason] || boost.stop_reason) + "."
+          : "";
+        blocked.textContent = why || last;
+      }
+      var coverOn = !!(statusNow && statusNow.battery_covers_ev);
+      legacy.style.display = coverOn ? "flex" : "none";
+      if (!coverOn) legacyOff.disabled = false;
+    }
+
+    update(lp, status);
+    return { el: box, update: update };
   }
 
   // buildManualChargeSection renders the Tesla-style manual override: an
@@ -2825,6 +3393,11 @@
   // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
   // is sent as watts (power_w = A × phases × voltage); the driver
   // converts back to amps given the wallbox it's talking to.
+  function evIsPaused(lp) {
+    return !!(lp && !lp.manual_restore_unconfirmed && lp.manual_active && (lp.manual_charge_w === 0 ||
+      lp.manual && (lp.manual.requested_w === 0 || lp.manual.state === "paused" || lp.manual.state === "pausing")));
+  }
+
   function buildManualChargeSection(lp) {
     var phases = (lp && lp.phases) || 3;
     var voltage = (lp && lp.voltage_v) || 230;
@@ -2841,13 +3414,21 @@
     if (curA < minA) { curA = minA; }
     if (curA > maxA) { curA = maxA; }
 
+    // Manual charge has no SoC gate. The estimate is a guess when the
+    // charger cannot read the car, and gating Start on it left the
+    // operator with a button that released itself on the next tick
+    // whenever the guess already sat at the target. Start runs until the
+    // car stops asking for current, Stop, or unplug; the plan takes over
+    // again after that.
+
     var box = document.createElement("div");
     box.style.marginTop = "0.75rem";
     box.style.paddingTop = "0.6rem";
     box.style.borderTop = "1px solid var(--line)";
 
     var eyebrow = document.createElement("div");
-    eyebrow.textContent = "Manual Charge";
+    eyebrow.textContent = "Charge now is active";
+    eyebrow.hidden = !active;
     eyebrow.style.fontFamily = "var(--mono)";
     eyebrow.style.fontSize = "0.7rem";
     eyebrow.style.letterSpacing = "0.18em";
@@ -2868,6 +3449,7 @@
     slider.max = String(maxA);
     slider.step = "1";
     slider.value = String(curA);
+    slider.setAttribute("aria-label", "Charging current");
     slider.style.flex = "1";
     slider.style.accentColor = "var(--accent-e)";
 
@@ -2882,10 +3464,13 @@
       readout.textContent = a + " A · " + (aToW(a) / 1000).toFixed(1) + " kW";
     }
     renderReadout();
-    slider.addEventListener("input", renderReadout);
+    var currentEditingUntil = 0;
+    slider.addEventListener("input", function () { currentEditingUntil = Date.now() + 1500; renderReadout(); });
 
     row.appendChild(slider);
     row.appendChild(readout);
+    row.hidden = !active;
+    row.style.display = active ? "flex" : "none";
     box.appendChild(row);
 
     // Status line.
@@ -2894,9 +3479,10 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.35rem";
     status.style.minHeight = "1em";
-    status.textContent = active
-      ? "Manual override active — overriding PV surplus (fuse still limits)."
-      : "Stopped = automatic (PV-surplus-only if enabled below). Start overrides it.";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    var idleText = "Starts at up to " + maxA + " A · " + (aToW(maxA) / 1000).toFixed(1) + " kW. Ignores the goal and solar rule until you return to the plan or unplug.";
+    status.textContent = active ? "Changes apply when you release the slider." : idleText;
     box.appendChild(status);
 
     // Start / Stop buttons.
@@ -2907,7 +3493,8 @@
 
     var startBtn = document.createElement("button");
     startBtn.type = "button";
-    startBtn.textContent = active ? "Update" : "Start";
+    startBtn.textContent = "Charge now";
+    startBtn.hidden = active;
     startBtn.style.flex = "1";
     startBtn.style.padding = "0.4rem 0.6rem";
     startBtn.style.border = "none";
@@ -2919,7 +3506,7 @@
 
     var stopBtn = document.createElement("button");
     stopBtn.type = "button";
-    stopBtn.textContent = "Stop";
+    stopBtn.textContent = "Return to plan";
     stopBtn.style.flex = "1";
     stopBtn.style.padding = "0.4rem 0.6rem";
     stopBtn.style.border = "1px solid var(--line)";
@@ -2927,50 +3514,140 @@
     stopBtn.style.cursor = "pointer";
     stopBtn.style.background = "transparent";
     stopBtn.style.color = "var(--fg)";
+    stopBtn.hidden = !active;
     stopBtn.disabled = !active;
     stopBtn.style.opacity = active ? "1" : "0.5";
 
+    var pauseBtn = stopBtn.cloneNode(false);
+    pauseBtn.textContent = "Pause charging";
+    pauseBtn.hidden = false;
+    pauseBtn.disabled = false;
+    pauseBtn.style.opacity = "1";
     btnRow.appendChild(startBtn);
+    btnRow.appendChild(pauseBtn);
     btnRow.appendChild(stopBtn);
     box.appendChild(btnRow);
 
-    startBtn.addEventListener("click", function () {
+    // Live state. The section is mounted once per loadpoint; update() runs
+    // on every poll and rewrites the status line from lp.manual, so what the
+    // operator reads follows the charger instead of the click. A message
+    // written by a click holds the line until the box shows the new state.
+    var lastLp = lp;
+    var lastD = null;
+    var busy = false;
+    var holdLineUntil = 0;
+    function renderStatus() {
+      var on = !!(lastLp && lastLp.manual_active);
+      var paused = evIsPaused(lastLp);
+      var restore = !!lastLp.manual_restore_unconfirmed;
+      if (!busy && paused && lastLp.manual && lastLp.manual.state === "paused") holdLineUntil = 0;
+      if (!busy) {
+        stopBtn.hidden = !on && !restore;
+        stopBtn.disabled = !on && !restore;
+        eyebrow.hidden = !on || paused || restore;
+        row.hidden = !on || paused || restore;
+        row.style.display = on && !paused && !restore ? "flex" : "none";
+        pauseBtn.hidden = paused;
+        pauseBtn.disabled = false;
+        stopBtn.textContent = paused || restore ? "Resume plan" : "Return to plan";
+        stopBtn.style.opacity = on || restore ? "1" : "0.5";
+        startBtn.hidden = on && !paused && !restore;
+        if (!on || paused || restore) { slider.value = String(maxA); renderReadout(); }
+        startBtn.disabled = false;
+      }
+      if (busy || Date.now() < holdLineUntil) return;
+      status.textContent = restore ? "Choose Charge now to request charging, Resume plan to use your goal, or Pause charging to request a stop." : paused ? "The goal and solar rule wait until you resume the plan. Charge now starts immediately." : on ? "Changes apply when you release the slider." : idleText;
+    }
+    function update(nextLp, d) {
+      if (nextLp) lastLp = nextLp;
+      if (d) lastD = d;
+      if (!busy && Date.now() >= currentEditingUntil && lastLp.manual_active) {
+        slider.value = String(Math.min(maxA, Math.max(minA, Math.round(wToA(lastLp.manual_charge_w || 0)))));
+        renderReadout();
+      }
+      renderStatus();
+    }
+
+    // failOn turns an HTTP error into a rejection carrying the server's
+    // reason, so a refused Start (403, 404, 409) never reads as success.
+    function failOn(r) {
+      if (r.ok) return r;
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        throw new Error((j && j.error) || ("HTTP " + r.status));
+      });
+    }
+
+    function requestCharge(pause) {
+      pause = pause === true;
+      if (busy) return;
+      busy = true;
+      slider.disabled = true;
+      stopBtn.disabled = true;
       startBtn.disabled = true;
-      status.textContent = "Starting…";
       var a = parseInt(slider.value, 10) || minA;
-      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0).
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+      pauseBtn.disabled = true;
+      status.textContent = pause ? "Sending pause request…" : "Asking FTW for " + a + " A…";
+      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0)
+      // with no SoC release — see the note above the slider.
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          power_w: aToW(a),
+          power_w: pause ? 0 : aToW(a),
           hold_s: 0,
           phase_mode: phases === 1 ? "1p" : "3p",
         }),
-      }).then(function () {
-        status.textContent = "Charging at " + a + " A — overriding PV surplus.";
-        manualNeedsRebuild = true; // reflect active state on next poll
-      }).catch(function () {
+      }).then(failOn).then(function () {
+        busy = false;
+        slider.disabled = false;
+        status.textContent = pause ? "Pause requested. Waiting for the charger to stop…" : "FTW received " + a + " A. Waiting for the charger…";
+        holdLineUntil = Date.now() + 6000;
+        refreshEvModalAfterWrite(); // read the hold and charger response without rebuilding focused inputs
+      }).catch(function (e) {
+        busy = false;
+        slider.disabled = false;
         startBtn.disabled = false;
-        status.textContent = "Start failed — try again.";
+        stopBtn.disabled = !lastLp.manual_active;
+        pauseBtn.disabled = false;
+        status.textContent = "Request not confirmed: " + ((e && e.message) || "try again") + ".";
+        holdLineUntil = Infinity;
       });
+    }
+    startBtn.addEventListener("click", function () { requestCharge(false); });
+    pauseBtn.addEventListener("click", function () { requestCharge(true); });
+    slider.addEventListener("change", function () {
+      if (lastLp.manual_active) requestCharge();
     });
 
     stopBtn.addEventListener("click", function () {
+      busy = true;
       stopBtn.disabled = true;
-      status.textContent = "Stopping…";
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+      slider.disabled = true;
+      startBtn.disabled = true;
+      pauseBtn.disabled = true;
+      status.textContent = "Returning to the plan…";
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "DELETE",
-      }).then(function () {
-        status.textContent = "Released — back to automatic charging.";
-        manualNeedsRebuild = true;
-      }).catch(function () {
+      }).then(failOn).then(function () {
+        busy = false;
+        slider.disabled = false;
+        startBtn.disabled = false;
+        pauseBtn.disabled = false;
+        status.textContent = "The plan decides when to charge.";
+        holdLineUntil = Date.now() + 6000;
+        refreshEvModalAfterWrite();
+      }).catch(function (e) {
+        busy = false;
+        slider.disabled = false;
+        startBtn.disabled = false;
         stopBtn.disabled = false;
-        status.textContent = "Stop failed — try again.";
+        pauseBtn.disabled = false;
+        status.textContent = "Return to plan not confirmed: " + ((e && e.message) || "try again") + ".";
+        holdLineUntil = Infinity;
       });
     });
 
-    return box;
+    return { el: box, update: update };
   }
 
   // sliderHeader builds a "LABEL ............ value" row (mono uppercase
@@ -3016,164 +3693,346 @@
     return s;
   }
 
-  // buildSoCSection — the car's CURRENT charge (a planning input: the
-  // planner sizes the grid/PV gap to the target from it). Lives in the
-  // Scheduled tab, above the target. The estimate drifts when there's no
-  // vehicle BMS reading, so the operator can correct it via
-  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Editing is gated
-  // on plugged_in.
-  function buildSoCSection(lp) {
-    var socBox = document.createElement("div");
-    socBox.style.marginTop = "0.25rem";
+  // buildEvPlanView — the plug-in moment. Above the controls, the operator
+  // sees what the box will do with this car: the plan-status sentence,
+  // the planned charge windows drawn on a 24 h track, and right under
+  // it the car's CURRENT charge, which is the input the plan is built
+  // from. Chargers like Easee cannot read the car, so that value is an
+  // estimate; correcting it should be the easiest thing in the modal.
+  // The slider writes on release (POST /api/loadpoints/{id}/soc, which
+  // replans before it answers) and the view refetches so the plan on
+  // screen moves with the value. No button. Mounted once per loadpoint;
+  // update() runs on every poll and leaves the slider alone while the
+  // operator is dragging it.
+  var EV_PLAN_HORIZON_MS = 24 * 3600 * 1000;
 
-    var curSoc = (lp && lp.current_soc_pct != null) ? lp.current_soc_pct : null;
-    var socSource = (lp && lp.soc_source) ? lp.soc_source : "";
-    var sourceNote = socSource === "vehicle"
-      ? "Live from the car — drag only to correct drift."
-      : socSource === "inferred"
-        ? "Estimated from energy delivered — drag to set the real value."
-        : "Drag to set the car's current charge.";
+  function buildEvPlanView(lp, d) {
+    var box = document.createElement("div");
+    box.style.margin = "0 0 0.6rem 0";
 
-    var hdr = sliderHeader("Current charge", curSoc != null ? Math.round(curSoc) + "%" : "—");
-    socBox.appendChild(hdr.row);
+    var headline = null; // <p> from renderEvPlanStatus, or null
 
-    if (lp && lp.plugged_in) {
-      var initSoc = (curSoc != null) ? Math.max(0, Math.min(100, Math.round(curSoc))) : 50;
-      var socInput = fullWidthSlider(initSoc, hdr.value);
-      socBox.appendChild(socInput);
+    // 24 h track: windows from lp.plan_windows placed by wall clock.
+    var track = document.createElement("div");
+    track.className = "ev-plan-track";
+    track.style.position = "relative";
+    track.style.height = "12px";
+    track.style.borderRadius = "3px";
+    track.style.background = "color-mix(in srgb, var(--line) 60%, transparent)";
+    track.style.margin = "0.5rem 0 0.25rem";
+    track.style.overflow = "hidden";
 
-      var socStatus = document.createElement("small");
-      socStatus.style.display = "block";
-      socStatus.style.color = "var(--text-dim)";
-      socStatus.style.marginTop = "0.4rem";
-      socStatus.style.minHeight = "1em";
-      socStatus.textContent = sourceNote;
-      socBox.appendChild(socStatus);
+    var ticks = document.createElement("div");
+    ticks.style.display = "flex";
+    ticks.style.justifyContent = "space-between";
+    ticks.style.fontFamily = "var(--mono)";
+    ticks.style.fontSize = "0.65rem";
+    ticks.style.color = "var(--text-dim)";
 
-      var socSetBtn = document.createElement("button");
-      socSetBtn.type = "button";
-      socSetBtn.textContent = "Set current charge";
-      socSetBtn.style.padding = "0.35rem 0.8rem";
-      socSetBtn.style.marginTop = "0.4rem";
-      socSetBtn.style.border = "1px solid var(--line)";
-      socSetBtn.style.borderRadius = "4px";
-      socSetBtn.style.cursor = "pointer";
-      socSetBtn.style.background = "transparent";
-      socSetBtn.style.color = "var(--fg)";
-      var socBtnRow = document.createElement("div");
-      socBtnRow.style.display = "flex";
-      socBtnRow.style.justifyContent = "flex-end";
-      socBtnRow.appendChild(socSetBtn);
-      socBox.appendChild(socBtnRow);
+    var caption = document.createElement("small");
+    caption.style.display = "block";
+    caption.style.color = "var(--text-dim)";
+    caption.style.marginTop = "0.3rem";
 
-      socSetBtn.addEventListener("click", function () {
-        var v = parseInt(socInput.value, 10);
-        if (!isFinite(v) || v < 0 || v > 100) { socStatus.textContent = "Enter 0–100%."; return; }
-        socSetBtn.disabled = true;
-        socStatus.textContent = "Saving…";
-        apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ soc_pct: v }),
-        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
-          .then(function (res) {
-            socSetBtn.disabled = false;
-            if (res.ok && res.body && res.body.ok) {
-              socStatus.textContent = "Saved — replanning.";
-              manualNeedsRebuild = true;
-            } else {
-              socStatus.textContent = (res.body && res.body.error) || "Set failed.";
-            }
-          }).catch(function (e) { socSetBtn.disabled = false; socStatus.textContent = "Set failed: " + e.message; });
-      });
-    } else {
-      hdr.value.style.color = "var(--text-dim)";
-      var socMuted = document.createElement("small");
-      socMuted.style.display = "block";
-      socMuted.style.color = "var(--text-dim)";
-      socMuted.textContent = "Plug in to set the car's current charge.";
-      socBox.appendChild(socMuted);
+    var planWrap = document.createElement("div");
+    planWrap.appendChild(track);
+    planWrap.appendChild(ticks);
+    planWrap.appendChild(caption);
+
+    // Car's current charge.
+    var socWrap = document.createElement("div");
+    socWrap.style.marginTop = "0.75rem";
+    var hdr = sliderHeader("Battery now", "—");
+    socWrap.appendChild(hdr.row);
+    var slider = fullWidthSlider(50, hdr.value);
+    slider.setAttribute("aria-label", "Car's current charge, percent");
+    socWrap.appendChild(slider);
+    var note = document.createElement("small");
+    note.style.display = "block";
+    note.style.color = "var(--text-dim)";
+    note.style.marginTop = "0.3rem";
+    note.style.minHeight = "1em";
+    socWrap.appendChild(note);
+
+    box.appendChild(planWrap);
+    box.appendChild(socWrap);
+    var capacityView = buildEvCapacityView(lp);
+    box.appendChild(capacityView.el);
+
+    // While the operator holds the slider (pointer down, or keyboard
+    // input in the last moment), polls must not snap it back to the
+    // server's value. Focus alone does not count: a range input keeps
+    // focus after a drag, and the slider must still follow the box.
+    var dragging = false;
+    var lastInputAt = 0;
+    var noteTimer = null;
+    var socFailed = false;
+    slider.addEventListener("pointerdown", function () { dragging = true; });
+    ["pointerup", "pointercancel"].forEach(function (ev) {
+      slider.addEventListener(ev, function () { dragging = false; });
+    });
+    slider.addEventListener("input", function () { lastInputAt = Date.now(); });
+    function operatorHolds() { return dragging || socSaving || socPending !== null || (Date.now() - lastInputAt) < 1500; }
+
+    function sourceNote(lpNow) {
+      var src = (lpNow && lpNow.soc_source) || "";
+      var retention = lpNow.soc_retention === "session"
+        ? " FTW keeps this level for the same charging session, including after a box restart."
+        : lpNow.soc_retention === "error"
+          ? " This level could not be saved for a box restart. Enter it again before relying on the plan after restarting."
+          : " This level must be entered again after a box restart.";
+      if (src === "assumed") return "Battery level needs confirmation. The plan currently assumes " + Math.round(lpNow.current_soc * 100) + " %. Drag to match the car." + retention;
+      if (src === "vehicle") return "Reported by the car. Drag only to correct drift.";
+      if (src === "completed") return "The car stopped asking for charge. Its actual battery level is not confirmed. Drag to match the car.";
+      return "Estimated from energy delivered. Drag to the real value and the plan follows." + retention;
     }
 
-    return socBox;
-  }
-
-  // buildPVModeSection — the per-loadpoint surplus-only toggle (PV
-  // charging tab). A hard flag, *independent* of any schedule: when on,
-  // dispatch refuses to import grid for this loadpoint regardless of what
-  // the MPC plans. Operators can run with this alone ("harvest PV when
-  // there's enough") or layer a schedule on top. Saves on click.
-  function buildPVModeSection(lp) {
-    var soBox = document.createElement("div");
-    soBox.style.marginTop = "0.25rem";
-
-    var soEyebrow = document.createElement("div");
-    soEyebrow.textContent = "PV Mode";
-    soEyebrow.style.fontFamily = "var(--mono)";
-    soEyebrow.style.fontSize = "0.7rem";
-    soEyebrow.style.letterSpacing = "0.18em";
-    soEyebrow.style.textTransform = "uppercase";
-    soEyebrow.style.color = "var(--text-dim)";
-    soEyebrow.style.marginBottom = "0.45rem";
-    soBox.appendChild(soEyebrow);
-
-    var soWrap = document.createElement("label");
-    soWrap.style.display = "flex";
-    soWrap.style.alignItems = "center";
-    soWrap.style.gap = "0.4rem";
-    soWrap.style.fontSize = "0.85rem";
-    soWrap.style.cursor = "pointer";
-    var soCb = document.createElement("input");
-    soCb.type = "checkbox";
-    soCb.checked = !!(lp && lp.surplus_only);
-    soCb.style.accentColor = "var(--accent-e)";
-    var soText = document.createElement("span");
-    soText.textContent = "Surplus only (PV only — no grid or battery)";
-    soWrap.appendChild(soCb);
-    soWrap.appendChild(soText);
-
-    var soStatus = document.createElement("small");
-    soStatus.style.display = "block";
-    soStatus.style.color = "var(--text-dim)";
-    soStatus.style.marginTop = "0.25rem";
-    soStatus.style.marginLeft = "1.4rem";
-    soStatus.style.minHeight = "1em";
-    soStatus.textContent = "Saves automatically on click. Independent of the schedule below.";
-
-    soBox.appendChild(soWrap);
-    soBox.appendChild(soStatus);
-
-    soCb.addEventListener("change", function () {
-      // Surface the surplus-only ↔ schedule interaction immediately on
-      // toggle, before the network save returns — operators get instant
-      // feedback that flipping surplus on turns the deadline soft.
-      if (typeof surplusBestEffortHint !== "undefined" && surplusBestEffortHint) {
-        surplusBestEffortHint.style.display = soCb.checked ? "" : "none";
-      }
-      soCb.disabled = true;
-      soStatus.textContent = "Saving…";
-      // CONTROL write — strict (FIX-B): loadpoint surplus-only toggle.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+    var socPending = null;
+    var socSaving = false;
+    var socRevision = 0;
+    function sendSoc() {
+      if (socSaving || socPending === null) return;
+      var v = socPending;
+      var revision = socRevision;
+      socPending = null;
+      socSaving = true;
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ surplus_only: soCb.checked }),
-      }).then(function () {
-        soCb.disabled = false;
-        soStatus.textContent = "Saved. Independent of the schedule below.";
-        // Rebuild on next poll so the schedule section reflects any
-        // server-side side effects (e.g. soc_source recompute).
-        schedNeedsRebuild = true;
-      }).catch(function () {
-        soCb.disabled = false;
-        soStatus.textContent = "Save failed — try again.";
-      });
+        body: JSON.stringify({ soc: v / 100 }),
+      }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+        .then(function (res) {
+          if (!(res.ok && res.body && res.body.ok)) throw new Error((res.body && res.body.error) || "FTW refused the change.");
+          if (revision !== socRevision) return;
+          note.textContent = "Charge level saved: " + v + " %." +
+            (!(lastLp.schedule && lastLp.schedule.soc > 0) && !lastLp.manual_active && !lastLp.surplus_only
+              ? " Set a ready time, or choose Charge now." : " Reading the updated plan…");
+          noteTimer = setTimeout(function () { noteTimer = null; if (!socFailed) note.textContent = sourceNote(lastLp); }, 6000);
+          refreshEvModalAfterWrite().then(function () {
+            if (revision === socRevision && lastLp.soc_retention === "error") {
+              if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+              socFailed = true;
+              note.textContent = "Charge level updated: " + v + " %. It could not be saved for a box restart.";
+            }
+          });
+        }).catch(function (e) {
+          if (revision === socRevision) { socFailed = true; note.textContent = "Charge level not confirmed: " + e.message; }
+        }).finally(function () {
+          socSaving = false;
+          if (socPending !== null) sendSoc();
+        });
+    }
+    slider.addEventListener("change", function () {
+      var v = parseInt(slider.value, 10);
+      if (!isFinite(v) || v < 0 || v > 100) return;
+      if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+      socRevision++;
+      socFailed = false;
+      socPending = v;
+      note.textContent = "Sending charge level: " + v + " %…";
+      sendSoc();
     });
 
+    var lastLp = lp;
+
+    function drawTrack(lpNow) {
+      track.textContent = "";
+      ticks.textContent = "";
+      var now = Date.now();
+      var windows = (lpNow && Array.isArray(lpNow.plan_windows)) ? lpNow.plan_windows : [];
+      planWrap.hidden = windows.length === 0 || !!lpNow.manual_active;
+      var shown = 0;
+      var shownWh = 0;
+      windows.forEach(function (w) {
+        var start = Math.max(w.start_ms, now);
+        var end = Math.min(w.end_ms, now + EV_PLAN_HORIZON_MS);
+        if (!(end > start)) return;
+        var seg = document.createElement("div");
+        seg.className = "ev-plan-window";
+        seg.style.position = "absolute";
+        seg.style.top = "0";
+        seg.style.bottom = "0";
+        seg.style.left = ((start - now) / EV_PLAN_HORIZON_MS * 100) + "%";
+        seg.style.width = Math.max(0.8, (end - start) / EV_PLAN_HORIZON_MS * 100) + "%";
+        seg.style.background = "var(--accent-e)";
+        seg.style.borderRadius = "2px";
+        seg.title = evFmtClock(w.start_ms) + "–" + evFmtClock(w.end_ms) + " · " + (w.wh / 1000).toFixed(1) + " kWh";
+        track.appendChild(seg);
+        shown++;
+        shownWh += w.wh;
+      });
+      for (var h = 0; h <= 24; h += 6) {
+        var t = document.createElement("span");
+        t.textContent = h === 0 ? "now" : evFmtClock(now + h * 3600 * 1000);
+        ticks.appendChild(t);
+      }
+      if (lpNow && lpNow.manual_active) {
+        caption.textContent = shown > 0
+          ? "Manual charge is selected. The plan below resumes when you return to it."
+          : "Manual charge is selected. Nothing else is planned in the next 24 h.";
+      } else if (shown > 0) {
+        var first = windows[0];
+        caption.textContent = "Charges " + evFmtClock(first.start_ms) + "–" + evFmtClock(first.end_ms) +
+          (shown > 1 ? " and " + (shown - 1) + " more window" + (shown > 2 ? "s" : "") : "") +
+          " · " + (shownWh / 1000).toFixed(1) + " kWh in the next 24 h.";
+      } else if (lpNow && lpNow.plugged_in) {
+        caption.textContent = "No charge window in the next 24 h.";
+      } else {
+        caption.textContent = "Plug in to see the plan for this car.";
+      }
+    }
+
+    function update(lpNow, dNow) {
+      lastLp = lpNow;
+      capacityView.update(lpNow);
+      var fresh = renderEvPlanStatus(lpNow, dNow);
+      if (headline && headline.parentNode === box) {
+        if (fresh) { box.replaceChild(fresh, headline); } else { box.removeChild(headline); }
+      } else if (fresh) {
+        box.insertBefore(fresh, planWrap);
+      }
+      headline = fresh;
+      drawTrack(lpNow);
+      var plugged = !!(lpNow && lpNow.plugged_in);
+      socWrap.hidden = !plugged;
+      if (!plugged) return;
+      var cur = (lpNow.current_soc != null) ? Math.max(0, Math.min(100, Math.round(lpNow.current_soc * 100))) : null;
+      if (!operatorHolds() && cur != null) {
+        slider.value = String(cur);
+        hdr.value.textContent = lpNow.soc_source === "assumed" ? "Not confirmed" : cur + "%";
+      }
+      if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
+    }
+
+    update(lp, d);
+    return { el: box, update: update, slider: slider };
+  }
+
+  function buildEvCapacityView(lp) {
+    var wrap = document.createElement("details");
+    wrap.style.cssText = "margin-top:0.6rem;font-size:0.85rem";
+    var summary = document.createElement("summary");
+    summary.style.cssText = "cursor:pointer;color:var(--text-dim)";
+    wrap.appendChild(summary);
+    var hint = document.createElement("p");
+    hint.style.cssText = "color:var(--text-dim);margin:0.4rem 0";
+    wrap.appendChild(hint);
+    var label = document.createElement("label");
+    label.textContent = "Usable battery size (kWh) ";
+    var input = document.createElement("input");
+    input.type = "number"; input.min = "1"; input.max = "300"; input.step = "0.1";
+    input.setAttribute("inputmode", "decimal");
+    input.setAttribute("aria-label", "Usable battery size, kWh");
+    input.style.cssText = "width:7em;padding:0.3rem;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)";
+    label.appendChild(input); wrap.appendChild(label);
+    var help = document.createElement("p");
+    help.style.cssText = "color:var(--text-dim);margin:0.4rem 0";
+    help.textContent = "Applies when you leave the field. Find the usable size in your car’s specifications.";
+    wrap.appendChild(help);
+    var note = document.createElement("p");
+    note.setAttribute("role", "status");
+    note.style.cssText = "color:var(--text-dim);margin:0.4rem 0";
+    wrap.appendChild(note);
+    var retry = document.createElement("button");
+    retry.type = "button"; retry.textContent = "Try battery size again"; retry.hidden = true;
+    wrap.appendChild(retry);
+    var busy = false, dirty = false, currentCapacity = null, available = true;
+    input.addEventListener("input", function () { dirty = true; });
+    function save() {
+      if (busy) return;
+      var value = Number(input.value);
+      if (!isFinite(value) || value < 1 || value > 300) { note.textContent = "Enter the usable battery size from 1 to 300 kWh."; note.setAttribute("role", "alert"); return; }
+      busy = true; input.disabled = true; retry.hidden = true;
+      note.setAttribute("role", "status"); note.textContent = "Sending battery size…";
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/vehicle", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ capacity_wh: Math.round(value * 1000) }),
+      }).then(function (r) { return r.json().then(function (j) { if (!r.ok || !j.ok) throw new Error(j.error || "FTW refused the change."); return j; }); })
+        .then(function () {
+          dirty = false;
+          note.textContent = "Battery size saved. Reading charging status…";
+          return refreshEvModalAfterWrite().then(function () {
+            note.textContent = !available ? "Battery size saved. Current charging status is unavailable."
+              : currentCapacity !== null && currentCapacity !== Math.round(value * 1000)
+                ? "Saved as the usual battery size. This session uses " + (currentCapacity / 1000) + " kWh."
+                : "Battery size saved. The plan uses this size for its estimates.";
+          });
+        })
+        .catch(function (err) { note.textContent = "Battery size not confirmed: " + err.message; note.setAttribute("role", "alert"); retry.hidden = false; })
+        .finally(function () { busy = false; input.disabled = false; });
+    }
+    input.addEventListener("change", save); retry.addEventListener("click", save);
+    function update(next) {
+      var capacity = Number(next.vehicle_capacity_wh);
+      currentCapacity = isFinite(capacity) && capacity > 0 ? capacity : null;
+      available = !next.charger || next.charger.available !== false;
+      wrap.hidden = !next.plugged_in || !(capacity > 0);
+      summary.textContent = "Car battery · " + (capacity / 1000) + " kWh";
+      hint.textContent = next.capacity_source === "default" ? "FTW is using a default size. Check it against your car." : "Used for estimates. Check this size if you use another car.";
+      if (!busy && !dirty && document.activeElement !== input) input.value = String(capacity / 1000);
+    }
+    update(lp);
+    return { el: wrap, update: update };
+  }
+
+  // Solar is a rule of the plan. A manual hold overrides it.
+  function buildPVModeSection(lp) {
+    var soBox = document.createElement("div");
+    soBox.style.marginTop = "0.7rem";
+    var soWrap = document.createElement("label");
+    soWrap.style.cssText = "display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;cursor:pointer";
+    var soCb = document.createElement("input");
+    soCb.type = "checkbox";
+    soCb.setAttribute("role", "switch");
+    soCb.style.accentColor = "var(--accent-e)";
+    var soText = document.createElement("span");
+    soText.textContent = "Only spare solar";
+    soWrap.appendChild(soCb);
+    soWrap.appendChild(soText);
+    var soStatus = document.createElement("small");
+    soStatus.style.cssText = "display:block;color:var(--text-dim);margin:0.25rem 0 0 1.5rem";
+    soStatus.setAttribute("role", "status");
+    var busy = false, failure = "", latest = lp;
+    function update(next) {
+      latest = next;
+      if (busy) return;
+      soCb.checked = !!latest.surplus_only;
+      soCb.disabled = !!latest.manual_active || !!latest.manual_restore_unconfirmed;
+      soStatus.textContent = failure || (evIsPaused(latest) || latest.manual_restore_unconfirmed
+        ? "This rule resumes with the plan."
+        : latest.manual_active
+        ? "Charge now overrides this rule. It resumes when you return to the plan."
+        : latest.surplus_only
+          ? "No grid or home battery. Your target may not be reached in time."
+          : "The plan may use grid power to reach your target.");
+    }
+    soCb.addEventListener("change", function () {
+      var on = soCb.checked;
+      busy = true;
+      failure = "";
+      soCb.disabled = true;
+      soStatus.textContent = "Applying solar rule…";
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ surplus_only: on }),
+      }).then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+        soStatus.textContent = "Solar rule saved. Reading the plan…";
+        // Keep it pending until the read finishes; a poll cannot undo the choice.
+        return refreshEvModalAfterWrite();
+      }).catch(function (e) {
+        failure = "Solar rule not confirmed: " + e.message;
+      }).finally(function () { busy = false; update(latest); });
+    });
+    soBox.appendChild(soWrap);
+    soBox.appendChild(soStatus);
+    soBox.update = update;
+    update(lp);
     return soBox;
   }
 
   // buildScheduleSection — target SoC by a deadline + recurring + the
-  // bat-SoC surplus-unlock threshold (Scheduled tab). Persisted across
+  // home battery threshold for spare solar. Persisted across
   // restarts; the backend rolls the deadline forward daily when Recurring
   // is set and arms the surplus-grab when the home battery is at/above the
   // threshold (5 pp release hysteresis).
@@ -3182,21 +4041,18 @@
     // Convert "minutes-of-day-UTC" to a "HH:MM" string in the browser's
     // local zone. The UI shows local time everywhere; we marshal back to
     // UTC minutes on save.
-    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
-    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
-    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
+    var hasSched = !!(sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
+    var initLocalHHMM = hasSched ? utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360) : "07:00";
+    var initSoC = typeof sched.soc === "number" && sched.soc > 0 ? sched.soc * 100 : 80;
     var initRec = !!sched.recurring;
-    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
+    var savedUnlock = typeof sched.surplus_unlock_bat_soc === "number" ? sched.surplus_unlock_bat_soc * 100 : 0;
     // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
     // The threshold input retains the last-used value (or defaults to 50)
     // so unchecking + re-checking doesn't wipe the user's pick.
     var initSurplus = savedUnlock > 0;
     var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
 
-    // Hairline divider separating the current-charge slider above from the
-    // target + deadline controls below. The tab is already named
-    // "Scheduled", so no section eyebrow/explainer here — the field labels
-    // carry the meaning.
+    // The goal editor opens below the saved goal summary.
     var box = document.createElement("div");
     box.style.marginTop = "0.9rem";
     box.style.paddingTop = "0.9rem";
@@ -3231,7 +4087,7 @@
     // above, so toggling it gives instant feedback without waiting on
     // the network save round-trip.
     var surplusBestEffortHint = document.createElement("div");
-    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from real PV surplus only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.textContent = "Only spare solar is on. Your target may not be reached in time.";
     surplusBestEffortHint.style.fontSize = "0.72rem";
     surplusBestEffortHint.style.color = "var(--fg)";
     surplusBestEffortHint.style.fontStyle = "italic";
@@ -3322,17 +4178,64 @@
       return wrap;
     }
 
-    var recWrap = checkbox(initRec, "Repeat daily");
-    var surWrap = checkbox(initSurplus && !!hasPV, "Also charge from PV surplus");
+    var recWrap = checkbox(initRec, "Repeat on chosen days");
+    var surWrap = checkbox(initSurplus && !!hasPV, "Also use spare solar before the planned hours");
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    // Target: same header + full-width slider treatment as Current charge.
-    var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
+    // Weekdays. The wire's zero means every day (older rows and clients);
+    // the chips show that as all seven lit, and send zero back for it,
+    // the same spelling the webapp uses. Bit 0 = Monday (ISO).
+    var initDays = (typeof sched.days === "number" && (sched.days & 0x7f) > 0) ? (sched.days & 0x7f) : 0x7f;
+    var dayChips = [];
+    var daysRow = document.createElement("div");
+    daysRow.setAttribute("role", "group");
+    daysRow.setAttribute("aria-label", "Days");
+    daysRow.style.display = "flex";
+    daysRow.style.gap = "0.3rem";
+    daysRow.style.margin = "0.1rem 0 0.55rem";
+    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (name, bit) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.textContent = name;
+      chip.dataset.bit = String(bit);
+      chip.style.flex = "1";
+      chip.style.padding = "0.25rem 0";
+      chip.style.fontFamily = "var(--mono)";
+      chip.style.fontSize = "0.68rem";
+      chip.style.letterSpacing = "0.06em";
+      chip.style.borderRadius = "3px";
+      chip.style.cursor = "pointer";
+      chip.style.border = "1px solid var(--line)";
+      chip.on = !!(initDays & (1 << bit));
+      dayChips.push(chip);
+      daysRow.appendChild(chip);
+    });
+    function paintChips() {
+      dayChips.forEach(function (chip) {
+        chip.setAttribute("aria-pressed", chip.on ? "true" : "false");
+        chip.style.background = chip.on ? "var(--accent-e)" : "transparent";
+        chip.style.color = chip.on ? "#0a0a0a" : "var(--text-dim)";
+        chip.style.borderColor = chip.on ? "var(--accent-e)" : "var(--line)";
+      });
+    }
+    function selectedDays() {
+      var mask = 0;
+      dayChips.forEach(function (chip) { if (chip.on) mask |= 1 << Number(chip.dataset.bit); });
+      return mask;
+    }
+    paintChips();
+
+    // Target: same header + full-width slider treatment as the car's
+    // current charge above the goal.
+    var targetHdr = sliderHeader("Charge to", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
     box.appendChild(targetHdr.row);
     var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    targetSlider.min = "10";
+    targetSlider.step = "5";
+    targetSlider.setAttribute("aria-label", "Target charge, percent");
     box.appendChild(targetSlider);
-    box.appendChild(row("Charge by", timeInp));
+    box.appendChild(row("Ready by", timeInp));
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -3340,13 +4243,20 @@
     checkRow.style.gap = "0.35rem";
     checkRow.style.marginBottom = "0.55rem";
     checkRow.appendChild(recWrap);
+    box.appendChild(checkRow);
+    box.appendChild(daysRow);
+    var solarDetails = document.createElement("details");
+    var solarSummary = document.createElement("summary");
+    solarSummary.textContent = "Solar timing";
+    solarSummary.style.cssText = "cursor:pointer;font-size:0.8rem;color:var(--text-dim)";
+    solarDetails.appendChild(solarSummary);
+    if (hasPV) box.appendChild(solarDetails);
     // Surplus-from-PV only makes sense on sites with a PV driver — the
     // bat-SoC unlock would have no surplus to grab otherwise. Omit the
     // checkbox + threshold entirely on PV-less sites.
     if (hasPV) {
-      checkRow.appendChild(surWrap);
+      solarDetails.appendChild(surWrap);
     }
-    box.appendChild(checkRow);
 
     var unlockHint = document.createElement("small");
     unlockHint.style.display = "block";
@@ -3358,8 +4268,8 @@
     var thresholdRow = row("Home battery ≥", unlockWrap);
 
     if (hasPV) {
-      box.appendChild(unlockHint);
-      box.appendChild(thresholdRow);
+      solarDetails.appendChild(unlockHint);
+      solarDetails.appendChild(thresholdRow);
     }
 
     function applySurplusGate() {
@@ -3369,20 +4279,26 @@
       thresholdRow.style.pointerEvents = on ? "auto" : "none";
       unlockHint.style.opacity = on ? "1" : "0.55";
     }
+    function applyDaysGate() {
+      // Inline display:flex beats the [hidden] attribute; toggle display.
+      daysRow.style.display = recCb.checked ? "flex" : "none";
+    }
     if (hasPV) {
       applySurplusGate();
-      surCb.addEventListener("change", applySurplusGate);
     }
+    applyDaysGate();
 
-    // Actions
+    // One explicit action remains: removing the schedule. Everything
+    // else saves as it changes (see scheduleSave below).
     var btnRow = document.createElement("div");
     btnRow.style.display = "flex";
     btnRow.style.gap = "0.5rem";
     btnRow.style.marginTop = "0.55rem";
     btnRow.style.justifyContent = "flex-end";
 
-    function mkBtn(label, primary) {
+    function mkBtn(label) {
       var b = document.createElement("button");
+      b.type = "button";
       b.textContent = label;
       b.style.padding = "0.3rem 0.8rem";
       b.style.fontSize = "0.8rem";
@@ -3392,22 +4308,24 @@
       b.style.borderRadius = "3px";
       b.style.cursor = "pointer";
       b.style.border = "1px solid var(--line)";
-      if (primary) {
-        b.style.background = "var(--accent-e)";
-        b.style.color = "#0a0a0a";
-        b.style.borderColor = "var(--accent-e)";
-      } else {
-        b.style.background = "transparent";
-        b.style.color = "var(--fg)";
-      }
+      b.style.background = "transparent";
+      b.style.color = "var(--fg)";
       return b;
     }
-    var clearBtn = mkBtn("Clear", false);
-    var saveBtn = mkBtn(hasSched ? "Update schedule" : "Set schedule", true);
-    clearBtn.disabled = !hasSched;
-    if (!hasSched) clearBtn.style.opacity = "0.4";
+    var chooseBtn = mkBtn("Use " + Math.round(initSoC) + " % by " + initLocalHHMM);
+    chooseBtn.style.textTransform = "none";
+    chooseBtn.style.letterSpacing = "normal";
+    chooseBtn.addEventListener("click", scheduleSave);
+    btnRow.appendChild(chooseBtn);
+    var clearBtn = mkBtn("Remove schedule");
+    function paintClear() {
+      chooseBtn.hidden = hasSched;
+      clearBtn.hidden = !hasSched;
+      clearBtn.disabled = !hasSched;
+      clearBtn.style.opacity = hasSched ? "1" : "0.4";
+    }
+    paintClear();
     btnRow.appendChild(clearBtn);
-    btnRow.appendChild(saveBtn);
     box.appendChild(btnRow);
 
     var status = document.createElement("small");
@@ -3415,146 +4333,166 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.4rem";
     status.style.minHeight = "1em";
+    status.textContent = hasSched
+      ? "Changes save as you make them; the plan above follows."
+      : "No goal set yet. Choose this goal, or change the level or time.";
     box.appendChild(status);
 
-    // Save and Clear both flag schedNeedsRebuild so the next poll
-    // rebuilds the section from the new authoritative server state
-    // (e.g. so the button label flips from "Save" → "Update" once a
-    // schedule exists). Polling never rebuilds otherwise — the cached
-    // schedSectionEl stays mounted and inputs keep focus.
-    saveBtn.addEventListener("click", function () {
-      saveBtn.disabled = true;
-      clearBtn.disabled = true;
-      status.textContent = "Saving…";
+    // Every control writes when it changes: the slider on release, the
+    // time and checkboxes on change, a chip on click. Debounced so a
+    // burst of edits is one request; a stale response never overwrites
+    // a newer status. The box replans before it answers the schedule
+    // write, so the refetch right after redraws the plan view above
+    // from the new schedule. No Save button.
+    var saveTimer = null;
+    var saveSeq = 0;
+    var writeQueue = Promise.resolve();
+    var statusTimer = null;
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
+      saveSeq++;
+      chooseBtn.disabled = true;
+      status.textContent = "Applying schedule…";
+      saveTimer = setTimeout(function () { saveTimer = null; doSave(); }, 400);
+    }
+    function doSave() {
+      var seq = saveSeq;
       var localHHMM = timeInp.value || initLocalHHMM;
       var minUTC = localHHMMToUtcMins(localHHMM);
       // Surplus checkbox gates the threshold: when off (or hidden on
       // PV-less sites), the threshold is sent as 0 — the backend
       // interprets 0 as "feature disabled".
       var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
+      var days = recCb.checked ? selectedDays() : 0;
+      if (recCb.checked && days === 0) {
+        status.textContent = "Pick at least one day.";
+        return;
+      }
       var body = {
         schedule: {
-          soc_pct: Number(targetSlider.value),
+          soc: Number(targetSlider.value) / 100,
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
-          surplus_unlock_bat_soc_pct: unlockVal,
+          // All seven days is the wire's zero.
+          days: days === 0x7f ? 0 : days,
+          surplus_unlock_bat_soc: unlockVal > 0 ? unlockVal / 100 : 0,
         },
       };
-      // CONTROL write — strict (FIX-B): loadpoint schedule save.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Saved.";
-        schedNeedsRebuild = true;
-        refreshEvModal();
-      }).catch(function (e) {
-        status.textContent = "Save failed: " + e.message;
-        saveBtn.disabled = false;
-        clearBtn.disabled = false;
-      });
-    });
-
-    clearBtn.addEventListener("click", function () {
-      saveBtn.disabled = true;
-      clearBtn.disabled = true;
-      status.textContent = "Clearing…";
-      // CONTROL write — strict (FIX-B): loadpoint schedule clear.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule: null }),
-      }).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Cleared.";
-        schedNeedsRebuild = true;
-        refreshEvModal();
-      }).catch(function (e) {
-        status.textContent = "Clear failed: " + e.message;
-        saveBtn.disabled = false;
-      });
-    });
-
-    return box;
-  }
-
-  // buildEvTabbedControl assembles the modal's three tabs and routes each
-  // section into the right one:
-  //   PV charging → surplus-only toggle
-  //   Manual      → amp slider + Start/Stop
-  //   Scheduled   → current-SoC correction (a planning input) + the
-  //                 target-SoC-by-deadline schedule
-  // The active tab persists across rebuilds via evActiveTab.
-  function buildEvTabbedControl(lp, hasPV) {
-    var container = document.createElement("div");
-    container.style.marginTop = "0.75rem";
-    container.style.paddingTop = "0.6rem";
-    container.style.borderTop = "1px solid var(--line)";
-
-    var tabBar = document.createElement("div");
-    tabBar.style.display = "flex";
-    tabBar.style.gap = "0.15rem";
-    tabBar.style.borderBottom = "1px solid var(--line)";
-    tabBar.style.marginBottom = "0.7rem";
-
-    var pvPanel = document.createElement("div");
-    pvPanel.appendChild(buildPVModeSection(lp));
-
-    var manualPanel = document.createElement("div");
-    manualPanel.appendChild(buildManualChargeSection(lp));
-
-    var schedPanel = document.createElement("div");
-    schedPanel.appendChild(buildSoCSection(lp));
-    schedPanel.appendChild(buildScheduleSection(lp, hasPV));
-
-    var panels = { pv: pvPanel, manual: manualPanel, scheduled: schedPanel };
-    var tabs = [
-      { id: "pv", label: "PV charging" },
-      { id: "manual", label: "Manual" },
-      { id: "scheduled", label: "Scheduled" },
-    ];
-    var tabBtns = {};
-
-    function selectTab(id) {
-      if (!panels[id]) { id = "pv"; }
-      evActiveTab = id;
-      for (var k in panels) { panels[k].style.display = (k === id) ? "" : "none"; }
-      tabs.forEach(function (t) {
-        var on = t.id === id;
-        var b = tabBtns[t.id];
-        b.style.color = on ? "var(--fg)" : "var(--text-dim)";
-        b.style.borderBottom = on ? "2px solid var(--accent-e)" : "2px solid transparent";
-        b.style.fontWeight = on ? "600" : "400";
+      // Complete writes in order, even when the charger or planner is slow.
+      writeQueue = writeQueue.catch(function () {}).then(function () {
+        if (seq !== saveSeq) return;
+        return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+          if (seq !== saveSeq) return;
+          hasSched = true;
+          paintClear();
+          status.textContent = "Schedule saved.";
+          refreshEvModalAfterWrite();
+        }).catch(function (e) {
+          if (seq === saveSeq) {
+            chooseBtn.disabled = false;
+            chooseBtn.textContent = "Use " + targetSlider.value + " % by " + timeInp.value;
+            status.textContent = "Schedule not confirmed: " + e.message;
+          }
+        });
       });
     }
 
-    tabs.forEach(function (t) {
-      var b = document.createElement("button");
-      b.type = "button";
-      b.textContent = t.label;
-      b.style.background = "transparent";
-      b.style.border = "none";
-      b.style.borderBottom = "2px solid transparent";
-      b.style.padding = "0.4rem 0.7rem";
-      b.style.marginBottom = "-1px";
-      b.style.cursor = "pointer";
-      b.style.fontFamily = "var(--mono)";
-      b.style.fontSize = "0.72rem";
-      b.style.letterSpacing = "0.08em";
-      b.style.textTransform = "uppercase";
-      b.addEventListener("click", function () { selectTab(t.id); });
-      tabBtns[t.id] = b;
-      tabBar.appendChild(b);
+    targetSlider.addEventListener("change", scheduleSave);
+    timeInp.addEventListener("change", scheduleSave);
+    recCb.addEventListener("change", function () { applyDaysGate(); scheduleSave(); });
+    dayChips.forEach(function (chip) {
+      chip.addEventListener("click", function () { chip.on = !chip.on; paintChips(); scheduleSave(); });
+    });
+    if (hasPV) {
+      surCb.addEventListener("change", function () { applySurplusGate(); scheduleSave(); });
+      unlockWrap.input.addEventListener("change", scheduleSave);
+    }
+
+    clearBtn.addEventListener("click", function () {
+      clearBtn.disabled = true;
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      saveSeq++;
+      status.textContent = "Removing…";
+      writeQueue = writeQueue.catch(function () {}).then(function () {
+        return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ schedule: null }),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+          status.textContent = "Schedule removed.";
+          schedNeedsRebuild = true;
+          refreshEvModalAfterWrite();
+        }).catch(function (e) {
+          status.textContent = "Removal not confirmed: " + e.message;
+          clearBtn.disabled = false;
+        });
+      });
     });
 
-    container.appendChild(tabBar);
-    container.appendChild(pvPanel);
-    container.appendChild(manualPanel);
-    container.appendChild(schedPanel);
+    box.update = function (nextLp) {
+      surplusBestEffortHint.style.display = nextLp.surplus_only && !nextLp.manual_active ? "" : "none";
+    };
+    return box;
+  }
 
-    selectTab(evActiveTab);
+  // One session view. Opening settings never changes the charging mode.
+  function buildEvControls(lp, hasPV) {
+    var container = document.createElement("div");
+    container.className = "ev-controls";
+    var manual = buildManualChargeSection(lp);
+    container.appendChild(manual.el);
+
+    var goal = document.createElement("section");
+    goal.className = "ev-goal";
+    goal.style.cssText = "margin-top:1rem;padding:0.8rem;border:1px solid var(--line);border-radius:8px";
+    var heading = document.createElement("div");
+    heading.textContent = "Your goal";
+    heading.style.cssText = "font-weight:600;font-size:0.95rem;margin-bottom:0.3rem";
+    goal.appendChild(heading);
+    var summary = document.createElement("p");
+    summary.style.cssText = "margin:0;font-size:0.9rem";
+    goal.appendChild(summary);
+    var suspended = document.createElement("small");
+    suspended.style.cssText = "display:block;color:var(--text-dim);margin-top:0.3rem";
+    goal.appendChild(suspended);
+
+    var editor = document.createElement("details");
+    var editLabel = document.createElement("summary");
+    editLabel.style.cssText = "cursor:pointer;color:var(--accent-e);font-size:0.85rem;margin-top:0.65rem";
+    editor.appendChild(editLabel);
+    var schedule = buildScheduleSection(lp, hasPV);
+    editor.appendChild(schedule);
+    goal.appendChild(editor);
+    var solar = hasPV || lp.surplus_only ? buildPVModeSection(lp) : null;
+    if (solar) goal.appendChild(solar);
+    container.appendChild(goal);
+
+    container.update = function (nextLp, d) {
+      manual.el.hidden = !nextLp.plugged_in;
+      manual.update(nextLp, d);
+      var s = nextLp.schedule;
+      var hasGoal = !!(s && s.soc > 0);
+      summary.textContent = hasGoal
+        ? Math.round(s.soc * 100) + " % by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
+          (s.recurring ? " · repeats" : " · once")
+        : "No ready time set.";
+      editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
+      suspended.textContent = evIsPaused(nextLp) || nextLp.manual_restore_unconfirmed
+        ? "Resume the plan to use this goal. Edits apply then."
+        : nextLp.manual_active
+        ? "Charge now overrides this goal. Edits apply when you return to the plan."
+        : "Changes apply as you make them.";
+      schedule.update(nextLp);
+      if (solar) solar.update(nextLp);
+    };
+    container.update(lp, null);
     return container;
   }
 

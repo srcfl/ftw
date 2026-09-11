@@ -11,9 +11,9 @@ func baseParams(mode Mode) Params {
 		Mode:                mode,
 		SoCLevels:           21,
 		CapacityWh:          10000, // 10 kWh
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       50,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.5,
 		ActionLevels:        21,
 		MaxChargeW:          5000,
 		MaxDischargeW:       5000,
@@ -47,7 +47,7 @@ func TestSelfConsumptionNoGridCharge(t *testing.T) {
 	prices := []float64{100, 200, 50, 300} // cheap slot at index 2
 	slots := flatLoadSlots(prices)
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 80 // full-ish
+	p.InitialSoC = 0.8 // full-ish
 	plan := Optimize(slots, p)
 	for i, a := range plan.Actions {
 		// In self-consumption with only load and no PV: baseline_grid = load = +1000.
@@ -68,7 +68,7 @@ func TestSelfConsumptionAbsorbsPVSurplus(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 100, LoadW: 2000, PVW: -3500},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	plan := Optimize(slots, p)
 	a := plan.Actions[0]
 	if a.BatteryW < 0 {
@@ -107,7 +107,7 @@ func TestPassiveArbitragePVChargeBonusPrefersPVOverExport(t *testing.T) {
 		Confidence: 1,
 	}}
 	pNoBonus := baseParams(ModePassiveArbitrage)
-	pNoBonus.InitialSoCPct = 60
+	pNoBonus.InitialSoC = 0.6
 	pNoBonus.TerminalSoCPrice = 20 // matches export revenue → DP indifferent without bonus
 	pNoBonus.PVChargeBonusOreKwh = 0
 	planNoBonus := Optimize(slots, pNoBonus)
@@ -158,7 +158,7 @@ func TestPassiveArbitragePVChargeBonusDoesNotMotivateGridCharge(t *testing.T) {
 		}
 	}
 	p := baseParams(ModePassiveArbitrage)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	p.TerminalSoCPrice = 50 // moderate — SC bias must be what blocks grid-charge
 	p.PVChargeBonusOreKwh = 30
 
@@ -207,7 +207,7 @@ func TestPassiveArbitrageChargesFromPVWhenSurplusAvailable(t *testing.T) {
 		}
 	}
 	p := baseParams(ModePassiveArbitrage)
-	p.InitialSoCPct = 20
+	p.InitialSoC = 0.2
 	p.TerminalSoCPrice = 100
 
 	plan := Optimize(slots, p)
@@ -251,11 +251,11 @@ func TestPassiveArbitrageGridChargesAtCheapHours(t *testing.T) {
 		}
 	}
 	p := baseParams(ModePassiveArbitrage)
-	p.InitialSoCPct = 20
+	p.InitialSoC = 0.2
 	p.TerminalSoCPrice = 50 // low so terminal credit doesn't dominate the test
 	// Big enough buffer so a charge during cheap hours fits.
-	p.SoCMinPct = 10
-	p.SoCMaxPct = 95
+	p.SoCMin = 0.1
+	p.SoCMax = 0.95
 
 	plan := Optimize(slots, p)
 	// Sum charge during cheap slots, sum discharge during expensive slots.
@@ -287,7 +287,7 @@ func TestPassiveArbitrageNeverExportsFromBattery(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 300, LoadW: 100, PVW: 0, Confidence: 1},
 	}
 	p := baseParams(ModePassiveArbitrage)
-	p.InitialSoCPct = 80 // plenty of stored energy
+	p.InitialSoC = 0.8 // plenty of stored energy
 
 	plan := Optimize(slots, p)
 	a := plan.Actions[0]
@@ -332,7 +332,7 @@ func TestDownsidePVKeepsReserveAgainstUncertainLatePV(t *testing.T) {
 		return s
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	// Leftover energy is worth more than the morning export price, so selling
 	// the battery early only pays off if it can be refilled — i.e. only when
 	// the midday PV is trusted.
@@ -346,8 +346,8 @@ func TestDownsidePVKeepsReserveAgainstUncertainLatePV(t *testing.T) {
 	minSoC := func(pl Plan) float64 {
 		m := 100.0
 		for _, a := range pl.Actions {
-			if a.SoCPct < m {
-				m = a.SoCPct
+			if a.SoC < m {
+				m = a.SoC
 			}
 		}
 		return m
@@ -361,8 +361,8 @@ func TestDownsidePVKeepsReserveAgainstUncertainLatePV(t *testing.T) {
 func planMinSoC(pl Plan) float64 {
 	m := 100.0
 	for _, a := range pl.Actions {
-		if a.SoCPct < m {
-			m = a.SoCPct
+		if a.SoC < m {
+			m = a.SoC
 		}
 	}
 	return m
@@ -388,7 +388,7 @@ func TestDownsidePVReserveIncreasesWithK(t *testing.T) {
 		return s
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	p.TerminalSoCPrice = 350
 	reserve := func(k float64) float64 {
 		sl := mk()
@@ -423,7 +423,7 @@ func TestDownsidePVWinterNoReserveForced(t *testing.T) {
 		return s
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	raw := Optimize(mk(), p)
 	hair := mk()
 	applyPVDownside(hair, 2.0, 5000) // large σ, but no PV to cut
@@ -450,9 +450,9 @@ func TestSelfConsumptionDefersPVStorageWhenCheaperSurplusAhead(t *testing.T) {
 		Mode:                ModeSelfConsumption,
 		SoCLevels:           41,
 		CapacityWh:          4000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       10,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.1,
 		ActionLevels:        41,
 		MaxChargeW:          4000,
 		MaxDischargeW:       4000,
@@ -520,9 +520,9 @@ func TestSmartSelfConsumptionExportsMorningPVAndChargesNegativeMidday(t *testing
 		Mode:                ModeSelfConsumption,
 		SoCLevels:           41,
 		CapacityWh:          10000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       10,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.1,
 		ActionLevels:        41,
 		MaxChargeW:          4000,
 		MaxDischargeW:       4000,
@@ -580,7 +580,7 @@ func TestCheapChargeUsesCheapGrid(t *testing.T) {
 	prices := []float64{100, 100, 50, 100, 100, 100}
 	slots := flatLoadSlots(prices)
 	p := baseParams(ModeCheapCharge)
-	p.InitialSoCPct = 30
+	p.InitialSoC = 0.3
 	p.TerminalSoCPrice = 100 // credit stored energy at 100 öre/kWh
 	plan := Optimize(slots, p)
 
@@ -598,7 +598,7 @@ func TestCheapChargeNeverExports(t *testing.T) {
 	prices := []float64{50, 50, 500, 50}
 	slots := flatLoadSlots(prices)
 	p := baseParams(ModeCheapCharge)
-	p.InitialSoCPct = 90
+	p.InitialSoC = 0.9
 	p.ExportOrePerKWh = 400 // tempting
 	plan := Optimize(slots, p)
 	for i, a := range plan.Actions {
@@ -616,7 +616,7 @@ func TestArbitrageDischargesToExpensive(t *testing.T) {
 	slots := flatLoadSlots(prices)
 	// Force SoC to plenty, give meaningful export credit.
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 80
+	p.InitialSoC = 0.8
 	p.ExportOrePerKWh = 400
 	plan := Optimize(slots, p)
 	// Slot 2 (price 500) should see discharge (battery < 0).
@@ -640,15 +640,15 @@ func TestArbitrageNoEVChargeWhileBatteryExporting(t *testing.T) {
 		{StartMs: 3600_000, LenMin: 60, PriceOre: 800, SpotOre: 800, LoadW: 500, PVW: 0, Confidence: 1},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 80 // headroom for big discharge
+	p.InitialSoC = 0.8 // headroom for big discharge
 	p.ExportOrePerKWh = 700
 	p.Loadpoint = &LoadpointSpec{
 		ID:               "garage",
 		CapacityWh:       60000,
 		Levels:           11,
-		InitialSoCPct:    20,
+		InitialSoC: 0.2,
 		PluggedIn:        true,
-		TargetSoCPct:     30,
+		TargetSoC: 0.3,
 		TargetSlotIdx:    1, // deadline at slot 1 forces some EV charging
 		MaxChargeW:       11000,
 		AllowedStepsW:    []float64{0, 5000, 11000},
@@ -692,7 +692,7 @@ func TestArbitrageDoesNotDischargeAtNegativeSpot(t *testing.T) {
 		}
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 60      // plenty of headroom either direction
+	p.InitialSoC = 0.6      // plenty of headroom either direction
 	p.TerminalSoCPrice = 80.0 // realistic — same scale as PriceOre, so
 	//                            cycling losses register in the objective
 	plan := Optimize(slots, p)
@@ -756,7 +756,7 @@ func TestArbitrageNegativeSpotWithExportFloorClampsAtZero(t *testing.T) {
 			LoadW: 500, PVW: -2000, Confidence: 1.0},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 60
+	p.InitialSoC = 0.6
 	p.ExportFloorOreKwh = &zero
 	p.TerminalSoCPrice = 0
 	// We don't assert a specific dispatch — the floor makes export
@@ -781,16 +781,16 @@ func TestEfficiencyCostsSoC(t *testing.T) {
 	}
 	p := baseParams(ModeArbitrage)
 	p.SoCLevels = 171 // 0.5%-grid: (95-10)/170 = 0.5
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	p.ActionLevels = 11
 	p.MaxChargeW = 1000
 	p.MaxDischargeW = 0
 	p.TerminalSoCPrice = 100 // give DP reason to charge (vs let PV waste)
 	plan := Optimize(slots, p)
 	a := plan.Actions[0]
-	expected := 50.0 + (1000*1.0*0.95)/10000.0*100.0
-	if math.Abs(a.SoCPct-expected) > 1.0 {
-		t.Errorf("eff-aware SoC: got %f, want ~%f", a.SoCPct, expected)
+	expected := 0.50 + (1000*1.0*0.95)/10000.0
+	if math.Abs(a.SoC-expected) > 1.0 {
+		t.Errorf("eff-aware SoC: got %f, want ~%f", a.SoC, expected)
 	}
 }
 
@@ -803,7 +803,7 @@ func TestRoundTripLossMakesArbitrageHarder(t *testing.T) {
 		{StartMs: 60 * 60 * 1000, LenMin: 60, PriceOre: 150, LoadW: 0, PVW: 0},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 10 // empty
+	p.InitialSoC = 0.1 // empty
 	p.ChargeEfficiency = 0.707
 	p.DischargeEfficiency = 0.707
 	p.ExportOrePerKWh = 150
@@ -835,8 +835,8 @@ func TestSoCStaysInBounds(t *testing.T) {
 	p.ExportOrePerKWh = 400
 	plan := Optimize(slots, p)
 	for i, a := range plan.Actions {
-		if a.SoCPct < p.SoCMinPct-1e-6 || a.SoCPct > p.SoCMaxPct+1e-6 {
-			t.Errorf("slot %d: SoC %f outside [%f, %f]", i, a.SoCPct, p.SoCMinPct, p.SoCMaxPct)
+		if a.SoC < p.SoCMin-1e-6 || a.SoC > p.SoCMax+1e-6 {
+			t.Errorf("slot %d: SoC %f outside [%f, %f]", i, a.SoC, p.SoCMin, p.SoCMax)
 		}
 	}
 }
@@ -870,7 +870,7 @@ func TestImportTariffRaisesMPCImportCost(t *testing.T) {
 		return s
 	}
 	p := baseParams(ModeCheapCharge)
-	p.InitialSoCPct = 30
+	p.InitialSoC = 0.3
 	p.TerminalSoCPrice = 100
 
 	cheap := Optimize(makeSlots(50), p)   // low consumer price — grid-charge
@@ -896,7 +896,7 @@ func TestExportBonusMakesArbitrageMoreProfitable(t *testing.T) {
 		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 500, LoadW: 500, PVW: 0},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 80
+	p.InitialSoC = 0.8
 	p.TerminalSoCPrice = 0
 
 	p.ExportOrePerKWh = 40
@@ -960,9 +960,9 @@ func TestExportWhenMorningIsHighStoreWhenMiddayIsLow(t *testing.T) {
 		Mode:                ModeArbitrage,
 		SoCLevels:           41,
 		CapacityWh:          10000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       40,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.4,
 		ActionLevels:        21,
 		MaxChargeW:          5000,
 		MaxDischargeW:       5000,
@@ -1028,7 +1028,7 @@ func TestCurtailmentFlagsNegativeExportSlots(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 10, LoadW: 500, PVW: -8000},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 95 // already at max — battery can't absorb more
+	p.InitialSoC = 0.95 // already at max — battery can't absorb more
 	p.ExportOrePerKWh = 0
 	plan := Optimize(slots, p)
 	a := plan.Actions[0]
@@ -1047,7 +1047,7 @@ func TestCurtailmentSkipsWhenExportProfitable(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 100, LoadW: 500, PVW: -8000},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 95
+	p.InitialSoC = 0.95
 	p.ExportOrePerKWh = 80 // profitable export
 	plan := Optimize(slots, p)
 	if plan.Actions[0].PVLimitW != 0 {
@@ -1061,7 +1061,7 @@ func TestCurtailmentSkipsPositiveSpotExport(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 80, LoadW: 500, PVW: -8000, Confidence: 1},
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 95
+	p.InitialSoC = 0.95
 	p.MaxDischargeW = 0
 	p.ActionLevels = 3
 
@@ -1189,7 +1189,7 @@ func TestZeroEfficiencyDoesNotPanic(t *testing.T) {
 	p := baseParams(ModeArbitrage)
 	p.ChargeEfficiency = 0
 	p.DischargeEfficiency = 0
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	p.ExportOrePerKWh = 100
 
 	plan := Optimize(slots, p) // must not panic
@@ -1198,14 +1198,14 @@ func TestZeroEfficiencyDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected %d actions, got %d", len(slots), len(plan.Actions))
 	}
 	for i, a := range plan.Actions {
-		if math.IsNaN(a.SoCPct) || math.IsInf(a.SoCPct, 0) {
+		if math.IsNaN(a.SoC) || math.IsInf(a.SoC, 0) {
 			t.Errorf("slot %d: SoC is NaN/Inf", i)
 		}
 		if math.IsNaN(a.CostOre) || math.IsInf(a.CostOre, 0) {
 			t.Errorf("slot %d: cost is NaN/Inf", i)
 		}
-		if a.SoCPct < p.SoCMinPct-1e-6 || a.SoCPct > p.SoCMaxPct+1e-6 {
-			t.Errorf("slot %d: SoC %f outside bounds", i, a.SoCPct)
+		if a.SoC < p.SoCMin-1e-6 || a.SoC > p.SoCMax+1e-6 {
+			t.Errorf("slot %d: SoC %f outside bounds", i, a.SoC)
 		}
 	}
 
@@ -1214,7 +1214,7 @@ func TestZeroEfficiencyDoesNotPanic(t *testing.T) {
 	p.DischargeEfficiency = -1.0
 	plan2 := Optimize(slots, p)
 	for i, a := range plan2.Actions {
-		if math.IsNaN(a.SoCPct) || math.IsInf(a.SoCPct, 0) {
+		if math.IsNaN(a.SoC) || math.IsInf(a.SoC, 0) {
 			t.Errorf("negative-eff slot %d: SoC is NaN/Inf", i)
 		}
 	}

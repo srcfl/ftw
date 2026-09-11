@@ -2,8 +2,7 @@ package currency
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -30,33 +29,9 @@ const sampleXML = `<?xml version="1.0" encoding="UTF-8"?>
   </Cube>
 </gesmes:Envelope>`
 
-func TestFetchParsesECBXML(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/xml")
-		_, _ = w.Write([]byte(sampleXML))
-	}))
-	defer srv.Close()
-
-	st, _ := state.Open(filepath.Join(t.TempDir(), "t.db"))
-	defer st.Close()
-	s := New(st)
-	s.Client = srv.Client()
-	// Point the service at test server URL via a one-off fetch.
-	// We shortcut by calling the http GET directly through a wrapper —
-	// but simpler: temporarily swap ecbURL via a custom request. Since
-	// ecbURL is a package-level const, inject via a test-only fetch:
-	req, _ := http.NewRequest("GET", srv.URL, nil)
-	resp, err := s.Client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	// Verify parser works on the sample bytes directly. Easier than
-	// reaching into fetch.
-	// (fetch() uses package-level URL; the parse path is what we test)
-	body := []byte(sampleXML)
+func TestParseECBXML(t *testing.T) {
 	var env ecbEnvelope
-	if err := parseECB(body, &env); err != nil {
+	if err := parseECB([]byte(sampleXML), &env); err != nil {
 		t.Fatal(err)
 	}
 	if env.Cube.Cube.Time != "2026-04-14" {
@@ -100,14 +75,64 @@ func TestConvert(t *testing.T) {
 	}
 }
 
+func TestConvertRejectsInvalidRatesAndResults(t *testing.T) {
+	s := &Service{rates: map[string]float64{
+		"EUR":  1,
+		"ZERO": 0,
+		"NEG":  -1,
+		"NAN":  math.NaN(),
+		"INF":  math.Inf(1),
+		"TINY": math.SmallestNonzeroFloat64,
+		"HUGE": math.MaxFloat64,
+	}}
+
+	for _, code := range []string{"ZERO", "NEG", "NAN", "INF"} {
+		if _, ok := s.Convert(100, code, "EUR"); ok {
+			t.Errorf("invalid source rate %s was accepted", code)
+		}
+		if _, ok := s.Convert(100, "EUR", code); ok {
+			t.Errorf("invalid target rate %s was accepted", code)
+		}
+	}
+	if _, ok := s.Convert(math.NaN(), "EUR", "EUR"); ok {
+		t.Error("non-finite amount was accepted for an identity conversion")
+	}
+	if _, ok := s.Convert(math.MaxFloat64, "TINY", "HUGE"); ok {
+		t.Error("overflowing conversion result was accepted")
+	}
+}
+
+func TestCachedBlobRejectsInvalidRates(t *testing.T) {
+	s := New(nil)
+	if err := s.parseCached("2026-04-14;SEK:11.4;ZERO:0;NEG:-1;NAN:NaN;INF:+Inf;EUR:2"); err != nil {
+		t.Fatal(err)
+	}
+
+	if rate, ok := s.Rate("SEK"); !ok || rate != 11.4 {
+		t.Fatalf("valid cached rate = %g, %v; want 11.4, true", rate, ok)
+	}
+	for _, code := range []string{"ZERO", "NEG", "NAN", "INF"} {
+		if rate, ok := s.Rate(code); ok {
+			t.Errorf("invalid cached rate %s = %g was restored", code, rate)
+		}
+	}
+	if rate, ok := s.Rate("EUR"); !ok || rate != 1 {
+		t.Errorf("cached EUR override changed fixed rate: got %g, %v", rate, ok)
+	}
+}
+
+func TestCachedBlobNeedsOneUsableRate(t *testing.T) {
+	s := New(nil)
+	if err := s.parseCached("2026-04-14;SEK:0;USD:NaN"); err == nil {
+		t.Fatal("cache with no usable non-EUR rates was accepted")
+	}
+}
+
 func TestCachedBlobRoundtrip(t *testing.T) {
 	st, _ := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	defer st.Close()
 	s := New(st)
 	s.rates = map[string]float64{"EUR": 1, "SEK": 11.4, "USD": 1.08}
-	if _, err := s.Convert(100, "EUR", "SEK"); err != true {
-		_ = err
-	}
 	s.persist()
 	// new service, restore from cache
 	s2 := New(st)

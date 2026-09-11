@@ -1,11 +1,13 @@
 package main
 
 import (
+	"math"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -59,6 +61,80 @@ func TestAppSnapshotKeepsTheSiteSignConvention(t *testing.T) {
 	}
 	if !snap.BatterySoCKnown || snap.BatterySoC != 0.62 {
 		t.Fatalf("soc = %v (known %v), want the fraction 0.62", snap.BatterySoC, snap.BatterySoCKnown)
+	}
+}
+
+// The LAN dashboard splits house and car from every charger that is still
+// reporting, including one that cannot take a command. The app snapshot has
+// to do the same: hiding that draw in load_w is how the phone showed EV at
+// 0 W and house at house+car.
+func TestAppSnapshotSplitsEVFromHouseLoad(t *testing.T) {
+	tel, ctrl := seedSite(t)
+	tel.Update("easee", telemetry.DerEV, 2000, nil, nil)
+	tel.RecordDriverSuccess("easee")
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: &sync.Mutex{},
+		revision: &control.Revision{}, started: time.Now(),
+		siteMeterStale: time.Minute,
+	}
+	snap := site.Snapshot()
+
+	if !snap.EVWKnown {
+		t.Fatal("a site with a charger did not send field 10")
+	}
+	if snap.EVW != 2000 {
+		t.Fatalf("ev = %v, want 2000", snap.EVW)
+	}
+	// grid 1200, battery +900, PV -3400, EV 2000 → house 1700.
+	if snap.LoadW != 1700 {
+		t.Fatalf("load = %v, want 1700 (house, not house+car)", snap.LoadW)
+	}
+}
+
+func TestAppSnapshotCountsAFaultedChargersDraw(t *testing.T) {
+	tel, ctrl := seedSite(t)
+	tel.Update("easee", telemetry.DerEV, 2000, nil, nil)
+	tel.RecordDriverSuccess("easee")
+	tel.SetDriverDeviceFault("easee", true, "setpoint refused")
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: &sync.Mutex{},
+		revision: &control.Revision{}, started: time.Now(),
+		siteMeterStale: time.Minute,
+	}
+	snap := site.Snapshot()
+
+	if !snap.EVWKnown || snap.EVW != 2000 {
+		t.Fatalf("ev = %v known=%v; a faulted charger is still drawing", snap.EVW, snap.EVWKnown)
+	}
+	if snap.LoadW != 1700 {
+		t.Fatalf("load = %v; the car's draw landed in the house", snap.LoadW)
+	}
+}
+
+func TestAppSnapshotIgnoresAnOfflineChargersDraw(t *testing.T) {
+	tel, ctrl := seedSite(t)
+	tel.Update("easee", telemetry.DerEV, 11400, nil, nil)
+	tel.RecordDriverSuccess("easee")
+	tel.DriverHealthMut("easee").SetOffline()
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: &sync.Mutex{},
+		revision: &control.Revision{}, started: time.Now(),
+		siteMeterStale: time.Minute,
+	}
+	snap := site.Snapshot()
+
+	if !snap.EVWKnown {
+		t.Fatal("an idle-looking charger that exists must still be named")
+	}
+	if snap.EVW != 0 {
+		t.Fatalf("ev = %v; an offline charger's last-known draw leaked", snap.EVW)
+	}
+	// grid 1200 - bat 900 - pv -3400 = 3700, no EV subtracted.
+	if snap.LoadW != 1200-900+3400 {
+		t.Fatalf("load = %v, want house without a live car", snap.LoadW)
 	}
 }
 
@@ -164,5 +240,63 @@ func TestAppSetModeRefusesAModeTheBoxDoesNotHave(t *testing.T) {
 	}
 	if ctrl.Mode != control.ModeSelfConsumption {
 		t.Fatalf("a refused mode still changed the state to %q", ctrl.Mode)
+	}
+}
+
+// The port's charge-level path is the HTTP route's: SetCurrentSoC on the
+// manager, refused while no car is plugged in, and read back from the
+// manager's own state — within the half-permille the handler allows, because
+// the manager re-anchors through the session's delivered energy.
+func TestAppLoadpointsCorrectTheChargeLevelThroughTheManager(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{
+		ID: "garage", DriverName: "easee-cloud",
+		VehicleCapacityWh: 60000, PluginSoC: 0.4,
+	}})
+	lp := &appLoadpoints{mgr: mgr}
+
+	if lp.SetSoC("garage", 0.62) {
+		t.Fatal("an unplugged car's level was set")
+	}
+
+	mgr.Observe("garage", true, 7400, 1200, true) // 1.2 kWh into the session
+	if !lp.SetSoC("garage", 0.62) {
+		t.Fatal("a plugged-in car's level was refused")
+	}
+	got, ok := lp.ObservedSoC("garage")
+	if !ok || math.Abs(got-0.62) > 0.0005 {
+		t.Fatalf("read back %v (known %v), want 0.62", got, ok)
+	}
+	if _, ok := lp.ObservedSoC("street"); ok {
+		t.Fatal("a loadpoint the box does not have read back a level")
+	}
+}
+
+// The port's PV-only path is the HTTP target route's SetSurplusOnly: the
+// previous value comes back so the caller knows the direction, and the
+// read-back is the manager's own flag.
+func TestAppLoadpointsFlipSurplusOnlyThroughTheManager(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee-cloud", SurplusOnly: true}})
+	lp := &appLoadpoints{mgr: mgr}
+
+	prev, ok := lp.SetSurplusOnly("garage", false)
+	if !ok || !prev {
+		t.Fatalf("SetSurplusOnly = (%v, %v), want the previous true", prev, ok)
+	}
+	if v, ok := lp.ObservedSurplusOnly("garage"); !ok || v {
+		t.Fatalf("read back %v (known %v), want off", v, ok)
+	}
+
+	prev, ok = lp.SetSurplusOnly("garage", true)
+	if !ok || prev {
+		t.Fatalf("SetSurplusOnly = (%v, %v), want the previous false", prev, ok)
+	}
+	if v, ok := lp.ObservedSurplusOnly("garage"); !ok || !v {
+		t.Fatalf("read back %v (known %v), want on", v, ok)
+	}
+
+	if _, ok := lp.SetSurplusOnly("street", true); ok {
+		t.Fatal("a loadpoint the box does not have took a flag")
 	}
 }

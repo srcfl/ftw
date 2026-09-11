@@ -34,6 +34,9 @@ func validateSlotChronology(slots []Slot) error {
 		if err != nil {
 			return fmt.Errorf("slot %d: %w", i, err)
 		}
+		if err := validateExecutionStart(i, slot.StartMs, endMs, slot.ExecutionStartMs); err != nil {
+			return err
+		}
 		if previousEndMs > 0 && slot.StartMs < previousEndMs {
 			return fmt.Errorf("slot %d starts before the prior slot ends", i)
 		}
@@ -51,6 +54,9 @@ func validateActionChronology(actions []Action) error {
 		endMs, err := checkedSlotEndMs(action.SlotStartMs, action.SlotLenMin)
 		if err != nil {
 			return fmt.Errorf("action %d: %w", i, err)
+		}
+		if err := validateExecutionStart(i, action.SlotStartMs, endMs, action.ExecutionStartMs); err != nil {
+			return err
 		}
 		if previousEndMs > 0 && action.SlotStartMs < previousEndMs {
 			return fmt.Errorf("action %d starts before the prior action ends", i)
@@ -72,9 +78,16 @@ func validatePlanSlotAlignment(slots []Slot, actions []Action) error {
 	}
 	for i, slot := range slots {
 		action := actions[i]
-		if action.SlotStartMs != slot.StartMs || action.SlotLenMin != slot.LenMin {
+		if action.SlotStartMs != slot.StartMs || action.SlotLenMin != slot.LenMin || action.ExecutionStartMs != slot.ExecutionStartMs {
 			return fmt.Errorf("action %d does not match its input slot", i)
 		}
+	}
+	return nil
+}
+
+func validateExecutionStart(index int, start, end, execution int64) error {
+	if execution != 0 && (index != 0 || execution < start || execution >= end) {
+		return fmt.Errorf("slot %d execution start must be within the first interval", index)
 	}
 	return nil
 }

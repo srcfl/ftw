@@ -58,33 +58,8 @@ write_base "$TMP/fresh/docker-compose.yml"
 PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/enable-modular-stack.sh" \
   "$TMP/fresh/docker-compose.yml"
 
-override="$TMP/fresh/docker-compose.override.yml"
-test -f "$override"
-grep -q '^  ftw-optimizer:' "$override"
-grep -q 'optimizer-ipc:/run/ftw-optimizer' "$override"
-grep -q 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "$override"
-grep -q 'FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}' "$override"
-grep -q '^up -d ftw-optimizer ftw$' "$DOCKER_LOG"
-
-cp "$override" "$TMP/override.before"
-PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/enable-modular-stack.sh" \
-  "$TMP/fresh/docker-compose.yml"
-cmp "$TMP/override.before" "$override"
-
-write_base "$TMP/custom/docker-compose.yml"
-cat >"$TMP/custom/docker-compose.override.yml" <<'YAML'
-services:
-  ftw:
-    environment:
-      OPERATOR_SETTING: preserved
-YAML
-
-if PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/enable-modular-stack.sh" \
-  "$TMP/custom/docker-compose.yml" >/dev/null 2>&1; then
-  echo "expected a custom override without ftw-optimizer to fail closed" >&2
-  exit 1
-fi
-grep -q 'OPERATOR_SETTING: preserved' "$TMP/custom/docker-compose.override.yml"
+test ! -e "$TMP/fresh/docker-compose.override.yml"
+test ! -e "$DOCKER_LOG"
 
 mkdir -p "$TMP/migrate/bin" "$TMP/migrate/data" "$TMP/migrate/state"
 cat >"$TMP/migrate/docker-compose.yml" <<'YAML'
@@ -322,13 +297,11 @@ FAKE_STATE_DIR="$TMP/migrate/state" \
 FAKE_DATA_DIR="$TMP/migrate/data" \
 bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/migrate"
 
-grep -q '^  ftw-optimizer:' "$TMP/migrate/docker-compose.override.yml"
+! grep -q 'ftw-optimizer' "$TMP/migrate/docker-compose.override.yml"
 grep -q 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "$TMP/migrate/docker-compose.override.yml"
-grep -q 'FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}' \
-  "$TMP/migrate/docker-compose.override.yml"
 test -f "$TMP/migrate/state/ftw"
 test -f "$TMP/migrate/state/ftw-updater"
-test -f "$TMP/migrate/state/ftw-optimizer"
+test ! -f "$TMP/migrate/state/ftw-optimizer"
 test -f "$TMP/migrate"/.ftw-migration-backup-*/previous-images.tsv
 
 # A legacy layout that already has the optimizer still needs the deploy tag
@@ -360,7 +333,7 @@ if grep -q '^  ftw-optimizer:' "$TMP/existing-optimizer/docker-compose.override.
 fi
 test -f "$TMP/existing-optimizer/state/ftw"
 test -f "$TMP/existing-optimizer/state/ftw-updater"
-test -f "$TMP/existing-optimizer/state/ftw-optimizer"
+test ! -f "$TMP/existing-optimizer/state/ftw-optimizer"
 
 # Generated container names still carry Compose labels. The migration must
 # reuse their explicit project name instead of creating a parallel default.
@@ -441,7 +414,7 @@ grep -q 'example.invalid/old-optimizer:latest' "$TMP/rollback-existing/docker-co
 test -e "$TMP/rollback-existing/state/ftw-optimizer"
 grep -q '^sha256:old-core example.invalid/old-core:latest$' "$TMP/rollback-existing/state/image-tags"
 grep -q '^sha256:old-updater example.invalid/old-updater:latest$' "$TMP/rollback-existing/state/image-tags"
-grep -q '^sha256:old-optimizer example.invalid/old-optimizer:latest$' "$TMP/rollback-existing/state/image-tags"
+! grep -q 'old-optimizer' "$TMP/rollback-existing/state/image-tags"
 
 # Optimizer is an independent, optional phase. A failed optimizer candidate
 # must leave the newly healthy Core + updater online and must not fail the

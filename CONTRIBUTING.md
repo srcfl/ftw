@@ -106,4 +106,25 @@ request must still explain the change and why it is correct.
 - Keep PRs focused on one logical change.
 - New code needs tests; `make verify` must pass before review.
 - User-visible changes need a Changeset entry (`npx changeset`) — see the
-  Release Process section in [`README.md`](README.md).
+  Releases section in [`README.md`](README.md).
+
+## Betas, issues and releases
+
+Every merged change ships in the next beta, usually within days — the beta
+channel is where new work gets its real test. Run beta on your site if you
+can live with the occasional rough edge; it is the most useful thing a
+contributor can do.
+
+- When you find a problem, open an issue and name the version you saw it on
+  (the dashboard's update view shows it, and `GET /api/version/check`
+  returns it).
+- Say so in the issue when you believe the line must not promote to stable
+  until it is fixed — a maintainer applies the `release-blocker` label that
+  gates promotion.
+- Fixes land on `master` and reach you in the next beta. A stable follows
+  once a beta has run clean on the validation sites for a few days.
+
+The repository owner cuts every release and may merge ahead of a pending
+review to keep pace; the review then happens on the running beta. The full
+rules, including the stable-hotfix runbook, are in the Releases section of
+[`AGENTS.md`](AGENTS.md).

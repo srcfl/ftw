@@ -1,33 +1,4 @@
-// Package loadmodel learns a household load profile online.
-//
-// Design choices driven by robustness / interpretability:
-//
-//  1. 168 buckets — one per (weekday, hour-of-day). An EMA per bucket.
-//     Directly models the weekly pattern that dominates residential
-//     load (weekend vs weekday, morning peak, evening peak, overnight
-//     baseline) without having to fit non-linear basis functions.
-//
-//  2. Typical-home prior. Each bucket is seeded with a reasonable
-//     Swedish-home default (300W overnight, 2000W morning/evening
-//     peaks, 600W midday). Day-one predictions are useful; the model
-//     refines from there.
-//
-//  3. Trust-weighted blending. Per-bucket trust = min(samples/20, 1).
-//     A fresh bucket ignores its (noisy) EMA and returns the prior.
-//     After ~20 samples through that bucket (3 weeks of 1-sample/min
-//     yields ~60 samples per bucket per week), we trust observations.
-//
-//  4. Optional temperature correction. Outdoor temperature below 18°C
-//     tracks heating load in homes with electric/heat-pump heating. We
-//     maintain a global scalar `HeatingW_per_degC` and fit it online
-//     via SGD on the prediction residual against (18 − temp_c), gated
-//     on bucket trust. Houses unaffected by outdoor temperature (district
-//     heating, all-electric pure-resistive baseboards on thermostats,
-//     etc.) converge toward 0 W/°C. Adds 0 W when temp is unknown or
-//     ≥ 18°C.
-//
-// The fallback-on-empty behavior makes this model safe on cold boot —
-// the MPC always gets a plausible load estimate, never zero or wild.
+// Package loadmodel maintains the existing local household-load predictor.
 package loadmodel
 
 import (
@@ -38,43 +9,20 @@ import (
 	"github.com/srcfl/ftw/go/internal/modelstate"
 )
 
-// Buckets is the number of hour-of-week buckets: 7 days × 24 hours.
 const Buckets = 7 * 24
 
-// MinTrustSamples is how many samples we want in a bucket before we
-// fully trust its EMA. Below this we blend with the prior. 8 ≈ two
-// months of weekly observations, enough signal to outrank the prior.
 const MinTrustSamples = 8
 
-// HeatingReferenceC is the indoor setpoint the heating curve is
-// relative to. Load proportional to max(setpoint − outdoor, 0).
 const HeatingReferenceC = 18.0
 
-// HeatingAlpha is the EMA weight applied to per-sample heating-slope
-// estimates. ~0.01 picks up systematic bias within a few hundred cold
-// samples (~1–2 weeks of every-15-min telemetry) while staying robust
-// to noise and to the bucket↔coef joint-fit underdetermination.
 const HeatingAlpha = 0.01
 
-// HeatingMinDeltaT gates the online fit: a sample whose deltaT is too
-// small (warm day, near reference) contributes too much noise via the
-// 1/deltaT divisor in the SGD step. Skip it. Bucket EMA still updates.
 const HeatingMinDeltaT = 3.0
 
-// HeatingCoefMaxW is the physical upper bound for the learned slope.
-// District-heating-replacement territory; well above any single-family
-// home. Clamp prevents one anomalous sample from blowing up the fit.
 const HeatingCoefMaxW = 1500.0
 
-// PlausibleLoadHeadroom multiplies the main fuse capacity to get the
-// point past which a reading must be a fault. Above 1.0 because a fuse
-// tolerates brief overload and a meter can overshoot a step; well below
-// anything a real house sustains, so a genuine 11 kW hour on a 25 A
-// service is nowhere near it.
 const PlausibleLoadHeadroom = 1.25
 
-// Profile selects which learned occupancy profile is used for training
-// and prediction.
 type Profile string
 
 const (
@@ -84,7 +32,6 @@ const (
 
 const awayPriorScale = 0.25
 
-// Profiles returns the supported load-model profiles in display order.
 func Profiles() []Profile {
 	return []Profile{ProfileHome, ProfileAway}
 }
@@ -98,40 +45,41 @@ func (p Profile) valid() bool {
 	}
 }
 
-// Bucket holds one hour-of-week's learned state.
 type Bucket struct {
-	Mean    float64 `json:"mean"` // EMA of observed load (W)
-	Samples int64   `json:"samples"`
+	Mean         float64 `json:"mean"` // Day-weighted observed load (W)
+	Samples      int64   `json:"samples"`
+	Days         int64   `json:"days"`
+	LastDay      string  `json:"last_day"`
+	LastMs       int64   `json:"last_ms"`
+	DaySum       float64 `json:"day_sum"`
+	DaySamples   int64   `json:"day_samples"`
+	PreviousMean float64 `json:"previous_mean"`
 }
 
-// Model is the hour-of-week + heating-gain predictor.
 type Model struct {
+	ConfigRevision    string          `json:"config_revision,omitempty"`
+	LearningStartedMS int64           `json:"learning_started_ms,omitempty"`
+	Timezone          string          `json:"timezone,omitempty"`
+	LastTemperatureC  float64         `json:"last_temperature_c"`
+	HasTemperature    bool            `json:"has_temperature"`
 	Bucket            [Buckets]Bucket `json:"bucket"`
 	HeatingW_per_degC float64         `json:"heating_w_per_degc"`
 	PeakW             float64         `json:"peak_w"`
 	Samples           int64           `json:"samples"`
 	LastMs            int64           `json:"last_ms"`
 	MAE               float64         `json:"mae"`
-	Alpha             float64         `json:"alpha"` // EMA coefficient for bucket updates
+	Alpha             float64         `json:"alpha"` // Retained for state compatibility
 	PriorScale        float64         `json:"prior_scale,omitempty"`
 
-	// MaxPlausibleW is the physical ceiling a sample must fall under to be
-	// trained on: main fuse capacity plus headroom. Derived from configured
-	// hardware and never from what the model has learned, so it cannot be
-	// talked down by a model that has mislearned. 0 disables the check —
-	// the state a site with no fuse configuration is in.
+	// MaxPlausibleW remains for stored-state/API compatibility. Grid limits do not cap gross household load.
 	MaxPlausibleW float64 `json:"max_plausible_w,omitempty"`
 }
 
-// typicalPrior returns an approximate W load for a given hour-of-week
-// based on a generic single-family Swedish home. Peak dinner around
-// 18:00–19:00, morning coffee around 07:00, weekend patterns shifted
-// slightly later.
 func typicalPrior(hourOfWeek int) float64 {
 	weekday := hourOfWeek / 24
 	hour := hourOfWeek % 24
 	isWeekend := weekday >= 5 // Saturday (5), Sunday (6)
-	base := 300.0             // overnight baseload
+	base := 650.0             // overnight baseload — typical Swedish house today, not 2010
 	morning := 2000.0 * math.Exp(-0.5*math.Pow(float64(hour-7)/1.2, 2))
 	midday := 600.0 * math.Exp(-0.5*math.Pow(float64(hour-13)/2.5, 2))
 	eveningH := 18.5
@@ -143,7 +91,6 @@ func typicalPrior(hourOfWeek int) float64 {
 	return base + morning + midday + evening
 }
 
-// NewModel returns a model seeded with the typical prior on every bucket.
 func NewModel(peakW float64) *Model {
 	return newModel(peakW, 1)
 }
@@ -180,50 +127,30 @@ func (m Model) prior(hourOfWeek int) float64 {
 	return typicalPrior(hourOfWeek) * scale
 }
 
-// repairPoisonedBuckets resets bucket.Mean back to the prior for any bucket
-// whose stored mean has drifted below a floor of prior*poisonFloor. This
-// repairs models that were trained before the heating-subtraction guard was
-// in place: when heatEst exceeded actualLoad the code clamped baseSample to
-// 0, causing the EMA to decay toward zero over many cold-weather samples even
-// though a real baseline load (fridge, server, standby) always exists.
-//
-// Samples count is left intact — the data was genuinely observed, we just
-// can't trust the mean it produced. Setting Samples=0 would reset trust to 0
-// and re-expose the prior, but would also trigger the exact-running-mean path
-// for the next 10 samples on warm days which is acceptable. Either way the
-// repaired model quickly re-learns from warm-season observations.
-//
-// Floor is conservative (25% of prior) so we only touch buckets that are
-// clearly below any plausible real consumption — a house at 75 W overnight
-// would be unusual but possible, so we preserve those. A mean of 15 W for an
-// overnight bucket that has prior=300 W is unambiguously poisoned.
 const poisonFloor = 0.25
 
 func (m *Model) repairPoisonedBuckets() {
-	for i := 0; i < Buckets; i++ {
-		p := m.prior(i)
-		if m.Bucket[i].Mean < p*poisonFloor {
-			m.Bucket[i].Mean = p
-			m.Bucket[i].Samples = 0
+	for i := range m.Bucket {
+		if math.IsNaN(m.Bucket[i].Mean) || math.IsInf(m.Bucket[i].Mean, 0) || m.Bucket[i].Mean < 0 {
+			m.Bucket[i] = Bucket{Mean: m.prior(i)}
 		}
 	}
 }
+func (m Model) localTime(t time.Time) time.Time {
+	return t.In(siteLocation(m.Timezone))
+}
+func (m Model) hourOfWeek(t time.Time) int {
+	t = m.localTime(t)
+	return ((int(t.Weekday())+6)%7)*24 + t.Hour()
+}
 
-// HourOfWeek computes 0..167 for a time. Monday = 0 through Sunday.
-// Coerces to UTC so the bucket index stays stable across DST
-// transitions (wall-clock 19:00 maps to a different bucket in summer
-// vs. winter otherwise, silently misaligning the EMA).
+// HourOfWeek retains UTC indexing for older external callers. Model methods use their stored site timezone.
 func HourOfWeek(t time.Time) int {
 	u := t.UTC()
-	// time.Weekday: Sunday=0, Saturday=6. We shift so Monday=0.
 	wd := (int(u.Weekday()) + 6) % 7
 	return wd*24 + u.Hour()
 }
 
-// heatingGain is the load a learned slope predicts at an outdoor
-// temperature: linear in the shortfall below the reference, zero above it.
-// One definition, used by both Predict and Update and probed by
-// featureProbe — HeatingW_per_degC means nothing except against this shape.
 func heatingGain(coefWPerDegC, tempC float64) float64 {
 	if tempC >= HeatingReferenceC {
 		return 0
@@ -231,30 +158,8 @@ func heatingGain(coefWPerDegC, tempC float64) float64 {
 	return coefWPerDegC * (HeatingReferenceC - tempC)
 }
 
-// featureSemantics declares what the numbers this model learns from mean. It
-// is the half of the fingerprint a probe cannot derive: change what the
-// sampler subtracts before calling Update — stop netting out the EV, say —
-// and every bucket mean is a measurement of something else, while nothing in
-// the model's own code has moved.
-//
-// CHANGE THIS STRING in the commit that changes what a caller feeds in.
-// Changes to the bucket indexing or the heating shape need no edit here —
-// featureProbe moves the fingerprint on its own.
-const featureSemantics = "loadmodel/1 load=site_w_less_pv_bat_ev_v2x temp=outdoor_c target=house_w"
+const featureSemantics = "loadmodel/2 independent_days local_site_clock raw_complete_balance load=site_w_less_pv_bat_ev_v2x temp=outdoor_c target=house_w"
 
-// featureProbe pins the two things whose change would invalidate stored
-// coefficients: which bucket a moment maps to, and the shape the heating
-// slope is measured against.
-//
-// The instants are given in a non-UTC zone and sit near midnight on purpose.
-// Drop the UTC coercion in HourOfWeek and both the hour and the weekday move
-// for those — which is precisely the defect commit 3255deba fixed, the one
-// that silently misaligned every learned bucket across a DST change.
-//
-// Deliberately absent: typicalPrior. A bucket mean is measured watts and stays
-// meaningful when the prior it started from is retuned; the prior only sets
-// the fallback for buckets nobody has observed yet. Discarding months of
-// learned buckets over a prior tweak would cost more than it protects.
 func featureProbe() []float64 {
 	out := []float64{float64(Buckets), HeatingReferenceC}
 	zone := time.FixedZone("probe", 2*60*60)
@@ -277,92 +182,65 @@ var featureHash = sync.OnceValue(func() string {
 	return modelstate.Fingerprint(featureSemantics, featureProbe())
 })
 
-// FeatureHash fingerprints the feature space the bucket means and the heating
-// slope are fitted against. Stored state is only restored when its recorded
-// hash matches this one; see internal/modelstate for why, and service.go for
-// what happens when it does not.
 func FeatureHash() string { return featureHash() }
 
-// Predict returns the expected load (W, non-negative) at time t with
-// outdoor temperature tempC (0 if unknown). Blends per-bucket EMA with
-// the typical prior by sample count, then adds the heating correction.
+// Predict uses site local time. NaN temperature means unknown and retains the last known heat estimate.
 func (m Model) Predict(t time.Time, tempC float64) float64 {
-	idx := HourOfWeek(t)
+	idx := m.hourOfWeek(t)
 	b := m.Bucket[idx]
-	trust := float64(b.Samples) / MinTrustSamples
-	if trust > 1 {
-		trust = 1
-	}
+	trust := m.Coverage(t)
 	prior := m.prior(idx)
 	base := trust*b.Mean + (1-trust)*prior
+	if math.IsNaN(tempC) || math.IsInf(tempC, 0) {
+		if m.HasTemperature {
+			tempC = m.LastTemperatureC
+		} else {
+			tempC = HeatingReferenceC
+		}
+	}
 	y := base + heatingGain(m.HeatingW_per_degC, tempC)
+	if math.IsNaN(y) || math.IsInf(y, 0) {
+		y = prior
+	}
 	if y < 0 {
 		return 0
-	}
-	if m.PeakW > 0 && y > 3*m.PeakW {
-		y = 3 * m.PeakW
 	}
 	return y
 }
 
-// PredictNoTemp is a convenience that predicts without a temperature
-// signal — useful when no forecast is available.
-func (m Model) PredictNoTemp(t time.Time) float64 { return m.Predict(t, HeatingReferenceC) }
+func (m Model) PredictNoTemp(t time.Time) float64 { return m.Predict(t, math.NaN()) }
 
-// Update runs one online update. Feed (now, actual_load_w, outdoor_temp_c).
-// Pass 0 for tempC if unknown; we'll skip the heating fit in that case.
-// Returns true when the update was applied (not filtered as an outlier).
+// Update requires a valid complete electrical balance. Zero degrees is real weather; NaN is unknown.
 func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
-	if actualLoadW < 0 {
+	if actualLoadW < 0 || math.IsNaN(actualLoadW) || math.IsInf(actualLoadW, 0) || (m.LastMs > 0 && t.UnixMilli() <= m.LastMs) {
 		return false
 	}
 
-	// Physical bound — the only sample filter this model needs, and the
-	// first thing it does. A house cannot draw more than its main fuse
-	// passes, so a reading above it is a fault and must touch nothing:
-	// not the buckets, not MAE, and not the heating coefficient. Running
-	// it after the heating fit let one cold-weather meter fault move
-	// HeatingW_per_degC while Update still reported no update applied,
-	// and repeated faults could walk the coefficient to its ceiling.
-	//
-	// A household's real load is strongly multimodal: a few hundred watts
-	// of baseline for most of the day, then 11 kW when the sauna, oven and
-	// car overlap. Both are true readings. Nothing about a residual's size
-	// distinguishes "unusual but real" from "wrong", which is why this is
-	// the only rejection left — see the git history for the MAE band that
-	// used to sit below, and what it cost.
-	//
-	// Short-term noise is handled a layer down: telemetry runs a Kalman
-	// filter per signal and this model reads the smoothed values.
-	if m.MaxPlausibleW > 0 && actualLoadW > m.MaxPlausibleW {
-		return false
-	}
-
-	idx := HourOfWeek(t)
+	idx := m.hourOfWeek(t)
 	b := &m.Bucket[idx]
+	if b.LastMs > 0 && t.UnixMilli() <= b.LastMs {
+		return false
+	}
+	knownTemp := !math.IsNaN(tempC) && !math.IsInf(tempC, 0)
+	if knownTemp {
+		m.LastTemperatureC = tempC
+		m.HasTemperature = true
+	} else if m.HasTemperature {
+		tempC = m.LastTemperatureC
+	} else {
+		tempC = HeatingReferenceC
+	}
 	predicted := m.Predict(t, tempC)
 	err := actualLoadW - predicted
 
-	// ---- Online heating fit ----
-	// Adapt HeatingW_per_degC from observed residuals before the outlier
-	// filter so a wildly stale coefficient can recover: every cold sample
-	// would otherwise look like an outlier vs the warm-day MAE, and no
-	// data could ever pull the coefficient down. Bucket-trust gates the
-	// fit because the residual derives the slope from the bucket
-	// baseline; an untrusted bucket would feed prior error into the
-	// heating estimate.
-	//
-	// SGD step on the squared-error loss: d/d(coef) ∝ −err · deltaT,
-	// so coef ← coef + α · err / deltaT (the 1/deltaT cancels the
-	// gradient's deltaT factor, giving a per-sample slope estimate).
-	// HeatingMinDeltaT gates near-reference samples where 1/deltaT
-	// amplifies noise. Clamp to [0, HeatingCoefMaxW]: floor at zero
-	// (heating doesn't go negative physically); a household whose load
-	// is unaffected by outdoor temperature gracefully settles at the
-	// floor.
-	if tempC < HeatingReferenceC-HeatingMinDeltaT && b.Samples >= MinTrustSamples {
+	if knownTemp && tempC < HeatingReferenceC-HeatingMinDeltaT && b.Days >= MinTrustSamples {
 		deltaT := HeatingReferenceC - tempC
-		m.HeatingW_per_degC += HeatingAlpha * err / deltaT
+		elapsedHours := 1.0
+		if m.LastMs > 0 {
+			elapsedHours = math.Min(1, math.Max(0, t.Sub(time.UnixMilli(m.LastMs)).Hours()))
+		}
+		alpha := 1 - math.Pow(1-HeatingAlpha, elapsedHours)
+		m.HeatingW_per_degC += alpha * err / deltaT
 		if m.HeatingW_per_degC < 0 {
 			m.HeatingW_per_degC = 0
 		}
@@ -371,34 +249,26 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		}
 	}
 
-	// Bucket update: exact running mean for the first 10 samples (crisp
-	// early convergence), EMA after (smooth drift as the home evolves).
-	// Subtract the current heating-gain estimate so the bucket learns
-	// the "base" load — heating varies day-to-day and shouldn't smear
-	// into the hour-of-week signature.
-	//
-	// Guard: when the heating estimate exceeds the measured load we
-	// cannot cleanly isolate the base load from the heating component.
-	// Storing 0 would poison the bucket (the EMA decays toward 0 even
-	// though a real baseline — fridge, server, standby — always exists).
-	// Instead, skip the bucket update entirely for this sample and let
-	// existing Samples + Mean stand. Global Samples and MAE still update.
 	heatEst := heatingGain(m.HeatingW_per_degC, tempC)
-	if heatEst < actualLoadW {
+	if heatEst <= actualLoadW {
 		baseSample := actualLoadW - heatEst
-		if b.Samples < 10 {
-			b.Mean = (b.Mean*float64(b.Samples) + baseSample) / float64(b.Samples+1)
-		} else {
-			b.Mean = (1-m.Alpha)*b.Mean + m.Alpha*baseSample
+		day := m.localTime(t).Format("2006-01-02")
+		if day != b.LastDay {
+			b.Days++
+			b.LastDay = day
+			b.PreviousMean = b.Mean
+			b.DaySum = 0
+			b.DaySamples = 0
 		}
+		b.DaySum += baseSample
+		b.DaySamples++
 		b.Samples++
+		// Average within a day before applying its weight to the weekly hour.
+		// Polling more often cannot give that day more structural influence.
+		weight := 1 / math.Min(float64(b.Days), 10)
+		b.Mean = (1-weight)*b.PreviousMean + weight*b.DaySum/float64(b.DaySamples)
+		b.LastMs = t.UnixMilli()
 	}
-	// Heating coefficient is adapted online above. The operator value
-	// (Planner.HeatingWPerDegC) seeds the initial estimate and is also
-	// applied on /api/loadmodel/reset; from there observation drives the
-	// fit. For a household whose load doesn't track temperature, the
-	// coefficient converges toward zero — which matches the user-visible
-	// guarantee "the model uses what it sees".
 
 	m.Samples++
 	m.LastMs = t.UnixMilli()
@@ -410,20 +280,17 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	return true
 }
 
-// Quality reports confidence in [0, 1]. Roughly: what fraction of
-// buckets have enough samples to be trusted, weighted by MAE.
 func (m Model) Quality() float64 {
 	if m.PeakW <= 0 {
 		return 0
 	}
 	var warm int
 	for i := 0; i < Buckets; i++ {
-		if m.Bucket[i].Samples >= MinTrustSamples {
+		if m.Bucket[i].Days >= MinTrustSamples {
 			warm++
 		}
 	}
 	coverage := float64(warm) / float64(Buckets)
-	// Accuracy factor based on MAE vs peak.
 	accuracy := 0.0
 	if m.Samples > 0 {
 		rel := m.MAE / m.PeakW
@@ -433,5 +300,31 @@ func (m Model) Quality() float64 {
 			accuracy = 1 - (rel-0.05)/0.45
 		}
 	}
-	return 0.5*coverage + 0.5*accuracy
+	return coverage * accuracy
+}
+
+var locationCache sync.Map
+
+func siteLocation(zone string) *time.Location {
+	if loc, ok := locationCache.Load(zone); ok {
+		return loc.(*time.Location)
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		loc = time.UTC
+	}
+	locationCache.Store(zone, loc)
+	return loc
+}
+
+// Coverage measures independent local days at this hour. Unseen seasons lose
+// trust after thirty days without observations; training error alone is not trust.
+func (m Model) Coverage(t time.Time) float64 {
+	b := m.Bucket[m.hourOfWeek(t)]
+	trust := math.Min(1, float64(b.Days)/MinTrustSamples)
+	if b.LastMs > 0 {
+		ageDays := t.Sub(time.UnixMilli(b.LastMs)).Hours() / 24
+		trust *= math.Exp(-math.Max(0, ageDays-30) / 60)
+	}
+	return trust
 }

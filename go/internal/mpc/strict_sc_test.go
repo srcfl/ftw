@@ -16,7 +16,7 @@ func TestStrictSelfConsumptionDischargesWhenSoCHealthy(t *testing.T) {
 			LoadW: 3480, PVW: -1985, Confidence: 1.0},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	p.TerminalSoCPrice = 107 // roughly selfConsumptionTerminalPrice output
 
 	plan := Optimize(slots, p)
@@ -27,7 +27,7 @@ func TestStrictSelfConsumptionDischargesWhenSoCHealthy(t *testing.T) {
 	if first.BatteryW >= -100 {
 		t.Errorf("strict SC expected battery discharge > 100 W, got BatteryW=%.1f "+
 			"(GridW=%.1f, SoC=%.1f%%, reason=%q)",
-			first.BatteryW, first.GridW, first.SoCPct, first.Reason)
+			first.BatteryW, first.GridW, first.SoC, first.Reason)
 	}
 	// GridW should be lower than baseline 2090 W import — discharging
 	// pulls it down.
@@ -64,7 +64,7 @@ func TestStrictSelfConsumptionDoesNotStarveEVDeadline(t *testing.T) {
 			LoadW: 500, PVW: -200, Confidence: 1.0},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 80 // well above floor+20
+	p.InitialSoC = 0.8 // well above floor+20
 	p.TerminalSoCPrice = 100
 	p.MaxDischargeW = 1000 // battery can't cover load + EV alone
 	p.MaxChargeW = 1000
@@ -72,10 +72,10 @@ func TestStrictSelfConsumptionDoesNotStarveEVDeadline(t *testing.T) {
 		ID:               "garage",
 		CapacityWh:       10000,
 		Levels:           11,
-		MaxPct:           100,
-		InitialSoCPct:    20,
+		SoCMax:           1.0,
+		InitialSoC: 0.2,
 		PluggedIn:        true,
-		TargetSoCPct:     40, // need 2 kWh
+		TargetSoC: 0.4, // need 2 kWh
 		TargetSlotIdx:    0,  // deadline = slot 0
 		MaxChargeW:       2500,
 		AllowedStepsW:    []float64{0, 2500},
@@ -117,9 +117,9 @@ func TestUpdateCapacityPropagatesToDefaults(t *testing.T) {
 
 // TestStrictSelfConsumptionRespectsFloor — replaces the old
 // BacksOffNearSoCFloor test after #157. The strict-SC bias now
-// extends all the way down to SoCMinPct: the operator's configured
+// extends all the way down to SoCMin: the operator's configured
 // floor IS the reserve, no implicit +20 % buffer on top. The DP
-// must still never drive SoC below SoCMinPct because the SoC-
+// must still never drive SoC below SoCMin because the SoC-
 // transition feasibility check rejects it.
 //
 // We start at SoC = 22 % (12 % above the 10 % floor) so the action
@@ -133,27 +133,27 @@ func TestStrictSelfConsumptionRespectsFloor(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 166, LoadW: 3480, PVW: -1390, Confidence: 1.0},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 22 // comfortably above min (10) but well below the old min+20 buffer
+	p.InitialSoC = 0.22 // comfortably above min (10) but well below the old min+20 buffer
 	p.TerminalSoCPrice = 200
 	plan := Optimize(slots, p)
-	// Floor is hard: SoC must not dip below SoCMinPct.
-	if plan.Actions[0].SoCPct < p.SoCMinPct-1e-6 {
+	// Floor is hard: SoC must not dip below SoCMin.
+	if plan.Actions[0].SoC < p.SoCMin-1e-6 {
 		t.Errorf("SoC went below configured floor: %.2f < %.2f",
-			plan.Actions[0].SoCPct, p.SoCMinPct)
+			plan.Actions[0].SoC, p.SoCMin)
 	}
 	// With the +20 buffer removed the bias is active here — DP
 	// should discharge rather than idle, since the slot price is
 	// well above zero and the battery has room above the hard floor.
 	if plan.Actions[0].BatteryW >= -50 {
 		t.Errorf("expected discharge under strict-SC bias at SoC=%.0f%% (floor=%.0f%%); "+
-			"got BatteryW=%.1f", p.InitialSoCPct, p.SoCMinPct, plan.Actions[0].BatteryW)
+			"got BatteryW=%.1f", p.InitialSoC, p.SoCMin, plan.Actions[0].BatteryW)
 	}
 }
 
 // TestStrictSelfConsumptionDischargesBelowOldBufferAtHighPrice is the
 // regression for #157: field report 2026-04-20 of the planner idling
 // at Tue 02:15 with SoC ≈ 27 %, importing 5.3 kW at 206 öre, because
-// the strict-SC bias used to be gated by `soc > SoCMinPct+20`. Below
+// the strict-SC bias used to be gated by `soc > SoCMin+20`. Below
 // that threshold the DP fell back to pure cost minimisation and
 // preferred reserving the last 17 % of capacity for the morning peak
 // — arbitrage behaviour the operator did not ask for.
@@ -163,7 +163,7 @@ func TestStrictSelfConsumptionDischargesBelowOldBufferAtHighPrice(t *testing.T) 
 			LoadW: 5300, PVW: 0, Confidence: 1.0},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 28     // just below the old floor+20 threshold (10+20)
+	p.InitialSoC = 0.28     // just below the old floor+20 threshold (10+20)
 	p.TerminalSoCPrice = 100 // modest terminal; not strong enough to dominate
 	plan := Optimize(slots, p)
 	if len(plan.Actions) == 0 {
@@ -173,10 +173,10 @@ func TestStrictSelfConsumptionDischargesBelowOldBufferAtHighPrice(t *testing.T) 
 	if first.BatteryW >= -100 {
 		t.Errorf("expected discharge below the old floor+20 buffer at price=206 öre; "+
 			"got BatteryW=%.1f (SoC=%.1f%%, reason=%q)",
-			first.BatteryW, first.SoCPct, first.Reason)
+			first.BatteryW, first.SoC, first.Reason)
 	}
 	// Floor is still respected.
-	if first.SoCPct < p.SoCMinPct-1e-6 {
-		t.Errorf("SoC went below configured floor: %.2f < %.2f", first.SoCPct, p.SoCMinPct)
+	if first.SoC < p.SoCMin-1e-6 {
+		t.Errorf("SoC went below configured floor: %.2f < %.2f", first.SoC, p.SoCMin)
 	}
 }

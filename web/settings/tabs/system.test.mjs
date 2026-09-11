@@ -1,5 +1,6 @@
 // node --test web/settings/tabs/system.test.mjs
 
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -39,13 +40,49 @@ describe("optimizerStatus", () => {
     assert.match(got.warning, /optimizer socket unavailable/);
   });
 
-  it("keeps explicit Go DP free of optimizer warnings", () => {
+  it("keeps a Core-only planner free of optimizer warnings", () => {
     assert.deepEqual(optimizerStatus({ configured: false }), {
-      label: "Go DP only",
+      label: "Core planner",
       degraded: false,
       warning: "",
       lastPlanAtMs: 0,
     });
+  });
+
+  it("treats a healthy Python shadow behind a Core plan as normal", () => {
+    const got = optimizerStatus({
+      configured: true,
+      role: "shadow",
+      healthy: true,
+      runtime: { version: "v2.3.0", transport: "unix" },
+      active_solver: { engine: "core", backend: "dp", status: "optimal" },
+      last_plan_at_ms: 99,
+    });
+    assert.equal(got.degraded, false);
+    assert.equal(got.warning, "");
+    assert.match(got.label, /shadow/);
+  });
+});
+
+describe("Ask why settings", () => {
+  it("renders the key field and default model", () => {
+    const html = globalThis.window.FTWSettings.tabs.system.render({
+      config: { assistant: { enabled: true, has_api_key: true, model: "openrouter/free" } },
+      escHtml: (s) => String(s ?? ""),
+    });
+    assert.match(html, /Ask why/);
+    assert.match(html, /data-checkbox-path="assistant.enabled"/);
+    assert.match(html, /data-path="assistant.api_key"/);
+    assert.match(html, /configured — hidden/);
+    assert.match(html, /openrouter\/free/);
+    assert.match(html, /never issues driver commands/);
+  });
+
+  it("checks Enable when a key is typed", () => {
+    const src = readFileSync(new URL("./system.js", import.meta.url), "utf8");
+    assert.match(src, /sys-assistant-key/);
+    assert.match(src, /enable\.checked = true/);
+    assert.match(src, /uncheck Enable later without deleting the key/);
   });
 });
 

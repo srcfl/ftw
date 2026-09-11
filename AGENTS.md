@@ -1,7 +1,7 @@
 # FTW project guide
 
 FTW is a local-first home energy management system written in Go, with Lua
-drivers and an optional Python/CVXPY optimizer.
+drivers and a compiled Energyplan worker.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ Read [docs/architecture.md](docs/architecture.md) for the system map and
 - A failed/stale driver receives its autonomous default mode.
 - Every clamp protects a quantified hardware or control risk.
 - Persistent device state is keyed by stable hardware identity, not a YAML name.
-- SQLite queries stay in [`go/internal/state`](go/internal/state).
+- Database queries stay in [`go/internal/state`](go/internal/state).
 
 ## Drivers
 
@@ -87,6 +87,10 @@ landed on somebody else's finished work.
   badly while it waits.
 - **Respect `.github/CODEOWNERS`.** An owner reviews what lands in their
   area, whoever — or whatever — wrote it.
+- **Do not request GitHub reviews except CODEOWNERS.** Never request
+  @erikarenhill and never @mention people for attention — the GitHub
+  Discord bot turns both into pings. See
+  [`APPROVAL_POLICY.md`](APPROVAL_POLICY.md).
 - **Review web/UI changes in a browser.** A human must inspect the rendered
   interface; AI review and reading the source code are not enough.
 
@@ -98,7 +102,7 @@ PR description, where it is read during review and then archived.
 ## Build and test
 
 ```bash
-make test         # Go and Python suites; independent work runs in parallel
+make test         # Go suites; independent work runs in parallel
 make verify       # tests, compose migration, vet and build
 make e2e          # full local stack
 make dev          # simulators + app
@@ -131,6 +135,53 @@ Normal path:
 2. Publish beta `vX.Y.Z-beta.N` from that exact commit.
 3. Validate that beta on real sites.
 4. Promote the same commit to stable `vX.Y.Z`.
+
+### Who releases, and when
+
+The repository owner cuts every release, unless they have explicitly
+handed that duty to someone. Cutting a beta needs green CI and nothing
+else: the owner may merge ahead of a pending review to keep pace,
+because in this project review happens on the beta as much as in the
+PR. Fast-tracking moves a review, it never removes it — the CODEOWNERS
+owner still reviews what landed in their area, on the running beta.
+
+Beta is the playground. Every merged change ships in the next beta;
+testers run it on real sites and file what they find as issues or PRs,
+each naming the beta it was seen on. Label a finding `release-blocker`
+when the line must not promote to stable until it is fixed.
+
+There is no release calendar. A beta promotes once it has run on the
+validation sites for a few days with no open `release-blocker`, and
+betas should promote often enough that beta and stable never drift far
+apart — weeks, not months.
+
+### Hotfixing a stable while beta is ahead
+
+When the newest stable has a critical bug and master has moved on, do
+not promote the moving beta line. Patch the stable line in place:
+
+1. `git checkout -b hotfix/vX.Y vX.Y.Z` from the affected stable tag.
+2. Land the fix on the branch — cherry-pick from master when it is
+   already fixed there, otherwise fix it here AND on master. A hotfix
+   that misses master regresses at the next release.
+3. Add the changeset and run `npx changeset version` on the branch,
+   then commit. The Version Packages bot only serves master; on a
+   hotfix branch changesets runs by hand, which still counts as
+   "changesets edits the version, not you".
+4. If the old line's release workflows predate current fixes,
+   cherry-pick `.github/workflows/beta.yml` and `release.yml` from
+   master first — the draft-recovery principle: workflow code from
+   master, binaries from the immutable tag.
+5. `gh workflow run beta.yml --ref hotfix/vX.Y -f version=vX.Y.<Z+1>-beta.1`
+6. Validate on an affected site, pinned explicitly via
+   `POST /api/version/update`.
+7. `gh workflow run release.yml --ref vX.Y.<Z+1>-beta.1 -f source_beta=vX.Y.<Z+1>-beta.1`
+
+The channels then do the right thing on their own: stable boxes see the
+hotfix because it is the newest published stable, and beta boxes are
+never offered a downgrade (the updater's `isNewer` guard). A hotfix
+beta briefly occupies the "latest beta" slot until the next main-line
+beta publishes — keep that window short.
 
 Do not create a new beta, tag, draft or candidate to recover a failed
 stable publish. Resume the existing draft by its numeric GitHub Release

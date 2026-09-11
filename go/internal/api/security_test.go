@@ -107,6 +107,12 @@ func TestAuthenticateGuardsProtectedReads(t *testing.T) {
 		{name: "support dump via HEAD", method: http.MethodHead, path: "/api/support/dump"},
 		{name: "support report", method: http.MethodGet, path: "/api/support/report"},
 		{name: "support report via HEAD", method: http.MethodHead, path: "/api/support/report"},
+		{name: "assistant status", method: http.MethodGet, path: "/api/assistant/status"},
+		{name: "assistant status via HEAD", method: http.MethodHead, path: "/api/assistant/status"},
+		{name: "Ask why history", method: http.MethodGet, path: "/api/assistant/threads"},
+		{name: "Ask why history via HEAD", method: http.MethodHead, path: "/api/assistant/threads"},
+		{name: "one Ask why conversation", method: http.MethodGet, path: "/api/assistant/threads/aaaa000000000001"},
+		{name: "one Ask why conversation via HEAD", method: http.MethodHead, path: "/api/assistant/threads/aaaa000000000001"},
 		{name: "logs", method: http.MethodGet, path: "/api/logs"},
 		{name: "logs via HEAD", method: http.MethodHead, path: "/api/logs"},
 		{name: "system info", method: http.MethodGet, path: "/api/system/info"},
@@ -143,6 +149,21 @@ func TestAuthenticateGuardsProtectedReads(t *testing.T) {
 		{name: "notification history via HEAD", method: http.MethodHead, path: "/api/notifications/history"},
 		{name: "version snapshots", method: http.MethodGet, path: "/api/version/snapshots"},
 		{name: "version snapshots via HEAD", method: http.MethodHead, path: "/api/version/snapshots"},
+		{name: "driver list", method: http.MethodGet, path: "/api/drivers"},
+		{name: "driver list via HEAD", method: http.MethodHead, path: "/api/drivers"},
+		{name: "driver draft", method: http.MethodGet, path: "/api/drivers/sonnen/draft"},
+		{name: "EV status", method: http.MethodGet, path: "/api/ev/status"},
+		{name: "EV status via HEAD", method: http.MethodHead, path: "/api/ev/status"},
+		{name: "series", method: http.MethodGet, path: "/api/series"},
+		{name: "series catalog", method: http.MethodGet, path: "/api/series/catalog"},
+		{name: "planner diagnose", method: http.MethodGet, path: "/api/mpc/diagnose"},
+		{name: "planner diagnose history", method: http.MethodGet, path: "/api/mpc/diagnose/history"},
+		{name: "planner diagnose at", method: http.MethodGet, path: "/api/mpc/diagnose/at"},
+		{name: "fleet ping", method: http.MethodGet, path: "/api/fleet-ping"},
+		{name: "notification rules", method: http.MethodGet, path: "/api/notifications/rules"},
+		{name: "device repository catalog", method: http.MethodGet, path: "/api/device_repository/catalog"},
+		{name: "device repository versions", method: http.MethodGet, path: "/api/device_repository/drivers/sonnen/versions"},
+		{name: "app-link status", method: http.MethodGet, path: "/api/app-link/status"},
 	}
 
 	for _, tc := range guarded {
@@ -188,6 +209,10 @@ func TestAuthenticateLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing.T)
 		{method: http.MethodGet, path: "/api/energy/history"},
 		{method: http.MethodGet, path: "/api/prices"},
 		{method: http.MethodGet, path: "/api/mpc/plan"},
+		// Dashboard poll — must stay open so lan_auth does not pop a login
+		// on every 2s status tick.
+		{method: http.MethodGet, path: "/api/loadpoints"},
+		{method: http.MethodGet, path: "/api/history"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "http://ftw.local:8080"+tc.path, nil)
@@ -213,6 +238,9 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 		"/api/config",
 		"/api/support/dump",
 		"/api/support/report",
+		"/api/assistant/status",
+		"/api/assistant/threads",
+		"/api/assistant/threads/aaaa000000000001",
 		"/api/logs",
 		"/api/system/info",
 		"/api/storage/inventory",
@@ -230,7 +258,19 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 		"/api/caldav/status",
 		"/api/notifications/status",
 		"/api/notifications/history",
+		"/api/notifications/rules",
 		"/api/version/snapshots",
+		"/api/drivers",
+		"/api/drivers/sonnen/draft",
+		"/api/ev/status",
+		"/api/series",
+		"/api/series/catalog",
+		"/api/mpc/diagnose",
+		"/api/mpc/diagnose/history",
+		"/api/fleet-ping",
+		"/api/device_repository/catalog",
+		"/api/device_repository/drivers/sonnen/versions",
+		"/api/app-link/status",
 	} {
 		t.Run(path, func(t *testing.T) {
 			request := func(auth string) *httptest.ResponseRecorder {
@@ -315,6 +355,18 @@ func TestAuthenticateRequiresBearerTokenForRemoteHost(t *testing.T) {
 	Authenticate(statusHandler(http.StatusNoContent), locked).ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("unconfigured remote policy status = %d, want 403", rr.Code)
+	}
+}
+
+func TestAuthenticateNoDotHostIsNotLocal(t *testing.T) {
+	req := mutationRequest(sensitiveMutations[4], "http://intranet:8080")
+	req.RemoteAddr = "192.168.1.10:43210"
+	req.Header.Set("Origin", "http://intranet:8080")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rr := httptest.NewRecorder()
+	Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true}).ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("no-dot host status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
 	}
 }
 

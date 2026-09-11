@@ -112,8 +112,17 @@ func NewWebPush(key VAPIDKey, store SubscriptionStore) (*WebPush, error) {
 	return &WebPush{
 		key:   key,
 		store: store,
-		http:  &http.Client{Timeout: 10 * time.Second},
-		now:   time.Now,
+		http: &http.Client{
+			Timeout: 10 * time.Second,
+			// Push services do not need redirects. A 307 or 308 would
+			// resend this body, so refuse every hop: a stored https
+			// endpoint must not bounce the encrypted payload onto the
+			// LAN or loopback.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		now: time.Now,
 	}, nil
 }
 
@@ -151,7 +160,7 @@ func (w *WebPush) Publish(ctx context.Context, m Message) error {
 		return ErrNothingToSend
 	}
 
-	payload, err := json.Marshal(map[string]string{"title": m.Title, "body": m.Body})
+	payload, err := json.Marshal(map[string]string{"title": m.Title, "body": m.Body, "kind": m.Kind, "loadpoint_id": m.LoadpointID})
 	if err != nil {
 		return fmt.Errorf("webpush: encode payload: %w", err)
 	}

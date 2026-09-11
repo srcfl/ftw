@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/config"
@@ -172,11 +171,7 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		}()
 	})
 
-	srv := &http.Server{
-		Addr:              ":8080",
-		Handler:           secureBootstrapMutations(mux),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newHTTPServer(":8080", secureBootstrapMutations(mux))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("bootstrap server", "err", err)
 		os.Exit(1)

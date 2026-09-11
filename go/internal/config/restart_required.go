@@ -12,11 +12,11 @@ import "reflect"
 //
 //   - Site control scalars (grid_target, tolerance, slew, min_dispatch),
 //     fuse params, drivers, capacities, inverter groups, driver limits,
-//     loadpoints, notifications, MPC capacity, the Weather subset
+//     loadpoints, notifications, assistant, MPC capacity, the Weather subset
 //     {pv_rated_w, latitude, longitude}, fleet_ping.enabled, and
 //     home_assistant.* reload live.
 //   - Everything else (api.port, state.path, price.*, planner.*, nova.*,
-//     ev_charger.*, caldav.*, modbus_proxy.*, weather.provider/arrays,
+//     ev_charger.*, ocpp.*, modbus_proxy.*, weather.provider/arrays,
 //     site.control_interval_s, site.watchdog_timeout_s, site.smoothing_alpha,
 //     site.gain) needs the binary restarted to take effect.
 //
@@ -78,11 +78,16 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg.FleetPing.Resolved() != newCfg.FleetPing.Resolved() {
 		reasons = append(reasons, "fleet_ping.endpoint — the sender resolves its endpoint at startup")
 	}
+	// The OCPP central system is started once in main.go; the config
+	// applier neither starts, stops nor re-arms it. Without this entry
+	// the Chargers panel's enable toggle saved cleanly, reported no
+	// restart needed, and the listener never opened — the exact silent
+	// failure the comment at the top of this file warns about.
+	if !pointerEqual(oldCfg.OCPP, newCfg.OCPP) {
+		reasons = append(reasons, "ocpp — the central system listener is started at startup")
+	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")
-	}
-	if !pointerEqual(oldCfg.CalDAV, newCfg.CalDAV) {
-		reasons = append(reasons, "caldav — native server, credentials, collections, and polling are wired at startup")
 	}
 
 	// Weather: PVRatedW, Latitude, Longitude reload live; everything else

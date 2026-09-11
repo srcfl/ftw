@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +33,7 @@ func externalTestFixture() ([]Slot, Params) {
 	}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 20,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.2,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 		TerminalSoCPrice: 20,
@@ -106,10 +104,10 @@ func TestValidatePlanAcceptsContinuousPowerTrajectory(t *testing.T) {
 	slots, p := externalTestFixture()
 	plan := Plan{
 		Mode: p.Mode, HorizonSlots: 2, CapacityWh: p.CapacityWh,
-		InitialSoCPct: p.InitialSoCPct, TotalCostOre: 29.085,
+		InitialSoC: p.InitialSoC, TotalCostOre: 29.085,
 		Actions: []Action{
-			{SlotStartMs: 1, SlotLenMin: 60, BatteryW: 1234.5, GridW: 1734.5, SoCPct: 31.72775, CostOre: 34.69},
-			{SlotStartMs: 3600001, SlotLenMin: 60, BatteryW: -2000, GridW: 500, SoCPct: 10.67511842105263, CostOre: 150},
+			{SlotStartMs: 1, SlotLenMin: 60, BatteryW: 1234.5, GridW: 1734.5, SoC: 0.317277, CostOre: 34.69},
+			{SlotStartMs: 3600001, SlotLenMin: 60, BatteryW: -2000, GridW: 500, SoC: 0.106751, CostOre: 150},
 		},
 	}
 	// Raw total cost is the sum of both slot costs.
@@ -123,7 +121,7 @@ func TestValidatePlanRejectsBrokenGridBalance(t *testing.T) {
 	slots, p := externalTestFixture()
 	plan := Optimize(slots, Params{
 		Mode: p.Mode, SoCLevels: 21, CapacityWh: p.CapacityWh,
-		SoCMinPct: p.SoCMinPct, SoCMaxPct: p.SoCMaxPct, InitialSoCPct: p.InitialSoCPct,
+		SoCMin: p.SoCMin, SoCMax: p.SoCMax, InitialSoC: p.InitialSoC,
 		ActionLevels: 21, MaxChargeW: p.MaxChargeW, MaxDischargeW: p.MaxDischargeW,
 		ChargeEfficiency: p.ChargeEfficiency, DischargeEfficiency: p.DischargeEfficiency,
 		TerminalSoCPrice: p.TerminalSoCPrice,
@@ -138,16 +136,58 @@ func TestValidatePlanAcceptsSubWattSolverResidueInPassiveMode(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
 	p := Params{
 		Mode: ModePassiveArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
 	plan := Plan{TotalCostOre: -0.0000025, Actions: []Action{{
 		SlotStartMs: 1, SlotLenMin: 15, BatteryW: -0.0001, GridW: -0.0001,
-		SoCPct: 49.99999975, CostOre: -0.0000025,
+		SoC: 0.5, CostOre: -0.0000025,
 	}}}
 	if err := ValidatePlan(slots, p, &plan); err != nil {
 		t.Fatalf("ValidatePlan rejected numerical solver residue: %v", err)
+	}
+}
+
+func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
+	const limitW = 11040.0
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	tests := []struct {
+		name    string
+		gridW   float64
+		wantErr bool
+	}{
+		{name: "import solver residue", gridW: limitW + 0.000001},
+		{name: "export solver residue", gridW: -limitW - 0.000001},
+		{name: "import real violation", gridW: limitW + 1, wantErr: true},
+		{name: "export real violation", gridW: -limitW - 1, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			slot := Slot{
+				StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 50, Confidence: 1,
+				Limits: PowerLimits{MaxImportW: limitW, MaxExportW: limitW},
+			}
+			if tc.gridW > 0 {
+				slot.LoadW = tc.gridW
+			} else {
+				slot.PVW = tc.gridW
+			}
+			costOre := SlotGridCostOre(slot, tc.gridW*0.25/1000, p)
+			plan := Plan{TotalCostOre: costOre, Actions: []Action{{
+				SlotStartMs: 1, SlotLenMin: 15, GridW: tc.gridW,
+				SoC: 0.5, CostOre: costOre,
+			}}}
+			err := ValidatePlan([]Slot{slot}, p, &plan)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidatePlan() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -155,18 +195,70 @@ func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
 	p := Params{
 		Mode: ModePassiveArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
 	plan := Plan{TotalCostOre: -0.0025, Actions: []Action{{
 		SlotStartMs: 1, SlotLenMin: 15, BatteryW: -0.2, GridW: -0.2,
-		SoCPct: 49.9995, CostOre: -0.005,
+		SoC: 0.499995, CostOre: -0.005,
 	}}}
 	plan.TotalCostOre = plan.Actions[0].CostOre
 	err := ValidatePlan(slots, p, &plan)
 	if err == nil || !strings.Contains(err.Error(), "baseline_grid_w=") || !strings.Contains(err.Error(), "battery_w=") {
 		t.Fatalf("expected detailed mode error, got %v", err)
+	}
+}
+
+// gridLimitFixture builds a single arbitrage slot whose baseline grid flow is
+// exactly gridW, under an 11 040 W fuse (16 A x 3 x 230 V) and an 8 000 W
+// export cap, plus the matching zero-battery plan. Grid balance, mode and cost
+// all reconcile, so only the grid-limit check can reject it.
+func gridLimitFixture(gridW float64) ([]Slot, Params, Plan) {
+	slot := Slot{
+		StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 80, Confidence: 1,
+		Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 8000},
+	}
+	if gridW >= 0 {
+		slot.LoadW = gridW
+	} else {
+		slot.PVW = gridW
+	}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	costOre := SlotGridCostOre(slot, gridW*0.25/1000, p)
+	plan := Plan{TotalCostOre: costOre, Actions: []Action{{
+		SlotStartMs: 1, SlotLenMin: 15, BatteryW: 0, GridW: gridW,
+		SoC: p.InitialSoC, CostOre: costOre,
+	}}}
+	return []Slot{slot}, p, plan
+}
+
+func TestValidatePlanAcceptsGridFlowRidingTheLimit(t *testing.T) {
+	slots, p, plan := gridLimitFixture(11040 + 1e-9)
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected solver residue at the import limit: %v", err)
+	}
+	slots, p, plan = gridLimitFixture(-8000 - 1e-9)
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected solver residue at the export limit: %v", err)
+	}
+}
+
+func TestValidatePlanRejectsGridFlowPastTheLimit(t *testing.T) {
+	slots, p, plan := gridLimitFixture(11040 + 5)
+	err := ValidatePlan(slots, p, &plan)
+	if err == nil || !strings.Contains(err.Error(), "violates grid limits") {
+		t.Fatalf("ValidatePlan 5 W over the import limit = %v, want a grid-limit rejection", err)
+	}
+	slots, p, plan = gridLimitFixture(-8000 - 5)
+	err = ValidatePlan(slots, p, &plan)
+	if err == nil || !strings.Contains(err.Error(), "violates grid limits") {
+		t.Fatalf("ValidatePlan 5 W past the export limit = %v, want a grid-limit rejection", err)
 	}
 }
 
@@ -227,19 +319,19 @@ func TestValidatePlanAllowsButDoesNotWorsenInitialSoCBelowMinimum(t *testing.T) 
 	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 5,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.05,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	}
 	plan := Plan{TotalCostOre: 50, Actions: []Action{{
-		SlotStartMs: 1, SlotLenMin: 60, BatteryW: 0, GridW: 500, SoCPct: 5, CostOre: 50,
+		SlotStartMs: 1, SlotLenMin: 60, BatteryW: 0, GridW: 500, SoC: 0.05, CostOre: 50,
 	}}}
 	if err := ValidatePlan(slots, p, &plan); err != nil {
 		t.Fatalf("ValidatePlan rejected stable recovery state: %v", err)
 	}
 	plan.Actions[0] = Action{
 		SlotStartMs: 1, SlotLenMin: 60, BatteryW: -100, GridW: 400,
-		SoCPct: 3.947368421052632, CostOre: 40,
+		SoC: 0.039474, CostOre: 40,
 	}
 	plan.TotalCostOre = 40
 	if err := ValidatePlan(slots, p, &plan); err == nil {
@@ -251,21 +343,21 @@ func TestValidatePlanRejectsBatteryFedSurplusLoadpoint(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 70, Confidence: 1, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 		Loadpoint: &LoadpointSpec{
-			ID: "car", CapacityWh: 40000, Levels: 11, MinPct: 0, MaxPct: 100,
-			InitialSoCPct: 25, PluggedIn: true, MaxChargeW: 2000,
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1.0,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 2000,
 			AllowedStepsW: []float64{0, 2000}, ChargeEfficiency: 1,
 			SurplusOnly: true,
 		},
 	}
-	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoCPct: 50,
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.5,
 		TotalCostOre: 0, Actions: []Action{{
 			SlotStartMs: 1, SlotLenMin: 60,
-			BatteryW: -2000, GridW: 500, SoCPct: 28.94736842105263,
-			LoadpointW: 2000, LoadpointSoCPct: 30, CostOre: 50,
+			BatteryW: -2000, GridW: 500, SoC: 0.289474,
+			LoadpointW: 2000, LoadpointSoC: 0.3, CostOre: 50,
 		}}}
 	plan.TotalCostOre = 50
 	if err := ValidatePlan(slots, p, &plan); err == nil {
@@ -273,136 +365,162 @@ func TestValidatePlanRejectsBatteryFedSurplusLoadpoint(t *testing.T) {
 	}
 }
 
-func TestExternalOptimizerEndToEnd(t *testing.T) {
-	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
-	if python == "" {
-		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
+func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 30, SpotOre: 10, Confidence: 1, LoadW: 500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.2,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1.0,
+			InitialSoC: 0.8, PluggedIn: true, MaxChargeW: 2000,
+			AllowedStepsW: []float64{0, 2000}, ChargeEfficiency: 1,
+			SurplusOnly: true,
+		},
 	}
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	moduleDir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer"))
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{python, "-m", "ftw_optimizer.worker"},
-		ModuleDir: moduleDir, Timeout: 20 * time.Second,
-		Solver: "HIGHS", Formulation: "auto", MIPRelGap: 0.001,
-		IdleTimeout: 30 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer optimizer.Close()
-	slots, p := externalTestFixture()
-	plan, err := optimizer.Optimize(context.Background(), slots, p)
-	if err != nil {
-		t.Fatalf("Optimize: %v", err)
-	}
-	if plan.Solver == nil || plan.Solver.Engine != "highspy" || plan.Solver.Backend != "highs" ||
-		plan.Solver.ScenarioPolicy != "shared" || plan.Solver.PolicyVersion != "shared-v1" {
-		t.Fatalf("unexpected solver metadata: %+v", plan.Solver)
-	}
-	if plan.Actions[0].BatteryW <= 0 || plan.Actions[1].BatteryW >= 0 {
-		t.Fatalf("expected cheap-charge/expensive-discharge plan: %+v", plan.Actions)
-	}
-	recourse, err := optimizer.OptimizeRecourse(context.Background(), slots, p, 1)
-	if err != nil {
-		t.Fatalf("OptimizeRecourse: %v", err)
-	}
-	if recourse.Solver == nil || recourse.Solver.ScenarioPolicy != "recourse" || recourse.Solver.NonAnticipativeSlots != 1 {
-		t.Fatalf("unexpected recourse metadata: %+v", recourse.Solver)
-	}
-	multistage, err := optimizer.OptimizeMultistage(context.Background(), slots, p, 1)
-	if err != nil {
-		t.Fatalf("OptimizeMultistage: %v", err)
-	}
-	if multistage.Solver == nil || multistage.Solver.ScenarioPolicy != "multistage" || multistage.Solver.PolicyVersion != "storage-multistage-v1" {
-		t.Fatalf("unexpected multistage metadata: %+v", multistage.Solver)
-	}
-	if multistage.Solver.PolicyConfig == "" || multistage.Solver.ModelVariables == 0 || multistage.Solver.ModelConstraints == 0 {
-		t.Fatalf("missing direct multistage topology metadata: %+v", multistage.Solver)
-	}
-	transport, ok := optimizer.transport.(*ProcessTransport)
-	if !ok {
-		t.Fatalf("transport = %T, want *ProcessTransport", optimizer.transport)
-	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		transport.mu.Lock()
-		stopped := transport.cmd == nil
-		transport.mu.Unlock()
-		if stopped {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("real optimizer worker remained running after idle timeout")
-}
-
-func TestExternalOptimizerPlansMultipleLoadpoints(t *testing.T) {
-	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
-	if python == "" {
-		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
-	}
-	_, file, _, _ := runtime.Caller(0)
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{python, "-m", "ftw_optimizer.worker"},
-		ModuleDir: filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer")),
-		Timeout:   20 * time.Second, Solver: "HIGHS", Formulation: "auto",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer optimizer.Close()
-	slots, p := externalTestFixture()
-	p.Loadpoints = []*LoadpointSpec{
-		{ID: "car-a", CapacityWh: 40000, Levels: 11, MinPct: 0, MaxPct: 100, InitialSoCPct: 25, PluggedIn: true, TargetSoCPct: 30, TargetSlotIdx: 1, MaxChargeW: 4000, AllowedStepsW: []float64{0, 2000, 4000}, ChargeEfficiency: 1},
-		{ID: "car-b", CapacityWh: 60000, Levels: 11, MinPct: 0, MaxPct: 100, InitialSoCPct: 20, PluggedIn: true, TargetSoCPct: 25, TargetSlotIdx: 1, MaxChargeW: 3000, AllowedStepsW: []float64{0, 3000}, ChargeEfficiency: 1},
-	}
-	plan, err := optimizer.Optimize(context.Background(), slots, p)
-	if err != nil {
-		t.Fatalf("Optimize: %v", err)
-	}
-	last := plan.Actions[len(plan.Actions)-1]
-	if last.LoadpointSoCPctByID["car-a"] < 30-0.02 || last.LoadpointSoCPctByID["car-b"] < 25-0.02 {
-		t.Fatalf("targets not met: %+v", last.LoadpointSoCPctByID)
-	}
-	if len(last.LoadpointPowerW) != 2 {
-		t.Fatalf("expected two loadpoint schedules, got %+v", last.LoadpointPowerW)
+	// 4000 W charge for 1 h at 95% from 20% of 10 kWh → 20 + 38 = 58%.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.2,
+		TotalCostOre: 135, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 4000, GridW: 4500, SoC: 0.58,
+			LoadpointW: 0, LoadpointSoC: 0.8, CostOre: 135,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected idle surplus-only EV plus battery grid-charge: %v", err)
 	}
 }
 
-func TestExternalOptimizerPlansAndValidatesMultipleStorages(t *testing.T) {
-	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
-	if python == "" {
-		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
+func TestValidatePlanAllowsEVPVWithBatteryGridCharge(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 4140,
+			AllowedStepsW: []float64{0, 4140}, ChargeEfficiency: 1,
+			SurplusOnly: true, NoBatteryToEV: true,
+		},
 	}
-	_, file, _, _ := runtime.Caller(0)
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{python, "-m", "ftw_optimizer.worker"},
-		ModuleDir: filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer")),
-		Timeout:   20 * time.Second, Solver: "HIGHS", Formulation: "auto",
-	})
-	if err != nil {
-		t.Fatal(err)
+	// leftover PV after house = 6000 W. EV 4140 + battery 5000 →
+	// grid = 500-6500+5000+4140 = 3140 import. Battery SoC: 0.20 + 0.475 = 0.675.
+	// EV SoC: 0.25 + 4140/40000 = 0.3535.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
+		TotalCostOre: 62.8, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 5000, GridW: 3140, SoC: 0.675,
+			LoadpointW: 4140, LoadpointSoC: 0.3535, CostOre: 62.8,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected leftover-PV EV beside battery grid-charge: %v", err)
 	}
-	defer optimizer.Close()
-	slots, p := externalTestFixture()
-	p.Storages = []StorageAssetSpec{
-		{ID: "battery-a", CapacityWh: 4000, InitialEnergyWh: 800, MinEnergyWh: 400, MaxEnergyWh: 3800, MaxChargeW: 1500, MaxDischargeW: 2000, ChargeEfficiency: 0.95, DischargeEfficiency: 0.95},
-		{ID: "battery-b", CapacityWh: 6000, InitialEnergyWh: 1200, MinEnergyWh: 600, MaxEnergyWh: 5700, MaxChargeW: 3500, MaxDischargeW: 3000, ChargeEfficiency: 0.95, DischargeEfficiency: 0.95},
+}
+
+func TestValidatePlanRejectsSurplusOnlyEVAboveLeftoverPV(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 11000,
+			AllowedStepsW: []float64{0, 7000}, ChargeEfficiency: 1,
+			SurplusOnly: true, NoBatteryToEV: true,
+		},
 	}
-	plan, err := optimizer.Optimize(context.Background(), slots, p)
-	if err != nil {
-		t.Fatalf("Optimize: %v", err)
-	}
-	for i, action := range plan.Actions {
-		if len(action.StoragePowerW) != 2 || len(action.StorageEnergyWh) != 2 {
-			t.Fatalf("slot %d missing per-storage result: power=%+v energy=%+v", i, action.StoragePowerW, action.StorageEnergyWh)
-		}
-	}
-	plan.Actions[0].StorageEnergyWh["battery-a"] += 100
+	// leftover after house = 6000 W. EV 7000 exceeds it even though
+	// the home battery is the one importing.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
+		TotalCostOre: 120, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 5000, GridW: 6000, SoC: 0.675,
+			LoadpointW: 7000, LoadpointSoC: 0.425, CostOre: 120,
+		}}}
 	if err := ValidatePlan(slots, p, &plan); err == nil {
-		t.Fatal("ValidatePlan accepted a corrupted per-storage energy trajectory")
+		t.Fatal("ValidatePlan accepted surplus-only EV above leftover PV")
+	}
+}
+
+// The champion's scenarios and the Go fallback's downside slots have to
+// describe the same physics. Once the twin has learned a relative error, the
+// scenario spread is a share of each slot's own generation, not one watt
+// figure repeated across the horizon.
+func TestBuildRequestScenarioSpreadIsPerSlotWhenRelativeIsLearned(t *testing.T) {
+	start := time.Date(2026, 8, 30, 4, 0, 0, 0, time.UTC).UnixMilli()
+	gen := []float64{0, 500, 6000}
+	slots := make([]Slot, len(gen))
+	for i, g := range gen {
+		slots[i] = Slot{
+			StartMs: start + int64(i)*15*60*1000, LenMin: 15,
+			PriceOre: 100, SpotOre: 50, LoadW: 400, PVW: -g, Confidence: 1,
+		}
+	}
+	p := Params{
+		Mode: ModeArbitrage, SoCMin: 0.1, SoCMax: 0.95, SoCLevels: 11,
+		InitialSoC: 0.5, ActionLevels: 7, CapacityWh: 10000,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		PVUncertaintyW: 1891, PVRelativeUncertainty: 0.25, PVForecastSafetyK: 1,
+	}
+
+	req := (&ExternalOptimizer{}).buildRequest(slots, p)
+	if len(req.Scenarios) != 3 {
+		t.Fatalf("got %d scenarios, want 3", len(req.Scenarios))
+	}
+	down, ok := req.Scenarios[1]["pv_w"].([]float64)
+	if !ok {
+		t.Fatalf("downside pv_w has type %T", req.Scenarios[1]["pv_w"])
+	}
+	up, ok := req.Scenarios[2]["pv_w"].([]float64)
+	if !ok {
+		t.Fatalf("upside pv_w has type %T", req.Scenarios[2]["pv_w"])
+	}
+	for i, g := range gen {
+		wantDown, wantUp := -(g * 0.75), -(g * 1.25)
+		if g == 0 {
+			wantDown, wantUp = 0, 0 // night slots carry no spread either way
+		}
+		if down[i] != wantDown {
+			t.Errorf("downside[%d] = %v, want %v", i, down[i], wantDown)
+		}
+		if up[i] != wantUp {
+			t.Errorf("upside[%d] = %v, want %v", i, up[i], wantUp)
+		}
+	}
+}
+
+// With no learned relative error the scenarios keep the flat watt spread, so
+// a fresh site's champion sees exactly what it saw before.
+func TestBuildRequestScenarioSpreadStaysFlatWhenRelativeIsUnlearned(t *testing.T) {
+	start := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC).UnixMilli()
+	slots := []Slot{
+		{StartMs: start, LenMin: 15, PriceOre: 100, SpotOre: 50,
+			LoadW: 400, PVW: -6000, Confidence: 1},
+		{StartMs: start + 15*60*1000, LenMin: 15, PriceOre: 100, SpotOre: 50,
+			LoadW: 400, PVW: -500, Confidence: 1},
+	}
+	p := Params{
+		Mode: ModeArbitrage, SoCMin: 0.1, SoCMax: 0.95, SoCLevels: 11,
+		InitialSoC: 0.5, ActionLevels: 7, CapacityWh: 10000,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		PVUncertaintyW: 2000, PVForecastSafetyK: 1,
+	}
+
+	req := (&ExternalOptimizer{}).buildRequest(slots, p)
+	if len(req.Scenarios) != 3 {
+		t.Fatalf("got %d scenarios, want 3", len(req.Scenarios))
+	}
+	down := req.Scenarios[1]["pv_w"].([]float64)
+	if down[0] != -4000 {
+		t.Errorf("downside[0] = %v, want -4000 (6000 − 2000)", down[0])
+	}
+	if down[1] != 0 {
+		t.Errorf("downside[1] = %v, want 0 (500 W shoulder minus a 2000 W flat cut)", down[1])
 	}
 }

@@ -5,13 +5,13 @@ root="${FTW_RELEASE_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 beta="${root}/.github/workflows/beta.yml"
 release="${root}/.github/workflows/release.yml"
 assets="${root}/.github/workflows/release-assets.yml"
-optimizer_release="${root}/.github/workflows/optimizer-release.yml"
 compose="${root}/docker-compose.yml"
 compose_macos="${root}/docker-compose.macos.yml"
 dockerfile="${root}/Dockerfile"
+core_build="${root}/scripts/build-core.sh"
 release_guard="${root}/scripts/check-stable-release.py"
 
-for workflow in "${beta}" "${release}" "${assets}" "${optimizer_release}"; do
+for workflow in "${beta}" "${release}" "${assets}"; do
   if grep -Eq 'SOURCEFUL_GHCR_(USER|TOKEN)' "${workflow}"; then
     echo "canonical GHCR writes must use the workflow GITHUB_TOKEN: ${workflow}" >&2
     exit 1
@@ -21,8 +21,6 @@ grep -Fq 'username: ${{ github.actor }}' "${beta}"
 grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${beta}"
 grep -Fq 'CANONICAL_GHCR_USER: ${{ github.actor }}' "${assets}"
 grep -Fq 'CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}"
-grep -Fq 'username: ${{ github.actor }}' "${optimizer_release}"
-grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${beta}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${assets}"
@@ -149,7 +147,9 @@ grep -Fq 'Not moving :beta aliases backwards' "${beta}"
 grep -Fq '> ftw-image-digests.json' "${beta}"
 grep -Fq 'cmp ftw-image-digests.json existing/ftw-image-digests.json' "${beta}"
 grep -Fq '"${source}@${SOURCE_DIGEST}"' "${beta}"
-grep -Fq -- '-X main.CandidateTag=${CANDIDATE_TAG}' "${dockerfile}"
+grep -Fq 'COPY scripts/build-core.sh ./scripts/build-core.sh' "${dockerfile}"
+grep -Fq 'bash scripts/build-core.sh "$TARGETOS" "$TARGETARCH" /out' "${dockerfile}"
+grep -Fq -- '-X main.CandidateTag=${CANDIDATE_TAG:-}' "${core_build}"
 grep -Fq 'python3 - "${metadata}" "${GITHUB_SHA}" "${VERSION}"' "${release}"
 grep -Fq 'STABLE_COMMIT="$(git rev-list -n 1 "${TAG}")"' "${release}"
 grep -Fq '[ "${STABLE_COMMIT}" != "${GITHUB_SHA}" ]' "${release}"

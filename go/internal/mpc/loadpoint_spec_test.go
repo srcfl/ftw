@@ -85,9 +85,9 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 		Mode:                ModeCheapCharge,
 		SoCLevels:           11,
 		CapacityWh:          5000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       50,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.5,
 		ActionLevels:        5,
 		MaxChargeW:          2000,
 		MaxDischargeW:       2000,
@@ -98,10 +98,10 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 			ID:              "garage",
 			CapacityWh:      60000, // 60 kWh
 			Levels:          11,
-			InitialSoCPct:   20,
+			InitialSoC:      0.2,
 			PluggedIn:       true,
-			TargetSoCPct:    30,   // need 10 % → 6 kWh
-			TargetSlotIdx:   3,    // deadline at end of horizon
+			TargetSoC:       0.3, // need 10 % → 6 kWh
+			TargetSlotIdx:   3,   // deadline at end of horizon
 			MaxChargeW:      11000,
 			AllowedStepsW:   []float64{0, 11000},
 			ChargeEfficiency: 0.9,
@@ -126,10 +126,10 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 		t.Errorf("DP did not charge EV in any cheap slot; actions: %+v", plan.Actions)
 	}
 	// Final EV SoC should be at or above target (hard deadline).
-	finalEV := plan.Actions[3].LoadpointSoCPct
-	if finalEV < p.Loadpoint.TargetSoCPct-1 {
+	finalEV := plan.Actions[3].LoadpointSoC
+	if finalEV < p.Loadpoint.TargetSoC-1 {
 		t.Errorf("final EV SoC %.1f below target %.1f — deadline missed",
-			finalEV, p.Loadpoint.TargetSoCPct)
+			finalEV, p.Loadpoint.TargetSoC)
 	}
 }
 
@@ -147,9 +147,9 @@ func TestOptimizeNilLoadpointUnchanged(t *testing.T) {
 		Mode:                ModeCheapCharge,
 		SoCLevels:           21,
 		CapacityWh:          10000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       50,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.5,
 		ActionLevels:        11,
 		MaxChargeW:          3000,
 		MaxDischargeW:       3000,

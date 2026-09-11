@@ -18,6 +18,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,6 @@ import (
 	// this package through an interface and must never import it.
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/battery"
-	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
@@ -47,6 +47,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/notifications"
+	"github.com/srcfl/ftw/go/internal/ocpp"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
 	"github.com/srcfl/ftw/go/internal/scanner"
@@ -54,6 +55,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/units"
 	v2xpolicy "github.com/srcfl/ftw/go/internal/v2x"
 )
 
@@ -61,9 +63,6 @@ const (
 	// evPasswordKey is the state.db key for the EV charger password
 	// (stored outside config.yaml for security).
 	evPasswordKey = "ev_charger_password"
-	// caldavPasswordKey is the state.db key for the CalDAV password (#498),
-	// stored outside config.yaml for security — same pattern as the EV charger.
-	caldavPasswordKey = "caldav_password"
 	// maskedPlaceholder is sent to the UI to indicate a password is set
 	// without revealing the actual value.
 	maskedPlaceholder = "••••••••"
@@ -73,6 +72,7 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
+
 	// MutationPolicy protects every state-changing route at the shared
 	// Handler boundary. Production requires tokens for non-local hostnames;
 	// the zero value retains local/test embedding compatibility.
@@ -137,14 +137,19 @@ type Deps struct {
 	Prices   *prices.Service
 	Forecast *forecast.Service
 
-	// Optional: MPC planner. Nil if disabled.
+	// Optional: MPC planner. Nil if disabled or a buildMPC gate skipped it.
 	MPC *mpc.Service
+
+	// PlannerPrefs is the live household planner object (forecast trust +
+	// battery export). Nil treats GET as balanced + unknown.
+	PlannerPrefs *config.PlannerPrefs
 
 	// Optional: PV digital-twin self-learner.
 	PVModel *pvmodel.Service
 
 	// Optional: load digital-twin self-learner.
-	LoadModel *loadmodel.Service
+	LoadModel        *loadmodel.Service
+	ForecastLearning ForecastLearning
 
 	// Optional: EV loadpoint state consumed by the API and MPC.
 	Loadpoints *loadpoint.Manager
@@ -155,9 +160,17 @@ type Deps struct {
 	// path until expiry. Nil disables the endpoint.
 	LoadpointCtrl *loadpoint.Controller
 
-	// Optional: CalDAV calendar-constraints client (#498). Nil when the
-	// feature is disabled; GET /api/caldav/status then reports disabled.
-	CalDAV *calendar.Service
+	// OCPPChargers snapshots the OCPP central system's charger map for
+	// GET /api/ocpp/chargers. Nil when the OCPP server is disabled or
+	// failed to start; the endpoint then reports an empty list.
+	OCPPChargers func() map[string]ocpp.ChargerView
+
+	// EVSend delivers a command to an EV charger by name, routing an OCPP
+	// charge point past the driver registry it is not in. Nil falls back to
+	// Registry.Send, which is correct for a build with no OCPP server and
+	// wrong for one with a charger that has no driver — the dashboard's
+	// Pause / Resume / Force start would find no such driver and fail.
+	EVSend func(ctx context.Context, name string, payload []byte) error
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
@@ -177,9 +190,6 @@ type Deps struct {
 	// Optional: background version-check + updater-sidecar dispatch.
 	// Nil disables every /api/version/* endpoint (returns 503).
 	SelfUpdate *selfupdate.Checker
-	// OptimizerUpdate resolves independently tagged optimizer releases. The
-	// privileged mutation still crosses SelfUpdate's shared updater socket.
-	OptimizerUpdate *selfupdate.Checker
 
 	// Events is the shared pub/sub bus. Nil is a safe no-op for
 	// handlers that publish (e.g. /api/notifications/test).
@@ -216,13 +226,18 @@ type Deps struct {
 	Bundle *components.Bundle
 
 	Version string
+
+	// AssistantHTTP is the outbound client for Ask why. Nil uses a
+	// client with assistant.Timeout. Tests inject httptest.Server's client.
+	AssistantHTTP *http.Client
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
 // no-cache headers on static assets).
 type Server struct {
-	deps *Deps
-	mux  *http.ServeMux
+	configWriteMu sync.Mutex // Covers persistence and apply for every config writer.
+	deps          *Deps
+	mux           *http.ServeMux
 
 	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
 	// Past days are immutable once the day ends, so we only ever recompute
@@ -260,6 +275,7 @@ type Server struct {
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
+	assistantAskMu  sync.Mutex
 
 	// Timers that put a driver back after an edit has been tried for its
 	// window. The record on disk is what survives a restart; these only make
@@ -398,6 +414,8 @@ func (s *Server) routes() {
 	s.handle("PATCH  /api/app-link/devices/{id}", Configure, s.handleAppLinkDeviceRole)
 	s.handle("GET  /api/fleet-ping", Read, s.handleFleetPing)
 	s.handle("POST /api/mode", Actuate, s.handleSetMode, Via(appproto.OpSetMode))
+	s.handle("GET  /api/planner/prefs", Read, s.handleGetPlannerPrefs)
+	s.handle("POST /api/planner/prefs", Actuate, s.handleSetPlannerPrefs)
 	s.handle("GET  /api/modes", Read, s.handleModes)
 	s.handle("POST /api/target", Actuate, s.handleSetTarget)
 	s.handle("POST /api/peak_limit", Actuate, s.handleSetPeakLimit)
@@ -418,7 +436,14 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers/{name}/logs", Local, s.handleDriverLogs)
 	s.handle("GET  /api/logs", Local, s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", Local, s.handleSupportDump)
+	s.handle("GET  /api/ocpp/chargers", Local, s.handleOCPPChargers)
 	s.handle("GET  /api/support/report", Local, s.handleSupportReport)
+	s.handle("GET  /api/assistant/status", Read, s.handleAssistantStatus)
+	s.handle("POST /api/assistant/ask", Local, s.handleAssistantAsk)
+	s.handle("GET  /api/assistant/threads", Read, s.handleAssistantThreads)
+	s.handle("GET  /api/assistant/threads/{id}", Read, s.handleAssistantThread)
+	s.handle("DELETE /api/assistant/threads/{id}", Configure, s.handleAssistantThreadDelete)
+	s.handle("DELETE /api/assistant/threads", Configure, s.handleAssistantThreadsClear)
 	s.handle("POST   /api/drivers/{name}/control", Actuate, s.handleDriverControl)
 	s.handle("DELETE /api/drivers/{name}/control", Actuate, s.handleDriverControlRelease)
 	s.handle("POST /api/drivers/{name}/restart", Configure, s.handleDriverRestart)
@@ -434,12 +459,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/device_repository/drivers/{id}/activate", Configure, s.handleDeviceRepositoryActivate)
 	s.handle("GET  /api/components", Read, s.handleComponents)
 	s.handle("GET  /api/components/history", Read, s.handleComponentHistory)
-	s.handle("POST /api/components/optimizer/update", Configure, s.handleOptimizerComponentUpdate)
-	s.handle("POST /api/components/optimizer/rollback", Configure, s.handleOptimizerComponentRollback)
-	s.handle("POST /api/components/optimizer/channel", Configure, s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", Read, s.handleHAStatus)
-	s.handle("GET  /api/caldav/status", Read, s.handleCalDAVStatus)
-	s.handle("GET  /api/caldav/credentials", Local, s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", Read, s.handleNotificationsStatus)
 	s.handle("GET  /api/notifications/defaults", Read, s.handleNotificationsDefaults)
 	s.handle("GET  /api/notifications/history", Read, s.handleNotificationsHistory)
@@ -485,14 +505,18 @@ func (s *Server) routes() {
 	s.handle("POST /api/ev/chargers", Configure, s.handleEVChargers)
 	s.handle("GET  /api/ev/providers", Read, s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", Read, s.handleLoadpoints)
-	s.handle("POST /api/loadpoints/{id}/target", Actuate, s.handleLoadpointTarget)
+	// Via names the one field of this body the session can set. The target
+	// level and its deadline still have no command; the passthrough refuses
+	// the whole route either way.
+	s.handle("POST /api/loadpoints/{id}/target", Actuate, s.handleLoadpointTarget, Via(appproto.OpLoadpointSurplusOnlySet))
 	// The schedule is configuration where its sibling target is
 	// actuation: a schedule saved late is the same instruction, only
 	// later, while target/soc/force_start move energy now. The split is
 	// what lets a phone save one through the passthrough.
+	s.handle("POST /api/loadpoints/{id}/vehicle", Configure, s.handleLoadpointVehicle)
 	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut)
 	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear)
-	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC, Via(appproto.OpLoadpointSoCSet))
 	s.handle("POST /api/loadpoints/{id}/force_start", Actuate, s.handleLoadpointForceStart)
 	s.handle("POST /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHoldClear)
@@ -625,9 +649,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+const maxJSONBody = 1 << 20
+
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB cap
+	body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxJSONBody))
 	if err != nil {
 		return err
 	}
@@ -677,6 +703,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			storage["detail"] = ev.Detail
 		}
 		resp["storage"] = storage
+	}
+	if s.deps.State != nil {
+		resp["history_storage"] = s.deps.State.HistoryBackend()
+		writer := s.deps.State.HistoryWriterStatus()
+		if writer.LastError != "" || writer.MaintenanceError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
+			resp["status"] = "degraded"
+		}
 	}
 	writeJSON(w, 200, resp)
 }
@@ -1135,18 +1168,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	v2xPolicy := s.v2xPolicyStatus(v2xGridW)
 
+	trust, export, safetyK, mappedMode := s.plannerPrefsSnapshot()
+
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
+		"forecast_trust":        trust,
+		"battery_export":        export,
+		"safety_k":              safetyK,
+		"planner_mapped_k":      safetyK,
+		"planner_mapped_mode":   mappedMode,
 		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
-		"grid_w":                gridW,
 		"pv_w":                  pvW,
 		"pv_w_predicted":        pvPredictW,
 		"bat_w":                 batW,
 		"ev_w":                  evW,
 		"v2x_w":                 v2xW,
-		"load_w":                loadW,
 		"load_w_predicted":      loadPredictW,
 		"bat_soc":               avgSoC,
 		"grid_target_w":         ctrl.GridTargetW,
@@ -1175,6 +1213,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
+	}
+	// A stale or missing site meter is not 0 W. Publishing zero made the
+	// dashboard and the FTW app draw "balanced" / "0 W" as if the house
+	// were idle. JSON null is what the flow mapping already treats as
+	// "no data". Development setups with no configured meter keep the
+	// historical zero (haveGrid is forced true above).
+	if haveGrid {
+		resp["grid_w"] = gridW
+		resp["load_w"] = loadW
+	} else {
+		resp["grid_w"] = nil
+		resp["load_w"] = nil
 	}
 	if energyToday != nil || energyCurrentSlot != nil {
 		energy := map[string]any{}
@@ -1286,30 +1336,26 @@ func siteMeterPhasePowers(tel *telemetry.Store, siteMeter string) []float64 {
 
 // ---- /api/config ----
 
+func configETag(revision int64) string { return fmt.Sprintf("\"%d\"", revision) }
+
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	cfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
+	w.Header().Set("ETag", configETag(cfg.Revision))
+	w.Header().Set("Cache-Control", "no-store")
 	masked := cfg.MaskSecrets()
 	// Strip resolved driver paths back to config-relative form so the UI
 	// doesn't display (and round-trip) paths like "../drivers/foo.lua".
 	masked.UnresolveDriverPaths(filepath.Dir(s.deps.ConfigPath))
-	// EV charger password lives in state.db, not YAML. Signal to the UI
+	// Signal a saved EV charger password to the UI
 	// that a password is set by using a masked placeholder (MaskSecrets
 	// blanked it to "").
 	if masked.EVCharger != nil {
-		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok && pw != "" {
+		if cfg.EVCharger.Password != "" {
 			cp := *masked.EVCharger
 			cp.Password = maskedPlaceholder
 			masked.EVCharger = &cp
-		}
-	}
-	// CalDAV password also lives in state.db — signal "set" with the placeholder.
-	if masked.CalDAV != nil {
-		if pw, ok := s.deps.State.LoadConfig(caldavPasswordKey); ok && pw != "" {
-			cp := *masked.CalDAV
-			cp.Password = maskedPlaceholder
-			masked.CalDAV = &cp
 		}
 	}
 	// Mask driver-declared config_secrets (e.g. sonnen api_token) so
@@ -1324,8 +1370,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // driverSecretKeys returns a map[lua-path]→[]secret-key built from the
 // drivers/ catalog. Used by handleGetConfig + handlePostConfig to scope
 // which `Driver.Config[*]` keys participate in the mask/restore cycle.
-// On catalog read errors returns nil — handlers then skip the secrets
-// pass entirely (fail-open: they still mask the structured fields).
+// On catalog read errors returns nil. maskDriverConfigSecrets then
+// blanks every string in Driver.Config (fail-closed) instead of
+// leaving undeclared tokens in the GET body.
 func (s *Server) driverSecretKeys() map[string][]string {
 	dir := s.deps.DriverDir
 	if dir == "" {
@@ -1337,17 +1384,18 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	}
 	out := make(map[string][]string, len(entries))
 	for _, e := range entries {
-		if len(e.ConfigSecrets) == 0 {
-			continue
+		keys := e.ConfigSecrets
+		if keys == nil {
+			keys = []string{}
 		}
 		path := filepath.ToSlash(e.Path)
-		out[path] = e.ConfigSecrets
+		out[path] = keys
 		base := filepath.ToSlash(filepath.Base(dir))
 		if rel, ok := strings.CutPrefix(path, base+"/"); ok {
 			// Config round-trips paths resolved via -drivers as
 			// "drivers/<rel>" regardless of the actual directory name.
 			// Keep catalog secret matching on that portable alias too.
-			out[filepath.ToSlash(filepath.Join("drivers", rel))] = e.ConfigSecrets
+			out[filepath.ToSlash(filepath.Join("drivers", rel))] = keys
 		}
 	}
 	return out
@@ -1359,12 +1407,20 @@ func (s *Server) driverSecretKeys() map[string][]string {
 // MaskSecrets for fields the config package can't know about (the
 // catalog isn't a config-package dependency on purpose).
 func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]string) {
-	if cfg == nil || len(secretsByLua) == 0 {
+	if cfg == nil {
+		return
+	}
+	if secretsByLua == nil {
+		maskAllDriverConfigStrings(cfg)
 		return
 	}
 	for i := range cfg.Drivers {
-		keys := secretsByLua[cfg.Drivers[i].Lua]
-		if len(keys) == 0 || cfg.Drivers[i].Config == nil {
+		keys, known := secretsByLua[cfg.Drivers[i].Lua]
+		if !known {
+			maskOneDriverConfigStrings(&cfg.Drivers[i])
+			continue
+		}
+		if cfg.Drivers[i].Config == nil {
 			continue
 		}
 		// Defensive copy so we don't mutate the live cfg.Drivers map
@@ -1374,14 +1430,103 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 		for k, v := range cfg.Drivers[i].Config {
 			cp[k] = v
 		}
-		for _, k := range keys {
-			if v, ok := cp[k]; ok {
-				if s, ok := v.(string); ok && s != "" {
-					cp[k] = maskedPlaceholder
-				}
+		for k, v := range cp {
+			if !isDriverSecretKey(k, keys) {
+				continue
+			}
+			if s, ok := v.(string); ok && s != "" {
+				cp[k] = maskedPlaceholder
 			}
 		}
 		cfg.Drivers[i].Config = cp
+	}
+}
+
+// secretKeyFragments are the substrings that mark a driver config key as
+// a credential whether or not the driver's DRIVER block lists it under
+// config_secrets. The catalog list is the contract; this is the floor
+// under it, because the installed copy of a driver can lag the source
+// (a signed channel build without the declaration served myuplink's
+// client_secret and refresh_token in clear text over the LAN, #1057).
+var secretKeyFragments = []string{"password", "passwd", "secret", "token", "credential", "apikey", "api_key", "private_key"}
+
+// isDriverSecretKey reports whether a Driver.Config key takes part in the
+// mask/restore cycle: either the catalog declared it, or its name says
+// credential. Case-insensitive on the name.
+func isDriverSecretKey(key string, declared []string) bool {
+	for _, d := range declared {
+		if d == key {
+			return true
+		}
+	}
+	// "Api-Key" and "api_key" are the same intent; fold the separator
+	// before matching.
+	lk := strings.ReplaceAll(strings.ToLower(key), "-", "_")
+	for _, frag := range secretKeyFragments {
+		if strings.Contains(lk, frag) {
+			return true
+		}
+	}
+	return strings.HasSuffix(lk, "_key")
+}
+
+func maskAllDriverConfigStrings(cfg *config.Config) {
+	for i := range cfg.Drivers {
+		maskOneDriverConfigStrings(&cfg.Drivers[i])
+	}
+}
+
+func maskOneDriverConfigStrings(d *config.Driver) {
+	if d == nil || d.Config == nil {
+		return
+	}
+	cp := make(map[string]any, len(d.Config))
+	for k, v := range d.Config {
+		if s, ok := v.(string); ok && s != "" {
+			cp[k] = maskedPlaceholder
+		} else {
+			cp[k] = v
+		}
+	}
+	d.Config = cp
+}
+
+func restoreAllBlankDriverConfigStrings(incoming, existing *config.Config) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	for i := range incoming.Drivers {
+		restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
+	}
+}
+
+func restoreOneDriverBlankStrings(incoming *config.Driver, existing *config.Config) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	var ed *config.Driver
+	for j := range existing.Drivers {
+		if existing.Drivers[j].Name == incoming.Name {
+			ed = &existing.Drivers[j]
+			break
+		}
+	}
+	if ed == nil || ed.Config == nil {
+		return
+	}
+	if incoming.Config == nil {
+		incoming.Config = map[string]any{}
+	}
+	for k, existingV := range ed.Config {
+		existingS, ok := existingV.(string)
+		if !ok || existingS == "" {
+			continue
+		}
+		incomingV, hasI := incoming.Config[k]
+		incomingS, _ := incomingV.(string)
+		if !hasI || incomingS == "" || incomingS == maskedPlaceholder {
+			incoming.Config[k] = existingS
+		}
 	}
 }
 
@@ -1391,12 +1536,17 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 // value) gets restored from `existing`. Without this, blanking the
 // password input in the Settings tab would clobber the saved token.
 func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua map[string][]string) {
-	if incoming == nil || existing == nil || len(secretsByLua) == 0 {
+	if incoming == nil || existing == nil {
+		return
+	}
+	if secretsByLua == nil {
+		restoreAllBlankDriverConfigStrings(incoming, existing)
 		return
 	}
 	for i := range incoming.Drivers {
-		keys := secretsByLua[incoming.Drivers[i].Lua]
-		if len(keys) == 0 {
+		keys, known := secretsByLua[incoming.Drivers[i].Lua]
+		if !known {
+			restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
 			continue
 		}
 		// Match the existing driver by Name (same key PreserveMaskedSecrets uses).
@@ -1413,9 +1563,8 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 		if incoming.Drivers[i].Config == nil {
 			incoming.Drivers[i].Config = map[string]any{}
 		}
-		for _, k := range keys {
-			existingV, hasE := ed.Config[k]
-			if !hasE {
+		for k, existingV := range ed.Config {
+			if !isDriverSecretKey(k, keys) {
 				continue
 			}
 			existingS, _ := existingV.(string)
@@ -1432,6 +1581,8 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 }
 
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	var posted struct {
 		config.Config
 		AppLink json.RawMessage `json:"app_link"`
@@ -1449,8 +1600,16 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if newCfg.EVCharger != nil && newCfg.EVCharger.Password == maskedPlaceholder {
+		newCfg.EVCharger.Password = ""
+	}
 	// Preserve secrets the UI sent back as empty (masked) values.
 	s.deps.CfgMu.RLock()
+	if match := r.Header.Get("If-Match"); match != "" && match != configETag(s.deps.Cfg.Revision) {
+		s.deps.CfgMu.RUnlock()
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Settings changed. Close and reopen Settings before saving."})
+		return
+	}
 	newCfg.PreserveMaskedSecrets(s.deps.Cfg)
 	// Restore catalog-declared driver secrets (api_token etc.) the UI
 	// returned as maskedPlaceholder or empty. Same semantics as
@@ -1460,49 +1619,22 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
 	s.deps.CfgMu.RUnlock()
 
-	// EV charger password lives in state.db instead of config.yaml. Empty
-	// or the masked placeholder means "keep existing"; a new value means
-	// the user typed a real password. Defer the state write until after
-	// validation + config save succeed so a rejected config cannot rotate
-	// credentials behind the operator's back.
-	var evPasswordToPersist string
-	var persistEVPassword bool
-	if newCfg.EVCharger != nil {
-		pw := newCfg.EVCharger.Password
-		if pw != "" && pw != maskedPlaceholder {
-			evPasswordToPersist = pw
-			persistEVPassword = true
-		} else if stored, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
-			// Restore the real password into the candidate config so the
-			// config-reload watcher sees it on the next apply.
-			newCfg.EVCharger.Password = stored
-		}
-	}
-
-	// CalDAV password follows the exact same state.db pattern (#498). Without
-	// this, a UI-set password would only live in memory and be blanked on the
-	// next config-reload (Password is yaml:"-", so it is never in config.yaml).
-	var caldavPasswordToPersist string
-	var persistCalDAVPassword bool
-	if newCfg.CalDAV != nil {
-		pw := newCfg.CalDAV.Password
-		if pw != "" && pw != maskedPlaceholder {
-			caldavPasswordToPersist = pw
-			persistCalDAVPassword = true
-		} else if stored, ok := s.deps.State.LoadConfig(caldavPasswordKey); ok {
-			newCfg.CalDAV.Password = stored
-		}
-	}
-
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return
 	}
+	// API input carries portable paths, while the registry and file watcher
+	// use resolved paths. Resolve before comparing or applying so an unrelated
+	// settings edit cannot restart every driver with a missing relative file.
+	newCfg.ResolveDriverPaths(filepath.Dir(s.deps.ConfigPath))
 	// Diff against the live config BEFORE we mutate the shared pointer —
 	// otherwise the comparison would always come back empty.
 	s.deps.CfgMu.RLock()
 	oldCfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
+	// The house-password flag only moves through POST /api/auth/password.
+	// A whole-document save must not turn the lock on (or off) by itself.
+	newCfg.API.LANAuth = oldCfg.API.LANAuth
 	restartReasons := config.RestartRequiredFor(&oldCfg, &newCfg)
 
 	// Persist atomically (Password has yaml:"-" so it won't appear in YAML)
@@ -1510,21 +1642,7 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
 	}
-	if persistCalDAVPassword {
-		if err := s.deps.State.SaveConfig(caldavPasswordKey, caldavPasswordToPersist); err != nil {
-			slog.Warn("failed to persist caldav_password", "err", err)
-		}
-	}
-	if persistEVPassword {
-		if err := s.deps.State.SaveConfig(evPasswordKey, evPasswordToPersist); err != nil {
-			slog.Warn("failed to persist ev_charger_password", "err", err)
-		}
-	}
-	// One apply path, shared with the file watcher. Hand-applying a
-	// subset here and swapping the shared pointer is what #760 was: the
-	// watcher then diffed new against new, so everything this handler
-	// didn't copy — starting with the site-meter designation — never
-	// reached the running controller until a restart.
+	// Apply the committed config through the same path as all Settings writers.
 	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
 		&newCfg, s.deps.ConfigApplier)
 	if s.deps.ConfigApplier == nil && s.deps.Registry != nil {
@@ -1532,6 +1650,7 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		// new driver set running.
 		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
 	}
+	w.Header().Set("ETag", configETag(newCfg.Revision))
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
@@ -1579,6 +1698,9 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 		slog.Warn("failed to persist mode", "err", err)
+	}
+	if s.deps.PlannerPrefs != nil && s.deps.State != nil {
+		s.deps.PlannerPrefs.ApplyExportFromMode(req.Mode, s.deps.State.SaveConfig)
 	}
 	// Propagate to MPC if switching to a planner mode and force an
 	// immediate replan. control.PlannerMPCMode is the single source of the
@@ -1811,31 +1933,32 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 		writeJSON(w, 400, map[string]string{"error": "missing driver name"})
 		return
 	}
-	s.deps.CfgMu.Lock()
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	s.deps.CfgMu.RLock()
+	cfgCopy := *s.deps.Cfg
+	cfgCopy.Drivers = append([]config.Driver(nil), s.deps.Cfg.Drivers...)
+	s.deps.CfgMu.RUnlock()
 	found := false
-	for i := range s.deps.Cfg.Drivers {
-		if s.deps.Cfg.Drivers[i].Name == name {
-			s.deps.Cfg.Drivers[i].Disabled = disabled
+	for i := range cfgCopy.Drivers {
+		if cfgCopy.Drivers[i].Name == name {
+			cfgCopy.Drivers[i].Disabled = disabled
 			found = true
 			break
 		}
 	}
 	if !found {
-		s.deps.CfgMu.Unlock()
 		writeJSON(w, 404, map[string]string{"error": "driver not found in config"})
 		return
 	}
-	cfgCopy := *s.deps.Cfg
-	s.deps.CfgMu.Unlock()
-
-	// Persist to disk so the change survives restart.
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &cfgCopy); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
 	}
-	// Apply immediately via Reload — it filters disabled drivers and
-	// stops running ones, or re-adds the newly-enabled one.
-	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
+	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl, &cfgCopy, s.deps.ConfigApplier)
+	if s.deps.ConfigApplier == nil {
+		s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
+	}
 
 	action := "disabled"
 	if !disabled {
@@ -2018,7 +2141,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	windowMs := parseRange(rangeStr)
 	nowMs := time.Now().UnixMilli()
 	since := nowMs - windowMs
-	rows, err := s.deps.State.LoadHistory(since, nowMs, points)
+	rows, err := s.deps.State.LoadHistoryContext(r.Context(), since, nowMs, points)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -2289,16 +2412,64 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 
 // ---- MPC planner ----
 
+func (s *Server) mpcDisabledPayload() map[string]any {
+	body := map[string]any{"enabled": false}
+	if reason := s.mpcUnavailableReason(); reason != "" {
+		body["reason"] = reason
+	}
+	return body
+}
+
+func (s *Server) mpcUnavailableReason() string {
+	if s.deps.MPC != nil {
+		return ""
+	}
+	var plannerOn bool
+	var supportsBatteryless bool
+	var priceProvider string
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+	}
+	if s.deps.Cfg != nil {
+		plannerOn = s.deps.Cfg.Planner != nil && s.deps.Cfg.Planner.Enabled
+		supportsBatteryless = s.deps.Cfg.Planner.EngineForBuild(s.deps.Version, runtime.GOOS, runtime.GOARCH) == config.PlannerEngineEnergyplan
+		if s.deps.Cfg.Price != nil {
+			priceProvider = s.deps.Cfg.Price.Provider
+		}
+	}
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RUnlock()
+	}
+	var totalCap float64
+	if s.deps.CapMu != nil {
+		s.deps.CapMu.RLock()
+	}
+	for _, capWh := range s.deps.Capacities {
+		if capWh > 0 {
+			totalCap += capWh
+		}
+	}
+	if s.deps.CapMu != nil {
+		s.deps.CapMu.RUnlock()
+	}
+	return mpc.UnavailableReason(plannerOn, priceProvider, totalCap, supportsBatteryless)
+}
+
 func (s *Server) handleMPCPlan(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MPC == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
+		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
-	plan := s.deps.MPC.Latest()
-	at, reason := s.deps.MPC.LastReplanInfo()
+	snapshot := s.deps.MPC.PlanSnapshot()
+	plan := snapshot.Plan
+	if snapshot.Outdated {
+		plan = nil
+	}
 	meta := map[string]any{
-		"last_replan_ms":     at.UnixMilli(),
-		"last_replan_reason": reason,
+		"last_replan_ms":     snapshot.ReplanAt.UnixMilli(),
+		"last_replan_reason": snapshot.Reason,
+		"replanning":         snapshot.Pending,
+		"outdated":           snapshot.Outdated,
 	}
 	if plan == nil {
 		writeJSON(w, 200, map[string]any{"enabled": true, "plan": nil, "meta": meta})
@@ -2323,7 +2494,7 @@ func (s *Server) handleMPCReplan(w http.ResponseWriter, r *http.Request) {
 // planner decide X at 21:00?" without shelling into the host.
 func (s *Server) handleMPCDiagnose(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MPC == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
+		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
 	diag := s.deps.MPC.Diagnose()
@@ -2528,7 +2699,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		if m == "" {
 			continue
 		}
-		pts, err := s.loadSeriesWithCold(driver, m, since, until, points)
+		pts, err := s.deps.State.LoadSeriesBucketsOrRawContext(r.Context(), driver, m, since, until, points)
 		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
@@ -2572,87 +2743,6 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// loadSeriesWithCold returns one series over [since, until], merging the
-// SQLite recent tier with cold Parquet days when the window reaches past
-// RecentRetention. Cold samples are bucketed in Go on the same boundaries
-// LoadSeriesBuckets uses, so the merged chart has one consistent resolution.
-func (s *Server) loadSeriesWithCold(driver, metric string, since, until int64, points int) ([]state.SeriesPoint, error) {
-	recent, err := s.deps.State.LoadSeriesBucketsOrRaw(driver, metric, since, until, points)
-	if err != nil {
-		return nil, err
-	}
-
-	coldCutoff := time.Now().Add(-state.RecentRetention).UnixMilli()
-	if s.deps.ColdDir == "" || since >= coldCutoff {
-		return recent, nil
-	}
-	coldUntil := until
-	if coldUntil > coldCutoff {
-		coldUntil = coldCutoff
-	}
-	coldRaw, err := s.deps.State.LoadSeriesFromParquet(s.deps.ColdDir, driver, metric, since, coldUntil)
-	if err != nil {
-		return nil, err
-	}
-	if len(coldRaw) == 0 {
-		return recent, nil
-	}
-
-	var cold []state.SeriesPoint
-	if points > 0 {
-		bucketMs := state.BucketWidthMs(since, until, points)
-		for _, sm := range coldRaw {
-			idx := (sm.TsMs - since) / bucketMs
-			if n := len(cold); n > 0 && (cold[n-1].TsMs-since)/bucketMs == idx {
-				b := &cold[n-1]
-				if sm.Value < b.Min {
-					b.Min = sm.Value
-				}
-				if sm.Value > b.Max {
-					b.Max = sm.Value
-				}
-				b.V = (b.V*float64(b.N) + sm.Value) / float64(b.N+1)
-				b.N++
-				if sm.TsMs > b.TsMs {
-					b.TsMs = sm.TsMs
-				}
-			} else {
-				cold = append(cold, state.SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1})
-			}
-		}
-	} else {
-		cold = make([]state.SeriesPoint, len(coldRaw))
-		for i, sm := range coldRaw {
-			cold[i] = state.SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1}
-		}
-	}
-
-	// Cold strictly precedes recent (rolloff deletes what it exports), but a
-	// boundary bucket can exist on both sides — merge rather than duplicate.
-	if len(cold) > 0 && len(recent) > 0 && points > 0 {
-		bucketMs := state.BucketWidthMs(since, until, points)
-		last, first := &cold[len(cold)-1], recent[0]
-		if (last.TsMs-since)/bucketMs == (first.TsMs-since)/bucketMs {
-			total := last.N + first.N
-			last.V = (last.V*float64(last.N) + first.V*float64(first.N)) / float64(total)
-			if first.Min < last.Min {
-				last.Min = first.Min
-			}
-			if first.Max > last.Max {
-				last.Max = first.Max
-			}
-			last.N = total
-			if first.TsMs > last.TsMs {
-				last.TsMs = first.TsMs
-			}
-			recent = recent[1:]
-		}
-	}
-	return append(cold, recent...), nil
-}
-
-// metricUnits returns the persisted unit per metric name (empty map on error
-// — units are display sugar, never worth failing a data request over).
 func (s *Server) metricUnits() map[string]string {
 	catalog, err := s.deps.State.MetricsCatalog()
 	if err != nil {
@@ -2761,6 +2851,7 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 		"enabled":                    true,
 		"samples":                    m.Samples,
 		"mae_w":                      m.MAE,
+		"rel_mae":                    m.RelMAE,
 		"rated_w":                    m.RatedW,
 		"quality":                    m.Quality(),
 		"last_ms":                    m.LastMs,
@@ -2771,16 +2862,12 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 		"pv_residual_mean_w":         rd.MeanW,
 		"pv_residual_std_w":          rd.StdW,
 		"pv_residual_window_minutes": rd.WindowMinutes,
+		"learning":                   s.forecastLearningStatus("pv"),
 	})
 }
 
 func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
-	if s.deps.PVModel == nil {
-		writeJSON(w, 400, map[string]string{"error": "pvmodel disabled"})
-		return
-	}
-	s.deps.PVModel.Reset()
-	writeJSON(w, 200, map[string]string{"status": "reset"})
+	s.handleForecastLearningReset(w, r, "pv")
 }
 
 // ---- static ----
@@ -2902,7 +2989,10 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.deps.Registry == nil {
+	// An OCPP-only site has chargers and no Lua driver behind them, so the
+	// registry being absent is not by itself a reason to refuse: EVSend can
+	// still deliver. Both missing is.
+	if s.deps.Registry == nil && s.deps.EVSend == nil {
 		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
 		return
 	}
@@ -2920,11 +3010,22 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		applyManualEVHold(s.deps, driverName, req.Action)
 	}
 	payload, _ := json.Marshal(map[string]any{"action": req.Action})
-	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {
+	if err := s.sendEV(r.Context(), driverName, payload); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// sendEV delivers an EV command, routing an OCPP charge point past the driver
+// registry it is not in. Without this an OCPP charger answers telemetry and
+// automatic dispatch but refuses every manual control on the dashboard, which
+// reads as the charger being broken rather than unrouted.
+func (s *Server) sendEV(ctx context.Context, driverName string, payload []byte) error {
+	if s.deps.EVSend != nil {
+		return s.deps.EVSend(ctx, driverName, payload)
+	}
+	return s.deps.Registry.Send(ctx, driverName, payload)
 }
 
 var validV2XActions = map[string]bool{
@@ -3235,19 +3336,17 @@ func applyManualEVHold(deps *Deps, driverName string, action string) {
 		return
 	}
 	if action == "ev_pause" {
-		deps.LoadpointCtrl.ClearManualHold(lpID)
-		slog.Info("ev manual pause — cleared manual hold, reverting to plan", "lp", lpID)
+		deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{PowerW: 0, Persistent: true})
+		slog.Info("ev manual pause — held at zero power", "lp", lpID)
 		return
 	}
 	if maxW <= 0 {
 		maxW = 11000 // 16 A × 3φ × 230 V fallback when the LP config didn't set it
 	}
-	// 100-year expiry serves as "sticky until the operator cancels".
-	// Using time.Now() + a long delta rather than time.Time{} because
-	// SetManualHold treats zero ExpiresAt as "delete" (controller.go:653).
+	// Keep an explicit start active until the operator changes it or unplugs.
 	deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{
-		PowerW:    maxW,
-		ExpiresAt: time.Now().Add(100 * 365 * 24 * time.Hour),
+		PowerW:     maxW,
+		Persistent: true,
 	})
 	slog.Info("ev manual start/resume — installed sticky hold",
 		"lp", lpID, "action", action, "hold_w", maxW)
@@ -3326,6 +3425,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	s.decorateLoadpointsWithManual(states)
 	s.decorateLoadpointsWithBatteryBoost(states)
+	s.decorateLoadpointsWithPlan(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,
@@ -3346,18 +3446,20 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 // every tick — the failure mode observed with two Teslas in the same
 // household.
 //
-// CurrentSoCPct is intentionally NOT overwritten with the BMS reading.
-// The loadpoint controller uses CurrentSoCPct as its inference state;
+// CurrentSoC is intentionally NOT overwritten with the BMS reading.
+// The loadpoint controller uses CurrentSoC as its inference state;
 // overlaying it from the BMS would mean the UI shows BMS truth while
 // the controller's plan was computed from the inferred value the
-// previous tick — a presentation lie. VehicleSoCPct exposes the BMS
+// previous tick — a presentation lie. VehicleSoC exposes the BMS
 // value separately; the frontend renders both and labels which one
 // the controller used.
 func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Store) {
 	if len(tel.ReadingsByType(telemetry.DerVehicle)) == 0 {
-		// No vehicle drivers — mark every plugged-in lp as inferred.
+		// No vehicle drivers — mark every plugged-in lp as inferred,
+		// unless the manager already says why the estimate is where it
+		// is ("completed": pinned to target after the car declined).
 		for i := range states {
-			if states[i].PluggedIn {
+			if states[i].PluggedIn && states[i].SoCSource == "" {
 				states[i].SoCSource = "inferred"
 			}
 		}
@@ -3371,12 +3473,14 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		delivering := states[i].CurrentPowerW > loadpoint.DeliveringW
 		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
 		if pick.Driver == "" {
-			states[i].SoCSource = "inferred"
+			if states[i].SoCSource == "" {
+				states[i].SoCSource = "inferred"
+			}
 			continue
 		}
 		states[i].VehicleDriver = pick.Driver
-		states[i].VehicleSoCPct = pick.SoCPct
-		states[i].VehicleChargeLimitPct = pick.ChargeLimitPct
+		states[i].VehicleSoC = pick.SoC
+		states[i].VehicleChargeLimit = pick.ChargeLimit
 		states[i].VehicleChargingState = pick.ChargingState
 		states[i].VehicleStale = pick.Stale
 		states[i].SoCSource = "vehicle"
@@ -3416,6 +3520,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	// to nil for *struct pointers, which would lose the explicit-clear
 	// signal the UI needs.
 	var req struct {
+		SoC          *float64        `json:"soc,omitempty"`
 		SoCPct       *float64        `json:"soc_pct,omitempty"`
 		TargetTimeMs *int64          `json:"target_time_ms,omitempty"`
 		SurplusOnly  *bool           `json:"surplus_only,omitempty"`
@@ -3425,7 +3530,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil && len(req.Schedule) == 0 {
+	if req.SoC == nil && req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil && len(req.Schedule) == 0 {
 		writeJSON(w, 400, map[string]string{"error": "no fields to update"})
 		return
 	}
@@ -3440,7 +3545,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		}
 		scheduleChanged = true
 	}
-	if req.SoCPct != nil || req.TargetTimeMs != nil {
+	if req.SoC != nil || req.SoCPct != nil || req.TargetTimeMs != nil {
 		// SetTarget always takes both fields, so when the caller
 		// omitted one we have to look up the existing value to
 		// preserve it. Read-modify-write under the manager's lock
@@ -3451,9 +3556,16 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 			return
 		}
-		soc := st.TargetSoCPct
-		if req.SoCPct != nil {
-			soc = *req.SoCPct
+		soc := st.TargetSoC
+		if req.SoC != nil || req.SoCPct != nil {
+			var canonical, legacy float64
+			if req.SoC != nil {
+				canonical = *req.SoC
+			}
+			if req.SoCPct != nil {
+				legacy = *req.SoCPct
+			}
+			soc = units.DecodeJSONFraction(canonical, legacy)
 		}
 		deadline := st.TargetTime
 		if req.TargetTimeMs != nil {
@@ -3470,19 +3582,18 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	surplusDisabled := false
 	if req.SurplusOnly != nil {
-		prev, ok := s.deps.Loadpoints.SetSurplusOnly(id, *req.SurplusOnly)
+		prev, ok, err := s.deps.Loadpoints.SetSurplusOnlyChecked(id, *req.SurplusOnly)
+		if err != nil {
+			slog.Warn("failed to save loadpoint solar preference", "lp", id, "err", err)
+			writeJSON(w, 500, map[string]string{"error": "Could not save solar charging preference. Your previous choice is unchanged. Try again."})
+			return
+		}
 		if !ok {
 			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 			return
 		}
-		// Disabling surplus_only is a planner regime change: the
-		// terminal SoC credit flips from self-consumption back to the
-		// arbitrage default (much higher), the grid-charge ban lifts,
-		// and the LP may now be eligible for grid-arbitrage scheduling
-		// (when target_soc_pct > 0). Force a synchronous replan with a
-		// tagged reason so the new schedule is in place by the time
-		// this HTTP response returns and the diagnose snapshot records
-		// "why" the plan changed at this timestamp.
+		// The saved rule takes effect in dispatch immediately. Rebuild the
+		// plan separately so a slow solve cannot hide the storage acknowledgement.
 		if prev && !*req.SurplusOnly {
 			surplusDisabled = true
 		}
@@ -3494,20 +3605,11 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		if surplusDisabled {
 			slog.Info("loadpoint surplus_only disabled — forcing replan",
 				"lp", id)
-			// Synchronous + fresh context (the request context dies the
-			// moment we writeJSON). Replan typically completes in
-			// <100ms for current grid sizes; the API caller blocks
-			// briefly and returns to a UI that can immediately fetch
-			// /api/mpc/plan and see the new schedule.
-			s.deps.MPC.ReplanWithReason(context.Background(), "surplus_only_disabled")
+			s.deps.MPC.RequestReplan("surplus_only_disabled")
 		} else if scheduleChanged {
 			s.replanForScheduleChange(id)
 		} else {
-			// Other field changes: replan is helpful but not load-
-			// bearing — kick it off in the background so the API stays
-			// snappy. The goroutine uses a fresh context for the same
-			// reason as above (request ctx cancellation).
-			go s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_target_changed")
+			s.deps.MPC.RequestReplan("loadpoint_target_changed")
 		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -3522,7 +3624,12 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 // schedule-only route.
 func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, string) {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		if !s.deps.Loadpoints.ClearSchedule(id) {
+		ok, err := s.deps.Loadpoints.ClearScheduleChecked(id)
+		if err != nil {
+			slog.Warn("failed to clear loadpoint schedule", "lp", id, "err", err)
+			return 500, "Could not remove charging goal. Your previous goal is unchanged. Try again."
+		}
+		if !ok {
 			return 404, "loadpoint not found"
 		}
 		return 0, ""
@@ -3537,7 +3644,12 @@ func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, st
 	if sched.Days > 0x7F {
 		return 400, "days must be a 7-bit weekday mask (0..127, bit 0 = Monday)"
 	}
-	if !s.deps.Loadpoints.SetSchedule(id, sched) {
+	ok, err := s.deps.Loadpoints.SetScheduleChecked(id, sched)
+	if err != nil {
+		slog.Warn("failed to save loadpoint schedule", "lp", id, "err", err)
+		return 500, "Could not save charging goal. Your previous goal is unchanged. Try again."
+	}
+	if !ok {
 		return 404, "loadpoint not found"
 	}
 	// Roll immediately so a read-modify-write on the heels of this set
@@ -3567,17 +3679,15 @@ func (s *Server) refreshVehicleForSchedule(id string) {
 	}(id)
 }
 
-// replanForScheduleChange forces a synchronous MPC replan tagged with
-// the schedule-change reason. Synchronous + fresh context (the request
-// context dies the moment the handler answers) so the caller returns
-// to a UI that can immediately fetch /api/mpc/plan and see the new
-// schedule.
+// replanForScheduleChange requests a new plan after the goal has been stored.
+// Saving and calculating are separate outcomes; GET /api/loadpoints reports
+// plan_pending until the new plan is ready.
 func (s *Server) replanForScheduleChange(id string) {
 	if s.deps.MPC == nil {
 		return
 	}
 	slog.Info("loadpoint schedule changed — forcing replan", "lp", id)
-	s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_schedule_changed")
+	s.deps.MPC.RequestReplan("loadpoint_schedule_changed")
 }
 
 // PUT /api/loadpoints/{id}/schedule replaces the loadpoint's schedule.
@@ -3616,10 +3726,8 @@ func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Reque
 }
 
 // DELETE /api/loadpoints/{id}/schedule clears the schedule. Same price
-// as PUT: removing the standing instruction is configuration too. The
-// one-shot target a previous roll derived stays until it expires —
-// clearing the schedule is not a stop button, and stopping a charge in
-// progress remains an actuation.
+// as PUT: removing the standing instruction is configuration too. Its derived
+// target clears after storage succeeds. Manual charging remains active.
 func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
@@ -3630,8 +3738,8 @@ func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Req
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
-	if !s.deps.Loadpoints.ClearSchedule(id) {
-		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+	if status, msg := s.applyLoadpointSchedule(id, json.RawMessage("null")); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	s.refreshVehicleForSchedule(id)
@@ -3663,26 +3771,27 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		SoC    float64 `json:"soc"`
 		SoCPct float64 `json:"soc_pct"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	soc := units.DecodeJSONFraction(req.SoC, req.SoCPct)
 	// Confirm loadpoint exists before inspecting plug state.
 	if _, ok := s.deps.Loadpoints.State(id); !ok {
 		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 		return
 	}
-	if !s.deps.Loadpoints.SetCurrentSoC(id, req.SoCPct) {
+	if !s.deps.Loadpoints.SetCurrentSoC(id, soc) {
 		writeJSON(w, 409, map[string]string{
 			"error": "loadpoint not plugged in — SoC can only be set during an active session",
 		})
 		return
 	}
-	// Trigger replan so the corrected SoC feeds into the next plan.
 	if s.deps.MPC != nil {
-		go s.deps.MPC.Replan(r.Context())
+		s.deps.MPC.RequestReplan("loadpoint_soc_corrected")
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

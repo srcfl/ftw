@@ -14,6 +14,13 @@ test('weather map loads Leaflet from the vendored copy, not unpkg', () => {
   assert.match(weather, /\/vendor\/leaflet\/leaflet\.css/);
 });
 
+test('weather map sends a Referer on OSM tiles so volunteer servers do not 403', () => {
+  assert.match(weather, /tile\.openstreetmap\.org/);
+  assert.match(weather, /referrerPolicy:\s*"strict-origin-when-cross-origin"/);
+  const leaflet = readFileSync(join(vendor, 'leaflet.js'), 'utf8');
+  assert.match(leaflet, /typeof this\.options\.referrerPolicy/);
+});
+
 test('vendored Leaflet 1.9.4 files are present', () => {
   for (const rel of [
     'leaflet.js',

@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math"
 	"path/filepath"
@@ -170,6 +171,34 @@ func TestEnergyLedgerKeepsSimultaneousMeterDirections(t *testing.T) {
 	}
 	if totals[FlowGridImport] != 10 || totals[FlowGridExport] != 5 {
 		t.Fatalf("directional totals = %#v, want import=10 export=5", totals)
+	}
+}
+
+func TestEnergyLedgerLaterExportDoesNotShrinkImport(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:serial", AssetGridMeter)
+	recordEnergyTestTick(t, s, base,
+		ledgerObservation(assetID, AssetGridMeter, FlowGridImport, base, energyPtr(1000), energyPtr(600)),
+		ledgerObservation(assetID, AssetGridMeter, FlowGridExport, base, energyPtr(0), energyPtr(0)),
+	)
+	recordEnergyTestTick(t, s, base+60_000,
+		ledgerObservation(assetID, AssetGridMeter, FlowGridImport, base+60_000, energyPtr(1010), energyPtr(0)),
+		ledgerObservation(assetID, AssetGridMeter, FlowGridExport, base+60_000, energyPtr(20), energyPtr(1200)),
+	)
+
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	totals := map[EnergyFlow]float64{}
+	for _, p := range points {
+		if p.Quality == "measured" {
+			totals[p.Flow] += p.EnergyWh
+		}
+	}
+	if totals[FlowGridImport] != 10 {
+		t.Fatalf("import shrunk after export interval: %#v", totals)
+	}
+	if totals[FlowGridExport] != 20 {
+		t.Fatalf("export = %#v, want 20", totals)
 	}
 }
 
@@ -389,17 +418,22 @@ func TestEnergyLedgerRollupChunkIsAtomic(t *testing.T) {
 
 	// Abort after the hourly INSERT but before the detailed DELETE can finish.
 	// Both operations must roll back together.
-	if _, err := s.db.Exec(`CREATE TRIGGER reject_energy_detail_delete
-		BEFORE DELETE ON energy_ledger_entries
-		WHEN OLD.bucket_len_ms = 300000
-		BEGIN SELECT RAISE(ABORT, 'test rollback'); END`); err != nil {
+	if _, err := s.history.Exec(`CREATE TABLE deletion_guard (
+ schema_version BIGINT, asset_id TEXT, flow TEXT, bucket_start_ms BIGINT,
+ bucket_len_ms BIGINT, source TEXT, quality TEXT, provenance TEXT,
+ FOREIGN KEY (schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, source, quality, provenance)
+ REFERENCES energy_ledger_entries(schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, source, quality, provenance))`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.history.Exec(`INSERT INTO deletion_guard SELECT schema_version,asset_id,flow,bucket_start_ms,bucket_len_ms,source,quality,provenance FROM energy_ledger_entries`); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, _, err := s.PruneEnergyLedger(context.Background(), now); err == nil {
 		t.Fatal("rollup should fail when its source delete is rejected")
 	}
 	var detailed, hourly int
-	if err := s.db.QueryRow(`SELECT
+	if err := s.history.QueryRow(`SELECT
 		COUNT(*) FILTER (WHERE bucket_len_ms = ?),
 		COUNT(*) FILTER (WHERE bucket_len_ms = ?)
 		FROM energy_ledger_entries WHERE asset_id = ?`,
@@ -414,7 +448,7 @@ func TestEnergyLedgerRollupChunkIsAtomic(t *testing.T) {
 func insertLedgerEntryTest(t *testing.T, s *Store, assetID string, flow EnergyFlow, startMS, lenMS int64,
 	energyWh float64, source, quality, provenance string, samples int64) {
 	t.Helper()
-	_, err := s.db.Exec(`INSERT INTO energy_ledger_entries(
+	_, err := s.history.Exec(`INSERT INTO energy_ledger_entries(
 		schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, energy_wh,
 		source, quality, provenance, sample_count, observed_at_ms
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, EnergyLedgerSchemaVersion, assetID,
@@ -495,7 +529,7 @@ func TestEnergyLedgerMigrationIsAdditiveAndPreservesHistory(t *testing.T) {
 		t.Fatalf("legacy history changed: rows=%+v err=%v", rows, err)
 	}
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM energy_ledger_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+	if err := s.history.QueryRow(`SELECT value FROM energy_ledger_meta WHERE key='schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("ledger schema missing after migration: %v", err)
 	}
 	if version != "1" {
@@ -509,7 +543,7 @@ func TestEnergyLedgerRejectsNewerSchemaWithoutChangingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE energy_ledger_meta SET value='2' WHERE key='schema_version'`); err != nil {
+	if _, err := s.history.Exec(`UPDATE energy_ledger_meta SET value='2' WHERE key='schema_version'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -518,7 +552,7 @@ func TestEnergyLedgerRejectsNewerSchemaWithoutChangingIt(t *testing.T) {
 	if _, err := Open(path); err == nil {
 		t.Fatal("opening a newer ledger schema should fail safely")
 	}
-	db, err := openRaw(path)
+	db, err := sql.Open("duckdb", historyDatabasePath(path))
 	if err != nil {
 		t.Fatal(err)
 	}

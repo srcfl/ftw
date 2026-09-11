@@ -225,3 +225,67 @@ func TestCorruptStateColdStarts(t *testing.T) {
 		})
 	}
 }
+
+// The planner reads RelMAE on every replan, so it has to survive a restart —
+// otherwise every reboot drops a learned site back onto the flat haircut.
+func TestRelMAERoundTrips(t *testing.T) {
+	db := openTestDB(t)
+	cs := func(time.Time) float64 { return 500 }
+	cl := func(time.Time) (float64, bool) { return 20, true }
+
+	svc := NewService(db, nil, cs, cl, 5000)
+	svc.mu.Lock()
+	svc.model.Samples = 400
+	svc.model.RelMAE = 0.27
+	svc.mu.Unlock()
+	svc.persist()
+
+	restored := NewService(db, nil, cs, cl, 5000)
+	if got := restored.Model().RelMAE; got != 0.27 {
+		t.Fatalf("restored RelMAE = %v, want 0.27", got)
+	}
+	if got := restored.RelativeUncertainty(); got != 0.27 {
+		t.Fatalf("RelativeUncertainty() = %v, want 0.27", got)
+	}
+}
+
+// State persisted before #1020 has no rel_mae. It must load as 0 — "not
+// learned yet" — so the site keeps the flat haircut instead of refusing the
+// blob or hedging on a garbage number.
+func TestStateWithoutRelMAELoadsAsUnlearned(t *testing.T) {
+	db := openTestDB(t)
+	cs := func(time.Time) float64 { return 500 }
+	cl := func(time.Time) (float64, bool) { return 20, true }
+
+	trained := NewModel(5000)
+	trained.Samples = 900
+	trained.MAE = 180
+	legacy := map[string]any{
+		"beta":       trained.Beta,
+		"p":          trained.P,
+		"forgetting": trained.Forgetting,
+		"samples":    trained.Samples,
+		"last_ms":    trained.LastMs,
+		"mae":        trained.MAE,
+		"rated_w":    trained.RatedW,
+	}
+	js, err := modelstate.Wrap(FeatureHash(), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveConfig(stateKey, js); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewService(db, nil, cs, cl, 5000)
+	got := svc.Model()
+	if got.Samples != 900 || got.MAE != 180 {
+		t.Fatalf("pre-#1020 state must still restore, got %+v", got)
+	}
+	if got.RelMAE != 0 {
+		t.Errorf("RelMAE = %v, want 0 when the field is absent", got.RelMAE)
+	}
+	if svc.RelativeUncertainty() != 0 {
+		t.Errorf("RelativeUncertainty() = %v, want 0", svc.RelativeUncertainty())
+	}
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "product": "energyplan",
+  "version": "0.4.1",
+  "source_repository": "srcfl/energyplan",
+  "source_commit": "4bc9633608ee5633c2c5212779c905b07cb8faaf",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "protocol_version": 1,
+  "forecast_protocol_version": 1,
+  "artifacts": {
+    "linux-arm64": {
+      "path": "ftw-solver-linux-arm64",
+      "target": "aarch64-unknown-linux-musl"
+    },
+    "linux-amd64": {
+      "path": "ftw-solver-linux-amd64",
+      "target": "x86_64-unknown-linux-musl"
+    }
+  },
+  "files": {
+    "LICENSE.txt": {
+      "sha256": "8efb23f7bc9449def58c3a12f843757df016b14a0fb05d13aab4f128498b7c13",
+      "bytes": 968
+    },
+    "THIRD-PARTY-NOTICES.txt": {
+      "sha256": "d5381c7a521d2e378b9e3df687d2bf55358b516f26981138020358037b034f71",
+      "bytes": 55889
+    },
+    "forecast-v1.response.schema.json": {
+      "sha256": "b7f06c00679b3798cbedd458f8b9b6bfd556e96ac442bb3820f9696c6c7bdd99",
+      "bytes": 13008
+    },
+    "forecast-v1.schema.json": {
+      "sha256": "6b374bd19d351e568761e1050016202d78aea2fc2e6783a2e9245aa23ffb2d3f",
+      "bytes": 15377
+    },
+    "ftw-solver-linux-amd64": {
+      "sha256": "cf72f13114f12a09a1252c9f6c8ee7b3d48673bd8913ff75dc96dbb1b28cfbc3",
+      "bytes": 1559840
+    },
+    "ftw-solver-linux-arm64": {
+      "sha256": "553ba0ef63af23e0722b9eb70ed1c26f5328f2875d8b8f0b9c1fb483ed520aee",
+      "bytes": 1263744
+    },
+    "rust-runtime/COPYRIGHT-library.html": {
+      "sha256": "90567e2718bf7fd65a71a3a43c5596488e80e5f51ed02bfea6fec54458b5f3d1",
+      "bytes": 425661
+    },
+    "rust-runtime/licenses/Apache-2.0.txt": {
+      "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+      "bytes": 10280
+    },
+    "rust-runtime/licenses/BSD-2-Clause.txt": {
+      "sha256": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df",
+      "bytes": 1267
+    },
+    "rust-runtime/licenses/CC-BY-SA-4.0.txt": {
+      "sha256": "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2",
+      "bytes": 20137
+    },
+    "rust-runtime/licenses/GCC-exception-3.1.txt": {
+      "sha256": "a3966c9410ef94a1efbfa9ec04e9c1994026a70623fbf0885ce36737bfba3b54",
+      "bytes": 3320
+    },
+    "rust-runtime/licenses/GPL-2.0-only.txt": {
+      "sha256": "54b212ba1f97f6948fa5486239ab505dd820b02e50cbfd296b4062c8609a70af",
+      "bytes": 17642
+    },
+    "rust-runtime/licenses/GPL-3.0-or-later.txt": {
+      "sha256": "05315fce6c35f79b8a35454828995fa26336f235895ac64557abc028f4ffcea2",
+      "bytes": 34795
+    },
+    "rust-runtime/licenses/ISC.txt": {
+      "sha256": "0ff61769b238634e042ab759dddfd104a8e69d091e3600ae3410e401a6164381",
+      "bytes": 730
+    },
+    "rust-runtime/licenses/LLVM-exception.txt": {
+      "sha256": "e34c58338bd89d43e709e226610d8f32b3e3c47f4ad9a99a8dc1d4ac7842488e",
+      "bytes": 919
+    },
+    "rust-runtime/licenses/MIT.txt": {
+      "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+      "bytes": 1078
+    },
+    "rust-runtime/licenses/NCSA.txt": {
+      "sha256": "39cb0234065c92b9e6cee3830cbb52b1aa289aa8fe9ba2e66730fec5cf05c630",
+      "bytes": 1676
+    },
+    "rust-runtime/licenses/OFL-1.1.txt": {
+      "sha256": "8eea8287e5876b539670cadb82e99f9a7afddec6f6730811be1daf25d2e9bcfd",
+      "bytes": 4016
+    },
+    "rust-runtime/licenses/Unicode-3.0.txt": {
+      "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
+      "bytes": 1995
+    }
+  }
+}

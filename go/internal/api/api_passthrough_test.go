@@ -354,6 +354,22 @@ func TestActuationThroughThePassthroughIsRefused(t *testing.T) {
 			},
 		},
 		{
+			name: "correcting the car's charge level, which has a command",
+			req: appproto.APIReq{
+				Method: appproto.APIPost, Path: "/api/loadpoints/1/soc",
+				Body: []byte(`{"soc":0.6}`), StepUp: true,
+			},
+			wantOp: appproto.OpLoadpointSoCSet,
+		},
+		{
+			name: "the loadpoint target, whose PV-only flag has a command",
+			req: appproto.APIReq{
+				Method: appproto.APIPost, Path: "/api/loadpoints/1/target",
+				Body: []byte(`{"surplus_only":false}`), StepUp: true,
+			},
+			wantOp: appproto.OpLoadpointSurplusOnlySet,
+		},
+		{
 			name: "holding the battery",
 			req: appproto.APIReq{
 				Method: appproto.APIPost, Path: "/api/battery/manual_hold",
@@ -602,6 +618,8 @@ func TestRouteTierIgnoresTheMethod(t *testing.T) {
 		{"POST", "/api/self_tune/start", apiauth.TierActuate, "it drives every battery through a step pattern"},
 		{"POST", "/api/notifications/test", apiauth.TierConfigure, "a late test message is the same message"},
 		{"POST", "/api/mode", apiauth.TierActuate, ""},
+		{"GET", "/api/planner/prefs", apiauth.TierRead, "household planner prefs are status"},
+		{"POST", "/api/planner/prefs", apiauth.TierActuate, "prefs change dispatch"},
 		{"DELETE", "/api/battery/manual_hold", apiauth.TierActuate, ""},
 
 		// Sibling routes priced apart on purpose: a charging schedule is a

@@ -1,5 +1,823 @@
 # Changelog
 
+## 3.3.1
+
+### Patch Changes
+
+- 0f092c9: After a verified DuckDB history import, hide the import UI on later boots and drop the leftover SQLite history tables and imported Parquet files. DuckDB keeps history; SQLite keeps configuration. A failed or interrupted import still keeps the original sources. Full backups still export portable SQLite history so restore and older Core can read it.
+
+## 3.3.0
+
+### Minor Changes
+
+- 9f4b6b9: Pin Energyplan 0.4.0 and send its planner contract without öre field names. Slot prices go as price_per_kwh / spot_per_kwh in the same minor currency units as before. When a weekday 06–20 demand charge is configured, Core expands local clock hours (including DST), applies VAT, and attaches already-measured month hours. Empty demand_price_per_kw leaves planning unchanged.
+
+### Patch Changes
+
+- 5d56af6: Overview no longer squeezes a plugged-in car notice into a one-word-wide column, and a charger paused at 0 W is resumed when FTW offers current again.
+
+## 3.2.4
+
+### Patch Changes
+
+- ac005c5: Use the running device's identity for energy counters. Wait for its known
+  serial at startup so a temporary MAC or endpoint alias cannot count the same
+  energy twice. Continue saving raw measurements while identity is pending.
+- 9f6ed6c: Show database write errors in the history import banner. Explain that new
+  history readings are not being saved and hide the import time estimate until
+  writes recover.
+- 9f6ed6c: Prevent history writes from exhausting database memory when several energy counters return after a long gap. Write each interval's five-minute buckets in one SQL statement while keeping history, samples, energy, cursor updates and retry receipts in the same transaction.
+
+## 3.2.3
+
+### Patch Changes
+
+- 419c857: Show compressed Parquet source bytes, estimated progress, throughput, elapsed time and remaining time during history import. Report checking, importing, waiting for live writes and checkpointing separately; hide estimates when there is too little evidence. Skip the full SQLite row scan when its import already has a completion receipt.
+
+## 3.2.2
+
+### Patch Changes
+
+- 2cfad06: A missing leftover config.yaml no longer starts the setup wizard over live
+  Settings. Core reloads settings/config_v1 from the sibling state.db and rewrites
+  the locator YAML. An edited leftover seed or a wizard document cannot replace
+  Settings already stored in SQLite; only an old-Core rollback save is imported.
+- 83412d1: Release retained DuckDB buffers after a failed telemetry commit runs out of memory, then retry the same queued tick. This lets live collection recover before the normal maintenance threshold and lets background history import resume.
+  
+  Increase the primary DuckDB memory budget to 256 MB so a full telemetry tick can reconcile the observed startup gap while history queries run.
+- 3e2198c: Accept `FTW_API_TOKEN` on the LAN as the API token. With the house password on, a matching Bearer is no longer hashed as a password guess, and a mismatch no longer locks Settings for the household.
+- 234cb3a: Bound Lua driver safety so a stuck poll, a huge watchdog override, or a
+  redirected POST cannot leave hardware on its last setpoint. Every driver VM
+  now drops `os.execute`/`io`/`load`, poll can be cancelled so default mode
+  still runs, watchdog overrides cap at 15 minutes, and `http_post` refuses
+  301/302/303 redirects the same way PATCH already does.
+- de74740: Route periodic EV dispatch through OCPP, keep Lua loadpoint names off the OCPP allowlist, and bound HTTP read/write/idle time.
+- 27ddfe7: OCPP charger power uses one accept rule for dispatch and forecast, so a
+  stale, per-phase, negative, or energy-only sample cannot publish a phantom EV load.
+  1.6 Available/unplug now zeros last power like 2.0.1.
+- 7f734e6: Bind OCPP mTLS client certificates to the charge-point identity in the URL. A certificate signed by `client_ca_file` is no longer enough to claim another charger's id: the CN or DNS SAN must match, and a per-charger password remains an additional gate when one is configured.
+- 9d7bb6a: Price-forecast hour-of-week buckets use Europe/Stockholm civil hours, so
+  Nordic evening peaks land in the evening prior instead of 1–2 hours late
+  under UTC indexing.
+- 8e175ab: Score remaining slot time in the load rain-check and cap the Energyplan
+  worker budget so a late-in-slot replan cannot burn a full solve that
+  cannot be published.
+- 36c3f12: Redact secrets in support-dump logs the same way Ask why does, including OAuth JSON and Bearer tokens, and treat authorization, passwd, credential and a bare auth key as sensitive in the redacted config.
+- 7a43337: Restore soft rollback onto the configured database path, drop that file's WAL, and refuse a gzip snapshot whose CRC does not match.
+- f9d90c5: Do not follow Web Push redirects, so a stored https subscription cannot bounce a notification onto the LAN.
+
+## 3.2.1
+
+### Patch Changes
+
+- 715ec0f: Show startup and background history import progress, keep incomplete history visible, and resume the update view when another client starts the work.
+- 715ec0f: Start live collection after importing the catalog and energy accounting, then move large sample archives into DuckDB in the background. Resume verified progress after an interruption, preserve live writes, and report incomplete history until every source is checked. Release native database buffers only between active SQL connections.
+  
+  Give Core startup more time and leave its image and data in place if readiness fails. Preserve the previous image ID before replacement. Check the updater before opening data, and stop with a clear message when an older installation needs to update its updater first.
+  
+  Keep catalog ID allocation safe after an abrupt process exit, and defer raw-history retention until import finishes.
+
+## 3.2.0
+
+### Minor Changes
+
+- a62b082: Use embedded DuckDB for all time-series reads and writes, including the energy ledger. Keep SQLite for configuration and learned state, and retire the FTWDB shadow process.
+  
+  Core verifies the import of existing SQLite and Parquet history before starting control. Health separates queued ticks from durable commits. State schema 3 requires a full backup; returning to an older Core requires a verified full restore with the matching version.
+
+### Patch Changes
+
+- 6eadec3: Plan only the time left in the current price interval. Core, Energyplan 0.3.1,
+  EV budgets and plan projections now share the same execution interval. Reject
+  plans that cross a slot boundary before publication and retry from live state.
+  Compare measured slot energy with the decisions that applied during each part
+  of the interval so a late replan cannot rewrite the whole quarter's target.
+  Support reports use the same observed intervals and distinguish execution-budget
+  credits from measured battery energy.
+
+## 3.1.3
+
+### Patch Changes
+
+- e3076a4: Use the telemetry snapshot time for live forecast observations so delayed archive writes do not mistake fresh readings for future data.
+
+## 3.1.2
+
+### Patch Changes
+
+- 481cca7: Retry frozen forecast archive writes after a timeout or temporary database lock, and prepare compressed model snapshots before taking the SQLite write lock.
+
+## 3.1.1
+
+### Patch Changes
+
+- 0b4b39d: Preserve the configured battery SoC window when installing, switching or restoring a driver. Apply the same runtime limits as startup without saving derived values over the operator's config.
+- 8e6d090: Update the compiled planner to reject a PV maximum without a minimum control capability instead of silently ignoring the maximum. Valid requests keep their existing validation and planning behavior.
+
+## 3.1.0
+
+### Minor Changes
+
+- a7f8f70: Plan sites with no home battery, several batteries or several EVs with the bundled Energyplan worker. Keep each asset's limits and energy target, validate worker identities and deadlines, and carry each battery's energy budget through Core control. Only count verified PV generation control, and stop using its plan when the driver or its health changes. Keep the previous plan for diagnosis when the fallback cannot represent the site.
+
+### Patch Changes
+
+- 522f29f: Drain queued FTWDB shadow history for up to two seconds on normal shutdown and update, after hardware stops. Retry lost acknowledgements with the same commit and report any unconfirmed ticks when the sidecar cannot complete the copy.
+- d30576c: Show Updates from the mobile More page while the header menu is closed.
+  Keep the backup section open and preserve its scroll position during creation,
+  verification and completion.
+  Let backup controls and timestamps fit the mobile dialog.
+- a45fda4: Keep sites without a home battery unavailable when Core DP is selected, and report the same reason in planner diagnostics. Keep Energyplan available for those sites. Match the documented worker budget to the request: Core's PV downside adjustment does not add scenarios or extend the budget on its own.
+- f9cb680: Keep official driver signature checks and read-only limits after repository names change. Use the trust recorded at installation and verify the saved manifest again; refuse an official driver if its saved manifest cannot be verified.
+- a001d50: Keep each managed driver's metadata format through restarts and rollback. A
+  Device Support package now requires its verified runtime policy even when
+  control is not selected, its repository is removed, or its envelope is missing.
+  Verified legacy installs retain their normal autonomous default. Older installs
+  with no recorded format need matching verified metadata; restore their repository
+  or reinstall them if that metadata is unavailable.
+- fed3695: Check retained package metadata before reinstalling a driver from an older
+  database. Reject a change to direct-manifest format while a package envelope
+  remains, and require signed legacy metadata when its format is unknown.
+  A rejected reinstall preserves the active artifact and rollback record.
+- 2e77a0f: Restore startup and autonomous default mode for retained legacy v1 drivers after their configured repository is removed. Keep official signature checks and control-v2 trust requirements unchanged.
+- 0a98614: Move focus into Settings when it opens, keep Tab within its visible controls,
+  and let Escape close it. Closing Settings returns focus to its opening button,
+  including the shortcut in More. The restart prompt keeps focus while open,
+  blocks the background, and returns focus when Restart later or Escape closes
+  the prompt. During a pending restart, focus stays in the prompt and Escape
+  does not close it.
+  Show restart progress only after Restart now starts the request.
+- f2ae6c6: Match signed driver updates to the configured driver ID when bundled and repository filenames differ. Save the selected path, restore the bundled file by ID, and report fresh telemetry only for instances that actually restarted. Tell an open Settings dialog when it must reload the saved config before saving again.
+
+## 3.0.3
+
+### Patch Changes
+
+- 48013fd: Restore and save rotated OAuth tokens before drivers start so myUplink can stay connected across Core restarts and updates.
+  
+  Apply signed OAuth rules to managed drivers, including official beta installs. Allow token exchange only at the declared path, block redirects, and let each driver save only its declared secret keys with bounded keys and values.
+- d6da557: Close the FTWDB shadow connection after each durable batch so the next batch does not reuse a socket closed by the sidecar's idle timeout. This avoids repeated transport errors and delayed shadow copies during normal beta collection.
+- 76f811b: Keep unchanged form defaults out of saved settings. Opening Planner and saving
+  now preserves an unset SoC limit, including when saving from another tab.
+  Show the planner's 95% default maximum instead of 90%.
+  Keep an untouched driver profile absent when its choices arrive after the form.
+
+## 3.0.2
+
+### Patch Changes
+
+- fbd29b5: Show the price for the current interval in the Energy chart. Respect quarter-hour prices and leave NOW unavailable when viewing tomorrow or a gap in prices.
+
+## 3.0.1
+
+### Patch Changes
+
+- bd44d13: Keep Energyplan forecasts active and save their full archive when a rolling 48-hour plan contains 193 quarter-hour intervals. Include the current partial quarter and the final interval instead of rejecting the forecast and falling back to the legacy models. Keep the forecast size bounded.
+
+## 3.0.0
+
+### Major Changes
+
+- faad896: BREAKING CHANGE: Remove the built-in CalDAV server, its API endpoints, calendar settings and calendar-driven charging and away events.
+  
+  Use loadpoint targets and ready-by schedules for future charging. Existing goals, calendar data, learned models and forecast archives remain in place. Older config files still load and warn when calendar support was enabled.
+
+### Minor Changes
+
+- 92ff96c: Add an optional FTWDB beta sidecar that copies committed live site history through a bounded memory queue. Keep SQLite and Parquet authoritative and report candidate gaps, errors and durable acknowledgements in health.
+- ab1431f: Store settings and credentials together in SQLite, with durable commits before applying changes. Import YAML once and retain it as a database locator and recovery export. Remove background YAML reloads. Reject stale Settings forms and preserve the previous live settings on a failed write. Capture current settings in backups and keep forecast learning state unchanged.
+  
+  Mark the migration as state schema 2 so upgrades take a full backup. Returning to a YAML-only Core requires a matching backup restore.
+
+### Patch Changes
+
+- d8a9a2e: Restart solar-production or household-consumption learning after a lasting site change. Each action resets the selected primary model, its legacy fallback and error calibration, preserves measured history and the other model, and shows the new learning period. Saved reset intent survives a restart and prevents old observations from restoring the previous model.
+
+## 2.17.1
+
+### Patch Changes
+
+- 336969a: Keep fresh measurements that arrive during a control tick in history and the household energy ledger. Check their age when taking the snapshot while preserving the tick timestamp.
+
+## 2.17.0
+
+### Minor Changes
+
+- 74b5cb0: Correct weather interval timing, panel direction and forecast energy. Train household and PV models only on fresh, complete measurements. Keep grid limits separate from household demand and let PV learn its scale without a battery-based guess.
+  
+  Use the local Energyplan PV and load models as the planner's first forecast source, with no required panel geometry. Keep the previous forecast as a shadow and use it when the new model lacks a valid prediction or its worker fails. Save issued forecasts, per-signal sources and model state for causal comparison, report uncertainty by horizon, and add a read-only forecast evaluation command.
+
+### Patch Changes
+
+- 821a5f6: Build the updater on Windows while preserving Compose file ownership on Unix.
+
+## 2.16.1
+
+### Patch Changes
+
+- 63185d0: Keep complete errors and backup paths visible when retiring Python, and find the installed updater even when its Compose service has a custom name.
+
+## 2.16.0
+
+### Minor Changes
+
+- 8515c96: Remove the Python optimizer service, its release channel, update controls and runtime settings. Energyplan ships with Core and keeps Core DP as its validated fallback and comparison shadow. Older Python engine settings migrate to Energyplan. Core updates and fresh installations no longer need a Python sidecar; the updater can retire its old Compose wiring after Energyplan is healthy.
+
+## 2.15.2
+
+### Patch Changes
+
+- 9271c3c: Update the compiled Energyplan worker to 0.1.2. It now plans from the real
+  battery SoC below the reserve or above the charge limit, while keeping each
+  step within Core's recovery rules. Low SoC no longer forces Core DP fallback;
+  Core DP stays as the comparison shadow and reserve planner.
+
+## 2.15.1
+
+### Patch Changes
+
+- e669eb5: Keep the latest Core DP comparison queued when a replan cancels the previous
+  shadow. Cancellation no longer overwrites a comparison with a rejected verdict.
+  Reject active zero PV caps until dispatch can execute them. Keep the Python
+  PV-charge bonus aligned with Core in every mode. On hosts without a compiled
+  worker, verify bundle integrity and skip execution tests; keep Core as default.
+  Keep the release default when saving planner settings, and offer Energyplan
+  and Core DP as explicit choices.
+
+## 2.15.0
+
+### Minor Changes
+
+- e005853: Use the compiled Energyplan worker first in beta releases when no planner engine
+  is set. Core validates its plan, then runs Core DP as a background shadow on the
+  same downside PV input. Core DP remains the validated fallback, with a visible
+  reason when it takes over. The worker and its license ship and update with Core;
+  source stays private. Explicit core and python settings keep their roles.
+  
+  Reject EV plans above the battery limit and clip DP power at the operating band
+  so fallback energy matches the power it schedules.
+
+### Patch Changes
+
+- f4cc89f: Accept sub-watt solver residue at a slot's grid limit so an optimizer plan at the configured fuse ceiling does not trigger Go planner fallback. Larger import and export violations still fail validation.
+- 533179a: Go fallback plans are replayed against the same site-power and battery-energy identities as the mathematical optimizer before they can become the live plan. A true zero PV cap is now a distinct `pv_curtail_active` flag, so full curtailment is no longer serialized as “no cap”. A trajectory that cannot be reconstructed from the request is kept off dispatch.
+
+## 2.14.1
+
+### Patch Changes
+
+- dc89136: The Devices card no longer has its own pencil editor for the car's charge level; the slider in the EV card owns that value (#1062). The card still shows the charge, now as one number with its source in plain words — "estimated", "from the car", or "pinned after the car stopped asking" — and, while a car is plugged in, a line saying where to change it. Two leftovers from an older EV power slider were removed from the dashboard script; they had no control on the page and nothing called them. The HTTP routes behind them are unchanged.
+- 5801b4d: Keep unchanged drivers running when settings pass through the web API. Compare numeric values from JSON and YAML equally, including nested driver settings. Bound charger settings requests so a missing reply leads to a visible retry state.
+- 8241ca1: Use Easee session evidence to retain a confirmed battery level across a restart only when the same active session is verified.
+- 9bbc69d: Keep a confirmed EV battery level across restart only when fresh charger telemetry identifies the same hardware and charging session. Show when the level cannot be retained or the disk write failed. Changing battery capacity preserves the current level and its confidence.
+  
+  Treat a car declining current as a separate charging status. It no longer changes the estimated battery level to the target or sends a completed notification. Completion needs a fresh matched vehicle battery reading.
+  
+  A higher goal, an explicit retry or measured charging lets the planner resume after a prior refusal.
+- 2e01f7f: Let the charging view save the usual car’s usable battery size without replacing other settings. Apply a saved size through the shared config path and keep the current charge level steady. A failed save leaves the previous size in use.
+- 008ba8c: Explain when the charger’s own current limit reduces a request, without blaming the main fuse.
+- 5e01da8: Add Pause charging and Resume plan beside Charge now, with status that waits for the charger to stop. Let users change battery size beside the current level. Explain whether that level survives a restart, and never call a car that declined charge full. Keep the request deadline active until the response body arrives.
+- 0fe4c9b: Keep a changed charging request pending until the controller processes that choice and receives a fresh charger reading. An earlier command cannot confirm a new current or pause.
+- c459d15: Notify subscribed phones when a car is plugged in. Ignore first readings and recovery after an outage. Charging notifications carry the charger identity so the app can open its status and controls.
+- e7edd06: Explain when charging needs a new choice because the charger or connection could not be confirmed, including after reconnecting. Keep the message separate from confirmation that current has stopped.
+- 87a7e80: Show when the current car uses a different battery size from the usual size just saved.
+- a4979e5: Stop dispatching an old plan when its replacement fails, so a removed charging goal cannot keep charging the car. Keep the current plan during normal recalculation, require a successful new plan after failure, and preserve manual Start and Pause with the usual safety limits.
+- aea554e: Add a charger without inventing an ID or pressing Save again. Charger settings apply on change, with errors and a retry beside the form. OCPP setup stays separate from cloud chargers.
+  
+  Charging feedback separates the FTW request, the charger's reported limit and measured power. Old charger readings cannot claim current charging. Manual current changes apply on release; Return to plan names the action that ends a manual hold. Charge level and schedule writes run in order, and failed requests stay visible.
+  
+  Keep the charging goal and solar rule together, with no mode tabs. Show when Charge now overrides them. Show the current slider only while manual charging is active. Opening goal settings does not send a command.
+- 7e6dc2e: Guide the first charger connection from Chargers into the charger catalog and back after saving the connection. Hide the unrelated global Save button for charger autosave; keep explicit saves beside OCPP and shared-car settings.
+- 7a31411: Keep the battery level entered while waiting when the same charger first verifies its session at charging start. Count newly delivered energy from that level and save it once the session is verified.
+- 8f3b6b5: Keep EV power below the fuse budget when the budget falls between charging steps or below the minimum.
+- cca809c: Save charging goals before applying them. If storage fails, keep the previous goal and return a clear error for both goal edits and removals. A successful retry applies and saves the new goal together.
+- 27bf915: Bind a saved manual charging request to its charger hardware and verified charging session. Keep a saved pause on the same charger. When a prior positive request cannot be verified, pause and ask the owner to confirm instead of resuming automatic charging. Preserve explicit Start or Clear actions that arrive before the first charger reading.
+  
+  A running request also stops if the charger, session or loadpoint binding changes. A clear issued before telemetry survives another immediate restart, and concurrent Set/Clear writes preserve the order shown by the controller.
+- 7085724: Show when a charging choice applies now but could not be saved for restart. Retry its save when fresh charger data arrives and clear the message only after storage confirms it.
+- c0c5bfb: Preserve manual charging while the charger driver starts or has no reading. An absent reading no longer counts as an unplug. A confirmed unplug still ends the manual session.
+- cf41766: Ask OCPP chargers for fresh hardware identity after reconnecting, with bounded retries for missing replies and a safe fallback when the request is unsupported. Pause an older manual Start when hardware identity is lost, keep an explicit Pause, and allow a new Start to bind to the next verified identity. Keep cable status unknown during a network interruption, and preserve the reconnect boundary even when it falls between control ticks.
+- 6843ddd: Keep OCPP messages and command replies bound to the connection they came from. A delayed status or BootNotification from an older connection can no longer clear Pause or replace the current charger's identity. Check capabilities again after reconnecting.
+- 51ce2f2: Show the connected car and its next action on the home screen, with a direct route to charging controls. Keep stale status visible until a fresh reading confirms unplugging. Let the user choose the displayed first goal without changing its time or battery target.
+- 51024e6: Keep a manual pause until the user resumes or unplugs. Show when a pause is waiting for the charger and when it is confirmed. Keep manual charging available without a planner and enforce charger and installation limits on every manual request.
+- 2e730b7: Apply an automatic charging stop only if the manual request has not changed since the controller checked it. Keep a newer Pause, Start or slider change, and give each explicit retry a fresh wait for the car to draw current.
+- 212b045: Remove the active derived target when a charging goal is removed. The old deadline no longer drives the planner after the UI says the goal is gone. A separate Charge now request continues unchanged.
+- a8eb067: Ask how to continue when an earlier charge request cannot be matched after restart. Offer Charge now, Resume plan and Pause charging without calling it a user pause. Keep actual power visible until a changed current limit reaches the charger.
+- f73cd99: Confirm saved charging settings before calculating the plan. Show that planning is in progress and keep old charging windows out of that state.
+- 8c33446: Mark the default EV battery level as unconfirmed. Ask for the car's level after a box restart instead of presenting a calculation from the default as a confirmed estimate. An entered level still applies on slider release and survives a settings reload.
+- b67f07b: Save the solar charging choice before applying it. If storage fails, keep the previous choice and reject the change in both the box UI and Webapp. A retry can save and apply the choice once storage recovers.
+- 08e117d: Keep an explicit charging pause across restart even before the charger reports hardware identity. A prior Start without matching session proof restores only a pause that needs confirmation. Use the current OCPP connection's boot identity, and retry failed saves when charger data returns.
+- 7a7024b: Pause a prior manual request when a session counter resets, including when the previous session had no verified ID. Keep an explicit Start when the same uninterrupted session gains its first verified ID.
+- cd07ddc: EV modal, Manual tab: after Charge now the line under the button follows the charger instead of repeating the request. It says that the amps were sent and the box is waiting for the charger to confirm, that the charger has taken the limit and the car has not started drawing, that the car is charging, that the charger offers the current but the car is not drawing it (with the charger's own reason, such as "EV not accepting current"), that the command stalled, or that the main fuse limits the charge right now — each with the time elapsed. The plan strip above the tabs says the same while a manual charge runs, so the charger's reason is no longer hidden behind the manual sentence. A refused Start (403, 404, 409) now reads as a failure with the server's reason instead of "Charging at 16 A".
+  
+  `GET /api/loadpoints` carries this as `manual` per loadpoint: `state` (`sent`, `accepted`, `charging`, `not_drawing`, `stalled`, `limited`), `started_at_ms`, `since_ms`, requested and commanded watts and amps, the charger's reported limit and reason. `POST …/manual_hold` answers with `started_at_ms`, and an Update of the amps keeps the first press as the start. `commanded_since_ms` says when the box's current order was first given.
+- 2391dd1: Full backups now include managed drivers whose active links use absolute paths inside the data directory. The archive stores relative links so restore works at a new path. Links that escape the data directory or form cycles remain blocked.
+- 3b66faf: Keep the selected optimizer image after updates and rollbacks by saving and checking its Compose pin. Report a failed pin write instead of a successful update, preserve other host settings and file permissions, and keep shell payloads containing credentials out of updater logs.
+- 2391dd1: Restart restarts the existing container and keeps its exact image, including local test builds. It never pulls or recreates from a stale Compose tag. Core refuses the unsafe restart path on older updaters and explains how to update the updater.
+- 7806f79: Stop savings database reads when an app request times out or is canceled, so the request releases its place for later app reads. Keep canceled calculations out of the daily savings cache.
+- 99371b8: Keep driver paths consistent when settings are saved. Adding a charger no longer restarts other drivers with paths that fail to load.
+- ab8f5ac: A surplus-only EV can take leftover PV while the home battery buys from the grid. Surplus-only is an EV policy, not a site-wide import ban: the car still cannot import, and the home battery still cannot feed the car.
+  
+  Core DP includes this change. Sites using the optional Python/HiGHS planner need an updated optimizer to produce the same allocation. Core DP does not require a new optimizer image.
+
+## 2.14.0
+
+### Minor Changes
+
+- 50a0992: EV modal: one way to let the home battery help the car. "Boost from home battery" now lives in the EV modal, below the charging tabs: pick how much the home battery keeps in reserve and for how long, start it, and see why it stopped when the box ends it. The "Legacy site-wide battery cover" toggle is gone from the modal; a site that still has that older setting on sees one line about it there with a button to turn it off. The Devices card no longer carries a second copy of the boost form, only a line about an active boost.
+- 173e32e: EV modal: the plan is visible at plug-in. Above the tabs the modal now draws the planned charge windows for the car on a 24 h track, with the energy in them, under the usual one-line status. Right below sits the car's current charge, which the plan is built from: drag it to the real value and let go, and the box replans and redraws the plan. The "Set current charge" button and the SoC editor in the Scheduled tab are gone. `GET /api/loadpoints` carries the windows as `plan_windows`, and `POST /api/loadpoints/{id}/soc` replans before it answers.
+  
+  Two fixes underneath, both seen on a real site: setting the car's charge level now clears the "session complete" latch instead of snapping back to the target on the next tick, and ten minutes of steady charging after that latch releases it, so the estimate follows the energy going in instead of sitting at the target while kilowatt-hours flow. `soc_source` reports `completed` when the latch is what pinned the value.
+- 43e6723: EV modal, Scheduled tab: the schedule saves as you change it. Move the target, pick a time, tick Repeat daily or choose weekdays, and the box saves, replans and redraws the plan above; the status line says so. The "Set schedule" button is gone; "Remove schedule" is the one button left. Weekday chips are new on the box (the wire and the phone client already had them).
+
+### Patch Changes
+
+- 903c701: The app can now correct the car's charge level and turn PV-only charging on or off over the session. Two new command operations, `loadpoint.soc.set` and `loadpoint.surplus_only.set`, do what the box's own page does through the same code path, and the matching HTTP routes name them when the passthrough refuses them.
+- f4430e5: "Also charge from PV surplus" on a scheduled charge now works. Once the home battery is at or above the threshold you set, spare solar is added on top of the planned charge. The planned charge itself is never cut back, and loadpoints set to PV-only behave as before.
+
+## 2.13.1
+
+### Patch Changes
+
+- 62640a5: EV manual charge: "Charge now" runs until the car is full, Stop or unplug. It no longer stops at the schedule's target SoC. The SoC estimate is a guess on chargers that cannot read the car, and a Start that released itself the moment the guess sat at the target left the operator with no way to charge. The API also refuses a `release_at_soc_pct` the estimate already meets (409) instead of installing a hold that clears on the next tick.
+- 384e2de: `GET /api/config` masks driver config keys whose names say credential (password, secret, token, api key, private key) even when the installed driver's catalog entry does not list them under `config_secrets`, and `POST /api/config` restores the stored value when the client sends the mask or a blank back. The installed copy of a driver can lag its source: a box served myuplink's `client_secret` and `refresh_token` in clear text over the LAN.
+- 37df5fe: Raspberry Pi image: apply host OS security updates automatically (Debian security + Raspberry Pi archives via unattended-upgrades, automatic reboot off) and restore Docker's apt source on first boot so the engine can be patched at all; document that self-update never covers the host.
+
+## 2.13.0
+
+### Minor Changes
+
+- e374e77: Ask why keeps earlier conversations. The box stores each thread, so a question asked from a laptop is readable from a phone and closing the dialog no longer throws the answer away. Open one from Earlier to read it or carry it on; the box keeps the 50 most recent.
+
+### Patch Changes
+
+- 711346b: Ask why streams the answer as it is written, shows each tool call while it waits, and keeps long replies inside the dialog. The reply renders as markdown — headings, lists and code, not raw dashes and asterisks — and a Stop button ends a slow model without losing the thread.
+
+## 2.12.1
+
+### Patch Changes
+
+- b129a83: Ask why follow-ups keep the conversation, a closed dialog cannot steal a late answer, and pasting a key no longer forces Enable on.
+- d464e47: Ask why can explain the current plan from a question under the Plan card, shows live progress in a conversation, and opens a GitHub issue with one filled text field.
+
+## 2.12.0
+
+### Minor Changes
+
+- bd3ecdc: Ask why: paste an OpenRouter key and the Plan card can explain the live site and draft a GitHub issue. It uses read-only tools (help report, driver health, logs, current plan slot). A header chip appears when a driver is offline; clicking it opens Ask why. Off until enabled. Default model is openrouter/free. The helper never issues driver commands.
+
+## 2.11.0
+
+### Minor Changes
+
+- ba64f5b: The planner now runs inside Core by default. The Go solver — measured
+  within öre of the external MILP on real site snapshots and structurally
+  immune to the relaxation failure modes the external stack needed guard
+  rails for — plans against the per-slot PV downside at 201×401
+  resolution. The Python/HiGHS optimizer is no longer the champion: with
+  planner.shadow_python (default on) it runs after each replan as a
+  comparison shadow on identical inputs, and every replan logs and
+  records the terminal-corrected cost difference — the field evidence
+  for its scheduled removal. Set planner.engine: python to keep the old
+  arrangement during the transition.
+  
+  A battery that has drifted outside soc_min…soc_max no longer stops
+  Core from planning. The planner starts from the nearest band edge,
+  warns with the real reading and the difference in Wh, and records the
+  unclamped value on the diagnostic as initial_soc_unclamped; the
+  dispatch clamp and the driver's own floor still bound what any plan
+  can ask the hardware for. A reading that is not physically possible —
+  outside 0–1 — is still refused, and the previous plan stands.
+
+### Patch Changes
+
+- aa8bf39: Keep Manual… strategy buttons on the Plan card in simple view, open them when the live mode changes to a manual fallback, and mark a tap before the server confirms. Hide manual now stays hidden — the status poll no longer reopens the drawer — and a tap no longer flickers back to the previous strategy.
+  
+  A house left in a manual mode can start planning again: the Plan card shows "Use the plan" whenever the planner is not driving. It hands the battery to the planner mode this household's own prefs imply — the passive one unless battery export is allowed — and never grants export rights on its own.
+
+## 2.10.0
+
+### Minor Changes
+
+- 82b069b: The forecast-trust slider becomes a real dial: 41 positions (0–2 in
+  0.05 steps) instead of three, stored as the numeric safety factor the
+  planner actually uses. With the per-slot PV hedge this is now a
+  tangible control — each notch changes the share of every slot's own
+  forecast uncertainty the plan holds in reserve, the hedge line updates
+  live while dragging, and releasing the slider replans immediately.
+  Existing three-step choices and the enum API field keep working; old
+  clients read the nearest step.
+
+## 2.9.0
+
+### Minor Changes
+
+- 5658cf3: The planner's PV-forecast hedge is now proportional per slot instead of
+  one flat watt figure across the whole horizon: the PV model learns the
+  relative forecast error online, and each slot's downside is that share
+  of its own expected generation — large on variable cloudy days, zero at
+  night, no longer erasing morning and evening shoulders or hedging a
+  clear tomorrow with today's uncertainty. Measured against real
+  snapshots the flat haircut cost 25–65 SEK per 48 h plan. Sites where
+  the model has not yet learned the relative error keep the previous
+  flat behavior.
+
+### Patch Changes
+
+- 1887965: A plan that rides the site's grid limit exactly is no longer rejected
+  for solver float noise: the external-plan validator's grid-limits
+  check gains the same ±2 W tolerance every other power check already
+  had. Rejection discarded the whole plan and silently degraded the
+  site to the fallback planner — observed in the field as
+  "slot 34 grid_w 11040.000 violates grid limits" on an 11 040 W fuse.
+
+## 2.8.0
+
+### Minor Changes
+
+- 44c62d1: The Plan card's forecast-trust slider always works now. An explicit
+  `pv_forecast_safety_k` in config.yaml used to win over it and render it
+  permanently disabled with a "config.yaml wins" note; the field is now a
+  first-boot seed only — it maps to the nearest trust step once when no
+  preference is stored, and the slider owns the live value from then on,
+  the same stored-wins contract `forecast_trust` already had.
+
+### Patch Changes
+
+- 8f0c2f9: Planner parity fixes ported from the MILP formulation (#1020): the
+  strict self-consumption bias clamps at zero price instead of
+  inverting into an import bonus on negative-price slots; the PV-charge
+  bonus applies in every mode (still bounded by live PV surplus);
+  horizon mean prices are length-weighted for mixed slot lengths; the
+  simulated plan starts at the battery's real state of charge instead
+  of the nearest grid point; and replan diagnostics persist the
+  arbitrage spread and PV-uncertainty inputs so a snapshot re-solves
+  under the exact economics the replan used.
+- 2a21b7f: The planner's DP grid resolution rises from 41 SoC × 81 action levels
+  to 201 × 401 (about 0.4 % SoC and 24 W steps), closing most of the
+  measured discretization gap to the external MILP; replans with an
+  active EV loadpoint automatically derate to 101 × 201 to keep the
+  extended state space near one second. Solve budgets were measured on
+  the snapshot replay bench before raising the defaults.
+
+## 2.7.0
+
+### Minor Changes
+
+- b824000: FTW now listens to what the car itself asks for. On an ISO 15118 session an
+  OCPP 2.0.1 charger forwards the vehicle's own `NotifyEVChargingNeeds` —
+  the energy it wants, when it expects to leave, and on DC its battery capacity
+  and present state of charge. Core takes that as the session's truth: the
+  reported capacity replaces the configured `vehicle_capacity_wh` (measured beats
+  an operator's estimate of the car that usually parks here), the reported SoC
+  re-anchors the session estimate, and the two together with the requested energy
+  derive the target the planner sizes on. A departure time the car states becomes
+  the loadpoint's target time, and one it does not state never erases the
+  operator's own. Everything is session-scoped and reverts on plug-out, like an
+  identified vehicle profile. The report is visible on `GET /api/ocpp/chargers`
+  as `charging_needs`, and quarantine still applies — a pending charge point's
+  needs are shown but never reach a loadpoint.
+  
+  An AC session states energy without a battery size, so no target fraction is
+  derived from it; guessing one would feed the planner a number the car never
+  claimed.
+- b824000: An adopted OCPP charger is now a device like any other. It gets a row in
+  `/api/devices` and under Settings → Devices, keyed on the vendor and serial
+  from its `BootNotification` rather than on the name it dialled with — that
+  name is one an installer typed and the charger's own web page can change, so
+  persistent state keyed on it would not survive a re-commissioning. Rename a
+  charger and the row follows it. A charger that reports no serial falls back to
+  the dialled name, recorded as an endpoint so it reads as stable-until-changed.
+  Pending chargers get no row: a device row says this hardware is part of the
+  site, and quarantine says an unadopted charge point is not.
+  
+  `GET /api/ocpp/chargers` now also reports each charger's `serial` and
+  `firmware`, and OCPP 1.6's deprecated `chargeBoxSerialNumber` is read when the
+  current field is empty — shipped firmware disagrees about which to fill, and
+  losing it loses the only stable identity some chargers ever report.
+  
+  The OCPP server's own settings — on/off, bind address, both ports, path,
+  username and password — are editable under Settings → Chargers instead of
+  only in `config.yaml`. TLS paths and per-charger credentials stay in the file:
+  they are host filesystem paths and one secret per charger, set once at
+  commissioning.
+- b824000: The OCPP listener can now be pinned to one interface, served over TLS, and
+  given a credential per charger.
+  
+  `ocpp.bind` finally does something. The library builds its listen address from
+  the port alone, so the socket is unavoidably open on every interface; FTW now
+  refuses the WebSocket handshake for a connection that arrived on any other
+  address. That is an access control rather than a smaller attack surface — the
+  port still answers a scan — and the docs say so.
+  
+  `ocpp.tls` serves `wss://` instead of `ws://`, ending the plaintext basic auth
+  anyone on the LAN could sniff. `client_ca_file` additionally requires every
+  charge point to present a certificate signed by that CA (OCPP 2.0.1 security
+  profile 3). Half a TLS section is refused at startup rather than quietly
+  serving plaintext.
+  
+  `ocpp.chargers` gives a named charge point a password of its own. On OCPP the
+  basic-auth username is the charge point identity, so a listed charger must
+  present both, and the shared password stops being enough to connect under its
+  name — the impersonation hole the pending-charger quarantine could not close.
+  It is opt-in per charger; anything unlisted keeps using the shared credential.
+  Per-charger passwords are masked out of `GET /api/config` and survive a
+  settings save, matched by charger id rather than position.
+
+### Patch Changes
+
+- b824000: Three fixes from running the OCPP central system against Sourceful's device
+  simulator. Each one let FTW report a limit it had not actually imposed, or
+  refuse a control that should have worked.
+  
+  **Charging profiles are sent as Relative, not Absolute.** FTW's schedule is a
+  single period at second 0 with no end — "hold this limit until I say
+  otherwise". Absolute expresses that only with a `startSchedule` timestamp, and
+  while the specification says an absolute schedule without one is relative to
+  the start of charging anyway, a charger that parses the missing timestamp
+  strictly finds no valid start, treats the profile as not yet active, and
+  answers **Accepted** while charging on at full rate. Relative carries no
+  timestamp, so there is nothing to misparse — and nothing that depends on the
+  charger's clock agreeing with ours.
+  
+  **A charger that refuses a charge-point-wide profile is retried on connector
+  1.** OCPP 1.6 permits a `TxDefaultProfile` on connector 0 — it is how a profile
+  applies to every connector — but some chargers read the connector-0 rule as
+  `ChargePointMaxProfile`-only and reject it. Rejecting means no limit at all, so
+  one retry on the first connector is the difference between a charger FTW steers
+  and one it can only meter.
+  
+  **Manual EV controls reach an OCPP charger.** Pause, Resume, Force start and
+  set-current posted to `/api/ev/command` went straight to the Lua driver
+  registry, which an OCPP charge point is not in — it dialled us rather than
+  being dialled. They failed with `driver "<id>" not found` while automatic
+  dispatch steered the same charger correctly.
+- 4f6060d: Enabling the OCPP server from the Chargers panel now works on the first
+  try: the username field carries the real default ("ftw") instead of a
+  placeholder that validation then rejected, and saving an OCPP change
+  honestly reports that a restart is required — the central system
+  listener only starts at boot, so the previous "no restart needed"
+  answer left the port silently closed after an apparently successful
+  save.
+
+## 2.6.0
+
+### Minor Changes
+
+- 87136d2: The EV modal names the exact clamp behind a paused charger instead of
+  the generic "paused by the box": main-fuse protection (with automatic
+  resume), waiting for PV surplus, stale site-meter safety hold — and an
+  ongoing charge says when the main fuse is limiting its rate. Every
+  dispatch branch now records why it chose the commanded watts, exposed
+  as `commanded_reason` on GET /api/loadpoints ("plan", "no_plan_budget",
+  "pv_surplus", "pv_surplus_pause", "fuse_limit", "fuse_cooldown",
+  "site_meter_stale", "manual_hold", "wake_kick"). Prompted by a field
+  report where the plan showed charging while the box sent 0 A and the
+  operator spent the evening debugging cable and charger.
+
+## 2.5.0
+
+### Minor Changes
+
+- 4082a64: The EV modal's Start button becomes "Charge now → target": the manual
+  hold charges at the slider's amps and releases itself once the car's
+  estimated state of charge reaches the schedule's target (80 % when no
+  schedule is set), falling straight back to planned dispatch — pressing
+  Start no longer overrides the planner for the rest of the session. The
+  release target survives restarts with the hold, holds without a target
+  keep the old pin-until-Stop-or-unplug contract, and
+  POST /api/loadpoints/{id}/manual_hold accepts the new
+  `release_at_soc_pct` field.
+- 3d99dd8: The EV modal now says why the charger is or is not charging, and when it
+  will: the next planned charge window from the active plan ("Charging
+  planned 02:15–06:30, ~18 kWh"), an explicit "waiting for tomorrow's
+  prices — PV surplus only until then" state when grid-funded planning is
+  deferred past the published price horizon, "charger offers X kW but the
+  car isn't drawing" with the charger's own reason when the vehicle
+  declines, and a plain warning when nothing (schedule, PV-only, Start)
+  will ever start a charge. GET /api/loadpoints carries the new fields:
+  `plan_next_start_ms` / `plan_next_end_ms` / `plan_next_wh` /
+  `plan_total_wh`, `grid_deferred`, and `commanded_w` / `commanded_known`.
+
+### Patch Changes
+
+- 940783e: Bundle easee_cloud 1.2.0 (srcfl/device-drivers#103): the driver now
+  emits `request_active`, so Core can tell "the car has stopped
+  requesting current" (Easee reason 50 / charging completed) from "the
+  box paused it". This turns on three existing protections for Easee
+  sites: the session-completion latch stops the planner allocating
+  energy to a full car, a manual Start hold auto-releases instead of
+  offering power all night, and the charging-interrupted notification
+  stops firing on the car's own renegotiation bursts. The driver's HTTP
+  transport is also pcall-hardened.
+
+## 2.4.0
+
+### Minor Changes
+
+- bf2c142: Rename the Loadpoints tab and dashboard section to Chargers, and give it an
+  OCPP panel: the exact backend URL to enter on a charger, live state for every
+  connected charge point (vendor, dialect, vehicle, power, session energy), and
+  the connected charge points offered in the charger-driver dropdown so an OCPP
+  charger can be bound to the planner without editing YAML. Backed by a new
+  GET /api/ocpp/chargers endpoint. Docs now recommend a DHCP reservation for the
+  FTW host before commissioning chargers.
+- c1bf48c: The planner now has a household preference object on the Plan card: follow-the-forecast (cautious / balanced / bold) and a battery-export permission (unknown / not allowed / allowed). Balanced is today's default. Unknown export does not sell from the battery. Sites that were on Active arbitrage must confirm before selling again. Settings keep house reserve on top and bury engine knobs; weather no longer asks for array orientation on the normal path.
+- bf2c142: FTW now asks each OCPP charger whether it can be steered, and says so. Shortly
+  after a charger connects, core reads its `SupportedFeatureProfiles` (1.6) or
+  `SmartChargingCtrlr.Available` (2.0.1), records the raw answer, and shows a
+  Control column on Settings → Chargers: "smart charging", "telemetry only" (with
+  a warning explaining the charger will meter but never plan), or "not reported"
+  for a charger that stayed silent. Also exposed as `steerable` and
+  `feature_profiles` on `GET /api/ocpp/chargers`. The verdict is advisory —
+  commands are still attempted, so a charger that under-reports its own
+  capabilities is never locked out of control.
+- bf2c142: Add OCPP 1.6J support so EV chargers connect to FTW directly instead of through
+  a vendor cloud. An OCPP charger needs no driver: the protocol is vendor-neutral,
+  so one server in core handles every charger that speaks it.
+  
+  Chargers dial FTW rather than the other way round, so there is nothing to add
+  under `drivers:`. A charge point becomes a device on its first BootNotification,
+  keyed by the last segment of the URL it connected to, and dispatch treats it
+  like any other EV reading.
+  
+  This reinstates `go/internal/ocpp`, retired as unused in #578, and wires it into
+  the process behind a new `ocpp` config section. It matters because Charge Amps
+  has no FTW driver at all and every current model speaks OCPP, while Easee and
+  Zaptec can be commissioned once through their vendor portal and then run with no
+  cloud in the runtime path.
+  
+  FTW throttles, pauses and resumes an OCPP charger like any other EV charger.
+  Every command is a current limit rather than a remote start or stop, because
+  `RemoteStopTransaction` is unreliable on Charge Amps hardware — units
+  acknowledge the stop and resume charging on their own, while a 0 A charging
+  profile is honoured consistently and keeps the session meter intact across a
+  pause. Below the IEC 61851 minimum of 6 A the charger is told 0 A rather than
+  being rounded up to current the site fuse was not asked to carry.
+  
+  The server is off by default. Enabling it requires a username and password, and
+  FTW refuses to start without them: the OCPP library builds its listen address
+  from the port alone, so the socket is reachable on every interface and basic
+  auth is the only gate. Keep the port closed at your router.
+- bf2c142: OCPP charge points now start quarantined. A charge point that no charger entry
+  (loadpoint) names connects as "pending": it shows on Settings → Chargers with
+  its vendor, dialect and live state so it can be adopted, but its telemetry is
+  withheld from the site — no DerEV reading, no driver health, no metrics — and
+  it is never commanded. This stops any device that merely knows the shared OCPP
+  password from fabricating EV load and steering dispatch (the DerEV sum
+  suppresses home-battery discharge). Adopting a charger = adding a charger
+  entry with its id as the charger driver and saving — charger entries
+  hot-reload, so adoption and un-adoption take effect on the save.
+- bf2c142: Serve OCPP 2.0.1 alongside 1.6J, so newer chargers connect without a driver too.
+  
+  Each version listens on its own port. A charger picks its dialect during the
+  WebSocket handshake, before any message is sent, and the underlying library
+  keeps one message handler per listener — so a single port cannot serve both.
+  Set `ocpp.port_v201` to enable 2.0.1; leaving it unset keeps 1.6J only.
+  
+  Only the message encoding differs. Both dialects share one charger map, one
+  telemetry path and one control path, so a 2.0.1 charger is metered, throttled
+  and paused exactly like a 1.6 one, and dispatch cannot tell them apart.
+  
+  2.0.1 restructures the messages more than the names suggest: StartTransaction
+  and StopTransaction collapse into a single TransactionEvent, transaction ids
+  become strings, connector status loses its charging meaning, and meter samples
+  arrive inside transaction events as well as on their own. The new handler
+  normalises all of that back to the same charger state.
+  
+  OCPP 2.1 is not supported. No production-grade Go implementation of it exists:
+  the library FTW uses covers 1.6 and 2.0.1 and has no 2.1 support, and the Go
+  projects that do claim 2.1 are early-stage validators and emulators rather than
+  servers. Adding it later is one more handler and one more listener; the
+  version-neutral core does not change.
+- a95a971: Tesla Wall Connector Gen 3 can be added as a local EV charger. The setup wizard and Settings → EV take the box's LAN address; FTW reads plug state, power and session energy over HTTP with no Tesla account. The wall connector cannot take a current setpoint — steer a Tesla through tesla_vehicle. Experimental until a live Gen 3 has been exercised.
+- bf2c142: Vehicle profiles for chargers shared by several cars. A new `vehicles:` config
+  list (also editable under Settings → Chargers → Vehicles) holds each car's
+  battery capacity, identifiers and charging policy — PV-surplus-only and/or a
+  target SoC the planner fills toward in the cheapest tariff hours. When an OCPP
+  charging session identifies the car (the RFID idTag on 1.6, a MacAddress or
+  eMAID idToken on 2.0.1), the charger switches to that car's capacity and
+  policy for the session; capacity reverts on plug-out. A session matching no
+  profile changes nothing — the visitor default — and the identity it presented
+  is shown in the Chargers tab so it can be pasted into a profile.
+
+## 2.3.2
+
+### Patch Changes
+
+- 0bcb0ed: "Show pairing code" works from a LAN browser again when no house password is set. The gate that sent owners to the box made sense only alongside the password: with the password off, the whole dashboard already accepts every LAN client, so the refusal blocked the household without slowing anyone else. Turning the house password on restores the strict rule — owner codes then require the password or the box itself. Promoting a phone to owner and the first pairing on an empty box follow the same rule.
+
+## 2.3.1
+
+### Patch Changes
+
+- 203e8ca: A config with two `is_site_meter: true` drivers no longer stops the box from starting. The box boots with the first declared driver as the site meter — the same one older versions silently used — ignores the flag on the rest, and logs a clear error naming both drivers so the mistake is visible in the log and the help report. Saving such a config from Settings is still rejected. A driver install that accidentally added a second site meter used to crash-loop the box before the web UI came up, leaving SSH as the only way back in.
+- 931ed6a: The pairing code — and the reason you cannot have one — now appears directly under the button that asked for it. Both used to render below the help paragraphs, usually under the settings window's fold, so pressing "Show pairing code" on a LAN browser looked like nothing happened while the answer ("making another owner is done on the box, or after the house password is on") sat unseen further down, styled like help text. Refusals are now red and the window scrolls the result into view.
+- 0b85747: FTW now holds at most one Modbus TCP connection per device. Many inverters accept a single session and drop the old one on every new connect, so a second driver on the same gateway, a driver test, or a fingerprint probe used to knock the live driver's session out mid-control; they now share the one session, each with its own unit id, and the socket closes only when the last user is gone. When something outside FTW keeps taking the device's only session, the box now says so — a rate-limited warning names the likely cause instead of flooding the log with a reconnect line per poll.
+
+## 2.3.0
+
+### Minor Changes
+
+- 7ac7be9: The phone app can now notify you when a device goes quiet or the house draws more than the fuse allows. Same thresholds as before (ten minutes of silence, thirty seconds over the rating) so a blip is not a lock-screen.
+- 54f0163: Sourceful Zap can again read PV and battery from devices it already talks to, as an opt-in under Settings → Devices. The default stays P1/HAN only. The driver never writes.
+- 53ca4ae: Zaptec Go, Go 2 and Pro can be added as a cloud EV charger. The setup wizard and Settings → EV offer Zaptec next to Easee; the same email and password list chargers on the account and drive current, pause and resume through Zaptec Cloud. The integration is experimental until a live charger has been exercised.
+
+### Patch Changes
+
+- 31742d7: Harden SI units and charging identities: SoC doors fold NaN/overflow instead of leaking percent or Inf, HA discovery slugs illegal driver names with a collision tag while leaving already-legal mixed-case ids unchanged, and synthetic history stores 0–1 SoC.
+- bab685a: Modbus give-up recovery no longer reload-loops a missing driver file or a device that never answered, and a failed `driver_init` during that reload keeps the previous VM so default-mode still works.
+- 33bd6ca: The weather location map loads again. OpenStreetMap's volunteer tiles now require a Referer, and the box was sending none.
+- 983c7ab: A short Modbus network blip no longer leaves a battery or meter offline until the box is restarted. Drivers that skip a register after a few failed reads used to skip every register after a "no route to host" moment; the host now reloads that driver and resumes polling once the link is back.
+- 5caddc1: The Plan chart reconstructs battery SoC from stored energy or battery power when a slot omits soc, instead of drawing a flat 0% line.
+- db39491: The live stats strip and today's self-powered share stay honest when a meter or inverter is offline: no fake 0 W, and a day that already happened still shows its percentage.
+- b1384b3: A meter that has stopped reporting no longer shows as 0 W balanced. Grid and house load go blank, and solar or battery that went quiet with it stay on the diagram as no data instead of vanishing.
+
+## 2.2.1
+
+### Patch Changes
+
+- 77c9514: The phone app now shows EV charging as its own number, the same way the local page does. A charger that is drawing but cannot take a command no longer hides that draw inside "house", and the battery no longer discharges into the car when cover-EV is off.
+- 9fdc46d: The house password can only be turned on from loopback inside the process. Saving Settings can no longer flip that lock through the whole config document. On Docker Desktop that means `compose exec`, not a host curl to localhost.
+- e2187f4: An owner pairing code can only be minted on the box itself, or after the house password is on. The same gate covers promoting a phone to owner and the first pairing on an empty box, which would otherwise become an owner. A viewer invite still works from the LAN once an owner exists.
+- 60fbf35: FTW now rejects corrupt, non-finite, and non-positive exchange rates before they can enter price data.
+- 5adda2f: A hostname with no dot is no longer treated as local. If the driver catalog cannot be read, or a configured driver is missing from it, config secrets stay hidden. Driver test and fingerprint refuse loopback, localhost, and link-local targets on MQTT, Modbus, HTTP, WebSocket and TCP.
+
+## 2.2.0
+
+### Minor Changes
+
+- f258a4d: Core stores power in watts, energy in watt-hours, SoC as 0–1, and PV arrays as rated watts. kWp and 0–100 percents remain only at UI, Home Assistant, appproto, calendar titles, and the forecast.solar URL. Loadpoint, calendar, vehicle telemetry, and V2X envelopes use 0–1 without `_pct` names. Pasting watts into the old kWp field is converted on config load. Heat-pump diagnostics emit W/Wh.
+
+### Patch Changes
+
+- 19f9264: An MQTT driver that stops draining its subscription no longer grows the inbound queue without limit. The buffer is bounded at 1024 messages, dropping the oldest half on overflow — the same rule the websocket and TCP capabilities already follow — so a stalled driver on a busy broker can no longer exhaust memory on the box.
+- 810fef9: The dashboard escapes driver names and planner reasons before putting them in HTML, so a crafted name cannot run script in the browser.
+- 1642fe3: Load forecast slots are hard-cut to the site fuse and cannot sit far below recent days. A 100 W overnight prediction on a lived-in house is lifted to the existing 25% prior floor before it reaches the planner.
+- 762e135: When planning cannot start, the Plan view now says why — a missing battery, no prices, or the planner being off — instead of asking you to pick a strategy you already picked.
+- f65007e: Public hosts now need the API token for diagnose, series, EV detail, driver list, fleet ping, and similar reads. The live dashboard (status, energy, prices, plan, loadpoints) stays open.
+- 1642fe3: A PV forecast can no longer exceed the site nameplate. Pasting watts into array kWp (18960 W → 18960 kWp) is treated as 18.96 kW, and both the stored forecast and the plan are hard-cut at rated watts.
+- b8cd2b6: A slew rate of 0 W/cycle no longer freezes battery dispatch. The limiter anchors on the battery's measured power, so a zero budget snapped every target back to whatever the battery was already doing and the site held that power until restart. Non-positive now means "no external ramp limit", the same as `slew_enabled: false`.
+
+## 2.1.0
+
+### Minor Changes
+
+- 928c9d5: Optional `api.lan_auth` asks for a house password on the LAN before config, logs, dumps and writes. Off by default. Loopback and the phone app stay as they are.
+- eec4c86: When LAN auth is on, the dashboard asks for the house password and keeps a session cookie. Settings → System turns the lock on and off.
+- 60685f6: Core now actually sends the solar surplus to a driver whose Solar PV feed is armed. Every control tick computes the site's solar-attributable export — the smaller of live PV generation and grid export, after subtracting battery/V2X discharge so stored energy is never advertised as sunshine — and hands it, site-signed, to every driver whose operator enabled the write path (the `solar_pv` action, e.g. the NIBE S-series surplus feed). Dispatch runs behind the existing site-meter freshness gate: stale telemetry stops the feed and the driver's default mode / dead-man switch clears the device register. Standing refusals (pump-side enable still off) log once per transition instead of every tick.
+- 60685f6: A driver's opt-in write path can be turned on from Settings, instead of by
+  hand-editing two keys in config.yaml.
+
+  Everything in the catalog reads. One driver can also write — the NIBE S-series
+  solar surplus feed — and arming it meant setting `config.write.solar_pv` on the
+  driver _and_ `capabilities.http.allow_write` on the host, neither of which the
+  settings screen offered. An owner could install the driver from a card in the
+  UI and then had no way to use the one thing it was built for.
+
+  A driver now names its write paths in its `DRIVER` block
+  (`write_capabilities = { "solar_pv" }`), and Settings → Devices grows a _Solar
+  PV surplus feed_ panel on the drivers that declare one: a switch and the
+  maximum surplus to report. A driver that declares nothing gets no panel and no
+  markup, so read-only drivers are untouched and nothing about writing is written
+  into their config.
+
+  The panel keeps the safety properties the YAML had, where an operator can see
+  them. One switch moves both gates, because holding one without the other never
+  wrote anything anyway — the host refuses the verb without the grant, and the
+  driver disables the feed without the verb — so a half-armed config reads as
+  off. The feed will not arm without a maximum above 0: that ceiling is what
+  stops a sign error or a telemetry spike from telling a pump there are 100 kW
+  going spare, and clearing it disarms a running feed. What the pump needs at its
+  own end — installer menu 7.5.15 set to read/write, its Solar PV input on —
+  cannot be checked from FTW, so the panel says so rather than letting the writes
+  fail silently as `read only value`.
+
+  The local-API help text also stopped telling NIBE owners to enable the API in
+  the myUplink app. It is generated on the pump's own screen; there is no app and
+  no cloud account in that path.
+
+### Patch Changes
+
+- 1be6c0c: Active arbitrage can buy from the grid again while a surplus-only EV is plugged in.
+
+  Surplus-only still keeps the car off the grid and still forbids feeding it from the home battery. Those two rules already stop "cheap grid laundered through the Pixii into the car". The extra rule that also forbade charging the house battery from the grid, for the whole time the car sat on the charger, is gone — including the automatic surplus-only that kicks in when the EV deadline is past published prices.
+
+  Unpublished hours after the day-ahead cut-off no longer jump to the hour-of-week climatology (often 60–80 öre right after a 200 öre evening). They start from the last known spot and fade toward the typical curve over about six hours, so the planner does not skip charging on a price crash that has not happened yet.
+
+  The load twin's overnight prior is 650 W instead of 300 W, which is closer to a current Swedish house on a cold start or a repaired night bucket.
+
+- 359e080: The setup wizard now installs a discovered device by its self-broadcast mDNS
+  (.local) name instead of its raw IP when the device advertises one, so the
+  connection survives DHCP lease changes. When only an IP address is used, the
+  wizard and device settings now tell the operator to reserve that IP for the
+  device in the router's DHCP settings.
+- d17141a: Startup no longer hard-fails when GitHub/GHCR is unreachable. `docker compose pull` fetches images from ghcr.io (GitHub Container Registry), and every start path gated `up` on it: `scripts/install.sh` (under `set -e`) aborted before `up -d`, and the Raspberry Pi first-boot provisioner retried the pull forever and never reached `up -d`. During a GitHub outage that left the box unable to start.
+
+  The pull is now best-effort and the stack starts from the locally-present last-known-good images instead: install falls through to `up -d` after a failed pull, and first-boot brings the stack up on local images first, only reaching GHCR for a genuinely missing image. A truly fresh host with no local image still needs GHCR reachable — pre-baking images into the OS image is the follow-up for that.
+
+- 3afa0b4: A brief GitHub outage no longer sticks as the last update-check error for hours. The checker retries 5xx and 429 replies a few times, does not cache a failed check, and the Updates dialog retries on its own and says Check for updates will try again.
+
 ## 2.0.0
 
 ### Major Changes

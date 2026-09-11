@@ -328,7 +328,7 @@ func TestStorePreservesSoCWhenMissing(t *testing.T) {
 
 func TestStorePreservesVehicleSoCWhenDriverReplaysCache(t *testing.T) {
 	s := NewStore()
-	freshSoC := 61.0
+	freshSoC := 0.61
 	s.Update("tesla", DerVehicle, 0, &freshSoC, json.RawMessage(`{"soc_fresh":true}`))
 	first := s.Get("tesla", DerVehicle)
 	if first == nil || first.SoC == nil || first.SoCUpdatedAt.IsZero() {
@@ -339,7 +339,7 @@ func TestStorePreservesVehicleSoCWhenDriverReplaysCache(t *testing.T) {
 		t.Fatalf("fresh vehicle samples = %+v, want power plus SoC", samples)
 	}
 
-	cachedSoC := 62.0 // cached replays must not replace the last proven value
+	cachedSoC := 0.62 // cached replays must not replace the last proven value
 	s.Update("tesla", DerVehicle, 0, &cachedSoC, json.RawMessage(`{"soc_fresh":false}`))
 	got := s.Get("tesla", DerVehicle)
 	if got == nil || got.SoC == nil || *got.SoC != freshSoC {
@@ -360,7 +360,7 @@ func TestStoreFailsClosedOnInvalidVehicleSoCFreshness(t *testing.T) {
 		json.RawMessage(`{`),
 	} {
 		s := NewStore()
-		soc := 61.0
+		soc := 0.61
 		s.Update("vehicle", DerVehicle, 0, &soc, data)
 		got := s.Get("vehicle", DerVehicle)
 		if got == nil || got.SoC != nil || !got.SoCUpdatedAt.IsZero() {
@@ -374,7 +374,7 @@ func TestStoreFailsClosedOnInvalidVehicleSoCFreshness(t *testing.T) {
 
 func TestStoreDropsCachedVehicleSoCWithoutFreshPredecessor(t *testing.T) {
 	s := NewStore()
-	cachedSoC := 61.0
+	cachedSoC := 0.61
 	s.Update("vehicle", DerVehicle, 0, &cachedSoC, json.RawMessage(`{"soc_fresh":false}`))
 	got := s.Get("vehicle", DerVehicle)
 	if got == nil || got.SoC != nil || !got.SoCUpdatedAt.IsZero() {
@@ -435,6 +435,22 @@ func TestSumOnlineEVWSumsAllOnline(t *testing.T) {
 	s.DriverHealthMut("easee-2").RecordSuccess()
 	if got := s.SumOnlineEVW(); got != 7200 {
 		t.Errorf("want 7200, got %f", got)
+	}
+}
+
+// A charger that cannot take a command is still drawing. DeviceFault must
+// not drop that watts from the house-vs-car split — that is how the phone
+// app showed EV at 0 W while the LAN dashboard showed 11 kW.
+func TestSumOnlineEVWCountsAFaultedDriver(t *testing.T) {
+	s := NewStore()
+	s.Update("easee", DerEV, 11400, nil, nil)
+	s.DriverHealthMut("easee").RecordSuccess()
+	s.SetDriverDeviceFault("easee", true, "setpoint refused")
+	if s.DriverHealth("easee").IsOnline() {
+		t.Fatal("precondition: a faulted charger is not online for control")
+	}
+	if got := s.SumOnlineEVW(); got != 11400 {
+		t.Errorf("faulted charger draw = %f, want 11400", got)
 	}
 }
 
@@ -580,5 +596,47 @@ func TestWatchdogPerDriverOverride(t *testing.T) {
 	}
 	if !flipped["tesla"] {
 		t.Errorf("tesla should flip stale at 6 min under 5-min override; transitions=%+v", transitions)
+	}
+}
+
+func TestValidateReadingSiteConventionAndFractions(t *testing.T) {
+	soc := 0.55
+	if err := ValidateReading(DerPV, -1200, nil); err != nil {
+		t.Fatalf("valid PV: %v", err)
+	}
+	if err := ValidateReading(DerPV, 50, nil); err == nil {
+		t.Fatal("positive PV must be rejected")
+	}
+	if err := ValidateReading(DerEV, -10, nil); err == nil {
+		t.Fatal("negative EV must be rejected")
+	}
+	if err := ValidateReading(DerEV, 4140, nil); err != nil {
+		t.Fatalf("charging EV: %v", err)
+	}
+	if err := ValidateReading(DerBattery, 2000, &soc); err != nil {
+		t.Fatalf("battery charge + fraction SoC: %v", err)
+	}
+	pct := 55.0
+	if err := ValidateReading(DerBattery, 0, &pct); err == nil {
+		t.Fatal("percent SoC must be rejected at the telemetry boundary")
+	}
+	neg := -0.01
+	if err := ValidateReading(DerBattery, 0, &neg); err == nil {
+		t.Fatal("negative SoC must be rejected")
+	}
+	over := 1.02
+	if err := ValidateReading(DerBattery, 0, &over); err == nil {
+		t.Fatal("SoC 1.02 must be rejected (not silently folded to 1%)")
+	}
+	nan := math.NaN()
+	if err := ValidateReading(DerMeter, nan, nil); err == nil {
+		t.Fatal("NaN power must be rejected")
+	}
+	if err := ValidateReading(DerBattery, 0, &nan); err == nil {
+		t.Fatal("NaN SoC must be rejected")
+	}
+	inf := math.Inf(1)
+	if err := ValidateReading(DerMeter, inf, nil); err == nil {
+		t.Fatal("+Inf power must be rejected")
 	}
 }

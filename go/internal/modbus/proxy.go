@@ -41,7 +41,8 @@ type Proxy struct {
 
 	mu        sync.Mutex
 	listeners []net.Listener
-	pins      []drivers.ModbusCap
+	pins      []*Capability
+	byAddr    map[string]*Capability
 	wg        sync.WaitGroup
 	closing   atomic.Bool
 	sem       chan struct{}
@@ -55,6 +56,7 @@ func (e *Engine) Listen(binds []Bind, allowWrite bool) (*Proxy, error) {
 	p := &Proxy{
 		engine:     e,
 		allowWrite: allowWrite,
+		byAddr:     make(map[string]*Capability),
 		sem:        make(chan struct{}, proxyMaxClients),
 	}
 	for _, b := range binds {
@@ -70,7 +72,7 @@ func (p *Proxy) addBind(b Bind) error {
 	if b.Listen == "" || b.Host == "" || b.Port < 1 {
 		return fmt.Errorf("modbus proxy bind incomplete: listen=%q host=%q port=%d", b.Listen, b.Host, b.Port)
 	}
-	pin, err := p.engine.Open(b.Host, b.Port, 1, b.AllowUnverifiedLocal)
+	pin, err := DialWithOptions(b.Host, b.Port, 1, b.AllowUnverifiedLocal)
 	if err != nil {
 		return fmt.Errorf("modbus proxy pin %s:%d: %w", b.Host, b.Port, err)
 	}
@@ -81,6 +83,10 @@ func (p *Proxy) addBind(b Bind) error {
 	}
 	p.mu.Lock()
 	p.pins = append(p.pins, pin)
+	if p.byAddr == nil {
+		p.byAddr = make(map[string]*Capability)
+	}
+	p.byAddr[sessionKey(b.Host, b.Port)] = pin
 	p.listeners = append(p.listeners, ln)
 	p.mu.Unlock()
 
@@ -148,7 +154,9 @@ func (p *Proxy) forward(backend Bind, unitID uint8, pdu []byte) []byte {
 	if !isModbusRead(fc) && !isModbusWrite(fc) {
 		return exceptionPDU(fc, modbusExcIllegalFn)
 	}
-	cap := p.engine.lookup(sessionKey(backend.Host, backend.Port))
+	p.mu.Lock()
+	cap := p.byAddr[sessionKey(backend.Host, backend.Port)]
+	p.mu.Unlock()
 	if cap == nil {
 		return exceptionPDU(fc, modbusExcGWPath)
 	}
@@ -192,6 +200,7 @@ func (p *Proxy) Close() error {
 	p.listeners = nil
 	pins := p.pins
 	p.pins = nil
+	p.byAddr = nil
 	p.mu.Unlock()
 	var first error
 	for _, ln := range listeners {

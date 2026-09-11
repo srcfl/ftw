@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -128,20 +129,25 @@ const maxCostIntegrationGap = 20 * time.Minute
 // Returns zeroes (not an error) when the history is empty over the range —
 // callers can render that as "no data" without special-casing nil.
 func (s *Store) DailyCostBreakdown(sinceMs, untilMs int64, zone string, ep ExportPricing) (DayCostBreakdown, error) {
+	return s.DailyCostBreakdownContext(context.Background(), sinceMs, untilMs, zone, ep)
+}
+
+// DailyCostBreakdownContext stops database work when the caller leaves or times out.
+func (s *Store) DailyCostBreakdownContext(ctx context.Context, sinceMs, untilMs int64, zone string, ep ExportPricing) (DayCostBreakdown, error) {
 	if untilMs <= sinceMs {
 		return DayCostBreakdown{}, nil
 	}
-	slots, err := s.loadPriceSlotsForRange(zone, sinceMs, untilMs)
+	slots, err := s.loadPriceSlotsForRange(ctx, zone, sinceMs, untilMs)
 	if err != nil {
 		return DayCostBreakdown{}, fmt.Errorf("DailyCostBreakdown: load slots: %w", err)
 	}
 
-	out, err := s.integrateHistoryRange(sinceMs, untilMs, slots, ep)
+	out, err := s.integrateHistoryRange(ctx, sinceMs, untilMs, slots, ep)
 	if err != nil {
 		return DayCostBreakdown{}, fmt.Errorf("DailyCostBreakdown: integrate: %w", err)
 	}
 
-	avgImp, avgExp, priceSlots, err := s.avgSlotPricesForRange(zone, sinceMs, untilMs, ep)
+	avgImp, avgExp, priceSlots, err := s.avgSlotPricesForRange(ctx, zone, sinceMs, untilMs, ep)
 	if err != nil {
 		return DayCostBreakdown{}, fmt.Errorf("DailyCostBreakdown: avg slots: %w", err)
 	}
@@ -160,8 +166,8 @@ func (s *Store) DailyCostBreakdown(sinceMs, untilMs int64, zone string, ep Expor
 // [sinceMs, untilMs], sorted ascending by StartMs. The pre-range pad is
 // maxSlotPadMs (1 day) — generous against any real provider slot length so
 // a slot that started just before sinceMs and extends into it is included.
-func (s *Store) loadPriceSlotsForRange(zone string, sinceMs, untilMs int64) ([]priceSlot, error) {
-	rows, err := s.cache.Query(`
+func (s *Store) loadPriceSlotsForRange(ctx context.Context, zone string, sinceMs, untilMs int64) ([]priceSlot, error) {
+	rows, err := s.cache.QueryContext(ctx, `
 		SELECT slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh
 		FROM prices
 		WHERE zone = ?
@@ -214,9 +220,9 @@ func (s *Store) loadPriceSlotsForRange(zone string, sinceMs, untilMs int64) ([]p
 // non-negative — the same identity main.go uses in reverse to compute
 // `load_w` for the history rows). Pricing of EVWh is deferred to the
 // caller (DailyCostBreakdown applies the day's avg import).
-func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
+func (s *Store) integrateHistoryRange(ctx context.Context, sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
 	historyStartMs := sinceMs - maxCostIntegrationGap.Milliseconds()
-	rows, err := s.db.Query(`
+	rows, err := s.history.QueryContext(ctx, `
 		WITH all_rows AS (
 			SELECT ts_ms,
 			       COALESCE(grid_w, 0) AS grid_w,
@@ -337,11 +343,87 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 	return out, rows.Err()
 }
 
+// ImportWhIntervals integrates grid import over each half-open interval in
+// one history scan. intervals must be sorted and non-overlapping.
+func (s *Store) ImportWhIntervals(ctx context.Context, intervals [][2]int64) ([]float64, []int64, error) {
+	wh := make([]float64, len(intervals))
+	covered := make([]int64, len(intervals))
+	if len(intervals) == 0 {
+		return wh, covered, nil
+	}
+	sinceMs, untilMs := intervals[0][0], intervals[len(intervals)-1][1]
+	if untilMs <= sinceMs {
+		return wh, covered, nil
+	}
+	historyStartMs := sinceMs - maxCostIntegrationGap.Milliseconds()
+	rows, err := s.history.QueryContext(ctx, `
+		WITH all_rows AS (
+			SELECT ts_ms, COALESCE(grid_w, 0) AS grid_w, 0 AS tier
+			FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
+			UNION ALL
+			SELECT ts_ms, COALESCE(grid_w, 0), 1
+			FROM history_warm WHERE ts_ms BETWEEN ? AND ?
+			UNION ALL
+			SELECT ts_ms, COALESCE(grid_w, 0), 2
+			FROM history_cold WHERE ts_ms BETWEEN ? AND ?
+		), ranked AS (
+			SELECT ts_ms, grid_w,
+			       ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier ASC) AS row_rank
+			FROM all_rows
+		)
+		SELECT ts_ms, grid_w
+		FROM ranked WHERE row_rank = 1 ORDER BY ts_ms ASC
+	`,
+		historyStartMs, untilMs,
+		historyStartMs, untilMs,
+		historyStartMs, untilMs,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var havePrev bool
+	var prevTs int64
+	idx := 0
+	for rows.Next() {
+		var ts int64
+		var gridW float64
+		if err := rows.Scan(&ts, &gridW); err != nil {
+			return nil, nil, err
+		}
+		if !havePrev {
+			prevTs, havePrev = ts, true
+			continue
+		}
+		rawDtMs := ts - prevTs
+		intervalStart := maxInt64(prevTs, sinceMs)
+		intervalEnd := minInt64(ts, untilMs)
+		prevTs = ts
+		if rawDtMs > maxCostIntegrationGap.Milliseconds() || intervalEnd <= intervalStart {
+			continue
+		}
+		dtMs := intervalEnd - intervalStart
+		midTs := intervalStart + dtMs/2
+		for idx < len(intervals) && intervals[idx][1] <= midTs {
+			idx++
+		}
+		if idx >= len(intervals) || intervals[idx][0] > midTs {
+			continue
+		}
+		covered[idx] += dtMs
+		if gridW > 0 {
+			wh[idx] += gridW * float64(dtMs) / 3600000.0
+		}
+	}
+	return wh, covered, rows.Err()
+}
+
 // avgSlotPricesForRange computes time-weighted import / export price metadata
 // over price slots overlapping [sinceMs, untilMs), including variable slot
 // lengths and partial edge slots.
-func (s *Store) avgSlotPricesForRange(zone string, sinceMs, untilMs int64, ep ExportPricing) (avgImport, avgExport float64, count int, err error) {
-	rows, err := s.cache.Query(`
+func (s *Store) avgSlotPricesForRange(ctx context.Context, zone string, sinceMs, untilMs int64, ep ExportPricing) (avgImport, avgExport float64, count int, err error) {
+	rows, err := s.cache.QueryContext(ctx, `
 		SELECT slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh
 		FROM prices
 		WHERE zone = ?

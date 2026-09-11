@@ -107,7 +107,7 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := backup.Create(r.Context(), backup.CreateOptions{
-		State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
+		ConfigPath: s.deps.ConfigPath, State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
 		OutputDir: dir, Components: s.backupComponentInventory(r.Context()),
 		Maintenance: s.deps.DataMaintenanceMu,
 	})
@@ -216,9 +216,11 @@ func (s *Server) backupComponentInventory(ctx context.Context) backup.ComponentI
 		coreVersion = s.deps.SelfUpdate.Info().Current
 	}
 	inventory := backup.ComponentInventory{Core: backup.ComponentVersion{Version: coreVersion}}
-	if s.deps.MPC != nil && s.deps.MPC.Optimizer != nil {
+	// A shadow optimizer is still an installed component: a restore has to put
+	// back the version this site was running, whichever role it held.
+	if worker := s.deps.MPC.ConfiguredOptimizer(); worker != nil {
 		optimizer := backup.ComponentVersion{Version: "unknown", Protocol: components.OptimizerProtocolVersion}
-		if health, ok := s.deps.MPC.Optimizer.(optimizerHealth); ok {
+		if health, ok := worker.(optimizerHealth); ok {
 			healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			if runtime, err := health.Health(healthCtx); err == nil {
 				optimizer.Version = runtime.Version

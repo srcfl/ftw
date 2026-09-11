@@ -50,7 +50,7 @@ end
 		t.Fatalf("fresh poll: %v", err)
 	}
 	first := store.Get("vehicle-cache", telemetry.DerVehicle)
-	if first == nil || first.SoC == nil || *first.SoC != 61 || first.SoCUpdatedAt.IsZero() {
+	if first == nil || first.SoC == nil || *first.SoC != 0.61 || first.SoCUpdatedAt.IsZero() {
 		t.Fatalf("fresh vehicle reading = %+v", first)
 	}
 	firstSoCUpdatedAt := first.SoCUpdatedAt
@@ -62,7 +62,7 @@ end
 		t.Fatalf("cached poll: %v", err)
 	}
 	cached := store.Get("vehicle-cache", telemetry.DerVehicle)
-	if cached == nil || cached.SoC == nil || *cached.SoC != 61 {
+	if cached == nil || cached.SoC == nil || *cached.SoC != 0.61 {
 		t.Fatalf("cached vehicle reading = %+v", cached)
 	}
 	if !cached.SoCUpdatedAt.Equal(firstSoCUpdatedAt) {

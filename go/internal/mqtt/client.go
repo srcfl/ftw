@@ -15,12 +15,38 @@ import (
 	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
+// maxIncoming bounds the inbound queue. The read side is the driver's
+// poll loop calling host.mqtt_messages(); the write side is paho's
+// handler goroutine, which keeps running — and keeps auto-reconnecting —
+// whether or not the driver is still draining. A driver that stops
+// polling (stuck in driver_poll, backing off between failed restarts) or
+// one subscribed to a busy wildcard on a shared broker therefore grows
+// this slice without limit, on a box that is usually a Raspberry Pi.
+//
+// The websocket and TCP capabilities already bound their inbound buffers
+// for exactly this reason (1024 frames and 64 KiB respectively); this is
+// the same rule for the third one. Same overflow policy too: drop the
+// oldest half, because the newest telemetry is what the driver acts on.
+const (
+	maxIncoming  = 1024
+	keepIncoming = 512
+	// dropLogInterval throttles the overflow warning. A stalled driver
+	// overflows every keepIncoming messages, which on a chatty broker is
+	// often enough to bury the log.
+	dropLogInterval = 30 * time.Second
+)
+
 // Capability wraps a paho client to match drivers.MQTTCap.
 type Capability struct {
 	client paho.Client
 
 	mu       sync.Mutex
 	incoming []drivers.MQTTMessage
+	// dropped counts messages discarded on overflow since Dial, and
+	// lastDropLog dates the most recent warning about them.
+	dropped     int
+	lastDropLog time.Time
+	clientID    string
 
 	// subsMu guards the subscription set. Released before any
 	// network call (SUBSCRIBE) — never held across I/O.
@@ -56,7 +82,8 @@ func Dial(host string, port int, username, password, clientID string) (*Capabili
 // for unauthenticated mDNS names.
 func DialWithOptions(host string, port int, username, password, clientID string, allowUnverifiedLocal bool) (*Capability, error) {
 	cap := &Capability{
-		subs: make(map[string]struct{}),
+		subs:     make(map[string]struct{}),
+		clientID: clientID,
 	}
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", host, port)).
@@ -79,12 +106,10 @@ func DialWithOptions(host string, port int, username, password, clientID string,
 			cap.replaySubscriptions(c, clientID)
 		}).
 		SetDefaultPublishHandler(func(_ paho.Client, m paho.Message) {
-			cap.mu.Lock()
-			cap.incoming = append(cap.incoming, drivers.MQTTMessage{
+			cap.enqueue(drivers.MQTTMessage{
 				Topic:   m.Topic(),
 				Payload: string(m.Payload()),
 			})
-			cap.mu.Unlock()
 		})
 	if username != "" {
 		opts.SetUsername(username)
@@ -188,6 +213,23 @@ func (c *Capability) Publish(topic string, payload []byte) error {
 		return fmt.Errorf("mqtt: publish timed out: topic=%q", topic)
 	}
 	return tok.Error()
+}
+
+// enqueue buffers one inbound message, bounded by maxIncoming. Called
+// from paho's handler goroutine, never from the driver's poll loop.
+func (c *Capability) enqueue(msg drivers.MQTTMessage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.incoming) >= maxIncoming {
+		c.dropped += len(c.incoming) - keepIncoming + 1
+		c.incoming = append([]drivers.MQTTMessage(nil), c.incoming[len(c.incoming)-keepIncoming+1:]...)
+		if now := time.Now(); now.Sub(c.lastDropLog) >= dropLogInterval {
+			c.lastDropLog = now
+			slog.Warn("mqtt: inbound queue full, dropping oldest messages — driver is not draining",
+				"client_id", c.clientID, "queued", len(c.incoming)+1, "dropped_total", c.dropped)
+		}
+	}
+	c.incoming = append(c.incoming, msg)
 }
 
 // PopMessages — implements drivers.MQTTCap.

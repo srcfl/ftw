@@ -334,6 +334,77 @@ func TestLANAuthDoesNotOverrideRemoteToken(t *testing.T) {
 	}
 }
 
+func TestLANAuthAcceptsAPIToken(t *testing.T) {
+	resetLANGuesses(t)
+	policy := lanAuthPolicy(testHousePassword)
+	policy.Token = testMutationToken
+	var caller apiauth.Caller
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer "+testMutationToken)
+	rr := serveLANAuth(policy, req, func(r *http.Request) {
+		caller, _ = apiauth.FromRequest(r)
+	})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if caller.Kind != apiauth.KindLAN || caller.Role != apiauth.RoleOwner {
+		t.Fatalf("caller = %+v, want LAN owner", caller)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/restart", strings.NewReader(`{}`))
+	req.RemoteAddr = "192.168.1.10:43210"
+	req.Header.Set("Authorization", "Bearer "+testMutationToken)
+	req.Header.Set("Content-Type", "application/json")
+	rr = serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("mutation status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLANAuthAcceptsAPITokenWhenHousePasswordDoesNotMatch(t *testing.T) {
+	resetLANGuesses(t)
+	policy := MutationPolicy{
+		Token:          testMutationToken,
+		LANAuthEnabled: func() bool { return true },
+		VerifyLANSecret: func(string) bool {
+			t.Fatal("API token hashed as house password")
+			return false
+		},
+	}
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer "+testMutationToken)
+	rr := serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLANAuthWrongAPITokenDoesNotLockOwnerCookie(t *testing.T) {
+	resetLANGuesses(t)
+	policy := lanAuthPolicy(testHousePassword)
+	policy.Token = testMutationToken
+	cookie := mustIssueLANSession(t)
+
+	for i := 0; i < lanGuessLimit; i++ {
+		req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer wrong-api-token")
+		rr := serveLANAuth(policy, req, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong token %d status = %d, want 401", i+1, rr.Code)
+		}
+	}
+
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "")
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: cookie})
+	rr := serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("owner cookie after wrong API token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	req = lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer "+testHousePassword)
+	rr = serveLANAuth(policy, req, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("house password after wrong API token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestLANAuthNilVerifyIsOff(t *testing.T) {
 	resetLANGuesses(t)
 	policy := MutationPolicy{LANAuthEnabled: func() bool { return true }}
@@ -346,19 +417,24 @@ func TestLANAuthNilVerifyIsOff(t *testing.T) {
 
 func newLANAuthServer(t *testing.T) *Server {
 	t.Helper()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	st, err := state.Open(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	cfg := &config.Config{API: config.API{Port: 8080}}
+	cfg := &config.Config{API: config.API{Port: 8080}, Site: config.Site{SmoothingAlpha: .3}, Fuse: config.Fuse{MaxAmps: 16, Phases: 3, Voltage: 230}}
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err = config.InitializeStorage(cfgPath, statePath, cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := New(&Deps{
 		State:      st,
 		Cfg:        cfg,
 		CfgMu:      &sync.RWMutex{},
 		ConfigPath: cfgPath,
-		SaveConfig: config.SaveAtomic,
+		SaveConfig: func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
 		WebDir:     t.TempDir(),
 		MutationPolicy: MutationPolicy{
 			LANAuthEnabled: func() bool {
@@ -413,13 +489,36 @@ func TestAuthPasswordEnableAndStatus(t *testing.T) {
 	}
 
 	body := `{"password":"` + testHousePassword + `","enabled":true}`
-	post := httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/auth/password", strings.NewReader(body))
-	post.RemoteAddr = "192.168.1.10:43210"
+	lanEnable := httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/auth/password", strings.NewReader(body))
+	lanEnable.RemoteAddr = "192.168.1.10:43210"
+	lanEnable.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, lanEnable)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("first LAN enable status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	// Docker Desktop published ports SNAT to the bridge gateway, not
+	// loopback. That peer is RFC1918, same as a LAN visitor.
+	bridge := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
+	bridge.RemoteAddr = "172.17.0.1:43210"
+	bridge.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, bridge)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("docker-bridge enable status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "docker compose") {
+		t.Fatalf("403 body should name the Docker Desktop exec path, got %s", rr.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
+	post.RemoteAddr = "127.0.0.1:43210"
 	post.Header.Set("Content-Type", "application/json")
 	rr = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, post)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("first LAN enable status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+		t.Fatalf("loopback enable status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/auth/status", nil)
@@ -448,6 +547,17 @@ func TestAuthPasswordEnableAndStatus(t *testing.T) {
 	encoded, ok := srv.deps.State.LoadConfig(lanAuthPasswordKey)
 	if !ok || !strings.Contains(encoded, "$argon2id$") {
 		t.Fatalf("stored hash = %q, want argon2id encoding", encoded)
+	}
+}
+
+func TestPostConfigCannotEnableLANAuth(t *testing.T) {
+	srv, _, cfg := postConfigServer(t, nil)
+	body := strings.Replace(firstSiteMeterConfig, `"api": {"port": 8080}`, `"api": {"port": 8080, "lan_auth": true}`, 1)
+	if code := postConfig(t, srv, body); code != 200 {
+		t.Fatalf("POST /api/config = %d, want 200", code)
+	}
+	if cfg.API.LANAuth {
+		t.Fatal("config POST turned lan_auth on; only /api/auth/password may do that")
 	}
 }
 

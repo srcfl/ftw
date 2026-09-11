@@ -63,7 +63,7 @@ func TestManualHoldOverridesPlannerBudget(t *testing.T) {
 	}
 }
 
-func TestManualHoldPropagatesSiteFuseFields(t *testing.T) {
+func TestManualHoldCannotReplaceInstallationLimits(t *testing.T) {
 	now := time.Date(2026, 4, 26, 18, 0, 0, 0, time.UTC)
 	cfg := holdLoadpoint()
 	cmd := runHoldTick(t, cfg, ManualHold{
@@ -74,11 +74,11 @@ func TestManualHoldPropagatesSiteFuseFields(t *testing.T) {
 		SitePhases:      3,
 		ExpiresAt:       now.Add(60 * time.Second),
 	}, now)
-	if cmd.voltage != 240 {
-		t.Errorf("voltage = %.0f, want 240", cmd.voltage)
+	if cmd.voltage != 230 {
+		t.Errorf("voltage = %.0f, want configured 230", cmd.voltage)
 	}
-	if cmd.maxAmpsPerPhase != 20 {
-		t.Errorf("max_amps_per_phase = %.0f, want 20", cmd.maxAmpsPerPhase)
+	if cmd.maxAmpsPerPhase != 16 {
+		t.Errorf("max_amps_per_phase = %.0f, want configured 16", cmd.maxAmpsPerPhase)
 	}
 	if cmd.sitePhases != 3 {
 		t.Errorf("site_phases = %d, want 3", cmd.sitePhases)
@@ -255,7 +255,7 @@ func TestManualHoldExplicitFieldsOverrideDefaults(t *testing.T) {
 	if cmd.phaseMode != "1p" {
 		t.Errorf("phase_mode = %q, want \"1p\" (operator override)", cmd.phaseMode)
 	}
-	if cmd.voltage != 220 {
-		t.Errorf("voltage = %.0f, want 220 (operator override)", cmd.voltage)
+	if cmd.voltage != 230 {
+		t.Errorf("voltage = %.0f, want configured 230", cmd.voltage)
 	}
 }

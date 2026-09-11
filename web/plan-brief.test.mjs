@@ -30,7 +30,9 @@ describe("plan brief normalization", () => {
       tone: "idle",
     });
     assert.equal(brief.next.action, "Manual control is active");
-    assert.match(brief.next.time, /planning strategy/);
+    // Both manual sentences name the button that actually exists on the
+    // card. There is no strategy picker to send anyone to any more.
+    assert.match(brief.next.time, /Use the plan/);
     assert.equal(brief.soc, null);
   });
 
@@ -63,8 +65,8 @@ describe("plan brief normalization", () => {
   it("chooses the live meaningful action for an active plan", () => {
     const plan = {
       actions: [
-        slot(-7, { battery_w: 2400, soc_pct: 48 }),
-        slot(8, { battery_w: 0, soc_pct: 49 }),
+        slot(-7, { battery_w: 2400, soc: 0.48 }),
+        slot(8, { battery_w: 0, soc: 0.49 }),
       ],
       solver: { engine: "cvxpy", backend: "osqp", status: "optimal" },
     };
@@ -112,6 +114,29 @@ describe("plan brief normalization", () => {
     assert.match(brief.constraint, /schedule is old/);
   });
 
+  it("shows the Core planner as an ordinary active plan, not a fallback", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [slot(-7, { battery_w: 2400, soc: 0.48 }), slot(8)],
+        solver: {
+          engine: "core",
+          backend: "dp",
+          status: "optimal",
+          soc_levels: 201,
+          action_levels: 401,
+        },
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.46 },
+      now,
+    });
+
+    assert.equal(brief.state.key, "active");
+    assert.equal(brief.state.label, "Plan active");
+    assert.equal(brief.planner.label, "core / dp");
+    assert.equal(brief.planner.detail, "Plan result: Optimal");
+  });
+
   it("names the built-in solver fallback without losing its reason", () => {
     const brief = derivePlanBrief({
       enabled: true,
@@ -152,5 +177,50 @@ describe("plan brief normalization", () => {
     assert.match(brief.constraint, /Safety adjusted battery to 1.8 kW/);
     assert.equal(brief.forecast.label, "Some modeled inputs");
     assert.match(brief.forecast.detail, /forecast after that/);
+  });
+
+  it("does not tell a user who already picked a planner mode to pick a strategy", () => {
+    const brief = derivePlanBrief({
+      enabled: false,
+      unavailableReason: "no-battery-capacity",
+      plan: null,
+      status: { mode: "planner_passive_arbitrage", bat_soc: 0.4 },
+      now,
+    });
+
+    assert.equal(brief.state.key, "blocked");
+    assert.equal(brief.state.label, "Cannot plan");
+    assert.match(brief.next.action, /controllable battery/);
+    assert.match(brief.next.time, /Devices/);
+    // A house with no controllable battery is not one button away from a
+    // plan, so it must not be told to press one.
+    assert.doesNotMatch(brief.next.time, /Use the plan/);
+    assert.doesNotMatch(brief.planner.detail, /Use the plan/);
+    assert.equal(brief.soc.label, "40% now");
+  });
+
+  it("names a missing price source instead of asking for another strategy click", () => {
+    const brief = derivePlanBrief({
+      enabled: false,
+      unavailableReason: "no-price-provider",
+      status: { mode: "planner_arbitrage" },
+      now,
+    });
+
+    assert.equal(brief.state.key, "blocked");
+    assert.match(brief.next.action, /electricity prices/);
+    assert.match(brief.next.time, /Settings → Price/);
+  });
+
+  it("keeps the manual brief when a manual mode is selected and the planner is off", () => {
+    const brief = derivePlanBrief({
+      enabled: false,
+      unavailableReason: "planner-disabled",
+      status: { mode: "self_consumption" },
+      now,
+    });
+
+    assert.equal(brief.state.key, "manual");
+    assert.equal(brief.next.action, "Manual control is active");
   });
 });

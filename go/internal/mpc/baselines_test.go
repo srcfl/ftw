@@ -17,7 +17,7 @@ func TestBaselinesArbitrageBeatsNoBattery(t *testing.T) {
 		slots[i].SpotOre = prices[i] // let export revenue scale with spot
 	}
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 50
+	p.InitialSoC = 0.5
 	p.MaxChargeW = 3000
 	p.MaxDischargeW = 3000
 
@@ -78,7 +78,7 @@ func TestBaselinesSelfConsumptionMatchesOptimize(t *testing.T) {
 		{StartMs: 10_800_000, LenMin: 60, PriceOre: 200, LoadW: 2000, PVW: 0, SpotOre: 200},
 	}
 	p := baseParams(ModeArbitrage) // doesn't matter — baseline overrides mode
-	p.InitialSoCPct = 40
+	p.InitialSoC = 0.4
 
 	pSC := p
 	pSC.Mode = ModeSelfConsumption

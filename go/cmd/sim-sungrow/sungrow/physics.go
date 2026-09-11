@@ -68,7 +68,7 @@ type Config struct {
 func Default() Config {
 	return Config{
 		CapacityWh:    9600,
-		SoC:           0.5,
+		SoC: 0.5,
 		ResponseTauS:  3.0,
 		GainPct:       0.96,
 		MaxChargeW:    5000,

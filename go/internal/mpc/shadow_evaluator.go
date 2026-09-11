@@ -31,8 +31,8 @@ type ShadowEvaluation struct {
 	ChampionValuedCostOre            float64            `json:"champion_valued_cost_ore"`
 	ChallengerValuedCostOre          float64            `json:"challenger_valued_cost_ore"`
 	ChallengerMinusChampionValuedOre float64            `json:"challenger_minus_champion_valued_ore"`
-	ChampionVirtualSoCPct            float64            `json:"champion_virtual_soc_pct"`
-	ChallengerVirtualSoCPct          float64            `json:"challenger_virtual_soc_pct"`
+	ChampionVirtualSoC               float64            `json:"champion_virtual_soc"`
+	ChallengerVirtualSoC             float64            `json:"challenger_virtual_soc"`
 	ChampionStorageEnergyWh          map[string]float64 `json:"champion_storage_energy_wh,omitempty"`
 	ChallengerStorageEnergyWh        map[string]float64 `json:"challenger_storage_energy_wh,omitempty"`
 	ChampionClampCount               int64              `json:"champion_clamp_count"`
@@ -321,11 +321,11 @@ func shadowStorageFleet(p Params) ([]virtualStorage, map[string]float64) {
 		}
 		return []virtualStorage{{
 			id: "home-battery", capacityWh: p.CapacityWh,
-			minEnergyWh: p.CapacityWh * p.SoCMinPct / 100,
-			maxEnergyWh: p.CapacityWh * p.SoCMaxPct / 100,
+			minEnergyWh: p.CapacityWh * p.SoCMin,
+			maxEnergyWh: p.CapacityWh * p.SoCMax,
 			maxChargeW:  p.MaxChargeW, maxDischarge: p.MaxDischargeW,
 			etaCharge: etaC, etaDischarge: etaD,
-		}}, map[string]float64{"home-battery": p.CapacityWh * p.InitialSoCPct / 100}
+		}}, map[string]float64{"home-battery": p.CapacityWh * p.InitialSoC}
 	}
 	storages := make([]virtualStorage, 0, len(p.Storages))
 	initial := make(map[string]float64, len(p.Storages))
@@ -368,7 +368,7 @@ func shadowActionAt(plan *Plan, now time.Time) (Action, bool) {
 	nowMs := now.UnixMilli()
 	for i, action := range plan.Actions {
 		endMs := action.SlotStartMs + int64(action.SlotLenMin)*60*1000
-		if nowMs >= action.SlotStartMs && nowMs < endMs {
+		if nowMs >= action.ExecutionStart() && nowMs < endMs {
 			if plan.Solver != nil && (plan.Solver.ScenarioPolicy == "recourse" || plan.Solver.ScenarioPolicy == "multistage") &&
 				plan.Solver.NonAnticipativeSlots > 0 && i >= plan.Solver.NonAnticipativeSlots {
 				return Action{}, false
@@ -383,7 +383,7 @@ func shadowSlotAt(slots []Slot, now time.Time) (Slot, bool) {
 	nowMs := now.UnixMilli()
 	for _, slot := range slots {
 		endMs := slot.StartMs + int64(slot.LenMin)*60*1000
-		if nowMs >= slot.StartMs && nowMs < endMs {
+		if nowMs >= slot.ExecutionStart() && nowMs < endMs {
 			return slot, true
 		}
 	}
@@ -400,8 +400,8 @@ func (e *StatefulShadowEvaluator) updateVirtualSoCLocked() {
 	}
 	e.summary.ChampionStorageEnergyWh = cloneEnergyMap(e.championWh)
 	e.summary.ChallengerStorageEnergyWh = cloneEnergyMap(e.challengerWh)
-	e.summary.ChampionVirtualSoCPct = sumEnergy(e.championWh) / capacity * 100
-	e.summary.ChallengerVirtualSoCPct = sumEnergy(e.challengerWh) / capacity * 100
+	e.summary.ChampionVirtualSoC = sumEnergy(e.championWh) / capacity
+	e.summary.ChallengerVirtualSoC = sumEnergy(e.challengerWh) / capacity
 	e.summary.ChampionTerminalValueOre = e.params.TerminalSoCPrice * sumEnergy(e.championWh) / 1000
 	e.summary.ChallengerTerminalValueOre = e.params.TerminalSoCPrice * sumEnergy(e.challengerWh) / 1000
 	e.summary.ChampionValuedCostOre = e.summary.ChampionCostOre - e.summary.ChampionTerminalValueOre

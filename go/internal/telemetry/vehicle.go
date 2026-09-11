@@ -3,6 +3,8 @@ package telemetry
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // VehicleMaxAge is the freshness window past which a DerVehicle reading
@@ -19,12 +21,12 @@ const VehicleMaxAge = 5 * time.Minute
 // Empty Driver means "no usable reading" — the caller should fall back
 // to whatever inferred SoC was already in place.
 type VehiclePick struct {
-	Driver         string
-	SoCPct         float64 // bounded [0,100]
-	ChargeLimitPct float64 // bounded [0,100]
-	ChargingState  string
-	Stale          bool      // false for usable picks; retained in the result shape
-	UpdatedAt      time.Time // wall-clock of the last fresh SoC observation
+	Driver        string
+	SoC           float64 // bounded [0,1]
+	ChargeLimit   float64 // bounded [0,1]
+	ChargingState string
+	Stale         bool      // false for usable picks; retained in the result shape
+	UpdatedAt     time.Time // wall-clock of the last fresh SoC observation
 }
 
 // VehicleConnectedRank scores how likely a DerVehicle driver is to be
@@ -60,9 +62,9 @@ func VehicleConnectedRank(chargingState string) int {
 // Defenses applied here (do NOT skip — every vehicle driver pulls
 // from a network trust boundary, whether a local BLE proxy, an
 // in-LAN OEM gateway, or a cloud API):
-//   - SoC bounded to [0,100] — a misbehaving driver reporting 200 % or
-//     -50 % must not be able to overcharge or freeze EV charging.
-//   - ChargeLimitPct bounded to [0,100] — same risk.
+//   - SoC bounded to [0,1] — a misbehaving driver reporting 2.0 or
+//     -0.5 must not be able to overcharge or freeze EV charging.
+//   - ChargeLimit bounded to [0,1] — same risk.
 //   - Stale by `now − SoCUpdatedAt > VehicleMaxAge` — wallclock check on
 //     the last fresh SoC observation, even when newer power or metadata
 //     updates carry the last-known value forward. A driver that stops
@@ -123,6 +125,7 @@ func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 		}
 		var meta struct {
 			ChargingState  string  `json:"charging_state"`
+			ChargeLimit    float64 `json:"charge_limit"`
 			ChargeLimitPct float64 `json:"charge_limit_pct"`
 			Stale          bool    `json:"stale"`
 		}
@@ -139,25 +142,15 @@ func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 		if rank < bestRank || (rank == bestRank && !socUpdatedAt.After(best.UpdatedAt)) {
 			continue
 		}
-		soc := *vr.SoC
-		if soc < 0 {
-			soc = 0
-		} else if soc > 100 {
-			soc = 100
-		}
-		limit := meta.ChargeLimitPct
-		if limit < 0 {
-			limit = 0
-		} else if limit > 100 {
-			limit = 100
-		}
+		soc := units.ClampFraction(*vr.SoC)
+		limit := units.ClampFraction(units.DecodeJSONFraction(meta.ChargeLimit, meta.ChargeLimitPct))
 		best = VehiclePick{
-			Driver:         vr.Driver,
-			SoCPct:         soc,
-			ChargeLimitPct: limit,
-			ChargingState:  meta.ChargingState,
-			Stale:          meta.Stale,
-			UpdatedAt:      socUpdatedAt,
+			Driver:        vr.Driver,
+			SoC:           soc,
+			ChargeLimit:   limit,
+			ChargingState: meta.ChargingState,
+			Stale:         meta.Stale,
+			UpdatedAt:     socUpdatedAt,
 		}
 		bestRank = rank
 	}

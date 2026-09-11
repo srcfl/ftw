@@ -51,6 +51,22 @@ func TestRenderPushFillsPlaceholders(t *testing.T) {
 	if title != "Your box updated itself" {
 		t.Fatalf("title = %q", title)
 	}
+
+	title, body, err = RenderPush(PushDriverOffline, map[string]string{"name": "Batteri"})
+	if err != nil {
+		t.Fatalf("render driver.offline: %v", err)
+	}
+	if title != "A device went quiet" || body != "Batteri stopped answering." {
+		t.Fatalf("driver.offline = %q / %q", title, body)
+	}
+
+	title, body, err = RenderPush(PushFuseOverLimit, map[string]string{"phase": "L1"})
+	if err != nil {
+		t.Fatalf("render fuse.over_limit: %v", err)
+	}
+	if title != "The house is drawing too much" || body != "L1 is over the fuse rating." {
+		t.Fatalf("fuse.over_limit = %q / %q", title, body)
+	}
 }
 
 // A sentence with a hole in it never leaves the box. The catalogue promised
@@ -59,6 +75,9 @@ func TestRenderPushFillsPlaceholders(t *testing.T) {
 func TestRenderPushRefusesAnUnfilledPlaceholder(t *testing.T) {
 	if _, _, err := RenderPush(PushChargingSessionComplete, nil); err == nil {
 		t.Fatal("rendered a sentence with {kwh} unfilled")
+	}
+	if _, _, err := RenderPush(PushDriverOffline, nil); err == nil {
+		t.Fatal("rendered a sentence with {name} unfilled")
 	}
 	if _, _, err := RenderPush("charging.someday", nil); err == nil {
 		t.Fatal("rendered a kind the catalogue does not carry")

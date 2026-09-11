@@ -212,3 +212,28 @@ func TestEngineOwnedPublisherSurvivesReload(t *testing.T) {
 	bus.Publish(events.ChargingSessionComplete{LoadpointID: "garage", KWh: 1.0, At: time.Now()})
 	waitForMsgs(t, push, 1)
 }
+
+func TestConnectedPushNeedsOptInAndKeepsChargerDestination(t *testing.T) {
+	pub := &fakePub{published: make(chan struct{}, 4)}
+	svc, clk := newSvc(pushCfg(config.NotificationRule{Type: PushChargingConnected, Enabled: false, CooldownS: 60}), pub)
+	bus := events.NewBus()
+	svc.Subscribe(bus)
+	bus.Publish(events.ChargingConnected{LoadpointID: "garage", At: clk.now()})
+	settle(svc)
+	if len(pub.Messages()) != 0 {
+		t.Fatal("sent without opt-in")
+	}
+	svc.Reload(pushCfg(config.NotificationRule{Type: PushChargingConnected, Enabled: true, CooldownS: 60}))
+	bus.Publish(events.ChargingConnected{LoadpointID: "garage", At: clk.now()})
+	msgs := waitForMsgs(t, pub, 1)
+	if msgs[0].Kind != PushChargingConnected || msgs[0].LoadpointID != "garage" || msgs[0].Title != "Car plugged in" {
+		t.Fatalf("wrong message: %+v", msgs[0])
+	}
+	bus.Publish(events.ChargingConnected{LoadpointID: "garage", At: clk.now()})
+	settle(svc)
+	if len(pub.Messages()) != 1 {
+		t.Fatal("repeated inside cooldown")
+	}
+	bus.Publish(events.ChargingConnected{LoadpointID: "street", At: clk.now()})
+	waitForMsgs(t, pub, 2)
+}

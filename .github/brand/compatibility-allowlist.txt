@@ -8,6 +8,8 @@
 ^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
 ^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
 ^go/cmd/ftw-updater/main\.go:.*legacyMainServiceName.*= "forty-two-watts"$
+# Published compatibility updater image remains supported during migration.
+^go/cmd/ftw-updater/self_replace\.go:.*legacyUpdaterImage.*= "ghcr.io/frahlg/forty-two-watts-updater"$
 ^go/cmd/ftw/main\.go:// caldavUsername resolves the CalDAV username \(default fortytwowatts\)\.$
 ^go/internal/ha/bridge\.go:.*topicPrefix string // stable wire ID, e\.g\. "forty-two-watts"$
 ^scripts/deploy-go\.sh:.*ln -sf ftw forty-two-watts$
@@ -18,3 +20,8 @@
 ^Makefile:.*-C "\$\$stage" ftw ftw-backup forty-two-watts.*$
 ^scripts/restore-full-backup\.sh:for candidate in ftw forty-two-watts; do$
 ^README\.md:Existing Forty Two Watts or older FTW deployments must use the$
+# Rust's upstream runtime notices describe third-party licenses, not FTW's license.
+^optimizer/native/bundle/rust-runtime/COPYRIGHT-library\.html:[[:space:]]*This project is triple-licensed under the MIT License, the Apache$
+# Upstream DuckDB component notices describe their own licenses, not FTW's.
+^THIRD-PARTY-NOTICES\.txt:   is licensed under the MIT License\. See$
+^THIRD-PARTY-NOTICES\.txt:Portions of the following files are licensed under the MIT License:$

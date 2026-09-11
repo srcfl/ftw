@@ -181,7 +181,7 @@ func newCancellationTestService(t *testing.T, optimizer PlanOptimizer) *Service 
 
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
-		CapacityWh: 10000, InitialSoCPct: 50, SoCMinPct: 10, SoCMaxPct: 95,
+		CapacityWh: 10000, InitialSoC: 0.5, SoCMin: 0.1, SoCMax: 0.95,
 		MaxChargeW: 3000, MaxDischargeW: 3000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -218,7 +218,7 @@ func TestReplanNewestRequestWinsWhenOlderSolveFinishesLast(t *testing.T) {
 	}
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
-		CapacityWh: 10000, InitialSoCPct: 50, SoCMinPct: 10, SoCMaxPct: 95,
+		CapacityWh: 10000, InitialSoC: 0.5, SoCMin: 0.1, SoCMax: 0.95,
 		MaxChargeW: 3000, MaxDischargeW: 3000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})

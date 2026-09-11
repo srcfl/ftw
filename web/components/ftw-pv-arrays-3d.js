@@ -1,7 +1,7 @@
 // <ftw-pv-arrays-3d> — tiny 3D preview of a site's PV-array config.
 //
 // Purpose: the settings Weather tab lets the operator list each PV
-// plane (name + kWp + tilt_deg + azimuth_deg). Those four numbers
+// plane (name + rated_w + tilt_deg + azimuth_deg). Those four numbers
 // fully specify a panel's orientation but they are hard to cross-
 // check by eye on a phone in the shed. This component turns the
 // list into a simple 3D scene — ground plane, compass, and one
@@ -18,9 +18,10 @@
 //
 // Public API
 // ----------
-//   el.setArrays([{ name, kwp, tilt_deg, azimuth_deg }, ...])
+//   el.setArrays([{ name, rated_w, tilt_deg, azimuth_deg }, ...])
 //     Replaces the scene contents. Call whenever the list changes
-//     — pass an empty array to clear.
+//     — pass an empty array to clear. Visual scale uses rated_w/1000
+//     (kW-peak); core stores watts.
 //
 // Azimuth convention matches the rest of the stack + the config
 // help text in settings.js: 0 = N, 90 = E, 180 = S, 270 = W.
@@ -41,6 +42,13 @@ const AREA_PER_KWP = 2;             // m²/kWp, conservative average
 const PANEL_EDGE_MIN = 1.4;         // floor so a 0.5 kWp array is still visible
 const PANEL_EDGE_MAX = 7;           // cap so a 30 kWp array doesn't swallow the scene
 const PANEL_ELEV    = 0.4;          // height above ground plane for the panel base
+
+// Visual scale is kW-peak. Core stores rated_w (watts).
+function arrayKwpForScale(a) {
+  const ratedW = Number(a && a.rated_w);
+  if (ratedW > 0) return ratedW / 1000;
+  return 0;
+}
 
 // Gap between adjacent panels along the orbit (world units). Small —
 // the squares are the dominant visual, gap just keeps them from
@@ -150,7 +158,7 @@ class FtwPvArrays3d extends FtwElement {
   }
 
   // Public entry point. Arrays is the same shape as
-  // config.weather.pv_arrays: [{ name, kwp, tilt_deg, azimuth_deg }, ...]
+  // config.weather.pv_arrays: [{ name, rated_w, tilt_deg, azimuth_deg }, ...]
   setArrays(arrays) {
     this._arrays = Array.isArray(arrays) ? arrays.slice() : [];
     if (this._three) {
@@ -367,11 +375,10 @@ class FtwPvArrays3d extends FtwElement {
       return;
     }
 
-    // Compute each array's edge length (metres) from its kWp, with
-    // soft min/max so pathologically small or large ratings don't
-    // blow the scene out of scale.
+    // Compute each array's edge length (metres) from rated watts.
+    // Visual scale is kW-peak (rated_w/1000); core stores watts.
     const panels = this._arrays.map((a) => {
-      const kwp = Math.max(0.1, Number(a.kwp) || 0.1);
+      const kwp = Math.max(0.1, arrayKwpForScale(a));
       const edge = Math.max(PANEL_EDGE_MIN,
         Math.min(PANEL_EDGE_MAX, Math.sqrt(kwp * AREA_PER_KWP)));
       // Normalize into [0, 360). Otherwise a user-entered 360 (or

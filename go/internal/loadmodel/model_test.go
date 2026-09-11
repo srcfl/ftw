@@ -41,6 +41,26 @@ func synthetic(t time.Time) float64 {
 	return base + morning + midday + evening
 }
 
+func TestPredictAllowsHundredWattOvernight(t *testing.T) {
+	m := NewModel(5520)
+	at := time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC)
+	idx := HourOfWeek(at)
+	m.Bucket[idx] = Bucket{Mean: 100, Samples: 40, Days: 8}
+	if got := m.Predict(at, HeatingReferenceC); math.Abs(got-100) > 0.001 {
+		t.Fatalf("valid low load raised to %.0f W", got)
+	}
+}
+
+func TestPredictDoesNotCapHouseAtGridFuse(t *testing.T) {
+	m := NewModel(5520)
+	m.MaxPlausibleW = 11000
+	m.HeatingW_per_degC = 500
+	at := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	if got := m.Predict(at, -20); got <= 11000 {
+		t.Fatalf("gross house capped by grid fuse: %.0f", got)
+	}
+}
+
 func TestDayOnePriorIsUsefulEverywhere(t *testing.T) {
 	// Before any training: predictions at any hour should be within
 	// reasonable bounds (>0 overnight, elevated at peaks). The typical
@@ -52,8 +72,8 @@ func TestDayOnePriorIsUsefulEverywhere(t *testing.T) {
 	o := m.PredictNoTemp(overnight)
 	mo := m.PredictNoTemp(morning)
 	e := m.PredictNoTemp(evening)
-	if o < 100 || o > 800 {
-		t.Errorf("overnight should be in [100, 800], got %f", o)
+	if o < 400 || o > 1000 {
+		t.Errorf("overnight should be in [400, 1000], got %f", o)
 	}
 	if mo < 1500 {
 		t.Errorf("morning peak should be >= 1500, got %f", mo)
@@ -131,18 +151,17 @@ func TestRejectsNegativeLoad(t *testing.T) {
 // it needs the physical ceiling set, which production wires from the fuse
 // configuration. The band version of this check also rejected genuine
 // household peaks; see TestFullHouseholdRangeIsTrained.
-func TestRejectsOutliers(t *testing.T) {
+func TestRejectsNonfiniteWithoutChangingModel(t *testing.T) {
 	m := NewModel(4000)
-	m.MaxPlausibleW = 17250
-	start := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 200; i++ {
-		m.Update(start.Add(time.Duration(i)*time.Minute), 1500, HeatingReferenceC)
+	at := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	before := *m
+	for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if m.Update(at, w, HeatingReferenceC) {
+			t.Fatal("nonfinite accepted")
+		}
 	}
-	preMean := m.Bucket[HourOfWeek(start)].Mean
-	m.Update(start.Add(500*time.Minute), 50000, HeatingReferenceC) // 33× typical
-	postMean := m.Bucket[HourOfWeek(start.Add(500*time.Minute))].Mean
-	if math.Abs(postMean-preMean) > 500 {
-		t.Errorf("outlier should be rejected, mean drift %.0f", postMean-preMean)
+	if *m != before {
+		t.Fatal("invalid observation changed model")
 	}
 }
 
@@ -204,10 +223,10 @@ func TestNightBucketNotPoisonedByHeatingSubtraction(t *testing.T) {
 			warmPred, priorW, priorW*poisonFloor)
 	}
 
-	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C).
-	// The model should now learn the actual overnight load.
+	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C),
+	// same hour-of-week as t0 so the bucket we predict actually moves.
 	for i := 0; i < 30; i++ {
-		m.Update(t0.Add(time.Duration(300+i*7)*24*time.Hour), 350, 20.0)
+		m.Update(t0.Add(time.Duration(301+i*7)*24*time.Hour), 350, 20.0)
 	}
 	trainedPred := m.Predict(t0, 20.0)
 	if math.Abs(trainedPred-350) > 100 {
@@ -218,44 +237,19 @@ func TestNightBucketNotPoisonedByHeatingSubtraction(t *testing.T) {
 // TestRepairPoisonedBuckets verifies that repairPoisonedBuckets resets bucket
 // means that are clearly below the prior floor while leaving healthy buckets
 // untouched.
-func TestRepairPoisonedBuckets(t *testing.T) {
+func TestRepairOnlyInvalidBuckets(t *testing.T) {
 	m := NewModel(5520)
-	m.HeatingW_per_degC = 300
-
-	// Artificially poison night bucket (3:00 UTC Monday) the old way:
-	// drain it to ~0 with many zero-valued EMA updates.
-	nightIdx := HourOfWeek(time.Date(2026, 1, 5, 3, 0, 0, 0, time.UTC))
-	m.Bucket[nightIdx].Mean = 5.0
-	m.Bucket[nightIdx].Samples = 260
-
-	// Set a healthy evening bucket (19:00 UTC Monday) to its proper value.
-	eveningIdx := HourOfWeek(time.Date(2026, 1, 5, 19, 0, 0, 0, time.UTC))
-	m.Bucket[eveningIdx].Mean = 2200
-	m.Bucket[eveningIdx].Samples = 260
-
+	m.Bucket[3] = Bucket{Mean: 5, Samples: 260, Days: 8}
+	m.Bucket[19] = Bucket{Mean: math.Inf(1), Samples: 10}
 	m.repairPoisonedBuckets()
-
-	nightPrior := typicalPrior(nightIdx)
-	if m.Bucket[nightIdx].Mean < nightPrior*poisonFloor {
-		t.Errorf("poisoned bucket not repaired: got %.0f W, want >= %.0f W",
-			m.Bucket[nightIdx].Mean, nightPrior*poisonFloor)
+	if m.Bucket[3].Mean != 5 || m.Bucket[3].Days != 8 {
+		t.Fatal("repair erased real low load")
 	}
-	if m.Bucket[nightIdx].Samples != 0 {
-		t.Errorf("repaired bucket samples should be reset to 0, got %d", m.Bucket[nightIdx].Samples)
-	}
-
-	// Evening bucket must be preserved — 2200 W is above floor.
-	if m.Bucket[eveningIdx].Mean != 2200 {
-		t.Errorf("healthy bucket should be untouched: got %.0f W, want 2200 W", m.Bucket[eveningIdx].Mean)
+	if m.Bucket[19].Samples != 0 || math.IsInf(m.Bucket[19].Mean, 0) {
+		t.Fatal("invalid bucket not reset")
 	}
 }
 
-// TestHeatingCoefLearnsFromMeasurements — a household whose load grows with
-// the heating-degrees signal should converge to roughly the true sensitivity
-// from measurements alone. The old behaviour was operator-only: coef stayed
-// at whatever the human typed in (or 0 if untyped). With online adaptation,
-// the model uses what it observes — including across mixed warm/cold days
-// where the warm days anchor the bucket baseline.
 func TestHeatingCoefLearnsFromMeasurements(t *testing.T) {
 	const trueBase = 800.0
 	const trueCoef = 250.0 // W per °C below 18°C
@@ -348,34 +342,26 @@ func TestHeatingFitWaitsForBucketTrust(t *testing.T) {
 // overlap — and nothing about a residual's size separates "unusual but
 // real" from "wrong". Short-term noise is already handled by the Kalman
 // filter in telemetry, one layer down.
-func TestSustainedLevelShiftIsLearned(t *testing.T) {
+func TestSustainedLevelShiftNeedsIndependentDays(t *testing.T) {
 	m := NewModel(10000)
-	m.MaxPlausibleW = 17000
-	start := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
-
-	// Two quiet days — under the old filter this is what armed a band so
-	// narrow that the house could never be learned.
-	n := 0
-	for ; n < 2*24*60; n++ {
-		m.Update(start.Add(time.Duration(n)*time.Minute), 400, HeatingReferenceC)
-	}
-
-	trainedFrom := n
-	for i := 0; i < 3*24*60; i++ {
-		m.Update(start.Add(time.Duration(n)*time.Minute), 3000, HeatingReferenceC)
-		n++
-	}
-
-	for i := trainedFrom; i < n; i += 60 {
-		got := m.Predict(start.Add(time.Duration(i)*time.Minute), HeatingReferenceC)
-		if math.Abs(got-3000) > 300 {
-			t.Fatalf("bucket at minute %d predicts %.0f W, want ~3000 W", i, got)
+	at := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
+	for i := 0; i < 8; i++ {
+		if !m.Update(at.Add(time.Duration(i)*time.Minute), 3000, HeatingReferenceC) {
+			t.Fatal("valid level rejected")
 		}
+	}
+	b := m.Bucket[HourOfWeek(at)]
+	if b.Days != 1 {
+		t.Fatalf("eight minutes granted %d days", b.Days)
+	}
+	for i := 1; i < 10; i++ {
+		m.Update(at.AddDate(0, 0, i*7), 3000, HeatingReferenceC)
+	}
+	if got := m.Predict(at.AddDate(0, 0, 70), HeatingReferenceC); math.Abs(got-3000) > 100 {
+		t.Fatalf("persistent level not learned: %.0f", got)
 	}
 }
 
-// A house that goes from near-idle to 11 kW is doing something ordinary,
-// not reporting a fault. That whole range has to reach the model.
 func TestFullHouseholdRangeIsTrained(t *testing.T) {
 	m := NewModel(8000)
 	m.MaxPlausibleW = 17250 // 25 A × 3 × 230 V
@@ -395,26 +381,15 @@ func TestFullHouseholdRangeIsTrained(t *testing.T) {
 // its main fuse passes. Because the bound comes from configured hardware
 // rather than from what the model has learned, it holds from the first
 // sample and a mislearned model cannot talk it down.
-func TestImplausibleLoadRejected(t *testing.T) {
+func TestGrossLoadAboveFuseAccepted(t *testing.T) {
 	m := NewModel(4000)
-	m.MaxPlausibleW = 11000 * PlausibleLoadHeadroom // 16 A service
-	t0 := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
-
-	if m.Update(t0, 50000, HeatingReferenceC) {
-		t.Error("50 kW past a 16 A service should never be accepted")
-	}
-	if m.Samples != 0 {
-		t.Errorf("rejected sample must not count, samples = %d", m.Samples)
-	}
-	// Right at the service limit is high but real — a fuse passes its
-	// rating, so this has to train.
-	if !m.Update(t0, 11000, HeatingReferenceC) {
-		t.Error("a load at the service limit should be accepted")
+	m.MaxPlausibleW = 11000
+	at := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	if !m.Update(at, 15000, HeatingReferenceC) {
+		t.Fatal("15kW house with PV support rejected by 11kW grid fuse")
 	}
 }
 
-// No fuse configured means no defensible ceiling, so the check disables
-// itself rather than inventing one.
 func TestNoFuseConfiguredTrainsEverything(t *testing.T) {
 	m := NewModel(4000)
 	t0 := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
@@ -459,47 +434,14 @@ func TestSpikeIsDampedByTheBucketEMA(t *testing.T) {
 // is gated on that bucket's trust, so a fault landing in a fresh bucket
 // would be filtered by the gate rather than by the bound, and the test
 // would pass either way without proving anything.
-func TestImplausibleLoadDoesNotMoveHeatingCoefficient(t *testing.T) {
+func TestInvalidLoadDoesNotMoveHeatingCoefficient(t *testing.T) {
 	m := NewModel(4000)
-	m.MaxPlausibleW = 11000
 	start := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
-	const coldC = 0.0 // well past HeatingMinDeltaT
-
-	// Warm the bucket past MinTrustSamples so the fit is ungated, and hold
-	// the load below the learned mean so the residual — and therefore the
-	// coefficient — is driven somewhere a fault could visibly move it.
 	for i := 0; i < 20; i++ {
-		m.Update(start.Add(time.Duration(i)*time.Minute), 1200, coldC)
+		m.Update(start.AddDate(0, 0, 7*i), 1200, 0)
 	}
-	idx := HourOfWeek(start)
-	if m.Bucket[idx].Samples < MinTrustSamples {
-		t.Fatalf("warmup left the bucket untrusted (%d samples) — the fit would be gated, not bounded",
-			m.Bucket[idx].Samples)
-	}
-
-	before := m.HeatingW_per_degC
-	beforeMAE := m.MAE
-	beforeSamples := m.Samples
-
-	// Faults in the SAME bucket, so only the bound can stop them.
-	for i := 20; i < 60; i++ {
-		at := start.Add(time.Duration(i) * time.Minute)
-		if HourOfWeek(at) != idx {
-			t.Fatalf("sample %d escaped the bucket under test", i)
-		}
-		if m.Update(at, 50000, coldC) {
-			t.Fatal("an implausible reading was accepted")
-		}
-	}
-
-	if m.HeatingW_per_degC != before {
-		t.Errorf("heating coefficient moved on rejected faults: %.4f → %.4f",
-			before, m.HeatingW_per_degC)
-	}
-	if m.MAE != beforeMAE {
-		t.Errorf("MAE moved on rejected faults: %.1f → %.1f", beforeMAE, m.MAE)
-	}
-	if m.Samples != beforeSamples {
-		t.Errorf("sample count moved on rejected faults: %d → %d", beforeSamples, m.Samples)
+	before := *m
+	if m.Update(start.AddDate(0, 0, 150), math.Inf(1), 0) || *m != before {
+		t.Fatal("invalid reading changed trained model")
 	}
 }

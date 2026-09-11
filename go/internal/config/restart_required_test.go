@@ -83,9 +83,9 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"ev_charger added", func(c *Config) {
 			c.EVCharger = &EVCharger{Provider: "easee", Username: "a@b.c"}
 		}, "ev_charger"},
-		{"caldav credentials changed", func(c *Config) {
-			c.CalDAV = &CalDAV{Enabled: true, Username: "calendar-user", Password: "rotated"}
-		}, "caldav"},
+		{"ocpp enabled", func(c *Config) {
+			c.OCPP = &OCPP{Enabled: true, Port: 8887, Username: "ftw", Password: "long-random-string"}
+		}, "ocpp"},
 		{"modbus proxy enabled", func(c *Config) {
 			c.ModbusProxy = &ModbusProxy{Enabled: true, Listen: ":1502"}
 		}, "modbus_proxy"},
@@ -111,6 +111,15 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 				t.Fatalf("expected reason mentioning %q, got %v", tc.wantIn, r)
 			}
 		})
+	}
+}
+
+func TestRestartRequiredFor_AssistantIsHot(t *testing.T) {
+	old := baseCfg()
+	n := baseCfg()
+	n.Assistant = &Assistant{Enabled: true, APIKey: "sk-or-v1-test", Model: "openrouter/free"}
+	if r := RestartRequiredFor(old, n); len(r) != 0 {
+		t.Fatalf("assistant is read per request, got restart reasons %v", r)
 	}
 }
 

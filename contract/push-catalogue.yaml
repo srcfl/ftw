@@ -13,6 +13,9 @@
 # lost every notification that mattered.
 version: 1
 events:
+  - kind: charging.connected
+    title: Car plugged in
+    body: "Open to see charging status, check the battery level and set a ready time."
   - kind: charging.session_complete
     title: Car charged
     body: "{kwh} kWh delivered — ready to go."
@@ -25,6 +28,16 @@ events:
   - kind: update.installed
     title: Your box updated itself
     body: "Now running {version}. Everything came back on its own."
+  - kind: driver.offline
+    # After the box's own threshold: ten minutes of silence from a driver
+    # that had been reporting. A blip must not become a lock-screen.
+    title: A device went quiet
+    body: "{name} stopped answering."
+  - kind: fuse.over_limit
+    # After the box's own threshold: thirty seconds over the rating. A
+    # kettle must not page anyone.
+    title: The house is drawing too much
+    body: "{phase} is over the fuse rating."
   - kind: box.unreachable
     # The one sentence the box cannot send about itself. The relay holds
     # this pre-encrypted and posts it only when the box has missed its

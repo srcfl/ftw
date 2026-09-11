@@ -29,7 +29,7 @@ func seedReactivePrices(t *testing.T, st *state.Store) {
 func reactiveTestParams() Params {
 	return Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
-		CapacityWh: 10000, InitialSoCPct: 50, SoCMinPct: 10, SoCMaxPct: 95,
+		CapacityWh: 10000, InitialSoC: 0.5, SoCMin: 0.1, SoCMax: 0.95,
 		MaxChargeW: 3000, MaxDischargeW: 3000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	}

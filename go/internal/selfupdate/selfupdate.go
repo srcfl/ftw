@@ -723,6 +723,13 @@ func (c *Checker) Trigger(ctx context.Context, action, target string) error {
 	return c.TriggerComponentAt(ctx, action, target, "core", time.Time{})
 }
 
+// TriggerRestart requests a restart of the existing container. The separate
+// wire action fails closed on older sidecars whose restart pulls/recreates an
+// image; checker versions (including QA overrides) never select a restart image.
+func (c *Checker) TriggerRestart(ctx context.Context) error {
+	return c.Trigger(ctx, "restart", "")
+}
+
 // TriggerComponent requests a selective core or optimizer compose update.
 func (c *Checker) TriggerComponent(ctx context.Context, action, target, component string) error {
 	return c.TriggerComponentAt(ctx, action, target, component, time.Time{})
@@ -743,10 +750,18 @@ func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, compon
 	if action == "component_rollback" && component != "optimizer" {
 		return errors.New("selfupdate: component rollback is only available for optimizer")
 	}
+	if action == "restart" {
+		action, target = "restart_existing", ""
+	}
 	body, _ := json.Marshal(map[string]any{
 		"action": action, "target": target, "component": component, "started_at": startedAt,
 	})
-	return c.postSidecar(ctx, body)
+	err := c.postSidecar(ctx, body)
+	var rejection *sidecarHTTPError
+	if action == "restart_existing" && errors.As(err, &rejection) && rejection.status == http.StatusBadRequest {
+		return fmt.Errorf("safe restart requires a newer updater; update Core and updater together: %w", err)
+	}
+	return err
 }
 
 // TriggerRollback asks the sidecar to restore a snapshot over the main
@@ -775,6 +790,15 @@ func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files 
 	return c.postSidecar(ctx, body)
 }
 
+type sidecarHTTPError struct {
+	status  int
+	message string
+}
+
+func (e *sidecarHTTPError) Error() string {
+	return fmt.Sprintf("sidecar %d: %s", e.status, e.message)
+}
+
 // postSidecar wraps the Unix-socket POST to the sidecar's /update
 // endpoint. Shared by Trigger and TriggerRollback so the HTTP client
 // config (socket dialer + timeout) only lives in one place.
@@ -797,7 +821,7 @@ func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("sidecar %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return &sidecarHTTPError{status: resp.StatusCode, message: strings.TrimSpace(string(b))}
 	}
 	return nil
 }

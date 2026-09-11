@@ -19,6 +19,9 @@ func TestDeviceFaultMakesDriverOfflineForControl(t *testing.T) {
 	if h.IsOnline() {
 		t.Error("a device fault must make IsOnline() false (excluded from control)")
 	}
+	if !h.TelemetryLive() {
+		t.Error("a device fault is not a stale meter; telemetry is still live")
+	}
 	if h.DeviceFaultReason != "ehub fault 0x8030" {
 		t.Errorf("DeviceFaultReason = %q, want the reason", h.DeviceFaultReason)
 	}

@@ -94,9 +94,15 @@ func DefaultRules() []config.NotificationRule {
 		// fires once per plug-in. interrupted keeps an hour on top of the
 		// emitter's hysteresis, because a charger failing repeatedly is
 		// one fact, not a feed.
+		{Type: PushChargingConnected, Enabled: false, Priority: 3, CooldownS: 60},
 		{Type: PushChargingSessionComplete, Enabled: false, Priority: 3},
 		{Type: PushChargingInterrupted, Enabled: false, Priority: 4, CooldownS: 3600},
 		{Type: PushUpdateInstalled, Enabled: false, Priority: 2},
+		// Phone lock-screen counterparts of the operator rules above.
+		// Same thresholds so a blip or a kettle is not a notification;
+		// the sentences come from the catalogue, never from templates.
+		{Type: PushDriverOffline, Enabled: false, ThresholdS: DefaultThresholdS, Priority: 4, CooldownS: DefaultCooldownS},
+		{Type: PushFuseOverLimit, Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
 	}
 }
 
@@ -109,8 +115,8 @@ func KnownRuleTypes() []string {
 	return []string{
 		EventDriverOffline, EventDriverRecovered, EventUpdateAvailable,
 		EventFuseOverLimit, EventConcurrentDriversOffline,
-		PushChargingSessionComplete, PushChargingInterrupted,
-		PushUpdateInstalled,
+		PushChargingConnected, PushChargingSessionComplete, PushChargingInterrupted,
+		PushUpdateInstalled, PushDriverOffline, PushFuseOverLimit,
 	}
 }
 
@@ -126,10 +132,12 @@ type FuseReader = func() (amps map[string]float64, limitA float64, ok bool)
 
 // Message is a rendered notification payload.
 type Message struct {
-	Title    string
-	Body     string
-	Priority int
-	Tags     []string
+	Kind        string
+	LoadpointID string
+	Title       string
+	Body        string
+	Priority    int
+	Tags        []string
 }
 
 // Publisher dispatches a rendered Message to its transport.
@@ -381,6 +389,11 @@ func (s *Service) Subscribe(bus *events.Bus) {
 	// real-world moment — the loadpoint latches, the boot version check —
 	// so the rule adds only the operator's gate: enabled, priority,
 	// cooldown. Words come from the catalogue and nowhere else.
+	bus.Subscribe(events.KindChargingConnected, func(e events.Event) {
+		if ev, ok := e.(events.ChargingConnected); ok {
+			go s.handleCatalogued(PushChargingConnected, ev.LoadpointID, nil)
+		}
+	})
 	bus.Subscribe(events.KindChargingSessionComplete, func(e events.Event) {
 		ev, ok := e.(events.ChargingSessionComplete)
 		if !ok {
@@ -447,7 +460,12 @@ func (s *Service) handleCatalogued(kind, device string, args map[string]string) 
 		s.emitDispatched(kind, device, Message{Priority: prio}, "failed", err.Error())
 		return
 	}
+	loadpointID := ""
+	if strings.HasPrefix(kind, "charging.") {
+		loadpointID = device
+	}
 	s.deliver(kind, device, Message{
+		Kind: kind, LoadpointID: loadpointID,
 		Title:    title,
 		Body:     body,
 		Priority: prio,
@@ -496,22 +514,21 @@ func (s *Service) handleUpdateAvailable(ev events.UpdateAvailable) {
 }
 
 // evaluateFuse reads the live per-phase current snapshot and fires the
-// fuse_over_limit rule when a phase has been over its rating for at
-// least threshold_s. State is per-phase: firstOverAt records when the
-// over-window started, alreadyFired latches to fire once per outage,
-// and cooldownS (shared lastFired map) rate-limits re-fires across
-// quick recover/over cycles.
+// fuse over-limit rules when a phase has been over its rating for at
+// least that rule's threshold_s. State is per-phase: firstOverAt records
+// when the over-window started, alreadyFired latches to fire once per
+// outage per rule, and cooldownS rate-limits re-fires across quick
+// recover/over cycles.
+//
+// Two rule names share this check: the operator template (fuse_over_limit)
+// and the phone catalogue (fuse.over_limit). Each is gated on its own
+// enabled bit so ntfy and the lock screen can be opted into separately.
 func (s *Service) evaluateFuse(now time.Time) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	if s.cfg == nil || !s.cfg.Enabled {
-		s.mu.Unlock()
-		return
-	}
-	rule, ok := findRule(s.cfg.Events, EventFuseOverLimit)
-	if !ok || !rule.Enabled {
 		s.mu.Unlock()
 		return
 	}
@@ -526,53 +543,67 @@ func (s *Service) evaluateFuse(now time.Time) {
 		return
 	}
 	cfg := s.cfg
-	threshold := time.Duration(rule.ThresholdS) * time.Second
-	if threshold == 0 {
-		threshold = 30 * time.Second
-	}
 	type toFire struct {
 		rule config.NotificationRule
 		data templateData
 	}
 	var pending []toFire
+
+	// Shared over-window: a phase is over or it isn't, independent of
+	// which rule is watching. Reset once, then each enabled rule decides
+	// against its own threshold and latch.
 	for phase, a := range amps {
-		key := EventFuseOverLimit + "|" + phase
 		if a <= limitA {
-			// Back under: reset the over-window and per-outage latch.
 			delete(s.fuseFirstOverAt, phase)
-			delete(s.alreadyFired, key)
 			continue
 		}
-		first, ok := s.fuseFirstOverAt[phase]
-		if !ok {
+		if _, seen := s.fuseFirstOverAt[phase]; !seen {
 			s.fuseFirstOverAt[phase] = now
+		}
+	}
+
+	for _, typ := range []string{EventFuseOverLimit, PushFuseOverLimit} {
+		rule, found := findRule(cfg.Events, typ)
+		if !found || !rule.Enabled {
 			continue
 		}
-		if now.Sub(first) < threshold {
-			continue
+		threshold := time.Duration(rule.ThresholdS) * time.Second
+		if threshold == 0 {
+			threshold = 30 * time.Second
 		}
-		if s.alreadyFired[key] {
-			continue
-		}
-		if rule.CooldownS > 0 {
-			if last, ok := s.lastFired[key]; ok && now.Sub(last) < time.Duration(rule.CooldownS)*time.Second {
+		for phase, a := range amps {
+			key := typ + "|" + phase
+			if a <= limitA {
+				delete(s.alreadyFired, key)
 				continue
 			}
+			first, seen := s.fuseFirstOverAt[phase]
+			if !seen || now.Sub(first) < threshold {
+				continue
+			}
+			if s.alreadyFired[key] {
+				continue
+			}
+			if rule.CooldownS > 0 {
+				if last, ok := s.lastFired[key]; ok && now.Sub(last) < time.Duration(rule.CooldownS)*time.Second {
+					continue
+				}
+			}
+			s.alreadyFired[key] = true
+			s.lastFired[key] = now
+			pending = append(pending, toFire{
+				rule: rule,
+				data: templateData{
+					EventType: typ,
+					Timestamp: now.UTC().Format(time.RFC3339),
+					Duration:  humanDuration(now.Sub(first)),
+					DurationS: int(now.Sub(first) / time.Second),
+					Phase:     phase,
+					Amps:      a,
+					LimitA:    limitA,
+				},
+			})
 		}
-		s.alreadyFired[key] = true
-		s.lastFired[key] = now
-		pending = append(pending, toFire{
-			rule: rule,
-			data: templateData{
-				EventType: EventFuseOverLimit,
-				Timestamp: now.UTC().Format(time.RFC3339),
-				Duration:  humanDuration(now.Sub(first)),
-				DurationS: int(now.Sub(first) / time.Second),
-				Phase:     phase,
-				Amps:      a,
-				LimitA:    limitA,
-			},
-		})
 	}
 	s.mu.Unlock()
 
@@ -670,7 +701,7 @@ func (s *Service) observeAt(health map[string]telemetry.DriverHealth, now time.T
 			key := rule.Type + "|" + driver
 
 			switch rule.Type {
-			case EventDriverOffline:
+			case EventDriverOffline, PushDriverOffline:
 				threshold := time.Duration(rule.ThresholdS) * time.Second
 				if threshold == 0 {
 					threshold = time.Duration(DefaultThresholdS) * time.Second
@@ -914,7 +945,42 @@ func (s *Service) buildData(driver, eventType string, since time.Duration, now t
 	return td
 }
 
+func (s *Service) dispatchCatalogue(cfg *config.Notifications, rule config.NotificationRule, data templateData) {
+	title, body, err := RenderPush(rule.Type, catalogueArgs(rule.Type, data))
+	if err != nil {
+		slog.Warn("notifications: catalogue render failed", "event", rule.Type, "err", err)
+		s.bumpFailed()
+		s.emitDispatched(rule.Type, data.Device, Message{Priority: rule.Priority}, "failed", err.Error())
+		return
+	}
+	prio := rule.Priority
+	if prio == 0 {
+		prio = cfg.DefaultPriority
+	}
+	s.deliver(rule.Type, data.Device, Message{
+		Title:    title,
+		Body:     body,
+		Priority: prio,
+		Tags:     splitTags(rule.Tags),
+	})
+}
+
+func catalogueArgs(kind string, data templateData) map[string]string {
+	switch kind {
+	case PushDriverOffline:
+		return map[string]string{"name": data.Device}
+	case PushFuseOverLimit:
+		return map[string]string{"phase": data.Phase}
+	default:
+		return nil
+	}
+}
+
 func (s *Service) dispatch(cfg *config.Notifications, rule config.NotificationRule, data templateData) {
+	if _, ok := PushSentences[rule.Type]; ok {
+		s.dispatchCatalogue(cfg, rule, data)
+		return
+	}
 	titleTpl := rule.TitleTemplate
 	if strings.TrimSpace(titleTpl) == "" {
 		titleTpl = defaultTitleFor(rule.Type)

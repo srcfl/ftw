@@ -78,6 +78,13 @@ describe("the app tab", () => {
     assert.match(html, /cannot read/);
   });
 
+  it("says this is not the Sourceful app, and LAN use needs no pairing", () => {
+    const html = render({});
+    assert.match(html, /not the Sourceful/);
+    assert.match(html, /app\.ftw\.energy/);
+    assert.match(html, /no pairing needed/);
+  });
+
   it("starts with the pairing button disabled", () => {
     // It is enabled once /api/app-link/status reports the uplink running.
     // Starting enabled means the first press of a fresh page fails.
@@ -118,5 +125,28 @@ describe("the app tab", () => {
   it("does not leave a standalone Fleet ping destination behind", () => {
     assert.doesNotMatch(index, /data-tab="fleet"/);
     assert.match(index, /settings\/tabs\/fleet\.js/);
+  });
+});
+
+// The slot receives the answer to the pairing buttons — QR, spoken code, or
+// the #951 refusal. It once rendered after the hint paragraphs, ~300 px below
+// the buttons and usually under the modal's fold, so the operator pressed and
+// saw nothing (field report 2026-08-29). The answer belongs where the press
+// happened.
+describe("the pairing-code slot", () => {
+  it("renders directly under the pairing buttons, before the hints", () => {
+    const html = render({});
+    const actions = html.indexOf('class="app-link-actions"');
+    const slot = html.indexOf('id="app-link-slot"');
+    const scanHint = html.indexOf("Scan the code with the FTW app");
+    assert.ok(actions >= 0 && slot >= 0 && scanHint >= 0, "expected markup missing");
+    assert.ok(actions < slot, "slot must come after the buttons that fill it");
+    assert.ok(slot < scanHint, "slot must come before the hint paragraphs, not after them");
+  });
+
+  it("marks a refusal as an error, not a hint", () => {
+    // requestCode's catch styles the message; the class carries the red. A
+    // rename here silently turns refusals back into invisible help text.
+    assert.match(source, /app-link-error/);
   });
 });

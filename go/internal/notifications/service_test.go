@@ -741,3 +741,86 @@ func TestConcurrentOffline_IgnoresColdStartDrivers(t *testing.T) {
 }
 
 func addr(t time.Time) *time.Time { return &t }
+
+// The phone's driver.offline kind uses the same silence threshold as the
+// operator rule, but the lock-screen sentence is the catalogue's — never
+// the ntfy template.
+func TestCatalogueDriverOfflineRendersFromCatalogue(t *testing.T) {
+	pub := &fakePub{}
+	svc, clk := newSvc(pushCfg(config.NotificationRule{
+		Type: PushDriverOffline, Enabled: true, ThresholdS: 600, Priority: 4, CooldownS: 3600,
+	}), pub)
+	last := clk.now()
+	clk.advance(400 * time.Second)
+	svc.Observe(healthOk(last))
+	if n := len(pub.Messages()); n != 0 {
+		t.Fatalf("below threshold: got %d msgs", n)
+	}
+	clk.advance(400 * time.Second)
+	svc.Observe(healthStale(last))
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("above threshold: got %d msgs", len(msgs))
+	}
+	if msgs[0].Title != "A device went quiet" {
+		t.Fatalf("title = %q", msgs[0].Title)
+	}
+	if msgs[0].Body != "ferroamp stopped answering." {
+		t.Fatalf("body = %q", msgs[0].Body)
+	}
+}
+
+func TestCatalogueDriverOfflineStaysSilentWhenDisabled(t *testing.T) {
+	pub := &fakePub{}
+	svc, clk := newSvc(pushCfg(config.NotificationRule{
+		Type: PushDriverOffline, Enabled: false, ThresholdS: 600,
+	}), pub)
+	last := clk.now()
+	clk.advance(1000 * time.Second)
+	svc.Observe(healthStale(last))
+	if n := len(pub.Messages()); n != 0 {
+		t.Fatalf("disabled catalogue kind dispatched %d messages", n)
+	}
+}
+
+func TestCatalogueFuseOverLimitRendersFromCatalogue(t *testing.T) {
+	cfg := pushCfg(config.NotificationRule{
+		Type: PushFuseOverLimit, Enabled: true, ThresholdS: 30, Priority: 5, CooldownS: 900,
+	})
+	pub := &fakePub{published: make(chan struct{}, 1)}
+	svc, clk := newSvc(cfg, pub)
+	bus := events.NewBus()
+	svc.Subscribe(bus)
+
+	fuseEvaluationStarted := make(chan struct{}, 1)
+	svc.SetFuseReader(func() (map[string]float64, float64, bool) {
+		fuseEvaluationStarted <- struct{}{}
+		return map[string]float64{"L1": 20.0, "L2": 10, "L3": 11}, 16.0, true
+	})
+	tick := func() {
+		bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+		waitForFuseEvaluation(t, svc, fuseEvaluationStarted)
+	}
+
+	tick()
+	if n := len(pub.Messages()); n != 0 {
+		t.Fatalf("before threshold: got %d msgs", n)
+	}
+	clk.advance(40 * time.Second)
+	tick()
+	select {
+	case <-pub.published:
+	case <-time.After(time.Second):
+		t.Fatal("catalogue fuse notification was not published")
+	}
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("after threshold: got %d msgs", len(msgs))
+	}
+	if msgs[0].Title != "The house is drawing too much" {
+		t.Fatalf("title = %q", msgs[0].Title)
+	}
+	if msgs[0].Body != "L1 is over the fuse rating." {
+		t.Fatalf("body = %q", msgs[0].Body)
+	}
+}

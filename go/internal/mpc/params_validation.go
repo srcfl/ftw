@@ -77,12 +77,16 @@ func validateBatteryFleetMembers(fleet []BatteryFleetMember) error {
 	return nil
 }
 
-// planningParamsRequireRecovery marks states the external model can replay but
-// the discrete Go DP cannot yet represent. The DP snaps its initial SoC onto
-// the operating grid, so using it here would plan from energy the site does not
-// have (or discard energy it does have).
+// planningParamsRequireRecovery marks states the external model represents
+// directly, with an operating-band recovery ratchet, and the discrete Go DP
+// does not: the DP snaps its initial SoC onto the operating grid, so solving
+// from an out-of-band start plans from energy the site does not have (or
+// discards energy it does have).
 func planningParamsRequireRecovery(p Params) bool {
-	if p.InitialSoCPct < p.SoCMinPct || p.InitialSoCPct > p.SoCMaxPct {
+	if p.CapacityWh == 0 && len(p.Storages) == 0 {
+		return false
+	}
+	if p.InitialSoC < p.SoCMin || p.InitialSoC > p.SoCMax {
 		return true
 	}
 	for _, storage := range p.Storages {
@@ -93,11 +97,77 @@ func planningParamsRequireRecovery(p Params) bool {
 	return false
 }
 
+// clampParamsIntoOperatingBand pulls a battery that has drifted outside
+// soc_min…soc_max back onto the nearest band edge so the Core planner can plan
+// at all, and records the real reading in InitialSoCUnclamped. It reports
+// whether anything moved, and whether the state was recoverable.
+//
+// Why clamping beats refusing, which is what a reviewer will ask. The clamp
+// overstates available energy by at most (soc_min − real)·capacity — on the
+// site that reported this, ~1 % ≈ 96 Wh. A plan that then asks for energy the
+// pack does not have is stopped by the layers below: the dispatch clamp and
+// the driver's own discharge floor, which exist because planner output is
+// never sent directly to hardware. Refusing leaves the site executing a stale
+// plan for hours and then falling back to live balancing, which is the worse
+// failure. That was tolerable only while reaching this path required a missing
+// optimizer; Core is the planner now. The field case is a Ferroamp driver
+// floor at 0.10 with the pack settling at 0.09 overnight.
+//
+// Non-finite or physically impossible readings — SoC outside 0..1, storage
+// energy outside 0..capacity — are broken telemetry rather than a recoverable
+// state, and are refused. Callers keep the previous plan for those.
+func clampParamsIntoOperatingBand(p *Params) (clamped, ok bool) {
+	if p == nil {
+		return false, false
+	}
+	if !finite(p.InitialSoC) || p.InitialSoC < 0 || p.InitialSoC > 1 {
+		return false, false
+	}
+	if !finite(p.SoCMin) || !finite(p.SoCMax) || p.SoCMin > p.SoCMax || p.CapacityWh <= 0 {
+		return false, false
+	}
+	for i := range p.Storages {
+		s := p.Storages[i]
+		if !finite(s.InitialEnergyWh) || s.InitialEnergyWh < 0 || s.InitialEnergyWh > s.CapacityWh {
+			return false, false
+		}
+		if !finite(s.MinEnergyWh) || !finite(s.MaxEnergyWh) || s.MinEnergyWh > s.MaxEnergyWh {
+			return false, false
+		}
+	}
+
+	unclamped := p.InitialSoC
+	// Clamp each battery first and re-derive the aggregate from the clamped
+	// fleet: validateStorageSpecs requires Σ initial_energy_wh to equal
+	// capacity × initial_soc, and the Python shadow receives both.
+	if len(p.Storages) > 0 {
+		totalWh := 0.0
+		for i := range p.Storages {
+			s := &p.Storages[i]
+			s.InitialEnergyWh = math.Min(math.Max(s.InitialEnergyWh, s.MinEnergyWh), s.MaxEnergyWh)
+			totalWh += s.InitialEnergyWh
+		}
+		p.InitialSoC = totalWh / p.CapacityWh
+	}
+	p.InitialSoC = math.Min(math.Max(p.InitialSoC, p.SoCMin), p.SoCMax)
+	if p.InitialSoC == unclamped {
+		return false, true
+	}
+	p.InitialSoCUnclamped = unclamped
+	return true, true
+}
+
 // validatePlanningParams checks the effective inputs that both planning
 // engines receive. Service calls it after live battery and loadpoint state has
 // been applied, so an invalid value cannot reach either the external optimizer
 // or the Go fallback with different defaulting or failure semantics.
 func validatePlanningParams(p Params) error {
+	if err := requireNonNegativePlanningValue("pv_curtailment_min_w", p.PVCurtailment.MinW); err != nil {
+		return err
+	}
+	if p.PVCurtailment.MinW > 0 && !p.PVCurtailment.Valid() {
+		return fmt.Errorf("pv_curtailment requires identified drivers")
+	}
 	switch p.Mode {
 	case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage, ModeArbitrage:
 	default:
@@ -110,18 +180,19 @@ func validatePlanningParams(p Params) error {
 	if p.ActionLevels < 3 {
 		return fmt.Errorf("action_levels must be at least 3, got %d", p.ActionLevels)
 	}
-	if err := requirePositivePlanningValue("capacity_wh", p.CapacityWh); err != nil {
+	if err := requireNonNegativePlanningValue("capacity_wh", p.CapacityWh); err != nil {
 		return err
 	}
-	if !finite(p.SoCMinPct) || !finite(p.SoCMaxPct) ||
-		p.SoCMinPct < 0 || p.SoCMinPct >= p.SoCMaxPct || p.SoCMaxPct > 100 {
-		return fmt.Errorf("soc bounds must satisfy 0 <= min < max <= 100, got %.6g..%.6g",
-			p.SoCMinPct, p.SoCMaxPct)
+	if p.CapacityWh == 0 && (len(p.Storages) != 0 || p.MaxChargeW != 0 || p.MaxDischargeW != 0 || p.InitialSoC != 0) {
+		return fmt.Errorf("zero capacity_wh requires no physical storage, battery power or initial energy")
 	}
-	// A live battery may start outside the configured operating band and
-	// recover toward it. Only the physical 0..100 percent range is hard here.
-	if !finite(p.InitialSoCPct) || p.InitialSoCPct < 0 || p.InitialSoCPct > 100 {
-		return fmt.Errorf("initial_soc_pct must be within 0..100, got %.6g", p.InitialSoCPct)
+	if !finite(p.SoCMin) || !finite(p.SoCMax) ||
+		p.SoCMin < 0 || p.SoCMin >= p.SoCMax || p.SoCMax > 1 {
+		return fmt.Errorf("soc bounds must satisfy 0 <= min < max <= 1, got %.6g..%.6g",
+			p.SoCMin, p.SoCMax)
+	}
+	if !finite(p.InitialSoC) || p.InitialSoC < 0 || p.InitialSoC > 1 {
+		return fmt.Errorf("initial_soc must be within 0..1, got %.6g", p.InitialSoC)
 	}
 	if err := requireNonNegativePlanningValue("max_charge_w", p.MaxChargeW); err != nil {
 		return err
@@ -159,6 +230,7 @@ func validatePlanningParams(p Params) error {
 		{"pv_charge_bonus_ore_kwh", p.PVChargeBonusOreKwh},
 		{"min_arbitrage_spread_ore_kwh", p.MinArbitrageSpreadOreKwh},
 		{"pv_uncertainty_w", p.PVUncertaintyW},
+		{"pv_relative_uncertainty", p.PVRelativeUncertainty},
 		{"pv_forecast_safety_k", p.PVForecastSafetyK},
 	} {
 		if err := requireNonNegativePlanningValue(value.name, value.v); err != nil {
@@ -230,11 +302,6 @@ func validateStorageSpecs(p Params, assetIDs map[string]string) error {
 		if err := requirePlanningEfficiency(field+".discharge_efficiency", storage.DischargeEfficiency, false); err != nil {
 			return err
 		}
-		if !planningValuesEqual(storage.ChargeEfficiency, p.ChargeEfficiency) ||
-			!planningValuesEqual(storage.DischargeEfficiency, p.DischargeEfficiency) {
-			return fmt.Errorf("%s efficiencies must match aggregate fallback efficiencies", field)
-		}
-
 		totalCapacityWh += storage.CapacityWh
 		totalInitialWh += storage.InitialEnergyWh
 		totalMinWh += storage.MinEnergyWh
@@ -254,9 +321,9 @@ func validateStorageSpecs(p Params, assetIDs map[string]string) error {
 		tol  float64
 	}{
 		{"capacity_wh", totalCapacityWh, p.CapacityWh, 1},
-		{"initial_energy_wh", totalInitialWh, p.CapacityWh * p.InitialSoCPct / 100, energyToleranceWh},
-		{"min_energy_wh", totalMinWh, p.CapacityWh * p.SoCMinPct / 100, energyToleranceWh},
-		{"max_energy_wh", totalMaxWh, p.CapacityWh * p.SoCMaxPct / 100, energyToleranceWh},
+		{"initial_energy_wh", totalInitialWh, p.CapacityWh * p.InitialSoC, energyToleranceWh},
+		{"min_energy_wh", totalMinWh, p.CapacityWh * p.SoCMin, energyToleranceWh},
+		{"max_energy_wh", totalMaxWh, p.CapacityWh * p.SoCMax, energyToleranceWh},
 		{"max_charge_w", totalChargeW, p.MaxChargeW, 2},
 		{"max_discharge_w", totalDischargeW, p.MaxDischargeW, 2},
 	}
@@ -303,8 +370,8 @@ func planningLoadpointsEquivalent(fallback, primary *LoadpointSpec) bool {
 		{fallback.CapacityWh, primary.CapacityWh},
 		{fallbackMin, primaryMin},
 		{fallbackMax, primaryMax},
-		{fallback.InitialSoCPct, primary.InitialSoCPct},
-		{fallback.TargetSoCPct, primary.TargetSoCPct},
+		{fallback.InitialSoC, primary.InitialSoC},
+		{fallback.TargetSoC, primary.TargetSoC},
 		{fallback.MaxChargeW, primary.MaxChargeW},
 		{planningLoadpointEfficiency(fallback), planningLoadpointEfficiency(primary)},
 	} {
@@ -326,11 +393,11 @@ func planningLoadpointsEquivalent(fallback, primary *LoadpointSpec) bool {
 }
 
 func planningLoadpointBounds(loadpoint *LoadpointSpec) (float64, float64) {
-	minPct, maxPct := loadpoint.MinPct, loadpoint.MaxPct
-	if minPct == 0 && maxPct == 0 {
-		maxPct = 100
+	minSoC, maxSoC := loadpoint.SoCMin, loadpoint.SoCMax
+	if minSoC == 0 && maxSoC == 0 {
+		maxSoC = 1
 	}
-	return minPct, maxPct
+	return minSoC, maxSoC
 }
 
 func planningLoadpointEfficiency(loadpoint *LoadpointSpec) float64 {
@@ -359,23 +426,23 @@ func validateLoadpointSpecs(loadpoints []*LoadpointSpec, assetIDs map[string]str
 		if loadpoint.Levels < 2 {
 			return fmt.Errorf("%s.levels must be at least 2, got %d", field, loadpoint.Levels)
 		}
-		minPct, maxPct := planningLoadpointBounds(loadpoint)
-		if !finite(minPct) || !finite(maxPct) ||
-			minPct < 0 || minPct >= maxPct || maxPct > 100 {
-			return fmt.Errorf("%s SoC bounds must satisfy 0 <= min < max <= 100", field)
+		minSoC, maxSoC := planningLoadpointBounds(loadpoint)
+		if !finite(minSoC) || !finite(maxSoC) ||
+			minSoC < 0 || minSoC >= maxSoC || maxSoC > 1 {
+			return fmt.Errorf("%s SoC bounds must satisfy 0 <= min < max <= 1", field)
 		}
-		if !finite(loadpoint.InitialSoCPct) || loadpoint.InitialSoCPct < minPct ||
-			loadpoint.InitialSoCPct > maxPct {
-			return fmt.Errorf("%s.initial_soc_pct must be within the loadpoint SoC bounds", field)
+		if !finite(loadpoint.InitialSoC) || loadpoint.InitialSoC < minSoC ||
+			loadpoint.InitialSoC > maxSoC {
+			return fmt.Errorf("%s.initial_soc must be within the loadpoint SoC bounds", field)
 		}
-		if !finite(loadpoint.TargetSoCPct) || loadpoint.TargetSoCPct < 0 ||
-			loadpoint.TargetSoCPct > 100 ||
-			(loadpoint.TargetSoCPct != 0 &&
-				(loadpoint.TargetSoCPct < minPct || loadpoint.TargetSoCPct > maxPct)) {
-			return fmt.Errorf("%s.target_soc_pct must be zero or within the loadpoint SoC bounds", field)
+		if !finite(loadpoint.TargetSoC) || loadpoint.TargetSoC < 0 ||
+			loadpoint.TargetSoC > 1 ||
+			(loadpoint.TargetSoC != 0 &&
+				(loadpoint.TargetSoC < minSoC || loadpoint.TargetSoC > maxSoC)) {
+			return fmt.Errorf("%s.target_soc must be zero or within the loadpoint SoC bounds", field)
 		}
-		if loadpoint.TargetSoCPct > 0 && loadpoint.TargetSlotIdx < 0 {
-			return fmt.Errorf("%s.target_slot_idx must be non-negative when target_soc_pct is set", field)
+		if loadpoint.TargetSoC > 0 && loadpoint.TargetSlotIdx < 0 {
+			return fmt.Errorf("%s.target_slot_idx must be non-negative when target_soc is set", field)
 		}
 		if err := requireNonNegativePlanningValue(field+".max_charge_w", loadpoint.MaxChargeW); err != nil {
 			return err

@@ -63,7 +63,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -150,7 +150,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -244,7 +244,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -336,7 +336,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -442,7 +442,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "sungrow",
@@ -553,7 +553,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 0.7,
@@ -668,7 +668,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -787,7 +787,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -881,7 +881,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -962,7 +962,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1050,7 +1050,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp",
@@ -1165,7 +1165,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.8,
@@ -1275,7 +1275,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1373,7 +1373,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1484,7 +1484,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1568,7 +1568,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1644,7 +1644,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp"
@@ -1737,7 +1737,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 2.5,
@@ -1822,7 +1822,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1900,7 +1900,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -1988,7 +1988,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -2088,7 +2088,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -2204,7 +2204,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp",
@@ -2319,7 +2319,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.2,
@@ -2416,7 +2416,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -2492,7 +2492,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -2600,7 +2600,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -2702,7 +2702,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -2778,7 +2778,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp"
@@ -2865,7 +2865,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1
@@ -2944,7 +2944,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3040,7 +3040,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3146,7 +3146,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3248,7 +3248,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3354,7 +3354,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "sungrow",
@@ -3463,7 +3463,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.3,
@@ -3578,7 +3578,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3688,7 +3688,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3781,7 +3781,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3862,7 +3862,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -3968,7 +3968,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "pixii",
@@ -4059,7 +4059,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.8
@@ -4156,7 +4156,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -4262,7 +4262,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -4362,7 +4362,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -4460,7 +4460,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -4571,7 +4571,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp",
@@ -4692,7 +4692,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 0.8,
@@ -4807,7 +4807,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -4921,7 +4921,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5037,7 +5037,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5133,7 +5133,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5239,7 +5239,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "pixii",
@@ -5342,7 +5342,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.5,
@@ -5433,7 +5433,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5515,7 +5515,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5617,7 +5617,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5707,7 +5707,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -5813,7 +5813,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp",
@@ -5917,7 +5917,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 0.6,
@@ -6014,7 +6014,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6120,7 +6120,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6206,7 +6206,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6312,7 +6312,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6416,7 +6416,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "sungrow",
@@ -6531,7 +6531,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 2,
@@ -6642,7 +6642,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6724,7 +6724,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6832,7 +6832,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -6922,7 +6922,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7010,7 +7010,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp",
@@ -7119,7 +7119,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 2.2,
@@ -7240,7 +7240,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7330,7 +7330,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7430,7 +7430,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7514,7 +7514,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7590,7 +7590,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp"
@@ -7669,7 +7669,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 0.9
@@ -7780,7 +7780,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7868,7 +7868,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -7962,7 +7962,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -8049,7 +8049,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -8143,7 +8143,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "sungrow",
@@ -8234,7 +8234,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.6
@@ -8325,7 +8325,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -8418,7 +8418,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -8514,7 +8514,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -8622,7 +8622,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -8726,7 +8726,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "sungrow",
@@ -8813,7 +8813,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 1.3
@@ -8918,7 +8918,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9031,7 +9031,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9117,7 +9117,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9199,7 +9199,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9293,7 +9293,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "priority_order": [
             "ferroamp",
@@ -9387,7 +9387,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0,
           "weights": {
             "ferroamp": 0.7,
@@ -9472,7 +9472,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9548,7 +9548,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9656,7 +9656,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },
@@ -9758,7 +9758,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         }
       },

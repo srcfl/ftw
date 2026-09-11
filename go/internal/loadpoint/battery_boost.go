@@ -1,8 +1,11 @@
 package loadpoint
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // MaxBatteryBoostDuration is deliberately short: a forgotten permission can
@@ -37,25 +40,47 @@ const (
 // an absolute expiry; StartedAt plus the duration cap prevents a hand-edited or
 // old row from reviving a permission indefinitely after restart.
 type BatteryBoostLease struct {
-	StartedAt        time.Time `json:"started_at"`
-	ExpiresAt        time.Time `json:"expires_at"`
-	MinBatterySoCPct float64   `json:"min_battery_soc_pct"`
-	EVTargetSoCPct   float64   `json:"ev_target_soc_pct,omitempty"`
-	DepartureAt      time.Time `json:"departure_at,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	MinBatterySoC float64   `json:"min_battery_soc"`
+	EVTargetSoC   float64   `json:"ev_target_soc,omitempty"`
+	DepartureAt   time.Time `json:"departure_at,omitempty"`
+}
+
+func (l *BatteryBoostLease) UnmarshalJSON(b []byte) error {
+	type alias BatteryBoostLease
+	aux := struct {
+		alias
+		MinBatterySoCPct *float64 `json:"min_battery_soc_pct"`
+		EVTargetSoCPct   *float64 `json:"ev_target_soc_pct"`
+	}{}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*l = BatteryBoostLease(aux.alias)
+	if l.MinBatterySoC == 0 && aux.MinBatterySoCPct != nil {
+		l.MinBatterySoC = *aux.MinBatterySoCPct
+	}
+	if l.EVTargetSoC == 0 && aux.EVTargetSoCPct != nil {
+		l.EVTargetSoC = *aux.EVTargetSoCPct
+	}
+	l.MinBatterySoC = units.ClampFraction(units.FractionFromLegacyPercent(l.MinBatterySoC))
+	l.EVTargetSoC = units.ClampFraction(units.FractionFromLegacyPercent(l.EVTargetSoC))
+	return nil
 }
 
 // BatteryBoostStatus is returned by the dedicated status endpoint and embedded
 // in GET /api/loadpoints. State is one of inactive, active, or stopped.
 type BatteryBoostStatus struct {
-	State            string                 `json:"state"`
-	Active           bool                   `json:"active"`
-	StartedAtMs      int64                  `json:"started_at_ms,omitempty"`
-	ExpiresAtMs      int64                  `json:"expires_at_ms,omitempty"`
-	MinBatterySoCPct float64                `json:"min_battery_soc_pct,omitempty"`
-	EVTargetSoCPct   float64                `json:"ev_target_soc_pct,omitempty"`
-	DepartureAtMs    int64                  `json:"departure_at_ms,omitempty"`
-	StopReason       BatteryBoostStopReason `json:"stop_reason,omitempty"`
-	StoppedAtMs      int64                  `json:"stopped_at_ms,omitempty"`
+	State         string                 `json:"state"`
+	Active        bool                   `json:"active"`
+	StartedAtMs   int64                  `json:"started_at_ms,omitempty"`
+	ExpiresAtMs   int64                  `json:"expires_at_ms,omitempty"`
+	MinBatterySoC float64                `json:"min_battery_soc,omitempty"`
+	EVTargetSoC   float64                `json:"ev_target_soc,omitempty"`
+	DepartureAtMs int64                  `json:"departure_at_ms,omitempty"`
+	StopReason    BatteryBoostStopReason `json:"stop_reason,omitempty"`
+	StoppedAtMs   int64                  `json:"stopped_at_ms,omitempty"`
 }
 
 // BatteryBoostSafetyFunc is wired by core and returns a stop reason whenever
@@ -85,11 +110,11 @@ func ValidateBatteryBoostLease(lease BatteryBoostLease, now time.Time) error {
 	if lease.ExpiresAt.Sub(now) > MaxBatteryBoostDuration {
 		return errors.New("lease remaining duration exceeds four hours")
 	}
-	if lease.MinBatterySoCPct < 5 || lease.MinBatterySoCPct > 100 {
-		return errors.New("min_battery_soc_pct must be 5..100")
+	if lease.MinBatterySoC < 0.05 || lease.MinBatterySoC > 1 {
+		return errors.New("min_battery_soc must be 0.05..1")
 	}
-	if lease.EVTargetSoCPct < 0 || lease.EVTargetSoCPct > 100 {
-		return errors.New("ev_target_soc_pct must be 0..100")
+	if lease.EVTargetSoC < 0 || lease.EVTargetSoC > 1 {
+		return errors.New("ev_target_soc must be 0..1")
 	}
 	if !lease.DepartureAt.IsZero() {
 		if !lease.DepartureAt.After(now) {
@@ -104,12 +129,12 @@ func ValidateBatteryBoostLease(lease BatteryBoostLease, now time.Time) error {
 
 func batteryBoostStatusFromLease(lease BatteryBoostLease) BatteryBoostStatus {
 	status := BatteryBoostStatus{
-		State:            "active",
-		Active:           true,
-		StartedAtMs:      lease.StartedAt.UnixMilli(),
-		ExpiresAtMs:      lease.ExpiresAt.UnixMilli(),
-		MinBatterySoCPct: lease.MinBatterySoCPct,
-		EVTargetSoCPct:   lease.EVTargetSoCPct,
+		State:         "active",
+		Active:        true,
+		StartedAtMs:   lease.StartedAt.UnixMilli(),
+		ExpiresAtMs:   lease.ExpiresAt.UnixMilli(),
+		MinBatterySoC: lease.MinBatterySoC,
+		EVTargetSoC:   lease.EVTargetSoC,
 	}
 	if !lease.DepartureAt.IsZero() {
 		status.DepartureAtMs = lease.DepartureAt.UnixMilli()
@@ -332,7 +357,7 @@ func (c *Controller) evaluateBatteryBoost(id string, now time.Time, connected, d
 			c.stopBatteryBoost(id, BatteryBoostStoppedSurplusOnly, now)
 			return
 		}
-		if lease.EVTargetSoCPct > 0 && st.CurrentSoCPct >= lease.EVTargetSoCPct {
+		if lease.EVTargetSoC > 0 && st.CurrentSoC >= lease.EVTargetSoC {
 			c.stopBatteryBoost(id, BatteryBoostStoppedEVTargetReached, now)
 			return
 		}
@@ -363,8 +388,8 @@ func (c *Controller) ActiveBatteryBoostTotals(states []State, now time.Time) (po
 		if st.CurrentPowerW > 0 {
 			powerW += st.CurrentPowerW
 		}
-		if lease.MinBatterySoCPct/100 > reserveSoC {
-			reserveSoC = lease.MinBatterySoCPct / 100
+		if lease.MinBatterySoC > reserveSoC {
+			reserveSoC = lease.MinBatterySoC
 		}
 	}
 	return powerW, reserveSoC

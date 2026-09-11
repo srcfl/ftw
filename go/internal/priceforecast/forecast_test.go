@@ -10,13 +10,24 @@ import (
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
+func stockholm(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatalf("Europe/Stockholm tzdata unavailable: %v", err)
+	}
+	return loc
+}
+
 func TestFreshModelHasSensibleCurve(t *testing.T) {
 	// Untrained model returns baked-in typical Nordic pattern:
 	// midday trough, morning + evening peaks. Tests shape, not exact values.
+	// Civil times are Europe/Stockholm — the clock the prior is drawn in.
+	loc := stockholm(t)
 	m := NewZoneModel("SE3")
-	midday := time.Date(2026, 6, 15, 13, 0, 0, 0, time.UTC)
-	evening := time.Date(2026, 6, 15, 19, 0, 0, 0, time.UTC)
-	overnight := time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)
+	midday := time.Date(2026, 6, 15, 13, 0, 0, 0, loc)
+	evening := time.Date(2026, 6, 15, 19, 0, 0, 0, loc)
+	overnight := time.Date(2026, 6, 15, 3, 0, 0, 0, loc)
 	pm := m.Predict(midday)
 	pe := m.Predict(evening)
 	po := m.Predict(overnight)
@@ -27,8 +38,8 @@ func TestFreshModelHasSensibleCurve(t *testing.T) {
 		t.Errorf("midday (%.1f) should be below overnight (%.1f) due to solar flood", pm, po)
 	}
 	// Winter vs summer seasonality
-	wintr := time.Date(2026, 1, 15, 19, 0, 0, 0, time.UTC)
-	smrEv := time.Date(2026, 7, 15, 19, 0, 0, 0, time.UTC)
+	wintr := time.Date(2026, 1, 15, 19, 0, 0, 0, loc)
+	smrEv := time.Date(2026, 7, 15, 19, 0, 0, 0, loc)
 	if !(m.Predict(wintr) > m.Predict(smrEv)) {
 		t.Errorf("winter (%.1f) should exceed summer (%.1f)", m.Predict(wintr), m.Predict(smrEv))
 	}
@@ -36,13 +47,16 @@ func TestFreshModelHasSensibleCurve(t *testing.T) {
 
 func TestFitsHourOfWeekPattern(t *testing.T) {
 	// Synthetic: SE3 prices with morning peak 150, midday trough 30,
-	// evening peak 200. Two years of data so the Bayesian prior (weight
-	// ≈ 8) is swamped by ~100 samples per hour-of-week bucket.
+	// evening peak 200, keyed to Stockholm local hours. Two years of
+	// data so the Bayesian prior (weight ≈ 8) is swamped by ~100
+	// samples per hour-of-week bucket.
+	loc := stockholm(t)
 	var pts []state.PricePoint
-	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, loc)
 	for d := 0; d < 730; d++ { // 2 years
+		day := start.AddDate(0, 0, d)
 		for h := 0; h < 24; h++ {
-			ts := start.Add(time.Duration(d*24+h) * time.Hour)
+			ts := time.Date(day.Year(), day.Month(), day.Day(), h, 0, 0, 0, loc)
 			var price float64
 			switch {
 			case h >= 7 && h <= 9:
@@ -68,15 +82,15 @@ func TestFitsHourOfWeekPattern(t *testing.T) {
 	// With ~100+ samples per bucket, fit should be very close to data.
 	// Tolerance generous because month multipliers still apply some
 	// seasonal scaling.
-	mornMon := time.Date(2026, 3, 2, 8, 0, 0, 0, time.UTC)
+	mornMon := time.Date(2026, 3, 2, 8, 0, 0, 0, loc)
 	if got := m.Predict(mornMon); math.Abs(got-150) > 20 {
 		t.Errorf("Mon 08:00 peak: got %f, want ~150 (±20)", got)
 	}
-	trough := time.Date(2026, 3, 4, 13, 0, 0, 0, time.UTC)
+	trough := time.Date(2026, 3, 4, 13, 0, 0, 0, loc)
 	if got := m.Predict(trough); math.Abs(got-30) > 20 {
 		t.Errorf("Wed 13:00 trough: got %f, want ~30 (±20)", got)
 	}
-	eve := time.Date(2026, 3, 6, 19, 0, 0, 0, time.UTC)
+	eve := time.Date(2026, 3, 6, 19, 0, 0, 0, loc)
 	if got := m.Predict(eve); math.Abs(got-200) > 20 {
 		t.Errorf("Fri 19:00 peak: got %f, want ~200 (±20)", got)
 	}
@@ -87,11 +101,13 @@ func TestSparseHistoryFallsBackToPriorShape(t *testing.T) {
 	// so the predictions should still show the baked hour-of-week
 	// shape — morning + evening peaks, midday trough — even if the
 	// short training sample happened to be uniform.
+	loc := stockholm(t)
 	var pts []state.PricePoint
-	start := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	start := time.Date(2026, 1, 5, 0, 0, 0, 0, loc)
 	for d := 0; d < 3; d++ {
+		day := start.AddDate(0, 0, d)
 		for h := 0; h < 24; h++ {
-			ts := start.Add(time.Duration(d*24+h) * time.Hour)
+			ts := time.Date(day.Year(), day.Month(), day.Day(), h, 0, 0, 0, loc)
 			pts = append(pts, state.PricePoint{
 				Zone: "SE3", SlotTsMs: ts.UnixMilli(),
 				SlotLenMin: 60, SpotOreKwh: 100, // totally flat — unusual
@@ -102,9 +118,9 @@ func TestSparseHistoryFallsBackToPriorShape(t *testing.T) {
 	m.FitFromHistory(pts)
 
 	// Even though training data was flat, shape persists from prior.
-	morn := time.Date(2026, 3, 2, 8, 0, 0, 0, time.UTC)
-	midday := time.Date(2026, 3, 2, 13, 0, 0, 0, time.UTC)
-	eve := time.Date(2026, 3, 2, 19, 0, 0, 0, time.UTC)
+	morn := time.Date(2026, 3, 2, 8, 0, 0, 0, loc)
+	midday := time.Date(2026, 3, 2, 13, 0, 0, 0, loc)
+	eve := time.Date(2026, 3, 2, 19, 0, 0, 0, loc)
 	if !(m.Predict(morn) > m.Predict(midday)) {
 		t.Errorf("morning (%f) should beat midday (%f) — prior shape lost",
 			m.Predict(morn), m.Predict(midday))
@@ -150,15 +166,10 @@ SE4,1735689600000,60,90.0
 
 // TestPredictStableAcrossDST ensures Predict returns the same value for
 // the same absolute instant regardless of the timezone the caller has
-// attached to the time.Time struct. Before the UTC coercion in
-// hourOfWeek + Predict, passing a local-zone time around DST boundaries
-// produced a different bucket (and thus price) than passing the UTC
-// equivalent — Erik's 21:00 bug was on this exact code path.
+// attached to the time.Time struct. hourOfWeek converts to Stockholm
+// first, so UTC and local presentations of one instant agree.
 func TestPredictStableAcrossDST(t *testing.T) {
-	stockholm, err := time.LoadLocation("Europe/Stockholm")
-	if err != nil {
-		t.Skipf("Europe/Stockholm tzdata unavailable: %v", err)
-	}
+	loc := stockholm(t)
 	m := NewZoneModel("SE3")
 	// Several points over the year — including both DST transitions.
 	cases := []struct {
@@ -182,7 +193,7 @@ func TestPredictStableAcrossDST(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			utc := tc.inst
-			local := utc.In(stockholm)
+			local := utc.In(loc)
 			if !utc.Equal(local) {
 				t.Fatalf("instants must be equal — test bug")
 			}
@@ -201,24 +212,58 @@ func TestPredictStableAcrossDST(t *testing.T) {
 // bucket index itself must not change when the same instant is
 // represented in a different timezone.
 func TestHourOfWeekStableAcrossDST(t *testing.T) {
-	stockholm, err := time.LoadLocation("Europe/Stockholm")
-	if err != nil {
-		t.Skipf("Europe/Stockholm tzdata unavailable: %v", err)
-	}
+	loc := stockholm(t)
 	// Pick a few instants across DST boundaries.
 	instants := []time.Time{
-		time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC), // spring forward
-		time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC), // fall back
-		time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC), // summer
+		time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC),   // spring forward
+		time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC),  // fall back
+		time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC),  // summer
 		time.Date(2026, 12, 15, 20, 0, 0, 0, time.UTC), // winter
 	}
 	for _, inst := range instants {
 		utc := inst
-		local := inst.In(stockholm)
+		local := inst.In(loc)
 		if hourOfWeek(utc) != hourOfWeek(local) {
 			t.Errorf("hourOfWeek differs: utc=%d local=%d (inst=%v)",
 				hourOfWeek(utc), hourOfWeek(local), inst)
 		}
+	}
+}
+
+// TestSE3CESTEveningPeakLandsInEveningPrior is the #1161 regression:
+// 19:00 CEST must use the baked 17–20 local evening bucket, not the
+// UTC hour (17) that the same instant occupies.
+func TestSE3CESTEveningPeakLandsInEveningPrior(t *testing.T) {
+	loc := stockholm(t)
+	m := NewZoneModel("SE3")
+
+	// Wednesday 15 Jul 2026 19:00 CEST = 17:00 UTC.
+	evening := time.Date(2026, 7, 15, 19, 0, 0, 0, loc)
+	if evening.UTC().Hour() != 17 {
+		t.Fatalf("test bug: 19:00 CEST should be 17:00 UTC, got %02d", evening.UTC().Hour())
+	}
+
+	idx := hourOfWeek(evening)
+	want := 2*24 + 19 // Wed 19:00 local
+	utcIdx := 2*24 + 17
+	if idx != want {
+		t.Errorf("19:00 CEST bucket = %d, want %d (UTC 17:00 would be %d)", idx, want, utcIdx)
+	}
+
+	peak := m.Predict(evening)
+	after := m.Predict(time.Date(2026, 7, 15, 21, 0, 0, 0, loc))
+	if !(peak > after) {
+		t.Errorf("19:00 CEST (%.1f) should exceed 21:00 CEST (%.1f) — peak must follow local evening, not UTC",
+			peak, after)
+	}
+
+	// Passing the instant as UTC must still hit the local-19 bucket.
+	asUTC := time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC)
+	if hourOfWeek(asUTC) != want {
+		t.Errorf("17:00 UTC (19:00 CEST) bucket = %d, want %d", hourOfWeek(asUTC), want)
+	}
+	if m.Predict(asUTC) != peak {
+		t.Errorf("Predict(17:00 UTC)=%.1f, Predict(19:00 CEST)=%.1f — same instant", m.Predict(asUTC), peak)
 	}
 }
 

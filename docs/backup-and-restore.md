@@ -19,10 +19,15 @@ Open **FTW Update Center → Full backups** and choose **Create full backup**.
 FTW:
 
 1. makes a transactionally consistent SQLite backup without stopping control;
-2. collects the rest of the persistent data directory;
+2. exports the current config from that database snapshot and collects the rest of the persistent data directory;
 3. records Core, Optimizer and active Driver versions;
 4. hashes every file, verifies the finished archive and runs SQLite
    `quick_check` before publishing it.
+
+Managed-driver links that point inside the persistent directory become relative
+links in the archive. Restore can therefore move the data to another directory
+or machine. Backup never follows these links to copy a host file; verification
+rejects link chains that escape the data directory or form a cycle.
 
 Choose **Download**, save the `.ftwbak` file on another computer or USB disk,
 and keep at least one older known-good copy. **Verify** rechecks the server copy;
@@ -75,6 +80,8 @@ ftw-backup revert  -data /var/lib/ftw -safety /var/lib/.ftw-pre-restore-... -yes
 
 Stop the native FTW service before `restore` or `revert`. `create` opens the
 existing database read-only and does not migrate or repair its schema.
+Pass `-config` to `create` when the seed has a name other than
+`<data>/config.yaml`. The config seed must be inside the data directory.
 
 ## Svenska – kortversion att skicka till en användare
 

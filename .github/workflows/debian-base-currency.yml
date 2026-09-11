@@ -69,9 +69,9 @@ jobs:
         run: |
           title="Container base is behind Debian stable"
           body="$(printf '%s\n\n```\n%s\n```\n\n%s\n\nFrom %s\n\nThis issue is rewritten by each run of the `debian base currency` workflow. Closing it without moving the pin means it comes back next Monday.\n' \
-            "The Debian suite pinned by the container images is no longer the current Debian stable, or the three images have drifted apart. Core, updater and optimizer are pinned to one suite on purpose: they share a single base layer, so a host pulls that rootfs once instead of three times." \
+            "The Debian suite pinned by the container images is no longer the current Debian stable, or the two images have drifted apart. Core and updater are pinned to one suite on purpose: they share a single base layer, so a host pulls that rootfs once instead of twice." \
             "${REPORT}" \
-            "Moving the pin means updating the FROM lines in \`Dockerfile\`, \`Dockerfile.updater\` and \`Dockerfile.optimizer\` together, then rebuilding all three and confirming the optimizer still resolves CVXPY and HiGHS wheels on the new suite. Do not move core alone — that splits the shared layer. If the readiness lines above say a tag is not published yet, wait for it rather than splitting the pin." \
+            "Moving the pin means updating the FROM lines in \`Dockerfile\`, \`Dockerfile.updater\` together, then rebuilding both and checking Core and updater health. Do not move core alone — that splits the shared layer. If the readiness lines above say a tag is not published yet, wait for it rather than splitting the pin." \
             "${RUN_URL}")"
 
           existing="$(gh issue list --state open --search "in:title \"${title}\"" \

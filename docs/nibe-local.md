@@ -71,8 +71,8 @@ its own metadata: modbus register, unit, **exact divisor**, and a writable
 flag. That means:
 
 - **Exact scaling.** A temperature with `divisor: 10` becomes °C precisely; a
-  power with `divisor: 100` becomes kW precisely. No °C×10 guessing like the
-  cloud driver has to do.
+  power with `divisor: 100` scales to the vendor unit, then kW/kWh convert
+  to W/Wh at emit. No °C×10 guessing like the cloud driver has to do.
 - **The whole register map.** Every point lands in the long-format
   TS DB via `host.emit_metric`. To keep
   a Pi-sized database bounded, headline metrics are sampled every minute while
@@ -150,8 +150,8 @@ instance via `param_power_id`, `param_hw_temp_id`, `param_indoor_temp_id`,
 | `hp_hw_top_temp_c` | °C | Hot water top BT7 (11) |
 | `hp_outdoor_temp_c` | °C | Outdoor BT1 (4) |
 | `hp_indoor_temp_c` | °C | Room BT50 (158) — absent if no room sensor |
-| `hp_energy_consumed_kwh` | kWh | Tot. consumption (28393) |
-| `hp_energy_produced_kwh` | kWh | Tot. production (28392) |
+| `hp_energy_consumed_kwh` | Wh | Tot. consumption (28393) — name still `_kwh`; value is Wh |
+| `hp_energy_produced_kwh` | Wh | Tot. production (28392) — name still `_kwh`; value is Wh |
 | `hp_degree_minutes` | DM | Degree minutes (781) |
 
 Every other point auto-emits as `hp_<sanitized title>` with its unit, so the

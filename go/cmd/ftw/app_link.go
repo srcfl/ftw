@@ -141,20 +141,26 @@ func (a *appSite) Snapshot() appproto.Snapshot {
 	// EV chargers. Known means the site has one at all — an idle charger
 	// is a real 0 W reading, a site without one sends no field 10 and the
 	// app draws no EV node. Positive while charging: a charger consumes
-	// like any other load.
+	// like any other load. The watts come from SumOnlineEVW so a charger
+	// that cannot take a command but is still drawing is counted here the
+	// same way the LAN dashboard counts it — IsOnline() would hide that
+	// draw in the house node.
 	for _, reading := range a.tel.ReadingsByType(telemetry.DerEV) {
 		addSource(reading.Driver)
 		snap.EVWKnown = true
-		if health := a.tel.DriverHealth(reading.Driver); health != nil && health.IsOnline() {
-			snap.EVW += reading.SmoothedW
-		}
 	}
+	snap.EVW = a.tel.SumOnlineEVW()
 
-	// grid = load + battery + pv, all site-signed. Rearranged, not
-	// re-derived: a second formula here would be a second thing to keep in
-	// step with docs/site-convention.md.
+	// grid = load + battery + pv + ev + v2x, all site-signed. Rearranged,
+	// not re-derived: a second formula here would be a second thing to
+	// keep in step with docs/site-convention.md. House load is never
+	// negative; metering noise that would push it below zero is the car
+	// or the battery, not the house consuming in reverse.
 	snap.LoadW = snap.GridW - snap.BatteryW - snap.PVW -
-		a.tel.SumOnlineEVW() - a.tel.SumOnlineV2XW()
+		snap.EVW - a.tel.SumOnlineV2XW()
+	if snap.LoadW < 0 {
+		snap.LoadW = 0
+	}
 
 	return snap
 }
@@ -185,6 +191,7 @@ type appModes struct {
 	ctrlMu *sync.Mutex
 	state  *state.Store
 	mpc    *mpc.Service
+	prefs  *config.PlannerPrefs
 }
 
 func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
@@ -200,9 +207,16 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 			slog.Warn("app uplink could not persist the mode", "err", err)
 		}
 	}
+	if a.prefs != nil {
+		var save func(string, string) error
+		if a.state != nil {
+			save = a.state.SaveConfig
+		}
+		a.prefs.ApplyExportFromMode(string(m), save)
+	}
 	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
 		// Forced replan, off this goroutine. mpc.SetMode replans before it
-		// returns, and the Python optimizer can take longer than the app
+		// returns, and planning can take longer than the app
 		// waits for a command result — so a mode change that had already
 		// been applied and read back was reported "unconfirmed" purely
 		// because the planner was slow. The mode itself is already set and
@@ -378,7 +392,7 @@ func (a *appLoadpoints) Boost(id string, lease loadpoint.BatteryBoostLease, now 
 		// its next scheduled run. Off this goroutine and unattached to the
 		// session — a phone that drops its socket right after tapping must
 		// not abort the planner mid-run.
-		go a.mpc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_enabled")
+		a.mpc.RequestReplan("loadpoint_battery_boost_enabled")
 	}
 	return nil
 }
@@ -390,6 +404,42 @@ func (a *appLoadpoints) CancelBoost(id string, now time.Time) {
 func (a *appLoadpoints) ObservedBoost(id string, now time.Time) loadpoint.BatteryBoostStatus {
 	_, status := a.ctrl.BatteryBoost(id, now)
 	return status
+}
+
+func (a *appLoadpoints) SetSoC(id string, soc float64) bool {
+	if !a.mgr.SetCurrentSoC(id, soc) {
+		return false
+	}
+	if a.mpc != nil {
+		a.mpc.RequestReplan("loadpoint_soc_corrected")
+	}
+	return true
+}
+
+func (a *appLoadpoints) ObservedSoC(id string) (float64, bool) {
+	st, ok := a.mgr.State(id)
+	return st.CurrentSoC, ok
+}
+
+func (a *appLoadpoints) SetSurplusOnly(id string, v bool) (bool, bool) {
+	prev, ok := a.mgr.SetSurplusOnly(id, v)
+	if !ok {
+		return false, false
+	}
+	if a.mpc != nil {
+		if prev && !v {
+			slog.Info("loadpoint surplus_only disabled — requesting replan", "lp", id)
+			a.mpc.RequestReplan("surplus_only_disabled")
+		} else {
+			a.mpc.RequestReplan("loadpoint_target_changed")
+		}
+	}
+	return prev, true
+}
+
+func (a *appLoadpoints) ObservedSurplusOnly(id string) (bool, bool) {
+	st, ok := a.mgr.State(id)
+	return st.SurplusOnly, ok
 }
 
 // appPlans hands over the planner's current output.
@@ -458,6 +508,7 @@ func startAppLink(
 	priceSvc *prices.Service,
 	ctrl *control.State,
 	ctrlMu *sync.Mutex,
+	prefs *config.PlannerPrefs,
 	revision *control.Revision,
 	siteMeterStale time.Duration,
 	gateway *lateAPI,
@@ -483,7 +534,7 @@ func startAppLink(
 		started: processStarted, siteMeterStale: siteMeterStale,
 	}
 	info := appBoxInfo{id: boxID, build: build, tz: tz}
-	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner}
+	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner, prefs: prefs}
 	plans := &appPlans{planner: planner, ctrl: ctrl, ctrlMu: ctrlMu}
 
 	// History rides on the energy ledger, so it exists exactly when state

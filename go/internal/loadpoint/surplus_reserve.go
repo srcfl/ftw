@@ -26,6 +26,11 @@ package loadpoint
 // real site.
 const EVRampHeadroomW = 2000
 
+// GridChargeImportW is the live/plan grid band that means the site is
+// deliberately importing, not soaking PV. Matches control's
+// coverLoadChargeSlot / energy-path grid-charge skip.
+const GridChargeImportW = 100.0
+
 // SurplusReserveW returns the aggregate PV headroom that must be
 // preserved for surplus_only loadpoints. For each surplus_only +
 // plugged_in LP it reserves min(MaxChargeW, CurrentPowerW +
@@ -128,8 +133,8 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 			// (exporting instead of charging the home battery) until it's
 			// unplugged — surfacing the charger's own "done" state into the
 			// loadpoint State would let us skip that too (follow-up).
-			knownFull := st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
-				st.VehicleSoCPct >= st.VehicleChargeLimitPct
+			knownFull := st.VehicleSoC > 0 && st.VehicleChargeLimit > 0 &&
+				st.VehicleSoC >= st.VehicleChargeLimit
 			if knownFull {
 				continue
 			}
@@ -190,7 +195,7 @@ func surplusOnlyProtected(st State) bool {
 // either is unknown — be optimistic when telemetry is partial)
 // contributes its MaxChargeW. That's the upper bound on what curtail
 // must preserve PV headroom for. Drivers report "no headroom" by
-// setting VehicleSoCPct >= VehicleChargeLimitPct, which excludes
+// setting VehicleSoC >= VehicleChargeLimit, which excludes
 // already-full EVs from the calculation.
 func SurplusPotentialW(states []State) float64 {
 	var sum float64
@@ -200,8 +205,8 @@ func SurplusPotentialW(states []State) float64 {
 		}
 		// Skip when the vehicle is already at/above its charge limit
 		// — both must be > 0 for the comparison to be meaningful.
-		if st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
-			st.VehicleSoCPct >= st.VehicleChargeLimitPct {
+		if st.VehicleSoC > 0 && st.VehicleChargeLimit > 0 &&
+			st.VehicleSoC >= st.VehicleChargeLimit {
 			continue
 		}
 		head := st.MaxChargeW
@@ -214,4 +219,48 @@ func SurplusPotentialW(states []State) float64 {
 		sum += head
 	}
 	return sum
+}
+
+// PlannerTreatsLoadpointAsSurplusOnly is the SurplusOnly flag the MPC spec
+// should carry. The bat-SoC unlock is a this-tick opportunistic clamp;
+// putting it on the 48 h spec forbids night-time grid EV in a plan that
+// was computed while the sun was still up. Battery→EV is already blocked
+// by NoBatteryToEV.
+func PlannerTreatsLoadpointAsSurplusOnly(operatorSurplusOnly, deferGridPlan bool) bool {
+	return operatorSurplusOnly || deferGridPlan
+}
+
+// SurplusAvailableForEVW is the live PV leftover the surplus-only clamp
+// may offer the charger this tick, in watts.
+//
+// Site identity: -gridW + batW + evW = -pvW - loadW (house leftover).
+//
+// The EV controller runs before battery dispatch on the same tick. If the
+// home battery is soaking PV, counting that charge as EV-available would
+// command the charger on before the battery has yielded and leak into
+// import. Meter import is not enough to call the charge grid-funded:
+// soak plus EV can import together while the battery is still taking
+// leftover PV. Import beyond the car (gridW − evW) is the battery
+// buying; that leftover is the car's without waiting for a yield.
+func SurplusAvailableForEVW(gridW, batW, evW float64, surplusOnlyActive bool) float64 {
+	leftover := -gridW + batW + evW
+	if surplusOnlyActive {
+		leftover -= PlannedPVSoakW(batW, gridW-evW)
+	}
+	if leftover < 0 {
+		return 0
+	}
+	return leftover
+}
+
+// PlannedPVSoakW is the portion of a battery charge that is soaking
+// leftover PV rather than buying from the grid. gridW is the grid
+// flow attributed to house+battery (live meter minus EV, or planned
+// GridW minus LoadpointW). A reading above the import band means the
+// battery is buying, so soak is zero and leftover PV stays with the car.
+func PlannedPVSoakW(batteryW, gridW float64) float64 {
+	if batteryW <= 0 || gridW > GridChargeImportW {
+		return 0
+	}
+	return batteryW
 }

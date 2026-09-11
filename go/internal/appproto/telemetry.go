@@ -3,6 +3,8 @@ package appproto
 import (
 	"math"
 	"strconv"
+
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // Source id prefixes are the box's own; only the shape matters to the app.
@@ -96,7 +98,7 @@ func fieldValues(snap Snapshot, modes []ModeInfo) map[string]int64 {
 		fidKey(FidLoadW):    roundW(snap.LoadW),
 	}
 	if snap.BatterySoCKnown {
-		f[fidKey(FidBatterySoc)] = int64(math.Round(snap.BatterySoC * 1000))
+		f[fidKey(FidBatterySoc)] = units.PermilleFromFraction(snap.BatterySoC)
 	}
 	if snap.EVWKnown {
 		f[fidKey(FidEvW)] = roundW(snap.EVW)

@@ -39,7 +39,7 @@ func TestBatteryBoostAPIEnableStatusCancelLifecycle(t *testing.T) {
 		t.Fatalf("enable = %d: %s", rr.Code, rr.Body.String())
 	}
 	var status loadpoint.BatteryBoostStatus
-	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil || !status.Active || status.EVTargetSoCPct != 80 {
+	if err := json.Unmarshal(rr.Body.Bytes(), &status); err != nil || !status.Active || status.EVTargetSoC != 0.8 {
 		t.Fatalf("enable status = %+v, err=%v", status, err)
 	}
 

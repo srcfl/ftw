@@ -31,7 +31,7 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// `<= 0 -> default` shortcut clobbered the disable case.
 	ctrl.SiteFuseSafetyA = cfg.Fuse.EffectiveSafetyMarginA()
 	// PV surplus absorber underlay (opt-in). cap == 0 keeps it off.
-	ctrl.PVSurplusAbsorbSoCCapPct = cfg.Site.PVSurplusAbsorbSoCCapPct
+	ctrl.PVSurplusAbsorbSoCCap = cfg.Site.PVSurplusAbsorbSoCCap
 	ctrl.PVSurplusAbsorbThresholdW = cfg.Site.PVSurplusAbsorbThresholdW
 	// DC-link protective curtail — opt-in, default off. SoC threshold
 	// and margin fall back to dispatch defaults (0.80 / 1000 W) when

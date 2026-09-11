@@ -51,7 +51,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -60,7 +60,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 2498,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 549,
           "remaining_s": 273
         }
@@ -139,7 +139,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -231,7 +231,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -240,7 +240,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -2183,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 382,
           "remaining_s": 465
         }
@@ -343,7 +343,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -352,7 +352,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 84,
           "remaining_s": 316
         }
@@ -443,7 +443,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -452,7 +452,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": -2028,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 93,
+          "live_pv_surplus_soc_cap": 0.93,
           "elapsed_s": 357,
           "remaining_s": 689
         }
@@ -529,7 +529,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -538,7 +538,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 590,
           "remaining_s": 594
         }
@@ -617,7 +617,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -626,7 +626,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -2367,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 170,
           "remaining_s": 313
         }
@@ -723,7 +723,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -732,7 +732,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -826,7 +826,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -835,7 +835,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 2456,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 86,
+          "live_pv_surplus_soc_cap": 0.86,
           "elapsed_s": 110,
           "remaining_s": 220
         }
@@ -923,7 +923,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -932,7 +932,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 283,
           "remaining_s": 311
         }
@@ -1011,7 +1011,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1020,7 +1020,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 1199,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 595,
           "remaining_s": 717
         }
@@ -1109,7 +1109,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1118,7 +1118,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -1593,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 99,
           "remaining_s": 411
         }
@@ -1218,7 +1218,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1227,7 +1227,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 621,
           "remaining_s": 382
         }
@@ -1327,7 +1327,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1336,7 +1336,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 70,
           "remaining_s": 749
         }
@@ -1421,7 +1421,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1430,7 +1430,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 323,
           "remaining_s": 387
         }
@@ -1519,7 +1519,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1528,7 +1528,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -2805,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 556,
           "remaining_s": 572
         }
@@ -1616,7 +1616,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1625,7 +1625,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 563,
           "remaining_s": 417
         }
@@ -1716,7 +1716,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1725,7 +1725,7 @@
           "strategy": "cheap",
           "planned_grid_w": -2034,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 402,
           "remaining_s": 558
         }
@@ -1825,7 +1825,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 84,
+          "pv_surplus_absorb_soc_cap": 0.84,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1834,7 +1834,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 348,
           "remaining_s": 377
         }
@@ -1931,7 +1931,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1940,7 +1940,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -2028,7 +2028,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2037,7 +2037,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 194,
           "remaining_s": 280
         }
@@ -2120,7 +2120,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2129,7 +2129,7 @@
           "strategy": "cheap",
           "planned_grid_w": -2366,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 674,
           "remaining_s": 663
         }
@@ -2218,7 +2218,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2227,7 +2227,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 2319,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 301,
           "remaining_s": 242
         }
@@ -2327,7 +2327,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2336,7 +2336,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -2436,7 +2436,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2445,7 +2445,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 936,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 76,
           "remaining_s": 299
         }
@@ -2533,7 +2533,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2542,7 +2542,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -2619,7 +2619,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2628,7 +2628,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 92,
+          "live_pv_surplus_soc_cap": 0.92,
           "elapsed_s": 392,
           "remaining_s": 582
         }
@@ -2719,7 +2719,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2728,7 +2728,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 526,
           "remaining_s": 517
         }
@@ -2825,7 +2825,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2834,7 +2834,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 911,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 306,
           "remaining_s": 581
         }
@@ -2925,7 +2925,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -2934,7 +2934,7 @@
           "strategy": "cheap",
           "planned_grid_w": 738,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 609,
           "remaining_s": 644
         }
@@ -3013,7 +3013,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3022,7 +3022,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 282,
           "remaining_s": 251
         }
@@ -3101,7 +3101,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3110,7 +3110,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 1069,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 61,
+          "live_pv_surplus_soc_cap": 0.61,
           "elapsed_s": 167,
           "remaining_s": 702
         }
@@ -3205,7 +3205,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3214,7 +3214,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 363,
           "remaining_s": 205
         }
@@ -3302,7 +3302,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3311,7 +3311,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 382,
           "remaining_s": 338
         }
@@ -3394,7 +3394,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3403,7 +3403,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -600,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 77,
+          "live_pv_surplus_soc_cap": 0.77,
           "elapsed_s": 225,
           "remaining_s": 623
         }
@@ -3500,7 +3500,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3509,7 +3509,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 430,
           "remaining_s": 609
         }
@@ -3597,7 +3597,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3606,7 +3606,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 1836,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 689,
           "remaining_s": 422
         }
@@ -3691,7 +3691,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 73,
+          "pv_surplus_absorb_soc_cap": 0.73,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3700,7 +3700,7 @@
           "strategy": "cheap",
           "planned_grid_w": -2489,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 185,
           "remaining_s": 255
         }
@@ -3789,7 +3789,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3798,7 +3798,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -23,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 91,
+          "live_pv_surplus_soc_cap": 0.91,
           "elapsed_s": 184,
           "remaining_s": 309
         }
@@ -3892,7 +3892,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3901,7 +3901,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 789,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 72,
           "remaining_s": 753
         }
@@ -3983,7 +3983,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3992,7 +3992,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 1101,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 145,
           "remaining_s": 310
         }
@@ -4075,7 +4075,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4084,7 +4084,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -4179,7 +4179,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4188,7 +4188,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 490,
           "remaining_s": 372
         }
@@ -4291,7 +4291,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -4379,7 +4379,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4388,7 +4388,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 520,
           "remaining_s": 564
         }
@@ -4471,7 +4471,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -4557,7 +4557,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4566,7 +4566,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -4655,7 +4655,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4664,7 +4664,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -1555,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 272,
           "remaining_s": 360
         }
@@ -4764,7 +4764,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4773,7 +4773,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": -1468,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 313,
           "remaining_s": 377
         }
@@ -4861,7 +4861,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4870,7 +4870,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 615,
           "remaining_s": 531
         }
@@ -4955,7 +4955,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -4964,7 +4964,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 60,
+          "live_pv_surplus_soc_cap": 0.6,
           "elapsed_s": 82,
           "remaining_s": 541
         }
@@ -5049,7 +5049,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5058,7 +5058,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -1598,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 281,
           "remaining_s": 357
         }
@@ -5147,7 +5147,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 82,
+          "pv_surplus_absorb_soc_cap": 0.82,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5156,7 +5156,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 334,
           "remaining_s": 250
         }
@@ -5256,7 +5256,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5265,7 +5265,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -5359,7 +5359,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5368,7 +5368,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 2507,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 309,
           "remaining_s": 783
         }
@@ -5456,7 +5456,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5465,7 +5465,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 58,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 69,
+          "live_pv_surplus_soc_cap": 0.69,
           "elapsed_s": 85,
           "remaining_s": 572
         }
@@ -5542,7 +5542,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5551,7 +5551,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 84,
+          "live_pv_surplus_soc_cap": 0.84,
           "elapsed_s": 582,
           "remaining_s": 307
         }
@@ -5628,7 +5628,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5637,7 +5637,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -5726,7 +5726,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5735,7 +5735,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -20,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 700,
           "remaining_s": 689
         }
@@ -5835,7 +5835,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -5920,7 +5920,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5929,7 +5929,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 397,
           "remaining_s": 729
         }
@@ -6006,7 +6006,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6015,7 +6015,7 @@
           "strategy": "cheap",
           "planned_grid_w": 1019,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 695,
           "remaining_s": 410
         }
@@ -6098,7 +6098,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6107,7 +6107,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -6196,7 +6196,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 72,
+          "pv_surplus_absorb_soc_cap": 0.72,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6205,7 +6205,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 2170,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 363,
           "remaining_s": 625
         }
@@ -6293,7 +6293,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6302,7 +6302,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 2519,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 63,
+          "live_pv_surplus_soc_cap": 0.63,
           "elapsed_s": 270,
           "remaining_s": 706
         }
@@ -6391,7 +6391,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -6485,7 +6485,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6494,7 +6494,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 2326,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 398,
           "remaining_s": 730
         }
@@ -6577,7 +6577,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6586,7 +6586,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -2097,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 514,
           "remaining_s": 247
         }
@@ -6681,7 +6681,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6690,7 +6690,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 856,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 696,
           "remaining_s": 651
         }
@@ -6772,7 +6772,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -6860,7 +6860,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6869,7 +6869,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 99,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 89,
+          "live_pv_surplus_soc_cap": 0.89,
           "elapsed_s": 204,
           "remaining_s": 246
         }
@@ -6964,7 +6964,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6973,7 +6973,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 304,
           "remaining_s": 435
         }
@@ -7070,7 +7070,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 86,
+          "pv_surplus_absorb_soc_cap": 0.86,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7079,7 +7079,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 92,
+          "live_pv_surplus_soc_cap": 0.92,
           "elapsed_s": 253,
           "remaining_s": 707
         }
@@ -7179,7 +7179,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7188,7 +7188,7 @@
           "strategy": "cheap",
           "planned_grid_w": 1686,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 650,
           "remaining_s": 679
         }
@@ -7270,7 +7270,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7279,7 +7279,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 82,
+          "live_pv_surplus_soc_cap": 0.82,
           "elapsed_s": 190,
           "remaining_s": 608
         }
@@ -7364,7 +7364,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 79,
+          "pv_surplus_absorb_soc_cap": 0.79,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7373,7 +7373,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -7456,7 +7456,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7465,7 +7465,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 91,
+          "live_pv_surplus_soc_cap": 0.91,
           "elapsed_s": 479,
           "remaining_s": 733
         }
@@ -7554,7 +7554,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 78,
+          "pv_surplus_absorb_soc_cap": 0.78,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7563,7 +7563,7 @@
           "strategy": "cheap",
           "planned_grid_w": -1016,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 297,
           "remaining_s": 351
         }
@@ -7660,7 +7660,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7669,7 +7669,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 259,
           "remaining_s": 461
         }
@@ -7769,7 +7769,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -7875,7 +7875,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7884,7 +7884,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 67,
+          "live_pv_surplus_soc_cap": 0.67,
           "elapsed_s": 90,
           "remaining_s": 718
         }
@@ -7966,7 +7966,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7975,7 +7975,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 340,
           "remaining_s": 715
         }
@@ -8072,7 +8072,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8081,7 +8081,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -2295,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 78,
           "remaining_s": 480
         }
@@ -8178,7 +8178,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8187,7 +8187,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -1552,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 67,
+          "live_pv_surplus_soc_cap": 0.67,
           "elapsed_s": 105,
           "remaining_s": 488
         }
@@ -8287,7 +8287,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8296,7 +8296,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 86,
           "remaining_s": 316
         }
@@ -8390,7 +8390,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8399,7 +8399,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -8483,7 +8483,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8492,7 +8492,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 259,
           "remaining_s": 201
         }
@@ -8571,7 +8571,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8580,7 +8580,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 453,
           "remaining_s": 331
         }
@@ -8671,7 +8671,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8680,7 +8680,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 79,
+          "live_pv_surplus_soc_cap": 0.79,
           "elapsed_s": 138,
           "remaining_s": 562
         }
@@ -8774,7 +8774,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8783,7 +8783,7 @@
           "strategy": "cheap",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 408,
           "remaining_s": 418
         }
@@ -8886,7 +8886,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8895,7 +8895,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 1419,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 374,
           "remaining_s": 388
         }
@@ -8983,7 +8983,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -8992,7 +8992,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -9075,7 +9075,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 77,
+          "pv_surplus_absorb_soc_cap": 0.77,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9084,7 +9084,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": -1490,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 316,
           "remaining_s": 314
         }
@@ -9179,7 +9179,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9188,7 +9188,7 @@
           "strategy": "cheap",
           "planned_grid_w": -1828,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 513,
           "remaining_s": 295
         }
@@ -9273,7 +9273,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9282,7 +9282,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -182,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 532,
           "remaining_s": 574
         }
@@ -9361,7 +9361,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9370,7 +9370,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 211,
           "remaining_s": 533
         }
@@ -9453,7 +9453,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9462,7 +9462,7 @@
           "strategy": "",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 0,
           "remaining_s": 0
         }
@@ -9545,7 +9545,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 81,
+          "pv_surplus_absorb_soc_cap": 0.81,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -9643,7 +9643,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 73,
+          "pv_surplus_absorb_soc_cap": 0.73,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9652,7 +9652,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 104,
           "remaining_s": 651
         }
@@ -9746,7 +9746,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap_pct": 0,
+          "pv_surplus_absorb_soc_cap": 0,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9755,7 +9755,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 2172,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap_pct": 0,
+          "live_pv_surplus_soc_cap": 0,
           "elapsed_s": 535,
           "remaining_s": 771
         }

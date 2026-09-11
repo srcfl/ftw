@@ -117,6 +117,8 @@ ops:
   - { name: battery.hold, scope: ftw.dispatch.write, desc: Hold the battery at a fixed setpoint }
   - { name: loadpoint.hold, scope: ftw.dispatch.write, desc: Charge the car now at a fixed current }
   - { name: loadpoint.boost, scope: ftw.dispatch.write, desc: Boost the car from the house battery }
+  - { name: loadpoint.soc.set, scope: ftw.dispatch.write, desc: Correct the car's current charge level }
+  - { name: loadpoint.surplus_only.set, scope: ftw.dispatch.write, desc: Charge the car from surplus PV only }
 
 # ---------------------------------------------------------------------------
 # Dispatch modes.

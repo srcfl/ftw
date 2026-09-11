@@ -112,10 +112,12 @@ func TestAPairingRequestThatNamesNoRoleIsRefused(t *testing.T) {
 	}
 
 	// The same request with its role named still works, or the rule above
-	// would be indistinguishable from a broken endpoint.
+	// would be indistinguishable from a broken endpoint. Owner mint is
+	// loopback (or a house-password proof), not any LAN address.
 	w := httptest.NewRecorder()
-	s.handleAppLinkPairing(w, localRequest(
-		http.MethodPost, "/api/app-link/pairing", `{"role":"owner"}`))
+	atBox := localRequest(http.MethodPost, "/api/app-link/pairing", `{"role":"owner"}`)
+	atBox.RemoteAddr = "127.0.0.1:1234"
+	s.handleAppLinkPairing(w, atBox)
 	if w.Code != http.StatusOK {
 		t.Fatalf("naming the role got %d, want 200: %s", w.Code, w.Body.String())
 	}
@@ -158,8 +160,9 @@ func TestABoxCodeIsTextAndAQRCodeIsNot(t *testing.T) {
 	// appear in the field a screen would print as text. Decoded into a fresh
 	// value, because an absent field leaves whatever was there before.
 	w = httptest.NewRecorder()
-	s.handleAppLinkPairing(w, localRequest(
-		http.MethodPost, "/api/app-link/pairing", `{"role":"owner"}`))
+	atBox := localRequest(http.MethodPost, "/api/app-link/pairing", `{"role":"owner"}`)
+	atBox.RemoteAddr = "127.0.0.1:1234"
+	s.handleAppLinkPairing(w, atBox)
 	var scanned appLinkPairing
 	if err := json.Unmarshal(w.Body.Bytes(), &scanned); err != nil {
 		t.Fatalf("decoding the answer: %v", err)

@@ -16,14 +16,17 @@ package control
 // Run: go test -run TestForecastScenarios -v ./go/internal/control
 
 import (
+	"context"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -32,10 +35,10 @@ import (
 // makeSeedStore builds a telemetry.Store with a site meter and N batteries.
 // The battery slice uses a named struct for clarity at call sites.
 type batterySetup struct {
-	name      string
-	currentW  float64
-	soc       float64
-	online    bool // if false: only Update is called, health.SetOffline()
+	name     string
+	currentW float64
+	soc      float64
+	online   bool // if false: only Update is called, health.SetOffline()
 }
 
 func makeSeedStore(gridW float64, pvW float64, batteries []batterySetup) *telemetry.Store {
@@ -372,97 +375,69 @@ func TestScenario_B12_StalePlan_FallsBackToSelfConsumption(t *testing.T) {
 	assertSign(t, "B12", targets, "discharge")
 }
 
-// ---- C. PV forecast cap (T33 scenarios) ---------------------------------
-//
-// These are pure unit tests of selectPlannerPVW which is unexported. We test
-// the visible property: the scenarios that exercise the cap logic used by
-// buildSlots. Since selectPlannerPVW is package-private inside mpc, we
-// exercise it indirectly by verifying the published constants and then
-// confirming the arithmetic as in the existing mpc package tests. The
-// scenarios below are purposely duplicated here in a condensed form to anchor
-// the dispatch-boundary tests in case mpc internals move.
+// ---- C. PV forecast trust ----------------------------------------------
+// Exercise the published planner path. The dispatch scenarios above retain
+// their live power and fuse checks independently of forecast quality.
 
-// C13. NWP forecast 5× twin + twin>50 W → cap activates (T33 core regression).
-// Verify the arithmetic matches: capped = 3×twin, result = 0.7×capped + 0.3×twin.
-func TestScenario_C13_ForecastCap_ActivatesWhenNWP5xTwin(t *testing.T) {
-	forecast := 2002.0
-	twin := 290.0
-	got := selectPlannerPVW(forecast, twin, true)
-
-	cappedForecast := mpc.PlannerForecastCapRatio * twin
-	want := (1-mpc.PlannerRadiationWeight)*cappedForecast + mpc.PlannerRadiationWeight*twin
-	if math.Abs(got-want) > 0.5 {
-		t.Errorf("C13: selectPlannerPVW(%.0f, %.0f, true) = %.1f, want %.1f (capped at 3×twin)",
-			forecast, twin, got, want)
+func TestScenario_C13_ForecastTrust_ColdModelCannotCapProvider(t *testing.T) {
+	got := scenarioPlannerPV(t, 2002, 290, 0)
+	if math.Abs(got-2002) > 0.01 {
+		t.Fatalf("untrusted model capped provider: got %.2fW", got)
 	}
-	// Capped result must be materially less than uncapped.
-	uncapped := (1-mpc.PlannerRadiationWeight)*forecast + mpc.PlannerRadiationWeight*twin
-	if got >= uncapped {
-		t.Errorf("C13: capped %.1f should be < uncapped %.1f", got, uncapped)
+	got = scenarioPlannerPV(t, 2002, 290, mpc.PlannerRadiationWeight)
+	if math.Abs(got-1488.4) > 0.01 {
+		t.Fatalf("trusted model blend = %.2fW, want 1488.4W", got)
 	}
 }
 
-// C14. NWP forecast 2× twin + twin>50 W → cap does NOT activate.
-func TestScenario_C14_ForecastCap_InactiveWhenRatioOK(t *testing.T) {
-	forecast := 4000.0
-	twin := 2000.0 // 2× — below cap threshold of 3×
-	got := selectPlannerPVW(forecast, twin, true)
-	want := (1-mpc.PlannerRadiationWeight)*forecast + mpc.PlannerRadiationWeight*twin
-	if math.Abs(got-want) > 0.01 {
-		t.Errorf("C14: cap must be inactive when forecast/twin=2×; got %.2f want %.2f", got, want)
+func TestScenario_C14_ForecastTrust_ContinuousAcrossFormerCap(t *testing.T) {
+	below := scenarioPlannerPV(t, 6000, 1999, mpc.PlannerRadiationWeight)
+	above := scenarioPlannerPV(t, 6000, 2001, mpc.PlannerRadiationWeight)
+	if math.Abs((above-below)-0.6) > 0.01 {
+		t.Fatalf("two model watts caused a forecast jump: %.2f -> %.2f", below, above)
 	}
 }
 
-// C15. NWP forecast 5× twin + twin=10 W (low signal) → cap does NOT activate.
-func TestScenario_C15_ForecastCap_InactiveWhenTwinNearZero(t *testing.T) {
-	forecast := 300.0
-	twin := 10.0 // below 50 W threshold
-	got := selectPlannerPVW(forecast, twin, true)
-	want := (1-mpc.PlannerRadiationWeight)*forecast + mpc.PlannerRadiationWeight*twin
-	if math.Abs(got-want) > 0.01 {
-		t.Errorf("C15: cap must be inactive when twin < 50 W; got %.2f want %.2f", got, want)
+func TestScenario_C15_ForecastTrust_LowOutputStillBlends(t *testing.T) {
+	got := scenarioPlannerPV(t, 300, 10, mpc.PlannerRadiationWeight)
+	if math.Abs(got-213) > 0.01 {
+		t.Fatalf("low output blend = %.2fW, want 213W", got)
 	}
 }
 
-// C16. NWP forecast=0 (night) + radiation flag → falls through, twin used.
-func TestScenario_C16_ForecastCap_NightForecastZero_TwinPassesThrough(t *testing.T) {
-	// Per the implementation: forecast < 200 threshold → use twin directly.
-	forecast := 0.0
-	twin := 300.0 // twin (probably garbage at night, but illustrates the logic)
-	got := selectPlannerPVW(forecast, twin, true)
-	if got != twin {
-		t.Errorf("C16: night forecast=0 should fall through to twin=%g, got %.2f", twin, got)
+func TestScenario_C16_ForecastTrust_RadiationZeroStaysZero(t *testing.T) {
+	got := scenarioPlannerPV(t, 0, 300, mpc.PlannerRadiationWeight)
+	if got != 0 {
+		t.Fatalf("zero radiation forecast created %.2fW generation", got)
 	}
 }
 
-// selectPlannerPVW is wired into mpc.Service.buildSlots. Since it is
-// package-private in mpc, we reach it via the exported test adapter below
-// which wraps the same arithmetic. The control package only needs to verify
-// the constants are stable and the three dispatch tests above. The full
-// matrix of selectPlannerPVW edge cases lives in mpc/service_test.go.
-func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
-	// Mirror of mpc.selectPlannerPVW for use in this package's tests.
-	// Kept in sync via constants from the mpc package.
-	if math.IsNaN(predictedPVW) || math.IsInf(predictedPVW, 0) || predictedPVW < 0 {
-		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) {
-			return 0
-		}
-		return forecastPVW
+func scenarioPlannerPV(t *testing.T, providerW, learnedW, weight float64) float64 {
+	t.Helper()
+	st, err := state.Open(filepath.Join(t.TempDir(), "forecast.db"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !radiationBacked {
-		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) || forecastPVW < 200 {
-			return predictedPVW
-		}
-		return predictedPVW
+	defer st.Close()
+	now := time.Now()
+	start := now.Truncate(15 * time.Minute).Add(15 * time.Minute)
+	if err = st.SavePrices([]state.PricePoint{{Zone: "test", SlotTsMs: start.UnixMilli(), SlotLenMin: 15, SpotOreKwh: 100, TotalOreKwh: 100, FetchedAtMs: now.UnixMilli()}}); err != nil {
+		t.Fatal(err)
 	}
-	if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) || forecastPVW < 200 {
-		return predictedPVW
+	radiation := 500.0
+	weather := []state.ForecastPoint{{SlotTsMs: start.UnixMilli(), SlotLenMin: 15, PVWEstimated: &providerW, SolarWm2: &radiation, Source: "test", FetchedAtMs: now.UnixMilli()}}
+	tel := makeSeedStore(0, 0, []batterySetup{{name: "battery", soc: .5, online: true}})
+	params := mpc.Params{Mode: mpc.ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000, SoCMin: .1, SoCMax: .9, InitialSoC: .5, ActionLevels: 11, MaxChargeW: 3000, MaxDischargeW: 3000, ChargeEfficiency: .95, DischargeEfficiency: .95}
+	svc := mpc.New(st, tel, "test", params)
+	svc.Horizon = time.Hour
+	var built []mpc.Slot
+	svc.ForecastSnapshot = func(time.Time, []state.ForecastPoint) mpc.ForecastInputs {
+		return mpc.ForecastInputs{Weather: weather, PV: func(time.Time, float64) float64 { return learnedW }, PVWeight: func(time.Time) float64 { return weight }, Load: func(time.Time) float64 { return 1000 }, Record: func(base, planning []mpc.Slot, _ string, _ int64) { built = append([]mpc.Slot(nil), base...) }}
 	}
-	cappedForecast := forecastPVW
-	if predictedPVW > 50 && forecastPVW > mpc.PlannerForecastCapRatio*predictedPVW {
-		cappedForecast = mpc.PlannerForecastCapRatio * predictedPVW
+	if svc.Replan(context.Background()) == nil || len(built) != 1 {
+		t.Fatalf("planner did not publish one forecast slot: %d", len(built))
 	}
-	return (1-mpc.PlannerRadiationWeight)*cappedForecast + mpc.PlannerRadiationWeight*predictedPVW
+	return -built[0].PVW
 }
 
 // ---- D. Load model bucket repair (T32 scenarios) -----------------------
@@ -573,9 +548,8 @@ func TestScenario_D20_LoadModel_HealthyBucket_Preserved_UnderColdTraining(t *tes
 }
 
 // D21. Bucket above floor (mean = prior×0.50) must not be repaired.
-// Verifies the 25% floor is conservative — only truly poisoned buckets are reset.
-// We simulate this by poisoning to 30% (above floor) and verifying the prediction
-// stays at the poisoned level rather than resetting.
+// Check the bucket itself: a cold prediction also includes the prior until
+// independent training days earn trust.
 func TestScenario_D21_LoadModel_AboveFloor_NotRepaired(t *testing.T) {
 	m := loadmodel.NewModel(5000)
 	now := time.Date(2026, 3, 12, 6, 0, 0, 0, time.UTC)
@@ -595,14 +569,11 @@ func TestScenario_D21_LoadModel_AboveFloor_NotRepaired(t *testing.T) {
 	if pred > prior*1.1 {
 		t.Errorf("D21: prediction %.0f > prior %.0f — something auto-reset the bucket it shouldn't have", pred, prior)
 	}
-	// After a couple of normal warm-weather samples the EMA moves toward real load
-	// rather than snapping to the prior. This distinguishes "not repaired" from
-	// "repaired to prior".
+	// A matching warm sample must preserve the observed baseline. Minute sample
+	// count alone does not earn prediction trust under the day-weighted model.
 	m.Update(now.AddDate(0, 0, 7), prior*0.50, loadmodel.HeatingReferenceC)
-	postPred := m.Predict(now, loadmodel.HeatingReferenceC)
-	// postPred should be in the neighborhood of the 50% value, not at full prior.
-	if postPred > prior*0.85 {
-		t.Errorf("D21: bucket at 50%% prior should not snap to full prior after one sample; got %.0f, prior %.0f", postPred, prior)
+	if got := m.Bucket[idx].Mean; math.Abs(got-prior*0.5) > 0.01 {
+		t.Errorf("D21: matching sample changed half-prior baseline to %.0f, prior %.0f", got, prior)
 	}
 }
 
@@ -882,11 +853,11 @@ func TestForecastScenarios(t *testing.T) {
 		{"B10_ChargeMode_NearFull_ClampedAtSoC", TestScenario_B10_ChargeMode_NearFull_ClampedAtSoC},
 		{"B11_PlannerSelf_EmptyBattery_NoDischarge", TestScenario_B11_PlannerSelf_EmptyBattery_NoDischarge},
 		{"B12_StalePlan_FallsBackToSelfConsumption", TestScenario_B12_StalePlan_FallsBackToSelfConsumption},
-		// C. PV forecast cap
-		{"C13_ForecastCap_Activates", TestScenario_C13_ForecastCap_ActivatesWhenNWP5xTwin},
-		{"C14_ForecastCap_InactiveRatioOK", TestScenario_C14_ForecastCap_InactiveWhenRatioOK},
-		{"C15_ForecastCap_InactiveTwinNearZero", TestScenario_C15_ForecastCap_InactiveWhenTwinNearZero},
-		{"C16_ForecastCap_Night", TestScenario_C16_ForecastCap_NightForecastZero_TwinPassesThrough},
+		// C. PV forecast trust
+		{"C13_ForecastTrust_ColdModel", TestScenario_C13_ForecastTrust_ColdModelCannotCapProvider},
+		{"C14_ForecastTrust_Continuous", TestScenario_C14_ForecastTrust_ContinuousAcrossFormerCap},
+		{"C15_ForecastTrust_LowOutput", TestScenario_C15_ForecastTrust_LowOutputStillBlends},
+		{"C16_ForecastTrust_RadiationZero", TestScenario_C16_ForecastTrust_RadiationZeroStaysZero},
 		// D. Load model bucket repair
 		{"D17_LoadModel_HeatGtLoad_NoBucketUpdate", TestScenario_D17_LoadModel_HeatGtLoad_BucketNotUpdated},
 		{"D18_LoadModel_HeatLtLoad_BucketUpdated", TestScenario_D18_LoadModel_HeatLtLoad_BucketUpdated},

@@ -4,3 +4,4 @@ curl
 jq
 network-manager
 raspberrypi-sys-mods
+unattended-upgrades

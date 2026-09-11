@@ -13,8 +13,8 @@ func TestStatefulShadowEvaluatorScoresSameRealizationWithIndependentSoC(t *testi
 		Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000},
 	}}
 	p := Params{
-		Mode: ModeArbitrage, CapacityWh: 10000, InitialSoCPct: 50,
-		SoCMinPct: 10, SoCMaxPct: 90, MaxChargeW: 5000, MaxDischargeW: 5000,
+		Mode: ModeArbitrage, CapacityWh: 10000, InitialSoC: 0.5,
+		SoCMin: 0.1, SoCMax: 0.9, MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
 	champion := &Plan{Actions: []Action{{SlotStartMs: start.UnixMilli(), SlotLenMin: 60, BatteryW: 1000}}}
@@ -33,7 +33,7 @@ func TestStatefulShadowEvaluatorScoresSameRealizationWithIndependentSoC(t *testi
 	if math.Abs(score.ChallengerCostOre) > 1e-6 || math.Abs(score.ChallengerMinusChampionOre+100) > 1e-6 {
 		t.Fatalf("unexpected challenger score: %+v", score)
 	}
-	if math.Abs(score.ChampionVirtualSoCPct-55) > 1e-6 || math.Abs(score.ChallengerVirtualSoCPct-45) > 1e-6 {
+	if math.Abs(score.ChampionVirtualSoC-0.55) > 1e-6 || math.Abs(score.ChallengerVirtualSoC-0.45) > 1e-6 {
 		t.Fatalf("virtual SoC did not evolve independently: %+v", score)
 	}
 }
@@ -42,8 +42,8 @@ func TestStatefulShadowEvaluatorProjectsModeAndEnergyBounds(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
 	slots := []Slot{{StartMs: start.UnixMilli(), LenMin: 60, PriceOre: 100, SpotOre: 50}}
 	p := Params{
-		Mode: ModePassiveArbitrage, CapacityWh: 10000, InitialSoCPct: 10,
-		SoCMinPct: 10, SoCMaxPct: 90, MaxChargeW: 5000, MaxDischargeW: 5000,
+		Mode: ModePassiveArbitrage, CapacityWh: 10000, InitialSoC: 0.1,
+		SoCMin: 0.1, SoCMax: 0.9, MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
 	plan := &Plan{Actions: []Action{{SlotStartMs: start.UnixMilli(), SlotLenMin: 60, BatteryW: -5000}}}
@@ -57,14 +57,14 @@ func TestStatefulShadowEvaluatorProjectsModeAndEnergyBounds(t *testing.T) {
 	if score.ChampionClampCount != 30 || score.ChallengerClampCount != 30 {
 		t.Fatalf("expected SoC/mode clamps: %+v", score)
 	}
-	if math.Abs(score.ChampionVirtualSoCPct-10) > 1e-6 || math.Abs(score.ChallengerVirtualSoCPct-10) > 1e-6 {
+	if math.Abs(score.ChampionVirtualSoC-0.10) > 1e-6 || math.Abs(score.ChallengerVirtualSoC-0.10) > 1e-6 {
 		t.Fatalf("minimum SoC was violated: %+v", score)
 	}
 }
 
 func TestStatefulShadowEvaluatorRestoresPersistedRun(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoCPct: 50, SoCMinPct: 10, SoCMaxPct: 90, MaxChargeW: 5000, MaxDischargeW: 5000, ChargeEfficiency: 1, DischargeEfficiency: 1}
+	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoC: 0.5, SoCMin: 0.1, SoCMax: 0.9, MaxChargeW: 5000, MaxDischargeW: 5000, ChargeEfficiency: 1, DischargeEfficiency: 1}
 	slots := []Slot{{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100}}
 	plan := &Plan{Actions: []Action{{SlotStartMs: now.UnixMilli(), SlotLenMin: 60}}}
 	persisted := &ShadowEvaluation{
@@ -76,7 +76,7 @@ func TestStatefulShadowEvaluatorRestoresPersistedRun(t *testing.T) {
 	evaluator.Restore(persisted)
 	evaluator.SetPlans(plan, plan, slots, p, now)
 	score := evaluator.Snapshot()
-	if score.StartedAtMs != 123 || score.Samples != 42 || score.ChampionVirtualSoCPct != 43 || score.ChallengerVirtualSoCPct != 47 {
+	if score.StartedAtMs != 123 || score.Samples != 42 || score.ChampionVirtualSoC != 0.43 || score.ChallengerVirtualSoC != 0.47 {
 		t.Fatalf("persisted evaluation was not resumed: %+v", score)
 	}
 }
@@ -114,14 +114,14 @@ func TestShadowEvaluatorNeverScoresConditionalMultistageTail(t *testing.T) {
 
 func TestShadowEvaluatorDoesNotInventRecoveryFromInitialBandViolation(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
-	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoCPct: 5, SoCMinPct: 10, SoCMaxPct: 90, MaxChargeW: 5000, MaxDischargeW: 5000, ChargeEfficiency: 1, DischargeEfficiency: 1}
+	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoC: 0.05, SoCMin: 0.1, SoCMax: 0.9, MaxChargeW: 5000, MaxDischargeW: 5000, ChargeEfficiency: 1, DischargeEfficiency: 1}
 	slots := []Slot{{StartMs: start.UnixMilli(), LenMin: 60, PriceOre: 100}}
 	plan := &Plan{Actions: []Action{{SlotStartMs: start.UnixMilli(), SlotLenMin: 60, BatteryW: -1000}}}
 	evaluator := newStatefulShadowEvaluator()
 	evaluator.SetPlans(plan, plan, slots, p, start)
 	_ = evaluator.Observe(start, 500, 0)
 	score := evaluator.Observe(start.Add(time.Minute), 500, 0)
-	if score.ChampionVirtualSoCPct != 5 || score.ChallengerVirtualSoCPct != 5 {
+	if score.ChampionVirtualSoC != 0.05 || score.ChallengerVirtualSoC != 0.05 {
 		t.Fatalf("evaluator invented operating-band recovery: %+v", score)
 	}
 	if score.ChampionClampCount != 1 || score.ChallengerClampCount != 1 {

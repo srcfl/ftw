@@ -231,3 +231,59 @@ func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
 		t.Fatal("Stop blocked after a failed Connect — teardown is stuck on <-doneCh; the connectAndStart rollback regressed")
 	}
 }
+
+func TestMQTTObjectIDSlugsIllegalDriverNames(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"easee", "easee"},
+		{"Ev-Charger_1", "Ev-Charger_1"},
+		{"Garage", "Garage"},
+		{"garage", "garage"},
+		{"Laddare, Garage", "Laddare_Garage_57d42421"},
+		{"Laddare Garage", "Laddare_Garage_7bcd041d"},
+		{"Värmepump, källaren", "V_rmepump_k_llaren_13212c9a"},
+		{"  foo   bar  ", "foo_bar_09e9096a"},
+		{"???", "driver_7bcac794"},
+		{"", "driver_811c9dc5"},
+	}
+	for _, c := range cases {
+		if got := mqttObjectID(c.in); got != c.want {
+			t.Errorf("mqttObjectID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if mqttObjectID("Laddare, Garage") == mqttObjectID("Laddare Garage") {
+		t.Fatal("comma vs space must not share a discovery id")
+	}
+	if mqttObjectID("Garage") == mqttObjectID("garage") {
+		t.Fatal("legal names that differ only in case must stay distinct")
+	}
+}
+
+func TestDiscoveryTopicsRejectIllegalCharacters(t *testing.T) {
+	b := &Bridge{deviceID: "site_box", discoPrefix: "homeassistant", topicPrefix: "ftw"}
+	topic := b.driverDiscoveryTopic("sensor", "Laddare, Garage", "ev_current_a")
+	want := "homeassistant/sensor/site_box/Laddare_Garage_57d42421_ev_current_a/config"
+	if topic != want {
+		t.Fatalf("discovery topic = %q, want %q", topic, want)
+	}
+	for _, r := range topic {
+		if r == ',' || r == ' ' {
+			t.Fatalf("discovery topic still has illegal %q: %s", r, topic)
+		}
+	}
+	if got := b.driverTopic("Laddare, Garage", "ev_current_a"); got != "ftw/driver/Laddare_Garage_57d42421/ev_current_a" {
+		t.Fatalf("state topic = %q", got)
+	}
+	if got := b.driverUniqueID("Ev-Charger_1", "_ev_w"); got != "site_box_Ev-Charger_1_ev_w" {
+		t.Fatalf("legal mixed-case unique_id changed: %q", got)
+	}
+}
+
+func TestPercentFromFractionUsedForSoCDoor(t *testing.T) {
+	// Guards the HA *100 door against a NaN/overflow regression in units.
+	if unit, class := metricUnitAndClass("bat_soc_pct", ""); unit != "%" || class != "battery" {
+		t.Fatalf("bat_soc_pct class = (%q, %q)", unit, class)
+	}
+	if unit, class := metricUnitAndClass("pack_soc", ""); unit != "%" || class != "battery" {
+		t.Fatalf("_soc suffix class = (%q, %q)", unit, class)
+	}
+}

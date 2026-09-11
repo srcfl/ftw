@@ -176,11 +176,11 @@ func TestSurplusReserveWAllowsOnePhaseLadderClimb(t *testing.T) {
 func TestSurplusReserveWPluggedStoppedWithHeadroomReservesMin(t *testing.T) {
 	states := []State{{
 		ID: "garage", SurplusOnly: true, PluggedIn: true,
-		CurrentPowerW:         0, // not drawing
-		MinChargeW:            1380,
-		MaxChargeW:            11000,
-		VehicleSoCPct:         34, // below limit
-		VehicleChargeLimitPct: 60,
+		CurrentPowerW:      0, // not drawing
+		MinChargeW:         1380,
+		MaxChargeW:         11000,
+		VehicleSoC:         0.34, // below limit
+		VehicleChargeLimit: 0.6,
 	}}
 	got := SurplusReserveW(states, nil)
 	if got != 1380 {
@@ -194,11 +194,11 @@ func TestSurplusReserveWPluggedStoppedWithHeadroomReservesMin(t *testing.T) {
 func TestSurplusReserveWPluggedStoppedAtLimitNoReserve(t *testing.T) {
 	states := []State{{
 		ID: "garage", SurplusOnly: true, PluggedIn: true,
-		CurrentPowerW:         0,
-		MinChargeW:            1380,
-		MaxChargeW:            11000,
-		VehicleSoCPct:         60, // at limit
-		VehicleChargeLimitPct: 60,
+		CurrentPowerW:      0,
+		MinChargeW:         1380,
+		MaxChargeW:         11000,
+		VehicleSoC:         0.6, // at limit
+		VehicleChargeLimit: 0.6,
 	}}
 	if got := SurplusReserveW(states, nil); got != 0 {
 		t.Errorf("SurplusReserveW = %.0f, want 0 (EV at limit, no headroom)", got)
@@ -218,11 +218,62 @@ func TestSurplusReserveWPluggedStoppedSoCUnknownBootstraps(t *testing.T) {
 		CurrentPowerW: 0,
 		MinChargeW:    1380,
 		MaxChargeW:    11000,
-		// VehicleSoCPct + VehicleChargeLimitPct both 0 (unknown — dumb charger)
+		// VehicleSoC + VehicleChargeLimit both 0 (unknown — dumb charger)
 	}}
 	if got := SurplusReserveW(states, nil); got != 1380 {
 		t.Errorf("SurplusReserveW = %.0f, want 1380 (MinChargeW bootstrap for dumb charger)", got)
 	}
+}
+
+func TestSurplusAvailableForEVWHidesPVSoakButNotGridCharge(t *testing.T) {
+	// Identity leftover after house: -grid + bat + ev.
+	// PV-soak (battery charging, site not importing): hide the battery
+	// so the charger cannot claim watts the battery has not yielded yet.
+	if got := SurplusAvailableForEVW(0, 4000, 0, true); got != 0 {
+		t.Errorf("PV-soak: got %.0f, want 0 (battery charge is not yet EV-available)", got)
+	}
+	// Soak + EV that together import: leftover 7640, battery 5000 < leftover
+	// so this is still soak. Meter import is the leak, not Pixii buying.
+	// Offering 7640 would keep the 4140 W setpoint that caused the import.
+	if got := SurplusAvailableForEVW(1500, 5000, 4140, true); got != 2640 {
+		t.Errorf("soak+EV import: got %.0f, want 2640 (leftover minus soak)", got)
+	}
+	// Grid-funded battery charge: leftover 7500, battery 10 kW, EV 4140,
+	// grid 6640. Import beyond the car is the battery buying.
+	if got := SurplusAvailableForEVW(6640, 10000, 4140, true); got != 7500 {
+		t.Errorf("grid-charge combo: got %.0f, want 7500", got)
+	}
+	if got := SurplusAvailableForEVW(-6500, 0, 0, true); got != 6500 {
+		t.Errorf("exporting idle: got %.0f, want 6500", got)
+	}
+	if got := SurplusAvailableForEVW(0, 4000, 0, false); got != 4000 {
+		t.Errorf("not surplus-only: got %.0f, want identity 4000", got)
+	}
+}
+
+func TestPlannedPVSoakWIgnoresGridFundedCharge(t *testing.T) {
+	if got := PlannedPVSoakW(5000, 0); got != 5000 {
+		t.Errorf("PV-soak: got %.0f, want 5000", got)
+	}
+	if got := PlannedPVSoakW(5000, 1500); got != 0 {
+		t.Errorf("grid-funded: got %.0f, want 0", got)
+	}
+	if got := PlannedPVSoakW(-2000, 0); got != 0 {
+		t.Errorf("discharge: got %.0f, want 0", got)
+	}
+}
+
+func TestPlannerTreatsLoadpointAsSurplusOnly(t *testing.T) {
+	if !PlannerTreatsLoadpointAsSurplusOnly(true, false) {
+		t.Fatal("operator surplus_only")
+	}
+	if !PlannerTreatsLoadpointAsSurplusOnly(false, true) {
+		t.Fatal("deadline past published prices")
+	}
+	if PlannerTreatsLoadpointAsSurplusOnly(false, false) {
+		t.Fatal("plain loadpoint")
+	}
+	// Bat-SoC unlock is this-tick only and must not appear here.
 }
 
 // Manual/schedule override: a force-charging (manual hold) surplus_only EV

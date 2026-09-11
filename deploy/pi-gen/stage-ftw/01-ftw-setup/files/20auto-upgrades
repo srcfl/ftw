@@ -1,0 +1,6 @@
+// Switch the apt-daily / apt-daily-upgrade timers' work on: refresh
+// package lists and run unattended-upgrade once a day. Normally written
+// by debconf on `dpkg-reconfigure unattended-upgrades`; the image ships
+// it directly.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";

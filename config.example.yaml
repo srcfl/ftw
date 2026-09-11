@@ -1,3 +1,5 @@
+# First boot imports this file into SQLite. After import, use FTW Settings.
+# Core records config_database here; later edits to these values do not reload.
 # FTW config example
 # Copy to config.yaml and edit for your site.
 
@@ -82,9 +84,10 @@ drivers:
   #       port: 1883
 
   # Sourceful Zap — P1/HAN site meter via the official local API.
-  # This driver is the meter only. If Zap also lists an inverter, battery
-  # or charger, add that device in FTW with its own driver. See
-  # docs/sourceful-zap.md.
+  # Default is the meter only. If Zap also lists an inverter or battery,
+  # add that device in FTW with its own driver when you can. Set read_pv
+  # / read_battery only when Zap is the only reader (closed Modbus, or
+  # an RS-485 bus Zap already owns). See docs/sourceful-zap.md.
   #
   # - name: sourceful-zap
   #   lua: drivers/zap.lua
@@ -99,6 +102,8 @@ drivers:
   #   config:
   #     host: zap.local
   #     # meter_serial: p1m-...          # optional; P1/HAN is auto-selected
+  #     # read_pv: true                  # opt-in; default is P1/HAN only
+  #     # read_battery: true             # opt-in; telemetry only
 
   # NIBE S-series heat pump — read-only telemetry over the on-prem Local
   # REST API (HTTPS + Basic auth). The pump presents a SELF-SIGNED cert, so
@@ -132,7 +137,7 @@ drivers:
 
 api:
   port: 8080
-  # lan_auth: false  # when true, protected LAN routes need Authorization: Bearer <house-password>
+  # lan_auth: false  # when true, protected LAN routes need the house password (Bearer/cookie) or FTW_API_TOKEN
 
 # Home Assistant MQTT bridge (optional)
 homeassistant:
@@ -159,35 +164,43 @@ homeassistant:
 # Docker host-networking already publishes 1502; other compose files need
 # the port mapped.
 
-# Calendar-based planner constraints (#498). FTW hosts its OWN in-process,
-# pure-Go CalDAV server (emersion/go-webdav, MIT — no sidecar, works in a
-# single container incl. a Home Assistant add-on; objects persist in state.db)
-# and turns the events you add into planner intents: "Away"/"Vacation" → away
-# load profile; "Charge car 80%" → EV target SoC by the event time. It also
-# writes EVSE usage-history and forward-looking plan calendars you subscribe
-# to. Recurring events are expanded server-side. Opt-in + fail-soft; the
-# password is stored in state.db. See docs/caldav-integration.md.
-caldav:
+# Built-in OCPP Central System, speaking 1.6J and 2.0.1. EV chargers that speak
+# OCPP connect to FTW directly — there is no driver to write and nothing to add
+# under `drivers:`.
+# A charger appears as a device on its first BootNotification, keyed by the last
+# segment of the URL it dialled: ws://<ftw-host>:8887/garage-left
+#
+# Credentials are required when enabled, and FTW refuses to start without them:
+# the OCPP library builds its listen address from the port alone, so the socket
+# is open on every interface whatever bind says — bind refuses the handshake for
+# a connection that arrived elsewhere, which controls access without closing the
+# port. Keep it closed at your router. See docs/ocpp.md.
+# Each version needs its own port: a charger picks its dialect in the WebSocket
+# handshake, so one listener cannot serve both. 2.1 is not supported — no
+# production-grade Go implementation of it exists yet.
+ocpp:
   enabled: false
-  # listen: ":5232"          # bind address for the in-process CalDAV server
-  url: http://localhost:5232
+  # bind: 192.168.1.10             # refuse chargers reaching the box any other
+                                   # way; omit for every interface
+  port: 8887                       # OCPP 1.6J
+  # port_v201: 8888                # OCPP 2.0.1; omit to disable
+  path: /
   username: ftw
-  # manage_credentials (default true): FTW generates the password and the
-  # in-process server authenticates against it, then shows it (with a QR) in
-  # Settings → Calendar. Set false to set `password` here by hand.
-  manage_credentials: true
-  password: ""
-  calendar_path: /ftw/energy/
-  poll_interval_s: 300
-  ev_default_target_soc_pct: 80
-  # ev_loadpoint_id: ""            # defaults to the first configured loadpoint
-  # away_keywords: [away, vacation, holiday]
-  # ev_keywords:   [ev, car, charge]
-  evse_history: true               # write a calendar event per EV charge session
-  history_path: /ftw/history/
-  publish_plan: true               # publish upcoming charge/discharge windows (read-only)
-  plan_path: /ftw/plan/
-  # plan_publish_interval_s: 900   # how often the plan calendar is reconciled
+  password: ""                     # required when enabled; use a long random string
+  heartbeat_interval_s: 60
+  # Serve wss:// instead of ws://. client_ca_file additionally requires each
+  # charger to present a certificate signed by that CA whose CN or DNS SAN
+  # matches the identity in the URL — OCPP 2.0.1 security profile 3.
+  # tls:
+  #   cert_file: /etc/ftw/ocpp/server.crt
+  #   key_file: /etc/ftw/ocpp/server.key
+  #   client_ca_file: /etc/ftw/ocpp/charger-ca.crt
+  # Give a charger a credential of its own, so the shared password above stops
+  # being enough to connect under its name. The id is what the charger dials
+  # with, and the same string a loadpoint's driver_name adopts.
+  # chargers:
+  #   - id: garage
+  #     password: ""               # a long random string, different per charger
 
 # Persistent state (SQLite)
 state:
@@ -215,6 +228,17 @@ app_link:
 fleet_ping:
   enabled: true
   # endpoint: https://relay.ftw.energy/fleet
+
+# Ask why — optional. Paste an OpenRouter key (free account, no card) and
+# the Plan card can explain the live help report and draft a GitHub issue.
+# Off until enabled. The key is stored on this box and sent only as a
+# bearer token to the API you set. Default model openrouter/free stays on
+# free models. The helper never issues driver commands.
+# assistant:
+#   enabled: true
+#   api_key: sk-or-v1-...
+#   model: openrouter/free
+#   # base_url: https://openrouter.ai/api/v1
 
 # Independently distributed Lua drivers. The signed stable catalog is refreshed
 # by default, but refresh never downloads, activates, or restarts a driver.
@@ -244,44 +268,21 @@ fleet_ping:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
-# Mathematical MPC optimizer. Official Compose runs it as the independently
-# updatable ftw-optimizer service; native installs can point optimizer_command
-# at their venv's Python executable.
+# Energyplan ships with Core and runs first in supported beta builds.
+# Core DP provides shadow comparisons and validated fallback plans.
 # planner:
 #   enabled: true
-#   engine: python
+#   # engine: energyplan # beta default; core selects the Go planner
 #   mode: passive_arbitrage
+#   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
+#   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)
 #   horizon_hours: 48
 #   interval_min: 15
-#   soc_min_pct: 10
-#   soc_max_pct: 95
-#   optimizer_solver: HIGHS
-#   optimizer_formulation: auto
-#   optimizer_transport: process # process | auto | unix; official Compose sets unix
-#   optimizer_socket: /run/ftw-optimizer/optimizer.sock
-#   optimizer_timeout_s: 30
-#   optimizer_idle_timeout_s: 120 # release Python/CVXPY memory between planning bursts
-#   optimizer_mip_rel_gap: 0.005
-#   optimizer_cvar_weight: 0.15
-#   optimizer_cvar_alpha: 0.90
-#   optimizer_recourse_shadow: false # diagnostic only; never controls dispatch
-#   optimizer_recourse_non_anticipative_slots: 1
-#   optimizer_challenger_policy: multistage # recourse | multistage
-#   optimizer_multistage:
-#     scenario_limit: 12
-#     branch_interval_slots: 4
-#     branch_horizon_slots: 48
-#     max_branching: 2
-#     near_horizon_slots: 16
-#     mid_horizon_slots: 96
-#     mid_block_slots: 2
-#     far_block_slots: 4
-#     service_cvar_weight: 1.0
-#     service_cvar_alpha: 0.95
-#     economic_cvar_weight: 0
-#     economic_cvar_alpha: 0.90
-#     decomposition_threshold: 20
-#     decomposition_method: auto # auto | extensive | progressive_hedging
-#     ph_max_iterations: 8
-#     ph_rho: 50
-#     ph_tolerance_w: 5
+#   soc_min: 0.10
+#   soc_max: 0.95
+
+# Peak-power tariff (weekday 06–20 local time). Same minor units as
+# grid_tariff_ore_kwh, per kW, excluding VAT. 0 disables it.
+# price:
+#   demand_price_per_kw: 7000
+#   demand_top_n: 3

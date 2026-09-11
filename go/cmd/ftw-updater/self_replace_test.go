@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,10 +170,10 @@ func TestCoreUpdateStaysDoneWhenUpdaterReplacementFails(t *testing.T) {
 		return errors.New("no updater service in compose")
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	s.handleUpdate(httptest.NewRecorder(), req)
-
-	done := waitForState(t, s, "done")
+	// Terminal state precedes sidecar replacement. Wait for the whole job,
+	// not merely "done", before checking the callback and its failure result.
+	s.runJob("update", "v1.2.3")
+	done := s.readState()
 	if done.State != "done" {
 		t.Fatalf("failed sidecar replacement must not reopen a finished update: %+v", done)
 	}
@@ -184,24 +182,16 @@ func TestCoreUpdateStaysDoneWhenUpdaterReplacementFails(t *testing.T) {
 	}
 }
 
-func TestSelfReplaceSkipsRestartAndOptimizer(t *testing.T) {
-	for _, tc := range []struct{ name, body string }{
-		{"restart", `{"action":"restart"}`},
-		{"optimizer", `{"action":"update","target":"v1.3.2","component":"optimizer"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, _ := newTestServer(t)
-			called := false
-			s.selfReplace = func(string) error { called = true; return nil }
-
-			req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(tc.body))
-			s.handleUpdate(httptest.NewRecorder(), req)
-			waitForState(t, s, "done")
-
-			if called {
-				t.Fatalf("%s must not replace the updater sidecar", tc.name)
-			}
-		})
+func TestSelfReplaceSkipsRestart(t *testing.T) {
+	s, _ := newTestServer(t)
+	called := false
+	s.selfReplace = func(string) error { called = true; return nil }
+	s.runJob("restart", "")
+	if done := s.readState(); done.State != "done" {
+		t.Fatalf("restart did not finish: %+v", done)
+	}
+	if called {
+		t.Fatal("restart must not replace the updater sidecar")
 	}
 }
 
@@ -254,6 +244,9 @@ func TestIsUpdaterImage(t *testing.T) {
 	}{
 		{"ghcr.io/srcfl/ftw-updater:latest", true},
 		{"ghcr.io/srcfl/ftw-updater", true},
+		{legacyUpdaterImage + ":v2.16.0-beta.1", true},
+		{legacyUpdaterImage + ":${FTW_UPDATER_IMAGE_TAG:-latest}", true},
+		{legacyUpdaterImage + "@sha256:abc", true},
 		// Compose images reach us unexpanded; the default's own colon must not
 		// be mistaken for the tag separator.
 		{"ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}", true},
@@ -266,5 +259,28 @@ func TestIsUpdaterImage(t *testing.T) {
 		if got := isUpdaterImage(tc.image); got != tc.want {
 			t.Errorf("isUpdaterImage(%q) = %v, want %v", tc.image, got, tc.want)
 		}
+	}
+}
+
+func TestBetaUpdateReplacesUpdaterWithTheSameCandidate(t *testing.T) {
+	s, _ := newTestServer(t)
+	healthy := false
+	s.healthCheck = func(_ context.Context, service string) error {
+		if service == canonicalMainServiceName {
+			healthy = true
+		}
+		return nil
+	}
+	var replacement string
+	s.selfReplace = func(target string) error {
+		if !healthy || s.readState().State != "done" {
+			t.Error("updater replacement preceded healthy Core")
+		}
+		replacement = target
+		return nil
+	}
+	s.runJob("update", "v2.15.0-beta.1")
+	if replacement != "v2.15.0-beta.1" {
+		t.Fatalf("updater replacement = %q", replacement)
 	}
 }

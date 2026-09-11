@@ -3,7 +3,9 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -182,5 +184,100 @@ func TestPixiiClearsDeviceFaultWhenNotTesting(t *testing.T) {
 	}
 	if !h.IsOnline() {
 		t.Fatal("healthy Pixii should be online for control")
+	}
+}
+
+// gatedPixiiModbus is the field failure: a few minutes of "no route to host"
+// against every holding register, then the TCP session is fine again.
+type gatedPixiiModbus struct {
+	inner *pixiiTestModbus
+	mu    sync.Mutex
+	down  bool
+}
+
+func (m *gatedPixiiModbus) setDown(down bool) {
+	m.mu.Lock()
+	m.down = down
+	m.mu.Unlock()
+}
+
+func (m *gatedPixiiModbus) Read(addr, count uint16, kind int32) ([]uint16, error) {
+	m.mu.Lock()
+	down := m.down
+	m.mu.Unlock()
+	if down {
+		return nil, fmt.Errorf("%w: no route to host", ErrModbusTransport)
+	}
+	return m.inner.Read(addr, count, kind)
+}
+
+func (m *gatedPixiiModbus) WriteSingle(addr, value uint16) error {
+	m.mu.Lock()
+	down := m.down
+	m.mu.Unlock()
+	if down {
+		return fmt.Errorf("%w: no route to host", ErrModbusTransport)
+	}
+	return m.inner.WriteSingle(addr, value)
+}
+
+func (m *gatedPixiiModbus) WriteMulti(addr uint16, values []uint16) error {
+	m.mu.Lock()
+	down := m.down
+	m.mu.Unlock()
+	if down {
+		return fmt.Errorf("%w: no route to host", ErrModbusTransport)
+	}
+	return m.inner.WriteMulti(addr, values)
+}
+
+func (m *gatedPixiiModbus) Close() error { return m.inner.Close() }
+
+func TestPixiiRecoversAfterTransportGiveUp(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "drivers", "pixii.lua")
+	tel := telemetry.NewStore()
+	inner := newPixiiTestModbus()
+	inner.regs[40137] = 4 // charging, not testing
+	bus := &gatedPixiiModbus{inner: inner}
+	env := NewHostEnv("pixii", tel).WithModbus(bus)
+	env.BatteryCapacityWh = 10000
+
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load pixii driver: %v", err)
+	}
+	defer d.Cleanup()
+
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("live poll: %v", err)
+	}
+	if tel.Get("pixii", telemetry.DerBattery) == nil {
+		t.Fatal("expected battery telemetry before the blip")
+	}
+
+	bus.setDown(true)
+	for poll := 1; poll <= 3; poll++ {
+		if _, err := d.Poll(context.Background()); err == nil {
+			t.Fatalf("outage poll %d succeeded", poll)
+		}
+	}
+
+	bus.setDown(false)
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll after Modbus returned: %v", err)
+	}
+	if d.reprobes() != 1 {
+		t.Fatalf("reprobes = %d, want 1: pixii.lua gives up every register after 3 misses", d.reprobes())
+	}
+	got := tel.Get("pixii", telemetry.DerBattery)
+	if got == nil || got.SoC == nil || *got.SoC != 0.94 {
+		t.Fatalf("recovered battery = %+v, want SoC 0.94", got)
+	}
+	h := tel.DriverHealth("pixii")
+	if h == nil || h.DeviceFault || !h.IsOnline() {
+		t.Fatalf("expected online Pixii after the blip, got %+v", h)
 	}
 }

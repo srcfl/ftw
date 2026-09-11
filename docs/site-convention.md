@@ -69,9 +69,10 @@ discharge.
 | Frequency | Hz | |
 | Temperature | °C | |
 | State of charge | fraction 0..1 | **Not percent** |
+| Irradiance | W/m² | Never watts |
+| Array nameplate | W | `rated_w`. kWp exists only in the forecast.solar URL |
 
-SI prefixes (k, M, m) only appear in the UI display layer. API and telemetry
-always use the base SI unit.
+SI prefixes (k, M, m) and 0–100 percents exist only at a door: UI, Home Assistant, appproto permille, calendar titles, and vendor APIs. Core stores watts, watt-hours, and 0–1 fractions.
 
 ## Where the sign flip happens
 

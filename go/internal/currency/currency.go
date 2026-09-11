@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,20 +70,26 @@ func (s *Service) Rate(code string) (float64, bool) {
 	if s == nil {
 		return 0, false
 	}
-	code = strings.ToUpper(code)
+	code = strings.ToUpper(strings.TrimSpace(code))
 	if code == "EUR" {
 		return 1.0, true
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.rates[code]
-	return v, ok
+	if !ok || !validRate(v) {
+		return 0, false
+	}
+	return v, true
 }
 
 // Convert transforms an amount from fromCode to toCode via EUR. Returns
 // (converted_amount, true) on success, (0, false) if either currency is
 // unknown.
 func (s *Service) Convert(amount float64, fromCode, toCode string) (float64, bool) {
+	if !finite(amount) {
+		return 0, false
+	}
 	if strings.EqualFold(fromCode, toCode) {
 		return amount, true
 	}
@@ -91,7 +98,19 @@ func (s *Service) Convert(amount float64, fromCode, toCode string) (float64, boo
 	if !ok1 || !ok2 {
 		return 0, false
 	}
-	return amount / from * to, true
+	converted := amount / from * to
+	if !finite(converted) {
+		return 0, false
+	}
+	return converted, true
+}
+
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func validRate(v float64) bool {
+	return finite(v) && v > 0
 }
 
 // AsOf returns when the current rates were published by ECB.
@@ -192,11 +211,16 @@ func (s *Service) fetch(ctx context.Context) {
 		slog.Warn("ecb fx parse", "err", err)
 		return
 	}
-	asOf, _ := time.Parse("2006-01-02", env.Cube.Cube.Time)
+	asOf, err := time.Parse("2006-01-02", env.Cube.Cube.Time)
+	if err != nil {
+		slog.Warn("ecb fx parse date", "value", env.Cube.Cube.Time, "err", err)
+		return
+	}
 	rates := map[string]float64{"EUR": 1.0}
 	for _, r := range env.Cube.Cube.Rates {
-		if r.Rate > 0 {
-			rates[strings.ToUpper(r.Currency)] = r.Rate
+		code := strings.ToUpper(strings.TrimSpace(r.Currency))
+		if code != "" && code != "EUR" && validRate(r.Rate) {
+			rates[code] = r.Rate
 		}
 	}
 	if len(rates) < 10 {
@@ -213,7 +237,7 @@ func (s *Service) fetch(ctx context.Context) {
 
 // persist writes the current rates to state as a simple flat string:
 //
-//   "YYYY-MM-DD;CODE:RATE;CODE:RATE;..."
+//	"YYYY-MM-DD;CODE:RATE;CODE:RATE;..."
 //
 // Keeps parsing trivial + human-debuggable.
 func (s *Service) persist() {
@@ -252,7 +276,14 @@ func (s *Service) parseCached(blob string) error {
 		if err != nil {
 			continue
 		}
-		rates[strings.ToUpper(kv[0])] = rate
+		code := strings.ToUpper(strings.TrimSpace(kv[0]))
+		if code == "" || code == "EUR" || !validRate(rate) {
+			continue
+		}
+		rates[code] = rate
+	}
+	if len(rates) == 1 {
+		return fmt.Errorf("cached rates contain no usable currency")
 	}
 	s.mu.Lock()
 	s.rates = rates

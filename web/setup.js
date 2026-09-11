@@ -273,7 +273,7 @@
 
     var lines = [];
     if (selectedCatalog.filename === 'zap.lua' || selectedCatalog.id === 'sourceful-zap') {
-      lines.push('This driver is the P1/HAN site meter. Add inverters, batteries and chargers as their own devices in FTW. Do not attach them to Zap.');
+      lines.push('This driver is the P1/HAN site meter by default. Add inverters, batteries and chargers as their own devices in FTW when you can. If Zap is the only reader, turn on PV or battery ingest later under Settings → Devices.');
     }
     if (selectedCatalog.description) lines.push(selectedCatalog.description);
 
@@ -582,11 +582,15 @@
   // Known EV charger providers, keyed by the `provider` string the Go
   // config (EVCharger.Provider) accepts. `transport` selects which field
   // block (#ev-fields-http vs #ev-fields-modbus) the wizard reveals:
-  //   - easee: cloud HTTP, needs username/password + serial lookup.
-  //   - ctek:  local Modbus/TCP, needs host/port/unit, no auth.
+  //   - easee:    cloud HTTP, needs username/password + serial lookup.
+  //   - zaptec:   cloud HTTP, needs username/password + serial lookup.
+  //   - tesla-wc: local HTTP, needs host, no auth. Observation only.
+  //   - ctek:     local Modbus/TCP, needs host/port/unit, no auth.
   // Mirrors go/internal/config/config.go EVCharger.Validate.
   var EV_PROVIDERS = [
     { value: 'easee', label: 'Easee', transport: 'http' },
+    { value: 'zaptec', label: 'Zaptec', transport: 'http' },
+    { value: 'tesla-wc', label: 'Tesla Wall Connector', transport: 'http-local' },
     { value: 'ctek', label: 'CTEK', transport: 'modbus' }
   ];
 
@@ -623,10 +627,13 @@
     var transport = evProviderTransport(provider);
     document.getElementById('ev-fields').style.display = provider ? 'block' : 'none';
     document.getElementById('ev-fields-http').style.display = transport === 'http' ? 'block' : 'none';
+    var localHttp = document.getElementById('ev-fields-http-local');
+    if (localHttp) localHttp.style.display = transport === 'http-local' ? 'block' : 'none';
     document.getElementById('ev-fields-modbus').style.display = transport === 'modbus' ? 'block' : 'none';
-    // Charger-serial lookup is an HTTP/cloud-only affordance.
-    document.getElementById('ev-load-chargers').style.display = transport === 'http' ? '' : 'none';
-    if (transport !== 'http') {
+    // Probe is offered for cloud accounts and for a LAN Tesla Wall Connector.
+    var canProbe = transport === 'http' || transport === 'http-local';
+    document.getElementById('ev-load-chargers').style.display = canProbe ? '' : 'none';
+    if (!canProbe) {
       document.getElementById('ev-serial-group').style.display = 'none';
     }
   }
@@ -651,19 +658,35 @@
   // mirrors the settings screen so operators don't have to transcribe a
   // serial off the side of the charger. The serial field only appears
   // after a successful call returns at least one device.
+  function evLocalHTTPBase(host) {
+    host = (host || '').trim();
+    if (!host) return '';
+    if (host.indexOf('://') >= 0) return host.replace(/\/$/, '');
+    return 'http://' + host.replace(/\/$/, '');
+  }
+
   window.loadEVChargers = function () {
     var provider = document.getElementById('ev-provider').value || 'easee';
+    var transport = evProviderTransport(provider);
     var username = document.getElementById('ev-username').value.trim();
     var password = document.getElementById('ev-password').value;
     var btn = document.getElementById('ev-load-chargers');
     var statusEl = document.getElementById('ev-chargers-status');
     var group = document.getElementById('ev-serial-group');
     var sel = document.getElementById('ev-serial');
+    var body;
 
     statusEl.style.display = 'inline';
     statusEl.style.color = 'var(--fg-muted)';
-    if (!username) { statusEl.textContent = 'Enter username first'; return; }
-    if (!password) { statusEl.textContent = 'Enter password first'; return; }
+    if (transport === 'http-local') {
+      var localHost = document.getElementById('ev-http-host').value.trim();
+      if (!localHost) { statusEl.textContent = 'Enter the wall connector IP first'; return; }
+      body = { provider: provider, http: { base_url: evLocalHTTPBase(localHost) } };
+    } else {
+      if (!username) { statusEl.textContent = 'Enter username first'; return; }
+      if (!password) { statusEl.textContent = 'Enter password first'; return; }
+      body = { provider: provider, email: username, password: password };
+    }
 
     statusEl.textContent = 'Connecting…';
     btn.disabled = true;
@@ -671,7 +694,7 @@
     fetch('/api/ev/chargers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: provider, email: username, password: password })
+      body: JSON.stringify(body)
     })
       .then(function (r) {
         return r.json().then(function (j) { return { ok: r.ok, body: j }; });
@@ -743,6 +766,9 @@
       if (evProviderTransport(evProvider) === 'modbus') {
         var mbHost = document.getElementById('ev-mb-host').value.trim();
         if (mbHost) html += ' (' + esc(mbHost) + ')';
+      } else if (evProviderTransport(evProvider) === 'http-local') {
+        var httpHost = document.getElementById('ev-http-host').value.trim();
+        if (httpHost) html += ' (' + esc(httpHost) + ')';
       } else {
         var evSerial = document.getElementById('ev-serial').value;
         if (evSerial) html += ' (' + esc(evSerial) + ')';
@@ -854,8 +880,9 @@
 
     // EV Charger — shape the block to match the provider's transport
     // (see go/internal/config/config.go EVCharger). Cloud HTTP providers
-    // (easee) carry username/password/serial; local Modbus providers
-    // (ctek) carry a modbus{host,port,unit_id} block and reject auth.
+    // (easee, zaptec) carry username/password/serial; local HTTP
+    // (tesla-wc) carries http.base_url; local Modbus (ctek) carries a
+    // modbus{host,port,unit_id} block and rejects auth.
     var evProvider = document.getElementById('ev-provider').value;
     if (evProvider) {
       var ev = { provider: evProvider };
@@ -866,6 +893,11 @@
         ev.modbus = { host: mbHost };
         if (mbPort) ev.modbus.port = mbPort;
         if (!isNaN(mbUnit)) ev.modbus.unit_id = mbUnit;
+      } else if (evProviderTransport(evProvider) === 'http-local') {
+        var localBase = evLocalHTTPBase(document.getElementById('ev-http-host').value);
+        if (localBase) ev.http = { base_url: localBase };
+        var localSerial = document.getElementById('ev-serial').value.trim();
+        if (localSerial) ev.serial = localSerial;
       } else {
         ev.username = document.getElementById('ev-username').value.trim();
         ev.password = document.getElementById('ev-password').value;

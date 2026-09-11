@@ -28,6 +28,8 @@ package api
 import (
 	"context"
 	"fmt"
+
+	"github.com/srcfl/ftw/go/internal/units"
 	"math"
 	"net/http"
 	"sort"
@@ -63,8 +65,8 @@ const forecastMissRatio = 1.5
 // the comparison to mean anything.
 const forecastMissFloorW = 500
 
-// slotEnergyIdleWh matches the dispatcher's own idle gate: below this the
-// slot is not asking the battery for anything and cannot fall behind.
+// slotEnergyIdleWh is the minimum expected energy over observed intervals
+// before a delivery comparison is useful.
 const slotEnergyIdleWh = 50
 
 // slotPaceMinElapsed is how much of a slot must have passed before its
@@ -386,15 +388,15 @@ func writeRightNow(
 	if slotEnergy.HasSlot && !slotEnergy.SlotEnd.IsZero() {
 		elapsed := now.Sub(slotEnergy.SlotStart)
 		remaining := slotEnergy.SlotEnd.Sub(now)
-		fmt.Fprintf(b, "Energy booked for this slot: plan asked for **%s**, "+
-			"the batteries have moved **%s** so far, %s elapsed and %s left.\n\n",
-			fmtReportWh(slotEnergy.PlannedWh), fmtReportWh(slotEnergy.ActualWh),
+		fmt.Fprintf(b, "Energy booked for this slot: accepted decisions plus the remaining plan total **%s**. "+
+			"Over observed intervals, the plan expected **%s** and measured battery energy was **%s**. "+
+			"%s elapsed and %s left in the price interval.\n\n",
+			fmtReportWh(slotEnergy.PlannedWh), fmtReportWh(slotEnergy.PlannedSoFarWh), fmtReportWh(slotEnergy.ActualWh),
 			fmtReportAge(elapsed), fmtReportAge(remaining))
 		if slotEnergy.EnergyPathWh != 0 || slotEnergy.PlannedWh != 0 {
-			fmt.Fprintf(b, "The energy-allocation path counts %s delivered. "+
-				"That figure only moves while that path is executing, so a "+
-				"real plan figure beside a zero here means the slot is being "+
-				"run by a reactive path instead.\n\n",
+			fmt.Fprintf(b, "The current execution budget counts %s used. "+
+				"This includes measured energy and any credit for replanning or elapsed time. "+
+				"It is budget accounting, not a separate energy measurement; zero alone does not identify the dispatch path.\n\n",
 				fmtReportWh(slotEnergy.EnergyPathWh))
 		}
 	}
@@ -472,7 +474,7 @@ func writePlanSection(
 			a.PriceOre, a.SpotOre,
 			fmtReportW(a.PVW), fmtReportW(a.LoadW),
 			fmtReportW(a.BatteryW), fmtReportW(a.GridW),
-			a.SoCPct, a.Reason)
+			units.PercentFromFraction(a.SoC), a.Reason)
 		shown++
 	}
 	if shown == 0 {
@@ -566,18 +568,25 @@ func writeDeviceSection(b *strings.Builder, health map[string]telemetry.DriverHe
 func (s *Server) writeComponentSection(b *strings.Builder, ctx context.Context, plan *mpc.Plan) {
 	b.WriteString("## Versions\n\n")
 	fmt.Fprintf(b, "- Core **%s**\n", s.deps.Version)
-	if s.deps.MPC == nil || s.deps.MPC.Optimizer == nil {
-		b.WriteString("- Optimizer **not configured** — every plan comes from " +
-			"the built-in Go fallback\n")
-	} else if h, ok := s.deps.MPC.Optimizer.(optimizerHealth); ok {
+	// The optimizer answers two questions for support: is it attached, and is
+	// it planning. Under the default engine it is attached as a measurement
+	// while Core plans — that is not a degraded site.
+	worker := s.deps.MPC.ConfiguredOptimizer()
+	role := "comparison shadow"
+	if s.deps.MPC.OptimizerIsChampion() {
+		role = "champion"
+	}
+	if worker == nil {
+		b.WriteString("- Optimizer **not attached** — Core plans on its own\n")
+	} else if h, ok := worker.(optimizerHealth); ok {
 		hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		info, err := h.Health(hctx)
 		cancel()
 		if err != nil {
-			fmt.Fprintf(b, "- Optimizer **unreachable**: %s\n", err.Error())
+			fmt.Fprintf(b, "- Optimizer **unreachable** (%s): %s\n", role, err.Error())
 		} else {
-			fmt.Fprintf(b, "- Optimizer **%s** (protocol %d)\n",
-				info.Version, info.ProtocolVersion)
+			fmt.Fprintf(b, "- Optimizer **%s** (protocol %d, %s)\n",
+				info.Version, info.ProtocolVersion, role)
 		}
 	}
 	if plan != nil && plan.Solver != nil && plan.Solver.Fallback {
@@ -657,7 +666,7 @@ func (s *Server) writeLogSection(b *strings.Builder) {
 		if g.Driver != "" {
 			fmt.Fprintf(b, "[%s] ", g.Driver)
 		}
-		b.WriteString(g.Msg)
+		b.WriteString(redactDumpLog(g.Msg))
 		if g.Count > 1 {
 			fmt.Fprintf(b, " ×%d", g.Count)
 			if span := g.Last.Sub(g.First); span > time.Second {
@@ -666,7 +675,7 @@ func (s *Server) writeLogSection(b *strings.Builder) {
 		}
 		if g.Attrs != "" {
 			b.WriteByte(' ')
-			b.WriteString(truncateReport(g.Attrs, 200))
+			b.WriteString(redactDumpLog(truncateReport(g.Attrs, 200)))
 		}
 		b.WriteByte('\n')
 	}
@@ -778,15 +787,10 @@ func (s *Server) collectFindings(
 	// reading "charge 4.5 kW, now", a live target of 0 W, and no way from
 	// the outside to tell whether the plan reached dispatch at all.
 	if pace, ok := slotPaceShortfall(slotEnergy, now); ok {
-		detail := fmt.Sprintf("This slot asked for %s and the batteries have "+
-			"moved %s with %s of it gone — about %.0f%% of the rate the plan "+
-			"needs.",
-			fmtReportWh(slotEnergy.PlannedWh), fmtReportWh(slotEnergy.ActualWh),
-			fmtReportAge(now.Sub(slotEnergy.SlotStart)), pace*100)
-		if slotEnergy.EnergyPathWh == 0 && slotEnergy.PlannedWh != 0 {
-			detail += " The energy-allocation path has delivered nothing this " +
-				"slot, so a reactive path is driving instead of the plan."
-		}
+		detail := fmt.Sprintf("Over observed intervals, accepted decisions expected %s and measured battery energy was "+
+			"%s — about %.0f%% of the expected energy. The accepted decisions plus the remaining plan total %s.",
+			fmtReportWh(slotEnergy.PlannedSoFarWh), fmtReportWh(slotEnergy.ActualWh),
+			pace*100, fmtReportWh(slotEnergy.PlannedWh))
 		detail += " Safety limits, a charge ceiling and a device that cannot " +
 			"follow the command all look like this from here — the dispatch " +
 			"table and the log below separate them."
@@ -824,7 +828,7 @@ func (s *Server) collectFindings(
 				sev = sevProblem
 			}
 			detail := fmt.Sprintf("%q has been logged %d times",
-				worst.Msg, worst.Count)
+				redactDumpLog(worst.Msg), worst.Count)
 			if span := worst.Last.Sub(worst.First); span > time.Second {
 				detail += " in " + fmtReportAge(span)
 			}
@@ -920,20 +924,15 @@ func forecastMiss(predicted, actual float64) bool {
 	return hi/lo >= forecastMissRatio
 }
 
-// slotPaceShortfall reports how far behind the slot's required rate the
-// batteries actually are, as a fraction of it, and whether that is worth
-// saying. Returns (pace, true) only when the slot has a real energy ask,
-// enough of it has passed to judge, and delivery is meaningfully behind.
-//
-// Pace rather than a plain energy comparison, because a slot is allowed
-// to be behind early and catch up. What is not normal is being a quarter
-// of the way through having moved almost nothing.
+// slotPaceShortfall compares measured energy with the decisions observed over
+// the same intervals. Future plans cannot change what was expected earlier.
+// A minimum elapsed time and energy keep early or small differences quiet.
 func slotPaceShortfall(e control.SlotEnergySnapshot, now time.Time) (float64, bool) {
 	if !e.HasSlot || e.SlotEnd.IsZero() {
 		return 0, false
 	}
-	if math.Abs(e.PlannedWh) < slotEnergyIdleWh {
-		return 0, false // an idle slot cannot fall behind
+	if math.Abs(e.PlannedSoFarWh) < slotEnergyIdleWh {
+		return 0, false // too little expected energy to judge
 	}
 	total := e.SlotEnd.Sub(e.SlotStart)
 	elapsed := now.Sub(e.SlotStart)
@@ -944,13 +943,9 @@ func slotPaceShortfall(e control.SlotEnergySnapshot, now time.Time) (float64, bo
 	if fraction < slotPaceMinElapsed {
 		return 0, false // too early to tell
 	}
-	expected := e.PlannedWh * fraction
-	if expected == 0 {
-		return 0, false
-	}
 	// Signed ratio: wrong-direction delivery lands negative and is
 	// therefore always a shortfall, which is what it should be.
-	pace := e.ActualWh / expected
+	pace := e.ActualWh / e.PlannedSoFarWh
 	if pace >= slotPaceFloor {
 		return 0, false
 	}

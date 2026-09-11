@@ -27,6 +27,25 @@ type sentCommand struct {
 	sitePhases      int
 }
 
+func lastSetCurrent(calls []sentCommand) (sentCommand, bool) {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].action == "ev_set_current" {
+			return calls[i], true
+		}
+	}
+	return sentCommand{}, false
+}
+
+func countAction(calls []sentCommand, action string) int {
+	n := 0
+	for _, c := range calls {
+		if c.action == action {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) error {
 	var d struct {
 		Action          string  `json:"action"`
@@ -46,7 +65,7 @@ func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) er
 		phaseMode: d.PhaseMode, phaseSplitW: d.PhaseSplitW,
 		minPhaseHoldS: d.MinPhaseHoldS,
 		voltage:       d.Voltage, maxAmpsPerPhase: d.MaxAmpsPerPhase,
-		sitePhases:    d.SitePhases,
+		sitePhases: d.SitePhases,
 	})
 	return f.err
 }
@@ -215,7 +234,7 @@ func TestTickFeedsObservationsToManager(t *testing.T) {
 		ID:                "garage",
 		DriverName:        "easee",
 		VehicleCapacityWh: 60000,
-		PluginSoCPct:      30,
+		PluginSoC:         0.3,
 	}}
 	samples := map[string]EVSample{"easee": {PowerW: 7400, Connected: true, SessionWh: 6000}}
 	c := newTestController(t, cfgs, nil, samples, sender)
@@ -227,8 +246,8 @@ func TestTickFeedsObservationsToManager(t *testing.T) {
 		t.Fatal("manager state missing after Tick")
 	}
 	// 30 + 6000/60000*100 = 40.
-	if st.CurrentSoCPct < 39 || st.CurrentSoCPct > 41 {
-		t.Errorf("expected ~40 %% SoC after Observe, got %.2f", st.CurrentSoCPct)
+	if st.CurrentSoC < 0.39 || st.CurrentSoC > 0.41 {
+		t.Errorf("expected ~40 %% SoC after Observe, got %.2f", st.CurrentSoC)
 	}
 	if !st.PluggedIn || st.CurrentPowerW != 7400 {
 		t.Errorf("observation not propagated: %+v", st)

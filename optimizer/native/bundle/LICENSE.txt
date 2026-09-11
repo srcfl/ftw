@@ -1,0 +1,17 @@
+Sourceful Energyplan Binary License
+Copyright (c) 2026 Sourceful. All rights reserved.
+
+Sourceful grants permission to use the unmodified ftw-solver binaries with
+FTW and to redistribute them, without changes, as part of FTW distributions,
+including commercial distributions, provided this license and the accompanying
+third-party notices remain included.
+
+The Energyplan solver is proprietary. No license to its source code is granted.
+Other uses or distribution require a separate license from Sourceful. Third-party
+components retain their own licenses as listed in THIRD-PARTY-NOTICES.txt.
+This license does not revoke rights previously granted for an earlier version.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. TO THE EXTENT PERMITTED BY LAW, SOURCEFUL IS NOT LIABLE FOR
+CLAIMS, DAMAGES OR OTHER LIABILITY ARISING FROM USE OF THE SOFTWARE.

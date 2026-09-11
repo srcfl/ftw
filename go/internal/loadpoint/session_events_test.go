@@ -70,7 +70,7 @@ func (r *sessionRig) tick(d time.Duration, plugged bool, powerW, deliveredWh flo
 // session meter's own kWh — once, however long the finished car stays in.
 func TestSessionCompletePublishesOnceWithSessionKWh(t *testing.T) {
 	r := newSessionRig(t)
-	r.mgr.SetTarget("garage", 80, time.Time{})
+	r.mgr.SetTarget("garage", 0.8, time.Time{})
 
 	r.tick(0, true, 11_000, 0, true)
 	r.tick(5*time.Minute, true, 11_000, 900, true)
@@ -81,6 +81,10 @@ func TestSessionCompletePublishesOnceWithSessionKWh(t *testing.T) {
 		t.Fatal("latched before the timeout")
 	}
 	r.tick(SessionCompletionTimeout, true, 0, 7_420, false)
+	if c, _ := r.log.counts(); c != 0 {
+		t.Fatal("refusal invented a completed goal")
+	}
+	r.mgr.AnchorVehicleSoC("garage", .8)
 	if c, _ := r.log.counts(); c != 1 {
 		t.Fatalf("complete events = %d, want 1", c)
 	}
@@ -98,10 +102,11 @@ func TestSessionCompletePublishesOnceWithSessionKWh(t *testing.T) {
 
 	// A new session may speak again.
 	r.tick(time.Minute, false, 0, 0, false)
-	r.mgr.SetTarget("garage", 80, time.Time{})
+	r.mgr.SetTarget("garage", 0.8, time.Time{})
 	r.tick(time.Minute, true, 11_000, 0, true)
 	r.tick(time.Minute, true, 0, 500, false)
 	r.tick(SessionCompletionTimeout, true, 0, 500, false)
+	r.mgr.AnchorVehicleSoC("garage", .8)
 	if c, _ := r.log.counts(); c != 2 {
 		t.Fatalf("complete events = %d after replug, want 2", c)
 	}
@@ -180,7 +185,7 @@ func TestBoxOrderedPauseIsNotAnInterruption(t *testing.T) {
 // session cannot also be an interrupted one.
 func TestVehicleDeclineIsNotAnInterruption(t *testing.T) {
 	r := newSessionRig(t)
-	r.mgr.SetTarget("garage", 80, time.Time{})
+	r.mgr.SetTarget("garage", 0.8, time.Time{})
 	r.mgr.SetCommandedW("garage", 11_000)
 
 	r.tick(0, true, 11_000, 0, true)
@@ -189,8 +194,8 @@ func TestVehicleDeclineIsNotAnInterruption(t *testing.T) {
 	r.tick(time.Second, true, 0, 8_000, false)
 	r.tick(interruptConfirm+SessionCompletionTimeout, true, 0, 8_000, false)
 	c, i := r.log.counts()
-	if c != 1 {
-		t.Fatalf("complete events = %d, want 1", c)
+	if c != 0 {
+		t.Fatalf("complete events = %d, want 0", c)
 	}
 	if i != 0 {
 		t.Fatalf("interrupted events = %d for a finished car, want 0", i)

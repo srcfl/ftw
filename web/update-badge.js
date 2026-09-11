@@ -43,6 +43,9 @@
     constructor() {
       super();
       this._shadow = this.attachShadow({ mode: "open" });
+      this._dialogHost = null;
+      this._dialogRoot = null;
+      this._storageOpen = false;
       this._info = null;              // last /api/version/check payload
       this._phase = "idle";           // idle | dialog | updating
       this._sidecarState = null;      // last /api/version/update/status
@@ -68,6 +71,11 @@
       this._driverVersions = {};
       this._componentAction = "";
       this._connected = true;         // header liveness light; see setConnected()
+      this._bootHealth = null;
+      this._bootConnected = true;
+      this._migrationHTML = "";
+      this._checkingCurrentRun = false;
+      this._resumeGeneration = 0;
       this._render();
     }
 
@@ -84,9 +92,11 @@
     }
 
     _resumeUpdateStatus() {
-      apiFetch("/api/version/update/status", { cache: "no-store" })
+      const generation = this._resumeGeneration;
+      return apiFetch("/api/version/update/status", { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
+          if (!this.isConnected || generation !== this._resumeGeneration) return;
           if (!st || !isUpdateInFlight(st.state) || this._phase === "updating") return;
           const started = st.started_at ? Date.parse(st.started_at) : 0;
           this._phase = "updating";
@@ -106,6 +116,8 @@
     }
 
     disconnectedCallback() {
+      this._resumeGeneration += 1;
+      this._removeDialog();
       clearInterval(this._checkTimer);
       clearTimeout(this._errorRetryTimer);
       clearInterval(this._statusTimer);
@@ -127,13 +139,52 @@
       this._render();
     }
 
+    setBootHealth(health) {
+      const wasStarting = !!this._bootHealth;
+      this._bootConnected = !!health;
+      if (health && health.status !== "starting") {
+        this._bootHealth = null;
+        this._migrationHTML = "";
+        if (wasStarting) {
+          if (!this._expectedRun && this._phase === "updating") {
+            this._phase = "dialog";
+            this._stopUpdateTimers();
+          }
+          this._refresh(false);
+          this._render();
+        }
+        return;
+      }
+      if (health) this._bootHealth = health;
+      if (!this._bootHealth) return;
+      const snapshot = this._bootHealth;
+      const connected = this._bootConnected;
+      import("/history-migration.js").then(({ migrationHTML }) => {
+        if (this._bootHealth !== snapshot || this._bootConnected !== connected) return;
+        this._migrationHTML = migrationHTML(snapshot.migration, { boot: true, connected });
+        this._render();
+      }).catch(() => {});
+      this._render();
+    }
+
     // Public: called by the header #version click handler in index.html so
     // the operator can open the modal without aiming at the tiny dot. No-op
     // when the backend has told us the feature is gated off.
     open() {
       if (this._disabled) return;
+      if (this._phase === "updating" || this._bootHealth) {
+        this._phase = "updating";
+        this._render();
+        this._startStatusPolling();
+        return;
+      }
       this._phase = "dialog";
+      this._checkingCurrentRun = true;
       this._render();
+      this._resumeUpdateStatus().finally(() => {
+        this._checkingCurrentRun = false;
+        this._render();
+      });
       this._refresh(false); // surface the freshest info when opened
       this._refreshSnapshots(); // pull the list for the Snapshots accordion
       this._refreshBackups();
@@ -382,9 +433,8 @@
 
     // Permanently shut the element down: stop polling, clear shadow DOM, hide
     // from layout, and fire an event so the #version bridge can drop its
-    // cursor/pointer affordance. Called when the backend returns 503, which
-    // means the feature is gated off (FTW_SELFUPDATE_ENABLED unset) — not a
-    // transient error, so we don't ever retry.
+    // cursor/pointer affordance. Only an explicit feature-disabled response
+    // does this; the same 503 status also occurs during normal startup.
     _disable() {
       if (this._disabled) return;
       this._disabled = true;
@@ -392,6 +442,7 @@
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
       this._shadow.innerHTML = "";
+      this._removeDialog();
       this.hidden = true;
       this.dispatchEvent(new CustomEvent("ftw-selfupdate-disabled", { bubbles: true }));
     }
@@ -401,16 +452,17 @@
       if (this._disabled) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
       apiFetch(url)
-        .then((r) => {
-          // 503 = feature disabled by the backend. Stop polling and get out
-          // of the way entirely — this is deployment config, not a bug.
-          if (r.status === 503) {
+        .then(async (r) => {
+          const body = await r.json().catch(() => null);
+          if (r.status === 503 && body?.error === "starting") {
+            this.setBootHealth({ status: "starting", migration: body.migration });
+            return null;
+          }
+          if (r.status === 503 && body?.error === "self-update disabled") {
             this._disable();
             return null;
           }
-          return r.json()
-            .then((body) => ({ ok: r.ok, body }))
-            .catch(() => ({ ok: r.ok, body: null }));
+          return { ok: r.ok, body };
         })
         .then((result) => {
           if (!result) return; // disabled, nothing to render
@@ -487,48 +539,8 @@
         });
     }
 
-    _setOptimizerChannel(channel) {
-      const updates = this._components && this._components.optimizer && this._components.optimizer.updates;
-      if (!channel || (updates && updates.channel === channel)) return;
-      this._postJSON("/api/components/optimizer/channel", { channel })
-        .then((resp) => {
-          if (!resp.ok) throw new Error((resp.body && resp.body.error) || "failed to change optimizer channel");
-          this._refreshComponents(true);
-        })
-        .catch((err) => window.alert("Optimizer channel failed: " + err.message));
-    }
-
-    _beginOptimizerUpdate(rollback) {
-      const optimizer = this._components && this._components.optimizer;
-      const updates = optimizer && optimizer.updates;
-      const action = rollback ? "component_rollback" : "update";
-      const target = rollback ? "" : ((updates && updates.latest) || "");
-      this._phase = "updating";
-      this._updateStartedAt = Date.now();
-      this._updateOriginalVersion = updates ? updates.current : null;
-      this._expectedRun = { action, target, snapshot: "", component: "optimizer" };
-      this._sidecarState = { state: "starting", action, component: "optimizer", target };
-      this._render();
-      this._startElapsedTicker();
-      this._startStatusPolling();
-      const url = rollback ? "/api/components/optimizer/rollback" : "/api/components/optimizer/update";
-      const body = rollback ? null : { target };
-      this._postJSON(url, body)
-        .then((resp) => {
-          if (!resp.ok) {
-            this._sidecarState = { state: "failed", action, component: "optimizer", message: (resp.body && resp.body.error) || "failed to start" };
-            this._stopUpdateTimers();
-            this._render();
-          }
-        })
-        .catch((e) => {
-          this._sidecarState = { state: "failed", action, component: "optimizer", message: String(e) };
-          this._stopUpdateTimers();
-          this._render();
-        });
-    }
-
     _beginUpdate(action) {
+      if (this._phase === "updating" || this._checkingCurrentRun || this._bootHealth) return;
       this._phase = "updating";
       this._updateStartedAt = Date.now();
       this._updateOriginalVersion = this._info ? this._info.current : null;
@@ -546,6 +558,10 @@
       this._postJSON(url, null)
         .then((resp) => {
           if (!resp.ok) {
+            if (resp.body?.error === "starting") {
+              this.setBootHealth({ status: "starting", migration: resp.body.migration });
+              return;
+            }
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
             this._stopUpdateTimers();
             this._render();
@@ -602,6 +618,7 @@
       apiFetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
+          if (this._phase !== "updating" || !this.isConnected) return;
           if (st && this._statusMatchesCurrentRun(st)) {
             const keepTimeout = this._sidecarState && this._sidecarState.timedOut &&
               this._sidecarState.state === st.state &&
@@ -641,6 +658,7 @@
     }
 
     _markSoftTimeout() {
+      if (this._bootHealth) return false;
       const timeoutMs = this._sidecarState && this._sidecarState.state === "snapshotting"
         ? SNAPSHOT_SOFT_TIMEOUT_MS
         : UPDATE_SOFT_TIMEOUT_MS;
@@ -681,11 +699,9 @@
 
     _pendingUpdates() {
       const info = this._info || {};
-      const optimizerUpdates = this._components && this._components.optimizer && this._components.optimizer.updates;
       const core = !!(info.update_available && !info.skipped);
-      const optimizer = !!(optimizerUpdates && optimizerUpdates.update_available);
       const drivers = this._driverEntries().filter((entry) => entry.pending_update).length;
-      return { core, optimizer, drivers, total: (core ? 1 : 0) + (optimizer ? 1 : 0) + drivers };
+      return { core, drivers, total: (core ? 1 : 0) + drivers };
     }
 
     _render() {
@@ -695,6 +711,7 @@
       // controls that open() will refuse to use.
       if (this._disabled) {
         this._shadow.innerHTML = "";
+        this._removeDialog();
         this.hidden = true;
         return;
       }
@@ -705,7 +722,10 @@
       const showOptimizerWarning = !!(optimizer && optimizer.configured && (optimizer.degraded === true || optimizer.healthy === false)) && this._phase !== "updating";
       const showBadge = showDot || showOptimizerWarning;
       const activeSolver = optimizer && optimizer.active_solver;
-      const optimizerFallbackActive = !!(activeSolver && (activeSolver.fallback || activeSolver.engine === "go-dp"));
+      // Core producing the plan is the default, so the engine name says
+      // nothing about health; only the fallback flag means the operator asked
+      // for the external planner and did not get it.
+      const optimizerFallbackActive = !!(activeSolver && activeSolver.fallback);
       const optimizerReason = optimizer && (optimizer.fallback_reason || optimizer.health_error || optimizer.error);
       const warningTitle = (optimizerFallbackActive ? "Planner fallback active" : "Optimizer unavailable") + (optimizerReason ? ": " + optimizerReason : "");
       const updateTitle = pending.core && info.latest
@@ -737,15 +757,48 @@
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
         <span class="marks">${marks.join("")}</span>
-        ${this._phase !== "idle" ? this._modalHTML() : ""}
       `;
 
       this._shadow.querySelectorAll("button.mark").forEach((btn) => {
         btn.addEventListener("click", () => this.open());
       });
 
-      const modal = this._shadow.querySelector(".modal");
-      if (modal) this._wireModal(modal);
+      this._renderDialog();
+    }
+
+    _removeDialog() {
+      if (this._dialogHost) this._dialogHost.remove();
+      this._dialogHost = null;
+      this._dialogRoot = null;
+      this._storageOpen = false;
+    }
+
+    _renderDialog() {
+      if (!this.isConnected || this._phase === "idle") {
+        this._removeDialog();
+        return;
+      }
+      const storage = this._dialogRoot && this._dialogRoot.querySelector("details.storage");
+      if (storage) this._storageOpen = storage.open;
+      const previous = this._dialogRoot && this._dialogRoot.querySelector(".modal");
+      const scrollTop = previous && this._phase === "dialog" ? previous.scrollTop : 0;
+      const focusedAction = this._dialogRoot?.activeElement?.dataset?.action;
+
+      if (!this._dialogHost) {
+        // The mobile menu hides the badge's ancestors. Keep the dialog at page level.
+        this._dialogHost = document.createElement("div");
+        this._dialogHost.className = "ftw-update-dialog";
+        this._dialogRoot = this._dialogHost.attachShadow({ mode: "open" });
+        document.body.appendChild(this._dialogHost);
+      }
+      this._dialogRoot.innerHTML = `<style>${this._styles()}</style>${this._modalHTML()}`;
+      this._wireModal(this._dialogRoot);
+      const modal = this._dialogRoot.querySelector(".modal");
+      if (modal) modal.scrollTop = scrollTop;
+      if (focusedAction) {
+        const button = [...this._dialogRoot.querySelectorAll("[data-action]")].find(el => el.dataset.action === focusedAction);
+        if (button && !button.disabled) button.focus({ preventScroll:true });
+      }
     }
 
     _modalHTML() {
@@ -774,11 +827,11 @@
       const actions = hasUpdate
         ? `
             <button class="btn btn-ghost" data-action="skip">Skip this version</button>
-            <button class="btn btn-ghost" data-action="restart">Restart</button>
-            <button class="btn btn-primary" data-action="update">Update Core to ${escapeHTML(info.latest || "")}</button>
+            <button class="btn btn-ghost" data-action="restart" ${this._checkingCurrentRun ? "disabled" : ""}>Restart</button>
+            <button class="btn btn-primary" data-action="update" ${this._checkingCurrentRun ? "disabled" : ""}>Update Core to ${escapeHTML(info.latest || "")}</button>
           `
         : `
-            <button class="btn btn-ghost" data-action="restart">Restart</button>
+            <button class="btn btn-ghost" data-action="restart" ${this._checkingCurrentRun ? "disabled" : ""}>Restart</button>
             <button class="btn" data-action="check">Check for updates</button>
           `;
 
@@ -819,6 +872,7 @@
           </header>
           <div class="body">
             <div class="status-line">
+              ${this._checkingCurrentRun ? '<p role="status">Checking for work already in progress…</p>' : ""}
               <p class="subtitle">${escapeHTML(subtitle)}</p>
               <p class="checked-at">${escapeHTML(checkedLine)}</p>
             </div>
@@ -835,9 +889,7 @@
       `;
     }
 
-    // _channelSectionHTML puts both channel controls side by side. They used
-    // to sit in different parts of the dialog, which left the operator no way
-    // to see that Core and Optimizer can track different channels.
+    // Core's channel includes the bundled Energyplan worker.
     _channelSectionHTML() {
       const info = this._info || {};
       const channels = Array.isArray(info.channels) && info.channels.length
@@ -854,42 +906,14 @@
         ? "Beta receives prereleases and promoted stable releases."
         : "Stable receives production releases only.";
 
-      const optimizerUpdates = (this._components && this._components.optimizer && this._components.optimizer.updates) || {};
-      const optimizerConfigured = !!(this._components && this._components.optimizer && this._components.optimizer.configured);
-      const optimizerChannels = Array.isArray(optimizerUpdates.channels) && optimizerUpdates.channels.length
-        ? optimizerUpdates.channels
-        : ["stable", "beta"];
-      const optimizerChannel = optimizerUpdates.channel || "stable";
-      const optimizerButtons = optimizerConfigured
-        ? optimizerChannels.map((channel) => `
-            <button class="channel-option${optimizerChannel === channel ? " active" : ""}"
-                    data-action="set-optimizer-channel" data-channel="${escapeHTML(channel)}"
-                    aria-pressed="${optimizerChannel === channel ? "true" : "false"}">
-              ${escapeHTML(channel)}
-            </button>`).join("")
-        : "";
-      const optimizerRow = optimizerConfigured
-        ? `<div class="channel-row">
-             <span class="channel-label">Optimizer</span>
-             <div class="channel-options" role="group" aria-label="Optimizer update channel">${optimizerButtons}</div>
-           </div>
-           ${optimizerChannel !== selectedChannel
-             ? `<p class="channel-note">Optimizer tracks ${escapeHTML(optimizerChannel)} while Core tracks ${escapeHTML(selectedChannel)}.</p>`
-             : ""}`
-        : "";
-
-      // Only Core and the optimizer subscribe to a channel. A driver is
-      // pinned to an exact version, and "stable"/"beta" only says where that
-      // artifact came from — so these buttons must not appear to govern it.
       return `<details class="snapshots channels">
-        <summary>Update channel · Core ${escapeHTML(selectedChannel)}${optimizerConfigured && optimizerChannel !== selectedChannel ? ` · Optimizer ${escapeHTML(optimizerChannel)}` : ""}</summary>
+        <summary>Update channel · Core ${escapeHTML(selectedChannel)}</summary>
         <div class="channel-body">
           <div class="channel-row">
             <span class="channel-label">Core</span>
             <div class="channel-options" role="group" aria-label="Update channel">${channelButtons}</div>
           </div>
           <p class="channel-note">${escapeHTML(channelNote)}</p>
-          ${optimizerRow}
           <p class="channel-note">Drivers follow no channel. Each one is pinned to a version you pick per driver above, from either stream.</p>
         </div>
       </details>`;
@@ -907,7 +931,9 @@
       const parts = [];
       if (snapshotList) parts.push(`${snapshotList.length} rollback point${snapshotList.length === 1 ? "" : "s"}`);
       if (backupList) parts.push(`${backupList.length} full backup${backupList.length === 1 ? "" : "s"}`);
-      return `<details class="snapshots storage">
+      const open = this._storageOpen || this._creatingSnapshot || this._creatingBackup ||
+        this._deletingSnapshot || this._deletingBackup || this._verifyingBackup;
+      return `<details class="snapshots storage"${open ? " open" : ""}>
         <summary>Backups · ${escapeHTML(parts.join(" · "))}</summary>
         ${this._snapshotsSectionHTML()}
         ${this._backupsSectionHTML()}
@@ -1011,28 +1037,8 @@
       const payload = this._components;
       if (!payload) return "";
       const optimizer = payload.optimizer || {};
-      const optimizerUpdates = optimizer.updates || {};
-      const optimizerRuntime = optimizer.runtime || {};
-      const sharedUpdateStatus = payload.updates && payload.updates.status;
-      const previousImages = (sharedUpdateStatus && sharedUpdateStatus.previous_images) || {};
-      const optimizerCurrent = optimizerUpdates.current || optimizerRuntime.version || "";
-      // Only claim a pending version when it actually differs. The old row
-      // printed "v1.3.2 → v1.3.2" next to the words "up to date".
-      const optimizerTarget = optimizerUpdates.latest && optimizerUpdates.latest !== optimizerCurrent
-        ? optimizerUpdates.latest
-        : "";
-      const optimizerAction = optimizerUpdates.update_available
-        ? `<button class="btn btn-small" data-action="optimizer-update">Update to ${escapeHTML(optimizerUpdates.latest || "")}</button>`
-        : "";
-      // Rolling back stays available whenever a previous image exists — that
-      // is exactly the state you are in right after an update goes wrong. It
-      // sits in the action column so it no longer competes with the status
-      // text for the eye.
-      const optimizerRollback = previousImages.optimizer
-        ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback" title="Restore the previous optimizer image">Roll back</button>`
-        : "";
       const activeSolver = optimizer.active_solver || {};
-      const optimizerFallbackActive = activeSolver.fallback || activeSolver.engine === "go-dp";
+      const optimizerFallbackActive = !!activeSolver.fallback;
       const optimizerReason = optimizer.fallback_reason || optimizer.health_error || optimizer.error || "";
       const optimizerWarning = optimizer.degraded === true || optimizer.healthy === false
         ? `<p class="component-warning" role="alert"><strong>${optimizerFallbackActive ? "Planner fallback active." : "Optimizer unavailable."}</strong>${optimizerFallbackActive ? " Core is using the built-in Go planner." : " The current plan stays active until the next replan."}${optimizerReason ? " " + escapeHTML(optimizerReason) : ""}</p>`
@@ -1084,11 +1090,6 @@
       const coreStatus = info.update_available
         ? `<span class="status-pending">${escapeHTML(info.latest || "update")} available</span>`
         : `<span class="dim">up to date</span>`;
-      const optimizerStatus = !optimizer.configured
-        ? `<span class="dim">not configured</span>`
-        : optimizerUpdates.update_available
-        ? `<span class="status-pending">${escapeHTML(optimizerTarget || "update")} available</span>`
-        : `<span class="dim">up to date</span>`;
 
       // One table listing every component, whether or not it has work waiting.
       // Rows only ever change their status and action cells, so the operator
@@ -1106,12 +1107,6 @@
               <td class="dim mono">${escapeHTML(payload.core && payload.core.version || info.current || "?")}</td>
               <td class="component-status">${coreStatus}</td>
               <td class="component-actions"></td>
-            </tr>
-            <tr class="optimizer-row">
-              <th scope="row">Optimizer</th>
-              <td class="dim mono">${escapeHTML(optimizerCurrent || "not running")}</td>
-              <td class="component-status">${optimizerStatus}</td>
-              <td class="component-actions">${optimizerAction}${optimizerRollback}</td>
             </tr>
             ${driverRows}
           </tbody>
@@ -1137,6 +1132,14 @@
     }
 
     _updatingModalHTML() {
+      if (this._bootHealth) {
+        return `<div class="backdrop"></div><div class="modal" role="dialog" aria-modal="true" aria-labelledby="boot-title">
+          <header><h3 id="boot-title">Starting FTW</h3></header><div class="body">
+          ${this._migrationHTML || '<p>Core is preparing to start. Control has not started yet.</p><p>Keep the box powered. This page checks progress automatically.</p>'}
+          <p class="dim">${this._bootConnected ? "The box is responding." : "Cannot reach the box. The last report may be out of date."}</p>
+          </div><footer><button class="btn btn-primary" data-action="reload">Reload status</button>
+          <span class="dim">Reloading this page does not restart the box.</span></footer></div>`;
+      }
       const st = this._sidecarState || { state: "starting" };
       const action = st.action || "update";
       const elapsed = Math.round((Date.now() - this._updateStartedAt) / 1000);
@@ -1171,14 +1174,13 @@
       const footer = failed || timedOut
         ? `<button class="btn btn-primary" data-action="reload">Reload page</button>
            <button class="btn btn-ghost" data-action="close">Dismiss</button>`
-        : `<span class="dim">Don't close this tab.</span>`;
+        : `<span class="dim">Keep the box powered. You can reopen this page to check progress.</span>`;
 
       let title;
       switch (action) {
         case "restart":  title = "Restarting service"; break;
         case "rollback": title = "Rolling back"; break;
-        case "component_rollback": title = "Rolling back optimizer"; break;
-        default:         title = st.component === "optimizer" ? "Updating optimizer" : "Updating service";
+        default:         title = "Updating service";
       }
 
       return `
@@ -1215,13 +1217,14 @@
       }
     }
 
-    _wireModal(modal) {
-      // Delegate: one listener on the shadow root, dispatch by data-action.
-      this._shadow.querySelectorAll("[data-action]").forEach((el) => {
+    _wireModal(root) {
+      // Bind the dialog controls and its sibling backdrop.
+      root.querySelectorAll("[data-action]").forEach((el) => {
         el.addEventListener("click", (e) => {
           const action = e.currentTarget.dataset.action;
           switch (action) {
             case "close":
+              this._resumeGeneration += 1;
               this._phase = "idle";
               this._stopUpdateTimers();
               this._render();
@@ -1244,17 +1247,6 @@
               break;
             case "set-channel":
               this._setChannel(e.currentTarget.dataset.channel);
-              break;
-            case "set-optimizer-channel":
-              this._setOptimizerChannel(e.currentTarget.dataset.channel);
-              break;
-            case "optimizer-update":
-              this._beginOptimizerUpdate(false);
-              break;
-            case "optimizer-rollback":
-              if (window.confirm("Roll back only the optimizer to its previous healthy image? Core and drivers stay unchanged.")) {
-                this._beginOptimizerUpdate(true);
-              }
               break;
             case "driver-versions":
               this._loadDriverVersions(e.currentTarget.dataset.id);
@@ -1758,6 +1750,11 @@
             padding-top: 0.3rem;
           }
           .component-actions > * { margin: 0 0.3rem 0.3rem 0; }
+          .snapshots-intro { flex-direction: column; align-items: stretch; }
+          .backup-intro p { max-width: none; }
+          .snapshots-table th,
+          .snapshots-table td { padding: 0.3rem 0.4rem; }
+          .snapshots-table .nowrap { white-space: normal; }
           .channel-row { grid-template-columns: minmax(0, 1fr); gap: 0.25rem; }
         }
       `;

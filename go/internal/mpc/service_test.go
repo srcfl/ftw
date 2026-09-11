@@ -144,9 +144,76 @@ func TestSynthesizedPriceCarriesCreationProvenance(t *testing.T) {
 	}
 }
 
+func TestForecastPricePersistsLastKnownInsteadOfClimatologyCliff(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	last := state.PricePoint{
+		Zone: "SE3", SlotTsMs: now.UnixMilli(), SlotLenMin: 60,
+		SpotOreKwh: 200, TotalOreKwh: 280, Source: "entsoe",
+	}
+	prices := extendPricesWithForecast(
+		[]state.PricePoint{last},
+		"SE3",
+		func(string, time.Time) float64 { return 70 },
+		now.UnixMilli(),
+		now.Add(2*time.Hour).UnixMilli(),
+		0, 0,
+	)
+	if len(prices) < 2 {
+		t.Fatalf("got %d prices, want published + forecast", len(prices))
+	}
+	var forecast []state.PricePoint
+	for _, p := range prices {
+		if p.Source == "forecast" {
+			forecast = append(forecast, p)
+		}
+	}
+	if len(forecast) == 0 {
+		t.Fatal("no forecast rows")
+	}
+	first := forecast[0]
+	if first.SpotOreKwh < 150 {
+		t.Errorf("first unpublished hour jumped to climatology: got %.1f, want near last-known 200 (not 70)", first.SpotOreKwh)
+	}
+	if first.SpotOreKwh > 201 {
+		t.Errorf("first unpublished hour overshot last-known: got %.1f", first.SpotOreKwh)
+	}
+}
+
+func TestForecastPriceFadesTowardClimatologyOverHours(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	last := state.PricePoint{
+		Zone: "SE3", SlotTsMs: now.UnixMilli(), SlotLenMin: 60,
+		SpotOreKwh: 200, TotalOreKwh: 280, Source: "entsoe",
+	}
+	prices := extendPricesWithForecast(
+		[]state.PricePoint{last},
+		"SE3",
+		func(string, time.Time) float64 { return 70 },
+		now.UnixMilli(),
+		now.Add(13*time.Hour).UnixMilli(),
+		0, 0,
+	)
+	var forecast []state.PricePoint
+	for _, p := range prices {
+		if p.Source == "forecast" {
+			forecast = append(forecast, p)
+		}
+	}
+	if len(forecast) < 12 {
+		t.Fatalf("got %d forecast rows, want >= 12", len(forecast))
+	}
+	late := forecast[len(forecast)-1]
+	if late.SpotOreKwh > 120 {
+		t.Errorf("12 h out should have faded toward climatology 70, got %.1f", late.SpotOreKwh)
+	}
+	if late.SpotOreKwh >= forecast[0].SpotOreKwh {
+		t.Errorf("later forecast %.1f should be below first-hour persist %.1f", late.SpotOreKwh, forecast[0].SpotOreKwh)
+	}
+}
+
 func TestBuildSlotsWeatherProvenanceFollowsTwinCloudInput(t *testing.T) {
 	weatherStart := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
-	priceStart := weatherStart.Add(75 * time.Minute)
+	priceStart := weatherStart.Add(45 * time.Minute)
 	cloud := 25.0
 	prices := []state.PricePoint{{
 		SlotTsMs: priceStart.UnixMilli(), SlotLenMin: 15,
@@ -168,7 +235,7 @@ func TestBuildSlotsWeatherProvenanceFollowsTwinCloudInput(t *testing.T) {
 	}
 }
 
-func TestBuildSlotsWeatherProvenanceKeepsNearestNilCloudRow(t *testing.T) {
+func TestBuildSlotsDoesNotUseFutureWeatherBeforeCoverage(t *testing.T) {
 	firstTs := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
 	laterCloud := 91.0
 	priceTs := firstTs - int64(15*time.Minute/time.Millisecond)
@@ -192,9 +259,62 @@ func TestBuildSlotsWeatherProvenanceKeepsNearestNilCloudRow(t *testing.T) {
 	if len(slots) != 1 {
 		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
 	}
-	if got := slots[0]; got.PVW != -500 || got.WeatherRowSource != "nearest" ||
-		got.WeatherRowAvailableAtMs != 111 {
-		t.Fatalf("nearest nil-cloud provenance = %+v", got)
+	if got := slots[0]; got.PVW != 0 || got.WeatherRowSource != "" || got.WeatherRowAvailableAtMs != 0 {
+		t.Fatalf("future weather manufactured PV or provenance = %+v", got)
+	}
+}
+
+func TestBuildSlotsDoesNotCreatePVAcrossWeatherGap(t *testing.T) {
+	start := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	cloud := 10.0
+	pvW := 3000.0
+	forecasts := []state.ForecastPoint{
+		{SlotTsMs: start.UnixMilli(), SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &pvW, Source: "before"},
+		{SlotTsMs: start.Add(2 * time.Hour).UnixMilli(), SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &pvW, Source: "after"},
+	}
+	target := start.Add(time.Hour).UnixMilli()
+	slots := buildSlots(
+		[]state.PricePoint{{SlotTsMs: target, SlotLenMin: 15, SpotOreKwh: 50, TotalOreKwh: 100}},
+		forecasts, 500, target,
+		func(time.Time, float64) float64 { return 5000 }, nil, nil,
+	)
+	if len(slots) != 1 {
+		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
+	}
+	if got := slots[0]; got.PVW != 0 || got.WeatherRowSource != "" || got.WeatherRowAvailableAtMs != 0 {
+		t.Fatalf("weather gap manufactured learned PV or provenance = %+v", got)
+	}
+}
+
+func TestSnapshotPredictionsUsesFrozenPlanPredictors(t *testing.T) {
+	start := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	cloud := 25.0
+	weather := []state.ForecastPoint{{SlotTsMs: start.UnixMilli(), SlotLenMin: 60, CloudCoverPct: &cloud}}
+	service := &Service{
+		PV:   func(time.Time, float64) float64 { return 9000 },
+		Load: func(time.Time) float64 { return 8000 },
+	}
+	points := service.snapshotPredictions(
+		[]Slot{{StartMs: start.UnixMilli(), LenMin: 60}}, weather,
+		func(time.Time, float64) float64 { return 1000 },
+		func(time.Time) float64 { return 700 },
+	)
+	if points == nil || len(points.pv) != 1 || points.pv[0] != 1000 || len(points.load) != 1 || points.load[0] != 700 {
+		t.Fatalf("drift baseline re-read live predictors: %+v", points)
+	}
+	loadOnly := service.snapshotPredictions(
+		[]Slot{{StartMs: start.UnixMilli(), LenMin: 60}}, nil,
+		nil, func(time.Time) float64 { return 700 },
+	)
+	if loadOnly == nil || loadOnly.pv != nil || len(loadOnly.load) != 1 {
+		t.Fatalf("nil frozen PV fell through to live service predictor: %+v", loadOnly)
+	}
+	withoutWeather := service.snapshotPredictions(
+		[]Slot{{StartMs: start.UnixMilli(), LenMin: 60}}, nil,
+		func(time.Time, float64) float64 { return 1000 }, nil,
+	)
+	if withoutWeather == nil || len(withoutWeather.pv) != 1 || len(withoutWeather.pvCovered) != 1 || withoutWeather.pvCovered[0] {
+		t.Fatalf("missing weather created a PV drift baseline: %+v", withoutWeather)
 	}
 }
 
@@ -309,6 +429,99 @@ func TestServiceApplyPVDownsideToSlotsNilServiceNoPanic(t *testing.T) {
 	s.applyPVDownsideToSlots(slots) // must not panic
 	if slots[0].PVW != -3000 {
 		t.Errorf("nil Service must be a no-op, got %v", slots[0].PVW)
+	}
+}
+
+// applyPVDownsidePerSlot sizes the hedge against each slot's own generation.
+// The flat form subtracted the same watt figure everywhere, which erased the
+// morning and evening shoulders outright and hedged a possibly-clear tomorrow
+// with today's cloudy-sky σ.
+func TestApplyPVDownsidePerSlotShavesAShareOfEachSlot(t *testing.T) {
+	// A day curve: night, shoulders, midday peak, shoulders, night.
+	gen := []float64{0, 500, 3000, 6000, 3000, 500, 0}
+	slots := make([]Slot, len(gen))
+	for i, g := range gen {
+		slots[i].PVW = -g
+	}
+
+	applyPVDownsidePerSlot(slots, 1.0, 0.3, 0) // σ_rel = 30 %, k = 1
+
+	for i, g := range gen {
+		want := -(g * 0.7)
+		if math.Abs(slots[i].PVW-want) > 1e-9 {
+			t.Errorf("slot %d: PVW = %v, want %v (30 %% off %v W of generation)",
+				i, slots[i].PVW, want, g)
+		}
+		if slots[i].PVW > 0 {
+			t.Errorf("slot %d: PVW = %v — the haircut must never add generation", i, slots[i].PVW)
+		}
+	}
+	if slots[0].PVW != 0 || slots[6].PVW != 0 {
+		t.Errorf("night slots must stay 0, got %v and %v", slots[0].PVW, slots[6].PVW)
+	}
+}
+
+// k·σ_rel above 1 is arithmetically possible (k=2, σ_rel=0.6). Generation is
+// floored at zero rather than turning into a phantom load.
+func TestApplyPVDownsidePerSlotFloorsAtZero(t *testing.T) {
+	slots := []Slot{{PVW: -4000}, {PVW: -100}}
+	applyPVDownsidePerSlot(slots, 2.0, 0.6, 0) // k·σ_rel = 1.2
+	for i, s := range slots {
+		if s.PVW != 0 {
+			t.Errorf("slot %d: PVW = %v, want 0", i, s.PVW)
+		}
+	}
+}
+
+// Until the twin has learned its relative error the site must keep exactly the
+// hedge it had before — bit for bit, not merely "about the same".
+func TestApplyPVDownsidePerSlotFallsBackToFlatWhenUnlearned(t *testing.T) {
+	base := []Slot{{PVW: -6000}, {PVW: -3000}, {PVW: -400}, {PVW: 0}}
+	for _, k := range []float64{0, 1, 2} {
+		flat := append([]Slot(nil), base...)
+		perSlot := append([]Slot(nil), base...)
+		applyPVDownside(flat, k, 1891)
+		applyPVDownsidePerSlot(perSlot, k, 0, 1891)
+		for i := range flat {
+			if flat[i].PVW != perSlot[i].PVW {
+				t.Errorf("k=%v slot %d: per-slot with σ_rel=0 gave %v, flat gave %v",
+					k, i, perSlot[i].PVW, flat[i].PVW)
+			}
+		}
+	}
+}
+
+func TestApplyPVDownsidePerSlotNoOpWhenDisabled(t *testing.T) {
+	slots := []Slot{{PVW: -3000}}
+	applyPVDownsidePerSlot(slots, 0, 0.3, 0) // k=0 → raw forecast
+	if slots[0].PVW != -3000 {
+		t.Errorf("k=0 must be a no-op, got %v", slots[0].PVW)
+	}
+	applyPVDownsidePerSlot(slots, -1, 0.3, 0) // negative k must not amplify PV
+	if slots[0].PVW != -3000 {
+		t.Errorf("negative k must be a no-op, got %v", slots[0].PVW)
+	}
+}
+
+// The Service seam prefers the relative hook and keeps the absolute one as the
+// fallback, so one replan cannot mix the two forms.
+func TestServiceApplyPVDownsideToSlotsPrefersRelative(t *testing.T) {
+	s := &Service{
+		PVForecastSafetyK:     1.0,
+		PVUncertaintyW:        func() float64 { return 1891 },
+		PVRelativeUncertainty: func() float64 { return 0.25 },
+	}
+	slots := []Slot{{PVW: -6000}, {PVW: -400}, {PVW: 0}}
+	s.applyPVDownsideToSlots(slots)
+	if slots[0].PVW != -4500 {
+		t.Errorf("PVW[0] = %v, want -4500 (6000 − 25 %%)", slots[0].PVW)
+	}
+	if slots[1].PVW != -300 {
+		t.Errorf("PVW[1] = %v, want -300 — a flat 1891 W cut would have zeroed this shoulder",
+			slots[1].PVW)
+	}
+	if slots[2].PVW != 0 {
+		t.Errorf("night slot must stay 0, got %v", slots[2].PVW)
 	}
 }
 
@@ -534,7 +747,7 @@ func TestOptimizeSelfConsumptionDischargesWithSpreadTerminalPrice(t *testing.T) 
 		{SpotOreKwh: 80, TotalOreKwh: 300}, {SpotOreKwh: 80, TotalOreKwh: 300},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 80
+	p.InitialSoC = 0.8
 	p.ExportBonusOreKwh = 60
 	p.ExportFeeOreKwh = 6
 	p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices, 60, 6)
@@ -569,7 +782,7 @@ func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
 	tel.DriverHealthMut("offline").SetOffline()
 
 	s := &Service{Tele: tel, FuseMaxW: 6000}
-	p, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+	p, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
 		{Driver: "b", CapacityWh: 30000, MaxChargeW: 5000, MaxDischargeW: 5000},
 		{Driver: "offline", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
@@ -581,8 +794,8 @@ func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
 		t.Fatalf("CapacityWh = %.0f, want 40000", p.CapacityWh)
 	}
 	// (10 kWh * 20% + 30 kWh * 80%) / 40 kWh = 65%.
-	if math.Abs(p.InitialSoCPct-65) > 1e-9 {
-		t.Fatalf("InitialSoCPct = %.3f, want 65.000", p.InitialSoCPct)
+	if math.Abs(p.InitialSoC-0.65) > 1e-9 {
+		t.Fatalf("InitialSoC = %.3f, want 0.650", p.InitialSoC)
 	}
 	if p.MaxChargeW != 6000 {
 		t.Fatalf("MaxChargeW = %.0f, want fuse-clamped 6000", p.MaxChargeW)
@@ -623,7 +836,7 @@ func TestOnlineFleetParamsDropsCommandFaultedBattery(t *testing.T) {
 	tel.SetDriverCommandFault("refusing", true, "modbus write refused")
 
 	s := &Service{Tele: tel, FuseMaxW: 20000}
-	p, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+	p, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
 		{Driver: "refusing", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
 	})
@@ -636,8 +849,8 @@ func TestOnlineFleetParamsDropsCommandFaultedBattery(t *testing.T) {
 	if len(p.Storages) != 1 || p.Storages[0].ID != "a" {
 		t.Fatalf("Storages = %+v, want only battery a", p.Storages)
 	}
-	if math.Abs(p.InitialSoCPct-20) > 1e-9 {
-		t.Fatalf("InitialSoCPct = %.3f, want 20.000 — the refusing battery's 95%% must not count", p.InitialSoCPct)
+	if math.Abs(p.InitialSoC-0.20) > 1e-9 {
+		t.Fatalf("InitialSoC = %.3f, want 0.200 — the refusing battery's 95%% must not count", p.InitialSoC)
 	}
 }
 
@@ -647,7 +860,7 @@ func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {
 	tel.DriverHealthMut("no-soc").RecordSuccess()
 	s := &Service{Tele: tel}
 
-	_, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+	_, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "no-soc", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
 		{Driver: "missing", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
 	})
@@ -720,52 +933,26 @@ func TestSelectPlannerPVWRadiationBlendClampsWildTwin(t *testing.T) {
 	}
 }
 
-// When forecast is radiation-backed but zero (night), the legacy cloud
-// path takes over — we don't want to emit 0.3*predicted for a slot
-// where the forecast correctly says "no sun".
-func TestSelectPlannerPVWRadiationZeroForecastIgnoresBlend(t *testing.T) {
-	// Twin predicts 300W at night (probably garbage); radiation says 0.
-	// With the guard, we fall through to cloud-only logic: forecast <
-	// 200 threshold → use twin. That's the original behaviour and
-	// matches "we have no sun, twin is the only signal left".
-	got := selectPlannerPVW(0, 300, true)
-	if got != 300 {
-		t.Errorf("zero-forecast with radiation flag should fall through, got %f", got)
+// A provider's explicit zero is a valid signal, including night.
+func TestSelectPlannerPVWRadiationZeroDoesNotInventPV(t *testing.T) {
+	if got := selectPlannerPVW(0, 300, true); got != 0 {
+		t.Fatalf("provider zero became %v W", got)
 	}
 }
 
-// T33 regression: open_meteo predicted 2002 W (solar_wm2=154, cloud=1%) for a
-// 13 kW site while the trained RLS twin (NowAnchor-corrected via live telemetry)
-// predicted 290 W — actual measured PV was ~290 W.  The old code produced
-// 0.7*2002 + 0.3*290 = 1488 W (5× actual).  With the forecast cap, the forecast
-// is limited to PlannerForecastCapRatio (3×) × twin before blending:
-//
-//	cappedForecast = 3 × 290 = 870
-//	result         = 0.7×870 + 0.3×290 = 696 W   (2.4× actual — still an overshoot
-//	                                                but far better than 5×)
-//
-// The residual over-prediction is expected and acceptable: the cap only activates
-// when the NWP cloud forecast was catastrophically wrong.  On a normal day (forecast
-// and twin agree within 3×) the cap is a no-op and accuracy is unchanged.
-func TestSelectPlannerPVWForecastCapActivatesOnWildForecast(t *testing.T) {
-	// Reproduce T33 inputs (scaled to round numbers).
-	forecast := 2002.0
-	twin := 290.0 // NowAnchor-corrected RLS twin value
-
-	got := selectPlannerPVW(forecast, twin, true)
-
-	// With the cap at PlannerForecastCapRatio=3: capped = 3*290 = 870.
-	cappedForecast := PlannerForecastCapRatio * twin
-	want := (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*twin
-	if math.Abs(got-want) > 0.5 {
-		t.Errorf("T33 forecast-cap: got %.1f, want %.1f (capped at %.0fx twin=%g)",
-			got, want, PlannerForecastCapRatio, twin)
+func TestSelectPlannerPVWContinuousAtLegacyThreshold(t *testing.T) {
+	before := selectPlannerPVW(6000, 50, true)
+	after := selectPlannerPVW(6000, 51, true)
+	if math.Abs((after-before)-PlannerRadiationWeight) > 1e-9 {
+		t.Fatalf("one watt changed blend %v -> %v", before, after)
 	}
+}
 
-	// Result must be materially less than the uncapped blend.
-	uncapped := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
-	if got >= uncapped {
-		t.Errorf("capped result %.1f should be less than uncapped %.1f", got, uncapped)
+func TestPlannerPVWeightRequiresBoundedTrust(t *testing.T) {
+	for _, tc := range []struct{ weight, want float64 }{{0, 6000}, {1, 50}, {-1, 6000}, {2, 50}, {math.NaN(), 6000}} {
+		if got := selectPlannerPVWithWeight(6000, 50, true, tc.weight); got != tc.want {
+			t.Fatalf("weight %v: got%v want%v", tc.weight, got, tc.want)
+		}
 	}
 }
 
@@ -814,7 +1001,7 @@ func TestOptimizeSelfConsumptionDischargesDespiteHighTerminal(t *testing.T) {
 		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 80
+	p.InitialSoC = 0.8
 	p.TerminalSoCPrice = 300 // mean import price — pre-strict this would have blocked discharge.
 
 	plan := Optimize(slots, p)
@@ -857,7 +1044,7 @@ func TestSlotDirectiveAt(t *testing.T) {
 					SlotLenMin:  slotLenMin,
 					SpotOre:     40,
 					BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
-					SoCPct:      45.5,
+					SoC:         0.455,
 					GridW:       -150, // plan expects 150 W export
 				},
 				{
@@ -866,7 +1053,7 @@ func TestSlotDirectiveAt(t *testing.T) {
 					PriceOre:    120, // later grid charge costs more than export earns now
 					BatteryW:    2000,
 					GridW:       1500,
-					SoCPct:      80,
+					SoC:         0.8,
 				},
 			},
 		},
@@ -888,8 +1075,8 @@ func TestSlotDirectiveAt(t *testing.T) {
 	if want := slotStart.Add(15 * time.Minute); !d.SlotEnd.Equal(want) {
 		t.Errorf("SlotEnd = %v, want %v", d.SlotEnd, want)
 	}
-	if d.SoCTargetPct != 45.5 {
-		t.Errorf("SoCTargetPct = %f, want 45.5", d.SoCTargetPct)
+	if d.SoCTarget != 0.455 {
+		t.Errorf("SoCTarget = %f, want 0.455", d.SoCTarget)
 	}
 	if d.Strategy != ModeArbitrage {
 		t.Errorf("Strategy = %v, want arbitrage", d.Strategy)
@@ -900,15 +1087,15 @@ func TestSlotDirectiveAt(t *testing.T) {
 	if d.GridW != -150 {
 		t.Errorf("GridW = %f, want −150 (must propagate from Action.GridW)", d.GridW)
 	}
-	if d.LivePVSurplusSoCCapPct != 49.25 {
-		t.Errorf("LivePVSurplusSoCCapPct = %f, want 49.25 from 375 Wh of later grid-funded charge", d.LivePVSurplusSoCCapPct)
+	if math.Abs(d.LivePVSurplusSoCCap-0.4925) > 1e-9 {
+		t.Errorf("LivePVSurplusSoCCap = %f, want 0.4925 from 375 Wh of later grid-funded charge", d.LivePVSurplusSoCCap)
 	}
 }
 
-func TestLivePVSurplusSoCCapPctEconomicGate(t *testing.T) {
+func TestLivePVSurplusSoCCapEconomicGate(t *testing.T) {
 	base := []Action{
-		{SpotOre: 50, BatteryW: 0, SoCPct: 40},
-		{SlotLenMin: 15, PriceOre: 120, BatteryW: 2000, GridW: 1500, SoCPct: 75},
+		{SpotOre: 50, BatteryW: 0, SoC: 0.4},
+		{SlotLenMin: 15, PriceOre: 120, BatteryW: 2000, GridW: 1500, SoC: 0.75},
 	}
 	tests := []struct {
 		name    string
@@ -916,7 +1103,7 @@ func TestLivePVSurplusSoCCapPctEconomicGate(t *testing.T) {
 		params  Params
 		wantCap float64
 	}{
-		{name: "cap follows later grid-funded energy", wantCap: 43.75},
+		{name: "cap follows later grid-funded energy", wantCap: 0.4375},
 		{name: "profitable current export is preserved", mutate: func(a []Action) {
 			a[0].SpotOre = 150
 		}, wantCap: 0},
@@ -937,7 +1124,7 @@ func TestLivePVSurplusSoCCapPctEconomicGate(t *testing.T) {
 			p := tc.params
 			p.CapacityWh = 10000
 			p.ChargeEfficiency = 1
-			if got := livePVSurplusSoCCapPct(actions, 0, p); got != tc.wantCap {
+			if got := livePVSurplusSoCCap(actions, 0, p); got != tc.wantCap {
 				t.Errorf("cap = %.1f, want %.1f", got, tc.wantCap)
 			}
 		})
@@ -1011,5 +1198,59 @@ func TestSlotDirectiveAtNilService(t *testing.T) {
 	var s *Service
 	if _, ok := s.SlotDirectiveAt(time.Now()); ok {
 		t.Error("nil Service returned ok=true")
+	}
+}
+
+func TestClampForecastPVHouseNameplate(t *testing.T) {
+	t.Parallel()
+	wild := 3544200.0
+	ok := 3200.0
+	bjorn := 2046200.0 // tooltip 2046.2 kW with rated 18960 W
+	rows := clampForecastPV([]state.ForecastPoint{
+		{PVWEstimated: &wild},
+		{PVWEstimated: &ok},
+		{PVWEstimated: &bjorn},
+	}, 18960)
+	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated != 18960 {
+		t.Fatalf("3544 kW row must cut to 18960 W, got %+v", rows[0].PVWEstimated)
+	}
+	if rows[1].PVWEstimated == nil || *rows[1].PVWEstimated != 3200 {
+		t.Fatalf("in-range estimate must stay, got %+v", rows[1].PVWEstimated)
+	}
+	if rows[2].PVWEstimated == nil || *rows[2].PVWEstimated != 18960 {
+		t.Fatalf("2046.2 kW row must cut to 18960 W, got %+v", rows[2].PVWEstimated)
+	}
+}
+
+func TestCapSlotsPVToNameplate(t *testing.T) {
+	t.Parallel()
+	slots := capSlotsPVToNameplate([]Slot{
+		{PVW: -2046200},
+		{PVW: -3200},
+		{PVW: 0},
+	}, 18960)
+	if slots[0].PVW != -18960 {
+		t.Fatalf("2 MW slot must cut to −18960 W, got %v", slots[0].PVW)
+	}
+	if slots[1].PVW != -3200 {
+		t.Fatalf("in-range generation must stay, got %v", slots[1].PVW)
+	}
+	if slots[2].PVW != 0 {
+		t.Fatalf("night slot must stay 0, got %v", slots[2].PVW)
+	}
+}
+
+func TestCapPlanPVToNameplate(t *testing.T) {
+	t.Parallel()
+	plan := &Plan{Actions: []Action{{PVW: -2046200}, {PVW: -4000}}}
+	capPlanPVToNameplate(plan, 18960)
+	if plan.PVNameplateW != 18960 {
+		t.Fatalf("plan must carry nameplate, got %v", plan.PVNameplateW)
+	}
+	if plan.Actions[0].PVW != -18960 {
+		t.Fatalf("published action must cut to −18960 W, got %v", plan.Actions[0].PVW)
+	}
+	if plan.Actions[1].PVW != -4000 {
+		t.Fatalf("in-range action must stay, got %v", plan.Actions[1].PVW)
 	}
 }

@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"math"
 	"testing"
 )
@@ -549,7 +550,7 @@ func TestDailyCostBreakdown_AcceptsWarmTierCadence(t *testing.T) {
 		t.Fatalf("save prices: %v", err)
 	}
 	for ts := int64(0); ts <= 60*60_000; ts += 15 * 60_000 {
-		if _, err := s.db.Exec(`INSERT INTO history_warm(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, ts, 1000, 1000); err != nil {
+		if _, err := s.history.Exec(`INSERT INTO history_warm(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, ts, 1000, 1000); err != nil {
 			t.Fatalf("seed warm history: %v", err)
 		}
 	}
@@ -633,7 +634,7 @@ func TestDailyCostBreakdown_DedupesHistoryTiersByResolution(t *testing.T) {
 		{"history_warm", 0, 2000}, {"history_warm", 5 * 60_000, 2000}, {"history_warm", 10 * 60_000, 2000},
 		{"history_cold", 0, 9000}, {"history_cold", 5 * 60_000, 9000}, {"history_cold", 10 * 60_000, 9000},
 	} {
-		if _, err := s.db.Exec(`INSERT INTO `+row.table+`(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, row.ts, row.w, row.w); err != nil {
+		if _, err := s.history.Exec(`INSERT INTO `+row.table+`(ts_ms, grid_w, load_w, json) VALUES (?, ?, ?, '{}')`, row.ts, row.w, row.w); err != nil {
 			t.Fatalf("seed %s: %v", row.table, err)
 		}
 	}
@@ -675,5 +676,22 @@ func TestDailyCostBreakdown_EmptyRange(t *testing.T) {
 	}
 	if b.PriceSlotCount != 0 {
 		t.Errorf("PriceSlotCount = %d, want 0", b.PriceSlotCount)
+	}
+}
+
+func TestImportWhIntervalsBucketsClockHours(t *testing.T) {
+	s := freshStore(t)
+	if err := s.BulkRecordHistory(constantCostHistory(0, 2*60*60_000, 2000, 0, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	wh, cov, err := s.ImportWhIntervals(context.Background(), [][2]int64{{0, 3_600_000}, {3_600_000, 7_200_000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wh) != 2 || !approxEq(wh[0], 2000, 0.01) || !approxEq(wh[1], 2000, 0.01) {
+		t.Fatalf("wh=%v, want 2000, 2000", wh)
+	}
+	if cov[0] != 3_600_000 || cov[1] != 3_600_000 {
+		t.Fatalf("covered=%v", cov)
 	}
 }

@@ -39,10 +39,10 @@ func TestScheduleEmpty(t *testing.T) {
 	if !(Schedule{}).Empty() {
 		t.Error("zero Schedule should be Empty")
 	}
-	if (Schedule{SoCPct: 50}).Empty() {
-		t.Error("Schedule with SoCPct set should not be Empty")
+	if (Schedule{SoC: 0.5}).Empty() {
+		t.Error("Schedule with SoC set should not be Empty")
 	}
-	if (Schedule{SurplusUnlockBatSoCPct: 80}).Empty() {
+	if (Schedule{SurplusUnlockBatSoC: 0.8}).Empty() {
 		t.Error("Schedule with bat-soc unlock should not be Empty")
 	}
 }
@@ -58,7 +58,7 @@ func TestManager_SetGetClearSchedule(t *testing.T) {
 		t.Fatal("unknown ID should return ok=false")
 	}
 
-	s := Schedule{SoCPct: 50, TimeOfDayMinUTC: 360, Recurring: true, SurplusUnlockBatSoCPct: 80}
+	s := Schedule{SoC: 0.5, TimeOfDayMinUTC: 360, Recurring: true, SurplusUnlockBatSoC: 0.8}
 	if !m.SetSchedule("garage", s) {
 		t.Fatal("SetSchedule should succeed for known ID")
 	}
@@ -81,15 +81,15 @@ func TestManager_SetGetClearSchedule(t *testing.T) {
 func TestManager_RollSchedules_RecurringPromotes(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
-	s := Schedule{SoCPct: 50, TimeOfDayMinUTC: 360, Recurring: true}
+	s := Schedule{SoC: 0.5, TimeOfDayMinUTC: 360, Recurring: true}
 	m.SetSchedule("garage", s)
 
 	now := time.Date(2026, 5, 11, 7, 0, 0, 0, time.UTC) // past 06:00
 	m.RollSchedules(now)
 
 	st, _ := m.State("garage")
-	if st.TargetSoCPct != 50 {
-		t.Errorf("expected target_soc_pct=50 after roll, got %v", st.TargetSoCPct)
+	if st.TargetSoC != 0.5 {
+		t.Errorf("expected target_soc_pct=50 after roll, got %v", st.TargetSoC)
 	}
 	want := time.Date(2026, 5, 12, 6, 0, 0, 0, time.UTC)
 	if !st.TargetTime.Equal(want) {
@@ -107,7 +107,7 @@ func TestManager_RollSchedules_RecurringPromotes(t *testing.T) {
 func TestManager_RollSchedules_NonRecurringSeedsOnce(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
-	s := Schedule{SoCPct: 50, TimeOfDayMinUTC: 360, Recurring: false}
+	s := Schedule{SoC: 0.5, TimeOfDayMinUTC: 360, Recurring: false}
 	m.SetSchedule("garage", s)
 
 	// Now is 07:00; today's 06:00 has already passed → seed for tomorrow.
@@ -119,8 +119,8 @@ func TestManager_RollSchedules_NonRecurringSeedsOnce(t *testing.T) {
 		t.Errorf("non-recurring first seed: target_time = %v, want %v",
 			st.TargetTime, want)
 	}
-	if st.TargetSoCPct != 50 {
-		t.Errorf("non-recurring first seed: target_soc_pct = %v, want 50", st.TargetSoCPct)
+	if st.TargetSoC != 0.5 {
+		t.Errorf("non-recurring first seed: target_soc_pct = %v, want 50", st.TargetSoC)
 	}
 
 	// After the deadline passes, RollSchedules must NOT re-seed —
@@ -139,15 +139,15 @@ func TestManager_RollSchedules_RecurringSeedsFirstTarget(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
 	// No SetTarget called yet — schedule alone should populate it.
-	s := Schedule{SoCPct: 50, TimeOfDayMinUTC: 360, Recurring: true}
+	s := Schedule{SoC: 0.5, TimeOfDayMinUTC: 360, Recurring: true}
 	m.SetSchedule("garage", s)
 
 	now := time.Date(2026, 5, 11, 7, 0, 0, 0, time.UTC)
 	m.RollSchedules(now)
 
 	st, _ := m.State("garage")
-	if st.TargetSoCPct != 50 {
-		t.Errorf("expected initial target_soc_pct=50 from schedule, got %v", st.TargetSoCPct)
+	if st.TargetSoC != 0.5 {
+		t.Errorf("expected initial target_soc_pct=50 from schedule, got %v", st.TargetSoC)
 	}
 	want := time.Date(2026, 5, 12, 6, 0, 0, 0, time.UTC)
 	if !st.TargetTime.Equal(want) {
@@ -158,7 +158,7 @@ func TestManager_RollSchedules_RecurringSeedsFirstTarget(t *testing.T) {
 func TestManager_HydrateSchedules(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}, {ID: "street"}})
-	want := Schedule{SoCPct: 80, TimeOfDayMinUTC: 420, Recurring: true, SurplusUnlockBatSoCPct: 75}
+	want := Schedule{SoC: 0.8, TimeOfDayMinUTC: 420, Recurring: true, SurplusUnlockBatSoC: 0.75}
 	m.HydrateSchedules(func(id string) (Schedule, bool) {
 		if id == "garage" {
 			return want, true
@@ -188,10 +188,10 @@ func TestManager_SetScheduleOverridesStaleTargetTime_Recurring(t *testing.T) {
 	// Operator (or stale state.db) leaves a one-shot target at 07:00
 	// tomorrow morning.
 	staleTarget := time.Date(2026, 5, 13, 5, 0, 0, 0, time.UTC)
-	m.SetTarget("garage", 100, staleTarget)
+	m.SetTarget("garage", 1, staleTarget)
 	// Operator now saves a recurring schedule for 17:00 local CEST
 	// (15:00 UTC = 900 min).
-	m.SetSchedule("garage", Schedule{SoCPct: 100, TimeOfDayMinUTC: 900, Recurring: true})
+	m.SetSchedule("garage", Schedule{SoC: 1, TimeOfDayMinUTC: 900, Recurring: true})
 	m.RollSchedules(now)
 	st, _ := m.State("garage")
 	want := time.Date(2026, 5, 13, 15, 0, 0, 0, time.UTC)
@@ -206,8 +206,8 @@ func TestManager_SetScheduleOverridesStaleTargetTime_NonRecurring(t *testing.T) 
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
 	now := time.Date(2026, 5, 12, 20, 0, 0, 0, time.UTC)
 	staleTarget := time.Date(2026, 5, 13, 5, 0, 0, 0, time.UTC)
-	m.SetTarget("garage", 100, staleTarget)
-	m.SetSchedule("garage", Schedule{SoCPct: 100, TimeOfDayMinUTC: 900, Recurring: false})
+	m.SetTarget("garage", 1, staleTarget)
+	m.SetSchedule("garage", Schedule{SoC: 1, TimeOfDayMinUTC: 900, Recurring: false})
 	m.RollSchedules(now)
 	st, _ := m.State("garage")
 	want := time.Date(2026, 5, 13, 15, 0, 0, 0, time.UTC)
@@ -220,7 +220,7 @@ func TestManager_SetScheduleOverridesStaleTargetTime_NonRecurring(t *testing.T) 
 func TestManager_LoadPreservesSchedule(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
-	s := Schedule{SoCPct: 50, TimeOfDayMinUTC: 360, Recurring: true}
+	s := Schedule{SoC: 0.5, TimeOfDayMinUTC: 360, Recurring: true}
 	m.SetSchedule("garage", s)
 	// Re-load (config hot reload): same id should keep its schedule.
 	m.Load([]Config{{ID: "garage", DriverName: "easee", MaxChargeW: 11000}})

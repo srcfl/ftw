@@ -3,8 +3,8 @@
 FTW is a local-first home energy management system. Its architecture has
 three explicit modules: **core**, **drivers**, and **optimizer**. Core is the
 safety boundary. Drivers translate hardware protocols. The optimizer proposes
-plans. A failure or upgrade outside core must never stop local measurement or
-make dispatch unsafe.
+plans and supplies primary forecasts. A failure or upgrade outside core must
+never stop local measurement or make dispatch unsafe.
 
 ## Module boundaries
 
@@ -12,11 +12,11 @@ make dispatch unsafe.
 |---|---|---|---|
 | Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
 | Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Optional Python service/process | Solve the long-horizon mathematical plan |
+| Optimizer | [`optimizer`](../optimizer), contracts in [`go/internal/mpc`](../go/internal/mpc) and [`go/internal/energyforecast`](../go/internal/energyforecast) | Compiled Energyplan worker | Solve the long-horizon plan and supply primary PV and household-load forecasts |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
-integrations such as Home Assistant, CalDAV, notifications and Nova attach at
+integrations such as Home Assistant, notifications and Nova attach at
 core's API, state or telemetry boundaries; they do not own dispatch safety.
 
 A future module belongs outside core only when it has:
@@ -53,17 +53,44 @@ device
 Lua driver                 optional optimizer
   ↕ site-convention data       ↓ proposed trajectory
 telemetry → control/planner → core validation and safety → driver command
-     ↘ SQLite/history       ↘ API/UI and integrations
+     ↘ DuckDB history       ↘ API/UI and integrations
 ```
 
-The in-memory telemetry store owns latest readings and driver health. SQLite
-owns durable configuration state, history, forecasts, prices, device identity
-and learned model state. Database access stays in
+The in-memory telemetry store owns latest readings and driver health. DuckDB
+owns time-series samples, site history and the energy ledger. SQLite owns
+configuration, forecasts, prices, device identity and learned model state.
+Database access stays in
 [`go/internal/state`](../go/internal/state).
 
 The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
+
+Core embeds DuckDB in the Go process. A bounded queue copies each telemetry
+tick before the writer commits its history, samples, energy ledger and retry
+receipt in one transaction. Admission to memory is separate from durable
+commit. A full queue returns a collection error; health reports pending,
+committed and rejected ticks. Queries use separate connections to the same
+database instance. They do not hold the writer's lock.
+The serial writer retires a previous retry receipt only after it has observed
+that commit succeed. The current receipt survives an uncertain commit and a
+retry; receipts do not grow with every tick for the lifetime of the box.
+
+On first boot, Core imports a fixed SQLite snapshot and the existing daily
+sample Parquet files. It checks row counts and values before it accepts the
+new history generation. Samples keep their first value for a key; history
+snapshots keep their last value. Signed zero becomes zero; all other finite
+floating-point values keep their precision. Invalid values stop the import.
+Original files remain available as migration evidence. Live reads and writes
+use DuckDB after migration. The [FTWDB experiment is retired](ftwdb-shadow.md).
+
+State schema 3 requires a full backup on upgrade. Full backups export one
+DuckDB read snapshot into portable SQLite, with counts and hashes checked.
+They omit imported sample Parquet files to prevent duplicate reads by an
+older Core. A config-only snapshot cannot restore a missing history database.
+To return to an older Core, stop Core and restore a verified full backup with
+its matching version. Changing only the image would use frozen SQLite history
+and is refused.
 
 ## Drivers
 
@@ -96,18 +123,49 @@ artifact, while activation remains explicit and atomic. See
 
 ## Optimizer
 
-The Python/CVXPY optimizer is optional and separately deployable. Core sends a
-versioned planning request and accepts only a complete, valid trajectory. The
-optimizer does not read hardware or issue commands.
+Beta releases use the bundled Energyplan worker when `planner.engine` is unset
+on a supported host. It solves Core's downside PV forecast. Core validates its
+plan before publishing it, then runs a bounded Core DP shadow on the same input.
+A worker error, timeout or rejected plan invokes Core DP fallback. Core validates
+fallback plans too; a failed validation leaves the prior plan in place.
 
-If the socket/process fails, times out or returns invalid output, core falls
-back to its Go planner. Optimizer deployment and dependency churn therefore do
-not enlarge the safety-critical runtime.
+`planner.engine: core` or `energyplan` selects an engine explicitly.
+Stable and development builds default to Core. Older `engine: python` values
+migrate to Energyplan; retired optimizer settings are ignored and omitted
+when the configuration is saved.
+Energyplan ships as compiled binaries with its own license; source and builds
+stay in the private Energyplan repository. It updates with the Core image.
+The optimizer never reads hardware or issues commands, so its deployment and
+dependency churn do not enlarge the safety-critical runtime.
+
+The same worker also supplies the primary PV and household-load forecast through
+a separate versioned contract. At the start of each replan, Core freezes the
+legacy forecast, weather, occupancy and saved model state. It calls the forecast
+worker once under a deadline, outside control and dispatch locks. Core accepts
+PV and load independently for each covered interval. If either signal is
+missing, late, partial or invalid, Core retains the matching legacy value. The
+resulting `champion` can therefore contain Energyplan PV with legacy load, or
+the reverse. `legacy_shadow` keeps both legacy signals from the same frozen
+capture for a fair later comparison.
+
+Complete qualified 15-minute observations update the local models outside
+dispatch. SQLite stores the latest Energyplan state under
+`forecast/energyplan_state_v1`; an update becomes visible only after its full
+state has been saved, and startup restores that saved state. The learning
+revision binds state to forecast inputs and stable hardware identities. A
+binding or input change starts fresh learning, while a compatible program
+upgrade can reuse the state. Issued forecasts use a stricter revision that also
+includes the Core build, worker bytes and pipeline policy.
+
+Core keeps issued forecasts, frozen inputs, model-state references and qualified
+truth in a bounded local archive. The read-only `ftw-forecast-evaluate` source
+command defaults to matched `champion` versus `legacy_shadow` results from the
+same issue. It does not treat missing or censored truth as evidence.
 
 ## Versioning a module contract
 
-Drivers and the optimizer release on their own schedules, so core cannot assume
-the version on the other side of either contract. Both use the same rule.
+Drivers release independently. Energyplan ships with Core, but Core still
+checks the worker contract before accepting plans.
 
 Each side declares the **window** of contract versions it speaks — core in
 [`go/internal/components`](../go/internal/components) and
@@ -150,10 +208,35 @@ schema. The handlers registered in
 [`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
-Some startup bindings cannot be hot-reloaded, including state paths, API
-listener and selected integration transports. Normal device and control
-configuration is reloaded through
-[`go/internal/configreload`](../go/internal/configreload).
+Core imports YAML into a versioned document in SQLite once. The seed file then
+holds `config_database`, a path relative to that file. Settings saves commit
+the document and credential rows together with SQLite `synchronous=FULL`
+before applying them through [`go/internal/configreload`](../go/internal/configreload).
+The file watcher has been removed; editing the seed does not change live settings.
+The first import keeps older YAML fields so a failed update can return to its
+previous Core image. If that older Core later saves settings, it removes the
+unknown database locator. The next upgrade detects that changed source and
+imports the newer save. An interrupted import with unchanged source bytes
+reuses the committed document.
+An unreadable settings database stops startup instead of restoring old seed values.
+
+The first import needs write access to the seed file so Core can record which
+database owns it. For a read-only mount, copy the seed into the data directory
+and point `-config` there before upgrading. Keep a full backup before migration.
+Use Settings for later edits. Moving the state database is an offline operation;
+API listener and selected integration changes still need a restart.
+
+State schema 2 marks this settings migration, so an update from older Core
+versions takes a full backup first. To return to a Core that reads YAML, stop
+Core and restore a full backup with its matching Core version. An image-only
+downgrade to state schema 1 is refused; the import seed can be older than the
+settings saved in SQLite.
+
+
+Document revisions only prevent stale Settings forms from overwriting a newer
+save. They do not change forecast learning revisions, hardware identity, model
+weights or the exact bytes of stored forecast snapshots. Backups export YAML
+from the same SQLite snapshot so older Core versions also read current settings.
 
 ## Remote access boundary
 
@@ -456,8 +539,8 @@ There are two channels:
 - `beta`: every new release candidate, used for real-site validation;
 - `stable`: promotion of the exact commit already published and tested as beta.
 
-Core, Optimizer and signed Drivers may release independently, but all use the
-same beta-to-stable progression. Core and its privileged updater remain a
+Core includes Energyplan. Core and signed Drivers use the same
+beta-to-stable progression. Core and its privileged updater remain a
 paired control plane; optional components negotiate compatibility with Core.
 There is no edge channel. See [self-update.md](self-update.md).
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // ErrNoCapability is returned by host functions the driver wasn't granted.
@@ -168,12 +169,12 @@ type HostEnv struct {
 	// in driver_init; read once by the registry's run loop.
 	WarmupS float64
 
-	// PersistSecret, when non-nil, lets a driver durably write a config
-	// secret (e.g. a rotated OAuth refresh_token) back into its own
-	// config block so it survives a restart. nil → host.persist_secret
+	// PersistSecret, when non-nil, lets a driver write a secret (e.g. a
+	// rotated OAuth refresh_token) into its own persisted KV namespace.
+	// nil → host.persist_secret
 	// returns ok=false + an error. Wired by the Registry to a per-driver
-	// closure (see registry.go SecretPersister). Keep the value small:
-	// it is round-tripped through config.yaml as a plain string.
+	// closure (see registry.go SecretPersister). The host limits each value
+	// to 1 MiB and checks signed secret-key grants for managed drivers.
 	PersistSecret func(key, value string) error
 	writePhase    string
 	writeDeadline time.Time
@@ -303,6 +304,9 @@ func (h *HostEnv) allowAuthPost(rawURL string) bool {
 func (h *HostEnv) allowWrite(permission string) error {
 	if h.RuntimePolicy == nil {
 		return nil
+	}
+	if h.RuntimePolicy.IsReadOnly() {
+		return fmt.Errorf("%s: read-only driver cannot write", permission)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -644,6 +648,13 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 			soc = env.VehicleSoCFract
 		}
 	}
+	// Driver door: Tesla battery_level and similar vendor percents arrive
+	// as 0–100 on DerVehicle. Battery and V2X already emit 0–1 and are
+	// rejected if they do not. Convert only vehicles, before ValidateReading.
+	if t == telemetry.DerVehicle && soc != nil {
+		f := units.FractionFromLegacyPercent(*soc)
+		soc = &f
+	}
 	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
 		return fmt.Errorf("emit_telemetry: %w", err)
 	}
@@ -684,10 +695,13 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 // Driver authors call this for anything beyond the standard pv/battery/meter
 // shape — temperatures, voltages, frequencies, MPPT currents, etc. unit is an
 // optional display unit (e.g. "°C", "Hz") used by the UI to group + label.
+// Vendor kW/kWh are folded to W/Wh here so a pinned Lua driver that still
+// speaks kilo-units cannot store the wrong scale.
 func (h *HostEnv) emitMetric(name string, value float64, unit, register, title string) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
 	}
+	value, unit = units.CanonicalPowerEnergy(value, unit)
 	if h.bufferPollMetric(pollMetric{name: name, value: value, unit: unit, register: register, title: title}) {
 		return nil
 	}

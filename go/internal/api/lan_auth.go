@@ -130,9 +130,20 @@ func setLANSessionCookie(w http.ResponseWriter, token string, maxAge int) {
 	})
 }
 
+// matchLANSecret reports whether secret is the house password without
+// touching the guess limiter. Authenticate uses this when the Bearer was
+// already compared to FTW_API_TOKEN; a token miss is not a house guess.
+func matchLANSecret(verify func(string) bool, secret string) bool {
+	return verify != nil && verify(secret)
+}
+
 // admitLANSecret is the process-global guess limiter for the house password.
 // Five failed VerifyLANSecret calls lock every further attempt, including
 // the right password, for 30s. The clock is swapped in tests.
+//
+// Call this for an explicit house-password guess (login, or a LAN Bearer
+// when no API token is configured). Do not call it for a Bearer that was
+// compared to FTW_API_TOKEN.
 func admitLANSecret(verify func(string) bool, secret string) bool {
 	lanGuessMu.Lock()
 	defer lanGuessMu.Unlock()
@@ -315,6 +326,8 @@ type lanAuthPasswordRequest struct {
 }
 
 func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	if s.deps.State == nil || s.deps.Cfg == nil || s.deps.CfgMu == nil || s.deps.SaveConfig == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config store unavailable"})
 		return
@@ -329,8 +342,24 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.deps.CfgMu.RLock()
+	cfgCopy := *s.deps.Cfg
+	s.deps.CfgMu.RUnlock()
 	enabled := *req.Enabled
 	if enabled {
+		s.deps.CfgMu.RLock()
+		currentlyOn := s.deps.Cfg.API.LANAuth
+		s.deps.CfgMu.RUnlock()
+		// While the lock is off every LAN peer is an owner. First enable
+		// from the LAN is how a visitor sets their own password and
+		// locks Settings. The box itself (loopback) is the only door
+		// that may turn the lock on.
+		if !currentlyOn && !isLoopbackClient(r.RemoteAddr) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "enable the house password from loopback inside the process. A published Docker port is not loopback — on Docker Desktop use docker compose -f docker-compose.macos.yml exec ftw, then curl http://127.0.0.1:8080",
+			})
+			return
+		}
 		already := lanPasswordConfigured(s.deps.State)
 		switch {
 		case req.Password == "":
@@ -349,29 +378,30 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not hash password"})
 				return
 			}
-			if err := s.deps.State.SaveConfig(lanAuthPasswordKey, encoded); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed: " + err.Error()})
-				return
-			}
-			dropAllLANSessions()
+			cfgCopy.LANPasswordHash = encoded
 		}
 	}
 
-	s.deps.CfgMu.Lock()
-	s.deps.Cfg.API.LANAuth = enabled
-	cfgCopy := *s.deps.Cfg
-	s.deps.CfgMu.Unlock()
+	if enabled && req.Password == "" {
+		var err error
+		cfgCopy.LANPasswordHash, _, err = s.deps.State.ConfigValue(lanAuthPasswordKey)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": "read saved password: " + err.Error()})
+			return
+		}
+	}
+	cfgCopy.API.LANAuth = enabled
+	if !enabled {
+		cfgCopy.LANPasswordHash = ""
+	}
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &cfgCopy); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed: " + err.Error()})
 		return
 	}
-	if !enabled {
-		dropAllLANSessions()
-		if err := s.deps.State.SaveConfig(lanAuthPasswordKey, ""); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed: " + err.Error()})
-			return
-		}
-	}
+	s.deps.CfgMu.Lock()
+	*s.deps.Cfg = cfgCopy
+	s.deps.CfgMu.Unlock()
+	dropAllLANSessions()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":     "ok",

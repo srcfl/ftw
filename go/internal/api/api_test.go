@@ -296,6 +296,59 @@ func TestHandleStatusKeepsFaultedSiteMeterReading(t *testing.T) {
 	}
 }
 
+func TestHandleStatusOmitsWattsWhenSiteMeterIsOffline(t *testing.T) {
+	tel := telemetry.NewStore()
+	ctrl := &control.State{SiteMeterDriver: "ferroamp"}
+
+	tel.Update("ferroamp", telemetry.DerMeter, 2400, nil, nil)
+	soc := 0.55
+	tel.Update("ferroamp", telemetry.DerBattery, -500, &soc, nil)
+	tel.Update("ferroamp", telemetry.DerPV, -1800, nil, nil)
+	tel.RecordDriverSuccess("ferroamp")
+	tel.DriverHealthMut("ferroamp").SetOffline()
+
+	srv := New(&Deps{
+		Tel:        tel,
+		Ctrl:       ctrl,
+		CtrlMu:     &sync.Mutex{},
+		CapMu:      &sync.RWMutex{},
+		Capacities: map[string]float64{"ferroamp": 10_000},
+		CfgMu:      &sync.RWMutex{},
+		Cfg:        &config.Config{},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["grid_w"]; !ok {
+		t.Fatal("grid_w key missing; want explicit JSON null, not an omitted field")
+	}
+	if raw["grid_w"] != nil {
+		t.Fatalf("grid_w = %v, want null so the UI cannot draw 0 W balanced", raw["grid_w"])
+	}
+	if raw["load_w"] != nil {
+		t.Fatalf("load_w = %v, want null", raw["load_w"])
+	}
+	drivers, _ := raw["drivers"].(map[string]any)
+	ferroamp, _ := drivers["ferroamp"].(map[string]any)
+	if ferroamp["status"] != "offline" {
+		t.Fatalf("driver status = %v, want offline", ferroamp["status"])
+	}
+	if ferroamp["pv_w"] != -1800.0 {
+		t.Fatalf("pv_w = %v, want last-known -1800 so the UI can keep a solar node", ferroamp["pv_w"])
+	}
+	if ferroamp["bat_w"] != -500.0 {
+		t.Fatalf("bat_w = %v, want last-known -500 so the UI can keep a battery node", ferroamp["bat_w"])
+	}
+}
+
 func TestHandleV2XPolicyReturnsLiveEnvelope(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("meter", telemetry.DerMeter, 1500, nil, nil)
@@ -319,7 +372,7 @@ func TestHandleV2XPolicyReturnsLiveEnvelope(t *testing.T) {
 		Cfg: &config.Config{V2X: &config.V2XPolicy{
 			Enabled:             true,
 			DriverName:          "dc2",
-			MinReserveSoCPct:    20,
+			MinReserveSoC:       0.20,
 			MaxChargeW:          6000,
 			MaxDischargeW:       4000,
 			ExportAllowed:       false,
@@ -459,7 +512,7 @@ func TestLoadResearchDumpExportsHouseLoadWithEVSplit(t *testing.T) {
 		PVW:    -500,
 		BatW:   0,
 		LoadW:  1800, // legacy whole-site load: grid - bat - pv
-		BatSoC: 55,
+		BatSoC: 0.55,
 		JSON:   js,
 	}); err != nil {
 		t.Fatalf("record history: %v", err)

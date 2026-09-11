@@ -60,11 +60,11 @@ func TestSurplusActive_ScheduleOverridesRuntimeClamp(t *testing.T) {
 	if !c.surplusActive(cfg, Schedule{}) {
 		t.Fatal("grid-deferred + no schedule should be surplus-active")
 	}
-	if c.surplusActive(cfg, Schedule{SoCPct: 50}) {
+	if c.surplusActive(cfg, Schedule{SoC: 0.5}) {
 		t.Error("active schedule (surplus_only off) must disable the runtime surplus clamp")
 	}
 	cfg.SurplusOnly = true
-	if !c.surplusActive(cfg, Schedule{SoCPct: 50}) {
+	if !c.surplusActive(cfg, Schedule{SoC: 0.5}) {
 		t.Error("explicit SurplusOnly config must stay surplus-active even with a schedule")
 	}
 }

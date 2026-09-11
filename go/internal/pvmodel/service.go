@@ -2,6 +2,7 @@ package pvmodel
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -15,7 +16,7 @@ import (
 // The `_utc` suffix invalidates pre-UTC-coercion models: learned β
 // coefficients were fitted against local-zone hour-of-day harmonic
 // features and would silently misalign if restored under the current
-// UTC-based Features(). Fresh init + ~50 samples retrains.
+// UTC-based Features(). Fresh state must earn new coverage.
 const stateKey = "pvmodel/state_utc"
 
 // legacyFeatureHash is the fingerprint of the feature space in force when the
@@ -51,10 +52,15 @@ type Service struct {
 	Cloud          CloudFunc
 	SampleInterval time.Duration
 	PersistEvery   int64 // samples between SQLite writes
+	// CurtailmentActive must include commands awaiting release confirmation.
+	// Curtailed production is not available PV and cannot train the model.
+	CurtailmentActive func() bool
+	forecastOptions   telemetry.ForecastOptions
 
-	mu        sync.RWMutex
-	model     *Model
-	persistMu sync.Mutex // serialises SQLite writes so a stale persist can't clobber a Reset
+	mu         sync.RWMutex
+	model      *Model
+	generation uint64     // invalidates samples read before a site reset
+	persistMu  sync.Mutex // serialises SQLite writes so a stale persist can't clobber a Reset
 
 	// Residuals captures (predicted_at_t, actual_at_t) pairs to compute a
 	// short-horizon additive correction the MPC applies on top of the
@@ -69,6 +75,9 @@ type Service struct {
 // NewService constructs the service. If model state exists in the DB,
 // it's restored; otherwise a fresh prior is initialized using ratedW.
 func NewService(st *state.Store, tel *telemetry.Store, cs ClearSkyFunc, cf CloudFunc, ratedW float64) *Service {
+	if !finite(ratedW) || ratedW < 0 || ratedW > maxLearningW {
+		ratedW = 0
+	}
 	s := &Service{
 		Store:          st,
 		Tele:           tel,
@@ -92,8 +101,7 @@ func NewService(st *state.Store, tel *telemetry.Store, cs ClearSkyFunc, cf Cloud
 			}
 			if reason != "" {
 				// Info, not Warn: a cold start is the designed response to
-				// state we cannot vouch for, and ~50 daylight samples
-				// rebuild it. Both hashes go in the line so an operator can
+				// state we cannot vouch for. Both hashes let an operator
 				// tell "the features changed under me" from "the file is
 				// damaged" without a debugger.
 				slog.Info("pvmodel: discarding learned state, cold starting",
@@ -129,14 +137,10 @@ func (s *Service) Model() Model {
 	return *s.model
 }
 
-// SetRated updates the array nameplate (W) used by the model's output
-// envelope, input outlier guards, and cold-start prior. Learned RLS
-// coefficients are NOT reset — the twin has already adapted to reality
-// so the learned fit stays more accurate than a fresh prior. Call
-// `POST /api/pvmodel/reset` separately if the array itself changed
-// and you want the model to re-seed.
+// SetRated updates the scale prior without resetting the learned coefficients.
+// It is a soft prior; only SetACLimit may impose a hardware boundary.
 func (s *Service) SetRated(w float64) {
-	if s == nil || w <= 0 {
+	if s == nil || !finite(w) || w < 0 || w > maxLearningW {
 		return
 	}
 	s.mu.Lock()
@@ -146,6 +150,50 @@ func (s *Service) SetRated(w float64) {
 	if prev != w {
 		slog.Info("pvmodel rated updated", "old_w", prev, "new_w", w)
 	}
+}
+
+// SetACLimit sets a verified inverter AC limit. Zero means unknown.
+// A configured DC nameplate or inferred rating must never be passed here.
+func (s *Service) SetACLimit(w float64) {
+	if s == nil || !finite(w) || w < 0 || w > maxLearningW {
+		return
+	}
+	s.mu.Lock()
+	s.model.ACLimitW = w
+	s.mu.Unlock()
+}
+
+func (s *Service) SetForecastOptions(options telemetry.ForecastOptions) {
+	if s == nil {
+		return
+	}
+	options.ExpectedFlows = append([]telemetry.ForecastFlow(nil), options.ExpectedFlows...)
+	s.mu.Lock()
+	s.forecastOptions = options
+	s.generation++ // an in-flight sample may have used the previous identity gate
+	s.mu.Unlock()
+}
+
+// Reconfigure replaces the site function and binds the model to its config
+// revision in the same persisted JSON. A changed or previously absent revision
+// clears learned state. Without a revision it always resets. A sampler that
+// read old inputs cannot train the new model. Set any new rating first.
+func (s *Service) Reconfigure(clearSky ClearSkyFunc, revision ...string) {
+	if s == nil || clearSky == nil {
+		return
+	}
+	s.mu.Lock()
+	s.ClearSky = clearSky
+	if len(revision) == 0 || revision[0] == "" || revision[0] != s.model.ConfigRevision {
+		s.resetLocked()
+	} else {
+		s.generation++
+	}
+	if len(revision) > 0 {
+		s.model.ConfigRevision = revision[0]
+	}
+	s.mu.Unlock()
+	s.persist()
 }
 
 // PredictStructural returns the RLS-driven prediction WITHOUT the
@@ -159,10 +207,13 @@ func (s *Service) PredictStructural(t time.Time, cloudPct float64) float64 {
 	if s == nil {
 		return 0
 	}
-	cs := s.ClearSky(t)
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.model.Predict(cs, cloudPct, t)
+	clearSky, m := s.ClearSky, *s.model
+	s.mu.RUnlock()
+	if clearSky == nil {
+		return 0
+	}
+	return m.Predict(clearSky(t), cloudPct, t)
 }
 
 // Predict is the main integration point for the UI + dispatch live-reading
@@ -178,17 +229,19 @@ func (s *Service) PredictStructural(t time.Time, cloudPct float64) float64 {
 // (weather shifts blur the correction). See applyNowAnchor for the math.
 //
 // This guards against systematically-wrong forecasts (met.no predicts
-// cloudy, sky is clear) that the RLS would need ~50 samples to learn
-// away — the twin should react to reality *now*, not in an hour.
+// cloudy, sky is clear) while the structural model learns more slowly.
 func (s *Service) Predict(t time.Time, cloudPct float64) float64 {
 	if s == nil {
 		return 0
 	}
-	cs := s.ClearSky(t)
 	s.mu.RLock()
-	basePred := s.model.Predict(cs, cloudPct, t)
-	rated := s.model.RatedW
+	clearSky, m := s.ClearSky, *s.model
 	s.mu.RUnlock()
+	if clearSky == nil {
+		return 0
+	}
+	basePred := m.Predict(clearSky(t), cloudPct, t)
+	rated := m.ACLimitW
 
 	actualNow, ok := s.liveActualPV()
 	if !ok {
@@ -201,10 +254,7 @@ func (s *Service) Predict(t time.Time, cloudPct float64) float64 {
 			cloudNow = v
 		}
 	}
-	csNow := s.ClearSky(now)
-	s.mu.RLock()
-	priorNow := s.model.Predict(csNow, cloudNow, now)
-	s.mu.RUnlock()
+	priorNow := m.Predict(clearSky(now), cloudNow, now)
 
 	anchored := applyNowAnchor(basePred, priorNow, actualNow, t.Sub(now))
 	if rated > 0 && anchored > rated {
@@ -237,10 +287,10 @@ const NowAnchorClamp = 5.0
 // caller stays simple and tests can exercise every edge case without
 // wiring a telemetry store.
 //
-//   basePred : model.Predict(t, cloudPct_t)           — in W
-//   priorNow : model.Predict(now, cloudPct_now)       — in W
-//   actualNow: summed live PV telemetry right now     — in W (≥ 0)
-//   dt       : t − now (signed)
+//	basePred : model.Predict(t, cloudPct_t)           — in W
+//	priorNow : model.Predict(now, cloudPct_now)       — in W
+//	actualNow: summed live PV telemetry right now     — in W (≥ 0)
+//	dt       : t − now (signed)
 //
 // Rules:
 //   - dt > NowAnchorHorizon → no correction (return basePred).
@@ -288,26 +338,26 @@ func applyNowAnchor(basePred, priorNow, actualNow float64, dt time.Duration) flo
 	return anchored
 }
 
-// liveActualPV sums SmoothedW across every PV reading, flipping site-
-// sign to produce a non-negative generation value. Mirrors sample().
-// Returns (value, false) when nothing's reporting — so Predict falls
-// back to pure-model behavior instead of pretending we saw 0 W.
+// liveActualPV returns fresh raw generation across all expected PV flows.
+// Healthy zero is valid; missing, stale and actively curtailed data are not.
 func (s *Service) liveActualPV() (float64, bool) {
-	if s.Tele == nil {
-		return 0, false
+	return s.liveActualPVAt(time.Now())
+}
+
+func (s *Service) liveActualPVAt(now time.Time) (float64, bool) {
+	pvW, _, valid := s.livePVMeasurementAt(now)
+	return pvW, valid
+}
+
+func (s *Service) livePVMeasurementAt(now time.Time) (float64, time.Time, bool) {
+	if s.Tele == nil || (s.CurtailmentActive != nil && s.CurtailmentActive()) {
+		return 0, time.Time{}, false
 	}
-	var pvW float64
-	count := 0
-	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
-		if r.SmoothedW < 0 {
-			pvW += -r.SmoothedW
-			count++
-		}
-	}
-	if count == 0 || pvW < 1 {
-		return 0, false
-	}
-	return pvW, true
+	s.mu.RLock()
+	options := s.forecastOptions
+	s.mu.RUnlock()
+	m := s.Tele.ForecastMeasurement(now, "", options)
+	return -m.PVW, m.PVEarliest, m.PVValid
 }
 
 // PredictNow returns the twin's prediction for right now using the
@@ -367,31 +417,34 @@ func (s *Service) loop(ctx context.Context) {
 // sample reads current PV telemetry, pulls current clear-sky + cloud,
 // and runs one RLS update.
 func (s *Service) sample() {
-	now := time.Now()
-	cs := s.ClearSky(now)
-	if cs < 50 {
+	s.sampleAt(time.Now())
+}
+
+func (s *Service) sampleAt(now time.Time) {
+	s.mu.RLock()
+	clearSky, generation, learningStartedMS := s.ClearSky, s.generation, s.model.LearningStartedMS
+	s.mu.RUnlock()
+	if clearSky == nil {
+		return
+	}
+	cs := clearSky(now)
+	if !finite(cs) || cs < 50 || cs > 2000 {
 		slog.Debug("pvmodel: skip (night)", "cs", cs)
 		return // night / near-night — no signal
 	}
-	cloud := 50.0 // neutral fallback if no forecast row
+	cloud, cloudOK := 0.0, false
 	if s.Cloud != nil {
-		if v, ok := s.Cloud(now); ok {
-			cloud = v
+		if v, ok := s.Cloud(now); ok && finite(v) && v >= 0 && v <= 100 {
+			cloud, cloudOK = v, true
 		}
 	}
 	// Aggregate PV across all drivers. PV telemetry is stored as
 	// site-sign (negative = generating), so flip to positive.
-	var pvW float64
-	readings := s.Tele.ReadingsByType(telemetry.DerPV)
-	for _, r := range readings {
-		if r.SmoothedW < 0 {
-			pvW += -r.SmoothedW
-		}
+	pvW, earliest, valid := s.livePVMeasurementAt(now)
+	if !valid {
+		return
 	}
-	// Guard: if all drivers report 0 when there's meaningful clear-sky,
-	// that's likely a driver outage — skip so we don't learn "0 output".
-	if pvW < 1 {
-		slog.Debug("pvmodel: skip (no PV reading)", "readings", len(readings), "cs", cs)
+	if learningStartedMS > 0 && earliest.UnixMilli() < learningStartedMS {
 		return
 	}
 
@@ -403,41 +456,54 @@ func (s *Service) sample() {
 	// is correcting that structural output. The Residuals buffer
 	// itself applies the gates / fade / variance check.
 	s.mu.Lock()
+	if generation != s.generation {
+		s.mu.Unlock()
+		return
+	}
 	predicted := s.model.Predict(cs, cloud, now)
-	updated := s.model.Update(cs, cloud, now, pvW)
+	updated := false
+	if cloudOK {
+		updated = s.model.Update(cs, cloud, now, pvW)
+	}
 	samples := s.model.Samples
 	mae := s.model.MAE
-	s.mu.Unlock()
-
-	if s.Residuals != nil {
+	if s.Residuals != nil && cloudOK {
 		s.Residuals.Add(now, predicted, pvW)
 	}
+	s.mu.Unlock()
 
 	slog.Info("pvmodel: sample", "cs_wm2", cs, "cloud_pct", cloud, "pv_w", pvW, "samples", samples, "mae_w", mae, "updated", updated)
 
-	if updated && samples%s.PersistEvery == 0 {
+	if updated && s.PersistEvery > 0 && samples%s.PersistEvery == 0 {
 		s.persist()
 	}
 }
 
-func (s *Service) persist() {
-	if s.Store == nil {
-		return
-	}
+func (s *Service) persist() error {
 	// Serialise the entire marshal+save so a sample-loop persist that
 	// started before a Reset cannot finish after Reset's persist and
 	// clobber the clean state with stale coefficients.
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
+	return s.persistLocked()
+}
+
+// persistLocked writes one snapshot while persistMu is held.
+func (s *Service) persistLocked() error {
+	if s.Store == nil {
+		return nil
+	}
 	s.mu.RLock()
 	js, err := modelstate.Wrap(FeatureHash(), s.model)
 	s.mu.RUnlock()
 	if err != nil {
-		return
+		return err
 	}
 	if err := s.Store.SaveConfig(stateKey, string(js)); err != nil {
 		slog.Warn("pvmodel persist", "err", err)
+		return err
 	}
+	return nil
 }
 
 // Reset clears the model to a fresh prior (useful after a system change
@@ -449,11 +515,56 @@ func (s *Service) Reset() {
 		return
 	}
 	s.mu.Lock()
-	rated := s.model.RatedW
-	s.model = NewModel(rated)
-	s.Residuals = NewResidualBuffer()
+	s.resetLocked()
 	s.mu.Unlock()
-	s.persist()
+	if err := s.persist(); err != nil {
+		slog.Warn("pvmodel persist", "err", err)
+	}
+}
+
+func (s *Service) resetLocked() {
+	rated := s.model.RatedW
+	ac := s.model.ACLimitW
+	revision := s.model.ConfigRevision
+	learningStartedMS := s.model.LearningStartedMS
+	s.model = NewModel(rated)
+	s.model.ACLimitW = ac
+	s.model.ConfigRevision = revision
+	s.model.LearningStartedMS = learningStartedMS
+	s.Residuals = NewResidualBuffer()
+	s.generation++
+}
+
+// RestartLearning starts a new learned-model epoch. A replay of the same or an
+// older cutoff only persists the current state, so a boot-time retry repairs a
+// failed write without erasing samples learned after the reset.
+func (s *Service) RestartLearning(at time.Time) error {
+	if s == nil {
+		return nil
+	}
+	startedMS := at.UnixMilli()
+	if at.IsZero() || startedMS <= 0 {
+		return fmt.Errorf("pvmodel learning cutoff must be after the Unix epoch")
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	s.mu.Lock()
+	if startedMS > s.model.LearningStartedMS {
+		s.resetLocked()
+		s.model.LearningStartedMS = startedMS
+	}
+	s.mu.Unlock()
+	return s.persistLocked()
+}
+
+// LearningStartedMS returns the current learned-model epoch cutoff.
+func (s *Service) LearningStartedMS() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.model.LearningStartedMS
 }
 
 // ResidualCorrect is the integration point for the MPC. Returns the
@@ -465,19 +576,25 @@ func (s *Service) Reset() {
 // underlying pvmodel.Predict). Callers consuming site-sign PV (e.g.
 // mpc.buildSlots which negates) should match the sign at their boundary.
 func (s *Service) ResidualCorrect(now, tTarget time.Time, basePrediction float64) float64 {
-	if s == nil || s.Residuals == nil {
+	if s == nil {
 		return 0
 	}
-	return s.Residuals.Correct(now, tTarget, basePrediction)
+	s.mu.RLock()
+	residuals := s.Residuals
+	s.mu.RUnlock()
+	return residuals.Correct(now, tTarget, basePrediction)
 }
 
 // ResidualDiagSnapshot returns the current residual-buffer state for
 // /api/pvmodel diagnostics. Zero-valued when the buffer is empty.
 func (s *Service) ResidualDiagSnapshot() ResidualDiag {
-	if s == nil || s.Residuals == nil {
+	if s == nil {
 		return ResidualDiag{WindowMinutes: int(ResidualBufferWindow.Minutes())}
 	}
-	return s.Residuals.Diag(time.Now())
+	s.mu.RLock()
+	residuals := s.Residuals
+	s.mu.RUnlock()
+	return residuals.Diag(time.Now())
 }
 
 // ResidualStdW returns the std (W) of recent PV-prediction residuals — the
@@ -486,4 +603,22 @@ func (s *Service) ResidualDiagSnapshot() ResidualDiag {
 // (no hedge until the twin has learned how wrong it tends to be).
 func (s *Service) ResidualStdW() float64 {
 	return s.ResidualDiagSnapshot().StdW
+}
+
+// RelativeUncertainty returns the twin's learned relative forecast error
+// (0..1): mean |error| as a share of the prediction it belongs to. The MPC
+// uses it to size each slot's downside against that slot's own expected
+// generation, so the hedge is large on a variable cloudy day and vanishes at
+// night and on a clear one. 0 means the twin has not learned it yet — the
+// planner then keeps the flat k·σ haircut.
+func (s *Service) RelativeUncertainty() float64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.model == nil {
+		return 0
+	}
+	return s.model.RelMAE
 }

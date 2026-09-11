@@ -33,9 +33,12 @@ systemctl enable avahi-daemon.service
 systemctl enable NetworkManager.service
 # pi-gen's export-image stage runs another apt update under qemu. Leaving
 # Docker's third-party apt source enabled has repeatedly OOMed that step on
-# GitHub hosted runners after Docker is already installed. App updates pull
-# containers from GHCR, so the image build does not need this repo afterward.
-rm -f /etc/apt/sources.list.d/docker.list
+# GitHub hosted runners after Docker is already installed. Park the source
+# under a name apt ignores (it reads only *.list/*.sources) instead of
+# deleting it; ftw-firstboot restores it on the flashed device, so the
+# engine can be patched with a plain `apt upgrade` for the appliance's
+# whole service life (srcfl/ftw#770).
+mv /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.list.disabled
 # /etc/hosts entry prevents sudo's "unable to resolve host ftw"
 # warning on first boot. pi-gen writes /etc/hostname from
 # TARGET_HOSTNAME but leaves /etc/hosts at the stock Raspberry Pi
@@ -77,14 +80,21 @@ install -d -m 0755                    "${ROOTFS_DIR}/opt/ftw"
 install -d -m 0755 -o 100 -g 101      "${ROOTFS_DIR}/opt/ftw/data"
 install -d -m 0755                    "${ROOTFS_DIR}/opt/ftw/mosquitto"
 install -d -m 0755                    "${ROOTFS_DIR}/opt/ftw/mosquitto/config"
-# Calendar (#498) needs no extra dirs/files: FTW's CalDAV server is in-process
-# (no sidecar) and persists in state.db under ./data.
 
 install -m 0644 files/docker-compose.yml    "${ROOTFS_DIR}/opt/ftw/docker-compose.yml"
 install -m 0644 files/mosquitto.conf        "${ROOTFS_DIR}/opt/ftw/mosquitto/config/mosquitto.conf"
 
 install -m 0755 files/firstboot.sh          "${ROOTFS_DIR}/usr/local/sbin/ftw-firstboot"
 install -m 0644 files/firstboot.service     "${ROOTFS_DIR}/etc/systemd/system/ftw-firstboot.service"
+
+# Host OS security updates (srcfl/ftw#770). Self-update covers only FTW's
+# own containers; the host relies on unattended-upgrades (installed via
+# 00-install-packages). 20auto-upgrades switches the apt-daily timers'
+# work on; 52ftw-unattended-upgrades adds the Raspberry Pi archive — the
+# kernel/firmware source, which has no separate security pocket — and
+# pins automatic reboots off, because a reboot stops dispatch.
+install -m 0644 files/20auto-upgrades           "${ROOTFS_DIR}/etc/apt/apt.conf.d/20auto-upgrades"
+install -m 0644 files/52ftw-unattended-upgrades "${ROOTFS_DIR}/etc/apt/apt.conf.d/52ftw-unattended-upgrades"
 
 # Sudoers fragment for ftw. Stage2 installs an `010_<user>-nopasswd` for
 # the build-time FIRST_USER (ftw); we drop this belt-and-suspenders copy

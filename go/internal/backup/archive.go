@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -70,6 +70,7 @@ type Manifest struct {
 }
 
 type CreateOptions struct {
+	ConfigPath  string // Defaults to config.yaml inside DataDir.
 	State       *state.Store
 	StatePath   string
 	DataDir     string
@@ -168,7 +169,8 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	defer os.RemoveAll(stageDir)
 	databaseGzip := filepath.Join(stageDir, "database.gz")
-	if err := opts.State.BackupToCompressed(databaseGzip); err != nil {
+	stored, hasStored, err := opts.State.BackupWithConfiguration(databaseGzip, nil)
+	if err != nil {
 		return Info{}, err
 	}
 
@@ -178,9 +180,43 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	databaseFile = filepath.ToSlash(databaseFile)
 	databaseEntry := "data/" + databaseFile + ".gz"
-	sources, err := collectSources(dataDir, statePath, outputDir)
+	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
 	if err != nil {
 		return Info{}, err
+	}
+	sources, err := collectSources(dataDir, statePath, outputDir, importedHistory)
+	if err != nil {
+		return Info{}, err
+	}
+	if hasStored {
+		configPath := opts.ConfigPath
+		if configPath == "" {
+			configPath = filepath.Join(dataDir, "config.yaml")
+		}
+		configPath, err = filepath.Abs(configPath)
+		if err != nil {
+			return Info{}, err
+		}
+		configFile, err := filepath.Rel(dataDir, configPath)
+		if err != nil || configFile == ".." || strings.HasPrefix(configFile, ".."+string(filepath.Separator)) {
+			return Info{}, errors.New("backup config is outside data directory")
+		}
+		databaseRef, err := filepath.Rel(filepath.Dir(configPath), filepath.Join(dataDir, databaseFile))
+		if err != nil {
+			return Info{}, err
+		}
+		exported := filepath.Join(stageDir, "config.yaml")
+		if err := config.ExportStored(exported, stored, databaseRef); err != nil {
+			return Info{}, err
+		}
+		archivePath := "data/" + filepath.ToSlash(configFile)
+		filtered := sources[:0]
+		for _, source := range sources {
+			if source.archivePath != archivePath {
+				filtered = append(filtered, source)
+			}
+		}
+		sources = append(filtered, sourceEntry{archivePath: archivePath, sourcePath: exported})
 	}
 	sources = append(sources, sourceEntry{
 		archivePath: databaseEntry,
@@ -235,7 +271,7 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	return Info{ID: id, Path: finalPath, CreatedAt: created, SizeBytes: info.Size(), SHA256: sum, Verified: true}, nil
 }
 
-func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error) {
+func collectSources(dataDir, statePath, outputDir string, importedHistory map[string]bool) ([]sourceEntry, error) {
 	stateRel, _ := filepath.Rel(dataDir, statePath)
 	outputRel, outputInside := filepath.Rel(dataDir, outputDir)
 	if outputInside != nil || outputRel == ".." || strings.HasPrefix(outputRel, ".."+string(filepath.Separator)) {
@@ -259,6 +295,18 @@ func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error)
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Primary history is exported from one read transaction into the
+		// SQLite backup above. Never copy a live DuckDB file or WAL.
+		historyRel, _ := filepath.Rel(dataDir, state.HistoryDatabasePath(statePath))
+		if rel == historyRel || strings.HasPrefix(rel, historyRel+".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if importedHistory[p] {
 			return nil
 		}
 		if rel == stateRel || rel == stateRel+"-wal" || rel == stateRel+"-shm" {
@@ -299,6 +347,23 @@ func describeSource(ctx context.Context, dataDir string, source sourceEntry) (Fi
 		if err != nil || !pathInside(dataDir, resolved) {
 			return FileEntry{}, fmt.Errorf("backup: symlink escapes data dir: %s -> %s", source.sourcePath, target)
 		}
+		// Managed driver activations use absolute paths in the running
+		// container. Store an internal relative link so restore can relocate
+		// data without referring back to /app/data or the original machine.
+		// Do not follow the link; validate the complete archive graph below.
+		if filepath.IsAbs(target) {
+			rootPrefix := dataDir + string(filepath.Separator)
+			if !strings.HasPrefix(target, rootPrefix) {
+				return FileEntry{}, fmt.Errorf("backup: absolute symlink is outside data dir: %s", source.sourcePath)
+			}
+			back, relErr := filepath.Rel(filepath.Dir(source.sourcePath), dataDir)
+			if relErr != nil {
+				return FileEntry{}, relErr
+			}
+			// Preserve .. until archive graph validation has expanded links.
+			target = back + string(filepath.Separator) + strings.TrimPrefix(target, rootPrefix)
+		}
+		target = filepath.ToSlash(target)
 		entry.Type, entry.LinkTarget = "symlink", target
 		h := sha256.Sum256([]byte(target))
 		entry.SHA256 = hex.EncodeToString(h[:])
@@ -495,7 +560,7 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("backup: invalid manifest identity or database path")
 	}
 	seen := make(map[string]bool, len(manifest.Files))
-	symlinks := make(map[string]bool)
+	symlinks := make(map[string]string)
 	databaseFound := false
 	for _, entry := range manifest.Files {
 		if !safeDataPath(entry.Path) || entry.Path == manifestPath || seen[entry.Path] {
@@ -528,19 +593,63 @@ func validateManifest(manifest Manifest) error {
 			if !safeDataPath(resolved) {
 				return fmt.Errorf("backup: symlink target escapes data root: %s -> %s", entry.Path, entry.LinkTarget)
 			}
-			symlinks[entry.Path] = true
+			symlinks[entry.Path] = entry.LinkTarget
 		}
 	}
 	if !databaseFound {
 		return errors.New("backup: compressed database missing from manifest")
 	}
+	// A lexical path check alone misses `alias/../outside`: .. applies
+	// after alias is followed. Resolve each link against archive entries,
+	// never the host filesystem, and reject cycles or escape chains.
+	for name, target := range symlinks {
+		if err := validateArchiveLink(name, target, symlinks); err != nil {
+			return err
+		}
+	}
 	for _, entry := range manifest.Files {
 		parent := path.Dir(entry.Path)
 		for parent != "." && parent != "/" {
-			if symlinks[parent] {
+			if _, ok := symlinks[parent]; ok {
 				return fmt.Errorf("backup: entry %s is nested below symlink %s", entry.Path, parent)
 			}
 			parent = path.Dir(parent)
+		}
+	}
+	return nil
+}
+
+// validateArchiveLink models relative symlink traversal without cleaning away
+// .. before symlink expansion. Archive paths start at the data root.
+func validateArchiveLink(name, target string, links map[string]string) error {
+	parts := strings.Split(strings.TrimPrefix(path.Dir(name), "data/"), "/")
+	if path.Dir(name) == "data" {
+		parts = nil
+	}
+	pending := strings.Split(target, "/")
+	expansions := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) == 0 {
+				return fmt.Errorf("backup: symlink chain escapes data root: %s", name)
+			}
+			parts = parts[:len(parts)-1]
+		default:
+			candidate := "data/" + strings.Join(append(append([]string{}, parts...), part), "/")
+			if next, ok := links[candidate]; ok {
+				expansions++
+				if expansions > 40 {
+					return fmt.Errorf("backup: cyclic or excessive symlink chain: %s", name)
+				}
+				pending = append(strings.Split(next, "/"), pending...)
+			} else {
+				parts = append(parts, part)
+			}
 		}
 	}
 	return nil
@@ -938,8 +1047,7 @@ func verifyCompressedDatabase(src string) error {
 }
 
 func verifyDatabase(dbPath string) error {
-	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", state.ReadOnlyDatabaseURI(dbPath))
 	if err != nil {
 		return err
 	}
@@ -1044,13 +1152,4 @@ func pathInside(root, candidate string) bool {
 	}
 	rel, err := filepath.Rel(rootAbs, candidateAbs)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
 }

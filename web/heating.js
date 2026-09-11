@@ -39,13 +39,15 @@
     return Math.round(v) + ' W';
   }
   function fmtTemp(v)   { return v == null ? '—' : v.toFixed(1) + ' °C'; }
-  function fmtKW(v)     { return v == null ? '—' : v.toFixed(2) + ' kW'; }
   function fmtHz(v)     { return v == null ? '—' : Math.round(v) + ' Hz'; }
   function fmtAmp(v)    { return v == null ? '—' : v.toFixed(1) + ' A'; }
   function fmtPct(v)    { return v == null ? '—' : Math.round(v) + ' %'; }
   function fmtFlow(v)   { return v == null ? '—' : Math.round(v) + ' m³/h'; }
   function fmtDM(v)     { return v == null ? '—' : Math.round(v) + ' DM'; }
-  function fmtKwh(v)    { return v == null ? '—' : Math.round(v).toLocaleString('en-US') + ' kWh'; }
+  function fmtKwh(wh) {
+    if (wh == null) return '—';
+    return Math.round(wh / 1000).toLocaleString('en-US') + ' kWh';
+  }
   function fmtRaw(v)    { return v == null ? '—' : String(Math.round(v * 100) / 100); }
   function fmtOffset(v) { return v == null ? '—' : (v > 0 ? '+' : '') + Math.round(v); }
   function fmtOnOff(v)  { return v == null ? '—' : (Math.round(v) ? 'On' : 'Off'); }
@@ -60,16 +62,16 @@
   // lists ALL ~960 signals; this is the curated at-a-glance set.
   var GROUPS = [
     { title: 'Power & electrical', items: [
-      { key: 'hp_energy_log_current_power_consumption', label: 'Total power now', fmt: fmtKW, info: "The whole heat pump's instantaneous electrical draw right now — compressor + fan + circulation pumps + electronics." },
+      { key: 'hp_energy_log_current_power_consumption', label: 'Total power now', fmt: fmtPower, info: "The whole heat pump's instantaneous electrical draw right now — compressor + fan + circulation pumps + electronics." },
       { key: 'hp_power_w', label: 'Compressor', fmt: fmtPower, info: 'Power to the compressor only. 0 W when the compressor is idle — the pump still draws power (see Total power now).' },
-      { key: 'hp_power_internal_additional_heat', label: 'Internal add. heat', fmt: fmtKW, info: 'Power to the internal immersion heater (supplementary heat). 0 when only the compressor runs.' },
+      { key: 'hp_power_internal_additional_heat', label: 'Internal add. heat', fmt: fmtPower, info: 'Power to the internal immersion heater (supplementary heat). 0 when only the compressor runs.' },
       { key: 'hp_compressor_frequency_current', label: 'Compr. freq.', fmt: fmtHz, info: 'Compressor speed/frequency right now. 0 Hz = compressor idle.' },
       { key: 'hp_current_be1', label: 'Current', sensor: 'BE1', fmt: fmtAmp, info: 'Measured current on phase 1 (current transformer BE1). Used by the load monitor / fuse protection.' },
       { key: 'hp_current_be2', label: 'Current', sensor: 'BE2', fmt: fmtAmp, info: 'Measured current on phase 2 (BE2).' },
       { key: 'hp_current_be3', label: 'Current', sensor: 'BE3', fmt: fmtAmp, info: 'Measured current on phase 3 (BE3).' },
       { key: 'hp_power_limitation_activation', label: 'Power limit', fmt: fmtOnOff, info: 'Whether the built-in power limitation (load monitor) is actively throttling to stay under the main fuse. Off = not limiting. Throttling only reduces output — it never damages the pump.' },
       { key: 'hp_fuse', label: 'Fuse', sensor: null, fmt: fmtAmp, info: 'Main fuse size the pump is configured for. It limits compressor + immersion heater to stay under this.' },
-      { key: 'hp_max_internal_additional_heat', label: 'Max add. heat', fmt: fmtKW, info: 'Maximum permitted internal immersion-heater power. Lower this to cap the supplementary heat draw.' },
+      { key: 'hp_max_internal_additional_heat', label: 'Max add. heat', fmt: fmtPower, info: 'Maximum permitted internal immersion-heater power. Lower this to cap the supplementary heat draw.' },
     ] },
     { title: 'Temperatures', items: [
       { key: 'hp_hw_top_temp_c', label: 'Hot water top', sensor: 'BT7', fmt: fmtTemp, info: 'Temperature at the top of the hot-water tank — what you get first from the tap.' },
@@ -273,9 +275,9 @@
   // Power over 24h — Total drawn / Compressor / Internal add. heat, all in kW.
   // Separate from sparkline() so the ~937 tiny detail sparklines stay axis-free.
   var PCHART = [
-    { key: 'total',      label: 'Total drawn',        color: 'var(--accent-e)', scale: 1 },
+    { key: 'total',      label: 'Total drawn',        color: 'var(--accent-e)', scale: 0.001 },
     { key: 'compressor', label: 'Compressor',         color: '#38bdf8', scale: 0.001 },
-    { key: 'internal',   label: 'Internal add. heat', color: '#f472b6', scale: 1 },
+    { key: 'internal',   label: 'Internal add. heat', color: '#f472b6', scale: 0.001 },
   ];
   function powerChartBlock(power) {
     if (!power) return '';
@@ -318,12 +320,18 @@
       '</div>';
   }
 
-  // ── Energy per calendar period, from the lifetime kWh counters ───
+  // ── Energy per calendar period, from the lifetime Wh counters ───
   // delta = current − value at the period boundary; null when the logged
   // history doesn't reach back that far (shown as "accumulating").
   function energyDeltas(points) {
     if (!points || points.length < 2) return {};
     var last = points[points.length - 1].v;
+    // Pre-upgrade samples under these metric names are kWh; new ones are Wh.
+    function asWh(v) {
+      if (last >= 1e6 && v < last / 100) return v * 1000;
+      return v;
+    }
+    last = asWh(last);
     var earliest = points[0].ts;
     var now = new Date();
     var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -333,8 +341,8 @@
     var startYear = new Date(now.getFullYear(), 0, 1).getTime();
     function delta(b) {
       if (earliest > b) return null;
-      var base = points[0].v;
-      for (var i = 0; i < points.length; i++) { if (points[i].ts <= b) base = points[i].v; else break; }
+      var base = asWh(points[0].v);
+      for (var i = 0; i < points.length; i++) { if (points[i].ts <= b) base = asWh(points[i].v); else break; }
       return Math.max(0, last - base);
     }
     return { today: delta(startToday), week: delta(startWeek), month: delta(startMonth), year: delta(startYear) };
@@ -342,7 +350,11 @@
   function energyPeriodsBlock(energy) {
     if (!energy || (energy.consumed || []).length < 2) return '';
     var c = energyDeltas(energy.consumed), p = energyDeltas(energy.produced);
-    function cell(v) { return v == null ? '<span class="ftw-hp-acc">accumulating</span>' : (Math.round(v * 10) / 10).toLocaleString('en-US') + ' kWh'; }
+    function cell(wh) {
+      if (wh == null) return '<span class="ftw-hp-acc">accumulating</span>';
+      var kwh = wh / 1000;
+      return (Math.round(kwh * 10) / 10).toLocaleString('en-US') + ' kWh';
+    }
     var rows = [
       { k: 'today', label: 'Today' },
       { k: 'week', label: 'This week' },

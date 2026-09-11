@@ -12,6 +12,7 @@ test("the plan card offers a help report", () => {
   // produce — someone whose battery is misbehaving does not search for
   // "diagnostics".
   assert.match(index, /Something looks wrong\?/);
+  assert.match(index, /id="plan-ask-why"/);
 });
 
 // One button, one file. The archive leads with the readable report and

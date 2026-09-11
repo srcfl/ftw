@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,55 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+func TestHandleSavingsDailyCanceledRequestDoesNotCacheSuccess(t *testing.T) {
+	for _, days := range []int{1, 2} {
+		t.Run(strconv.Itoa(days), func(t *testing.T) {
+			testSavingsDailyCanceledRequest(t, days)
+		})
+	}
+}
+
+func testSavingsDailyCanceledRequest(t *testing.T, days int) {
+	t.Helper()
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := New(&Deps{
+		State: st,
+		Cfg:   &config.Config{Price: &config.Price{Zone: "SE3"}},
+		CfgMu: &sync.RWMutex{},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	path := "/api/savings/daily?days=" + strconv.Itoa(days)
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("canceled savings status = %d, want 500", rr.Code)
+	}
+	if len(srv.savingsCache) != 0 {
+		t.Fatal("canceled request cached an incomplete day")
+	}
+
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("next savings status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Days []any `json:"days"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Days) != days || len(srv.savingsCache) != days-1 {
+		t.Fatalf("retry returned %d days and cached %d, want %d and %d", len(body.Days), len(srv.savingsCache), days, days-1)
+	}
+}
 
 // No state and no config → empty days, 200. Matches /api/energy/daily's
 // "history is optional" contract so dev / test harnesses without a DB

@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -489,10 +490,9 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	env := NewHostEnv(cfg.Name, r.tel)
 	env.BatteryCapacityWh = cfg.BatteryCapacityWh
 	env.BatteryTelemetryOnly = cfg.BatteryTelemetryOnly
-	// Wire durable secret write-back (rotated OAuth tokens). The closure
-	// reads r.SecretPersister lazily at call time so main.go may set it
-	// either before or after the initial Add loop; persists only ever
-	// happen at runtime poll, long after wiring completes.
+	// Wire secret write-back (rotated OAuth tokens). The host must install
+	// SecretPersister and SecretOverride before Add: init may persist a
+	// secret, and the poll loop starts before Add returns.
 	driverName := cfg.Name
 	env.PersistSecret = func(key, value string) error {
 		if r.SecretPersister == nil {
@@ -1031,7 +1031,12 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 		case <-timer.C:
 			pollFailed := false
-			if _, err := rd.driver.Poll(ctx); err != nil {
+			// Register the poll as the active Lua call so SendDefault can
+			// cancel it the same way it cancels an in-flight command.
+			pollCtx, finishPoll := rd.beginCommand(ctx)
+			_, err := rd.driver.Poll(pollCtx)
+			finishPoll()
+			if err != nil {
 				pollFailed = true
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
 				if r.tel != nil {
@@ -1686,9 +1691,18 @@ func sameDriverConfig(a, b config.Driver) bool {
 	// Compare the free-form Config map. Previously omitted, so a changed
 	// cloud-driver password in drivers[i].config.password was silently
 	// ignored by the hot-reload diff — the driver kept running with the
-	// stale credentials. DeepEqual also treats nil and empty maps as equal.
+	// stale credentials. The empty-map case below handles nil versus empty.
 	if len(a.Config) == 0 && len(b.Config) == 0 {
 		return true
 	}
-	return reflect.DeepEqual(a.Config, b.Config)
+	if reflect.DeepEqual(a.Config, b.Config) {
+		return true
+	}
+	// YAML decodes whole numbers as int; JSON decodes them as float64.
+	// Compare their wire values so a settings save and its file-watcher
+	// reload do not restart an unchanged driver twice. JSON keeps strings,
+	// booleans and numbers distinct, including inside nested settings.
+	aj, aerr := json.Marshal(a.Config)
+	bj, berr := json.Marshal(b.Config)
+	return aerr == nil && berr == nil && bytes.Equal(aj, bj)
 }

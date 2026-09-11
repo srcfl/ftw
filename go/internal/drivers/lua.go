@@ -73,6 +73,10 @@ import (
 	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
+// maxDriverWatchdogTimeout is the longest a Lua driver may stretch the
+// per-driver staleness window. Tesla's 5-minute BLE proxy fits; a year does not.
+const maxDriverWatchdogTimeout = 15 * time.Minute
+
 // LuaDriver wraps a running Lua VM bound to a HostEnv.
 type LuaDriver struct {
 	Env  *HostEnv
@@ -80,6 +84,23 @@ type LuaDriver struct {
 
 	mu sync.Mutex
 	L  *lua.LState
+
+	// Proof has its own short lock; readers never wait behind Lua/network I/O.
+	pvProofMu          sync.RWMutex
+	pvProof            PVGenerationLimit
+	pvProofEpoch       uint64
+	loadedSourceSHA256 string
+
+	initConfig map[string]any
+	// sawModbusRead is true only after a poll that successfully read a
+	// register. Failed attempts do not count: a device that never answered
+	// is not reloaded every time its give-up tables go quiet.
+	sawModbusRead bool
+	// skipReprobe latches after a failed reload, or after a reload whose
+	// immediate retry still made zero reads, so a missing file or a driver
+	// that legitimately stops probing is not reloaded on every poll.
+	skipReprobe  bool
+	reprobeCount int
 }
 
 // NewLuaDriver loads the file at path and runs it in a fresh Lua VM.
@@ -90,8 +111,8 @@ func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
 }
 
 // NewLuaDriverWithPolicy binds verified managed package permissions to the
-// host. Only control v2 also gets the restricted Lua library surface. Local,
-// bundled and legacy repository drivers keep the existing Lua 5.1 environment.
+// host. Every driver VM uses the restricted library surface (no io/load, no
+// os.execute). Control v2 also gets a bounded load timeout.
 func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*LuaDriver, error) {
 	if policy != nil {
 		if err := policy.validate(); err != nil {
@@ -103,21 +124,18 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	restricted := policy != nil && policy.IsControlV2()
-	L := lua.NewState(lua.Options{SkipOpenLibs: restricted})
-	if restricted {
-		openRestrictedLibraries(L)
-	}
-	d := &LuaDriver{Env: env, Path: path, L: L}
+	L := lua.NewState(lua.Options{SkipOpenLibs: true})
+	openRestrictedLibraries(L)
+	d := &LuaDriver{Env: env, Path: path, L: L, loadedSourceSHA256: fmt.Sprintf("%x", sha256.Sum256(src))}
 	registerHost(L, env)
 	var loadCancel context.CancelFunc
-	if restricted {
+	if policy != nil && policy.IsControlV2() {
 		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		loadCancel = cancel
 		L.SetContext(loadCtx)
 	}
 	err = L.DoString(string(src))
-	if restricted {
+	if loadCancel != nil {
 		L.RemoveContext()
 		loadCancel()
 	}
@@ -146,6 +164,7 @@ func openRestrictedLibraries(L *lua.LState) {
 		{lua.TabLibName, lua.OpenTable},
 		{lua.StringLibName, lua.OpenString},
 		{lua.MathLibName, lua.OpenMath},
+		{lua.OsLibName, lua.OpenOs},
 	} {
 		L.Push(L.NewFunction(lib.open))
 		L.Push(lua.LString(lib.name))
@@ -157,8 +176,13 @@ func openRestrictedLibraries(L *lua.LState) {
 	} {
 		L.SetGlobal(name, lua.LNil)
 	}
+	// os.time/date stay for MQTT timestamps; process/filesystem entry points do not.
+	if osTbl, ok := L.GetGlobal("os").(*lua.LTable); ok {
+		for _, name := range []string{"execute", "exit", "getenv", "remove", "rename", "setlocale", "tmpname"} {
+			osTbl.RawSetString(name, lua.LNil)
+		}
+	}
 	L.SetGlobal("package", lua.LNil)
-	L.SetGlobal("os", lua.LNil)
 	L.SetGlobal("io", lua.LNil)
 	L.SetGlobal("debug", lua.LNil)
 	L.SetGlobal("channel", lua.LNil)
@@ -189,13 +213,23 @@ func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
 func (d *LuaDriver) Init(ctx context.Context, config map[string]any) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.clearPVGenerationLimit()
+	d.initConfig = cloneStringAnyMap(config)
+	if err := d.callInitLocked(ctx); err != nil {
+		return err
+	}
+	d.refreshPVGenerationLimit()
+	return nil
+}
+
+func (d *LuaDriver) callInitLocked(ctx context.Context) error {
 	fn := d.L.GetGlobal("driver_init")
 	if fn == lua.LNil {
 		return nil
 	}
 	var arg lua.LValue = lua.LNil
-	if config != nil {
-		arg = goToLua(d.L, config)
+	if d.initConfig != nil {
+		arg = goToLua(d.L, d.initConfig)
 	}
 	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
 	defer cleanup()
@@ -207,6 +241,38 @@ func (d *LuaDriver) Init(ctx context.Context, config map[string]any) error {
 func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	interval, err := d.pollLocked(ctx)
+	if err != nil || !d.shouldReprobe() {
+		return interval, err
+	}
+	// Several catalog drivers (pixii, solis, huawei, ...) permanently skip a
+	// register after three failed reads so an unimplemented point does not
+	// fail every poll. A network blip makes every register look absent, and
+	// the driver then has nothing left to ask — the TCP session can come
+	// back while telemetry stays offline until process restart. The give-up
+	// tables are Lua locals the host cannot see; reloading the file resets
+	// them. driver_cleanup is intentionally not called: that path writes
+	// the hardware default (setpoint 0 on a battery) and this is a probe
+	// retry, not a shutdown.
+	d.Env.Logger.Info("modbus driver stopped probing registers; reloading to retry")
+	if rerr := d.reprobeLocked(ctx); rerr != nil {
+		d.skipReprobe = true
+		return 0, fmt.Errorf("reprobe: %w", rerr)
+	}
+	d.reprobeCount++
+	interval, err = d.pollLocked(ctx)
+	if d.Env.lastPollEvidence.Attempts == 0 {
+		d.skipReprobe = true
+	}
+	return interval, err
+}
+
+func (d *LuaDriver) shouldReprobe() bool {
+	return d.Env.requiresFreshModbusRead && d.sawModbusRead && !d.skipReprobe &&
+		d.Env.lastPollEvidence.Attempts == 0
+}
+
+func (d *LuaDriver) pollLocked(ctx context.Context) (time.Duration, error) {
 	fn := d.L.GetGlobal("driver_poll")
 	if fn == lua.LNil {
 		return 0, nil
@@ -216,11 +282,13 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	d.Env.beginPollEvidence()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		_, _, _ = d.Env.endPollEvidence(false)
+		d.notePollModbusActivity()
 		return 0, err
 	}
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
 	_, _, emitErr := d.Env.endPollEvidence(true)
+	d.notePollModbusActivity()
 	if emitErr != nil {
 		return 0, emitErr
 	}
@@ -228,7 +296,8 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	// a driver may skip its reads during warmup, or hold off while a
 	// command is in flight. Its telemetry is already withheld by
 	// endPollEvidence; raising an error here would mark the driver failed
-	// for staying quiet on purpose.
+	// for staying quiet on purpose. If this follows earlier successful
+	// reads, Poll() reloads the VM once and retries — see shouldReprobe.
 	if ev := d.Env.lastPollEvidence; d.Env.requiresFreshModbusRead &&
 		ev.Attempts > 0 && !ev.fresh() {
 		return 0, fmt.Errorf("driver_poll: %s", ev.describe())
@@ -238,6 +307,83 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 		return time.Duration(n) * time.Millisecond, nil
 	}
 	return 0, nil
+}
+
+func (d *LuaDriver) notePollModbusActivity() {
+	if !d.Env.requiresFreshModbusRead {
+		return
+	}
+	if d.Env.lastPollEvidence.Successes > 0 {
+		d.sawModbusRead = true
+		d.skipReprobe = false
+	}
+}
+
+// reprobeLocked re-executes the driver file in a new VM and re-runs
+// driver_init. Caller holds d.mu. The previous VM is closed without
+// driver_cleanup so a live setpoint is not cleared.
+//
+// The file is read from disk so a hot-edited driver is what we retry
+// with; catalog drivers are already hot-editable, and this path is a
+// probe retry rather than a process restart. The new VM is initialized
+// before the swap: a failed driver_init keeps the previous state so
+// default-mode still has its locals.
+func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
+	d.clearPVGenerationLimit()
+	src, err := os.ReadFile(d.Path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", d.Path, err)
+	}
+	L := lua.NewState(lua.Options{SkipOpenLibs: true})
+	openRestrictedLibraries(L)
+	registerHost(L, d.Env)
+	var loadCancel context.CancelFunc
+	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
+		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		loadCancel = cancel
+		L.SetContext(loadCtx)
+	}
+	err = L.DoString(string(src))
+	if loadCancel != nil {
+		L.RemoveContext()
+		loadCancel()
+	}
+	if err != nil {
+		L.Close()
+		return fmt.Errorf("execute %s: %w", d.Path, err)
+	}
+	old := d.L
+	d.L = L
+	if err := d.callInitLocked(ctx); err != nil {
+		d.L = old
+		L.Close()
+		return err
+	}
+	old.Close()
+	d.loadedSourceSHA256 = fmt.Sprintf("%x", sha256.Sum256(src))
+	d.refreshPVGenerationLimit()
+	d.Env.requiresFreshModbusRead = driverRequiresFreshModbusRead(L, d.Env.Modbus != nil)
+	if driverDeclaresReadOnlyBattery(L) {
+		d.Env.BatteryTelemetryOnly = true
+	}
+	return nil
+}
+
+func (d *LuaDriver) reprobes() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.reprobeCount
+}
+
+func cloneStringAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func driverRequiresFreshModbusRead(L *lua.LState, hasModbusCapability bool) bool {
@@ -509,17 +655,20 @@ func (d *LuaDriver) setLuaCallContext(parent context.Context, timeout time.Durat
 }
 
 func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Duration) func() {
-	if d.Env.RuntimePolicy == nil || !d.Env.RuntimePolicy.IsControlV2() {
-		return func() {}
-	}
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	d.L.SetContext(ctx)
+	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
+		ctx, cancel := context.WithTimeout(parent, timeout)
+		d.L.SetContext(ctx)
+		return func() {
+			d.L.RemoveContext()
+			cancel()
+		}
+	}
+	d.L.SetContext(parent)
 	return func() {
 		d.L.RemoveContext()
-		cancel()
 	}
 }
 
@@ -547,6 +696,7 @@ func (d *LuaDriver) Cleanup() {
 // before closing the state. The no-argument Cleanup method remains for tests
 // and direct embedders that do not have a lifecycle context.
 func (d *LuaDriver) CleanupContext(ctx context.Context) {
+	d.clearPVGenerationLimit()
 	_ = d.call(ctx, "driver_cleanup")
 	d.mu.Lock()
 	d.L.Close()
@@ -685,8 +835,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              ev_target_energy_req_wh, ev_min_energy_req_wh,
 	//              ev_max_energy_req_wh, rated_power_w, status, protocol,
 	//              control_mode
-	//   vehicle -> soc (required, vehicle battery level % 0-100),
-	//              charge_limit_pct (optional, vehicle-configured limit),
+	//   vehicle -> soc (required, 0–1 fraction; 0–100 vendor percents
+	//              are converted at this door),
+	//              charge_limit / charge_limit_pct (optional; 0–1 or
+	//              legacy 0–100, converted at PickBestVehicle),
 	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),
 	//              time_to_full_min (optional),
 	//              stale (optional bool, true when data hasn't refreshed
@@ -773,11 +925,21 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// `seconds` since the last successful emit. Used by drivers whose
 	// natural poll cadence is too slow for the site-wide 60 s default
 	// (Tesla BLE proxy, cloud EV APIs). Calling with 0 clears the
-	// override and reverts to the default.
+	// override and reverts to the default. Negative values are rejected.
+	// Values above 15 minutes are capped so a driver cannot disable
+	// staleness indefinitely.
 	host.RawSetString("set_watchdog_timeout_s", L.NewFunction(func(L *lua.LState) int {
 		secs := L.CheckInt(1)
+		if secs < 0 {
+			L.Push(lua.LString("set_watchdog_timeout_s: timeout must be >= 0"))
+			return 1
+		}
+		d := time.Duration(secs) * time.Second
+		if d > maxDriverWatchdogTimeout {
+			d = maxDriverWatchdogTimeout
+		}
 		if env.Telemetry != nil {
-			env.Telemetry.SetDriverWatchdogTimeout(env.DriverName, time.Duration(secs)*time.Second)
+			env.Telemetry.SetDriverWatchdogTimeout(env.DriverName, d)
 		}
 		return 0
 	}))
@@ -839,15 +1001,22 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}))
 
 	// host.persist_secret(key, value) -> ok, err
-	// Durably writes a config secret back into the driver's own config
-	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
+	// Writes a secret into the driver's own persisted KV namespace.
+	// Managed read-only OAuth drivers need a signed config_secrets entry.
+	// Keys use at most 64 lowercase letters, digits or underscores; values
+	// are capped at 1 MiB, matching the host's HTTP response limit.
 	// Returns ok=false + an error string when the capability isn't wired.
 	host.RawSetString("persist_secret", L.NewFunction(func(L *lua.LState) int {
 		key := L.CheckString(1)
 		val := L.CheckString(2)
-		if env.RuntimePolicy != nil || env.PersistSecret == nil {
+		if env.PersistSecret == nil || !env.RuntimePolicy.allowsSecretPersistence(key) {
 			L.Push(lua.LBool(false))
 			L.Push(lua.LString("persist_secret: capability not granted"))
+			return 2
+		}
+		if !validPersistSecretKey(key) || len(val) > 1<<20 {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString("persist_secret: invalid key or value exceeds 1 MiB"))
 			return 2
 		}
 		if err := env.PersistSecret(key, val); err != nil {
@@ -1259,6 +1428,23 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			if len(via) > 0 && via[0].Method == "PATCH" {
 				return fmt.Errorf("redirect not followed for PATCH (a redirected write cannot be verified)")
 			}
+			// The managed read-only OAuth exception authorizes one exact path.
+			// A 307/308 must not carry its POST body to a device write endpoint.
+			if len(via) > 0 && via[0].Method == "POST" && env.allowAuthPost(via[0].URL.String()) {
+				return fmt.Errorf("redirect not followed for managed OAuth POST")
+			}
+			// Ordinary POST has the same 301/302/303 trap as PATCH: Go converts
+			// those to a body-less GET, then a 200 would be recorded as write_ack.
+			if len(via) > 0 && via[0].Method == "POST" {
+				status := 0
+				if req.Response != nil {
+					status = req.Response.StatusCode
+				}
+				if status == net_http.StatusMovedPermanently || status == net_http.StatusFound ||
+					status == net_http.StatusSeeOther || req.Method != "POST" {
+					return fmt.Errorf("redirect not followed for POST (a redirected write cannot be verified)")
+				}
+			}
 			if ok, reason := hostAllowed(req.URL.String()); !ok {
 				return fmt.Errorf("redirect blocked: %s", reason)
 			}
@@ -1628,10 +1814,13 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		// Do not leave these functions reachable in a v2 VM even when local
 		// YAML happens to configure those legacy capabilities.
 		for _, name := range []string{
-			"persist_secret", "ws_open", "ws_send", "ws_messages", "ws_is_open", "ws_close",
+			"ws_open", "ws_send", "ws_messages", "ws_is_open", "ws_close",
 			"tcp_open", "tcp_recv", "tcp_is_open", "tcp_close",
 		} {
 			host.RawSetString(name, lua.LNil)
+		}
+		if !env.RuntimePolicy.IsReadOnly() {
+			host.RawSetString("persist_secret", lua.LNil)
 		}
 	}
 	L.SetGlobal("host", host)

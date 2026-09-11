@@ -145,4 +145,5 @@ Fungerar inte den adressen — prova IP-adressen du skrev ner, t.ex. `http://192
 - **Lampan lyser inte alls** → kolla att strömadaptern sitter i.
 - **Hittar ingen IP-adress** → starta om routern, vänta 5 minuter, titta igen.
 - **SSH säger "Connection refused"** → vänta lite till. Första uppstarten tar tid.
+- **Sidan öppnas, men vid ändringar eller uppdatering står det "remote access to protected API routes is disabled"** → FTW tar bara emot ändringar från adresser den ser som lokala. Öppna gränssnittet via Pi:ns IP-adress, t.ex. `http://192.168.1.123:8080`. Varför det händer — även hemma — förklaras i [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled) (på engelska).
 - **Det hjälper inte** → kika in på vår Discord och fråga snällt om hjälp: **https://discord.gg/25xcBzQaux**

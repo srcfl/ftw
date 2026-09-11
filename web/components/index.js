@@ -18,6 +18,7 @@ import "./ftw-card.js";
 import "./ftw-tabs.js";
 import "./ftw-legend.js";
 import "./ftw-energy-flow.js";
+import "./energy-flow-readings.js";
 import "./ftw-battery-control.js?v=apifetch1";
 import "./ftw-pv-control.js?v=apifetch1";
 import "./ftw-price-chart.js?v=zones1";

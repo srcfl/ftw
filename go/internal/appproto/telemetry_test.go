@@ -1,6 +1,7 @@
 package appproto
 
 import (
+	"math"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/control"
@@ -96,6 +97,20 @@ func TestStateOfChargeIsPermilleOnTheWire(t *testing.T) {
 	snap := body[Snap](t, rec.only(t, MsgSnap))
 	if got := snap.Fields[fidKey(FidBatterySoc)]; got != 624 {
 		t.Fatalf("battery_soc = %d, want 624 permille", got)
+	}
+}
+
+func TestStateOfChargeNonFiniteIsZeroPermille(t *testing.T) {
+	h, box, rec, _ := newRig(t)
+	box.snap.BatterySoC = math.NaN()
+	box.snap.BatterySoCKnown = true
+	deliver(t, h, MsgHello, nil, Hello{Proto: ProtoRange{Min: 0, Max: ProtoMax}})
+	rec.reset()
+	deliver(t, h, MsgSub, nil, Sub{Bucket: 512, Hz: 1})
+
+	snap := body[Snap](t, rec.only(t, MsgSnap))
+	if got := snap.Fields[fidKey(FidBatterySoc)]; got != 0 {
+		t.Fatalf("NaN battery_soc = %d, want 0 permille", got)
 	}
 }
 

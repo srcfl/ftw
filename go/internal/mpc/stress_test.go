@@ -92,14 +92,14 @@ func buildScenarios(rng *rand.Rand) []scenario {
 	s = append(s, scenario{
 		name:   "sunny_mild",
 		slots:  makeSlots(nordicPrices(130, 60, rng), pvCurve(8000), loadCurve(500, 1500), start),
-		initSoC: 50,
+		initSoC: 0.50,
 	})
 
 	// Cloudy day — barely any PV, typical prices.
 	s = append(s, scenario{
 		name:   "cloudy",
 		slots:  makeSlots(nordicPrices(160, 80, rng), pvCurve(2000), loadCurve(500, 1500), start),
-		initSoC: 50,
+		initSoC: 0.50,
 	})
 
 	// Price-spike day (cold winter, low PV, Europe-wide gas crisis).
@@ -111,7 +111,7 @@ func buildScenarios(rng *rand.Rand) []scenario {
 	s = append(s, scenario{
 		name:   "price_spike",
 		slots:  makeSlots(prices, pvCurve(1000), loadCurve(1200, 3000), start),
-		initSoC: 50,
+		initSoC: 0.50,
 	})
 
 	// Flat day — nearly constant prices, no arbitrage.
@@ -122,7 +122,7 @@ func buildScenarios(rng *rand.Rand) []scenario {
 	s = append(s, scenario{
 		name:   "flat_prices",
 		slots:  makeSlots(flat, pvCurve(5000), loadCurve(500, 1500), start),
-		initSoC: 50,
+		initSoC: 0.50,
 	})
 
 	// Cheap-night scenario — classic overnight charging window.
@@ -133,7 +133,7 @@ func buildScenarios(rng *rand.Rand) []scenario {
 	s = append(s, scenario{
 		name:   "cheap_night",
 		slots:  makeSlots(nightCheap, pvCurve(3000), loadCurve(600, 2000), start),
-		initSoC: 20, // start with a near-empty battery to test grid charging
+		initSoC: 0.20, // start with a near-empty battery to test grid charging
 	})
 
 	// Extreme export day — massive PV, low prices from surplus.
@@ -144,7 +144,7 @@ func buildScenarios(rng *rand.Rand) []scenario {
 	s = append(s, scenario{
 		name:   "solar_surplus",
 		slots:  makeSlots(exportDay, pvCurve(12000), loadCurve(400, 1200), start),
-		initSoC: 30,
+		initSoC: 0.30,
 	})
 
 	return s
@@ -162,9 +162,9 @@ func runMode(slots []Slot, initSoC float64, mode Mode, capWh, maxChg, maxDis flo
 		Mode:                mode,
 		SoCLevels:           51,
 		CapacityWh:          capWh,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       initSoC,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC:       initSoC,
 		ActionLevels:        21,
 		MaxChargeW:          maxChg,
 		MaxDischargeW:       maxDis,
@@ -197,7 +197,7 @@ func baselineCost(slots []Slot, exportCredit float64) float64 {
 
 // planStats summarises cycles + SoC range for a plan.
 func planStats(p Plan) (chgKWh, disKWh, socMin, socMax float64) {
-	socMin, socMax = 100, 0
+	socMin, socMax = 1, 0
 	for _, a := range p.Actions {
 		dt := float64(a.SlotLenMin) / 60.0
 		if a.BatteryW > 0 {
@@ -205,11 +205,11 @@ func planStats(p Plan) (chgKWh, disKWh, socMin, socMax float64) {
 		} else {
 			disKWh += -a.BatteryW * dt / 1000.0
 		}
-		if a.SoCPct < socMin {
-			socMin = a.SoCPct
+		if a.SoC < socMin {
+			socMin = a.SoC
 		}
-		if a.SoCPct > socMax {
-			socMax = a.SoCPct
+		if a.SoC > socMax {
+			socMax = a.SoC
 		}
 	}
 	return
@@ -262,12 +262,12 @@ func TestAnnualSavingsProjection(t *testing.T) {
 		}
 		mean /= float64(len(sc.slots))
 		base := baselineCost(sc.slots, mean*0.7)
-		initKWh := sc.initSoC * capWh / 100 / 1000
+		initKWh := sc.initSoC * capWh / 1000
 		baseNet := base/100 - mean*initKWh/100
 		row := fmt.Sprintf("%-18s  %-8.0f%%", sc.name, w*100)
 		for _, m := range modes {
 			plan := runMode(sc.slots, sc.initSoC, m, capWh, maxChg, maxDis)
-			endKWh := plan.Actions[len(plan.Actions)-1].SoCPct * capWh / 100 / 1000
+			endKWh := plan.Actions[len(plan.Actions)-1].SoC * capWh / 1000
 			netSek := plan.TotalCostOre/100 - mean*endKWh/100
 			savings := baseNet - netSek // positive = saving
 			annual := savings * 365 * w
@@ -315,12 +315,12 @@ func TestStrategyComparison(t *testing.T) {
 		}
 		mean /= float64(len(sc.slots))
 		base := baselineCost(sc.slots, mean*0.7)
-		initKWh := sc.initSoC * capWh / 100 / 1000
+		initKWh := sc.initSoC * capWh / 1000
 		baseNet := base/100 - mean*initKWh/100 // baseline ends with initial SoC
 		for i, m := range modes {
 			plan := runMode(sc.slots, sc.initSoC, m, capWh, maxChg, maxDis)
 			chgK, disK, smin, smax := planStats(plan)
-			endKWh := plan.Actions[len(plan.Actions)-1].SoCPct * capWh / 100 / 1000
+			endKWh := plan.Actions[len(plan.Actions)-1].SoC * capWh / 1000
 			costSek := plan.TotalCostOre / 100
 			netSek := costSek - mean*endKWh/100
 			vsBase := netSek - baseNet
@@ -329,7 +329,7 @@ func TestStrategyComparison(t *testing.T) {
 				label = ""
 			}
 			fmt.Printf("%-18s  %-20s  %8.2f  %8.2f  %+8.2f  %8.2f  %8.2f  %5.0f→%3.0f\n",
-				label, m, costSek, netSek, vsBase, chgK, disK, smin, smax)
+				label, m, costSek, netSek, vsBase, chgK, disK, smin*100, smax*100)
 			// No ordering assertion: different modes end at different
 			// SoC, so raw spent-energy cost doesn't capture the
 			// terminal value of stored kWh. The DP *does* account for

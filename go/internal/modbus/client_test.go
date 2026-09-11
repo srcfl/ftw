@@ -94,7 +94,7 @@ func TestDialRecoversWhenDeviceComesOnlineAfterStartup(t *testing.T) {
 		t.Fatalf("Dial while device offline: %v", err)
 	}
 	defer capability.Close()
-	if capability.client != nil {
+	if capability.conn.client != nil {
 		t.Fatal("offline Dial kept a client")
 	}
 
@@ -175,14 +175,16 @@ func TestValidateEndpointAllowsSupportedHosts(t *testing.T) {
 
 func TestNeverConnectedCapabilityCloseAndPollRespectBackoff(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	capability := &Capability{
+	conn := &sharedConn{
 		addr:                         "127.0.0.1:502",
 		url:                          "tcp://127.0.0.1:502",
 		requestTimeout:               10 * time.Millisecond,
 		consecutiveTransportFailures: 2,
 		nextReconnectAt:              now.Add(2 * time.Second),
 		now:                          func() time.Time { return now },
+		refs:                         1,
 	}
+	capability := &Capability{conn: conn, unitID: 1, url: conn.url}
 
 	started := time.Now()
 	for i := 0; i < 100; i++ {
@@ -194,13 +196,13 @@ func TestNeverConnectedCapabilityCloseAndPollRespectBackoff(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
 		t.Fatalf("poll during backoff took %v; possible busy/blocking retry", elapsed)
 	}
-	if capability.client != nil {
+	if conn.client != nil {
 		t.Fatal("poll during backoff opened a client")
 	}
-	if capability.consecutiveTransportFailures != 2 ||
-		!capability.nextReconnectAt.Equal(now.Add(2*time.Second)) {
+	if conn.consecutiveTransportFailures != 2 ||
+		!conn.nextReconnectAt.Equal(now.Add(2*time.Second)) {
 		t.Fatalf("poll during backoff changed retry state: failures=%d next=%v",
-			capability.consecutiveTransportFailures, capability.nextReconnectAt)
+			conn.consecutiveTransportFailures, conn.nextReconnectAt)
 	}
 	if err := capability.Close(); err != nil {
 		t.Fatalf("Close before first connection: %v", err)
@@ -465,7 +467,7 @@ func TestConfigureTCPKeepAlive(t *testing.T) {
 }
 
 func TestReconnectBackoffSchedule(t *testing.T) {
-	c := &Capability{}
+	c := &sharedConn{}
 	want := map[int]time.Duration{
 		0: 0,
 		1: 0,
@@ -536,19 +538,19 @@ func TestMuteReconnectBackoffReturnsFastAndRecovers(t *testing.T) {
 	}
 	defer capability.Close()
 	const requestTimeout = 40 * time.Millisecond
-	capability.requestTimeout = requestTimeout
-	capability.client.timeout = requestTimeout
+	capability.conn.requestTimeout = requestTimeout
+	capability.conn.client.timeout = requestTimeout
 
 	fakeNow := time.Unix(1_700_000_000, 0)
-	capability.now = func() time.Time { return fakeNow }
+	capability.conn.now = func() time.Time { return fakeNow }
 
 	if _, err := capability.Read(0, 1, drivers.ModbusInput); err == nil {
 		t.Fatal("first mute read succeeded")
 	}
-	if capability.consecutiveTransportFailures != 2 {
-		t.Fatalf("transport failures=%d, want 2", capability.consecutiveTransportFailures)
+	if capability.conn.consecutiveTransportFailures != 2 {
+		t.Fatalf("transport failures=%d, want 2", capability.conn.consecutiveTransportFailures)
 	}
-	if capability.client != nil {
+	if capability.conn.client != nil {
 		t.Fatal("mute retry left its socket open")
 	}
 
@@ -568,9 +570,9 @@ func TestMuteReconnectBackoffReturnsFastAndRecovers(t *testing.T) {
 	if len(registers) != 1 || registers[0] != 222 {
 		t.Fatalf("read after cooldown=%v, want [222]", registers)
 	}
-	if capability.consecutiveTransportFailures != 0 || !capability.nextReconnectAt.IsZero() {
+	if capability.conn.consecutiveTransportFailures != 0 || !capability.conn.nextReconnectAt.IsZero() {
 		t.Fatalf("successful recovery kept failure state: failures=%d next=%v",
-			capability.consecutiveTransportFailures, capability.nextReconnectAt)
+			capability.conn.consecutiveTransportFailures, capability.conn.nextReconnectAt)
 	}
 }
 
@@ -628,3 +630,168 @@ type fakeAddr string
 
 func (a fakeAddr) Network() string { return string(a) }
 func (a fakeAddr) String() string  { return string(a) }
+
+// TestDialSharesSingleConnectionPerEndpoint is the #986 contract: FTW
+// must never hold two TCP connections to the same Modbus endpoint. Many
+// inverters (the live Sungrow that motivated this) accept exactly one
+// session and RST the previous one on every new connect, so a second
+// FTW-side client — another driver on the same gateway, a driver test,
+// a fingerprint probe — evicts the production session on every request.
+func TestDialSharesSingleConnectionPerEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	var accepts atomic.Int32
+	unitIDs := make(chan byte, 8)
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			go func(c net.Conn) {
+				defer c.Close()
+				for {
+					hdr := make([]byte, 12)
+					if _, err := io.ReadFull(c, hdr); err != nil {
+						return
+					}
+					unitIDs <- hdr[6]
+					resp := []byte{
+						hdr[0], hdr[1],
+						0, 0,
+						0, 5,
+						hdr[6],
+						hdr[7],
+						2,
+						0, 7,
+					}
+					if _, err := c.Write(resp); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	if _, err := fmtSscan(portStr, &port); err != nil {
+		t.Fatalf("bad listener port: %v", err)
+	}
+
+	first, err := Dial(host, port, 1)
+	if err != nil {
+		t.Fatalf("dial first: %v", err)
+	}
+	second, err := Dial(host, port, 2)
+	if err != nil {
+		t.Fatalf("dial second: %v", err)
+	}
+	if first.conn != second.conn {
+		t.Fatal("two capabilities for one endpoint hold different connections")
+	}
+
+	if _, err := first.Read(0, 1, drivers.ModbusInput); err != nil {
+		t.Fatalf("read on first: %v", err)
+	}
+	if _, err := second.Read(0, 1, drivers.ModbusInput); err != nil {
+		t.Fatalf("read on second: %v", err)
+	}
+	if _, err := first.Read(0, 1, drivers.ModbusInput); err != nil {
+		t.Fatalf("second read on first: %v", err)
+	}
+	if got := accepts.Load(); got != 1 {
+		t.Fatalf("device saw %d connections, want exactly 1", got)
+	}
+	for i, want := range []byte{1, 2, 1} {
+		if got := <-unitIDs; got != want {
+			t.Fatalf("request %d used unit id %d, want %d", i, got, want)
+		}
+	}
+
+	// Closing one handle must not tear down the other's session.
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first: %v", err)
+	}
+	if _, err := second.Read(0, 1, drivers.ModbusInput); err != nil {
+		t.Fatalf("read on second after first closed: %v", err)
+	}
+	if got := accepts.Load(); got != 1 {
+		t.Fatalf("device saw %d connections after handle close, want 1", got)
+	}
+
+	// The last handle closing releases the endpoint entirely.
+	if err := second.Close(); err != nil {
+		t.Fatalf("close second: %v", err)
+	}
+	addr := net.JoinHostPort(host, portStr)
+	registryMu.Lock()
+	_, stillRegistered := endpointConns[addr]
+	registryMu.Unlock()
+	if stillRegistered {
+		t.Fatal("endpoint still registered after last handle closed")
+	}
+}
+
+// TestNoteReconnectedRateLimitsAndDetectsEviction drives the redial
+// bookkeeping directly: the INFO line is suppressed inside the
+// rate-limit window, and crossing the redial threshold inside the
+// observation window arms the eviction warning exactly once per
+// interval.
+func TestNoteReconnectedRateLimitsAndDetectsEviction(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	c := &sharedConn{
+		url: "tcp://192.0.2.1:502",
+		now: func() time.Time { return now },
+	}
+
+	for i := 0; i < evictionRedialThreshold-1; i++ {
+		c.noteReconnected()
+		now = now.Add(5 * time.Second)
+	}
+	if !c.lastEvictionWarnAt.IsZero() {
+		t.Fatalf("eviction warned after %d redials, below threshold %d",
+			evictionRedialThreshold-1, evictionRedialThreshold)
+	}
+	if c.suppressedReconnectLogs != evictionRedialThreshold-2 {
+		t.Fatalf("suppressed %d reconnect logs, want %d (all but the first inside the window)",
+			c.suppressedReconnectLogs, evictionRedialThreshold-2)
+	}
+
+	c.noteReconnected()
+	firstWarnAt := c.lastEvictionWarnAt
+	if firstWarnAt.IsZero() {
+		t.Fatalf("no eviction warning after %d redials in %v",
+			evictionRedialThreshold, reconnectObserveWindow)
+	}
+
+	// More redials right away: still evicting, but the warn holds its
+	// interval instead of flooding.
+	now = now.Add(5 * time.Second)
+	c.noteReconnected()
+	if !c.lastEvictionWarnAt.Equal(firstWarnAt) {
+		t.Fatal("eviction warning repeated inside its rate-limit interval")
+	}
+
+	// A war that keeps going re-arms the warning once the interval has
+	// passed — redials continue at eviction rate the whole time.
+	for i := 0; i < 13; i++ {
+		now = now.Add(5 * time.Second)
+		c.noteReconnected()
+	}
+	if c.lastEvictionWarnAt.Equal(firstWarnAt) {
+		t.Fatal("eviction warning never re-armed after its interval")
+	}
+
+	// Redials older than the observation window fall out of the count.
+	now = now.Add(2 * reconnectObserveWindow)
+	c.noteReconnected()
+	if got := len(c.recentRedials); got != 1 {
+		t.Fatalf("window kept %d redials after quiet period, want 1", got)
+	}
+}

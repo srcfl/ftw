@@ -176,7 +176,7 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 
 		var ds daySavings
 		if isToday {
-			b, err := s.deps.State.DailyCostBreakdown(dayStart.UnixMilli(), now.UnixMilli(), zone, ep)
+			b, err := s.deps.State.DailyCostBreakdownContext(r.Context(), dayStart.UnixMilli(), now.UnixMilli(), zone, ep)
 			if err != nil {
 				slog.Error("handleSavingsDaily: DailyCostBreakdown failed", "err", err, "day", dayKey)
 				http.Error(w, "savings load failed", http.StatusInternalServerError)
@@ -191,7 +191,7 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 				ds = cached
 			} else {
 				dayEnd := dayStart.AddDate(0, 0, 1)
-				b, err := s.deps.State.DailyCostBreakdown(dayStart.UnixMilli(), dayEnd.UnixMilli(), zone, ep)
+				b, err := s.deps.State.DailyCostBreakdownContext(r.Context(), dayStart.UnixMilli(), dayEnd.UnixMilli(), zone, ep)
 				if err != nil {
 					slog.Error("handleSavingsDaily: DailyCostBreakdown failed", "err", err, "day", dayKey)
 					http.Error(w, "savings load failed", http.StatusInternalServerError)

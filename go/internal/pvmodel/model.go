@@ -43,19 +43,57 @@ import (
 // NFeat is the number of features in the RLS regression.
 const NFeat = 7
 
+// maxLearningW is a numerical sensor-unit guard, not a site hardware limit.
+// It permits up to 10 MW; only ACLimitW represents a verified inverter limit.
+const maxLearningW = 10_000_000.0
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
 // Model is the learned PV predictor.
 type Model struct {
-	Beta       [NFeat]float64         `json:"beta"`
-	P          [NFeat][NFeat]float64  `json:"p"` // covariance
-	Forgetting float64                `json:"forgetting"`
-	Samples    int64                  `json:"samples"`
-	LastMs     int64                  `json:"last_ms"`
-	MAE        float64                `json:"mae"`        // EMA of |err| (W)
-	RatedW     float64                `json:"rated_w"`    // nominal plate rating (prior)
+	ConfigRevision    string                `json:"config_revision,omitempty"`
+	LearningStartedMS int64                 `json:"learning_started_ms,omitempty"`
+	Beta              [NFeat]float64        `json:"beta"`
+	P                 [NFeat][NFeat]float64 `json:"p"` // covariance
+	Forgetting        float64               `json:"forgetting"`
+	Samples           int64                 `json:"samples"`
+	LastMs            int64                 `json:"last_ms"`
+	MAE               float64               `json:"mae"` // EMA of |err| (W)
+	// RelMAE is MAE expressed as a share of the prediction it belongs to
+	// (0..1), over the same EMA window. The planner sizes each slot's PV
+	// downside against that slot's own expected generation, which a watt
+	// figure cannot do. Absent from state persisted before #1020; 0 there
+	// reads as "not learned yet" and the planner keeps the flat haircut.
+	RelMAE             float64    `json:"rel_mae"`
+	RatedW             float64    `json:"rated_w"`    // nominal plate rating (prior)
+	ACLimitW           float64    `json:"ac_limit_w"` // verified AC limit only; zero is unknown
+	InferredScaleKnown bool       `json:"inferred_scale_known"`
+	InferredScaleW     float64    `json:"inferred_scale_w"`
+	ScaleCandidateW    float64    `json:"scale_candidate_w"`
+	ScaleSamples       uint16     `json:"scale_samples"`
+	ScaleDays          uint16     `json:"scale_days"`
+	ScaleLastDay       int64      `json:"scale_last_day"`
+	ScaleStartMs       int64      `json:"scale_start_ms"`
+	ScaleLastMs        int64      `json:"scale_last_ms"`
+	ScaleDirection     int        `json:"scale_direction"`
+	CoverageDays       [24]uint16 `json:"coverage_days"`
+	CoverageLastDay    [24]int64  `json:"coverage_last_day"`
+	ChangeCount        int        `json:"change_count"`
+	ChangeSign         int        `json:"change_sign"`
+	ChangeStartMs      int64      `json:"change_start_ms"`
+	ChangeLastMs       int64      `json:"change_last_ms"`
 }
+
+// relMAEMinPredictedW gates the relative-error EMA. Below it the denominator
+// is small enough that ordinary watt-level noise yields ratios of several
+// hundred percent, and the average would report a storm on a clear morning.
+const relMAEMinPredictedW = 500.0
 
 // NewModel returns a model anchored on the naive clear-sky prior.
 func NewModel(ratedW float64) *Model {
+	if !finite(ratedW) || ratedW < 0 || ratedW > maxLearningW {
+		ratedW = 0
+	}
 	m := &Model{
 		Forgetting: 0.995, // ~200-sample effective window
 		RatedW:     ratedW,
@@ -160,15 +198,15 @@ var featureHash = sync.OnceValue(func() string {
 // does not.
 func FeatureHash() string { return featureHash() }
 
-// Predict returns the expected AC output in W (non-negative). Cold-start
-// behavior: during the first WarmupSamples we blend the learned β with
-// the naive physics prior so a wild β coefficient (which RLS can take a
-// few samples to tame) doesn't produce an unreasonable forecast.
-//
-// After ~warmup samples we trust the learned model fully.
+// Predict returns non-negative AC output. Separate days of coverage at the
+// target hour control the blend between the learned shape and the scale prior.
+// WarmupSamples remains the minimum history for the residual outlier filter.
 const WarmupSamples = 50
 
 func (m Model) Predict(clearSkyW, cloudPct float64, t time.Time) float64 {
+	if !finite(clearSkyW) || !finite(cloudPct) || clearSkyW > 2000 {
+		return 0
+	}
 	// Physics gate: no sun above the horizon → no PV output. Mirrors the
 	// Update-side guard (`clearSkyW < 50` skips training), so prediction
 	// and training share one definition of "night". Without this gate the
@@ -197,41 +235,59 @@ func (m Model) Predict(clearSkyW, cloudPct float64, t time.Time) float64 {
 		}
 		cf = math.Pow(1-c, 1.5)
 	}
-	prior := m.RatedW * (clearSkyW / 1000.0) * cf
+	scale := m.RatedW
+	if m.InferredScaleKnown || m.InferredScaleW > 0 {
+		scale = m.InferredScaleW
+	}
+	prior := scale * (clearSkyW / 1000.0) * cf
 
-	// Trust = samples / WarmupSamples, clipped to [0, 1].
-	// samples=0  → 100% prior.
-	// samples≥50 → 100% learned.
-	trust := float64(m.Samples) / float64(WarmupSamples)
-	if trust > 1 {
-		trust = 1
+	// Dense samples from one morning cannot grant full-day trust.
+	trust := m.Trust(t)
+	if !finite(learned) {
+		learned = prior
 	}
 	y := trust*learned + (1-trust)*prior
 
 	if y < 0 {
 		return 0
 	}
-	// Hard cap at 105% of nameplate. Anything above is RLS having a bad
-	// day — fall back to the physics prior, which is bounded by construction.
-	if m.RatedW > 0 && y > 1.05*m.RatedW {
-		return prior
+	// Only a verified AC boundary limits an otherwise valid forecast.
+	if m.ACLimitW > 0 {
+		y = math.Min(y, m.ACLimitW)
 	}
-	return y
+	return math.Min(y, maxLearningW)
+}
+
+// Trust is coverage at the target UTC hour, earned on separate days. Legacy
+// states retain their coefficients but start with no earned coverage.
+func (m Model) Trust(t time.Time) float64 {
+	hour := t.UTC().Hour()
+	days := t.Unix()/86400 - m.CoverageLastDay[hour]
+	if days < 0 {
+		return 0
+	}
+	// Coverage from a distant season cannot grant full weight to today's
+	// solar response. The first fortnight covers the normal planning horizon;
+	// older support decays with a 30-day time scale.
+	age := math.Exp(-math.Max(0, float64(days-14)) / 30)
+	return math.Min(1, float64(m.CoverageDays[hour])/7) * age
 }
 
 // Update runs one RLS step. Skipped when clearSky < threshold (night /
 // near-night — little signal, mostly noise), or when the residual is a
 // large-σ outlier (sensor glitch, inverter restart).
 func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float64) (updated bool) {
+	if !finite(clearSkyW) || !finite(cloudPct) || !finite(actualPVW) || clearSkyW > 2000 || actualPVW > maxLearningW {
+		return false
+	}
 	if clearSkyW < 50 {
 		return false
 	}
 	if actualPVW < 0 {
 		return false
 	}
-	// Physical sanity envelope: anything wildly above nameplate is sensor
-	// noise (inverter restart, transient) — never feed it to RLS.
-	if m.RatedW > 0 && actualPVW > 1.2*m.RatedW {
+	// A verified AC limit can reject impossible readings; a size guess cannot.
+	if m.ACLimitW > 0 && actualPVW > 1.2*m.ACLimitW {
 		return false
 	}
 	x := Features(clearSkyW, cloudPct, t)
@@ -240,18 +296,57 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 		yHat += m.Beta[i] * x[i]
 	}
 	err := actualPVW - yHat
-	// Cold-start outlier guard: before the MAE-based filter kicks in, reject
-	// samples where the predicted value is already absurd (>2× rated). This
-	// stops a single bad sample from cascading into wild β coefficients.
-	if m.RatedW > 0 && math.Abs(yHat) > 2*m.RatedW {
-		return false
+	// Recover corrupt numerical state instead of rejecting every later sample.
+	if !finite(yHat) || math.Abs(yHat) > maxLearningW*10 {
+		fresh := NewModel(m.RatedW)
+		m.Beta = fresh.Beta
+		m.P = fresh.P
+		m.Forgetting = fresh.Forgetting
+		yHat = 0
+		for i := 0; i < NFeat; i++ {
+			yHat += m.Beta[i] * x[i]
+		}
+		err = actualPVW - yHat
 	}
 	// After warm-up, reject 10σ outliers. MAE is in W; use it as a proxy
 	// for σ (scales with system size, unlike a hard-coded threshold).
-	if m.Samples > 50 {
+	if m.Samples > WarmupSamples {
 		band := math.Max(m.MAE*10, 200)
 		if math.Abs(err) > band {
-			return false
+			sign := 1
+			if err < 0 {
+				sign = -1
+			}
+			if m.ChangeSign != sign || t.UnixMilli()-m.ChangeLastMs > int64((2*time.Hour)/time.Millisecond) {
+				m.ChangeCount = 0
+				m.ChangeStartMs = t.UnixMilli()
+			}
+			m.ChangeSign = sign
+			m.ChangeCount++
+			m.ChangeLastMs = t.UnixMilli()
+			if m.ChangeCount < 5 || t.UnixMilli()-m.ChangeStartMs < int64((15*time.Minute)/time.Millisecond) {
+				return false
+			}
+			// Repeated evidence of a new operating regime is not a sensor
+			// spike. Retire the old fit and earn coverage again. Resetting its
+			// covariance also avoids amplifying ill-conditioned old harmonics.
+			fresh := NewModel(m.RatedW)
+			m.Beta = [NFeat]float64{}
+			if x[2] >= 50 {
+				m.Beta[2] = actualPVW / x[2]
+			} else {
+				m.Beta[1] = actualPVW / clearSkyW
+			}
+			m.P = fresh.P
+			m.CoverageDays = [24]uint16{}
+			m.CoverageLastDay = [24]int64{}
+			m.ChangeCount = 0
+			m.ChangeSign = 0
+			yHat = actualPVW
+			err = 0
+		} else {
+			m.ChangeCount = 0
+			m.ChangeSign = 0
 		}
 	}
 
@@ -268,7 +363,23 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 	for i := 0; i < NFeat; i++ {
 		xPx += x[i] * Px[i]
 	}
+	if !finite(m.Forgetting) || m.Forgetting <= 0 || m.Forgetting > 1 {
+		m.Forgetting = 0.995
+	}
 	denom := m.Forgetting + xPx
+	if !finite(denom) || denom <= 0 {
+		// A lost covariance direction must not permanently stop learning.
+		// Rebuild uncertainty while retaining the finite coefficient estimate.
+		m.P = [NFeat][NFeat]float64{}
+		xPx = 0
+		for i := 1; i < NFeat; i++ {
+			m.P[i][i] = 1
+			Px[i] = x[i]
+			xPx += x[i] * x[i]
+		}
+		Px[0] = 0
+		denom = m.Forgetting + xPx
+	}
 	var K [NFeat]float64
 	for i := 0; i < NFeat; i++ {
 		K[i] = Px[i] / denom
@@ -288,25 +399,81 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 	// ~140k samples, after which Px[0] = Inf*0 = NaN poisons K, β, and
 	// all predictions. Freezing row/column 0 at zero keeps the
 	// dead-slot invariant numerically stable forever. Codex P1 on PR #136.
-	var newP [NFeat][NFeat]float64
+	// Joseph covariance update preserves symmetry and positive directions
+	// under repeated, nearly identical feature vectors. The short subtractive
+	// form can lose both and produce large extrapolation errors after days.
+	var a, ap, newP [NFeat][NFeat]float64
 	for i := 1; i < NFeat; i++ {
 		for j := 1; j < NFeat; j++ {
-			var kxTP float64
-			for k := 1; k < NFeat; k++ {
-				kxTP += K[i] * x[k] * m.P[k][j]
+			a[i][j] = -K[i] * x[j]
+			if i == j {
+				a[i][j]++
 			}
-			newP[i][j] = (m.P[i][j] - kxTP) / m.Forgetting
+		}
+	}
+	for i := 1; i < NFeat; i++ {
+		for j := 1; j < NFeat; j++ {
+			for k := 1; k < NFeat; k++ {
+				ap[i][j] += a[i][k] * m.P[k][j]
+			}
+		}
+	}
+	var trace float64
+	for i := 1; i < NFeat; i++ {
+		for j := i; j < NFeat; j++ {
+			v := K[i] * K[j]
+			for k := 1; k < NFeat; k++ {
+				v += ap[i][k] * a[j][k] / m.Forgetting
+			}
+			if i == j {
+				v = math.Max(0, v)
+				trace += v
+			}
+			newP[i][j] = v
+			newP[j][i] = v
+		}
+	}
+	// Bound unobserved covariance growth (not PV power). Scaling the whole
+	// matrix preserves its positive directions and finite numerical range.
+	if trace > 1e6 {
+		for i := 1; i < NFeat; i++ {
+			for j := 1; j < NFeat; j++ {
+				newP[i][j] *= 1e6 / trace
+			}
 		}
 	}
 	m.P = newP
 
 	m.Samples++
 	m.LastMs = t.UnixMilli()
+	hour, day := t.UTC().Hour(), t.Unix()/86400
+	if m.CoverageDays[hour] == 0 || m.CoverageLastDay[hour] != day {
+		m.CoverageDays[hour] = min(365, m.CoverageDays[hour]+1)
+		m.CoverageLastDay[hour] = day
+	}
+	m.observeScale(clearSkyW, cloudPct, t, actualPVW)
 	// MAE EMA: gives a ~99-sample window; good for outlier banding.
 	if m.Samples == 1 {
 		m.MAE = math.Abs(err)
 	} else {
 		m.MAE = 0.99*m.MAE + 0.01*math.Abs(err)
+	}
+	// Relative twin of the MAE EMA, same window. The ratio is clamped at 1
+	// because a 3× miss and a 1× miss both mean "the forecast was worthless",
+	// while an unclamped outlier would hold the average up for days. RelMAE
+	// == 0 means unseeded — the first qualifying sample sets it outright, so a
+	// site that has just learned its error is hedged immediately rather than
+	// ramping up from nothing over a hundred samples.
+	if yHat >= relMAEMinPredictedW {
+		ratio := math.Abs(err) / yHat
+		if ratio > 1 {
+			ratio = 1
+		}
+		if m.RelMAE == 0 {
+			m.RelMAE = ratio
+		} else {
+			m.RelMAE = 0.99*m.RelMAE + 0.01*ratio
+		}
 	}
 	// Self-heal the intercept: Features[0] is pinned to 0 (see Features
 	// doc), but off-diagonal covariance can still nudge Beta[0] via K[0]
@@ -317,19 +484,98 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 	return true
 }
 
-// Quality reports how confident we are in the model. 0 = untrained,
-// 1.0+ = fully converged (matches rated_w → 5% MAE threshold).
+// observeScale changes the prior only after separate observations support a
+// persistent change. Low-light cloud normalization cannot resize the plant.
+// A drop requires three separate days (seven for near-zero production), while
+// repeated growth can correct an undersized guess within an hour.
+func (m *Model) observeScale(cs, cloud float64, t time.Time, actual float64) {
+	if cs < 300 || cloud < 0 || cloud > 20 {
+		return
+	}
+	if m.ScaleLastMs > 0 && t.UnixMilli()-m.ScaleLastMs < int64(15*time.Minute/time.Millisecond) {
+		return
+	}
+	scale := actual / (cs / 1000 * math.Pow(1-cloud/100, 1.5))
+	base := m.RatedW
+	if m.InferredScaleKnown || m.InferredScaleW > 0 {
+		base = m.InferredScaleW
+	}
+	direction := 0
+	if scale > base*1.2+50 {
+		direction = 1
+	} else if scale < base*.8-50 {
+		direction = -1
+	}
+	if direction == 0 {
+		m.ScaleDirection = 0
+		m.ScaleSamples = 0
+		m.ScaleDays = 0
+		m.ScaleLastMs = t.UnixMilli()
+		return
+	}
+	if direction != m.ScaleDirection || t.UnixMilli()-m.ScaleLastMs > int64(14*24*time.Hour/time.Millisecond) {
+		m.ScaleSamples = 0
+		m.ScaleDays = 0
+		m.ScaleStartMs = t.UnixMilli()
+	}
+	m.ScaleDirection = direction
+	m.ScaleSamples = min(96, m.ScaleSamples+1)
+	if m.ScaleSamples == 1 {
+		m.ScaleCandidateW = scale
+	} else {
+		m.ScaleCandidateW += (scale - m.ScaleCandidateW) / float64(min(16, m.ScaleSamples))
+	}
+	day := t.Unix() / 86400
+	if m.ScaleDays == 0 || day != m.ScaleLastDay {
+		m.ScaleDays = min(365, m.ScaleDays+1)
+		m.ScaleLastDay = day
+	}
+	m.ScaleLastMs = t.UnixMilli()
+	if m.ScaleSamples < 4 || t.UnixMilli()-m.ScaleStartMs < int64(45*time.Minute/time.Millisecond) {
+		return
+	}
+	if direction < 0 {
+		need := uint16(3)
+		if m.ScaleCandidateW < base*.05 {
+			need = 7
+		}
+		if m.ScaleDays < need {
+			return
+		}
+	}
+	m.InferredScaleW = math.Min(maxLearningW, m.ScaleCandidateW)
+	m.InferredScaleKnown = true
+}
+
+// Quality is a training-fit diagnostic limited by independent coverage.
+// It is not out-of-sample forecast accuracy and must not select a model.
 func (m Model) Quality() float64 {
-	if m.Samples < 30 || m.RatedW <= 0 {
+	scale := m.RatedW
+	if m.InferredScaleKnown || m.InferredScaleW > 0 {
+		scale = m.InferredScaleW
+	}
+	if m.Samples < 30 || scale <= 0 {
 		return 0
 	}
 	// Relative MAE vs. rated → inverse (lower MAE = higher quality).
-	rel := m.MAE / m.RatedW
+	rel := m.MAE / scale
+	var coverage float64
+	var seen int
+	for _, days := range m.CoverageDays {
+		if days > 0 {
+			coverage += math.Min(1, float64(days)/7)
+			seen++
+		}
+	}
+	if seen == 0 {
+		return 0
+	}
+	coverage /= float64(seen)
 	if rel <= 0.05 {
-		return 1.0
+		return coverage
 	}
 	if rel >= 0.5 {
 		return 0.0
 	}
-	return 1.0 - (rel-0.05)/0.45
+	return coverage * (1.0 - (rel-0.05)/0.45)
 }

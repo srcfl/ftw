@@ -255,3 +255,20 @@ func TestResidualBuffer_Diag_SamplesAndStd(t *testing.T) {
 		t.Fatalf("MeanW=%v, want ~-200", d.MeanW)
 	}
 }
+
+// RelativeUncertainty feeds the MPC's per-slot downside haircut. A missing
+// service or an un-built model must read as "not learned" (0), which sends
+// the planner back to the flat k·σ form rather than panicking mid-replan.
+func TestServiceRelativeUncertainty(t *testing.T) {
+	if got := (*Service)(nil).RelativeUncertainty(); got != 0 {
+		t.Errorf("nil Service = %v, want 0", got)
+	}
+	if got := (&Service{}).RelativeUncertainty(); got != 0 {
+		t.Errorf("Service without a model = %v, want 0", got)
+	}
+	m := NewModel(5000)
+	m.RelMAE = 0.42
+	if got := (&Service{model: m}).RelativeUncertainty(); got != 0.42 {
+		t.Errorf("RelativeUncertainty = %v, want 0.42", got)
+	}
+}

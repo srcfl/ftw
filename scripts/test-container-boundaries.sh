@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 if grep -Eq 'COPY optimizer/|--from=optimizer|/opt/venv|FTW_OPTIMIZER_(PYTHON|DIR)' Dockerfile; then
-  echo "Dockerfile must contain only core, drivers and web assets; use Dockerfile.optimizer for Python/CVXPY" >&2
+  echo "Dockerfile must contain only core, drivers and web assets" >&2
   exit 1
 fi
 
@@ -15,7 +15,7 @@ fi
 # the optimizer's base image, so the check existed to catch a base that drags an
 # interpreter in, not to mandate one distro. Assert that directly instead.
 if grep -Eq '^FROM .*(python|pypy)' Dockerfile; then
-  echo "Dockerfile must not build on a Python base image; use Dockerfile.optimizer for Python/CVXPY" >&2
+  echo "Dockerfile must not build on a Python base image" >&2
   exit 1
 fi
 # wget is contractual, not incidental: the HEALTHCHECK uses it, and
@@ -27,7 +27,6 @@ if ! grep -Eq 'wget' Dockerfile; then
   echo "Dockerfile must provide wget: the HEALTHCHECK and ftw-updater's readiness probe both exec it" >&2
   exit 1
 fi
-grep -q '^COPY optimizer/' Dockerfile.optimizer
 grep -q '/out/ftw-backup' Dockerfile
 grep -q '/app/ftw-backup' Dockerfile
 grep -q -- '--chown=100:101 /out/ftw' Dockerfile
@@ -35,8 +34,10 @@ if grep -q 'chown -R 100:101 /app' Dockerfile; then
   echo "Dockerfile must set ownership while copying; a full-tree chown duplicates every app layer" >&2
   exit 1
 fi
-grep -q '^  ftw-optimizer:' docker-compose.yml
-grep -q 'FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock' docker-compose.yml
+if grep -Eq 'ftw-optimizer|FTW_OPTIMIZER_|optimizer-ipc' docker-compose.yml; then
+  echo 'Compose must not require the retired Python optimizer' >&2
+  exit 1
+fi
 
 # mDNS container contract: the static core resolves names itself, direct
 # multicast needs Linux host networking, and the optional Avahi bind is the

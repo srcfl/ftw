@@ -145,4 +145,5 @@ Wenn diese Adresse nicht funktioniert — probiere die IP-Adresse, die du aufges
 - **Das Lämpchen leuchtet gar nicht** → prüfe, ob das Netzteil richtig eingesteckt ist.
 - **Keine IP-Adresse zu finden** → starte den Router neu, warte 5 Minuten, schau nochmal.
 - **SSH sagt "Connection refused"** → warte noch etwas. Der erste Start dauert.
+- **Die Seite lädt, aber beim Ändern von Einstellungen oder beim Update erscheint "remote access to protected API routes is disabled"** → FTW nimmt Änderungen nur von Adressen an, die es als lokal erkennt. Öffne die Oberfläche über die IP-Adresse des Pi, z. B. `http://192.168.1.123:8080`. Warum das passiert — auch zu Hause — steht in [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled) (auf Englisch).
 - **Das alles hilft nicht** → schau auf unserem Discord vorbei und frage freundlich nach Hilfe: **https://discord.gg/25xcBzQaux**

@@ -32,7 +32,7 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=history3">
   <!-- Dashboard layout is layered on the shared base styles. -->
-  <link rel="stylesheet" href="/app.css?v=ia1">
+  <link rel="stylesheet" href="/app.css?v=ask3">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
@@ -66,12 +66,14 @@
          drawer (tabs + toggles + settings + version) via CSS class flip
          handled in the init block at the bottom of this file. -->
     <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
+    <button type="button" id="ask-why-chip" class="ask-why-chip" hidden></button>
     <div class="header-right">
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
       <!-- Advanced toggle moved below the Plan chart so it's visually
-           colocated with the controls + diagnostics it reveals (twins,
-           drivers, models, manual mode buttons). The button still
-           lives in the DOM as #ui-mode-toggle, just rendered there. -->
+           colocated with the diagnostics it reveals (twins, drivers,
+           models). The button still lives in the DOM as #ui-mode-toggle,
+           just rendered there. Manual strategy fallbacks stay on the
+           Plan card itself. -->
       <ftw-notif-history poll-ms="30000" data-menu-label="Notification history"></ftw-notif-history>
       <!-- Always-available entry into the setup wizard. The wizard
            currently REPLACES config on save, so the copy says "Run setup
@@ -93,14 +95,13 @@
       <div class="modal-tabs" id="settings-tabs">
         <button data-tab="control" class="active">Control</button>
         <button data-tab="devices">Devices</button>
-        <button data-tab="loadpoints">Loadpoints</button>
+        <button data-tab="loadpoints">Chargers</button>
         <button data-tab="price">Price</button>
         <button data-tab="weather">Weather</button>
         <button data-tab="batteries">Batteries</button>
         <button data-tab="planner">Planner</button>
         <button data-tab="app">FTW app</button>
         <button data-tab="ha">Home Assistant</button>
-        <button data-tab="caldav">Calendar</button>
         <button data-tab="notifications">Notifications</button>
         <button data-tab="system">System</button>
       </div>
@@ -156,6 +157,8 @@
       </div>
     </section>
 
+    <div id="charging-notices" hidden></div>
+
     <section class="power-now" id="power-now" aria-labelledby="power-now-title">
       <div class="power-now-head">
         <div>
@@ -184,7 +187,7 @@
           <div class="summary-card" id="card-pv">
             <div class="card-label">Solar</div>
             <div class="card-value" id="pv-w">—</div>
-            <div class="card-sub">generating</div>
+            <div class="card-sub" id="pv-dir">generating</div>
           </div>
           <div class="summary-card" id="card-grid">
             <div class="card-label">Grid <span class="card-target" id="grid-target-display"></span></div>
@@ -194,7 +197,7 @@
           <div class="summary-card" id="card-load">
             <div class="card-label">Home</div>
             <div class="card-value val-neutral" id="load-w">—</div>
-            <div class="card-sub">using now</div>
+            <div class="card-sub" id="load-dir">using now</div>
           </div>
           <div class="summary-card bat-only" id="card-bat">
             <div class="card-label">Battery <span class="card-target" id="bat-target-display"></span></div>
@@ -528,26 +531,76 @@
               </dd>
             </div>
           </dl>
+          <form id="plan-ask-why-form" class="plan-ask-why">
+            <label class="plan-now-label" for="plan-ask-why-input">Ask why this plan</label>
+            <div class="plan-ask-why-row">
+              <input id="plan-ask-why-input" type="text" maxlength="2000"
+                     placeholder="Why is it charging now?"
+                     aria-label="Question about this plan" autocomplete="off">
+              <button type="submit" id="plan-ask-why-plan" class="btn-send">Ask why</button>
+            </div>
+          </form>
         </section>
 
-        <!-- Strategy — the operator-facing knob that drives plan
-             behaviour. Lives inside the Plan card because that's what
-             it controls; the standalone "controls row" above
-             previously felt disconnected (operator note 2026-05-25).
-             Two-tier: planner strategies first, manual fallbacks
-             behind a "Manual…" toggle. -->
+        <!-- Household planner prefs — forecast trust + battery export.
+             Passive/Active are no longer primary buttons (HA/app keep
+             those keys). Manual fallbacks stay behind Manual…. -->
         <div class="plan-strategy">
-          <span class="card-label plan-strategy-label">Strategy</span>
-          <!-- Buttons are populated from GET /api/modes at load (see
-               renderModeCatalog in app.js) so the dashboard, the
-               /api/mode validator, and Home Assistant discovery all derive
-               from the same canonical control mode set and can't drift. -->
-          <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary"></div>
+          <span class="card-label plan-strategy-label">Follow the forecast</span>
+          <!-- The slider's value IS the planner's safety factor k, so the
+               position and the number the plan runs on can never drift
+               apart. Left is k=0 (raw forecast); right is k=2. -->
+          <div class="forecast-trust">
+            <input type="range" id="forecast-trust-slider" min="0" max="2" step="0.05" value="1"
+                   aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
+                   aria-label="Share of the PV forecast uncertainty held in reserve">
+            <div class="forecast-trust-labels">
+              <span>Trust forecast</span>
+              <span id="forecast-trust-value" class="slider-current">k 1</span>
+              <span>Hold reserve</span>
+            </div>
+            <div id="forecast-trust-hedge" class="forecast-trust-hedge" hidden></div>
+            <p class="forecast-trust-help">Left follows the forecast fully — if it is right, that earns more. Right keeps more in the battery in case the sun misses, closer to using the battery only for the house. Every notch changes how much of each slot's own forecast error the plan holds back.</p>
+          </div>
+          <div class="plan-export">
+            <div id="plan-export-banner" class="plan-export-banner" hidden>
+              <p>FTW used to sell from the battery on high-price hours. Allow that to continue?</p>
+              <div class="plan-export-banner-actions">
+                <button type="button" id="plan-export-allow">Allow</button>
+                <button type="button" id="plan-export-deny" class="btn-link">Keep off</button>
+              </div>
+            </div>
+            <label id="plan-export-row" class="plan-export-row" hidden>
+              <input type="checkbox" id="plan-export-check">
+              <span>Allow the battery to sell to the grid when the plan expects a worthwhile sale.</span>
+            </label>
+            <p class="plan-export-help">Solar can still export when this is off. Check your electricity contract.</p>
+            <p id="plan-export-unknown" class="plan-export-unknown" hidden>Not checked — battery export stays off.</p>
+          </div>
+          <p id="plan-export-sentence" class="plan-export-sentence"></p>
+          <!-- The way back to the planner. Without it a house left in a
+               manual mode has no control here that starts planning again.
+               Which planner mode it lands on is the server's answer
+               (GET /api/planner/prefs → mapped_mode), so this button never
+               decides on its own whether the battery may sell. Shown only
+               while a manual mode is driving. -->
+          <div class="mode-buttons mode-buttons-primary" id="plan-use-row" hidden>
+            <button type="button" id="plan-use-btn"
+                    title="Hand the battery back to the plan">Use the plan</button>
+          </div>
+          <!-- Remaining /api/modes entries (manual) still render here.
+               Planner keys are skipped in renderModeCatalog. -->
+          <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary" hidden></div>
           <div class="strategy-hint" id="strategy-hint"></div>
-          <div class="mode-advanced-toggle advanced-only">
+          <!-- Manual fallbacks are a drawer on this card, not a diagnostic.
+               They used to be `.advanced-only`, so the simple view hid both
+               the current manual mode and the way back to a planner
+               strategy. Keep them behind "Manual…" — that is already the
+               progressive disclosure. -->
+          <div class="mode-advanced-toggle">
             <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
           </div>
-          <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none"></div>
+          <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
         <p class="plan-help">
           Forecast-driven battery schedule for the next 48&nbsp;h, recomputed every few minutes.
@@ -574,10 +627,15 @@
              forecast-versus-reality and any automated findings — enough
              for someone else to answer without a screenshot round-trip. -->
         <div class="plan-help-request">
-          <button type="button" id="plan-help-report" class="btn-link">
-            Something looks wrong? Download a help report
-          </button>
-          <small>One file describing what FTW is doing and why, with the logs behind it. Share it when asking for help.</small>
+          <div class="plan-help-actions">
+            <button type="button" id="plan-ask-why" class="btn-link">
+              Something looks wrong? Ask why
+            </button>
+            <button type="button" id="plan-help-report" class="btn-link">
+              Download a help report
+            </button>
+          </div>
+          <small>Ask why reads this site and explains. The report is the same file you can share as-is.</small>
         </div>
       </section>
     </section>
@@ -601,10 +659,10 @@
       <div class="twins-grid" id="twins-grid"></div>
     </section>
 
-    <!-- Loadpoints — EV charger configuration + planned schedule -->
+    <!-- Chargers (loadpoints) — EV charger state + planned schedule -->
     <section id="loadpoints-section" class="advanced-only">
       <div class="section-header">
-        <h2>Loadpoints</h2>
+        <h2>Chargers</h2>
         <span id="loadpoints-subtitle" class="plan-summary"></span>
       </div>
       <div id="loadpoints-grid"></div>
@@ -872,20 +930,6 @@
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
-    <!-- Kept for API/UI backward compatibility. New operation should use the
-         bounded per-loadpoint Battery boost lease in the Loadpoints panel. -->
-    <div class="control-card" style="margin-top:1rem">
-      <div class="card-label">Legacy site-wide battery cover</div>
-      <label class="ftw-toggle">
-        <input type="checkbox" id="battery-covers-ev-toggle">
-        <span class="ftw-toggle-slider"></span>
-        <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
-      </label>
-      <div class="card-sub card-hint">Compatibility control. Prefer Battery boost on a loadpoint for a time limit, reserve and visible stop reason. Surplus-only loadpoints still use real PV surplus only.</div>
-      <div class="ev-cover-info" id="battery-covers-ev-info" hidden>
-        This site-wide setting has no lease or reserve of its own. Use the loadpoint Battery boost for normal operation.
-      </div>
-    </div>
     <!-- Start/Pause/Resume footer buttons removed: the Manual tab's
          Charge control (amp slider + Start/Stop, built by buildManualChargeSection)
          supersedes them. Start pins a persistent hold at a chosen amperage
@@ -936,24 +980,24 @@
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
   <script src="/settings/tabs/devices.js?v=catcards2"></script>
-  <script src="/settings/tabs/loadpoints.js?v=lp2"></script>
-  <script src="/settings/tabs/price.js?v=zones1"></script>
-  <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/loadpoints.js?v=lp7"></script>
+  <script src="/settings/tabs/price.js?v=demand1"></script>
+  <script src="/settings/tabs/weather.js?v=osmref1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
   <script src="/settings/tabs/planner.js?v=cvxpy1"></script>
-  <script src="/settings/tabs/ha.js?v=modbusproxy1"></script>
-  <script src="/settings/tabs/caldav.js?v=caldav498g"></script>
+  <script src="/settings/tabs/ha.js?v=modbusproxy2"></script>
   <script src="/settings/tabs/app.js?v=applink2"></script>
   <script src="/settings/tabs/fleet.js?v=fleetping2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
-  <script src="/settings/tabs/system.js?v=lan1"></script>
+  <script src="/settings/tabs/system.js?v=ask3"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
+  <script src="/assistant.js?v=ask6"></script>
   <script src="/models.js?v=diag2"></script>
-  <script type="module" src="/plan.js?v=zones1"></script>
+  <script type="module" src="/plan.js?v=soc2"></script>
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
-  <script src="/loadpoints.js?v=zones1"></script>
+  <script src="/loadpoints.js?v=zones2"></script>
   <script src="/energy-history.js?v=story1"></script>
   <script src="/diagnose.js?v=zones1"></script>
   <script type="module" src="/mobile-navigation.js?v=scroll1"></script>

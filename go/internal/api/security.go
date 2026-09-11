@@ -13,9 +13,10 @@ import (
 
 // MutationPolicy is the trust boundary for protected HTTP requests.
 // Local LAN clients remain compatible without a token; public/FQDN access is
-// opt-in and must prove possession of Token. LANAuthEnabled / VerifyLANSecret
-// are an extra, optional house-password check on the LAN and do not replace
-// the remote token.
+// opt-in and must prove possession of Token. Token also admits a LAN client
+// when lan_auth is on — it is compared as the token, never hashed as the
+// house password. LANAuthEnabled / VerifyLANSecret are an extra, optional
+// house-password check on the LAN and do not replace Token.
 type MutationPolicy struct {
 	RequireTokenForRemote bool
 	Token                 string
@@ -50,17 +51,18 @@ func WithSecurityHeaders(next http.Handler) http.Handler {
 //     existed. It is kept as it is. KindApp is never replaced and never
 //     asked for the house password.
 //   - anything else arrived on the LAN listener. With api.lan_auth off
-//     (the default), or from loopback, or with a matching house Bearer
-//     or session cookie, it is minted as a local owner — today's
-//     behaviour. With lan_auth on, a LAN peer without that proof is a
-//     viewer.
+//     (the default), or from loopback, or with a matching house Bearer,
+//     FTW_API_TOKEN, or session cookie, it is minted as a local owner —
+//     today's behaviour. With lan_auth on, a LAN peer without that proof
+//     is a viewer.
 //
 // The guarding half rejects browser cross-site writes, non-JSON request
 // bodies, malformed Host/Origin metadata and unauthenticated protected
 // requests addressed through non-local hostnames. Semantically active and
 // secret-bearing GET/HEAD requests are protected too; ordinary reads remain
 // unaffected. When lan_auth is on, protected LAN routes also need the
-// house password. Public-host checks stay independent and still use Token.
+// house password, FTW_API_TOKEN, or the session cookie. Public-host
+// checks stay independent and still use Token.
 func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		houseOK, r := resolveLANSecret(r, policy)
@@ -138,10 +140,12 @@ func decideLANCaller(r *http.Request, policy MutationPolicy, houseOK bool) apiau
 	return lanViewerCaller(r)
 }
 
-// resolveLANSecret verifies a presented house Bearer or session cookie at
-// most once per request. Bearer wins when both are present. The outer
-// listener and Server.Handler both wrap Authenticate; a context flag
-// stops the inner wrap from hashing or counting twice.
+// resolveLANSecret verifies a presented API token, house Bearer or session
+// cookie at most once per request. Bearer wins when both a Bearer and a
+// cookie are present. FTW_API_TOKEN is compared as the token and is never
+// counted as a house-password guess. The outer listener and Server.Handler
+// both wrap Authenticate; a context flag stops the inner wrap from hashing
+// or counting twice.
 func resolveLANSecret(r *http.Request, policy MutationPolicy) (bool, *http.Request) {
 	if ok, checked := lanSecretFrom(r.Context()); checked {
 		return ok, r
@@ -150,13 +154,29 @@ func resolveLANSecret(r *http.Request, policy MutationPolicy) (bool, *http.Reque
 		return false, r
 	}
 	if secret, ok := parseBearer(r.Header.Get("Authorization")); ok {
-		houseOK := admitLANSecret(policy.VerifyLANSecret, secret)
+		houseOK := lanBearerSecretOK(policy, secret)
 		return houseOK, r.WithContext(withLANSecret(r.Context(), houseOK))
 	}
 	if token, ok := lanSessionCookieValue(r); ok && lanSessionValid(token) {
 		return true, r.WithContext(withLANSecret(r.Context(), true))
 	}
 	return false, r
+}
+
+// lanBearerSecretOK accepts FTW_API_TOKEN as the token, or the house
+// password. A configured API token is compared first and never counted as
+// a house-password guess, so a script retrying the token cannot lock
+// Settings. The house password is still accepted as Bearer so the two
+// secrets stay independent.
+func lanBearerSecretOK(policy MutationPolicy, secret string) bool {
+	want := policy.Token
+	if want != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(want)) == 1 {
+		return true
+	}
+	if strings.TrimSpace(want) != "" {
+		return matchLANSecret(policy.VerifyLANSecret, secret)
+	}
+	return admitLANSecret(policy.VerifyLANSecret, secret)
 }
 
 // localCaller is what a request off the LAN listener carries.
@@ -221,6 +241,7 @@ func protectedReadPath(path string) bool {
 	case "/api/config",
 		"/api/support/dump",
 		"/api/support/report",
+		"/api/assistant/status",
 		"/api/logs",
 		"/api/system/info",
 		"/api/storage/inventory",
@@ -238,17 +259,40 @@ func protectedReadPath(path string) bool {
 		"/api/notifications/history",
 		"/api/version/snapshots",
 		"/api/scan",
-		"/api/oauth/myuplink/start":
+		"/api/oauth/myuplink/start",
+		"/api/drivers",
+		"/api/ev/status",
+		"/api/fleet-ping",
+		"/api/notifications/rules",
+		"/api/notifications/defaults",
+		"/api/notifications/vapid",
+		"/api/device_repository/catalog",
+		"/api/app-link/status":
 		return true
 	}
 	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {
 		return true
 	}
+	// Ask why history holds the model's answers about this house, so the
+	// list and every single conversation stay off a public host.
+	if path == "/api/assistant/threads" || strings.HasPrefix(path, "/api/assistant/threads/") {
+		return true
+	}
+	if path == "/api/series" || strings.HasPrefix(path, "/api/series/") {
+		return true
+	}
+	if path == "/api/mpc/diagnose" || strings.HasPrefix(path, "/api/mpc/diagnose/") {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/device_repository/drivers/") && strings.HasSuffix(path, "/versions") {
+		return true
+	}
 	if rest, ok := strings.CutPrefix(path, "/api/drivers/"); ok {
 		// The detail route includes serial number, MAC address and endpoint.
-		// Nested source and log routes can hold credentials or arbitrary text.
+		// Nested source, log and draft routes can hold credentials or arbitrary text.
 		return (rest != "" && !strings.Contains(rest, "/")) ||
-			strings.HasSuffix(rest, "/source") || strings.HasSuffix(rest, "/logs")
+			strings.HasSuffix(rest, "/source") || strings.HasSuffix(rest, "/logs") ||
+			strings.HasSuffix(rest, "/draft")
 	}
 	return false
 }
@@ -372,11 +416,13 @@ func isLocalAuthority(a authority) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 	}
+	// A name with no dot is not local. `http://intranet` rebound onto
+	// this box would otherwise skip the remote token. Keep `.local` —
+	// that is the documented LAN name (ftw.local).
 	return host == "localhost" ||
 		strings.HasSuffix(host, ".localhost") ||
 		strings.HasSuffix(host, ".local") ||
-		strings.HasSuffix(host, ".home.arpa") ||
-		!strings.Contains(host, ".")
+		strings.HasSuffix(host, ".home.arpa")
 }
 
 func isLocalClient(remoteAddr string) bool {

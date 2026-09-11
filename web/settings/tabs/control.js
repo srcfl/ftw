@@ -15,6 +15,11 @@
           '<input type="number" step="' + step + '" data-path="' + path +
           '" value="' + escHtml(val == null ? "" : String(val)) + '">';
       }
+      if (!config.site) config.site = {};
+      if (config.site.pv_surplus_absorb_soc_cap == null && config.site.pv_surplus_absorb_soc_cap_pct != null) {
+        config.site.pv_surplus_absorb_soc_cap = config.site.pv_surplus_absorb_soc_cap_pct / 100;
+      }
+      delete config.site.pv_surplus_absorb_soc_cap_pct;
       return '<fieldset><legend>Site</legend>' +
         field("Name", "site.name", "text", "Home") +
         '<div class="field-row"><div>' +
@@ -55,8 +60,9 @@
         'Set a SoC cap below to force the policy for every eligible non-discharge slot.' +
         '</p>' +
         '<div class="field-row"><div>' +
-        field("Operator SoC cap (%)", "site.pv_surplus_absorb_soc_cap_pct", "number", 0,
-          "Force surplus absorption until average battery SoC reaches this percentage. 0 leaves the decision to the planner's economic comparison. Suggested override: 88, leaving 2 pp below a typical planner soc_max_pct of 90.") +
+        decimalField("Operator SoC cap (0–1)", "site.pv_surplus_absorb_soc_cap", 0,
+          "Force surplus absorption until average battery SoC reaches this fraction. 0 leaves the decision to the planner's economic comparison. Suggested override: 0.88, leaving 0.02 below a typical planner soc_max of 0.90.",
+          "0.01") +
         '</div><div>' +
         field("Export threshold (W)", "site.pv_surplus_absorb_threshold_w", "number", 100,
           "Trigger when projected grid export exceeds this many watts after the plan's target. Defaults to 100 W whenever the operator or planner enables absorption.") +

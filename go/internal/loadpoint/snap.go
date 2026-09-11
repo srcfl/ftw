@@ -21,7 +21,7 @@ import "math"
 // on a {0, 4.1, 7.4, 11} step set should hit 4.1 exactly even when
 // floating-point math puts it at 4099 W.
 func SnapChargeW(want, min, max float64, steps []float64) float64 {
-	if want <= 0 {
+	if math.IsNaN(want) || math.IsInf(want, 0) || want <= 0 {
 		return 0
 	}
 	if want < min {
@@ -33,12 +33,38 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	if len(steps) == 0 {
 		return want
 	}
-	best := steps[0]
-	bestDiff := math.Abs(want - best)
-	for _, s := range steps[1:] {
-		if d := math.Abs(want - s); d < bestDiff {
-			best = s
+	best := 0.0
+	bestDiff := math.Inf(1)
+	for _, step := range steps {
+		if math.IsNaN(step) || math.IsInf(step, 0) || step < min || (max > 0 && step > max) {
+			continue
+		}
+		if d := math.Abs(want - step); d < bestDiff {
+			best = step
 			bestDiff = d
+		}
+	}
+	return best
+}
+
+// floorChargeW treats want as a hard ceiling. No feasible step means pause.
+func floorChargeW(want, min, max float64, steps []float64) float64 {
+	if math.IsNaN(want) || math.IsInf(want, 0) || want <= 0 {
+		return 0
+	}
+	if max > 0 && want > max {
+		want = max
+	}
+	if want < min {
+		return 0
+	}
+	if len(steps) == 0 {
+		return want
+	}
+	best := 0.0
+	for _, step := range steps {
+		if step >= min && step <= want && step > best {
+			best = step
 		}
 	}
 	return best

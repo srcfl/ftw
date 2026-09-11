@@ -17,9 +17,10 @@
 //	battery > 0 → charging (load on site)
 //	battery < 0 → discharging (source on site)
 //
-// Power balance per slot (from the grid meter's point of view):
+// Power balance per slot (from the grid meter's point of view). EV
+// charge is a site load; the identity lives in loadpoint.GridW:
 //
-//	grid_w = load_w + pv_w + battery_w
+//	grid_w = load_w + pv_w + battery_w + ev_w
 //
 // Battery efficiency: the `battery_w` we command is measured at the AC
 // terminals (site-facing). Due to conversion losses, only a fraction
@@ -34,6 +35,7 @@
 package mpc
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"sort"
@@ -41,6 +43,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/gridcost"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
 // Mode selects how aggressively the planner uses the battery.
@@ -103,12 +106,15 @@ const inputProvenanceSchemaVersion = 1
 
 // Slot is one input time slot for the optimizer.
 type Slot struct {
-	StartMs  int64
-	LenMin   int
-	PriceOre float64 // total consumer öre/kWh (incl. grid + VAT) — used for IMPORT cost
-	SpotOre  float64 // raw spot öre/kWh — used for EXPORT revenue (before bonus/fee)
-	PVW      float64 // negative (site sign). 0 if no forecast.
-	LoadW    float64 // positive (site sign). Defaults to a flat baseline.
+	// ExecutionStartMs trims the first price slot to the time still available.
+	// Zero means the full interval; StartMs/LenMin keep the price identity.
+	ExecutionStartMs int64 `json:",omitempty"`
+	StartMs          int64
+	LenMin           int
+	PriceOre         float64 // total consumer öre/kWh (incl. grid + VAT) — used for IMPORT cost
+	SpotOre          float64 // raw spot öre/kWh — used for EXPORT revenue (before bonus/fee)
+	PVW              float64 // negative (site sign). 0 if no forecast.
+	LoadW            float64 // positive (site sign). Defaults to a flat baseline.
 
 	// Input provenance is diagnostic metadata; it does not change optimizer
 	// math. AvailableAtMs is when Core fetched or created the row, not a
@@ -137,14 +143,20 @@ type Slot struct {
 
 // Params bounds the optimization. All fields are required.
 type Params struct {
-	Mode Mode
+	PVCurtailment PVCurtailment
+	Mode          Mode
 
 	// SoC grid
-	SoCLevels     int     // e.g. 41 (2.5% steps)
-	CapacityWh    float64 // aggregate battery capacity
-	SoCMinPct     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
-	SoCMaxPct     float64 // e.g. 95
-	InitialSoCPct float64
+	SoCLevels  int     // e.g. 41 (2.5% steps)
+	CapacityWh float64 // aggregate battery capacity
+	SoCMin     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
+	SoCMax     float64 // e.g. 95
+	InitialSoC float64
+	// InitialSoCUnclamped records the SoC the site actually reported when it
+	// had drifted outside SoCMin…SoCMax and InitialSoC was pulled onto the
+	// band edge so Core could plan at all. Zero when no clamp was needed. It
+	// is a record, not an input: nothing solves from it.
+	InitialSoCUnclamped float64
 
 	// Forecast-risk reserve is handled outside the DP cost now: the planner
 	// optimises against downside PV (forecast − k·σ) via
@@ -166,9 +178,9 @@ type Params struct {
 	// genuine arbitrage (active_arbitrage paths still see spreads
 	// >100 öre/kWh).
 	//
-	// Only applies to ModePassiveArbitrage. 0 disables. The cost
-	// reduction is bounded by the live PV surplus this slot — DP
-	// can never claim a bonus larger than the surplus available, so
+	// Applies in every mode, matching the MILP (#1020). 0 disables.
+	// The cost reduction is bounded by the live PV surplus this slot —
+	// DP can never claim a bonus larger than the surplus available, so
 	// the bias never converts to grid-charge incentive.
 	PVChargeBonusOreKwh float64
 
@@ -233,8 +245,15 @@ type Params struct {
 
 	// PV scenario inputs are consumed by the mathematical optimizer. The Go DP
 	// fallback still receives downside-adjusted slots directly from Service.
-	PVUncertaintyW    float64
-	PVForecastSafetyK float64
+	// PVRelativeUncertainty (0..1) sizes the spread per slot against that
+	// slot's own generation; 0 keeps the flat PVUncertaintyW watt figure.
+	PVUncertaintyW        float64
+	PVRelativeUncertainty float64
+	PVForecastSafetyK     float64
+
+	// DemandCharges are peak-power tariffs Core expanded to clock hours.
+	// Empty leaves Energyplan on energy prices only.
+	DemandCharges []DemandCharge
 }
 
 // StorageAssetSpec is one independently constrained home battery in the
@@ -272,9 +291,10 @@ func (p Params) activeLoadpoints() []*LoadpointSpec {
 
 // Action is one scheduled battery target.
 type Action struct {
-	SlotStartMs int64   `json:"slot_start_ms"`
-	SlotLenMin  int     `json:"slot_len_min"`
-	PriceOre    float64 `json:"price_ore"`
+	ExecutionStartMs int64   `json:"execution_start_ms,omitempty"`
+	SlotStartMs      int64   `json:"slot_start_ms"`
+	SlotLenMin       int     `json:"slot_len_min"`
+	PriceOre         float64 `json:"price_ore"`
 	// SpotOre is the raw wholesale spot price (öre/kWh, ex grid tariff
 	// and VAT). Surfaced so the UI can break the price bar into
 	// components (spot + grid tariff + VAT) — pedagogical view of
@@ -284,20 +304,22 @@ type Action struct {
 	LoadW      float64 `json:"load_w"`
 	BatteryW   float64 `json:"battery_w"`  // decision (site sign, AC terminals)
 	GridW      float64 `json:"grid_w"`     // resulting grid power
-	SoCPct     float64 `json:"soc_pct"`    // SoC at END of slot
+	SoC        float64 `json:"soc"`        // 0–1 at END of slot
 	CostOre    float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
 	Confidence float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
 	Reason     string  `json:"reason"`     // short human-readable explanation
 	EMSMode    string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
-	// 0 = no curtailment. Set by post-processing when exporting would
-	// cost money (negative export revenue after fees). Includes house
-	// load + battery charge + any planned EV loadpoint charge so that
-	// curtailment does not starve loads the plan itself scheduled.
-	// Consumed by the control loop only when the driver advertises
-	// `supports_pv_curtail`.
-	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+	// When PVCurtailActive is false, 0 means no cap (a dispatch hint may
+	// still use a positive PVLimitW without rewriting GridW). When
+	// PVCurtailActive is true, 0 is a real zero cap already applied to
+	// GridW. Includes house load + battery charge + any planned EV
+	// loadpoint charge so that curtailment does not starve loads the
+	// plan itself scheduled. Consumed by the control loop only when
+	// the driver advertises `supports_pv_curtail`.
+	PVLimitW        float64 `json:"pv_limit_w,omitempty"`
+	PVCurtailActive bool    `json:"pv_curtail_active,omitempty"`
 
 	// LoadpointW is the EV charger power (W, positive = charging) the
 	// DP picked for this slot. Zero when no loadpoint was in Params
@@ -305,14 +327,14 @@ type Action struct {
 	// multi-LP future; single-value for now.
 	LoadpointW float64 `json:"loadpoint_w,omitempty"`
 
-	// LoadpointSoCPct is the EV SoC at END of slot, following the
-	// same convention as SoCPct for the home battery.
-	LoadpointSoCPct     float64            `json:"loadpoint_soc_pct,omitempty"`
-	LoadpointPowerW     map[string]float64 `json:"loadpoint_power_w,omitempty"`
-	LoadpointSoCPctByID map[string]float64 `json:"loadpoint_soc_pct_by_id,omitempty"`
+	// LoadpointSoC is the EV SoC at END of slot, following the
+	// same convention as SoC for the home battery.
+	LoadpointSoC     float64            `json:"loadpoint_soc,omitempty"`
+	LoadpointPowerW  map[string]float64 `json:"loadpoint_power_w,omitempty"`
+	LoadpointSoCByID map[string]float64 `json:"loadpoint_soc_by_id,omitempty"`
 
 	// Per-storage values make a multi-battery solve auditable. BatteryW and
-	// SoCPct remain the stable aggregate dispatch/API contract.
+	// SoC remain the stable aggregate dispatch/API contract.
 	StoragePowerW   map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh map[string]float64 `json:"storage_energy_wh,omitempty"`
 }
@@ -346,14 +368,21 @@ type Plan struct {
 	// active do not get an execution-facing identity. Together with an
 	// Action's SlotStartMs it forms the stable key for one planned decision.
 	// Direct Optimize callers leave it empty; the service fills it on publish.
-	DecisionID         string            `json:"decision_id,omitempty"`
-	GeneratedAtMs      int64             `json:"generated_at_ms"`
-	Mode               Mode              `json:"mode"`
-	HorizonSlots       int               `json:"horizon_slots"`
-	CapacityWh         float64           `json:"capacity_wh"`
-	InitialSoCPct      float64           `json:"initial_soc_pct"`
-	TotalCostOre       float64           `json:"total_cost_ore"`
-	Actions            []Action          `json:"actions"`
+	DecisionID    string   `json:"decision_id,omitempty"`
+	GeneratedAtMs int64    `json:"generated_at_ms"`
+	Mode          Mode     `json:"mode"`
+	HorizonSlots  int      `json:"horizon_slots"`
+	CapacityWh    float64  `json:"capacity_wh"`
+	InitialSoC    float64  `json:"initial_soc"`
+	TotalCostOre  float64  `json:"total_cost_ore"`
+	Actions       []Action `json:"actions"`
+	// PVNameplateW is the hard generation ceiling (W) applied to
+	// every slot. The UI uses it so a stale megawatt pv_w cannot
+	// paint the chart; 0 means no cut was configured.
+	PVNameplateW float64 `json:"pv_nameplate_w,omitempty"`
+	// LoadMaxW is the hard house-load ceiling (W), normally the fuse.
+	// The UI uses it so a stale wild load_w cannot paint the chart.
+	LoadMaxW           float64           `json:"load_max_w,omitempty"`
 	Baselines          *Baselines        `json:"baselines,omitempty"`
 	Solver             *SolverInfo       `json:"solver,omitempty"`
 	DPShadow           *ShadowPlan       `json:"dp_shadow,omitempty"`
@@ -366,9 +395,9 @@ type Plan struct {
 	OptimizerInput json.RawMessage `json:"-"`
 }
 
-// ShadowPlan is a Go-DP candidate calculated alongside an active mathematical
-// plan. It is diagnostic only and is never read by dispatch.
-// ActiveMinusShadowOre is negative when the Python plan has lower raw cost.
+// ShadowPlan is a challenger candidate calculated alongside the active plan.
+// It is diagnostic only and is never read by dispatch. ActiveMinusShadowOre is
+// negative when the challenger has lower raw cost.
 type ShadowPlan struct {
 	TotalCostOre           float64     `json:"total_cost_ore"`
 	ActiveMinusShadowOre   float64     `json:"active_minus_shadow_ore"`
@@ -379,18 +408,52 @@ type ShadowPlan struct {
 	ComparedSlots          int         `json:"compared_slots"`
 	FirstAction            *Action     `json:"first_action,omitempty"`
 	Solver                 *SolverInfo `json:"solver,omitempty"`
+
+	// Terminal-corrected costs net out the terminal-SoC credit both solvers
+	// optimize with but neither reports. Two plans that park the horizon at
+	// different SoC are not comparable on raw cost: the fuller one is storing
+	// value, not overspending, and on a 9.6 kWh pack that artifact is worth up
+	// to ~21 SEK. Filled by the Python field shadow; zero on blocks written
+	// before it existed.
+	ActiveTerminalCorrectedOre            float64 `json:"active_terminal_corrected_ore,omitempty"`
+	TerminalCorrectedOre                  float64 `json:"terminal_corrected_ore,omitempty"`
+	ActiveMinusShadowTerminalCorrectedOre float64 `json:"active_minus_shadow_terminal_corrected_ore,omitempty"`
+}
+
+// terminalCorrectedOre nets the terminal-SoC credit out of a raw grid cost so
+// two plans ending at different SoC compare honestly. Same formula as the DP's
+// terminal value (Optimize) and the stateful shadow's valued cost.
+func terminalCorrectedOre(rawCostOre, endSoC float64, p Params) float64 {
+	return rawCostOre - p.TerminalSoCPrice*(endSoC*p.CapacityWh)/1000.0
+}
+
+// planEndSoC is the SoC the plan parks the horizon at.
+func planEndSoC(plan *Plan) float64 {
+	if plan == nil || len(plan.Actions) == 0 {
+		return 0
+	}
+	return plan.Actions[len(plan.Actions)-1].SoC
 }
 
 // SolverInfo identifies the engine that produced a plan and records enough
-// detail to audit optimizer fallbacks. The Go DP remains available as an
-// emergency fallback when the external mathematical planner is unavailable or
-// returns a plan that fails the Go-side physics validator.
+// detail to audit which planner ran. Engine "core" / Backend "dp" is the
+// in-process Go DP; Fallback separates "core is the configured planner" from
+// "the external planner failed and the DP caught it".
 type SolverInfo struct {
-	Engine                 string   `json:"engine"`
-	Backend                string   `json:"backend,omitempty"`
-	Status                 string   `json:"status"`
-	Formulation            string   `json:"formulation,omitempty"`
+	Engine      string `json:"engine"`
+	Backend     string `json:"backend,omitempty"`
+	Status      string `json:"status"`
+	Formulation string `json:"formulation,omitempty"`
+	// SoCLevels and ActionLevels are the DP's discretization grid — the
+	// dimension that bounds how close it lands to a continuous optimum, and
+	// the one derated when a loadpoint joins the state space. Empty for
+	// solvers that do not discretize.
+	SoCLevels              int      `json:"soc_levels,omitempty"`
+	ActionLevels           int      `json:"action_levels,omitempty"`
 	ObjectiveOre           float64  `json:"objective_ore,omitempty"`
+	LowerBoundOre          *float64 `json:"lower_bound_ore,omitempty"`
+	AbsoluteGapOre         *float64 `json:"absolute_gap_ore,omitempty"`
+	SearchNodes            int64    `json:"search_nodes,omitempty"`
 	ServiceSlack           float64  `json:"service_slack,omitempty"`
 	SolveMs                float64  `json:"solve_ms,omitempty"`
 	PrepareMs              float64  `json:"prepare_ms,omitempty"`
@@ -460,6 +523,52 @@ func finite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
+func gridIndex(value, min, step float64, n int) int {
+	if n <= 1 || step <= 0 {
+		return 0
+	}
+	i := int(math.Round((value - min) / step))
+	if i < 0 {
+		return 0
+	}
+	if i >= n {
+		return n - 1
+	}
+	return i
+}
+
+func operatingBoundWorsens(from, to, min, max float64) bool {
+	const eps = 1e-9
+	return math.Max(0, min-to) > math.Max(0, min-from)+eps ||
+		math.Max(0, to-max) > math.Max(0, from-max)+eps
+}
+
+// clipBatteryPowerToBand reduces a DP action so continuous SoC does not
+// worsen operating-bound recovery. Policy is looked up on the grid; energy
+// is not, so a charge that lands on max from the nearest grid point can
+// overshoot from the real SoC.
+func clipBatteryPowerToBand(soc, powerW, dtH, capacityWh, etaC, etaD, min, max float64) float64 {
+	if capacityWh <= 0 || dtH <= 0 {
+		return 0
+	}
+	delta := loadpoint.BatteryEnergyDeltaWh(powerW, dtH, etaC, etaD) / capacityWh
+	if !operatingBoundWorsens(soc, soc+delta, min, max) {
+		return powerW
+	}
+	if powerW > 0 {
+		headroom := max - soc
+		if headroom <= 0 || etaC <= 0 {
+			return 0
+		}
+		return headroom * capacityWh / (dtH * etaC)
+	}
+	headroom := soc - min
+	if headroom <= 0 || etaD <= 0 {
+		return 0
+	}
+	return -headroom * capacityWh * etaD / dtH
+}
+
 func sanitizeOptimizeSlots(slots []Slot) []Slot {
 	out := make([]Slot, 0, len(slots))
 	for _, s := range slots {
@@ -497,10 +606,25 @@ func sanitizeOptimizeSlots(slots []Slot) []Slot {
 // For a 96-slot (24h × 15m) horizon with 41 SoC × 21 action levels, that's
 // ~82k evaluations — well under 10ms.
 func Optimize(slots []Slot, p Params) Plan {
+	plan, _ := OptimizeContext(context.Background(), slots, p)
+	return plan
+}
+
+// OptimizeContext bounds background DP work and discards a cancelled solve.
+func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) {
+	if err := ctx.Err(); err != nil {
+		return Plan{}, err
+	}
+	if err := coreDPModelError(p); err != nil {
+		return Plan{}, err
+	}
 	now := time.Now().UnixMilli()
+	if err := validatePartialSlots(slots); err != nil {
+		return Plan{}, err
+	}
 	slots = sanitizeOptimizeSlots(slots)
 	if len(slots) == 0 || p.CapacityWh <= 0 {
-		return Plan{GeneratedAtMs: now, Mode: p.Mode}
+		return Plan{GeneratedAtMs: now, Mode: p.Mode}, nil
 	}
 	if p.Mode == "" {
 		p.Mode = ModeSelfConsumption
@@ -521,20 +645,19 @@ func Optimize(slots []Slot, p Params) Plan {
 		A = 3
 	}
 
-	socStep := (p.SoCMaxPct - p.SoCMinPct) / float64(S-1)
-	socAt := func(i int) float64 { return p.SoCMinPct + float64(i)*socStep }
+	socStep := (p.SoCMax - p.SoCMin) / float64(S-1)
+	socAt := func(i int) float64 { return p.SoCMin + float64(i)*socStep }
 
-	// Confidence handling: compute the horizon mean (real + forecast)
-	// so we can blend low-confidence prices toward it. Default any
-	// missing confidence to 1.0 (treat caller-unaware slots as "real").
-	var sumPrice float64
+	// Default any missing confidence to 1.0 (treat caller-unaware slots
+	// as "real") before anything reads it.
 	for i := range slots {
 		if slots[i].Confidence <= 0 {
 			slots[i].Confidence = 1.0
 		}
-		sumPrice += slots[i].PriceOre
 	}
-	meanPrice := sumPrice / float64(N)
+	// Confidence handling: blend low-confidence prices toward the
+	// horizon mean (real + forecast).
+	meanPrice, meanExport := horizonMeans(slots, p)
 	// effPrice(slot) = c × raw + (1 − c) × mean. c=1 → raw; c<1 pulls
 	// toward horizon mean, dampening arbitrage the DP sees on shaky
 	// forecasted slots without hiding them entirely.
@@ -543,11 +666,6 @@ func Optimize(slots []Slot, p Params) Plan {
 	}
 	// Export decision lens mirrors import price confidence handling, but
 	// starts from the same raw per-slot export model used everywhere else.
-	var sumExport float64
-	for _, s := range slots {
-		sumExport += SlotExportPriceOre(s, p)
-	}
-	meanExport := sumExport / float64(N)
 	effExportOre := func(s Slot) float64 {
 		raw := SlotExportPriceOre(s, p)
 		return s.Confidence*raw + (1-s.Confidence)*meanExport
@@ -598,11 +716,11 @@ func Optimize(slots []Slot, p Params) Plan {
 		EL = lp.Levels
 		evSteps = lp.normalizedSteps()
 		EA = len(evSteps)
-		if lp.MaxPct <= lp.MinPct {
-			lp.MaxPct = 100
-			lp.MinPct = 0
+		if lp.SoCMax <= lp.SoCMin {
+			lp.SoCMax = 1.0
+			lp.SoCMin = 0
 		}
-		evSocStep = (lp.MaxPct - lp.MinPct) / float64(EL-1)
+		evSocStep = (lp.SoCMax - lp.SoCMin) / float64(EL-1)
 		if lp.ChargeEfficiency > 0 {
 			evChargeEff = lp.ChargeEfficiency
 		}
@@ -611,7 +729,7 @@ func Optimize(slots []Slot, p Params) Plan {
 		if !evActive {
 			return 0
 		}
-		return lp.MinPct + float64(e)*evSocStep
+		return lp.SoCMin + float64(e)*evSocStep
 	}
 	evActionW := func(ea int) float64 {
 		if !evActive {
@@ -642,7 +760,7 @@ func Optimize(slots []Slot, p Params) Plan {
 	// the DP still "sees" it (rather than silently ignoring). A
 	// target of -1 means no deadline — opportunistic charging only.
 	deadlineSlot := -1
-	if evActive && lp.TargetSoCPct > 0 {
+	if evActive && lp.TargetSoC > 0 {
 		deadlineSlot = lp.TargetSlotIdx
 		if deadlineSlot < 0 {
 			deadlineSlot = -1
@@ -655,7 +773,7 @@ func Optimize(slots []Slot, p Params) Plan {
 	// carries no terminal cost — the deadline-slot penalty below
 	// handles target enforcement and avoids double-counting.
 	for si := 0; si < S; si++ {
-		battKwh := p.CapacityWh * socAt(si) / 100.0 / 1000.0
+		battKwh := p.CapacityWh * socAt(si) / 1000.0
 		battCredit := -p.TerminalSoCPrice * battKwh
 		for ei := 0; ei < EL; ei++ {
 			V[N][si][ei] = battCredit
@@ -664,8 +782,11 @@ func Optimize(slots []Slot, p Params) Plan {
 
 	// Backwards induction.
 	for t := N - 1; t >= 0; t-- {
+		if err := ctx.Err(); err != nil {
+			return Plan{}, err
+		}
 		slot := slots[t]
-		dtH := float64(slot.LenMin) / 60.0
+		dtH := slot.DurationHours()
 		for si := 0; si < S; si++ {
 			soc := socAt(si)
 			for ei := 0; ei < EL; ei++ {
@@ -676,14 +797,9 @@ func Optimize(slots []Slot, p Params) Plan {
 					battW := actionAt(ba)
 
 					// Battery SoC transition (independent of EV).
-					var dBattWh float64
-					if battW >= 0 {
-						dBattWh = +battW * dtH * p.ChargeEfficiency
-					} else {
-						dBattWh = +battW * dtH / p.DischargeEfficiency
-					}
-					battSoc2 := soc + dBattWh/p.CapacityWh*100.0
-					if battSoc2 < p.SoCMinPct-1e-9 || battSoc2 > p.SoCMaxPct+1e-9 {
+					dBattWh := loadpoint.BatteryEnergyDeltaWh(battW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)
+					battSoc2 := soc + dBattWh/p.CapacityWh
+					if battSoc2 < p.SoCMin-1e-9 || battSoc2 > p.SoCMax+1e-9 {
 						continue
 					}
 
@@ -696,52 +812,40 @@ func Optimize(slots []Slot, p Params) Plan {
 						var evSoc2 float64
 						if evActive {
 							dEvWh := evW * dtH * evChargeEff
-							evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
-							if evSoc2 > lp.MaxPct+1e-9 {
+							evSoc2 = evSoc + dEvWh/lp.CapacityWh
+							if evSoc2 > lp.SoCMax+1e-9 {
 								continue
 							}
 						}
 						// EV appears as a site load (+ site-signed).
-						// GridW = load + PV + battery + EV.
-						gridW := slot.LoadW + slot.PVW + battW + evW
+						gridW := loadpoint.GridW(slot.LoadW, slot.PVW, battW, evW)
 
-						// Surplus-only EV: forbid any non-zero EV
-						// action that turns the site into a net
-						// importer. evW = 0 is always feasible (the
-						// constraint short-circuits), so the DP
-						// degrades gracefully on low-PV days — the
-						// deadline shortfall penalty then makes the
-						// "miss target" outcome expensive but legal.
-						// 50 W epsilon absorbs floating-point dither
-						// from the discretized PV/load grid so the
-						// constraint isn't artificially tight against
-						// an action that's effectively zero net.
-						if evActive && lp.SurplusOnly && evW > 0 && gridW > 50 {
+						// Surplus-only EV: take at most leftover PV
+						// after house load. Site import caused by a
+						// simultaneous home-battery grid-charge is not
+						// the car importing — forbidding gridW > 0
+						// whenever evW > 0 forced the DP to idle the
+						// car on every cheap slot the battery wanted
+						// to buy, which is how "EV takes the PV, Pixii
+						// never grid-charges" and the reverse
+						// "battery buys, car sits in the sun" both
+						// appear on the same site. evW = 0 is always
+						// feasible, so a no-PV day degrades to "miss
+						// the deadline" rather than an infeasible
+						// plan. Epsilon is loadpoint.SitePowerEpsW.
+						if evActive && lp.SurplusOnly && surplusOnlyExceedsHousePV(evW, slot.LoadW, slot.PVW) {
 							continue
 						}
 
-						// Surplus-only EV: the battery must not steal
-						// PV that the EV could use, and must not
-						// grid-charge for arbitrage while the EV is
-						// connected. Without this rule the planner
-						// "launders" cheap grid through the battery:
-						// import in slot N to charge battery, discharge
-						// to EV in slot N+1 — gridW in N+1 looks ~0,
-						// the EV-only constraint above doesn't catch
-						// it, and the EV ends up grid-fed at retail
-						// import price + roundtrip loss. Forbidding
-						// (battW > 0 AND gridW > 50) when a surplus-
-						// only LP is plugged in closes that loophole.
-						// Battery charging from genuine PV surplus
-						// (gridW ≤ 50) stays allowed — that just
-						// means PV exceeds load+EV+battery and the
-						// battery soaks up what would otherwise
-						// export. Discharge (battW < 0) is always
-						// allowed (peak shaving, fuse guard, self-
-						// consumption when EV not drawing).
-						if evActive && lp.SurplusOnly && battW > 0 && gridW > 50 {
-							continue
-						}
+						// Surplus-only must not also ban home-battery
+						// grid charge. The leftover-PV rule above
+						// keeps the car off grid, and blocksBatteryToEV()
+						// below already rejects battery→EV, so the
+						// "launder cheap grid through the battery into
+						// the car" path is closed without forbidding
+						// Pixii/house-battery arbitrage while the car
+						// is taking real PV. Active arbitrage with a
+						// surplus-only EV is a real operator setup.
 
 						// Don't simultaneously discharge the home battery
 						// for grid export AND charge the EV. Either the
@@ -762,41 +866,19 @@ func Optimize(slots []Slot, p Params) Plan {
 						}
 
 						// Battery-to-EV block: operator has BatteryCoversEV=false
-						// (the default), or this loadpoint is surplus-only. In
-						// both cases, the home battery's energy may cover house
-						// load but must not become synthetic EV surplus.
-						// Reject any allocation where the battery's
-						// discharge exceeds the PV-residual house demand
-						// — i.e. where, by conservation, some of the
-						// battery's energy must have flowed into the EV.
-						// houseResidualW = max(0, load - pv_gen) is how
-						// much house demand is left after PV has covered
-						// what it can; the battery can supply up to that
-						// much and still be claimed as "house only".
-						// Anything beyond it must go to EV (illegal here)
-						// or grid (covered by the rule above).
-						// Matches the canonical runtime safety clamp in
-						// control/dispatch.go (search "CANONICAL
-						// \"battery may not feed EV\"") — keep them
-						// aligned. 50 W epsilon mirrors the surrounding
-						// constraints. TODO(refactor): the
-						// houseResidualW math + feasibility predicate
-						// is duplicated; extract a shared helper.
-						if evActive && lp.blocksBatteryToEV() && evW > 0 && battW < 0 {
-							houseResidualW := slot.LoadW + slot.PVW // PVW is negative
-							if houseResidualW < 0 {
-								houseResidualW = 0
-							}
-							if (-battW) > houseResidualW+50 {
-								continue
-							}
+						// (the default), or this loadpoint is surplus-only. Same
+						// conservation check as ValidatePlan and the runtime
+						// clamp in control/dispatch.go (search CANONICAL
+						// "battery may not feed EV"): loadpoint.BatteryDischargeFeedsEV.
+						if evActive && lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEV(battW, evW, slot.LoadW, slot.PVW) {
+							continue
 						}
 
 						// Mode-based feasibility. Baseline includes
 						// EV so the mode check asks "is the extra
 						// battery action pulling the grid further
 						// into import/export than baseline?".
-						baseGridW := slot.LoadW + slot.PVW + evW
+						baseGridW := loadpoint.GridW(slot.LoadW, slot.PVW, 0, evW)
 						if !modeAllows(p.Mode, baseGridW, gridW, battW) {
 							continue
 						}
@@ -840,7 +922,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						// preserve SoC for tomorrow's peak — that's
 						// arbitrage behaviour, not self-consumption.
 						// The bias extends all the way down to
-						// SoCMinPct: the operator's configured floor
+						// SoCMin: the operator's configured floor
 						// IS the reserve, no implicit extra buffer on
 						// top of it (#157). The hard floor is still
 						// enforced by the SoC-transition feasibility
@@ -851,7 +933,7 @@ func Optimize(slots []Slot, p Params) Plan {
 							houseGridW := slot.LoadW + slot.PVW + battW
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
-								cost += 2.0 * effPrice(slot) * houseKWh
+								cost += strictSCBiasOre(effPrice(slot), houseKWh)
 							}
 						}
 
@@ -871,7 +953,12 @@ func Optimize(slots []Slot, p Params) Plan {
 						// as economically equivalent. The bonus is
 						// bounded by the live surplus so it never
 						// incentivises grid-charging.
-						if p.Mode == ModePassiveArbitrage && p.PVChargeBonusOreKwh > 0 && battW > 0 {
+						// Applied in every mode, matching the MILP
+						// (parity fix, #1020 — the DP used to gate
+						// this to passive_arbitrage; the bound to
+						// live surplus is what keeps it safe, not
+						// the mode).
+						if p.PVChargeBonusOreKwh > 0 && battW > 0 {
 							pvSurplusW := -slot.PVW - slot.LoadW
 							if pvSurplusW > 0 {
 								chargeFromPVW := battW
@@ -914,15 +1001,15 @@ func Optimize(slots []Slot, p Params) Plan {
 						// DP maximizes delivered energy since less
 						// shortfall = less penalty.
 						if deadlineSlot == t {
-							short := lp.TargetSoCPct - evSoc2
+							short := lp.TargetSoC - evSoc2
 							if short > 0 {
-								missedKwh := lp.CapacityWh * short / 100.0 / 1000.0
+								missedKwh := lp.CapacityWh * short / 1000.0
 								cost += missedKwh * meanPrice * 4.0
 							}
 						}
 
 						// Battery SoC interpolation indices.
-						fIdx := (battSoc2 - p.SoCMinPct) / socStep
+						fIdx := (battSoc2 - p.SoCMin) / socStep
 						lo := int(math.Floor(fIdx))
 						hi := lo + 1
 						if lo < 0 {
@@ -944,7 +1031,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						eLo, eHi := 0, 0
 						eFrac := 0.0
 						if evActive {
-							f := (evSoc2 - lp.MinPct) / evSocStep
+							f := (evSoc2 - lp.SoCMin) / evSocStep
 							eLo = int(math.Floor(f))
 							eHi = eLo + 1
 							if eLo < 0 {
@@ -993,65 +1080,45 @@ func Optimize(slots []Slot, p Params) Plan {
 		Mode:          p.Mode,
 		HorizonSlots:  N,
 		CapacityWh:    p.CapacityWh,
-		InitialSoCPct: p.InitialSoCPct,
+		InitialSoC:    p.InitialSoC,
 		Actions:       make([]Action, 0, N),
 	}
-	fIdx := (p.InitialSoCPct - p.SoCMinPct) / socStep
-	si := int(math.Round(fIdx))
-	if si < 0 {
-		si = 0
-	}
-	if si >= S {
-		si = S - 1
-	}
-	soc := socAt(si)
-	// Initial EV SoC index.
+	// Policy is stored on the SoC grid; energy is not. Integrate from
+	// the actual initial SoC so reported trajectories replay. Clamp
+	// only the policy lookup index onto the operating grid.
+	soc := p.InitialSoC
+	si := gridIndex(soc, p.SoCMin, socStep, S)
 	ei := 0
 	var evSoc float64
 	if evActive {
-		f := (lp.InitialSoCPct - lp.MinPct) / evSocStep
-		ei = int(math.Round(f))
-		if ei < 0 {
-			ei = 0
-		}
-		if ei >= EL {
-			ei = EL - 1
-		}
-		evSoc = evSocAt(ei)
+		evSoc = lp.InitialSoC
+		ei = gridIndex(evSoc, lp.SoCMin, evSocStep, EL)
 	}
 	var totalCost float64
 	for t := 0; t < N; t++ {
 		slot := slots[t]
-		dtH := float64(slot.LenMin) / 60.0
+		dtH := slot.DurationHours()
 		pol := Policy[t][si][ei]
 		ba := pol / EA
 		ea := pol % EA
-		actW := actionAt(ba)
+		actW := clipBatteryPowerToBand(soc, actionAt(ba), dtH, p.CapacityWh,
+			p.ChargeEfficiency, p.DischargeEfficiency, p.SoCMin, p.SoCMax)
 		evW := evActionW(ea)
-		// Battery SoC transition.
-		var dSoCWh float64
-		if actW >= 0 {
-			dSoCWh = +actW * dtH * p.ChargeEfficiency
-		} else {
-			dSoCWh = +actW * dtH / p.DischargeEfficiency
+		soc2 := soc + loadpoint.BatteryEnergyDeltaWh(actW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)/p.CapacityWh
+		if operatingBoundWorsens(soc, soc2, p.SoCMin, p.SoCMax) {
+			actW = 0
+			soc2 = soc
 		}
-		soc2 := soc + dSoCWh/p.CapacityWh*100.0
-		if soc2 < p.SoCMinPct {
-			soc2 = p.SoCMinPct
-		}
-		if soc2 > p.SoCMaxPct {
-			soc2 = p.SoCMaxPct
-		}
-		// EV SoC transition (no-op when !evActive since evW = 0).
 		var evSoc2 float64
 		if evActive {
 			dEvWh := evW * dtH * evChargeEff
-			evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
-			if evSoc2 > lp.MaxPct {
-				evSoc2 = lp.MaxPct
+			evSoc2 = evSoc + dEvWh/lp.CapacityWh
+			if evSoc2 > lp.SoCMax+1e-9 {
+				evW = 0
+				evSoc2 = evSoc
 			}
 		}
-		gridW := slot.LoadW + slot.PVW + actW + evW
+		gridW := loadpoint.GridW(slot.LoadW, slot.PVW, actW, evW)
 		gridKWh := gridW * dtH / 1000.0
 		// Report the ACTUAL expected cost using the raw (un-blended)
 		// prices so the UI summary reflects "what we'd actually pay
@@ -1059,48 +1126,78 @@ func Optimize(slots []Slot, p Params) Plan {
 		cost := SlotGridCostOre(slot, gridKWh, p)
 		totalCost += cost
 		a := Action{
-			SlotStartMs: slot.StartMs,
-			SlotLenMin:  slot.LenMin,
-			PriceOre:    slot.PriceOre,
-			SpotOre:     slot.SpotOre,
-			Confidence:  slot.Confidence,
-			PVW:         slot.PVW,
-			LoadW:       slot.LoadW,
-			BatteryW:    actW,
-			GridW:       gridW,
-			SoCPct:      soc2,
-			CostOre:     cost,
-			Reason:      reasonFor(slot, actW, gridW, meanPrice),
+			SlotStartMs:      slot.StartMs,
+			SlotLenMin:       slot.LenMin,
+			ExecutionStartMs: slot.ExecutionStartMs,
+			PriceOre:         slot.PriceOre,
+			SpotOre:          slot.SpotOre,
+			Confidence:       slot.Confidence,
+			PVW:              slot.PVW,
+			LoadW:            slot.LoadW,
+			BatteryW:         actW,
+			GridW:            gridW,
+			SoC:              soc2,
+			CostOre:          cost,
+			Reason:           reasonFor(slot, actW, gridW, meanPrice),
 		}
 		if evActive {
 			a.LoadpointW = evW
-			a.LoadpointSoCPct = evSoc2
+			a.LoadpointSoC = evSoc2
 		}
 		plan.Actions = append(plan.Actions, a)
 		soc = soc2
-		fIdx = (soc - p.SoCMinPct) / socStep
-		si = int(math.Round(fIdx))
-		if si < 0 {
-			si = 0
-		}
-		if si >= S {
-			si = S - 1
-		}
+		si = gridIndex(soc, p.SoCMin, socStep, S)
 		if evActive {
 			evSoc = evSoc2
-			f := (evSoc - lp.MinPct) / evSocStep
-			ei = int(math.Round(f))
-			if ei < 0 {
-				ei = 0
-			}
-			if ei >= EL {
-				ei = EL - 1
-			}
+			ei = gridIndex(evSoc, lp.SoCMin, evSocStep, EL)
 		}
 	}
 	plan.TotalCostOre = totalCost
 	annotateCurtailment(&plan, p)
-	return plan
+	return plan, ctx.Err()
+}
+
+// horizonMeans returns the horizon's mean import price and mean export
+// price, both LENGTH-WEIGHTED by Slot.LenMin: with mixed 15/60-minute
+// slots an unweighted mean over-counts the short slots, skewing the
+// confidence blend and the EV deadline penalty (parity fix, #1020 —
+// Baselines already weighted by LenMin; the DP did not). Falls back to
+// the unweighted mean when no slot carries a length. Never mutates
+// slots.
+func horizonMeans(slots []Slot, p Params) (meanPriceOre, meanExportOre float64) {
+	if len(slots) == 0 {
+		return 0, 0
+	}
+	var sumPrice, sumExport, sumLenMin float64
+	for _, s := range slots {
+		w := s.DurationHours() * 60
+		sumPrice += s.PriceOre * w
+		sumExport += SlotExportPriceOre(s, p) * w
+		sumLenMin += w
+	}
+	if sumLenMin <= 0 {
+		sumPrice, sumExport = 0, 0
+		for _, s := range slots {
+			sumPrice += s.PriceOre
+			sumExport += SlotExportPriceOre(s, p)
+		}
+		sumLenMin = float64(len(slots))
+	}
+	return sumPrice / sumLenMin, sumExport / sumLenMin
+}
+
+// strictSCBiasOre is the strict self-consumption decision bias: house
+// import priced at 2× on top of the real cost, so covering the house
+// from the battery outranks economically-equivalent alternatives. The
+// price is clamped at zero — on a negative retail slot an unclamped
+// bias INVERTS into a house-import bonus. The MILP always clamped
+// (max(eff_import, 0)); the DP now matches (parity fix, #1020).
+// Decision-only: never part of the reported plan cost.
+func strictSCBiasOre(effPriceOre, houseImportKWh float64) float64 {
+	if effPriceOre < 0 {
+		effPriceOre = 0
+	}
+	return 2.0 * effPriceOre * houseImportKWh
 }
 
 // annotateCurtailment walks the plan and flags slots where curtailing

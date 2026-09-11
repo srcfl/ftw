@@ -2,6 +2,7 @@ package loadpoint
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -10,7 +11,7 @@ func newBatteryBoostController(t *testing.T, surplusOnly bool) (*Controller, *Ma
 	t.Helper()
 	mgr := NewManager()
 	mgr.Load([]Config{{
-		ID: "garage", DriverName: "charger", PluginSoCPct: 40,
+		ID: "garage", DriverName: "charger", PluginSoC: 0.4,
 		MinChargeW: 1380, MaxChargeW: 11000, SurplusOnly: surplusOnly,
 	}})
 	sample := &EVSample{Connected: true, RequestActive: true}
@@ -28,7 +29,7 @@ func newBatteryBoostController(t *testing.T, surplusOnly bool) (*Controller, *Ma
 
 func validBatteryBoost(now time.Time) BatteryBoostLease {
 	return BatteryBoostLease{
-		StartedAt: now, ExpiresAt: now.Add(time.Hour), MinBatterySoCPct: 30,
+		StartedAt: now, ExpiresAt: now.Add(time.Hour), MinBatterySoC: 0.3,
 	}
 }
 
@@ -50,7 +51,7 @@ func TestBatteryBoostEnableStatusCancelAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	if !status.Active || status.State != "active" || status.MinBatterySoCPct != 30 {
+	if !status.Active || status.State != "active" || status.MinBatterySoC != 0.3 {
 		t.Fatalf("active status = %+v", status)
 	}
 	if len(saves) != 1 || saves[0].cleared {
@@ -77,10 +78,10 @@ func TestBatteryBoostValidationAndOperatorClamps(t *testing.T) {
 		surplusOnly bool
 		hold        bool
 	}{
-		{"short duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(30 * time.Second), MinBatterySoCPct: 30}, false, false},
-		{"long duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(MaxBatteryBoostDuration + time.Second), MinBatterySoCPct: 30}, false, false},
-		{"low reserve", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), MinBatterySoCPct: 4}, false, false},
-		{"departure after expiry", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), DepartureAt: now.Add(2 * time.Hour), MinBatterySoCPct: 30}, false, false},
+		{"short duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(30 * time.Second), MinBatterySoC: 0.3}, false, false},
+		{"long duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(MaxBatteryBoostDuration + time.Second), MinBatterySoC: 0.3}, false, false},
+		{"low reserve", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), MinBatterySoC: 0.04}, false, false},
+		{"departure after expiry", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), DepartureAt: now.Add(2 * time.Hour), MinBatterySoC: 0.3}, false, false},
 		{"surplus only", validBatteryBoost(now), true, false},
 		{"manual hold", validBatteryBoost(now), false, true},
 	}
@@ -152,7 +153,7 @@ func TestBatteryBoostSafetyAndEVTargetStop(t *testing.T) {
 
 	ctrl.SetBatteryBoostSafety(nil)
 	lease := validBatteryBoost(now)
-	lease.EVTargetSoCPct = 40
+	lease.EVTargetSoC = 0.40
 	if _, err := ctrl.EnableBatteryBoost("garage", lease, now); err != nil {
 		t.Fatal(err)
 	}
@@ -168,8 +169,8 @@ func TestBatteryBoostRestoreRejectsUnboundedOrExpiredRows(t *testing.T) {
 	ctrl, _, _ := newBatteryBoostController(t, false)
 	now := time.Now()
 	for _, lease := range []BatteryBoostLease{
-		{StartedAt: now.Add(-5 * time.Hour), ExpiresAt: now.Add(time.Hour), MinBatterySoCPct: 30},
-		{StartedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Second), MinBatterySoCPct: 30},
+		{StartedAt: now.Add(-5 * time.Hour), ExpiresAt: now.Add(time.Hour), MinBatterySoC: 0.3},
+		{StartedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Second), MinBatterySoC: 0.3},
 	} {
 		if ctrl.RestoreBatteryBoost("garage", lease, now) {
 			t.Fatalf("restored unsafe lease %+v", lease)
@@ -247,9 +248,9 @@ func TestActiveBatteryBoostTotalsArePerLoadpointAndUseStrictestReserve(t *testin
 	}
 	ctrl := NewController(mgr, nil, nil, nil)
 	now := time.Now()
-	for id, reserve := range map[string]float64{"a": 20, "b": 35} {
+	for id, reserve := range map[string]float64{"a": 0.20, "b": 0.35} {
 		lease := validBatteryBoost(now)
-		lease.MinBatterySoCPct = reserve
+		lease.MinBatterySoC = reserve
 		if _, err := ctrl.EnableBatteryBoost(id, lease, now); err != nil {
 			t.Fatal(err)
 		}
@@ -257,5 +258,43 @@ func TestActiveBatteryBoostTotalsArePerLoadpointAndUseStrictestReserve(t *testin
 	power, reserve := ctrl.ActiveBatteryBoostTotals(mgr.States(), now)
 	if power != 5000 || reserve != 0.35 {
 		t.Fatalf("totals = %.0f W, %.2f reserve; want 5000 W, 0.35", power, reserve)
+	}
+}
+
+func TestBatteryBoostLeaseJSONRoundTripIsFraction(t *testing.T) {
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	lease := BatteryBoostLease{
+		StartedAt: now, ExpiresAt: now.Add(time.Hour),
+		MinBatterySoC: 0.30, EVTargetSoC: 0.80,
+	}
+	raw, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["min_battery_soc_pct"]; ok {
+		t.Fatalf("lease JSON still emits percent key: %s", raw)
+	}
+	if m["min_battery_soc"] != 0.30 {
+		t.Fatalf("min_battery_soc = %v, want 0.30", m["min_battery_soc"])
+	}
+
+	var back BatteryBoostLease
+	if err := json.Unmarshal([]byte(`{"started_at":"2026-08-22T12:00:00Z","expires_at":"2026-08-22T13:00:00Z","min_battery_soc_pct":30,"ev_target_soc_pct":80}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.MinBatterySoC != 0.30 || back.EVTargetSoC != 0.80 {
+		t.Fatalf("legacy percent hydrate = %+v", back)
+	}
+
+	var overflow BatteryBoostLease
+	if err := json.Unmarshal([]byte(`{"started_at":"2026-08-22T12:00:00Z","expires_at":"2026-08-22T13:00:00Z","min_battery_soc":1.02}`), &overflow); err != nil {
+		t.Fatal(err)
+	}
+	if overflow.MinBatterySoC != 1 {
+		t.Fatalf("1.02 overflow = %v, want 1 (not 0.0102)", overflow.MinBatterySoC)
 	}
 }

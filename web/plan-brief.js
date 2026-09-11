@@ -1,3 +1,5 @@
+import { fillPlanSoC } from "./plan-soc.js";
+
 function formatClock(tsMs) {
   const date = new Date(tsMs);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
@@ -53,7 +55,59 @@ function batteryIsPresent(status, actions) {
   ))) {
     return true;
   }
-  return actions.some((action) => Number.isFinite(action && action.soc_pct));
+  return actions.some((action) => Number.isFinite(action && action.soc));
+}
+
+function socPercent(frac) {
+  if (!Number.isFinite(frac)) return null;
+  return frac * 100;
+}
+
+export function unavailablePlannerCopy(reason) {
+  const known = {
+    "no-battery-capacity": {
+      label: "Cannot plan",
+      action: "Planning needs a controllable battery",
+      nextStep: "Add a battery in Devices, or pick a manual strategy",
+      why: "No battery with a known capacity is available to schedule",
+      detail: "The planner starts only when at least one battery reports capacity",
+      summary: "Cannot plan — no controllable battery",
+    },
+    "no-price-provider": {
+      label: "Cannot plan",
+      action: "Planning needs electricity prices",
+      nextStep: "Set a price zone in Settings → Price",
+      why: "No price source is configured",
+      detail: "The planner uses prices to decide when to charge and discharge",
+      summary: "Cannot plan — no electricity prices",
+    },
+    "planner-disabled": {
+      label: "Planner off",
+      action: "Planning is turned off",
+      nextStep: "Turn the planner on in Settings → Planner",
+      why: "The planner is disabled in Settings",
+      detail: "Enable it under Settings → Planner to create a schedule",
+      summary: "Planner is turned off",
+    },
+  };
+  return known[reason] || {
+    label: "Cannot plan",
+    action: "Planning cannot run right now",
+    nextStep: "Check Settings → Planner, a battery, and a price zone",
+    why: "A planning strategy is selected, but the planner is not running",
+    detail: "The planner did not start, so no schedule is being dispatched",
+    summary: "Cannot plan — planner is not running",
+  };
+}
+
+function batterySocNow(status, hasBattery, detail) {
+  if (!hasBattery) return null;
+  return {
+    label: Number.isFinite(status.bat_soc)
+      ? `${(status.bat_soc * 100).toFixed(0)}% now`
+      : "Live value unavailable",
+    detail,
+  };
 }
 
 function manualBrief(status, hasBattery) {
@@ -61,7 +115,7 @@ function manualBrief(status, hasBattery) {
     state: { key: "manual", label: "Manual", tone: "idle" },
     next: {
       action: "Manual control is active",
-      time: "Choose a planning strategy to create a schedule",
+      time: "Use the plan to create a schedule",
     },
     reason: "Planning is not controlling the battery",
     constraint: "FTW safety limits still apply to manual control",
@@ -69,17 +123,32 @@ function manualBrief(status, hasBattery) {
       label: "No plan forecast",
       detail: "Live readings continue without a forward schedule",
     },
-    soc: hasBattery
-      ? {
-          label: Number.isFinite(status.bat_soc)
-            ? `${(status.bat_soc * 100).toFixed(0)}% now`
-            : "Live value unavailable",
-          detail: "Expected charge needs an active plan",
-        }
-      : null,
+    soc: batterySocNow(status, hasBattery, "Expected charge needs an active plan"),
     planner: {
       label: "Planner off",
-      detail: "Select a planning strategy to enable it",
+      detail: "Use the plan to enable it",
+    },
+  };
+}
+
+function blockedBrief(status, hasBattery, reason) {
+  const copy = unavailablePlannerCopy(reason);
+  return {
+    state: { key: "blocked", label: copy.label, tone: "warn" },
+    next: {
+      action: copy.action,
+      time: copy.nextStep,
+    },
+    reason: copy.why,
+    constraint: "No schedule is being dispatched",
+    forecast: {
+      label: "No plan forecast",
+      detail: "Planning cannot run until this is fixed",
+    },
+    soc: batterySocNow(status, hasBattery, "Expected charge needs an active plan"),
+    planner: {
+      label: "Cannot plan",
+      detail: copy.detail,
     },
   };
 }
@@ -114,14 +183,21 @@ function preparingBrief(status, hasBattery) {
 
 export function derivePlanBrief({
   enabled = false,
+  unavailableReason = "",
   plan = null,
   status = {},
   now = Date.now(),
+  socOpts = {},
 } = {}) {
+  fillPlanSoC(plan, socOpts);
   const actions = plan && Array.isArray(plan.actions) ? plan.actions : [];
   const hasBattery = batteryIsPresent(status, actions);
+  const plannerMode = String(status.mode || "").startsWith("planner_");
 
-  if (!enabled) return manualBrief(status, hasBattery);
+  if (!enabled) {
+    if (plannerMode) return blockedBrief(status, hasBattery, unavailableReason);
+    return manualBrief(status, hasBattery);
+  }
   if (!actions.length) return preparingBrief(status, hasBattery);
 
   const solver = plan.solver || {};
@@ -186,13 +262,15 @@ export function derivePlanBrief({
       };
 
   const finalAction = actions[actions.length - 1];
+  const nextSocPct = next ? socPercent(next.soc) : null;
+  const finalSocPct = finalAction ? socPercent(finalAction.soc) : null;
   const soc = hasBattery
     ? {
-        label: next && Number.isFinite(next.soc_pct)
-          ? `${next.soc_pct.toFixed(0)}% after next step`
+        label: nextSocPct != null
+          ? `${nextSocPct.toFixed(0)}% after next step`
           : "—",
-        detail: finalAction && Number.isFinite(finalAction.soc_pct)
-          ? `${finalAction.soc_pct.toFixed(0)}% at the end of the plan`
+        detail: finalSocPct != null
+          ? `${finalSocPct.toFixed(0)}% at the end of the plan`
           : "No battery forecast available",
       }
     : null;

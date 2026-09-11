@@ -15,9 +15,9 @@ func TestSelfWithheldNCRQDoesNotComplete(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "ctek",
-		VehicleCapacityWh: 60000, PluginSoCPct: 20,
+		VehicleCapacityWh: 60000, PluginSoC: 0.2,
 	}})
-	m.SetTarget("garage", 80, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
+	m.SetTarget("garage", 0.8, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
 
 	clock := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })
@@ -28,7 +28,7 @@ func TestSelfWithheldNCRQDoesNotComplete(t *testing.T) {
 	clock = clock.Add(5 * time.Minute) // well past the 90s completion timeout
 	m.Observe("garage", true, 0, 0, false)
 
-	if st, _ := m.State("garage"); st.SoCSource == "completed" {
+	if st, _ := m.State("garage"); st.ChargingDeclined {
 		t.Errorf("self-withheld NCRQ must not latch session complete: %+v", st)
 	}
 }
@@ -41,9 +41,9 @@ func TestGenuineNCRQStillCompletesAfterWithheldClears(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "ctek",
-		VehicleCapacityWh: 60000, PluginSoCPct: 20,
+		VehicleCapacityWh: 60000, PluginSoC: 0.2,
 	}})
-	m.SetTarget("garage", 80, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
+	m.SetTarget("garage", 0.8, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
 
 	clock := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })
@@ -60,7 +60,7 @@ func TestGenuineNCRQStillCompletesAfterWithheldClears(t *testing.T) {
 	clock = clock.Add(2 * time.Minute)     // past 90s of genuine refusal
 	m.Observe("garage", true, 0, 0, false)
 
-	if st, _ := m.State("garage"); st.SoCSource != "completed" {
+	if st, _ := m.State("garage"); !st.ChargingDeclined {
 		t.Errorf("genuine NCRQ after withheld clears should complete: %+v", st)
 	}
 }

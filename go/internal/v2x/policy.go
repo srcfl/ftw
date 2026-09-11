@@ -44,13 +44,13 @@ type Envelope struct {
 
 	GridChargingAllowed bool `json:"grid_charging_allowed"`
 
-	MinReserveSoCPct      float64  `json:"min_reserve_soc_pct,omitempty"`
-	VehicleSoC            *float64 `json:"vehicle_soc,omitempty"`
-	VehicleCapacityWh     float64  `json:"vehicle_capacity_wh,omitempty"`
-	DepartureTargetSoCPct float64  `json:"departure_target_soc_pct,omitempty"`
-	DepartureAt           string   `json:"departure_at,omitempty"`
-	HoursToDeparture      float64  `json:"hours_to_departure,omitempty"`
-	CycleCostOreKWh       float64  `json:"cycle_cost_ore_kwh,omitempty"`
+	MinReserveSoC      float64  `json:"min_reserve_soc,omitempty"`
+	VehicleSoC         *float64 `json:"vehicle_soc,omitempty"`
+	VehicleCapacityWh  float64  `json:"vehicle_capacity_wh,omitempty"`
+	DepartureTargetSoC float64  `json:"departure_target_soc,omitempty"`
+	DepartureAt        string   `json:"departure_at,omitempty"`
+	HoursToDeparture   float64  `json:"hours_to_departure,omitempty"`
+	CycleCostOreKWh    float64  `json:"cycle_cost_ore_kwh,omitempty"`
 
 	Reasons []string `json:"reasons,omitempty"`
 }
@@ -73,9 +73,9 @@ func Evaluate(policy *config.V2XPolicy, snap Snapshot) Envelope {
 	env.Enabled = true
 	env.ExportAllowed = policy.ExportAllowed
 	env.GridChargingAllowed = policy.GridChargingAllowed
-	env.MinReserveSoCPct = policy.MinReserveSoCPct
+	env.MinReserveSoC = policy.MinReserveSoC
 	env.VehicleCapacityWh = firstPositive(policy.VehicleCapacityWh, snap.CapacityWh)
-	env.DepartureTargetSoCPct = policy.DepartureTargetSoCPct
+	env.DepartureTargetSoC = policy.DepartureTargetSoC
 	env.CycleCostOreKWh = policy.CycleCostOreKWh
 
 	if policy.DriverName != "" && snap.Driver != policy.DriverName {
@@ -114,13 +114,13 @@ func Evaluate(policy *config.V2XPolicy, snap Snapshot) Envelope {
 		env.addReason("discharge_limit_missing")
 	}
 
-	reserve := policy.MinReserveSoCPct / 100.0
+	reserve := policy.MinReserveSoC
 	if soc <= reserve {
 		dischargeW = 0
 		env.addReason("reserve_floor")
 	}
 
-	if policy.DepartureTargetSoCPct > 0 {
+	if policy.DepartureTargetSoC > 0 {
 		departureAt, ok := nextDeparture(now, policy.DepartureTime)
 		if ok {
 			env.DepartureAt = departureAt.Format(time.RFC3339)
@@ -130,7 +130,7 @@ func Evaluate(policy *config.V2XPolicy, snap Snapshot) Envelope {
 				dischargeW = 0
 				env.addReason("capacity_missing")
 			} else {
-				target := policy.DepartureTargetSoCPct / 100.0
+				target := policy.DepartureTargetSoC
 				// recoverableW is the charge power we can *guarantee* before
 				// departure. When grid charging is allowed it's the full
 				// charger limit. When it isn't, the car can only recharge from

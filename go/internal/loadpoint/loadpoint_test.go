@@ -1,6 +1,7 @@
 package loadpoint
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -28,16 +29,16 @@ func TestReloadPreservesObservedState(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "easee-cloud",
-		VehicleCapacityWh: 60000, PluginSoCPct: 40,
+		VehicleCapacityWh: 60000, PluginSoC: 0.4,
 	}})
 	m.Observe("garage", true, 7400, 1200, true) // 1.2 kWh into session
 	target := time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC)
-	m.SetTarget("garage", 80, target)
+	m.SetTarget("garage", 0.8, target)
 
 	// Reload with same ID — state should persist.
 	m.Load([]Config{{
 		ID: "garage", DriverName: "easee-cloud", MaxChargeW: 11000,
-		VehicleCapacityWh: 60000, PluginSoCPct: 40,
+		VehicleCapacityWh: 60000, PluginSoC: 0.4,
 	}})
 	st, ok := m.State("garage")
 	if !ok {
@@ -47,10 +48,10 @@ func TestReloadPreservesObservedState(t *testing.T) {
 	if !st.PluggedIn || st.CurrentPowerW != 7400 {
 		t.Errorf("observed state lost: %+v", st)
 	}
-	if got := st.CurrentSoCPct; got < 41.5 || got > 42.5 {
-		t.Errorf("SoC estimate: got %.2f, want ~42", got)
+	if got := st.CurrentSoC; got < 0.415 || got > 0.425 {
+		t.Errorf("SoC estimate: got %.2f, want ~0.42", got)
 	}
-	if st.TargetSoCPct != 80 || !st.TargetTime.Equal(target) {
+	if st.TargetSoC != 0.8 || !st.TargetTime.Equal(target) {
 		t.Errorf("target lost: %+v", st)
 	}
 	// But config should update.
@@ -80,15 +81,15 @@ func TestObserveOnUnknownIsNoop(t *testing.T) {
 func TestSetTargetClamp(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a"}})
-	m.SetTarget("a", 250, time.Time{})
+	m.SetTarget("a", 2.5, time.Time{})
 	st, _ := m.State("a")
-	if st.TargetSoCPct != 100 {
-		t.Errorf("should clamp to 100; got %f", st.TargetSoCPct)
+	if st.TargetSoC != 1 {
+		t.Errorf("should clamp to 100; got %f", st.TargetSoC)
 	}
 	m.SetTarget("a", -10, time.Time{})
 	st, _ = m.State("a")
-	if st.TargetSoCPct != 0 {
-		t.Errorf("should clamp to 0; got %f", st.TargetSoCPct)
+	if st.TargetSoC != 0 {
+		t.Errorf("should clamp to 0; got %f", st.TargetSoC)
 	}
 }
 
@@ -98,33 +99,33 @@ func TestSetTargetClamp(t *testing.T) {
 // away.
 func TestObserveUnpluggedClearsSoCEstimate(t *testing.T) {
 	m := NewManager()
-	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 30}})
+	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoC: 0.3}})
 	m.Observe("a", true, 7400, 1800, true) // charging → SoC = 30 + 3 = 33
-	if st, _ := m.State("a"); st.CurrentSoCPct < 32.5 || st.CurrentSoCPct > 33.5 {
-		t.Fatalf("expected ~33 %% while plugged in, got %.2f", st.CurrentSoCPct)
+	if st, _ := m.State("a"); st.CurrentSoC < 0.325 || st.CurrentSoC > 0.335 {
+		t.Fatalf("expected ~33 %% while plugged in, got %.2f", st.CurrentSoC)
 	}
 	m.Observe("a", false, 0, 0, true)
-	if st, _ := m.State("a"); st.CurrentSoCPct != 0 || st.PluggedIn {
+	if st, _ := m.State("a"); st.CurrentSoC != 0 || st.PluggedIn {
 		t.Errorf("expected cleared state when unplugged, got %+v", st)
 	}
 }
 
 // TestObserveNewSessionAnchor — on plug-in the anchor resets to
-// Config.PluginSoCPct. This prevents residual session_wh from a
+// Config.PluginSoC. This prevents residual session_wh from a
 // previous session leaking into the new one.
 func TestObserveNewSessionAnchor(t *testing.T) {
 	m := NewManager()
-	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 50}})
+	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoC: 0.5}})
 	m.Observe("a", true, 0, 0, true)
-	if st, _ := m.State("a"); st.CurrentSoCPct < 49 || st.CurrentSoCPct > 51 {
-		t.Errorf("fresh plug-in should show 50 %%, got %.2f", st.CurrentSoCPct)
+	if st, _ := m.State("a"); st.CurrentSoC < 0.49 || st.CurrentSoC > 0.51 {
+		t.Errorf("fresh plug-in should show 50 %%, got %.2f", st.CurrentSoC)
 	}
 	// Disconnect.
 	m.Observe("a", false, 0, 0, true)
 	// Re-plug — session delivered counter starts fresh.
 	m.Observe("a", true, 0, 0, true)
-	if st, _ := m.State("a"); st.CurrentSoCPct < 49 || st.CurrentSoCPct > 51 {
-		t.Errorf("re-plug should re-anchor at 50 %%, got %.2f", st.CurrentSoCPct)
+	if st, _ := m.State("a"); st.CurrentSoC < 0.49 || st.CurrentSoC > 0.51 {
+		t.Errorf("re-plug should re-anchor at 50 %%, got %.2f", st.CurrentSoC)
 	}
 }
 
@@ -135,25 +136,25 @@ func TestObserveNewSessionAnchor(t *testing.T) {
 // operator can correct drift.
 func TestSetCurrentSoCReAnchors(t *testing.T) {
 	m := NewManager()
-	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 25}})
+	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoC: 0.25}})
 	// Plug in, deliver 9 kWh → naive estimate = 25 + 9000/60000*100 = 40 %.
 	m.Observe("a", true, 7400, 9000, true)
-	if st, _ := m.State("a"); st.CurrentSoCPct < 39 || st.CurrentSoCPct > 41 {
-		t.Fatalf("pre-correction SoC: got %.2f want ~40", st.CurrentSoCPct)
+	if st, _ := m.State("a"); st.CurrentSoC < 0.39 || st.CurrentSoC > 0.41 {
+		t.Fatalf("pre-correction SoC: got %.2f want ~40", st.CurrentSoC)
 	}
 	// Operator looks at their dashboard: car is actually 60 %.
-	if !m.SetCurrentSoC("a", 60) {
+	if !m.SetCurrentSoC("a", 0.6) {
 		t.Fatal("SetCurrentSoC returned false on plugged-in loadpoint")
 	}
 	st, _ := m.State("a")
-	if st.CurrentSoCPct < 59 || st.CurrentSoCPct > 61 {
-		t.Errorf("post-correction SoC: got %.2f want ~60", st.CurrentSoCPct)
+	if st.CurrentSoC < 0.59 || st.CurrentSoC > 0.61 {
+		t.Errorf("post-correction SoC: got %.2f want ~60", st.CurrentSoC)
 	}
 	// Deliver another 3 kWh → should be ~65 % (60 + 3000/60000*100).
 	m.Observe("a", true, 7400, 12000, true)
 	st, _ = m.State("a")
-	if st.CurrentSoCPct < 64 || st.CurrentSoCPct > 66 {
-		t.Errorf("after more delivery SoC: got %.2f want ~65", st.CurrentSoCPct)
+	if st.CurrentSoC < 0.64 || st.CurrentSoC > 0.66 {
+		t.Errorf("after more delivery SoC: got %.2f want ~65", st.CurrentSoC)
 	}
 }
 
@@ -163,12 +164,12 @@ func TestSetCurrentSoCReAnchors(t *testing.T) {
 func TestSetCurrentSoCRejectsUnplugged(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000}})
-	if m.SetCurrentSoC("a", 55) {
+	if m.SetCurrentSoC("a", 0.55) {
 		t.Error("should reject SetCurrentSoC on never-plugged loadpoint")
 	}
 	m.Observe("a", true, 0, 0, true)
 	m.Observe("a", false, 0, 0, true)
-	if m.SetCurrentSoC("a", 55) {
+	if m.SetCurrentSoC("a", 0.55) {
 		t.Error("should reject SetCurrentSoC after unplug")
 	}
 }
@@ -177,13 +178,13 @@ func TestSetCurrentSoCClampsRange(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000}})
 	m.Observe("a", true, 0, 0, true)
-	m.SetCurrentSoC("a", 150)
-	if st, _ := m.State("a"); st.CurrentSoCPct != 100 {
-		t.Errorf("clamp high: got %.2f", st.CurrentSoCPct)
+	m.SetCurrentSoC("a", 1.5)
+	if st, _ := m.State("a"); st.CurrentSoC != 1 {
+		t.Errorf("clamp high: got %.2f", st.CurrentSoC)
 	}
 	m.SetCurrentSoC("a", -10)
-	if st, _ := m.State("a"); st.CurrentSoCPct != 0 {
-		t.Errorf("clamp low: got %.2f", st.CurrentSoCPct)
+	if st, _ := m.State("a"); st.CurrentSoC != 0 {
+		t.Errorf("clamp low: got %.2f", st.CurrentSoC)
 	}
 }
 
@@ -209,7 +210,7 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 	}
 }
 
-// TestSessionCompletionSnapsToTarget walks the scenario where the
+// TestVehicleDeclineDoesNotInventTargetSoC walks the scenario where the
 // vehicle charges normally, then explicitly stops requesting current
 // for a sustained window (typically because it hit its own onboard
 // SoC target or its onboard schedule ended). Without the completion
@@ -217,42 +218,42 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 // the MPC would keep allocating PV surplus to a phantom sink, spilling
 // it to the grid. With the latch the inferred SoC snaps to the target
 // and the planner sees the EV as done.
-func TestSessionCompletionSnapsToTarget(t *testing.T) {
+func TestVehicleDeclineDoesNotInventTargetSoC(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "evse-test",
-		VehicleCapacityWh: 60000, PluginSoCPct: 20, MaxChargeW: 11000,
+		VehicleCapacityWh: 60000, PluginSoC: 0.2, MaxChargeW: 11000,
 	}})
-	m.SetTarget("garage", 60, time.Date(2026, 5, 27, 15, 0, 0, 0, time.UTC))
+	m.SetTarget("garage", 0.6, time.Date(2026, 5, 27, 15, 0, 0, 0, time.UTC))
 
 	clock := time.Date(2026, 5, 27, 10, 19, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })
 
 	// Tick 1: connected and charging — request_active = true.
 	m.Observe("garage", true, 7400, 0, true)
-	if st, _ := m.State("garage"); st.SoCSource != "" {
-		t.Errorf("session start should not be marked completed: %+v", st)
+	if st, _ := m.State("garage"); st.SoCSource != "assumed" {
+		t.Errorf("session start should expose its unconfirmed level: %+v", st)
 	}
 
 	// Tick 2 (T+1m of charging): some energy delivered, inferred SoC rises.
 	clock = clock.Add(60 * time.Second)
 	m.Observe("garage", true, 7400, 1000, true) // SoC = 20 + 1000/60000*100 ≈ 21.67
-	if st, _ := m.State("garage"); st.CurrentSoCPct < 21 || st.CurrentSoCPct > 22.5 {
-		t.Errorf("expected inferred SoC ~21.67, got %.2f", st.CurrentSoCPct)
+	if st, _ := m.State("garage"); st.CurrentSoC < 0.21 || st.CurrentSoC > 0.225 {
+		t.Errorf("expected inferred SoC ~21.67, got %.2f", st.CurrentSoC)
 	}
 
 	// Tick 3 (T+1m6s): vehicle stops requesting current.
 	// delivered_wh frozen, power drops to 0.
 	clock = clock.Add(6 * time.Second)
 	m.Observe("garage", true, 0, 1000, false)
-	if st, _ := m.State("garage"); st.SoCSource == "completed" {
+	if st, _ := m.State("garage"); st.ChargingDeclined {
 		t.Errorf("first not-requesting tick should NOT yet complete (under threshold): %+v", st)
 	}
 
 	// Tick 4 (T+30s of not-requesting): below threshold — still not completed.
 	clock = clock.Add(30 * time.Second)
 	m.Observe("garage", true, 0, 1000, false)
-	if st, _ := m.State("garage"); st.SoCSource == "completed" {
+	if st, _ := m.State("garage"); st.ChargingDeclined {
 		t.Errorf("30s not-requesting should NOT yet complete (under 90s threshold): %+v", st)
 	}
 
@@ -260,11 +261,11 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 	clock = clock.Add(60 * time.Second)
 	m.Observe("garage", true, 0, 1000, false)
 	st, _ := m.State("garage")
-	if st.SoCSource != "completed" {
+	if !st.ChargingDeclined {
 		t.Errorf("expected SoCSource='completed' after threshold, got %q (state=%+v)", st.SoCSource, st)
 	}
-	if st.CurrentSoCPct != 60 {
-		t.Errorf("expected inferred SoC pinned to target 60, got %.2f", st.CurrentSoCPct)
+	if math.Abs(st.CurrentSoC-(0.2+1000.0/60000)) > 1e-9 {
+		t.Errorf("expected inferred SoC pinned to target 60, got %.2f", st.CurrentSoC)
 	}
 
 	// Tick 6: a transient request_active=true blip (EVSE retried and
@@ -274,7 +275,7 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 	// clears it.
 	clock = clock.Add(15 * time.Second)
 	m.Observe("garage", true, 0, 1000, true)
-	if st, _ := m.State("garage"); st.SoCSource != "completed" || st.CurrentSoCPct != 60 {
+	if st, _ := m.State("garage"); !st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1000.0/60000)) > 1e-9 {
 		t.Errorf("brief request_active flicker should not clear latch: %+v", st)
 	}
 
@@ -294,9 +295,9 @@ func TestSessionCompletionRequiresTarget(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "evse-test",
-		VehicleCapacityWh: 60000, PluginSoCPct: 20,
+		VehicleCapacityWh: 60000, PluginSoC: 0.2,
 	}})
-	// No SetTarget call — targetSoCPct stays 0.
+	// No SetTarget call — targetSoC stays 0.
 
 	clock := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })
@@ -306,7 +307,7 @@ func TestSessionCompletionRequiresTarget(t *testing.T) {
 	m.Observe("garage", true, 0, 0, false)
 
 	st, _ := m.State("garage")
-	if st.SoCSource == "completed" {
+	if st.ChargingDeclined {
 		t.Errorf("completion should not trigger without a target: %+v", st)
 	}
 }
@@ -319,9 +320,9 @@ func TestRequestActiveDefaultPreservesInference(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "evse-test",
-		VehicleCapacityWh: 60000, PluginSoCPct: 30,
+		VehicleCapacityWh: 60000, PluginSoC: 0.3,
 	}})
-	m.SetTarget("garage", 80, time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC))
+	m.SetTarget("garage", 0.8, time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC))
 
 	clock := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })
@@ -332,10 +333,97 @@ func TestRequestActiveDefaultPreservesInference(t *testing.T) {
 	clock = clock.Add(5 * time.Minute)
 	m.Observe("garage", true, 7400, 600, true) // 600 Wh in → SoC = 30 + 1
 	st, _ := m.State("garage")
-	if st.SoCSource == "completed" {
+	if st.ChargingDeclined {
 		t.Errorf("request_active=true must not trigger completion: %+v", st)
 	}
-	if st.CurrentSoCPct < 30.5 || st.CurrentSoCPct > 31.5 {
-		t.Errorf("inferred SoC drifted: %.2f", st.CurrentSoCPct)
+	if st.CurrentSoC < 0.305 || st.CurrentSoC > 0.315 {
+		t.Errorf("inferred SoC drifted: %.2f", st.CurrentSoC)
+	}
+}
+
+// latchedManager returns a plugged-in loadpoint whose completion latch
+// has fired: target 0.6, 1 kWh delivered, 90 s of not requesting. The
+// estimate sits pinned at 0.6. Returned clock is the latch moment.
+func latchedManager(t *testing.T) (*Manager, *time.Time) {
+	t.Helper()
+	m := NewManager()
+	m.Load([]Config{{
+		ID: "garage", DriverName: "evse-test",
+		VehicleCapacityWh: 60000, PluginSoC: 0.2, MaxChargeW: 11000,
+	}})
+	m.SetTarget("garage", 0.6, time.Date(2026, 9, 4, 15, 0, 0, 0, time.UTC))
+	clock := time.Date(2026, 9, 4, 4, 0, 0, 0, time.UTC)
+	m.SetNowFn(func() time.Time { return clock })
+	m.Observe("garage", true, 7400, 1000, true)
+	clock = clock.Add(10 * time.Second)
+	m.Observe("garage", true, 0, 1000, false)
+	clock = clock.Add(SessionCompletionTimeout)
+	m.Observe("garage", true, 0, 1000, false)
+	st, _ := m.State("garage")
+	if !st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1000.0/60000)) > 1e-9 {
+		t.Fatalf("precondition: latch should have fired, got %+v", st)
+	}
+	return m, &clock
+}
+
+// The maintainer's morning of 2026-09-04: the car declined overnight at
+// the schedule's 80 %, the latch pinned the estimate there, and every
+// drag of the "current charge" slider snapped back to 80 on the next
+// tick. Setting the level is the operator overruling the latch.
+func TestSetCurrentSoCClearsCompletionLatch(t *testing.T) {
+	m, clock := latchedManager(t)
+	if !m.SetCurrentSoC("garage", 0.5) {
+		t.Fatalf("SetCurrentSoC refused")
+	}
+	*clock = clock.Add(3 * time.Second)
+	m.Observe("garage", true, 0, 1000, false) // still not requesting, timer restarts
+	st, _ := m.State("garage")
+	if st.ChargingDeclined {
+		t.Errorf("latch should be cleared by the operator's correction: %+v", st)
+	}
+	if st.CurrentSoC < 0.49 || st.CurrentSoC > 0.51 {
+		t.Errorf("estimate should hold the corrected 0.5, got %.3f", st.CurrentSoC)
+	}
+	// A car that keeps declining re-arms the latch after the timeout.
+	*clock = clock.Add(SessionCompletionTimeout)
+	m.Observe("garage", true, 0, 1000, false)
+	if st, _ := m.State("garage"); !st.ChargingDeclined || math.Abs(st.CurrentSoC-0.5) > 1e-9 {
+		t.Errorf("latch should re-arm after sustained not-requesting: %+v", st)
+	}
+}
+
+// A car that actually resumes charging is eligible for planning immediately.
+func TestMeasuredChargingClearsVehicleDecline(t *testing.T) {
+	m, clock := latchedManager(t)
+	*clock = clock.Add(5 * time.Second)
+	m.Observe("garage", true, 11000, 1500, true)
+	st, _ := m.State("garage")
+	if st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1500.0/60000)) > 1e-9 {
+		t.Fatalf("resumed delivery did not clear refusal: %+v", st)
+	}
+}
+
+func TestHigherTargetRetriesVehicleWithoutInventingBatteryLevel(t *testing.T) {
+	m, _ := latchedManager(t)
+	before, _ := m.State("garage")
+	m.SetTarget("garage", .9, time.Now().Add(time.Hour))
+	after, _ := m.State("garage")
+	if after.ChargingDeclined || after.CurrentSoC != before.CurrentSoC {
+		t.Fatalf("higher target did not retry honestly: %+v", after)
+	}
+}
+
+func TestExplicitRetryAndHigherScheduleClearVehicleDecline(t *testing.T) {
+	m, _ := latchedManager(t)
+	before, _ := m.State("garage")
+	m.RetryCharging("garage")
+	after, _ := m.State("garage")
+	if after.ChargingDeclined || after.CurrentSoC != before.CurrentSoC {
+		t.Fatalf("retry changed level: %+v", after)
+	}
+	m, _ = latchedManager(t)
+	m.SetSchedule("garage", Schedule{SoC: .9, TimeOfDayMinUTC: 7 * 60})
+	if after, _ := m.State("garage"); after.ChargingDeclined {
+		t.Fatalf("new goal retained refusal: %+v", after)
 	}
 }

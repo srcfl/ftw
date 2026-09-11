@@ -116,6 +116,29 @@ The installer image is independent of application releases. New images pull
 the current stable containers on first boot; installed systems use the normal
 beta/stable updater.
 
+### Host OS security updates
+
+The in-app updater covers FTW's own components — Core, Optimizer, drivers —
+never the host underneath them. The image keeps the host patched with
+`unattended-upgrades`: Debian security updates and the Raspberry Pi archive
+(kernel, firmware, bootloader) apply automatically once a day. The Pi never
+reboots on its own — a reboot stops dispatch — so an installed kernel takes
+effect at the next reboot you choose.
+
+The Docker engine comes from Docker's own apt repository, restored on first
+boot, and updates only with a manual `sudo apt update && sudo apt upgrade`,
+because an engine upgrade restarts the whole container stack.
+
+Devices flashed from an image built before this policy can adopt it:
+
+```bash
+sudo apt-get update && sudo apt-get install -y unattended-upgrades
+base=https://raw.githubusercontent.com/srcfl/ftw/master/deploy/pi-gen/stage-ftw/01-ftw-setup/files
+sudo curl -fsSL "${base}/20auto-upgrades" -o /etc/apt/apt.conf.d/20auto-upgrades
+sudo curl -fsSL "${base}/52ftw-unattended-upgrades" -o /etc/apt/apt.conf.d/52ftw-unattended-upgrades
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+```
+
 ## Build the image
 
 Image provisioning lives under [`deploy/pi-gen`](../deploy/pi-gen):

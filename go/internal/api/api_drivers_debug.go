@@ -11,15 +11,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/assistant"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -234,6 +238,10 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	resolved.ResolveDriverPaths(baseDir)
 	cfg = resolved.Drivers[0]
 
+	if err := rejectUnsafeProbeTargets(cfg); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
 	if mq := cfg.EffectiveMQTT(); mq != nil {
 		if mq.Port == 0 {
 			mq.Port = 1883
@@ -312,6 +320,122 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// rejectUnsafeProbeTargets checks every host a driver test might dial:
+// MQTT, Modbus, config.host / config.url, and HTTP/WS/TCP allowlists.
+func rejectUnsafeProbeTargets(cfg config.Driver) error {
+	if mq := cfg.EffectiveMQTT(); mq != nil {
+		if err := rejectUnsafeProbeHost(mq.Host); err != nil {
+			return fmt.Errorf("mqtt host: %w", err)
+		}
+	}
+	if mb := cfg.EffectiveModbus(); mb != nil {
+		if err := rejectUnsafeProbeHost(mb.Host); err != nil {
+			return fmt.Errorf("modbus host: %w", err)
+		}
+	}
+	if cfg.Config != nil {
+		if h, ok := cfg.Config["host"].(string); ok && strings.TrimSpace(h) != "" {
+			if err := rejectUnsafeProbeHost(h); err != nil {
+				return fmt.Errorf("config.host: %w", err)
+			}
+		}
+		if u, ok := cfg.Config["url"].(string); ok && strings.TrimSpace(u) != "" {
+			if host := hostFromProbeURL(u); host != "" {
+				if err := rejectUnsafeProbeHost(host); err != nil {
+					return fmt.Errorf("config.url: %w", err)
+				}
+			}
+		}
+	}
+	if httpCap := cfg.Capabilities.HTTP; httpCap != nil {
+		for _, h := range httpCap.AllowedHosts {
+			if strings.TrimSpace(h) == "" {
+				continue
+			}
+			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+				return fmt.Errorf("http allowlist: %w", err)
+			}
+		}
+	}
+	if ws := cfg.Capabilities.WebSocket; ws != nil {
+		for _, h := range ws.AllowedHosts {
+			if strings.TrimSpace(h) == "" {
+				continue
+			}
+			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+				return fmt.Errorf("websocket allowlist: %w", err)
+			}
+		}
+	}
+	if tcp := cfg.Capabilities.TCP; tcp != nil {
+		for _, h := range tcp.AllowedHosts {
+			if strings.TrimSpace(h) == "" {
+				continue
+			}
+			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+				return fmt.Errorf("tcp allowlist: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func hostFromProbeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return strings.TrimSpace(raw)
+	}
+	return u.Hostname()
+}
+
+func hostFromAllowlistEntry(entry string) string {
+	entry = strings.TrimSpace(entry)
+	if host, _, err := net.SplitHostPort(entry); err == nil {
+		return host
+	}
+	return entry
+}
+
+// rejectUnsafeProbeHost stops a driver test or fingerprint from dialing
+// the box itself or link-local/metadata addresses. Hostnames such as
+// zap.local still probe unless they resolve to a forbidden address.
+func rejectUnsafeProbeHost(host string) error {
+	host = strings.TrimSpace(host)
+	if i := strings.Index(host, "%"); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if host == "" {
+		return fmt.Errorf("missing host")
+	}
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("loopback, link-local and unspecified addresses are not permitted")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return rejectUnsafeProbeIP(ip)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil
+	}
+	for _, a := range addrs {
+		if err := rejectUnsafeProbeIP(a.IP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectUnsafeProbeIP(ip net.IP) error {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return fmt.Errorf("loopback, link-local and unspecified addresses are not permitted")
+	}
+	return nil
 }
 
 func collectDriverProbe(displayName, runtimeName string, tel *telemetry.Store, reg *drivers.Registry, started time.Time) driverProbeResp {
@@ -413,10 +537,11 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/support/dump — zip archive with everything a developer needs
 // to triage a support incident: redacted config, full driver health JSON,
-// recent global + per-driver logs, last 1 h of TS samples per
-// (driver, metric), and a manifest. SQLite is NOT included; the dump is
-// intended to be small enough to attach to a chat message — measured at
-// ~6 kB on a two-driver install.
+// recent global + per-driver logs (secrets stripped at least as strictly
+// as Ask why), last 1 h of TS samples per (driver, metric), and a
+// manifest. SQLite is NOT included; the dump is intended to be small
+// enough to attach to a chat message — measured at ~6 kB on a two-driver
+// install.
 //
 // Zip rather than tar.gz because this file's whole purpose is to be
 // handed to somebody else. Windows and every chat client open a zip
@@ -488,7 +613,8 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	healthBody, _ := json.MarshalIndent(s.deps.Tel.AllHealth(), "", "  ")
 	addFile("drivers.json", healthBody)
 
-	// Logs.
+	// Logs. Lua host.log and HTTP error bodies often carry OAuth JSON;
+	// redact before the zip leaves the house.
 	globalLog := formatLogs(s.deps.LogRing.RecentGlobal(0))
 	addFile("logs/global.log", []byte(globalLog))
 	for _, d := range s.deps.LogRing.Drivers() {
@@ -558,10 +684,10 @@ func formatLogs(entries []telemetry.LogEntry) string {
 		if e.Driver != "" {
 			fmt.Fprintf(&b, "[%s] ", e.Driver)
 		}
-		b.WriteString(e.Msg)
+		b.WriteString(redactDumpLog(e.Msg))
 		if e.Attrs != "" {
 			b.WriteByte(' ')
-			b.WriteString(e.Attrs)
+			b.WriteString(redactDumpLog(e.Attrs))
 		}
 		b.WriteByte('\n')
 	}
@@ -616,11 +742,65 @@ func redactSensitive(v any) {
 }
 
 func isSensitiveKey(k string) bool {
-	keys := []string{"password", "secret", "token", "api_key", "apikey", "private_key", "client_secret"}
-	for _, s := range keys {
+	k = strings.ToLower(strings.TrimSpace(k))
+	if k == "" {
+		return false
+	}
+	for _, s := range []string{
+		"password", "passwd", "secret", "token", "api_key", "apikey",
+		"private_key", "client_secret", "authorization", "credential",
+	} {
 		if strings.Contains(k, s) {
 			return true
 		}
 	}
+	return hasAuthSegment(k)
+}
+
+// hasAuthSegment is true for a bare "auth" path segment so auth,
+// auth_header and x-auth redact, while oauth and oauth_client_id do not.
+func hasAuthSegment(k string) bool {
+	start := 0
+	for i := 0; i <= len(k); i++ {
+		if i < len(k) && ((k[i] >= 'a' && k[i] <= 'z') || (k[i] >= '0' && k[i] <= '9')) {
+			continue
+		}
+		if i-start == 4 && k[start:i] == "auth" {
+			return true
+		}
+		start = i + 1
+	}
 	return false
+}
+
+var (
+	dumpJSONSecretRe = regexp.MustCompile(`(?i)("([^"\\]+)"\s*:\s*)("(?:\\.|[^"\\])*")`)
+	dumpFormSecretRe = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9_-]*)=([^\s&"]+)`)
+	dumpBasicAuthRe  = regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=_-]+`)
+)
+
+// redactDumpLog applies Ask-why redaction, then also blanks JSON/form
+// fields whose keys isSensitiveKey would catch. Stricter on OAuth bodies
+// that Lua logs as `HTTP %d: %s`.
+func redactDumpLog(s string) string {
+	if s == "" {
+		return s
+	}
+	s = assistant.Redact(s)
+	s = dumpBasicAuthRe.ReplaceAllString(s, "Basic [omitted]")
+	s = dumpJSONSecretRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := dumpJSONSecretRe.FindStringSubmatch(m)
+		if len(parts) != 4 || !isSensitiveKey(parts[2]) {
+			return m
+		}
+		return parts[1] + `"***"`
+	})
+	s = dumpFormSecretRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := dumpFormSecretRe.FindStringSubmatch(m)
+		if len(parts) != 3 || !isSensitiveKey(parts[1]) {
+			return m
+		}
+		return parts[1] + "=***"
+	})
+	return s
 }

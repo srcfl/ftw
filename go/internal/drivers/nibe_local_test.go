@@ -60,7 +60,8 @@ func TestNibeLocalEmitsTelemetry(t *testing.T) {
 		"11":    point("Hot water top (BT7)", "s16", "°C", 10, 570),                // 57.0
 		"8":     point("Supply line (BT2)", "s16", "°C", 10, 449),                  // auto → hp_supply_line_bt2 44.9
 		"5":     point("Supply line (EP23-BT2)", "s16", "°C", 10, -32768),          // sentinel → skipped
-		"28393": point("Tot. consump­tion", "u32", "kWh", 10, 53999),               // hp_energy_consumed_kwh 5399.9
+		"28393": point("Tot. consump­tion", "u32", "kWh", 10, 53999),               // hp_energy_consumed_kwh 5399.9 kWh → 5_399_900 Wh
+		"2219":  point("Internal additional heat", "u16", "kW", 10, 15),            // bulk 1.5 kW → 1500 W
 		"9001":  point("Duplicate title", "u16", "", 1, 10),
 		"9002":  point("Duplicate title", "u16", "", 1, 20),
 	}
@@ -121,13 +122,14 @@ func TestNibeLocalEmitsTelemetry(t *testing.T) {
 		t.Errorf("serial not anchored: SN=%q, want 06613225140002", got)
 	}
 
-	// Canonical headline metrics with exact scaling.
+	// Canonical headline metrics with exact scaling. Vendor kW/kWh become W/Wh.
 	wantMetric := map[string]float64{
-		"hp_power_w":             1500,   // W, div 1
-		"hp_outdoor_temp_c":      29.4,   // 294 / 10
-		"hp_hw_top_temp_c":       57.0,   // 570 / 10
-		"hp_energy_consumed_kwh": 5399.9, // 53999 / 10
-		"hp_supply_line_bt2":     44.9,   // auto-named, 449 / 10
+		"hp_power_w":                  1500,      // W, div 1
+		"hp_outdoor_temp_c":           29.4,      // 294 / 10
+		"hp_hw_top_temp_c":            57.0,      // 570 / 10
+		"hp_energy_consumed_kwh":      5_399_900, // 53999 / 10 kWh → Wh
+		"hp_supply_line_bt2":          44.9,      // auto-named, 449 / 10
+		"hp_internal_additional_heat": 1500,      // bulk 1.5 kW → 1500 W
 	}
 	for name, want := range wantMetric {
 		v, _, ok := tel.LatestMetric("nibe", name)
@@ -137,6 +139,19 @@ func TestNibeLocalEmitsTelemetry(t *testing.T) {
 		}
 		if !approxEq(v, want) {
 			t.Errorf("metric %s = %v, want %v", name, v, want)
+		}
+	}
+	byName := map[string]telemetry.MetricSnapshot{}
+	for _, m := range tel.LatestMetricsByDriver("nibe") {
+		byName[m.Name] = m
+	}
+	for name, wantUnit := range map[string]string{
+		"hp_power_w":                  "W",
+		"hp_energy_consumed_kwh":      "Wh",
+		"hp_internal_additional_heat": "W",
+	} {
+		if byName[name].Unit != wantUnit {
+			t.Errorf("metric %s unit = %q, want %q", name, byName[name].Unit, wantUnit)
 		}
 	}
 

@@ -29,9 +29,9 @@ func validPlanningStorageParams() Params {
 	p := validPlanningParams()
 	p.Storages = []StorageAssetSpec{{
 		ID: "battery", CapacityWh: p.CapacityWh,
-		InitialEnergyWh: p.CapacityWh * p.InitialSoCPct / 100,
-		MinEnergyWh:     p.CapacityWh * p.SoCMinPct / 100,
-		MaxEnergyWh:     p.CapacityWh * p.SoCMaxPct / 100,
+		InitialEnergyWh: p.CapacityWh * p.InitialSoC,
+		MinEnergyWh:     p.CapacityWh * p.SoCMin,
+		MaxEnergyWh:     p.CapacityWh * p.SoCMax,
 		MaxChargeW:      p.MaxChargeW, MaxDischargeW: p.MaxDischargeW,
 		ChargeEfficiency: p.ChargeEfficiency, DischargeEfficiency: p.DischargeEfficiency,
 	}}
@@ -41,8 +41,8 @@ func validPlanningStorageParams() Params {
 func validPlanningLoadpoint() *LoadpointSpec {
 	return &LoadpointSpec{
 		ID: "garage", CapacityWh: 60000, Levels: 11,
-		MinPct: 0, MaxPct: 100, InitialSoCPct: 20, PluggedIn: true,
-		TargetSoCPct: 80, TargetSlotIdx: 8,
+		SoCMin: 0, SoCMax: 1.0, InitialSoC: 0.2, PluggedIn: true,
+		TargetSoC: 0.8, TargetSlotIdx: 8,
 		MaxChargeW: 11000, AllowedStepsW: []float64{0, 1400, 4100, 11000},
 		ChargeEfficiency: 0.9,
 	}
@@ -106,9 +106,9 @@ func TestValidatePlanningParamsAcceptsSupportedPhysicalStates(t *testing.T) {
 		name   string
 		mutate func(*Params)
 	}{
-		{"physical minimum and maximum", func(p *Params) { p.SoCMinPct, p.SoCMaxPct = 0, 100 }},
-		{"below operating minimum recovery", func(p *Params) { p.InitialSoCPct = 5 }},
-		{"above operating maximum recovery", func(p *Params) { p.InitialSoCPct = 97 }},
+		{"physical minimum and maximum", func(p *Params) { p.SoCMin, p.SoCMax = 0, 1 }},
+		{"below operating minimum recovery", func(p *Params) { p.InitialSoC = 0.05 }},
+		{"above operating maximum recovery", func(p *Params) { p.InitialSoC = 0.97 }},
 		{"disabled power", func(p *Params) { p.MaxChargeW, p.MaxDischargeW = 0, 0 }},
 		{"ideal efficiency", func(p *Params) { p.ChargeEfficiency, p.DischargeEfficiency = 1, 1 }},
 		{"finite negative prices", func(p *Params) {
@@ -116,17 +116,17 @@ func TestValidatePlanningParamsAcceptsSupportedPhysicalStates(t *testing.T) {
 		}},
 		{"storage below operating minimum recovery", func(p *Params) {
 			*p = validPlanningStorageParams()
-			p.InitialSoCPct = 5
+			p.InitialSoC = 0.05
 			p.Storages[0].InitialEnergyWh = 500
 		}},
 		{"storage above operating maximum recovery", func(p *Params) {
 			*p = validPlanningStorageParams()
-			p.InitialSoCPct = 97
+			p.InitialSoC = 0.97
 			p.Storages[0].InitialEnergyWh = 9700
 		}},
 		{"loadpoint documented default efficiency", func(p *Params) {
 			lp := validPlanningLoadpoint()
-			lp.MinPct, lp.MaxPct = 0, 0
+			lp.SoCMin, lp.SoCMax = 0, 0
 			lp.ChargeEfficiency = 0
 			p.Loadpoints = []*LoadpointSpec{lp}
 			p.Loadpoint = lp
@@ -139,13 +139,13 @@ func TestValidatePlanningParamsAcceptsSupportedPhysicalStates(t *testing.T) {
 		}},
 		{"loadpoint zero target sentinel", func(p *Params) {
 			lp := validPlanningLoadpoint()
-			lp.MinPct, lp.TargetSoCPct = 10, 0
+			lp.SoCMin, lp.TargetSoC = 0.1, 0
 			p.Loadpoints = []*LoadpointSpec{lp}
 			p.Loadpoint = lp
 		}},
 		{"loadpoint zero target ignores negative deadline", func(p *Params) {
 			lp := validPlanningLoadpoint()
-			lp.TargetSoCPct = 0
+			lp.TargetSoC = 0
 			lp.TargetSlotIdx = -1
 			p.Loadpoints = []*LoadpointSpec{lp}
 			p.Loadpoint = lp
@@ -164,11 +164,11 @@ func TestValidatePlanningParamsAcceptsSupportedPhysicalStates(t *testing.T) {
 		}},
 		{"equivalent normalized loadpoint fallback", func(p *Params) {
 			lp := validPlanningLoadpoint()
-			lp.MinPct, lp.MaxPct = 0, 0
+			lp.SoCMin, lp.SoCMax = 0, 0
 			lp.ChargeEfficiency = 0
 			lp.AllowedStepsW = []float64{4100, 0, 1400, 4100}
 			fallback := *lp
-			fallback.MinPct, fallback.MaxPct = 0, 100
+			fallback.SoCMin, fallback.SoCMax = 0, 1
 			fallback.ChargeEfficiency = 0.9
 			fallback.AllowedStepsW = []float64{1400, 4100}
 			p.Loadpoints = []*LoadpointSpec{lp}
@@ -202,14 +202,14 @@ func TestValidatePlanningParamsRejectsInvalidAggregateValues(t *testing.T) {
 		{"action levels", "action_levels", func(p *Params) { p.ActionLevels = 2 }},
 		{"zero capacity", "capacity_wh", func(p *Params) { p.CapacityWh = 0 }},
 		{"nan capacity", "capacity_wh", func(p *Params) { p.CapacityWh = math.NaN() }},
-		{"negative soc minimum", "soc bounds", func(p *Params) { p.SoCMinPct = -1 }},
-		{"equal soc bounds", "soc bounds", func(p *Params) { p.SoCMaxPct = p.SoCMinPct }},
-		{"reversed soc bounds", "soc bounds", func(p *Params) { p.SoCMinPct = 96 }},
-		{"soc maximum above physical", "soc bounds", func(p *Params) { p.SoCMaxPct = 101 }},
-		{"nan soc bound", "soc bounds", func(p *Params) { p.SoCMinPct = math.NaN() }},
-		{"initial soc below physical", "initial_soc_pct", func(p *Params) { p.InitialSoCPct = -0.1 }},
-		{"initial soc above physical", "initial_soc_pct", func(p *Params) { p.InitialSoCPct = 100.1 }},
-		{"initial soc infinite", "initial_soc_pct", func(p *Params) { p.InitialSoCPct = math.Inf(1) }},
+		{"negative soc minimum", "soc bounds", func(p *Params) { p.SoCMin = -1 }},
+		{"equal soc bounds", "soc bounds", func(p *Params) { p.SoCMax = p.SoCMin }},
+		{"reversed soc bounds", "soc bounds", func(p *Params) { p.SoCMin = 0.96 }},
+		{"soc maximum above physical", "soc bounds", func(p *Params) { p.SoCMax = 1.01 }},
+		{"nan soc bound", "soc bounds", func(p *Params) { p.SoCMin = math.NaN() }},
+		{"initial soc below physical", "initial_soc", func(p *Params) { p.InitialSoC = -0.1 }},
+		{"initial soc above physical", "initial_soc", func(p *Params) { p.InitialSoC = 1.001 }},
+		{"initial soc infinite", "initial_soc", func(p *Params) { p.InitialSoC = math.Inf(1) }},
 		{"negative charge power", "max_charge_w", func(p *Params) { p.MaxChargeW = -1 }},
 		{"infinite discharge power", "max_discharge_w", func(p *Params) { p.MaxDischargeW = math.Inf(1) }},
 		{"zero charge efficiency", "charge_efficiency", func(p *Params) { p.ChargeEfficiency = 0 }},
@@ -223,6 +223,8 @@ func TestValidatePlanningParamsRejectsInvalidAggregateValues(t *testing.T) {
 		{"negative pv bonus", "pv_charge_bonus", func(p *Params) { p.PVChargeBonusOreKwh = -1 }},
 		{"negative spread", "min_arbitrage_spread", func(p *Params) { p.MinArbitrageSpreadOreKwh = -1 }},
 		{"negative uncertainty", "pv_uncertainty", func(p *Params) { p.PVUncertaintyW = -1 }},
+		{"negative relative uncertainty", "pv_relative_uncertainty", func(p *Params) { p.PVRelativeUncertainty = -1 }},
+		{"nan relative uncertainty", "pv_relative_uncertainty", func(p *Params) { p.PVRelativeUncertainty = math.NaN() }},
 		{"nan safety", "pv_forecast_safety", func(p *Params) { p.PVForecastSafetyK = math.NaN() }},
 	}
 	for _, tc := range tests {
@@ -259,7 +261,6 @@ func TestValidatePlanningParamsRejectsInvalidStoragePhysics(t *testing.T) {
 		{"zero efficiency", ".charge_efficiency", func(p *Params) { p.Storages[0].ChargeEfficiency = 0 }},
 		{"nan efficiency", ".charge_efficiency", func(p *Params) { p.Storages[0].ChargeEfficiency = math.NaN() }},
 		{"high efficiency", ".discharge_efficiency", func(p *Params) { p.Storages[0].DischargeEfficiency = 1.01 }},
-		{"different fallback efficiency", "fallback efficiencies", func(p *Params) { p.Storages[0].ChargeEfficiency = 0.9 }},
 		{"capacity aggregate mismatch", "aggregate capacity", func(p *Params) { p.Storages[0].CapacityWh += 10 }},
 		{"initial aggregate mismatch", "aggregate initial", func(p *Params) { p.Storages[0].InitialEnergyWh += 10 }},
 		{"minimum aggregate mismatch", "aggregate min", func(p *Params) { p.Storages[0].MinEnergyWh += 10 }},
@@ -290,24 +291,24 @@ func TestValidatePlanningParamsRejectsInvalidLoadpointPhysics(t *testing.T) {
 		{"zero capacity", ".capacity_wh", func(p *Params) { p.Loadpoints[0].CapacityWh = 0 }},
 		{"nan capacity", ".capacity_wh", func(p *Params) { p.Loadpoints[0].CapacityWh = math.NaN() }},
 		{"too few levels", ".levels", func(p *Params) { p.Loadpoints[0].Levels = 1 }},
-		{"invalid bounds", "SoC bounds", func(p *Params) { p.Loadpoints[0].MinPct, p.Loadpoints[0].MaxPct = 60, 50 }},
-		{"nan bound", "SoC bounds", func(p *Params) { p.Loadpoints[0].MinPct = math.NaN() }},
-		{"initial outside bounds", "initial_soc_pct", func(p *Params) { p.Loadpoints[0].InitialSoCPct = 101 }},
-		{"initial below operating minimum", "initial_soc_pct", func(p *Params) {
-			p.Loadpoints[0].MinPct, p.Loadpoints[0].InitialSoCPct = 30, 20
+		{"invalid bounds", "SoC bounds", func(p *Params) { p.Loadpoints[0].SoCMin, p.Loadpoints[0].SoCMax = 0.6, 0.50 }},
+		{"nan bound", "SoC bounds", func(p *Params) { p.Loadpoints[0].SoCMin = math.NaN() }},
+		{"initial outside bounds", "initial_soc", func(p *Params) { p.Loadpoints[0].InitialSoC = 1.01 }},
+		{"initial below operating minimum", "initial_soc", func(p *Params) {
+			p.Loadpoints[0].SoCMin, p.Loadpoints[0].InitialSoC = 0.3, 0.20
 		}},
-		{"initial above operating maximum", "initial_soc_pct", func(p *Params) {
-			p.Loadpoints[0].MaxPct, p.Loadpoints[0].InitialSoCPct = 10, 20
+		{"initial above operating maximum", "initial_soc", func(p *Params) {
+			p.Loadpoints[0].SoCMax, p.Loadpoints[0].InitialSoC = 0.1, 0.20
 		}},
-		{"nan initial", "initial_soc_pct", func(p *Params) { p.Loadpoints[0].InitialSoCPct = math.NaN() }},
-		{"target outside bounds", "target_soc_pct", func(p *Params) { p.Loadpoints[0].TargetSoCPct = 101 }},
-		{"target below operating minimum", "target_soc_pct", func(p *Params) {
-			p.Loadpoints[0].MinPct, p.Loadpoints[0].InitialSoCPct, p.Loadpoints[0].TargetSoCPct = 30, 40, 20
+		{"nan initial", "initial_soc", func(p *Params) { p.Loadpoints[0].InitialSoC = math.NaN() }},
+		{"target outside bounds", "target_soc", func(p *Params) { p.Loadpoints[0].TargetSoC = 1.01 }},
+		{"target below operating minimum", "target_soc", func(p *Params) {
+			p.Loadpoints[0].SoCMin, p.Loadpoints[0].InitialSoC, p.Loadpoints[0].TargetSoC = 0.3, 0.40, 0.20
 		}},
-		{"target above operating maximum", "target_soc_pct", func(p *Params) {
-			p.Loadpoints[0].MaxPct, p.Loadpoints[0].TargetSoCPct = 70, 80
+		{"target above operating maximum", "target_soc", func(p *Params) {
+			p.Loadpoints[0].SoCMax, p.Loadpoints[0].TargetSoC = 0.7, 0.80
 		}},
-		{"infinite target", "target_soc_pct", func(p *Params) { p.Loadpoints[0].TargetSoCPct = math.Inf(1) }},
+		{"infinite target", "target_soc", func(p *Params) { p.Loadpoints[0].TargetSoC = math.Inf(1) }},
 		{"target with negative deadline", "target_slot_idx", func(p *Params) { p.Loadpoints[0].TargetSlotIdx = -1 }},
 		{"negative max power", ".max_charge_w", func(p *Params) { p.Loadpoints[0].MaxChargeW = -1 }},
 		{"infinite max power", ".max_charge_w", func(p *Params) { p.Loadpoints[0].MaxChargeW = math.Inf(1) }},
@@ -324,7 +325,7 @@ func TestValidatePlanningParamsRejectsInvalidLoadpointPhysics(t *testing.T) {
 		}},
 		{"fallback invalid physics", "loadpoint fallback", func(p *Params) {
 			fallback := *p.Loadpoint
-			fallback.InitialSoCPct = math.NaN()
+			fallback.InitialSoC = math.NaN()
 			p.Loadpoint = &fallback
 		}},
 	}
@@ -432,18 +433,26 @@ func (o *physicsGateRecoveryOptimizer) Optimize(_ context.Context, slots []Slot,
 	plan := Plan{
 		GeneratedAtMs: time.Now().UnixMilli(), Mode: p.Mode,
 		HorizonSlots: len(slots), CapacityWh: p.CapacityWh,
-		InitialSoCPct: p.InitialSoCPct,
-		Actions:       make([]Action, len(slots)),
-		Solver:        &SolverInfo{Engine: "test", Backend: "recovery", Status: "optimal"},
+		InitialSoC: p.InitialSoC,
+		Actions:    make([]Action, len(slots)),
+		Solver:     &SolverInfo{Engine: "test", Backend: "recovery", Status: "optimal"},
 	}
 	for i, slot := range slots {
 		gridW := slot.LoadW + slot.PVW
-		cost := SlotGridCostOre(slot, gridW*float64(slot.LenMin)/60/1000, p)
+		cost := SlotGridCostOre(slot, gridW*slot.DurationHours()/1000, p)
 		plan.Actions[i] = Action{
-			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin,
+			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin, ExecutionStartMs: slot.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
-			GridW: gridW, SoCPct: p.InitialSoCPct, CostOre: cost,
+			GridW: gridW, SoC: p.InitialSoC, CostOre: cost,
+		}
+		if len(p.Storages) > 0 {
+			plan.Actions[i].StoragePowerW = make(map[string]float64)
+			plan.Actions[i].StorageEnergyWh = make(map[string]float64)
+			for _, b := range p.Storages {
+				plan.Actions[i].StoragePowerW[b.ID] = 0
+				plan.Actions[i].StorageEnergyWh[b.ID] = b.InitialEnergyWh
+			}
 		}
 		plan.TotalCostOre += cost
 	}
@@ -463,15 +472,15 @@ func (o *physicsGateFailingOptimizer) Optimize(context.Context, []Slot, Params) 
 
 func (*physicsGateFailingOptimizer) Close() error { return nil }
 
-func configurePhysicsGateFleet(svc *Service, firstSoCPct, secondSoCPct float64) {
+func configurePhysicsGateFleet(svc *Service, firstSoC, secondSoC float64) {
 	svc.Tele = telemetry.NewStore()
 	svc.BatteryFleet = []BatteryFleetMember{
 		{Driver: "battery-a", CapacityWh: 5000, MaxChargeW: 1500, MaxDischargeW: 1500},
 		{Driver: "battery-b", CapacityWh: 5000, MaxChargeW: 1500, MaxDischargeW: 1500},
 	}
-	for i, socPct := range []float64{firstSoCPct, secondSoCPct} {
+	for i, socPct := range []float64{firstSoC, secondSoC} {
 		driver := svc.BatteryFleet[i].Driver
-		soc := socPct / 100
+		soc := socPct // 0–1
 		svc.Tele.Update(driver, telemetry.DerBattery, 0, &soc, nil)
 		svc.Tele.DriverHealthMut(driver).RecordSuccess()
 	}
@@ -485,7 +494,7 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 		{"unknown mode", func(s *Service) { s.Defaults.Mode = "fast" }},
 		{"nan capacity", func(s *Service) { s.Defaults.CapacityWh = math.NaN() }},
 		{"efficiency above one", func(s *Service) { s.Defaults.ChargeEfficiency = 1.01 }},
-		{"reversed soc bounds", func(s *Service) { s.Defaults.SoCMinPct = 96 }},
+		{"reversed soc bounds", func(s *Service) { s.Defaults.SoCMin = 0.96 }},
 		{"negative power", func(s *Service) { s.Defaults.MaxDischargeW = -1 }},
 		{"negative fuse limit", func(s *Service) { s.FuseMaxW = -1 }},
 		{"nan fuse limit", func(s *Service) { s.FuseMaxW = math.NaN() }},
@@ -499,12 +508,6 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 		{"negative pv uncertainty", func(s *Service) {
 			s.PVUncertaintyW = func() float64 { return -1 }
 		}},
-		{"negative load input", func(s *Service) {
-			s.Load = func(time.Time) float64 { return -1 }
-		}},
-		{"nan load input", func(s *Service) {
-			s.Load = func(time.Time) float64 { return math.NaN() }
-		}},
 		{"invalid plugged loadpoint", func(s *Service) {
 			s.Loadpoints = func(int) []*LoadpointSpec {
 				return []*LoadpointSpec{{ID: "garage", PluggedIn: true, CapacityWh: 0, Levels: 1}}
@@ -513,14 +516,14 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 		{"loadpoint initial outside operating bounds", func(s *Service) {
 			s.Loadpoints = func(int) []*LoadpointSpec {
 				lp := validPlanningLoadpoint()
-				lp.MinPct, lp.InitialSoCPct = 30, 20
+				lp.SoCMin, lp.InitialSoC = 0.3, 20
 				return []*LoadpointSpec{lp}
 			}
 		}},
 		{"loadpoint target outside operating bounds", func(s *Service) {
 			s.Loadpoints = func(int) []*LoadpointSpec {
 				lp := validPlanningLoadpoint()
-				lp.MaxPct, lp.TargetSoCPct = 70, 80
+				lp.SoCMax, lp.TargetSoC = 0.7, 80
 				return []*LoadpointSpec{lp}
 			}
 		}},
@@ -568,7 +571,7 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 			optimizer := &physicsGateCountingOptimizer{}
 			svc := New(st, nil, "SE3", Params{
 				Mode: ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
-				CapacityWh: 10000, SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+				CapacityWh: 10000, SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 				MaxChargeW: 3000, MaxDischargeW: 3000,
 				ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 			})
@@ -599,6 +602,46 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 			}
 			if d := svc.Diagnose(); d == nil || d.DecisionID != accepted.DecisionID {
 				t.Fatalf("diagnostic changed after rejected inputs: %+v", d)
+			}
+		})
+	}
+}
+
+func TestReplanSanitizesBadLoadInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		load float64
+	}{
+		{"negative", -1},
+		{"nan", math.NaN()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			now := time.Now().UTC().Truncate(time.Minute)
+			if err := st.SavePrices([]state.PricePoint{{
+				Zone: "SE3", SlotTsMs: now.Add(-5 * time.Minute).UnixMilli(), SlotLenMin: 60,
+				SpotOreKwh: 50, TotalOreKwh: 100, Source: "test", FetchedAtMs: now.UnixMilli(),
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			svc := New(st, nil, "SE3", Params{
+				Mode: ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
+				CapacityWh: 10000, SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
+				MaxChargeW: 3000, MaxDischargeW: 3000,
+				ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+			})
+			svc.LoadMaxW = 11000
+			svc.Load = func(time.Time) float64 { return tc.load }
+			plan := svc.Replan(context.Background())
+			if plan == nil || len(plan.Actions) == 0 {
+				t.Fatalf("sanitized load must still produce a plan, got %+v", plan)
+			}
+			if plan.Actions[0].LoadW != 0 {
+				t.Fatalf("bad load input must floor at 0 W, got %v", plan.Actions[0].LoadW)
 			}
 		})
 	}
@@ -652,8 +695,8 @@ func TestReplanRecoveryUsesExternalPlannerWithoutDPDerivedResults(t *testing.T) 
 		name  string
 		setup func(*Service)
 	}{
-		{"aggregate recovery", func(svc *Service) { svc.Defaults.InitialSoCPct = 5 }},
-		{"storage member recovery", func(svc *Service) { configurePhysicsGateFleet(svc, 5, 55) }},
+		{"aggregate recovery", func(svc *Service) { svc.Defaults.InitialSoC = 0.05 }},
+		{"storage member recovery", func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -700,12 +743,15 @@ func TestReplanRecoveryKeepsPreviousPlanWhenDPWouldBeRequired(t *testing.T) {
 		wantFailCalls int32
 		setupRecovery func(*Service)
 	}{
-		{name: "aggregate go only", setupRecovery: func(svc *Service) { svc.Defaults.InitialSoCPct = 5 }},
+		// Only the external-champion path still refuses: its operating-band
+		// recovery ratchet is what the DP cannot represent, so a failed primary
+		// must not silently become a DP plan solved from a snapped SoC. With
+		// Core as the configured planner the same state is clamped and planned
+		// — see TestCoreChampionClampsOutOfBandSoC.
 		{name: "aggregate failed primary", baseline: &physicsGateCountingOptimizer{}, recovery: &physicsGateFailingOptimizer{}, wantFailCalls: 1,
-			setupRecovery: func(svc *Service) { svc.Defaults.InitialSoCPct = 5 }},
-		{name: "storage member go only", setupRecovery: func(svc *Service) { configurePhysicsGateFleet(svc, 5, 55) }},
+			setupRecovery: func(svc *Service) { svc.Defaults.InitialSoC = 0.05 }},
 		{name: "storage member failed primary", baseline: &physicsGateCountingOptimizer{}, recovery: &physicsGateFailingOptimizer{}, wantFailCalls: 1,
-			setupRecovery: func(svc *Service) { configurePhysicsGateFleet(svc, 5, 55) }},
+			setupRecovery: func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -775,15 +821,22 @@ func TestReplanSnapshotsPVUncertaintyOnce(t *testing.T) {
 	svc.BaseLoad = 500
 	svc.PVForecastSafetyK = 1
 	svc.Optimizer = &physicsGateCountingOptimizer{}
-	var calls atomic.Int32
+	var calls, relCalls atomic.Int32
 	svc.PVUncertaintyW = func() float64 {
 		calls.Add(1)
 		return 300
+	}
+	svc.PVRelativeUncertainty = func() float64 {
+		relCalls.Add(1)
+		return 0.2
 	}
 	if plan := svc.Replan(context.Background()); plan == nil {
 		t.Fatal("Replan returned nil")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("PV uncertainty sampled %d times, want exactly 1", calls.Load())
+	}
+	if relCalls.Load() != 1 {
+		t.Fatalf("PV relative uncertainty sampled %d times, want exactly 1", relCalls.Load())
 	}
 }

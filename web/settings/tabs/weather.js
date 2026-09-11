@@ -43,14 +43,31 @@
     return pvArraysModulePromise;
   }
 
+  // Legacy yaml/json key `kwp` is kilowatt-peak, except values ≥ 1000
+  // which were nameplate watts pasted into that field.
+  function ratedWattsFromLegacyKwp(kwp) {
+    var v = Number(kwp);
+    if (!(v > 0)) return 0;
+    return v >= 1000 ? v : v * 1000;
+  }
+
+  function migrateArrayRatedW(a) {
+    if (!a) return;
+    if (!(Number(a.rated_w) > 0) && Number(a.kwp) > 0) {
+      a.rated_w = ratedWattsFromLegacyKwp(a.kwp);
+    }
+    delete a.kwp;
+  }
+
   function renderPVArrays(ctx) {
     var host = document.getElementById("pv-arrays-list");
     if (!host) return;
     var escHtml = ctx.escHtml;
     var config = ctx.config;
     var arrays = (config.weather && config.weather.pv_arrays) || [];
+    arrays.forEach(migrateArrayRatedW);
     if (arrays.length === 0) {
-      host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined — model will learn orientation from telemetry.</p>';
+      host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined. The model learns the production pattern from measured solar.</p>';
       return;
     }
     var previewHtml = '<div class="pv-arrays-3d-slot" ' +
@@ -61,8 +78,8 @@
           '<div style="flex:1.4"><label>Name</label>' +
             '<input type="text" data-pv-arr="' + i + '" data-field="name" value="' + escHtml(a.name || "") + '" placeholder="e.g. south roof">' +
           '</div>' +
-          '<div style="flex:1"><label>kWp</label>' +
-            '<input type="number" step="0.1" data-pv-arr="' + i + '" data-field="kwp" value="' + (a.kwp || 0) + '">' +
+          '<div style="flex:1"><label>Rated (W)</label>' +
+            '<input type="number" step="1" min="0" data-pv-arr="' + i + '" data-field="rated_w" value="' + (a.rated_w || 0) + '" placeholder="12960">' +
           '</div>' +
           '<div style="flex:1"><label>Tilt °</label>' +
             '<input type="number" step="1" min="0" max="90" data-pv-arr="' + i + '" data-field="tilt_deg" value="' + (a.tilt_deg || 0) + '">' +
@@ -103,6 +120,7 @@
       if (idx == null || idx === "") return;
       config.weather.pv_arrays.splice(parseInt(idx, 10), 1);
       renderPVArrays(ctx);
+      refreshArraysSummary(config);
     };
   }
 
@@ -120,9 +138,13 @@
     if (window._weatherMap) { try { window._weatherMap.remove(); } catch (e) {} window._weatherMap = null; }
     var map = L.map(container, { zoomControl: true }).setView([lat, lon], 11);
     window._weatherMap = map;
+    // OSM volunteer tiles 403 when the page sends no Referer. The box
+    // sends Referrer-Policy: no-referrer on every response, so Leaflet
+    // must opt these images back in. Origin only; the path stays private.
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: "© OpenStreetMap",
+      referrerPolicy: "strict-origin-when-cross-origin",
     }).addTo(map);
     var marker = L.marker([lat, lon], { draggable: true }).addTo(map);
     function setCoord(la, lo) {
@@ -151,6 +173,21 @@
     setTimeout(function () { map.invalidateSize(); }, 150);
   }
 
+  function arraysSummary(n) {
+    var count = Number(n) || 0;
+    if (count > 0) {
+      return count === 1 ? "1 array set in config" : count + " arrays set in config";
+    }
+    return "The solar production pattern is learned from measured solar.";
+  }
+
+  function refreshArraysSummary(config) {
+    var el = document.getElementById("pv-arrays-summary");
+    if (!el) return;
+    var n = ((config.weather && config.weather.pv_arrays) || []).length;
+    el.textContent = arraysSummary(n);
+  }
+
   function initWeatherMap(ctx) {
     var container = document.getElementById("weather-map");
     if (!container) return;
@@ -163,9 +200,10 @@
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
       if (!config.weather) config.weather = { latitude: 59.3293, longitude: 18.0686 };
       if (!Array.isArray(config.weather.pv_arrays)) config.weather.pv_arrays = [];
+      var n = config.weather.pv_arrays.length;
       return '<fieldset><legend>Weather forecast &amp; PV</legend>' +
         selectField("Provider", "weather.provider", ["met_no", "openweather", "open_meteo", "forecast_solar", "none"], "met_no",
-          "met_no + openweather: cloud-cover only. open_meteo: direct shortwave radiation (better day-one forecast). forecast_solar: site-calibrated watts using the panel geometry below (best with multi-array setups).") +
+          "met_no + openweather: cloud-cover only. open_meteo: direct shortwave radiation (better day-one forecast). forecast_solar: site-calibrated watts. The production pattern is learned from measured solar.") +
         '<div class="field-row"><div>' +
         field("Latitude", "weather.latitude", "number", 59.3293) +
         '</div><div>' +
@@ -176,24 +214,33 @@
         field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +
         '</fieldset>' +
+        '<p id="pv-arrays-summary" style="color:var(--text-dim);font-size:0.8rem;margin:8px 0">' +
+        arraysSummary(n) + '</p>' +
+        '<details class="engine-details" id="pv-arrays-advanced">' +
+        '<summary>Advanced array geometry — leave this unless you are debugging.</summary>' +
         '<fieldset><legend>PV arrays ' + help(
           'Optional. Open-Meteo uses these per-plane values to project shortwave radiation onto each array. ' +
-          'Forecast.Solar uses them for its site-calibrated forecast. Leave empty for the safe flat estimate or the provider default.') + '</legend>' +
+          'Forecast.Solar uses them for its site-calibrated forecast. Leave empty unless you are debugging a multi-plane site.') + '</legend>' +
         '<div id="pv-arrays-list"></div>' +
         '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
-        'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W.' +
+        'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W. ' +
+        'Rated (W) is watts, same unit as PV rated.' +
         '</p>' +
-        '</fieldset>';
+        '</fieldset></details>';
     },
     after: function (ctx) {
       initWeatherMap(ctx);
       renderPVArrays(ctx);
+      refreshArraysSummary(ctx.config);
       var addBtn = document.getElementById("pv-array-add");
       if (addBtn) addBtn.addEventListener("click", function () {
-        ctx.config.weather.pv_arrays.push({ name: "", kwp: 0, tilt_deg: 35, azimuth_deg: 180 });
+        ctx.config.weather.pv_arrays.push({ name: "", rated_w: 0, tilt_deg: 35, azimuth_deg: 180 });
         renderPVArrays(ctx);
+        refreshArraysSummary(ctx.config);
       });
     },
   };
+
+  S.tabs.weather._pure = { arraysSummary: arraysSummary };
 })();

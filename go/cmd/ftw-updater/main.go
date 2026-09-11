@@ -35,14 +35,14 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/srcfl/ftw/go/internal/updateipc"
 )
 
 const (
 	canonicalMainServiceName = "ftw"
 	legacyMainServiceName    = "forty-two-watts"
 	canonicalMainImage       = "ghcr.io/srcfl/ftw"
-	optimizerServiceName     = "ftw-optimizer"
-	canonicalOptimizerImage  = "ghcr.io/srcfl/ftw-optimizer"
 )
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
@@ -113,13 +113,9 @@ type server struct {
 	// pins to the requested version. nil/empty means "inherit only".
 	runner func(ctx context.Context, env []string, args ...string) error
 	// imageID captures the image backing the running service before an update.
-	// imageRef captures the exact image reference used to create it so an
-	// automatic rollback can restore a beta's runtime identity as well as its
-	// bytes.
-	// healthCheck waits for the recreated service to become healthy. Both are
-	// injectable so the rollback path is testable without Docker.
+	// healthCheck waits for the recreated service to become ready.
+	// These hooks let tests exercise recovery without Docker.
 	imageID     func(ctx context.Context, service string) (string, error)
-	imageRef    func(ctx context.Context, service string) (string, error)
 	containerID func(ctx context.Context, service string) (string, error)
 	healthCheck func(ctx context.Context, service string) error
 	// selfReplace brings the updater sidecar to the release Core just moved to.
@@ -236,6 +232,7 @@ func main() {
 	compose := flag.String("compose", envOr("FTW_UPDATER_COMPOSE", "/compose/docker-compose.yml"), "Path to docker-compose.yml")
 	mainService := flag.String("main-service", envOr("FTW_UPDATER_MAIN_SERVICE", ""), "Compose service for FTW (auto-detected when empty)")
 	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
+	retirePython := flag.Bool("retire-python", false, "Remove the retired optimizer from Compose after Energyplan is healthy")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -278,7 +275,22 @@ func main() {
 	}
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
-	srv.imageRef = srv.currentServiceImageRef
+	if *retirePython {
+		// This is an interactive command. Preserve the helper's complete output,
+		// including the final error or backup path after its startup messages.
+		srv.runner = dockerStreaming
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		retire := srv.retirePythonViaHelper
+		if os.Getenv("FTW_RETIRE_PYTHON_HELPER") == "1" {
+			retire = srv.retirePythonOptimizer
+		}
+		if err := retire(ctx); err != nil {
+			slog.Error("retire Python", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth
 	srv.selfReplace = func(target string) error {
@@ -302,6 +314,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /update", srv.handleUpdate)
 	mux.HandleFunc("GET /status", srv.handleStatus)
+	mux.HandleFunc("GET "+updateipc.CapabilitiesPath, updateipc.ServeCapabilities)
 
 	// Remove a stale socket — common pattern; the listener would EADDRINUSE otherwise.
 	_ = os.Remove(*socket)
@@ -346,15 +359,16 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json: "+err.Error(), 400)
 		return
 	}
+	// A distinct action lets new Core fail closed on an old updater: old
+	// sidecars reject it before running Docker instead of pulling :latest.
+	if body.Action == "restart_existing" {
+		body.Action = "restart"
+	}
 	if body.Component == "" {
 		body.Component = "core"
 	}
-	if body.Component != "core" && body.Component != "optimizer" {
-		http.Error(w, "component must be core or optimizer", 400)
-		return
-	}
-	if body.Component == "optimizer" && body.Action != "update" && body.Action != "restart" && body.Action != "component_rollback" {
-		http.Error(w, "optimizer component supports update, restart, or component_rollback", 400)
+	if body.Component != "core" {
+		http.Error(w, "component must be core", 400)
 		return
 	}
 	switch body.Action {
@@ -372,9 +386,13 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "restart":
-		// target optional — when empty, compose's `${FTW_IMAGE_TAG:-latest}`
-		// substitution falls through to :latest. That's the dev path for
-		// exercising the flow without a real release.
+		// Older Core may send a release target. Validate the old wire shape,
+		// but never use that hint to select an image during a restart.
+		if body.Target != "" && !isImmutableImageTag(body.Target) {
+			http.Error(w, "target must be stable vX.Y.Z or beta vX.Y.Z-beta.N", 400)
+			return
+		}
+		body.Target = ""
 	case "rollback":
 		if body.Snapshot == "" {
 			http.Error(w, "rollback requires snapshot id", 400)
@@ -404,17 +422,8 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rollback and safety snapshots must include state.db.gz", 400)
 			return
 		}
-	case "component_rollback":
-		if body.Component != "optimizer" {
-			http.Error(w, "component_rollback is only available for optimizer", 400)
-			return
-		}
-		if s.previousImageID(body.Component) == "" {
-			http.Error(w, "no previous optimizer image is available", 409)
-			return
-		}
 	default:
-		http.Error(w, "action must be update, restart, rollback, or component_rollback", 400)
+		http.Error(w, "action must be update, restart, or rollback", 400)
 		return
 	}
 	if !s.runMu.TryLock() {
@@ -428,8 +437,6 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		defer s.runMu.Unlock()
 		if body.Action == "rollback" {
 			s.runRollback(body.Snapshot, body.Files, body.SafetySnapshot, body.SafetyFiles)
-		} else if body.Action == "component_rollback" {
-			s.runComponentRollback(body.Component, body.StartedAt)
 		} else {
 			s.runComponentJob(body.Action, body.Target, body.Component, body.StartedAt)
 		}
@@ -451,17 +458,38 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(st)
 }
 
-// runJob executes a pull+up (or pull+up --force-recreate) sequence,
-// emitting state transitions between steps. Runs inside a goroutine so
-// the HTTP handler that kicked it off has already responded.
-//
-// When target is non-empty (always the case for action=update), it's
-// passed as FTW_IMAGE_TAG=<target> so docker-compose.yml's image tag
-// substitution pulls the specific version. action=restart with empty
-// target falls through to compose's default (`:latest`) — that's the
-// dev path for exercising the flow without a real release.
+// runJob dispatches a component update or a restart of its existing container.
 func (s *server) runJob(action, target string) {
 	s.runComponentJob(action, target, "core", time.Time{})
+}
+
+// restartExisting never pulls or recreates a container. Its image ID, mounts
+// and environment survive even when Compose or .env now names another build.
+func (s *server) restartExisting(spec componentSpec, startedAt time.Time) {
+	st := State{State: "restarting", Action: "restart", Component: spec.name,
+		StartedAt: startedAt, PhaseStartedAt: time.Now(), UpdatedAt: time.Now(),
+		Message: "Restarting the existing container", Step: 1, TotalSteps: 3}
+	s.writeState(st)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	err := s.runWithStateHeartbeat(st, func() error {
+		return s.runner(ctx, nil, s.composeArgs("restart", "--no-deps", spec.service)...)
+	})
+	cancel()
+	if err == nil && s.healthCheck != nil {
+		st.State, st.Message, st.Step = "checking", "Waiting for the service to become ready", 2
+		st.PhaseStartedAt, st.UpdatedAt = time.Now(), time.Now()
+		s.writeState(st)
+		ctx, cancel = context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
+		err = s.runWithStateHeartbeat(st, func() error { return s.healthCheck(ctx, spec.service) })
+		cancel()
+	}
+	st.UpdatedAt = time.Now()
+	if err != nil {
+		st.State, st.Message = "failed", "restart failed: "+err.Error()
+	} else {
+		st.State, st.Message, st.Step = "done", "Service restarted and ready", 3
+	}
+	s.writeState(st)
 }
 
 func (s *server) runComponentJob(action, target, component string, startedAt time.Time) {
@@ -474,13 +502,9 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now, Message: err.Error()})
 		return
 	}
-	if action == "update" && spec.name == "core" {
-		if err := s.requireHealthyOptimizer(); err != nil {
-			msg := "core update blocked: " + err.Error()
-			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
-			slog.Error("core update blocked", "err", err)
-			return
-		}
+	if action == "restart" {
+		s.restartExisting(spec, now)
+		return
 	}
 	totalSteps := 3
 	pullStep := 1
@@ -503,7 +527,7 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	if target != "" {
 		env = []string{spec.tagEnv + "=" + target}
 	}
-	if action == "update" || action == "restart" {
+	if action == "update" {
 		cleanup, err := s.prepareComponentImagePin(spec)
 		if err != nil {
 			msg := "compose preflight failed: " + err.Error()
@@ -520,26 +544,21 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		}
 	}
 
-	// Capture the current immutable image ID before pulling. Docker retains the
-	// old image object after the tag moves, which lets us retag and recreate it
-	// if the new container never becomes healthy.
-	var previousImageID, previousImageTag string
+	// Keep the previous image in durable job history before replacing Core.
+	// Starting it again also requires its matching full backup: the new Core
+	// may have changed the data before its API becomes ready.
+	var previousImageID string
 	if action == "update" && s.imageID != nil {
 		inspectCtx, cancelInspect := context.WithTimeout(context.Background(), 30*time.Second)
 		var err error
 		previousImageID, err = s.imageID(inspectCtx, spec.service)
-		if err == nil && s.imageRef != nil {
-			if previousRef, refErr := s.imageRef(inspectCtx, spec.service); refErr == nil {
-				previousImageTag, _ = imageTagFromReference(previousRef)
-			} else {
-				slog.Warn("cannot capture current image tag; rollback will use a synthetic tag", "service", spec.service, "err", refErr)
-			}
-		}
 		cancelInspect()
 		if err != nil {
 			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot capture current image for rollback: " + err.Error()})
 			return
 		}
+		pullState.PreviousImageID = previousImageID
+		s.writeState(pullState)
 	}
 
 	if !s.skipPull {
@@ -590,12 +609,6 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	defer upCancel()
 
 	upArgs := s.composeArgs("up", "-d", spec.service)
-	if action == "restart" {
-		// --force-recreate is what makes restart actually restart when the
-		// image digest didn't change — exactly the dev/test path the main
-		// UI exposes as the "Restart" button.
-		upArgs = s.composeArgs("up", "-d", "--force-recreate", spec.service)
-	}
 	if err := s.runWithStateHeartbeat(restartState, func() error {
 		return s.runner(upCtx, env, upArgs...)
 	}); err != nil {
@@ -613,15 +626,10 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		})
 		cancelHealth()
 		if healthErr != nil {
-			if action == "update" && previousImageID != "" {
-				if rollbackErr := s.restorePreviousComponentImageWithTag(previousImageID, previousImageTag, spec); rollbackErr == nil {
-					s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "new image failed health check; previous image restored: " + healthErr.Error()})
-					return
-				} else {
-					healthErr = fmt.Errorf("%v; automatic image rollback failed: %w", healthErr, rollbackErr)
-				}
-			}
-			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "health check failed: " + healthErr.Error()})
+			checkState.State = "failed"
+			checkState.UpdatedAt = time.Now()
+			checkState.Message = "Core readiness failed: " + healthErr.Error() + ". Core and data were left in place; migration may still be running. Check Core status before retrying. To return to an older release, stop Core and restore a verified full backup with its matching image."
+			s.writeState(checkState)
 			return
 		}
 	}
@@ -645,62 +653,6 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	}
 }
 
-// requireHealthyOptimizer keeps a Core image without embedded Python from
-// replacing a legacy image before its optimizer sidecar works. It only reads
-// the merged Compose files and running container state. In particular, it
-// never rewrites an operator-owned override file.
-func (s *server) requireHealthyOptimizer() error {
-	spec, err := s.componentSpec("optimizer")
-	if err != nil {
-		return fmt.Errorf("a healthy %s service is required; add the optimizer sidecar with scripts/migrate-legacy-compose.sh or follow docs/upgrade-from-legacy.md: %w", optimizerServiceName, err)
-	}
-	if s.healthCheck == nil {
-		return fmt.Errorf("cannot verify that %s is healthy", optimizerServiceName)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
-	defer cancel()
-	if err := s.healthCheck(ctx, spec.service); err != nil {
-		return fmt.Errorf("%s must be running and healthy before Core can update: %w", optimizerServiceName, err)
-	}
-	return nil
-}
-
-func (s *server) runComponentRollback(component string, startedAt time.Time) {
-	now := startedAt
-	if now.IsZero() {
-		now = time.Now()
-	}
-	previous := s.previousImageID(component)
-	spec, err := s.componentSpec(component)
-	if err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
-		return
-	}
-	cleanup, err := s.prepareComponentImagePin(spec)
-	if err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error(), PreviousImageID: previous})
-		return
-	}
-	defer cleanup()
-	if err := s.validateComponentImagePin(spec); err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error(), PreviousImageID: previous})
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	current, currentErr := s.imageID(ctx, spec.service)
-	cancel()
-	if currentErr != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: currentErr.Error(), PreviousImageID: previous})
-		return
-	}
-	s.writeState(State{State: "restoring", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "restoring previous component image", PreviousImageID: previous})
-	if err := s.restorePreviousComponentImage(previous, spec); err != nil {
-		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
-		return
-	}
-	s.writeState(State{State: "done", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "previous component image restored", PreviousImageID: current})
-}
-
 type componentSpec struct {
 	name, service, image, tagEnv, tagVariable string
 }
@@ -709,66 +661,9 @@ func (s *server) componentSpec(component string) (componentSpec, error) {
 	switch component {
 	case "", "core":
 		return componentSpec{name: "core", service: s.mainServiceName, image: canonicalMainImage, tagEnv: "FTW_IMAGE_TAG", tagVariable: "FTW_IMAGE_TAG"}, nil
-	case "optimizer":
-		if _, ok, err := serviceImageFromComposeFiles(s.composeFiles(), optimizerServiceName); err != nil {
-			return componentSpec{}, err
-		} else if !ok {
-			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", optimizerServiceName)
-		}
-		return componentSpec{name: "optimizer", service: optimizerServiceName, image: canonicalOptimizerImage, tagEnv: "FTW_OPTIMIZER_IMAGE_TAG", tagVariable: "FTW_OPTIMIZER_IMAGE_TAG"}, nil
 	default:
 		return componentSpec{}, fmt.Errorf("unsupported component %q", component)
 	}
-}
-
-func (s *server) restorePreviousImage(imageID string) error {
-	spec, err := s.componentSpec("core")
-	if err != nil {
-		return err
-	}
-	return s.restorePreviousComponentImage(imageID, spec)
-}
-
-func (s *server) restorePreviousComponentImage(imageID string, spec componentSpec) error {
-	return s.restorePreviousComponentImageWithTag(imageID, "", spec)
-}
-
-func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag string, spec componentSpec) error {
-	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("service %q has no image", spec.service)
-	}
-	repository, ok := composeImageRepositoryForTag(image, spec.tagVariable)
-	if !ok {
-		return fmt.Errorf("service %q image %q does not reference %s", spec.service, image, spec.tagVariable)
-	}
-	rollbackTag := previousTag
-	if rollbackTag == "" {
-		rollbackTag = fmt.Sprintf("ftw-rollback-%d", time.Now().Unix())
-	}
-	rollbackRef := repository + ":" + rollbackTag
-	timeout := 10 * time.Minute
-	if spec.name == "core" {
-		timeout = 35 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
-		return fmt.Errorf("tag previous image: %w", err)
-	}
-	env := []string{spec.tagEnv + "=" + rollbackTag}
-	if err := s.runner(ctx, env, s.composeArgs("up", "-d", spec.service)...); err != nil {
-		return fmt.Errorf("recreate previous image: %w", err)
-	}
-	if s.healthCheck != nil {
-		if err := s.healthCheck(ctx, spec.service); err != nil {
-			return fmt.Errorf("previous image health check: %w", err)
-		}
-	}
-	return nil
 }
 
 // prepareUpdateImagePin makes old Compose layouts safe for immutable updates.
@@ -1090,34 +985,58 @@ func hasRollbackState(files []string) bool {
 	return false
 }
 
+type stagedRollbackFile struct {
+	name string
+	path string
+}
+
 // restoreSnapshotFiles copies only allowlisted backup files into the stopped
 // container. docker cp defaults container-side ownership to root, which made
 // the uid-100 FTW process unable to write a restored database. Archive mode
 // preserves uid/gid; compressed databases are materialised with uid 100:101
 // first so the same rule applies.
+//
+// Core opens ConfigDatabase, then State.Path, then state.db. The gzip snapshot
+// is always named state.db.gz; restore writes that file to the configured
+// name and deletes that name's WAL/SHM so leftover sidecars cannot replay
+// over the restored main file.
 func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, files []string, containerID, imageRef string) error {
+	staged := make([]stagedRollbackFile, 0, len(files))
+	defer func() {
+		for _, file := range staged {
+			_ = os.Remove(file.path)
+		}
+	}()
 	for _, file := range files {
 		if !validRollbackFile(file) {
 			return fmt.Errorf("unsupported rollback file %q", file)
 		}
-		staged, err := os.CreateTemp("", "ftw-rollback-source-*")
+		tmp, err := os.CreateTemp("", "ftw-rollback-source-*")
 		if err != nil {
 			return fmt.Errorf("create snapshot staging file: %w", err)
 		}
-		stagedPath := staged.Name()
-		_ = staged.Close()
+		stagedPath := tmp.Name()
+		_ = tmp.Close()
 		_ = os.Remove(stagedPath)
-		defer os.Remove(stagedPath)
 		if s.stageSnapshotFile == nil {
 			return errors.New("snapshot staging unavailable")
 		}
 		if err := s.stageSnapshotFile(ctx, containerID, snapshotID, file, stagedPath); err != nil {
 			return fmt.Errorf("stage %s: %w", file, err)
 		}
-		copySrc := stagedPath
-		dstName := file
-		if file == "state.db.gz" {
-			dstName = "state.db"
+		staged = append(staged, stagedRollbackFile{name: file, path: stagedPath})
+	}
+
+	dbName, err := s.rollbackDatabaseName(ctx, containerID, staged)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range staged {
+		copySrc := file.path
+		dstName := file.name
+		if file.name == "state.db.gz" {
+			dstName = dbName
 			tmp, err := os.CreateTemp("", "ftw-rollback-state-*.db")
 			if err != nil {
 				return fmt.Errorf("create rollback temp: %w", err)
@@ -1126,7 +1045,7 @@ func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, fi
 			_ = tmp.Close()
 			_ = os.Remove(tmpPath)
 			defer os.Remove(tmpPath)
-			if err := decompressGzipFile(stagedPath, tmpPath); err != nil {
+			if err := decompressGzipFile(file.path, tmpPath); err != nil {
 				return fmt.Errorf("decompress state.db.gz: %w", err)
 			}
 			if s.chownFile == nil {
@@ -1141,16 +1060,98 @@ func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, fi
 			copySrc = tmpPath
 		}
 		if err := s.runner(ctx, nil, "cp", "-a", copySrc, containerID+":/app/data/"+dstName); err != nil {
-			return fmt.Errorf("docker cp %s: %w", file, err)
+			return fmt.Errorf("docker cp %s: %w", file.name, err)
 		}
 	}
-	// A clean stop normally removes SQLite's WAL sidecars. Remove any stale
-	// remnants explicitly so pages from the pre-rollback database cannot be
-	// replayed over the restored main file.
-	if err := s.runner(ctx, nil, "run", "--rm", "--network", "none", "--user", "0:0", "--volumes-from", containerID, "--entrypoint", "rm", imageRef, "-f", "/app/data/state.db-wal", "/app/data/state.db-shm"); err != nil {
+	wal := "/app/data/" + dbName + "-wal"
+	shm := "/app/data/" + dbName + "-shm"
+	if err := s.runner(ctx, nil, "run", "--rm", "--network", "none", "--user", "0:0", "--volumes-from", containerID, "--entrypoint", "rm", imageRef, "-f", wal, shm); err != nil {
 		return fmt.Errorf("remove stale SQLite WAL files: %w", err)
 	}
 	return nil
+}
+
+func (s *server) rollbackDatabaseName(ctx context.Context, containerID string, staged []stagedRollbackFile) (string, error) {
+	for _, file := range staged {
+		if file.name != "config.yaml" {
+			continue
+		}
+		name, err := databaseNameFromConfigFile(file.path)
+		if err != nil {
+			return "", fmt.Errorf("configured database path: %w", err)
+		}
+		return name, nil
+	}
+	return s.liveDatabaseName(ctx, containerID)
+}
+
+func (s *server) liveDatabaseName(ctx context.Context, containerID string) (string, error) {
+	tmp, err := os.CreateTemp("", "ftw-rollback-live-config-*")
+	if err != nil {
+		return "", fmt.Errorf("create live config staging file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+	if err := s.runner(ctx, nil, "cp", "-a", containerID+":/app/data/config.yaml", tmpPath); err != nil {
+		return "state.db", nil
+	}
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || len(bytes.TrimSpace(data)) == 0 {
+		return "state.db", nil
+	}
+	name, err := configuredDatabaseName(data)
+	if err != nil {
+		return "", fmt.Errorf("live config.yaml: %w", err)
+	}
+	return name, nil
+}
+
+func databaseNameFromConfigFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return configuredDatabaseName(data)
+}
+
+// configuredDatabaseName matches Core: ConfigDatabase overrides State.Path,
+// and both default to state.db. Only a single file under /app/data is
+// restorable through the data volume.
+func configuredDatabaseName(data []byte) (string, error) {
+	var doc struct {
+		ConfigDatabase string `yaml:"config_database"`
+		State          *struct {
+			Path string `yaml:"path"`
+		} `yaml:"state"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", fmt.Errorf("parse config.yaml: %w", err)
+	}
+	path := "state.db"
+	if doc.State != nil && strings.TrimSpace(doc.State.Path) != "" {
+		path = strings.TrimSpace(doc.State.Path)
+	}
+	if strings.TrimSpace(doc.ConfigDatabase) != "" {
+		path = strings.TrimSpace(doc.ConfigDatabase)
+	}
+	return dataVolumeDatabaseName(path)
+}
+
+func dataVolumeDatabaseName(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "state.db", nil
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(cleaned, "/app/data/") {
+		cleaned = strings.TrimPrefix(cleaned, "/app/data/")
+	}
+	if cleaned == "" || cleaned == "." || cleaned == ".." || strings.Contains(cleaned, "/") || strings.Contains(cleaned, "\\") || cleaned != filepath.Base(cleaned) {
+		return "", fmt.Errorf("database path %q must be a file in /app/data", path)
+	}
+	return cleaned, nil
 }
 
 func decompressGzipFile(src, dst string) error {
@@ -1163,7 +1164,12 @@ func decompressGzipFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer zr.Close()
+	closeReader := true
+	defer func() {
+		if closeReader {
+			_ = zr.Close()
+		}
+	}()
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -1176,6 +1182,10 @@ func decompressGzipFile(src, dst string) error {
 		}
 	}()
 	if _, err := io.Copy(out, zr); err != nil {
+		return err
+	}
+	closeReader = false
+	if err := zr.Close(); err != nil {
 		return err
 	}
 	if err := out.Sync(); err != nil {
@@ -1355,6 +1365,8 @@ func (s *server) recoverCrashedState() {
 			return
 		}
 		st.Message = fmt.Sprintf("updater restarted during rollback; safety recovery unavailable: container=%v image=%v", containerErr, imageErr)
+	} else if st.Action == "update" {
+		st.Message = "Updater stopped before it confirmed Core readiness. Core and data were left in place; check Core status before retrying. Keep the pre-update full backup and matching image for recovery."
 	} else if st.Message == "" {
 		st.Message = "updater process restarted while in-flight"
 	}
@@ -1487,39 +1499,6 @@ func (s *server) currentServiceImageID(ctx context.Context, service string) (str
 	return imageID, nil
 }
 
-func (s *server) currentServiceImageRef(ctx context.Context, service string) (string, error) {
-	containerID, err := s.serviceContainerID(ctx, service)
-	if err != nil {
-		return "", err
-	}
-	out, err := dockerOutput(ctx, "inspect", "--format", "{{.Config.Image}}", containerID)
-	if err != nil {
-		return "", err
-	}
-	imageRef := strings.TrimSpace(out)
-	if imageRef == "" {
-		return "", errors.New("running container has no image reference")
-	}
-	return imageRef, nil
-}
-
-func imageTagFromReference(imageRef string) (string, bool) {
-	imageRef = strings.TrimSpace(imageRef)
-	if imageRef == "" || strings.Contains(imageRef, "@") {
-		return "", false
-	}
-	lastSlash := strings.LastIndexByte(imageRef, '/')
-	lastColon := strings.LastIndexByte(imageRef, ':')
-	if lastColon <= lastSlash || lastColon == len(imageRef)-1 {
-		return "", false
-	}
-	tag := imageRef[lastColon+1:]
-	if !isImmutableImageTag(tag) {
-		return "", false
-	}
-	return tag, true
-}
-
 func (s *server) waitForServiceHealth(ctx context.Context, service string) error {
 	containerID, err := s.serviceContainerID(ctx, service)
 	if err != nil {
@@ -1563,7 +1542,9 @@ func (s *server) waitForServiceHealth(ctx context.Context, service string) error
 
 func componentHealthTimeout(component string) time.Duration {
 	if component == "core" {
-		return 30 * time.Minute
+		// First-start imports on microSD can take hours. The finite deadline
+		// reports failure without stopping Core or reverting its image.
+		return 6 * time.Hour
 	}
 	return 3 * time.Minute
 }
@@ -1583,8 +1564,20 @@ func dockerCompose(ctx context.Context, extraEnv []string, args ...string) error
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, truncate(string(out), 400))
 	}
-	slog.Info("docker compose ok", "args", args, "env", extraEnv, "out", truncate(string(out), 200))
+	slog.Info("docker compose ok", "args", loggedDockerArgs(args), "env", extraEnv, "out", truncate(string(out), 200))
 	return nil
+}
+
+// Shell payloads can contain the base64-encoded .env. Keep command shape in
+// logs without publishing credentials in support bundles.
+func loggedDockerArgs(args []string) []string {
+	redacted := append([]string(nil), args...)
+	for i, arg := range redacted {
+		if arg == "-c" && i+1 < len(redacted) {
+			redacted[i+1] = "[shell payload hidden]"
+		}
+	}
+	return redacted
 }
 
 func dockerOutput(ctx context.Context, args ...string) (string, error) {

@@ -43,6 +43,10 @@ describe("setup wizard EV charger — provider options (Job 1)", () => {
       "a provider table must drive the #ev-provider options");
     assert.match(JS, /value:\s*['"]easee['"]/,
       "Easee (the cloud HTTP provider) must be selectable");
+    assert.match(JS, /value:\s*['"]zaptec['"]/,
+      "Zaptec (the cloud HTTP provider) must be selectable");
+    assert.match(JS, /value:\s*['"]tesla-wc['"]/,
+      "Tesla Wall Connector (local HTTP) must be selectable");
     assert.match(JS, /value:\s*['"]ctek['"]/,
       "CTEK (the local Modbus provider) must be selectable");
     assert.match(JS, /populateEVProviders/,
@@ -54,6 +58,10 @@ describe("setup wizard EV charger — provider options (Job 1)", () => {
       "the HTTP credentials block must be revealed for cloud providers");
     assert.match(JS, /ev-fields-modbus/,
       "the Modbus block must be revealed for local providers");
+    assert.match(JS, /ev-fields-http-local/,
+      "the LAN HTTP block must be revealed for Tesla Wall Connector");
+    assert.match(HTML, /id=["']ev-http-host["']/,
+      "the Tesla Wall Connector host field must exist in the wizard");
   });
 });
 
@@ -68,6 +76,13 @@ describe("setup wizard EV charger — buildConfig shapes the block per provider"
   it("emits username/password/serial for HTTP providers", () => {
     assert.match(JS, /ev\.username\s*=/, "easee carries a username");
     assert.match(JS, /ev\.serial\s*=/, "easee carries the looked-up charger serial");
+  });
+
+  it("emits http.base_url for local HTTP providers", () => {
+    assert.match(JS, /http-local/,
+      "Tesla Wall Connector uses the http-local transport");
+    assert.match(JS, /ev\.http\s*=\s*\{\s*base_url:/,
+      "tesla-wc must serialise as ev_charger.http.base_url");
   });
 
   it("does not regress to hard-coded 'Easee' in the review summary", () => {
@@ -126,6 +141,11 @@ describe("setup wizard — read-only battery gateways", () => {
       "operators should see why Zap has no battery-capacity control field");
   });
 
+  it("treats an EV-only local HTTP driver as a host field, not a cloud account", () => {
+    assert.match(DEVICES_JS, /entryCaps\.indexOf\("ev"\) >= 0 && hosts\.length === 0/,
+      "Tesla Wall Connector has ev + no catalog http_hosts and must get config.host");
+  });
+
   it("lets a gateway battery source be disabled when a native driver owns the same battery", () => {
     assert.match(DEVICES_JS, /class="drv-disable-battery"/);
     assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.disable_battery/);
@@ -133,11 +153,19 @@ describe("setup wizard — read-only battery gateways", () => {
     assert.match(DEVICES_JS, /prevents Combined from counting its power twice/);
   });
 
-  it("tells the operator that Zap is the P1/HAN meter only", () => {
-    assert.match(JS, /P1\/HAN site meter/,
-      "setup must say Zap is the meter, not a proxy for other devices");
+  it("tells the operator that Zap is the P1/HAN meter by default", () => {
+    assert.match(JS, /P1\/HAN site meter by default/,
+      "setup must say Zap is the meter unless the operator opts in");
     assert.match(DEVICES_JS, /class="zap-p1-note"/);
-    assert.match(DEVICES_JS, /Do not use Zap as a proxy/);
+    assert.match(DEVICES_JS, /Zap never writes/);
+  });
+
+  it("offers opt-in Zap PV and battery reads in Devices", () => {
+    assert.match(DEVICES_JS, /class="drv-read-pv"/);
+    assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.read_pv/);
+    assert.match(DEVICES_JS, /class="drv-read-battery"/);
+    assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.read_battery/);
+    assert.match(DEVICES_JS, /Read PV from devices on this Zap/);
   });
 });
 

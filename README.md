@@ -4,10 +4,11 @@
 
 > Local-first home energy coordination.
 
-FTW coordinates solar, batteries, grid power, EV charging and thermal assets
-on a Raspberry Pi or Linux host. The safety-critical runtime is one Go binary,
-hardware integrations are sandboxed Lua drivers, and an optional Python/CVXPY
-optimizer handles long-horizon planning.
+FTW is a local-first home energy management system (EMS). It coordinates
+solar, batteries, grid power, EV charging and thermal assets on a Raspberry Pi
+or Linux host. The safety-critical runtime is one Go binary,
+hardware integrations are sandboxed Lua drivers, and a compiled Energyplan
+worker handles long-horizon planning.
 
 The control path stays on the local network. Cloud price, weather and device
 integrations degrade independently; they are not required for safe local
@@ -36,10 +37,10 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - multi-battery allocation with fuse, SoC, slew and stale-data protection;
 - price-, weather-, PV- and load-aware planning;
 - EV charging, V2X and thermal planning;
-- local web UI, SQLite history and Parquet rolloff;
+- local web UI, DuckDB history and SQLite configuration;
 - Home Assistant MQTT discovery;
-- CalDAV planning intents and published schedules;
-- hot-reloadable, independently released Lua drivers.
+- hot-reloadable, independently released Lua drivers;
+- a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
 
 The local catalog is generated from `DRIVER` metadata. The public
 [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
@@ -82,8 +83,13 @@ curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh
 ```
 
 It installs Docker when needed, creates `~/ftw`, downloads the Compose file
-and starts core, optimizer, updater and the local MQTT broker. Open
+and starts core, updater and the local MQTT broker. Open
 `http://<host>:8080/setup` on the LAN.
+
+Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
+that dial in to FTW — OCPP chargers store their backend URL at commissioning,
+and some hardware whitelists which addresses may talk to it — silently lose
+the connection if DHCP later hands the host a different address.
 
 Existing Forty Two Watts or older FTW deployments must use the
 [legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
@@ -121,8 +127,8 @@ faults to [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers/issue
 
 ## Local development
 
-Requirements are Go, Python 3 and Node.js. The optimizer environment is cached
-after its first install.
+Requirements are Go and Node.js. Python 3 verifies release artifacts during
+development; no Python interpreter or service runs the planner.
 
 ```bash
 git clone https://github.com/srcfl/ftw.git
@@ -133,7 +139,7 @@ make dev
 Useful checks:
 
 ```bash
-make test      # Go + Python, parallel where independent
+make test      # Go tests
 npm test       # web
 make verify    # fast test, compose, vet and build checks
 make e2e       # simulator-backed full stack
@@ -177,16 +183,32 @@ driver, which can update or roll back without a new FTW core release. Device
 Support may consume the same public source later for other products or a higher
 support level.
 
+EV chargers that speak OCPP are the exception: they need no driver. FTW runs an
+OCPP Central System (1.6J and 2.0.1), so the charger connects and registers itself.
+See [docs/ocpp.md](docs/ocpp.md).
+
 ## Releases
 
 There are two channels:
 
-- **beta** receives new release candidates for real-site validation;
+- **beta** receives every merged change, usually within days;
 - **stable** promotes the exact commit already published and tested as beta.
 
-There is no edge channel. Changesets produce versions and changelog entries;
-GitHub Actions builds the binaries, containers and installer assets. Details
-for operators and maintainers are in [docs/self-update.md](docs/self-update.md).
+There is no edge channel. Beta is the shared playground: run it on a real
+site and report what you find as an issue naming the beta version you saw it
+on. An issue marked `release-blocker` stops that line from promoting. A beta
+promotes to stable once it has run clean on the validation sites for a few
+days — there is no release calendar, but beta and stable stay weeks apart at
+most. A critical bug in stable while beta is ahead is fixed on a short-lived
+`hotfix/vX.Y` branch cut from the stable tag, never by promoting the moving
+beta line.
+
+Changesets produce versions and changelog entries; GitHub Actions builds the
+binaries, containers and installer assets. The repository owner cuts every
+release. Details for operators are in
+[docs/self-update.md](docs/self-update.md); the full maintainer rules,
+including the stable-hotfix runbook, are in the Releases section of
+[AGENTS.md](AGENTS.md).
 
 ## Documentation
 
@@ -201,9 +223,10 @@ metadata are the detailed reference.
 - [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)
 - [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
+- [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)
-- [CalDAV](docs/caldav-integration.md)
+- [Calendar removal and existing schedules](docs/caldav-integration.md)
 
 Other files under [`docs/`](docs/) are focused installation or
 external-integration guides.

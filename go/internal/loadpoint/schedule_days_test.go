@@ -30,7 +30,7 @@ func TestNextDeadlineUTC_ZeroMaskIsEveryDay(t *testing.T) {
 	loc := stockholm(t)
 	base := time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC)
 	for _, min := range []int{0, 360, 480, 600, 1439} {
-		s := Schedule{SoCPct: 80, TimeOfDayMinUTC: min}
+		s := Schedule{SoC: 0.8, TimeOfDayMinUTC: min}
 		if got, want := s.NextDeadlineUTC(base, loc), NextDailyUTC(base, min); !got.Equal(want) {
 			t.Errorf("zero mask, min=%d: got %v, want NextDailyUTC's %v", min, got, want)
 		}
@@ -51,7 +51,7 @@ func TestNextDeadlineUTC_ZeroMaskIsEveryDay(t *testing.T) {
 // the deadline lands on Monday, at the same stored UTC time-of-day.
 func TestNextDeadlineUTC_WeekdayMaskRollsPastTheWeekend(t *testing.T) {
 	loc := stockholm(t)
-	s := Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true, Days: maskMonToFri}
+	s := Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true, Days: maskMonToFri}
 	// Friday 2026-05-15 07:00 UTC — today's 06:00 slot has passed.
 	now := time.Date(2026, 5, 15, 7, 0, 0, 0, time.UTC)
 	got := s.NextDeadlineUTC(now, loc)
@@ -68,7 +68,7 @@ func TestNextDeadlineUTC_WeekdayMaskRollsPastTheWeekend(t *testing.T) {
 // skipping until Sunday 22:30 UTC — Monday 00:30 local.
 func TestNextDeadlineUTC_WeekdayIsTheHouseholdsNotUTCs(t *testing.T) {
 	loc := stockholm(t)
-	s := Schedule{SoCPct: 80, TimeOfDayMinUTC: 22*60 + 30, Days: maskMonToFri}
+	s := Schedule{SoC: 0.8, TimeOfDayMinUTC: 22*60 + 30, Days: maskMonToFri}
 	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC) // Friday noon UTC
 	got := s.NextDeadlineUTC(now, loc)
 
@@ -85,8 +85,8 @@ func TestNextDeadlineUTC_WeekdayIsTheHouseholdsNotUTCs(t *testing.T) {
 // A single-day mask reaches its day from anywhere in the week.
 func TestNextDeadlineUTC_SingleDayMask(t *testing.T) {
 	loc := stockholm(t)
-	s := Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Days: 1 << 6} // Sunday only
-	now := time.Date(2026, 5, 18, 7, 0, 0, 0, time.UTC)          // Monday
+	s := Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Days: 1 << 6} // Sunday only
+	now := time.Date(2026, 5, 18, 7, 0, 0, 0, time.UTC)         // Monday
 	got := s.NextDeadlineUTC(now, loc)
 	want := time.Date(2026, 5, 24, 6, 0, 0, 0, time.UTC) // next Sunday
 	if !got.Equal(want) {
@@ -102,7 +102,7 @@ func TestManager_RollSchedules_WeekdayMaskSkipsWeekend(t *testing.T) {
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
 	m.SetLocation(stockholm(t))
 	m.SetSchedule("garage", Schedule{
-		SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true, Days: maskMonToFri,
+		SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true, Days: maskMonToFri,
 	})
 
 	// Friday 2026-05-15 19:00 UTC, past today's 06:00 slot.
@@ -114,8 +114,8 @@ func TestManager_RollSchedules_WeekdayMaskSkipsWeekend(t *testing.T) {
 	if !st.TargetTime.Equal(want) {
 		t.Fatalf("target_time = %v (%v), want Monday %v", st.TargetTime, st.TargetTime.Weekday(), want)
 	}
-	if st.TargetSoCPct != 80 {
-		t.Fatalf("target_soc_pct = %v, want 80", st.TargetSoCPct)
+	if st.TargetSoC != 0.8 {
+		t.Fatalf("target_soc_pct = %v, want 80", st.TargetSoC)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestManager_RollSchedules_ZeroMaskStillRollsDaily(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
 	m.SetLocation(stockholm(t))
-	m.SetSchedule("garage", Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true})
+	m.SetSchedule("garage", Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true})
 
 	now := time.Date(2026, 5, 15, 19, 0, 0, 0, time.UTC) // Friday evening
 	m.RollSchedules(now)
@@ -143,7 +143,7 @@ func TestSetSchedule_MasksDaysToSevenBits(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
 	m.SetSchedule("garage", Schedule{
-		SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true, Days: 0x80 | maskMonToFri,
+		SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true, Days: 0x80 | maskMonToFri,
 	})
 	got, ok := m.GetSchedule("garage")
 	if !ok {

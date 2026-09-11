@@ -1,6 +1,6 @@
 name: test
 
-# Heavy suites run independently so Go, Python and browser work do not queue
+# Heavy suites run independently so Go, driver and browser work do not queue
 # behind one another. The final job keeps the historical required-check name.
 on:
   pull_request:
@@ -21,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       core: ${{ steps.paths.outputs.core }}
-      optimizer: ${{ steps.paths.outputs.optimizer }}
       web: ${{ steps.paths.outputs.web }}
       drivers: ${{ steps.paths.outputs.drivers }}
       compose: ${{ steps.paths.outputs.compose }}
@@ -42,7 +41,6 @@ jobs:
         run: |
           set -euo pipefail
           core=false
-          optimizer=false
           web=false
           drivers=false
           compose=false
@@ -59,7 +57,6 @@ jobs:
             while IFS='=' read -r key value; do
               case "${key}" in
                 core) core="${value}" ;;
-                optimizer) optimizer="${value}" ;;
                 web) web="${value}" ;;
                 drivers) drivers="${value}" ;;
                 compose) compose="${value}" ;;
@@ -69,7 +66,6 @@ jobs:
 
           {
             echo "core=${core}"
-            echo "optimizer=${optimizer}"
             echo "web=${web}"
             echo "drivers=${drivers}"
             echo "compose=${compose}"
@@ -98,38 +94,10 @@ jobs:
 
       - name: Test
         working-directory: go
-        # -timeout is per package. The slowest one takes about 25s, so 120s
-        # leaves plenty of room while capping a hung package at two minutes
-        # instead of the ten-minute default.
-        run: go test -count=1 -timeout 120s ./...
-
-  optimizer:
-    name: optimizer (Python + contract)
-    needs: changes
-    if: needs.changes.outputs.optimizer == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: optimizer/pyproject.toml
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-          cache-dependency-path: go/go.sum
-      - name: Install
-        run: pip install -e 'optimizer[test]'
-      - name: Python tests
-        run: pytest -q optimizer/tests
-      - name: Core ↔ optimizer contract
-        working-directory: go
-        env:
-          FTW_TEST_OPTIMIZER_PYTHON: python
-        run: >-
-          go test -count=1 ./internal/mpc
-          -run 'TestExternalOptimizer(EndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$'
+        # Embedded database fixtures make API/state packages exceed two
+        # minutes on shared runners. Keep a finite package deadline; focused
+        # tests still check queue latency, cancellation and operation limits.
+        run: go test -count=1 -timeout 300s ./...
 
   web:
     name: web
@@ -480,12 +448,12 @@ jobs:
     name: go test + vet
     if: always()
     needs:
-      [changes, core, optimizer, web, drivers, device-support-contract, compose, e2e, contract]
+      [changes, core, web, drivers, device-support-contract, compose, e2e, contract]
     runs-on: ubuntu-latest
     env:
       RESULTS: >-
         ${{ needs.changes.result }} ${{ needs.core.result }}
-        ${{ needs.optimizer.result }} ${{ needs.web.result }}
+        ${{ needs.web.result }}
         ${{ needs.drivers.result }} ${{ needs.device-support-contract.result }}
         ${{ needs.compose.result }}
         ${{ needs.e2e.result }} ${{ needs.contract.result }}

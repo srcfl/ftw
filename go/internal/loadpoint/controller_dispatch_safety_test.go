@@ -30,7 +30,7 @@ func TestStaleSiteMeterStopsScheduledChargeAndRecovers(t *testing.T) {
 	}
 	c := newTestController(t, []Config{cfg}, directive, samples, sender)
 	if !c.manager.SetSchedule(cfg.ID, Schedule{
-		SoCPct:          80,
+		SoC:             0.8,
 		TimeOfDayMinUTC: 13 * 60,
 		Recurring:       true,
 	}) {
@@ -43,13 +43,17 @@ func TestStaleSiteMeterStopsScheduledChargeAndRecovers(t *testing.T) {
 		t.Fatalf("stale site meter must stand scheduled EV down: %+v", sender.calls)
 	}
 	state, ok := c.manager.State(cfg.ID)
-	if !ok || !state.PluggedIn || state.TargetSoCPct != 80 || state.TargetTime.IsZero() {
+	if !ok || !state.PluggedIn || state.TargetSoC != 0.8 || state.TargetTime.IsZero() {
 		t.Fatalf("schedule/observation did not stay live while blocked: %+v", state)
 	}
 
 	c.TickWithDispatch(context.Background(), now.Add(5*time.Second), true)
-	if len(sender.calls) != 2 || sender.calls[1].power <= 0 {
+	set, ok := lastSetCurrent(sender.calls)
+	if !ok || set.power <= 0 {
 		t.Fatalf("fresh site meter did not resume scheduled charge: %+v", sender.calls)
+	}
+	if countAction(sender.calls, "ev_resume") != 1 {
+		t.Fatalf("reoffer after 0 W standdown must send ev_resume: %+v", sender.calls)
 	}
 }
 
@@ -77,7 +81,11 @@ func TestStaleSiteMeterStopsPersistentManualHoldAndRecovers(t *testing.T) {
 
 	samples[cfg.DriverName] = EVSample{Connected: true, RequestActive: true}
 	c.TickWithDispatch(context.Background(), now.Add(SessionCompletionTimeout+2*time.Minute), true)
-	if len(sender.calls) != 3 || sender.calls[2].power != 6900 {
+	set, ok := lastSetCurrent(sender.calls)
+	if !ok || set.power != 6900 {
 		t.Fatalf("fresh site meter did not resume persistent manual hold: %+v", sender.calls)
+	}
+	if countAction(sender.calls, "ev_resume") != 1 {
+		t.Fatalf("reoffer after 0 W standdown must send ev_resume: %+v", sender.calls)
 	}
 }

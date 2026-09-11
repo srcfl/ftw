@@ -35,13 +35,13 @@ func planFrom(p *mpc.Plan, rev uint64, ceilingW *int64, uptimeMs int64, now time
 	out.Stale = now.Sub(time.UnixMilli(p.GeneratedAtMs)) > mpc.MaxPlanAge
 
 	mean := meanPriceOre(p.Actions)
-	minSoC := minSoCPct(p.Actions)
+	minSoC := minSoC(p.Actions)
 
 	for _, a := range p.Actions {
 		price := int64(math.Round(a.PriceOre))
 		out.Slots = append(out.Slots, PlanSlot{
-			StartMs:    a.SlotStartMs,
-			DurationMs: int64(a.SlotLenMin) * int64(time.Minute/time.Millisecond),
+			StartMs:    a.ExecutionStart(),
+			DurationMs: int64(math.Round(a.DurationHours() * 3600000)),
 			BatteryW:   roundW(a.BatteryW),
 			GridW:      roundW(a.GridW),
 			PriceMinor: &price,
@@ -58,7 +58,7 @@ func planFrom(p *mpc.Plan, rev uint64, ceilingW *int64, uptimeMs int64, now time
 func meanPriceOre(actions []mpc.Action) float64 {
 	var sum, weight float64
 	for _, a := range actions {
-		w := float64(a.SlotLenMin)
+		w := a.DurationHours() * 60
 		if w <= 0 {
 			w = 1
 		}
@@ -71,17 +71,17 @@ func meanPriceOre(actions []mpc.Action) float64 {
 	return sum / weight
 }
 
-// minSoCPct is the lowest state of charge the plan intends to reach.
+// minSoC is the lowest state of charge the plan intends to reach.
 //
 // The planner never crosses its own reserve floor, so the deepest point it
 // schedules is the floor it is defending. That makes it the honest reference
 // for "held back" without this package having to be told the floor separately
 // and then drift from it.
-func minSoCPct(actions []mpc.Action) float64 {
+func minSoC(actions []mpc.Action) float64 {
 	min := math.Inf(1)
 	for _, a := range actions {
-		if a.SoCPct < min {
-			min = a.SoCPct
+		if a.SoC < min {
+			min = a.SoC
 		}
 	}
 	if math.IsInf(min, 1) {
@@ -95,7 +95,7 @@ func minSoCPct(actions []mpc.Action) float64 {
 // Derived from the numbers, not parsed from mpc's English. Parsing the prose
 // would break the first time somebody improved a sentence, and the point of a
 // stable code is that it survives exactly that.
-func reasonCode(a mpc.Action, meanPriceOre, minSoCPct float64, ceilingW *int64) PlanReason {
+func reasonCode(a mpc.Action, meanPriceOre, minSoC float64, ceilingW *int64) PlanReason {
 	const idleGateW = mpc.IdleGateThresholdW
 	const gridThreshW = 100.0
 
@@ -140,7 +140,7 @@ func reasonCode(a mpc.Action, meanPriceOre, minSoCPct float64, ceilingW *int64) 
 		// Idle at its deepest planned point during an expensive hour is
 		// the planner refusing to spend the reserve, which is a decision
 		// worth naming rather than calling nothing.
-		if priceAbove && a.SoCPct <= minSoCPct+0.5 {
+		if priceAbove && a.SoC <= minSoC+0.005 {
 			return ReasonReserveHeld
 		}
 		if gridExports {

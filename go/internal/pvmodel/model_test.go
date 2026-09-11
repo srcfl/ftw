@@ -191,8 +191,8 @@ func TestPredictAtNightReturnsZero(t *testing.T) {
 
 	t02 := time.Date(2026, 4, 20, 2, 0, 0, 0, time.UTC)
 	cases := []struct {
-		name       string
-		clearSkyW  float64
+		name      string
+		clearSkyW float64
 	}{
 		{"pitch-dark-midnight", 0},
 		{"astronomical-twilight", 10},
@@ -309,5 +309,129 @@ func TestPredictAtGateThresholdBoundary(t *testing.T) {
 	}
 	if got := m.Predict(50, 0, tt); got <= 0 {
 		t.Errorf("clearSky=50 should be above the gate and produce nonzero, got %.2f", got)
+	}
+}
+
+// frozenModel zeroes the RLS covariance so K = P·x/(λ + xᵀPx) is 0 and Beta
+// never moves. Every Update then predicts the same watt figure, which makes
+// the error EMAs hand-checkable across several samples.
+func frozenModel(ratedW float64) *Model {
+	m := NewModel(ratedW)
+	m.P = [NFeat][NFeat]float64{}
+	return m
+}
+
+// With rated 5 kW and clear sky 200 W/m² at zero cloud, the frozen prior
+// predicts exactly 1000 W, so each sample's relative error is the actual
+// divided by 1000.
+func TestRelMAETracksRelativeErrorOverTheMAEWindow(t *testing.T) {
+	m := frozenModel(5000)
+	tt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	// 1300 W against a 1000 W prediction: ratio 0.3, and the first
+	// qualifying sample seeds outright rather than ramping from zero.
+	if !m.Update(200, 0, tt, 1300) {
+		t.Fatal("first update should have run")
+	}
+	if math.Abs(m.RelMAE-0.3) > 1e-12 {
+		t.Fatalf("seed RelMAE = %v, want 0.3", m.RelMAE)
+	}
+
+	// 900 W: ratio 0.1 → 0.99·0.3 + 0.01·0.1.
+	if !m.Update(200, 0, tt, 900) {
+		t.Fatal("second update should have run")
+	}
+	if want := 0.298; math.Abs(m.RelMAE-want) > 1e-12 {
+		t.Fatalf("RelMAE = %v, want %v", m.RelMAE, want)
+	}
+
+	// A perfect sample folds a 0 in at the same weight.
+	if !m.Update(200, 0, tt, 1000) {
+		t.Fatal("third update should have run")
+	}
+	if want := 0.29502; math.Abs(m.RelMAE-want) > 1e-12 {
+		t.Fatalf("RelMAE = %v, want %v", m.RelMAE, want)
+	}
+}
+
+// A 4× miss and a 1× miss both mean the forecast was worthless. Without the
+// clamp one such sample would hold the planner's hedge above 100 % of
+// generation for days.
+func TestRelMAEClampsRatioAtOne(t *testing.T) {
+	m := frozenModel(5000)
+	tt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	if !m.Update(200, 0, tt, 5000) { // 5000 vs 1000 predicted → raw ratio 4
+		t.Fatal("update should have run")
+	}
+	if m.RelMAE != 1 {
+		t.Fatalf("RelMAE = %v, want 1 (ratio clamped)", m.RelMAE)
+	}
+	if !m.Update(200, 0, tt, 5000) {
+		t.Fatal("update should have run")
+	}
+	if m.RelMAE != 1 {
+		t.Fatalf("RelMAE = %v, want 1 — the clamp must hold across samples", m.RelMAE)
+	}
+}
+
+// Below the gate the denominator is small enough that watt-level noise
+// produces meaningless ratios, so those samples train MAE but not RelMAE.
+func TestRelMAEIgnoresPredictionsBelowTheGate(t *testing.T) {
+	m := frozenModel(1000) // Beta[2] = 1 → prediction equals clear sky
+	tt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	if !m.Update(400, 0, tt, 800) { // predicted 400 W, under the 500 W gate
+		t.Fatal("update should have run")
+	}
+	if m.MAE == 0 {
+		t.Fatal("MAE must still train on sub-gate samples")
+	}
+	if m.RelMAE != 0 {
+		t.Fatalf("RelMAE = %v, want 0: sub-gate ratios must not be folded in", m.RelMAE)
+	}
+
+	if !m.Update(600, 0, tt, 900) { // predicted 600 W, ratio 300/600 = 0.5
+		t.Fatal("update should have run")
+	}
+	if math.Abs(m.RelMAE-0.5) > 1e-12 {
+		t.Fatalf("RelMAE = %v, want 0.5 from the first qualifying sample", m.RelMAE)
+	}
+}
+
+// The gate is a threshold, not a range: exactly 500 W qualifies.
+func TestRelMAEGateBoundary(t *testing.T) {
+	tt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	below := frozenModel(1000)
+	if !below.Update(relMAEMinPredictedW-1, 0, tt, 600) {
+		t.Fatal("update should have run")
+	}
+	if below.RelMAE != 0 {
+		t.Errorf("prediction just below the gate must not train RelMAE, got %v", below.RelMAE)
+	}
+
+	at := frozenModel(1000)
+	if !at.Update(relMAEMinPredictedW, 0, tt, 600) {
+		t.Fatal("update should have run")
+	}
+	if at.RelMAE <= 0 {
+		t.Errorf("prediction exactly at the gate must train RelMAE, got %v", at.RelMAE)
+	}
+}
+
+// Night samples never reach the EMA at all — Update returns before it.
+func TestRelMAEUnchangedByNightSamples(t *testing.T) {
+	m := frozenModel(5000)
+	tt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	if !m.Update(200, 0, tt, 1300) {
+		t.Fatal("daylight update should have run")
+	}
+	seeded := m.RelMAE
+	if m.Update(10, 0, tt, 0) {
+		t.Fatal("night sample should have been skipped")
+	}
+	if m.RelMAE != seeded {
+		t.Errorf("RelMAE = %v, want it unchanged at %v", m.RelMAE, seeded)
 	}
 }

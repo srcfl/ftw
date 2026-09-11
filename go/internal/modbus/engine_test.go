@@ -69,7 +69,7 @@ func TestEngineSharesOneSocketPerHostPort(t *testing.T) {
 	}
 }
 
-func TestDialDoesNotJoinTheEnginePool(t *testing.T) {
+func TestDialJoinsTheSharedSession(t *testing.T) {
 	slave := startTestSlave(t)
 	host, port := slave.Addr()
 	engine := NewEngine()
@@ -79,20 +79,20 @@ func TestDialDoesNotJoinTheEnginePool(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer pooled.Close()
-	private, err := Dial(host, port, 1)
+	viaDial, err := Dial(host, port, 1)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer private.Close()
+	defer viaDial.Close()
 
 	if _, err := pooled.Read(1, 1, drivers.ModbusHolding); err != nil {
 		t.Fatalf("pooled read: %v", err)
 	}
-	if _, err := private.Read(1, 1, drivers.ModbusHolding); err != nil {
-		t.Fatalf("private read: %v", err)
+	if _, err := viaDial.Read(1, 1, drivers.ModbusHolding); err != nil {
+		t.Fatalf("dial read: %v", err)
 	}
-	if got := slave.Accepts(); got != 2 {
-		t.Fatalf("accepts = %d, want 2 (engine + Dial)", got)
+	if got := slave.Accepts(); got != 1 {
+		t.Fatalf("accepts = %d, want 1 (Open and Dial share)", got)
 	}
 }
 

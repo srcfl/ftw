@@ -22,6 +22,10 @@
 #     In config.yaml set the MQTT host to `mosquitto` (port 1883), NOT
 #     `localhost` / `127.0.0.1`. There is no host networking to make
 #     localhost mean "the broker".
+#   - First enable of the house password (api.lan_auth) is loopback-only
+#     inside the container. A Mac curl to http://127.0.0.1:8080 arrives as
+#     the bridge gateway. Use `docker compose -f docker-compose.macos.yml
+#     exec ftw` and then curl http://127.0.0.1:8080 from there.
 #   - mDNS (`zap.local`) and UDP broadcast device discovery do NOT cross
 #     the Docker Desktop VM boundary. Configure every driver with an
 #     EXPLICIT IP address. Outbound unicast TCP (Modbus TCP to a known
@@ -59,10 +63,7 @@ services:
       # Optional Bearer token for mutations through public/FQDN hostnames.
       # Store it in .env so updater-driven recreates retain it.
       FTW_API_TOKEN: ${FTW_API_TOKEN:-}
-      # The Core image has no local Python worker. A sidecar failure falls
-      # straight back to Core's safe Go DP planner.
-      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}
-      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
+      # Core bundles Energyplan and validates its plans, with Go DP as fallback.
 
     # Bridge networking + a published port. The dashboard is reachable at
     # http://localhost:8080/ on the Mac itself and http://<mac-ip>:8080/
@@ -70,28 +71,12 @@ services:
     # NOT used — see the header.)
     ports:
       - "8080:8080"
-      # Calendar (#498): publish FTW's in-process CalDAV server so phones and
-      # desktops on the LAN can subscribe at http://<mac-ip>:5232/. (On the
-      # host-networking Linux compose this is implicit; macOS bridge networking
-      # needs it published.) Drop this line if caldav.enabled is false.
-      - "5232:5232"
 
     volumes:
       - ./data:/app/data
       # Shared volume with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
-      - optimizer-ipc:/run/ftw-optimizer
-
-  ftw-optimizer:
-    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
-    container_name: ftw-optimizer
-    restart: unless-stopped
-    network_mode: none
-    environment:
-      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
-    volumes:
-      - optimizer-ipc:/run/ftw-optimizer
 
   ftw-updater:
     image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
@@ -145,20 +130,6 @@ services:
       - ./mosquitto/config:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
 
-  # ---------------------------------------------------------------------
-  # Calendar (CalDAV) planner constraints (#498)
-  #
-  # No service here: FTW hosts its OWN in-process, pure-Go CalDAV server
-  # (emersion/go-webdav, MIT) inside the main container above — there is no
-  # sidecar. With `caldav.enabled: true`, the in-container server binds :5232,
-  # which the main service publishes (see its ports above), so phones/desktops
-  # on the LAN subscribe at http://<mac-ip>:5232/<user>/energy/. Keep
-  # `caldav.url: http://localhost:5232` (the in-container loopback). Credentials
-  # are auto-managed and shown (with a QR) in Settings → Calendar. LAN-only by
-  # design. See docs/caldav-integration.md.
-  # ---------------------------------------------------------------------
-
 volumes:
   update-ipc:
-  optimizer-ipc:
   mosquitto-data:

@@ -42,9 +42,9 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 		Mode:                ModeSelfConsumption,
 		SoCLevels:           11,
 		CapacityWh:          10000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       50,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.5,
 		ActionLevels:        7,
 		MaxChargeW:          5000,
 		MaxDischargeW:       5000,
@@ -72,8 +72,8 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	if d.Params.Mode != ModeSelfConsumption {
 		t.Errorf("Params.Mode: got %q want self_consumption", d.Params.Mode)
 	}
-	if d.Params.InitialSoCPct != 50 {
-		t.Errorf("Params.InitialSoCPct: got %.2f want 50", d.Params.InitialSoCPct)
+	if d.Params.InitialSoC != 0.50 {
+		t.Errorf("Params.InitialSoC: got %.2f want 0.50", d.Params.InitialSoC)
 	}
 	if d.LastReason != "unit-test" {
 		t.Errorf("LastReason: got %q want unit-test", d.LastReason)
@@ -201,9 +201,9 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 		LastReason:            "scheduled",
 		Params: DiagnosticParams{
 			Mode:                ModeSelfConsumption,
-			InitialSoCPct:       42,
-			SoCMinPct:           10,
-			SoCMaxPct:           90,
+			InitialSoC: 0.42,
+			SoCMin: 0.1,
+			SoCMax: 0.9,
 			SoCLevels:           41,
 			ActionLevels:        81,
 			MaxChargeW:          5000,
@@ -226,7 +226,7 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 				LoadW:            900,
 				BatteryW:         0,
 				GridW:            -3600,
-				SoCPct:           42,
+				SoC: 0.42,
 				CostOre:          -72,
 				Reason:           "export surplus",
 				EMSMode:          "self_consumption",
@@ -246,7 +246,7 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 				LoadW:       900,
 				BatteryW:    1200,
 				GridW:       -2900,
-				SoCPct:      44,
+				SoC: 0.44,
 				CostOre:     9,
 				Reason:      "avoid negative export",
 				EMSMode:     "self_consumption",
@@ -449,9 +449,9 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
 		Params: DiagnosticParams{
 			Mode:                ModeSelfConsumption,
-			InitialSoCPct:       8,
-			SoCMinPct:           10,
-			SoCMaxPct:           95,
+			InitialSoC: 0.08,
+			SoCMin: 0.1,
+			SoCMax: 0.95,
 			SoCLevels:           41,
 			ActionLevels:        81,
 			MaxChargeW:          5000,
@@ -466,7 +466,7 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 			Idx: 0, SlotStartMs: start.UnixMilli(),
 			SlotEndMs: start.Add(15 * time.Minute).UnixMilli(),
 			LenMin:    15, PriceOre: 100, Confidence: 1, PVW: -3000, LoadW: 500,
-			BatteryW: 0, GridW: -2500, SoCPct: 8,
+			BatteryW: 0, GridW: -2500, SoC: 0.08,
 			EMSMode: "self_consumption",
 		}},
 	}
@@ -539,9 +539,9 @@ func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
 		Params: DiagnosticParams{
 			Mode:                ModeSelfConsumption,
-			InitialSoCPct:       30,
-			SoCMinPct:           10,
-			SoCMaxPct:           95,
+			InitialSoC: 0.3,
+			SoCMin: 0.1,
+			SoCMax: 0.95,
 			SoCLevels:           41,
 			ActionLevels:        81,
 			MaxChargeW:          5000,
@@ -556,7 +556,7 @@ func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 			Idx: 0, SlotStartMs: start.UnixMilli(),
 			SlotEndMs: start.Add(15 * time.Minute).UnixMilli(),
 			LenMin:    15, PriceOre: 100, Confidence: 1, PVW: -3000, LoadW: 500,
-			BatteryW: 0, GridW: -2500, SoCPct: 30,
+			BatteryW: 0, GridW: -2500, SoC: 0.3,
 			EMSMode: "self_consumption",
 		}},
 	}
@@ -604,9 +604,9 @@ func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
 		Mode:                ModeCheapCharge,
 		SoCLevels:           21,
 		CapacityWh:          10000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       50,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.5,
 		ActionLevels:        5,
 		MaxChargeW:          2000,
 		MaxDischargeW:       2000,
@@ -617,9 +617,9 @@ func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
 			ID:               "garage",
 			CapacityWh:       60000,
 			Levels:           11,
-			InitialSoCPct:    20,
+			InitialSoC: 0.2,
 			PluggedIn:        true,
-			TargetSoCPct:     30,
+			TargetSoC: 0.3,
 			TargetSlotIdx:    3,
 			MaxChargeW:       11000,
 			AllowedStepsW:    []float64{0, 11000},
@@ -654,14 +654,14 @@ func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
 				"the plumb from Action → DiagnosticSlot is broken",
 				i, row.LoadpointW, plan.Actions[i].LoadpointW)
 		}
-		if row.LoadpointSoCPct != plan.Actions[i].LoadpointSoCPct {
-			t.Errorf("slot %d LoadpointSoCPct: diagnostic=%.1f plan=%.1f",
-				i, row.LoadpointSoCPct, plan.Actions[i].LoadpointSoCPct)
+		if row.LoadpointSoC != plan.Actions[i].LoadpointSoC {
+			t.Errorf("slot %d LoadpointSoC: diagnostic=%.1f plan=%.1f",
+				i, row.LoadpointSoC, plan.Actions[i].LoadpointSoC)
 		}
 		if row.LoadpointW > 0 {
 			sawCharge = true
 		}
-		if row.LoadpointSoCPct > 0 {
+		if row.LoadpointSoC > 0 {
 			sawSoC = true
 		}
 	}
@@ -670,6 +670,6 @@ func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
 			"charge at least once; check Action.LoadpointW plumbing")
 	}
 	if !sawSoC {
-		t.Error("no slot carries LoadpointSoCPct — EV SoC trajectory lost")
+		t.Error("no slot carries LoadpointSoC — EV SoC trajectory lost")
 	}
 }

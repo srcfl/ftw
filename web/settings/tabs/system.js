@@ -33,13 +33,16 @@
     var solver = optimizer.active_solver || {};
     var degraded = optimizer.degraded === true || optimizer.healthy === false || solver.fallback === true;
     if (!optimizer.configured) {
-      return { label: "Go DP only", degraded: false, warning: "", lastPlanAtMs: 0 };
+      return { label: "Core planner", degraded: false, warning: "", lastPlanAtMs: 0 };
     }
-    var runtimeLabel = (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
+    var runtimeLabel = (optimizer.bundled_with_core ? "Energyplan " : "") + (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
+    if (optimizer.role === "shadow") runtimeLabel += " · shadow";
     var solverLabel = [solver.engine, solver.backend].filter(Boolean).join(" / ");
     var reason = optimizer.fallback_reason || solver.fallback_reason || optimizer.health_error || optimizer.error || "";
     var warning = "";
-    if (solver.fallback || solver.engine === "go-dp") {
+    // Only the fallback flag means a failure: under the default engine the
+    // sidecar is attached as a shadow and Core plans on purpose.
+    if (solver.fallback) {
       warning = "Planner fallback active" + (solverLabel ? " — " + solverLabel : "") + (reason ? ". " + reason : "");
     } else if (degraded) {
       warning = "Optimizer unavailable" + (reason ? " — " + reason : "");
@@ -79,7 +82,23 @@
   }
 
   S.tabs.system = {
-    render: function () {
+    render: function (ctx) {
+      ctx = ctx || {};
+      var escHtml = ctx.escHtml || function (s) {
+        var div = document.createElement("div");
+        div.textContent = s == null ? "" : String(s);
+        return div.innerHTML;
+      };
+      function escAttr(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;")
+          .replace(/"/g, "&quot;")
+          .replace(/</g, "&lt;");
+      }
+      var a = (ctx.config && ctx.config.assistant) || {};
+      var keyPlaceholder = a.has_api_key
+        ? "configured — hidden, type to replace"
+        : "sk-or-v1-…";
       return '' +
         '<style>' +
         '  .sys-grid { display: grid; gap: 12px; }' +
@@ -165,6 +184,19 @@
         '<div class="sys-grid" id="sys-components">Loading component status…</div>' +
         '</fieldset>' +
         '<fieldset>' +
+        '<legend>Ask why</legend>' +
+        '<p class="sys-meta">Explains what this box is doing, including why the plan looks like it does. Paste an OpenRouter key to turn it on. You can uncheck Enable later without deleting the key. The key stays on this box. Ask why never issues driver commands.</p>' +
+        '<label class="sys-check" style="display:flex;align-items:center;gap:8px;margin:8px 0">' +
+        '  <input type="checkbox" data-checkbox-path="assistant.enabled"' + (a.enabled ? ' checked' : '') + '>' +
+        '  Enable' +
+        '</label>' +
+        '<label for="sys-assistant-key">OpenRouter API key</label>' +
+        '<input type="password" id="sys-assistant-key" data-path="assistant.api_key" value="" autocomplete="off" placeholder="' + escAttr(keyPlaceholder) + '">' +
+        '<label for="sys-assistant-model">Model</label>' +
+        '<input type="text" id="sys-assistant-model" data-path="assistant.model" value="' + escAttr(a.model || "openrouter/free") + '">' +
+        '<p class="sys-help-secondary">Free key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>. Default <code>openrouter/free</code> stays on free models.</p>' +
+        '</fieldset>' +
+        '<fieldset>' +
         '<legend>Help</legend>' +
         '<div class="sys-help-actions">' +
         '  <a class="btn-add" href="https://github.com/srcfl/ftw/issues/new?template=bug_report.yml" target="_blank" rel="noopener">Report FTW bug</a>' +
@@ -175,6 +207,14 @@
     },
 
     after: function (ctx) {
+      var keyEl = document.getElementById("sys-assistant-key");
+      if (keyEl) {
+        keyEl.addEventListener("input", function () {
+          if (!String(keyEl.value || "").trim()) return;
+          var enable = document.querySelector('[data-checkbox-path="assistant.enabled"]');
+          if (enable) enable.checked = true;
+        });
+      }
       var escHtml = (ctx && ctx.escHtml) || function (s) {
         var div = document.createElement("div");
         div.textContent = s == null ? "" : String(s);
@@ -281,32 +321,11 @@
             el.innerHTML =
               '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
                 ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
-              '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
-                '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
-                ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
               warningHTML +
               driversHTML +
               actionHTML;
           }
           var status = document.getElementById("sys-component-action");
-          var optimizerBtn = document.getElementById("sys-update-optimizer");
-          if (optimizerBtn) optimizerBtn.onclick = function () {
-            optimizerBtn.disabled = true;
-            if (status) status.textContent = "Starting optimizer update…";
-            apiFetch("/api/components/optimizer/update", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
-              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "update failed"); return body; }); })
-              .then(function () { if (status) status.textContent = "Optimizer update started; core remains online."; })
-              .catch(function (err) { if (status) status.textContent = err.message; optimizerBtn.disabled = false; });
-          };
-          var rollbackBtn = document.getElementById("sys-rollback-optimizer");
-          if (rollbackBtn) rollbackBtn.onclick = function () {
-            rollbackBtn.disabled = true;
-            if (status) status.textContent = "Restoring previous optimizer image…";
-            apiFetch("/api/components/optimizer/rollback", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
-              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
-              .then(function () { if (status) status.textContent = "Optimizer rollback started; core remains online."; })
-              .catch(function (err) { if (status) status.textContent = err.message; rollbackBtn.disabled = false; });
-          };
           var driverBtn = document.getElementById("sys-refresh-drivers");
           if (driverBtn) driverBtn.onclick = function () {
             driverBtn.disabled = true;

@@ -21,25 +21,74 @@ import (
 const (
 	reconnectBackoffBase = 2 * time.Second
 	reconnectBackoffMax  = 60 * time.Second
+
+	// Many inverters accept exactly one Modbus TCP session and evict the
+	// previous one on every new connect. Redials above this rate almost
+	// always mean another client is fighting for the device's only
+	// session — worth a named warning instead of a silent log flood.
+	// Threshold calibrated against the 2026-08-29 incident: the war ran
+	// 20-30 redials/min sustained, while the same inverter alone (its own
+	// short idle timeout) peaks at 7-8/min — 10 splits them cleanly.
+	reconnectObserveWindow  = time.Minute
+	evictionRedialThreshold = 10
+	evictionWarnMinInterval = time.Minute
+	reconnectLogMinInterval = time.Minute
 )
 
-// Capability wraps a Modbus TCP client. Each call serializes through the
-// mutex. The first transport error gets one immediate reconnect and retry.
-// Repeated mute sessions use a non-blocking reconnect cooldown so a
-// single-session dongle can release its old socket without blocking the
-// driver's poll and command loop.
-type Capability struct {
+// sharedConn owns the single Modbus TCP session for one endpoint. Every
+// Capability for the same host:port serializes through this mutex and
+// socket, because devices that allow only one session (Sungrow hybrids,
+// most single-session dongles) RST the old connection on every new
+// connect — two FTW-side clients would evict each other on every
+// request. The first transport error gets one immediate reconnect and
+// retry. Repeated mute sessions use a non-blocking reconnect cooldown so
+// a single-session device can release its old socket without blocking
+// the driver's poll and command loop.
+type sharedConn struct {
 	mu                   sync.Mutex
 	client               *tcpClient
 	url                  string
 	addr                 string
-	unitID               int
 	allowUnverifiedLocal bool
 	requestTimeout       time.Duration
+
+	// activeUnitID mirrors what the live client was last programmed
+	// with, so capabilities with different unit ids can share the
+	// session and only touch the wire header when the id changes.
+	// A fresh tcpClient defaults to unit 1.
+	activeUnitID int
 
 	consecutiveTransportFailures int
 	nextReconnectAt              time.Time
 	now                          func() time.Time
+
+	// Redial observability: recent successful redials (pruned to
+	// reconnectObserveWindow), plus rate-limit state for the reconnect
+	// INFO line and the eviction WARN.
+	recentRedials           []time.Time
+	lastReconnectLogAt      time.Time
+	suppressedReconnectLogs int
+	lastEvictionWarnAt      time.Time
+
+	// refs counts live Capabilities; guarded by registryMu, not mu.
+	refs int
+}
+
+var (
+	registryMu    sync.Mutex
+	endpointConns = map[string]*sharedConn{}
+)
+
+// Capability is one user's handle on an endpoint's shared session —
+// implements drivers.ModbusCap. Each driver (and each driver-test or
+// fingerprint probe) gets its own handle with its own unit id; they all
+// borrow the same underlying socket so FTW never opens a second
+// connection to a device it is already talking to.
+type Capability struct {
+	conn   *sharedConn
+	unitID int
+	url    string
+	closed bool // guarded by registryMu; Close is idempotent per handle
 }
 
 // Dial opens a Modbus TCP connection.
@@ -47,36 +96,65 @@ func Dial(host string, port, unitID int) (*Capability, error) {
 	return DialWithOptions(host, port, unitID, false)
 }
 
-// DialWithOptions opens a Modbus TCP connection with the core's explicit
-// policy for unauthenticated mDNS names.
+// DialWithOptions returns a capability on the endpoint's single shared
+// connection, dialing it only if no other capability holds it, with the
+// core's explicit policy for unauthenticated mDNS names.
 func DialWithOptions(host string, port, unitID int, allowUnverifiedLocal bool) (*Capability, error) {
 	if err := validateEndpoint(host, port, unitID); err != nil {
 		return nil, err
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	url := "tcp://" + addr
-	cli := newTCPClientWithOptions(addr, modbusRequestTimeout, modbusTCPKeepAlive, allowUnverifiedLocal)
-	capability := &Capability{
+
+	registryMu.Lock()
+	if existing := endpointConns[addr]; existing != nil {
+		existing.refs++
+		refs := existing.refs
+		mismatch := existing.allowUnverifiedLocal != allowUnverifiedLocal
+		registryMu.Unlock()
+		slog.Info("modbus endpoint shared — reusing the device's single session",
+			"url", url, "users", refs, "unit_id", unitID)
+		if mismatch {
+			slog.Warn("modbus endpoint shared with a different allow_unverified_local policy; the first dialer's policy stays in effect",
+				"url", url)
+		}
+		return &Capability{conn: existing, unitID: unitID, url: url}, nil
+	}
+	conn := &sharedConn{
 		url:                  url,
 		addr:                 addr,
-		unitID:               unitID,
 		allowUnverifiedLocal: allowUnverifiedLocal,
 		requestTimeout:       modbusRequestTimeout,
+		activeUnitID:         1,
 		now:                  time.Now,
+		refs:                 1,
 	}
+	endpointConns[addr] = conn
+	registryMu.Unlock()
+
+	capability := &Capability{conn: conn, unitID: unitID, url: url}
+	conn.mu.Lock()
+	cli := newTCPClientWithOptions(addr, modbusRequestTimeout, modbusTCPKeepAlive, allowUnverifiedLocal)
 	if err := cli.Open(); err != nil {
 		if !isRetryableDialError(err) {
+			conn.mu.Unlock()
+			// Permanent config problem — don't leave a dead entry for
+			// later dialers to share.
+			releaseConn(capability)
 			return nil, err
 		}
-		capability.noteTransportFailure()
+		conn.noteTransportFailure()
+		conn.mu.Unlock()
 		slog.Warn("modbus initial connection unavailable; polling will retry",
 			"url", url, "err", err)
 		return capability, nil
 	}
 	if unitID > 0 {
 		cli.SetUnitId(uint8(unitID))
+		conn.activeUnitID = unitID
 	}
-	capability.client = cli
+	conn.client = cli
+	conn.mu.Unlock()
 	return capability, nil
 }
 
@@ -136,25 +214,47 @@ func asciiAlphaNum(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
-// Close the underlying connection.
+// Close releases this handle's reference on the shared session. The
+// socket closes only when the last handle is gone, so a driver-test or
+// fingerprint probe finishing does not tear down the live driver's
+// connection.
 func (c *Capability) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closeClient()
+	if released := releaseConn(c); !released {
+		return nil
+	}
+	c.conn.mu.Lock()
+	defer c.conn.mu.Unlock()
+	return c.conn.closeClient()
+}
+
+// releaseConn drops the handle's reference and reports whether it was
+// the last one, deregistering the endpoint if so.
+func releaseConn(c *Capability) bool {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.closed = true
+	c.conn.refs--
+	if c.conn.refs > 0 {
+		return false
+	}
+	if endpointConns[c.conn.addr] == c.conn {
+		delete(endpointConns, c.conn.addr)
+	}
+	return true
 }
 
 // Read — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) Read(addr, count uint16, kind int32) ([]uint16, error) {
-	return c.readAs(c.unitID, addr, count, kind)
-}
-
-func (c *Capability) readAs(unitID int, addr, count uint16, kind int32) ([]uint16, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.ensureClient(); err != nil {
+	conn := c.conn
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if err := conn.ensureClient(); err != nil {
 		return nil, err
 	}
-	c.applyUnit(unitID)
+	conn.applyUnit(c.unitID)
 	var fc byte
 	switch kind {
 	case drivers.ModbusInput:
@@ -164,21 +264,21 @@ func (c *Capability) readAs(unitID int, addr, count uint16, kind int32) ([]uint1
 	default:
 		fc = modbusReadInputRegisters
 	}
-	regs, err := c.client.ReadRegisters(addr, count, fc)
+	regs, err := conn.client.ReadRegisters(addr, count, fc)
 	if err == nil {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return regs, nil
 	}
 	if !isTransportError(err) {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return regs, err
 	}
-	if rerr := c.prepareTransportRetry(); rerr != nil {
+	if rerr := conn.prepareTransportRetry(); rerr != nil {
 		return nil, fmt.Errorf("read after reconnect: %w (original: %v)", rerr, err)
 	}
-	c.applyUnit(unitID)
-	regs, err = c.client.ReadRegisters(addr, count, fc)
-	c.finishRequest(err)
+	conn.applyUnit(c.unitID)
+	regs, err = conn.client.ReadRegisters(addr, count, fc)
+	conn.finishRequest(err)
 	return regs, markTransport(err)
 }
 
@@ -198,98 +298,102 @@ func markTransport(err error) error {
 
 // WriteSingle — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) WriteSingle(addr, value uint16) error {
-	return c.writeSingleAs(c.unitID, addr, value)
-}
-
-func (c *Capability) writeSingleAs(unitID int, addr, value uint16) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.ensureClient(); err != nil {
+	conn := c.conn
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if err := conn.ensureClient(); err != nil {
 		return err
 	}
-	c.applyUnit(unitID)
-	err := c.client.WriteRegister(addr, value)
+	conn.applyUnit(c.unitID)
+	err := conn.client.WriteRegister(addr, value)
 	if err == nil {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return nil
 	}
 	if !isTransportError(err) {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return err
 	}
-	if rerr := c.prepareTransportRetry(); rerr != nil {
+	if rerr := conn.prepareTransportRetry(); rerr != nil {
 		return fmt.Errorf("write after reconnect: %w (original: %v)", rerr, err)
 	}
-	c.applyUnit(unitID)
-	err = c.client.WriteRegister(addr, value)
-	c.finishRequest(err)
+	conn.applyUnit(c.unitID)
+	err = conn.client.WriteRegister(addr, value)
+	conn.finishRequest(err)
 	return err
 }
 
 // WriteMulti — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
-	return c.writeMultiAs(c.unitID, addr, values)
-}
-
-func (c *Capability) writeMultiAs(unitID int, addr uint16, values []uint16) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.ensureClient(); err != nil {
+	conn := c.conn
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if err := conn.ensureClient(); err != nil {
 		return err
 	}
-	c.applyUnit(unitID)
-	err := c.client.WriteRegisters(addr, values)
+	conn.applyUnit(c.unitID)
+	err := conn.client.WriteRegisters(addr, values)
 	if err == nil {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return nil
 	}
 	if !isTransportError(err) {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return err
 	}
-	if rerr := c.prepareTransportRetry(); rerr != nil {
+	if rerr := conn.prepareTransportRetry(); rerr != nil {
 		return fmt.Errorf("write-multi after reconnect: %w (original: %v)", rerr, err)
 	}
-	c.applyUnit(unitID)
-	err = c.client.WriteRegisters(addr, values)
-	c.finishRequest(err)
+	conn.applyUnit(c.unitID)
+	err = conn.client.WriteRegisters(addr, values)
+	conn.finishRequest(err)
 	return err
 }
 
-func (c *Capability) applyUnit(unitID int) {
-	if c.client == nil || unitID <= 0 {
-		return
-	}
-	c.client.SetUnitId(uint8(unitID))
-}
-
-// executePDU runs one raw PDU on this connection. Exception PDUs are
+// executePDU runs one raw PDU on the shared session. Exception PDUs are
 // returned as data so a proxy can forward them. Transport errors follow
-// the same reconnect-once policy as Read.
+// the same reconnect-once policy as Read. unitID is taken from the
+// request so one TCP session can serve several slaves.
 func (c *Capability) executePDU(unitID uint8, pdu []byte) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.ensureClient(); err != nil {
+	conn := c.conn
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if err := conn.ensureClient(); err != nil {
 		return nil, err
 	}
-	res, err := c.client.roundTrip(unitID, pdu)
+	conn.applyUnit(int(unitID))
+	res, err := conn.client.roundTrip(unitID, pdu)
 	if err == nil {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return res, nil
 	}
 	if !isTransportError(err) {
-		c.noteLiveResponse()
+		conn.noteLiveResponse()
 		return res, err
 	}
-	if rerr := c.prepareTransportRetry(); rerr != nil {
+	if rerr := conn.prepareTransportRetry(); rerr != nil {
 		return nil, fmt.Errorf("pdu after reconnect: %w (original: %v)", rerr, err)
 	}
-	res, err = c.client.roundTrip(unitID, pdu)
-	c.finishRequest(err)
+	conn.applyUnit(int(unitID))
+	res, err = conn.client.roundTrip(unitID, pdu)
+	conn.finishRequest(err)
 	return res, markTransport(err)
 }
 
-func (c *Capability) ensureClient() error {
+// applyUnit programs the handle's unit id into the live client when it
+// differs from what the session was last set to. Caller holds c.mu and
+// has ensured the client exists. Unit id 0 keeps whatever the session
+// already uses (a fresh client defaults to unit 1), matching the old
+// single-owner behavior where 0 meant "never set".
+func (c *sharedConn) applyUnit(unitID int) {
+	if unitID <= 0 || unitID == c.activeUnitID || c.client == nil {
+		return
+	}
+	c.client.SetUnitId(uint8(unitID))
+	c.activeUnitID = unitID
+}
+
+func (c *sharedConn) ensureClient() error {
 	if c.client != nil {
 		return nil
 	}
@@ -302,7 +406,7 @@ func (c *Capability) ensureClient() error {
 	return c.reconnect()
 }
 
-func (c *Capability) prepareTransportRetry() error {
+func (c *sharedConn) prepareTransportRetry() error {
 	c.noteTransportFailure()
 	_ = c.closeClient()
 	if c.consecutiveTransportFailures > 1 {
@@ -311,7 +415,7 @@ func (c *Capability) prepareTransportRetry() error {
 	return c.reconnect()
 }
 
-func (c *Capability) finishRequest(err error) {
+func (c *sharedConn) finishRequest(err error) {
 	if err == nil || !isTransportError(err) {
 		c.noteLiveResponse()
 		return
@@ -320,12 +424,12 @@ func (c *Capability) finishRequest(err error) {
 	_ = c.closeClient()
 }
 
-func (c *Capability) noteLiveResponse() {
+func (c *sharedConn) noteLiveResponse() {
 	c.consecutiveTransportFailures = 0
 	c.nextReconnectAt = time.Time{}
 }
 
-func (c *Capability) noteTransportFailure() {
+func (c *sharedConn) noteTransportFailure() {
 	c.consecutiveTransportFailures++
 	wait := c.reconnectBackoff()
 	if wait == 0 {
@@ -338,7 +442,7 @@ func (c *Capability) noteTransportFailure() {
 		"retry_in", wait)
 }
 
-func (c *Capability) reconnectBackoff() time.Duration {
+func (c *sharedConn) reconnectBackoff() time.Duration {
 	if c.consecutiveTransportFailures <= 1 {
 		return 0
 	}
@@ -353,7 +457,7 @@ func (c *Capability) reconnectBackoff() time.Duration {
 	return wait
 }
 
-func (c *Capability) reconnectDelay() time.Duration {
+func (c *sharedConn) reconnectDelay() time.Duration {
 	if c.nextReconnectAt.IsZero() {
 		return 0
 	}
@@ -364,14 +468,14 @@ func (c *Capability) reconnectDelay() time.Duration {
 	return remaining
 }
 
-func (c *Capability) nowTime() time.Time {
+func (c *sharedConn) nowTime() time.Time {
 	if c.now != nil {
 		return c.now()
 	}
 	return time.Now()
 }
 
-func (c *Capability) closeClient() error {
+func (c *sharedConn) closeClient() error {
 	if c.client == nil {
 		return nil
 	}
@@ -383,7 +487,7 @@ func (c *Capability) closeClient() error {
 // reconnect tears down the current socket and dials a fresh one. Caller must
 // hold c.mu. Some inverter firmwares leave Modbus TCP sessions stale after idle
 // time or a write; a fresh socket is the only reliable recovery.
-func (c *Capability) reconnect() error {
+func (c *sharedConn) reconnect() error {
 	_ = c.closeClient()
 	timeout := c.requestTimeout
 	if timeout <= 0 {
@@ -394,12 +498,48 @@ func (c *Capability) reconnect() error {
 		c.noteTransportFailure()
 		return err
 	}
-	if c.unitID > 0 {
-		cli.SetUnitId(uint8(c.unitID))
-	}
 	c.client = cli
-	slog.Info("modbus reconnected", "url", c.url)
+	c.activeUnitID = 1 // fresh client default; applyUnit reprograms per request
+	c.noteReconnected()
 	return nil
+}
+
+// noteReconnected records a successful redial, warns when the redial
+// rate says another client keeps taking the device's only session, and
+// rate-limits the reconnect INFO line so a redial-per-poll situation
+// cannot flood the log ring (observed: ~17k lines in 14 h). Caller
+// holds c.mu.
+func (c *sharedConn) noteReconnected() {
+	now := c.nowTime()
+	cutoff := now.Add(-reconnectObserveWindow)
+	kept := c.recentRedials[:0]
+	for _, t := range c.recentRedials {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	c.recentRedials = append(kept, now)
+
+	if len(c.recentRedials) >= evictionRedialThreshold &&
+		(c.lastEvictionWarnAt.IsZero() || now.Sub(c.lastEvictionWarnAt) >= evictionWarnMinInterval) {
+		c.lastEvictionWarnAt = now
+		slog.Warn("modbus session keeps being replaced — another Modbus client is likely competing for this device's only session",
+			"url", c.url,
+			"redials_last_minute", len(c.recentRedials))
+	}
+
+	if c.lastReconnectLogAt.IsZero() || now.Sub(c.lastReconnectLogAt) >= reconnectLogMinInterval {
+		if c.suppressedReconnectLogs > 0 {
+			slog.Info("modbus reconnected", "url", c.url,
+				"suppressed_repeats", c.suppressedReconnectLogs)
+		} else {
+			slog.Info("modbus reconnected", "url", c.url)
+		}
+		c.lastReconnectLogAt = now
+		c.suppressedReconnectLogs = 0
+		return
+	}
+	c.suppressedReconnectLogs++
 }
 
 // isTransportError classifies an error as a TCP transport failure where

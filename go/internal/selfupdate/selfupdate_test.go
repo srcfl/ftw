@@ -3,12 +3,14 @@ package selfupdate
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -851,6 +853,76 @@ func TestTrigger_NoSocket(t *testing.T) {
 	c := New(Config{}, newMemStore())
 	if err := c.Trigger(context.Background(), "update", ""); err == nil {
 		t.Error("expected 'socket not configured' error")
+	}
+}
+
+// Reported versions, including QA overrides and baked stable identities,
+// cannot select another image when a user presses Restart.
+func TestTriggerRestartPreservesContainerRegardlessOfReportedVersion(t *testing.T) {
+	for _, current := range []string{"v2.14.0-beta.1", "v2.14.0", "v2.0.0", "dev", "edge-20260101"} {
+		t.Run(current, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "ftw-su-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(dir) })
+			sock := filepath.Join(dir, "sock")
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			got := make(chan map[string]any, 1)
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				got <- body
+				w.WriteHeader(202)
+			})}
+			go srv.Serve(ln)
+			t.Cleanup(func() { srv.Close() })
+			c := New(Config{SocketPath: sock, CurrentVersion: current}, newMemStore())
+			if err := c.TriggerRestart(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			body := <-got
+			if body["action"] != "restart_existing" || body["target"] != "" {
+				t.Fatalf("unsafe restart request: %v", body)
+			}
+		})
+	}
+}
+
+func TestTriggerRestartFailsClosedOnOldUpdater(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ftw-su-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["action"] != "restart_existing" {
+			t.Errorf("unsafe fallback: %v", body)
+		}
+		http.Error(w, "action must be update, restart, rollback, or component_rollback", http.StatusBadRequest)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	c := New(Config{SocketPath: sock, CurrentVersion: "v2.14.0-beta.1"}, newMemStore())
+	err = c.TriggerRestart(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "safe restart requires a newer updater") {
+		t.Fatalf("restart error = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("restart requests = %d", calls.Load())
 	}
 }
 

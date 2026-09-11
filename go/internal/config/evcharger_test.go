@@ -84,6 +84,83 @@ func TestEVChargerValidateEasee(t *testing.T) {
 	}
 }
 
+func TestEVChargerValidateZaptec(t *testing.T) {
+	cases := []struct {
+		name    string
+		e       EVCharger
+		wantErr string
+	}{
+		{"happy", EVCharger{Provider: "zaptec", Username: "u@x"}, ""},
+		{"empty creds allowed (wizard placeholder)", EVCharger{Provider: "zaptec"}, ""},
+		{"modbus block rejected", EVCharger{Provider: "zaptec", Username: "u@x", Modbus: &EVChargerModbus{Host: "h"}}, "modbus"},
+		{"http block allowed", EVCharger{Provider: "zaptec", Username: "u@x", HTTP: &EVChargerHTTP{BaseURL: "https://staging"}}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.e.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestEVChargerValidateTeslaWC(t *testing.T) {
+	cases := []struct {
+		name    string
+		e       EVCharger
+		wantErr string
+	}{
+		{"happy", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://192.168.1.50"}}, ""},
+		{"empty host allowed (wizard placeholder)", EVCharger{Provider: "tesla-wc"}, ""},
+		{"modbus block rejected", EVCharger{Provider: "tesla-wc", Modbus: &EVChargerModbus{Host: "h"}}, "modbus"},
+		{"leftover username stripped", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://10.0.0.8"}, Username: "u"}, ""},
+		{"leftover password stripped", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://10.0.0.8"}, Password: "p"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.e.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestEVChargerValidateTeslaWCStripsCloudCreds(t *testing.T) {
+	e := EVCharger{
+		Provider:    "tesla-wc",
+		Username:    "old@example.com",
+		Password:    "easee-secret",
+		EmailLegacy: "old@example.com",
+		HTTP:        &EVChargerHTTP{BaseURL: "http://192.168.1.50"},
+	}
+	if err := e.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if e.Username != "" || e.Password != "" || e.EmailLegacy != "" {
+		t.Fatalf("leftover cloud creds after tesla-wc validate: %+v", e)
+	}
+}
+
 func TestEVChargerValidateCTek(t *testing.T) {
 	cases := []struct {
 		name    string

@@ -1,0 +1,71 @@
+name: Core Linux binaries
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'go/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'Makefile'
+      - 'scripts/build-core.sh'
+      - '.github/workflows/core-binaries.yml'
+      - '.github/workflows/release-assets.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'go/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'Makefile'
+      - 'scripts/build-core.sh'
+      - '.github/workflows/core-binaries.yml'
+      - '.github/workflows/release-assets.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    name: Core + backup (linux/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build with the release toolchain
+        env:
+          FTW_BUILD_DOCKER: '1'
+        run: bash scripts/build-core.sh linux '${{ matrix.arch }}' bin/linux
+      - name: Verify build flags and the linked DuckDB module
+        run: |
+          set -euo pipefail
+          for binary in bin/linux/ftw bin/linux/ftw-backup; do
+            go version -m "$binary" | tee "$binary.buildinfo"
+            grep -F 'github.com/duckdb/duckdb-go/v2' "$binary.buildinfo"
+            grep -F 'CGO_ENABLED=1' "$binary.buildinfo"
+            grep -F -- '-tags=netgo,osusergo' "$binary.buildinfo"
+          done
+      - name: Start both binaries with the supported Debian runtime
+        run: |
+          docker run --rm --network none --read-only \
+            --platform 'linux/${{ matrix.arch }}' \
+            -v "$PWD/bin/linux:/binaries:ro" debian:bookworm-slim \
+            sh -ec '
+              /binaries/ftw -h
+              set +e
+              output=$(/binaries/ftw-backup 2>&1)
+              status=$?
+              set -e
+              test "$status" -eq 1
+              printf "%s\n" "$output" | grep -F "usage: ftw-backup"
+            '

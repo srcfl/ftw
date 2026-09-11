@@ -1,7 +1,6 @@
 package loadmodel
 
 import (
-	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -60,7 +59,7 @@ func TestProfileSwitchTrainsOnlyActiveProfile(t *testing.T) {
 	tel.RecordDriverSuccess("site")
 
 	s := NewService(nil, tel, "site", 4000, 17250)
-	now := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	s.sampleAt(now)
 
 	if err := s.SetProfile(ProfileAway); err != nil {
@@ -68,7 +67,7 @@ func TestProfileSwitchTrainsOnlyActiveProfile(t *testing.T) {
 	}
 	tel.Update("site", telemetry.DerMeter, 200, nil, nil)
 	tel.RecordDriverSuccess("site")
-	s.sampleAt(now.Add(time.Hour))
+	s.sampleAt(time.Now())
 
 	snap := s.Snapshot()
 	if snap.ActiveProfile != ProfileAway {
@@ -124,29 +123,22 @@ func TestSampleRequiresOnlineSiteMeter(t *testing.T) {
 	}
 }
 
-func TestSampleUsesOnlyOnlineDERsAndSubtractsEV(t *testing.T) {
+func TestSampleRejectsMissingDERs(t *testing.T) {
 	tel := telemetry.NewStore()
-	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
+	tel.Update("site", telemetry.DerMeter, 4000, nil, nil)
 	tel.RecordDriverSuccess("site")
-
-	tel.Update("pv-offline", telemetry.DerPV, -700, nil, nil)
-	tel.DriverHealthMut("pv-offline").SetOffline()
-	tel.Update("bat-offline", telemetry.DerBattery, -200, nil, nil)
-	tel.DriverHealthMut("bat-offline").SetOffline()
-
-	tel.Update("charger", telemetry.DerEV, 300, nil, nil)
-	tel.RecordDriverSuccess("charger")
-
-	s := NewService(nil, tel, "site", 4000, 17250)
-	now := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
-	s.sampleAt(now)
-
-	m := s.Model()
-	if m.Samples != 1 {
-		t.Fatalf("samples = %d, want 1", m.Samples)
+	tel.Update("battery", telemetry.DerBattery, 3000, nil, nil)
+	tel.DriverHealthMut("battery").SetOffline()
+	s := NewService(nil, tel, "site", 4000, 11000)
+	s.sampleAt(time.Now())
+	if s.Model().Samples != 0 {
+		t.Fatal("missing battery trained 4kW as house load")
 	}
-	got := m.Bucket[HourOfWeek(now)].Mean
-	if math.Abs(got-700) > 1 {
-		t.Fatalf("bucket mean = %.1f, want house load 700 W", got)
+	tel.RecordDriverSuccess("battery")
+	tel.SetDriverCommandFault("battery", true, "refused")
+	s.sampleAt(time.Now())
+	m := s.Model()
+	if m.Samples != 1 || m.Bucket[m.hourOfWeek(time.Now())].Mean != 1000 {
+		t.Fatalf("fresh command fault dropped real battery flow: %+v", m)
 	}
 }

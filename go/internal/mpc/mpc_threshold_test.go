@@ -18,7 +18,7 @@ func arbitrageCycleSlots() []Slot {
 
 func arbitrageCycleParams() Params {
 	p := baseParams(ModeArbitrage)
-	p.InitialSoCPct = 10 // at the floor: discharge must be funded by a charge
+	p.InitialSoC = 0.1 // at the floor: discharge must be funded by a charge
 	p.TerminalSoCPrice = 0
 	return p
 }
@@ -70,7 +70,7 @@ func TestThresholdDoesNotSuppressCoverLoadDischarge(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 250, SpotOre: 200, LoadW: 2000, Confidence: 1},
 	}
 	p := baseParams(ModePassiveArbitrage)
-	p.InitialSoCPct = 80
+	p.InitialSoC = 0.8
 	p.MinArbitrageSpreadOreKwh = 25
 	plan := Optimize(slots, p)
 	if plan.Actions[0].BatteryW >= -100 {
@@ -111,7 +111,7 @@ func TestThresholdGatedOutOfSelfConsumption(t *testing.T) {
 		{StartMs: 0, LenMin: 60, PriceOre: 250, SpotOre: 200, LoadW: 2000, Confidence: 1},
 	}
 	base := baseParams(ModeSelfConsumption)
-	base.InitialSoCPct = 80
+	base.InitialSoC = 0.8
 	plan0 := Optimize(slots, base)
 	pS := base
 	pS.MinArbitrageSpreadOreKwh = 25

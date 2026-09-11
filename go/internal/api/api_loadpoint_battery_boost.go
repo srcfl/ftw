@@ -6,12 +6,15 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 type batteryBoostRequest struct {
 	DurationS        int64   `json:"duration_s,omitempty"`
 	ExpiresAtMs      int64   `json:"expires_at_ms,omitempty"`
+	MinBatterySoC    float64 `json:"min_battery_soc"`
 	MinBatterySoCPct float64 `json:"min_battery_soc_pct"`
+	EVTargetSoC      float64 `json:"ev_target_soc,omitempty"`
 	EVTargetSoCPct   float64 `json:"ev_target_soc_pct,omitempty"`
 	DepartureAtMs    int64   `json:"departure_at_ms,omitempty"`
 }
@@ -60,10 +63,10 @@ func (s *Server) handleLoadpointBatteryBoostEnable(w http.ResponseWriter, r *htt
 		expires = now.Add(time.Duration(req.DurationS) * time.Second)
 	}
 	lease := loadpoint.BatteryBoostLease{
-		StartedAt:        now,
-		ExpiresAt:        expires,
-		MinBatterySoCPct: req.MinBatterySoCPct,
-		EVTargetSoCPct:   req.EVTargetSoCPct,
+		StartedAt:     now,
+		ExpiresAt:     expires,
+		MinBatterySoC: units.DecodeJSONFraction(req.MinBatterySoC, req.MinBatterySoCPct),
+		EVTargetSoC:   units.DecodeJSONFraction(req.EVTargetSoC, req.EVTargetSoCPct),
 	}
 	if req.DepartureAtMs > 0 {
 		lease.DepartureAt = time.UnixMilli(req.DepartureAtMs)

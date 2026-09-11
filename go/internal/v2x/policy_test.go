@@ -52,7 +52,7 @@ func TestEvaluateReserveBlocksDischargeButAllowsCharge(t *testing.T) {
 
 func TestEvaluateDepartureTargetBlocksDischargeWhenRechargeWindowIsTight(t *testing.T) {
 	p := basePolicy()
-	p.DepartureTargetSoCPct = 80
+	p.DepartureTargetSoC = 0.80
 	p.DepartureTime = "08:00"
 	p.VehicleCapacityWh = 100_000
 	p.MaxChargeW = 7_000
@@ -76,7 +76,7 @@ func TestEvaluateDepartureFloorIgnoresGridRechargeWhenGridChargingForbidden(t *t
 	p := basePolicy()
 	p.ExportAllowed = true
 	p.GridChargingAllowed = false
-	p.DepartureTargetSoCPct = 80
+	p.DepartureTargetSoC = 0.80
 	p.DepartureTime = "08:00"
 	p.VehicleCapacityWh = 100_000
 	p.MaxChargeW = 7_000
@@ -127,7 +127,7 @@ func TestEvaluateExportAndGridChargingLimitsUseCurrentGridPower(t *testing.T) {
 func basePolicy() *config.V2XPolicy {
 	return &config.V2XPolicy{
 		Enabled:             true,
-		MinReserveSoCPct:    20,
+		MinReserveSoC:       0.20,
 		MaxChargeW:          3500,
 		MaxDischargeW:       3200,
 		ExportAllowed:       true,

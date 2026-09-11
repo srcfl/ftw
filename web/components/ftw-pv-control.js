@@ -343,13 +343,18 @@ class FtwPvControl extends FtwElement {
     this._selectMode(this._formState.mode);
     root.querySelector("[data-install]").disabled = false;
 
-    const opts = ['<option value="">All curtail-capable drivers</option>'];
+    sel.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All curtail-capable drivers";
+    sel.appendChild(all);
     for (const e of this._capableDrivers) {
-      const id = e.id || e.ID;
-      const name = e.name || e.Name || id;
-      opts.push(`<option value="${id}">${name}</option>`);
+      const opt = document.createElement("option");
+      const id = e.id || e.ID || "";
+      opt.value = String(id);
+      opt.textContent = String(e.name || e.Name || id);
+      sel.appendChild(opt);
     }
-    sel.innerHTML = opts.join("");
     if (this._formState.driver) sel.value = this._formState.driver;
   }
 

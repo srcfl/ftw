@@ -1,9 +1,5 @@
-// Package state is SQLite-backed persistent storage for config overrides,
-// event log, history snapshots, and battery models.
-//
-// History uses one table per tier (hot/warm/cold) like the Rust version, but
-// the aggregation from hot → warm → cold is pure SQL instead of custom
-// bucketing code. See Prune() for the aggregation queries.
+// Package state stores configuration, models and cache in SQLite, and all
+// time-series history and energy accounting in embedded DuckDB.
 package state
 
 import (
@@ -14,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +23,7 @@ const (
 	// SchemaVersion identifies the on-disk state format for update rollback.
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
-	SchemaVersion = 1
+	SchemaVersion = 3
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -39,13 +34,21 @@ const (
 	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
-// Store is the persistent state DB. It wraps two SQLite files:
-//   - db:    precious state.db (models, history, devices, config, telemetry)
-//   - cache: disposable cache.db (prices, forecasts) — re-fetchable, so it can
-//     be quarantined and rebuilt on corruption without losing anything.
+// Store owns one DuckDB history database and two SQLite databases:
+//   - history: primary samples, site history and energy ledger
+//   - db: state.db configuration, devices and learned state
+//   - cache: cache.db prices and forecasts, which can be rebuilt
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
+	historyConnector *historyConnector
+	history          *sql.DB
+	historyPath      string
+	historyImportMu  sync.Mutex
+	historyWriteMu   sync.Mutex
+	historyWriter    *historyWriter
+	historyMigration *historyMigration
+
 	db    *sql.DB
 	cache *sql.DB
 	ts    *internCache
@@ -69,6 +72,8 @@ type Store struct {
 	corrupt      bool
 	verifyCancel context.CancelFunc
 	verifyWG     sync.WaitGroup
+
+	seriesHourWG sync.WaitGroup
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -76,6 +81,65 @@ type Store struct {
 // then runs all migrations. The connection pragmas (WAL, synchronous(NORMAL),
 // foreign_keys, busy_timeout) and a small pool live in openRaw — see heal.go.
 func Open(path string) (*Store, error) {
+	return openStore(path, "", false, nil)
+}
+
+// OpenWithLegacyHistory is the synchronous entry point for offline tools.
+// Core uses OpenWithBackgroundHistory so raw history does not block startup.
+func OpenWithLegacyHistory(path, coldDir string) (*Store, error) {
+	s, err := openStore(path, coldDir, true, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.retireLegacyHistorySources(); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.ensureSeriesHours(context.Background()); err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenWithBackgroundHistory seeds the catalog and energy accounting before
+// starting telemetry. Frozen raw samples and Parquet then import in bounded
+// transactions while the same primary database serves live readers and writers.
+// A later boot whose DuckDB import already verified every source does not
+// start an import or report import progress.
+func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigrationStatus)) (*Store, error) {
+	m := newHistoryMigration(onProgress)
+	s, err := openStore(path, coldDir, false, m)
+	if err != nil {
+		m.cancel()
+		return nil, err
+	}
+	idle, err := s.legacyHistoryIdle(coldDir)
+	if err != nil {
+		s.historyMigration = nil
+		m.cancel()
+		s.Close()
+		return nil, err
+	}
+	if idle {
+		s.historyMigration = nil
+		m.cancel()
+		if onProgress != nil {
+			onProgress(s.HistoryMigrationStatus())
+		}
+		if err := s.retireLegacyHistorySources(); err != nil {
+			s.Close()
+			return nil, err
+		}
+		s.CompactIfBloated()
+		s.startSeriesHourBackfill()
+		return s, nil
+	}
+	go s.runHistoryMigration(coldDir)
+	return s, nil
+}
+
+func openStore(path, coldDir string, importLegacy bool, migration *historyMigration) (*Store, error) {
 	nowMs := time.Now().UnixMilli()
 	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
 
@@ -102,7 +166,7 @@ func Open(path string) (*Store, error) {
 	slog.Info("state: integrity gate complete", "elapsed", time.Since(tGate).Round(time.Millisecond))
 
 	s := &Store{
-		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath,
+		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath, historyMigration: migration,
 	}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
@@ -133,6 +197,47 @@ func Open(path string) (*Store, error) {
 	// persists across restarts and crashes — it does NOT depend on a clean Close.
 	// Only VerifyInBackground finding corruption removes it, which forces the next
 	// boot to run the full check + heal. This is what makes restarts reliably fast.
+	if err := s.openHistory(); err != nil {
+		db.Close()
+		cache.Close()
+		return nil, err
+	}
+	if importLegacy {
+		if err := s.ImportLegacyParquet(context.Background(), coldDir); err != nil {
+			if s.history != nil {
+				s.history.Close()
+			}
+			db.Close()
+			cache.Close()
+			return nil, err
+		}
+	}
+	if migration != nil {
+		idle, err := s.legacyHistoryIdle(coldDir)
+		if err != nil {
+			s.history.Close()
+			db.Close()
+			cache.Close()
+			return nil, err
+		}
+		if !idle {
+			// Remember all source paths before live work starts. A file that goes
+			// missing before its first chunk must not disappear from coverage.
+			if err := s.bindLegacyParquetSources(coldDir); err != nil {
+				s.history.Close()
+				db.Close()
+				cache.Close()
+				return nil, err
+			}
+			if _, err := s.history.Exec(`INSERT INTO history_migrations(name) VALUES ('legacy-import-pending') ON CONFLICT DO NOTHING`); err != nil {
+				s.history.Close()
+				db.Close()
+				cache.Close()
+				return nil, err
+			}
+		}
+	}
+	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
 	return s, nil
 }
@@ -146,8 +251,7 @@ func OpenBackupSource(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", ReadOnlyDatabaseURI(abs))
 	if err != nil {
 		return nil, err
 	}
@@ -156,10 +260,41 @@ func OpenBackupSource(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db, mainDBPath: abs, historyPath: historyDatabasePath(abs)}
+	// Offline helpers must export the primary database, never frozen legacy rows.
+	var configTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='config'`).Scan(&configTable); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if configTable != 0 {
+		active, err := s.historyConfig("history_duckdb_generation")
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if active != "" {
+			if _, err := os.Stat(s.historyPath); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("backup primary history: %w", err)
+			}
+			s.history, err = sql.Open("duckdb", s.historyPath+"?access_mode=read_only&threads=1&memory_limit=128MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
+			if err != nil {
+				db.Close()
+				return nil, err
+			}
+			var generation string
+			err = s.history.QueryRow(`SELECT name FROM history_migrations WHERE name=?`, "generation:"+active).Scan(&generation)
+			if err != nil {
+				s.Close()
+				return nil, fmt.Errorf("open primary history for backup; stop Core first: %w", err)
+			}
+		}
+	}
+	return s, nil
 }
 
-// Close releases both DB files. Safe to call multiple times. The verified-good
+// Close drains accepted history ticks and releases the databases. Safe to call multiple times. The verified-good
 // marker is NOT managed here — it is armed by Open and removed only by a
 // background verify that finds corruption, so fast restarts never depend on this
 // running cleanly (a SIGKILLed shutdown still leaves a fast next boot).
@@ -178,10 +313,21 @@ func (s *Store) Close() error {
 		cancel()
 	}
 	s.verifyWG.Wait()
+	if s.historyMigration != nil {
+		s.historyMigration.cancel()
+		<-s.historyMigration.done
+	}
+	s.seriesHourWG.Wait()
 
 	var err error
+	if s.historyWriter != nil {
+		err = s.historyWriter.close()
+	}
+	if s.history != nil {
+		err = errors.Join(err, s.history.Close())
+	}
 	if s.cache != nil {
-		err = s.cache.Close()
+		err = errors.Join(err, s.cache.Close())
 	}
 	if s.db != nil {
 		if e := s.db.Close(); e != nil {
@@ -430,6 +576,27 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
+	return s.backupToCompressed(dstPath, report, nil)
+}
+
+// BackupWithConfiguration returns settings from the same SQLite snapshot as
+// the archive, so its YAML export remains correct even for an older Core.
+func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	var configuration Configuration
+	var found bool
+	err := s.backupToCompressed(dstPath, report, func(rawPath string) error {
+		var err error
+		configuration, err = ReadConfiguration(rawPath)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		found = err == nil
+		return err
+	})
+	return configuration, found, err
+}
+
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -448,6 +615,15 @@ func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(Backu
 		return fmt.Errorf("backup to %s: %w", rawPath, err)
 	}
 
+	if err := s.exportHistoryToSQLite(rawPath); err != nil {
+		return fmt.Errorf("backup history: %w", err)
+	}
+
+	if capture != nil {
+		if err := capture(rawPath); err != nil {
+			return fmt.Errorf("backup settings: %w", err)
+		}
+	}
 	in, err := os.Open(rawPath)
 	if err != nil {
 		return fmt.Errorf("open backup temp: %w", err)
@@ -681,52 +857,14 @@ func (s *Store) migrate() error {
 			name TEXT PRIMARY KEY NOT NULL,
 			json TEXT NOT NULL
 		)`,
-		// History tiers — hot/warm/cold, all keyed by ms timestamp
-		`CREATE TABLE IF NOT EXISTS history_hot (
-			ts_ms INTEGER PRIMARY KEY NOT NULL,
-			grid_w REAL, pv_w REAL, bat_w REAL, load_w REAL, bat_soc REAL,
-			json TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS history_warm (
-			ts_ms INTEGER PRIMARY KEY NOT NULL,
-			grid_w REAL, pv_w REAL, bat_w REAL, load_w REAL, bat_soc REAL,
-			json TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS history_cold (
-			ts_ms INTEGER PRIMARY KEY NOT NULL,
-			grid_w REAL, pv_w REAL, bat_w REAL, load_w REAL, bat_soc REAL,
-			json TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_hot_ts ON history_hot(ts_ms)`,
-		`CREATE INDEX IF NOT EXISTS idx_warm_ts ON history_warm(ts_ms)`,
-		`CREATE INDEX IF NOT EXISTS idx_cold_ts ON history_cold(ts_ms)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms DESC)`,
 
 		// NB: the `prices` and `forecasts` tables live in the disposable
 		// cache.db, not here — see cacheStmts below.
 
-		// ---- Long-format time-series ("recent" tier, last 14 days) ----
-		// Drivers + metrics are interned to integer ids to keep rows small.
-		// Composite PK is (driver_id, metric_id, ts) WITHOUT ROWID so storage
-		// is clustered by driver+metric — typical access pattern is "give me
-		// metric X for driver Y over time range Z".
-		`CREATE TABLE IF NOT EXISTS ts_drivers (
-			id INTEGER PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE
-		)`,
-		`CREATE TABLE IF NOT EXISTS ts_metrics (
-			id INTEGER PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
-			unit TEXT
-		)`,
-		`CREATE TABLE IF NOT EXISTS ts_samples (
-			driver_id INTEGER NOT NULL,
-			metric_id INTEGER NOT NULL,
-			ts_ms     INTEGER NOT NULL,
-			value     REAL NOT NULL,
-			PRIMARY KEY (driver_id, metric_id, ts_ms)
-		) WITHOUT ROWID, STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_ts_samples_ts ON ts_samples(ts_ms)`,
+		// History, samples and the energy ledger live in DuckDB after the
+		// verified import. sqliteLegacyHistoryStmts keeps the SQLite copies
+		// only until that import finishes.
 
 		// ---- Devices: hardware-stable identity for each driver ----
 		// device_id resolution priority:
@@ -767,23 +905,19 @@ func (s *Store) migrate() error {
 			json           TEXT    NOT NULL
 		) STRICT`,
 
-		// CalDAV objects + collections for the native in-process CalDAV server
-		// (#498). One row per calendar object (.ics),
-		// keyed by its full path; `collection` is the parent collection path so
-		// listing a calendar is an indexed scan. `data` is the raw iCalendar.
-		`CREATE TABLE IF NOT EXISTS caldav_calendars (
-			path        TEXT PRIMARY KEY NOT NULL,
-			name        TEXT NOT NULL DEFAULT '',
-			description TEXT NOT NULL DEFAULT ''
+		// Ask why conversations. One row per thread; the turns are JSON
+		// because a thread is read and written whole and is never queried
+		// by its contents. Capped at AssistantThreadCap rows on write —
+		// see assistant_threads.go for why the box does not keep them all.
+		`CREATE TABLE IF NOT EXISTS assistant_threads (
+			id         TEXT PRIMARY KEY NOT NULL,
+			started_ms INTEGER NOT NULL,
+			updated_ms INTEGER NOT NULL,
+			title      TEXT NOT NULL DEFAULT '',
+			model      TEXT NOT NULL DEFAULT '',
+			turns_json TEXT NOT NULL
 		) STRICT`,
-		`CREATE TABLE IF NOT EXISTS caldav_objects (
-			path        TEXT PRIMARY KEY NOT NULL,
-			collection  TEXT NOT NULL,
-			etag        TEXT NOT NULL,
-			data        TEXT NOT NULL,
-			modified_ms INTEGER NOT NULL
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_caldav_objects_collection ON caldav_objects(collection)`,
+		`CREATE INDEX IF NOT EXISTS idx_assistant_threads_updated ON assistant_threads(updated_ms)`,
 
 		// Nova federation: one row per local DER we've provisioned in Nova.
 		// Keyed on (device_id, der_type) so a hybrid inverter with multiple
@@ -846,7 +980,8 @@ func (s *Store) migrate() error {
 			previous_installed_path TEXT NOT NULL DEFAULT '',
 			installed_at_ms INTEGER NOT NULL,
 			active INTEGER NOT NULL DEFAULT 0,
-			ftw_signed INTEGER NOT NULL DEFAULT 0
+			ftw_signed INTEGER NOT NULL DEFAULT 0,
+			repository_format TEXT NOT NULL DEFAULT ''
 		) STRICT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_artifact
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
@@ -900,87 +1035,20 @@ func (s *Store) migrate() error {
 		// a migration that deletes rows is the one kind that cannot be undone
 		// if this turns out to have been wrong. Do not reuse these names.
 
-		// Persistent daily-energy aggregate cache.
-		//
-		// 2026-05-25 measurement: /api/energy/daily?days=30 took ~25 s
-		// on the live Pi cold-start because the handler did one
-		// DailyEnergy SQL call per day and the in-memory cache was
-		// empty after every restart. Each call walked history_hot +
-		// warm + cold for that day's window — slow on a 1 GB state.db.
-		//
-		// This table stores the integration result so closed days never
-		// have to be re-computed. The handler writes a row on first
-		// compute and reads it back forever — days are immutable once
-		// past the local-midnight rollover, so cache invalidation is
-		// trivially "always valid".
-		//
-		// Today's row is never persisted (the day is in progress); the
-		// handler still computes it on every request. Tomorrow's
-		// midnight rollover the previous day's final value lands here
-		// once, lazily, on the next /api/energy/daily request.
-		`CREATE TABLE IF NOT EXISTS energy_daily (
-			day               TEXT PRIMARY KEY,
-			import_wh         REAL NOT NULL,
-			export_wh         REAL NOT NULL,
-			pv_wh             REAL NOT NULL,
-			bat_charged_wh    REAL NOT NULL,
-			bat_discharged_wh REAL NOT NULL,
-			load_wh           REAL NOT NULL,
-			computed_at_ms    INTEGER NOT NULL
-		) STRICT`,
-
-		// ---- Versioned energy ledger ----
-		// Energy is stored as non-negative directional quantities. Asset IDs
-		// are derived from stable hardware identity (or the reserved site
-		// identity for the inferred household consumer), never config names.
-		`CREATE TABLE IF NOT EXISTS energy_ledger_meta (
-			key   TEXT PRIMARY KEY NOT NULL,
-			value TEXT NOT NULL
-		) STRICT`,
-		`INSERT OR IGNORE INTO energy_ledger_meta(key, value)
-			VALUES ('schema_version', '1')`,
-		`CREATE TABLE IF NOT EXISTS energy_assets (
-			asset_id       TEXT PRIMARY KEY NOT NULL,
-			device_id      TEXT NOT NULL DEFAULT '',
-			kind           TEXT NOT NULL,
-			label          TEXT NOT NULL DEFAULT '',
-			read_only      INTEGER NOT NULL DEFAULT 0 CHECK(read_only IN (0, 1)),
-			first_seen_ms  INTEGER NOT NULL,
-			last_seen_ms   INTEGER NOT NULL
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_energy_assets_device
-			ON energy_assets(device_id, kind)`,
-		`CREATE TABLE IF NOT EXISTS energy_ledger_entries (
-			schema_version INTEGER NOT NULL,
-			asset_id       TEXT NOT NULL,
-			flow           TEXT NOT NULL,
-			bucket_start_ms INTEGER NOT NULL,
-			bucket_len_ms   INTEGER NOT NULL CHECK(bucket_len_ms > 0),
-			energy_wh      REAL NOT NULL CHECK(energy_wh >= 0),
-			source         TEXT NOT NULL,
-			quality        TEXT NOT NULL,
-			provenance     TEXT NOT NULL,
-			sample_count   INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
-			observed_at_ms INTEGER NOT NULL,
-			PRIMARY KEY (
-				schema_version, asset_id, flow, bucket_start_ms,
-				bucket_len_ms, source, quality, provenance
-			)
-		) WITHOUT ROWID, STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_energy_ledger_time
-			ON energy_ledger_entries(bucket_start_ms, asset_id, flow)`,
-		`CREATE TABLE IF NOT EXISTS energy_ledger_cursors (
-			asset_id   TEXT NOT NULL,
-			flow       TEXT NOT NULL,
-			cursor_kind TEXT NOT NULL,
-			value      REAL NOT NULL,
-			ts_ms      INTEGER NOT NULL,
-			PRIMARY KEY(asset_id, flow, cursor_kind)
-		) WITHOUT ROWID, STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
+		}
+	}
+	if !s.legacyHistorySourcesRetired() {
+		if err := ensureSqliteLegacyHistory(func(stmt string) error {
+			if _, err := s.db.Exec(stmt); err != nil {
+				return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 	// Columns added to tables that already exist on shipped boxes. CREATE TABLE
@@ -993,9 +1061,11 @@ func (s *Store) migrate() error {
 		"INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	if err := s.ensureEnergyLedgerVersion(); err != nil {
+	if err := s.addColumn("driver_repo_installs", "repository_format",
+		"TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
 	// separate file so its corruption (or a deliberate flush) never risks the
 	// precious state.db — and recovery is just "rebuild empty + re-fetch".
@@ -1293,7 +1363,14 @@ type HistoryPoint struct {
 
 // RecordHistory inserts a new hot-tier entry.
 func (s *Store) RecordHistory(p HistoryPoint) error {
-	_, err := s.db.Exec(
+	var normalizeErr error
+	p, normalizeErr = normalizeHistoryPoint(p)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	_, err := s.history.Exec(
 		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
@@ -1301,32 +1378,42 @@ func (s *Store) RecordHistory(p HistoryPoint) error {
 	return err
 }
 
-// BulkRecordHistory writes many HistoryPoints in a single transaction.
-// Used by backfill / migration tooling where per-row implicit-commit
-// overhead dominates (SQLite on slow filesystems).
+// BulkRecordHistory writes bounded transactions of at most 2048 points.
+// A retry is safe: the last history point for each timestamp wins.
 func (s *Store) BulkRecordHistory(pts []HistoryPoint) error {
-	if len(pts) == 0 {
-		return nil
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	stmt, err := tx.Prepare(
-		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-	)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
 	for _, p := range pts {
-		if _, err := stmt.Exec(p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON); err != nil {
+		if _, err := normalizeHistoryPoint(p); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	for len(pts) > 0 {
+		n := min(len(pts), 2048)
+		if err := s.bulkHistoryChunk(pts[:n]); err != nil {
+			return err
+		}
+		pts = pts[n:]
+	}
+	return nil
+}
+
+func (s *Store) bulkHistoryChunk(pts []HistoryPoint) error {
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	ctx := context.Background()
+	conn, err := s.history.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, `BEGIN`); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, `ROLLBACK`)
+	if err := appendHistoryRows(conn, pts); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `COMMIT`)
+	return err
 }
 
 // LoadHistory returns points from ALL tiers in [sinceMs, untilMs], merged + sorted.
@@ -1337,6 +1424,15 @@ func (s *Store) BulkRecordHistory(pts []HistoryPoint) error {
 // Downsampling used to fetch every row into Go and keep every Nth — a month
 // view materialized >1M rows per request once the hot tier grew.
 func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
+	return s.LoadHistoryContext(context.Background(), sinceMs, untilMs, maxPoints)
+}
+
+func (s *Store) LoadHistoryContext(ctx context.Context, sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Union across all three tiers. Dedupe on ts_ms preferring hot over warm over cold.
 	// COALESCE to 0 so NULL columns (from partial aggregations) scan cleanly.
 	const tierUnion = `
@@ -1352,8 +1448,7 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		),
 		deduped AS (
 			SELECT * FROM all_rows
-			GROUP BY ts_ms
-			HAVING tier = MIN(tier)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier) = 1
 		)
 	`
 	var (
@@ -1361,23 +1456,21 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		err  error
 	)
 	if maxPoints > 0 && untilMs >= sinceMs {
-		// Ceil so the bucket count never exceeds maxPoints. MAX(ts_ms) is an
-		// aggregate, so SQLite's bare-column rule makes the un-aggregated
-		// json column come from that same newest row.
+		// Ceil the bucket width; arg_max selects JSON from its newest row.
 		bucketMs := (untilMs - sinceMs + int64(maxPoints)) / int64(maxPoints)
 		if bucketMs < 1 {
 			bucketMs = 1
 		}
-		rows, err = s.db.Query(tierUnion+`
+		rows, err = s.history.QueryContext(ctx, tierUnion+`
 			SELECT MAX(ts_ms),
 			       AVG(COALESCE(grid_w, 0)), AVG(COALESCE(pv_w, 0)), AVG(COALESCE(bat_w, 0)),
-			       AVG(COALESCE(load_w, 0)), AVG(COALESCE(bat_soc, 0)), json
+			       AVG(COALESCE(load_w, 0)), AVG(COALESCE(bat_soc, 0)), arg_max(json, ts_ms)
 			FROM deduped
-			GROUP BY (ts_ms - ?) / ?
+			GROUP BY (ts_ms - ?) // ?
 			ORDER BY 1 ASC
 		`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
 	} else {
-		rows, err = s.db.Query(tierUnion+`
+		rows, err = s.history.QueryContext(ctx, tierUnion+`
 			SELECT ts_ms,
 			       COALESCE(grid_w, 0), COALESCE(pv_w, 0), COALESCE(bat_w, 0),
 			       COALESCE(load_w, 0), COALESCE(bat_soc, 0), json
@@ -1458,7 +1551,7 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 		WHERE prev_ts IS NOT NULL
 	`
 	var d DayEnergy
-	err := s.db.QueryRow(q,
+	err := s.history.QueryRow(q,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
@@ -1485,7 +1578,7 @@ func (s *Store) LoadDailyEnergy(day string) (DayEnergy, bool, error) {
 		FROM energy_daily WHERE day = ?
 	`
 	var d DayEnergy
-	err := s.db.QueryRow(q, day).Scan(
+	err := s.history.QueryRow(q, day).Scan(
 		&d.ImportWh, &d.ExportWh, &d.PVWh,
 		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
 	)
@@ -1503,6 +1596,8 @@ func (s *Store) LoadDailyEnergy(day string) (DayEnergy, bool, error) {
 // persisted via this method (the day is still accumulating); callers
 // should gate on "is closed day" before saving.
 func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
 	const q = `
 		INSERT INTO energy_daily(
 			day, import_wh, export_wh, pv_wh, bat_charged_wh, bat_discharged_wh, load_wh, computed_at_ms
@@ -1516,7 +1611,7 @@ func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
 			load_wh           = excluded.load_wh,
 			computed_at_ms    = excluded.computed_at_ms
 	`
-	_, err := s.db.Exec(q, day,
+	_, err := s.history.Exec(q, day,
 		de.ImportWh, de.ExportWh, de.PVWh,
 		de.BatChargedWh, de.BatDischargedWh, de.LoadWh,
 		time.Now().UnixMilli(),
@@ -1530,12 +1625,12 @@ func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
 func (s *Store) CountHistoryWithoutMarker(marker string) (int, error) {
 	const q = `
 		SELECT
-			(SELECT COUNT(*) FROM history_hot  WHERE json IS NOT ?) +
-			(SELECT COUNT(*) FROM history_warm WHERE json IS NOT ?) +
-			(SELECT COUNT(*) FROM history_cold WHERE json IS NOT ?)
+			(SELECT COUNT(*) FROM history_hot  WHERE json IS DISTINCT FROM ?) +
+			(SELECT COUNT(*) FROM history_warm WHERE json IS DISTINCT FROM ?) +
+			(SELECT COUNT(*) FROM history_cold WHERE json IS DISTINCT FROM ?)
 	`
 	var n int
-	if err := s.db.QueryRow(q, marker, marker, marker).Scan(&n); err != nil {
+	if err := s.history.QueryRow(q, marker, marker, marker).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -1543,7 +1638,7 @@ func (s *Store) CountHistoryWithoutMarker(marker string) (int, error) {
 
 // HistoryCounts returns the number of rows in (hot, warm, cold) tiers.
 func (s *Store) HistoryCounts() (hot, warm, cold int, err error) {
-	row := s.db.QueryRow(`SELECT
+	row := s.history.QueryRow(`SELECT
 		(SELECT COUNT(*) FROM history_hot),
 		(SELECT COUNT(*) FROM history_warm),
 		(SELECT COUNT(*) FROM history_cold)`)
@@ -1610,7 +1705,7 @@ func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucket
 			return aged, chunks, err
 		}
 		var minTs sql.NullInt64
-		if err := s.db.QueryRowContext(ctx,
+		if err := s.history.QueryRowContext(ctx,
 			`SELECT MIN(ts_ms) FROM `+src).Scan(&minTs); err != nil {
 			return aged, chunks, err
 		}
@@ -1659,7 +1754,9 @@ var pruneChunkPause = 250 * time.Millisecond
 // pruneChunk aggregates+deletes src rows in [fromMs, toMs) in one short
 // transaction.
 func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, bucketMs int64) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -1670,13 +1767,13 @@ func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, b
 	q := fmt.Sprintf(`
 		INSERT OR REPLACE INTO %s (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		SELECT b_ts, a_grid, a_pv, a_bat, a_load, a_soc, json FROM (
-			SELECT (ts_ms / %d) * %d + %d AS b_ts,
+			SELECT (ts_ms // %d) * %d + %d AS b_ts,
 			       AVG(grid_w) AS a_grid, AVG(pv_w) AS a_pv, AVG(bat_w) AS a_bat,
 			       AVG(load_w) AS a_load, AVG(bat_soc) AS a_soc,
-			       json, MAX(ts_ms) AS newest
+			       arg_max(json, ts_ms) AS json, MAX(ts_ms) AS newest
 			FROM %s
 			WHERE ts_ms >= ? AND ts_ms < ?
-			GROUP BY ts_ms / %d
+			GROUP BY ts_ms // %d
 		)`, dst, bucketMs, bucketMs, bucketMs/2, src, bucketMs)
 	if _, err := tx.ExecContext(ctx, q, fromMs, toMs); err != nil {
 		return 0, fmt.Errorf("aggregate: %w", err)

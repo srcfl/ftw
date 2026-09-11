@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,40 +148,6 @@ func TestRunWithStateHeartbeatRefreshesLongPhase(t *testing.T) {
 	}
 }
 
-func TestOptimizerUpdateTargetsOnlyOptimizerService(t *testing.T) {
-	s, runner := newTestServer(t)
-	s.skipPull = true
-	writeCompose(t, s.composeFile, `services:
-  ftw:
-    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
-    volumes: ["./data:/app/data"]
-  ftw-optimizer:
-    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
-`)
-	started := time.Date(2026, 7, 18, 9, 30, 0, 123000000, time.UTC)
-	body := fmt.Sprintf(`{"action":"update","component":"optimizer","target":"v1.2.3","started_at":%q}`, started.Format(time.RFC3339Nano))
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
-	}
-	state := waitForState(t, s, "done")
-	if state.Component != "optimizer" {
-		t.Fatalf("component = %q", state.Component)
-	}
-	if !state.StartedAt.Equal(started) {
-		t.Fatalf("started_at = %s, want preserved audit time %s", state.StartedAt, started)
-	}
-	calls, envs := runner.snapshot(), runner.envSnapshot()
-	if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "up -d ftw-optimizer") {
-		t.Fatalf("unexpected calls: %v", calls)
-	}
-	if len(envs) != 1 || len(envs[0]) != 1 || envs[0][0] != "FTW_OPTIMIZER_IMAGE_TAG=v1.2.3" {
-		t.Fatalf("unexpected env: %v", envs)
-	}
-}
-
 func TestComponentRollbackHistorySurvivesOtherComponentUpdates(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.writeState(State{
@@ -243,55 +208,7 @@ func TestHandleUpdate_HappyPath(t *testing.T) {
 	}
 }
 
-func TestHandleUpdate_BlocksCoreUpdateWithoutOptimizer(t *testing.T) {
-	s, runner := newTestServer(t)
-	writeCompose(t, s.composeFile, `services:
-  ftw:
-    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
-    volumes:
-      - ./data:/app/data
-`)
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
-	}
-	state := waitForState(t, s, "failed")
-	if !strings.Contains(state.Message, "core update blocked") ||
-		!strings.Contains(state.Message, optimizerServiceName) ||
-		!strings.Contains(state.Message, "migrate-legacy-compose.sh") {
-		t.Fatalf("missing migration guidance: %+v", state)
-	}
-	if calls := runner.snapshot(); len(calls) != 0 {
-		t.Fatalf("blocked update must not call Docker: %v", calls)
-	}
-}
-
-func TestHandleUpdate_BlocksCoreUpdateWhenOptimizerIsUnhealthy(t *testing.T) {
-	s, runner := newTestServer(t)
-	s.healthCheck = func(_ context.Context, service string) error {
-		if service == optimizerServiceName {
-			return errors.New("container status is unhealthy")
-		}
-		return nil
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	state := waitForState(t, s, "failed")
-	if !strings.Contains(state.Message, "must be running and healthy") ||
-		!strings.Contains(state.Message, "container status is unhealthy") {
-		t.Fatalf("optimizer health failure is unclear: %+v", state)
-	}
-	if calls := runner.snapshot(); len(calls) != 0 {
-		t.Fatalf("blocked update must not call Docker: %v", calls)
-	}
-}
-
-func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) {
+func TestHandleUpdate_WithoutOptimizerPreservesUserOverride(t *testing.T) {
 	s, _ := newTestServer(t)
 	writeCompose(t, s.composeFile, `services:
   ftw:
@@ -309,7 +226,7 @@ func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
-	waitForState(t, s, "failed")
+	waitForState(t, s, "done")
 	got, err := os.ReadFile(override)
 	if err != nil {
 		t.Fatal(err)
@@ -319,7 +236,7 @@ func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) 
 	}
 }
 
-func TestHandleUpdate_RestartForceRecreates(t *testing.T) {
+func TestHandleUpdate_RestartDoesNotRecreate(t *testing.T) {
 	s, runner := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
 	rr := httptest.NewRecorder()
@@ -328,9 +245,9 @@ func TestHandleUpdate_RestartForceRecreates(t *testing.T) {
 		t.Fatalf("status = %d", rr.Code)
 	}
 	waitForState(t, s, "done")
-	up := strings.Join(runner.snapshot()[1], " ")
-	if !strings.Contains(up, "--force-recreate") {
-		t.Errorf("restart path must force-recreate: %v", up)
+	calls := runner.snapshot()
+	if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", s.mainServiceName), " ") {
+		t.Fatalf("restart must only restart the existing container: %v", calls)
 	}
 }
 
@@ -473,7 +390,7 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
 	}
 }
 
-func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *testing.T) {
+func TestHandleUpdate_RestartPreservesHardcodedImage(t *testing.T) {
 	s, runner := newTestServer(t)
 	writeCompose(t, s.composeFile, `services:
   forty-two-watts:
@@ -494,8 +411,8 @@ func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *test
 	waitForState(t, s, "done")
 	for _, call := range runner.snapshot() {
 		joined := strings.Join(call, " ")
-		if !strings.Contains(joined, "ftw-compose-update-") {
-			t.Fatalf("legacy restart must use compatibility override: %v", call)
+		if strings.Contains(joined, "ftw-compose-update-") || !strings.Contains(joined, "restart --no-deps") {
+			t.Fatalf("legacy restart must keep its container without a migration override: %v", call)
 		}
 		if call[len(call)-1] != legacyMainServiceName {
 			t.Fatalf("legacy service identity must be preserved: %v", call)
@@ -696,32 +613,6 @@ func TestValidateComponentImagePinRequiresExactVariable(t *testing.T) {
 	}
 }
 
-func TestComponentRollbackPinsUnsupportedOptimizerImages(t *testing.T) {
-	for _, image := range []string{
-		"ghcr.io/srcfl/ftw-optimizer:latest",
-		"ghcr.io/srcfl/ftw-optimizer:${MY_TAG:-latest}",
-	} {
-		t.Run(image, func(t *testing.T) {
-			s, runner := newTestServer(t)
-			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}\n  ftw-optimizer:\n    image: "+image+"\n")
-			s.writeState(State{State: "done", Component: "optimizer", PreviousImageID: "sha256:optimizer-old"})
-
-			s.runComponentRollback("optimizer", time.Now())
-			state := s.readState()
-			if state.State != "done" || state.Action != "component_rollback" {
-				t.Fatalf("rollback state = %+v", state)
-			}
-			calls, envs := runner.snapshot(), runner.envSnapshot()
-			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "image tag sha256:optimizer-old "+canonicalOptimizerImage+":ftw-rollback-") {
-				t.Fatalf("rollback calls = %v", calls)
-			}
-			if len(envs) != 2 || len(envs[1]) != 1 || !strings.HasPrefix(envs[1][0], "FTW_OPTIMIZER_IMAGE_TAG=ftw-rollback-") {
-				t.Fatalf("rollback env = %v", envs)
-			}
-		})
-	}
-}
-
 func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
 	s, _ := newTestServer(t)
 	userOverride := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")
@@ -744,21 +635,88 @@ func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
 	}
 }
 
-// `restart` is the dev path — no target needed, no env override, falls
-// through to compose's :latest default.
-func TestHandleUpdate_RestartLeavesEnvUnset(t *testing.T) {
+func TestHandleUpdate_RestartKeepsEveryRunningImage(t *testing.T) {
+	for _, tc := range []struct{ name, image, target, action string }{
+		{"beta with stale env", "ghcr.io/srcfl/ftw:v2.14.0-beta.1", "", "restart"},
+		{"wrong caller version", "ghcr.io/srcfl/ftw:v2.14.0-beta.1", "v2.0.0", "restart"},
+		{"moving tag", "ghcr.io/srcfl/ftw:latest", "", "restart"},
+		{"local review", "ftw-ev-review:46d04a7a", "", "restart_existing"},
+		{"digest", "ghcr.io/srcfl/ftw@sha256:abc123", "", "restart_existing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, runner := newTestServer(t)
+			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: "+tc.image+"\n")
+			writeCompose(t, filepath.Join(filepath.Dir(s.composeFile), ".env"), "FTW_IMAGE_TAG=v2.0.0-beta.2\n")
+			s.imageID = func(context.Context, string) (string, error) {
+				t.Error("restart must not resolve an image")
+				return "", errors.New("inspect unavailable")
+			}
+			healthChecks := 0
+			s.healthCheck = func(_ context.Context, service string) error {
+				healthChecks++
+				if service != canonicalMainServiceName {
+					t.Errorf("health checked %s", service)
+				}
+				return nil
+			}
+			req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"`+tc.action+`","target":"`+tc.target+`"}`))
+			rr := httptest.NewRecorder()
+			s.handleUpdate(rr, req)
+			if rr.Code != http.StatusAccepted {
+				t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+			}
+			st := waitForState(t, s, "done")
+			if st.Action != "restart" || st.Target != "" || st.Step != st.TotalSteps {
+				t.Fatalf("restart state = %+v", st)
+			}
+			calls := runner.snapshot()
+			if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", canonicalMainServiceName), " ") {
+				t.Fatalf("restart selected or pulled a replacement image: %v", calls)
+			}
+			for _, env := range runner.envSnapshot() {
+				if len(env) != 0 {
+					t.Fatalf("restart image env = %v", env)
+				}
+			}
+			if healthChecks != 1 {
+				t.Fatalf("health checks = %d", healthChecks)
+			}
+			pin, _ := os.ReadFile(filepath.Join(filepath.Dir(s.composeFile), ".env"))
+			if string(pin) != "FTW_IMAGE_TAG=v2.0.0-beta.2\n" {
+				t.Fatalf("restart rewrote .env: %s", pin)
+			}
+		})
+	}
+}
+
+func TestHandleUpdate_RestartRejectsMovingTarget(t *testing.T) {
 	s, runner := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart","target":"latest"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
-	if rr.Code != 202 {
-		t.Fatalf("status = %d", rr.Code)
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400", rr.Code)
 	}
-	waitForState(t, s, "done")
-	for i, env := range runner.envSnapshot() {
-		if len(env) != 0 {
-			t.Errorf("restart call %d should have no extra env, got %v", i, env)
-		}
+	if len(runner.snapshot()) != 0 {
+		t.Fatal("rejected restart called Docker")
+	}
+}
+
+func TestRestartFailureDoesNotFallBackToRecreate(t *testing.T) {
+	for _, failed := range []string{"restart", "health"} {
+		t.Run(failed, func(t *testing.T) {
+			s, runner := newTestServer(t)
+			runner.fail = failed == "restart"
+			s.healthCheck = func(context.Context, string) error { return errors.New("health did not recover") }
+			s.runJob("restart", "v2.0.0")
+			st := s.readState()
+			if st.State != "failed" || !strings.Contains(st.Message, "restart failed") {
+				t.Fatalf("state = %+v", st)
+			}
+			if len(runner.snapshot()) != 1 {
+				t.Fatalf("failure must not pull/recreate: %v", runner.snapshot())
+			}
+		})
 	}
 }
 
@@ -782,9 +740,7 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	}
 	writeGzipFile(t, filepath.Join(snapDir, "state.db.gz"), []byte("target database"))
 	writeGzipFile(t, filepath.Join(safetyDir, "state.db.gz"), []byte("safety database"))
-	if err := os.WriteFile(filepath.Join(snapDir, "config.yaml"), []byte("fake"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRollbackConfig(t, filepath.Join(snapDir, "config.yaml"), "state.db")
 
 	body := `{"action":"rollback","snapshot":"` + snapID + `","files":["state.db.gz","config.yaml"],"safety_snapshot":"` + safetyID + `","safety_files":["state.db.gz"]}`
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
@@ -868,9 +824,7 @@ func TestHandleUpdate_RollbackHealthFailureRestoresSafetyBackup(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
-		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(id), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeRollbackConfig(t, filepath.Join(dir, "config.yaml"), "state.db")
 	}
 	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
@@ -914,6 +868,226 @@ func TestHandleUpdate_RollbackRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestHandleUpdate_RollbackRestoresConfiguredDatabasePath(t *testing.T) {
+	s, runner := newTestServer(t)
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	for _, id := range []string{"target", "safety"} {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
+		writeRollbackConfig(t, filepath.Join(dir, "config.yaml"), "site.db")
+	}
+
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+
+	calls := runner.snapshot()
+	if len(calls) != 5 {
+		t.Fatalf("want 5 docker calls, got %d: %v", len(calls), calls)
+	}
+	copied := strings.Join(calls[1], " ")
+	if !strings.HasPrefix(copied, "cp -a ") || !strings.Contains(copied, "ftw-container:/app/data/site.db") {
+		t.Fatalf("database restore must target configured path: %v", calls[1])
+	}
+	if strings.Contains(copied, "/app/data/state.db") {
+		t.Fatalf("database restore still used hardcoded state.db: %v", calls[1])
+	}
+	wal := strings.Join(calls[3], " ")
+	if !strings.Contains(wal, "/app/data/site.db-wal") || !strings.Contains(wal, "/app/data/site.db-shm") {
+		t.Fatalf("WAL delete must match configured database: %v", calls[3])
+	}
+	if strings.Contains(wal, "/app/data/state.db-wal") {
+		t.Fatalf("WAL delete still used hardcoded state.db: %v", calls[3])
+	}
+}
+
+func TestHandleUpdate_RollbackUsesLiveConfigDatabasePath(t *testing.T) {
+	s, runner := newTestServer(t)
+	liveConfig := filepath.Join(filepath.Dir(s.composeFile), "data", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(liveConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRollbackConfig(t, liveConfig, "live.db")
+	orig := s.runner
+	s.runner = func(ctx context.Context, env []string, args ...string) error {
+		if len(args) >= 4 && args[0] == "cp" && strings.HasSuffix(args[2], "/app/data/config.yaml") {
+			data, err := os.ReadFile(liveConfig)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(args[3], data, 0o600)
+		}
+		return orig(ctx, env, args...)
+	}
+
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	for _, id := range []string{"target", "safety"} {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
+	}
+
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz"],"safety_snapshot":"safety","safety_files":["state.db.gz"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+
+	var copied, wal string
+	for _, call := range runner.snapshot() {
+		joined := strings.Join(call, " ")
+		if strings.HasPrefix(joined, "cp -a ") && strings.Contains(joined, "ftw-container:/app/data/live.db") {
+			copied = joined
+		}
+		if strings.Contains(joined, "live.db-wal") {
+			wal = joined
+		}
+	}
+	if copied == "" {
+		t.Fatalf("state-only rollback must restore onto live config_database: %v", runner.snapshot())
+	}
+	if wal == "" {
+		t.Fatalf("state-only rollback must delete live.db WAL: %v", runner.snapshot())
+	}
+}
+
+func TestHandleUpdate_RollbackRejectsTruncatedGzip(t *testing.T) {
+	s, _ := newTestServer(t)
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	target := filepath.Join(root, "target")
+	safety := filepath.Join(root, "safety")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(safety, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gz := filepath.Join(target, "state.db.gz")
+	writeGzipFile(t, gz, []byte("target database"))
+	data, err := os.ReadFile(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 8 {
+		t.Fatal("gzip fixture too small to truncate")
+	}
+	if err := os.WriteFile(gz, data[:len(data)-8], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRollbackConfig(t, filepath.Join(target, "config.yaml"), "state.db")
+	writeGzipFile(t, filepath.Join(safety, "state.db.gz"), []byte("safety database"))
+	writeRollbackConfig(t, filepath.Join(safety, "config.yaml"), "state.db")
+
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	st := waitForState(t, s, "failed")
+	if !strings.Contains(st.Message, "decompress state.db.gz") {
+		t.Fatalf("truncated gzip should fail decompress: %+v", st)
+	}
+	if !strings.Contains(st.Message, "pre-rollback state restored and service recovered") {
+		t.Fatalf("safety recovery after truncated gzip = %+v", st)
+	}
+}
+
+func TestConfiguredDatabaseName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", yaml: "site:\n  name: x\n", want: "state.db"},
+		{name: "config_database", yaml: "config_database: site.db\n", want: "site.db"},
+		{name: "state path", yaml: "state:\n  path: telemetry.db\n", want: "telemetry.db"},
+		{name: "config_database wins", yaml: "config_database: settings.db\nstate:\n  path: telemetry.db\n", want: "settings.db"},
+		{name: "absolute data volume", yaml: "config_database: /app/data/custom.db\n", want: "custom.db"},
+		{name: "rejects escape", yaml: "config_database: ../escape.db\n", wantErr: true},
+		{name: "rejects other volume", yaml: "config_database: /var/lib/ftw/state.db\n", wantErr: true},
+		{name: "rejects nested", yaml: "config_database: sub/dir.db\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := configuredDatabaseName([]byte(tc.yaml))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("got %q, want error", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecompressGzipFileChecksCRC(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "valid.gz")
+	writeGzipFile(t, valid, []byte("restored sqlite"))
+	dst := filepath.Join(dir, "ok.db")
+	if err := decompressGzipFile(valid, dst); err != nil {
+		t.Fatalf("valid gzip: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "restored sqlite" {
+		t.Fatalf("round-trip = %q, %v", got, err)
+	}
+
+	truncated := filepath.Join(dir, "truncated.gz")
+	data, err := os.ReadFile(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(truncated, data[:len(data)-8], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	truncDst := filepath.Join(dir, "truncated.db")
+	if err := decompressGzipFile(truncated, truncDst); err == nil {
+		t.Fatal("truncated gzip should fail")
+	}
+	if _, err := os.Stat(truncDst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("truncated gzip must not leave a destination file")
+	}
+
+	corrupt := filepath.Join(dir, "corrupt.gz")
+	bad := append([]byte{}, data...)
+	bad[len(bad)-1] ^= 0xff
+	if err := os.WriteFile(corrupt, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corruptDst := filepath.Join(dir, "corrupt.db")
+	err = decompressGzipFile(corrupt, corruptDst)
+	if err == nil {
+		t.Fatal("checksum-mismatched gzip should fail")
+	}
+	if !errors.Is(err, gzip.ErrChecksum) {
+		t.Fatalf("corrupt gzip error = %v, want gzip.ErrChecksum", err)
+	}
+	if _, err := os.Stat(corruptDst); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("corrupt gzip must not leave a destination file")
+	}
+}
+
 func writeGzipFile(t *testing.T, path string, body []byte) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -928,6 +1102,13 @@ func writeGzipFile(t *testing.T, path string, body []byte) {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRollbackConfig(t *testing.T, path, database string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("config_database: "+database+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1033,77 +1214,6 @@ func TestSelectMainServiceRejectsAmbiguousDataOwners(t *testing.T) {
 	}
 }
 
-func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
-	s, runner := newTestServer(t)
-	writeCompose(t, s.composeFile, `services:
-  forty-two-watts:
-    image: forty-two-watts:optimizer-champion-recourse-b10acacd
-    volumes:
-      - ./data:/app/data
-  ftw-optimizer:
-    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
-`)
-	s.mainServiceName = legacyMainServiceName
-	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
-	s.imageRef = func(context.Context, string) (string, error) {
-		return "ghcr.io/srcfl/ftw:v1.2.2-beta.4", nil
-	}
-	checks := 0
-	s.healthCheck = func(_ context.Context, service string) error {
-		if service == optimizerServiceName {
-			return nil
-		}
-		checks++
-		if checks == 1 {
-			return errors.New("unhealthy")
-		}
-		return nil
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
-	rr := httptest.NewRecorder()
-	s.handleUpdate(rr, req)
-	st := waitForState(t, s, "failed")
-	if !strings.Contains(st.Message, "previous image restored") {
-		t.Fatalf("state should report automatic rollback, got %+v", st)
-	}
-	calls := runner.snapshot()
-	if len(calls) != 4 {
-		t.Fatalf("want pull, new up, image tag, rollback up; got %v", calls)
-	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, "image tag sha256:previous") {
-		t.Fatalf("third call should tag previous image, got %q", got)
-	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, canonicalMainImage+":v1.2.2-beta.4") {
-		t.Fatalf("previous legacy beta should keep its exact tag, got %q", got)
-	}
-	if got := strings.Join(calls[3], " "); !strings.Contains(got, "ftw-compose-update-") || calls[3][len(calls[3])-1] != legacyMainServiceName {
-		t.Fatalf("rollback must reuse transient pin and legacy service identity, got %q", got)
-	}
-	if got := runner.envSnapshot()[3]; len(got) != 1 || got[0] != "FTW_IMAGE_TAG=v1.2.2-beta.4" {
-		t.Fatalf("rollback env = %v", got)
-	}
-}
-
-func TestImageTagFromReferenceAcceptsOnlyImmutableReleaseTags(t *testing.T) {
-	for _, tc := range []struct {
-		ref  string
-		want string
-		ok   bool
-	}{
-		{ref: "ghcr.io/srcfl/ftw:v2.0.0-beta.7", want: "v2.0.0-beta.7", ok: true},
-		{ref: "ghcr.io/srcfl/ftw:v2.0.0", want: "v2.0.0", ok: true},
-		{ref: "ghcr.io/srcfl/ftw:latest"},
-		{ref: "ghcr.io/srcfl/ftw@sha256:deadbeef"},
-		{ref: "ghcr.io/srcfl/ftw"},
-	} {
-		got, ok := imageTagFromReference(tc.ref)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("imageTagFromReference(%q) = %q, %v; want %q, %v", tc.ref, got, ok, tc.want, tc.ok)
-		}
-	}
-}
-
 func TestRecoverCrashedState(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.writeState(State{State: "pulling", UpdatedAt: time.Now()})
@@ -1120,9 +1230,10 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeGzipFile(t, filepath.Join(safetyDir, "state.db.gz"), []byte("current state"))
+	writeRollbackConfig(t, filepath.Join(safetyDir, "config.yaml"), "state.db")
 	s.writeState(State{
 		State: "restoring", Action: "rollback", Snapshot: "target",
-		SafetySnapshot: "safety", SafetyFiles: []string{"state.db.gz"},
+		SafetySnapshot: "safety", SafetyFiles: []string{"state.db.gz", "config.yaml"},
 		StartedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now(),
 	})
 
@@ -1132,7 +1243,7 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 		t.Fatalf("crashed rollback recovery = %+v", state)
 	}
 	calls := runner.snapshot()
-	if len(calls) != 4 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[3], " ") != "start ftw-container" {
+	if len(calls) != 5 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[4], " ") != "start ftw-container" {
 		t.Fatalf("crashed rollback recovery calls = %v", calls)
 	}
 }
@@ -1154,5 +1265,46 @@ func TestContainerIDsFromDockerPS_IgnoresNoiseAndDedupes(t *testing.T) {
 	// Single clean ID (common happy path).
 	if got := containerIDsFromDockerPS(id + "\n"); len(got) != 1 || got[0] != id {
 		t.Fatalf("clean id = %v", got)
+	}
+}
+
+func TestUpdateReadinessFailureNeverRevertsImage(t *testing.T) {
+	for _, healthErr := range []error{context.DeadlineExceeded, errors.New("container status is unhealthy")} {
+		t.Run(healthErr.Error(), func(t *testing.T) {
+			s, runner := newTestServer(t)
+			s.healthCheck = func(ctx context.Context, _ string) error {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) < 5*time.Hour {
+					t.Error("migration got less than the Core startup budget")
+				}
+				if st := s.readState(); st.State != "checking" || st.PreviousImageID != "sha256:current" {
+					t.Errorf("missing in-flight image history: %+v", st)
+				}
+				return healthErr
+			}
+			s.selfReplace = func(string) error { t.Error("replaced updater before Core became ready"); return nil }
+			s.runJob("update", "v3.2.0-beta.2")
+			st := s.readState()
+			if st.State != "failed" || st.Target != "v3.2.0-beta.2" || st.PreviousImageID != "sha256:current" || !strings.Contains(st.Message, "verified full backup") {
+				t.Fatalf("state=%+v", st)
+			}
+			calls := runner.snapshot()
+			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "pull ftw") || !strings.Contains(strings.Join(calls[1], " "), "up -d ftw") {
+				t.Fatalf("readiness failure changed the running image: %v", calls)
+			}
+		})
+	}
+}
+
+func TestInterruptedUpdateRetainsImageHistoryWithoutTouchingCore(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.writeState(State{State: "checking", Action: "update", Component: "core", Target: "v3.2.0-beta.2", PreviousImageID: "sha256:before", Message: "Waiting for the new service to become ready"})
+	s.recoverCrashedState()
+	st := s.readState()
+	if st.State != "failed" || st.PreviousImageID != "sha256:before" || !strings.Contains(st.Message, "Core and data were left in place") {
+		t.Fatalf("state=%+v", st)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("restart changed Core: %v", calls)
 	}
 }

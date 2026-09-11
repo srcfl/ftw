@@ -99,7 +99,7 @@ func Backfill(s *state.Store, cfg BackfillConfig, log *slog.Logger) error {
 
 	const capWh = 15000.0
 	const batchSize = 5000
-	soc := 50.0
+	soc := 0.50
 	written := 0
 	batch := make([]state.HistoryPoint, 0, batchSize)
 	reportEvery := total / 10
@@ -161,20 +161,20 @@ func Backfill(s *state.Store, cfg BackfillConfig, log *slog.Logger) error {
 		// Battery cascade with small efficiency jitter.
 		surplus := pvGen - load
 		batW := 0.0
-		if surplus > 0 && soc < 95 {
+		if surplus > 0 && soc < 0.95 {
 			batW = math.Min(surplus*(0.75+0.1*rng.Float64()), 5000)
-		} else if surplus < 0 && soc > 15 {
+		} else if surplus < 0 && soc > 0.15 {
 			batW = math.Max(surplus*(0.65+0.1*rng.Float64()), -4000)
 		}
 
 		// Grid residual + measurement noise.
 		gridW := load - pvGen + batW + 30*rng.NormFloat64()
 
-		// SoC update — Wh = W * dtH.
+		// SoC is a 0–1 fraction in history, matching production writes.
 		dtH := step.Seconds() / 3600.0
-		soc += batW * dtH / capWh * 100
-		if soc > 100 {
-			soc = 100
+		soc += batW * dtH / capWh
+		if soc > 1 {
+			soc = 1
 		}
 		if soc < 0 {
 			soc = 0

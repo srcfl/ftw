@@ -25,21 +25,23 @@ api:
   port: 8080
 `
 
-func TestPlannerPVSafetyKResolution(t *testing.T) {
-	var nilPlanner *Planner
-	if got := nilPlanner.PVSafetyK(); got != 1.0 {
-		t.Errorf("nil Planner → 1.0, got %v", got)
+func TestPlannerSafetyKFollowsSliderNotYAML(t *testing.T) {
+	// pv_forecast_safety_k seeds the first boot and never wins over the
+	// slider afterwards — EffectiveSafetyK is the stored k regardless of
+	// what YAML says.
+	quarter := 0.25
+	p := &Planner{PVForecastSafetyK: &quarter}
+	if got := p.EffectiveSafetyK(2.0); got != 2.0 {
+		t.Errorf("stored 2.0 despite YAML k, got %v", got)
 	}
-	if got := (&Planner{}).PVSafetyK(); got != 1.0 {
-		t.Errorf("nil field → 1.0, got %v", got)
+	if got := TrustFromSafetyK(0); got != ForecastTrustBold {
+		t.Errorf("k=0 derives bold, got %v", got)
 	}
-	zero := 0.0
-	if got := (&Planner{PVForecastSafetyK: &zero}).PVSafetyK(); got != 0 {
-		t.Errorf("explicit 0 → 0 (no hedge), got %v", got)
+	if got := TrustFromSafetyK(0.85); got != ForecastTrustBalanced {
+		t.Errorf("k=0.85 derives balanced, got %v", got)
 	}
-	two := 2.0
-	if got := (&Planner{PVForecastSafetyK: &two}).PVSafetyK(); got != 2.0 {
-		t.Errorf("explicit 2.0 → 2.0, got %v", got)
+	if got := TrustFromSafetyK(2); got != ForecastTrustCautious {
+		t.Errorf("k=2 derives cautious, got %v", got)
 	}
 }
 
@@ -70,10 +72,8 @@ planner:
 	if c.Planner.PVForecastSafetyK != nil {
 		t.Errorf("unset pv_forecast_safety_k must stay nil, got %v", *c.Planner.PVForecastSafetyK)
 	}
-	if got := c.Planner.PVSafetyK(); got != 1.0 {
-		t.Errorf("unset → PVSafetyK 1.0, got %v", got)
-	}
-	// Explicit 0 must parse to *0 (distinct from unset) and be honored.
+	// Explicit 0 must parse to *0 (distinct from unset): it seeds the
+	// first boot as bold via TrustFromSafetyK.
 	c0, err := Parse([]byte(base+"  pv_forecast_safety_k: 0\n"), "/tmp")
 	if err != nil {
 		t.Fatal(err)
@@ -81,16 +81,40 @@ planner:
 	if c0.Planner.PVForecastSafetyK == nil || *c0.Planner.PVForecastSafetyK != 0 {
 		t.Errorf("explicit 0 must parse to *0, got %v", c0.Planner.PVForecastSafetyK)
 	}
-	if got := c0.Planner.PVSafetyK(); got != 0 {
-		t.Errorf("explicit 0 → PVSafetyK 0 (no hedge), got %v", got)
+	// The live value always follows the stored k, never the YAML k.
+	if got := c0.Planner.EffectiveSafetyK(1.0); got != 1.0 {
+		t.Errorf("EffectiveSafetyK ignores YAML k: want 1.0, got %v", got)
 	}
-	// Explicit non-default value.
-	c25, err := Parse([]byte(base+"  pv_forecast_safety_k: 2.5\n"), "/tmp")
+}
+
+func TestPlannerForecastTrustAndExportValidate(t *testing.T) {
+	base := `
+site:
+  name: Test
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+planner:
+  mode: passive_arbitrage
+`
+	if _, err := Parse([]byte(base+"  forecast_trust: spicy\n"), "/tmp"); err == nil {
+		t.Fatal("expected error for junk forecast_trust")
+	}
+	if _, err := Parse([]byte(base+"  battery_export: maybe\n"), "/tmp"); err == nil {
+		t.Fatal("expected error for junk battery_export")
+	}
+	c, err := Parse([]byte(base+"  forecast_trust: cautious\n  battery_export: not_allowed\n"), "/tmp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c25.Planner.PVSafetyK(); got != 2.5 {
-		t.Errorf("explicit 2.5 → PVSafetyK 2.5, got %v", got)
+	if c.Planner.ForecastTrust != "cautious" || c.Planner.BatteryExport != "not_allowed" {
+		t.Fatalf("got trust=%q export=%q", c.Planner.ForecastTrust, c.Planner.BatteryExport)
 	}
 }
 
@@ -257,7 +281,7 @@ v2x:
 	if c.V2X == nil {
 		t.Fatal("v2x policy not parsed")
 	}
-	if !c.V2X.Enabled || c.V2X.DriverName != "ferroamp" || c.V2X.MinReserveSoCPct != 35 {
+	if !c.V2X.Enabled || c.V2X.DriverName != "ferroamp" || c.V2X.MinReserveSoC != 0.35 {
 		t.Fatalf("unexpected v2x policy: %+v", c.V2X)
 	}
 }
@@ -634,9 +658,9 @@ weather:
 		t.Fatal("partial geometry must not be treated as a north-facing array")
 	}
 	northFlat := c.Weather.PVArrays[1]
-	tilt, azimuth, kwp, ok := northFlat.CompleteGeometry()
-	if !ok || tilt != 0 || azimuth != 0 || kwp != 5 {
-		t.Fatalf("explicit zero geometry should remain valid: tilt=%v azimuth=%v kwp=%v ok=%v", tilt, azimuth, kwp, ok)
+	tilt, azimuth, ratedW, ok := northFlat.CompleteGeometry()
+	if !ok || tilt != 0 || azimuth != 0 || ratedW != 5000 {
+		t.Fatalf("explicit zero geometry should remain valid: tilt=%v azimuth=%v ratedW=%v ok=%v", tilt, azimuth, ratedW, ok)
 	}
 }
 
@@ -1360,6 +1384,44 @@ api: { port: 8080 }
 	// And the resolved value must be 0, not the default.
 	if got := c.Fuse.EffectiveSafetyMarginA(); got != 0 {
 		t.Errorf("EffectiveSafetyMarginA after explicit 0: got %v, want 0", got)
+	}
+}
+
+func TestAssistantMaskAndPreserveKey(t *testing.T) {
+	c := Config{Assistant: &Assistant{Enabled: true, APIKey: "sk-or-v1-secret", Model: "openrouter/free"}}
+	m := c.MaskSecrets()
+	if m.Assistant.APIKey != "" {
+		t.Errorf("key not blanked: %q", m.Assistant.APIKey)
+	}
+	if !m.Assistant.HasAPIKey {
+		t.Error("HasAPIKey should be true after masking a stored key")
+	}
+	if c.Assistant.APIKey != "sk-or-v1-secret" {
+		t.Error("MaskSecrets mutated the source")
+	}
+	incoming := &Config{Assistant: &Assistant{Enabled: true, Model: "openrouter/free"}}
+	incoming.PreserveMaskedSecrets(&c)
+	if incoming.Assistant.APIKey != "sk-or-v1-secret" {
+		t.Errorf("key not restored: %q", incoming.Assistant.APIKey)
+	}
+}
+
+func TestAssistantValidateRejectsCredentialsInBaseURL(t *testing.T) {
+	a := &Assistant{BaseURL: "https://user:pass@proxy.example/v1"}
+	if err := a.Validate(); err == nil || !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAssistantReady(t *testing.T) {
+	if (*Assistant)(nil).Ready() {
+		t.Fatal("nil should not be ready")
+	}
+	if (&Assistant{Enabled: true}).Ready() {
+		t.Fatal("enabled without key should not be ready")
+	}
+	if !(&Assistant{Enabled: true, APIKey: "k"}).Ready() {
+		t.Fatal("enabled with key should be ready")
 	}
 }
 

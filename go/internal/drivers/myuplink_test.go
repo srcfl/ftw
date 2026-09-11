@@ -173,11 +173,13 @@ func TestMyUplinkEmitsAllPointsWithUnits(t *testing.T) {
 			t.Errorf("expected unfiltered points fetch, got query %q", q)
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"parameterId": "10012", "parameterName": "Compressor power", "value": "1500", "parameterUnit": "W"},    // canonical
-			{"parameterId": "40004", "parameterName": "Outdoor temp (BT1)", "value": "226", "parameterUnit": "°C"},  // canonical
-			{"parameterId": "40008", "parameterName": "Supply line (BT2)", "value": "455", "parameterUnit": "°C"},   // generic temp, ×10
-			{"parameterId": "43136", "parameterName": "Compressor frequency", "value": "42", "parameterUnit": "Hz"}, // generic
-			{"parameterId": "43005", "parameterName": "Degree minutes", "value": "-600", "parameterUnit": "GM"},     // generic, negative
+			{"parameterId": "10012", "parameterName": "Compressor power", "value": "1500", "parameterUnit": "W"},          // canonical
+			{"parameterId": "40004", "parameterName": "Outdoor temp (BT1)", "value": "226", "parameterUnit": "°C"},        // canonical
+			{"parameterId": "40008", "parameterName": "Supply line (BT2)", "value": "455", "parameterUnit": "°C"},         // generic temp, ×10
+			{"parameterId": "43136", "parameterName": "Compressor frequency", "value": "42", "parameterUnit": "Hz"},       // generic
+			{"parameterId": "43005", "parameterName": "Degree minutes", "value": "-600", "parameterUnit": "GM"},           // generic, negative
+			{"parameterId": "43100", "parameterName": "Current power consumption", "value": "2.5", "parameterUnit": "kW"}, // bulk 2.5 kW → 2500 W
+			{"parameterId": "43101", "parameterName": "Tot consumption", "value": "12.5", "parameterUnit": "kWh"},         // bulk 12.5 kWh → 12500 Wh
 		})
 	}))
 	defer srv.Close()
@@ -207,8 +209,8 @@ func TestMyUplinkEmitsAllPointsWithUnits(t *testing.T) {
 		byName[m.Name] = m
 	}
 	// Canonical headline metrics still present.
-	if m, ok := byName["hp_power_w"]; !ok || m.Value != 1500 {
-		t.Errorf("hp_power_w = %+v, want value 1500", m)
+	if m, ok := byName["hp_power_w"]; !ok || m.Value != 1500 || m.Unit != "W" {
+		t.Errorf("hp_power_w = %+v, want value 1500 W", m)
 	}
 	if m, ok := byName["hp_outdoor_temp_c"]; !ok || m.Value != 22.6 {
 		t.Errorf("hp_outdoor_temp_c = %+v, want 22.6", m)
@@ -226,6 +228,12 @@ func TestMyUplinkEmitsAllPointsWithUnits(t *testing.T) {
 	}
 	if dm, ok := byName["hp_degree_minutes"]; !ok || dm.Value != -600 {
 		t.Errorf("degree minutes = %+v, want -600 (no scaling for non-°C)", dm)
+	}
+	if p, ok := byName["hp_current_power_consumption"]; !ok || p.Value != 2500 || p.Unit != "W" {
+		t.Errorf("current power consumption = %+v, want 2500 W (2.5 kW)", p)
+	}
+	if e, ok := byName["hp_tot_consumption"]; !ok || e.Value != 12500 || e.Unit != "Wh" {
+		t.Errorf("tot consumption = %+v, want 12500 Wh (12.5 kWh)", e)
 	}
 	// Canonical IDs must NOT be double-emitted under generic names.
 	if _, ok := byName["hp_compressor_power"]; ok {

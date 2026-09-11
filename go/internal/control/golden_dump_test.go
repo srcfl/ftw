@@ -78,12 +78,12 @@ type goldenPhases struct {
 
 type goldenSlot struct {
 	// Present=false models a stale/missing plan (SlotDirectiveFunc ok=false).
-	Present                bool    `json:"present"`
-	BatteryEnergyWh        float64 `json:"battery_energy_wh"`
-	Strategy               string  `json:"strategy"`
-	PlannedGridW           float64 `json:"planned_grid_w"`
-	HasPlannedGridW        bool    `json:"has_planned_grid_w"`
-	LivePVSurplusSoCCapPct float64 `json:"live_pv_surplus_soc_cap_pct"`
+	Present             bool    `json:"present"`
+	BatteryEnergyWh     float64 `json:"battery_energy_wh"`
+	Strategy            string  `json:"strategy"`
+	PlannedGridW        float64 `json:"planned_grid_w"`
+	HasPlannedGridW     bool    `json:"has_planned_grid_w"`
+	LivePVSurplusSoCCap float64 `json:"live_pv_surplus_soc_cap"`
 	// Nominal slot geometry relative to the dispatch call:
 	// SlotStart = now - elapsed_s, SlotEnd = now + remaining_s.
 	ElapsedS   float64 `json:"elapsed_s"`
@@ -117,7 +117,7 @@ type goldenStateInputs struct {
 	SiteFuseVoltage           float64            `json:"site_fuse_voltage"`
 	SiteFusePhases            int                `json:"site_fuse_phases"`
 	SiteFuseSafetyA           float64            `json:"site_fuse_safety_a"`
-	PVSurplusAbsorbSoCCapPct  float64            `json:"pv_surplus_absorb_soc_cap_pct"`
+	PVSurplusAbsorbSoCCap     float64            `json:"pv_surplus_absorb_soc_cap"`
 	PVSurplusAbsorbThresholdW float64            `json:"pv_surplus_absorb_threshold_w"`
 	InverterGroups            map[string]string  `json:"inverter_groups,omitempty"`
 	PriorityOrder             []string           `json:"priority_order,omitempty"`
@@ -292,7 +292,7 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	st.SiteFuseVoltage = si.SiteFuseVoltage
 	st.SiteFusePhases = si.SiteFusePhases
 	st.SiteFuseSafetyA = si.SiteFuseSafetyA
-	st.PVSurplusAbsorbSoCCapPct = si.PVSurplusAbsorbSoCCapPct
+	st.PVSurplusAbsorbSoCCap = si.PVSurplusAbsorbSoCCap
 	st.PVSurplusAbsorbThresholdW = si.PVSurplusAbsorbThresholdW
 	if len(limits) > 0 {
 		st.DriverLimits = limits
@@ -320,13 +320,13 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 				time.Sleep(slotDirectiveDelay)
 			}
 			return SlotDirective{
-				SlotStart:              scenarioNow.Add(-time.Duration(slot.ElapsedS * float64(time.Second))),
-				SlotEnd:                scenarioNow.Add(time.Duration(slot.RemainingS * float64(time.Second))),
-				BatteryEnergyWh:        slot.BatteryEnergyWh,
-				Strategy:               slot.Strategy,
-				PlannedGridW:           slot.PlannedGridW,
-				HasPlannedGridW:        slot.HasPlannedGridW,
-				LivePVSurplusSoCCapPct: slot.LivePVSurplusSoCCapPct,
+				SlotStart:           scenarioNow.Add(-time.Duration(slot.ElapsedS * float64(time.Second))),
+				SlotEnd:             scenarioNow.Add(time.Duration(slot.RemainingS * float64(time.Second))),
+				BatteryEnergyWh:     slot.BatteryEnergyWh,
+				Strategy:            slot.Strategy,
+				PlannedGridW:        slot.PlannedGridW,
+				HasPlannedGridW:     slot.HasPlannedGridW,
+				LivePVSurplusSoCCap: slot.LivePVSurplusSoCCap,
 			}, true
 		}
 	}
@@ -1815,12 +1815,12 @@ func seededPlanner() []goldenScenario {
 				slot.PlannedGridW = roundW(rng.Float64()*6000 - 3000)
 			}
 			if rng.Float64() < 0.15 {
-				slot.LivePVSurplusSoCCapPct = roundW(60 + rng.Float64()*35)
+				slot.LivePVSurplusSoCCap = 0.60 + rng.Float64()*0.35
 			}
 			in.Slot = slot
 		}
 		if rng.Float64() < 0.10 {
-			in.State.PVSurplusAbsorbSoCCapPct = roundW(70 + rng.Float64()*20)
+			in.State.PVSurplusAbsorbSoCCap = 0.70 + rng.Float64()*0.20
 		}
 		out = append(out, goldenScenario{
 			ID: fmt.Sprintf("seeded_planner/%03d_%s", i, mode), Seed: seed, Inputs: in,

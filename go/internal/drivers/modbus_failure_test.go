@@ -223,3 +223,304 @@ func TestUnreachableMeterStillFailsEveryPoll(t *testing.T) {
 		t.Fatalf("unreachable device stored %d readings", len(readings))
 	}
 }
+
+// probeGiveUpSource is the catalog pattern that took Pixii offline after a
+// network blip: three failed reads permanently skip the register, and a
+// transport outage looks identical to an unimplemented point.
+const probeGiveUpSource = `
+PROTOCOL = "modbus"
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    read_failures[addr] = (read_failures[addr] or 0) + 1
+    return nil
+end
+function driver_init() end
+function driver_poll()
+    local regs = probe_read(10, 1, "holding")
+    probe_read(11, 1, "holding")
+    local watts = 0
+    if regs then watts = regs[1] end
+    host.emit("meter", { w = watts })
+    return 1000
+end
+`
+
+type toggleModbus struct {
+	registers       []uint16
+	errorsByAddress map[uint16]error
+	down            bool
+	reads           map[uint16]int
+}
+
+func (m *toggleModbus) Read(addr, count uint16, _ int32) ([]uint16, error) {
+	if m.reads == nil {
+		m.reads = map[uint16]int{}
+	}
+	m.reads[addr]++
+	if m.down {
+		return nil, fmt.Errorf("%w: no route to host", ErrModbusTransport)
+	}
+	if err := m.errorsByAddress[addr]; err != nil {
+		return nil, err
+	}
+	return m.registers, nil
+}
+func (m *toggleModbus) WriteSingle(uint16, uint16) error  { return nil }
+func (m *toggleModbus) WriteMulti(uint16, []uint16) error { return nil }
+func (m *toggleModbus) Close() error                      { return nil }
+
+func newGiveUpDriver(t *testing.T, tel *telemetry.Store, modbus ModbusCap) *LuaDriver {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "give_up.lua")
+	if err := os.WriteFile(path, []byte(probeGiveUpSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver, err := NewLuaDriver(path, NewHostEnv("give-up", tel).WithModbus(modbus))
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	t.Cleanup(driver.Cleanup)
+	if err := driver.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init driver: %v", err)
+	}
+	return driver
+}
+
+// A short network blip used to permanently silence every register: three
+// failed polls skip them all, the TCP session comes back, and the driver
+// never asks again. The host must reload and resume on the next poll.
+func TestGiveUpDriverRecoversAfterTransportBlip(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{registers: []uint16{321}}
+	driver := newGiveUpDriver(t, tel, bus)
+
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("live poll: %v", err)
+	}
+	if reading := tel.Get("give-up", telemetry.DerMeter); reading == nil || reading.RawW != 321 {
+		t.Fatalf("live meter = %+v, want 321 W", reading)
+	}
+
+	bus.down = true
+	for poll := 1; poll <= 3; poll++ {
+		if _, err := driver.Poll(context.Background()); err == nil {
+			t.Fatalf("outage poll %d succeeded", poll)
+		}
+	}
+
+	bus.down = false
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll after the link returned: %v", err)
+	}
+	if driver.reprobes() != 1 {
+		t.Fatalf("reprobes = %d, want 1 reload once the driver had nothing left to ask", driver.reprobes())
+	}
+	reading := tel.Get("give-up", telemetry.DerMeter)
+	if reading == nil || reading.RawW != 321 {
+		t.Fatalf("recovered meter = %+v, want 321 W", reading)
+	}
+	health := tel.DriverHealth("give-up")
+	if health == nil || health.LastSuccess == nil {
+		t.Fatalf("recovery did not advance LastSuccess: %+v", health)
+	}
+}
+
+// An unimplemented register must stay skipped. Reloading would undo the
+// absent-register fix and fail the poll forever on that firmware.
+func TestGiveUpOnAbsentRegisterDoesNotReload(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{
+		registers: []uint16{321},
+		errorsByAddress: map[uint16]error{
+			11: errors.New("modbus exception 2: illegal data address"),
+		},
+	}
+	driver := newGiveUpDriver(t, tel, bus)
+
+	for poll := 1; poll <= 6; poll++ {
+		if _, err := driver.Poll(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+	}
+	if driver.reprobes() != 0 {
+		t.Fatalf("reprobes = %d, want 0: an absent optional register is not a dead link", driver.reprobes())
+	}
+	if bus.reads[11] > 3 {
+		t.Fatalf("absent register 11 was read %d times, want at most 3", bus.reads[11])
+	}
+	if bus.reads[10] < 6 {
+		t.Fatalf("present register 10 was read %d times, want every poll", bus.reads[10])
+	}
+	if reading := tel.Get("give-up", telemetry.DerMeter); reading == nil || reading.RawW != 321 {
+		t.Fatalf("meter = %+v, want 321 W kept while 11 is absent", reading)
+	}
+}
+
+func pollLiveThenGiveUp(t *testing.T, driver *LuaDriver, bus *toggleModbus) {
+	t.Helper()
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("live poll: %v", err)
+	}
+	bus.down = true
+	for poll := 1; poll <= 3; poll++ {
+		if _, err := driver.Poll(context.Background()); err == nil {
+			t.Fatalf("outage poll %d succeeded", poll)
+		}
+	}
+}
+
+// A missing driver file must not become a per-poll reload loop. The PR
+// promised that a failed reload latches until process restart.
+func TestGiveUpFailedReloadLatches(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{registers: []uint16{321}}
+	driver := newGiveUpDriver(t, tel, bus)
+	pollLiveThenGiveUp(t, driver, bus)
+
+	src, err := os.ReadFile(driver.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(driver.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Poll(context.Background()); err == nil {
+		t.Fatal("expected reprobe error after the driver file disappeared")
+	}
+	if err := os.WriteFile(driver.Path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("given-up poll after a failed reload: %v", err)
+	}
+	if driver.reprobes() != 0 {
+		t.Fatalf("reprobes = %d, want 0: a failed reload latches", driver.reprobes())
+	}
+}
+
+// driver_init must succeed on the candidate VM before we throw the old one
+// away. Otherwise default-mode runs against an uninitialized state.
+func TestGiveUpKeepsOldVMWhenReprobeInitFails(t *testing.T) {
+	const withDefault = probeGiveUpSource + `
+function driver_default_mode()
+    host.emit("meter", { w = 42 })
+end
+`
+	const failingInit = `
+PROTOCOL = "modbus"
+function driver_init()
+    error("init failed")
+end
+function driver_poll()
+    host.modbus_read(10, 1, "holding")
+    host.emit("meter", { w = 999 })
+    return 1000
+end
+function driver_default_mode()
+    error("new vm")
+end
+`
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{registers: []uint16{321}}
+	path := filepath.Join(t.TempDir(), "give_up.lua")
+	if err := os.WriteFile(path, []byte(withDefault), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver, err := NewLuaDriver(path, NewHostEnv("give-up", tel).WithModbus(bus))
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	t.Cleanup(driver.Cleanup)
+	if err := driver.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init driver: %v", err)
+	}
+
+	pollLiveThenGiveUp(t, driver, bus)
+	readsAfterGiveUp := bus.reads[10]
+	if err := os.WriteFile(path, []byte(failingInit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Poll(context.Background()); err == nil {
+		t.Fatal("expected reprobe to fail when driver_init errors")
+	}
+	if driver.reprobes() != 0 {
+		t.Fatalf("reprobes = %d, want 0", driver.reprobes())
+	}
+	if err := driver.DefaultMode(); err != nil {
+		t.Fatalf("default-mode on the kept VM: %v", err)
+	}
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("given-up poll on the kept VM: %v", err)
+	}
+	if bus.reads[10] != readsAfterGiveUp {
+		t.Fatalf("register 10 reads = %d, want %d: new VM would have probed again", bus.reads[10], readsAfterGiveUp)
+	}
+}
+
+// Failed attempts must not arm reprobe. A device that never answered would
+// otherwise reload-loop once its give-up tables emptied.
+func TestGiveUpNeverOnlineDoesNotReload(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{registers: []uint16{321}, down: true}
+	driver := newGiveUpDriver(t, tel, bus)
+
+	for poll := 1; poll <= 3; poll++ {
+		if _, err := driver.Poll(context.Background()); err == nil {
+			t.Fatalf("never-online poll %d succeeded", poll)
+		}
+	}
+	for poll := 4; poll <= 6; poll++ {
+		if _, err := driver.Poll(context.Background()); err != nil {
+			t.Fatalf("given-up poll %d: %v", poll, err)
+		}
+	}
+	if driver.reprobes() != 0 {
+		t.Fatalf("reprobes = %d, want 0 before the device has ever been read", driver.reprobes())
+	}
+
+	bus.down = false
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("quiet poll after the link appeared: %v", err)
+	}
+	if driver.reprobes() != 0 {
+		t.Fatalf("reprobes = %d, want 0: never-online stays given-up until restart", driver.reprobes())
+	}
+	if reading := tel.Get("give-up", telemetry.DerMeter); reading != nil {
+		t.Fatalf("never-online driver stored meter %+v", reading)
+	}
+}
+
+// A blip that outlasts the first reload must keep retrying. Latch-after-
+// every-reload would recover a 15-second flap and miss the 9-minute one
+// that took Pixii offline.
+func TestGiveUpDriverRecoversAfterSustainedOutage(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{registers: []uint16{321}}
+	driver := newGiveUpDriver(t, tel, bus)
+	pollLiveThenGiveUp(t, driver, bus)
+
+	for poll := 1; poll <= 6; poll++ {
+		if _, err := driver.Poll(context.Background()); err == nil {
+			t.Fatalf("sustained-outage poll %d succeeded", poll)
+		}
+	}
+	if driver.reprobes() < 1 {
+		t.Fatalf("reprobes = %d, want at least one retry while the link stayed down", driver.reprobes())
+	}
+
+	bus.down = false
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll after a sustained outage: %v", err)
+	}
+	reading := tel.Get("give-up", telemetry.DerMeter)
+	if reading == nil || reading.RawW != 321 {
+		t.Fatalf("recovered meter = %+v, want 321 W", reading)
+	}
+}

@@ -286,6 +286,7 @@
   }
 
   S.driverVersions = {
+    runtimeVerified: runtimeVerified,
     runningSummary: runningSummary,
     verificationLabel: verificationLabel,
     versionRows: versionRows,
@@ -336,6 +337,26 @@
     }
   }
 
+  function configReloadNote(body) {
+    return body && body.config_changed
+      ? " Settings changed. Close and reopen Settings before saving."
+      : "";
+  }
+
+  function runtimeVerified(body, opts) {
+    var names = body && body.restarted_drivers;
+    return !!(body && body.runtime_verified === true && Array.isArray(names) &&
+      names.length > 0 && (!opts || !opts.driverName || names.indexOf(opts.driverName) >= 0));
+  }
+
+  function applyRuntimeResult(opts, body) {
+    if (!opts || !runtimeVerified(body, opts)) return;
+    if (body.logical_path) {
+      if (opts.onPathChanged) opts.onPathChanged(opts.logicalPath, body.logical_path);
+      opts.logicalPath = body.logical_path;
+    }
+  }
+
   function renderVersionRow(panel, driverID, row, rows, opts, overridden) {
     var line = document.createElement("div");
     line.style.display = "flex";
@@ -351,7 +372,7 @@
     var detail = document.createElement("span");
     detail.className = "drv-version-detail";
     var facts = [];
-    if (row.active && !overridden) facts.push("running now");
+    if (row.active && !overridden) facts.push("selected");
     else if (row.downloaded) facts.push("on disk");
     if (row.verification) facts.push(row.verification);
     detail.textContent = facts.join(" · ");
@@ -387,7 +408,7 @@
             if (!r.ok) throw new Error(b.error || "could not switch version");
             return b;
           });
-        }).then(function () {
+        }).then(function (body) {
           // It came down from the channel and is kept on disk now. Without
           // this the next attempt would fetch it again, which fails offline
           // for a file that is already there.
@@ -398,7 +419,14 @@
             action.disabled = true;
             return;
           }
-          status.textContent = "v" + row.version + " is running.";
+          if (!runtimeVerified(body, opts)) {
+            status.textContent = "Installed. No running instance was verified for this device." + configReloadNote(body);
+            action.textContent = "Use this";
+            action.disabled = false;
+            return;
+          }
+          applyRuntimeResult(opts, body);
+          status.textContent = "v" + row.version + " is running; fresh telemetry verified." + configReloadNote(body);
           // The line above the panel still named the old version, and the
           // other rows still claimed to be running, so all three contradicted
           // each other until the tab was re-rendered.
@@ -451,8 +479,14 @@
     action.addEventListener("click", function () {
       action.disabled = true;
       status.textContent = "Switching…";
-      useBundled(driverID, opts).then(function () {
-        status.textContent = "The bundled driver is running.";
+      useBundled(driverID, opts).then(function (body) {
+        if (!runtimeVerified(body, opts)) {
+          status.textContent = "Bundled driver selected. No running instance was verified for this device." + configReloadNote(body);
+          action.disabled = false;
+          return;
+        }
+        applyRuntimeResult(opts, body);
+        status.textContent = "The bundled driver is running." + configReloadNote(body);
         refreshSummary(opts, driverID);
         markRunning(panel, null);
         action.textContent = "Running";
@@ -501,6 +535,11 @@
         entries.forEach(function (e) { if (e && e.path === opts.logicalPath) entry = e; });
         if (!entry) return;
         var summary = runningSummary(entry);
+        if (opts.versionsEl) {
+          opts.versionsEl.dataset.logicalPath = entry.path;
+          opts.versionsEl.dataset.source = entry.source || "bundled";
+          opts.versionsEl.dataset.runningVersion = entry.installed_version || entry.version || "";
+        }
         badge.textContent = summary.headline;
         if (opts.detailEl) opts.detailEl.textContent = summary.detail;
         if (opts.readOnlyEl) opts.readOnlyEl.style.display = entry.read_only ? "" : "none";
@@ -526,7 +565,7 @@
       var detail = line.querySelector ? line.querySelector(".drv-version-detail") : null;
       if (!label || !detail) return;
       var facts = detail.textContent.split(" · ").filter(function (fact) {
-        return fact !== "running now";
+        return fact !== "running now" && fact !== "selected";
       });
       if (label.textContent === wanted) facts.unshift("running now");
       detail.textContent = facts.join(" · ");
@@ -869,10 +908,16 @@
       var call = wasBundled
         ? useBundled(driverID, opts)
         : switchBack(driverID, previousVersion, onDisk, opts);
-      call.then(function () {
-        status.textContent = wasBundled
+      call.then(function (body) {
+        if (!runtimeVerified(body, opts)) {
+          status.textContent = "Previous driver selected. No running instance was verified for this device." + configReloadNote(body);
+          undo.disabled = false;
+          return;
+        }
+        applyRuntimeResult(opts, body);
+        status.textContent = (wasBundled
           ? "The bundled driver is running again."
-          : "v" + previousVersion + " is running again.";
+          : "v" + previousVersion + " is running again.") + configReloadNote(body);
         refreshSummary(opts, driverID);
         markRunning(panel, wasBundled ? null : previousVersion);
         undo.remove();
@@ -919,7 +964,11 @@
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
       if (!config.drivers) config.drivers = [];
-      var html = '<fieldset><legend>Add from catalog</legend>' +
+      var html = S.chargerSetup ? '<section aria-label="Charger connection"><h3>Connect your charger</h3>' +
+        '<p>Choose your charger below and enter its connection details. Continue to charging when the connection is ready.</p>' +
+        '<button type="button" class="btn-add" id="charger-setup-continue"' + (S.chargerSetupPending ? '' : ' disabled') + '>Continue to charging</button>' +
+        '<p id="charger-setup-status" role="status"></p></section>' : '';
+      html += '<fieldset><legend>' + (S.chargerSetup ? 'Choose your charger' : 'Add from catalog') + '</legend>' +
         '<div class="field-row"><div>' +
         '<label>Channel</label>' +
         '<select id="driver-catalog-channel"><option value="stable">Stable</option><option value="beta">Beta · test one driver</option></select>' +
@@ -960,7 +1009,7 @@
           '<div class="device-item-header">' +
           '<strong>' + escHtml(d.name) + '</strong>' +
           '<span class="device-meta">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
-          '<span class="driver-module-status" data-drv-lua="' + escHtml(d.lua || '') + '"></span>' +
+          '<span class="driver-module-status" data-driver-name="' + escHtml(d.name) + '" data-drv-lua="' + escHtml(d.lua || '') + '"></span>' +
           '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
           '</div>' +
           '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
@@ -1058,7 +1107,19 @@
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. Prefer the device\'s mDNS (.local) name when it broadcasts one — it survives DHCP lease changes. If you use a raw IP, reserve it for the device in your router\'s DHCP settings so it can\'t change.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
             ((d.lua || '').indexOf('zap.lua') >= 0
-              ? '<p class="zap-p1-note" style="margin:8px 0 0;font-size:0.82rem;color:var(--text-dim);line-height:1.45">This driver is the P1/HAN site meter. If the Zap also lists an inverter, battery or charger, add that device here with its own driver. Do not use Zap as a proxy for those.</p>'
+              ? '<p class="zap-p1-note" style="margin:8px 0 0;font-size:0.82rem;color:var(--text-dim);line-height:1.45">This driver is the P1/HAN site meter by default. Prefer a native driver for inverters and batteries. Turn on a read below only when Zap is the only reader — a SolarEdge whose Modbus is closed, or an inverter on RS-485 that Zap already owns. Zap never writes.</p>' +
+                '<label class="drv-read-pv" style="margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:normal">' +
+                '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.read_pv"' +
+                (lcfg.read_pv ? ' checked' : '') + '>' +
+                'Read PV from devices on this Zap ' +
+                help('Pull generation from inverters Zap already talks to. Leave this off when a native inverter driver owns PV, so Combined does not count the same array twice.') +
+                '</label>' +
+                '<label class="drv-read-battery" style="margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:normal">' +
+                '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.read_battery"' +
+                (lcfg.read_battery ? ' checked' : '') + '>' +
+                'Read battery from devices on this Zap ' +
+                help('Telemetry only. Zap never writes a setpoint. Leave this off when a native battery driver owns the same pack.') +
+                '</label>'
               : '') +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the account the pump generates on its own screen when you enable the Local REST API (installer menu 7.5) — no myUplink account and no app are involved.') + '</label>' +
@@ -1195,6 +1256,33 @@
       var escHtml = ctx.escHtml;
       var help = ctx.help;
 
+      function moduleOptions(slot) {
+        var versions = slot.querySelector(".drv-module-versions");
+        return {
+          driverName: slot.dataset.driverName,
+          overridden: versions && versions.dataset.source === "local",
+          runningSource: versions && versions.dataset.source,
+          runningVersion: versions && versions.dataset.runningVersion,
+          logicalPath: versions && versions.dataset.logicalPath,
+          versionsEl: versions,
+          headlineEl: slot.querySelector(".drv-module-headline"),
+          detailEl: slot.querySelector(".drv-module-detail"),
+          updateEl: slot.querySelector(".drv-module-update"),
+          readOnlyEl: slot.querySelector(".drv-module-readonly"),
+          onPathChanged: function (previous, next) {
+            config.drivers.forEach(function (driver, idx) {
+              if (driver.name !== slot.dataset.driverName || driver.lua !== previous) return;
+              driver.lua = next;
+              var input = bodyEl.querySelector('[data-path="drivers.' + idx + '.lua"]');
+              if (input && input.value === previous) input.value = next;
+            });
+            var meta = slot.parentElement.querySelector(".device-meta");
+            if (meta && previous) meta.textContent = meta.textContent.replace(previous, next);
+            slot.dataset.drvLua = next;
+          }
+        };
+      }
+
       function fmtW(v) {
         if (!Number.isFinite(v)) return "—";
         return Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + " kW" : v.toFixed(0) + " W";
@@ -1313,7 +1401,10 @@
         if (!host || !picker) return;
 
         var query = (search && search.value || "").trim();
-        var matches = searchCatalog(entries, query);
+        var choices = S.chargerSetup ? entries.filter(function (entry) {
+          return (entry.capabilities || []).indexOf('ev') >= 0;
+        }) : entries;
+        var matches = searchCatalog(choices, query);
 
         host.textContent = "";
         if (matches.length === 0) {
@@ -1343,7 +1434,7 @@
 
         var tags = document.createElement("div");
         tags.className = "drv-catalog-tags";
-        (e.capabilities || []).forEach(function (cap) {
+        (S.chargerSetup ? [] : (e.capabilities || [])).forEach(function (cap) {
           var tag = document.createElement("span");
           tag.className = "drv-catalog-tag";
           tag.textContent = cap;
@@ -1445,7 +1536,18 @@
               method: "POST", headers: {"Content-Type":"application/json"},
               body: JSON.stringify({repository_id: btn.dataset.repositoryId, version: btn.dataset.version})
             }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "install failed"); return body; }); })
-              .then(function () { if (status) status.textContent = " Updated; fresh telemetry verified."; btn.remove(); })
+              .then(function (body) {
+                var opts = moduleOptions(btn.parentElement);
+                if (!runtimeVerified(body, opts)) {
+                  if (status) status.textContent = " Installed. No running instance was verified for this device." + configReloadNote(body);
+                  btn.disabled = false;
+                  return;
+                }
+                applyRuntimeResult(opts, body);
+                if (status) status.textContent = " Updated; fresh telemetry verified." + configReloadNote(body);
+                refreshSummary(opts, btn.dataset.driverId);
+                btn.remove();
+              })
               .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
           });
         });
@@ -1465,18 +1567,7 @@
                 });
               })
               .then(function (body) {
-                renderVersionPicker(panel, id, body, {
-                  overridden: btn.dataset.source === "local",
-                  runningSource: btn.dataset.source,
-                  runningVersion: btn.dataset.runningVersion,
-                  logicalPath: btn.dataset.logicalPath,
-                  // So a switch can correct the summary line above without
-                  // re-rendering the tab, which would close this panel.
-                  headlineEl: btn.parentElement.querySelector(".drv-module-headline"),
-                  detailEl: btn.parentElement.querySelector(".drv-module-detail"),
-                  updateEl: btn.parentElement.querySelector(".drv-module-update"),
-                  readOnlyEl: btn.parentElement.querySelector(".drv-module-readonly")
-                });
+                renderVersionPicker(panel, id, body, moduleOptions(btn.parentElement));
               })
               .catch(function (err) { panel.textContent = err.message; });
           });
@@ -1518,6 +1609,7 @@
           fs += '</select></fieldset>';
           slot.innerHTML = fs;
           var select = slot.querySelector(".drv-profile-select");
+          if (select) ctx.rememberFieldValue(select);
           if (select) select.addEventListener("change", function () {
             var selected = profileByValue(profiles, select.value);
             var unitInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.capabilities.modbus.unit_id"]');
@@ -1600,7 +1692,8 @@
           fillWriteSlot(slot, d, byLua[d.lua], {idx: dIdx, help: help, escHtml: escHtml});
         });
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
-          var lua = lbl.getAttribute("data-drv-lua");
+          var lua = lbl.getAttribute("data-drv-lua") || "";
+          if (lua.indexOf("zap.lua") >= 0) return;
           var entry = lua && byLua[lua];
           if (!entry) return;
           var caps = entry.capabilities || [];
@@ -1609,7 +1702,8 @@
           }
         });
         bodyEl.querySelectorAll(".drv-disable-battery").forEach(function (lbl) {
-          var lua = lbl.getAttribute("data-drv-lua");
+          var lua = lbl.getAttribute("data-drv-lua") || "";
+          if (lua.indexOf("zap.lua") >= 0) return;
           var entry = lua && byLua[lua];
           if (!entry) return;
           var caps = entry.capabilities || [];
@@ -1747,7 +1841,8 @@
 			  driver.config = { client_id: "", client_secret: "" };
 		  } else if (entryCaps.indexOf("meter") >= 0 ||
                      entryCaps.indexOf("pv") >= 0 ||
-                     entryCaps.indexOf("battery") >= 0) {
+                     entryCaps.indexOf("battery") >= 0 ||
+                     (entryCaps.indexOf("ev") >= 0 && hosts.length === 0)) {
             // Local-HTTP meter / PV / battery driver without a canned
             // hostname in connection_defaults (typical for generic
             // ESPHome / DSMR firmwares — every install picks its own
@@ -1766,7 +1861,13 @@
         }
         var finishAdd = function () {
           config.drivers.push(driver);
+          if (S.chargerSetup) S.chargerSetupPending = driver.name;
           ctx.renderTab("devices");
+          if (S.chargerSetup) {
+            var connection = bodyEl.querySelector('[data-path="drivers.' + (config.drivers.length - 1) + '.config.email"]') ||
+              bodyEl.querySelector('[data-path="drivers.' + (config.drivers.length - 1) + '.config.host"]');
+            if (connection) { connection.scrollIntoView({ block: 'center' }); connection.focus(); }
+          }
         };
         if (chosen.dataset.channel !== "beta") {
           finishAdd();
@@ -1783,6 +1884,49 @@
           window.alert("Beta driver install failed: " + err.message);
           btn.disabled = false;
           btn.textContent = "+ Add selected";
+        });
+      });
+
+      var continueCharging = document.getElementById('charger-setup-continue');
+      if (continueCharging) {
+        bodyEl.querySelectorAll('.device-meta,.driver-module-status,.device-core-row').forEach(function (element) { element.hidden = true; element.style.display = 'none'; });
+        var channel = document.getElementById('driver-catalog-channel');
+        if (channel) channel.parentElement.hidden = true;
+        var name = document.getElementById('driver-catalog-name');
+        if (name) name.placeholder = 'e.g. garage';
+        var picker = document.getElementById('driver-catalog-picker');
+        if (picker) picker.closest('fieldset').querySelectorAll(':scope > p').forEach(function (paragraph) { paragraph.hidden = true; });
+        var pendingIndex = (config.drivers || []).findIndex(function (device) { return device.name === S.chargerSetupPending; });
+        var connectionInput = bodyEl.querySelector('[data-path="drivers.' + pendingIndex + '.config.email"]') || bodyEl.querySelector('[data-path="drivers.' + pendingIndex + '.config.host"]');
+        var connectionBox = connectionInput && connectionInput.closest('fieldset');
+        if (connectionBox) {
+          connectionBox.appendChild(continueCharging);
+          connectionBox.appendChild(document.getElementById('charger-setup-status'));
+        }
+      }
+      if (continueCharging) continueCharging.addEventListener('click', function () {
+        ctx.captureCurrentTab();
+        var charger = (config.drivers || []).find(function (device) { return device.name === S.chargerSetupPending; });
+        var status = document.getElementById('charger-setup-status');
+        if (!charger) { status.textContent = 'Choose your charger below first.'; return; }
+        var connection = charger.config || {};
+        if (Object.prototype.hasOwnProperty.call(connection, 'email') && (!connection.email || !connection.serial)) {
+          status.textContent = 'Connect your account and choose the charger first.';
+          return;
+        }
+        if (Object.prototype.hasOwnProperty.call(connection, 'host') && !connection.host) {
+          status.textContent = 'Enter your charger’s address first.';
+          return;
+        }
+        continueCharging.disabled = true;
+        status.textContent = 'Saving the charger connection…';
+        ctx.saveConfig().then(function () {
+          S.chargerSetup = false;
+          S.chargerSetupPending = null;
+          ctx.navigateTab('loadpoints');
+        }).catch(function (error) {
+          status.textContent = 'Connection not saved: ' + error.message + '. Try again.';
+          continueCharging.disabled = false;
         });
       });
 
@@ -1837,7 +1981,7 @@
               if (d && d.config) d.config.serial = sel.value;
               if (config.ev_charger) config.ev_charger.serial = sel.value;
             };
-            if (statusEl) statusEl.textContent = chargers.length + " charger(s) found";
+            if (statusEl) statusEl.textContent = chargers.length + (S.chargerSetup ? " charger(s) found. Choose Continue to charging to save the connection." : " charger(s) found");
           }).catch(function (e) {
             if (statusEl) statusEl.textContent = "Error: " + e.message;
           }).finally(function () {

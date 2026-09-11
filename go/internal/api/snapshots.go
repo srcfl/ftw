@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -26,6 +27,7 @@ const snapshotKeepCount = 5
 // lets future code read older snapshots without a guessing game.
 type SnapshotMeta struct {
 	SchemaVersion    int       `json:"schema_version"`
+	DatabaseSchema   int       `json:"database_schema,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	FromVersion      string    `json:"from_version,omitempty"`
 	ToVersion        string    `json:"to_version,omitempty"`
@@ -71,6 +73,8 @@ func (s *Server) createPreUpdateSnapshotWithProgress(
 	action, fromVersion, toVersion string,
 	report func(state.BackupProgress),
 ) (SnapshotInfo, error) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	if s.deps.SnapshotDir == "" {
 		return SnapshotInfo{}, errors.New("snapshot dir not configured")
 	}
@@ -102,20 +106,32 @@ func (s *Server) createPreUpdateSnapshotWithProgress(
 	// 1. A complete state.db via VACUUM INTO + gzip. Rollback backups must
 	// include history and samples; the compact daily corruption-recovery
 	// snapshot deliberately excludes those large tables and is not safe here.
-	if err := s.deps.State.BackupToCompressedWithProgress(filepath.Join(dir, "state.db.gz"), report); err != nil {
+	stored, hasStored, err := s.deps.State.BackupWithConfiguration(filepath.Join(dir, "state.db.gz"), report)
+	if err != nil {
 		return SnapshotInfo{}, fmt.Errorf("state snapshot: %w", err)
 	}
 	captured = append(captured, "state.db.gz")
 
-	// 2. config.yaml — plain file copy. Missing/empty path means the
-	// caller wasn't wired with one; log and move on without failing
-	// the snapshot (an update with no config on disk is legal — it
-	// just means the operator runs with defaults, and we have nothing
-	// to restore).
+	// 2. Export settings from the same database snapshot so an older Core can
+	// read current YAML after rollback. Legacy stores still copy their seed.
 	if s.deps.ConfigPath != "" {
 		dst := filepath.Join(dir, "config.yaml")
-		if err := copyFile(s.deps.ConfigPath, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return SnapshotInfo{}, fmt.Errorf("copy config: %w", err)
+		var err error
+		if hasStored {
+			configPath, refErr := filepath.Abs(s.deps.ConfigPath)
+			if refErr != nil {
+				return SnapshotInfo{}, fmt.Errorf("config path: %w", refErr)
+			}
+			databaseRef, refErr := filepath.Rel(filepath.Dir(configPath), s.deps.StatePath)
+			if refErr != nil {
+				return SnapshotInfo{}, fmt.Errorf("config database path: %w", refErr)
+			}
+			err = config.ExportStored(dst, stored, databaseRef)
+		} else {
+			err = copyFile(s.deps.ConfigPath, dst)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return SnapshotInfo{}, fmt.Errorf("export config: %w", err)
 		}
 		if _, err := os.Stat(dst); err == nil {
 			captured = append(captured, "config.yaml")
@@ -125,6 +141,7 @@ func (s *Server) createPreUpdateSnapshotWithProgress(
 	// 3. meta.json — the pointer the UI/rollback flow reads first.
 	meta := SnapshotMeta{
 		SchemaVersion:    snapshotSchemaVersion,
+		DatabaseSchema:   state.SchemaVersion,
 		CreatedAt:        time.Now().UTC(),
 		FromVersion:      fromVersion,
 		ToVersion:        toVersion,

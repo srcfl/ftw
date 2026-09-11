@@ -883,3 +883,23 @@ func TestVersionUpdateStatus_Idle(t *testing.T) {
 		t.Errorf("state = %q, want idle (no StatusPath configured)", out.State)
 	}
 }
+
+func TestVersionRestartSurfacesOldUpdaterRefusal(t *testing.T) {
+	checker := selfupdate.New(selfupdate.Config{
+		CurrentVersion: "v2.14.0-beta.1",
+		SocketPath:     startFakeSidecar(t, http.StatusBadRequest),
+	}, newMemStore())
+	srv := New(&Deps{SelfUpdate: checker})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/restart", nil))
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body["error"], "safe restart requires a newer updater") {
+		t.Fatalf("missing user recovery instruction: %v", body)
+	}
+}

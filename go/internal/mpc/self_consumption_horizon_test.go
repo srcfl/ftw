@@ -58,9 +58,9 @@ func TestSelfConsumptionAbsorbsCheapPVOver48hHorizon(t *testing.T) {
 	p := Params{
 		Mode:                ModeSelfConsumption,
 		CapacityWh:          20000,
-		InitialSoCPct:       65,
-		SoCMinPct:           10,
-		SoCMaxPct:           90,
+		InitialSoC: 0.65,
+		SoCMin: 0.1,
+		SoCMax: 0.9,
 		SoCLevels:           41,
 		MaxChargeW:          9000,
 		MaxDischargeW:       9000,
