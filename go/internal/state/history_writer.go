@@ -113,7 +113,7 @@ func (w *historyWriter) commitBatches(ctx context.Context, batches []historyBatc
 	if w.commitFn != nil {
 		return w.commitFn(ctx, batches, ack)
 	}
-	return w.store.recordHistoryBatches(ctx, batches, ack)
+	return w.store.recordHotBatches(ctx, batches, ack)
 }
 
 // historyCommitInterrupted is a deadline or DuckDB interrupt. Retrying the
@@ -420,6 +420,10 @@ func (w *historyWriter) runMaintenance() {
 	w.maintenanceMu.Lock()
 	defer w.maintenanceMu.Unlock()
 	ctx, cancel := context.WithTimeout(w.ctx, historyMaintenanceTimeout)
+	sealErr := w.store.SealHotHistory(ctx)
+	if sealErr != nil {
+		slog.Warn("live history seal postponed; SQLite ticks retained", "err", sealErr)
+	}
 	err := w.store.CheckpointHistory(ctx)
 	if err == nil && (w.forceRotate.Load() || shouldRotateNative()) {
 		if rotErr := w.store.RotateHistory(ctx); rotErr != nil {
@@ -429,6 +433,9 @@ func (w *historyWriter) runMaintenance() {
 		}
 	}
 	cancel()
+	if err == nil {
+		err = sealErr
+	}
 	// A successful rotation may still leave the same tick too large. Back off
 	// every actual attempt; skipped calls above must not extend this deadline.
 	w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)

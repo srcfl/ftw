@@ -581,8 +581,12 @@ func TestHistoryDownsampling(t *testing.T) {
 func TestHistoryCounts(t *testing.T) {
 	s := freshStore(t)
 	now := time.Now().UnixMilli()
-	for i := 0; i < 5; i++ {
-		s.RecordHistory(HistoryPoint{TsMs: now + int64(i), JSON: "{}"})
+	pts := make([]HistoryPoint, 5)
+	for i := range pts {
+		pts[i] = HistoryPoint{TsMs: now + int64(i), JSON: "{}"}
+	}
+	if err := s.BulkRecordHistory(pts); err != nil {
+		t.Fatal(err)
 	}
 	hot, warm, cold, err := s.HistoryCounts()
 	if err != nil {
@@ -617,12 +621,16 @@ func TestHistoryPruneAggregates(t *testing.T) {
 	s := freshStore(t)
 	// Insert 20 rows, all older than HotRetention
 	oldMs := time.Now().UnixMilli() - int64(HotRetention.Milliseconds()) - 24*3600*1000
-	for i := 0; i < 20; i++ {
-		s.RecordHistory(HistoryPoint{
+	old := make([]HistoryPoint, 20)
+	for i := range old {
+		old[i] = HistoryPoint{
 			TsMs:  oldMs + int64(i)*1000,
 			GridW: float64(100 + i),
 			JSON:  "{}",
-		})
+		}
+	}
+	if err := s.BulkRecordHistory(old); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.Prune(context.Background()); err != nil {
 		t.Fatal(err)
@@ -730,12 +738,11 @@ func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
 	if err := s.SaveConfig("mode", "passive_arbitrage"); err != nil {
 		t.Fatal(err)
 	}
-	// Seed a history_hot row so we can verify exclusion. RecordHistory
-	// writes into history_hot directly.
-	if err := s.RecordHistory(HistoryPoint{
+	// Seed a DuckDB history_hot row so we can verify the snapshot skips it.
+	if err := s.BulkRecordHistory([]HistoryPoint{{
 		TsMs:  time.Now().UnixMilli(),
-		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890,
-	}); err != nil {
+		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890, JSON: "{}",
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	// Seed a long-format TS sample so ts_samples has rows too.
@@ -799,7 +806,7 @@ func TestBackupToCompressedPreservesCompleteHistory(t *testing.T) {
 	if err := s.SaveConfig("mode", "planner_self"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordHistory(HistoryPoint{TsMs: now, GridW: 1234}); err != nil {
+	if err := s.BulkRecordHistory([]HistoryPoint{{TsMs: now, GridW: 1234, JSON: "{}"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RecordSamples([]Sample{{Driver: "meter", Metric: "grid_w", TsMs: now, Value: 1234}}); err != nil {
