@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -153,7 +154,34 @@ func (s *Store) recordHotBatches(ctx context.Context, batches []historyBatch, ac
 	if err := tx.Commit(); err != nil {
 		return out, err
 	}
+	if err := s.applyHotLedger(ctx, batches); err != nil {
+		slog.Warn("energy ledger write postponed; live tick is in SQLite", "err", err)
+	}
 	return out, nil
+}
+
+func (s *Store) applyHotLedger(ctx context.Context, batches []historyBatch) error {
+	if s.history == nil {
+		return nil
+	}
+	var obs []EnergyObservation
+	for _, b := range batches {
+		obs = append(obs, b.payload.Observations...)
+	}
+	if len(obs) == 0 {
+		return nil
+	}
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := recordEnergyObservationsTx(tx, obs); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func tickTimestamp(p *HistoryPoint, samples []Sample, observations []EnergyObservation) int64 {
