@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.4.1
+
+### Patch Changes
+
+- fb10547: Live 5m/1h charts read a small SQLite file. DuckDB keeps the archive and is no longer on the live write path.
+
 ## 3.4.0
 
 ### Minor Changes
