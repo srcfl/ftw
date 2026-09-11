@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 
 globalThis.window = {};
 await import("./ha.js");
-const { statusView } = globalThis.window.FTWSettings.tabs.ha._pure;
+const haTab = globalThis.window.FTWSettings.tabs.ha;
+const { statusView } = haTab._pure;
 
 describe("Home Assistant status", () => {
   it("shows disabled only when saved config is disabled", () => {
@@ -44,5 +45,18 @@ describe("Home Assistant status", () => {
       className: "ha-status-indicator ha-ok",
       text: "● connected to 192.168.1.65:1883  ·  12 sensors  ·  last publish 1s ago",
     });
+  });
+});
+
+describe("Modbus proxy settings", () => {
+  it("renders the proxy fieldset on the Home Assistant tab", () => {
+    const html = haTab.render({
+      field: function (label, path) { return "<span data-path=\"" + path + "\">" + label + "</span>"; },
+      config: {},
+    });
+    assert.match(html, /Modbus TCP proxy/);
+    assert.match(html, /modbus_proxy.enabled/);
+    assert.match(html, /data-path="modbus_proxy.listen"/);
+    assert.match(html, /modbus_proxy.allow_write/);
   });
 });

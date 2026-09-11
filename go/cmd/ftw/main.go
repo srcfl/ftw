@@ -647,8 +647,33 @@ func main() {
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.DialWithOptions(c.Host, c.Port, c.Username, c.Password, "ftw-"+name, c.AllowUnverifiedLocal)
 	}
+	modbusEngine := modbuscli.NewEngine()
 	reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
-		return modbuscli.DialWithOptions(c.Host, c.Port, c.UnitID, c.AllowUnverifiedLocal)
+		return modbusEngine.Open(c.Host, c.Port, c.UnitID, c.AllowUnverifiedLocal)
+	}
+	if cfg.ModbusProxy.On() {
+		binds, err := cfg.ModbusProxyBinds()
+		if err != nil {
+			slog.Error("modbus proxy not started", "err", err)
+		} else if len(binds) == 0 {
+			slog.Warn("modbus proxy enabled but no Modbus TCP drivers to expose")
+		} else {
+			mbBinds := make([]modbuscli.Bind, 0, len(binds))
+			for _, b := range binds {
+				mbBinds = append(mbBinds, modbuscli.Bind{
+					Listen:               b.Listen,
+					Host:                 b.Host,
+					Port:                 b.Port,
+					AllowUnverifiedLocal: b.AllowUnverifiedLocal,
+				})
+			}
+			proxy, err := modbusEngine.Listen(mbBinds, cfg.ModbusProxy.AllowWrite)
+			if err != nil {
+				slog.Error("modbus proxy listen failed", "err", err)
+			} else {
+				defer proxy.Close()
+			}
+		}
 	}
 	reg.SerialFactory = func(name string, c *config.SerialConfig) (drivers.SerialCap, error) {
 		return drivers.OpenSerial(c)

@@ -86,6 +86,9 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"ocpp enabled", func(c *Config) {
 			c.OCPP = &OCPP{Enabled: true, Port: 8887, Username: "ftw", Password: "long-random-string"}
 		}, "ocpp"},
+		{"modbus proxy enabled", func(c *Config) {
+			c.ModbusProxy = &ModbusProxy{Enabled: true, Listen: ":1502"}
+		}, "modbus_proxy"},
 		{"weather provider change", func(c *Config) {
 			c.Weather = &Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18}
 		}, "weather"},

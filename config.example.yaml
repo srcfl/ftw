@@ -44,6 +44,7 @@ drivers:
         host: 192.168.1.10
         port: 502
         unit_id: 1
+        # proxy_listen: ":1502"  # only needed when modbus_proxy is on and this is not the only Modbus device
 
   # Pixii PowerShaper. When troubleshooting mode is enabled in Settings,
   # Pixii also exposes calibration/control status and setpoint readback metrics.
@@ -147,6 +148,21 @@ homeassistant:
   username: homeems
   password: homeems
   publish_interval_s: 5
+
+# Modbus TCP proxy. FTW already holds the inverter's single socket; other
+# integrations (Home Assistant's native Modbus / Sungrow / SolarEdge
+# integrations, Node-RED, …) share it by talking to this box instead of the
+# device. Off by default: the listener has no Modbus authentication, and
+# writes would bypass FTW's control loop.
+# modbus_proxy:
+#   enabled: true
+#   listen: ":1502"     # used when the site has one unique Modbus TCP endpoint
+#   allow_write: false  # keep off unless you trust every host on the LAN
+#
+# Two inverters (different host:port) each need their own listen address:
+#   capabilities.modbus.proxy_listen: ":1502"  /  ":1503"
+# Docker host-networking already publishes 1502; other compose files need
+# the port mapped.
 
 # Built-in OCPP Central System, speaking 1.6J and 2.0.1. EV chargers that speak
 # OCPP connect to FTW directly — there is no driver to write and nothing to add

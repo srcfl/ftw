@@ -91,7 +91,7 @@ func (c *tcpClient) ReadRegisters(addr, count uint16, fc byte) ([]uint16, error)
 		byte(addr >> 8), byte(addr),
 		byte(count >> 8), byte(count),
 	}
-	res, err := c.execute(pdu)
+	res, err := c.execute(c.unitID, pdu)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (c *tcpClient) WriteRegister(addr, value uint16) error {
 		byte(addr >> 8), byte(addr),
 		byte(value >> 8), byte(value),
 	}
-	res, err := c.execute(pdu)
+	res, err := c.execute(c.unitID, pdu)
 	if err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ func (c *tcpClient) WriteRegisters(addr uint16, values []uint16) error {
 	for i, v := range values {
 		binary.BigEndian.PutUint16(pdu[6+i*2:8+i*2], v)
 	}
-	res, err := c.execute(pdu)
+	res, err := c.execute(c.unitID, pdu)
 	if err != nil {
 		return err
 	}
@@ -156,9 +156,33 @@ func (c *tcpClient) WriteRegisters(addr uint16, values []uint16) error {
 	return nil
 }
 
-func (c *tcpClient) execute(pdu []byte) ([]byte, error) {
+func (c *tcpClient) execute(unitID uint8, pdu []byte) ([]byte, error) {
+	res, err := c.roundTrip(unitID, pdu)
+	if err != nil {
+		return nil, err
+	}
+	if len(res) == 0 {
+		return nil, errors.New("modbus empty response pdu")
+	}
+	if res[0]&0x80 != 0 {
+		code := byte(0)
+		if len(res) > 1 {
+			code = res[1]
+		}
+		return nil, modbusException{function: res[0] &^ 0x80, code: code}
+	}
+	return res, nil
+}
+
+// roundTrip sends one PDU and returns the response PDU, including Modbus
+// exception PDUs. Transport failures are the only errors. unitID is taken
+// from the caller so one TCP session can serve several slaves.
+func (c *tcpClient) roundTrip(unitID uint8, pdu []byte) ([]byte, error) {
 	if c.conn == nil {
 		return nil, io.ErrClosedPipe
+	}
+	if len(pdu) == 0 {
+		return nil, errors.New("modbus empty request pdu")
 	}
 	c.txID++
 	txID := c.txID
@@ -166,7 +190,7 @@ func (c *tcpClient) execute(pdu []byte) ([]byte, error) {
 	binary.BigEndian.PutUint16(req[0:2], txID)
 	binary.BigEndian.PutUint16(req[2:4], 0)
 	binary.BigEndian.PutUint16(req[4:6], uint16(len(pdu)+1))
-	req[6] = c.unitID
+	req[6] = unitID
 	copy(req[7:], pdu)
 
 	deadline := time.Now().Add(c.timeout)
@@ -191,16 +215,6 @@ func (c *tcpClient) execute(pdu []byte) ([]byte, error) {
 	res := make([]byte, length-1)
 	if _, err := io.ReadFull(c.conn, res); err != nil {
 		return nil, err
-	}
-	if len(res) == 0 {
-		return nil, errors.New("modbus empty response pdu")
-	}
-	if res[0]&0x80 != 0 {
-		code := byte(0)
-		if len(res) > 1 {
-			code = res[1]
-		}
-		return nil, modbusException{function: res[0] &^ 0x80, code: code}
 	}
 	return res, nil
 }

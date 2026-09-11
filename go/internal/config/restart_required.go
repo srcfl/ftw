@@ -16,7 +16,7 @@ import "reflect"
 //     {pv_rated_w, latitude, longitude}, fleet_ping.enabled, and
 //     home_assistant.* reload live.
 //   - Everything else (api.port, state.path, price.*, planner.*, nova.*,
-//     ev_charger.*, weather.provider/arrays,
+//     ev_charger.*, ocpp.*, modbus_proxy.*, weather.provider/arrays,
 //     site.control_interval_s, site.watchdog_timeout_s, site.smoothing_alpha,
 //     site.gain) needs the binary restarted to take effect.
 //
@@ -52,6 +52,7 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg.API.Port != newCfg.API.Port {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")
 	}
+	reasons = append(reasons, modbusProxyRestartReasons(oldCfg, newCfg)...)
 	// homeassistant.* is hot-reloadable via (*ha.Bridge).Reload; see the
 	// applier in cmd/ftw/main.go.
 	if !pointerEqual(oldCfg.State, newCfg.State) {
