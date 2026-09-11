@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.4.2
+
+### Patch Changes
+
+- 8a069c3: Status and 1h charts read SQLite only. Live maintenance no longer writes or checkpoints the imported DuckDB archive.
+
 ## 3.4.1
 
 ### Patch Changes
