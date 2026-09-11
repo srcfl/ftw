@@ -277,6 +277,42 @@ func TestDailyEnergyIntervalsDistinguishesNoDataFromZero(t *testing.T) {
 	})
 }
 
+func TestDailyEnergySkipsLongTelemetryGap(t *testing.T) {
+	base := time.Date(2026, 9, 11, 5, 40, 0, 0, time.UTC)
+	s := freshStore(t)
+	if err := s.RecordHistory(HistoryPoint{TsMs: base.UnixMilli(), PVW: -6000, GridW: -5000, LoadW: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(7 * time.Hour).UnixMilli(), PVW: -6000, GridW: -5000, LoadW: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.DailyEnergy(base.UnixMilli(), base.Add(8*time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Intervals != 0 {
+		t.Fatalf("Intervals = %d, want 0 (7h hole skipped)", d.Intervals)
+	}
+	if d.PVWh != 0 || d.ExportWh != 0 || d.LoadWh != 0 {
+		t.Fatalf("long gap invented energy: %+v", d)
+	}
+
+	if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(7*time.Hour + 3*time.Minute).UnixMilli(), PVW: -6000, GridW: -5000, LoadW: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.DailyEnergy(base.UnixMilli(), base.Add(8*time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Intervals != 1 {
+		t.Fatalf("Intervals = %d, want 1 (3 min interval kept)", d.Intervals)
+	}
+	wantPV := 6000.0 * 3 / 60
+	if d.PVWh < wantPV*0.99 || d.PVWh > wantPV*1.01 {
+		t.Fatalf("PVWh = %v, want ~%v", d.PVWh, wantPV)
+	}
+}
+
 func TestConfigPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s1, err := Open(path)

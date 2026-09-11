@@ -1521,6 +1521,10 @@ type DayEnergy struct {
 // to a left-endpoint sum. Pushing the sums into SQL avoids shipping ~17k
 // hot-tier rows per day back to the application — month-view dashboards got
 // slow once hot retention grew.
+//
+// Intervals longer than maxCostIntegrationGap are skipped. A history-writer
+// stall that later resumes would otherwise attribute hours of the first new
+// sample as if the site had run at that power through the hole.
 func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	const q = `
 		WITH all_rows AS (
@@ -1548,13 +1552,14 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0),
 			COUNT(*)
 		FROM lagged
-		WHERE prev_ts IS NOT NULL
+		WHERE prev_ts IS NOT NULL AND (ts_ms - prev_ts) <= ?
 	`
 	var d DayEnergy
 	err := s.history.QueryRow(q,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
+		maxCostIntegrationGap.Milliseconds(),
 	).Scan(
 		&d.ImportWh, &d.ExportWh, &d.PVWh,
 		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
