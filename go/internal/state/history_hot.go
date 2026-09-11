@@ -184,6 +184,16 @@ func (s *Store) applyHotLedger(ctx context.Context, batches []historyBatch) erro
 	return tx.Commit()
 }
 
+func (s *Store) checkpointLiveHistory(ctx context.Context) error {
+	if s.hot == nil {
+		return nil
+	}
+	s.hotWriteMu.Lock()
+	defer s.hotWriteMu.Unlock()
+	_, err := s.hot.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+	return err
+}
+
 func tickTimestamp(p *HistoryPoint, samples []Sample, observations []EnergyObservation) int64 {
 	var ts int64
 	if p != nil {

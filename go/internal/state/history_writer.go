@@ -420,21 +420,10 @@ func (w *historyWriter) runMaintenance() {
 	w.maintenanceMu.Lock()
 	defer w.maintenanceMu.Unlock()
 	ctx, cancel := context.WithTimeout(w.ctx, historyMaintenanceTimeout)
-	sealErr := w.store.SealHotHistory(ctx)
-	if sealErr != nil {
-		slog.Warn("live history seal postponed; SQLite ticks retained", "err", sealErr)
-	}
-	err := w.store.CheckpointHistory(ctx)
-	if err == nil && (w.forceRotate.Load() || shouldRotateNative()) {
-		if rotErr := w.store.RotateHistory(ctx); rotErr != nil {
-			err = rotErr
-		} else {
-			w.forceRotate.Store(false)
-		}
-	}
+	err := w.store.checkpointLiveHistory(ctx)
 	cancel()
-	if err == nil {
-		err = sealErr
+	if w.forceRotate.Load() {
+		w.forceRotate.Store(false)
 	}
 	// A successful rotation may still leave the same tick too large. Back off
 	// every actual attempt; skipped calls above must not extend this deadline.

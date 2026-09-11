@@ -1590,15 +1590,33 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	if !hasHot {
 		return s.dailyEnergyFromArchive(sinceMs, untilMs)
 	}
-	arch, err := s.dailyEnergyFromArchive(sinceMs, cut-1)
-	if err != nil {
-		return DayEnergy{}, err
-	}
 	hot, err := s.dailyEnergyFromHot(ctx, cut, untilMs)
 	if err != nil {
 		return DayEnergy{}, err
 	}
+	arch, err := s.dailyEnergyFromArchive(sinceMs, cut-1)
+	if err != nil {
+		slog.Warn("archive daily energy skipped; using live SQLite only", "err", err)
+		return hot, nil
+	}
 	return addDayEnergy(arch, hot), nil
+}
+
+// LiveDayEnergy integrates only SQLite hot ticks. Status polls every 2 s and
+// must not touch the imported DuckDB archive.
+func (s *Store) LiveDayEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
+	ctx := context.Background()
+	cut, hasHot, err := s.hotEarliestMs(ctx)
+	if err != nil {
+		return DayEnergy{}, err
+	}
+	if !hasHot {
+		return DayEnergy{}, nil
+	}
+	if cut > sinceMs {
+		sinceMs = cut
+	}
+	return s.dailyEnergyFromHot(ctx, sinceMs, untilMs)
 }
 
 func (s *Store) dailyEnergyFromArchive(sinceMs, untilMs int64) (DayEnergy, error) {
