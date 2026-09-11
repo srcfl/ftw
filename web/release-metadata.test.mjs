@@ -89,7 +89,16 @@ describe("release metadata", () => {
       packageJSON.scripts?.["version-packages"] || "",
       /changeset version.+npm install --package-lock-only/,
     );
-    assert.match(releaseWorkflow, /version:\s+npm run version-packages/);
+    assert.match(releaseWorkflow, /version-script:\s+npm run version-packages/);
+  });
+
+  it("reads the changesets output name its action major publishes", () => {
+    // changesets/action v2 renamed every input and output to kebab-case.
+    // A stale `hasChangesets` reads as empty, so the stable promotion
+    // steps guarded by it would skip in silence and release nothing.
+    assert.match(releaseWorkflow, /uses: changesets\/action@v2\b/);
+    assert.doesNotMatch(releaseWorkflow, /outputs\.hasChangesets/);
+    assert.match(releaseWorkflow, /outputs\.has-changesets/);
   });
 
   it("publishes the state schema in beta and stable release notes", () => {
