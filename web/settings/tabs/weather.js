@@ -1,31 +1,48 @@
 // Settings → Weather tab: forecast provider + location + PV arrays.
-// Owns its own Leaflet loader + PV-array editor + 3D preview loader
+// Owns its own MapLibre loader + PV-array editor + 3D preview loader
 // so the Settings shell stays weather-agnostic.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  var leafletLoading = null;
-  function loadLeaflet() {
-    if (window.L) return Promise.resolve();
-    if (leafletLoading) return leafletLoading;
-    leafletLoading = new Promise(function (resolve, reject) {
-      var css = document.createElement("link");
-      css.rel = "stylesheet";
-      css.href = "/vendor/leaflet/leaflet.css";
-      document.head.appendChild(css);
+  // MapLibre GL JS (BSD-3), vendored under /vendor/maplibre and loaded on
+  // demand exactly the way this tab already lazy-loads its other heavy
+  // optional dependency — the picker is ~1 MB and only the Weather tab needs
+  // it. Shipping it on the box follows the same policy as /vendor/three and
+  // the Leaflet copy this replaced: no third-party JS from a CDN, and the map
+  // must load when the gateway cannot reach the internet.
+  //
+  // v6 ships ESM only and is code-split (the entry pulls in
+  // maplibre-gl-shared.mjs and spawns maplibre-gl-worker.mjs by relative
+  // URL), so it is loaded with a dynamic import() rather than a <script>
+  // tag. Same-origin also means the worker loads directly instead of through
+  // the blob: detour MapLibre uses for cross-origin serving. The numeric
+  // lat/lon fields stay authoritative, so a WebGL failure costs the picker
+  // and nothing else.
+  var MAPLIBRE_BASE = "/vendor/maplibre/";
+  var maplibreLoading = null;
+  function loadMapLibre() {
+    if (window.maplibregl) return Promise.resolve();
+    if (maplibreLoading) return maplibreLoading;
 
-      var script = document.createElement("script");
-      script.src = "/vendor/leaflet/leaflet.js";
-      script.async = true;
-      script.onload = function () { resolve(); };
-      script.onerror = function () {
-        leafletLoading = null;
-        reject(new Error("Leaflet failed to load"));
-      };
-      document.head.appendChild(script);
-    });
-    return leafletLoading;
+    if (!document.getElementById("maplibre-css")) {
+      var css = document.createElement("link");
+      css.id = "maplibre-css";
+      css.rel = "stylesheet";
+      css.href = MAPLIBRE_BASE + "maplibre-gl.css";
+      document.head.appendChild(css);
+    }
+
+    // v6 removed the default export, so the module namespace is the API.
+    maplibreLoading = import(MAPLIBRE_BASE + "maplibre-gl.mjs")
+      .then(function (mod) {
+        window.maplibregl = mod.default || mod;
+      })
+      .catch(function (e) {
+        maplibreLoading = null;
+        throw new Error("MapLibre GL JS failed to load: " + (e && e.message ? e.message : e));
+      });
+    return maplibreLoading;
   }
 
   var pvArraysModulePromise = null;
@@ -124,8 +141,28 @@
     };
   }
 
+  // Raster style assembled inline from the same OpenStreetMap tiles the old
+  // Leaflet picker used: swapping the renderer changes neither the tile source
+  // nor the attribution. Raster-only also means no glyph or sprite server is
+  // needed, so the picker has exactly one external origin to reach.
+  function osmRasterStyle() {
+    return {
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: "© OpenStreetMap",
+        },
+      },
+      layers: [{ id: "osm", type: "raster", source: "osm" }],
+    };
+  }
+
   function mountMap(ctx, container) {
-    if (!window.L) return;
+    if (!window.maplibregl) return;
     var bodyEl = ctx.bodyEl;
     var setByPath = ctx.setByPath;
     var latInput = bodyEl.querySelector('[data-path="weather.latitude"]');
@@ -136,17 +173,24 @@
     if (isNaN(lat)) lat = 59.3293;
     if (isNaN(lon)) lon = 18.0686;
     if (window._weatherMap) { try { window._weatherMap.remove(); } catch (e) {} window._weatherMap = null; }
-    var map = L.map(container, { zoomControl: true }).setView([lat, lon], 11);
+    // MapLibre takes coordinates as [lng, lat] — the reverse of Leaflet's
+    // [lat, lng]. Every call below is ordered accordingly.
+    var map = new maplibregl.Map({
+      container: container,
+      style: osmRasterStyle(),
+      center: [lon, lat],
+      zoom: 11,
+      attributionControl: { compact: true },
+      // OSM volunteer tiles 403 when the page sends no Referer. The box sends
+      // Referrer-Policy: no-referrer on every response, so tile requests must
+      // opt back in. Origin only; the path stays private.
+      transformRequest: function (url) {
+        return { url: url, referrerPolicy: "strict-origin-when-cross-origin" };
+      },
+    });
     window._weatherMap = map;
-    // OSM volunteer tiles 403 when the page sends no Referer. The box
-    // sends Referrer-Policy: no-referrer on every response, so Leaflet
-    // must opt these images back in. Origin only; the path stays private.
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 18,
-      attribution: "© OpenStreetMap",
-      referrerPolicy: "strict-origin-when-cross-origin",
-    }).addTo(map);
-    var marker = L.marker([lat, lon], { draggable: true }).addTo(map);
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    var marker = new maplibregl.Marker({ draggable: true }).setLngLat([lon, lat]).addTo(map);
     function setCoord(la, lo) {
       latInput.value = la.toFixed(4);
       lonInput.value = lo.toFixed(4);
@@ -154,23 +198,23 @@
       setByPath(ctx.config, "weather.longitude", lo);
     }
     marker.on("dragend", function () {
-      var ll = marker.getLatLng();
+      var ll = marker.getLngLat();
       setCoord(ll.lat, ll.lng);
     });
     map.on("click", function (e) {
-      marker.setLatLng(e.latlng);
-      setCoord(e.latlng.lat, e.latlng.lng);
+      marker.setLngLat(e.lngLat);
+      setCoord(e.lngLat.lat, e.lngLat.lng);
     });
     function syncFromInputs() {
       var la = parseFloat(latInput.value), lo = parseFloat(lonInput.value);
       if (!isNaN(la) && !isNaN(lo)) {
-        marker.setLatLng([la, lo]);
-        map.panTo([la, lo]);
+        marker.setLngLat([lo, la]);
+        map.panTo([lo, la]);
       }
     }
     latInput.addEventListener("change", syncFromInputs);
     lonInput.addEventListener("change", syncFromInputs);
-    setTimeout(function () { map.invalidateSize(); }, 150);
+    setTimeout(function () { map.resize(); }, 150);
   }
 
   function arraysSummary(n) {
@@ -191,7 +235,9 @@
   function initWeatherMap(ctx) {
     var container = document.getElementById("weather-map");
     if (!container) return;
-    loadLeaflet().then(function () { mountMap(ctx, container); })
+    // mountMap throws on hosts without WebGL; the same catch that handles a CDN
+    // failure degrades those to the numeric fields.
+    loadMapLibre().then(function () { mountMap(ctx, container); })
       .catch(function (e) { container.textContent = "map unavailable: " + e.message; });
   }
 

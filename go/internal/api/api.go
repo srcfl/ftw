@@ -2875,6 +2875,23 @@ func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 
 // ---- static ----
 
+// staticContentTypes pins the Content-Type of every asset kind the web tree
+// ships. Without it, http.ServeFile asks the operating system's MIME table —
+// the registry on Windows — and a host that maps .mjs (or .js) to text/plain
+// does not merely mislabel the file: the app sends X-Content-Type-Options:
+// nosniff, so the browser is required to refuse it, and the vendored MapLibre
+// dies with "failed to fetch dynamically imported module". ES modules are the
+// strictest case; the rest are pinned so no asset depends on host state.
+var staticContentTypes = map[string]string{
+	".html": "text/html; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".js":   "text/javascript; charset=utf-8",
+	".mjs":  "text/javascript; charset=utf-8",
+	".svg":  "image/svg+xml",
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+}
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if path == "/" {
@@ -2893,6 +2910,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	// Always-revalidate so version bumps land immediately
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(clean))]; ok {
+		w.Header().Set("Content-Type", ct)
+	}
 	http.ServeFile(w, r, clean)
 }
 
