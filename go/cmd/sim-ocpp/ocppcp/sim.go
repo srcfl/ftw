@@ -183,8 +183,8 @@ func (s *Sim) Report() error {
 	wh := s.physics.EnergyWh
 	txID := s.txID
 	txRef := s.txRef
-	seq := s.seq
 	s.seq++
+	seq := s.seq
 	s.mu.Unlock()
 
 	if s.cp != nil {

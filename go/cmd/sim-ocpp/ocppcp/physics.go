@@ -51,9 +51,9 @@ func (p Physics) targetA() float64 {
 // Tick advances DrawA toward the granted limit and integrates energy.
 func (p *Physics) Tick(dt time.Duration) {
 	target := p.targetA()
-	if p.TauS <= 0 || dt <= 0 {
+	if p.TauS <= 0 {
 		p.DrawA = target
-	} else {
+	} else if dt > 0 {
 		alpha := 1 - math.Exp(-dt.Seconds()/p.TauS)
 		p.DrawA += (target - p.DrawA) * alpha
 	}
