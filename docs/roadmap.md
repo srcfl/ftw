@@ -42,6 +42,31 @@ remaining PR against its old feature base. Preserve independent benchmarks
 and Python development tools where they verify today's product; they are not
 the retired optimizer runtime.
 
+### First delivery after the review
+
+Core [#1170](https://github.com/srcfl/ftw/pull/1170) and
+[#1199](https://github.com/srcfl/ftw/pull/1199) merged on 12 September.
+Missing-SoC protection now holds through final dispatch. Load calculations
+exclude offline devices; the curtailment helper requires a fresh site meter. The Lua host rejects absent command hooks and
+read-only commands, denies writes during fingerprint probes, and requires a
+safe default for PV control too. The recovery pin carries 40 drivers, each
+covered by the startup-contract test.
+
+Webapp [#57](https://github.com/srcfl/ftw-webapp/pull/57) also merged. A manual
+mode keeps a clear **Use the plan** action. Sending and confirmed state remain
+distinct, and mode changes cannot overlap with the same control revision.
+
+The Core changes passed `make verify` and CI. The webapp passed its verification
+suite, shared-contract checks and a browser run against the protocol simulator.
+These results close the confirmed code defects; they do not complete physical
+safe-default qualification, the full daily charging outcome or a release.
+The implementation review below remains the original baseline for comparison.
+
+The next product change remains the direct post-plug-in SoC flow, accepted-plan
+feedback and actionable missed-departure risk. Verify recurring goals, Charge
+now and restart recovery together on a named charger with an offline car.
+Keep target-box response and safe-default evidence alongside that work.
+
 ### Reviewed baseline
 
 This baseline checks Core `f1a3b765`, webapp `ff7af033`, native app
@@ -171,8 +196,12 @@ telemetry-only driver or require every house to supply a thermal model.
 
 ## How work enters the roadmap
 
-External users submit issues, not PRs. Sourceful implements selected work.
-Acceptance of an issue does not invite an external implementation PR.
+Contributions are welcome, preferably based on an issue. Broad ideas may
+start as short Markdown PRs; concrete fixes can include code and relevant
+test evidence. Hardware claims need hardware results. Work is agentic first:
+make the problem, scope and results clear enough for people and agents to
+assess and continue. Fredrik sets priority; Sourceful reviews and maintains
+changes. An accepted issue or proposal does not promise delivery.
 
 For each selected change, state the household need, the behaviour to change,
 the existing work it touches and the evidence that will establish completion.
