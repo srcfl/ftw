@@ -36,6 +36,11 @@ workers, obtain the required Energyplan license or use an FTW deployment that
 omits them. An automatic update does not grant commercial rights to a new
 worker. Keep the original license with any older worker you retain.
 
+In image metadata, `LicenseRef-Energyplan-Home-Use-1.0` means the license in
+`optimizer/native/bundle/LICENSE.txt`. The Core image lists both AGPL and
+Energyplan terms; the updater lists AGPL. The AGPL grant includes the extra
+permission in LICENSE. Dependency licenses remain in their own notices.
+
 ## Source for a distributed version
 
 The source repository is https://github.com/srcfl/ftw.
