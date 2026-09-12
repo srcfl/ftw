@@ -6,8 +6,10 @@ safety boundary. Drivers translate hardware protocols. The optimizer proposes
 plans and supplies primary forecasts. A failure or upgrade outside core must
 never stop local measurement or make dispatch unsafe.
 
-The product boundary — what that system is, and is not — lives in
-[`AGENTS.md`](../AGENTS.md). This document is the system map.
+[VISION.md](../VISION.md) defines the product direction and
+[the roadmap](roadmap.md) defines acceptance evidence. This document describes
+the running system. Product requirements below guide future work and do not
+by themselves add runtime behaviour or new protocol capabilities.
 
 ## Module boundaries
 
@@ -22,12 +24,36 @@ driver, but one failed driver is isolated from the others. Optional
 integrations such as Home Assistant, notifications and Nova attach at
 core's API, state or telemetry boundaries; they do not own dispatch safety.
 
-A future module belongs outside core only when it has:
+Choose the design with the least total complexity. Moving code out of Core
+is useful only when it improves the product's operation or maintenance.
+A separate module requires a concrete benefit and:
 
 - a small, explicit and versioned contract;
 - independent failure and update semantics;
 - no authority to bypass core's validation or safety limits;
 - a useful fallback or a cleanly unavailable state.
+
+## Product requirements across these boundaries
+
+Discovery, first-day models and controlled commissioning should establish
+useful operation without extensive configuration. Keep verified limits,
+learned capabilities and user estimates distinct. A failed control integration
+must not remain available to planning merely because it still emits telemetry.
+
+The UI and agent clients need a trace from requested intent through acceptance,
+dispatch, device result and measured effect, including age and uncertainty.
+Reading a value and controlling its source are separate capabilities.
+
+Agents and external automation follow the same Core authority as the planner.
+The target includes durable schedule changes and submitted plans, alongside
+renewable temporary control. Expired temporary control returns to local
+operation; disconnecting a client does not delete a stored household goal.
+
+Cloud MCP should reuse the encrypted client/session path where it fits. The
+relay and escrow remain blind. An authorized agent endpoint can read only
+what its grant allows, and its access must be revocable. Protocol extensions
+require registry changes and paired implementation tests; this section does
+not introduce wire names or bypass existing admission rules.
 
 ## Power convention
 

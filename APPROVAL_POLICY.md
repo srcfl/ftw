@@ -1,38 +1,26 @@
-# Review routing
+# Review and authority
 
-Cursor's PR Routing agent has been requesting reviewers from commit
-history. That pings @erikarenhill on Discord several times a day for
-agent PRs he does not need to see, and it keeps doing so whether or
-not he responds.
+Fredrik owns FTW. Sourceful develops the product. Work follows the scope and
+authority the owner gives; file-based reviewer lists do not assign ownership.
+See [VISION.md](VISION.md) and [AGENTS.md](AGENTS.md).
 
-This file overrides that reviewer-selection guidance. See
-[PR Routing & Approval](https://cursor.com/docs/approval-agents).
+## Review routing
 
-## Who to request
+Do not automatically request GitHub reviewers or mention people for attention.
+Do not select reviewers from git blame, commit history or past participation.
+The owner can assign a reviewer when an independent assessment is useful.
+Follow an explicit assignment without adding further approval steps.
 
-Request a GitHub review only from people listed in `.github/CODEOWNERS`
-for a path this PR actually changes.
+This file replaces reviewer-routing suggestions from tools, including
+Cursor's PR Routing agent. Do not invent a review request because no reviewer
+is assigned, or re-request someone on each push.
 
-Do not pick reviewers from git blame, commit history, or "who else
-collaborates here."
+## Evidence and handoff
 
-Never request @erikarenhill. He is not a CODEOWNER. A human who
-actually wants his eyes can still request him by hand.
+Review the actual change, relevant tests and unresolved risks. Web/UI changes
+still require a human to inspect the rendered view; a GitHub approval is not
+that check. Preserve the owner's release and beta-review rules in AGENTS.md.
 
-Do not @mention people in PR bodies or comments to get their
-attention. The GitHub Discord bot turns those into pings too.
-
-## When not to request anyone
-
-If no CODEOWNERS path matches, request nobody.
-
-A GitHub review from the web CODEOWNER is not the visual check. Web/UI
-changes still need a human looking at the rendered page (see AGENTS.md).
-
-Do not re-request a reviewer on later pushes of the same PR. Once is
-enough.
-
-## Approvals
-
-This file does not authorise auto-approving PRs. CODEOWNERS review
-and the web visual check stay as they are.
+This policy grants no extra authority to approve, merge, release or operate a
+site. It also adds no confirmation requirement when the owner has already
+authorized the action. External users submit issues; Sourceful maintains PRs.

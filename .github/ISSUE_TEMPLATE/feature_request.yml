@@ -10,10 +10,9 @@ body:
         a thread in [Discussions](../../discussions) first — issues are
         best for concrete, actionable proposals.
 
-        External code contributions start here as text. Describe and discuss
-        the change before writing code, then wait for a maintainer to accept
-        one bounded scope. Please do not open an implementation pull request
-        until that happens.
+        Sourceful develops FTW. External users submit issues with needs and
+        evidence; we do not accept external pull requests, including docs and
+        drivers. You do not need to design an API or write code to make a request.
   - type: textarea
     id: problem
     attributes:
@@ -24,10 +23,8 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed solution
-      description: How would you like this to work? Sketch the API / UX / config.
-    validations:
-      required: true
+      label: Desired result
+      description: Describe the result you want. A technical design is optional.
   - type: textarea
     id: alternatives
     attributes:
@@ -39,15 +36,11 @@ body:
       label: Evidence and source material
       description: Link real hardware or protocol documents, tariff rules, screenshots, logs, user reports, or other evidence that defines the need.
       placeholder: State what the source proves, its version or effective date, and any limits.
-    validations:
-      required: true
   - type: textarea
     id: boundaries
     attributes:
       label: Boundaries, failure behavior and proof
       description: What stays out of scope? How should failure stay safe? What test, run, HIL result, or rendered view would prove the change?
-    validations:
-      required: true
   - type: dropdown
     id: area
     attributes:
@@ -76,5 +69,5 @@ body:
     attributes:
       label: Contribution path
       options:
-        - label: I will wait for a maintainer to accept the written scope before opening an implementation pull request.
+        - label: I understand that Sourceful handles implementation and external contributions use issues, not pull requests.
           required: true
