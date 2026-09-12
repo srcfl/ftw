@@ -55,6 +55,8 @@ func (t *TeslaWC) Describe() Descriptor {
 		Label:     "Tesla Wall Connector",
 		Transport: TransportHTTP,
 		NeedsAuth: false,
+		// Installed from the device-drivers pin as drivers/tesla_wall_connector.lua.
+		// Tests load the in-tree copy at go/internal/drivers/testdata/.
 		LuaDriver: "drivers/tesla_wall_connector.lua",
 	}
 }

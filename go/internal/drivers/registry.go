@@ -30,6 +30,9 @@ var (
 	// ErrObserveOnly is returned when a configured telemetry-only driver is
 	// reached through a generic command path instead of the API guard.
 	ErrObserveOnly = errors.New("driver is observe_only and cannot be controlled")
+	// ErrReadOnlyDriver rejects dispatch before the declared read-only Lua
+	// command hook can run, even when that hook exists and would accept it.
+	ErrReadOnlyDriver = errors.New("driver is read_only and cannot be controlled")
 	// ErrCommandSuperseded is returned when an EV command no longer belongs
 	// to the current per-driver control sequence. In particular, ev_resume is
 	// valid only immediately after the ev_pause that opened its cycle; any
@@ -242,6 +245,7 @@ type runningDriver struct {
 	env                *HostEnv
 	cfg                config.Driver
 	policy             *RuntimePolicy
+	readOnly           bool
 	leaseExpiresAt     time.Time
 	generation         uint64
 	statusMu           sync.RWMutex
@@ -453,12 +457,34 @@ func (r *Registry) AddProbe(ctx context.Context, cfg config.Driver) error {
 	return r.add(ctx, cfg, false)
 }
 
-func legacyDriverDeclaresControls(path string) (bool, error) {
+func actuationCapability(caps []string) bool {
+	for _, c := range caps {
+		switch strings.ToLower(strings.TrimSpace(c)) {
+		case "battery", "pv", "ev", "v2x", "v2x_charger", "vehicle", "heatpump":
+			return true
+		}
+	}
+	return false
+}
+
+// legacyDriverRequiresDefaultMode is the start-time safety gate for bundled
+// and local drivers. A driver that can receive commands and claims an
+// actuation capability (or declares operator controls) must implement
+// driver_default_mode so watchdog/shutdown have somewhere to hand the
+// hardware back. read_only drivers are reporting-only even if they stub
+// driver_command to refuse.
+func legacyDriverRequiresDefaultMode(path string, hasCommand bool) (bool, error) {
 	entry, err := ParseCatalogFile(path)
 	if err != nil {
 		return false, err
 	}
-	return len(entry.Controls) > 0, nil
+	if entry.ReadOnly {
+		return false, nil
+	}
+	if len(entry.Controls) > 0 {
+		return true, nil
+	}
+	return hasCommand && actuationCapability(entry.Capabilities), nil
 }
 
 // add is the shared driver construction path. The caller must hold the
@@ -595,14 +621,14 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		return fmt.Errorf("load lua: %w", err)
 	}
 	if !cfg.ObserveOnly && (policy == nil || !policy.IsControlV2()) {
-		declaresControls, catalogErr := legacyDriverDeclaresControls(cfg.Lua)
+		requiresDefault, catalogErr := legacyDriverRequiresDefaultMode(cfg.Lua, luaDrv.hasEntrypoint("driver_command"))
 		if catalogErr != nil {
 			luaDrv.CleanupContext(ctx)
 			return fmt.Errorf("validate legacy driver controls: %w", catalogErr)
 		}
-		if declaresControls && !luaDrv.hasEntrypoint("driver_default_mode") {
+		if requiresDefault && !luaDrv.hasEntrypoint("driver_default_mode") {
 			luaDrv.CleanupContext(ctx)
-			return fmt.Errorf("driver %q declares operator controls but is missing required driver_default_mode", cfg.Name)
+			return fmt.Errorf("driver %q can be commanded but is missing required driver_default_mode", cfg.Name)
 		}
 	}
 	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}
@@ -662,6 +688,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		env:             env,
 		cfg:             cfg,
 		policy:          policy,
+		readOnly:        driverDeclaresReadOnly(luaDrv.L),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		cmdCh:           make(chan driverCmd, 8),
@@ -1305,6 +1332,9 @@ func (r *Registry) sendWithGeneration(ctx context.Context, name string, payload 
 	}
 	if rd.cfg.ObserveOnly {
 		return generation, ErrObserveOnly
+	}
+	if rd.readOnly {
+		return generation, ErrReadOnlyDriver
 	}
 	if err := ctx.Err(); err != nil {
 		return generation, err

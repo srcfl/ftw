@@ -123,6 +123,10 @@ type HostEnv struct {
 	// signed read-only policy denies writes in every phase. A signed v2 control
 	// policy also limits writes to a bounded command/default-mode call.
 	RuntimePolicy *RuntimePolicy
+	// ProbeReadOnly denies every mutating host verb. Fingerprint probes set
+	// this so a buggy driver_fingerprint cannot reconfigure hardware: bundled
+	// drivers otherwise have allowWrite as a no-op.
+	ProbeReadOnly bool
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
 	// declaration for this driver. Zero means "no physical battery
@@ -302,6 +306,9 @@ func (h *HostEnv) allowAuthPost(rawURL string) bool {
 }
 
 func (h *HostEnv) allowWrite(permission string) error {
+	if h.ProbeReadOnly {
+		return fmt.Errorf("%s: fingerprint probe cannot write", permission)
+	}
 	if h.RuntimePolicy == nil {
 		return nil
 	}
