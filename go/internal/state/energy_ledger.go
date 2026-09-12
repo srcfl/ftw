@@ -314,19 +314,30 @@ func addLedgerInterval(tx *sql.Tx, o EnergyObservation, fromMS, toMS int64, ener
 	if toMS <= fromMS || energyWh < 0 {
 		return nil
 	}
-	duration := float64(toMS - fromMS)
-	for start := (fromMS / EnergyLedgerBucketMS) * EnergyLedgerBucketMS; start < toMS; start += EnergyLedgerBucketMS {
-		end := start + EnergyLedgerBucketMS
-		overlapStart, overlapEnd := max64(fromMS, start), min64(toMS, end)
-		if overlapEnd <= overlapStart {
-			continue
-		}
-		part := energyWh * float64(overlapEnd-overlapStart) / duration
-		if err := upsertLedgerEntry(tx, o, start, part, source, quality, provenance); err != nil {
-			return err
-		}
-	}
-	return nil
+	// A separate upsert for every bucket retains DuckDB transaction buffers
+	// across the whole tick. Several counters returning after a long outage can
+	// exhaust the budget even in an otherwise empty database. Stream the same
+	// overlap calculation through one insert, keeping the tick atomic.
+	_, err := tx.Exec(`WITH span AS (
+		SELECT ?::BIGINT AS from_ms, ?::BIGINT AS to_ms,
+			?::DOUBLE AS delta_wh, ?::BIGINT AS bucket_ms
+	)
+	INSERT INTO energy_ledger_entries(
+		schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms,
+		energy_wh, source, quality, provenance, sample_count, observed_at_ms
+	)
+	SELECT ?, ?, ?, bucket_start, bucket_ms,
+		delta_wh * CAST(LEAST(bucket_start + bucket_ms, to_ms) - GREATEST(bucket_start, from_ms) AS DOUBLE)
+			/ CAST(to_ms - from_ms AS DOUBLE), ?, ?, ?, 1, ?
+	FROM span, range(?::BIGINT, ?::BIGINT, ?::BIGINT) AS buckets(bucket_start)
+	ON CONFLICT(schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, source, quality, provenance)
+	DO UPDATE SET energy_wh = energy_ledger_entries.energy_wh + excluded.energy_wh,
+		sample_count = energy_ledger_entries.sample_count + 1,
+		observed_at_ms = GREATEST(energy_ledger_entries.observed_at_ms, excluded.observed_at_ms)`,
+		fromMS, toMS, energyWh, EnergyLedgerBucketMS,
+		EnergyLedgerSchemaVersion, o.AssetID, o.Flow, source, quality, provenance, o.AtMs,
+		(fromMS/EnergyLedgerBucketMS)*EnergyLedgerBucketMS, toMS, EnergyLedgerBucketMS)
+	return err
 }
 
 func plausibleEnergy(energyWh float64, durationMS int64) bool {

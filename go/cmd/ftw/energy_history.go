@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math"
 
 	"github.com/srcfl/ftw/go/internal/control"
@@ -11,24 +12,69 @@ import (
 
 const observedConsumerAssetID = "site/observed-consumer"
 
+type energyIdentityLookup func(string) state.Device
+
+// A known serial must be confirmed by the running driver before a weaker
+// alias can write counters again. Another MAC or a newly reported serial is
+// a replacement, not evidence that it owns the old device's counter history.
+func confirmedEnergyDeviceID(current state.Device, known []state.Device) string {
+	id := state.ResolveDeviceID(current.Make, current.Serial, current.MAC, current.Endpoint)
+	if id == "" || state.ResolveDeviceID(current.Make, current.Serial, "", "") != "" {
+		return id
+	}
+	macID := state.ResolveDeviceID("", "", current.MAC, "")
+	for _, previous := range known {
+		if macID != "" {
+			previousMAC := state.ResolveDeviceID("", "", previous.MAC, "")
+			sameEndpoint := current.Endpoint != "" && previous.Endpoint == current.Endpoint
+			// ARP and serial discovery can leave their evidence in separate rows.
+			// Follow the known MAC's old endpoint even after an address change.
+			for _, alias := range known {
+				if previous.Endpoint != "" && alias.Endpoint == previous.Endpoint &&
+					state.ResolveDeviceID("", "", alias.MAC, "") == macID {
+					sameEndpoint = true
+				}
+			}
+			if state.ResolveDeviceID(previous.Make, previous.Serial, "", "") != "" &&
+				(previousMAC == macID || (previousMAC == "" && sameEndpoint)) {
+				return ""
+			}
+		} else if previous.Endpoint == current.Endpoint &&
+			state.ResolveDeviceID(previous.Make, previous.Serial, previous.MAC, previous.Endpoint) != id {
+			return ""
+		}
+	}
+	return id
+}
+
 // buildEnergyObservations translates current telemetry into independent,
 // unsigned ledger directions. It does not attribute PV to individual loads:
 // the observed household consumer remains a site-balance observation only.
-func buildEnergyObservations(st *state.Store, tel *telemetry.Store, ctrl *control.State, hp state.HistoryPoint) []state.EnergyObservation {
+func buildEnergyObservations(st *state.Store, tel *telemetry.Store, ctrl *control.State, hp state.HistoryPoint, identity energyIdentityLookup) []state.EnergyObservation {
 	if st == nil || tel == nil || ctrl == nil {
 		return nil
 	}
 	out := make([]state.EnergyObservation, 0, 16)
+	known, err := st.AllDevices()
+	if err != nil {
+		slog.Warn("energy device identity unavailable; skipping device counters", "err", err)
+		identity = nil
+	}
+	ids := make(map[string]string)
 	usable := func(driver string) bool {
 		h := tel.DriverHealth(driver)
 		return h != nil && h.Status != telemetry.StatusOffline
 	}
 	asset := func(driver string, kind state.EnergyAssetKind) (string, string, bool) {
-		dev := st.LookupDeviceByDriverName(driver)
-		if dev == nil || dev.DeviceID == "" {
+		id, resolved := ids[driver]
+		if !resolved && identity != nil {
+			id = confirmedEnergyDeviceID(identity(driver), known)
+			ids[driver] = id
+		}
+		if id == "" {
 			return "", "", false
 		}
-		return state.HardwareEnergyAssetID(dev.DeviceID, kind), dev.DeviceID, true
+		return state.HardwareEnergyAssetID(id, kind), id, true
 	}
 	appendDirection := func(assetID, deviceID string, kind state.EnergyAssetKind, label string,
 		flow state.EnergyFlow, atMS int64, powerW float64, counter *float64, readOnly bool) {

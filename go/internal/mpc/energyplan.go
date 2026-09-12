@@ -42,7 +42,9 @@ func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
 	// Core already adjusts PV to one downside horizon. That margin does not
 	// add worker scenarios or change this model's size.
 	budget := energyplanSmallBudget
-	if len(slots)*assets >= 193*6 || p.PVCurtailment.MinW > 0 {
+	// 1 battery + 1 EV is 5 "assets". A 193-slot villa with demand charges
+	// routes to fleet MILP; 193*6 would leave it on the 500 ms budget.
+	if len(slots)*assets >= 193*5 || p.PVCurtailment.MinW > 0 || len(p.DemandCharges) > 0 {
 		budget = energyplanFleetBudget
 	}
 	remaining := remainingFirstSlot(slots)

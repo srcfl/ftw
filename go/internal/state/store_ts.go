@@ -245,22 +245,9 @@ func (s *Store) RecordSamples(samples []Sample) error {
 		return err
 	}
 
-	type resolved struct {
-		dID, mID int64
-		ts       int64
-		v        float64
-	}
-	rs := make([]resolved, 0, len(samples))
-	for _, sm := range samples {
-		dID, err := s.driverID(sm.Driver)
-		if err != nil {
-			return fmt.Errorf("driver intern %s: %w", sm.Driver, err)
-		}
-		mID, err := s.metricID(sm.Metric, sm.Unit)
-		if err != nil {
-			return fmt.Errorf("metric intern %s: %w", sm.Metric, err)
-		}
-		rs = append(rs, resolved{dID: dID, mID: mID, ts: sm.TsMs, v: canonicalHistoryFloat(sm.Value)})
+	rs, err := s.resolveSamples(samples)
+	if err != nil {
+		return err
 	}
 
 	s.historyWriteMu.Lock()
@@ -270,17 +257,59 @@ func (s *Store) RecordSamples(samples []Sample) error {
 		return err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
+	if err := s.insertSamplesAndHours(context.Background(), tx, rs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type resolvedSample struct {
+	dID, mID int64
+	ts       int64
+	v        float64
+}
+
+func (s *Store) resolveSamples(samples []Sample) ([]resolvedSample, error) {
+	rs := make([]resolvedSample, 0, len(samples))
+	for _, sm := range samples {
+		dID, err := s.driverID(sm.Driver)
+		if err != nil {
+			return nil, fmt.Errorf("driver intern %s: %w", sm.Driver, err)
+		}
+		mID, err := s.metricID(sm.Metric, sm.Unit)
+		if err != nil {
+			return nil, fmt.Errorf("metric intern %s: %w", sm.Metric, err)
+		}
+		rs = append(rs, resolvedSample{dID: dID, mID: mID, ts: sm.TsMs, v: canonicalHistoryFloat(sm.Value)})
+	}
+	return rs, nil
+}
+
+func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []resolvedSample) error {
+	if len(rs) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
+	hours := make(map[seriesHourKey]*seriesHourAcc, 8)
 	for _, r := range rs {
-		if _, err := stmt.Exec(r.dID, r.mID, r.ts, r.v); err != nil {
+		res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
+		if err != nil {
 			return err
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		addSeriesHourSample(hours, r.dID, r.mID, r.ts, r.v)
 	}
-	return tx.Commit()
+	return s.upsertSeriesHoursTx(ctx, tx, hours)
 }
 
 // RecordTick persists one control-loop tick — the history snapshot plus the
@@ -327,22 +356,9 @@ func (s *Store) recordHistoryBatch(ctx context.Context, batchID, payloadHash str
 	if err := s.hydrateIntern(); err != nil {
 		return 0, err
 	}
-	type resolved struct {
-		dID, mID int64
-		ts       int64
-		v        float64
-	}
-	rs := make([]resolved, 0, len(samples))
-	for _, sm := range samples {
-		dID, err := s.driverID(sm.Driver)
-		if err != nil {
-			return 0, fmt.Errorf("driver intern %s: %w", sm.Driver, err)
-		}
-		mID, err := s.metricID(sm.Metric, sm.Unit)
-		if err != nil {
-			return 0, fmt.Errorf("metric intern %s: %w", sm.Metric, err)
-		}
-		rs = append(rs, resolved{dID: dID, mID: mID, ts: sm.TsMs, v: canonicalHistoryFloat(sm.Value)})
+	rs, err := s.resolveSamples(samples)
+	if err != nil {
+		return 0, err
 	}
 
 	s.historyWriteMu.Lock()
@@ -352,64 +368,136 @@ func (s *Store) recordHistoryBatch(ctx context.Context, batchID, payloadHash str
 		return 0, err
 	}
 	defer tx.Rollback()
-	if batchID != "" {
-		var previous string
-		var seq int64
-		err := tx.QueryRowContext(ctx, `SELECT payload_hash, sequence FROM history_receipts WHERE batch_id=?`, batchID).Scan(&previous, &seq)
-		if err == nil {
-			if previous != payloadHash {
-				return 0, errors.New("history batch ID has a different payload")
-			}
-			return seq, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+	seq, skipped, err := s.writeHistoryBatchTx(ctx, tx, batchID, payloadHash, p, rs, observations)
+	if err != nil {
+		return 0, err
+	}
+	if !skipped {
+		if err := ackHistoryReceipts(ctx, tx, seq, acknowledgedSequence); err != nil {
 			return 0, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
 
+func ackHistoryReceipts(ctx context.Context, tx *sql.Tx, seq, acknowledgedSequence int64) error {
+	if acknowledgedSequence <= 0 || seq <= 0 {
+		return nil
+	}
+	if acknowledgedSequence >= seq {
+		return errors.New("history acknowledgement must precede the current commit")
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM history_receipts WHERE sequence<=?`, acknowledgedSequence)
+	return err
+}
+
+func (s *Store) writeHistoryBatchTx(ctx context.Context, tx *sql.Tx, batchID, payloadHash string, p *HistoryPoint, rs []resolvedSample, observations []EnergyObservation) (seq int64, skipped bool, err error) {
+	if batchID != "" {
+		var previous string
+		err := tx.QueryRowContext(ctx, `SELECT payload_hash, sequence FROM history_receipts WHERE batch_id=?`, batchID).Scan(&previous, &seq)
+		if err == nil {
+			if previous != payloadHash {
+				return 0, false, errors.New("history batch ID has a different payload")
+			}
+			return seq, true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, false, err
+		}
+	}
 	if p != nil {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
 		); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
-	if len(rs) > 0 {
-		stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
-		if err != nil {
-			return 0, err
-		}
-		defer stmt.Close()
-		for _, r := range rs {
-			if _, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v); err != nil {
-				return 0, err
-			}
-		}
+	if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
+		return 0, false, err
 	}
 	if err := recordEnergyObservationsTx(tx, observations); err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	var seq int64
 	if batchID != "" {
 		if err := tx.QueryRowContext(ctx, `INSERT INTO history_receipts(batch_id,payload_hash) VALUES (?,?) RETURNING sequence`, batchID, payloadHash).Scan(&seq); err != nil {
-			return 0, err
-		}
-		if acknowledgedSequence > 0 {
-			if acknowledgedSequence >= seq {
-				return 0, errors.New("history acknowledgement must precede the current commit")
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM history_receipts WHERE sequence<=?`, acknowledgedSequence); err != nil {
-				return 0, err
-			}
+			return 0, false, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
+	return seq, false, nil
+}
+
+type historyBatchCommit struct {
+	committed int
+	rows      int
+	seq       int64
+}
+
+func (s *Store) recordHistoryBatches(ctx context.Context, batches []historyBatch, acknowledgedSequence int64) (historyBatchCommit, error) {
+	var out historyBatchCommit
+	if len(batches) == 0 {
+		return out, nil
+	}
+	type prepared struct {
+		b  historyBatch
+		p  *HistoryPoint
+		rs []resolvedSample
+	}
+	prep := make([]prepared, 0, len(batches))
+	for _, b := range batches {
+		if err := validateHistorySamples(b.payload.Samples); err != nil {
+			return out, err
+		}
+		var p *HistoryPoint
+		if b.payload.Point != nil {
+			point, err := normalizeHistoryPoint(*b.payload.Point)
+			if err != nil {
+				return out, err
+			}
+			p = &point
+		}
+		if err := s.hydrateIntern(); err != nil {
+			return out, err
+		}
+		rs, err := s.resolveSamples(b.payload.Samples)
+		if err != nil {
+			return out, err
+		}
+		prep = append(prep, prepared{b: b, p: p, rs: rs})
 	}
 
-	return seq, nil
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+	for _, item := range prep {
+		seq, skipped, err := s.writeHistoryBatchTx(ctx, tx, item.b.id, item.b.hash, item.p, item.rs, item.b.payload.Observations)
+		if err != nil {
+			return out, err
+		}
+		out.committed++
+		out.seq = seq
+		if !skipped {
+			out.rows += len(item.rs) + len(item.b.payload.Observations)
+			if item.p != nil {
+				out.rows++
+			}
+		}
+	}
+	if err := ackHistoryReceipts(ctx, tx, out.seq, acknowledgedSequence); err != nil {
+		return out, err
+	}
+	if err := tx.Commit(); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 // LoadSeries returns one metric's history for one driver in [sinceMs, untilMs].
@@ -438,6 +526,26 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 		}
 		return out, nil
 	}
+	hot, err := s.loadHotSeries(ctx, driver, metric, sinceMs, untilMs, 0)
+	if err != nil {
+		return nil, err
+	}
+	arch, err := s.loadArchiveSeriesRaw(ctx, driver, metric, sinceMs, untilMs)
+	if err != nil {
+		return nil, err
+	}
+	merged := mergeSeriesPoints(hot, arch)
+	out := make([]Sample, len(merged))
+	for i, p := range merged {
+		out[i] = Sample{Driver: driver, Metric: metric, TsMs: p.TsMs, Value: p.V}
+	}
+	return out, nil
+}
+
+func (s *Store) loadArchiveSeriesRaw(ctx context.Context, driver, metric string, sinceMs, untilMs int64) ([]SeriesPoint, error) {
+	if s.history == nil || untilMs < sinceMs {
+		return nil, nil
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return nil, err
 	}
@@ -449,7 +557,6 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 	if !dOK || !mOK {
 		return nil, nil
 	}
-
 	rows, err := s.history.QueryContext(ctx, `SELECT ts_ms, value FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
 		ORDER BY ts_ms ASC`, dID, mEnt.id, sinceMs, untilMs)
@@ -457,14 +564,14 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]Sample, 0, 256)
+	out := make([]SeriesPoint, 0, 256)
 	for rows.Next() {
-		var sm Sample
-		sm.Driver, sm.Metric = driver, metric
-		if err := rows.Scan(&sm.TsMs, &sm.Value); err != nil {
+		var p SeriesPoint
+		if err := rows.Scan(&p.TsMs, &p.V); err != nil {
 			return out, err
 		}
-		out = append(out, sm)
+		p.Min, p.Max, p.N = p.V, p.V, 1
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
@@ -541,6 +648,31 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 	if maxPoints <= 0 || untilMs < sinceMs {
 		return nil, nil
 	}
+	cut, hasHot, err := s.hotEarliestMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if hasHot && cut <= sinceMs {
+		return s.loadHotSeries(ctx, driver, metric, sinceMs, untilMs, maxPoints)
+	}
+	arch, err := s.loadArchiveSeriesBuckets(ctx, driver, metric, sinceMs, untilMs, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	if !hasHot {
+		return arch, nil
+	}
+	hot, err := s.loadHotSeries(ctx, driver, metric, cut, untilMs, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	return downsampleSeries(mergeSeriesPoints(hot, arch), sinceMs, untilMs, maxPoints), nil
+}
+
+func (s *Store) loadArchiveSeriesBuckets(ctx context.Context, driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
+	if s.history == nil || untilMs < sinceMs {
+		return nil, nil
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return nil, err
 	}
@@ -553,6 +685,9 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 		return nil, nil
 	}
 
+	if s.seriesHoursReady() && useSeriesHourRollup(sinceMs, untilMs) {
+		return s.loadSeriesBucketsFromHours(ctx, dID, mEnt.id, sinceMs, untilMs, maxPoints)
+	}
 	bucketMs := BucketWidthMs(sinceMs, untilMs, maxPoints)
 	rows, err := s.history.QueryContext(ctx, `SELECT MAX(ts_ms), AVG(value), MIN(value), MAX(value), COUNT(*)
 		FROM ts_samples
@@ -577,6 +712,22 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 // LatestSample returns the most recent value for one (driver, metric).
 // Returns sql.ErrNoRows if nothing has been recorded.
 func (s *Store) LatestSample(driver, metric string) (Sample, error) {
+	if s.hot != nil {
+		var sm Sample
+		err := s.hot.QueryRow(`SELECT s.ts_ms, s.value
+			FROM ts_samples s
+			JOIN ts_drivers d ON d.id = s.driver_id
+			JOIN ts_metrics m ON m.id = s.metric_id
+			WHERE d.name = ? AND m.name = ?
+			ORDER BY s.ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
+		if err == nil {
+			sm.Driver, sm.Metric = driver, metric
+			return sm, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Sample{}, err
+		}
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return Sample{}, err
 	}

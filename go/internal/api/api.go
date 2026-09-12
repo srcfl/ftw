@@ -707,7 +707,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State != nil {
 		resp["history_storage"] = s.deps.State.HistoryBackend()
 		writer := s.deps.State.HistoryWriterStatus()
-		if writer.LastError != "" || writer.MaintenanceError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
+		if writer.LastError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
 			resp["status"] = "degraded"
 		}
 	}
@@ -1119,7 +1119,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State != nil {
 		now := time.Now()
 		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-		d, err := s.deps.State.DailyEnergy(midnight.UnixMilli(), now.UnixMilli())
+		d, err := s.deps.State.LiveDayEnergy(midnight.UnixMilli(), now.UnixMilli())
 		if err == nil {
 			// Only surface today's totals once at least one integration
 			// interval exists. Right after local midnight the range has
@@ -1251,7 +1251,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func currentGridEnergySlot(st *state.Store, now time.Time) (map[string]any, error) {
 	slotStart := now.Truncate(15 * time.Minute)
 	slotEnd := slotStart.Add(15 * time.Minute)
-	d, err := st.DailyEnergy(slotStart.UnixMilli(), now.UnixMilli())
+	d, err := st.LiveDayEnergy(slotStart.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -1652,6 +1652,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", configETag(newCfg.Revision))
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
+	if restartReasons == nil {
+		restartReasons = []string{}
+	}
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
 		"restart_required": len(restartReasons) > 0,

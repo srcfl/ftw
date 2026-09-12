@@ -19,6 +19,8 @@ func (p *Planner) EngineForBuild(version, goos, goarch string) string {
 	return PlannerEngineCore
 }
 
+// SupportsBundledEnergyplan is true on Linux ARM64 and AMD64, the only
+// required Energyplan worker targets. macOS uses Core unless engine is set.
 func SupportsBundledEnergyplan(goos, goarch string) bool {
-	return (goos == "linux" && (goarch == "amd64" || goarch == "arm64")) || (goos == "darwin" && goarch == "arm64")
+	return goos == "linux" && (goarch == "amd64" || goarch == "arm64")
 }

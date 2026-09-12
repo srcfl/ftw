@@ -20,11 +20,12 @@ python3 optimizer/native/verify.py --host-binary
 optimizer/native/bundle/ftw-solver-linux-arm64 --time-limit=100ms < requests.jsonl
 ```
 
-The bundle contains static Linux ARM64 and Linux AMD64 workers and a macOS
-ARM64 worker. The manifest pins their version, private source commit, sizes
-and SHA-256 checksums. The verifier checks every bundled file, the host worker
-handshake and the public source boundary. Keep the license and notices with
-any copied or redistributed executable. Run only a verified bundle.
+The bundle requires static Linux ARM64 and Linux AMD64 workers. A macOS ARM64
+worker is optional and is not a deployment target. The manifest pins their
+version, private source commit, sizes and SHA-256 checksums. The verifier
+checks every bundled file, the host worker handshake on Linux, and the public
+source boundary. Keep the license and notices with any copied or redistributed
+executable. Run only a verified bundle.
 
 The worker reads optimizer protocol v1 JSON lines and stays alive across
 requests. Core's existing `mpc.ExternalOptimizer` starts it through an absolute
@@ -32,7 +33,8 @@ path in `ExternalOptimizerConfig.Command`. Core validates all proposed plans
 and keeps its Go fallback. Beta releases select Energyplan when `planner.engine`
 is unset on a supported host. Set `planner.engine: energyplan` to select it
 explicitly, or `core` to select Core DP. Stable and development
-builds keep Core as the unset default; Windows has no bundled worker.
+builds keep Core as the unset default; Windows and macOS have no required
+bundled worker.
 
 Energyplan uses the same downside PV forecast as Core. Small requests get a
 500 ms solve budget; larger fleets and PV-control requests get 5 s.

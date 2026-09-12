@@ -10,7 +10,9 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
-PLATFORMS = {"linux-arm64", "linux-amd64", "darwin-arm64"}
+REQUIRED_PLATFORMS = {"linux-arm64", "linux-amd64"}
+OPTIONAL_PLATFORMS = {"darwin-arm64"}
+KNOWN_PLATFORMS = REQUIRED_PLATFORMS | OPTIONAL_PLATFORMS
 RUNTIME_LICENSES = {
     "Apache-2.0.txt", "BSD-2-Clause.txt", "CC-BY-SA-4.0.txt", "GCC-exception-3.1.txt",
     "GPL-2.0-only.txt", "GPL-3.0-or-later.txt", "ISC.txt", "LLVM-exception.txt",
@@ -28,9 +30,12 @@ def verify_bundle(root):
             or not re.fullmatch(r"\d+\.\d+\.\d+", manifest.get("version", ""))):
         raise ValueError("Invalid Energyplan manifest identity")
     artifacts, files = manifest["artifacts"], manifest["files"]
-    if set(artifacts) != PLATFORMS:
-        raise ValueError("The bundle must contain every supported platform")
-    expected = {f"ftw-solver-{name}" for name in PLATFORMS}
+    names = set(artifacts)
+    if not REQUIRED_PLATFORMS <= names:
+        raise ValueError("The bundle must contain every required platform")
+    if not names <= KNOWN_PLATFORMS:
+        raise ValueError("Unknown platform in the bundle")
+    expected = {f"ftw-solver-{name}" for name in names}
     expected |= {"forecast-v1.schema.json", "forecast-v1.response.schema.json"}
     expected |= {"LICENSE.txt", "THIRD-PARTY-NOTICES.txt", "rust-runtime/COPYRIGHT-library.html"}
     expected |= {f"rust-runtime/licenses/{name}" for name in RUNTIME_LICENSES}
@@ -58,8 +63,11 @@ def verify_bundle(root):
             machine = 183 if name.endswith("arm64") else 62
             if data[:6] != b"\x7fELF\x02\x01" or int.from_bytes(data[18:20], "little") != machine:
                 raise ValueError(f"Wrong executable architecture: {name}")
-        elif data[:4] != bytes.fromhex("cffaedfe") or int.from_bytes(data[4:8], "little") != 0x100000c:
-            raise ValueError(f"Wrong executable architecture: {name}")
+        elif name.startswith("darwin-"):
+            if data[:4] != bytes.fromhex("cffaedfe") or int.from_bytes(data[4:8], "little") != 0x100000c:
+                raise ValueError(f"Wrong executable architecture: {name}")
+        else:
+            raise ValueError(f"Unknown executable architecture: {name}")
         if os.name != "nt" and not os.access(file, os.X_OK):
             raise ValueError(f"Executable bit missing: {name}")
     return manifest
@@ -68,7 +76,7 @@ def verify_bundle(root):
 def host_key():
     machine = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}.get(platform.machine().lower())
     key = f"{platform.system().lower()}-{machine}"
-    return key if key in PLATFORMS else None
+    return key if key in REQUIRED_PLATFORMS else None
 
 
 def check_public_tree():

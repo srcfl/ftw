@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,6 +58,9 @@ func TestNativeProcessCoreContract(t *testing.T) {
 		}
 		if plan.Solver.Backend != "value_curve_rust" || plan.Actions[1].LoadpointSoC < p.Loadpoint.TargetSoC {
 			t.Fatalf("unexpected plan: %+v", plan)
+		}
+		if strings.Contains(string(plan.OptimizerInput), `"price_ore"`) || !strings.Contains(string(plan.OptimizerInput), `"price_per_kwh"`) {
+			t.Fatalf("planner wire still uses öre keys: %s", plan.OptimizerInput)
 		}
 		for _, a := range plan.Actions {
 			if a.PVLimitW != 0 {

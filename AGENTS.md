@@ -1,7 +1,35 @@
 # FTW project guide
 
-FTW is a local-first home energy management system written in Go, with Lua
-drivers and a compiled Energyplan worker.
+FTW makes mixed home energy equipment work together through local planning,
+safe control and clear feedback. Its default experience must serve a novice
+and earn an expert's trust. Read [VISION.md](VISION.md) for the product
+requirements and [docs/roadmap.md](docs/roadmap.md) for acceptance evidence.
+These are direction, not claims that all planned behaviour has shipped.
+
+Fredrik owns FTW's direction. Sourceful develops and maintains it. External
+users submit issues; we do not accept external pull requests, including docs
+and drivers. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Product rules
+
+- Solve a concrete household need with the least total complexity. Require a
+  reason for every new setting, service or framework. Keep expert access and
+  Lua customization useful while reducing routine setup and decisions.
+- Preserve working behaviour when simplifying. Removing a setting includes
+  handling its stored state; hidden configuration must not keep steering a site.
+- Make request, acceptance, command, device response and measured effect
+  distinct. Show freshness and failures in the normal experience.
+- Treat useful cold start, simple charging, notifications, recovery and
+  analysis by agents as parts of the product, not optional polish.
+- Default battery wear cost is zero. Include charge/discharge efficiency.
+  Keep min/max SoC limits separate from forecast-based caution.
+- External automation and agents express goals, schedules and proposed plans.
+  Core validates and dispatches. Temporary control expires; durable user
+  goals persist. Local operation survives loss of the caller or cloud.
+- Decide scope exclusions with the owner as needs arise. Do not invent a
+  standing blacklist, a one-week value test or a ban on necessary maintenance.
+
+The implementation is Go, with Lua drivers and a compiled Energyplan worker.
 
 ## Architecture
 
@@ -20,9 +48,10 @@ The repository has three explicit modules:
   [`go/internal/mpc`](go/internal/mpc).
   It proposes plans; core validates them and retains a Go fallback.
 
-Keep new functionality in core unless it has a narrow versioned contract,
-independent failure/update semantics and a safe unavailable state. Optional
-modules never bypass core safety.
+Keep responsibilities cohesive and minimize the complexity of the whole
+product. A separate module needs a concrete benefit, a narrow versioned
+contract, independent failure and update semantics, and a safe unavailable
+state. Optional modules never bypass Core safety.
 
 Read [docs/architecture.md](docs/architecture.md) for the system map and
 [docs/site-convention.md](docs/site-convention.md) before changing power math.
@@ -78,24 +107,30 @@ landed on somebody else's finished work.
 - **Check for open PRs touching the files you are about to change.** If one
   exists, it has right of way: rebase onto it, or say so and pick different
   work. Do not rewrite files out from under an open branch.
+- **Coordinate stalled or overlapping work.** Identify a merged base or a
+  blocked dependency and propose the next step. Age alone does not authorize
+  closing a PR or moving another person's commits. Follow the owner's scope,
+  preserve unique work and coordinate with the active author.
 - **"This already exists" is a claim that needs evidence of the right kind.**
   For behaviour, that means a test or a run. For anything visual, it means
   rendering both versions and comparing them — counting tokens, selectors
   or symbols in the source does not establish that a UI change landed.
-- **Prefer small PRs in one area.** Merging often only works when changes do
-  not overlap; a large cross-cutting pass conflicts with everything and ages
-  badly while it waits.
-- **Respect `.github/CODEOWNERS`.** An owner reviews what lands in their
-  area, whoever — or whatever — wrote it.
-- **Do not request GitHub reviews except CODEOWNERS.** Never request
-  @erikarenhill and never @mention people for attention — the GitHub
-  Discord bot turns both into pings. See
-  [`APPROVAL_POLICY.md`](APPROVAL_POLICY.md).
+- **Complete one coherent change.** Follow the owner's selected outcome.
+  Keep PRs small, pair cross-repo changes and avoid unrelated additions.
+  Necessary bug fixes, security, recovery and maintenance still proceed.
+- **Ownership is project-wide.** Fredrik sets direction and authority.
+  Reviews supply evidence and independent judgment. We do not use path-based
+  ownership in Core as a substitute for that responsibility.
+- **Do not request reviewers or ping people automatically.** Follow an
+  explicit owner assignment; do not infer reviewers from commit history.
+  See [APPROVAL_POLICY.md](APPROVAL_POLICY.md).
 - **Review web/UI changes in a browser.** A human must inspect the rendered
-  interface; AI review and reading the source code are not enough.
+  interface; AI review, a GitHub approve and reading the source code are not
+  enough.
 
-Planning documents, design specs, task breakdowns and agent scratch notes
-stay out of the repository; [`.github/check-no-planning-docs.sh`](.github/check-no-planning-docs.sh) enforces
+Keep VISION.md and the roadmap current as the maintained product direction.
+Task plans, design drafts, breakdowns and agent scratch notes stay out of the
+repository; [`.github/check-no-planning-docs.sh`](.github/check-no-planning-docs.sh) enforces
 this. Commit the change, its tests and a changeset; put the reasoning in the
 PR description, where it is read during review and then archived.
 
@@ -142,13 +177,14 @@ The repository owner cuts every release, unless they have explicitly
 handed that duty to someone. Cutting a beta needs green CI and nothing
 else: the owner may merge ahead of a pending review to keep pace,
 because in this project review happens on the beta as much as in the
-PR. Fast-tracking moves a review, it never removes it — the CODEOWNERS
-owner still reviews what landed in their area, on the running beta.
+PR. Fast-tracking defers the review; the owner remains responsible for
+ensuring that it happens on the running beta.
 
-Beta is the playground. Every merged change ships in the next beta;
-testers run it on real sites and file what they find as issues or PRs,
-each naming the beta it was seen on. Label a finding `release-blocker`
-when the line must not promote to stable until it is fixed.
+Every merged change ships in the next beta. Testers run it on real sites and
+report findings in issues, naming the beta. Sourceful maintains the fixes and
+implementation PRs. Label a finding `release-blocker` when the line must not
+promote to stable until it is fixed. Green CI alone does not set product
+priority.
 
 There is no release calendar. A beta promotes once it has run on the
 validation sites for a few days with no open `release-blocker`, and
@@ -209,6 +245,26 @@ check. If the write check fails, stop, repair package access or rotate the one
 dedicated secret, then rerun the same immutable version. Do not mint another
 beta tag to work around an access failure.
 `CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent environment is a multi-repo FTW stack. `/workspace` is
+`srcfl/ftw`. Sibling checkouts live under `/agent/repos/`. Install and start
+run with cwd `/agent`, so `cd` into the repo you mean before `make`.
+
+| Repo | Role |
+|---|---|
+| [`srcfl/ftw`](https://github.com/srcfl/ftw) | Core. `make test`, `make e2e`, `make verify`. |
+| [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) | Editable driver source. Change Lua there, never in `ftw/drivers/*.lua`. |
+| [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated site FTW talks to over real protocols. |
+| [`srcfl/ftw-webapp`](https://github.com/srcfl/ftw-webapp) | Installable client. |
+| [`srcfl/ftwdb`](https://github.com/srcfl/ftwdb) | Archived storage experiment; new storage work belongs in Core. |
+
+`make e2e` and `make dev` still use the in-tree Go simulators
+(`sim-ferroamp`, `sim-sungrow`). For driver, protocol or site behaviour,
+run **device-simulator** as the house: Sungrow hybrid on Modbus plus a bound
+SDM630 as site meter. Its dashboard is `http://127.0.0.1:8762`; FTW is
+`http://127.0.0.1:8080` once `config.local.yaml` points at those ports.
 
 ## Useful source entry points
 

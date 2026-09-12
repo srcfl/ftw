@@ -42,6 +42,17 @@ var historySchema = []string{
 			value     DOUBLE NOT NULL,
 			PRIMARY KEY (driver_id, metric_id, ts_ms)
 		)`,
+	`CREATE TABLE IF NOT EXISTS ts_series_hour (
+			driver_id BIGINT NOT NULL,
+			metric_id BIGINT NOT NULL,
+			hour_ms   BIGINT NOT NULL,
+			sum_value DOUBLE NOT NULL,
+			min_value DOUBLE NOT NULL,
+			max_value DOUBLE NOT NULL,
+			n         BIGINT NOT NULL,
+			last_ts_ms BIGINT NOT NULL,
+			PRIMARY KEY (driver_id, metric_id, hour_ms)
+		)`,
 	`CREATE TABLE IF NOT EXISTS energy_daily (
 			day               TEXT PRIMARY KEY,
 			import_wh         DOUBLE NOT NULL,

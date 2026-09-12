@@ -624,7 +624,9 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 				selected[i].PVW, selected[i].PVKnown, selected[i].PVQuality = point.PVW, true, point.PVQuality
 				selected[i].PVSource, selected[i].ModelPV = "energyplan", point.ModelPV
 			}
-			if usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
+			// A cold load can still be the worker's generic prior. Keep the frozen
+			// profile and heating prior until this interval has learned support.
+			if point.LoadQuality != "cold_start" && usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
 				resolved[i].LoadW = point.LoadW
 				selected[i].LoadW, selected[i].LoadKnown, selected[i].LoadQuality = point.LoadW, true, point.LoadQuality
 				selected[i].LoadSource, selected[i].ModelLoad = "energyplan", point.ModelLoad
@@ -661,6 +663,16 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 					loss = absolute
 				}
 				planning[i].PVW = s.PVW + math.Min(-s.PVW, k*loss)
+			}
+			if band.Method != forecasting.BandMethodEmpirical {
+				// Until joint errors can set the margin, cover load upside as
+				// well as PV downside. This also works at night and without PV.
+				loadBand := calibrator.BandForInterval("champion", "load", max(s.StartMs, origin.UnixMilli()), end, s.LoadW)
+				loadLoss := math.Max(0, loadBand.HighW-s.LoadW)
+				if loadBand.Method != forecasting.BandMethodEmpirical && i < len(selected) && selected[i].ModelLoad != nil {
+					loadLoss = math.Max(loadLoss, selected[i].ModelLoad.UpperW-s.LoadW)
+				}
+				planning[i].LoadW = s.LoadW + k*loadLoss
 			}
 		}
 	}
