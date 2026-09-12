@@ -9,8 +9,8 @@ body:
         Thanks for taking the time to report a bug. Please fill in the
         details below so the community can reproduce and evaluate it.
 
-        If you want to contribute a code fix, start with this report and wait
-        for a maintainer to confirm the scope before opening the pull request.
+        PRs are welcome. Prefer linking a fix to this report and include
+        test steps and results. See [CONTRIBUTING.md](https://github.com/srcfl/ftw/blob/master/CONTRIBUTING.md).
 
         FTW Community has no guaranteed response or resolution time. Do not
         include credentials, access tokens, private keys, or unredacted
@@ -77,10 +77,3 @@ body:
     attributes:
       label: Anything else?
       description: Config snippets, screenshots, network topology, etc.
-  - type: checkboxes
-    id: text-first
-    attributes:
-      label: Contribution path
-      options:
-        - label: I understand that Sourceful handles implementation and external contributions use issues, not pull requests.
-          required: true
