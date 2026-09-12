@@ -11,6 +11,39 @@ necessary maintenance continue alongside product work.
 
 ## Implementation review, 12 September 2026
 
+### Selected scope after the PR review
+
+The owner selected the delivery order below. Start with the confirmed Core
+control and Lua-host gaps, then finish the daily charging flow. Keep necessary
+maintenance in small changes alongside that work.
+
+The STRÅNG, roof-geometry, panel-drawing and related settings stack
+([#734](https://github.com/srcfl/ftw/pull/734),
+[#735](https://github.com/srcfl/ftw/pull/735),
+[#826](https://github.com/srcfl/ftw/pull/826),
+[#1052](https://github.com/srcfl/ftw/pull/1052)) leaves the Core queue.
+Preserve the work as reference for a possible optional extension. Its form
+is undecided; do not add a module framework now. Default setup must work
+without irradiance-source selection, azimuth or panel geometry.
+
+Close the retired Python-optimizer work in
+[#963](https://github.com/srcfl/ftw/pull/963) and
+[#1036](https://github.com/srcfl/ftw/pull/1036). Core removed that runtime in
+[#1083](https://github.com/srcfl/ftw/pull/1083); new solver work belongs in
+Energyplan. Retain the useful requirements: report unmet household goals,
+compare plans with one physical and economic model, and evaluate whether
+cost-neutral peak reduction improves the current planner. These requirements
+do not authorize restoring the Python runtime or copying private solver source
+into Core.
+
+[#971](https://github.com/srcfl/ftw/pull/971) already reached Core through the
+Energyplan integration; its exact head is in master's history. Close the
+remaining PR against its old feature base. Preserve independent benchmarks
+and Python development tools where they verify today's product; they are not
+the retired optimizer runtime.
+
+### Reviewed baseline
+
 This baseline checks Core `f1a3b765`, webapp `ff7af033`, native app
 `79fdd0e8`, drivers `7e594655`, and website `d26e14f7`, after the shared
 vision changes merged. It combines source review, repository tests and a local
@@ -67,11 +100,11 @@ change does not prove the currently pinned recovery bundle passes.
 | Savings | [The API](../go/internal/api/api_savings.go) explicitly reports `site_total` against `no_pv_no_battery_vehicle_energy_at_daily_average`. Actual import cost and export revenue are available. | Make the scope clear on each surface that says “saved”. Then add and validate the same-hardware self-consumption counterfactual, including EV behaviour and stored-energy accounting. Do not relabel the current figure as FTW's incremental benefit. |
 | Heat and settings | Thermal contracts and an [explicitly opted-in solar feed](../go/cmd/ftw/solar_feed_send.go) already exist. The on-box [planner settings](../web/settings/tabs/planner.js) and webapp use different levels of technical language; the on-box minimum SoC still says “House reserve”. | Keep existing opt-ins explicit while phase one uses heat data for planning. Align basic controls around user goals and distinguish operating limits from forecast caution. Audit stored settings before removing or hiding them. Active tank/hot-water optimization remains a later bounded outcome. |
 
-### Recommended delivery order
+### Selected delivery order
 
-These are proposed priorities, not permission to start every row in parallel
-or dates promised to users. Each delivery should have a focused PR and a clear
-result that the owner can review.
+These are the selected priorities, with no dates promised to users. Complete
+one bounded outcome at a time. Each delivery should have a focused PR and a
+clear result that the owner can review.
 
 | Order | Delivery | Done when |
 |---|---|---|
