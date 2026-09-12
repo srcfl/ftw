@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "product": "energyplan",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "source_repository": "srcfl/energyplan",
-  "source_commit": "4bc9633608ee5633c2c5212779c905b07cb8faaf",
+  "source_commit": "022f6d044e52c86fbb4b529a8d9425ec627e24da",
   "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
   "protocol_version": 1,
   "forecast_protocol_version": 1,
@@ -15,12 +15,16 @@
     "linux-amd64": {
       "path": "ftw-solver-linux-amd64",
       "target": "x86_64-unknown-linux-musl"
+    },
+    "darwin-arm64": {
+      "path": "ftw-solver-darwin-arm64",
+      "target": "aarch64-apple-darwin"
     }
   },
   "files": {
     "LICENSE.txt": {
-      "sha256": "8efb23f7bc9449def58c3a12f843757df016b14a0fb05d13aab4f128498b7c13",
-      "bytes": 968
+      "sha256": "3167dfc54316a4719544525091bd47b58ca0248aa2a071751a028045eed08e47",
+      "bytes": 4296
     },
     "THIRD-PARTY-NOTICES.txt": {
       "sha256": "d5381c7a521d2e378b9e3df687d2bf55358b516f26981138020358037b034f71",
@@ -34,13 +38,17 @@
       "sha256": "6b374bd19d351e568761e1050016202d78aea2fc2e6783a2e9245aa23ffb2d3f",
       "bytes": 15377
     },
+    "ftw-solver-darwin-arm64": {
+      "sha256": "45341a4eaad6f7d0cbd702d63405483dc084801bc46b6d675a6c823b0e626221",
+      "bytes": 1223600
+    },
     "ftw-solver-linux-amd64": {
-      "sha256": "cf72f13114f12a09a1252c9f6c8ee7b3d48673bd8913ff75dc96dbb1b28cfbc3",
-      "bytes": 1559840
+      "sha256": "c0e2c9b04d9f23272b799c4d11ee5246acf0bf994e24c5960b59055f26c5c967",
+      "bytes": 1559560
     },
     "ftw-solver-linux-arm64": {
-      "sha256": "553ba0ef63af23e0722b9eb70ed1c26f5328f2875d8b8f0b9c1fb483ed520aee",
-      "bytes": 1263744
+      "sha256": "bdff1c8010a2ce76bce9072dd3932b60a8d7af447302d327a808bfe750de26d2",
+      "bytes": 1263760
     },
     "rust-runtime/COPYRIGHT-library.html": {
       "sha256": "90567e2718bf7fd65a71a3a43c5596488e80e5f51ed02bfea6fec54458b5f3d1",

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FTW source and licenses</title>
+<style>
+  body { margin: 3rem auto; padding: 0 1.5rem; max-width: 48rem; font: 1rem/1.6 system-ui, sans-serif; color: #e8e8e8; background: #121212; }
+  a { color: #8dd8ff; } li { margin: .6rem 0; } code { overflow-wrap: anywhere; }
+</style>
+<h1>FTW source and licenses</h1>
+<p>Copyright 2026 Sourceful Labs AB and contributors. FTW uses GNU AGPL v3
+only, with a narrow permission to combine it with Energyplan. You may copy,
+modify and redistribute the covered FTW code under those terms. It comes
+without warranty to the extent permitted by law.</p>
+<p id="build">Reading this box's version…</p>
+<ul>
+  <li><a id="source" href="https://github.com/srcfl/ftw">FTW source repository</a></li>
+  <li><a id="license" href="https://github.com/srcfl/ftw/blob/master/LICENSE">License and Energyplan combination permission</a></li>
+  <li><a id="instructions" href="https://github.com/srcfl/ftw/blob/master/LICENSING.md">Source, build and distribution instructions</a></li>
+  <li><a id="drivers" href="https://github.com/srcfl/ftw/blob/master/drivers/BUNDLED_SOURCE.json">Driver source revision</a></li>
+</ul>
+<p>Energyplan is proprietary. Its binary license is separate. New Home Use
+workers permit private household use with FTW; commercial use and distribution
+require a Sourceful agreement. Earlier copies keep their earlier licenses.
+The terms accompanying the exact binary apply.</p>
+<p>For a modified distribution, its distributor must supply the matching
+source, build files and any required installation information. The upstream
+repository alone does not supply unpublished changes.</p>
+<p><a href="/">Back to FTW</a></p>
+<script>
+  fetch('/api/status').then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(status => {
+    const version = String(status.version || 'dev');
+    document.getElementById('build').textContent = 'Running version: ' + version;
+    // Official releases use their exact tag. Never call the moving master
+    // branch the corresponding source of an unknown or dirty build.
+    if (/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/.test(version) && !version.endsWith('-dirty') && !/-\d+-g[0-9a-f]+$/.test(version)) {
+      const tag = version.startsWith('v') ? version : 'v' + version;
+      document.getElementById('source').href = 'https://github.com/srcfl/ftw/archive/refs/tags/' + tag + '.tar.gz';
+      document.getElementById('source').textContent = 'Download source for ' + tag;
+      for (const [id, path] of [['license', 'LICENSE'], ['instructions', 'LICENSING.md'], ['drivers', 'drivers/BUNDLED_SOURCE.json']]) {
+        document.getElementById(id).href = 'https://github.com/srcfl/ftw/blob/' + tag + '/' + path;
+      }
+    } else {
+      document.getElementById('build').textContent += '. Development or custom build: obtain matching source from the distributor.';
+    }
+  }).catch(() => { document.getElementById('build').textContent = 'Version unavailable. Obtain matching source from the distributor.'; });
+</script>
+</html>

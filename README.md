@@ -25,7 +25,8 @@ while keeping expert controls and Lua drivers available.
 [docs/roadmap.md](docs/roadmap.md) lists the outcomes and proof needed. These
 include goals that have not shipped; the capability list below is separate.
 
-Sourceful Energy maintains FTW Community under Apache-2.0. External users
+Sourceful Energy maintains FTW Community under AGPL-3.0-only with the
+Energyplan combination permission. External users
 report bugs, needs and evidence through [issues](https://github.com/srcfl/ftw/issues).
 We do not accept external pull requests, including documentation and drivers.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
@@ -249,4 +250,7 @@ external-integration guides.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). User-visible changes need a Changeset.
 
-Apache-2.0 — see [LICENSE](LICENSE).
+AGPL-3.0-only with the Energyplan combination permission — see
+[LICENSE](LICENSE) and [LICENSING.md](LICENSING.md). Energyplan binaries have
+separate household-use terms; commercial use of those binaries needs a
+Sourceful agreement. Earlier versions retain their earlier licenses.

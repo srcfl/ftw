@@ -1,8 +1,8 @@
 # FTW naming and marks
 
 FTW is an open-source project maintained by Sourceful Labs AB and project
-contributors. The source code is licensed under the Apache License, Version
-2.0; that license does not grant rights to imply endorsement by Sourceful Labs
+contributors. The source code uses GNU AGPL v3 only with the Energyplan combination
+permission; that license does not grant rights to imply endorsement by Sourceful Labs
 AB or the FTW project.
 
 Use `FTW` when accurately referring to the project, compatible software, or

@@ -349,6 +349,9 @@ jobs:
           mkdir -p "${STAGE}"
           # Stable draft recovery can still package an older immutable tag.
           notices=(LICENSE NOTICE)
+          if [[ -f LICENSING.md ]]; then
+            notices+=(LICENSING.md)
+          fi
           if [[ -f THIRD-PARTY-NOTICES.txt ]]; then
             notices+=(THIRD-PARTY-NOTICES.txt)
           fi
