@@ -31,7 +31,7 @@ while IFS= read -r file; do
     web/*|package.json|package-lock.json)
       web=true
       ;;
-    Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh|.github/scripts/classify-test-changes.sh|.github/scripts/test-change-classifier.sh)
+    Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/upgrade-paired-release.sh|scripts/test-upgrade-paired-release.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh|.github/scripts/classify-test-changes.sh|.github/scripts/test-change-classifier.sh)
       compose=true
       ;;
     .github/workflows/beta.yml|.github/workflows/release.yml|.github/workflows/release-assets.yml|scripts/check-stable-release.py|scripts/check-ghcr-write-access.sh|scripts/test-ghcr-write-access.sh|scripts/test-exact-image-promotion.sh|scripts/github-release-by-id.sh|scripts/test-github-release-by-id.sh|scripts/promote-paired-latest.sh|scripts/test-promote-paired-latest.sh)

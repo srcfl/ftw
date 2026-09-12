@@ -34,7 +34,9 @@ The UI updater performs an immutable pull and recreate through the updater
 sidecar; it never patches the host OS or Docker engine — that is the
 operator's job on a self-managed host, and automatic on the
 [Raspberry Pi image](rpi-image.md#host-os-security-updates). See
-[self-update.md](self-update.md).
+[self-update.md](self-update.md). A 2.x site moving to 3.x must follow
+[upgrade-paired-release.md](upgrade-paired-release.md) instead of orange
+Update.
 
 ## Persistent state
 

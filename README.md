@@ -107,7 +107,9 @@ the connection if DHCP later hands the host a different address.
 
 Existing Forty Two Watts or older FTW deployments must use the
 [legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
-are preserved. Raspberry Pi image installation is covered by
+are preserved. A 2.x Compose site that already runs `ghcr.io/srcfl/ftw`
+and wants 3.x uses [upgrade-paired-release.md](docs/upgrade-paired-release.md),
+not orange Update. Raspberry Pi image installation is covered by
 [docs/rpi-image.md](docs/rpi-image.md).
 
 The on-box dashboard remains local. The optional
@@ -240,6 +242,7 @@ metadata are the detailed reference.
 - [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
 - [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Self-update and release channels](docs/self-update.md)
+- [Upgrade a Compose install to one Core + updater tag](docs/upgrade-paired-release.md)
 - [Home Assistant](docs/ha-integration.md)
 - [Calendar removal and existing schedules](docs/caldav-integration.md)
 
