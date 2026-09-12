@@ -96,7 +96,7 @@ COPY --from=builder --chown=100:101 /out/ftw-backup /app/ftw-backup
 COPY --chown=100:101 drivers/ /app/drivers/
 COPY --chown=100:101 web/     /app/web/
 COPY --chown=100:101 optimizer/native/bundle/ /app/optimizer/native/bundle/
-COPY LICENSE NOTICE THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
+COPY LICENSE NOTICE LICENSING.md THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
     mkdir -p /app/data /app/data/drivers /run/ftw-update && \

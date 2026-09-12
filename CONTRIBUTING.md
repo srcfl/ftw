@@ -39,9 +39,12 @@ changes. Shared Lua drivers belong in
 
 ## License of contributions
 
-This project is licensed under the **Apache License, Version 2.0** (see
-[`LICENSE`](LICENSE)). By submitting a contribution, you agree that your
-contribution is licensed under the Apache License, Version 2.0.
+This version uses **GNU AGPL v3 only with the Energyplan combination
+permission** in [`LICENSE`](LICENSE). Contributions to this version must
+carry those terms, including that permission. Preserve all third-party licenses and
+attributions. A sign-off does not assign copyright or authorize commercial
+relicensing; Sourceful must separately hold those rights where needed.
+See [LICENSING.md](LICENSING.md).
 
 ## Developer Certificate of Origin (DCO)
 
