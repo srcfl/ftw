@@ -25,9 +25,9 @@ while keeping expert controls and Lua drivers available.
 [docs/roadmap.md](docs/roadmap.md) lists the outcomes and proof needed. These
 include goals that have not shipped; the capability list below is separate.
 
-Sourceful Energy maintains FTW Community under Apache-2.0. External users
-report bugs, needs and evidence through [issues](https://github.com/srcfl/ftw/issues).
-We do not accept external pull requests, including documentation and drivers.
+Sourceful Energy maintains FTW Community under Apache-2.0. Contributions are
+welcome, preferably starting with [issues](https://github.com/srcfl/ftw/issues).
+Share a short Markdown proposal or a focused fix with relevant test evidence.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
 [SUPPORT.md](SUPPORT.md) describes separate commercial services.
 
