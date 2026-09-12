@@ -784,14 +784,41 @@ DRIVER = {
 }
 function driver_init(config) host.set_poll_interval(1000) end
 function driver_poll() return 1000 end
-function driver_command(action, w, cmd) return false end
+function driver_command(action, w, cmd)
+    host.emit_metric("unexpected_command", 1)
+    return true
+end
 `
 	path := writeTestDriver(t, src)
-	r := NewRegistry(telemetry.NewStore())
+	tel := telemetry.NewStore()
+	r := NewRegistry(tel)
 	if err := r.Add(context.Background(), config.Driver{Name: "d1", Lua: path}); err != nil {
 		t.Fatalf("read-only battery without default = %v", err)
 	}
 	t.Cleanup(func() { r.Remove("d1") })
+	if err := r.Send(context.Background(), "d1", []byte(`{"action":"battery","power_w":1000}`)); !errors.Is(err, ErrReadOnlyDriver) {
+		t.Fatalf("read-only command = %v, want ErrReadOnlyDriver", err)
+	}
+	if _, _, ok := tel.LatestMetric("d1", "unexpected_command"); ok {
+		t.Fatal("read-only driver_command ran")
+	}
+}
+
+func TestLegacyPVCurtailDriverRequiresDefaultMode(t *testing.T) {
+	path := writeTestDriver(t, `
+DRIVER = {
+    id = "pv_without_default",
+    capabilities = { "pv" },
+}
+function driver_init(config) host.set_poll_interval(1000) end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd) return true end
+`)
+	r := NewRegistry(telemetry.NewStore())
+	err := r.Add(context.Background(), config.Driver{Name: "pv", Lua: path})
+	if err == nil || !strings.Contains(err.Error(), "driver_default_mode") {
+		t.Fatalf("PV actuator without safe default = %v", err)
+	}
 }
 
 func TestBatteryTelemetryDriverWithoutCommandMayOmitDefaultMode(t *testing.T) {

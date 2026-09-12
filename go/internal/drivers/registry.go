@@ -30,6 +30,9 @@ var (
 	// ErrObserveOnly is returned when a configured telemetry-only driver is
 	// reached through a generic command path instead of the API guard.
 	ErrObserveOnly = errors.New("driver is observe_only and cannot be controlled")
+	// ErrReadOnlyDriver rejects dispatch before the declared read-only Lua
+	// command hook can run, even when that hook exists and would accept it.
+	ErrReadOnlyDriver = errors.New("driver is read_only and cannot be controlled")
 	// ErrCommandSuperseded is returned when an EV command no longer belongs
 	// to the current per-driver control sequence. In particular, ev_resume is
 	// valid only immediately after the ev_pause that opened its cycle; any
@@ -242,6 +245,7 @@ type runningDriver struct {
 	env                *HostEnv
 	cfg                config.Driver
 	policy             *RuntimePolicy
+	readOnly           bool
 	leaseExpiresAt     time.Time
 	generation         uint64
 	statusMu           sync.RWMutex
@@ -456,7 +460,7 @@ func (r *Registry) AddProbe(ctx context.Context, cfg config.Driver) error {
 func actuationCapability(caps []string) bool {
 	for _, c := range caps {
 		switch strings.ToLower(strings.TrimSpace(c)) {
-		case "battery", "ev", "v2x", "v2x_charger", "vehicle", "heatpump":
+		case "battery", "pv", "ev", "v2x", "v2x_charger", "vehicle", "heatpump":
 			return true
 		}
 	}
@@ -684,6 +688,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		env:             env,
 		cfg:             cfg,
 		policy:          policy,
+		readOnly:        driverDeclaresReadOnly(luaDrv.L),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		cmdCh:           make(chan driverCmd, 8),
@@ -1327,6 +1332,9 @@ func (r *Registry) sendWithGeneration(ctx context.Context, name string, payload 
 	}
 	if rd.cfg.ObserveOnly {
 		return generation, ErrObserveOnly
+	}
+	if rd.readOnly {
+		return generation, ErrReadOnlyDriver
 	}
 	if err := ctx.Err(); err != nil {
 		return generation, err

@@ -7,7 +7,7 @@
 //	driver_command(c)      — receive a control command (JSON table)
 //	driver_cleanup()       — optional, called on shutdown
 //	driver_default_mode()  — required for a non-read-only driver that
-//	                         declares controls or a battery/EV/V2X/heatpump
+//	                         declares controls or a battery/PV/EV/V2X/heatpump
 //	                         command path; optional for reporting-only
 //
 // registerHost is the complete host API. writing-a-driver.md summarises it.
@@ -172,11 +172,16 @@ func openRestrictedLibraries(L *lua.LState) {
 	L.SetGlobal("coroutine", lua.LNil)
 }
 
-func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
+func driverDeclaresReadOnly(L *lua.LState) bool {
 	meta, ok := L.GetGlobal("DRIVER").(*lua.LTable)
-	if !ok || meta.RawGetString("read_only") != lua.LTrue {
+	return ok && meta.RawGetString("read_only") == lua.LTrue
+}
+
+func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
+	if !driverDeclaresReadOnly(L) {
 		return false
 	}
+	meta := L.GetGlobal("DRIVER").(*lua.LTable)
 	caps, ok := meta.RawGetString("capabilities").(*lua.LTable)
 	if !ok {
 		return false
@@ -400,6 +405,9 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if driverDeclaresReadOnly(d.L) {
+		return ErrReadOnlyDriver
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
