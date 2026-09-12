@@ -134,13 +134,12 @@ So we pick: **grid-meter-positive, view the site from the boundary**.
 
 ## Verification
 
-- Each driver's telemetry emission is covered by tests that assert the sign
-  (e.g., `emit_pv` always produces `w <= 0`)
-- Integration tests between Lua drivers and simulators verify
-  that a `+N` charge command produces an actual reading with `bat_w > 0`
-- The control loop's own tests assert both sides of the contract:
-  self-consumption discharges on import to hold grid near zero, while planner
-  idle/charge slots do not keep individual batteries discharging
+The host rejects a structured emit that breaks the door rules:
+PV with `w > 0`, EV with `w < 0`, non-finite power, or an SoC outside 0..1
+(`telemetry.ValidateReading`). It does not clamp a bad sign into range.
 
-Any driver that violates the convention breaks a test. The convention is
-enforced, not just documented.
+Individual drivers have sign tests (Ferroamp, Zap, ESPHome DSMR, and the
+control-loop cases that a `+N` charge must read back as charge). The catalog
+as a whole is not yet under one emit-contract suite — a new driver can still
+ship a sign bug until someone writes that test. The convention is enforced at
+the door for the cases above, and by driver tests where they exist.

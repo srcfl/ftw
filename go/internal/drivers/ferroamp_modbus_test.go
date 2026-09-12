@@ -3,7 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
@@ -33,7 +33,7 @@ func TestFerroampModbusLoads(t *testing.T) {
 
 	for _, action := range []string{"battery", "curtail", "curtail_disable", "deinit"} {
 		cmd, _ := json.Marshal(map[string]any{"action": action, "power_w": 1000.0})
-		if err := d.Command(ctx, cmd); err == nil || !strings.Contains(err.Error(), "returned false") {
+		if err := d.Command(ctx, cmd); !errors.Is(err, ErrReadOnlyDriver) {
 			t.Fatalf("%s cmd: got %v, want read-only refusal", action, err)
 		}
 	}
