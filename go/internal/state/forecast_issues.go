@@ -27,7 +27,7 @@ const (
 	MaxForecastErrors           = 65536
 	MaxForecastErrorBytes       = 64 << 20
 
-	maxForecastCompressedBytes = 64 << 10
+	maxForecastCompressedBytes = 256 << 10
 	maxForecastModelCompressed = 256 << 10
 	maxForecastRecordBytes     = 8 << 10
 	maxForecastSliceBytes      = 32 << 20
@@ -83,7 +83,7 @@ func gzipForecastIssue(issue forecasting.Issue) ([]byte, error) {
 		return nil, err
 	}
 	if buf.Len() > maxForecastCompressedBytes {
-		return nil, errors.New("compressed forecast issue exceeds 64 KiB")
+		return nil, errors.New("compressed forecast issue exceeds 256 KiB")
 	}
 	return buf.Bytes(), nil
 }

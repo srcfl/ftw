@@ -1,5 +1,35 @@
 # Changelog
 
+## 3.4.2
+
+### Patch Changes
+
+- 8a069c3: Status and 1h charts read SQLite only. Live maintenance no longer writes or checkpoints the imported DuckDB archive.
+
+## 3.4.1
+
+### Patch Changes
+
+- fb10547: Live 5m/1h charts read a small SQLite file. DuckDB keeps the archive and is no longer on the live write path.
+
+## 3.4.0
+
+### Minor Changes
+
+- 5fdc678: Ellevio-style demand charges: set `price.demand_night_weight` (0.5) so 22:00–06:00 count at half in the same peak pool, all days. Weekday 06–20 remains the default.
+
+### Patch Changes
+
+- 34ba31d: Tag Energyplan demand hours with the local calendar day so top-N peaks cannot all come from the same morning.
+- 6298aec: Pin Energyplan 0.4.1 Linux ARM64 and AMD64 workers. The pin includes demand-hour algebra, honest budget status, charging lattice, compact EV steps, and departure commitment. macOS is not bundled.
+- baed0b8: Require only Linux ARM64 and AMD64 Energyplan workers in the native bundle. macOS is no longer a default or required worker host.
+- 85ab0f7: Give a 193-slot villa (one battery and one EV) Energyplan's 5 s fleet budget so demand-charge sites are not left on 500 ms.
+- 0a47785: Keep the site's load and heating priors until Energyplan has learned support for an interval. Include load uncertainty in planning margins before joint forecast errors are calibrated, including at night and on sites without PV.
+- 6d8c9bc: Multi-day history charts use the hourly DuckDB rollup even when buckets are finer than one hour, so a 30-day series no longer scans raw samples. Shutdown flushes queued ticks. Forecast archive accepts a 256 KiB compressed issue so a 48-hour villa forecast can be stored.
+- f69e16a: Live history keeps recording when a DuckDB commit misses its deadline, and today's kWh no longer counts a multi-hour hole as energy.
+- 6069e50: Long-range history charts use an hourly DuckDB rollup so a year of samples returns within the request budget. Live ticks add to that rollup instead of rebuilding the hour, commit in 15 s batches to cut SD fsyncs, and reopen DuckDB only when RSS is high or it ran out of memory. Hourly work otherwise just checkpoints. `state.cold_retention_days` is read live so a cap can take effect without a restart.
+- 8a6be0f: Settings no longer asks for a restart when you change retention, gain, tick rate, watchdog, weather geometry, price tariff, or planner SoC. Restart is only for process wiring: listen port, database path, price provider, planner engine, OCPP, EV charger, nova, and app uplink.
+
 ## 3.3.1
 
 ### Patch Changes

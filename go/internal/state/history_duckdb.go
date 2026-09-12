@@ -345,7 +345,8 @@ func historyFloatBits(value float64) uint64 {
 }
 
 func (s *Store) HistoryBackend() map[string]any {
-	info := map[string]any{"engine": "duckdb", "version": "1.5.5", "role": "primary", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus()}
+	info := map[string]any{"engine": "duckdb", "version": "1.5.5", "role": "archive", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus()}
+	info["hot"] = s.hotFileInfo()
 	info["migration"] = s.HistoryMigrationStatus()
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + ".wal"} {
 		if stat, err := os.Stat(path); err == nil {
@@ -363,15 +364,22 @@ func (s *Store) CheckpointHistory(ctx context.Context) error {
 		return nil
 	}
 	if s.historyConnector != nil {
-		// A checkpoint alone does not evict all native index/table buffers.
-		// Wait for a gap between active connections, then reopen the native
-		// instance while retaining the public SQL pool and durable primary.
-		return s.rotateHistory(ctx)
+		return s.historyConnector.checkpoint(ctx)
 	}
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()
 	_, err := s.history.ExecContext(ctx, `CHECKPOINT`)
 	return err
+}
+
+// RotateHistory checkpoints, then reopens the native instance so DuckDB can
+// drop index buffers. Use after OOM or when process RSS is high. A checkpoint
+// alone does not evict those buffers.
+func (s *Store) RotateHistory(ctx context.Context) error {
+	if s.historyConnector == nil {
+		return s.CheckpointHistory(ctx)
+	}
+	return s.historyConnector.rotate(ctx)
 }
 
 // quoteDuckDBString is only for fixed administrative paths, never user SQL.
@@ -462,6 +470,9 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	if err := s.FlushHistory(ctx); err != nil {
+		return err
+	}
+	if err := s.sealAndPruneHot(ctx, time.Now().UnixMilli()+1, 0); err != nil {
 		return err
 	}
 	src, err := s.history.BeginTx(ctx, nil)
