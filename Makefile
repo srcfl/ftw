@@ -90,8 +90,9 @@ test: drivers-present
 	cd go && go test -tags=$(GO_TAGS) ./...
 
 compose-migration-test:
-	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh scripts/check-debian-base.sh
+	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/upgrade-paired-release.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh scripts/check-debian-base.sh
 	bash scripts/test-modular-compose.sh
+	bash scripts/test-upgrade-paired-release.sh
 
 container-boundary-test: release-workflow-test
 	bash scripts/test-container-boundaries.sh

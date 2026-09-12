@@ -5,7 +5,8 @@
 #
 #   Start:    docker compose up -d
 #   Logs:     docker compose logs -f
-#   Upgrade:  docker compose pull && docker compose up -d
+#   Upgrade:  docs/upgrade-paired-release.md (updater first, then Core).
+#             Do not `docker compose pull` both services together for 2.x → 3.x.
 #   Stop:     docker compose down
 #
 # PLATFORM:  This file uses `network_mode: host`, a Linux-kernel feature.
