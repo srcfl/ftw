@@ -2164,14 +2164,11 @@
         var section = document.createElement("section");
         section.className = "overview-card";
         section.setAttribute("aria-label", "Car connection");
-        section.style.cssText = "padding:0.9rem;margin-bottom:1rem";
         var title = document.createElement("strong");
         var status = document.createElement("p");
         status.setAttribute("role", "status");
-        status.style.cssText = "margin:0.45rem 0;font-size:0.9rem";
         var button = document.createElement("button");
         button.type = "button";
-        button.style.cssText = "background:none;border:0;color:var(--accent-e);padding:0.3rem 0;text-align:left;text-decoration:underline;font:inherit;cursor:pointer";
         section.append(title, status, button);
         host.appendChild(section);
         row = { section: section, title: title, status: status, button: button };

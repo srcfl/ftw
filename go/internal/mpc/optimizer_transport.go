@@ -520,11 +520,15 @@ func requiredOptimizerFeature(payload []byte) string {
 		Settings struct {
 			ScenarioPolicy string `json:"scenario_policy"`
 		} `json:"settings"`
+		DemandCharges []json.RawMessage `json:"demand_charges"`
 	}
 	if json.Unmarshal(payload, &request) == nil {
 		switch request.Settings.ScenarioPolicy {
 		case "recourse", "multistage":
 			return request.Settings.ScenarioPolicy
+		}
+		if len(request.DemandCharges) > 0 {
+			return "demand_charges"
 		}
 	}
 	return "champion"

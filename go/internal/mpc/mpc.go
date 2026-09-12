@@ -250,6 +250,10 @@ type Params struct {
 	PVUncertaintyW        float64
 	PVRelativeUncertainty float64
 	PVForecastSafetyK     float64
+
+	// DemandCharges are peak-power tariffs Core expanded to clock hours.
+	// Empty leaves Energyplan on energy prices only.
+	DemandCharges []DemandCharge
 }
 
 // StorageAssetSpec is one independently constrained home battery in the

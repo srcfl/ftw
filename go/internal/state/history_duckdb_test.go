@@ -49,11 +49,11 @@ func TestHistoryPrimaryAndRetryReceipt(t *testing.T) {
 
 func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 	s := freshStore(t)
-	s.historyWriteMu.Lock()
+	s.hotWriteMu.Lock()
 	locked := true
 	defer func() {
 		if locked {
-			s.historyWriteMu.Unlock()
+			s.hotWriteMu.Unlock()
 		}
 	}()
 	samples := []Sample{{Driver: "meter", Metric: "power", TsMs: 1, Value: 17}}
@@ -80,7 +80,7 @@ func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 	if !errors.Is(s.FlushHistory(ctx), context.DeadlineExceeded) {
 		t.Fatal("flush claimed a blocked write was durable")
 	}
-	s.historyWriteMu.Unlock()
+	s.hotWriteMu.Unlock()
 	locked = false
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
@@ -97,7 +97,7 @@ func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 		}
 	}
 	var receipts int
-	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&receipts); err != nil || receipts != 1 {
+	if err := s.hot.QueryRow(`SELECT COUNT(*) FROM hot_ticks`).Scan(&receipts); err != nil || receipts != 64 {
 		t.Fatalf("serial writer retained %d receipts: %v", receipts, err)
 	}
 }
@@ -141,7 +141,8 @@ func TestHistoryReceiptRetirementPreservesUncertainCommit(t *testing.T) {
 
 func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 	s := freshStore(t)
-	if _, err := s.history.Exec(`ALTER TABLE history_hot RENAME TO history_unavailable`); err != nil {
+	s.historyWriter.commitInterval = 0
+	if _, err := s.hot.Exec(`ALTER TABLE history_hot RENAME TO history_unavailable`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.EnqueueTelemetryTick(&HistoryPoint{TsMs: 1, GridW: 42}, nil, nil); err != nil {
@@ -155,7 +156,7 @@ func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 	if status.LastError == "" || status.Pending != 1 || status.Committed != 0 {
 		t.Fatalf("failed write was not retained: %+v", status)
 	}
-	if _, err := s.history.Exec(`ALTER TABLE history_unavailable RENAME TO history_hot`); err != nil {
+	if _, err := s.hot.Exec(`ALTER TABLE history_unavailable RENAME TO history_hot`); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -164,7 +165,7 @@ func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&n); err != nil || n != 1 {
+	if err := s.hot.QueryRow(`SELECT COUNT(*) FROM hot_ticks`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("retry receipts=%d %v", n, err)
 	}
 }
@@ -212,13 +213,13 @@ func TestOfflineBackupIncludesDuckDBCorrectionsAndRestoresBesideOldPrimary(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordHistory(HistoryPoint{TsMs: 1, GridW: 10}); err != nil {
+	if err := s.BulkRecordHistory([]HistoryPoint{
+		{TsMs: 1, GridW: 10, JSON: "{}"},
+		{TsMs: 100, GridW: 100, JSON: "{}"},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordHistory(HistoryPoint{TsMs: 100, GridW: 100}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RecordHistory(HistoryPoint{TsMs: 1, GridW: 20}); err != nil {
+	if err := s.BulkRecordHistory([]HistoryPoint{{TsMs: 1, GridW: 20, JSON: "{}"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

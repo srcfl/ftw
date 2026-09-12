@@ -92,32 +92,49 @@ func (c *historyConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 }
 
-func (c *historyConnector) rotate(ctx context.Context) error {
-	if err := c.lock(ctx, true); err != nil {
-		return err
-	}
-	defer c.mu.Unlock()
+func (c *historyConnector) checkpointLocked(ctx context.Context) error {
 	if c.closed {
 		return errors.New("history database is closed")
 	}
+	if c.native == nil {
+		return nil
+	}
+	conn, err := c.native.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = conn.(driver.ExecerContext).ExecContext(ctx, "CHECKPOINT", nil)
+	return errors.Join(err, conn.Close())
+}
+
+func (c *historyConnector) checkpoint(ctx context.Context) error {
+	lockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err := c.lock(lockCtx, true)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer c.mu.Unlock()
+	return c.checkpointLocked(ctx)
+}
+
+func (c *historyConnector) rotate(ctx context.Context) error {
+	lockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err := c.lock(lockCtx, true)
+	cancel()
+	if err != nil {
+		return err
+	}
+	defer c.mu.Unlock()
+	if err := c.checkpointLocked(ctx); err != nil {
+		return err
+	}
 	if c.native != nil {
-		// Flush while there are no live connections, and retain this instance if
-		// checkpoint fails. A rotation never interrupts a reader or transaction.
-		conn, err := c.native.Connect(ctx)
-		if err != nil {
-			return err
-		}
-		_, err = conn.(driver.ExecerContext).ExecContext(ctx, "CHECKPOINT", nil)
-		err = errors.Join(err, conn.Close())
-		if err != nil {
-			return err
-		}
 		if err := c.native.Close(); err != nil {
 			return err
 		}
 		c.native = nil
 	}
-	var err error
 	c.native, err = duckdb.NewConnector(c.dsn, nil)
 	return err
 }

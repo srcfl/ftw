@@ -719,6 +719,19 @@ func main() {
 	var forecastSvc *forecast.Service
 	var forecastConfigMu sync.RWMutex
 	var ocppSrv *ocpp.Server
+	var priceSvc *prices.Service
+	energyIdentity := func(name string) state.Device {
+		if env := reg.Env(name); env != nil {
+			make, serial, mac, endpoint := env.FullIdentity()
+			return state.Device{DriverName: name, Make: make, Serial: serial, MAC: mac, Endpoint: endpoint}
+		}
+		if ocppSrv != nil {
+			if ident, ok := ocppSrv.Handler().CurrentIdentity(name); ok {
+				return state.Device{DriverName: name, Make: ident.Vendor, Serial: ident.Serial, Endpoint: "ocpp://" + ident.ID}
+			}
+		}
+		return state.Device{}
+	}
 	forecastSettings := newForecastSiteConfig(st)
 	forecastSettings.identity = func(name string) (string, bool) {
 		if id, ok := runningDeviceID(reg, name); ok {
@@ -1017,6 +1030,57 @@ func main() {
 			mpcSvc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 			slog.Info("mpc: capacity updated via hot-reload",
 				"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
+			if newCfg.Price != nil {
+				mpcSvc.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
+				mpcSvc.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
+				mpcSvc.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
+				mpcSvc.GridTariffOreKwh = newCfg.Price.GridTariffOreKwh
+				mpcSvc.VATPercent = newCfg.Price.VATPercent
+				mpcSvc.DemandPricePerKW = newCfg.Price.DemandPricePerKW
+				mpcSvc.DemandTopN = newCfg.Price.DemandTopN
+				mpcSvc.DemandNightWeight = newCfg.Price.DemandNightWeight
+			} else {
+				mpcSvc.DemandPricePerKW = 0
+				mpcSvc.DemandTopN = 0
+				mpcSvc.DemandNightWeight = 0
+			}
+			mpcSvc.Timezone = forecastTimezone()
+			mpcSvc.FuseMaxW = newCfg.Fuse.MaxPowerW()
+			mpcSvc.MaxExportW = newCfg.Site.MaxExportW
+			if newCfg.Planner != nil {
+				applyPlannerScalars(mpcSvc, newCfg.Planner)
+				ctrlMu.Lock()
+				ctrl.UseEnergyDispatch = !newCfg.Planner.LegacyDispatch
+				if newCfg.Planner.UseEnergyDispatch != nil {
+					ctrl.UseEnergyDispatch = *newCfg.Planner.UseEnergyDispatch
+				}
+				ctrlMu.Unlock()
+			}
+		}
+		if priceSvc != nil && newCfg.Price != nil {
+			vat := newCfg.Price.VATPercent
+			if vat == 0 {
+				vat = 25
+			}
+			priceSvc.SetApplier(prices.Applier{
+				GridTariffOreKwh: newCfg.Price.GridTariffOreKwh,
+				VATPercent:       vat,
+			})
+		}
+		if deps != nil {
+			dtS := float64(newCfg.Site.ControlIntervalS)
+			if dtS <= 0 {
+				dtS = 2
+			}
+			deps.DtS = dtS
+			backup := filepath.Join(dataDir, "backups")
+			if newCfg.State != nil && newCfg.State.BackupDir != "" {
+				backup = newCfg.State.BackupDir
+				if !filepath.IsAbs(backup) {
+					backup = filepath.Join(dataDir, backup)
+				}
+			}
+			deps.BackupDir = backup
 		}
 
 		// Hot-reload EV loadpoints so operators can add / remove /
@@ -1105,7 +1169,7 @@ func main() {
 	fxSvc.Start(ctx)
 	defer fxSvc.Stop()
 
-	priceSvc := prices.FromConfig(cfg.Price, st, fxSvc)
+	priceSvc = prices.FromConfig(cfg.Price, st, fxSvc)
 
 	// ---- Price forecaster (fills in beyond day-ahead publication) ----
 	zones := []string{"SE3"}
@@ -1691,7 +1755,11 @@ func main() {
 			mpcSvc.ExportFloorOreKwh = cfg.Price.ExportFloorOreKwh
 			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
 			mpcSvc.VATPercent = cfg.Price.VATPercent
+			mpcSvc.DemandPricePerKW = cfg.Price.DemandPricePerKW
+			mpcSvc.DemandTopN = cfg.Price.DemandTopN
+			mpcSvc.DemandNightWeight = cfg.Price.DemandNightWeight
 		}
+		mpcSvc.Timezone = forecastTimezone()
 		// Persist every replan's Diagnostic so operators can inspect
 		// past decisions in the planner_diagnostics table.
 		mpcSvc.SaveDiag = func(d *mpc.Diagnostic, reason string) error {
@@ -2600,11 +2668,14 @@ func main() {
 	}
 
 	// ---- Background: Parquet rolloff (>14d → cold dir) ----
-	coldRetentionDays := 0
-	if cfg.State != nil {
-		coldRetentionDays = cfg.State.ColdRetentionDays
-	}
-	go rolloffLoop(ctx, st, coldDir, coldRetentionDays, dataMaintenanceMu)
+	go rolloffLoop(ctx, st, coldDir, func() int {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		if cfg.State == nil {
+			return 0
+		}
+		return cfg.State.ColdRetentionDays
+	}, dataMaintenanceMu)
 
 	// ---- Background: daily state.db recovery snapshot ----
 	go snapshotLoop(ctx, st)
@@ -2661,17 +2732,34 @@ func main() {
 		select {
 		case <-sigc:
 			slog.Info("shutting down")
+			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
 			}
 			return
 		case <-restartCh:
 			slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
+			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)
 			}
 			return
 		case <-ticker.C:
+			cfgMu.RLock()
+			nextInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
+			cfgMu.RUnlock()
+			if nextInterval <= 0 {
+				nextInterval = 2 * time.Second
+			}
+			if nextInterval != controlInterval {
+				ticker.Reset(nextInterval)
+				controlInterval = nextInterval
+				dtS = nextInterval.Seconds()
+				if lpController != nil {
+					lpController.SetCommandTimeout(driverCommandTimeout(nextInterval))
+				}
+				slog.Info("control interval updated", "interval", nextInterval)
+			}
 			tickNow := time.Now()
 			nowMs := tickNow.UnixMilli()
 
@@ -2718,13 +2806,13 @@ func main() {
 			}
 
 			// ---- Watchdog: mark stale drivers offline, revert them to autonomous ----
+			cfgMu.RLock()
 			watchdogTimeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			troubleshootingMode := cfg.Site.TroubleshootingMode
+			cfgMu.RUnlock()
 			if watchdogTimeout <= 0 {
 				watchdogTimeout = 60 * time.Second
 			}
-			cfgMu.RLock()
-			troubleshootingMode := cfg.Site.TroubleshootingMode
-			cfgMu.RUnlock()
 			capMu.RLock()
 			observeOnlySnap := observeOnly
 			capMu.RUnlock()
@@ -2830,7 +2918,7 @@ func main() {
 				// ctrl, so the stored tick has to show the hold already
 				// released rather than one the blocked tick never executed.
 				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
-				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, forecastSettings.Snapshot().Options)
+				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
@@ -3085,7 +3173,7 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, forecastSettings.Snapshot().Options)
+			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 			if err != nil {
 				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
@@ -3178,7 +3266,7 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 }
 
 // rolloffLoop maintains diagnostic archives and history retention hourly.
-func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldRetentionDays int, dataMaintenanceMu *sync.Mutex) {
+func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retentionDays func() int, dataMaintenanceMu *sync.Mutex) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
 	var lastDiskWarn time.Time
@@ -3187,8 +3275,12 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldReten
 			dataMaintenanceMu.Lock()
 			defer dataMaintenanceMu.Unlock()
 		}
+		days := 0
+		if retentionDays != nil {
+			days = retentionDays()
+		}
 		doRolloff(ctx, st, coldDir)
-		if err := st.PruneHistorySamples(ctx, coldRetentionDays, time.Now()); err != nil {
+		if err := st.PruneHistorySamples(ctx, days, time.Now()); err != nil {
 			slog.Warn("history retention failed", "err", err)
 		}
 
@@ -3196,10 +3288,10 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldReten
 		// instead of letting the -wal file ratchet upward on the SD card.
 		st.CheckpointWAL()
 
-		if removed, err := state.PruneDiagnosticsParquet(coldDir, coldRetentionDays, time.Now()); err != nil {
+		if removed, err := state.PruneDiagnosticsParquet(coldDir, days, time.Now()); err != nil {
 			slog.Warn("cold parquet retention prune failed", "err", err)
 		} else if len(removed) > 0 {
-			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", coldRetentionDays)
+			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", days)
 		}
 
 		// Disk watch: an SD card that fills up takes SQLite down with it.
@@ -3256,6 +3348,14 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	if dRows > 0 {
 		slog.Info("diagnostics parquet rolloff",
 			"rows", dRows, "files", len(dFiles))
+	}
+}
+
+func flushHistoryOnStop(st *state.Store) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := st.FlushHistory(ctx); err != nil {
+		slog.Warn("history flush on shutdown", "err", err)
 	}
 }
 
@@ -3783,14 +3883,54 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	} else {
 		slog.Info("mpc: Core DP planner")
 	}
-	svc.BaseLoad = pl.BaseLoadW
-	if pl.HorizonHours > 0 {
-		svc.Horizon = time.Duration(pl.HorizonHours) * time.Hour
-	}
-	if pl.IntervalMin > 0 {
-		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
-	}
+	applyPlannerScalars(svc, pl)
 	return svc
+}
+
+// applyPlannerScalars pushes SoC window, efficiency, export value, base
+// load, horizon and replan interval into a running planner. Engine and
+// optimizer path stay a restart; these fields are read on the next replan.
+func applyPlannerScalars(svc *mpc.Service, pl *config.Planner) {
+	if svc == nil || pl == nil {
+		return
+	}
+	socMin := pl.SoCMin
+	if socMin <= 0 {
+		socMin = 0.10
+	}
+	socMax := pl.SoCMax
+	if socMax <= 0 || socMax > 1 {
+		socMax = 0.95
+	}
+	chgEff := pl.ChargeEfficiency
+	if chgEff <= 0 {
+		chgEff = 0.95
+	}
+	disEff := pl.DischargeEfficiency
+	if disEff <= 0 {
+		disEff = 0.95
+	}
+	pvBonus := pl.PVChargeBonusOreKwh
+	if pvBonus < 0 {
+		pvBonus = 0
+	}
+	horizon := 48 * time.Hour
+	if pl.HorizonHours > 0 {
+		horizon = time.Duration(pl.HorizonHours) * time.Hour
+	}
+	interval := 15 * time.Minute
+	if pl.IntervalMin > 0 {
+		interval = time.Duration(pl.IntervalMin) * time.Minute
+	}
+	svc.UpdatePlannerScalars(mpc.Params{
+		SoCMin:              socMin,
+		SoCMax:              socMax,
+		ChargeEfficiency:    chgEff,
+		DischargeEfficiency: disEff,
+		PVChargeBonusOreKwh: pvBonus,
+		ExportOrePerKWh:     pl.ExportOrePerKWh,
+	}, pl.BaseLoadW, horizon, interval)
+	svc.MinArbitrageSpreadOreKwh = pl.MinArbitrageSpreadOreKwh
 }
 
 func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Manager, intervalHours int) {
@@ -3824,7 +3964,7 @@ func isConfigMissing(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (int, error) {
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
 	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge, options...)
 	samples := tel.FlushSamples()
 	stSamples := make([]state.Sample, len(samples))
@@ -3834,7 +3974,7 @@ func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.S
 			Value: sm.Value, Unit: sm.Unit,
 		}
 	}
-	energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
+	energyObservations := buildEnergyObservations(st, tel, ctrl, hp, identity)
 	filtered := energyObservations[:0]
 	for _, observation := range energyObservations {
 		if !historyAvailable && observation.AssetKind == state.AssetObservedConsumer {

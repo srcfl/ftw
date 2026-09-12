@@ -227,6 +227,15 @@ type Service struct {
 	// using s.Price. Mirrors prices.Applier semantics.
 	GridTariffOreKwh float64
 	VATPercent       float64
+	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
+	// minor units as slot prices, excluding VAT. Zero disables it.
+	DemandPricePerKW float64
+	DemandTopN       int
+	// DemandNightWeight, when > 0, includes every local hour (all days).
+	// Hours 22:00–06:00 are scaled by this factor (Ellevio uses 0.5).
+	DemandNightWeight float64
+	// Timezone is the household IANA zone used to expand weekday 06–20.
+	Timezone string
 
 	Defaults     Params
 	BatteryFleet []BatteryFleetMember
@@ -373,6 +382,39 @@ func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, max
 	s.Defaults.MaxDischargeW = maxDischargeW
 	if totalCapWh == 0 && len(cp) == 0 {
 		s.Defaults.InitialSoC = 0
+	}
+	s.mu.Unlock()
+}
+
+// UpdatePlannerScalars pushes operator planner knobs that do not rebuild
+// the optimizer process: SoC window, efficiency, export value, base load,
+// horizon and replan interval. The next replan (and the next ticker fire
+// for Interval) uses them. Engine / optimizer path still need a restart.
+func (s *Service) UpdatePlannerScalars(p Params, baseLoad float64, horizon, interval time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if p.SoCMin > 0 {
+		s.Defaults.SoCMin = p.SoCMin
+	}
+	if p.SoCMax > 0 {
+		s.Defaults.SoCMax = p.SoCMax
+	}
+	if p.ChargeEfficiency > 0 {
+		s.Defaults.ChargeEfficiency = p.ChargeEfficiency
+	}
+	if p.DischargeEfficiency > 0 {
+		s.Defaults.DischargeEfficiency = p.DischargeEfficiency
+	}
+	s.Defaults.PVChargeBonusOreKwh = p.PVChargeBonusOreKwh
+	s.Defaults.ExportOrePerKWh = p.ExportOrePerKWh
+	s.BaseLoad = baseLoad
+	if horizon > 0 {
+		s.Horizon = horizon
+	}
+	if interval > 0 {
+		s.Interval = interval
 	}
 	s.mu.Unlock()
 }
@@ -881,7 +923,11 @@ func (s *Service) OptimizerIsChampion() bool {
 func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
 	s.replan(ctx, "scheduled")
-	t := time.NewTicker(s.Interval)
+	interval := s.Interval
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
 	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
@@ -896,6 +942,13 @@ func (s *Service) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			s.mu.RLock()
+			next := s.Interval
+			s.mu.RUnlock()
+			if next > 0 && next != interval {
+				t.Reset(next)
+				interval = next
+			}
 			s.replan(ctx, "scheduled")
 		case <-reactiveTick:
 			s.checkDivergence(ctx)
@@ -1376,7 +1429,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.Latest()
 	}
 	now := s.planningNow()
-	untilMs := now.Add(s.Horizon).UnixMilli()
+	s.mu.RLock()
+	horizon := s.Horizon
+	baseLoad := s.BaseLoad
+	s.mu.RUnlock()
+	if horizon <= 0 {
+		horizon = 48 * time.Hour
+	}
+	untilMs := now.Add(horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
 
 	prices, err := s.Store.LoadPrices(s.Zone, sinceMs, untilMs)
@@ -1423,7 +1483,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			forecasts = captured.Weather
 		}
 	}
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
+	slots := buildSlots(prices, forecasts, baseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
 	// Resolve receives the complete legacy forecast, including verified limits,
 	// so its frozen shadow matches what the previous pipeline would have used.
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
@@ -1537,6 +1597,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 	p.PVForecastSafetyK = s.PVForecastSafetyK
+	p.DemandCharges = s.demandChargesFor(slots, executionNow)
 	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}

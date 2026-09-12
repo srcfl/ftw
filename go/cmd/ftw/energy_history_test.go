@@ -38,7 +38,7 @@ func TestBuildEnergyObservationsUsesStableAssetsAndDirectionalCounters(t *testin
 	tel.Update("mutable-ev-name", telemetry.DerEV, 3200, nil,
 		json.RawMessage(`{"session_wh":800}`))
 	ctrl := &control.State{SiteMeterDriver: "mutable-meter-name"}
-	observations := buildEnergyObservations(st, tel, ctrl, state.HistoryPoint{LoadW: 450})
+	observations := buildEnergyObservations(st, tel, ctrl, state.HistoryPoint{LoadW: 450}, testEnergyIdentity(st))
 
 	wantAssetID := state.HardwareEnergyAssetID(deviceID, state.AssetGridMeter)
 	wantEVAssetID := state.HardwareEnergyAssetID(evDeviceID, state.AssetVehicleCharger)
@@ -169,7 +169,7 @@ func TestPersistTelemetryTickUsesPersistenceFreshness(t *testing.T) {
 			sampleAt := time.Now().Add(tc.sampleAge)
 			tel.Get("meter", telemetry.DerMeter).UpdatedAt = sampleAt
 			ctrl := &control.State{SiteMeterDriver: "meter"}
-			if _, err := persistTelemetryTick(st, tel, ctrl, tickMS, time.Minute); err != nil {
+			if _, err := persistTelemetryTick(st, tel, ctrl, tickMS, time.Minute, testEnergyIdentity(st)); err != nil {
 				t.Fatal(err)
 			}
 			if err := st.FlushHistory(context.Background()); err != nil {
@@ -235,14 +235,14 @@ func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testin
 	if freshness.Allowed() || freshness.Reason != siteDispatchMeterStale {
 		t.Fatalf("stale meter dispatch decision = %+v", freshness)
 	}
-	if _, err := persistTelemetryTick(st, tel, ctrl, now.UnixMilli(), time.Minute); err != nil {
+	if _, err := persistTelemetryTick(st, tel, ctrl, now.UnixMilli(), time.Minute, testEnergyIdentity(st)); err != nil {
 		t.Fatal(err)
 	}
 
 	tel.Update("solar", telemetry.DerPV, -400, nil, json.RawMessage(`{"generation_wh":110}`))
 	tel.Get("solar", telemetry.DerPV).UpdatedAt = now
 	tel.RecordDriverSuccess("solar")
-	if _, err := persistTelemetryTick(st, tel, ctrl, now.Add(time.Second).UnixMilli(), time.Minute); err != nil {
+	if _, err := persistTelemetryTick(st, tel, ctrl, now.Add(time.Second).UnixMilli(), time.Minute, testEnergyIdentity(st)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -287,5 +287,14 @@ func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testin
 	if len(ctrl.LastTargets) != 1 || ctrl.LastTargets[0].Driver != "battery" ||
 		ctrl.LastTargets[0].TargetW != 321 {
 		t.Fatalf("stale persistence changed dispatch targets: %+v", ctrl.LastTargets)
+	}
+}
+
+func testEnergyIdentity(st *state.Store) energyIdentityLookup {
+	return func(name string) state.Device {
+		if d := st.LookupDeviceByDriverName(name); d != nil {
+			return *d
+		}
+		return state.Device{}
 	}
 }

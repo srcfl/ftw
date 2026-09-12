@@ -48,8 +48,12 @@ func TestStaleSiteMeterStopsScheduledChargeAndRecovers(t *testing.T) {
 	}
 
 	c.TickWithDispatch(context.Background(), now.Add(5*time.Second), true)
-	if len(sender.calls) != 2 || sender.calls[1].power <= 0 {
+	set, ok := lastSetCurrent(sender.calls)
+	if !ok || set.power <= 0 {
 		t.Fatalf("fresh site meter did not resume scheduled charge: %+v", sender.calls)
+	}
+	if countAction(sender.calls, "ev_resume") != 1 {
+		t.Fatalf("reoffer after 0 W standdown must send ev_resume: %+v", sender.calls)
 	}
 }
 
@@ -77,7 +81,11 @@ func TestStaleSiteMeterStopsPersistentManualHoldAndRecovers(t *testing.T) {
 
 	samples[cfg.DriverName] = EVSample{Connected: true, RequestActive: true}
 	c.TickWithDispatch(context.Background(), now.Add(SessionCompletionTimeout+2*time.Minute), true)
-	if len(sender.calls) != 3 || sender.calls[2].power != 6900 {
+	set, ok := lastSetCurrent(sender.calls)
+	if !ok || set.power != 6900 {
 		t.Fatalf("fresh site meter did not resume persistent manual hold: %+v", sender.calls)
+	}
+	if countAction(sender.calls, "ev_resume") != 1 {
+		t.Fatalf("reoffer after 0 W standdown must send ev_resume: %+v", sender.calls)
 	}
 }

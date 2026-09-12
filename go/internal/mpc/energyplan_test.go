@@ -67,7 +67,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = o
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.3.1" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.4.1" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
 	}
 	start := time.Now().UTC().Truncate(time.Hour)
@@ -287,6 +287,17 @@ func TestBatterylessEVBudgetDoesNotInventStorage(t *testing.T) {
 	p.CapacityWh = 20000
 	if got := energyplanTimeBudget(horizon, p); got != 5*time.Second {
 		t.Fatalf("real aggregate battery budget=%v", got)
+	}
+}
+
+func TestVillaBatteryAndEVGetsFleetBudget(t *testing.T) {
+	slots, p := topologyFixture(1, 1)
+	horizon := make([]Slot, 193)
+	for i := range horizon {
+		horizon[i] = slots[0]
+	}
+	if got := energyplanTimeBudget(horizon, p); got != energyplanFleetBudget {
+		t.Fatalf("1b+1EV 193-slot budget=%v, want fleet", got)
 	}
 }
 

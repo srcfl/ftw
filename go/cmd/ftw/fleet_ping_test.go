@@ -84,7 +84,11 @@ func TestSavingAConfigWithoutTheSectionLeavesThePingOn(t *testing.T) {
 	if !enabled() {
 		t.Error("saving a config with no fleet_ping section switched the ping off until the next reboot")
 	}
-	for _, reason := range res["restart_reasons"].([]any) {
+	reasons, _ := res["restart_reasons"].([]any)
+	if reasons == nil {
+		t.Fatal("restart_reasons must be [] when no restart is needed, not null")
+	}
+	for _, reason := range reasons {
 		if strings.Contains(reason.(string), "fleet_ping") {
 			t.Errorf("a config that never named the endpoint asked for a restart: %v", reason)
 		}
