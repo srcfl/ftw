@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.5.0
+
+### Minor Changes
+
+- fb6b118: Adopt AGPLv3 with a narrow Energyplan combination permission and expose source access. Commercial use of the AGPL-covered code remains allowed under its source-sharing terms. New Energyplan workers allow unmodified use with FTW only for a person's own private household. Free, noncommercial redistribution with FTW is allowed only for that household use, with the binary license and third-party notices. Other use or distribution requires a separate written Sourceful license, including commercial use, resale, paid installation/support and hosted or managed operation for others. Earlier grants remain unchanged.
+  
+  Commercial installations must arrange Energyplan rights or omit the restricted worker before upgrading, including through automatic updates.
+
+### Patch Changes
+
+- 9e38fad: Ignore offline battery and PV watts when computing household load, refuse to
+  discharge a battery that has never reported SoC, and require a fresh site
+  meter before live PV curtail uses live load.
+- 79d180b: Lua driver host: a missing `driver_command` is an error, a battery/PV/EV/V2X/heat-pump driver that can be commanded must implement `driver_default_mode`, and fingerprint probes cannot write hardware. A read-only declaration blocks dispatch before the command hook runs. The catalog now reads `auth_post_path`.
+  
+  Update the recovery bundle to the companion driver audit, including corrected telemetry freshness, read-only declarations, and the Easee safe default. Include the read-only Zaptec Cloud and Tesla Wall Connector drivers so their setup paths also resolve offline.
+- bd7d76b: Add `sim-ocpp`, an OCPP 1.6J / 2.0.1 charge-point simulator covering the recorded Evify charger range. Tesla Wall Connector is listed but skipped: it has no OCPP.
+- 42da9f2: Add an updater-then-Core upgrade script so a 2.x Compose site can move to a published 3.x pair without the orange Update hop.
+
 ## 3.4.2
 
 ### Patch Changes
