@@ -17,13 +17,16 @@ async function render(version) {
 }
 
 test('source offer pins an official release including beta tags', async () => {
-  const elements = await render('3.4.3-beta.1');
-  assert.equal(elements.source.href, 'https://github.com/srcfl/ftw/archive/refs/tags/v3.4.3-beta.1.tar.gz');
-  assert.match(elements.license.href, /\/v3\.4\.3-beta\.1\/LICENSE$/);
+  for (const version of ['3.4.3', 'v3.4.3', '3.4.3-beta.1', 'v3.4.3-beta.2']) {
+    const tag = version.startsWith('v') ? version : 'v' + version;
+    const elements = await render(version);
+    assert.equal(elements.source.href, `https://github.com/srcfl/ftw/archive/refs/tags/${tag}.tar.gz`);
+    assert.equal(elements.license.href, `https://github.com/srcfl/ftw/blob/${tag}/LICENSE`);
+  }
 });
 
 test('source offer does not call a moving branch the source of a dirty or custom build', async () => {
-  for (const version of ['dev', 'v3.4.3-dirty', 'v3.4.3-2-gabcdef1', '<script>']) {
+  for (const version of ['dev', 'v3.4.3-local', '3.4.3-rc.1', 'v3.4.3-alpha.1', 'v3.4.3-beta.1-local', 'v3.4.3+custom', 'v3.4.3-dirty', 'v3.4.3-2-gabcdef1', '<script>']) {
     const elements = await render(version);
     assert.equal(elements.source.href, undefined);
     assert.match(elements.build.textContent, /obtain matching source/i);

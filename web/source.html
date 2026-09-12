@@ -31,9 +31,9 @@ repository alone does not supply unpublished changes.</p>
   fetch('/api/status').then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(status => {
     const version = String(status.version || 'dev');
     document.getElementById('build').textContent = 'Running version: ' + version;
-    // Official releases use their exact tag. Never call the moving master
+    // Only stable and beta.N releases use upstream tags. Never call master
     // branch the corresponding source of an unknown or dirty build.
-    if (/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/.test(version) && !version.endsWith('-dirty') && !/-\d+-g[0-9a-f]+$/.test(version)) {
+    if (/^v?\d+\.\d+\.\d+(?:-beta\.\d+)?$/.test(version)) {
       const tag = version.startsWith('v') ? version : 'v' + version;
       document.getElementById('source').href = 'https://github.com/srcfl/ftw/archive/refs/tags/' + tag + '.tar.gz';
       document.getElementById('source').textContent = 'Download source for ' + tag;
