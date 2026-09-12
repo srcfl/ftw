@@ -6,7 +6,7 @@
 # native Go arch inside the builder image.
 
 # --- Builder ---------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS builder
 
 # DuckDB ships glibc static libraries. Build against bookworm to keep the
 # libc requirement below the trixie runtime, using native cross compilers.
