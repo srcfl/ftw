@@ -6,6 +6,9 @@ safety boundary. Drivers translate hardware protocols. The optimizer proposes
 plans and supplies primary forecasts. A failure or upgrade outside core must
 never stop local measurement or make dispatch unsafe.
 
+The product boundary — what that system is, and is not — lives in
+[`AGENTS.md`](../AGENTS.md). This document is the system map.
+
 ## Module boundaries
 
 | Module | Source | Runtime | Responsibility |

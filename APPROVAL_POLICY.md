@@ -24,9 +24,10 @@ attention. The GitHub Discord bot turns those into pings too.
 
 ## When not to request anyone
 
-If no CODEOWNERS path matches, request nobody. Web/UI changes need a
-human looking at the rendered page (see AGENTS.md); that is not a
-GitHub review request.
+If no CODEOWNERS path matches, request nobody.
+
+A GitHub review from the web CODEOWNER is not the visual check. Web/UI
+changes still need a human looking at the rendered page (see AGENTS.md).
 
 Do not re-request a reviewer on later pushes of the same PR. Once is
 enough.

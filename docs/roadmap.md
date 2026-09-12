@@ -5,6 +5,10 @@ work already in implementation or acceptance. **NEXT** has a defined contract
 and entry gates. **LATER** items have no delivery promise; each must satisfy its
 promotion gate before it can move forward.
 
+Operating law for what may land is [`AGENTS.md`](../AGENTS.md): the household
+loop is the product, there is one live theme, and a LATER row is not
+permission to open a PR against `master`.
+
 The permanent rules do not move between lanes: core owns safety and dispatch,
 the site sign convention is unchanged, and local operation never depends on an
 optional service. Planner output remains untrusted input. A failed or stale

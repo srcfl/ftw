@@ -4,9 +4,18 @@
 # produced.
 #
 # This is about who gets asked, not who is allowed to contribute.
+# The control loop is owned because that is the product. Process files are
+# owned so agent rules cannot be rewritten in passing.
 
-# Web/UI changes require a human visual check; see AGENTS.md.
+# Web/UI changes still need a human visual check; see AGENTS.md.
+# A GitHub review from the CODEOWNER does not replace looking at the page.
 # Do not auto-request @erikarenhill; he is not a CODEOWNER.
+
+# The household loop: measure, plan, dispatch, and the UI that explains it.
+/go/internal/control/       @frahlg
+/go/internal/mpc/           @frahlg
+/go/internal/telemetry/     @frahlg
+/web/                       @frahlg
 
 # Drivers and the Lua host.
 /drivers/                   @frahlg

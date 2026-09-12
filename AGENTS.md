@@ -1,7 +1,32 @@
 # FTW project guide
 
-FTW is a local-first home energy management system written in Go, with Lua
-drivers and a compiled Energyplan worker.
+FTW is a box in the house that measures, plans and dispatches battery, PV and
+charging so the site stays safe and intelligible when the cloud, the optimizer
+or a driver is gone.
+
+That loop is the product. Everything else is an add-on. Work belongs in core
+only when it makes that loop better this week, for a household, without a new
+tariff model, a new protocol or a second safety authority.
+
+The implementation is Go, with Lua drivers and a compiled Energyplan worker.
+
+## Not this project
+
+These are standing no's, not a backlog. A later theme can reopen one of them;
+until then they wait, and they do not queue against master.
+
+- Not a GIS or roof-drawing product. Irradiance that improves the plan is
+  core; a map of the house is not.
+- Not a CPO. A local OCPP server that core commands is in; forwarding sessions
+  to an upstream operator waits.
+- Not a Modbus server for other home-automation stacks.
+- Not a worldwide tariff engine. Named household tariffs, after a written
+  contract, are enough.
+- Not Matter, EnergyKit, V2X automation or a second commander on the site
+  until the household loop is boringly correct.
+- A simulator is a test harness, not a second UI.
+
+The optimizer proposes. It is not the product.
 
 ## Architecture
 
@@ -20,9 +45,9 @@ The repository has three explicit modules:
   [`go/internal/mpc`](go/internal/mpc).
   It proposes plans; core validates them and retains a Go fallback.
 
-Keep new functionality in core unless it has a narrow versioned contract,
-independent failure/update semantics and a safe unavailable state. Optional
-modules never bypass core safety.
+If work is not the household loop, it belongs outside core, and only with a
+narrow versioned contract, independent failure and update semantics, and a
+safe unavailable state. Optional modules never bypass core safety.
 
 Read [docs/architecture.md](docs/architecture.md) for the system map and
 [docs/site-convention.md](docs/site-convention.md) before changing power math.
@@ -78,21 +103,31 @@ landed on somebody else's finished work.
 - **Check for open PRs touching the files you are about to change.** If one
   exists, it has right of way: rebase onto it, or say so and pick different
   work. Do not rewrite files out from under an open branch.
+- **An open PR is a lock with an expiry.** Right of way is a reservation you
+  use. A PR whose base branch is already merged must be retargeted at
+  `master` or closed. Parking means the unique commits move, then the PR
+  closes. A branch that is not moving toward `master` is an abandoned
+  reservation, not a review queue.
 - **"This already exists" is a claim that needs evidence of the right kind.**
   For behaviour, that means a test or a run. For anything visual, it means
   rendering both versions and comparing them — counting tokens, selectors
   or symbols in the source does not establish that a UI change landed.
-- **Prefer small PRs in one area.** Merging often only works when changes do
-  not overlap; a large cross-cutting pass conflicts with everything and ages
-  badly while it waits.
+- **One live theme, small PRs inside it.** The default theme is the control
+  loop: measure, plan, dispatch. The repository owner may name a different
+  theme when opening that window. Merging often only works when changes do
+  not overlap. A large cross-cutting pass, or a green PR outside the theme,
+  waits; it does not queue against `master`.
 - **Respect `.github/CODEOWNERS`.** An owner reviews what lands in their
-  area, whoever — or whatever — wrote it.
+  area, whoever — or whatever — wrote it. Control, planning, telemetry and
+  the UI are owned because that is the product, not because they are
+  process files.
 - **Do not request GitHub reviews except CODEOWNERS.** Never request
-  @erikarenhill and never @mention people for attention — the GitHub
+  @erikarenhill and never @mention people for attention. The GitHub
   Discord bot turns both into pings. See
   [`APPROVAL_POLICY.md`](APPROVAL_POLICY.md).
 - **Review web/UI changes in a browser.** A human must inspect the rendered
-  interface; AI review and reading the source code are not enough.
+  interface; AI review, a GitHub approve and reading the source code are not
+  enough.
 
 Planning documents, design specs, task breakdowns and agent scratch notes
 stay out of the repository; [`.github/check-no-planning-docs.sh`](.github/check-no-planning-docs.sh) enforces
@@ -145,10 +180,11 @@ because in this project review happens on the beta as much as in the
 PR. Fast-tracking moves a review, it never removes it — the CODEOWNERS
 owner still reviews what landed in their area, on the running beta.
 
-Beta is the playground. Every merged change ships in the next beta;
-testers run it on real sites and file what they find as issues or PRs,
-each naming the beta it was seen on. Label a finding `release-blocker`
-when the line must not promote to stable until it is fixed.
+Beta is the playground for what landed in the live theme. Every merged
+change ships in the next beta; testers run it on real sites and file what
+they find as issues or PRs, each naming the beta it was seen on. Label a
+finding `release-blocker` when the line must not promote to stable until it
+is fixed. Green CI is not a reason to merge work outside the theme.
 
 There is no release calendar. A beta promotes once it has run on the
 validation sites for a few days with no open `release-blocker`, and
