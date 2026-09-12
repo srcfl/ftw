@@ -68,6 +68,11 @@ Installed kWp is an optional starting estimate. Approximate user input must
 not permanently constrain a model when measurements support a better fit.
 Panel drawings, orientations and engineering knowledge are not prerequisites.
 
+STRÅNG, roof geometry and panel drawing are outside the selected Core scope.
+They may serve a future optional extension if a concrete need warrants it;
+the module boundary and delivery are not decided. Normal setup must work
+without choosing an irradiance source, azimuth or panel layout.
+
 Initial load and solar models must already support useful first-day planning.
 On-site learning improves them as evidence arrives. Elapsed days alone do
 not prove model quality; state uncertainty honestly and handle cold start.
