@@ -101,6 +101,75 @@ func TestMissingSoCAllowsChargeFromSurplus(t *testing.T) {
 	}
 }
 
+func TestMissingSoCDischargeStaysBlockedThroughSafety(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		gridW    float64
+		batteryW float64
+		mode     Mode
+		holdoff  bool
+	}{
+		{name: "slew from autonomous discharge", gridW: 2000, batteryW: -1000, mode: ModeSelfConsumption},
+		{name: "fuse relief from idle", gridW: 15000, mode: ModeIdle},
+		{name: "fuse relief cancels charge", gridW: 15000, batteryW: 1000, mode: ModeSelfConsumption},
+		{name: "fuse relief during dispatch holdoff", gridW: 15000, mode: ModeSelfConsumption, holdoff: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := telemetry.NewStore()
+			emitMeter(t, store, "meter", tc.gridW)
+			store.Update("battery", telemetry.DerBattery, tc.batteryW, nil, nil)
+			store.DriverHealthMut("battery").RecordSuccess()
+			st := NewState(0, 50, "meter")
+			st.Mode = tc.mode
+			st.SlewRateW = 500
+			st.MinDispatchIntervalS = 0
+			if tc.holdoff {
+				now := st.now()
+				st.LastDispatch = &now
+				st.MinDispatchIntervalS = 60
+			}
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"battery": 15200}), 11040)
+			if !tc.holdoff && len(targets) != 1 {
+				t.Fatalf("expected a battery command, got %+v", targets)
+			}
+			for _, target := range targets {
+				if target.TargetW < 0 {
+					t.Errorf("unknown SoC cannot authorize discharge: %+v", target)
+				}
+			}
+			for _, target := range st.LastTargets {
+				if target.TargetW < 0 {
+					t.Errorf("recorded a discharge command without SoC: %+v", target)
+				}
+			}
+		})
+	}
+}
+
+func TestMissingSoCFuseReliefUsesKnownBattery(t *testing.T) {
+	store := telemetry.NewStore()
+	emitMeter(t, store, "meter", 15000)
+	store.Update("unknown", telemetry.DerBattery, 0, nil, nil)
+	store.DriverHealthMut("unknown").RecordSuccess()
+	emitBattery(t, store, "known", 0, 0.5)
+	st := NewState(0, 50, "meter")
+	st.Mode = ModeIdle
+	st.MinDispatchIntervalS = 0
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"unknown": 15200, "known": 15200}), 11040)
+	knownDischarges := false
+	for _, target := range targets {
+		if target.Driver == "unknown" && target.TargetW < 0 {
+			t.Errorf("unknown battery received fuse discharge: %+v", target)
+		}
+		if target.Driver == "known" && target.TargetW < 0 {
+			knownDischarges = true
+		}
+	}
+	if !knownDischarges {
+		t.Fatalf("known battery should still provide fuse relief, got %+v", targets)
+	}
+}
+
 func TestLiveCurtailLimitWStaleMeter(t *testing.T) {
 	st := NewState(0, 100, "meter")
 	store := telemetry.NewStore()

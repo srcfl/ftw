@@ -2720,8 +2720,29 @@ func applyDispatchSafetyPipeline(
 	if state != nil {
 		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
 	}
+	targets = floorMissingSoCDischarge(targets, store)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
+	return targets
+}
+
+// Unknown battery energy cannot support a discharge command, even during
+// fuse relief. Check the final targets so slew cannot restore live discharge
+// and EV headroom reflects only the battery commands we can actually send.
+func floorMissingSoCDischarge(targets []DispatchTarget, store *telemetry.Store) []DispatchTarget {
+	for i := range targets {
+		if targets[i].TargetW >= 0 {
+			continue
+		}
+		if store != nil {
+			r := store.Get(targets[i].Driver, telemetry.DerBattery)
+			if r != nil && r.SoC != nil {
+				continue
+			}
+		}
+		targets[i].TargetW = 0
+		targets[i].Clamped = true
+	}
 	return targets
 }
 
@@ -4579,12 +4600,8 @@ func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []Di
 func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper float64) {
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
-	soc := 0.1
-	if r.SoC != nil {
-		soc = *r.SoC
-	}
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if soc < 0.05 || dischargeBlocked {
+	if r.SoC == nil || *r.SoC < 0.05 || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked {
