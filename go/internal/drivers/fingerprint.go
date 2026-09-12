@@ -168,6 +168,9 @@ func (d *LuaDriver) Discard() {
 // invoked — fingerprinting is a passive probe and must not reconfigure the
 // device. A driver that fails to load yields MatchUnknown + error.
 func RunFingerprint(luaPath string, env *HostEnv, target FingerprintTarget) (Fingerprint, error) {
+	if env != nil {
+		env.ProbeReadOnly = true
+	}
 	d, err := NewLuaDriver(luaPath, env)
 	if err != nil {
 		return Fingerprint{Match: MatchUnknown, Err: err.Error()}, err

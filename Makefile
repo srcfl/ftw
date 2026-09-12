@@ -14,7 +14,7 @@
 #   make clean                — remove all build artifacts
 
 .PHONY: help test compose-migration-test container-boundary-test release-workflow-test build build-arm64 build-amd64 build-windows-amd64 release release-linux release-windows \
-        run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
+        run-sim sim-ocpp dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions \
         drivers drivers-present driver-versions-across-pin
 
@@ -37,7 +37,8 @@ help:
 	@echo "  release-linux        linux tarballs in release/"
 	@echo "  release-windows      Windows zip in release/ (UCRT64 compiler)"
 	@echo "  release              all archives (all target compilers required)"
-	@echo "  run-sim              start Ferroamp + Sungrow simulators"
+	@echo "  run-sim              start Ferroamp + Sungrow + PCS simulators"
+	@echo "  sim-ocpp             dial Evify OCPP chargers at a running FTW"
 	@echo "  dev                  start sims + main app against config.local.yaml"
 	@echo "  e2e                  run the full-stack e2e test"
 	@echo "  verify               fast pre-commit: test + compose + vet + build"
@@ -169,6 +170,7 @@ build:
 	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
 	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-pcs ./cmd/sim-pcs
+	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-ocpp ./cmd/sim-ocpp
 	@ls -la bin/
 
 build-arm64:
@@ -250,6 +252,12 @@ run-sim:
 	(cd go && go run ./cmd/sim-sungrow) & \
 	(cd go && go run ./cmd/sim-pcs) & \
 	wait
+
+# Charge-point client: needs a running FTW with ocpp.enabled (see
+# config.local.example.yaml). Tesla Wall Connector is in the catalog but has
+# no OCPP and is skipped.
+sim-ocpp:
+	cd go && go run ./cmd/sim-ocpp -all -plug
 
 dev: config.local.yaml
 	@mkdir -p dev-data

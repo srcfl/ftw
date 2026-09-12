@@ -18,9 +18,9 @@ Use the public community channels for help:
   searchable questions, ideas, and open-ended technical conversation;
 - report reproducible bugs and request features in
   [GitHub Issues](https://github.com/srcfl/ftw/issues);
-- describe proposed fixes, driver needs, test evidence and documentation
-  corrections in issues. Sourceful implements selected changes; external pull
-  requests are not accepted. See [CONTRIBUTING.md](CONTRIBUTING.md).
+- share proposed fixes, driver needs and test evidence in issues. PRs are
+  welcome, including short Markdown proposals and documentation fixes.
+  See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Maintainers and community members may help on a best-effort basis. A question
 may receive no response, and a fix may not arrive on a particular schedule.

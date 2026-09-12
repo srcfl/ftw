@@ -69,7 +69,9 @@ func (z *Zaptec) Describe() Descriptor {
 		Transport:     TransportHTTP,
 		NeedsAuth:     true,
 		UsernameLabel: "Email",
-		LuaDriver:     "drivers/zaptec_cloud.lua",
+		// Installed from the device-drivers pin as drivers/zaptec_cloud.lua.
+		// Tests load the in-tree copy at go/internal/drivers/testdata/.
+		LuaDriver: "drivers/zaptec_cloud.lua",
 	}
 }
 

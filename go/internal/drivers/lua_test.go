@@ -87,6 +87,27 @@ func TestLuaDriverLifecycle(t *testing.T) {
 	}
 }
 
+func TestLuaDriverMissingCommandIsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nocommand.lua")
+	src := `
+function driver_init(config) end
+function driver_poll() return 1000 end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewLuaDriver(path, NewHostEnv("nocommand", telemetry.NewStore()))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+	err = d.Command(context.Background(), []byte(`{"action":"battery","power_w":1000}`))
+	if err == nil || !strings.Contains(err.Error(), "driver_command is not defined") {
+		t.Fatalf("Command error = %v, want driver_command is not defined", err)
+	}
+}
+
 func TestLuaDriverCommandAndDefaultModeReturnErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "failing.lua")

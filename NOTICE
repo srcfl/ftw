@@ -6,8 +6,8 @@ License transition: 2026-09-12
 This version changes the license of the project as a whole to GNU AGPL v3
 only with the Energyplan combination permission in LICENSE. It does not
 withdraw any rights already granted for earlier copies or their code.
-The last default-branch snapshot before this change was:
-https://github.com/srcfl/ftw/tree/469671fe2f54aa99d62712b2b5c70ec14447fd87
+The Apache-licensed default-branch snapshot used for this transition was:
+https://github.com/srcfl/ftw/tree/d281df8c975bdac0acad28f5bc4c1335dac3111b
 
 That snapshot was offered under Apache-2.0. Its copyright holders keep their
 copyrights and the permissions they previously granted remain available.

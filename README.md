@@ -26,9 +26,9 @@ while keeping expert controls and Lua drivers available.
 include goals that have not shipped; the capability list below is separate.
 
 Sourceful Energy maintains FTW Community under AGPL-3.0-only with the
-Energyplan combination permission. External users
-report bugs, needs and evidence through [issues](https://github.com/srcfl/ftw/issues).
-We do not accept external pull requests, including documentation and drivers.
+Energyplan combination permission. Contributions are welcome, preferably
+starting with [issues](https://github.com/srcfl/ftw/issues). Share a short
+Markdown proposal or a focused fix with relevant test evidence.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
 [SUPPORT.md](SUPPORT.md) describes separate commercial services.
 

@@ -1,28 +1,47 @@
 # Contributing to FTW
 
-Sourceful develops FTW and Fredrik owns its direction. External users help
-through [issues](https://github.com/srcfl/ftw/issues): report bugs, describe
-needs and share evidence. We do not accept external pull requests, including
-documentation, driver and website changes. Acceptance of an issue does not
-invite an external implementation PR.
+Sourceful develops and maintains FTW; Fredrik owns its direction. External
+PRs are welcome, including code, drivers, documentation and website changes.
+Prefer an [issue](https://github.com/srcfl/ftw/issues) that states the need and
+evidence, and link it from the PR. Small fixes do not need a separate issue.
+The [product vision](VISION.md) guides scope and priority.
 
-The [product vision](VISION.md) guides the work Sourceful selects. Users may
-still run, inspect and adapt FTW under its existing license. This policy does
-not change the license or past contributions. The development and sign-off
-instructions below apply to Sourceful-maintained changes and local work.
+For a broad product or architecture idea, a short Markdown PR is a useful
+start. Explain the problem, proposed result and how we could test it in the
+PR description or relevant maintained docs. Mark proposals as proposed;
+keep agent scratch notes and task breakdowns out of the repository. Concrete
+fixes can include code and tests. No proposal promises a delivery date.
+
+## Agentic first
+
+People and agents should be able to assess and continue the work from its
+record. State the problem, scope, relevant issue, test steps and results.
+Use focused changes and reproducible evidence. The submitter checks agent
+output and remains responsible for the contribution and its sign-off.
+
+Test evidence should fit the change. For device behaviour, include hardware
+model, firmware, test steps and observed results before merge. State missing
+hardware tests and keep the PR as a proposal or draft until they are done.
+Simulator tests help catch bugs but do not prove physical support. Docs do
+not need hardware tests; UI changes need a browser review. Driver control
+keeps its separate safety and hardware acceptance gates.
+
+This policy changes no license, past attribution or release authority.
 
 ## Website
 
 The public website (<https://ftw.energy>) lives in its own
 repository, [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web). Landing-page
-copy, install instructions and other site content live there. Report website
-changes in [its issue tracker](https://github.com/srcfl/ftw-web/issues).
+copy, install instructions and other site content live there. Use
+[its issue tracker](https://github.com/srcfl/ftw-web/issues) and PRs for website
+changes. Shared Lua drivers belong in
+[`srcfl/device-drivers`](https://github.com/srcfl/device-drivers).
 
 ## License of contributions
 
 This version uses **GNU AGPL v3 only with the Energyplan combination
-permission** in [`LICENSE`](LICENSE). Sourceful-maintained changes must carry
-those terms, including that permission. Preserve all third-party licenses and
+permission** in [`LICENSE`](LICENSE). Contributions to this version must
+carry those terms, including that permission. Preserve all third-party licenses and
 attributions. A sign-off does not assign copyright or authorize commercial
 relicensing; Sourceful must separately hold those rights where needed.
 See [LICENSING.md](LICENSING.md).
@@ -92,11 +111,11 @@ involved. Add relevant logs, screenshots or protocol documents when available.
 Do not post credentials or private site data. You do not need to design an API
 or write a patch to report a problem.
 
-Sourceful decides scope and priority and links implementation PRs to the issue.
-External PRs are not the intake path; maintainers may close them and direct the
-author to issues. General questions can still use Discussions or Discord.
+Fredrik sets direction and priority; Sourceful reviews and maintains changes.
+Link related issues and PRs so the evidence stays easy to follow. General
+questions can use Discussions or Discord.
 
-## Sourceful pull requests
+## Pull requests
 
 - State the household need, selected scope and relevant issue or owner request.
 - Keep the change focused and coordinate overlap with open work.
