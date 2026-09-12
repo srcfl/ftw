@@ -42,6 +42,18 @@ drivers:
 api:
   port: 8080
 
+# Built-in OCPP Central System. sim-ocpp dials this with the same credentials.
+# Chargers appear pending on Settings → Chargers until a charger entry adopts
+# them. Tesla Wall Connector is not OCPP — it uses tesla_wall_connector.lua.
+ocpp:
+  enabled: true
+  bind: 127.0.0.1
+  port: 8887
+  port_v201: 8888
+  username: ftw
+  password: sim-ocpp
+  heartbeat_interval_s: 60
+
 state:
   # `make dev` starts the Go process from go/, so keep disposable state in
   # the repo's ignored dev-data/ directory.
