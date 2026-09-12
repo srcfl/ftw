@@ -1,16 +1,22 @@
 # Contributing to FTW
 
-Thanks for helping build the local energy coordination layer. This document
-covers the legal bits — for how the code is organized and how to add a driver,
-start with [`AGENTS.md`](AGENTS.md) and
-[`docs/writing-a-driver.md`](docs/writing-a-driver.md).
+Sourceful develops FTW and Fredrik owns its direction. External users help
+through [issues](https://github.com/srcfl/ftw/issues): report bugs, describe
+needs and share evidence. We do not accept external pull requests, including
+documentation, driver and website changes. Acceptance of an issue does not
+invite an external implementation PR.
+
+The [product vision](VISION.md) guides the work Sourceful selects. Users may
+still run, inspect and adapt FTW under its existing license. This policy does
+not change the license or past contributions. The development and sign-off
+instructions below apply to Sourceful-maintained changes and local work.
 
 ## Website
 
-The public website (<https://ftw.sourceful.energy>) lives in its own
+The public website (<https://ftw.energy>) lives in its own
 repository, [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web). Landing-page
-copy, install instructions and other site content are edited there, not in this
-repo — open a pull request against `srcfl/ftw-web` for website changes.
+copy, install instructions and other site content live there. Report website
+changes in [its issue tracker](https://github.com/srcfl/ftw-web/issues).
 
 ## License of contributions
 
@@ -76,37 +82,25 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
-## Start with text
+## Report a need or bug
 
-External code contributions start with a written proposal, not an
-implementation pull request. Open an issue or Discussion before writing code
-and describe:
+Describe the result you expected, what happened and the version and equipment
+involved. Add relevant logs, screenshots or protocol documents when available.
+Do not post credentials or private site data. You do not need to design an API
+or write a patch to report a problem.
 
-- the problem and current behaviour;
-- the result you want and what stays out of scope;
-- real hardware, tariff, protocol or user evidence where it applies;
-- safety and failure behaviour;
-- the test, run or rendered view that would prove the change;
-- related issues and open pull requests that touch the same area.
+Sourceful decides scope and priority and links implementation PRs to the issue.
+External PRs are not the intake path; maintainers may close them and direct the
+author to issues. General questions can still use Discussions or Discord.
 
-Wait for a maintainer to accept the scope in that thread. An accepted proposal
-covers one focused change; it does not approve a stack of follow-on pull
-requests. Once the scope is agreed, link the thread from the implementation
-pull request and keep the code within it.
+## Sourceful pull requests
 
-This review protects contributor time and keeps new work aligned with current
-architecture and work already in progress. We may close an unsolicited code
-pull request and invite the author to bring the proposal back as text first.
-Documentation-only corrections may go straight to a pull request, but the pull
-request must still explain the change and why it is correct.
-
-## Pull requests
-
-- Link the written proposal and the maintainer comment that accepted its scope.
-- Keep PRs focused on one logical change.
-- New code needs tests; `make verify` must pass before review.
-- User-visible changes need a Changeset entry (`npx changeset`) — see the
-  Releases section in [`README.md`](README.md).
+- State the household need, selected scope and relevant issue or owner request.
+- Keep the change focused and coordinate overlap with open work.
+- Test changed behaviour and failure paths; run the relevant repository checks.
+- Review changed UI in a browser.
+- Add a Changeset for user-visible runtime changes; documentation is exempt.
+- Keep VISION.md, the roadmap and current-behaviour docs consistent.
 
 ## Betas, issues and releases
 

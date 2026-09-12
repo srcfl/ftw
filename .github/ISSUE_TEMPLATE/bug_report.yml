@@ -82,5 +82,5 @@ body:
     attributes:
       label: Contribution path
       options:
-        - label: I will wait for a maintainer to confirm the fix scope before opening a code pull request.
+        - label: I understand that Sourceful handles implementation and external contributions use issues, not pull requests.
           required: true
