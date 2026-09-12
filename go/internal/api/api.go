@@ -36,6 +36,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/coverage"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
@@ -483,6 +484,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/prices", Read, s.handlePrices)
 	s.handle("GET  /api/prices/zones", Read, s.handlePriceZones)
 	s.handle("GET  /api/forecast", Read, s.handleForecast)
+	s.handle("GET  /api/data-sources", Read, s.handleDataSources)
 	s.handle("GET  /api/mpc/plan", Read, s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", Configure, s.handleMPCReplan)
 	s.handle("GET  /api/mpc/diagnose", Read, s.handleMPCDiagnose)
@@ -2871,6 +2873,79 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 	s.handleForecastLearningReset(w, r, "pv")
+}
+
+// ---- /api/data-sources ----
+//
+// Where each external data source works, and whether it covers this site.
+// Response: {latitude, longitude, sources:[{id, kind, label, area, countries,
+// worldwide, requires_key, license, note, covers}]}. `covers` is advisory: for
+// a bounded source it is a lat/lon box test, so true means "worth trying".
+// False is reliable — that location is definitely not served.
+//
+// This exists because some sources are regional (every price provider is
+// European) and nothing previously said so: a site outside those areas got an
+// empty result and no explanation. See #726.
+func (s *Server) handleDataSources(w http.ResponseWriter, r *http.Request) {
+	var lat, lon float64
+	var haveSite bool
+	// Weather is an optional config section, so it is nil on a site that has
+	// never configured one — which is exactly the site most likely to be
+	// looking at this endpoint.
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+		if s.deps.Cfg != nil && s.deps.Cfg.Weather != nil {
+			lat, lon = s.deps.Cfg.Weather.Latitude, s.deps.Cfg.Weather.Longitude
+			haveSite = lat != 0 || lon != 0
+		}
+		s.deps.CfgMu.RUnlock()
+	}
+
+	// An explicit ?lat=&lon= overrides the configured site so the Weather tab
+	// can preview coverage for a pin the operator is still dragging around,
+	// before they save it.
+	if v := r.URL.Query().Get("lat"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lat, haveSite = f, true
+		}
+	}
+	if v := r.URL.Query().Get("lon"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lon, haveSite = f, true
+		}
+	}
+
+	items := make([]map[string]any, 0, len(coverage.All()))
+	for _, src := range coverage.All() {
+		item := map[string]any{
+			"id":           src.ID,
+			"kind":         string(src.Kind),
+			"label":        src.Label,
+			"area":         src.Area,
+			"worldwide":    src.Worldwide(),
+			"requires_key": src.RequiresKey,
+		}
+		if len(src.Countries) > 0 {
+			item["countries"] = src.Countries
+		}
+		if src.License != "" {
+			item["license"] = src.License
+		}
+		if src.Note != "" {
+			item["note"] = src.Note
+		}
+		// Without a site location there is nothing to test against, so omit
+		// `covers` entirely rather than defaulting it to a misleading true.
+		if haveSite {
+			item["covers"] = src.Covers(lat, lon)
+		}
+		items = append(items, item)
+	}
+	resp := map[string]any{"sources": items}
+	if haveSite {
+		resp["latitude"], resp["longitude"] = lat, lon
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---- static ----
