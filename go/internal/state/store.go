@@ -1,5 +1,5 @@
-// Package state stores configuration, models and cache in SQLite, and all
-// time-series history and energy accounting in embedded DuckDB.
+// Package state stores configuration and cache in SQLite, live ticks in a
+// separate SQLite hot file, and long history in embedded DuckDB.
 package state
 
 import (
@@ -34,8 +34,9 @@ const (
 	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
-// Store owns one DuckDB history database and two SQLite databases:
-//   - history: primary samples, site history and energy ledger
+// Store owns one DuckDB archive and three SQLite databases:
+//   - history: DuckDB archive — sealed samples, hourly rollups, energy ledger
+//   - hot: history-hot.db live ticks for 5m/1h/24h charts (48 h)
 //   - db: state.db configuration, devices and learned state
 //   - cache: cache.db prices and forecasts, which can be rebuilt
 //
@@ -48,6 +49,10 @@ type Store struct {
 	historyWriteMu   sync.Mutex
 	historyWriter    *historyWriter
 	historyMigration *historyMigration
+
+	hot        *sql.DB
+	hotPath    string
+	hotWriteMu sync.Mutex
 
 	db    *sql.DB
 	cache *sql.DB
@@ -202,11 +207,17 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 		cache.Close()
 		return nil, err
 	}
+	if err := s.openHotHistory(); err != nil {
+		if s.history != nil {
+			s.history.Close()
+		}
+		db.Close()
+		cache.Close()
+		return nil, err
+	}
 	if importLegacy {
 		if err := s.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-			if s.history != nil {
-				s.history.Close()
-			}
+			s.closeOpenedHistory()
 			db.Close()
 			cache.Close()
 			return nil, err
@@ -215,7 +226,7 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 	if migration != nil {
 		idle, err := s.legacyHistoryIdle(coldDir)
 		if err != nil {
-			s.history.Close()
+			s.closeOpenedHistory()
 			db.Close()
 			cache.Close()
 			return nil, err
@@ -224,13 +235,13 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 			// Remember all source paths before live work starts. A file that goes
 			// missing before its first chunk must not disappear from coverage.
 			if err := s.bindLegacyParquetSources(coldDir); err != nil {
-				s.history.Close()
+				s.closeOpenedHistory()
 				db.Close()
 				cache.Close()
 				return nil, err
 			}
 			if _, err := s.history.Exec(`INSERT INTO history_migrations(name) VALUES ('legacy-import-pending') ON CONFLICT DO NOTHING`); err != nil {
-				s.history.Close()
+				s.closeOpenedHistory()
 				db.Close()
 				cache.Close()
 				return nil, err
@@ -240,6 +251,17 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
 	return s, nil
+}
+
+func (s *Store) closeOpenedHistory() {
+	if s.hot != nil {
+		s.hot.Close()
+		s.hot = nil
+	}
+	if s.history != nil {
+		s.history.Close()
+		s.history = nil
+	}
 }
 
 // OpenBackupSource opens an existing state.db without integrity healing,
@@ -322,6 +344,9 @@ func (s *Store) Close() error {
 	var err error
 	if s.historyWriter != nil {
 		err = s.historyWriter.close()
+	}
+	if s.hot != nil {
+		err = errors.Join(err, s.hot.Close())
 	}
 	if s.history != nil {
 		err = errors.Join(err, s.history.Close())
@@ -1361,16 +1386,19 @@ type HistoryPoint struct {
 	JSON   string
 }
 
-// RecordHistory inserts a new hot-tier entry.
+// RecordHistory inserts a live hot-tier entry into SQLite.
 func (s *Store) RecordHistory(p HistoryPoint) error {
 	var normalizeErr error
 	p, normalizeErr = normalizeHistoryPoint(p)
 	if normalizeErr != nil {
 		return normalizeErr
 	}
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	_, err := s.history.Exec(
+	if s.hot == nil {
+		return errors.New("live history is unavailable")
+	}
+	s.hotWriteMu.Lock()
+	defer s.hotWriteMu.Unlock()
+	_, err := s.hot.Exec(
 		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
@@ -1432,6 +1460,31 @@ func (s *Store) LoadHistoryContext(ctx context.Context, sinceMs, untilMs int64, 
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	cut, hasHot, err := s.hotEarliestMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if hasHot && cut <= sinceMs {
+		return s.loadHotHistory(ctx, sinceMs, untilMs, maxPoints)
+	}
+	if !hasHot {
+		return s.loadArchiveHistory(ctx, sinceMs, untilMs, maxPoints)
+	}
+	arch, err := s.loadArchiveHistory(ctx, sinceMs, cut-1, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	hot, err := s.loadHotHistory(ctx, cut, untilMs, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	return downsampleHistory(mergeHistoryPoints(hot, arch), sinceMs, untilMs, maxPoints), nil
+}
+
+func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
+	if s.history == nil || untilMs < sinceMs {
+		return nil, nil
 	}
 	// Union across all three tiers. Dedupe on ts_ms preferring hot over warm over cold.
 	// COALESCE to 0 so NULL columns (from partial aggregations) scan cleanly.
@@ -1521,7 +1574,55 @@ type DayEnergy struct {
 // to a left-endpoint sum. Pushing the sums into SQL avoids shipping ~17k
 // hot-tier rows per day back to the application — month-view dashboards got
 // slow once hot retention grew.
+//
+// Intervals longer than maxCostIntegrationGap are skipped. A history-writer
+// stall that later resumes would otherwise attribute hours of the first new
+// sample as if the site had run at that power through the hole.
 func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
+	ctx := context.Background()
+	cut, hasHot, err := s.hotEarliestMs(ctx)
+	if err != nil {
+		return DayEnergy{}, err
+	}
+	if hasHot && cut <= sinceMs {
+		return s.dailyEnergyFromHot(ctx, sinceMs, untilMs)
+	}
+	if !hasHot {
+		return s.dailyEnergyFromArchive(sinceMs, untilMs)
+	}
+	hot, err := s.dailyEnergyFromHot(ctx, cut, untilMs)
+	if err != nil {
+		return DayEnergy{}, err
+	}
+	arch, err := s.dailyEnergyFromArchive(sinceMs, cut-1)
+	if err != nil {
+		slog.Warn("archive daily energy skipped; using live SQLite only", "err", err)
+		return hot, nil
+	}
+	return addDayEnergy(arch, hot), nil
+}
+
+// LiveDayEnergy integrates only SQLite hot ticks. Status polls every 2 s and
+// must not touch the imported DuckDB archive.
+func (s *Store) LiveDayEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
+	ctx := context.Background()
+	cut, hasHot, err := s.hotEarliestMs(ctx)
+	if err != nil {
+		return DayEnergy{}, err
+	}
+	if !hasHot {
+		return DayEnergy{}, nil
+	}
+	if cut > sinceMs {
+		sinceMs = cut
+	}
+	return s.dailyEnergyFromHot(ctx, sinceMs, untilMs)
+}
+
+func (s *Store) dailyEnergyFromArchive(sinceMs, untilMs int64) (DayEnergy, error) {
+	if s.history == nil || untilMs < sinceMs {
+		return DayEnergy{}, nil
+	}
 	const q = `
 		WITH all_rows AS (
 			SELECT ts_ms, grid_w, pv_w, bat_w, load_w FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
@@ -1548,13 +1649,14 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0),
 			COUNT(*)
 		FROM lagged
-		WHERE prev_ts IS NOT NULL
+		WHERE prev_ts IS NOT NULL AND (ts_ms - prev_ts) <= ?
 	`
 	var d DayEnergy
 	err := s.history.QueryRow(q,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
+		maxCostIntegrationGap.Milliseconds(),
 	).Scan(
 		&d.ImportWh, &d.ExportWh, &d.PVWh,
 		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,

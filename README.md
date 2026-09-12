@@ -14,9 +14,22 @@ The control path stays on the local network. Cloud price, weather and device
 integrations degrade independently; they are not required for safe local
 operation.
 
-FTW Community is Apache-2.0 software maintained by Sourceful Energy and project
-contributors. Community help is best effort. See [SUPPORT.md](SUPPORT.md) for
-the boundary between community use and separate commercial services.
+## Product direction
+
+FTW should make mixed equipment simple to live with: useful first-day
+planning, reliable daily charging, fast and honest live feedback, and
+structured access for agents. The default experience should need few choices
+while keeping expert controls and Lua drivers available.
+
+[VISION.md](VISION.md) is the product direction set by Fredrik.
+[docs/roadmap.md](docs/roadmap.md) lists the outcomes and proof needed. These
+include goals that have not shipped; the capability list below is separate.
+
+Sourceful Energy maintains FTW Community under Apache-2.0. External users
+report bugs, needs and evidence through [issues](https://github.com/srcfl/ftw/issues).
+We do not accept external pull requests, including documentation and drivers.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
+[SUPPORT.md](SUPPORT.md) describes separate commercial services.
 
 ## Architecture
 
@@ -27,9 +40,9 @@ FTW has three explicit modules:
 - **Optimizer** proposes plans over a versioned contract; core validates every
   result and keeps a Go fallback.
 
-This separation lets drivers and the optimizer evolve independently without
-moving safety authority out of core. New module types should follow the same
-rule. See [docs/architecture.md](docs/architecture.md).
+Drivers and the optimizer can evolve without moving safety authority out of
+Core. A new module needs a concrete reason and must reduce the complexity of
+the whole product. See [docs/architecture.md](docs/architecture.md).
 
 ## Capabilities
 
@@ -96,9 +109,10 @@ Existing Forty Two Watts or older FTW deployments must use the
 are preserved. Raspberry Pi image installation is covered by
 [docs/rpi-image.md](docs/rpi-image.md).
 
-The dashboard is intentionally local. Use a VPN or another operator-managed
-private network when access is needed away from home; FTW does not ship a
-public relay.
+The on-box dashboard remains local. The optional
+[FTW webapp](https://github.com/srcfl/ftw-webapp) connects through an encrypted
+session and blind relay; relay loss does not stop local control. Cloud MCP
+access is a product goal, not an endpoint provided by this installation guide.
 
 ## Install on Home Assistant
 

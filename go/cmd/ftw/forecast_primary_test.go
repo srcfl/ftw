@@ -21,8 +21,18 @@ func primaryFixture(at time.Time, exchange hostForecastExchange) *forecastTracke
 }
 
 func primaryReply(_ context.Context, payload []byte) ([]byte, error) {
-	_, reply := hostForecastReply(payload)
+	_, reply := primaryHostForecastReply(payload)
 	return json.Marshal(reply)
+}
+
+// Selection tests use a learned load; raw host tests retain cold-start evidence.
+func primaryHostForecastReply(payload []byte) (map[string]any, map[string]any) {
+	req, reply := hostForecastReply(payload)
+	for _, row := range reply["predictions"].([]any) {
+		load := row.(map[string]any)["load"].(map[string]any)
+		load["quality"], load["coverage"] = "learning", 0.5
+	}
+	return req, reply
 }
 
 func primarySeries(t *testing.T, issue forecasting.Issue, name string) forecasting.Series {
@@ -69,7 +79,7 @@ func TestForecastPrimaryRustControlsSlotsAndArchivesFrozenLegacy(t *testing.T) {
 	if champion.Points[0].PVW != 100 || shadow.Points[0].PVW != 2000 || *issue.Weather[0].GHIWm2 != 500 {
 		t.Fatal("issued primary/shadow not frozen independently")
 	}
-	if champion.Points[0].LoadSource != "energyplan" || champion.Points[0].LoadQuality != "cold_start" || champion.Points[2].PVQuality != "learning" || shadow.Points[0].PVSource != "legacy" {
+	if champion.Points[0].LoadSource != "energyplan" || champion.Points[0].LoadQuality != "learning" || champion.Points[2].PVQuality != "learning" || shadow.Points[0].PVSource != "legacy" {
 		t.Fatal("primary source or independently earned model quality lost")
 	}
 	if primarySeries(t, issue, "planning").Points[0].PVW != 50 || primarySeries(t, issue, "energyplan").Points[0].PVW != 100 {
@@ -84,7 +94,7 @@ func TestForecastPrimaryRustControlsSlotsAndArchivesFrozenLegacy(t *testing.T) {
 func TestForecastPrimarySelectsEachSignalAndRealZero(t *testing.T) {
 	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	f := primaryFixture(at, func(_ context.Context, p []byte) ([]byte, error) {
-		_, reply := hostForecastReply(p)
+		_, reply := primaryHostForecastReply(p)
 		rows := reply["predictions"].([]any)
 		rows[0].(map[string]any)["pv"] = map[string]any{"known": false, "quality": "unknown", "uncertainty": "unavailable", "coverage": 0}
 		rows[1].(map[string]any)["pv"] = map[string]any{"known": true, "point_w": 0, "lower_w": 0, "upper_w": 50, "quality": "cold_start", "uncertainty": "provisional", "coverage": 0}
@@ -113,7 +123,7 @@ func TestForecastPrimaryUnavailableRetainsLegacy(t *testing.T) {
 					<-ctx.Done()
 					return nil, ctx.Err()
 				}
-				_, reply := hostForecastReply(p)
+				_, reply := primaryHostForecastReply(p)
 				rows := reply["predictions"].([]any)
 				if kind == "invalid" {
 					rows[0].(map[string]any)["pv"].(map[string]any)["point_w"] = -1
@@ -165,7 +175,7 @@ func TestForecastPrimaryPartialCurrentIntervalUsesRustRemainder(t *testing.T) {
 	}
 }
 
-func TestForecastPrimaryNativeColdLoadUsedWithoutLegacyTrust(t *testing.T) {
+func TestForecastPrimaryNativeColdLoadKeepsHeatingPriorUntilLearning(t *testing.T) {
 	binary := os.Getenv("FTW_FORECAST_WORKER")
 	if binary == "" {
 		t.Skip("set FTW_FORECAST_WORKER for native primary integration")
@@ -179,18 +189,37 @@ func TestForecastPrimaryNativeColdLoadUsedWithoutLegacyTrust(t *testing.T) {
 	defer r.Close()
 	f := trackerFixture(at)
 	f.site, f.candidate = hostForecastSite, r
-	in := f.Snapshot(at, trackerWeather(at, at))
+	f.load.SetHeatingCoef(300)
+	weather := trackerWeather(at, at)
+	weather[0].TempC = hostForecastPtr(0.0)
+	in := f.Snapshot(at, weather)
 	legacy := trackerSlots(at, 4)
-	legacy[0].LoadW = 98765
+	legacy[0].LoadW = in.Load(at)
+	if legacy[0].LoadW < 5400 {
+		t.Fatal("fixture lost the configured heating prior")
+	}
 	got := in.Resolve(context.Background(), legacy)
-	if got[0].LoadW == legacy[0].LoadW {
-		t.Fatal("native cold model did not become primary")
+	if got[0].LoadW != legacy[0].LoadW {
+		t.Fatalf("cold model replaced heating prior: %v -> %v", legacy[0].LoadW, got[0].LoadW)
 	}
 	in.Record(got, got, "native-decision", at.Add(time.Second).UnixMilli())
 	issue := (<-f.queue).issue
 	point := primarySeries(t, issue, "champion").Points[0]
-	if point.LoadSource != "energyplan" || !point.LoadKnown || point.LoadQuality != "cold_start" || !reflect.DeepEqual(point.ModelLoad, primarySeries(t, issue, "energyplan").Points[0].ModelLoad) {
-		t.Fatalf("native cold primary evidence missing: %+v", point)
+	if point.LoadSource != "legacy" || !point.LoadKnown || point.ModelLoad != nil {
+		t.Fatalf("cold fallback evidence missing: %+v", point)
+	}
+	if raw := primarySeries(t, issue, "energyplan").Points[0]; raw.LoadW != 500 || raw.LoadQuality != "cold_start" {
+		t.Fatalf("raw cold forecast was not retained: %+v", raw)
+	}
+	trainNativeLoad(t, r, at)
+	learned := f.Snapshot(at, weather)
+	next := learned.Resolve(context.Background(), legacy)
+	if next[0].LoadW >= 1000 {
+		t.Fatalf("measured low load did not replace the prior: %+v", next[0])
+	}
+	learned.Record(next, next, "learned-decision", at.UnixMilli())
+	if p := primarySeries(t, (<-f.queue).issue, "champion").Points[0]; p.LoadSource != "energyplan" || p.LoadQuality != "learning" {
+		t.Fatalf("learned load did not take over: %+v", p)
 	}
 	if err := st.SaveForecastIssue(context.Background(), issue); err != nil {
 		t.Fatal(err)
@@ -244,6 +273,7 @@ func TestForecastPrimaryNativeCurrentIntervalReplaysAfterNewObservation(t *testi
 	defer r.Close()
 	f := trackerFixture(origin)
 	f.site, f.candidate = hostForecastSite, r
+	trainNativeLoad(t, r, start)
 	capturedState := r.Snapshot()
 	in := f.Snapshot(origin, trackerWeather(start, origin))
 	legacy := trackerSlots(start, 4)
@@ -271,6 +301,18 @@ func TestForecastPrimaryNativeCurrentIntervalReplaysAfterNewObservation(t *testi
 		applyForecastBands(&replay, nil)
 		if !reflect.DeepEqual(replay.Series[0].Points, primarySeries(t, issue, "energyplan").Points) {
 			t.Fatal("new observation changed replayed remaining-interval forecast")
+		}
+	}
+}
+
+func trainNativeLoad(t *testing.T, r *rustForecast, target time.Time) {
+	t.Helper()
+	for _, days := range []int{-2, -1} {
+		at := target.AddDate(0, 0, days)
+		end := at.Add(15 * time.Minute)
+		o := forecasting.Observation{StartMS: at.UnixMilli(), EndMS: end.UnixMilli(), AvailableAtMS: end.UnixMilli(), LoadW: 900, LoadKnown: true}
+		if err := r.Update(context.Background(), hostForecastSite(), o, nil, false); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

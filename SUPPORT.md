@@ -1,7 +1,7 @@
 # FTW support
 
 FTW Community is a self-hosted, Apache-2.0-licensed project maintained by
-Sourceful Energy (Sourceful Labs AB) and project contributors.
+Sourceful Energy (Sourceful Labs AB). Fredrik owns the product direction.
 
 ## Community support
 
@@ -17,7 +17,9 @@ Use the public community channels for help:
   searchable questions, ideas, and open-ended technical conversation;
 - report reproducible bugs and request features in
   [GitHub Issues](https://github.com/srcfl/ftw/issues);
-- propose fixes, drivers, tests, and documentation through pull requests.
+- describe proposed fixes, driver needs, test evidence and documentation
+  corrections in issues. Sourceful implements selected changes; external pull
+  requests are not accepted. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Maintainers and community members may help on a best-effort basis. A question
 may receive no response, and a fix may not arrive on a particular schedule.
