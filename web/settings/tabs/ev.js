@@ -168,6 +168,8 @@
           }, 5000);
         }
       }
+      // A rerender replaces the status element and its refresh callback.
+      stopTimer();
       if (window._evOnVisibility) {
         document.removeEventListener("visibilitychange", window._evOnVisibility);
       }

@@ -130,7 +130,27 @@ import {
     return d.getTime();
   }
 
-  async function fetchAll() {
+  let planFetchInFlight = null;
+  let planRefreshQueued = false;
+
+  function fetchAll() {
+    if (planFetchInFlight) {
+      planRefreshQueued = true;
+      return planFetchInFlight;
+    }
+    planFetchInFlight = (async function () {
+      do {
+        planRefreshQueued = false;
+        await fetchPlanData();
+      } while (planRefreshQueued && !document.hidden);
+    })().finally(function () {
+      planFetchInFlight = null;
+      planRefreshQueued = false;
+    });
+    return planFetchInFlight;
+  }
+
+  async function fetchPlanData() {
     const [p, f, m, c, s, pv] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),

@@ -111,7 +111,7 @@ function rigEv({ hidden = false } = {}) {
   const observers = [];
   let nextTimer = 1;
   const modalHidden = new Set();
-  const indicator = { className: "", textContent: "" };
+  let indicator = { className: "", textContent: "" };
   const modal = {
     classList: {
       contains: (name) => modalHidden.has(name),
@@ -164,14 +164,17 @@ function rigEv({ hidden = false } = {}) {
   windowObj.window = windowObj;
   vm.createContext(sandbox);
   vm.runInContext(evSource, sandbox);
-  sandbox.window.FTWSettings.tabs.ev.after({
+  function mount() { sandbox.window.FTWSettings.tabs.ev.after({
     bodyEl: { querySelector() { return null; } },
     config: { ev_charger: {} },
     getByPath() { return ""; },
     captureCurrentTab() {},
     renderTab() {},
-  });
+  }); }
+  mount();
   return {
+    indicator() { return indicator; },
+    rerender() { indicator = { className: "", textContent: "" }; mount(); },
     fetches,
     pollTimers() { return [...intervals.values()].filter((timer) => timer.ms === 5000); },
     setHidden(next) {
@@ -266,4 +269,20 @@ test("plan, cards, and remaining settings pollers hook visibilitychange", () => 
   assert.match(readWeb("./components/ftw-price-chart.js"), /visibilitychange/);
   assert.match(readWeb("./settings/tabs/system.js"), /visibilitychange/);
   assert.match(readWeb("./components/ftw-energy-flow.js"), /document\.hidden/);
+});
+
+
+test("EV status polling follows the new element after a provider rerender", async () => {
+  const ev = rigEv();
+  const old = ev.indicator();
+  ev.rerender();
+  assert.equal(ev.pollTimers().length, 1);
+  for (const entry of ev.fetches) entry.resolve({ json: async () => ({}) });
+  await new Promise(resolve => setImmediate(resolve));
+  const oldText = old.textContent;
+  ev.runPollTimers();
+  ev.fetches.at(-1).resolve({ json: async () => ({ drivers: { easee: { status: "online", device_id: "new-status" } } }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(ev.indicator().textContent, /new-status/);
+  assert.equal(old.textContent, oldText, "the old timer must not update its detached element");
 });
