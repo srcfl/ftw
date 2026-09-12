@@ -719,6 +719,13 @@
       refreshQueued = false;
       var waiters = refreshWaiters;
       refreshWaiters = [];
+      // A timer tick that overlapped a live refresh must not catch up
+      // after the tab has gone hidden; visibilitychange starts the next
+      // poll when the document is shown again.
+      if (document.hidden) {
+        waiters.forEach(function (waiter) { waiter(); });
+        return;
+      }
       refresh().then(function () {
         waiters.forEach(function (waiter) { waiter(); });
       });
@@ -908,8 +915,30 @@
     if (card && card.dataset.hpDriver) openDetail(card.dataset.hpDriver);
   }
 
+  var started = false;
+
+  function pollHeating() {
+    if (document.hidden) return;
+    refresh();
+  }
+
+  function syncHeatingPolling() {
+    if (document.hidden) {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      return;
+    }
+    pollHeating();
+    if (timer === null) {
+      timer = setInterval(pollHeating, REFRESH_MS);
+    }
+  }
+
   function start() {
-    if (timer) return;
+    if (started) return;
+    started = true;
     var grid = document.getElementById('heating-grid');
     if (grid) {
       grid.addEventListener('click', onGridClick);
@@ -919,8 +948,8 @@
         }
       });
     }
-    refresh();
-    timer = setInterval(refresh, REFRESH_MS);
+    document.addEventListener('visibilitychange', syncHeatingPolling);
+    syncHeatingPolling();
   }
 
   if (document.readyState === 'loading') {

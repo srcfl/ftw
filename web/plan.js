@@ -18,6 +18,7 @@ import {
   'use strict';
 
   const PLAN_REFRESH_MS = 30000;
+  const HINT_REFRESH_MS = 5000;
 
   function apiFetch(path, opts) {
     return fetch(path, opts);
@@ -129,7 +130,27 @@ import {
     return d.getTime();
   }
 
-  async function fetchAll() {
+  let planFetchInFlight = null;
+  let planRefreshQueued = false;
+
+  function fetchAll() {
+    if (planFetchInFlight) {
+      planRefreshQueued = true;
+      return planFetchInFlight;
+    }
+    planFetchInFlight = (async function () {
+      do {
+        planRefreshQueued = false;
+        await fetchPlanData();
+      } while (planRefreshQueued && !document.hidden);
+    })().finally(function () {
+      planFetchInFlight = null;
+      planRefreshQueued = false;
+    });
+    return planFetchInFlight;
+  }
+
+  async function fetchPlanData() {
     const [p, f, m, c, s, pv] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
@@ -1269,13 +1290,46 @@ import {
       .catch(function () {});
   }
 
-  function init() {
+  var planPollTimer = null;
+  var hintPollTimer = null;
+
+  function pollPlan() {
+    if (document.hidden) return;
     fetchAll();
+  }
+
+  function pollHint() {
+    if (document.hidden) return;
+    renderStrategyHint();
+  }
+
+  function syncPlanPolling() {
+    if (document.hidden) {
+      if (planPollTimer !== null) {
+        clearInterval(planPollTimer);
+        planPollTimer = null;
+      }
+      if (hintPollTimer !== null) {
+        clearInterval(hintPollTimer);
+        hintPollTimer = null;
+      }
+      return;
+    }
+    pollPlan();
+    pollHint();
+    if (planPollTimer === null) {
+      planPollTimer = setInterval(pollPlan, PLAN_REFRESH_MS);
+    }
+    if (hintPollTimer === null) {
+      hintPollTimer = setInterval(pollHint, HINT_REFRESH_MS);
+    }
+  }
+
+  function init() {
     setupHover();
     initPrefs();
-    renderStrategyHint();
-    setInterval(fetchAll, PLAN_REFRESH_MS);
-    setInterval(renderStrategyHint, 5000);
+    document.addEventListener('visibilitychange', syncPlanPolling);
+    syncPlanPolling();
     window.addEventListener('resize', render);
     window.addEventListener('ftw-theme-change', render);
     const btn = document.getElementById('plan-replan');
