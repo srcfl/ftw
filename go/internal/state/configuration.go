@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const configurationKey = "settings/config_v1"
@@ -88,7 +89,8 @@ func (s *Store) ConfigValue(key string) (string, bool, error) {
 // History keeps its existing policy. FULL syncs the WAL before acknowledging
 // settings, rather than waiting for a later checkpoint.
 func (s *Store) durableConfigWrite(write func(*sql.Tx) error) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err

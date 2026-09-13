@@ -117,7 +117,7 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	}
 }
 
-func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
+func TestSQLiteBackupKeepsParquetAndOmitsLiveDatabaseFiles(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "source")
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -138,9 +138,6 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 	if err != nil || len(files) != 1 {
 		t.Fatalf("legacy source: %v %v", files, err)
 	}
-	if err := st.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-		t.Fatal(err)
-	}
 	liveTmp := state.HistoryDatabasePath(statePath) + ".tmp"
 	if err := os.MkdirAll(liveTmp, 0700); err != nil {
 		t.Fatal(err)
@@ -157,7 +154,7 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range manifest.Files {
-		if strings.Contains(f.Path, ".duckdb") || (strings.HasPrefix(f.Path, "data/cold/") && !strings.HasPrefix(f.Path, "data/cold/diagnostics/")) {
+		if strings.Contains(f.Path, ".duckdb") || strings.Contains(f.Path, ".history.db") {
 			t.Fatalf("live or duplicated history in archive: %s", f.Path)
 		}
 	}
@@ -168,14 +165,11 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 	}
 	// A SQLite-only Core reads the portable database, with no overlapping
 	// daily sample files that could make its old merge count samples twice.
-	restored, err := state.Open(filepath.Join(restoredDir, "custom.db"))
+	restored, err := state.OpenWithLegacyHistory(filepath.Join(restoredDir, "custom.db"), filepath.Join(restoredDir, "cold"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer restored.Close()
-	if err := restored.ImportLegacyParquet(context.Background(), filepath.Join(restoredDir, "cold")); err != nil {
-		t.Fatal(err)
-	}
 	samples, err := restored.LoadSeries("meter", "power", 0, time.Now().UnixMilli(), 0)
 	if err != nil || len(samples) != 1 || samples[0].Value != 123 {
 		t.Fatalf("restored history: %+v %v", samples, err)

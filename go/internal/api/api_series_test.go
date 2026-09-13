@@ -17,12 +17,12 @@ import (
 func newSeriesTestServer(t *testing.T) (*Server, *state.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := state.Open(filepath.Join(dir, "state.db"))
+	coldDir := filepath.Join(dir, "cold")
+	st, err := state.OpenWithLegacyHistory(filepath.Join(dir, "state.db"), coldDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	coldDir := filepath.Join(dir, "cold")
 	return New(&Deps{State: st, ColdDir: coldDir}), st, coldDir
 }
 
@@ -124,7 +124,7 @@ func TestHandleSeriesAbsoluteWindowAndCSV(t *testing.T) {
 	}
 }
 
-func TestHandleSeriesReadsImportedParquet(t *testing.T) {
+func TestHandleSeriesReadsParquetAndSQLite(t *testing.T) {
 	srv, st, coldDir := newSeriesTestServer(t)
 
 	// Old samples: destined for cold storage.
@@ -137,11 +137,7 @@ func TestHandleSeriesReadsImportedParquet(t *testing.T) {
 	if _, _, err := st.RolloffToParquet(context.Background(), coldDir); err != nil {
 		t.Fatal(err)
 	}
-	// Import the legacy file before serving requests, as Core does at startup.
-	if err := st.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-		t.Fatal(err)
-	}
-	// Fresh samples use the same DuckDB database.
+	// The day file stays in place; fresh samples go to SQLite.
 	nowTs := time.Now().UnixMilli()
 	if err := st.RecordSamples([]state.Sample{
 		{Driver: "meter", Metric: "grid_w", TsMs: nowTs, Value: 222},

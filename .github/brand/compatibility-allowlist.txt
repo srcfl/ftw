@@ -26,5 +26,5 @@
 # Rust's upstream runtime notices describe third-party licenses, not FTW's license.
 ^optimizer/native/bundle/rust-runtime/COPYRIGHT-library\.html:[[:space:]]*This project is triple-licensed under the MIT License, the Apache$
 # Upstream DuckDB component notices describe their own licenses, not FTW's.
-^THIRD-PARTY-NOTICES\.txt:   is licensed under the MIT License\. See$
-^THIRD-PARTY-NOTICES\.txt:Portions of the following files are licensed under the MIT License:$
+^go/tools/history-migrate/THIRD-PARTY-NOTICES\.txt:   is licensed under the MIT License\. See$
+^go/tools/history-migrate/THIRD-PARTY-NOTICES\.txt:Portions of the following files are licensed under the MIT License:$

@@ -1,20 +1,12 @@
 package state
 
-import (
-	"fmt"
-	"log/slog"
-	"os"
-	"path/filepath"
-)
-
 const (
 	historyLegacySourcesRetiredKey  = "history_legacy_sources_retired"
 	historyLegacySourcesRetiredName = "legacy-sources-retired"
 )
 
-// sqliteLegacyHistoryStmts are the SQLite history tables used only as the
-// one-time import source. After a verified DuckDB import they are dropped
-// and not recreated. Full backups recreate them as the portable export.
+// sqliteLegacyHistoryStmts define the portable history schema shared with
+// older SQLite installations. Core selects history.db; source tables remain.
 var sqliteLegacyHistoryStmts = []string{
 	`CREATE TABLE IF NOT EXISTS history_hot (
 			ts_ms INTEGER PRIMARY KEY NOT NULL,
@@ -111,68 +103,6 @@ func (s *Store) legacyHistorySourcesRetired() bool {
 	value, err := s.historyConfig(historyLegacySourcesRetiredKey)
 	return err == nil && value != ""
 }
-
-func (s *Store) legacyImportComplete() (bool, error) {
-	if s.history == nil {
-		return false, nil
-	}
-	var complete int
-	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-v1'`).Scan(&complete); err != nil {
-		return false, err
-	}
-	if complete == 0 {
-		return false, nil
-	}
-	var pending int
-	if err := s.history.QueryRow(`SELECT (SELECT COUNT(*) FROM history_parquet_imports) + (SELECT COUNT(*) FROM history_migrations WHERE name='legacy-import-pending')`).Scan(&pending); err != nil {
-		return false, err
-	}
-	if pending != 0 {
-		return false, nil
-	}
-	active, err := s.historyConfig("history_duckdb_generation")
-	if err != nil {
-		return false, err
-	}
-	return active != "", nil
-}
-
-func (s *Store) unimportedLegacyParquet(coldDir string) (bool, error) {
-	if coldDir == "" || s.history == nil {
-		return false, nil
-	}
-	paths, err := filepath.Glob(filepath.Join(coldDir, "[0-9][0-9][0-9][0-9]", "[0-9][0-9]", "[0-9][0-9].parquet"))
-	if err != nil {
-		return false, err
-	}
-	for _, path := range paths {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return false, err
-		}
-		var n int
-		if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_parquet_sources WHERE path=?`, abs).Scan(&n); err != nil {
-			return false, err
-		}
-		if n == 0 {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (s *Store) legacyHistoryIdle(coldDir string) (bool, error) {
-	complete, err := s.legacyImportComplete()
-	if err != nil || !complete {
-		return false, err
-	}
-	leftover, err := s.unimportedLegacyParquet(coldDir)
-	if err != nil {
-		return false, err
-	}
-	return !leftover, nil
-}
-
 func ensureSqliteLegacyHistory(exec func(string) error) error {
 	for _, stmt := range sqliteLegacyHistoryStmts {
 		if err := exec(stmt); err != nil {
@@ -181,57 +111,8 @@ func ensureSqliteLegacyHistory(exec func(string) error) error {
 	}
 	return nil
 }
-
-// retireLegacyHistorySources drops the frozen SQLite history copy and the
-// imported Parquet files after DuckDB has verified every source. Incomplete
-// imports, failed imports and unbound generations leave the originals in place.
-func (s *Store) retireLegacyHistorySources() error {
-	complete, err := s.legacyImportComplete()
-	if err != nil || !complete {
-		return err
-	}
-	active, err := s.historyConfig("history_duckdb_generation")
-	if err != nil {
-		return err
-	}
-	if err := s.SaveConfig(historyLegacySourcesRetiredKey, active); err != nil {
-		return err
-	}
-	for _, table := range historyTables {
-		if _, err := s.db.Exec(`DROP TABLE IF EXISTS ` + table); err != nil {
-			return fmt.Errorf("drop leftover SQLite %s: %w", table, err)
-		}
-	}
-	if s.history != nil {
-		rows, err := s.history.Query(`SELECT path FROM history_parquet_sources`)
-		if err != nil {
-			return err
-		}
-		var paths []string
-		for rows.Next() {
-			var path string
-			if err := rows.Scan(&path); err != nil {
-				rows.Close()
-				return err
-			}
-			paths = append(paths, path)
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, path := range paths {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				slog.Warn("legacy parquet source still on disk", "path", path, "err", err)
-				continue
-			}
-			dir := filepath.Dir(path)
-			_ = os.Remove(dir)
-			_ = os.Remove(filepath.Dir(dir))
-		}
-		if _, err := s.history.Exec(`INSERT INTO history_migrations(name) VALUES (?) ON CONFLICT DO NOTHING`, historyLegacySourcesRetiredName); err != nil {
-			return err
-		}
-	}
-	slog.Info("legacy history sources retired; DuckDB is the sole history store")
-	return nil
+func (s *Store) legacyHistoryIdle(coldDir string) (bool, error) {
+	var n int
+	err := s.history.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-v1'`).Scan(&n)
+	return n > 0, err
 }

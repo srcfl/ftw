@@ -298,14 +298,21 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 			return nil
 		}
 		// Primary history is exported from one read transaction into the
-		// SQLite backup above. Never copy a live DuckDB file or WAL.
+		// SQLite backup above. Never copy a live database file or WAL.
 		historyRel, _ := filepath.Rel(dataDir, state.HistoryDatabasePath(statePath))
-		if rel == historyRel || strings.HasPrefix(rel, historyRel+".") {
+		if rel == historyRel || rel == historyRel+"-wal" || rel == historyRel+"-shm" || strings.HasPrefix(rel, historyRel+".") {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		// Beta originals remain on disk for recovery; the converter verified
+		// their rows into the canonical history exported above.
+		betaRel, _ := filepath.Rel(dataDir, state.BetaHistoryDatabasePath(statePath))
+		if rel == betaRel || rel == betaRel+".wal" || first == state.HotHistoryFilename || first == state.HotHistoryFilename+"-wal" || first == state.HotHistoryFilename+"-shm" {
+			return nil
+		}
+
 		if importedHistory[p] {
 			return nil
 		}
@@ -386,7 +393,7 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 			_ = os.Remove(dst)
 		}
 	}()
-	zw, err := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(state.NewMaintenanceWriter(ctx, f), gzip.BestSpeed)
 	if err != nil {
 		return err
 	}

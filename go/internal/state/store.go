@@ -1,5 +1,5 @@
-// Package state stores configuration and cache in SQLite, live ticks in a
-// separate SQLite hot file, and long history in embedded DuckDB.
+// Package state stores durable goals and device state separately from SQLite
+// telemetry, with streaming Parquet archives for older samples.
 package state
 
 import (
@@ -23,7 +23,7 @@ const (
 	// SchemaVersion identifies the on-disk state format for update rollback.
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
-	SchemaVersion = 3
+	SchemaVersion = 4
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -34,15 +34,14 @@ const (
 	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
-// Store owns one DuckDB archive and three SQLite databases:
-//   - history: DuckDB archive — sealed samples, hourly rollups, energy ledger
-//   - hot: history-hot.db live ticks for 5m/1h/24h charts (48 h)
+// Store owns three SQLite databases:
+//   - history: samples, hourly summaries, energy ledger and dashboard history
+//   - hot: alias for history, used by recent-history readers
 //   - db: state.db configuration, devices and learned state
 //   - cache: cache.db prices and forecasts, which can be rebuilt
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
-	historyConnector *historyConnector
 	history          *sql.DB
 	historyPath      string
 	historyImportMu  sync.Mutex
@@ -54,9 +53,11 @@ type Store struct {
 	hotPath    string
 	hotWriteMu sync.Mutex
 
-	db    *sql.DB
-	cache *sql.DB
-	ts    *internCache
+	archiveMu sync.Mutex
+	coldDir   string
+	db        *sql.DB
+	cache     *sql.DB
+	ts        *internCache
 
 	healEvents []HealEvent
 
@@ -78,7 +79,9 @@ type Store struct {
 	verifyCancel context.CancelFunc
 	verifyWG     sync.WaitGroup
 
-	seriesHourWG sync.WaitGroup
+	seriesHourWG     sync.WaitGroup
+	seriesHourMu     sync.Mutex
+	seriesHourCancel context.CancelFunc
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -96,10 +99,6 @@ func OpenWithLegacyHistory(path, coldDir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.retireLegacyHistorySources(); err != nil {
-		s.Close()
-		return nil, err
-	}
 	if err := s.ensureSeriesHours(context.Background()); err != nil {
 		s.Close()
 		return nil, err
@@ -110,7 +109,7 @@ func OpenWithLegacyHistory(path, coldDir string) (*Store, error) {
 // OpenWithBackgroundHistory seeds the catalog and energy accounting before
 // starting telemetry. Frozen raw samples and Parquet then import in bounded
 // transactions while the same primary database serves live readers and writers.
-// A later boot whose DuckDB import already verified every source does not
+// A later boot whose SQLite import already verified every source does not
 // start an import or report import progress.
 func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigrationStatus)) (*Store, error) {
 	m := newHistoryMigration(onProgress)
@@ -132,10 +131,6 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 		if onProgress != nil {
 			onProgress(s.HistoryMigrationStatus())
 		}
-		if err := s.retireLegacyHistorySources(); err != nil {
-			s.Close()
-			return nil, err
-		}
 		s.CompactIfBloated()
 		s.startSeriesHourBackfill()
 		return s, nil
@@ -145,6 +140,9 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 }
 
 func openStore(path, coldDir string, importLegacy bool, migration *historyMigration) (*Store, error) {
+	if err := requireConvertedBeta(path); err != nil {
+		return nil, err
+	}
 	nowMs := time.Now().UnixMilli()
 	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
 
@@ -171,7 +169,7 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 	slog.Info("state: integrity gate complete", "elapsed", time.Since(tGate).Round(time.Millisecond))
 
 	s := &Store{
-		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath, historyMigration: migration,
+		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath, historyMigration: migration, coldDir: coldDir,
 	}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
@@ -215,46 +213,13 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 		cache.Close()
 		return nil, err
 	}
-	if importLegacy {
-		if err := s.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-			s.closeOpenedHistory()
-			db.Close()
-			cache.Close()
-			return nil, err
-		}
-	}
-	if migration != nil {
-		idle, err := s.legacyHistoryIdle(coldDir)
-		if err != nil {
-			s.closeOpenedHistory()
-			db.Close()
-			cache.Close()
-			return nil, err
-		}
-		if !idle {
-			// Remember all source paths before live work starts. A file that goes
-			// missing before its first chunk must not disappear from coverage.
-			if err := s.bindLegacyParquetSources(coldDir); err != nil {
-				s.closeOpenedHistory()
-				db.Close()
-				cache.Close()
-				return nil, err
-			}
-			if _, err := s.history.Exec(`INSERT INTO history_migrations(name) VALUES ('legacy-import-pending') ON CONFLICT DO NOTHING`); err != nil {
-				s.closeOpenedHistory()
-				db.Close()
-				cache.Close()
-				return nil, err
-			}
-		}
-	}
 	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
 	return s, nil
 }
 
 func (s *Store) closeOpenedHistory() {
-	if s.hot != nil {
+	if s.hot != nil && s.hot != s.history {
 		s.hot.Close()
 		s.hot = nil
 	}
@@ -290,17 +255,26 @@ func OpenBackupSource(path string) (*Store, error) {
 		return nil, err
 	}
 	if configTable != 0 {
-		active, err := s.historyConfig("history_duckdb_generation")
+		active, err := s.historyConfig("history_sqlite_generation")
 		if err != nil {
 			db.Close()
 			return nil, err
+		}
+		beta, err := s.historyConfig("history_duckdb_generation")
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		if beta != "" && active == "" {
+			db.Close()
+			return nil, errors.New("convert beta history before making a portable backup; frozen legacy tables are not a complete backup")
 		}
 		if active != "" {
 			if _, err := os.Stat(s.historyPath); err != nil {
 				db.Close()
 				return nil, fmt.Errorf("backup primary history: %w", err)
 			}
-			s.history, err = sql.Open("duckdb", s.historyPath+"?access_mode=read_only&threads=1&memory_limit=128MB&autoload_known_extensions=false&autoinstall_known_extensions=false")
+			s.history, err = sql.Open("sqlite", ReadOnlyDatabaseURI(s.historyPath))
 			if err != nil {
 				db.Close()
 				return nil, err
@@ -339,13 +313,18 @@ func (s *Store) Close() error {
 		s.historyMigration.cancel()
 		<-s.historyMigration.done
 	}
+	s.seriesHourMu.Lock()
+	if s.seriesHourCancel != nil {
+		s.seriesHourCancel()
+	}
+	s.seriesHourMu.Unlock()
 	s.seriesHourWG.Wait()
 
 	var err error
 	if s.historyWriter != nil {
 		err = s.historyWriter.close()
 	}
-	if s.hot != nil {
+	if s.hot != nil && s.hot != s.history {
 		err = errors.Join(err, s.hot.Close())
 	}
 	if s.history != nil {
@@ -591,8 +570,8 @@ const (
 // recovery snapshot produced by SnapshotTo would intentionally erase recent
 // time-series data.
 //
-// SQLite cannot stream VACUUM INTO, so the complete raw copy is materialised
-// next to dstPath, compressed, synced, and removed. dstPath must not exist.
+// Verified row copies build a temporary SQLite file next to dstPath. It is
+// compressed, synced and removed. dstPath must not exist.
 func (s *Store) BackupToCompressed(dstPath string) error {
 	return s.BackupToCompressedWithProgress(dstPath, nil)
 }
@@ -635,9 +614,8 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 	_ = os.Remove(rawPath)
 	defer os.Remove(rawPath)
 	reportBackupProgress(report, BackupProgress{Phase: BackupPhaseCopying})
-	escaped := strings.ReplaceAll(rawPath, "'", "''")
-	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
-		return fmt.Errorf("backup to %s: %w", rawPath, err)
+	if err := s.copyStateForBackup(rawPath); err != nil {
+		return fmt.Errorf("backup state: %w", err)
 	}
 
 	if err := s.exportHistoryToSQLite(rawPath); err != nil {
@@ -675,7 +653,7 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 		}
 	}()
 
-	zw, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(NewMaintenanceWriter(context.Background(), out), gzip.BestSpeed)
 	if err != nil {
 		return fmt.Errorf("create gzip writer: %w", err)
 	}
@@ -887,9 +865,8 @@ func (s *Store) migrate() error {
 		// NB: the `prices` and `forecasts` tables live in the disposable
 		// cache.db, not here — see cacheStmts below.
 
-		// History, samples and the energy ledger live in DuckDB after the
-		// verified import. sqliteLegacyHistoryStmts keeps the SQLite copies
-		// only until that import finishes.
+		// History, samples and the energy ledger live in history.db. Frozen
+		// legacy source tables remain available after the verified copy.
 
 		// ---- Devices: hardware-stable identity for each driver ----
 		// device_id resolution priority:
@@ -1228,8 +1205,10 @@ func (s *Store) copyTableToCache(tbl string) error {
 
 // SaveConfig writes a config k/v. Upserts on conflict.
 func (s *Store) SaveConfig(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
-	return err
+	return s.durableConfigWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+		return err
+	})
 }
 
 // LoadConfig returns the value for key, or ok=false if missing.
@@ -1461,28 +1440,13 @@ func (s *Store) LoadHistoryContext(ctx context.Context, sinceMs, untilMs int64, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cut, hasHot, err := s.hotEarliestMs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if hasHot && cut <= sinceMs {
-		return s.loadHotHistory(ctx, sinceMs, untilMs, maxPoints)
-	}
-	if !hasHot {
-		return s.loadArchiveHistory(ctx, sinceMs, untilMs, maxPoints)
-	}
-	arch, err := s.loadArchiveHistory(ctx, sinceMs, cut-1, maxPoints)
-	if err != nil {
-		return nil, err
-	}
-	hot, err := s.loadHotHistory(ctx, cut, untilMs, maxPoints)
-	if err != nil {
-		return nil, err
-	}
-	return downsampleHistory(mergeHistoryPoints(hot, arch), sinceMs, untilMs, maxPoints), nil
+	return s.loadArchiveHistory(ctx, sinceMs, untilMs, maxPoints)
 }
 
 func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
+	if maxPoints > maxSeriesBuckets {
+		return nil, ErrHistoryQueryLimit
+	}
 	if s.history == nil || untilMs < sinceMs {
 		return nil, nil
 	}
@@ -1490,18 +1454,17 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 	// COALESCE to 0 so NULL columns (from partial aggregations) scan cleanly.
 	const tierUnion = `
 		WITH all_rows AS (
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json, 0 AS tier FROM history_hot
+			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 0 AS tier FROM history_hot
 			WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json, 1 FROM history_warm
+			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 1 FROM history_warm
 			WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json, 2 FROM history_cold
+			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 2 FROM history_cold
 			WHERE ts_ms BETWEEN ? AND ?
 		),
 		deduped AS (
-			SELECT * FROM all_rows
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier) = 1
+			SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier) AS rn FROM all_rows) WHERE rn=1
 		)
 	`
 	var (
@@ -1509,27 +1472,30 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 		err  error
 	)
 	if maxPoints > 0 && untilMs >= sinceMs {
-		// Ceil the bucket width; arg_max selects JSON from its newest row.
+		// Ceil the bucket width; SQLite MAX selects JSON from its newest row.
 		bucketMs := (untilMs - sinceMs + int64(maxPoints)) / int64(maxPoints)
 		if bucketMs < 1 {
 			bucketMs = 1
 		}
-		rows, err = s.history.QueryContext(ctx, tierUnion+`
-			SELECT MAX(ts_ms),
-			       AVG(COALESCE(grid_w, 0)), AVG(COALESCE(pv_w, 0)), AVG(COALESCE(bat_w, 0)),
-			       AVG(COALESCE(load_w, 0)), AVG(COALESCE(bat_soc, 0)), arg_max(json, ts_ms)
-			FROM deduped
-			GROUP BY (ts_ms - ?) // ?
-			ORDER BY 1 ASC
-		`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
+		rows, err = s.history.QueryContext(ctx, tierUnion+`, bucketed AS (
+			SELECT MAX(ts_ms) AS ts_ms,
+			       AVG(COALESCE(grid_w, 0)) AS grid_w, AVG(COALESCE(pv_w, 0)) AS pv_w,
+			       AVG(COALESCE(bat_w, 0)) AS bat_w, AVG(COALESCE(load_w, 0)) AS load_w,
+			       AVG(COALESCE(bat_soc, 0)) AS bat_soc
+			FROM deduped GROUP BY (ts_ms - ?) / ?
+		)
+		SELECT ts_ms,grid_w,pv_w,bat_w,load_w,bat_soc,
+		COALESCE((SELECT json FROM history_hot WHERE ts_ms=b.ts_ms),
+		         (SELECT json FROM history_warm WHERE ts_ms=b.ts_ms),
+		         (SELECT json FROM history_cold WHERE ts_ms=b.ts_ms),'{}')
+		FROM bucketed b ORDER BY ts_ms`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
 	} else {
 		rows, err = s.history.QueryContext(ctx, tierUnion+`
-			SELECT ts_ms,
-			       COALESCE(grid_w, 0), COALESCE(pv_w, 0), COALESCE(bat_w, 0),
-			       COALESCE(load_w, 0), COALESCE(bat_soc, 0), json
-			FROM deduped
-			ORDER BY ts_ms ASC
-		`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs)
+			SELECT ts_ms,COALESCE(grid_w,0),COALESCE(pv_w,0),COALESCE(bat_w,0),COALESCE(load_w,0),COALESCE(bat_soc,0),
+			COALESCE((SELECT json FROM history_hot WHERE ts_ms=b.ts_ms),
+			         (SELECT json FROM history_warm WHERE ts_ms=b.ts_ms),
+			         (SELECT json FROM history_cold WHERE ts_ms=b.ts_ms),'{}')
+			FROM deduped b ORDER BY ts_ms LIMIT ?`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, maxRawSeriesPoints+1)
 	}
 	if err != nil {
 		return nil, err
@@ -1537,10 +1503,15 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 	defer rows.Close()
 
 	all := make([]HistoryPoint, 0)
+	var bytes int
 	for rows.Next() {
 		var p HistoryPoint
 		if err := rows.Scan(&p.TsMs, &p.GridW, &p.PVW, &p.BatW, &p.LoadW, &p.BatSoC, &p.JSON); err != nil {
 			return all, err
+		}
+		bytes += len(p.JSON) + 64
+		if bytes > 16<<20 || len(all) >= maxRawSeriesPoints {
+			return nil, ErrHistoryQueryLimit
 		}
 		all = append(all, p)
 	}
@@ -1603,7 +1574,7 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 }
 
 // LiveDayEnergy integrates only SQLite hot ticks. Status polls every 2 s and
-// must not touch the imported DuckDB archive.
+// uses recent dashboard rows only.
 func (s *Store) LiveDayEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	ctx := context.Background()
 	cut, hasHot, err := s.hotEarliestMs(ctx)
@@ -1869,13 +1840,13 @@ func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, b
 	q := fmt.Sprintf(`
 		INSERT OR REPLACE INTO %s (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		SELECT b_ts, a_grid, a_pv, a_bat, a_load, a_soc, json FROM (
-			SELECT (ts_ms // %d) * %d + %d AS b_ts,
+			SELECT (ts_ms / %d) * %d + %d AS b_ts,
 			       AVG(grid_w) AS a_grid, AVG(pv_w) AS a_pv, AVG(bat_w) AS a_bat,
 			       AVG(load_w) AS a_load, AVG(bat_soc) AS a_soc,
-			       arg_max(json, ts_ms) AS json, MAX(ts_ms) AS newest
+			       json AS json, MAX(ts_ms) AS newest
 			FROM %s
 			WHERE ts_ms >= ? AND ts_ms < ?
-			GROUP BY ts_ms // %d
+			GROUP BY ts_ms / %d
 		)`, dst, bucketMs, bucketMs, bucketMs/2, src, bucketMs)
 	if _, err := tx.ExecContext(ctx, q, fromMs, toMs); err != nil {
 		return 0, fmt.Errorf("aggregate: %w", err)

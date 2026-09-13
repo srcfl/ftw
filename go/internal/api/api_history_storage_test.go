@@ -22,15 +22,15 @@ func TestHealthShowsRejectedPrimaryHistory(t *testing.T) {
 	var body struct {
 		Status  string `json:"status"`
 		History struct {
-			Engine string                    `json:"engine"`
-			Role   string                    `json:"role"`
-			Writer state.HistoryWriterStatus `json:"writer"`
+			Engine  string                    `json:"engine"`
+			Archive string                    `json:"archive"`
+			Writer  state.HistoryWriterStatus `json:"writer"`
 		} `json:"history_storage"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Code != 200 || body.Status != "degraded" || body.History.Engine != "duckdb" || body.History.Role != "archive" || body.History.Writer.Rejected != 1 || body.History.Writer.Committed != 0 {
+	if rr.Code != 200 || body.Status != "degraded" || body.History.Engine != "sqlite" || body.History.Archive != "parquet" || body.History.Writer.Rejected != 1 || body.History.Writer.Committed != 0 {
 		t.Fatalf("health hid a collection error: %s", rr.Body.String())
 	}
 }
