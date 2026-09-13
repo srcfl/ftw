@@ -3,6 +3,7 @@ package mpc
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -158,10 +159,19 @@ func validateEVPulse(slot Slot, p Params, a Action, pvW float64) error {
 	for i, lp := range loads {
 		peak, ok := a.LoadpointMaxPowerW[lp.ID]
 		average, hasAverage := a.LoadpointPowerW[lp.ID]
-		if !ok || !hasAverage || !finite(peak) || !finite(average) || average < 0 || peak < average || (average == 0 && peak != 0) {
+		if !ok || !hasAverage || !finite(peak) || !finite(average) || average < 0 || peak < 0 {
 			return fmt.Errorf("invalid EV pulse identity or power")
 		}
-		if i == 0 && a.LoadpointW != average {
+		if average <= 1e-7 {
+			average = 0
+		}
+		if peak <= 1e-7 {
+			peak = 0
+		}
+		if peak < average || (average == 0 && peak != 0) {
+			return fmt.Errorf("invalid EV pulse identity or power")
+		}
+		if i == 0 && math.Abs(a.LoadpointW-average) > 1e-6 {
 			return fmt.Errorf("EV pulse average disagrees with loadpoint allocation")
 		}
 		maxEV += peak
