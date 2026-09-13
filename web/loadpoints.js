@@ -305,10 +305,11 @@
       refreshTimer = null;
     }
     function syncPolling() {
-      if (advancedVisible()) startPolling();
+      if (advancedVisible() && !document.hidden) startPolling();
       else stopPolling();
     }
     document.addEventListener('ftw-ui-mode-change', syncPolling);
+    document.addEventListener('visibilitychange', syncPolling);
     syncPolling();
   }
 

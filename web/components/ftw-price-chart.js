@@ -458,8 +458,11 @@ class FtwPriceChart extends FtwElement {
     super.connectedCallback();
     if (!this.hasAttribute("fed")) {
       this._loadConfig();
-      this._loadPrices();
-      this._refreshTimer = setInterval(() => this._loadPrices(), 5 * 60 * 1000);
+      if (!this._onVisibility) {
+        this._onVisibility = () => this._syncPolling();
+        document.addEventListener("visibilitychange", this._onVisibility);
+      }
+      this._syncPolling();
     }
     // Re-render when the viewport crosses the small-screen breakpoint
     // — render() picks a different viewBox H per side, so a rotation
@@ -479,7 +482,21 @@ class FtwPriceChart extends FtwElement {
     window.addEventListener("ftw-price-mode-change", this._modeSyncListener);
   }
 
+  _syncPolling() {
+    if (this._refreshTimer) {
+      clearInterval(this._refreshTimer);
+      this._refreshTimer = null;
+    }
+    if (this.hasAttribute("fed") || !this.isConnected || document.hidden) return;
+    this._loadPrices();
+    this._refreshTimer = setInterval(() => this._loadPrices(), 5 * 60 * 1000);
+  }
+
   disconnectedCallback() {
+    if (this._onVisibility) {
+      document.removeEventListener("visibilitychange", this._onVisibility);
+      this._onVisibility = null;
+    }
     if (this._refreshTimer) {
       clearInterval(this._refreshTimer);
       this._refreshTimer = null;

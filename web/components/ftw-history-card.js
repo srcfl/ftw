@@ -226,11 +226,18 @@ class FtwHistoryCard extends FtwElement {
 
   connectedCallback() {
     super.connectedCallback();
-    this._refresh();
-    this._restartPolling();
+    if (!this._onVisibility) {
+      this._onVisibility = () => this._syncPolling();
+      document.addEventListener("visibilitychange", this._onVisibility);
+    }
+    this._syncPolling();
   }
   disconnectedCallback() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    if (this._onVisibility) {
+      document.removeEventListener("visibilitychange", this._onVisibility);
+      this._onVisibility = null;
+    }
   }
 
   attributeChangedCallback(name) {
@@ -248,21 +255,20 @@ class FtwHistoryCard extends FtwElement {
     }
     this.update();
     if (name === "metric" || name === "poll-ms") {
-      this._refresh();
-      this._restartPolling();
+      this._syncPolling();
     }
     if (rangeChanged) this._refresh();
   }
 
-  _restartPolling() {
+  _syncPolling() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    if (!this.isConnected || document.hidden) return;
+    this._refresh();
     // `??` not `||`: poll-ms="0" must disable polling, but "0" is truthy
     // in the ||-fallback so that path silently reverts to 300000.
     const raw = this.getAttribute("poll-ms");
     const ms = Number(raw ?? 300000);
-    if (ms > 0 && this.isConnected) {
-      this._timer = setInterval(() => this._refresh(), ms);
-    }
+    if (ms > 0) this._timer = setInterval(() => this._refresh(), ms);
   }
 
   _accent() {

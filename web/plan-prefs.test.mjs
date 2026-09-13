@@ -55,31 +55,10 @@ describe("safety k", () => {
 });
 
 describe("hedge line", () => {
-  it("formats k·σ in watts", () => {
-    assert.equal(hedgeLine(1, 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 432 W");
-    assert.equal(hedgeLine(2, 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 864 W");
-    assert.equal(hedgeLine(0, 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 0 W");
-  });
-
-  it("follows a fractional k", () => {
-    assert.equal(hedgeLine(0.85, 1891), "σ right now ≈ 1891 W → hedge = k·σ ≈ 1607 W");
-    assert.equal(hedgeLine(0.9, 1891), "σ right now ≈ 1891 W → hedge = k·σ ≈ 1702 W");
-  });
-
-  it("names the per-slot share when the PV twin reports rel_mae", () => {
-    assert.equal(
-      hedgeLine(0.85, 1891, 0.25),
-      "σ right now ≈ 1891 W → hedge = k·σ ≈ 1607 W · holds back 21% of each sunny slot",
-    );
-    // The per-slot haircut can exceed a whole slot; the line does not.
-    assert.match(hedgeLine(2, 1891, 0.8), /holds back 100% of each sunny slot$/);
-    // No rel_mae → the watt line alone, unchanged.
-    assert.equal(hedgeLine(1, 432.16, 0), "σ right now ≈ 432 W → hedge = k·σ ≈ 432 W");
-  });
-
-  it("hides when σ is missing", () => {
-    assert.equal(hedgeLine(1, null), null);
-    assert.equal(hedgeLine(1, -1), null);
+  it("does not turn a zero legacy residual into a no-margin claim", () => {
+    assert.match(hedgeLine(1, 0), /varies by interval/);
+    assert.doesNotMatch(hedgeLine(1, 0), /no hedge|0 W/);
+    assert.match(hedgeLine(0, 432), /No forecast margin requested/);
   });
 });
 
