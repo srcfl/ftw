@@ -3565,8 +3565,9 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 // default while the planner schedules against the configured 9 kW.
 // Battery limit pointers preserve omitted versus explicit zero. As in the
 // MPC builder below, exact both-zero battery overrides are a config error and
-// retain defaults rather than disabling the battery in both directions.
-// Drivers without limits in either place are omitted from the map.
+// use the same 0.5C watts the planner uses, rather than omitting the map and
+// falling through to MaxCommandW. Drivers without limits in either place are
+// omitted from the map.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
@@ -3578,7 +3579,14 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 		if b, ok := batteries[d.Name]; ok {
 			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
 				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
-			if !bothZero {
+			if bothZero {
+				if defaultP := d.BatteryCapacityWh / 2; defaultP > 0 {
+					chg, dis = defaultP, defaultP
+					chgSet, disSet = true, true
+					slog.Warn("control: batteries.max_{charge,discharge}_w both 0 — treating as config error, using default 0.5C",
+						"driver", d.Name, "default_w", defaultP)
+				}
+			} else {
 				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
 					chg = *b.MaxChargeW
 					chgSet = true

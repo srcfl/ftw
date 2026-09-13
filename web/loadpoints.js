@@ -145,6 +145,7 @@
     inferred: 'estimated',
     vehicle: 'from the car',
     completed: 'pinned after the car stopped asking',
+    assumed: 'not confirmed by the car',
   };
   function socSourceLabel(src) {
     return SOC_SOURCE_LABELS[src] || SOC_SOURCE_LABELS.inferred;

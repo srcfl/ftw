@@ -49,6 +49,23 @@ func TestControlSlotDirectiveFromMPCPreservesDecisionIdentity(t *testing.T) {
 	}
 }
 
+func TestControlSlotDirectiveFromMPCPreservesEVOnPower(t *testing.T) {
+	start := time.Date(2026, 9, 13, 8, 0, 0, 0, time.UTC)
+	in := mpc.SlotDirective{
+		SlotStart: start, SlotEnd: start.Add(15 * time.Minute),
+		LoadpointEnergyWh:  map[string]float64{"easee": 100},
+		LoadpointMaxPowerW: map[string]float64{"easee": 10350},
+		Strategy:           mpc.ModeArbitrage,
+	}
+	got := control.SlotDirectiveFromMPC(in)
+	if !reflect.DeepEqual(got.LoadpointMaxPowerW, in.LoadpointMaxPowerW) {
+		t.Fatalf("EV on-power dropped across adapter: %+v", got.LoadpointMaxPowerW)
+	}
+	if !reflect.DeepEqual(got.LoadpointEnergyWh, in.LoadpointEnergyWh) {
+		t.Fatalf("EV energy budget dropped across adapter: %+v", got.LoadpointEnergyWh)
+	}
+}
+
 func parseBatteryLimitConfig(t *testing.T, driverLimits, batteryLimits string) *config.Config {
 	t.Helper()
 	yaml := `
@@ -133,16 +150,17 @@ func TestBatteryLimitConfigUnsetUsesDriverValue(t *testing.T) {
 	}
 }
 
-func TestBatteryLimitConfigBothZeroRetainsControlDefault(t *testing.T) {
+func TestBatteryLimitConfigBothZeroUsesHalfC(t *testing.T) {
 	cfg := parseBatteryLimitConfig(t, "",
 		"    max_charge_w: 0\n    max_discharge_w: 0\n")
 	ctrl := newControlStateFromConfig(cfg)
-	if _, ok := ctrl.DriverLimits["battery"]; ok {
-		t.Fatalf("both-zero config error became hard-disabled limits: %+v", ctrl.DriverLimits["battery"])
+	lim, ok := ctrl.DriverLimits["battery"]
+	if !ok || !lim.MaxChargeWSet || !lim.MaxDischargeWSet || lim.MaxChargeW != 5000 || lim.MaxDischargeW != 5000 {
+		t.Fatalf("both-zero config error did not share MPC 0.5C: %+v ok=%v", lim, ok)
 	}
 	ctrl.Mode = control.ModeCharge
 	targets := control.ComputeDispatch(batteryLimitStore(0), ctrl, map[string]float64{"battery": 10000}, 40000)
-	if len(targets) != 1 || targets[0].TargetW != control.MaxCommandW {
-		t.Fatalf("both-zero config error produced %+v, want control default %d W", targets, control.MaxCommandW)
+	if len(targets) != 1 || targets[0].TargetW != 5000 {
+		t.Fatalf("both-zero config error produced %+v, want 0.5C 5000 W", targets)
 	}
 }

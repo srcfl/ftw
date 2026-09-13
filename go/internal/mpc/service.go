@@ -296,6 +296,49 @@ func (s *Service) driverOnline(name string) bool {
 	return h != nil && h.IsOnline()
 }
 
+// liveHouseLoadW is house-only consumption from a live site meter:
+// grid − pv − battery − EV − V2X, floored at 0. False when the meter
+// is missing or offline. The current planning slot uses this instead of
+// a cold-start hour-of-week prior.
+func (s *Service) liveHouseLoadW() (float64, bool) {
+	if s == nil || s.Tele == nil || s.SiteMeter == "" || !s.driverOnline(s.SiteMeter) {
+		return 0, false
+	}
+	m := s.Tele.Get(s.SiteMeter, telemetry.DerMeter)
+	if m == nil {
+		return 0, false
+	}
+	var pvW, batW float64
+	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
+		if s.driverOnline(r.Driver) {
+			pvW += r.SmoothedW
+		}
+	}
+	for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
+		if s.driverOnline(r.Driver) {
+			batW += r.SmoothedW
+		}
+	}
+	loadW := m.SmoothedW - pvW - batW - s.Tele.SumOnlineEVW() - s.Tele.SumOnlineV2XW()
+	if loadW < 0 || math.IsNaN(loadW) || math.IsInf(loadW, 0) {
+		loadW = 0
+	}
+	return loadW, true
+}
+
+// overlayLiveHouseLoad replaces the in-flight slot's modeled house load
+// with the live meter identity. Later slots keep the forecast. A stale
+// meter leaves the model in place; dispatch already stands down hardware.
+func overlayLiveHouseLoad(slots []Slot, loadW float64, ok bool) {
+	if !ok || len(slots) == 0 {
+		return
+	}
+	if math.IsNaN(loadW) || math.IsInf(loadW, 0) || loadW < 0 {
+		loadW = 0
+	}
+	slots[0].LoadW = loadW
+}
+
 // New constructs a service. Caller wires it in main.go after store + telemetry.
 func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 	return &Service{
@@ -968,7 +1011,6 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
 	last := s.lastReplanAt
-	siteMeter := s.SiteMeter
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
@@ -1001,31 +1043,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		pvW += r.SmoothedW
 	}
 
-	// Live load = grid - pv - bat - vehicle charging/storage when we
-	// have a site meter wired.
-	var loadW float64
-	haveLoad := false
-	if siteMeter != "" && s.driverOnline(siteMeter) {
-		if m := s.Tele.Get(siteMeter, telemetry.DerMeter); m != nil {
-			var batW float64
-			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-				if !s.driverOnline(r.Driver) {
-					continue
-				}
-				batW += r.SmoothedW
-			}
-			evW := s.Tele.SumOnlineEVW()
-			v2xW := s.Tele.SumOnlineV2XW()
-			// House-only load: subtract EV so the divergence detector
-			// compares actual house consumption against the plan's
-			// house-load forecast, not a moving "house + vehicle" target.
-			loadW = m.SmoothedW - pvW - batW - evW - v2xW
-			if loadW < 0 {
-				loadW = 0
-			}
-			haveLoad = true
-		}
-	}
+	loadW, haveLoad := s.liveHouseLoadW()
 
 	// Leaky integral of energy error (Wh). Decay with an 8-minute
 	// half-life so transients fade but a sustained offset accumulates.
@@ -1516,6 +1534,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
 	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	{
+		loadW, ok := s.liveHouseLoadW()
+		overlayLiveHouseLoad(slots, loadW, ok)
+	}
 	// Qualified load models own their level. Unqualified historic daily
 	// totals must not impose a floor on a changed or low-load household.
 	if len(slots) == 0 {
