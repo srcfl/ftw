@@ -3,6 +3,7 @@
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
+import { forecastMarginLine, evShortfallWh } from "./plan-forecast.js";
 import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 import {
@@ -151,13 +152,12 @@ import {
   }
 
   async function fetchPlanData() {
-    const [p, f, m, c, s, pv] = await Promise.all([
+    const [p, f, m, c, s] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/config').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/status').then(r => r.json()).catch(() => ({})),
-      apiFetch('/api/pvmodel').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     // /api/prices says which currency the stored minor units are in, so
@@ -177,14 +177,6 @@ import {
     state.priceCfg = (c && c.price) || null;
     state.status = s || {};
     state.prefs = prefsFromStatus(s);
-    state.pvSigmaW = (pv && typeof pv.pv_residual_std_w === "number")
-      ? pv.pv_residual_std_w
-      : null;
-    // rel_mae is the σ_rel the per-slot PV haircut multiplies by k, so the
-    // hedge line can quote the share of each sunny slot, not only watts.
-    state.pvSigmaRel = (pv && typeof pv.rel_mae === "number")
-      ? pv.rel_mae
-      : null;
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
@@ -286,7 +278,11 @@ import {
       section.insertBefore(alert, help || section.firstChild);
     }
     const reason = solver.fallback_reason ? ' ' + solver.fallback_reason : '';
-    alert.textContent = 'Mathematical optimizer unavailable. This plan uses the built-in Go fallback.' + reason;
+    const missingWh = evShortfallWh(plan);
+    alert.textContent = solver.backend === "ev_reserve"
+      ? "FTW is using a reserve plan for the departure target. Price optimisation is unavailable."
+        + (missingWh > 1 ? ` The car is ${(missingWh / 1000).toFixed(1)} kWh short at departure. Check charging limits or allow more time.` : "")
+      : 'Mathematical optimizer unavailable. This plan uses the built-in Go fallback.' + reason;
   }
 
   function render() {
@@ -567,7 +563,7 @@ import {
         if (a.slot_start_ms > tMax) break;
         if (a.pv_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(sitePVWCapped(a.pv_w, plan.pv_nameplate_w)); // site-signed, cut at nameplate
+        const y = powerY(sitePVWCapped(a.forecast_pv_w ?? a.pv_w, plan.pv_nameplate_w)); // site-signed, cut at nameplate
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -588,20 +584,56 @@ import {
     if (plan && plan.actions && plan.actions.length) {
       ctx.strokeStyle = '#fde68a';
       ctx.lineWidth = 1.8;
-      ctx.setLineDash([4, 5]);
+      ctx.setLineDash([]);
       ctx.beginPath();
       let f2 = true;
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
         if (a.load_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(siteLoadWCapped(a.load_w, plan.load_max_w));
+        const y = powerY(siteLoadWCapped(a.forecast_load_w ?? a.load_w, plan.load_max_w));
         if (f2) { ctx.moveTo(x, y); f2 = false; }
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
       ctx.setLineDash([]);
     }
+
+    // Dashed curves retain the adjusted inputs that drove this plan.
+    if (plan?.actions?.some(a => Number.isFinite(a.forecast_pv_w))) {
+      for (const [field, color] of [["pv_w", "rgba(34,197,94,0.7)"], ["load_w", "#fde68a"]]) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([4, 5]);
+        ctx.beginPath();
+        let first = true;
+        for (const a of plan.actions) {
+          if (a.slot_start_ms > tMax) break;
+          const value = field === "pv_w" ? sitePVWCapped(a[field], plan.pv_nameplate_w) : siteLoadWCapped(a[field], plan.load_max_w);
+          const x = xScale(a.slot_start_ms), y = powerY(value);
+          if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    const hasPointForecast = Boolean(plan?.actions?.some(a => Number.isFinite(a.forecast_pv_w)));
+    const legend = canvas.parentElement?.nextElementSibling;
+    if (legend?.classList.contains("chart-legend")) {
+      const pvLegend = legend.querySelector('[title*="solar forecast"]');
+      const loadLegend = legend.querySelector('[title*="load twin"]');
+      if (pvLegend) pvLegend.innerHTML = '<span class="legend-color" style="background:#22c55e"></span> ' + (hasPointForecast ? "PV forecast" : "PV used by plan");
+      if (loadLegend) loadLegend.innerHTML = '<span class="legend-color" style="background:#fde68a"></span> ' + (hasPointForecast ? "Load forecast" : "Load used by plan");
+      let item = legend.querySelector(".planning-margin-legend");
+      if (!item) {
+        item = document.createElement("span");
+        item.className = "legend-item planning-margin-legend";
+        item.textContent = "Solid: forecast · dashed: used by plan";
+        legend.appendChild(item);
+      }
+      item.hidden = !hasPointForecast;
+    }
+    renderHedge(state.prefs?.safety_k);
 
     // Planned EV charging — site-signed load (always ≥ 0, plotted above
     // zero). Solid cyan so it's distinguishable from the dashed amber
@@ -940,14 +972,20 @@ import {
           `</div>`
         );
       }
+      if (Number.isFinite(a.forecast_pv_w)) {
+        lines.push(`<div class="tip-row"><span>PV forecast</span><b>${(Math.max(0, -a.forecast_pv_w) / 1000).toFixed(1)} kW</b></div>`);
+      }
+      if (Number.isFinite(a.forecast_load_w)) {
+        lines.push(`<div class="tip-row"><span>Load forecast</span><b>${(a.forecast_load_w / 1000).toFixed(1)} kW</b></div>`);
+      }
       if (a.pv_w != null) {
         const pvW = sitePVWCapped(a.pv_w, state.plan && state.plan.pv_nameplate_w);
         const pvGen = Math.max(0, -pvW) / 1000;
-        lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot — cut at the site nameplate">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
+        lines.push(`<div class="tip-row"><span title="Solar generation used for planning after the forecast margin">PV used by plan</span><b>${pvGen.toFixed(1)} kW</b></div>`);
       }
       if (a.load_w != null) {
         const loadW = siteLoadWCapped(a.load_w, state.plan && state.plan.load_max_w);
-        lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot — floored against recent days and cut at the fuse">Load forecast</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
+        lines.push(`<div class="tip-row"><span title="Household load used for planning after the forecast margin">Load used by plan</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
       }
       if (a.loadpoint_w != null && a.loadpoint_w > 0) {
         const lpSoc = socPercent(a.loadpoint_soc);
@@ -1108,7 +1146,9 @@ import {
   function renderHedge(k) {
     const hedgeEl = document.getElementById("forecast-trust-hedge");
     if (!hedgeEl) return;
-    const text = hedgeLine(k, state.pvSigmaW, state.pvSigmaRel);
+    const bounds = horizonBounds(state.horizon);
+    const text = forecastMarginLine(state.plan?.actions, bounds.tMin, bounds.tMax)
+      || hedgeLine(k);
     if (text == null) {
       hedgeEl.hidden = true;
       hedgeEl.textContent = "";

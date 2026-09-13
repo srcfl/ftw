@@ -55,7 +55,7 @@ test('plan resume waits for the current batch then catches up once', async () =>
   plan.setHidden(false);
   plan.poll();
   plan.poll();
-  assert.equal(plan.batches(), 1, 'resume must not start an overlapping six-request batch');
+  assert.equal(plan.batches(), 1, 'resume must not start an overlapping request batch');
   await plan.settle();
   assert.equal(plan.batches(), 1, 'one catch-up starts after the first batch settles');
   await plan.settle();
