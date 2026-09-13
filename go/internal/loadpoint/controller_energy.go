@@ -41,6 +41,9 @@ func (c *Controller) observeEnergy(cfg Config, sample EVSample, now time.Time) {
 			measuredAt = sample.EnergyAt
 		}
 	}
+	if sample.PowerMaxAge > 0 && !sample.PowerUnavailable && now.Sub(sample.PowerAt) <= sample.PowerWindow() {
+		measuredAt = now
+	}
 	if measuredAt.After(now) {
 		return
 	}
@@ -50,7 +53,7 @@ func (c *Controller) observeEnergy(cfg Config, sample EVSample, now time.Time) {
 			return
 		}
 		counterAdvanced := !sample.SessionWhUnavailable && sample.SessionWh > e.last.SessionWh && (sample.EnergyAt.IsZero() || sample.EnergyAt.After(previous.at))
-		if measuredAt.Sub(previous.at) > 30*time.Second && !counterAdvanced {
+		if measuredAt.Sub(previous.at) > sample.PowerWindow() && !counterAdvanced {
 			e.points = nil
 		}
 	}

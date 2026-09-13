@@ -188,7 +188,7 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 		lp.socRetention = "unavailable"
 	}
 	// Save each change inferred from power: the cloud counter can remain
-	// behind through an arbitrary restart. Cached readings do not write.
+	// behind through an arbitrary restart. Unchanged estimates do not write.
 	saveProgress := lp.socConfirmed && lp.sessionID != "" && lp.energy.counterKnown &&
 		(lp.socRetention != "session" || (lp.energy.source == "power" && lp.deliveredWhSession != lp.lastSavedEnergyWh))
 	m.mu.Unlock()
@@ -222,8 +222,8 @@ func (m *Manager) persistSession(id string) {
 			value := lp.deliveredWhSession
 			record.EstimatedWh = &value
 			record.EstimatedAt = lp.energy.floorAt
-			if n := len(lp.energy.points); n > 0 && lp.energy.points[n-1].at.After(record.EstimatedAt) {
-				record.EstimatedAt = lp.energy.points[n-1].at
+			if lp.energy.coverageAt.After(record.EstimatedAt) {
+				record.EstimatedAt = lp.energy.coverageAt
 			}
 		}
 	}

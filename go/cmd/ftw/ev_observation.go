@@ -27,6 +27,7 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 		RequestActive        *bool    `json:"request_active"`
 		SessionID            string   `json:"session_id"`
 		PowerAt              string   `json:"power_observed_at"`
+		PowerMaxAgeS         int      `json:"power_max_age_s"`
 		EnergyAt             string   `json:"energy_observed_at"`
 	}
 	if json.Unmarshal(r.Data, &d) != nil || (d.SessionWh != nil && *d.SessionWh < 0) {
@@ -43,7 +44,7 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 		active = *d.RequestActive
 	}
 	sample := loadpoint.EVSample{ConnectionGeneration: d.ConnectionGeneration, PowerW: r.RawW,
-		PowerAt: r.UpdatedAt, Connected: *d.Connected, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID,
+		PowerAt: r.UpdatedAt, PowerMaxAge: time.Duration(min(max(d.PowerMaxAgeS, 0), 180)) * time.Second, Connected: *d.Connected, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID,
 		SessionWhUnavailable: d.SessionWh == nil}
 	if d.SessionWh != nil {
 		sample.SessionWh = *d.SessionWh
@@ -51,7 +52,7 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 	if d.PowerAt != "" {
 		at, err := time.Parse(time.RFC3339Nano, d.PowerAt)
 		sample.PowerAt = at
-		sample.PowerUnavailable = err != nil || at.After(now.Add(time.Second)) || (now.Sub(at) > 30*time.Second && r.RawW > 0)
+		sample.PowerUnavailable = err != nil || at.After(now.Add(time.Second)) || (now.Sub(at) > sample.PowerWindow() && r.RawW > 0)
 	}
 	if d.EnergyAt != "" {
 		at, err := time.Parse(time.RFC3339Nano, d.EnergyAt)

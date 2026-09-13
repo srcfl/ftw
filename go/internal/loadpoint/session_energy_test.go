@@ -196,3 +196,43 @@ func TestLateFirstCounterDoesNotConsumeCurrentSlotBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestSlowPowerCadenceUsesBoundedEstimateBetweenSourceUpdates(t *testing.T) {
+	start := time.Now().Add(-time.Hour)
+	e := &sessionEnergy{}
+	s := EVSample{PowerW: 7103, PowerAt: start, SessionWh: 1000, EnergyAt: start, PowerMaxAge: 3 * time.Minute}
+	e.observe(s, start)
+	// Each poll advances the power estimate while preserving the source time.
+	for sec := 5; sec < 115; sec += 5 {
+		if got := e.observe(s, start.Add(time.Duration(sec)*time.Second)); math.Abs(got-(1000+7103*float64(sec)/3600)) > 1e-8 {
+			t.Fatal(got)
+		}
+	}
+	s.PowerAt = start.Add(115 * time.Second)
+	got := e.observe(s, s.PowerAt)
+	if want := 1000 + 7103*115.0/3600; math.Abs(got-want) > 1e-8 {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	s.PowerAt = start.Add(10 * time.Minute)
+	if next := e.observe(s, s.PowerAt); next != got {
+		t.Fatalf("long gap invented charge: %v -> %v", got, next)
+	}
+}
+
+func TestPowerEstimateExpiresAndCounterCatchupDoesNotDuplicate(t *testing.T) {
+	start := time.Now().Add(-time.Hour)
+	e := &sessionEnergy{}
+	sample := EVSample{PowerW: 3600, PowerAt: start, PowerMaxAge: 3 * time.Minute, SessionWh: 1000, EnergyAt: start}
+	for sec := 0; sec <= 240; sec += 5 {
+		at := start.Add(time.Duration(sec) * time.Second)
+		got := e.observe(sample, at)
+		if want := 1000 + float64(min(sec, 180)); math.Abs(got-want) > 1e-8 {
+			t.Fatalf("at %ds got %v want %v", sec, got, want)
+		}
+	}
+	sample.SessionWh = 1180
+	sample.EnergyAt = start.Add(180 * time.Second)
+	if got := e.observe(sample, start.Add(240*time.Second)); got != 1180 {
+		t.Fatal(got)
+	}
+}

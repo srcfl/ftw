@@ -450,6 +450,7 @@ type EVSample struct {
 	SessionWhUnavailable bool
 	PowerUnavailable     bool
 	PowerAt              time.Time
+	PowerMaxAge          time.Duration
 	EnergyAt             time.Time
 	Connected            bool
 	RequestActive        bool

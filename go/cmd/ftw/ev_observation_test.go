@@ -53,3 +53,18 @@ func TestEVObservationKeepsSourceTimesAndMissingCounter(t *testing.T) {
 		t.Fatalf("old vendor power became fresh on receipt: %+v", s)
 	}
 }
+
+func TestEVSourceCadenceDoesNotExtendTransportWatchdog(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	data, _ := json.Marshal(map[string]any{"connected": true, "session_wh": 1000, "power_observed_at": now.Add(-2 * time.Minute).Format(time.RFC3339), "power_max_age_s": 180})
+	r := &telemetry.DerReading{UpdatedAt: now, RawW: 6900, Data: data}
+	health := &telemetry.DriverHealth{Status: telemetry.StatusOk}
+	sample, ok := currentEVSample(r, health, time.Minute, now, false, "charger")
+	if !ok || sample.PowerUnavailable || sample.PowerMaxAge != 3*time.Minute {
+		t.Fatalf("source cadence rejected: %+v", sample)
+	}
+	r.UpdatedAt = now.Add(-2 * time.Minute)
+	if _, ok := currentEVSample(r, health, time.Minute, now, false, "charger"); ok {
+		t.Fatal("source cadence bypassed transport watchdog")
+	}
+}
