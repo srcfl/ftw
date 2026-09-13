@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.5.0
+
+### Minor Changes
+
+- fb6b118: Adopt AGPLv3 with a narrow Energyplan combination permission and expose source access. Commercial use of the AGPL-covered code remains allowed under its source-sharing terms. New Energyplan workers allow unmodified use with FTW only for a person's own private household. Free, noncommercial redistribution with FTW is allowed only for that household use, with the binary license and third-party notices. Other use or distribution requires a separate written Sourceful license, including commercial use, resale, paid installation/support and hosted or managed operation for others. Earlier grants remain unchanged.
+  
+  Commercial installations must arrange Energyplan rights or omit the restricted worker before upgrading, including through automatic updates.
+- e5f281f: Optional Modbus TCP proxy. Other LAN integrations can talk to the device's one shared Modbus TCP session through FTW. Off by default; writes stay blocked unless you opt in.
+
+### Patch Changes
+
+- fc1c7af: Reserve an EV duty-cycle pulse at its legal on-power when sharing the fuse with optional battery charge. Keep house and PV forecast learning when only a charger package changes. Plan the current slot from the live house meter instead of a cold-start prior. Treat both-zero battery watts as the same 0.5C limit in planner and dispatch. Say when charging waits because the ready time has passed.
+- 9e38fad: Ignore offline battery and PV watts when computing household load, refuse to
+  discharge a battery that has never reported SoC, and require a fresh site
+  meter before live PV curtail uses live load.
+- 6716619: Include LICENSING.md in the Docker build context so beta images can copy it.
+- e5f281f: Pin Energyplan 0.4.3. The worker can hit an EV energy target with a last-interval duty cycle, reports on-power and remaining shortfall, and prices partial charges as on/off pulses so Core accepts the plan.
+- fc1c7af: Pin Energyplan 0.4.4. Binary chargers duty-cycle a remainder smaller than the on-step. Two EVs that share a tight import limit return a feasible plan with shortfall.
+- e5f281f: Reserve scheduled EV charging before optional battery charge under the site limit. Preserve battery energy during idle arbitrage slots while retaining fuse protection.
+- e5f281f: Use exact remaining EV energy in Core's reserve plan when Energyplan is unavailable. Reserve legal current and fuse headroom for a partial final interval, and report any energy that cannot be delivered before departure.
+- e5f281f: Retry a failed charger resume while the same plug session still needs power. Count measured EV energy across power changes so a completed slot budget stays stopped, and keep snapped current below the fuse allocation.
+- e5f281f: Pass configured EV phase and current limits into planning, including lower whole-amp steps that leave room for house load. Clarify that the fuse voltage is measured phase to neutral.
+- e5f281f: Use the same charging-loss estimate for inferred vehicle charge and planning. Keep confirmed levels when restoring older saved sessions.
+- e5f281f: Show the point forecast separately from the solar and household load values used by the plan. Remove the false zero-margin claim from the legacy PV residual and show any EV energy shortfall in a reserve plan.
+- e5f281f: Score forecast history in small saved pages without blocking new measurements or model updates. Replay retained observations after restart to recover missing calibration evidence.
+- e5f281f: Pause plan, heating, settings, and dashboard card polls while the tab is
+  hidden, and stop Settings EV/System timers when the modal closes. Returning
+  to the tab refreshes once, then resumes a single timer.
+- 79d180b: Lua driver host: a missing `driver_command` is an error, a battery/PV/EV/V2X/heat-pump driver that can be commanded must implement `driver_default_mode`, and fingerprint probes cannot write hardware. A read-only declaration blocks dispatch before the command hook runs. The catalog now reads `auth_post_path`.
+  
+  Update the recovery bundle to the companion driver audit, including corrected telemetry freshness, read-only declarations, and the Easee safe default. Include the read-only Zaptec Cloud and Tesla Wall Connector drivers so their setup paths also resolve offline.
+- e5f281f: Fresh site-meter data now makes Core trim curtail-capable solar when solar alone pushes export above the configured site limit. Core reports any overage it cannot remove without an unsafe zero-watt cap or control of unsupported solar.
+- f2874ff: Preserve valid forecast learning across the beta.3 hash-policy upgrade and keep known driver battery limits when both battery overrides are zero. Use fresh, complete telemetry for the current household-load estimate.
+  
+  Bundle Energyplan 0.4.5. EV goals share site capacity across deadlines, retain safe partial plans when goals cannot be met, and reserve the charger's real pulse power. Report missing charge and executable pulse cost without a false optimality claim.
+- bd7d76b: Add `sim-ocpp`, an OCPP 1.6J / 2.0.1 charge-point simulator covering the recorded Evify charger range. Tesla Wall Connector is listed but skipped: it has no OCPP.
+- 42da9f2: Add an updater-then-Core upgrade script so a 2.x Compose site can move to a published 3.x pair without the orange Update hop.
+
 ## 3.4.2
 
 ### Patch Changes
