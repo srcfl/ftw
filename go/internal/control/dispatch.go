@@ -1478,16 +1478,9 @@ func ComputeDispatch(
 				state.controlSlotDecisionID = dir.DecisionID
 				state.controlPlanSnapshot.source = controlPlanDirective
 				currentDirective = dir
-				// planner_arbitrage and planner_passive_arbitrage idle slots: skip the energy path and
-				// fall through to reactive PI (same as planner_self does always).
-				// When the plan slot is idle (BatteryEnergyWh ≈ 0), the energy
-				// formula produces targetTotalW=0 and cannot react to live
-				// conditions — a PV forecast miss leaves the site importing while
-				// the battery sits at 0 W. The reactive PI path handles this
-				// correctly, and planHasNonDischargeIntent (below) permits
-				// discharge for non-charge arbitrage-family slots.
-				// Charge slots (BatteryEnergyWh > idleWh) still use the energy
-				// path so the DP's deliberate grid-charge intent is honoured.
+				// Idle arbitrage slots use live control subject to the idle
+				// charge and discharge gates. Fuse protection may still spend
+				// energy reserved for a later slot.
 				const idleWhGate = 50.0
 				// |BatteryEnergyWh| ≤ idleWhGate — true idle only. A
 				// planned-discharge slot is also ≤ idleWhGate by the
@@ -2369,36 +2362,14 @@ func ComputeDispatch(
 		}
 	}
 
-	// ---- Joint fuse-budget allocator ----
-	// When EV draw + commanded battery charge would exceed the site fuse,
-	// scale BOTH proportionally so they share the budget rather than
-	// oscillating against each other (battery ramps up per plan → fuse
-	// guard cuts it → plan ramps again next tick — operator report
-	// 2026-04-27). The battery side is mutated here; the EV side is
-	// published via state.FuseEVMaxW + FuseSaturated for the loadpoint
-	// controller to read on its next Tick.
-	//
-	// Math (site sign, + = import):
-	//   targetTotal = currentTotal + totalCorrection
-	//   B  = max(0, targetTotal)        battery charge component (≥0)
-	//   Bn = min(0, targetTotal)        battery discharge component (≤0)
-	//   E  = state.EVChargingW          EV draw (≥0)
-	//   H  = rawGridW − currentTotal − E   "house" net (load + PV)
-	//   newGrid' = H + (Bn + B*scale) + E*scale
-	//   solve newGrid' ≤ fuseMaxW  ⇒  scale ≤ (fuseMaxW − H − Bn) / (B + E)
-	//
-	// Discharge alone never trips this — Bn is negative, so it lifts the
-	// numerator (more headroom). Only positive battery demand competes
-	// with EV.
-	//
-	// BatteryCoversEV mode: H is computed from rawGridW (the raw meter,
-	// unchanged regardless of BatteryCoversEV) so H stays correct in
-	// both modes. The PI's gridW is the only place that branches on
-	// BatteryCoversEV; the joint allocator's geometry is independent
-	// of that. Regression: TestJointFuseAllocatorWithBatteryCoversEV.
+	// Share the site ceiling between EV and battery charge. An accepted
+	// EV plan reserves its demand before optional battery charge, including
+	// while the car ramps up. Unscheduled EV draw retains proportional sharing.
+	// Infer house net power from measured EV draw, never from planned demand.
 	state.FuseEVMaxW = 0
 	state.FuseSaturated = false
-	if fuseMaxW > 0 && state.EVChargingW > 0 {
+	plannedEVW := scheduledEVPowerW(state)
+	if fuseMaxW > 0 && math.Max(state.EVChargingW, plannedEVW) > 0 {
 		// Use the effective import ceiling (fuse minus safety margin,
 		// or tariff peak when tighter) so PeakImportCeilingW throttles
 		// the EV through the same surface as the fuse. Steady-state
@@ -2409,20 +2380,21 @@ func ComputeDispatch(
 		targetTotal := currentTotal + totalCorrection
 		B := math.Max(0, targetTotal)
 		Bn := math.Min(0, targetTotal)
-		E := state.EVChargingW
-		H := rawGridW - currentTotal - E
+		E := math.Max(state.EVChargingW, plannedEVW)
+		H := rawGridW - currentTotal - state.EVChargingW
 		projectedGrid := H + targetTotal + E
 		if projectedGrid > ceilingW && (B+E) > 0 {
-			scale := (ceilingW - H - Bn) / (B + E)
-			if scale < 0 {
-				scale = 0
+			if plannedEVW > 0 {
+				// A timed EV goal takes its share before optional battery charge.
+				available := math.Max(0, ceilingW-H-Bn)
+				state.FuseEVMaxW = math.Min(E, available)
+				newBattery := Bn + math.Min(B, math.Max(0, available-state.FuseEVMaxW))
+				totalCorrection = newBattery - currentTotal
+			} else {
+				scale := math.Max(0, math.Min(1, (ceilingW-H-Bn)/(B+E)))
+				totalCorrection = Bn + B*scale - currentTotal
+				state.FuseEVMaxW = E * scale
 			}
-			if scale > 1 {
-				scale = 1
-			}
-			newBattery := Bn + B*scale
-			totalCorrection = newBattery - currentTotal
-			state.FuseEVMaxW = E * scale
 			state.FuseSaturated = true
 		}
 	}
@@ -2792,8 +2764,8 @@ func republishFuseEVCapAfterFuseDischarge(targets []DispatchTarget, store *telem
 		headroom = 0
 	}
 	newCap := headroom
-	if newCap > state.EVChargingW {
-		newCap = state.EVChargingW
+	if demand := math.Max(state.EVChargingW, scheduledEVPowerW(state)); newCap > demand {
+		newCap = demand
 	}
 	state.FuseEVMaxW = newCap
 }
@@ -3869,20 +3841,8 @@ func planHasNonDischargeIntent(state *State) bool {
 	// overriding it with reactive discharge would undo that decision.
 	// Operators who want strict "never grid-charge regardless of price"
 	// should keep planner_self.
-	//
-	// However, that rationale only applies when the plan slot's intent
-	// is to charge. When the slot is idle (battery_w ≈ 0, e.g. "export
-	// the PV surplus") there is no protected charge decision — reactive
-	// discharge is safe and correct. Without the carve-out for idle
-	// slots, a forecast miss (PV overestimated, load underestimated)
-	// leaves the site importing while batteries sit at 0 W. Found in
-	// production v0.87.0: PV forecast off by 7×, plan idle, site
-	// imported 648 W continuously through the slot.
-	//
-	// Fix: planner_passive_arbitrage now participates in the carve-out
-	// for non-charge slots (BatteryEnergyWh ≤ idleWh). Charge slots
-	// remain authoritative — except explicit BatteryCoversEV PV-surplus
-	// slots (coverLoadChargeSlot), where the EV-cover contract wins.
+	// Idle in an arbitrage plan preserves energy for later. A forecast miss
+	// requests a new plan; it must not silently spend that stored energy.
 	if state.Mode == ModePlannerSelf {
 		return false
 	}
@@ -3890,25 +3850,11 @@ func planHasNonDischargeIntent(state *State) bool {
 	const idleGridW = 100.0
 	if state.SlotDirective != nil {
 		if dir, ok := planDirectiveForIntent(state); ok {
-			// For passive_arbitrage: only block reactive discharge when the
-			// plan slot has explicit charge intent. Idle and discharge slots
-			// get no non-discharge block — reactive discharge may cover load.
-			if state.Mode == ModePlannerPassiveArbitrage {
+			if state.Mode == ModePlannerPassiveArbitrage || state.Mode == ModePlannerArbitrage {
 				if coverLoadChargeSlot(state, dir) {
 					return false
 				}
-				return dir.intentEnergyWh() > idleWh
-			}
-			if state.Mode == ModePlannerArbitrage {
-				// A charge-from-PV-surplus slot (coverLoadChargeSlot) and an
-				// idle slot both carry no protected charge decision, so reactive
-				// discharge may cover a forecast-missed load. Only a deliberate
-				// grid-charge slot (BatteryEnergyWh > idleWh and not a PV-surplus
-				// charge) keeps the non-discharge block.
-				if coverLoadChargeSlot(state, dir) {
-					return false
-				}
-				return dir.intentEnergyWh() > idleWh
+				return dir.intentEnergyWh() >= -idleWh
 			}
 			// planner_cheap (and any other planner mode): idle slots keep the
 			// non-discharge block; only deliberate discharge slots are exempt.
