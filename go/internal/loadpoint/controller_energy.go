@@ -14,7 +14,7 @@ type meteredEnergy struct {
 	driver, device, session string
 	generation              uint64
 	last                    EVSample
-	powerWh, counterWh      float64
+	meter                   sessionEnergy
 	points                  []energyPoint
 }
 
@@ -25,40 +25,46 @@ func (c *Controller) observeEnergy(cfg Config, sample EVSample, now time.Time) {
 	if c.energySamples == nil {
 		c.energySamples = make(map[string]*meteredEnergy)
 	}
-	if !sample.Connected || sample.ConnectionUnknown || math.IsNaN(sample.PowerW) || math.IsInf(sample.PowerW, 0) {
+	if !sample.Connected || sample.ConnectionUnknown || sample.PowerUnavailable || math.IsNaN(sample.PowerW) || math.IsInf(sample.PowerW, 0) {
 		delete(c.energySamples, cfg.ID)
 		return
 	}
 	e := c.energySamples[cfg.ID]
-	if e == nil || e.driver != cfg.DriverName || e.device != sample.DeviceID || e.session != sample.SessionID || e.generation != sample.ConnectionGeneration {
+	if e == nil || e.driver != cfg.DriverName || e.device != sample.DeviceID || e.session != sample.SessionID || e.generation != sample.ConnectionGeneration || e.meter.counterRegressed(sample) {
 		e = &meteredEnergy{driver: cfg.DriverName, device: sample.DeviceID, session: sample.SessionID, generation: sample.ConnectionGeneration}
 		c.energySamples[cfg.ID] = e
 	}
-	if len(e.points) == 0 {
-		e.points = []energyPoint{{at: now}}
-		e.last = sample
-		return
-	}
-	previous := e.points[len(e.points)-1]
-	if !now.After(previous.at) {
-		return
-	}
-	elapsed := now.Sub(previous.at)
-	counterKnown := finite(sample.SessionWh) && finite(e.last.SessionWh) && sample.SessionWh >= e.last.SessionWh && (sample.SessionWh > 0 || e.last.SessionWh > 0)
-	if elapsed > 30*time.Second && !counterKnown {
-		e.points = nil
-		e.powerWh, e.counterWh = 0, 0
-	} else {
-		if elapsed <= 30*time.Second {
-			e.powerWh += max(0, e.last.PowerW) * elapsed.Hours()
-		}
-		if counterKnown {
-			e.counterWh += sample.SessionWh - e.last.SessionWh
+	measuredAt := now
+	if !sample.PowerAt.IsZero() {
+		measuredAt = sample.PowerAt
+		if !sample.SessionWhUnavailable && sample.EnergyAt.After(measuredAt) {
+			measuredAt = sample.EnergyAt
 		}
 	}
-	// Counters can update less often than power. Stop conservatively on
-	// either measured signal; adding their deltas would count energy twice.
-	e.points = append(e.points, energyPoint{at: now, wh: max(e.powerWh, e.counterWh)})
+	if measuredAt.After(now) {
+		return
+	}
+	if len(e.points) > 0 {
+		previous := e.points[len(e.points)-1]
+		if !measuredAt.After(previous.at) {
+			return
+		}
+		counterAdvanced := !sample.SessionWhUnavailable && sample.SessionWh > e.last.SessionWh && (sample.EnergyAt.IsZero() || sample.EnergyAt.After(previous.at))
+		if measuredAt.Sub(previous.at) > 30*time.Second && !counterAdvanced {
+			e.points = nil
+		}
+	}
+	counterWasKnown := e.meter.counterKnown
+	wh := e.meter.observe(sample, now)
+	if !counterWasKnown && e.meter.counterKnown {
+		// A first counter includes energy from before this slot. Align prior
+		// power points to its baseline before calculating slot delivery.
+		baseline := e.meter.counterWh - e.meter.integralAt(e.meter.counterAt)
+		for i := range e.points {
+			e.points[i].wh += baseline
+		}
+	}
+	e.points = append(e.points, energyPoint{at: measuredAt, wh: wh})
 	e.last = sample
 	// Keep one boundary reading for a two-hour slot, with a hard cap for
 	// callers ticking faster than production's five-second loop.

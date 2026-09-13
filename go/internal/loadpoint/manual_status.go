@@ -173,7 +173,7 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 	if h.PowerW == 0 {
 		m.State = ManualPausing
 		switch {
-		case ch.Unavailable:
+		case ch.Unavailable || st.PowerUnavailable:
 			m.State = ManualUnavailable
 		case commandMatches && st.CommandedKnown && st.CommandedReason == "manual_hold" && st.CommandedW == 0 &&
 			!ch.UpdatedAt.IsZero() && !ch.UpdatedAt.Before(since) &&
@@ -188,7 +188,7 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 
 	limitMatches := m.ChargerLimitKnown && m.CommandedA >= 0 && math.Abs(ch.LimitA-m.CommandedA) < 1
 	switch {
-	case ch.Unavailable:
+	case ch.Unavailable || st.PowerUnavailable:
 		m.State = ManualUnavailable
 	case !commandMatches && elapsed >= manualConfirmTimeout:
 		m.State = ManualStalled
@@ -200,7 +200,7 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 		m.State = ManualStalled
 	case (m.ChargerLimitKnown && !limitMatches) || (!ch.UpdatedAt.IsZero() && ch.UpdatedAt.Before(since)):
 		m.State = ManualSent
-	case st.CurrentPowerW >= manualChargingFloorW || (ch.Known && ch.Charging):
+	case st.CurrentPowerW >= manualChargingFloorW:
 		m.State = ManualCharging
 		if clamp {
 			m.LimitReason = st.CommandedReason

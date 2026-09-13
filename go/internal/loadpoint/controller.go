@@ -447,6 +447,10 @@ type EVSample struct {
 	ConnectionGeneration uint64 // process-local transport epoch, not durable session proof
 	PowerW               float64
 	SessionWh            float64
+	SessionWhUnavailable bool
+	PowerUnavailable     bool
+	PowerAt              time.Time
+	EnergyAt             time.Time
 	Connected            bool
 	RequestActive        bool
 	DeviceID             string
@@ -1560,7 +1564,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
 	selfWithheld := surplusOn && enteringSurplusPaused
 	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
-	c.manager.ObserveSession(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive, sample.DeviceID, sample.SessionID)
+	c.manager.ObserveSample(lpCfg.ID, sample)
 	c.restoreManualHoldForSession(lpCfg.ID)
 	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
 	if !sample.Connected {
