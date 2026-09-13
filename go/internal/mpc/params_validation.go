@@ -447,6 +447,9 @@ func validateLoadpointSpecs(loadpoints []*LoadpointSpec, assetIDs map[string]str
 		if err := requireNonNegativePlanningValue(field+".max_charge_w", loadpoint.MaxChargeW); err != nil {
 			return err
 		}
+		if !finite(loadpoint.MinChargeW) || loadpoint.MinChargeW < 0 || loadpoint.MinChargeW > loadpoint.MaxChargeW {
+			return fmt.Errorf("%s.min_charge_w must be within charging bounds", field)
+		}
 		if err := requirePlanningEfficiency(field+".charge_efficiency", loadpoint.ChargeEfficiency, true); err != nil {
 			return err
 		}

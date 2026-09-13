@@ -48,7 +48,7 @@ type Config struct {
 
 	// Assumed EV SoC at plug-in (0–1). Chargers like Easee don't report
 	// the vehicle's SoC directly — only cumulative session energy.
-	// Current SoC is then estimated as PluginSoC + deliveredWh/capacityWh.
+	// Current SoC is then estimated as PluginSoC + deliveredWh*DefaultChargeEfficiency/capacityWh.
 	// 0 defaults to units.DefaultPluginSoC (0.20). Operators who care can
 	// override per-loadpoint or pre-plug-in.
 	PluginSoC float64 `yaml:"plugin_soc,omitempty" json:"plugin_soc,omitempty"`
@@ -351,7 +351,7 @@ type loadpointRuntime struct {
 
 	// Plug-in anchor: the SoC we believe the vehicle was at when
 	// this session began. Persisted across Observe() calls so SoC
-	// inference (pluginSoC + deliveredWh/capacity) stays stable
+	// inference (pluginSoC + deliveredWh*DefaultChargeEfficiency/capacity) stays stable
 	// even as session_wh grows. Reset to Config.PluginSoC on
 	// every plug-in transition (prev !pluggedIn → now pluggedIn).
 	sessionPluginSoC float64
@@ -586,7 +586,7 @@ func (m *Manager) Load(cfgs []Config) {
 				// not the battery level the user just saw or its confidence.
 				delivered := 0.0
 				if lp.VehicleCapacityWh > 0 {
-					delivered = lp.deliveredWhSession / lp.VehicleCapacityWh
+					delivered = lp.deliveredWhSession * DefaultChargeEfficiency / lp.VehicleCapacityWh
 				}
 				lp.sessionPluginSoC = existing.currentSoC - delivered
 				changedCapacity = append(changedCapacity, c.ID)
@@ -864,11 +864,14 @@ func (m *Manager) SetLocation(loc *time.Location) {
 //
 // Clamps to [0, 1]. Falls back to the anchor when capacity is
 // unknown (can't translate Wh → fraction).
+// DefaultChargeEfficiency is the shared AC-to-car estimate used by planning.
+const DefaultChargeEfficiency = 0.9
+
 func estimateSoC(pluginSoC, deliveredWh, capacityWh float64) float64 {
 	if capacityWh <= 0 {
 		return units.ClampFraction(pluginSoC)
 	}
-	return units.ClampFraction(pluginSoC + deliveredWh/capacityWh)
+	return units.ClampFraction(pluginSoC + deliveredWh*DefaultChargeEfficiency/capacityWh)
 }
 
 // SetTarget updates the user-intent fields for an existing loadpoint.
@@ -1092,7 +1095,7 @@ func reanchorSoCLocked(lp *loadpointRuntime, soc float64) {
 	// Re-anchor: new_anchor + delivered/capacity == soc.
 	delivered := 0.0
 	if lp.VehicleCapacityWh > 0 {
-		delivered = lp.deliveredWhSession / lp.VehicleCapacityWh
+		delivered = lp.deliveredWhSession * DefaultChargeEfficiency / lp.VehicleCapacityWh
 	}
 	// The offset may be negative when the corrected level is below the
 	// energy already delivered. Clamp the resulting level, not the offset.

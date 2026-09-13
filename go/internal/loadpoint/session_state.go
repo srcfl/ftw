@@ -115,11 +115,17 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	if pluggedIn && !confirmed && !regressed && deviceID != "" && sessionID != "" && m.sessionStore != nil {
 		if raw, ok := m.sessionStore.LoadConfig(sessionKey(deviceID)); ok {
 			var saved savedSession
-			if json.Unmarshal([]byte(raw), &saved) == nil && saved.Version == 1 &&
+			if json.Unmarshal([]byte(raw), &saved) == nil && (saved.Version == 1 || saved.Version == 2) &&
 				saved.DeviceID == deviceID && saved.SessionID == sessionID &&
 				finite(saved.AnchorSoC) && finite(saved.ConfirmedAtWh) && saved.ConfirmedAtWh >= 0 &&
 				deliveredWh >= saved.ConfirmedAtWh && finite(saved.CapacityWh) && saved.CapacityWh > 0 {
-				atConfirmation := saved.AnchorSoC + saved.ConfirmedAtWh/saved.CapacityWh
+				efficiency := DefaultChargeEfficiency
+				if saved.Version == 1 {
+					efficiency = 1
+				}
+				atConfirmation := saved.AnchorSoC + saved.ConfirmedAtWh*efficiency/saved.CapacityWh
+				// Preserve the last confirmed level when migrating the old AC-only estimate.
+				saved.AnchorSoC = atConfirmation - saved.ConfirmedAtWh*DefaultChargeEfficiency/saved.CapacityWh
 				if atConfirmation >= 0 && atConfirmation <= 1 {
 					restore = &saved
 				}
@@ -157,7 +163,7 @@ func (m *Manager) persistSession(id string) {
 		m.mu.RUnlock()
 		return
 	}
-	record := savedSession{Version: 1, DeviceID: lp.sessionDeviceID, SessionID: lp.sessionID,
+	record := savedSession{Version: 2, DeviceID: lp.sessionDeviceID, SessionID: lp.sessionID,
 		AnchorSoC: lp.sessionPluginSoC, ConfirmedAtWh: lp.deliveredWhSession,
 		CapacityWh: lp.VehicleCapacityWh, CompletionNotified: lp.completionNotified}
 	eligible := lp.pluggedIn && lp.socConfirmed && record.DeviceID != "" && record.SessionID != "" &&

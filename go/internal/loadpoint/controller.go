@@ -58,6 +58,8 @@ type Controller struct {
 	// registry owns cross-command serialization and lifecycle cancellation.
 	commandTimeout  time.Duration
 	wallboxCycleSeq atomic.Uint64
+	resumeOffers    map[string]resumeOffer // owned by the dispatch tick
+	energySamples   map[string]*meteredEnergy
 
 	// fuseEVMax is the joint fuse-budget allocator's verdict for how much
 	// W this controller may command to the EV this tick. Set by the
@@ -421,9 +423,10 @@ type ManualHold struct {
 // the controller only needs the slot window and per-loadpoint Wh
 // budget, so we don't pull in the whole struct.
 type Directive struct {
-	SlotStart         time.Time
-	SlotEnd           time.Time
-	LoadpointEnergyWh map[string]float64
+	SlotStart          time.Time
+	SlotEnd            time.Time
+	LoadpointEnergyWh  map[string]float64
+	LoadpointMaxPowerW map[string]float64
 }
 
 // EVSample is the loadpoint-relevant slice of telemetry.DerReading
@@ -564,35 +567,6 @@ func (c *Controller) SetCommandTimeout(timeout time.Duration) {
 		return
 	}
 	c.commandTimeout = timeout
-}
-
-func previousCommanded(c *Controller, id string) (w float64, known bool) {
-	if c == nil || c.manager == nil {
-		return 0, false
-	}
-	st, ok := c.manager.State(id)
-	if !ok {
-		return 0, false
-	}
-	return st.CommandedW, st.CommandedKnown
-}
-
-// resumeAfterZeroOffer sends ev_resume when dispatch returns to a non-zero
-// offer after commanding 0 W. Cloud chargers that map 0 A to a sticky user
-// pause (Easee dynamicChargerCurrent) otherwise keep the contactor open
-// until the cable is unplugged, even after a later ev_set_current with amps.
-func (c *Controller) resumeAfterZeroOffer(ctx context.Context, lpCfg Config, prevW float64, prevKnown bool, offerW float64) {
-	if c == nil || !prevKnown || prevW > 0 || offerW <= 0 {
-		return
-	}
-	payload, err := json.Marshal(map[string]any{"action": "ev_resume"})
-	if err != nil {
-		return
-	}
-	if err := c.sendDispatchWithDeadline(ctx, lpCfg.DriverName, payload); err != nil {
-		slog.Warn("loadpoint resume after zero offer",
-			"lp", lpCfg.ID, "driver", lpCfg.DriverName, "err", err)
-	}
 }
 
 func (c *Controller) sendDispatchWithDeadline(ctx context.Context, driver string, payload []byte) error {
@@ -1539,8 +1513,10 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// an EV sample this loop cannot confirm a session or send a setpoint.
 		return
 	}
+	c.observeEnergy(lpCfg, sample, now)
 	c.manager.observeConnectionProof(lpCfg.ID, sample.ConnectionGeneration, sample.ConnectionUnknown)
 	if sample.ConnectionUnknown {
+		delete(c.resumeOffers, lpCfg.ID)
 		c.restoreManualHoldForSession(lpCfg.ID)
 		return
 	}
@@ -1588,6 +1564,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	c.restoreManualHoldForSession(lpCfg.ID)
 	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
 	if !sample.Connected {
+		delete(c.resumeOffers, lpCfg.ID)
 		c.resetSurplusSession(lpCfg.ID)
 		// Release any manual override when the vehicle unplugs. A
 		// persistent "Start" hold (zero ExpiresAt) would otherwise
@@ -1624,6 +1601,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 			manualUpdatedAt = hold.UpdatedAt
 		}
 		c.manager.setCommandedForManual(lpCfg.ID, 0, "site_meter_stale", manualUpdatedAt)
+		c.resumeAfterZeroOffer(ctx, lpCfg, sample, 0, now)
 		payload, err := json.Marshal(map[string]any{
 			"action":  "ev_set_current",
 			"power_w": 0,
@@ -1930,7 +1908,6 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// The interruption latch reads this to keep a pause the box chose —
 	// plan slot, Stop hold, surplus clamp — from ever reading as a
 	// charge that failed.
-	prevW, prevKnown := previousCommanded(c, lpCfg.ID)
 	var offerW float64
 	var haveOffer bool
 	if w, ok := cmd["power_w"].(float64); ok {
@@ -1944,15 +1921,10 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	if c.send == nil {
 		return
 	}
-	// Easee (and similar cloud chargers) treat a 0 A dynamic limit as a
-	// user pause that stays until resume or unplug. Writing amps alone
-	// does not reopen the contactor — field report 2026-09-07, e-tron
-	// "no voltage" / Easee "user paused". Resume on the 0 W → offer edge
-	// so a later plan, surplus, Charge now, or safety recovery actually
-	// starts current. Skip the first command of a process (prevKnown
-	// false): that is not a standdown we issued.
+	// Resume only a zero offer from this transport and plug session. A failed
+	// optional resume keeps its retry state even after recording positive W.
 	if haveOffer {
-		c.resumeAfterZeroOffer(ctx, lpCfg, prevW, prevKnown, offerW)
+		c.resumeAfterZeroOffer(ctx, lpCfg, sample, offerW, now)
 	}
 	// The one command whose outcome decides whether core can actuate this
 	// charger. A charger that answers every poll and refuses this holds
@@ -2806,13 +2778,21 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 		return 0, false, false
 	}
 	remainingS := d.SlotEnd.Sub(now).Seconds()
-	elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
-	if elapsed < 0 {
-		elapsed = 0
+	alreadyWh, unmeasuredS := c.energySince(lpCfg.ID, d.SlotStart, now)
+	if durationS := d.SlotEnd.Sub(d.SlotStart).Seconds(); durationS > 0 {
+		alreadyWh += budgetWh * unmeasuredS / durationS
 	}
-	alreadyWh := currentPowerW * elapsed / 3600.0
 	remainingWh := budgetWh - alreadyWh
 	wantW := EnergyBudgetToPowerW(remainingWh, remainingS)
+	maxW := lpCfg.MaxChargeW
+	if ceiling, ok := d.LoadpointMaxPowerW[lpCfg.ID]; ok {
+		maxW = min(maxW, ceiling)
+		if maxW <= 0 || remainingWh <= 1e-6 || remainingS <= 0 {
+			return 0, true, false
+		}
+		// A duty plan commands its legal on-power until the Wh budget is spent.
+		wantW = maxW
+	}
 	// Joint fuse allocator (dispatch.go) caps EV demand when battery + EV
 	// would together bust the fuse. Honour it before snapping to the
 	// charger's discrete steps so the snap chooses a level under the cap.
@@ -2825,5 +2805,8 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 	}
 	// Clamp to the loadpoint's static MaxChargeW (configured cap; the
 	// driver's per-phase fuse clamp is the ultimate safety stop).
-	return SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW), true, fuseCapped
+	if fuseCapped {
+		return floorChargeW(wantW, lpCfg.MinChargeW, maxW, lpCfg.AllowedStepsW), true, true
+	}
+	return SnapChargeW(wantW, lpCfg.MinChargeW, maxW, lpCfg.AllowedStepsW), true, false
 }

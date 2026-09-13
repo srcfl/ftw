@@ -52,7 +52,7 @@ func TestLowSoCCorrectionAfterEnergyWasDelivered(t *testing.T) {
 	}
 	m.Observe("garage", true, 4300, 9600, true)
 	s, _ = m.State("garage")
-	if s.CurrentSoC < .059 || s.CurrentSoC > .061 {
+	if s.CurrentSoC < .058999 || s.CurrentSoC > .059001 {
 		t.Fatalf("energy must accrue from the corrected level: %v", s.CurrentSoC)
 	}
 }

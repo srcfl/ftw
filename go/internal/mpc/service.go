@@ -3,6 +3,7 @@ package mpc
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"sync"
@@ -548,7 +549,8 @@ type SlotDirective struct {
 	// configured / active. The dispatch layer converts energy to
 	// instantaneous power via the same `remaining_wh × 3600 /
 	// remaining_s` formula it uses for the battery.
-	LoadpointEnergyWh map[string]float64
+	LoadpointEnergyWh  map[string]float64
+	LoadpointMaxPowerW map[string]float64
 
 	// LoadpointSoCTarget is the plan's EV SoC at SlotEnd per
 	// loadpoint. Used by the per-loadpoint divergence check.
@@ -613,6 +615,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			}
 		}
 		if len(a.LoadpointPowerW) > 0 {
+			d.LoadpointMaxPowerW = maps.Clone(a.LoadpointMaxPowerW)
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
 			d.LoadpointSoCTarget = make(map[string]float64, len(a.LoadpointPowerW))
 			for id, powerW := range a.LoadpointPowerW {
@@ -1744,8 +1747,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		// not bet on sun that may not arrive.
 		slots = fallbackSlots
 		solveStart := time.Now()
-		plan = Optimize(slots, p)
-		plan.Solver = coreSolverInfo(p, msSince(solveStart))
+		plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+		setCoreReserveSolver(&plan, p, msSince(solveStart))
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if request.wasCanceledByService() {
@@ -1824,8 +1827,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			slog.Error("mpc: primary optimizer failed; using Core DP fallback", "err", err)
 			slots = fallbackSlots
 			solveStart := time.Now()
-			plan = Optimize(slots, p)
-			plan.Solver = coreSolverInfo(p, msSince(solveStart))
+			plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+			setCoreReserveSolver(&plan, p, msSince(solveStart))
 			// Same solver, different standing: the operator asked for the
 			// external planner and did not get it. Everything that warns about
 			// a degraded optimizer keys on this flag, not on the engine name.
@@ -1861,6 +1864,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	for i := range plan.Actions {
 		mode, _, _ := actionToSlot(plan.Actions[i], p.Mode)
 		plan.Actions[i].EMSMode = mode
+		pvPoint, loadPoint := baseForecastSlots[i].PVW, baseForecastSlots[i].LoadW
+		plan.Actions[i].ForecastPVW = &pvPoint
+		plan.Actions[i].ForecastLoadW = &loadPoint
 	}
 
 	// Baselines — counter-factual dispatch costs over the same horizon
@@ -1868,7 +1874,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil {
+	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil && (plan.Solver == nil || plan.Solver.Backend != "ev_reserve") {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}
