@@ -2836,6 +2836,14 @@
       if (lp.commanded_reason === "fuse_limit") {
         text += " Rate is limited by the main fuse right now.";
       }
+    } else if (lp.commanded_known && lp.commanded_w === 0 && !lp.power_unavailable &&
+        typeof lp.target_soc === "number" && lp.target_soc > 0 && lp.target_soc <= 1 &&
+        typeof lp.current_soc === "number" && lp.current_soc >= lp.target_soc && lp.current_soc <= 1 &&
+        (lp.soc_source === "vehicle" || lp.soc_source === "inferred")) {
+      text = "Charge target reached (" + Math.round(lp.target_soc * 100) + "%).";
+      text += lp.soc_source === "vehicle"
+        ? " Battery level reported by the car."
+        : " Battery level is estimated by FTW; check the car to confirm.";
     } else if (lp.charging_declined) {
       text = "The car stopped asking for charge. Check its charge limit or schedule. This does not confirm the battery is full.";
     } else if (lp.commanded_known && lp.commanded_w > 0) {
