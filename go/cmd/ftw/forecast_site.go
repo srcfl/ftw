@@ -101,23 +101,24 @@ func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.Cat
 	}
 	driverInputs := append([]config.Driver(nil), cfg.Drivers...)
 	sort.Slice(driverInputs, func(i, j int) bool { return driverInputs[i].Name < driverInputs[j].Name })
+	learningDrivers := forecastLearningDrivers(v.Meter, v.Options.ExpectedFlows, driverInputs)
 	scripts := make(map[string]string)
-	for _, d := range driverInputs {
+	for _, d := range learningDrivers {
 		if digest, err := forecastReleaseScriptDigest(d.Lua); err == nil {
 			scripts[d.Name] = digest
 		} else {
 			scripts[d.Name] = "unavailable"
 		}
 	}
-	// Only the digest leaves this function. Driver measurement settings and
-	// stable hardware bindings must invalidate learning when they change.
+	// Only measurement drivers enter the learning hash. A charger packaging
+	// change (default mode, metadata) must not wipe house and PV models.
 	data, err := json.Marshal(struct {
 		Meter, Timezone string
 		Options         telemetry.ForecastOptions
 		Weather         *config.Weather
 		Drivers         []config.Driver
 		Scripts         map[string]string
-	}{v.Meter, v.Timezone, v.Options, weather, driverInputs, scripts})
+	}{v.Meter, v.Timezone, v.Options, weather, learningDrivers, scripts})
 	if err != nil {
 		slog.Warn("forecast configuration is not serializable", "err", err)
 		v.Options.HouseholdInvalidReason = "invalid_forecast_configuration"
@@ -225,6 +226,32 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 		}
 	}
 	return changed
+}
+
+// forecastLearningDrivers are the physical measurement sources whose script
+// or scaling change must reset learned PV/load models. EV/V2X chargers stay
+// in ExpectedFlows for household completeness, but their Lua packaging is
+// not a house or PV measurement contract.
+func forecastLearningDrivers(meter string, flows []telemetry.ForecastFlow, drivers []config.Driver) []config.Driver {
+	keep := map[string]bool{}
+	if meter != "" {
+		keep[meter] = true
+	}
+	for _, flow := range flows {
+		switch flow.DerType {
+		case telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery:
+			if flow.Driver != "" {
+				keep[flow.Driver] = true
+			}
+		}
+	}
+	out := make([]config.Driver, 0, len(keep))
+	for _, d := range drivers {
+		if keep[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func forecastIdentityStrength(id string) int {

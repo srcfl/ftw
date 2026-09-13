@@ -173,6 +173,11 @@ type SlotDirective struct {
 	// Runtime uses planned EV energy to keep surplus-only EV from being
 	// satisfied by home-battery discharge if a stale plan tries.
 	LoadpointEnergyWh map[string]float64
+	// LoadpointMaxPowerW is the legal on-power for each loadpoint's duty
+	// cycle. Fuse sharing must reserve this instantaneous demand, not the
+	// slot-average Wh/time, or a short pulse can share the fuse with a
+	// battery charge that no longer fits when the charger actually turns on.
+	LoadpointMaxPowerW map[string]float64
 }
 
 // SlotDirectiveFunc returns the plan's energy-allocation directive for

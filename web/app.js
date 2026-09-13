@@ -2863,6 +2863,17 @@
       text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "pv_surplus_pause") {
       text = "Paused: waiting for PV surplus — solar is below the charger's minimum step right now." + kwPlanned;
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "no_plan_budget") {
+      var deadlineMs = lp.target_time ? Date.parse(lp.target_time) : NaN;
+      if (isFinite(deadlineMs) && deadlineMs <= Date.now()) {
+        text = "The ready time has passed, so FTW is not charging. Set a new ready time, or choose Charge now.";
+      } else {
+        text = "No charging energy in this interval. The plan will charge later, or choose Charge now.";
+      }
+      if (lp.soc_source === "assumed") {
+        text += " Battery level is assumed, not read from the car.";
+      }
+      tone = "var(--text)";
     } else if (winActive) {
       text = "Paused by the box — charging resumes on its own." + kwPlanned;
     } else if (lp.plan_next_start_ms > Date.now()) {

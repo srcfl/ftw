@@ -17,9 +17,13 @@ class BundleBoundaryTest(unittest.TestCase):
         shutil.copytree(HERE / "bundle", self.root)
 
     def test_unsupported_host_keeps_integrity_checks(self):
-        with patch("verify.platform.system", return_value="Darwin"), patch("verify.platform.machine", return_value="arm64"):
+        with patch("verify.platform.system", return_value="Windows"), patch("verify.platform.machine", return_value="amd64"):
             self.assertIsNone(host_key())
             self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
+
+    def test_darwin_host_is_executable_when_bundled(self):
+        with patch("verify.platform.system", return_value="Darwin"), patch("verify.platform.machine", return_value="arm64"):
+            self.assertEqual(host_key(), "darwin-arm64")
 
     def test_valid_bundle(self):
         self.assertEqual(verify_bundle(self.root)["product"], "energyplan")

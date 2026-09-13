@@ -25,5 +25,6 @@ func SlotDirectiveFromMPC(d mpc.SlotDirective) SlotDirective {
 		HasPlannedGridW:     true,
 		LivePVSurplusSoCCap: d.LivePVSurplusSoCCap,
 		LoadpointEnergyWh:   maps.Clone(d.LoadpointEnergyWh),
+		LoadpointMaxPowerW:  maps.Clone(d.LoadpointMaxPowerW),
 	}
 }

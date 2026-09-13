@@ -59,6 +59,7 @@ test("each soc_source is worded for an operator; the raw token never shows", asy
     inferred: "estimated",
     vehicle: "from the car",
     completed: "pinned after the car stopped asking",
+    assumed: "not confirmed by the car",
   };
   for (const [token, phrase] of Object.entries(words)) {
     const row = socRow(await renderCard({ ...base, soc_source: token }));
