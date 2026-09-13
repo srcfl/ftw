@@ -1765,9 +1765,10 @@ func main() {
 					PluggedIn:        true,
 					TargetSoC:        targetSoC,
 					TargetSlotIdx:    targetSlot,
+					MinChargeW:       st.MinChargeW,
 					MaxChargeW:       st.MaxChargeW,
-					AllowedStepsW:    st.AllowedStepsW,
-					ChargeEfficiency: 0.9,
+					AllowedStepsW:    planningStepsForLoadpoint(st, cfg),
+					ChargeEfficiency: loadpoint.DefaultChargeEfficiency,
 					SurplusOnly:      loadpoint.PlannerTreatsLoadpointAsSurplusOnly(st.SurplusOnly, deferGridPlan),
 					NoBatteryToEV:    noBatteryToEV,
 				})
