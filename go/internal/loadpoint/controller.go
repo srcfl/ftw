@@ -1601,7 +1601,6 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 			manualUpdatedAt = hold.UpdatedAt
 		}
 		c.manager.setCommandedForManual(lpCfg.ID, 0, "site_meter_stale", manualUpdatedAt)
-		c.resumeAfterZeroOffer(ctx, lpCfg, sample, 0, now)
 		payload, err := json.Marshal(map[string]any{
 			"action":  "ev_set_current",
 			"power_w": 0,
@@ -1610,6 +1609,8 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 			if err := c.sendDispatchWithDeadline(ctx, lpCfg.DriverName, payload); err != nil {
 				slog.Warn("loadpoint safety standdown", "lp", lpCfg.ID,
 					"driver", lpCfg.DriverName, "err", err)
+			} else {
+				c.resumeAfterZeroOffer(ctx, lpCfg, sample, 0, now)
 			}
 		}
 		return
@@ -1923,7 +1924,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	}
 	// Resume only a zero offer from this transport and plug session. A failed
 	// optional resume keeps its retry state even after recording positive W.
-	if haveOffer {
+	if haveOffer && offerW > 0 {
 		c.resumeAfterZeroOffer(ctx, lpCfg, sample, offerW, now)
 	}
 	// The one command whose outcome decides whether core can actuate this
@@ -1944,6 +1945,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// particular, a timeout may still be unwinding inside the registry;
 		// its per-driver owner restores default before another command runs.
 		return
+	}
+	if haveOffer && offerW <= 0 {
+		c.resumeAfterZeroOffer(ctx, lpCfg, sample, 0, now)
 	}
 	if !c.driverCanDispatch(lpCfg.DriverName) {
 		// The outcome callback can close Core's health gate synchronously.

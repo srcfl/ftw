@@ -203,3 +203,36 @@ func TestTickCancelsResumeRetryWhenSessionProofChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestFailedZeroCommandDoesNotAuthorizeResume(t *testing.T) {
+	for _, safetyStanddown := range []bool{false, true} {
+		now := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+		cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}
+		dir := &Directive{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), LoadpointEnergyWh: map[string]float64{"garage": 0}}
+		c := newTestController(t, []Config{cfg}, dir, map[string]EVSample{"easee": {Connected: true, RequestActive: true}}, &fakeSender{})
+		resumes := 0
+		c.send = func(_ context.Context, _ string, payload []byte) error {
+			var cmd struct {
+				Action string  `json:"action"`
+				PowerW float64 `json:"power_w"`
+			}
+			if err := json.Unmarshal(payload, &cmd); err != nil {
+				return err
+			}
+			if cmd.Action == "ev_resume" {
+				resumes++
+				return nil
+			}
+			if cmd.PowerW == 0 {
+				return errors.New("zero command rejected")
+			}
+			return nil
+		}
+		c.TickWithDispatch(context.Background(), now, !safetyStanddown)
+		dir.LoadpointEnergyWh["garage"] = 2750
+		c.Tick(context.Background(), now.Add(5*time.Second))
+		if resumes != 0 {
+			t.Fatal("failed standdown was treated as an acknowledged pause")
+		}
+	}
+}
