@@ -910,3 +910,32 @@ jobs:
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}" \
             "${DISCORD_WEBHOOK}"
+
+  addon:
+    name: notify the Home Assistant app repository
+    runs-on: ubuntu-latest
+    needs: [meta, publish]
+    # Same contract as the beta workflow: srcfl/home-assistant-addons verifies
+    # the stable release against ftw-promotion-receipt.json and the registry;
+    # this event only shortens the wait for its hourly sync.
+    if: ${{ github.repository == 'srcfl/ftw' }}
+    steps:
+      - name: Dispatch ftw-release to srcfl/home-assistant-addons
+        env:
+          GH_TOKEN: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          SOURCE_BETA: ${{ needs.meta.outputs.source_beta }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::HA_ADDON_DISPATCH_TOKEN is not set; srcfl/home-assistant-addons picks up ${TAG} on its hourly sync."
+            exit 0
+          fi
+          gh api repos/srcfl/home-assistant-addons/dispatches \
+            --method POST \
+            -f event_type=ftw-release \
+            -f "client_payload[channel]=stable" \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[source_beta]=${SOURCE_BETA}" \
+            -f "client_payload[commit]=${GITHUB_SHA}"
+          echo "Dispatched ftw-release for ${TAG} (stable, from ${SOURCE_BETA})."
