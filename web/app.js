@@ -2822,6 +2822,9 @@
         ? "Charger status is out of date. FTW cannot confirm whether the car is charging."
         : "Waiting for the charger's first status report.";
       tone = "var(--text)";
+    } else if (lp.power_unavailable) {
+      text = "Paused: charger power data is out of date. Charging resumes when readings recover.";
+      tone = "var(--text)";
     } else if (lp.manual_active) {
       // The same sentence as the charge controls, so the charger's own reason is
       // never hidden behind "manual charge is running".

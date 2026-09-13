@@ -125,7 +125,7 @@ func TestSessionEnergyOldCounterDoesNotLoseTrimmedPower(t *testing.T) {
 	}
 }
 
-func TestSessionProgressPersistsBetweenMinuteBoundaries(t *testing.T) {
+func TestSessionProgressCheckpointBoundsRestartGap(t *testing.T) {
 	store := &sessionMemory{data: map[string]string{}}
 	m := sessionManager(store, "garage", "charger")
 	at := time.Now().Add(-time.Hour).Truncate(time.Second)
@@ -144,8 +144,14 @@ func TestSessionProgressPersistsBetweenMinuteBoundaries(t *testing.T) {
 	m.SetNowFn(func() time.Time { return at })
 	m.ObserveSample("garage", s)
 	after, _ := m.State("garage")
-	if before.CurrentSoC != after.CurrentSoC || after.SoCRetention != "session" {
-		t.Fatalf("restart forgot measured progress: before=%+v after=%+v", before, after)
+	if math.Abs(before.DeliveredWhSession-after.DeliveredWhSession) >= 30 || after.SoCRetention != "session" {
+		t.Fatalf("restart exceeded checkpoint bound: before=%+v after=%+v", before, after)
+	}
+	s.SessionWh, s.EnergyAt = before.DeliveredWhSession, s.PowerAt
+	m.ObserveSample("garage", s)
+	after, _ = m.State("garage")
+	if math.Abs(before.CurrentSoC-after.CurrentSoC) > 1e-9 {
+		t.Fatalf("counter catch-up lost progress: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -256,5 +262,53 @@ func TestOutOfOrderPowerDoesNotEraseEstimatedProgress(t *testing.T) {
 	s.PowerAt, s.PowerW = start.Add(30*time.Second), 3600
 	if got := e.observe(s, start.Add(70*time.Second)); got != 1070 {
 		t.Fatalf("latest power did not resume correctly: %v", got)
+	}
+}
+
+type countedSessionStore struct {
+	*sessionMemory
+	writes int
+}
+
+func (s *countedSessionStore) SaveConfig(key, value string) error {
+	s.writes++
+	return s.sessionMemory.SaveConfig(key, value)
+}
+
+func TestSessionCheckpointsBoundWritesAndSaveStoppedProgress(t *testing.T) {
+	store := &countedSessionStore{sessionMemory: &sessionMemory{data: map[string]string{}}}
+	m := sessionManager(store, "garage", "charger")
+	start := time.Now().Add(-time.Hour)
+	at := start
+	m.SetNowFn(func() time.Time { return at })
+	s := EVSample{Connected: true, RequestActive: true, DeviceID: "easee:A", SessionID: "session-1", SessionWh: 1000, EnergyAt: start, PowerW: 3600, PowerAt: start}
+	m.ObserveSample("garage", s)
+	m.SetCurrentSoC("garage", .76)
+	for sec := 2; sec <= 180; sec += 2 {
+		at, s.PowerAt = start.Add(time.Duration(sec)*time.Second), start.Add(time.Duration(sec)*time.Second)
+		m.ObserveSample("garage", s)
+	}
+	if store.writes > 8 {
+		t.Fatalf("90 control ticks wrote %d checkpoints", store.writes)
+	}
+	at = at.Add(2 * time.Second)
+	s.PowerAt, s.PowerW = at, 0
+	m.ObserveSample("garage", s)
+	before, _ := m.State("garage")
+	writes := store.writes
+	for i := 0; i < 30; i++ {
+		at = at.Add(2 * time.Second)
+		s.PowerAt = at
+		m.ObserveSample("garage", s)
+	}
+	if store.writes != writes {
+		t.Fatal("unchanged stopped energy kept writing checkpoints")
+	}
+	m = sessionManager(store, "garage", "charger")
+	m.SetNowFn(func() time.Time { return at })
+	m.ObserveSample("garage", s)
+	after, _ := m.State("garage")
+	if before.CurrentSoC != after.CurrentSoC || after.SoCRetention != "session" {
+		t.Fatalf("stop did not save final progress: before=%+v after=%+v", before, after)
 	}
 }

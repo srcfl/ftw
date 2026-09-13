@@ -1567,7 +1567,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
 	c.manager.ObserveSample(lpCfg.ID, sample)
 	c.restoreManualHoldForSession(lpCfg.ID)
-	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
+	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed && !sample.PowerUnavailable)
 	if !sample.Connected {
 		delete(c.resumeOffers, lpCfg.ID)
 		c.resetSurplusSession(lpCfg.ID)
@@ -1588,14 +1588,14 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// outcome here; driverActuationTracker.update owns the timed retry.
 		return
 	}
-	if !dispatchAllowed {
+	if !dispatchAllowed || sample.PowerUnavailable {
 		// The observation above is deliberately retained: dashboards, SoC
-		// inference and plug/unplug state must stay live while the site-meter
+		// inference and plug/unplug state must stay live while a measurement
 		// safety gate is closed. Do not advance manual-hold completion timers
 		// or auto-wake state while we are the reason current is withheld; a
 		// persistent hold or schedule must resume normally after recovery.
 		// The outcome is deliberately not reported to dispatchOutcome: this
-		// is core withdrawing under a stale site meter, not core actuating,
+		// is core withdrawing under stale measurements, not core actuating,
 		// and the staleness tracker already owns that transition. A charger
 		// that refuses the standdown must not be excluded for it — the fault
 		// being handled is the meter's.
@@ -1605,7 +1605,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		if hold, held := c.GetManualHold(lpCfg.ID, now); held {
 			manualUpdatedAt = hold.UpdatedAt
 		}
-		c.manager.setCommandedForManual(lpCfg.ID, 0, "site_meter_stale", manualUpdatedAt)
+		reason := "site_meter_stale"
+		if dispatchAllowed && sample.PowerUnavailable {
+			reason = "charger_power_stale"
+		}
+		c.manager.setCommandedForManual(lpCfg.ID, 0, reason, manualUpdatedAt)
 		payload, err := json.Marshal(map[string]any{
 			"action":  "ev_set_current",
 			"power_w": 0,

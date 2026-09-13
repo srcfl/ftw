@@ -1,9 +1,6 @@
 package mpc
 
-import (
-	"math"
-	"time"
-)
+import "time"
 
 // A restored level or charging outside the plan changes the remaining duty.
 // Reuse the existing reactive loop and cooldown, including when PV/load
@@ -38,7 +35,7 @@ func (s *Service) loadpointStateDiverged(plan *Plan, params Params, now time.Tim
 		if initial == nil {
 			return true
 		}
-		expected := initial.InitialSoC
+		expectedMin, expectedMax := initial.InitialSoC, initial.InitialSoC
 		efficiency := initial.ChargeEfficiency
 		if efficiency <= 0 {
 			efficiency = .9
@@ -53,11 +50,21 @@ func (s *Service) loadpointStateDiverged(plan *Plan, params Params, now time.Tim
 			if len(a.LoadpointPowerW) == 0 && len(previous) == 1 {
 				watts = a.LoadpointW
 			}
-			expected += max(0, watts) * float64(elapsed) / 3600000 * efficiency / initial.CapacityWh
+			lowWh := max(0, watts) * float64(elapsed) / 3600000
+			highWh := lowWh
+			if peak := a.LoadpointMaxPowerW[lp.ID]; peak > 0 {
+				// A duty plan budgets average watts but executes a legal peak.
+				// Allow any placement of that pulse within the remaining slot.
+				budgetWh := max(0, watts) * float64(end-start) / 3600000
+				highWh = min(budgetWh, peak*float64(elapsed)/3600000)
+				lowWh = max(0, budgetWh-peak*float64(end-start-elapsed)/3600000)
+			}
+			expectedMin += lowWh * efficiency / initial.CapacityWh
+			expectedMax += highWh * efficiency / initial.CapacityWh
 		}
 		// Two percentage points avoid replanning for rounding and normal meter
 		// delay. A larger restoration/correction must not wait fifteen minutes.
-		if math.Abs(lp.InitialSoC-min(1, expected)) > .02 {
+		if lp.InitialSoC < min(1, expectedMin)-.02 || lp.InitialSoC > min(1, expectedMax)+.02 {
 			return true
 		}
 	}

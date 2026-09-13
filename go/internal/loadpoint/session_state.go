@@ -187,10 +187,14 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 	} else if !lp.socConfirmed || deviceID == "" || sessionID == "" || m.sessionStore == nil {
 		lp.socRetention = "unavailable"
 	}
-	// Save each change inferred from power: the cloud counter can remain
-	// behind through an arbitrary restart. Unchanged estimates do not write.
+	// Bound unsaved progress without writing state.db on every control tick.
+	// At 75 kWh, 30 Wh is 0.036 percentage points after charging loss. A stop,
+	// user correction or failed save still gets an immediate checkpoint.
+	progressChanged := lp.deliveredWhSession != lp.lastSavedEnergyWh
+	checkpointDue := math.Abs(lp.deliveredWhSession-lp.lastSavedEnergyWh) >= 30 ||
+		m.now().Sub(lp.lastSavedEnergyAt) >= 30*time.Second || lp.currentPowerW == 0
 	saveProgress := lp.socConfirmed && lp.sessionID != "" && lp.energy.counterKnown &&
-		(lp.socRetention != "session" || (lp.energy.source == "power" && lp.deliveredWhSession != lp.lastSavedEnergyWh))
+		(lp.socRetention != "session" || (lp.energy.source == "power" && progressChanged && checkpointDue))
 	m.mu.Unlock()
 	if saveProgress {
 		m.persistSession(id)
@@ -247,6 +251,7 @@ func (m *Manager) persistSession(id string) {
 		lp.socRetention = retention
 		if retention == "session" {
 			lp.lastSavedEnergyWh = lp.deliveredWhSession
+			lp.lastSavedEnergyAt = m.now()
 		}
 	}
 	m.mu.Unlock()

@@ -13,20 +13,25 @@ type energyPoint struct {
 type meteredEnergy struct {
 	driver, device, session string
 	generation              uint64
-	last                    EVSample
 	meter                   sessionEnergy
 	points                  []energyPoint
 }
 
 // observeEnergy uses the charger counter when available, otherwise integrates
 // successive fresh power readings. It never applies today's power to an entire
-// elapsed slot. A transport/session change or an unmeasured gap breaks coverage.
+// elapsed slot. A transport/session change resets delivery. Measurement gaps
+// add no assumed charge and cannot erase energy already spent in the slot.
 func (c *Controller) observeEnergy(cfg Config, sample EVSample, now time.Time) {
 	if c.energySamples == nil {
 		c.energySamples = make(map[string]*meteredEnergy)
 	}
-	if !sample.Connected || sample.ConnectionUnknown || sample.PowerUnavailable || math.IsNaN(sample.PowerW) || math.IsInf(sample.PowerW, 0) {
+	if !sample.Connected || sample.ConnectionUnknown {
 		delete(c.energySamples, cfg.ID)
+		return
+	}
+	if sample.PowerUnavailable || math.IsNaN(sample.PowerW) || math.IsInf(sample.PowerW, 0) {
+		// Dispatch pauses without measurements. Retain already spent energy so
+		// recovery cannot repeat the same pulse while its counter is delayed.
 		return
 	}
 	e := c.energySamples[cfg.ID]
@@ -52,10 +57,8 @@ func (c *Controller) observeEnergy(cfg Config, sample EVSample, now time.Time) {
 		if !measuredAt.After(previous.at) {
 			return
 		}
-		counterAdvanced := !sample.SessionWhUnavailable && sample.SessionWh > e.last.SessionWh && (sample.EnergyAt.IsZero() || sample.EnergyAt.After(previous.at))
-		if measuredAt.Sub(previous.at) > sample.PowerWindow() && !counterAdvanced {
-			e.points = nil
-		}
+		// sessionEnergy leaves a measurement gap unintegrated. Keep its known
+		// delivery before the gap rather than reopening an already spent budget.
 	}
 	counterWasKnown := e.meter.counterKnown
 	wh := e.meter.observe(sample, now)
@@ -68,7 +71,6 @@ func (c *Controller) observeEnergy(cfg Config, sample EVSample, now time.Time) {
 		}
 	}
 	e.points = append(e.points, energyPoint{at: measuredAt, wh: wh})
-	e.last = sample
 	// Keep one boundary reading for a two-hour slot, with a hard cap for
 	// callers ticking faster than production's five-second loop.
 	for len(e.points) > 2048 || (len(e.points) > 2 && e.points[1].at.Before(now.Add(-2*time.Hour))) {

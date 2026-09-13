@@ -74,6 +74,9 @@ func TestDelayedCounterProgressSurvivesDatabaseReopen(t *testing.T) {
 		sample.PowerAt = at
 		m.ObserveSample("garage", sample)
 	}
+	// A stopped charge checkpoints immediately, including between periodic saves.
+	sample.PowerW = 0
+	m.ObserveSample("garage", sample)
 	before, _ := m.State("garage")
 	if err := store.Close(); err != nil {
 		t.Fatal(err)

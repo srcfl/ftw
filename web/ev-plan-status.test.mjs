@@ -68,3 +68,10 @@ test('reached goal explains a stopped charge and names the level source', () => 
     assert.doesNotMatch(planStatus({ ...lp, ...change }, {}).textContent, /target reached/);
   }
 });
+
+test('unavailable charger power explains the pause without declaring completion', () => {
+  const text = planStatus({ plugged_in: true, power_unavailable: true,
+    charger: { available: true }, manual_active: true }, {}).textContent;
+  assert.match(text, /Paused: charger power data is out of date/);
+  assert.doesNotMatch(text, /target reached|Charging on plan/);
+});
