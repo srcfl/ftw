@@ -17,6 +17,9 @@
 ^scripts/install-macos\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
 ^scripts/enable-modular-stack\.sh:.*forty-two-watts.*$
 ^scripts/migrate-legacy-compose\.sh:.*forty-two-watts.*$
+# Migrated Compose installs may keep the legacy service name; this script
+# must detect it without guessing when both names exist.
+^scripts/upgrade-paired-release\.sh:.*forty-two-watts.*$
 ^Makefile:.*-C "\$\$stage" ftw ftw-backup forty-two-watts.*$
 ^scripts/restore-full-backup\.sh:for candidate in ftw forty-two-watts; do$
 ^README\.md:Existing Forty Two Watts or older FTW deployments must use the$

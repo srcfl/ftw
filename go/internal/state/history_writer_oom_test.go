@@ -37,8 +37,18 @@ func TestLiveWriterRecoversWholeTickAfterOutOfMemory(t *testing.T) {
 		t.Fatalf("writer did not recover: %+v: %v", s.HistoryWriterStatus(), err)
 	}
 	st := s.HistoryWriterStatus()
-	if st.Accepted != 2 || st.Committed != 2 || st.Pending != 0 || st.Rejected != 0 || st.LastError != "" || st.MaintenanceError != "" || st.MaintenanceRuns == 0 {
-		t.Fatalf("OOM recovery status=%+v", st)
+	if st.Accepted != 2 || st.Committed != 2 || st.Pending != 0 || st.Rejected != 0 || st.LastError != "" {
+		t.Fatalf("live SQLite commit status=%+v", st)
+	}
+	got, err := s.LoadSeries("meter", "power", 0, base+120_000, 0)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("live series=%v %v", got, err)
+	}
+	if _, err := s.history.Exec(`SET memory_limit='256MB'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.sealAndPruneHot(ctx, base+120_000, 0); err != nil {
+		t.Fatal(err)
 	}
 	var historyRows, sampleRows int
 	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_hot`).Scan(&historyRows); err != nil {
@@ -55,7 +65,7 @@ func TestLiveWriterRecoversWholeTickAfterOutOfMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if historyRows != 2 || sampleRows != 2 || energy != 20 || counter != 120 {
-		t.Fatalf("partial or duplicate tick: history=%d samples=%d energy=%v counter=%v", historyRows, sampleRows, energy, counter)
+		t.Fatalf("archive seal partial: history=%d samples=%d energy=%v counter=%v", historyRows, sampleRows, energy, counter)
 	}
 }
 

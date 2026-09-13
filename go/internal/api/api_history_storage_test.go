@@ -30,7 +30,7 @@ func TestHealthShowsRejectedPrimaryHistory(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if rr.Code != 200 || body.Status != "degraded" || body.History.Engine != "duckdb" || body.History.Role != "primary" || body.History.Writer.Rejected != 1 || body.History.Writer.Committed != 0 {
+	if rr.Code != 200 || body.Status != "degraded" || body.History.Engine != "duckdb" || body.History.Role != "archive" || body.History.Writer.Rejected != 1 || body.History.Writer.Committed != 0 {
 		t.Fatalf("health hid a collection error: %s", rr.Body.String())
 	}
 }

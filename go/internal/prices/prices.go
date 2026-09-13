@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
@@ -535,16 +536,28 @@ func (a Applier) Apply(sekPerKwh float64) (spotOre, totalOre float64) {
 
 // Service wraps a provider + store + scheduler.
 type Service struct {
-	Provider Provider
-	Store    *state.Store
-	Applier  Applier
-	Zone     string
+	Provider  Provider
+	Store     *state.Store
+	Applier   Applier
+	applierMu sync.Mutex
+	Zone      string
 	// Currency the stored minor units are in. Read by the API so the UI
 	// can label them.
 	Currency string
 
 	stop chan struct{}
 	done chan struct{}
+}
+
+// SetApplier swaps tariff + VAT as one value so a fetch in flight cannot
+// persist a mixed old/new pair.
+func (s *Service) SetApplier(a Applier) {
+	if s == nil {
+		return
+	}
+	s.applierMu.Lock()
+	s.Applier = a
+	s.applierMu.Unlock()
 }
 
 // FXConverter abstracts currency conversion so the prices package
@@ -680,8 +693,11 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		}
 		points := make([]state.PricePoint, 0, len(rows))
 		nowMs := time.Now().UnixMilli()
+		s.applierMu.Lock()
+		applier := s.Applier
+		s.applierMu.Unlock()
 		for _, r := range rows {
-			spotOre, totalOre := s.Applier.Apply(r.SEKPerKWh)
+			spotOre, totalOre := applier.Apply(r.SEKPerKWh)
 			slot := r.SlotLenMin
 			if slot <= 0 {
 				slot = 60

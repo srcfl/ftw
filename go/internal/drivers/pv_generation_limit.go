@@ -25,8 +25,15 @@ func (d *LuaDriver) clearPVGenerationLimit() {
 func (d *LuaDriver) refreshPVGenerationLimit() {
 	d.pvProofMu.Lock()
 	defer d.pvProofMu.Unlock()
-	const reviewedFerroamp = "c04d137d595ba50b8c6178c82d917b115dbe9a7cbd2cf671ef2660e871f96de3"
-	if d.loadedSourceSHA256 != reviewedFerroamp || d.Env.MQTT == nil || d.initConfig["_supports_pv_curtail"] != true {
+	// The second reviewed version adds configured serial identity and a version
+	// bump; its generation-limit and release commands are unchanged.
+	switch d.loadedSourceSHA256 {
+	case "c04d137d595ba50b8c6178c82d917b115dbe9a7cbd2cf671ef2660e871f96de3",
+		"81de3c2f78618f4a30994b0397f4b6b4b56273a33946ae2d23f75a27698bc399":
+	default:
+		return
+	}
+	if d.Env.MQTT == nil || d.initConfig["_supports_pv_curtail"] != true {
 		return
 	}
 	w, err := strconv.ParseFloat(fmt.Sprint(d.initConfig["pplim_release_w"]), 64)
@@ -34,7 +41,7 @@ func (d *LuaDriver) refreshPVGenerationLimit() {
 		return
 	}
 	w = math.Floor(w)
-	d.pvProof = PVGenerationLimit{Token: fmt.Sprintf("%s/%d/%.0f", reviewedFerroamp, d.pvProofEpoch, w), MinW: 2, MaxW: w}
+	d.pvProof = PVGenerationLimit{Token: fmt.Sprintf("%s/%d/%.0f", d.loadedSourceSHA256, d.pvProofEpoch, w), MinW: 2, MaxW: w}
 }
 
 func (d *LuaDriver) PVGenerationLimit() PVGenerationLimit {
@@ -47,7 +54,7 @@ func (r *Registry) PVGenerationLimit(name string) PVGenerationLimit {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rd := r.rec[name]
-	if rd == nil || rd.cfg.Disabled || rd.cfg.ObserveOnly || rd.cfg.BatteryTelemetryOnly || !rd.cfg.SupportsPVCurtail {
+	if rd == nil || rd.readOnly || rd.cfg.Disabled || rd.cfg.ObserveOnly || rd.cfg.BatteryTelemetryOnly || !rd.cfg.SupportsPVCurtail {
 		return PVGenerationLimit{}
 	}
 	s := rd.controlStatus()

@@ -1,17 +1,81 @@
-Sourceful Energyplan Binary License
-Copyright (c) 2026 Sourceful. All rights reserved.
+Sourceful Energyplan Home Use Binary License 1.0
+Copyright (c) 2026 Sourceful Labs AB. All rights reserved.
 
-Sourceful grants permission to use the unmodified ftw-solver binaries with
-FTW and to redistribute them, without changes, as part of FTW distributions,
-including commercial distributions, provided this license and the accompanying
-third-party notices remain included.
+1. Scope
 
-The Energyplan solver is proprietary. No license to its source code is granted.
-Other uses or distribution require a separate license from Sourceful. Third-party
-components retain their own licenses as listed in THIRD-PARTY-NOTICES.txt.
-This license does not revoke rights previously granted for an earlier version.
+This license applies only to the Energyplan binaries delivered with this
+license by Sourceful Labs AB ("Sourceful"). It grants no rights to Energyplan
+source code, tests or build tools. Third-party components keep their own
+licenses and rights, including those in THIRD-PARTY-NOTICES.txt.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. TO THE EXTENT PERMITTED BY LAW, SOURCEFUL IS NOT LIABLE FOR
-CLAIMS, DAMAGES OR OTHER LIABILITY ARISING FROM USE OF THE SOFTWARE.
+"FTW" means Sourceful's FTW home energy management software, including
+modified versions that comply with their applicable licenses. Renaming FTW
+does not by itself change this definition. This license grants no trademark
+or endorsement rights.
+
+"Home Use" means use by a natural person, with FTW, to plan, forecast and
+manage energy for that person's own private household, including a residence
+they own or rent. Household energy savings and export of surplus energy from
+that household's own generation are permitted. Working from home does not by
+itself exclude an otherwise private household. Home Use does not include
+operation for customers or tenants, a business energy installation, fleet
+or multi-customer operation, paid hosting or a commercial energy service.
+
+2. Free permission
+
+Subject to this license, Sourceful grants you a nonexclusive, worldwide,
+royalty-free right to download, copy, install and run the unmodified binaries
+with FTW solely for Home Use. You may make backup copies and move your copy
+between your own household devices. No subscription, cloud connection or
+periodic renewal is required by this license.
+
+You may redistribute the unmodified binaries without charge as part of FTW
+solely for Home Use, provided the distribution is noncommercial and includes
+this license and all accompanying third-party notices. Recipients receive
+these permissions directly from Sourceful. You must not present the binaries
+as open source or offer recipients broader rights to them.
+
+3. Uses requiring a separate license
+
+This license does not permit commercial use or distribution of the binaries,
+including sale or resale with hardware or software, OEM or white-label
+bundling, paid installation or support involving the binaries, hosting,
+managed operation, optimization for customers, or incorporation into a
+commercial platform. Giving the binary away within a paid product or service
+does not make that distribution noncommercial. These uses require a separate
+written license from Sourceful. A household customer's status does not grant
+its installer, supplier or service provider commercial rights.
+
+Use outside Home Use, use apart from FTW, modification of the binaries and
+redistribution outside section 2 require a separate written license. Nothing
+here limits rights under mandatory law, including applicable rights to
+interoperability, or rights granted by a third-party component's license.
+
+4. Other software and prior grants
+
+This license imposes no restriction on FTW's AGPL-covered code, independent
+software, user data or outputs. It does not withdraw, narrow or replace rights
+already granted for any earlier copy or version of Energyplan, even if an
+earlier version has the same functionality. The license accompanying each
+copy and any separate agreement determine the rights to that copy.
+
+5. Duration and breach
+
+The permissions for a lawfully obtained copy last for its copyright term
+while you comply with this license. Sourceful cannot withdraw them merely
+by changing the terms for a later release. If you breach this license, these
+permissions end unless you cure the breach within 30 days after written
+notice from Sourceful. A termination does not end the rights of recipients
+who comply with their licenses. This license grants no right to future
+updates, support or access to Sourceful's services.
+
+6. Warranty and liability
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE OR NONINFRINGEMENT. TO THE EXTENT PERMITTED
+BY APPLICABLE LAW, SOURCEFUL IS NOT LIABLE FOR CLAIMS, DAMAGES OR OTHER
+LIABILITY ARISING FROM THE SOFTWARE OR ITS USE. NOTHING IN THIS LICENSE
+EXCLUDES MANDATORY CONSUMER RIGHTS OR LIABILITY THAT CANNOT LAWFULLY BE
+EXCLUDED, INCLUDING LIABILITY FOR INTENT OR GROSS NEGLIGENCE WHERE APPLICABLE.
+
+For a commercial license: https://www.sourceful.energy/contact

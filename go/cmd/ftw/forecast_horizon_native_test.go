@@ -64,8 +64,8 @@ func TestForecastPrimaryNativeFullHorizonArchivesEveryInterval(t *testing.T) {
 				t.Fatalf("primary changed horizon length: %d", len(resolved))
 			}
 			for i, slot := range resolved {
-				if slot.LoadW == legacy[i].LoadW {
-					t.Fatalf("native forecast fell back to legacy at interval %d of %d", i, tc.count)
+				if slot.LoadW != legacy[i].LoadW {
+					t.Fatalf("cold load replaced site prior at interval %d of %d", i, tc.count)
 				}
 			}
 			inputs.Record(resolved, resolved, "full-horizon-"+tc.name, origin.Add(time.Second).UnixMilli())
@@ -95,7 +95,7 @@ func TestForecastPrimaryNativeFullHorizonArchivesEveryInterval(t *testing.T) {
 			native := primarySeries(t, issue, "energyplan").Points
 			positiveNativePV := 0
 			for i, point := range primarySeries(t, issue, "champion").Points {
-				if point.LoadSource != "energyplan" || point.LoadW != resolved[i].LoadW || point.PVW != -resolved[i].PVW {
+				if point.LoadSource != "legacy" || native[i].LoadQuality != "cold_start" || native[i].LoadW != 500 || point.LoadW != resolved[i].LoadW || point.PVW != -resolved[i].PVW {
 					t.Fatalf("primary source or value changed at interval %d: %+v", i, point)
 				}
 				if native[i].PVKnown {

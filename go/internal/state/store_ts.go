@@ -526,6 +526,26 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 		}
 		return out, nil
 	}
+	hot, err := s.loadHotSeries(ctx, driver, metric, sinceMs, untilMs, 0)
+	if err != nil {
+		return nil, err
+	}
+	arch, err := s.loadArchiveSeriesRaw(ctx, driver, metric, sinceMs, untilMs)
+	if err != nil {
+		return nil, err
+	}
+	merged := mergeSeriesPoints(hot, arch)
+	out := make([]Sample, len(merged))
+	for i, p := range merged {
+		out[i] = Sample{Driver: driver, Metric: metric, TsMs: p.TsMs, Value: p.V}
+	}
+	return out, nil
+}
+
+func (s *Store) loadArchiveSeriesRaw(ctx context.Context, driver, metric string, sinceMs, untilMs int64) ([]SeriesPoint, error) {
+	if s.history == nil || untilMs < sinceMs {
+		return nil, nil
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return nil, err
 	}
@@ -537,7 +557,6 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 	if !dOK || !mOK {
 		return nil, nil
 	}
-
 	rows, err := s.history.QueryContext(ctx, `SELECT ts_ms, value FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
 		ORDER BY ts_ms ASC`, dID, mEnt.id, sinceMs, untilMs)
@@ -545,14 +564,14 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]Sample, 0, 256)
+	out := make([]SeriesPoint, 0, 256)
 	for rows.Next() {
-		var sm Sample
-		sm.Driver, sm.Metric = driver, metric
-		if err := rows.Scan(&sm.TsMs, &sm.Value); err != nil {
+		var p SeriesPoint
+		if err := rows.Scan(&p.TsMs, &p.V); err != nil {
 			return out, err
 		}
-		out = append(out, sm)
+		p.Min, p.Max, p.N = p.V, p.V, 1
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
@@ -629,6 +648,31 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 	if maxPoints <= 0 || untilMs < sinceMs {
 		return nil, nil
 	}
+	cut, hasHot, err := s.hotEarliestMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if hasHot && cut <= sinceMs {
+		return s.loadHotSeries(ctx, driver, metric, sinceMs, untilMs, maxPoints)
+	}
+	arch, err := s.loadArchiveSeriesBuckets(ctx, driver, metric, sinceMs, untilMs, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	if !hasHot {
+		return arch, nil
+	}
+	hot, err := s.loadHotSeries(ctx, driver, metric, cut, untilMs, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	return downsampleSeries(mergeSeriesPoints(hot, arch), sinceMs, untilMs, maxPoints), nil
+}
+
+func (s *Store) loadArchiveSeriesBuckets(ctx context.Context, driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
+	if s.history == nil || untilMs < sinceMs {
+		return nil, nil
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return nil, err
 	}
@@ -668,6 +712,22 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 // LatestSample returns the most recent value for one (driver, metric).
 // Returns sql.ErrNoRows if nothing has been recorded.
 func (s *Store) LatestSample(driver, metric string) (Sample, error) {
+	if s.hot != nil {
+		var sm Sample
+		err := s.hot.QueryRow(`SELECT s.ts_ms, s.value
+			FROM ts_samples s
+			JOIN ts_drivers d ON d.id = s.driver_id
+			JOIN ts_metrics m ON m.id = s.metric_id
+			WHERE d.name = ? AND m.name = ?
+			ORDER BY s.ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
+		if err == nil {
+			sm.Driver, sm.Metric = driver, metric
+			return sm, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Sample{}, err
+		}
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return Sample{}, err
 	}

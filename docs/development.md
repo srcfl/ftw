@@ -8,6 +8,7 @@ them.
 
 ```bash
 make dev          # simulators + core, creates config.local.yaml when missing
+make sim-ocpp     # Evify OCPP charge points against a running FTW
 make test         # Go and Python suites
 make e2e          # explicit full-stack simulator test
 npm test          # web tests

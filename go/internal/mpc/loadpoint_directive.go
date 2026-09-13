@@ -11,9 +11,10 @@ import (
 // budgets cannot drift from the plan the battery dispatch sees.
 func (d SlotDirective) LoadpointDirective() loadpoint.Directive {
 	return loadpoint.Directive{
-		SlotStart:         d.SlotStart,
-		SlotEnd:           d.SlotEnd,
-		LoadpointEnergyWh: d.LoadpointEnergyWh,
+		SlotStart:          d.SlotStart,
+		SlotEnd:            d.SlotEnd,
+		LoadpointEnergyWh:  d.LoadpointEnergyWh,
+		LoadpointMaxPowerW: d.LoadpointMaxPowerW,
 	}
 }
 

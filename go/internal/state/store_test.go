@@ -277,6 +277,42 @@ func TestDailyEnergyIntervalsDistinguishesNoDataFromZero(t *testing.T) {
 	})
 }
 
+func TestDailyEnergySkipsLongTelemetryGap(t *testing.T) {
+	base := time.Date(2026, 9, 11, 5, 40, 0, 0, time.UTC)
+	s := freshStore(t)
+	if err := s.RecordHistory(HistoryPoint{TsMs: base.UnixMilli(), PVW: -6000, GridW: -5000, LoadW: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(7 * time.Hour).UnixMilli(), PVW: -6000, GridW: -5000, LoadW: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.DailyEnergy(base.UnixMilli(), base.Add(8*time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Intervals != 0 {
+		t.Fatalf("Intervals = %d, want 0 (7h hole skipped)", d.Intervals)
+	}
+	if d.PVWh != 0 || d.ExportWh != 0 || d.LoadWh != 0 {
+		t.Fatalf("long gap invented energy: %+v", d)
+	}
+
+	if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(7*time.Hour + 3*time.Minute).UnixMilli(), PVW: -6000, GridW: -5000, LoadW: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.DailyEnergy(base.UnixMilli(), base.Add(8*time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Intervals != 1 {
+		t.Fatalf("Intervals = %d, want 1 (3 min interval kept)", d.Intervals)
+	}
+	wantPV := 6000.0 * 3 / 60
+	if d.PVWh < wantPV*0.99 || d.PVWh > wantPV*1.01 {
+		t.Fatalf("PVWh = %v, want ~%v", d.PVWh, wantPV)
+	}
+}
+
 func TestConfigPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s1, err := Open(path)
@@ -545,8 +581,12 @@ func TestHistoryDownsampling(t *testing.T) {
 func TestHistoryCounts(t *testing.T) {
 	s := freshStore(t)
 	now := time.Now().UnixMilli()
-	for i := 0; i < 5; i++ {
-		s.RecordHistory(HistoryPoint{TsMs: now + int64(i), JSON: "{}"})
+	pts := make([]HistoryPoint, 5)
+	for i := range pts {
+		pts[i] = HistoryPoint{TsMs: now + int64(i), JSON: "{}"}
+	}
+	if err := s.BulkRecordHistory(pts); err != nil {
+		t.Fatal(err)
 	}
 	hot, warm, cold, err := s.HistoryCounts()
 	if err != nil {
@@ -581,12 +621,16 @@ func TestHistoryPruneAggregates(t *testing.T) {
 	s := freshStore(t)
 	// Insert 20 rows, all older than HotRetention
 	oldMs := time.Now().UnixMilli() - int64(HotRetention.Milliseconds()) - 24*3600*1000
-	for i := 0; i < 20; i++ {
-		s.RecordHistory(HistoryPoint{
+	old := make([]HistoryPoint, 20)
+	for i := range old {
+		old[i] = HistoryPoint{
 			TsMs:  oldMs + int64(i)*1000,
 			GridW: float64(100 + i),
 			JSON:  "{}",
-		})
+		}
+	}
+	if err := s.BulkRecordHistory(old); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.Prune(context.Background()); err != nil {
 		t.Fatal(err)
@@ -694,12 +738,11 @@ func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
 	if err := s.SaveConfig("mode", "passive_arbitrage"); err != nil {
 		t.Fatal(err)
 	}
-	// Seed a history_hot row so we can verify exclusion. RecordHistory
-	// writes into history_hot directly.
-	if err := s.RecordHistory(HistoryPoint{
+	// Seed a DuckDB history_hot row so we can verify the snapshot skips it.
+	if err := s.BulkRecordHistory([]HistoryPoint{{
 		TsMs:  time.Now().UnixMilli(),
-		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890,
-	}); err != nil {
+		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890, JSON: "{}",
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	// Seed a long-format TS sample so ts_samples has rows too.
@@ -763,7 +806,7 @@ func TestBackupToCompressedPreservesCompleteHistory(t *testing.T) {
 	if err := s.SaveConfig("mode", "planner_self"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordHistory(HistoryPoint{TsMs: now, GridW: 1234}); err != nil {
+	if err := s.BulkRecordHistory([]HistoryPoint{{TsMs: now, GridW: 1234, JSON: "{}"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RecordSamples([]Sample{{Driver: "meter", Metric: "grid_w", TsMs: now, Value: 1234}}); err != nil {

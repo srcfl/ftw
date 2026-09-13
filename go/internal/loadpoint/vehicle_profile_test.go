@@ -21,12 +21,12 @@ func TestApplyVehicleProfileSessionScoped(t *testing.T) {
 		t.Fatalf("vehicle name missing from state: %+v", st)
 	}
 
-	// 20 kWh delivered on a 40 kWh car = +50 points from the 30 % anchor.
+	// 20 kWh delivered on a 40 kWh car = +45 points after charging losses from the 30 % anchor.
 	// With the configured 60 kWh it would only be +33 — the applied
 	// capacity must win.
 	m.Observe("a", true, 7000, 20000, true)
 	st, _ = m.State("a")
-	if st.CurrentSoC < 0.79 || st.CurrentSoC > 0.81 {
+	if st.CurrentSoC < 0.749 || st.CurrentSoC > 0.751 {
 		t.Fatalf("SoC should follow the applied 40 kWh capacity, got %v", st.CurrentSoC)
 	}
 

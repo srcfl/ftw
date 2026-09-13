@@ -3,6 +3,7 @@ package mpc
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"sync"
@@ -386,6 +387,39 @@ func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, max
 	s.mu.Unlock()
 }
 
+// UpdatePlannerScalars pushes operator planner knobs that do not rebuild
+// the optimizer process: SoC window, efficiency, export value, base load,
+// horizon and replan interval. The next replan (and the next ticker fire
+// for Interval) uses them. Engine / optimizer path still need a restart.
+func (s *Service) UpdatePlannerScalars(p Params, baseLoad float64, horizon, interval time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if p.SoCMin > 0 {
+		s.Defaults.SoCMin = p.SoCMin
+	}
+	if p.SoCMax > 0 {
+		s.Defaults.SoCMax = p.SoCMax
+	}
+	if p.ChargeEfficiency > 0 {
+		s.Defaults.ChargeEfficiency = p.ChargeEfficiency
+	}
+	if p.DischargeEfficiency > 0 {
+		s.Defaults.DischargeEfficiency = p.DischargeEfficiency
+	}
+	s.Defaults.PVChargeBonusOreKwh = p.PVChargeBonusOreKwh
+	s.Defaults.ExportOrePerKWh = p.ExportOrePerKWh
+	s.BaseLoad = baseLoad
+	if horizon > 0 {
+		s.Horizon = horizon
+	}
+	if interval > 0 {
+		s.Interval = interval
+	}
+	s.mu.Unlock()
+}
+
 // Latest returns the most recently computed plan (nil before first run).
 func (s *Service) Latest() *Plan {
 	if s == nil {
@@ -515,7 +549,8 @@ type SlotDirective struct {
 	// configured / active. The dispatch layer converts energy to
 	// instantaneous power via the same `remaining_wh × 3600 /
 	// remaining_s` formula it uses for the battery.
-	LoadpointEnergyWh map[string]float64
+	LoadpointEnergyWh  map[string]float64
+	LoadpointMaxPowerW map[string]float64
 
 	// LoadpointSoCTarget is the plan's EV SoC at SlotEnd per
 	// loadpoint. Used by the per-loadpoint divergence check.
@@ -580,6 +615,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			}
 		}
 		if len(a.LoadpointPowerW) > 0 {
+			d.LoadpointMaxPowerW = maps.Clone(a.LoadpointMaxPowerW)
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
 			d.LoadpointSoCTarget = make(map[string]float64, len(a.LoadpointPowerW))
 			for id, powerW := range a.LoadpointPowerW {
@@ -890,7 +926,11 @@ func (s *Service) OptimizerIsChampion() bool {
 func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
 	s.replan(ctx, "scheduled")
-	t := time.NewTicker(s.Interval)
+	interval := s.Interval
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
 	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
@@ -905,6 +945,13 @@ func (s *Service) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			s.mu.RLock()
+			next := s.Interval
+			s.mu.RUnlock()
+			if next > 0 && next != interval {
+				t.Reset(next)
+				interval = next
+			}
 			s.replan(ctx, "scheduled")
 		case <-reactiveTick:
 			s.checkDivergence(ctx)
@@ -1385,7 +1432,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.Latest()
 	}
 	now := s.planningNow()
-	untilMs := now.Add(s.Horizon).UnixMilli()
+	s.mu.RLock()
+	horizon := s.Horizon
+	baseLoad := s.BaseLoad
+	s.mu.RUnlock()
+	if horizon <= 0 {
+		horizon = 48 * time.Hour
+	}
+	untilMs := now.Add(horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
 
 	prices, err := s.Store.LoadPrices(s.Zone, sinceMs, untilMs)
@@ -1432,7 +1486,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			forecasts = captured.Weather
 		}
 	}
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
+	slots := buildSlots(prices, forecasts, baseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
 	// Resolve receives the complete legacy forecast, including verified limits,
 	// so its frozen shadow matches what the previous pipeline would have used.
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
@@ -1693,8 +1747,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		// not bet on sun that may not arrive.
 		slots = fallbackSlots
 		solveStart := time.Now()
-		plan = Optimize(slots, p)
-		plan.Solver = coreSolverInfo(p, msSince(solveStart))
+		plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+		setCoreReserveSolver(&plan, p, msSince(solveStart))
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if request.wasCanceledByService() {
@@ -1773,8 +1827,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			slog.Error("mpc: primary optimizer failed; using Core DP fallback", "err", err)
 			slots = fallbackSlots
 			solveStart := time.Now()
-			plan = Optimize(slots, p)
-			plan.Solver = coreSolverInfo(p, msSince(solveStart))
+			plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+			setCoreReserveSolver(&plan, p, msSince(solveStart))
 			// Same solver, different standing: the operator asked for the
 			// external planner and did not get it. Everything that warns about
 			// a degraded optimizer keys on this flag, not on the engine name.
@@ -1810,6 +1864,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	for i := range plan.Actions {
 		mode, _, _ := actionToSlot(plan.Actions[i], p.Mode)
 		plan.Actions[i].EMSMode = mode
+		pvPoint, loadPoint := baseForecastSlots[i].PVW, baseForecastSlots[i].LoadW
+		plan.Actions[i].ForecastPVW = &pvPoint
+		plan.Actions[i].ForecastLoadW = &loadPoint
 	}
 
 	// Baselines — counter-factual dispatch costs over the same horizon
@@ -1817,7 +1874,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil {
+	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil && (plan.Solver == nil || plan.Solver.Backend != "ev_reserve") {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}

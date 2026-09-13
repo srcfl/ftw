@@ -199,14 +199,8 @@ func TestLiveWriterRetriesMaintenanceAfterLongReader(t *testing.T) {
 	if err := s.FlushHistory(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for s.HistoryWriterStatus().MaintenanceError == "" {
-		if ctx.Err() != nil {
-			t.Fatal(ctx.Err())
-		}
-		time.Sleep(time.Millisecond)
-	}
 	if st := s.HistoryWriterStatus(); st.Committed != 1 || st.LastError != "" {
-		t.Fatalf("maintenance hid a durable commit: %+v", st)
+		t.Fatalf("legacy DuckDB reader blocked live SQLite: %+v", st)
 	}
 	var n int
 	if err := reader.QueryRow(`SELECT 42`).Scan(&n); err != nil || n != 42 {

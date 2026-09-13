@@ -345,7 +345,8 @@ func historyFloatBits(value float64) uint64 {
 }
 
 func (s *Store) HistoryBackend() map[string]any {
-	info := map[string]any{"engine": "duckdb", "version": "1.5.5", "role": "primary", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus()}
+	info := map[string]any{"engine": "duckdb", "version": "1.5.5", "role": "archive", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus()}
+	info["hot"] = s.hotFileInfo()
 	info["migration"] = s.HistoryMigrationStatus()
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + ".wal"} {
 		if stat, err := os.Stat(path); err == nil {
@@ -469,6 +470,9 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	if err := s.FlushHistory(ctx); err != nil {
+		return err
+	}
+	if err := s.sealAndPruneHot(ctx, time.Now().UnixMilli()+1, 0); err != nil {
 		return err
 	}
 	src, err := s.history.BeginTx(ctx, nil)

@@ -118,10 +118,13 @@ func TestPruneNeverSplitsBuckets(t *testing.T) {
 	alignedCutoff := (cutoff / WarmBucketMS) * WarmBucketMS
 	inBucketBefore := alignedCutoff - 1 // last row of the fully-aged bucket
 	inBucketAfter := alignedCutoff + 1  // first row of the partial bucket
-	for _, ts := range []int64{inBucketBefore - 60_000, inBucketBefore, inBucketAfter} {
-		if err := s.RecordHistory(HistoryPoint{TsMs: ts, GridW: 50, JSON: "{}"}); err != nil {
-			t.Fatal(err)
-		}
+	pts := []HistoryPoint{
+		{TsMs: inBucketBefore - 60_000, GridW: 50, JSON: "{}"},
+		{TsMs: inBucketBefore, GridW: 50, JSON: "{}"},
+		{TsMs: inBucketAfter, GridW: 50, JSON: "{}"},
+	}
+	if err := s.BulkRecordHistory(pts); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.Prune(context.Background()); err != nil {
 		t.Fatal(err)

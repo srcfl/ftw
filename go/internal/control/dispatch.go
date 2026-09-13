@@ -1674,15 +1674,16 @@ func ComputeDispatch(
 		if r == nil || h == nil {
 			continue
 		}
-		// Default to near-empty SoC so dispatch errs on the side of
-		// caution (no discharge) if a battery never reports SoC.
-		// Using 0.5 would allow discharge of a potentially empty battery.
-		soc := 0.1
-		if r.SoC != nil {
-			soc = *r.SoC
-		}
+		soc := 0.0
 		lim := state.DriverLimits[name]
 		dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
+		if r.SoC != nil {
+			soc = *r.SoC
+		} else {
+			// Never reported SoC: do not discharge a pack we cannot
+			// prove has energy. Charge-from-surplus stays allowed.
+			dischargeBlocked = true
+		}
 		// A configured zero is a hard direction block, not the legacy
 		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
 		// the clamps so capable siblings receive the blocked battery's share.
@@ -2719,8 +2720,29 @@ func applyDispatchSafetyPipeline(
 	if state != nil {
 		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
 	}
+	targets = floorMissingSoCDischarge(targets, store)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
+	return targets
+}
+
+// Unknown battery energy cannot support a discharge command, even during
+// fuse relief. Check the final targets so slew cannot restore live discharge
+// and EV headroom reflects only the battery commands we can actually send.
+func floorMissingSoCDischarge(targets []DispatchTarget, store *telemetry.Store) []DispatchTarget {
+	for i := range targets {
+		if targets[i].TargetW >= 0 {
+			continue
+		}
+		if store != nil {
+			r := store.Get(targets[i].Driver, telemetry.DerBattery)
+			if r != nil && r.SoC != nil {
+				continue
+			}
+		}
+		targets[i].TargetW = 0
+		targets[i].Clamped = true
+	}
 	return targets
 }
 
@@ -2942,9 +2964,12 @@ func protectiveCurtailLimitW(state *State, store *telemetry.Store) (float64, boo
 
 // siteLoadW reads the household load (W) from the site meter when
 // available. Mirrors the formula main.go uses for status: load =
-// gridW - battery - PV - EV - V2X (site convention). Falls back to 0 on
-// missing telemetry, which makes protectiveCurtailLimitW degrade
-// safely to "don't engage" rather than to a bogus tiny limit.
+// gridW - battery - PV - EV - V2X (site convention). Battery and PV
+// follow SumOnlineEVW: watchdog-offline last-known watts are ignored
+// so a dead inverter cannot inflate load and skip export protection.
+// Falls back to 0 on missing telemetry, which makes
+// protectiveCurtailLimitW degrade safely to "don't engage" rather than
+// to a bogus tiny limit.
 func siteLoadW(state *State, store *telemetry.Store) float64 {
 	if state == nil || store == nil || state.SiteMeterDriver == "" {
 		return 0
@@ -2954,18 +2979,31 @@ func siteLoadW(state *State, store *telemetry.Store) float64 {
 		return 0
 	}
 	gridW := mtr.SmoothedW
-	var batW, pvW float64
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		batW += r.SmoothedW
-	}
-	for _, r := range store.ReadingsByType(telemetry.DerPV) {
-		pvW += r.SmoothedW
-	}
-	load := gridW - batW - pvW - store.SumOnlineEVW() - store.SumOnlineV2XW()
+	load := gridW -
+		sumOnlineSignedW(store, telemetry.DerBattery) -
+		sumOnlineSignedW(store, telemetry.DerPV) -
+		store.SumOnlineEVW() -
+		store.SumOnlineV2XW()
 	if load < 0 {
 		return 0
 	}
 	return load
+}
+
+// sumOnlineSignedW mirrors telemetry.SumOnlineEVW for one DER type:
+// last-known watts from a watchdog-offline driver do not enter load math.
+func sumOnlineSignedW(store *telemetry.Store, t telemetry.DerType) float64 {
+	if store == nil {
+		return 0
+	}
+	var sum float64
+	for _, r := range store.ReadingsByType(t) {
+		if !store.DriverHealth(r.Driver).TelemetryLive() {
+			continue
+		}
+		sum += r.SmoothedW
+	}
+	return sum
 }
 
 func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
@@ -3202,6 +3240,11 @@ const curtailMinPerDriverW = 1.0
 // anywhere meaningful to put it.
 const pvCurtailBatterySoCMax = 0.99
 
+// liveMeterMaxAge is the inner freshness window for liveCurtailLimitW.
+// Matches the PV generation proof window in pv_plan.go. The main-loop
+// watchdog still gates dispatch; this catches callers that skipped it.
+const liveMeterMaxAge = 90 * time.Second
+
 // liveCurtailLimitW computes the cap PV may produce *right now* given
 // the planner's decision that curtail is economically warranted for
 // this slot. It rolls together three runtime quantities the planner
@@ -3228,27 +3271,11 @@ const pvCurtailBatterySoCMax = 0.99
 // curtail dispatch upstream skips curtail entirely (the cap doesn't
 // bind anything).
 func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
-	if state == nil || store == nil {
+	m, ok := liveSiteMeter(state, store)
+	if !ok {
 		return 0, false
 	}
-
-	// Require a fresh site-meter reading. Without it we can't compute
-	// live load and shouldn't be making live decisions — defer to the
-	// planner's static value instead.
-	var gridW float64
-	if state.SiteMeterDriver == "" {
-		return 0, false
-	}
-	if m := store.Get(state.SiteMeterDriver, telemetry.DerMeter); m != nil {
-		gridW = m.RawW
-	} else if m := store.Get(state.SiteMeterDriver, telemetry.DerBattery); m != nil {
-		// Some site-meter drivers (e.g. ferroamp) emit grid flow on
-		// the battery channel because the same driver also owns the
-		// battery. Accept that as the meter reading.
-		gridW = m.RawW
-	} else {
-		return 0, false
-	}
+	gridW := m.RawW
 
 	// Live PV (positive watts of generation).
 	var pvW float64
@@ -3311,6 +3338,33 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	}
 
 	return liveLoadW + batHeadroomW + evReserveW, true
+}
+
+// liveSiteMeter returns the configured site meter's live reading.
+// Missing, watchdog-offline, or older-than-liveMeterMaxAge → ok=false.
+// DerBattery is accepted only for that same configured driver when it
+// has no DerMeter channel (Ferroamp combined owner). Any other battery
+// is not the grid.
+func liveSiteMeter(state *State, store *telemetry.Store) (*telemetry.DerReading, bool) {
+	if state == nil || store == nil || state.SiteMeterDriver == "" {
+		return nil, false
+	}
+	m := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if m == nil {
+		m = store.Get(state.SiteMeterDriver, telemetry.DerBattery)
+	}
+	if m == nil {
+		return nil, false
+	}
+	if !store.DriverHealth(state.SiteMeterDriver).TelemetryLive() {
+		return nil, false
+	}
+	now := state.now()
+	age := now.Sub(m.UpdatedAt)
+	if m.UpdatedAt.IsZero() || age < 0 || age > liveMeterMaxAge {
+		return nil, false
+	}
+	return m, true
 }
 
 func distributeScopedManualHold(bats []batteryInfo, driver string, powerW float64) []DispatchTarget {
@@ -4546,12 +4600,8 @@ func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []Di
 func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper float64) {
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
-	soc := 0.1
-	if r.SoC != nil {
-		soc = *r.SoC
-	}
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if soc < 0.05 || dischargeBlocked {
+	if r.SoC == nil || *r.SoC < 0.05 || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked {

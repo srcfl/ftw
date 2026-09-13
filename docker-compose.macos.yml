@@ -6,8 +6,8 @@
 #
 #   Start:    docker compose -f docker-compose.macos.yml up -d
 #   Logs:     docker compose -f docker-compose.macos.yml logs -f
-#   Upgrade:  docker compose -f docker-compose.macos.yml pull && \
-#             docker compose -f docker-compose.macos.yml up -d
+#   Upgrade:  pin FTW_UPDATER_IMAGE_TAG first, then Core.
+#             See docs/upgrade-paired-release.md and docs/self-update.md.
 #   Stop:     docker compose -f docker-compose.macos.yml down
 #
 # WHY A SEPARATE FILE.  The Linux compose file uses `network_mode: host`,

@@ -64,6 +64,7 @@ type forecastTracker struct {
 	curtailed       func(time.Time) bool
 	candidate       forecastCandidate
 	queue           chan forecastJob
+	scoreWake       chan struct{}
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	mu              sync.RWMutex
@@ -91,10 +92,12 @@ func (f *forecastTracker) Start(ctx context.Context) error {
 		return err
 	}
 	f.queue = make(chan forecastJob, 8)
+	f.scoreWake = make(chan struct{}, 1)
 	workerCtx, stop := context.WithCancel(ctx)
 	f.cancel = stop
-	f.wg.Add(1)
+	f.wg.Add(2)
 	go func() { defer f.wg.Done(); f.run(workerCtx) }()
+	go func() { defer f.wg.Done(); f.runScoring(workerCtx) }()
 	return nil
 }
 func (f *forecastTracker) Stop() {
@@ -275,7 +278,7 @@ func (f *forecastTracker) observe(ctx context.Context) {
 				slog.Debug("forecast candidate update unavailable", "err", err)
 			}
 		}
-		f.score(ctx, now)
+		f.requestScoring()
 	}
 }
 
@@ -311,31 +314,6 @@ func (f *forecastTracker) observationIntervals(r telemetry.ForecastReading, site
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartMS < out[j].StartMS })
 	return out
-}
-
-func (f *forecastTracker) score(ctx context.Context, now time.Time) {
-	scoreCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	observations, err := f.store.LoadForecastObservations(scoreCtx, now.Add(-2*time.Hour).UnixMilli(), now.UnixMilli())
-	if err != nil {
-		slog.Warn("forecast evaluation: observations unavailable", "err", err)
-		return
-	}
-	// Decode one archived model snapshot at a time. Only the last complete
-	// hour of outcomes can have become scoreable since the previous tick.
-	scores := make(map[forecastErrorKey]forecasting.ErrorSample)
-	err = f.store.VisitForecastIssues(scoreCtx, now.Add(-50*time.Hour).UnixMilli(), now.UnixMilli(), func(issue forecasting.Issue) error {
-		mergeForecastErrors(scores, forecasting.Errors([]forecasting.Issue{issue}, observations, now.UnixMilli()))
-		return nil
-	})
-	if err == nil {
-		err = f.store.SaveForecastErrors(scoreCtx, forecastErrorValues(scores), now.UnixMilli())
-	}
-	if err != nil {
-		slog.Warn("forecast evaluation failed", "err", err)
-		return
-	}
-	f.refreshEvidence(ctx, now)
 }
 
 type forecastErrorKey struct {
@@ -624,7 +602,9 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 				selected[i].PVW, selected[i].PVKnown, selected[i].PVQuality = point.PVW, true, point.PVQuality
 				selected[i].PVSource, selected[i].ModelPV = "energyplan", point.ModelPV
 			}
-			if usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
+			// A cold load can still be the worker's generic prior. Keep the frozen
+			// profile and heating prior until this interval has learned support.
+			if point.LoadQuality != "cold_start" && usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
 				resolved[i].LoadW = point.LoadW
 				selected[i].LoadW, selected[i].LoadKnown, selected[i].LoadQuality = point.LoadW, true, point.LoadQuality
 				selected[i].LoadSource, selected[i].ModelLoad = "energyplan", point.ModelLoad
@@ -661,6 +641,16 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 					loss = absolute
 				}
 				planning[i].PVW = s.PVW + math.Min(-s.PVW, k*loss)
+			}
+			if band.Method != forecasting.BandMethodEmpirical {
+				// Until joint errors can set the margin, cover load upside as
+				// well as PV downside. This also works at night and without PV.
+				loadBand := calibrator.BandForInterval("champion", "load", max(s.StartMs, origin.UnixMilli()), end, s.LoadW)
+				loadLoss := math.Max(0, loadBand.HighW-s.LoadW)
+				if loadBand.Method != forecasting.BandMethodEmpirical && i < len(selected) && selected[i].ModelLoad != nil {
+					loadLoss = math.Max(loadLoss, selected[i].ModelLoad.UpperW-s.LoadW)
+				}
+				planning[i].LoadW = s.LoadW + k*loadLoss
 			}
 		}
 	}
