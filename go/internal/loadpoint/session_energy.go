@@ -80,7 +80,7 @@ func (e *sessionEnergy) observe(s EVSample, now time.Time) float64 {
 			e.points = append(e.points, sessionPowerPoint{at: powerAt, w: max(0, s.PowerW), wh: wh})
 		}
 
-		if n := len(e.points); n > 0 {
+		if n := len(e.points); n > 0 && !powerAt.Before(e.points[n-1].at) {
 			e.coverageAt = e.points[n-1].at
 			if s.PowerMaxAge > 0 && powerAt.Equal(e.points[n-1].at) && now.After(powerAt) {
 				// The driver declares a bounded reporting interval. Between

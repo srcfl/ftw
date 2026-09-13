@@ -236,3 +236,25 @@ func TestPowerEstimateExpiresAndCounterCatchupDoesNotDuplicate(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestOutOfOrderPowerDoesNotEraseEstimatedProgress(t *testing.T) {
+	start := time.Now().Add(-time.Hour)
+	e := &sessionEnergy{}
+	s := EVSample{PowerW: 3600, PowerAt: start, PowerMaxAge: 3 * time.Minute, SessionWh: 1000, EnergyAt: start}
+	e.observe(s, start)
+	s.PowerAt = start.Add(30 * time.Second)
+	e.observe(s, s.PowerAt)
+	if got := e.observe(s, start.Add(time.Minute)); got != 1060 {
+		t.Fatal(got)
+	}
+	// An older response can arrive after the latest source reading. It must
+	// neither erase the estimate nor replace the latest measured power.
+	s.PowerAt, s.PowerW = start, 11000
+	if got := e.observe(s, start.Add(65*time.Second)); got != 1060 {
+		t.Fatalf("older power erased progress: %v", got)
+	}
+	s.PowerAt, s.PowerW = start.Add(30*time.Second), 3600
+	if got := e.observe(s, start.Add(70*time.Second)); got != 1070 {
+		t.Fatalf("latest power did not resume correctly: %v", got)
+	}
+}
