@@ -1786,6 +1786,10 @@ func main() {
 			mpcSvc.DemandNightWeight = cfg.Price.DemandNightWeight
 		}
 		mpcSvc.Timezone = forecastTimezone()
+		mpcSvc.HouseholdMeasurement = func() telemetry.ForecastReading {
+			site := forecastSettings.Snapshot()
+			return tel.ForecastMeasurementNow(site.Meter, site.Options)
+		}
 		// Persist every replan's Diagnostic so operators can inspect
 		// past decisions in the planner_diagnostics table.
 		mpcSvc.SaveDiag = func(d *mpc.Diagnostic, reason string) error {
@@ -3565,9 +3569,8 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 // default while the planner schedules against the configured 9 kW.
 // Battery limit pointers preserve omitted versus explicit zero. As in the
 // MPC builder below, exact both-zero battery overrides are a config error and
-// use the same 0.5C watts the planner uses, rather than omitting the map and
-// falling through to MaxCommandW. Drivers without limits in either place are
-// omitted from the map.
+// keep driver caps, using 0.5C only for missing limits, as the planner does.
+// Drivers without limits in either place are omitted from the map.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
@@ -3581,10 +3584,14 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
 			if bothZero {
 				if defaultP := d.BatteryCapacityWh / 2; defaultP > 0 {
-					chg, dis = defaultP, defaultP
-					chgSet, disSet = true, true
-					slog.Warn("control: batteries.max_{charge,discharge}_w both 0 — treating as config error, using default 0.5C",
-						"driver", d.Name, "default_w", defaultP)
+					if !chgSet {
+						chg, chgSet = defaultP, true
+					}
+					if !disSet {
+						dis, disSet = defaultP, true
+					}
+					slog.Warn("control: ignoring both-zero battery overrides; retaining driver limits with 0.5C for missing limits",
+						"driver", d.Name, "max_charge_w", chg, "max_discharge_w", dis)
 				}
 			} else {
 				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
@@ -3728,7 +3735,7 @@ func mpcBatteryFleetFromConfig(cfg *config.Config, capacities map[string]float64
 		if cap <= 0 {
 			continue
 		}
-		// Default max (de)charge = 0.5C unless overridden. Zero is a
+		// Use configured driver limits, then 0.5C for missing limits. Zero is a
 		// legitimate one-sided constraint — `max_charge_w: 0` means
 		// "forbid charging, allow discharge only" and mpc.Optimize's
 		// action grid (`-MaxDischargeW…+MaxChargeW`) supports it.
@@ -3737,28 +3744,34 @@ func mpcBatteryFleetFromConfig(cfg *config.Config, capacities map[string]float64
 		// Only the *both-zero* case is treated as a config error (and
 		// almost certainly is — it kills the planner's entire action
 		// space while leaving the service running). We fall back to
-		// default in that case and log a warning.
+		// driver limits in that case and log a warning.
 		defaultP := cap / 2
 		chg := defaultP
 		dis := defaultP
+		if d.MaxChargeW > 0 {
+			chg = d.MaxChargeW
+		}
+		if d.MaxDischargeW > 0 {
+			dis = d.MaxDischargeW
+		}
 		if b, ok := cfg.Batteries[d.Name]; ok {
 			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
 				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
 			if bothZero {
-				slog.Warn("mpc: batteries.max_{charge,discharge}_w both 0 — treating as config error, using default 0.5C",
-					"driver", d.Name, "default_w", defaultP)
+				slog.Warn("mpc: ignoring both-zero battery overrides; retaining driver limits with 0.5C for missing limits",
+					"driver", d.Name, "max_charge_w", chg, "max_discharge_w", dis)
 			} else {
 				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
 					chg = *b.MaxChargeW
 				} else if b.MaxChargeW != nil {
-					slog.Warn("mpc: ignoring negative batteries.max_charge_w; using default 0.5C",
-						"driver", d.Name, "value", *b.MaxChargeW, "default_w", defaultP)
+					slog.Warn("mpc: ignoring negative batteries.max_charge_w; retaining charge limit",
+						"driver", d.Name, "value", *b.MaxChargeW, "max_charge_w", chg)
 				}
 				if b.MaxDischargeW != nil && *b.MaxDischargeW >= 0 {
 					dis = *b.MaxDischargeW
 				} else if b.MaxDischargeW != nil {
-					slog.Warn("mpc: ignoring negative batteries.max_discharge_w; using default 0.5C",
-						"driver", d.Name, "value", *b.MaxDischargeW, "default_w", defaultP)
+					slog.Warn("mpc: ignoring negative batteries.max_discharge_w; retaining discharge limit",
+						"driver", d.Name, "value", *b.MaxDischargeW, "max_discharge_w", dis)
 				}
 			}
 		}

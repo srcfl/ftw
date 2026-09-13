@@ -56,7 +56,7 @@ func TestNativeProcessCoreContract(t *testing.T) {
 		if err := ValidatePlan(slots, p, &plan); err != nil {
 			t.Fatal(err)
 		}
-		if plan.Solver.Backend != "value_curve_rust" || plan.Actions[1].LoadpointSoC < p.Loadpoint.TargetSoC {
+		if plan.Solver.Backend != "fleet_milp_rust" || plan.Actions[1].LoadpointSoC < p.Loadpoint.TargetSoC {
 			t.Fatalf("unexpected plan: %+v", plan)
 		}
 		if strings.Contains(string(plan.OptimizerInput), `"price_ore"`) || !strings.Contains(string(plan.OptimizerInput), `"price_per_kwh"`) {

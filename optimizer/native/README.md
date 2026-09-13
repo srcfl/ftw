@@ -4,7 +4,7 @@ This directory contains the optional proprietary Sourceful Energyplan worker,
 its license and third-party notices, and public integration checks. Rust source,
 source tests and builds live in the private `srcfl/energyplan` repository.
 
-Energyplan 0.4.4 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
+Energyplan 0.4.5 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
 permits private household use with FTW and free noncommercial redistribution
 for that use. Commercial use, OEM bundles, paid installation and services need
 a separate written license from Sourceful Labs AB. FTW's AGPL code has a
@@ -28,6 +28,20 @@ version, private source commit, sizes and SHA-256 checksums. The verifier
 checks every bundled file, the host worker handshake on Linux, and the public
 source boundary. Keep the license and notices with any copied or redistributed
 executable. Run only a verified bundle.
+
+For a captured single-battery request without scenarios, demand charges,
+thermal loads or PV controls, Core can replay the exact response from another
+CPU. Keep site captures outside the repository:
+
+```sh
+cd go
+FTW_NATIVE_CAPTURE_REQUEST=/absolute/path/request.json \
+FTW_NATIVE_CAPTURE_RESPONSE=/absolute/path/response.json \
+go test ./internal/mpc -run '^TestNativeCapturedSiteReplay$' -v
+```
+
+Omit `FTW_NATIVE_CAPTURE_RESPONSE` and set `FTW_NATIVE_SOLVER` to an absolute
+worker path to solve locally. This test validates plans and sends no commands.
 
 The worker reads optimizer protocol v1 JSON lines and stays alive across
 requests. Core's existing `mpc.ExternalOptimizer` starts it through an absolute
