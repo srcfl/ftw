@@ -474,8 +474,10 @@ The honest limits, which belong here rather than in a comment nobody reads:
   cannot verify that a passkey ceremony happened — it has no relationship with
   the authenticator, and being a WebAuthn relying party would need an origin,
   which the box deliberately never has. It stops a phone left unlocked on a
-  table from being used to reconfigure the site. It stops nothing that a
-  modified client on an enrolled device could not already do through `cmd`;
+  table from being used to reconfigure the site. Routes marked `NoStepUp` skip
+  the ceremony: owner is enough. The charging schedule is the case. It stops
+  nothing that a modified client on an enrolled device could not already do
+  through `cmd`;
 - **revocation is immediate at the box.** Three layers: the session is torn
   down and the call it was making is cancelled, the grant is re-read from
   `appenroll` on every privileged request so a socket cannot outlive a revoke,
