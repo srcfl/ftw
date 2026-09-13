@@ -79,6 +79,171 @@ func TestComputePVCurtail_LimitZero_DoesNothing(t *testing.T) {
 	}
 }
 
+func exportGuardState(maxExportW float64) *State {
+	st := NewState(0, 100, "meter")
+	st.SiteFuseAmps = 16
+	st.SiteFuseVoltage = 230
+	st.SiteFusePhases = 3
+	st.MaxExportW = maxExportW
+	return st
+}
+
+func TestComputePVCurtail_ReactsToPVOnlyExportAboveCeiling(t *testing.T) {
+	st := exportGuardState(5000)
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "sungrow", -7000)
+	emitMeter(t, store, "meter", -6000)
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["sungrow"]-6000) > 1e-3 {
+		t.Fatalf("want a 6000 W cap to remove the 1000 W overage, got %+v", got)
+	}
+	if !st.PVExportGuardActive {
+		t.Fatal("PVExportGuardActive = false while PV-only export is over the ceiling")
+	}
+	if st.PVExportResidualW != 0 {
+		t.Fatalf("fully controllable overage left %.2f W residual", st.PVExportResidualW)
+	}
+}
+
+func TestComputePVCurtail_UsesFuseCeilingAndSafetyMargin(t *testing.T) {
+	st := exportGuardState(20000) // looser than the physical fuse
+	st.SiteFuseSafetyA = 0.5
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "sungrow", -12000)
+	emitMeter(t, store, "meter", -12000)
+
+	// 16 A * 230 V * 3 phases = 11040 W. The 0.5 A safety margin is
+	// 345 W, so the same effective ceiling as the battery guard is 10695 W.
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["sungrow"]-10695) > 1e-3 {
+		t.Fatalf("want fuse-minus-margin cap 10695 W, got %+v", got)
+	}
+}
+
+func TestComputePVCurtail_DoesNotAttributeStorageExportToPV(t *testing.T) {
+	st := exportGuardState(5000)
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "sungrow", -7000)
+	emitBattery(t, store, "battery", -2000, 0.8)
+	emitMeter(t, store, "meter", -6000)
+
+	// Of the 6 kW site export, 2 kW comes from storage. Solar-attributable
+	// export is therefore 4 kW, below the 5 kW ceiling.
+	if got := ComputePVCurtail(st, store); got != nil {
+		t.Fatalf("storage export must not trigger a PV cap, got %+v", got)
+	}
+	if st.PVExportGuardActive || st.PVExportResidualW != 0 {
+		t.Fatalf("guard state = active:%v residual:%.2f, want inactive and zero",
+			st.PVExportGuardActive, st.PVExportResidualW)
+	}
+}
+
+func TestComputePVCurtail_ExportGuardNeverLoosensExistingCap(t *testing.T) {
+	st := exportGuardState(5000)
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	st.SetPVManualHold(PVManualHold{
+		LimitW:    4000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	store := telemetry.NewStore()
+	emitPV(t, store, "sungrow", -7000)
+	emitMeter(t, store, "meter", -6000)
+
+	// The live guard would allow 6 kW. The existing 4 kW manual cap must win.
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["sungrow"]-4000) > 1e-3 {
+		t.Fatalf("export guard loosened the existing 4000 W cap: %+v", got)
+	}
+}
+
+func TestComputePVCurtail_ResidualUsesMergedStricterCap(t *testing.T) {
+	st := exportGuardState(5000)
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	st.SetPVManualHold(PVManualHold{
+		LimitW:    1.5,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	store := telemetry.NewStore()
+	emitPV(t, store, "sungrow", -2000)
+	emitPV(t, store, "unsupported", -6000)
+	emitMeter(t, store, "meter", -8000)
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["sungrow"]-1.5) > 1e-3 {
+		t.Fatalf("want the existing 1.5 W positive cap to stay tighter, got %+v", got)
+	}
+	// The merged cap safely removes 1998.5 W of the 3000 W overage.
+	if abs(st.PVExportResidualW-1001.5) > 1e-3 {
+		t.Fatalf("residual = %.2f W, want 1001.5 W after the merged cap",
+			st.PVExportResidualW)
+	}
+}
+
+func TestComputePVCurtail_FullReductionUsesSafeFloorAndReportsResidual(t *testing.T) {
+	st := exportGuardState(5000)
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "sungrow", -2000)
+	emitPV(t, store, "unsupported", -6000)
+	emitMeter(t, store, "meter", -8000)
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["sungrow"]-reactivePVCurtailFloorW) > 1e-3 {
+		t.Fatalf("want the safe positive floor %.0f W, got %+v",
+			reactivePVCurtailFloorW, got)
+	}
+	// Required reduction is 3000 W. The only controllable PV can safely
+	// shed 1998 W without using the ambiguous zero command.
+	if abs(st.PVExportResidualW-1002) > 1e-3 {
+		t.Fatalf("residual = %.2f W, want 1002 W", st.PVExportResidualW)
+	}
+}
+
+func TestComputePVCurtail_UnsupportedPVOverageIsExposed(t *testing.T) {
+	st := exportGuardState(5000)
+	store := telemetry.NewStore()
+	emitPV(t, store, "unsupported", -6000)
+	emitMeter(t, store, "meter", -6000)
+
+	if got := ComputePVCurtail(st, store); got != nil {
+		t.Fatalf("unsupported PV must not receive a cap, got %+v", got)
+	}
+	if !st.PVExportGuardActive || abs(st.PVExportResidualW-1000) > 1e-3 {
+		t.Fatalf("guard state = active:%v residual:%.2f, want active and 1000 W",
+			st.PVExportGuardActive, st.PVExportResidualW)
+	}
+}
+
+func TestComputePVCurtail_ReleasesReactiveCapBelowCeiling(t *testing.T) {
+	st := exportGuardState(5000)
+	st.SupportsPVCurtail = map[string]bool{"sungrow": true}
+	first := telemetry.NewStore()
+	emitPV(t, first, "sungrow", -7000)
+	emitMeter(t, first, "meter", -6000)
+	if got := ComputePVCurtail(st, first); len(got) != 1 || got[0].LimitW <= 0 {
+		t.Fatalf("first tick did not install a reactive cap: %+v", got)
+	}
+
+	// Use a fresh store so Kalman history from the violating sample does not
+	// blur the release condition. Live load now absorbs enough PV that export
+	// sits below the ceiling.
+	second := telemetry.NewStore()
+	emitPV(t, second, "sungrow", -7000)
+	emitMeter(t, second, "meter", -4000)
+	got := ComputePVCurtail(st, second)
+	if len(got) != 1 || got[0].Driver != "sungrow" || got[0].LimitW != 0 {
+		t.Fatalf("want one curtail release below the ceiling, got %+v", got)
+	}
+	if st.PVExportGuardActive || st.PVExportResidualW != 0 {
+		t.Fatalf("guard state was not cleared: active:%v residual:%.2f",
+			st.PVExportGuardActive, st.PVExportResidualW)
+	}
+}
+
 func TestComputePVCurtail_AllocatesLimitProportionally(t *testing.T) {
 	// Two PV drivers: sungrow producing 6 kW, ferroamp producing 4 kW.
 	// Total = 10 kW; plan caps at 1500 W. Expect:
