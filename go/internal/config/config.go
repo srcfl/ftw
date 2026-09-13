@@ -28,6 +28,7 @@ type Config struct {
 	Drivers          []Driver           `yaml:"drivers" json:"drivers"`
 	API              API                `yaml:"api" json:"api"`
 	HomeAssistant    *HomeAssistant     `yaml:"homeassistant,omitempty" json:"homeassistant,omitempty"`
+	ModbusProxy      *ModbusProxy       `yaml:"modbus_proxy,omitempty" json:"modbus_proxy,omitempty"`
 	State            *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
 	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
@@ -1097,6 +1098,11 @@ type ModbusConfig struct {
 	Host   string `yaml:"host" json:"host"`
 	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`       // default 502
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
+	// ProxyListen is the local Modbus TCP address FTW binds for this
+	// backend when modbus_proxy is enabled. Required when the site has
+	// more than one unique host:port; a single-endpoint site uses
+	// modbus_proxy.listen.
+	ProxyListen string `yaml:"proxy_listen,omitempty" json:"proxy_listen,omitempty"`
 	// AllowUnverifiedLocal is copied from capabilities.allow_unverified_local
 	// by the core before this config reaches the transport factory. It is
 	// runtime-only and never comes from this nested YAML block.
@@ -1913,6 +1919,9 @@ func applyDefaults(c *Config) {
 			c.HomeAssistant.PublishIntervalS = 5
 		}
 	}
+	if c.ModbusProxy != nil && strings.TrimSpace(c.ModbusProxy.Listen) == "" {
+		c.ModbusProxy.Listen = DefaultModbusProxyListen
+	}
 	// Backfill for configs that predate notifications: — lands a
 	// populated-but-disabled stub so upgrading an existing install
 	// lights up the Notifications tab with the defaults instead of an
@@ -2006,6 +2015,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.FleetPing.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateModbusProxy(); err != nil {
 		return err
 	}
 	if err := c.OCPP.Validate(); err != nil {

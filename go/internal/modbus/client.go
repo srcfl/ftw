@@ -350,6 +350,36 @@ func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
 	return err
 }
 
+// executePDU runs one raw PDU on the shared session. Exception PDUs are
+// returned as data so a proxy can forward them. Transport errors follow
+// the same reconnect-once policy as Read. unitID is taken from the
+// request so one TCP session can serve several slaves.
+func (c *Capability) executePDU(unitID uint8, pdu []byte) ([]byte, error) {
+	conn := c.conn
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if err := conn.ensureClient(); err != nil {
+		return nil, err
+	}
+	conn.applyUnit(int(unitID))
+	res, err := conn.client.roundTrip(unitID, pdu)
+	if err == nil {
+		conn.noteLiveResponse()
+		return res, nil
+	}
+	if !isTransportError(err) {
+		conn.noteLiveResponse()
+		return res, err
+	}
+	if rerr := conn.prepareTransportRetry(); rerr != nil {
+		return nil, fmt.Errorf("pdu after reconnect: %w (original: %v)", rerr, err)
+	}
+	conn.applyUnit(int(unitID))
+	res, err = conn.client.roundTrip(unitID, pdu)
+	conn.finishRequest(err)
+	return res, markTransport(err)
+}
+
 // applyUnit programs the handle's unit id into the live client when it
 // differs from what the session was last set to. Caller holds c.mu and
 // has ensured the client exists. Unit id 0 keeps whatever the session

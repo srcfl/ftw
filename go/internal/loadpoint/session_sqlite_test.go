@@ -43,7 +43,7 @@ func TestConfirmedBatteryLevelSurvivesDatabaseCloseAndReopen(t *testing.T) {
 			m.SetSessionStore(store)
 			m.ObserveSession("garage", true, 4300, 9600, true, "easee:TEST", "728:2026-01-01T08:00:00Z")
 			s, _ := m.State("garage")
-			if math.Abs(s.CurrentSoC-(.84+600/capacityWh)) > 1e-9 || s.SoCSource == "assumed" || s.SoCRetention != "session" {
+			if math.Abs(s.CurrentSoC-(.84+540/capacityWh)) > 1e-9 || s.SoCSource == "assumed" || s.SoCRetention != "session" {
 				t.Fatalf("restart did not retain level: %+v", s)
 			}
 		})

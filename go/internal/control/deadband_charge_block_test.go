@@ -264,17 +264,14 @@ func TestDeadbandExitStaysQuietWhenTheBlockedBatteryIsIdle(t *testing.T) {
 	}
 }
 
-// A blocked battery measured DISCHARGING is not charging against its block
-// either. The charge floor is one-sided and so is the exit that feeds it.
-func TestDeadbandExitStaysQuietWhenTheBlockedBatteryIsDischarging(t *testing.T) {
+// The idle plan withdraws a prior discharge even within the meter deadband.
+func TestDeadbandIdlePlanWithdrawsDischarge(t *testing.T) {
 	now := time.Now()
 	store := seedDeadbandSite(30, []deadbandBattery{{"ferroamp", -2000, 0.55, ""}})
 	st := passiveArbitrageIdleState(now)
-
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 0 {
-		t.Errorf("deadband tick issued %d target(s) %v — a discharging battery is not charging against a charge block",
-			len(targets), targets)
+	if len(targets) != 1 || targets[0].TargetW != 0 {
+		t.Fatalf("idle plan must withdraw discharge, got %v", targets)
 	}
 }
 

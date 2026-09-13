@@ -36,7 +36,7 @@ func TestConfirmedSoCSurvivesRestartOnlyForSameHardwareSession(t *testing.T) {
 	// Renaming the configured driver and loadpoint does not change hardware.
 	m = sessionManager(store, "renamed", "renamed-driver")
 	m.ObserveSession("renamed", true, 4300, 9600, true, "easee:ABC", "connection-1")
-	if s, _ := m.State("renamed"); math.Abs(s.CurrentSoC-.85) > 1e-9 || s.SoCSource == "assumed" {
+	if s, _ := m.State("renamed"); math.Abs(s.CurrentSoC-.849) > 1e-9 || s.SoCSource == "assumed" {
 		t.Fatalf("same session failed to restore: %+v", s)
 	}
 	for _, tc := range []struct {
@@ -68,12 +68,12 @@ func TestConfirmedSoCSurvivesFirstSessionProofWhenChargingStarts(t *testing.T) {
 		t.Fatalf("unverified session was saved: %+v", s)
 	}
 	m.ObserveSession("garage", true, 4300, 600, true, "easee:A", "session-1")
-	if s, _ := m.State("garage"); math.Abs(s.CurrentSoC-.13) > 1e-9 || s.SoCSource == "assumed" || s.SoCRetention != "session" {
+	if s, _ := m.State("garage"); math.Abs(s.CurrentSoC-.129) > 1e-9 || s.SoCSource == "assumed" || s.SoCRetention != "session" {
 		t.Fatalf("charging lost the level entered while waiting: %+v", s)
 	}
 	m = sessionManager(store, "garage", "charger")
 	m.ObserveSession("garage", true, 4300, 600, true, "easee:A", "session-1")
-	if s, _ := m.State("garage"); math.Abs(s.CurrentSoC-.13) > 1e-9 || s.SoCSource == "assumed" {
+	if s, _ := m.State("garage"); math.Abs(s.CurrentSoC-.129) > 1e-9 || s.SoCSource == "assumed" {
 		t.Fatalf("verified level did not survive restart: %+v", s)
 	}
 }
@@ -143,7 +143,7 @@ func TestUnknownSessionKeepsManualLevelOnlyInMemory(t *testing.T) {
 	m.Observe("garage", true, 4300, 9000, true)
 	m.SetCurrentSoC("garage", .84)
 	m.Observe("garage", true, 4300, 9600, true)
-	if s, _ := m.State("garage"); s.SoCRetention != "unavailable" || math.Abs(s.CurrentSoC-.85) > 1e-9 {
+	if s, _ := m.State("garage"); s.SoCRetention != "unavailable" || math.Abs(s.CurrentSoC-.849) > 1e-9 {
 		t.Fatalf("unsupported charger lost input: %+v", s)
 	}
 }
@@ -164,7 +164,7 @@ func TestCapacityChangeKeepsCurrentLevelAndConfidence(t *testing.T) {
 		}
 		m.ObserveSession("garage", true, 4300, 10000, true, "easee:ABC", "session-1")
 		after, _ = m.State("garage")
-		if math.Abs(after.CurrentSoC-before.CurrentSoC-.01) > 1e-9 {
+		if math.Abs(after.CurrentSoC-before.CurrentSoC-.009) > 1e-9 {
 			t.Fatalf("new capacity not used: %+v", after)
 		}
 	}
@@ -191,5 +191,22 @@ func TestFirstReadingUnpluggedTombstonesStoredSession(t *testing.T) {
 	m.ObserveSession("garage", true, 0, 1000, true, "easee:ABC", "session-1")
 	if s, _ := m.State("garage"); s.SoCSource != "assumed" {
 		t.Fatalf("cold unplug failed to clear stored session: %+v", s)
+	}
+}
+
+// Version 1 stored an AC-only anchor. Keep the confirmed level while applying
+// charging losses only to energy delivered after that saved confirmation.
+func TestLegacySessionAnchorMigratesWithoutChangingConfirmedSoC(t *testing.T) {
+	store := &sessionMemory{data: map[string]string{sessionKey("easee:ABC"): `{"version":1,"device_id":"easee:ABC","session_id":"connection-1","anchor_soc":0.69,"confirmed_at_wh":9000,"capacity_wh":60000}`}}
+	m := sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", true, 4300, 9000, true, "easee:ABC", "connection-1")
+	s, _ := m.State("garage")
+	if math.Abs(s.CurrentSoC-.84) > 1e-9 {
+		t.Fatalf("migration changed confirmation: %v", s.CurrentSoC)
+	}
+	m.ObserveSession("garage", true, 4300, 9600, true, "easee:ABC", "connection-1")
+	s, _ = m.State("garage")
+	if math.Abs(s.CurrentSoC-.849) > 1e-9 {
+		t.Fatalf("post-confirmation loss missing: %v", s.CurrentSoC)
 	}
 }

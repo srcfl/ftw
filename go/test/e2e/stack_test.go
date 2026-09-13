@@ -277,8 +277,9 @@ func setupStack(t *testing.T) *stack {
 	s.reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-e2e-"+name)
 	}
+	modbusEngine := modbuscli.NewEngine()
 	s.reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
-		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
+		return modbusEngine.Open(c.Host, c.Port, c.UnitID, false)
 	}
 	for _, d := range s.cfg.Drivers {
 		if err := s.reg.Add(ctx, d); err != nil {

@@ -25,6 +25,7 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg.API.Port != newCfg.API.Port {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")
 	}
+	reasons = append(reasons, modbusProxyRestartReasons(oldCfg, newCfg)...)
 	if stateNeedsRestart(oldCfg.State, newCfg.State) {
 		reasons = append(reasons, "state.path / state.cold_dir — database files are opened at startup")
 	}

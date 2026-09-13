@@ -1,6 +1,9 @@
 package loadpoint
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestAnchorVehicleSoC — when a trusted vehicle BMS reading (e.g. Tesla
 // via TeslaBLEProxy) is paired to a loadpoint, the control loop anchors
@@ -11,10 +14,10 @@ import "testing"
 func TestAnchorVehicleSoC(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoC: 0.25}})
-	// Plug in, deliver 9 kWh → naive estimate = 25 + 9000/60000*100 = 40 %.
+	// Plug in, deliver 9 kWh → naive estimate = 25 + 9000*0.9/60000*100 = 38.5 %.
 	m.Observe("a", true, 7400, 9000, true)
-	if st, _ := m.State("a"); st.CurrentSoC < 0.39 || st.CurrentSoC > 0.41 {
-		t.Fatalf("pre-anchor SoC: got %.2f want ~40", st.CurrentSoC)
+	if st, _ := m.State("a"); math.Abs(st.CurrentSoC-0.385) > 1e-9 {
+		t.Fatalf("pre-anchor SoC: got %.2f want 38.5%%", st.CurrentSoC)
 	}
 	// The bound vehicle's BMS reports the real SoC is 31 %.
 	if !m.AnchorVehicleSoC("a", 0.31) {

@@ -2,6 +2,8 @@ package loadpoint
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -96,5 +98,141 @@ func TestTickFirstPositiveOfferDoesNotResume(t *testing.T) {
 	}
 	if countAction(sender.calls, "ev_resume") != 0 {
 		t.Fatalf("first offer is not a standdown we issued: %+v", sender.calls)
+	}
+}
+
+func TestTickRetriesFailedResumeWithBackoff(t *testing.T) {
+	now := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	sender := &fakeSender{}
+	cfgs := []Config{{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}}
+	samples := map[string]EVSample{"easee": {Connected: true, RequestActive: true, DeviceID: "charger", SessionID: "plug-1", ConnectionGeneration: 1}}
+	dir := &Directive{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), LoadpointEnergyWh: map[string]float64{"garage": 0}}
+	c := newTestController(t, cfgs, dir, samples, sender)
+	attempts := 0
+	outcomes := 0
+	c.SetDispatchOutcome(func(_ string, err error, _ time.Time) {
+		outcomes++
+		if err != nil {
+			t.Fatalf("optional resume changed driver health: %v", err)
+		}
+	})
+	c.send = func(ctx context.Context, driver string, payload []byte) error {
+		var cmd struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(payload, &cmd); err != nil {
+			return err
+		}
+		if cmd.Action == "ev_resume" {
+			attempts++
+			if attempts < 3 {
+				return errors.New("temporary transport failure")
+			}
+		}
+		return sender.Send(ctx, driver, payload)
+	}
+	c.Tick(context.Background(), now)
+	dir.LoadpointEnergyWh["garage"] = 2750
+	for _, seconds := range []int{5, 6, 9, 10, 15, 19} {
+		c.Tick(context.Background(), now.Add(time.Duration(seconds)*time.Second))
+	}
+	if attempts != 2 {
+		t.Fatalf("got %d resume attempts before second backoff elapsed, want 2", attempts)
+	}
+	c.Tick(context.Background(), now.Add(20*time.Second))
+	c.Tick(context.Background(), now.Add(25*time.Second))
+	if attempts != 3 {
+		t.Fatalf("failed resume was lost or successful resume repeated: %d", attempts)
+	}
+	if outcomes != 9 {
+		t.Fatalf("current dispatch must continue during optional resume failures: %d", outcomes)
+	}
+	st, _ := c.manager.State("garage")
+	if st.CommandedW <= 0 || st.CurrentPowerW != 0 {
+		t.Fatalf("request must remain distinct from actual power: %+v", st)
+	}
+}
+
+func TestTickCancelsResumeRetryWhenSessionProofChanges(t *testing.T) {
+	for _, change := range []string{"unplug", "session", "device", "generation", "unknown", "delivering"} {
+		t.Run(change, func(t *testing.T) {
+			now := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+			sender := &fakeSender{}
+			cfgs := []Config{{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}}
+			sample := EVSample{Connected: true, RequestActive: true, DeviceID: "charger", SessionID: "plug-1", ConnectionGeneration: 1}
+			samples := map[string]EVSample{"easee": sample}
+			dir := &Directive{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), LoadpointEnergyWh: map[string]float64{"garage": 0}}
+			c := newTestController(t, cfgs, dir, samples, sender)
+			attempts := 0
+			c.send = func(ctx context.Context, driver string, payload []byte) error {
+				var cmd struct {
+					Action string `json:"action"`
+				}
+				_ = json.Unmarshal(payload, &cmd)
+				if cmd.Action == "ev_resume" {
+					attempts++
+					return errors.New("temporary failure")
+				}
+				return sender.Send(ctx, driver, payload)
+			}
+			c.Tick(context.Background(), now)
+			dir.LoadpointEnergyWh["garage"] = 2750
+			c.Tick(context.Background(), now.Add(5*time.Second))
+			switch change {
+			case "unplug":
+				sample.Connected = false
+			case "session":
+				sample.SessionID = "plug-2"
+			case "device":
+				sample.DeviceID = "other-charger"
+			case "generation":
+				sample.ConnectionGeneration++
+			case "unknown":
+				sample.ConnectionUnknown = true
+			case "delivering":
+				sample.PowerW = 5000
+			}
+			samples["easee"] = sample
+			c.Tick(context.Background(), now.Add(10*time.Second))
+			sample.Connected, sample.ConnectionUnknown, sample.PowerW = true, false, 0
+			samples["easee"] = sample
+			c.Tick(context.Background(), now.Add(15*time.Second))
+			if attempts != 1 {
+				t.Fatalf("stale retry crossed %s boundary: %d attempts", change, attempts)
+			}
+		})
+	}
+}
+
+func TestFailedZeroCommandDoesNotAuthorizeResume(t *testing.T) {
+	for _, safetyStanddown := range []bool{false, true} {
+		now := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+		cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}
+		dir := &Directive{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), LoadpointEnergyWh: map[string]float64{"garage": 0}}
+		c := newTestController(t, []Config{cfg}, dir, map[string]EVSample{"easee": {Connected: true, RequestActive: true}}, &fakeSender{})
+		resumes := 0
+		c.send = func(_ context.Context, _ string, payload []byte) error {
+			var cmd struct {
+				Action string  `json:"action"`
+				PowerW float64 `json:"power_w"`
+			}
+			if err := json.Unmarshal(payload, &cmd); err != nil {
+				return err
+			}
+			if cmd.Action == "ev_resume" {
+				resumes++
+				return nil
+			}
+			if cmd.PowerW == 0 {
+				return errors.New("zero command rejected")
+			}
+			return nil
+		}
+		c.TickWithDispatch(context.Background(), now, !safetyStanddown)
+		dir.LoadpointEnergyWh["garage"] = 2750
+		c.Tick(context.Background(), now.Add(5*time.Second))
+		if resumes != 0 {
+			t.Fatal("failed standdown was treated as an acknowledged pause")
+		}
 	}
 }

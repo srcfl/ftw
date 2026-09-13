@@ -45,19 +45,11 @@ export function formatSafetyK(k) {
   return String(Math.round(clampSafetyK(k) * 100) / 100);
 }
 
-// hedgeLine says what the current k costs in watts. sigmaRel (the PV twin's
-// rel_mae) is the same number the per-slot haircut uses, so when it is known
-// the line can name the share of every sunny slot held in reserve.
-export function hedgeLine(k, sigmaW, sigmaRel) {
-  if (sigmaW == null || typeof sigmaW !== "number" || isNaN(sigmaW) || sigmaW < 0) return null;
-  const sigma = Math.round(sigmaW);
-  if (sigma < 1) return "σ right now ≈ 0 W — no hedge";
-  const kn = clampSafetyK(k);
-  const line = "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
-  const rel = typeof sigmaRel === "number" && !isNaN(sigmaRel) && sigmaRel > 0 ? sigmaRel : null;
-  if (rel == null) return line;
-  const share = Math.min(100, Math.round(kn * rel * 100));
-  return line + " · holds back " + share + "% of each sunny slot";
+// A legacy model's residual does not measure the active plan's margin.
+export function hedgeLine(k) {
+  return clampSafetyK(k) === 0
+    ? "No forecast margin requested."
+    : "The forecast margin varies by interval. This box has not supplied separate forecast and planning values.";
 }
 
 export function isBatterySale(action) {

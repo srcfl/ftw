@@ -46,26 +46,10 @@ describe("strategyLabel", () => {
 });
 
 describe("hedgeLine", () => {
-  it("formats a normal σ with the hedge product", () => {
-    assert.equal(hedgeLine("1", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 432 W");
-    assert.equal(hedgeLine("2", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 864 W");
-  });
-
-  it("treats empty or junk k as 0", () => {
-    assert.equal(hedgeLine("", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 0 W");
-    assert.equal(hedgeLine("abc", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 0 W");
-  });
-
-  it("reports no hedge when σ is ~0", () => {
-    assert.equal(hedgeLine("1", 0), "σ right now ≈ 0 W — no hedge");
-    assert.equal(hedgeLine("1", 0.4), "σ right now ≈ 0 W — no hedge");
-  });
-
-  it("returns null when σ is missing or invalid (line stays hidden)", () => {
-    assert.equal(hedgeLine("1", null), null);
-    assert.equal(hedgeLine("1", undefined), null);
-    assert.equal(hedgeLine("1", NaN), null);
-    assert.equal(hedgeLine("1", -5), null);
+  it("does not infer the active margin from the legacy residual", () => {
+    assert.match(hedgeLine("1", 0), /margin varies by interval/);
+    assert.match(hedgeLine("1", 432), /Plan chart/);
+    assert.equal(hedgeLine("0", 432), "No forecast margin requested.");
   });
 });
 

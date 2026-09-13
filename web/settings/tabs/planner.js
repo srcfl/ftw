@@ -36,17 +36,12 @@
     return label;
   }
 
-  // hedgeLine renders the live "what does k actually do" readout under
-  // the k input: σ (the live PV-forecast error std from /api/pvmodel)
-  // and the resulting hedge k·σ in watts. Returns null when σ is
-  // missing/invalid — the caller keeps the line hidden.
-  function hedgeLine(k, sigmaW) {
-    if (sigmaW == null || typeof sigmaW !== "number" || isNaN(sigmaW) || sigmaW < 0) return null;
-    var sigma = Math.round(sigmaW);
-    if (sigma < 1) return "σ right now ≈ 0 W — no hedge";
-    var kn = parseFloat(k);
-    if (isNaN(kn) || kn < 0) kn = 0;
-    return "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
+  // The active forecast owns its interval margin; the legacy PV residual
+  // cannot quantify it. The Plan chart shows the actual paired inputs.
+  function hedgeLine(k) {
+    return Number(k) === 0
+      ? "No forecast margin requested."
+      : "The margin varies by interval. See forecast and planning values on the Plan chart.";
   }
 
   function engineSelect(engine, help) {

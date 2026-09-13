@@ -114,7 +114,9 @@ func validateExternalAssets(req externalRequest, plan externalPlan) error {
 			}
 			deadline := min(e.TargetSlot, len(req.Slots)-1)
 			if e.TargetSlot >= 0 && e.TargetEnergyWh > 0 && i >= deadline && (!finite(wh) || wh+1 < e.TargetEnergyWh) {
-				return fmt.Errorf("slot %d misses EV %q deadline", i, e.ID)
+				if _, ok := plan.FlexShortfallWh[e.ID]; !ok {
+					return fmt.Errorf("slot %d misses EV %q deadline", i, e.ID)
+				}
 			}
 		}
 	}

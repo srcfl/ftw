@@ -299,16 +299,18 @@ type Action struct {
 	// and VAT). Surfaced so the UI can break the price bar into
 	// components (spot + grid tariff + VAT) — pedagogical view of
 	// where the kr/kWh actually goes. Mirrors Slot.SpotOre.
-	SpotOre    float64 `json:"spot_ore"`
-	PVW        float64 `json:"pv_w"`
-	LoadW      float64 `json:"load_w"`
-	BatteryW   float64 `json:"battery_w"`  // decision (site sign, AC terminals)
-	GridW      float64 `json:"grid_w"`     // resulting grid power
-	SoC        float64 `json:"soc"`        // 0–1 at END of slot
-	CostOre    float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
-	Confidence float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
-	Reason     string  `json:"reason"`     // short human-readable explanation
-	EMSMode    string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
+	SpotOre       float64  `json:"spot_ore"`
+	PVW           float64  `json:"pv_w"`
+	ForecastPVW   *float64 `json:"forecast_pv_w,omitempty"`
+	ForecastLoadW *float64 `json:"forecast_load_w,omitempty"`
+	LoadW         float64  `json:"load_w"`
+	BatteryW      float64  `json:"battery_w"`  // decision (site sign, AC terminals)
+	GridW         float64  `json:"grid_w"`     // resulting grid power
+	SoC           float64  `json:"soc"`        // 0–1 at END of slot
+	CostOre       float64  `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
+	Confidence    float64  `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
+	Reason        string   `json:"reason"`     // short human-readable explanation
+	EMSMode       string   `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
 	// When PVCurtailActive is false, 0 means no cap (a dispatch hint may
@@ -329,9 +331,12 @@ type Action struct {
 
 	// LoadpointSoC is the EV SoC at END of slot, following the
 	// same convention as SoC for the home battery.
-	LoadpointSoC     float64            `json:"loadpoint_soc,omitempty"`
-	LoadpointPowerW  map[string]float64 `json:"loadpoint_power_w,omitempty"`
-	LoadpointSoCByID map[string]float64 `json:"loadpoint_soc_by_id,omitempty"`
+	LoadpointSoC    float64            `json:"loadpoint_soc,omitempty"`
+	LoadpointPowerW map[string]float64 `json:"loadpoint_power_w,omitempty"`
+	// Core reserve plans may spend an exact Wh budget at this legal on-power
+	// for part of a slot. It is an instantaneous ceiling, not average demand.
+	LoadpointMaxPowerW map[string]float64 `json:"loadpoint_max_power_w,omitempty"`
+	LoadpointSoCByID   map[string]float64 `json:"loadpoint_soc_by_id,omitempty"`
 
 	// Per-storage values make a multi-battery solve auditable. BatteryW and
 	// SoC remain the stable aggregate dispatch/API contract.
@@ -392,7 +397,8 @@ type Plan struct {
 	// OptimizerInput is the exact versioned request used by an external
 	// optimizer. It is omitted from the live plan API and copied into the
 	// persisted Diagnostic for deterministic replay.
-	OptimizerInput json.RawMessage `json:"-"`
+	OptimizerInput       json.RawMessage    `json:"-"`
+	LoadpointShortfallWh map[string]float64 `json:"loadpoint_shortfall_wh,omitempty"`
 }
 
 // ShadowPlan is a challenger candidate calculated alongside the active plan.
