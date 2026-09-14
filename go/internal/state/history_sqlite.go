@@ -321,7 +321,7 @@ func historyFloatBits(value float64) uint64 {
 }
 
 func (s *Store) HistoryBackend() map[string]any {
-	info := map[string]any{"engine": "sqlite", "archive": "parquet", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus()}
+	info := map[string]any{"engine": "sqlite", "archive": "parquet", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + "-wal"} {
 		if stat, err := os.Stat(path); err == nil {
 			info[key] = stat.Size()

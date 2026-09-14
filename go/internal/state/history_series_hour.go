@@ -57,164 +57,221 @@ func (s *Store) startSeriesHourBackfill() {
 		return
 	}
 	s.seriesHourMu.Lock()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	if s.seriesHourCancel != nil {
+		s.seriesHourMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s.seriesHourCancel = cancel
 	s.seriesHourWG.Add(1)
 	s.seriesHourMu.Unlock()
 	go func() {
 		defer s.seriesHourWG.Done()
 		defer cancel()
-		if err := s.ensureSeriesHours(ctx); err != nil {
-			slog.Error("hourly series rollup paused; long-range charts keep using raw samples", "err", err)
-		}
+		s.runSeriesHourBackfill(ctx, 5*time.Second)
 	}()
 }
 
-// ensureSeriesHours builds ts_series_hour from ts_samples once. Live writes
-// keep the table current afterwards. A completed import must run this before
-// year-scale /api/series can use the rollup.
-func (s *Store) ensureSeriesHours(ctx context.Context) error {
-	if s.history == nil {
-		return nil
-	}
-	if s.seriesHoursReady() {
-		return nil
-	}
-	var minTs, maxTs sql.NullInt64
-	// Separate extrema let SQLite seek each end of the time index instead of
-	// scanning the complete history for a combined MIN/MAX aggregate.
-	rangeCtx, cancelRange := context.WithTimeout(ctx, 5*time.Second)
-	err := s.history.QueryRowContext(rangeCtx, `SELECT
-		(SELECT MIN(ts_ms) FROM ts_samples), (SELECT MAX(ts_ms) FROM ts_samples)`).Scan(&minTs, &maxTs)
-	cancelRange()
-	if err != nil {
-		return err
-	}
-	if minTs.Valid {
-		start := seriesHourOf(minTs.Int64)
-		end := maxTs.Int64 + 1
-		const chunk = seriesHourMs
-		for t := start; t < end; t += chunk {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			tEnd := t + chunk
-			if tEnd > end {
-				tEnd = end
-			}
-			if err := s.backfillSeriesHour(ctx, t, tEnd); err != nil {
-				return err
-			}
+func (s *Store) runSeriesHourBackfill(ctx context.Context, retryDelay time.Duration) {
+	for ctx.Err() == nil {
+		// SQLite work checkpoints each small batch. Parquet keeps a receipt
+		// per complete file, so retain its original two-hour work budget;
+		// a short whole-attempt deadline would restart a slow day forever.
+		// Individual SQLite reads/writes remain bounded to five seconds.
+		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Hour)
+		err := s.ensureSeriesHours(attemptCtx)
+		cancel()
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Warn("hourly series rollup will resume; raw history remains available", "err", err)
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
-	if err := s.ensureParquetHours(ctx); err != nil {
-		return err
-	}
-
-	s.historyWriteMu.Lock()
-	_, err = s.history.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?) ON CONFLICT DO NOTHING`, seriesHoursMigration)
-	s.historyWriteMu.Unlock()
-	if err == nil {
-		slog.Info("hourly series rollup ready")
-	}
-	return err
 }
 
-// A deferred transaction reads without owning SQLite's writer. If a live write
-// changes its snapshot, SQLite rejects the write upgrade; retry the read rather
-// than publishing stale aggregates. Never use BEGIN IMMEDIATE here.
-func (s *Store) backfillSeriesHour(ctx context.Context, from, until int64) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		var wrote bool
-		wrote, err = s.backfillSeriesHourSnapshot(ctx, from, until)
-		if err == nil {
-			if wrote {
-				return pauseMaintenance(ctx)
-			}
-			return nil
-		}
-		var sqliteErr *sqlite.Error
-		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != 5 {
+// The cursor follows the samples' primary key, skipping empty hours and
+// avoiding time-index reads scattered across the whole database. Every
+// completed batch saves its cursor in the same transaction as its summaries.
+// Live/late writes seed a complete hour before adding samples, so an existing
+// summary must never be replaced by a background snapshot.
+func (s *Store) ensureSeriesHours(ctx context.Context) error {
+	if s.history == nil || s.seriesHoursReady() {
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if s.HistoryWriterStatus().Pending >= historyCommitMaxTicks/2 {
+			if err := pauseMaintenance(ctx); err != nil {
+				return err
+			}
+			continue
+		}
+		done, err := s.backfillSeriesHours(ctx, 64)
+		if err != nil {
+			return err
+		}
+		if done {
+			break
 		}
 		if err := pauseMaintenance(ctx); err != nil {
 			return err
 		}
 	}
-	return err
+	if err := s.ensureParquetHours(ctx); err != nil {
+		return err
+	}
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?) ON CONFLICT DO NOTHING`, seriesHoursMigration); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_sqlite_progress WHERE source=?`, seriesHoursMigration); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	slog.Info("hourly series rollup ready")
+	return nil
 }
 
-func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int64) (bool, error) {
+func (s *Store) backfillSeriesHours(ctx context.Context, maxHours int) (bool, error) {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		var done bool
+		done, err = s.backfillSeriesHoursSnapshot(ctx, maxHours)
+		if err == nil {
+			return done, nil
+		}
+		var sqliteErr *sqlite.Error
+		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != 5 {
+			return false, err
+		}
+		if err := pauseMaintenance(ctx); err != nil {
+			return false, err
+		}
+	}
+	return false, err
+}
+
+func (s *Store) backfillSeriesHoursSnapshot(ctx context.Context, maxHours int) (bool, error) {
 	txCtx, cancelTx := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelTx()
+	// Deferred: reading never owns SQLite's writer. A concurrent write makes
+	// the later upgrade fail with BUSY_SNAPSHOT, including the cursor write.
 	tx, err := s.history.BeginTx(txCtx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
+	readCtx, cancelRead := context.WithTimeout(txCtx, 5*time.Second)
 	defer cancelRead()
-	rows, err := tx.QueryContext(readCtx, `
-		SELECT driver_id, metric_id, (ts_ms / ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
-		FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ? GROUP BY 1, 2, 3`,
-		seriesHourMs, seriesHourMs, from, until)
-	if err != nil {
+	var driver, metric, through, rowsDone int64
+	err = tx.QueryRowContext(readCtx, `SELECT rows_done,driver_id,metric_id,ts_ms FROM history_sqlite_progress WHERE source=?`, seriesHoursMigration).Scan(&rowsDone, &driver, &metric, &through)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	type hour struct {
 		key seriesHourKey
 		acc seriesHourAcc
 	}
-	var hours []hour
-	for rows.Next() {
-		if len(hours) >= 4096 {
-			rows.Close()
-			return false, errors.New("hourly series backfill exceeds 4096 series per hour")
+	hours := make([]hour, 0, maxHours)
+	done := false
+	started := time.Now()
+	for len(hours) < maxHours {
+		var nextDriver, nextMetric, nextTs int64
+		err := tx.QueryRowContext(readCtx, `SELECT driver_id,metric_id,ts_ms FROM ts_samples
+			WHERE (driver_id,metric_id,ts_ms) > (?,?,?) ORDER BY driver_id,metric_id,ts_ms LIMIT 1`, driver, metric, through).Scan(&nextDriver, &nextMetric, &nextTs)
+		if errors.Is(err, sql.ErrNoRows) {
+			done = true
+			break
 		}
-		var h hour
-		if err := rows.Scan(&h.key.driverID, &h.key.metricID, &h.key.hourMs,
-			&h.acc.sum, &h.acc.min, &h.acc.max, &h.acc.n, &h.acc.last); err != nil {
-			rows.Close()
+		if err != nil {
+			return false, err
+		}
+		h := hour{key: seriesHourKey{nextDriver, nextMetric, seriesHourOf(nextTs)}}
+		if h.key.hourMs > math.MaxInt64-seriesHourMs {
+			return false, errors.New("hourly series timestamp exceeds supported range")
+		}
+		err = tx.QueryRowContext(readCtx, `SELECT SUM(value),MIN(value),MAX(value),COUNT(*),MAX(ts_ms)
+			FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms>=? AND ts_ms<?`,
+			nextDriver, nextMetric, h.key.hourMs, h.key.hourMs+seriesHourMs).Scan(&h.acc.sum, &h.acc.min, &h.acc.max, &h.acc.n, &h.acc.last)
+		if err != nil {
 			return false, err
 		}
 		hours = append(hours, h)
+		driver, metric, through = nextDriver, nextMetric, h.key.hourMs+seriesHourMs-1
+		rowsDone += h.acc.n
+		// Keep useful progress even on a slow disk. The read deadline still
+		// bounds an individual dense hour; background retries resume here.
+		if time.Since(started) >= 500*time.Millisecond {
+			break
+		}
 	}
-	err = errors.Join(rows.Err(), rows.Close())
 	cancelRead()
-	if err != nil {
-		return false, err
-	}
 	if len(hours) == 0 {
-		return false, tx.Commit()
+		return done, tx.Commit()
 	}
-	// Preserve existing summaries. SQLite validates that the source snapshot
-	// is still current when this transaction first tries to write.
-	writeCtx, cancelWrite := context.WithTimeout(ctx, historyCommitTimeout)
+	writeCtx, cancelWrite := context.WithTimeout(txCtx, historyCommitTimeout)
 	defer cancelWrite()
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()
-	stmt, err := tx.PrepareContext(writeCtx, `
-		INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+	stmt, err := tx.PrepareContext(writeCtx, `INSERT INTO ts_series_hour
+		(driver_id,metric_id,hour_ms,sum_value,min_value,max_value,n,last_ts_ms)
+		VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return false, err
 	}
 	defer stmt.Close()
-	wrote := false
 	for _, h := range hours {
-		res, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs,
-			h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last)
-		if err != nil {
+		if _, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs, h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last); err != nil {
 			return false, err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return false, err
-		}
-		wrote = wrote || n > 0
 	}
-	return wrote, tx.Commit()
+	if _, err := tx.ExecContext(writeCtx, `INSERT INTO history_sqlite_progress(source,rows_done,driver_id,metric_id,ts_ms)
+		VALUES (?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET rows_done=excluded.rows_done,
+		driver_id=excluded.driver_id,metric_id=excluded.metric_id,ts_ms=excluded.ts_ms`,
+		seriesHoursMigration, rowsDone, driver, metric, through); err != nil {
+		return false, err
+	}
+	return done, tx.Commit()
+}
+
+// Raw history remains usable until all summaries and Parquet sources are ready.
+func (s *Store) SeriesHourBackfillStatus() map[string]any {
+	if s == nil || s.history == nil {
+		return map[string]any{"state": "unavailable"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	var rows int64
+	var ready bool
+	err := s.history.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM history_migrations WHERE name=?),
+		COALESCE((SELECT rows_done FROM history_sqlite_progress WHERE source=?),0)`, seriesHoursMigration, seriesHoursMigration).Scan(&ready, &rows)
+	if err != nil {
+		return map[string]any{"state": "unknown", "ready": false}
+	}
+	if ready {
+		return map[string]any{"state": "complete", "ready": true}
+	}
+	return map[string]any{"state": "rebuilding", "ready": false, "rows_done": rows}
 }
 
 type seriesHourAcc struct {

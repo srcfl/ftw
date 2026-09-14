@@ -52,6 +52,7 @@ services:
     image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
     container_name: ftw
     restart: unless-stopped
+    stop_grace_period: 60s
 
     environment:
       # In-app self-update feature (version banner + Update/Restart

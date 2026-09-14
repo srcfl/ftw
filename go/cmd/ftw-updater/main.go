@@ -472,7 +472,7 @@ func (s *server) restartExisting(spec componentSpec, startedAt time.Time) {
 	s.writeState(st)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	err := s.runWithStateHeartbeat(st, func() error {
-		return s.runner(ctx, nil, s.composeArgs("restart", "--no-deps", spec.service)...)
+		return s.runner(ctx, nil, s.composeArgs("restart", "--no-deps", "--timeout", "60", spec.service)...)
 	})
 	cancel()
 	if err == nil && s.healthCheck != nil {
@@ -608,7 +608,7 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer upCancel()
 
-	upArgs := s.composeArgs("up", "-d", spec.service)
+	upArgs := s.composeArgs("up", "-d", "--timeout", "60", spec.service)
 	if err := s.runWithStateHeartbeat(restartState, func() error {
 		return s.runner(upCtx, env, upArgs...)
 	}); err != nil {
@@ -940,7 +940,7 @@ func (s *server) runRollback(snapshotID string, files []string, safetySnapshotID
 
 	// 1. Stop the main service so SQLite isn't holding a file handle
 	// while we swap state.db under it.
-	if err := s.runner(ctx, nil, "stop", "--time", "30", containerID); err != nil {
+	if err := s.runner(ctx, nil, "stop", "--time", "60", containerID); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "container stop failed: " + err.Error()})
 		return
 	}
@@ -1200,7 +1200,7 @@ func decompressGzipFile(src, dst string) error {
 
 func (s *server) recoverRollbackSafety(ctx context.Context, base State, safetySnapshotID string, safetyFiles []string, containerID, imageRef, cause string) {
 	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: base.StartedAt, UpdatedAt: time.Now(), Message: "rollback failed; restoring pre-rollback safety backup"})
-	_ = s.runner(ctx, nil, "stop", "--time", "30", containerID)
+	_ = s.runner(ctx, nil, "stop", "--time", "60", containerID)
 	restoreErr := s.restoreSnapshotFiles(ctx, safetySnapshotID, safetyFiles, containerID, imageRef)
 	var startErr error
 	if restoreErr == nil {

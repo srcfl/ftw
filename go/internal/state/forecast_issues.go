@@ -106,6 +106,35 @@ func gzipForecastModelState(state json.RawMessage) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// Identity belongs to the uncompressed record. Gzip headers and encoder
+// versions may change without changing a model or an issued forecast.
+func sameForecastPayload(a, b []byte, compressedLimit, expandedLimit int) bool {
+	if len(a) > compressedLimit || len(b) > compressedLimit {
+		return false
+	}
+	if bytes.Equal(a, b) {
+		return true
+	}
+	expand := func(data []byte) ([]byte, error) {
+		z, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		plain, readErr := io.ReadAll(io.LimitReader(z, int64(expandedLimit)+1))
+		closeErr := z.Close()
+		if len(plain) > expandedLimit {
+			return nil, errors.New("oversized forecast payload")
+		}
+		return plain, errors.Join(readErr, closeErr)
+	}
+	plainA, err := expand(a)
+	if err != nil {
+		return false
+	}
+	plainB, err := expand(b)
+	return err == nil && bytes.Equal(plainA, plainB)
+}
+
 type preparedForecastModelState struct {
 	id            string
 	expandedBytes int
@@ -185,7 +214,7 @@ func storePreparedForecastModelStates(ctx context.Context, tx *sql.Tx, prepared 
 			if err = tx.QueryRowContext(ctx, "SELECT expanded_bytes,payload FROM forecast_model_states WHERE id=?", state.id).Scan(&expanded, &old); err != nil {
 				return err
 			}
-			if expanded != state.expandedBytes || !bytes.Equal(old, state.payload) {
+			if expanded != state.expandedBytes || !sameForecastPayload(old, state.payload, maxForecastModelCompressed, forecasting.MaxModelStateBytes) {
 				return errors.New("forecast model state ID is immutable")
 			}
 		}
@@ -261,7 +290,7 @@ func (s *Store) SaveForecastIssue(ctx context.Context, issue forecasting.Issue) 
 		if err = tx.QueryRowContext(ctx, "SELECT payload FROM forecast_issues WHERE id=?", prepared.issue.ID).Scan(&old); err != nil {
 			return fmt.Errorf("read existing forecast issue: %w", err)
 		}
-		if !bytes.Equal(old, prepared.payload) {
+		if !sameForecastPayload(old, prepared.payload, maxForecastCompressedBytes, forecasting.MaxPayloadBytes) {
 			return errors.New("forecast issue ID is immutable")
 		}
 	}
