@@ -74,7 +74,11 @@ func (s *Store) startSeriesHourBackfill() {
 
 func (s *Store) runSeriesHourBackfill(ctx context.Context, retryDelay time.Duration) {
 	for ctx.Err() == nil {
-		attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// SQLite work checkpoints each small batch. Parquet keeps a receipt
+		// per complete file, so retain its original two-hour work budget;
+		// a short whole-attempt deadline would restart a slow day forever.
+		// Individual SQLite reads/writes remain bounded to five seconds.
+		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 		err := s.ensureSeriesHours(attemptCtx)
 		cancel()
 		if err == nil {
