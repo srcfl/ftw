@@ -194,7 +194,7 @@ func (s *Store) archiveSampleDay(ctx context.Context, coldDir string, from, to i
 	if copied == 0 {
 		return 0, "", nil
 	}
-	if err := publishStagedSamples(ctx, path, stage); err != nil {
+	if err := s.publishStagedSamples(ctx, path, stage); err != nil {
 		return copied, "", err
 	}
 	// Hourly totals already include live samples and any prior archive. Do
@@ -248,7 +248,7 @@ func (s *Store) archiveSampleDay(ctx context.Context, coldDir string, from, to i
 	return deleted, path, nil
 }
 
-func publishStagedSamples(ctx context.Context, path string, stage *sql.DB) error {
+func (s *Store) publishStagedSamples(ctx context.Context, path string, stage *sql.DB) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".ftw-parquet-*.tmp")
 	if err != nil {
 		return err
@@ -335,41 +335,54 @@ func publishStagedSamples(ctx context.Context, path string, stage *sql.DB) error
 	if err := verify(tmp); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
+	if err := s.replaceArchive(ctx, tmp, path); err != nil {
 		return err
 	}
 	return verify(path)
 }
 
 func (s *Store) pruneArchivedSamples(ctx context.Context, batch []resolvedSample) (int64, error) {
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	tx, err := s.history.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `DELETE FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms=? AND value=?`)
-	if err != nil {
-		return 0, err
-	}
-	defer stmt.Close()
-	var n int64
-	for _, r := range batch {
-		res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
+	var deleted int64
+	limit := 64
+	for len(batch) > 0 {
+		n := min(len(batch), limit)
+		var removed int64
+		err := s.writeArchiveBatch(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			removed = 0 // A busy attempt rolls back and retries this same prefix.
+			stmt, err := tx.PrepareContext(ctx, `DELETE FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms=? AND value=?`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+			for _, r := range batch[:n] {
+				res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
+				if err != nil {
+					return err
+				}
+				count, err := res.RowsAffected()
+				if err != nil {
+					return err
+				}
+				removed += count
+			}
+			return nil
+		})
 		if err != nil {
-			return n, err
+			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && n > 1 {
+				limit = max(1, n/2)
+				continue
+			}
+			return deleted, err
 		}
-		v, err := res.RowsAffected()
-		if err != nil {
-			return n, err
+		deleted += removed
+		batch = batch[n:]
+		if len(batch) > 0 && s.HistoryWriterStatus().Pending > 0 {
+			if err := pauseMaintenance(ctx); err != nil {
+				return deleted, err
+			}
 		}
-		n += v
 	}
-	return n, tx.Commit()
+	return deleted, nil
 }
 
 func (s *Store) archiveDayHours(ctx context.Context, stage *sql.DB) error {
@@ -436,43 +449,43 @@ func (s *Store) archiveDayHours(ctx context.Context, stage *sql.DB) error {
 }
 
 func (s *Store) mergeArchivedHour(ctx context.Context, d, m, hour int64, values map[int64]float64) error {
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	tx, err := s.history.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT ts_ms,value FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms>=? AND ts_ms<?`, d, m, hour, hour+seriesHourMs)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var ts int64
-		var v float64
-		if err := rows.Scan(&ts, &v); err != nil {
-			rows.Close()
+	return s.writeArchiveBatch(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// A retry must reread raw values instead of retaining an earlier snapshot.
+		merged := make(map[int64]float64, len(values))
+		for ts, v := range values {
+			merged[ts] = v
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT ts_ms,value FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms>=? AND ts_ms<?`, d, m, hour, hour+seriesHourMs)
+		if err != nil {
 			return err
 		}
-		if _, exists := values[ts]; !exists && len(values) >= maxRawSeriesPoints {
-			rows.Close()
-			return ErrHistoryQueryLimit
+		for rows.Next() {
+			var ts int64
+			var v float64
+			if err := rows.Scan(&ts, &v); err != nil {
+				rows.Close()
+				return err
+			}
+			if _, exists := merged[ts]; !exists && len(merged) >= maxRawSeriesPoints {
+				rows.Close()
+				return ErrHistoryQueryLimit
+			}
+			merged[ts] = v
 		}
-		values[ts] = v
-	}
-	err = errors.Join(rows.Err(), rows.Close())
-	if err != nil {
-		return err
-	}
-	var a seriesBucketAcc
-	for ts, v := range values {
-		a.add(1, v, v, v, ts)
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO ts_series_hour VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(driver_id,metric_id,hour_ms) DO UPDATE SET sum_value=excluded.sum_value,min_value=excluded.min_value,max_value=excluded.max_value,n=excluded.n,last_ts_ms=excluded.last_ts_ms`, d, m, hour, a.sum, a.min, a.max, a.n, a.last)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+		err = errors.Join(rows.Err(), rows.Close())
+		if err != nil {
+			return err
+		}
+		var a seriesBucketAcc
+		for ts, v := range merged {
+			a.add(1, v, v, v, ts)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO ts_series_hour VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(driver_id,metric_id,hour_ms) DO UPDATE SET sum_value=excluded.sum_value,min_value=excluded.min_value,max_value=excluded.max_value,n=excluded.n,last_ts_ms=excluded.last_ts_ms`, d, m, hour, a.sum, a.min, a.max, a.n, a.last)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func pauseMaintenance(ctx context.Context) error {

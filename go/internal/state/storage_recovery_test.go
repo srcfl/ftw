@@ -644,7 +644,7 @@ func writeParquetDay(path string, rows []parquetSampleRow) error {
 	if err := insertArchiveRows(context.Background(), stage, rows); err != nil {
 		return err
 	}
-	return publishStagedSamples(context.Background(), path, stage)
+	return new(Store).publishStagedSamples(context.Background(), path, stage)
 }
 
 // Opt-in admission fixture: records kernel peak RSS on the target. Also use

@@ -489,7 +489,9 @@ func (s *Store) recordHistoryBatches(ctx context.Context, batches []historyBatch
 		prep = append(prep, prepared{b: b, p: p, rs: rs})
 	}
 
-	s.historyWriteMu.Lock()
+	if err := lockContext(ctx, s.historyWriteMu.TryLock); err != nil {
+		return out, err
+	}
 	defer s.historyWriteMu.Unlock()
 	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {

@@ -53,11 +53,12 @@ type Store struct {
 	hotPath    string
 	hotWriteMu sync.Mutex
 
-	archiveMu sync.Mutex
-	coldDir   string
-	db        *sql.DB
-	cache     *sql.DB
-	ts        *internCache
+	archiveMu     sync.Mutex   // Serializes archive construction and retention.
+	archiveViewMu sync.RWMutex // Protects file publication/pruning against readers.
+	coldDir       string
+	db            *sql.DB
+	cache         *sql.DB
+	ts            *internCache
 
 	healEvents []HealEvent
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -130,6 +131,11 @@ func historyCommitInterrupted(err error) bool {
 		return true
 	}
 	return false
+}
+
+func historyWriteBusy(err error) bool {
+	var busy *sqlite.Error
+	return errors.As(err, &busy) && (busy.Code()&0xff == 5 || busy.Code()&0xff == 6)
 }
 
 // EnqueueTelemetryTick copies a whole tick without waiting on disk. The caller
@@ -285,7 +291,13 @@ func (w *historyWriter) run() {
 				maxAttempt = next
 				continue
 			}
-			timer := time.NewTimer(time.Second)
+			retryDelay := time.Second
+			if historyWriteBusy(err) {
+				// A competing transaction can release its lock quickly. Keep the
+				// accepted batch and retry without a full second of dead time.
+				retryDelay = 100 * time.Millisecond
+			}
+			timer := time.NewTimer(retryDelay)
 			select {
 			case <-w.ctx.Done():
 				timer.Stop()

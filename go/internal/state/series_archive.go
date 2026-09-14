@@ -46,12 +46,12 @@ func parquetPaths(coldDir string, since, until int64) ([]string, error) {
 // walkMergedSeries only holds one selected series/day in memory. Raw SQLite
 // wins on matching timestamps during a retry between file publish and prune.
 func (s *Store) walkMergedSeries(ctx context.Context, coldDir, driver, metric string, since, until int64, visit func(int64, float64) error) error {
-	// The day list and its raw overlap must stay on one side of archive
-	// publication/pruning. This lock never blocks the live history writer.
-	if err := s.lockArchive(ctx); err != nil {
+	// Keep the files and their raw overlap on one side of publication/pruning.
+	// Staging and compression do not need this lock; live writes never take it.
+	if err := lockContext(ctx, s.archiveViewMu.TryRLock); err != nil {
 		return err
 	}
-	defer s.archiveMu.Unlock()
+	defer s.archiveViewMu.RUnlock()
 	if until < since {
 		return nil
 	}
@@ -217,10 +217,7 @@ func (s *Store) retainSampleHistory(ctx context.Context, days int, now time.Time
 		if err := s.summarizeParquetDay(ctx, path); err != nil {
 			return err
 		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		if err := syncDir(filepath.Dir(path)); err != nil {
+		if err := s.removeArchive(ctx, path); err != nil {
 			return err
 		}
 	}
@@ -319,11 +316,15 @@ func (s *Store) markParquetSummary(ctx context.Context, path string) error {
 }
 
 func (s *Store) lockArchive(ctx context.Context) error {
+	return lockContext(ctx, s.archiveMu.TryLock)
+}
+
+func lockContext(ctx context.Context, tryLock func() bool) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if s.archiveMu.TryLock() {
+		if tryLock() {
 			return nil
 		}
 		timer := time.NewTimer(10 * time.Millisecond)
@@ -334,4 +335,26 @@ func (s *Store) lockArchive(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func (s *Store) removeArchive(ctx context.Context, path string) error {
+	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
+		return err
+	}
+	defer s.archiveViewMu.Unlock()
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func (s *Store) replaceArchive(ctx context.Context, tmp, path string) error {
+	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
+		return err
+	}
+	defer s.archiveViewMu.Unlock()
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
