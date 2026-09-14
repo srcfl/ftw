@@ -238,7 +238,7 @@ func TestOfflineBackupIncludesSQLiteCorrectionsAndRestoresBesideOldPrimary(t *te
 	if _, err := backup.db.Exec(`VACUUM INTO '` + dst + `'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := backup.exportHistoryToSQLite(dst); err != nil {
+	if err := backup.exportHistoryToSQLite(context.Background(), dst); err != nil {
 		t.Fatal(err)
 	}
 	backup.Close()
