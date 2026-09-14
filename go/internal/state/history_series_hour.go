@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"math"
 	"sort"
@@ -93,17 +94,10 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 			if tEnd > end {
 				tEnd = end
 			}
-			// Do not take historyWriteMu: a month-scale aggregate on a
-			// physical box can exceed the live writer's 30s commit budget.
-			_, err := s.history.ExecContext(ctx, `
-				INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
-				SELECT driver_id, metric_id, (ts_ms / ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
-				FROM ts_samples
-				WHERE ts_ms >= ? AND ts_ms < ?
-				GROUP BY 1, 2, 3
-				ON CONFLICT DO NOTHING`,
-				seriesHourMs, seriesHourMs, t, tEnd)
-			if err != nil {
+			if err := s.backfillSeriesHour(ctx, t, tEnd); err != nil {
+				return err
+			}
+			if err := pauseMaintenance(ctx); err != nil {
 				return err
 			}
 		}
@@ -119,6 +113,85 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 		slog.Info("hourly series rollup ready")
 	}
 	return err
+}
+
+// Read the source before starting a write. INSERT ... SELECT reserves SQLite's
+// writer for the entire aggregation, even without holding historyWriteMu.
+// A slow SD-card read must leave live telemetry free to commit. A timed-out
+// backfill leaves the completion marker unset, so reads still use raw samples.
+func (s *Store) backfillSeriesHour(ctx context.Context, from, until int64) error {
+	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelRead()
+	rows, err := s.history.QueryContext(readCtx, `
+		SELECT driver_id, metric_id, (ts_ms / ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
+		FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ? GROUP BY 1, 2, 3`,
+		seriesHourMs, seriesHourMs, from, until)
+	if err != nil {
+		return err
+	}
+	type hour struct {
+		key seriesHourKey
+		acc seriesHourAcc
+	}
+	var hours []hour
+	for rows.Next() {
+		if len(hours) >= 4096 {
+			rows.Close()
+			return errors.New("hourly series backfill exceeds 4096 series per hour")
+		}
+		var h hour
+		if err := rows.Scan(&h.key.driverID, &h.key.metricID, &h.key.hourMs,
+			&h.acc.sum, &h.acc.min, &h.acc.max, &h.acc.n, &h.acc.last); err != nil {
+			rows.Close()
+			return err
+		}
+		hours = append(hours, h)
+	}
+	err = errors.Join(rows.Err(), rows.Close())
+	cancelRead()
+	if err != nil {
+		return err
+	}
+	// Keep existing summaries, including hours updated by live writes while
+	// the source query ran. Commit small groups and yield between transactions.
+	for len(hours) > 0 {
+		n := min(len(hours), 128)
+		err := func() error {
+			writeCtx, cancel := context.WithTimeout(ctx, historyCommitTimeout)
+			defer cancel()
+			s.historyWriteMu.Lock()
+			defer s.historyWriteMu.Unlock()
+			tx, err := s.history.BeginTx(writeCtx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			stmt, err := tx.PrepareContext(writeCtx, `
+				INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+			for _, h := range hours[:n] {
+				if _, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs,
+					h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last); err != nil {
+					return err
+				}
+			}
+			return tx.Commit()
+		}()
+		if err != nil {
+			return err
+		}
+		hours = hours[n:]
+		if len(hours) > 0 {
+			if err := pauseMaintenance(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type seriesHourAcc struct {
