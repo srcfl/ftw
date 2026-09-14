@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.5.2
+
+### Patch Changes
+
+- a3e3921: Build the offline converter's sample time index after copying and verifying the rows to reduce SD-card writes. Keep the primary key throughout the copy and require the time index before publishing the converted history.
+- 4675122: Stop history admission and background work before draining the accepted queue. Give the whole queue a separate shutdown budget, finish deferred cleanup on restart, and report an incomplete drain through a failed process exit. Allow 60 seconds for container shutdown during updates and restarts.
+- 6e9cb45: Copy numeric DuckDB history in larger bounded batches to reduce migration time on Raspberry Pi storage. Keep full readback checks and resume interrupted conversions from the saved row cursor.
+  
+  Keep state read-only until the verified history is selected, so an interrupted converter cannot change its own source through a SQLite checkpoint. Treat absent and empty SQLite WAL files alike while still checking every nonempty WAL.
+- 84778bc: Keep forecast and model IDs valid when a software update changes gzip encoding. Compare bounded, verified record contents and retain the original archive bytes. Changed or corrupt records still fail validation.
+- ed17cf6: Read hourly history summaries before taking SQLite's write lock. Bound each read and write so a slow backfill cannot monopolize live telemetry commits; incomplete backfills keep using raw history.
+- 51fbcf7: Build hourly history in small batches that follow the primary index. Save progress with each committed batch, resume after timeouts and restarts, and expose unfinished work separately from raw-history migration. Keep live writes and late samples ahead of background work.
+
 ## 3.5.1
 
 ### Patch Changes
