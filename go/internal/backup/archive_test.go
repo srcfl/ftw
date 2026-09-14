@@ -71,13 +71,80 @@ func TestBackupRejectsUnreadableParquetWithMatchingHash(t *testing.T) {
 				manifest.Files = append(manifest.Files, entry)
 			}
 			archive := filepath.Join(t.TempDir(), "bad.ftwbak")
-			if err := writeArchive(context.Background(), archive, manifest, sources); err != nil {
+			if err := writeArchive(context.Background(), archive, manifest, sources, true); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Verify(archive); err == nil {
 				t.Fatal("accepted matching hashes for unreadable Parquet")
 			}
 		})
+	}
+}
+
+func TestOfflineBackupCreateVerifyRestore(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dataDir, "state.db")
+	st, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveConfig("ev_goal", "80% by 07:00"); err != nil {
+		t.Fatal(err)
+	}
+	points := make([]state.HistoryPoint, 2500)
+	for i := range points {
+		points[i] = state.HistoryPoint{TsMs: int64(i + 1), GridW: float64(i)}
+	}
+	if err := st.BulkRecordHistory(points); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	src, err := state.OpenBackupSource(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if !src.OfflineBackup() {
+		t.Fatal("offline helper was treated as a live Core store")
+	}
+	info, err := Create(context.Background(), CreateOptions{
+		State: src, StatePath: statePath, DataDir: dataDir,
+		OutputDir: filepath.Join(root, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+	t.Setenv("TMP", blocked)
+	t.Setenv("TEMP", blocked)
+	if _, err := Verify(info.Path); err != nil {
+		t.Fatal(err)
+	}
+	restoredDir := filepath.Join(root, "restored")
+	if _, err := Restore(info.Path, restoredDir, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := state.Open(filepath.Join(restoredDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if goal, ok := restored.LoadConfig("ev_goal"); !ok || goal != "80% by 07:00" {
+		t.Fatalf("restored goal = %q ok=%v", goal, ok)
+	}
+	h, err := restored.LoadHistory(0, 3000, 0)
+	if err != nil || len(h) != 2500 || h[0].GridW != 0 || h[2499].GridW != 2499 {
+		t.Fatalf("restored history = %d %v %+v", len(h), err, h)
 	}
 }
 
