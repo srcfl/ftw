@@ -20,7 +20,10 @@ import (
 // hold the source engine's file lock until conversion finishes.
 // Original databases and Parquet files are never removed or rewritten here.
 func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, report func(string)) error {
-	cfg, err := sql.Open("sqlite", statePath+"?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(1000)")
+	// A writable connection can checkpoint an existing state WAL when an
+	// interrupted attempt closes, changing its own source fingerprint. Keep
+	// the source read-only until the verified destination can be selected.
+	cfg, err := sql.Open("sqlite", ReadOnlyDatabaseURI(statePath))
 	if err != nil {
 		return err
 	}
@@ -69,7 +72,7 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 		if err := verifyPublishedConversion(ctx, statePath, destPath, generation); err != nil {
 			return err
 		}
-		return bindConvertedHistory(ctx, cfg, generation)
+		return bindConvertedHistory(ctx, statePath, generation)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -89,7 +92,15 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	}
 	defer dest.Close()
 	dest.SetMaxOpenConns(1)
-	if err := ensureHistorySchema(func(stmt string) error { _, err := dest.ExecContext(ctx, stmt); return err }); err != nil {
+	if err := ensureHistorySchema(func(stmt string) error {
+		// Maintain the primary key during the copy, then build the secondary
+		// time index in one pass. Incremental index updates amplify SD writes.
+		if stmt == sampleTimeIndexSQL {
+			return nil
+		}
+		_, err := dest.ExecContext(ctx, stmt)
+		return err
+	}); err != nil {
 		return err
 	}
 	if _, err := dest.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS conversion_progress(name TEXT PRIMARY KEY,cursor TEXT NOT NULL); CREATE TABLE IF NOT EXISTS conversion_source(digest TEXT NOT NULL)`); err != nil {
@@ -104,6 +115,17 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	}
 	if err != nil {
 		return err
+	}
+	var samplesVerified int
+	if err := dest.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversion_progress WHERE name='ts_samples:verified'`).Scan(&samplesVerified); err != nil {
+		return err
+	}
+	if samplesVerified == 0 {
+		// A partial copy from an earlier tool may already have this index.
+		// Once samples are verified, retain any completed late index build.
+		if _, err := dest.ExecContext(ctx, `DROP INDEX IF EXISTS idx_ts_samples_ts`); err != nil {
+			return err
+		}
 	}
 	for _, table := range historyTables {
 		if report != nil {
@@ -154,6 +176,22 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// This unpublished destination has no live readers. A rollback journal
+	// avoids keeping a second full index in WAL while CREATE INDEX commits.
+	// SQLite rolls back an interrupted build before a later resume opens WAL.
+	var journalMode string
+	if err := dest.QueryRowContext(ctx, `PRAGMA journal_mode=DELETE`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("prepare conversion index journal: %w", err)
+	}
+	if journalMode != "delete" {
+		return fmt.Errorf("conversion index requires delete journal, got %q", journalMode)
+	}
+	if report != nil {
+		report("build sample time index")
+	}
+	if _, err := dest.ExecContext(ctx, sampleTimeIndexSQL); err != nil {
+		return err
+	}
 	afterHash, err := betaSourceHash(ctx, statePath)
 	if err != nil {
 		return err
@@ -200,11 +238,18 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	if report != nil {
 		report("published verified history")
 	}
-	return bindConvertedHistory(ctx, cfg, generation)
+	return bindConvertedHistory(ctx, statePath, generation)
 }
 
-func bindConvertedHistory(ctx context.Context, cfg *sql.DB, generation string) error {
-	_, err := cfg.ExecContext(ctx, `INSERT INTO config(key,value) VALUES('history_sqlite_generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, generation)
+func bindConvertedHistory(ctx context.Context, statePath, generation string) error {
+	// Retain the source's journal mode. Changing it before this write could
+	// invalidate recovery after a cancelled bind without selecting anything.
+	cfg, err := sql.Open("sqlite", statePath+"?_pragma=synchronous(FULL)&_pragma=busy_timeout(1000)")
+	if err != nil {
+		return err
+	}
+	defer cfg.Close()
+	_, err = cfg.ExecContext(ctx, `INSERT INTO config(key,value) VALUES('history_sqlite_generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, generation)
 	return err
 }
 
@@ -752,6 +797,11 @@ func betaSourceHash(ctx context.Context, statePath string) (string, error) {
 		} else if err != nil {
 			return "", err
 		}
+		// SQLite readers can create an empty WAL without changing data.
+		// Nonempty WALs, including their headers, remain fully fingerprinted.
+		if strings.HasSuffix(path, "-wal") && digest == fmt.Sprintf("%x", sha256.Sum256(nil)) {
+			digest = "absent"
+		}
 		fmt.Fprintf(fingerprint, "%s:%s\n", filepath.Base(path), digest)
 	}
 	return fmt.Sprintf("%x", fingerprint.Sum(nil)), nil
@@ -818,6 +868,13 @@ func verifyPublishedConversion(ctx context.Context, statePath, dest, generation 
 // its full interleaved series. The physical cursor and destination rows commit
 // together. Source fingerprints prevent resuming against different row IDs.
 func convertPhysicalBetaTable(ctx context.Context, src, dst *sql.DB, table string) error {
+	batchRows := int64(1024)
+	if table == "ts_samples" {
+		// Four numeric columns keep this batch bounded. Larger ranges avoid
+		// repeated DuckDB scans and small SQLite commits on the Pi's SD card.
+		// Keep smaller batches for tables that can contain large JSON values.
+		batchRows = 64 * 1024
+	}
 	var start, end sql.NullInt64
 	if err := src.QueryRowContext(ctx, `SELECT MIN(rowid),MAX(rowid) FROM `+quoteHistoryIdentifier(table)).Scan(&start, &end); err != nil {
 		return err
@@ -837,7 +894,7 @@ func convertPhysicalBetaTable(ctx context.Context, src, dst *sql.DB, table strin
 	}
 	if start.Valid {
 		for cursor <= end.Int64 {
-			until := min(cursor+1024, end.Int64+1)
+			until := min(cursor+batchRows, end.Int64+1)
 			rows, err := src.QueryContext(ctx, `SELECT * FROM `+quoteHistoryIdentifier(table)+` WHERE rowid>=? AND rowid<?`, cursor, until)
 			if err != nil {
 				return err
@@ -890,8 +947,8 @@ func convertPhysicalBetaTable(ctx context.Context, src, dst *sql.DB, table strin
 	// counts and a 256-bit sum of SHA-256 row hashes must both match.
 	var expected, actual historyMultisetDigest
 	if start.Valid {
-		for from := start.Int64; from <= end.Int64; from += 1024 {
-			rows, err := src.QueryContext(ctx, `SELECT * FROM `+quoteHistoryIdentifier(table)+` WHERE rowid>=? AND rowid<?`, from, from+1024)
+		for from := start.Int64; from <= end.Int64; from += batchRows {
+			rows, err := src.QueryContext(ctx, `SELECT * FROM `+quoteHistoryIdentifier(table)+` WHERE rowid>=? AND rowid<?`, from, from+batchRows)
 			if err != nil {
 				return err
 			}

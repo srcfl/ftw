@@ -108,12 +108,52 @@ func TestRealBetaConversionPreservesIDsGoalsAndHotSamples(t *testing.T) {
 	source.SetMaxOpenConns(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	err = state.ConvertBetaHistory(ctx, path, source, func(phase string) {
-		if phase == "copy and verify energy_daily" {
+		if phase == "copy and verify ts_samples" {
 			cancel()
 		}
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal("expected partial copy", err)
+	}
+	// Resume a committed prefix from the released 1024-row converter. The
+	// cursor is deliberately not aligned to the new numeric batch size.
+	partial, err := sql.Open("sqlite", state.HistoryDatabasePath(path)+".converting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := partial.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Released partial copies also have the incrementally maintained index.
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_ts_samples_ts ON ts_samples(ts_ms)`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := source.Query(`SELECT driver_id,metric_id,ts_ms,value FROM ts_samples WHERE rowid<1024`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var driver, metric, ts int64
+		var value float64
+		if err := rows.Scan(&driver, &metric, &ts, &value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`INSERT INTO ts_samples VALUES(?,?,?,?)`, driver, metric, ts, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO conversion_progress VALUES('ts_samples:physical','1024')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := partial.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if err := state.ConvertBetaHistory(context.Background(), path, source, func(s string) { t.Log(s) }); err != nil {
 		t.Fatal(err)
@@ -143,6 +183,10 @@ func TestRealBetaConversionPreservesIDsGoalsAndHotSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var indexed int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 1 {
+		t.Fatal("published history lacks its time index", indexed, err)
+	}
 	var id int64
 	if err := db.QueryRow(`SELECT id FROM ts_drivers WHERE name='meter'`).Scan(&id); err != nil || id != 7 {
 		t.Fatal("changed identifier", id, err)

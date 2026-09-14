@@ -2,6 +2,7 @@ package state
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -849,6 +850,130 @@ func TestBetaConversionRefusesChangedSourceOnResume(t *testing.T) {
 	}
 	if err := ConvertBetaHistory(context.Background(), path, source, nil); err == nil || !strings.Contains(err.Error(), "source changed") {
 		t.Fatal("mixed different sources", err)
+	}
+}
+
+func TestBetaConversionPreservesUncheckpointedStateWALOnCancel(t *testing.T) {
+	path, source := betaSQLiteFixture(t)
+	cfg, err := openRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.Exec(`PRAGMA wal_autocheckpoint=0; UPDATE config SET value='90% by 08:00' WHERE key='saved_goal'`); err != nil {
+		t.Fatal(err)
+	}
+	mainBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walBytes, err := os.ReadFile(path + "-wal")
+	if err != nil || len(walBytes) <= 32 {
+		t.Fatal("fixture must have committed WAL frames", len(walBytes), err)
+	}
+	if err := cfg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the frozen main/WAL pair, as left by an exited process. No
+	// other connection may checkpoint it while the converter runs.
+	for name, data := range map[string][]byte{path: mainBytes, path + "-wal": walBytes} {
+		if err := os.WriteFile(name, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	err = ConvertBetaHistory(ctx, path, source, func(phase string) {
+		if phase == "copy and verify energy_daily" {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("expected interrupted copy", err)
+	}
+	for name, expected := range map[string][]byte{path: mainBytes, path + "-wal": walBytes} {
+		got, err := os.ReadFile(name)
+		if err != nil || !bytes.Equal(got, expected) {
+			t.Fatal("interrupted converter changed its source", filepath.Base(name), err)
+		}
+	}
+	if err := ConvertBetaHistory(context.Background(), path, source, nil); err != nil {
+		t.Fatal("resume from frozen WAL", err)
+	}
+	cfg, err = sql.Open("sqlite", ReadOnlyDatabaseURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cfg.Close()
+	var goal string
+	if err := cfg.QueryRow(`SELECT value FROM config WHERE key='saved_goal'`).Scan(&goal); err != nil || goal != "90% by 08:00" {
+		t.Fatal("committed WAL goal changed", goal, err)
+	}
+}
+
+func TestBetaFingerprintIgnoresOnlyEmptySQLiteWAL(t *testing.T) {
+	path, _ := betaSQLiteFixture(t)
+	ctx := context.Background()
+	before, err := betaSourceHash(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wal := range []string{path + "-wal", hotHistoryPath(path) + "-wal"} {
+		if err := os.WriteFile(wal, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := betaSourceHash(ctx, path)
+		if err != nil || got != before {
+			t.Fatal("empty reader WAL changed source fingerprint", err)
+		}
+		if err := os.WriteFile(wal, []byte("nonempty WAL must remain protected"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		got, err = betaSourceHash(ctx, path)
+		if err != nil || got == before {
+			t.Fatal("nonempty WAL was not fingerprinted", err)
+		}
+		if err := os.Remove(wal); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestBetaConversionResumesBeforeTimeIndex(t *testing.T) {
+	path, source := betaSQLiteFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	err := ConvertBetaHistory(ctx, path, source, func(phase string) {
+		if phase == "build sample time index" {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("expected interrupted index build", err)
+	}
+	partial, err := sql.Open("sqlite", ReadOnlyDatabaseURI(historyDatabasePath(path)+".converting"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journalMode string
+	if err := partial.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "delete" {
+		t.Fatal("index build still stages its pages in WAL", journalMode, err)
+	}
+	var indexed, rows int
+	if err := partial.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 0 {
+		t.Fatal("time index built before raw copy completed", indexed, err)
+	}
+	if err := partial.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&rows); err != nil || rows != 2300 {
+		t.Fatal("copied samples missing before index build", rows, err)
+	}
+	partial.Close()
+	if err := ConvertBetaHistory(context.Background(), path, source, nil); err != nil {
+		t.Fatal("index build resume", err)
+	}
+	dest, err := sql.Open("sqlite", ReadOnlyDatabaseURI(historyDatabasePath(path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dest.Close()
+	if err := dest.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 1 {
+		t.Fatal("published history lacks the time index", indexed, err)
 	}
 }
 
