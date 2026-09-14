@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -27,7 +28,10 @@ func (s *Store) archiveTransaction(ctx context.Context, prepare, write func(cont
 		}
 		if s.HistoryWriterStatus().Pending < historyCommitMaxTicks/2 {
 			err := s.tryArchiveBatch(ctx, prepare, write)
-			if !historyWriteBusy(err) {
+			// A prepared hour stays in its current file job on a transient
+			// write/lock deadline. Pruning returns deadlines to split its batch.
+			retryPrepared := prepare != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
+			if !historyWriteBusy(err) && !retryPrepared {
 				return err
 			}
 		}

@@ -131,6 +131,31 @@ func TestDenseArchiveHourReadsOutsideWriteBudgetAndRetriesSnapshot(t *testing.T)
 	}
 }
 
+func TestPreparedArchiveHourRetriesInnerWriteDeadline(t *testing.T) {
+	s := freshStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	attempts := 0
+	err := s.archiveTransaction(ctx, func(context.Context, *sql.Tx) error {
+		attempts++
+		return nil
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		if attempts == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES ('prepared-hour-retried')`)
+		return err
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("inner deadline abandoned the prepared hour: attempts=%d err=%v", attempts, err)
+	}
+	var n int
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='prepared-hour-retried'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("retried write missing: %d %v", n, err)
+	}
+}
+
 func TestArchivePruneKeepsReaderViewAndLateCorrections(t *testing.T) {
 	s := freshStore(t)
 	s.coldDir = t.TempDir()
