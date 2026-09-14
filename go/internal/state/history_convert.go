@@ -175,7 +175,9 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	if err := dest.Close(); err != nil {
 		return err
 	}
-	f, err := os.Open(tmp)
+	// Windows FlushFileBuffers requires a writable handle. This is the new
+	// destination, never one of the read-only conversion sources.
+	f, err := os.OpenFile(tmp, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
