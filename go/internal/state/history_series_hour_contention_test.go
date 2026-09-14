@@ -57,7 +57,7 @@ func TestSeriesHourBackfillReadDoesNotOwnSQLiteWriter(t *testing.T) {
 	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=100`); err != nil {
 		t.Fatal(err)
 	}
-	_, writeErr := conn.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES ('concurrent-live-write')`)
+	_, writeErr := conn.ExecContext(ctx, `UPDATE backfill_source SET value=2400`)
 	conn.Close()
 	released.Do(func() { close(release) })
 	if err := <-done; err != nil {
@@ -68,7 +68,7 @@ func TestSeriesHourBackfillReadDoesNotOwnSQLiteWriter(t *testing.T) {
 	}
 	var n int
 	var sum float64
-	if err := s.history.QueryRow(`SELECT n,sum_value FROM ts_series_hour`).Scan(&n, &sum); err != nil || n != 1 || sum != 1200 {
+	if err := s.history.QueryRow(`SELECT n,sum_value FROM ts_series_hour`).Scan(&n, &sum); err != nil || n != 1 || sum != 2400 {
 		t.Fatalf("backfill result: n=%d sum=%v err=%v", n, sum, err)
 	}
 }

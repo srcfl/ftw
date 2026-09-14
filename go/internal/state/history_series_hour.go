@@ -8,6 +8,8 @@ import (
 	"math"
 	"sort"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 const (
@@ -79,7 +81,13 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 		return nil
 	}
 	var minTs, maxTs sql.NullInt64
-	if err := s.history.QueryRowContext(ctx, `SELECT MIN(ts_ms), MAX(ts_ms) FROM ts_samples`).Scan(&minTs, &maxTs); err != nil {
+	// Separate extrema let SQLite seek each end of the time index instead of
+	// scanning the complete history for a combined MIN/MAX aggregate.
+	rangeCtx, cancelRange := context.WithTimeout(ctx, 5*time.Second)
+	err := s.history.QueryRowContext(rangeCtx, `SELECT
+		(SELECT MIN(ts_ms) FROM ts_samples), (SELECT MAX(ts_ms) FROM ts_samples)`).Scan(&minTs, &maxTs)
+	cancelRange()
+	if err != nil {
 		return err
 	}
 	if minTs.Valid {
@@ -107,7 +115,7 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 	}
 
 	s.historyWriteMu.Lock()
-	_, err := s.history.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?) ON CONFLICT DO NOTHING`, seriesHoursMigration)
+	_, err = s.history.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?) ON CONFLICT DO NOTHING`, seriesHoursMigration)
 	s.historyWriteMu.Unlock()
 	if err == nil {
 		slog.Info("hourly series rollup ready")
@@ -115,14 +123,35 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 	return err
 }
 
-// Read the source before starting a write. INSERT ... SELECT reserves SQLite's
-// writer for the entire aggregation, even without holding historyWriteMu.
-// A slow SD-card read must leave live telemetry free to commit. A timed-out
-// backfill leaves the completion marker unset, so reads still use raw samples.
+// A deferred transaction reads without owning SQLite's writer. If a live write
+// changes its snapshot, SQLite rejects the write upgrade; retry the read rather
+// than publishing stale aggregates. Never use BEGIN IMMEDIATE here.
 func (s *Store) backfillSeriesHour(ctx context.Context, from, until int64) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = s.backfillSeriesHourSnapshot(ctx, from, until)
+		var sqliteErr *sqlite.Error
+		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != 5 {
+			return err
+		}
+		if err := pauseMaintenance(ctx); err != nil {
+			return err
+		}
+	}
+	return err
+}
+
+func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int64) error {
+	txCtx, cancelTx := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelTx()
+	tx, err := s.history.BeginTx(txCtx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelRead()
-	rows, err := s.history.QueryContext(readCtx, `
+	rows, err := tx.QueryContext(readCtx, `
 		SELECT driver_id, metric_id, (ts_ms / ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
 		FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ? GROUP BY 1, 2, 3`,
 		seriesHourMs, seriesHourMs, from, until)
@@ -152,46 +181,26 @@ func (s *Store) backfillSeriesHour(ctx context.Context, from, until int64) error
 	if err != nil {
 		return err
 	}
-	// Keep existing summaries, including hours updated by live writes while
-	// the source query ran. Commit small groups and yield between transactions.
-	for len(hours) > 0 {
-		n := min(len(hours), 128)
-		err := func() error {
-			writeCtx, cancel := context.WithTimeout(ctx, historyCommitTimeout)
-			defer cancel()
-			s.historyWriteMu.Lock()
-			defer s.historyWriteMu.Unlock()
-			tx, err := s.history.BeginTx(writeCtx, nil)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback()
-			stmt, err := tx.PrepareContext(writeCtx, `
-				INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
-			if err != nil {
-				return err
-			}
-			defer stmt.Close()
-			for _, h := range hours[:n] {
-				if _, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs,
-					h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last); err != nil {
-					return err
-				}
-			}
-			return tx.Commit()
-		}()
-		if err != nil {
+	// Preserve existing summaries. SQLite validates that the source snapshot
+	// is still current when this transaction first tries to write.
+	writeCtx, cancelWrite := context.WithTimeout(ctx, historyCommitTimeout)
+	defer cancelWrite()
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	stmt, err := tx.PrepareContext(writeCtx, `
+		INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, h := range hours {
+		if _, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs,
+			h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last); err != nil {
 			return err
 		}
-		hours = hours[n:]
-		if len(hours) > 0 {
-			if err := pauseMaintenance(ctx); err != nil {
-				return err
-			}
-		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 type seriesHourAcc struct {
