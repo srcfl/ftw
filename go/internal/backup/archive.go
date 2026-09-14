@@ -146,6 +146,9 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return Info{}, fmt.Errorf("backup: create output dir: %w", err)
 	}
+	if err := state.EnsureDiskSpace(outputDir, state.BackupArchiveScratch(opts.State.BackupSourceBytes(), 0)); err != nil {
+		return Info{}, err
+	}
 	if opts.Maintenance != nil {
 		opts.Maintenance.Lock()
 		defer opts.Maintenance.Unlock()
@@ -245,7 +248,7 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 
 	tmpPath := filepath.Join(outputDir, "."+id+".tmp")
-	if err := writeArchive(ctx, tmpPath, manifest, sources); err != nil {
+	if err := writeArchive(ctx, tmpPath, manifest, sources, !opts.State.OfflineBackup()); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, err
 	}
@@ -381,7 +384,7 @@ func describeSource(ctx context.Context, dataDir string, source sourceEntry) (Fi
 	return entry, err
 }
 
-func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []sourceEntry) error {
+func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []sourceEntry, live bool) error {
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -393,7 +396,7 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 			_ = os.Remove(dst)
 		}
 	}()
-	zw, err := gzip.NewWriterLevel(state.NewMaintenanceWriter(ctx, f), gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(state.NewMaintenanceWriterPaced(ctx, f, live), gzip.BestSpeed)
 	if err != nil {
 		return err
 	}
@@ -491,7 +494,7 @@ func Verify(archivePath string) (Manifest, error) {
 		want[entry.Path] = entry
 	}
 	seen := make(map[string]bool, len(want))
-	tmpDir, err := os.MkdirTemp("", ".ftw-backup-verify-")
+	tmpDir, err := os.MkdirTemp(filepath.Dir(archivePath), ".ftw-backup-verify-")
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -569,7 +572,7 @@ func Verify(archivePath string) (Manifest, error) {
 	if len(seen) != len(want) {
 		return Manifest{}, errors.New("backup: archive is missing one or more manifest files")
 	}
-	if err := verifyCompressedDatabase(dbGzip); err != nil {
+	if err := verifyCompressedDatabase(dbGzip, tmpDir); err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
@@ -1055,8 +1058,8 @@ func extractArchive(archivePath, staging string) error {
 	return verifyDatabase(filepath.Join(staging, filepath.FromSlash(manifest.DatabaseFile)))
 }
 
-func verifyCompressedDatabase(src string) error {
-	tmp, err := os.CreateTemp("", ".ftw-backup-db-*.sqlite")
+func verifyCompressedDatabase(src, workDir string) error {
+	tmp, err := os.CreateTemp(workDir, ".ftw-backup-db-*.sqlite")
 	if err != nil {
 		return err
 	}
