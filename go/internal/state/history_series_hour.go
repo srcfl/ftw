@@ -105,9 +105,6 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 			if err := s.backfillSeriesHour(ctx, t, tEnd); err != nil {
 				return err
 			}
-			if err := pauseMaintenance(ctx); err != nil {
-				return err
-			}
 		}
 	}
 	if err := s.ensureParquetHours(ctx); err != nil {
@@ -129,7 +126,14 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 func (s *Store) backfillSeriesHour(ctx context.Context, from, until int64) error {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		err = s.backfillSeriesHourSnapshot(ctx, from, until)
+		var wrote bool
+		wrote, err = s.backfillSeriesHourSnapshot(ctx, from, until)
+		if err == nil {
+			if wrote {
+				return pauseMaintenance(ctx)
+			}
+			return nil
+		}
 		var sqliteErr *sqlite.Error
 		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != 5 {
 			return err
@@ -141,12 +145,12 @@ func (s *Store) backfillSeriesHour(ctx context.Context, from, until int64) error
 	return err
 }
 
-func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int64) error {
+func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int64) (bool, error) {
 	txCtx, cancelTx := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelTx()
 	tx, err := s.history.BeginTx(txCtx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
@@ -156,7 +160,7 @@ func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int6
 		FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ? GROUP BY 1, 2, 3`,
 		seriesHourMs, seriesHourMs, from, until)
 	if err != nil {
-		return err
+		return false, err
 	}
 	type hour struct {
 		key seriesHourKey
@@ -166,20 +170,23 @@ func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int6
 	for rows.Next() {
 		if len(hours) >= 4096 {
 			rows.Close()
-			return errors.New("hourly series backfill exceeds 4096 series per hour")
+			return false, errors.New("hourly series backfill exceeds 4096 series per hour")
 		}
 		var h hour
 		if err := rows.Scan(&h.key.driverID, &h.key.metricID, &h.key.hourMs,
 			&h.acc.sum, &h.acc.min, &h.acc.max, &h.acc.n, &h.acc.last); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		hours = append(hours, h)
 	}
 	err = errors.Join(rows.Err(), rows.Close())
 	cancelRead()
 	if err != nil {
-		return err
+		return false, err
+	}
+	if len(hours) == 0 {
+		return false, tx.Commit()
 	}
 	// Preserve existing summaries. SQLite validates that the source snapshot
 	// is still current when this transaction first tries to write.
@@ -191,16 +198,23 @@ func (s *Store) backfillSeriesHourSnapshot(ctx context.Context, from, until int6
 		INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer stmt.Close()
+	wrote := false
 	for _, h := range hours {
-		if _, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs,
-			h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last); err != nil {
-			return err
+		res, err := stmt.ExecContext(writeCtx, h.key.driverID, h.key.metricID, h.key.hourMs,
+			h.acc.sum, h.acc.min, h.acc.max, h.acc.n, h.acc.last)
+		if err != nil {
+			return false, err
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		wrote = wrote || n > 0
 	}
-	return tx.Commit()
+	return wrote, tx.Commit()
 }
 
 type seriesHourAcc struct {

@@ -72,3 +72,31 @@ func TestSeriesHourBackfillReadDoesNotOwnSQLiteWriter(t *testing.T) {
 		t.Fatalf("backfill result: n=%d sum=%v err=%v", n, sum, err)
 	}
 }
+
+func TestSeriesHourBackfillDoesNotPauseForEmptyGap(t *testing.T) {
+	s := freshStore(t)
+	if err := s.RecordSamples([]Sample{
+		{Driver: "meter", Metric: "pv_w", TsMs: 0, Value: 1},
+		{Driver: "meter", Metric: "pv_w", TsMs: 96 * seriesHourMs, Value: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.history.Exec(`DELETE FROM ts_series_hour`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.history.Exec(`DELETE FROM history_migrations WHERE name=?`, seriesHoursMigration); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.ensureSeriesHours(ctx); err != nil {
+		t.Fatalf("sparse history did not finish within the maintenance budget: %v", err)
+	}
+	if !s.seriesHoursReady() {
+		t.Fatal("completed sparse backfill lacks its completion marker")
+	}
+	var n int
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM ts_series_hour`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("sparse summaries: count=%d err=%v", n, err)
+	}
+}
