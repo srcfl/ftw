@@ -20,7 +20,10 @@ import (
 // hold the source engine's file lock until conversion finishes.
 // Original databases and Parquet files are never removed or rewritten here.
 func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, report func(string)) error {
-	cfg, err := sql.Open("sqlite", statePath+"?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(1000)")
+	// A writable connection can checkpoint an existing state WAL when an
+	// interrupted attempt closes, changing its own source fingerprint. Keep
+	// the source read-only until the verified destination can be selected.
+	cfg, err := sql.Open("sqlite", ReadOnlyDatabaseURI(statePath))
 	if err != nil {
 		return err
 	}
@@ -69,7 +72,7 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 		if err := verifyPublishedConversion(ctx, statePath, destPath, generation); err != nil {
 			return err
 		}
-		return bindConvertedHistory(ctx, cfg, generation)
+		return bindConvertedHistory(ctx, statePath, generation)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -200,11 +203,18 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	if report != nil {
 		report("published verified history")
 	}
-	return bindConvertedHistory(ctx, cfg, generation)
+	return bindConvertedHistory(ctx, statePath, generation)
 }
 
-func bindConvertedHistory(ctx context.Context, cfg *sql.DB, generation string) error {
-	_, err := cfg.ExecContext(ctx, `INSERT INTO config(key,value) VALUES('history_sqlite_generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, generation)
+func bindConvertedHistory(ctx context.Context, statePath, generation string) error {
+	// Retain the source's journal mode. Changing it before this write could
+	// invalidate recovery after a cancelled bind without selecting anything.
+	cfg, err := sql.Open("sqlite", statePath+"?_pragma=synchronous(FULL)&_pragma=busy_timeout(1000)")
+	if err != nil {
+		return err
+	}
+	defer cfg.Close()
+	_, err = cfg.ExecContext(ctx, `INSERT INTO config(key,value) VALUES('history_sqlite_generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, generation)
 	return err
 }
 
@@ -751,6 +761,11 @@ func betaSourceHash(ctx context.Context, statePath string) (string, error) {
 			digest = "absent"
 		} else if err != nil {
 			return "", err
+		}
+		// SQLite readers can create an empty WAL without changing data.
+		// Nonempty WALs, including their headers, remain fully fingerprinted.
+		if strings.HasSuffix(path, "-wal") && digest == fmt.Sprintf("%x", sha256.Sum256(nil)) {
+			digest = "absent"
 		}
 		fmt.Fprintf(fingerprint, "%s:%s\n", filepath.Base(path), digest)
 	}
