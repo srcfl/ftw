@@ -3,13 +3,17 @@ package state
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 func TestPartialHourQueriesAndLiveWritesDuringArchiveBuild(t *testing.T) {
@@ -59,6 +63,71 @@ func TestPartialHourQueriesAndLiveWritesDuringArchiveBuild(t *testing.T) {
 	}
 	if st := s.HistoryWriterStatus(); st.Accepted != 8 || st.Committed != 8 || st.Pending != 0 || st.Rejected != 0 || st.LastError != "" {
 		t.Fatalf("live writes did not remain durable: %+v", st)
+	}
+}
+
+func TestDenseArchiveHourReadsOutsideWriteBudgetAndRetriesSnapshot(t *testing.T) {
+	reading, release := make(chan struct{}), make(chan struct{})
+	var entered, released sync.Once
+	defer released.Do(func() { close(release) })
+	fn := fmt.Sprintf("test_archive_slow_hour_%d", time.Now().UnixNano())
+	if err := sqlite.RegisterScalarFunction(fn, 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		entered.Do(func() { close(reading); <-release })
+		return args[0], nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := freshStore(t)
+	base := time.Now().UTC().Truncate(time.Hour).UnixMilli()
+	if err := s.RecordSamples([]Sample{{Driver: "meter", Metric: "power", TsMs: base + 1, Value: 10}}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.driverID("meter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.metricID("power", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`ALTER TABLE ts_samples RENAME TO slow_archive_source`,
+		`CREATE VIEW ts_samples AS SELECT driver_id,metric_id,ts_ms,` + fn + `(value) AS value FROM slow_archive_source`,
+	} {
+		if _, err := s.history.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.mergeArchivedHour(ctx, d, m, base, map[int64]float64{base + 2: 20}) }()
+	select {
+	case <-reading:
+	case <-ctx.Done():
+		t.Fatal("hour read did not start")
+	}
+	// A dense/slow scan may exceed the write budget. It must not own the
+	// live mutex, and its snapshot must be retried if raw data changes.
+	lockCtx, stopLock := context.WithTimeout(ctx, 200*time.Millisecond)
+	err = lockContext(lockCtx, s.historyWriteMu.TryLock)
+	stopLock()
+	if err != nil {
+		t.Fatal("slow hour read held the live writer mutex:", err)
+	}
+	s.historyWriteMu.Unlock()
+	if _, err := s.history.ExecContext(ctx, `INSERT INTO slow_archive_source(driver_id,metric_id,ts_ms,value) VALUES(?,?,?,?)`, d, m, base+3, 30); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(archiveWriteTimeout + 100*time.Millisecond)
+	released.Do(func() { close(release) })
+	if err := <-done; err != nil {
+		t.Fatal("dense hour could not resume:", err)
+	}
+	var n int64
+	var sum float64
+	if err := s.history.QueryRow(`SELECT n,sum_value FROM ts_series_hour WHERE driver_id=? AND metric_id=? AND hour_ms=?`, d, m, base).Scan(&n, &sum); err != nil || n != 3 || sum != 60 {
+		t.Fatalf("snapshot retry lost the late raw sample: n=%d sum=%v err=%v", n, sum, err)
 	}
 }
 

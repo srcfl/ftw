@@ -449,7 +449,8 @@ func (s *Store) archiveDayHours(ctx context.Context, stage *sql.DB) error {
 }
 
 func (s *Store) mergeArchivedHour(ctx context.Context, d, m, hour int64, values map[int64]float64) error {
-	return s.writeArchiveBatch(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	var a seriesBucketAcc
+	return s.archiveTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		// A retry must reread raw values instead of retaining an earlier snapshot.
 		merged := make(map[int64]float64, len(values))
 		for ts, v := range values {
@@ -476,11 +477,13 @@ func (s *Store) mergeArchivedHour(ctx context.Context, d, m, hour int64, values 
 		if err != nil {
 			return err
 		}
-		var a seriesBucketAcc
+		a = seriesBucketAcc{}
 		for ts, v := range merged {
 			a.add(1, v, v, v, ts)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO ts_series_hour VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(driver_id,metric_id,hour_ms) DO UPDATE SET sum_value=excluded.sum_value,min_value=excluded.min_value,max_value=excluded.max_value,n=excluded.n,last_ts_ms=excluded.last_ts_ms`, d, m, hour, a.sum, a.min, a.max, a.n, a.last)
+		return nil
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO ts_series_hour VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(driver_id,metric_id,hour_ms) DO UPDATE SET sum_value=excluded.sum_value,min_value=excluded.min_value,max_value=excluded.max_value,n=excluded.n,last_ts_ms=excluded.last_ts_ms`, d, m, hour, a.sum, a.min, a.max, a.n, a.last)
 		if err != nil {
 			return err
 		}
