@@ -952,6 +952,10 @@ func TestBetaConversionResumesBeforeTimeIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var journalMode string
+	if err := partial.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "delete" {
+		t.Fatal("index build still stages its pages in WAL", journalMode, err)
+	}
 	var indexed, rows int
 	if err := partial.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 0 {
 		t.Fatal("time index built before raw copy completed", indexed, err)

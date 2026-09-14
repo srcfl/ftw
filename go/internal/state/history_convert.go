@@ -176,6 +176,16 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// This unpublished destination has no live readers. A rollback journal
+	// avoids keeping a second full index in WAL while CREATE INDEX commits.
+	// SQLite rolls back an interrupted build before a later resume opens WAL.
+	var journalMode string
+	if err := dest.QueryRowContext(ctx, `PRAGMA journal_mode=DELETE`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("prepare conversion index journal: %w", err)
+	}
+	if journalMode != "delete" {
+		return fmt.Errorf("conversion index requires delete journal, got %q", journalMode)
+	}
 	if report != nil {
 		report("build sample time index")
 	}
