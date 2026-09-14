@@ -30,6 +30,68 @@ func TestFreshSQLiteStoreDoesNotCreateBetaFiles(t *testing.T) {
 	}
 }
 
+func TestSQLiteInitialBindingResumesAfterInterruptedSave(t *testing.T) {
+	for _, n := range []int{0, 2300} {
+		for _, background := range []bool{false, true} {
+			t.Run(fmt.Sprintf("rows=%d/background=%t", n, background), func(t *testing.T) {
+				path, cold := legacyMigrationFixture(t, n)
+				cfg, err := openRaw(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = cfg.Exec(`CREATE TRIGGER interrupt_binding BEFORE INSERT ON config
+					WHEN NEW.key='history_sqlite_generation' BEGIN SELECT RAISE(ABORT,'interrupted binding'); END`)
+				cfg.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				open := func() (*Store, error) {
+					if background {
+						return OpenWithBackgroundHistory(path, cold, nil)
+					}
+					return Open(path)
+				}
+				if st, err := open(); err == nil {
+					st.Close()
+					t.Fatal("binding unexpectedly completed")
+				} else if !strings.Contains(err.Error(), "interrupted binding") {
+					t.Fatal(err)
+				}
+				cfg, err = openRaw(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = cfg.Exec(`DROP TRIGGER interrupt_binding`)
+				cfg.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				st, err := open()
+				if err != nil {
+					t.Fatalf("restart must finish its own binding: %v", err)
+				}
+				defer st.Close()
+				if background {
+					waitHistoryMigration(t, st)
+				}
+				got, err := st.LoadSeries("meter", "power", 1, 2300, 0)
+				if err != nil || len(got) != n {
+					t.Fatalf("restart lost history: rows=%d err=%v", len(got), err)
+				}
+				var generation string
+				if err := st.history.QueryRow(`SELECT name FROM history_migrations WHERE name LIKE 'generation:%'`).Scan(&generation); err != nil {
+					t.Fatal(err)
+				}
+				active, _ := st.historyConfig("history_sqlite_generation")
+				pending, _ := st.historyConfig("history_sqlite_pending_generation")
+				if active == "" || generation != "generation:"+active || pending != "" {
+					t.Fatalf("binding not finished: active=%q generation=%q pending=%q", active, generation, pending)
+				}
+			})
+		}
+	}
+}
+
 func TestSQLiteLegacyResumeRetainsParquetIdentityAndLiveTicks(t *testing.T) {
 	path, cold := legacyMigrationFixture(t, 5000)
 	day := time.Now().AddDate(0, 0, -90).UTC().Truncate(24 * time.Hour)

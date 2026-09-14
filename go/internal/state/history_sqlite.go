@@ -50,6 +50,10 @@ func (s *Store) openHistory() error {
 	if err != nil {
 		return err
 	}
+	pending, err := s.historyConfig("history_sqlite_pending_generation")
+	if err != nil {
+		return err
+	}
 	if beta != "" && active == "" && restore == "" {
 		return errors.New("beta history needs conversion: stop Core and run ftw-history-migrate; keep history.duckdb and history-hot.db")
 	}
@@ -95,12 +99,20 @@ func (s *Store) openHistory() error {
 	if generation == "" {
 		generation = restore
 		if generation == "" {
-			generation = uuid.NewString()
+			generation = pending
+			if generation == "" {
+				generation = uuid.NewString()
+			}
+			// Persist ownership before the destination can commit its marker.
+			// A restart may bind only this generation, never an unrelated file.
+			if err := s.SaveConfig("history_sqlite_pending_generation", generation); err != nil {
+				return err
+			}
 		}
 		if err := s.migrateSQLiteHistory(context.Background(), generation); err != nil {
 			return err
 		}
-	} else if active == "" && restore == "" {
+	} else if active == "" && restore == "" && pending != generation {
 		return errors.New("unbound SQLite history; complete its migration before starting")
 	}
 	var complete int
@@ -114,7 +126,7 @@ func (s *Store) openHistory() error {
 	if err := s.SaveConfig("history_sqlite_generation", generation); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM config WHERE key IN ('history_restore_generation','history_migration_generation')`); err != nil {
+	if _, err := s.db.Exec(`DELETE FROM config WHERE key IN ('history_restore_generation','history_migration_generation','history_sqlite_pending_generation')`); err != nil {
 		return err
 	}
 	if err := s.ensureEnergyLedgerVersion(); err != nil {
@@ -457,7 +469,7 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM config WHERE key IN ('history_duckdb_generation','history_sqlite_generation','history_migration_generation',?)`, historyLegacySourcesRetiredKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM config WHERE key IN ('history_duckdb_generation','history_sqlite_generation','history_sqlite_pending_generation','history_migration_generation',?)`, historyLegacySourcesRetiredKey); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO config VALUES ('history_restore_generation',?)`, uuid.NewString()); err != nil {

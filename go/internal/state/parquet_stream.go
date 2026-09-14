@@ -18,6 +18,47 @@ import (
 const archiveBatchRows = 1024
 const maintenancePause = 100 * time.Millisecond
 
+// VerifyParquetFile reads every page without retaining the archive in memory.
+// It accepts both sample and diagnostic schemas and checks the footer row count.
+func VerifyParquetFile(ctx context.Context, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	pf, err := parquet.OpenFile(f, st.Size())
+	if err != nil {
+		return err
+	}
+	r := parquet.NewReader(pf)
+	defer r.Close()
+	buf := make([]parquet.Row, 64)
+	var count int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := r.ReadRows(buf)
+		count += int64(n)
+		if errors.Is(err, io.EOF) {
+			if count != pf.NumRows() {
+				return fmt.Errorf("Parquet row count differs: read %d, expected %d", count, pf.NumRows())
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+}
+
 // walkParquetRows reads row groups incrementally. Neither callers nor readers
 // retain a full day, including days with a large number of device metrics.
 func walkParquetRows(ctx context.Context, path string, visit func([]parquetSampleRow) error) error {

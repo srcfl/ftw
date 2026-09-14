@@ -171,7 +171,7 @@ func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 }
 
 func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
-	for _, kind := range []string{"missing", "unbound", "incomplete"} {
+	for _, kind := range []string{"missing", "unbound", "wrong-pending", "incomplete"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.db")
 			s, err := Open(path)
@@ -181,8 +181,13 @@ func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
 			if err := s.RecordHistory(HistoryPoint{TsMs: 1}); err != nil {
 				t.Fatal(err)
 			}
-			if kind == "unbound" {
+			if kind == "unbound" || kind == "wrong-pending" {
 				if _, err := s.db.Exec(`DELETE FROM config WHERE key LIKE 'history_%'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "wrong-pending" {
+				if err := s.SaveConfig("history_sqlite_pending_generation", "unrelated"); err != nil {
 					t.Fatal(err)
 				}
 			}
