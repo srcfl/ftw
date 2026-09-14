@@ -937,6 +937,46 @@ func TestBetaFingerprintIgnoresOnlyEmptySQLiteWAL(t *testing.T) {
 	}
 }
 
+func TestBetaConversionResumesBeforeTimeIndex(t *testing.T) {
+	path, source := betaSQLiteFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	err := ConvertBetaHistory(ctx, path, source, func(phase string) {
+		if phase == "build sample time index" {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal("expected interrupted index build", err)
+	}
+	partial, err := sql.Open("sqlite", ReadOnlyDatabaseURI(historyDatabasePath(path)+".converting"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journalMode string
+	if err := partial.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil || journalMode != "delete" {
+		t.Fatal("index build still stages its pages in WAL", journalMode, err)
+	}
+	var indexed, rows int
+	if err := partial.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 0 {
+		t.Fatal("time index built before raw copy completed", indexed, err)
+	}
+	if err := partial.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&rows); err != nil || rows != 2300 {
+		t.Fatal("copied samples missing before index build", rows, err)
+	}
+	partial.Close()
+	if err := ConvertBetaHistory(context.Background(), path, source, nil); err != nil {
+		t.Fatal("index build resume", err)
+	}
+	dest, err := sql.Open("sqlite", ReadOnlyDatabaseURI(historyDatabasePath(path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dest.Close()
+	if err := dest.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 1 {
+		t.Fatal("published history lacks the time index", indexed, err)
+	}
+}
+
 func TestCloseCancelsBlockedSeriesBackfill(t *testing.T) {
 	s := freshStore(t)
 	s.coldDir = t.TempDir()

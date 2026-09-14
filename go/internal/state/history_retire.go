@@ -3,6 +3,7 @@ package state
 const (
 	historyLegacySourcesRetiredKey  = "history_legacy_sources_retired"
 	historyLegacySourcesRetiredName = "legacy-sources-retired"
+	sampleTimeIndexSQL              = `CREATE INDEX IF NOT EXISTS idx_ts_samples_ts ON ts_samples(ts_ms)`
 )
 
 // sqliteLegacyHistoryStmts define the portable history schema shared with
@@ -42,7 +43,7 @@ var sqliteLegacyHistoryStmts = []string{
 			value     REAL NOT NULL,
 			PRIMARY KEY (driver_id, metric_id, ts_ms)
 		) WITHOUT ROWID, STRICT`,
-	`CREATE INDEX IF NOT EXISTS idx_ts_samples_ts ON ts_samples(ts_ms)`,
+	sampleTimeIndexSQL,
 	`CREATE TABLE IF NOT EXISTS energy_daily (
 			day               TEXT PRIMARY KEY,
 			import_wh         REAL NOT NULL,

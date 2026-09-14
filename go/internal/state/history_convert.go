@@ -92,7 +92,15 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	}
 	defer dest.Close()
 	dest.SetMaxOpenConns(1)
-	if err := ensureHistorySchema(func(stmt string) error { _, err := dest.ExecContext(ctx, stmt); return err }); err != nil {
+	if err := ensureHistorySchema(func(stmt string) error {
+		// Maintain the primary key during the copy, then build the secondary
+		// time index in one pass. Incremental index updates amplify SD writes.
+		if stmt == sampleTimeIndexSQL {
+			return nil
+		}
+		_, err := dest.ExecContext(ctx, stmt)
+		return err
+	}); err != nil {
 		return err
 	}
 	if _, err := dest.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS conversion_progress(name TEXT PRIMARY KEY,cursor TEXT NOT NULL); CREATE TABLE IF NOT EXISTS conversion_source(digest TEXT NOT NULL)`); err != nil {
@@ -107,6 +115,17 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 	}
 	if err != nil {
 		return err
+	}
+	var samplesVerified int
+	if err := dest.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversion_progress WHERE name='ts_samples:verified'`).Scan(&samplesVerified); err != nil {
+		return err
+	}
+	if samplesVerified == 0 {
+		// A partial copy from an earlier tool may already have this index.
+		// Once samples are verified, retain any completed late index build.
+		if _, err := dest.ExecContext(ctx, `DROP INDEX IF EXISTS idx_ts_samples_ts`); err != nil {
+			return err
+		}
 	}
 	for _, table := range historyTables {
 		if report != nil {
@@ -155,6 +174,22 @@ func ConvertBetaHistory(ctx context.Context, statePath string, source *sql.DB, r
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// This unpublished destination has no live readers. A rollback journal
+	// avoids keeping a second full index in WAL while CREATE INDEX commits.
+	// SQLite rolls back an interrupted build before a later resume opens WAL.
+	var journalMode string
+	if err := dest.QueryRowContext(ctx, `PRAGMA journal_mode=DELETE`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("prepare conversion index journal: %w", err)
+	}
+	if journalMode != "delete" {
+		return fmt.Errorf("conversion index requires delete journal, got %q", journalMode)
+	}
+	if report != nil {
+		report("build sample time index")
+	}
+	if _, err := dest.ExecContext(ctx, sampleTimeIndexSQL); err != nil {
 		return err
 	}
 	afterHash, err := betaSourceHash(ctx, statePath)

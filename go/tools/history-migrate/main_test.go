@@ -125,6 +125,10 @@ func TestRealBetaConversionPreservesIDsGoalsAndHotSamples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Released partial copies also have the incrementally maintained index.
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_ts_samples_ts ON ts_samples(ts_ms)`); err != nil {
+		t.Fatal(err)
+	}
 	rows, err := source.Query(`SELECT driver_id,metric_id,ts_ms,value FROM ts_samples WHERE rowid<1024`)
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +183,10 @@ func TestRealBetaConversionPreservesIDsGoalsAndHotSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var indexed int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='idx_ts_samples_ts'`).Scan(&indexed); err != nil || indexed != 1 {
+		t.Fatal("published history lacks its time index", indexed, err)
+	}
 	var id int64
 	if err := db.QueryRow(`SELECT id FROM ts_drivers WHERE name='meter'`).Scan(&id); err != nil || id != 7 {
 		t.Fatal("changed identifier", id, err)
