@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.5.3
+
+### Patch Changes
+
+- e01ac3d: Keep history queries and live commits responsive during archive building. Protect only file publication and bounded pruning against readers, and release archive write locks before retrying database contention.
+
 ## 3.5.2
 
 ### Patch Changes
