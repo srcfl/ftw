@@ -43,9 +43,6 @@ func (s *Store) tryArchiveBatch(parent context.Context, write func(context.Conte
 	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyMS); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
-		return err
-	}
 	defer func() {
 		restore, done := context.WithTimeout(context.Background(), time.Second)
 		defer done()
@@ -54,6 +51,9 @@ func (s *Store) tryArchiveBatch(parent context.Context, write func(context.Conte
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
+		return err
+	}
 	// Readers may postpone archive writes, but must never make an archive
 	// operation wait while holding the live writer mutex.
 	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
