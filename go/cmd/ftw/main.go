@@ -3362,7 +3362,7 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	if rolled, expired, err := st.PruneEnergyLedger(ctx, time.Now()); err != nil {
 		slog.Warn("energy ledger retention failed", "err", err)
 	} else if rolled > 0 || expired > 0 {
-		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "expired_rows", expired)
+		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "hourly_rows_rolled_to_days", expired)
 	}
 
 	// Planner diagnostics roll off on the same cadence but keep a

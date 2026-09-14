@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	duckdb "github.com/duckdb/duckdb-go/v2"
 	"github.com/google/uuid"
 )
 
@@ -20,7 +19,7 @@ const (
 	historyQueueBytes         = 16 << 20
 	historyBatchBytes         = 1 << 20
 	historyMaintenanceTimeout = 2 * time.Minute
-	historyCommitTimeout      = 2 * time.Minute
+	historyCommitTimeout      = 5 * time.Second
 	historyCommitInterval     = 15 * time.Second
 	historyCommitMaxTicks     = 32
 )
@@ -113,10 +112,10 @@ func (w *historyWriter) commitBatches(ctx context.Context, batches []historyBatc
 	if w.commitFn != nil {
 		return w.commitFn(ctx, batches, ack)
 	}
-	return w.store.recordHotBatches(ctx, batches, ack)
+	return w.store.recordHistoryBatches(ctx, batches, ack)
 }
 
-// historyCommitInterrupted is a deadline or DuckDB interrupt. Retrying the
+// historyCommitInterrupted is a deadline or SQLite interrupt. Retrying the
 // same batch under the same budget cannot finish; a smaller prefix can.
 func historyCommitInterrupted(err error) bool {
 	if err == nil {
@@ -125,8 +124,7 @@ func historyCommitInterrupted(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
-	var dbErr *duckdb.Error
-	return errors.As(err, &dbErr) && dbErr.Type == duckdb.ErrorTypeInterrupt
+	return false
 }
 
 // EnqueueTelemetryTick copies a whole tick without waiting on disk. The caller
@@ -275,12 +273,6 @@ func (w *historyWriter) run() {
 				}
 				maxAttempt = w.maxTicks()
 				continue
-			}
-			var dbErr *duckdb.Error
-			if errors.As(err, &dbErr) && dbErr.Type == duckdb.ErrorTypeOutOfMemory {
-				w.maintenanceDue = time.Time{}
-				w.forceRotate.Store(true)
-				w.maintainHistory(0)
 			}
 			if historyCommitInterrupted(err) && n > 1 {
 				next := max(1, n/2)

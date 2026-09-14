@@ -37,7 +37,7 @@ func (s *Store) statePath() (string, error) {
 // SnapshotState writes a fresh "<state.db>.snapshot" recovery copy atomically:
 // snapshot to a temp file, verify it with quick_check, then rename over the
 // previous snapshot. Reuses SnapshotTo, which already excludes the bulky
-// time-series tables. The snapshot retains the DuckDB generation binding;
+// time-series tables. The snapshot retains the history generation binding;
 // recovering a missing history file requires a full backup.
 func (s *Store) SnapshotState() error {
 	main, err := s.statePath()

@@ -1,0 +1,11 @@
+*
+!go/
+!go/**
+go/**/state.db*
+go/**/history*.db*
+go/**/history*.duckdb*
+go/**/cold/
+go/**/bin/
+
+!LICENSE
+!NOTICE

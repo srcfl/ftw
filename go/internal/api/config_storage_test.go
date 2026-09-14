@@ -129,13 +129,19 @@ func TestSQLiteSettingsBlockImageOnlyDowngrade(t *testing.T) {
 	}
 }
 
-func TestDuckDBHistoryBlocksImageOnlyDowngrade(t *testing.T) {
-	for _, body := range []string{"<!-- ftw-state-schema:2 -->", ""} {
+func TestNewHistoryBlocksImageOnlyDowngrade(t *testing.T) {
+	for _, tc := range []struct {
+		current int
+		body    string
+	}{
+		{3, "<!-- ftw-state-schema:2 -->"}, {3, ""},
+		{4, "<!-- ftw-state-schema:3 -->"}, {4, "<!-- ftw-state-schema:2 -->"}, {4, ""},
+	} {
 		srv, _, _ := storedConfigServer(t)
-		srv.deps.SelfUpdate = newCheckerAgainstOptions(t, "v3.1.3-beta.1", "v3.2.0-beta.1", filepath.Join(t.TempDir(), "status.json"), "", body, 3)
+		srv.deps.SelfUpdate = newCheckerAgainstOptions(t, "v3.1.3-beta.1", "v3.2.0-beta.1", filepath.Join(t.TempDir(), "status.json"), "", tc.body, tc.current)
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/update", nil))
-		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "DuckDB") {
+		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "history format") {
 			t.Fatalf("unsafe history downgrade: %d %s", rr.Code, rr.Body.String())
 		}
 	}

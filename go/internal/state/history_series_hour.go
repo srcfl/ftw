@@ -53,10 +53,13 @@ func (s *Store) startSeriesHourBackfill() {
 	if s == nil || s.history == nil {
 		return
 	}
+	s.seriesHourMu.Lock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	s.seriesHourCancel = cancel
 	s.seriesHourWG.Add(1)
+	s.seriesHourMu.Unlock()
 	go func() {
 		defer s.seriesHourWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
 		if err := s.ensureSeriesHours(ctx); err != nil {
 			slog.Error("hourly series rollup paused; long-range charts keep using raw samples", "err", err)
@@ -81,7 +84,7 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 	if minTs.Valid {
 		start := seriesHourOf(minTs.Int64)
 		end := maxTs.Int64 + 1
-		const chunk = 7 * 24 * seriesHourMs
+		const chunk = seriesHourMs
 		for t := start; t < end; t += chunk {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -94,7 +97,7 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 			// physical box can exceed the live writer's 30s commit budget.
 			_, err := s.history.ExecContext(ctx, `
 				INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
-				SELECT driver_id, metric_id, (ts_ms // ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
+				SELECT driver_id, metric_id, (ts_ms / ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
 				FROM ts_samples
 				WHERE ts_ms >= ? AND ts_ms < ?
 				GROUP BY 1, 2, 3
@@ -105,6 +108,10 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 			}
 		}
 	}
+	if err := s.ensureParquetHours(ctx); err != nil {
+		return err
+	}
+
 	s.historyWriteMu.Lock()
 	_, err := s.history.ExecContext(ctx, `INSERT INTO history_migrations(name) VALUES (?) ON CONFLICT DO NOTHING`, seriesHoursMigration)
 	s.historyWriteMu.Unlock()
@@ -149,10 +156,10 @@ func (s *Store) upsertSeriesHoursTx(ctx context.Context, tx *sql.Tx, acc map[ser
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (driver_id, metric_id, hour_ms) DO UPDATE SET
 			sum_value = ts_series_hour.sum_value + excluded.sum_value,
-			min_value = LEAST(ts_series_hour.min_value, excluded.min_value),
-			max_value = GREATEST(ts_series_hour.max_value, excluded.max_value),
+			min_value = MIN(ts_series_hour.min_value, excluded.min_value),
+			max_value = MAX(ts_series_hour.max_value, excluded.max_value),
 			n = ts_series_hour.n + excluded.n,
-			last_ts_ms = GREATEST(ts_series_hour.last_ts_ms, excluded.last_ts_ms)`)
+			last_ts_ms = MAX(ts_series_hour.last_ts_ms, excluded.last_ts_ms)`)
 	if err != nil {
 		return err
 	}
@@ -178,7 +185,7 @@ func (s *Store) refreshSeriesHoursTx(ctx context.Context, tx *sql.Tx, hours []se
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
-			SELECT driver_id, metric_id, (ts_ms // ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
+			SELECT driver_id, metric_id, (ts_ms / ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
 			FROM ts_samples
 			WHERE driver_id=? AND metric_id=? AND ts_ms >= ? AND ts_ms < ?
 			GROUP BY 1, 2, 3`,
@@ -187,26 +194,6 @@ func (s *Store) refreshSeriesHoursTx(ctx context.Context, tx *sql.Tx, hours []se
 		}
 	}
 	return nil
-}
-
-func (s *Store) refreshSeriesHoursRange(ctx context.Context, fromMs, toMs int64) error {
-	if toMs <= fromMs {
-		return nil
-	}
-	hourStart := seriesHourOf(fromMs)
-	hourEnd := seriesHourOf(toMs-1) + seriesHourMs
-	if _, err := s.history.ExecContext(ctx,
-		`DELETE FROM ts_series_hour WHERE hour_ms >= ? AND hour_ms < ?`, hourStart, hourEnd); err != nil {
-		return err
-	}
-	_, err := s.history.ExecContext(ctx, `
-		INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
-		SELECT driver_id, metric_id, (ts_ms // ?) * ?, SUM(value), MIN(value), MAX(value), COUNT(*), MAX(ts_ms)
-		FROM ts_samples
-		WHERE ts_ms >= ? AND ts_ms < ?
-		GROUP BY 1, 2, 3`,
-		seriesHourMs, seriesHourMs, hourStart, hourEnd)
-	return err
 }
 
 type seriesBucketAcc struct {
@@ -290,26 +277,27 @@ func (s *Store) loadSeriesBucketsFromHours(ctx context.Context, dID, mID, sinceM
 		if to < from {
 			return nil
 		}
-		rows, err := s.history.QueryContext(ctx, `
-			SELECT ts_ms, value FROM ts_samples
-			WHERE driver_id=? AND metric_id=? AND ts_ms BETWEEN ? AND ?`,
-			dID, mID, from, to)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var ts int64
-			var v float64
-			if err := rows.Scan(&ts, &v); err != nil {
-				return err
+		s.ts.mu.RLock()
+		var driver, metric string
+		for name, id := range s.ts.drivers {
+			if id == dID {
+				driver = name
+				break
 			}
-			if math.IsNaN(v) {
-				continue
-			}
-			add((ts-sinceMs)/bucketMs, 1, v, v, v, ts)
 		}
-		return rows.Err()
+		for name, info := range s.ts.metrics {
+			if info.id == mID {
+				metric = name
+				break
+			}
+		}
+		s.ts.mu.RUnlock()
+		return s.walkMergedSeries(ctx, s.coldDir, driver, metric, from, to, func(ts int64, v float64) error {
+			if !math.IsNaN(v) {
+				add((ts-sinceMs)/bucketMs, 1, v, v, v, ts)
+			}
+			return nil
+		})
 	}
 	if firstFull > lastFull {
 		if err := loadPartial(sinceMs, untilMs); err != nil {

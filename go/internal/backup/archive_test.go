@@ -2,14 +2,84 @@ package backup
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+func writeTestParquet(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := parquet.WriteFile(path, []struct {
+		Ts    int64
+		Value float64
+	}{{Ts: 1, Value: 123}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRejectsUnreadableParquetWithMatchingHash(t *testing.T) {
+	for _, corruption := range []string{"truncated", "pages"} {
+		t.Run(corruption, func(t *testing.T) {
+			root := t.TempDir()
+			statePath := filepath.Join(root, "state.db")
+			st, err := state.Open(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			pq := filepath.Join(root, "cold", "2026", "01", "01.parquet")
+			writeTestParquet(t, pq)
+			data, err := os.ReadFile(pq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if corruption == "truncated" {
+				data = data[:len(data)/2]
+			} else {
+				footer := int(binary.LittleEndian.Uint32(data[len(data)-8:]))
+				clear(data[4 : len(data)-8-footer])
+			}
+			if err := os.WriteFile(pq, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if info, err := Create(context.Background(), CreateOptions{State: st, StatePath: statePath, DataDir: root, OutputDir: filepath.Join(root, "backups")}); err == nil {
+				t.Errorf("published unreadable Parquet as verified: %+v", info)
+			}
+			// A hash only proves that the archive kept the bytes it received.
+			// Also exercise verification of an archive produced elsewhere.
+			db := filepath.Join(t.TempDir(), "state.db.gz")
+			if _, _, err := st.BackupWithConfiguration(db, nil); err != nil {
+				t.Fatal(err)
+			}
+			sources := []sourceEntry{{archivePath: "data/state.db.gz", sourcePath: db}, {archivePath: "data/cold/2026/01/01.parquet", sourcePath: pq}}
+			manifest := Manifest{Format: Format, SchemaVersion: SchemaVersion, CreatedAt: time.Now(), DatabaseFile: "state.db", DatabaseEntry: "data/state.db.gz"}
+			for i := range sources {
+				entry, err := describeSource(context.Background(), root, sources[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				sources[i].entry = entry
+				manifest.Files = append(manifest.Files, entry)
+			}
+			archive := filepath.Join(t.TempDir(), "bad.ftwbak")
+			if err := writeArchive(context.Background(), archive, manifest, sources); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(archive); err == nil {
+				t.Fatal("accepted matching hashes for unreadable Parquet")
+			}
+		})
+	}
+}
 
 func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	root := t.TempDir()
@@ -33,7 +103,7 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(dataDir, "config.yaml"), "site:\n  name: backup-test\n")
-	writeTestFile(t, filepath.Join(dataDir, "cold", "2026", "07", "17.parquet"), "parquet-test")
+	writeTestParquet(t, filepath.Join(dataDir, "cold", "2026", "07", "17.parquet"))
 	installed := filepath.Join(dataDir, "driver-repository", "installed", "official", "meter", "1.2.3", "meter.lua")
 	writeTestFile(t, installed, "DRIVER = { id = 'meter', version = '1.2.3' }")
 	active := filepath.Join(dataDir, "driver-repository", "active", "meter.lua")
@@ -117,7 +187,7 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	}
 }
 
-func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
+func TestSQLiteBackupKeepsParquetAndOmitsLiveDatabaseFiles(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "source")
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
@@ -138,16 +208,13 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 	if err != nil || len(files) != 1 {
 		t.Fatalf("legacy source: %v %v", files, err)
 	}
-	if err := st.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-		t.Fatal(err)
-	}
 	liveTmp := state.HistoryDatabasePath(statePath) + ".tmp"
 	if err := os.MkdirAll(liveTmp, 0700); err != nil {
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(liveTmp, "spill.bin"), "transient history data")
 	writeTestFile(t, filepath.Join(state.HistoryDatabasePath(statePath)+".import-abandoned", "staging.duckdb"), "abandoned import staging")
-	writeTestFile(t, filepath.Join(coldDir, "diagnostics", "2026", "01", "01.parquet"), "diagnostic archive")
+	writeTestParquet(t, filepath.Join(coldDir, "diagnostics", "2026", "01", "01.parquet"))
 	info, err := Create(context.Background(), CreateOptions{State: st, StatePath: statePath, DataDir: dataDir, OutputDir: filepath.Join(root, "backups")})
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +224,7 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range manifest.Files {
-		if strings.Contains(f.Path, ".duckdb") || (strings.HasPrefix(f.Path, "data/cold/") && !strings.HasPrefix(f.Path, "data/cold/diagnostics/")) {
+		if strings.Contains(f.Path, ".duckdb") || strings.Contains(f.Path, ".history.db") {
 			t.Fatalf("live or duplicated history in archive: %s", f.Path)
 		}
 	}
@@ -168,14 +235,11 @@ func TestDuckDBBackupOmitsImportedSamplesAndLiveFiles(t *testing.T) {
 	}
 	// A SQLite-only Core reads the portable database, with no overlapping
 	// daily sample files that could make its old merge count samples twice.
-	restored, err := state.Open(filepath.Join(restoredDir, "custom.db"))
+	restored, err := state.OpenWithLegacyHistory(filepath.Join(restoredDir, "custom.db"), filepath.Join(restoredDir, "cold"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer restored.Close()
-	if err := restored.ImportLegacyParquet(context.Background(), filepath.Join(restoredDir, "cold")); err != nil {
-		t.Fatal(err)
-	}
 	samples, err := restored.LoadSeries("meter", "power", 0, time.Now().UnixMilli(), 0)
 	if err != nil || len(samples) != 1 || samples[0].Value != 123 {
 		t.Fatalf("restored history: %+v %v", samples, err)

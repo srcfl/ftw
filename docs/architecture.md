@@ -82,12 +82,14 @@ device
 Lua driver                 optional optimizer
   ↕ site-convention data       ↓ proposed trajectory
 telemetry → control/planner → core validation and safety → driver command
-     ↘ DuckDB history       ↘ API/UI and integrations
+     ↘ SQLite + Parquet       ↘ API/UI and integrations
 ```
 
-The in-memory telemetry store owns latest readings and driver health. DuckDB
-owns time-series samples, site history and the energy ledger. SQLite owns
-configuration, forecasts, prices, device identity and learned model state.
+The in-memory telemetry store owns latest readings and driver health.
+SQLite history.db owns samples, hourly summaries, dashboard history and the
+energy ledger. A separate state.db owns goals, device identity and learned
+state. Rebuildable prices and forecasts live in cache.db. Older samples use
+daily Parquet files.
 Database access stays in
 [`go/internal/state`](../go/internal/state).
 
@@ -95,31 +97,40 @@ The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
 
-Core embeds DuckDB in the Go process. A bounded queue copies each telemetry
-tick before the writer commits its history, samples, energy ledger and retry
-receipt in one transaction. Admission to memory is separate from durable
-commit. A full queue returns a collection error; health reports pending,
-committed and rejected ticks. Queries use separate connections to the same
-database instance. They do not hold the writer's lock.
-The serial writer retires a previous retry receipt only after it has observed
-that commit succeed. The current receipt survives an uncertain commit and a
-retry; receipts do not grow with every tick for the lifetime of the box.
+A bounded queue copies each telemetry tick before the SQLite writer commits
+its history, samples, energy ledger and retry receipt in one transaction.
+Admission to memory is separate from commit. A full queue returns a collection
+error; health reports pending, committed and rejected ticks. Reads use WAL
+snapshots. Goals and session state use a separate database and sync their WAL
+before returning success, so history maintenance does not hold their writer.
 
-On first boot, Core imports a fixed SQLite snapshot and the existing daily
-sample Parquet files. It checks row counts and values before it accepts the
-new history generation. Samples keep their first value for a key; history
-snapshots keep their last value. Signed zero becomes zero; all other finite
-floating-point values keep their precision. Invalid values stop the import.
-Original files remain available as migration evidence. Live reads and writes
-use DuckDB after migration. The [FTWDB experiment is retired](ftwdb-shadow.md).
+Recent raw samples stay in SQLite for 14 days. Archiving merges one complete
+UTC day through a temporary SQLite file and streams Parquet in bounded groups.
+It syncs the file, verifies row counts and values, renames it, syncs the directory
+and reads it back before pruning matching SQLite rows in small transactions.
+Failure keeps the raw source. Retried publication merges matching sample keys.
+Live SQLite values take precedence while both copies exist.
 
-State schema 3 requires a full backup on upgrade. Full backups export one
-DuckDB read snapshot into portable SQLite, with counts and hashes checked.
-They omit imported sample Parquet files to prevent duplicate reads by an
-older Core. A config-only snapshot cannot restore a missing history database.
-To return to an older Core, stop Core and restore a verified full backup with
-its matching version. Changing only the image would use frozen SQLite history
-and is refused.
+Configured raw retention removes only verified Parquet files whose hourly
+summaries remain in SQLite. Every scalar series keeps count, sum, min, max
+and last observation time. Empty intervals stay empty. Generic counter averages
+are not energy: the ledger keeps counter deltas, reset/gap markers, power
+integration and source/quality separate. Five-minute energy detail becomes
+hourly after 30 days and daily after two years; totals remain. Long reads have
+time and output limits, and charts use summaries once raw data has expired.
+
+Fresh installations create SQLite directly. Earlier SQLite installations copy
+frozen history in bounded, restartable transactions and keep their Parquet
+files. Only DuckDB beta installations need the separate offline
+[history converter](history-conversion.md). Core and normal release builds
+have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
+
+State schema 4 binds state.db to a specific history.db generation. Portable
+backups export a SQLite read snapshot with row counts and hashes checked, plus
+retained Parquet. The old beta files stay on the box for recovery. A config-only
+snapshot cannot recover missing history. To return to an older Core, stop Core
+and restore a verified full backup with its matching version; image-only
+rollback across the format boundary is refused.
 
 ## Drivers
 

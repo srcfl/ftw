@@ -227,6 +227,8 @@ func (s *Store) loadPriceSlotsForRange(ctx context.Context, zone string, sinceMs
 // `load_w` for the history rows). Pricing of EVWh is deferred to the
 // caller (DailyCostBreakdown applies the day's avg import).
 func (s *Store) loadCostHistoryRows(ctx context.Context, sinceMs, untilMs int64) ([]costHistoryRow, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	byTS := make(map[int64]costHistoryRow)
 	if s.history != nil && untilMs >= sinceMs {
 		rows, err := s.history.QueryContext(ctx, `
@@ -271,6 +273,10 @@ func (s *Store) loadCostHistoryRows(ctx context.Context, sinceMs, untilMs int64)
 				rows.Close()
 				return nil, err
 			}
+			if len(byTS) >= maxRawSeriesPoints {
+				rows.Close()
+				return nil, ErrHistoryQueryLimit
+			}
 			byTS[r.ts] = r
 		}
 		err = rows.Err()
@@ -279,7 +285,7 @@ func (s *Store) loadCostHistoryRows(ctx context.Context, sinceMs, untilMs int64)
 			return nil, err
 		}
 	}
-	if s.hot != nil && untilMs >= sinceMs {
+	if s.hot != nil && s.hot != s.history && untilMs >= sinceMs {
 		rows, err := s.hot.QueryContext(ctx, `
 			SELECT ts_ms, COALESCE(grid_w, 0), COALESCE(load_w, 0), COALESCE(bat_w, 0), COALESCE(pv_w, 0)
 			FROM history_hot WHERE ts_ms BETWEEN ? AND ?`, sinceMs, untilMs)
@@ -291,6 +297,10 @@ func (s *Store) loadCostHistoryRows(ctx context.Context, sinceMs, untilMs int64)
 			if err := rows.Scan(&r.ts, &r.gridW, &r.loadW, &r.batW, &r.pvW); err != nil {
 				rows.Close()
 				return nil, err
+			}
+			if len(byTS) >= maxRawSeriesPoints {
+				rows.Close()
+				return nil, ErrHistoryQueryLimit
 			}
 			byTS[r.ts] = r
 		}

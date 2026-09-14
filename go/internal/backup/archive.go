@@ -298,14 +298,21 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 			return nil
 		}
 		// Primary history is exported from one read transaction into the
-		// SQLite backup above. Never copy a live DuckDB file or WAL.
+		// SQLite backup above. Never copy a live database file or WAL.
 		historyRel, _ := filepath.Rel(dataDir, state.HistoryDatabasePath(statePath))
-		if rel == historyRel || strings.HasPrefix(rel, historyRel+".") {
+		if rel == historyRel || rel == historyRel+"-wal" || rel == historyRel+"-shm" || strings.HasPrefix(rel, historyRel+".") {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
+		// Beta originals remain on disk for recovery; the converter verified
+		// their rows into the canonical history exported above.
+		betaRel, _ := filepath.Rel(dataDir, state.BetaHistoryDatabasePath(statePath))
+		if rel == betaRel || rel == betaRel+".wal" || first == state.HotHistoryFilename || first == state.HotHistoryFilename+"-wal" || first == state.HotHistoryFilename+"-shm" {
+			return nil
+		}
+
 		if importedHistory[p] {
 			return nil
 		}
@@ -386,7 +393,7 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 			_ = os.Remove(dst)
 		}
 	}()
-	zw, err := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(state.NewMaintenanceWriter(ctx, f), gzip.BestSpeed)
 	if err != nil {
 		return err
 	}
@@ -451,7 +458,8 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 	return nil
 }
 
-// Verify checks archive structure, every file hash, and SQLite quick_check.
+// Verify checks archive structure, every file hash, SQLite quick_check and
+// Parquet readability. A matching hash alone cannot detect a damaged source.
 func Verify(archivePath string) (Manifest, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -521,11 +529,18 @@ func Verify(archivePath string) (Manifest, error) {
 		h := sha256.New()
 		var writer io.Writer = h
 		var dbFile *os.File
+		parquetPath := ""
 		if entry.Path == manifest.DatabaseEntry {
 			dbFile, err = os.OpenFile(dbGzip, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if err != nil {
-				return Manifest{}, err
-			}
+		} else if strings.HasSuffix(strings.ToLower(entry.Path), ".parquet") {
+			// Stage and remove one day at a time, not the entire cold archive.
+			parquetPath = filepath.Join(tmpDir, "parquet.tmp")
+			dbFile, err = os.OpenFile(parquetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		}
+		if err != nil {
+			return Manifest{}, err
+		}
+		if dbFile != nil {
 			writer = io.MultiWriter(h, dbFile)
 		}
 		if _, err := io.Copy(writer, tr); err != nil {
@@ -541,6 +556,14 @@ func Verify(archivePath string) (Manifest, error) {
 		}
 		if got := hex.EncodeToString(h.Sum(nil)); got != entry.SHA256 {
 			return Manifest{}, fmt.Errorf("backup: hash mismatch for %s", entry.Path)
+		}
+		if parquetPath != "" {
+			if err := state.VerifyParquetFile(context.Background(), parquetPath); err != nil {
+				return Manifest{}, fmt.Errorf("backup: unreadable Parquet %s: %w", entry.Path, err)
+			}
+			if err := os.Remove(parquetPath); err != nil {
+				return Manifest{}, err
+			}
 		}
 	}
 	if len(seen) != len(want) {
