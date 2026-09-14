@@ -246,7 +246,7 @@ func TestHandleUpdate_RestartDoesNotRecreate(t *testing.T) {
 	}
 	waitForState(t, s, "done")
 	calls := runner.snapshot()
-	if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", s.mainServiceName), " ") {
+	if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", "--timeout", "60", s.mainServiceName), " ") {
 		t.Fatalf("restart must only restart the existing container: %v", calls)
 	}
 }
@@ -670,7 +670,7 @@ func TestHandleUpdate_RestartKeepsEveryRunningImage(t *testing.T) {
 				t.Fatalf("restart state = %+v", st)
 			}
 			calls := runner.snapshot()
-			if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", canonicalMainServiceName), " ") {
+			if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", "--timeout", "60", canonicalMainServiceName), " ") {
 				t.Fatalf("restart selected or pulled a replacement image: %v", calls)
 			}
 			for _, env := range runner.envSnapshot() {
@@ -760,7 +760,7 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	if len(calls) != 5 {
 		t.Fatalf("want 5 docker calls, got %d: %v", len(calls), calls)
 	}
-	if got := strings.Join(calls[0], " "); got != "stop --time 30 ftw-container" {
+	if got := strings.Join(calls[0], " "); got != "stop --time 60 ftw-container" {
 		t.Errorf("first call must stop the exact running container: %v", calls[0])
 	}
 	for i, f := range []string{"state.db", "config.yaml"} {
@@ -1243,7 +1243,7 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 		t.Fatalf("crashed rollback recovery = %+v", state)
 	}
 	calls := runner.snapshot()
-	if len(calls) != 5 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[4], " ") != "start ftw-container" {
+	if len(calls) != 5 || strings.Join(calls[0], " ") != "stop --time 60 ftw-container" || strings.Join(calls[4], " ") != "start ftw-container" {
 		t.Fatalf("crashed rollback recovery calls = %v", calls)
 	}
 }
@@ -1289,7 +1289,7 @@ func TestUpdateReadinessFailureNeverRevertsImage(t *testing.T) {
 				t.Fatalf("state=%+v", st)
 			}
 			calls := runner.snapshot()
-			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "pull ftw") || !strings.Contains(strings.Join(calls[1], " "), "up -d ftw") {
+			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "pull ftw") || !strings.Contains(strings.Join(calls[1], " "), "up -d --timeout 60 ftw") {
 				t.Fatalf("readiness failure changed the running image: %v", calls)
 			}
 		})

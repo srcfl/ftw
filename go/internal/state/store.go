@@ -298,6 +298,34 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	err := s.StopHistory()
+	if s.hot != nil && s.hot != s.history {
+		err = errors.Join(err, s.hot.Close())
+	}
+	if s.history != nil {
+		err = errors.Join(err, s.history.Close())
+	}
+	if s.cache != nil {
+		err = errors.Join(err, s.cache.Close())
+	}
+	if s.db != nil {
+		if e := s.db.Close(); e != nil {
+			err = errors.Join(err, e)
+		}
+	}
+	return err
+}
+
+// StopHistory stops admission and background reads before draining accepted
+// measurements. Databases remain open for final events and deferred cleanup.
+func (s *Store) StopHistory() error {
+	if s == nil {
+		return nil
+	}
+	if s.historyWriter != nil {
+		s.historyWriter.stopAdmission()
+		s.historyWriter.maintenanceCancel()
+	}
 	// Stop the background integrity scan first: db.Close() blocks until every
 	// in-flight query finishes, and the scan's quick_check can run for minutes on
 	// a large DB. Cancelling it (sqlite3_interrupt) lets the close happen promptly
@@ -320,25 +348,10 @@ func (s *Store) Close() error {
 	s.seriesHourMu.Unlock()
 	s.seriesHourWG.Wait()
 
-	var err error
 	if s.historyWriter != nil {
-		err = s.historyWriter.close()
+		return s.historyWriter.close()
 	}
-	if s.hot != nil && s.hot != s.history {
-		err = errors.Join(err, s.hot.Close())
-	}
-	if s.history != nil {
-		err = errors.Join(err, s.history.Close())
-	}
-	if s.cache != nil {
-		err = errors.Join(err, s.cache.Close())
-	}
-	if s.db != nil {
-		if e := s.db.Close(); e != nil {
-			err = errors.Join(err, e)
-		}
-	}
-	return err
+	return nil
 }
 
 // resolveMainDBPath is where heal.go drops the clean-shutdown marker.

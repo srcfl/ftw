@@ -298,6 +298,12 @@ func adoptGatewayIdentityWith(
 }
 
 func main() {
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	imageTag := os.Getenv("FTW_IMAGE_TAG")
 	builtVersion := Version
 	resolvedVersion, imageTagApplied := runtimeVersionFromImageTag(builtVersion, CandidateTag, imageTag)
@@ -465,6 +471,7 @@ func main() {
 	defer func() {
 		if err := st.Close(); err != nil {
 			slog.Error("state shutdown failed", "err", err)
+			exitCode = 1
 		}
 	}()
 	if *retiredShadowSocket != "" {
@@ -614,18 +621,12 @@ func main() {
 	// Closing restartCh from /api/restart drops the main control loop out
 	// of its select, which returns from main() so every defer (HA Stop,
 	// state.Close, http.Shutdown, …) runs in normal LIFO order. The
-	// bottom-of-stack `os.Exit` defer below then translates exitCode 1
+	// first registered `os.Exit` defer then translates exitCode 1
 	// into a non-zero process exit so docker (`unless-stopped`) and
 	// systemd (`Restart=on-failure`) bring the binary back up. SIGTERM /
 	// SIGINT take the same return path with exitCode 0.
 	restartCh := make(chan struct{})
 	var restartOnce sync.Once
-	exitCode := 0
-	defer func() {
-		if exitCode != 0 {
-			os.Exit(exitCode)
-		}
-	}()
 
 	// ---- Driver registry ----
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3382,9 +3383,7 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 }
 
 func flushHistoryOnStop(st *state.Store) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := st.FlushHistory(ctx); err != nil {
+	if err := st.StopHistory(); err != nil {
 		slog.Warn("history flush on shutdown", "err", err)
 	}
 }

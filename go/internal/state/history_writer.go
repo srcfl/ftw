@@ -20,6 +20,7 @@ const (
 	historyBatchBytes         = 1 << 20
 	historyMaintenanceTimeout = 2 * time.Minute
 	historyCommitTimeout      = 5 * time.Second
+	historyShutdownTimeout    = 20 * time.Second
 	historyCommitInterval     = 15 * time.Second
 	historyCommitMaxTicks     = 32
 )
@@ -74,6 +75,9 @@ type historyWriter struct {
 	maintenanceRetryDelay time.Duration
 	maintenanceRunning    atomic.Bool
 	maintenanceMu         sync.Mutex
+	maintenanceCtx        context.Context
+	maintenanceCancel     context.CancelFunc
+	shutdownTimeout       time.Duration
 	maintenanceWG         sync.WaitGroup
 	commitInterval        time.Duration
 	commitTimeout         time.Duration
@@ -90,6 +94,7 @@ func newHistoryWriter(s *Store) *historyWriter {
 		maintenanceRowsLimit: 64 * historyImportRows, maintenanceDue: time.Now().Add(time.Hour), maintenanceRetryDelay: 30 * time.Second,
 		commitInterval: historyCommitInterval, commitTimeout: historyCommitTimeout, commitMaxTicks: historyCommitMaxTicks,
 		flushCh: make(chan struct{}, 1)}
+	w.maintenanceCtx, w.maintenanceCancel = context.WithCancel(ctx)
 	go w.run()
 	return w
 }
@@ -383,6 +388,9 @@ func (w *historyWriter) run() {
 // Hourly rotation runs in the background so a multi-GB reopen cannot stall
 // live commits past the site watchdog.
 func (w *historyWriter) scheduleMaintenance(rows int) {
+	if w.maintenanceCtx.Err() != nil {
+		return
+	}
 	w.maintenanceRows += rows
 	now := time.Now()
 	if now.Before(w.maintenanceRetry) || (w.maintenanceRows < w.maintenanceRowsLimit && now.Before(w.maintenanceDue)) {
@@ -411,7 +419,7 @@ func (w *historyWriter) maintainHistory(rows int) {
 func (w *historyWriter) runMaintenance() {
 	w.maintenanceMu.Lock()
 	defer w.maintenanceMu.Unlock()
-	ctx, cancel := context.WithTimeout(w.ctx, historyMaintenanceTimeout)
+	ctx, cancel := context.WithTimeout(w.maintenanceCtx, historyMaintenanceTimeout)
 	err := w.store.checkpointLiveHistory(ctx)
 	cancel()
 	if w.forceRotate.Load() {
@@ -474,7 +482,7 @@ func (s *Store) FlushHistory(ctx context.Context) error {
 	return nil
 }
 
-func (w *historyWriter) close() error {
+func (w *historyWriter) stopAdmission() {
 	w.mu.Lock()
 	target := w.status.Accepted
 	if !w.status.Stopping {
@@ -484,7 +492,16 @@ func (w *historyWriter) close() error {
 	}
 	w.mu.Unlock()
 	w.requestFlush(target)
-	timer := time.NewTimer(w.timeout())
+}
+
+func (w *historyWriter) close() error {
+	w.stopAdmission()
+	w.maintenanceCancel()
+	budget := w.shutdownTimeout
+	if budget <= 0 {
+		budget = historyShutdownTimeout
+	}
+	timer := time.NewTimer(budget)
 	defer timer.Stop()
 	select {
 	case <-w.done:
