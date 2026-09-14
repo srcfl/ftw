@@ -322,7 +322,8 @@ func TestLoadpointsCarryManualStatus(t *testing.T) {
 		t.Fatalf("after a stall: %+v", m)
 	}
 
-	// Power flows.
+	// Power flows and reaches the loadpoint on the next controller observation.
+	mgr.Observe("garage", true, 10800, 0, true)
 	tel.Update("easee", telemetry.DerEV, 10800, nil, json.RawMessage(`{"max_a":16,"charging":true}`))
 	if m = manual(); m.State != loadpoint.ManualCharging {
 		t.Fatalf("while charging: %+v", m)

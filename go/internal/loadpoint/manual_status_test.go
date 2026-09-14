@@ -158,3 +158,18 @@ func TestManualStatusUnavailableDoesNotReuseChargingPower(t *testing.T) {
 		t.Fatalf("did not recover: %+v", got)
 	}
 }
+
+func TestManualStatusDoesNotCallOldChargingFlagMeasuredPower(t *testing.T) {
+	now := time.Now()
+	hold := ManualHold{PowerW: 6900, StartedAt: now.Add(-3 * time.Minute)}
+	st := State{Phases: 3, VoltageV: 230, CurrentPowerW: 0, CommandedKnown: true, CommandedW: 6900, CommandedReason: "manual_hold"}
+	ch := ChargerReading{Known: true, LimitKnown: true, LimitA: 10, Charging: true}
+	if got := ManualStatusFrom(hold, true, st, ch, now); got.State != ManualNotDrawing {
+		t.Fatalf("old charging flag reported power: %+v", got)
+	}
+	st.CurrentPowerW = 6900
+	st.PowerUnavailable = true
+	if got := ManualStatusFrom(hold, true, st, ch, now); got.State != ManualUnavailable {
+		t.Fatalf("stale power reported charging: %+v", got)
+	}
+}

@@ -128,6 +128,10 @@ type State struct {
 	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
 	ChargingDeclined bool `json:"charging_declined"`
 	// SoCRetention reports whether the confirmed estimate can survive restart.
+	EnergySource       string    `json:"energy_source,omitempty"`
+	EnergyUpdatedAtMs  int64     `json:"energy_updated_at_ms,omitempty"`
+	PowerUpdatedAtMs   int64     `json:"power_updated_at_ms,omitempty"`
+	PowerUnavailable   bool      `json:"power_unavailable,omitempty"`
 	SoCRetention       string    `json:"soc_retention,omitempty"`
 	ID                 string    `json:"id"`
 	DriverName         string    `json:"driver_name"`
@@ -335,6 +339,11 @@ type loadpointRuntime struct {
 	connectionGeneration     uint64
 	manualRestoreUnconfirmed bool
 	manualSaveError          bool
+	energy                   *sessionEnergy
+	powerAt                  time.Time
+	powerUnavailable         bool
+	lastSavedEnergyWh        float64
+	lastSavedEnergyAt        time.Time
 	sessionDeviceID          string
 	sessionID                string
 	socRetention             string
@@ -541,6 +550,11 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.currentSoC = existing.currentSoC
 			lp.currentPowerW = existing.currentPowerW
 			lp.deliveredWhSession = existing.deliveredWhSession
+			lp.energy = existing.energy
+			lp.powerAt = existing.powerAt
+			lp.powerUnavailable = existing.powerUnavailable
+			lp.lastSavedEnergyWh = existing.lastSavedEnergyWh
+			lp.lastSavedEnergyAt = existing.lastSavedEnergyAt
 			lp.targetSoC = existing.targetSoC
 			lp.targetTime = existing.targetTime
 			lp.updatedAtMs = existing.updatedAtMs
@@ -1137,6 +1151,16 @@ func (lp *loadpointRuntime) snapshot() State {
 	if lp.VehicleCapacityWh <= 0 {
 		st.VehicleCapacityWh = 60000
 		st.CapacitySource = "default"
+	}
+	if lp.energy != nil {
+		st.EnergySource = lp.energy.source
+		if !lp.energy.counterAt.IsZero() {
+			st.EnergyUpdatedAtMs = lp.energy.counterAt.UnixMilli()
+		}
+	}
+	st.PowerUnavailable = lp.powerUnavailable
+	if !lp.powerAt.IsZero() {
+		st.PowerUpdatedAtMs = lp.powerAt.UnixMilli()
 	}
 	if st.PluggedIn && st.SoCSource == "" && !lp.socConfirmed {
 		st.SoCSource = "assumed"

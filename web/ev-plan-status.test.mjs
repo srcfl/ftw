@@ -51,3 +51,27 @@ test('pending and failed plans do not pretend that charging windows are ready', 
   assert.doesNotMatch(failed, /Updating|Charging planned/);
   assert.equal(planStatus({ ...lp, manual_active: true, plan_pending: true }, {}).textContent, 'Paused by you.');
 });
+
+test('reached goal explains a stopped charge and names the level source', () => {
+  const lp = { plugged_in: true, charger: { available: true }, current_power_w: 0,
+    commanded_known: true, commanded_w: 0, target_soc: .8, current_soc: .8014,
+    soc_source: 'inferred', schedule: { soc: .8 } };
+  const estimated = planStatus(lp, {}).textContent;
+  assert.match(estimated, /Charge target reached \(80%\).*estimated by FTW/);
+  assert.doesNotMatch(estimated, /No charge window|Choose Charge now/);
+  assert.match(planStatus({ ...lp, soc_source: 'vehicle' }, {}).textContent, /reported by the car/);
+  for (const change of [
+    { soc_source: 'assumed' }, { current_soc: .79 }, { target_soc: null },
+    { power_unavailable: true }, { charger: { known: true, available: false } },
+    { current_power_w: 6900 }, { commanded_w: 6900 }, { commanded_known: false },
+  ]) {
+    assert.doesNotMatch(planStatus({ ...lp, ...change }, {}).textContent, /target reached/);
+  }
+});
+
+test('unavailable charger power explains the pause without declaring completion', () => {
+  const text = planStatus({ plugged_in: true, power_unavailable: true,
+    charger: { available: true }, manual_active: true }, {}).textContent;
+  assert.match(text, /Paused: charger power data is out of date/);
+  assert.doesNotMatch(text, /target reached|Charging on plan/);
+});
