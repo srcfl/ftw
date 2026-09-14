@@ -818,6 +818,13 @@ func verifyPublishedConversion(ctx context.Context, statePath, dest, generation 
 // its full interleaved series. The physical cursor and destination rows commit
 // together. Source fingerprints prevent resuming against different row IDs.
 func convertPhysicalBetaTable(ctx context.Context, src, dst *sql.DB, table string) error {
+	batchRows := int64(1024)
+	if table == "ts_samples" {
+		// Four numeric columns keep this batch bounded. Larger ranges avoid
+		// repeated DuckDB scans and small SQLite commits on the Pi's SD card.
+		// Keep smaller batches for tables that can contain large JSON values.
+		batchRows = 64 * 1024
+	}
 	var start, end sql.NullInt64
 	if err := src.QueryRowContext(ctx, `SELECT MIN(rowid),MAX(rowid) FROM `+quoteHistoryIdentifier(table)).Scan(&start, &end); err != nil {
 		return err
@@ -837,7 +844,7 @@ func convertPhysicalBetaTable(ctx context.Context, src, dst *sql.DB, table strin
 	}
 	if start.Valid {
 		for cursor <= end.Int64 {
-			until := min(cursor+1024, end.Int64+1)
+			until := min(cursor+batchRows, end.Int64+1)
 			rows, err := src.QueryContext(ctx, `SELECT * FROM `+quoteHistoryIdentifier(table)+` WHERE rowid>=? AND rowid<?`, cursor, until)
 			if err != nil {
 				return err
@@ -890,8 +897,8 @@ func convertPhysicalBetaTable(ctx context.Context, src, dst *sql.DB, table strin
 	// counts and a 256-bit sum of SHA-256 row hashes must both match.
 	var expected, actual historyMultisetDigest
 	if start.Valid {
-		for from := start.Int64; from <= end.Int64; from += 1024 {
-			rows, err := src.QueryContext(ctx, `SELECT * FROM `+quoteHistoryIdentifier(table)+` WHERE rowid>=? AND rowid<?`, from, from+1024)
+		for from := start.Int64; from <= end.Int64; from += batchRows {
+			rows, err := src.QueryContext(ctx, `SELECT * FROM `+quoteHistoryIdentifier(table)+` WHERE rowid>=? AND rowid<?`, from, from+batchRows)
 			if err != nil {
 				return err
 			}
