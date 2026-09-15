@@ -115,26 +115,32 @@ jobs:
 
       - name: Create or update Version Packages PR
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
-          # `version-packages` runs `changeset version` to bump package.json
-          # and rewrite CHANGELOG.md, then synchronizes package-lock.json's
-          # root package metadata with the generated version.
-          # We deliberately do NOT pass `publish:` — see the header
-          # comment for the rationale. The publish step below does
-          # the tag + GitHub Release manually, idempotently.
-          version: npm run version-packages
-          title:  "chore(release): version packages"
-          commit: "chore(release): version packages"
-        env:
-          # changesets/action uses this token for its GitHub API calls. Its
-          # git push uses the single local auth header installed by the prior
-          # step; checkout does not persist a second credential.
+          # v2 takes the token as an input. It no longer reads a
+          # GITHUB_TOKEN environment variable, and it ignores the
+          # credentials checkout leaves behind, so passing CI_TOKEN here is
+          # the only way the action authenticates as anything but
+          # `github.token`.
           #
           # CI_TOKEN should be a fine-grained PAT scoped to THIS repo with
           # `contents: write` + `pull-requests: write` only — nothing here
           # needs broader scope, and a narrow token bounds the blast radius.
-          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+          github-token: ${{ secrets.CI_TOKEN }}
+          # v2 pushes through the GitHub API by default. Keep the Git CLI:
+          # the push then uses the single local auth header installed by the
+          # prior step, which is the same CI_TOKEN, and a PAT push starts the
+          # Version PR's checks. A push made with `github.token` starts none.
+          push-with-git-cli: true
+          # `version-packages` runs `changeset version` to bump package.json
+          # and rewrite CHANGELOG.md, then synchronizes package-lock.json's
+          # root package metadata with the generated version.
+          # We deliberately do NOT pass `publish-script:` — see the header
+          # comment for the rationale. The publish step below does
+          # the tag + GitHub Release manually, idempotently.
+          version-script: npm run version-packages
+          pr-title: "chore(release): version packages"
+          commit-message: "chore(release): version packages"
 
       - name: Restore default release credential
         if: always()
@@ -152,11 +158,11 @@ jobs:
           fi
 
       - name: Set up Docker Buildx for stable promotion validation
-        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.has-changesets == 'false'
         uses: docker/setup-buildx-action@v4
 
       - name: Require the compatibility package credential
-        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.has-changesets == 'false'
         env:
           LEGACY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
         run: |
@@ -166,14 +172,14 @@ jobs:
           fi
 
       - name: Verify canonical package writes before stable release state
-        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.has-changesets == 'false'
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/check-ghcr-write-access.sh srcfl/ftw srcfl/ftw-updater
 
       - name: Verify compatibility package writes before stable release state
-        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.has-changesets == 'false'
         env:
           GHCR_USERNAME: frahlg
           GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
@@ -183,7 +189,7 @@ jobs:
         id: publish
         # Stable is an explicit promotion after real beta validation. Pushes
         # still maintain the Version Packages PR but never publish stable.
-        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.has-changesets == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_BETA: ${{ inputs.source_beta }}
