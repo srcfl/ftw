@@ -302,6 +302,13 @@ func (h *Handler) gateAPI(caller apiauth.Caller, facts apiauth.RouteFacts, req A
 				Args:      map[string]any{"needRole": apiauth.RoleOwner, "role": caller.Role},
 			}
 		}
+		if facts.NoStepUp {
+			// Owner is enough. Login already proved who is asking; a
+			// second Face ID is the wrong cost for this write. Do not
+			// open the window: a ready-time save must not let an
+			// unmarked configure through.
+			return nil
+		}
 		// Step-up, with a grace window. A configure action needs recent human
 		// presence; one ceremony proves it, and the box now remembers that
 		// proof for StepUpWindowMs instead of demanding a fresh one per write.
