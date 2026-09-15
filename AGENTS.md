@@ -248,6 +248,15 @@ cleanup, which is accepted; any other unexpected cleanup result fails the
 check. If the write check fails, stop, repair package access or rotate the one
 dedicated secret, then rerun the same immutable version. Do not mint another
 beta tag to work around an access failure.
+The Home Assistant app repository, `srcfl/home-assistant-addons`, follows
+every release on its own. `beta.yml` and `release-assets.yml` end by sending
+it a `repository_dispatch` of type `ftw-release`, authenticated with the
+secret `HA_ADDON_DISPATCH_TOKEN`: a fine-grained token with *Contents: read
+and write* on that repository only. Without the secret the step logs a notice
+and the app repository picks the release up on its hourly sync. The dispatch
+never blocks a release, and the app repository verifies the release against
+its digest receipt and the registry rather than trusting the payload.
+
 `CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
 
 ## Cursor Cloud specific instructions
