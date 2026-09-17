@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +25,7 @@ const (
 	// SchemaVersion identifies the on-disk state format for update rollback.
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
-	SchemaVersion = 5
+	SchemaVersion = 6
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -1386,13 +1387,16 @@ func (s *Store) batteryModelKey(driverName string) string {
 
 // HistoryPoint is one row of the history table.
 type HistoryPoint struct {
-	TsMs   int64
-	GridW  float64
-	PVW    float64
-	BatW   float64
-	LoadW  float64
-	BatSoC float64
-	JSON   string
+	N            int64 `json:"n,omitempty"`
+	ResolutionMS int64 `json:"resolution_ms,omitempty"`
+	FirstMS      int64 `json:"first_ms,omitempty"`
+	TsMs         int64
+	GridW        float64
+	PVW          float64
+	BatW         float64
+	LoadW        float64
+	BatSoC       float64
+	JSON         string
 }
 
 // RecordHistory inserts a live hot-tier entry into SQLite.
@@ -1484,15 +1488,16 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 	// COALESCE to 0 so NULL columns (from partial aggregations) scan cleanly.
 	const tierUnion = `
 		WITH all_rows AS (
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 0 AS tier FROM history_hot
+			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 0 AS tier,1 AS n,1 AS resolution_ms,ts_ms AS first_ms FROM history_hot
 			WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 1 FROM history_warm
+			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 1,1,900000,ts_ms FROM history_warm
 			WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 2 FROM history_cold
+			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, 2,1,86400000,ts_ms FROM history_cold
 			WHERE ts_ms BETWEEN ? AND ?
-		),
+		UNION ALL SELECT last_ms,grid_w,pv_w,bat_w,load_w,bat_soc,-1,n,resolution_ms,first_ms FROM history_dashboard WHERE last_ms BETWEEN ? AND ?
+ ),
 		deduped AS (
 			SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY ts_ms ORDER BY tier) AS rn FROM all_rows) WHERE rn=1
 		)
@@ -1509,23 +1514,25 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 		}
 		rows, err = s.history.QueryContext(ctx, tierUnion+`, bucketed AS (
 			SELECT MAX(ts_ms) AS ts_ms,
-			       AVG(COALESCE(grid_w, 0)) AS grid_w, AVG(COALESCE(pv_w, 0)) AS pv_w,
-			       AVG(COALESCE(bat_w, 0)) AS bat_w, AVG(COALESCE(load_w, 0)) AS load_w,
-			       AVG(COALESCE(bat_soc, 0)) AS bat_soc
+			       SUM(COALESCE(grid_w, 0)*n)/SUM(n) AS grid_w, SUM(COALESCE(pv_w, 0)*n)/SUM(n) AS pv_w,
+			       SUM(COALESCE(bat_w, 0)*n)/SUM(n) AS bat_w, SUM(COALESCE(load_w, 0)*n)/SUM(n) AS load_w,
+			       SUM(COALESCE(bat_soc, 0)*n)/SUM(n) AS bat_soc,SUM(n) AS n,MAX(resolution_ms) AS resolution_ms,MIN(first_ms) AS first_ms
 			FROM deduped GROUP BY (ts_ms - ?) / ?
 		)
 		SELECT ts_ms,grid_w,pv_w,bat_w,load_w,bat_soc,
-		COALESCE((SELECT json FROM history_hot WHERE ts_ms=b.ts_ms),
+		COALESCE((SELECT json FROM history_dashboard WHERE last_ms=b.ts_ms),
+ (SELECT json FROM history_hot WHERE ts_ms=b.ts_ms),
 		         (SELECT json FROM history_warm WHERE ts_ms=b.ts_ms),
-		         (SELECT json FROM history_cold WHERE ts_ms=b.ts_ms),'{}')
-		FROM bucketed b ORDER BY ts_ms`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
+		         (SELECT json FROM history_cold WHERE ts_ms=b.ts_ms),'{}'),n,resolution_ms,first_ms
+		FROM bucketed b ORDER BY ts_ms`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
 	} else {
 		rows, err = s.history.QueryContext(ctx, tierUnion+`
 			SELECT ts_ms,COALESCE(grid_w,0),COALESCE(pv_w,0),COALESCE(bat_w,0),COALESCE(load_w,0),COALESCE(bat_soc,0),
-			COALESCE((SELECT json FROM history_hot WHERE ts_ms=b.ts_ms),
+			COALESCE((SELECT json FROM history_dashboard WHERE last_ms=b.ts_ms),
+ (SELECT json FROM history_hot WHERE ts_ms=b.ts_ms),
 			         (SELECT json FROM history_warm WHERE ts_ms=b.ts_ms),
-			         (SELECT json FROM history_cold WHERE ts_ms=b.ts_ms),'{}')
-			FROM deduped b ORDER BY ts_ms LIMIT ?`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, maxRawSeriesPoints+1)
+			         (SELECT json FROM history_cold WHERE ts_ms=b.ts_ms),'{}'),n,resolution_ms,first_ms
+			FROM deduped b ORDER BY ts_ms LIMIT ?`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, maxRawSeriesPoints+1)
 	}
 	if err != nil {
 		return nil, err
@@ -1536,8 +1543,18 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 	var bytes int
 	for rows.Next() {
 		var p HistoryPoint
-		if err := rows.Scan(&p.TsMs, &p.GridW, &p.PVW, &p.BatW, &p.LoadW, &p.BatSoC, &p.JSON); err != nil {
+		if err := rows.Scan(&p.TsMs, &p.GridW, &p.PVW, &p.BatW, &p.LoadW, &p.BatSoC, &p.JSON, &p.N, &p.ResolutionMS, &p.FirstMS); err != nil {
 			return all, err
+		}
+		if p.ResolutionMS > 1 {
+			var detail map[string]any
+			if json.Unmarshal([]byte(p.JSON), &detail) == nil && detail != nil {
+				detail["forecast_measurement_quality"] = "aggregate_not_for_training"
+				detail["detail_ts"] = p.TsMs
+				if b, err := json.Marshal(detail); err == nil {
+					p.JSON = string(b)
+				}
+			}
 		}
 		bytes += len(p.JSON) + 64
 		if bytes > 16<<20 || len(all) >= maxRawSeriesPoints {
@@ -1581,6 +1598,29 @@ type DayEnergy struct {
 // sample as if the site had run at that power through the hole.
 func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	ctx := context.Background()
+	from, ok, err := s.siteEnergyFrom(ctx)
+	if err != nil {
+		return DayEnergy{}, err
+	}
+	if !ok || untilMs <= from {
+		return s.legacyDailyEnergy(sinceMs, untilMs)
+	}
+	out, err := s.aggregateDayEnergy(ctx, max(from, sinceMs), untilMs)
+	if err != nil {
+		return out, err
+	}
+	if sinceMs < from {
+		old, err := s.legacyDailyEnergy(sinceMs, from)
+		if err != nil {
+			return out, err
+		}
+		out = addDayEnergy(old, out)
+	}
+	return out, nil
+}
+
+func (s *Store) legacyDailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
+	ctx := context.Background()
 	cut, hasHot, err := s.hotEarliestMs(ctx)
 	if err != nil {
 		return DayEnergy{}, err
@@ -1606,6 +1646,13 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 // LiveDayEnergy integrates only SQLite hot ticks. Status polls every 2 s and
 // uses recent dashboard rows only.
 func (s *Store) LiveDayEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
+	from, ok, err := s.siteEnergyFrom(context.Background())
+	if err != nil {
+		return DayEnergy{}, err
+	}
+	if ok && untilMs > from {
+		return s.DailyEnergy(sinceMs, untilMs)
+	}
 	ctx := context.Background()
 	cut, hasHot, err := s.hotEarliestMs(ctx)
 	if err != nil {
@@ -1765,6 +1812,11 @@ var pruneChunkSpanMS = int64(24 * 60 * 60 * 1000)
 // bucket twice, each time from a partial slice, keeping only the second).
 // Idempotent; safe to call often.
 func (s *Store) Prune(ctx context.Context) error {
+	if s.aggregateHistory.Load() {
+		if err := s.maintainDashboard(ctx, time.Now()); err != nil {
+			return err
+		}
+	}
 	nowMs := time.Now().UnixMilli()
 	t0 := time.Now()
 

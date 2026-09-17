@@ -109,9 +109,17 @@ Core writes scalar history as 10-second summaries in SQLite for the last
 Parquet. Minute files cover days 1–30; five-minute files cover days 30–730.
 Hourly gauge summaries and the energy ledger remain after detailed history
 expires. The old `state.cold_retention_days` setting no longer controls this
-policy; startup reports a stored nonzero value. Dashboard and cost history
-still use their existing path until their energy integration can consume
-aggregates without changing import, export or gap accounting.
+policy; startup reports a stored nonzero value.
+
+Dashboard charts use the same 10-second, one-minute and five-minute ages in
+SQLite. These small site summaries stay separate from scalar Parquet archives.
+Energy and cost consume original observed intervals recorded before chart
+averaging. Minute energy totals remain for two years, then quarter-hour totals
+preserve local day boundaries and normal tariff periods. A range edge or price
+change inside a retained interval stays uncovered; no reader invents a split.
+Missing site observations break integration. Chart detail keeps the last
+observed JSON and its timestamp; the reader marks it as aggregate data that
+forecast training must not use. Existing legacy chart tiers remain readable.
 
 Every scalar bucket keeps count, sum, min, max, last value and the first and
 last observed timestamps. Means are weighted by sample count, not by elapsed

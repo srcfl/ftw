@@ -2166,6 +2166,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		inner["bat_w"] = row.BatW
 		inner["load_w"] = row.LoadW
 		inner["bat_soc"] = row.BatSoC
+		inner["n"] = row.N
+		inner["resolution_ms"] = row.ResolutionMS
+		inner["first_ms"] = row.FirstMS
+		inner["detail_ts"] = row.TsMs
 		items = append(items, inner)
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "range": rangeStr})
