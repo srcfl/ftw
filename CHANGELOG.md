@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.6.0
+
+### Minor Changes
+
+- b9d4ea0: Keep dashboard history at 10 seconds, then one minute and five minutes. Count energy and cost from the original observed intervals before averaging chart power, retain gaps and coverage, and preserve both through backup and restart.
+- f9217d5: Store scalar measurements as 10-second summaries for 24 hours, one-minute Parquet for 30 days and five-minute Parquet for two years. Preserve counts, extrema, last readings and original energy observations. Verify and resume old archive conversion before removing source data. Keep dashboard energy and cost integration on its existing path. The state schema upgrade requires a matching full backup for rollback.
+- 2da8102: Support charging to the car's own limit as a distinct saved goal. Keep unfinished charging active after an estimated target or a missed deadline, retain the same session's deadline across restart, and preserve explicit percentage goals and safety limits. Clients must check Core support before offering this goal.
+
+### Patch Changes
+
+- c48f3fb: Keep backup verification and restore working from read-only sources. Reserve space for cold history and every database copy that coexists during verification before starting an export.
+- 0b2baef: Keep EV session and battery-model disk writes outside the control loop. Confirm saved choices only after a durable write, keep pending writes bounded, and preserve manual Stop across queued updates and restart.
+- c48f3fb: Let the offline backup helper copy large histories without the live 100 ms pause that made a two-hour export deadline unreachable. Keep live backup yielding between copy batches, and refuse to start when the destination cannot hold the raw export, compressed archive and verification extract. The Raspberry Pi durable-goal latency requirement remains open in #1246.
+- 792cd21: Show simple forecast status and recorded learning days in More. Put model diagnostics and relearning behind Details, remove misleading training-quality bars, and require an explicit health check before showing Healthy.
+- 19ab0ea: Keep live storage responsive during archive and history maintenance. Bound write transactions, retain completed forecast observations for retry, and expose current storage and forecast health with failure history for diagnostics.
+- 2390e61: Let users choose the car's charge limit in their charging goal while keeping existing percent targets unchanged. Show pending saves separately from saved state and write failures.
+  
+  Show the current battery level and car limit with their sources, add readable charging windows, and include all cars in the household plan and overview.
+
 ## 3.5.3
 
 ### Patch Changes
