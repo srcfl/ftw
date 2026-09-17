@@ -75,3 +75,11 @@ test('unavailable charger power explains the pause without declaring completion'
   assert.match(text, /Paused: charger power data is out of date/);
   assert.doesNotMatch(text, /target reached|Charging on plan/);
 });
+
+test('car-limit goal never declares completion from estimated target_soc', () => {
+  const lp = { plugged_in: true, charger: { available: true }, current_power_w: 0,
+    commanded_known: true, commanded_w: 0, target_soc: 1, current_soc: 1,
+    soc_source: 'inferred', schedule: { soc: 0, finish_at_vehicle_limit: true } };
+  assert.doesNotMatch(planStatus(lp, {}).textContent, /target reached|No charging plan yet/);
+  assert.match(planStatus({ ...lp, charging_declined: true }, {}).textContent, /car stopped asking for charge/);
+});

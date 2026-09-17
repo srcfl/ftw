@@ -2814,7 +2814,7 @@
     var kwPlanned = lp.plan_total_wh > 0 ? " ~" + (lp.plan_total_wh / 1000).toFixed(1) + " kWh planned." : "";
     var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
     var charging = (lp.current_power_w || 0) >= 100;
-    var hasSchedule = lp.schedule && lp.schedule.soc > 0;
+    var hasSchedule = lp.schedule && (lp.schedule.finish_at_vehicle_limit === true || lp.schedule.soc > 0);
     if (lp.manual_restore_unconfirmed) {
       text = manualStatusText(lp, d);
     } else if (lp.charger && !lp.charger.available) {
@@ -2839,7 +2839,8 @@
       if (lp.commanded_reason === "fuse_limit") {
         text += " Rate is limited by the main fuse right now.";
       }
-    } else if (lp.commanded_known && lp.commanded_w === 0 && !lp.power_unavailable &&
+    } else if (lp.finish_at_vehicle_limit !== true && !(lp.schedule && lp.schedule.finish_at_vehicle_limit === true) &&
+        lp.commanded_known && lp.commanded_w === 0 && !lp.power_unavailable &&
         typeof lp.target_soc === "number" && lp.target_soc > 0 && lp.target_soc <= 1 &&
         typeof lp.current_soc === "number" && lp.current_soc >= lp.target_soc && lp.current_soc <= 1 &&
         (lp.soc_source === "vehicle" || lp.soc_source === "inferred")) {
@@ -3044,7 +3045,7 @@
           matched = lps.loadpoints[0];
         }
       }
-      if (!carConnected && matched && matched.schedule && matched.schedule.soc > 0) {
+      if (!carConnected && matched && matched.schedule && (matched.schedule.finish_at_vehicle_limit === true || matched.schedule.soc > 0)) {
         freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
       }
       evLastLp = matched;
@@ -3095,12 +3096,14 @@
       }
       if (matched) {
         // Rebuild only for a changed charger or a removed goal.
-        var lpChanged = evControlsEl == null || evControlsLpId !== matched.id;
+        var supportsVehicleLimit = lps.vehicle_limit_goal_supported === true;
+        var lpChanged = evControlsEl == null || evControlsLpId !== matched.id ||
+          evControlsEl.vehicleLimitSupported !== supportsVehicleLimit;
         if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
           if (evControlsEl && evControlsEl.parentNode === evModalBody) {
             evModalBody.removeChild(evControlsEl);
           }
-          evControlsEl = buildEvControls(matched, siteHasPV(status));
+          evControlsEl = buildEvControls(matched, siteHasPV(status), supportsVehicleLimit);
           evControlsLpId = matched.id;
           schedNeedsRebuild = false;
           manualNeedsRebuild = false;
@@ -3827,7 +3830,7 @@
           if (!(res.ok && res.body && res.body.ok)) throw new Error((res.body && res.body.error) || "FTW refused the change.");
           if (revision !== socRevision) return;
           note.textContent = "Charge level saved: " + v + " %." +
-            (!(lastLp.schedule && lastLp.schedule.soc > 0) && !lastLp.manual_active && !lastLp.surplus_only
+            (!(lastLp.schedule && (lastLp.schedule.finish_at_vehicle_limit === true || lastLp.schedule.soc > 0)) && !lastLp.manual_active && !lastLp.surplus_only
               ? " Set a ready time, or choose Charge now." : " Reading the updated plan…");
           noteTimer = setTimeout(function () { noteTimer = null; if (!socFailed) note.textContent = sourceNote(lastLp); }, 6000);
           refreshEvModalAfterWrite().then(function () {
@@ -4058,14 +4061,17 @@
   // restarts; the backend rolls the deadline forward daily when Recurring
   // is set and arms the surplus-grab when the home battery is at/above the
   // threshold (5 pp release hysteresis).
-  function buildScheduleSection(lp, hasPV) {
+  function buildScheduleSection(lp, hasPV, supportsVehicleLimit) {
     var sched = (lp && lp.schedule) || {};
     // Convert "minutes-of-day-UTC" to a "HH:MM" string in the browser's
     // local zone. The UI shows local time everywhere; we marshal back to
     // UTC minutes on save.
-    var hasSched = !!(sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
+    supportsVehicleLimit = supportsVehicleLimit === true;
+    var useVehicleLimit = sched.finish_at_vehicle_limit === true;
+    var hasSched = !!(useVehicleLimit || sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
     var initLocalHHMM = hasSched ? utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360) : "07:00";
     var initSoC = typeof sched.soc === "number" && sched.soc > 0 ? sched.soc * 100 : 80;
+    var percentSoC = useVehicleLimit && typeof sched.soc === "number" ? sched.soc : initSoC / 100;
     var initRec = !!sched.recurring;
     var savedUnlock = typeof sched.surplus_unlock_bat_soc === "number" ? sched.surplus_unlock_bat_soc * 100 : 0;
     // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
@@ -4248,16 +4254,55 @@
     }
     paintChips();
 
+    var targetMode = document.createElement("select");
+    targetMode.setAttribute("aria-label", "Charge target");
+    targetMode.style.cssText = "max-width:100%;padding:0.4rem;background:var(--ink-raised);color:var(--fg);border:1px solid var(--line);border-radius:4px;font:inherit;font-size:0.85rem";
+    [["vehicle", "Car's charge limit"], ["percent", "Choose percent"]].forEach(function (item) {
+      var option = document.createElement("option");
+      option.value = item[0];
+      option.textContent = item[1];
+      targetMode.appendChild(option);
+    });
+    targetMode.value = useVehicleLimit ? "vehicle" : "percent";
+    targetMode.disabled = !supportsVehicleLimit;
+    if (supportsVehicleLimit) box.appendChild(row("Charge to", targetMode));
+
+    var vehicleLimitHint = document.createElement("p");
+    vehicleLimitHint.textContent = "The car decides when to stop. Change its limit in the car or its app.";
+    vehicleLimitHint.style.cssText = "margin:0.3rem 0 0.7rem;font-size:0.8rem;color:var(--text-dim)";
+    box.appendChild(vehicleLimitHint);
+    var limitDetails = document.createElement("details");
+    limitDetails.style.cssText = "margin:0.5rem 0;color:var(--text-dim);font-size:0.8rem";
+    var limitSummary = document.createElement("summary");
+    limitSummary.textContent = "How this goal works";
+    limitSummary.style.cursor = "pointer";
+    limitDetails.appendChild(limitSummary);
+    var limitExplanation = document.createElement("p");
+    limitExplanation.textContent = "FTW plans to the car's reported limit when available. Without it, FTW reserves time for up to 100%. An estimated battery level does not end this charge. This choice does not change the limit set in your car.";
+    limitDetails.appendChild(limitExplanation);
+
     // Target: same header + full-width slider treatment as the car's
     // current charge above the goal.
     var targetHdr = sliderHeader("Charge to", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
     box.appendChild(targetHdr.row);
     var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
     targetSlider.min = "10";
-    targetSlider.step = "5";
+    targetSlider.step = "1";
     targetSlider.setAttribute("aria-label", "Target charge, percent");
     box.appendChild(targetSlider);
     box.appendChild(row("Ready by", timeInp));
+    timeInp.setAttribute("aria-label", "Ready by");
+    box.appendChild(limitDetails);
+
+    function applyTargetMode() {
+      useVehicleLimit = targetMode.value === "vehicle";
+      targetHdr.row.style.display = useVehicleLimit ? "none" : "flex";
+      targetSlider.hidden = useVehicleLimit;
+      targetSlider.disabled = useVehicleLimit;
+      vehicleLimitHint.hidden = !useVehicleLimit;
+      limitDetails.hidden = !useVehicleLimit;
+    }
+    applyTargetMode();
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -4334,7 +4379,10 @@
       b.style.color = "var(--fg)";
       return b;
     }
-    var chooseBtn = mkBtn("Use " + Math.round(initSoC) + " % by " + initLocalHHMM);
+    function chooseLabel() {
+      return "Use " + (useVehicleLimit ? "car's limit" : targetSlider.value + " %") + " by " + timeInp.value;
+    }
+    var chooseBtn = mkBtn(chooseLabel());
     chooseBtn.style.textTransform = "none";
     chooseBtn.style.letterSpacing = "normal";
     chooseBtn.addEventListener("click", scheduleSave);
@@ -4355,6 +4403,7 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.4rem";
     status.style.minHeight = "1em";
+    status.setAttribute("role", "status");
     status.textContent = hasSched
       ? "Changes save as you make them; the plan above follows."
       : "No goal set yet. Choose this goal, or change the level or time.";
@@ -4371,6 +4420,10 @@
     var writeQueue = Promise.resolve();
     var statusTimer = null;
     function scheduleSave() {
+      if (useVehicleLimit && !supportsVehicleLimit) {
+        status.textContent = "This Core version cannot save a car-limit goal.";
+        return;
+      }
       if (saveTimer) clearTimeout(saveTimer);
       if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
       saveSeq++;
@@ -4393,7 +4446,7 @@
       }
       var body = {
         schedule: {
-          soc: Number(targetSlider.value) / 100,
+          soc: percentSoC,
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
           // All seven days is the wire's zero.
@@ -4401,6 +4454,9 @@
           surplus_unlock_bat_soc: unlockVal > 0 ? unlockVal / 100 : 0,
         },
       };
+      // Older Core versions omit the support flag. Never offer or send an
+      // unsupported goal that their parser would silently ignore.
+      if (supportsVehicleLimit) body.schedule.finish_at_vehicle_limit = useVehicleLimit;
       // Complete writes in order, even when the charger or planner is slow.
       writeQueue = writeQueue.catch(function () {}).then(function () {
         if (seq !== saveSeq) return;
@@ -4418,14 +4474,23 @@
         }).catch(function (e) {
           if (seq === saveSeq) {
             chooseBtn.disabled = false;
-            chooseBtn.textContent = "Use " + targetSlider.value + " % by " + timeInp.value;
+            chooseBtn.textContent = chooseLabel();
             status.textContent = "Schedule not confirmed: " + e.message;
           }
         });
       });
     }
 
-    targetSlider.addEventListener("change", scheduleSave);
+    targetMode.addEventListener("change", function () {
+      applyTargetMode();
+      if (!useVehicleLimit && percentSoC <= 0) percentSoC = Number(targetSlider.value) / 100;
+      chooseBtn.textContent = chooseLabel();
+      scheduleSave();
+    });
+    targetSlider.addEventListener("change", function () {
+      percentSoC = Number(targetSlider.value) / 100;
+      scheduleSave();
+    });
     timeInp.addEventListener("change", scheduleSave);
     recCb.addEventListener("change", function () { applyDaysGate(); scheduleSave(); });
     dayChips.forEach(function (chip) {
@@ -4465,9 +4530,10 @@
   }
 
   // One session view. Opening settings never changes the charging mode.
-  function buildEvControls(lp, hasPV) {
+  function buildEvControls(lp, hasPV, supportsVehicleLimit) {
     var container = document.createElement("div");
     container.className = "ev-controls";
+    container.vehicleLimitSupported = supportsVehicleLimit === true;
     var manual = buildManualChargeSection(lp);
     container.appendChild(manual.el);
 
@@ -4489,7 +4555,7 @@
     var editLabel = document.createElement("summary");
     editLabel.style.cssText = "cursor:pointer;color:var(--accent-e);font-size:0.85rem;margin-top:0.65rem";
     editor.appendChild(editLabel);
-    var schedule = buildScheduleSection(lp, hasPV);
+    var schedule = buildScheduleSection(lp, hasPV, supportsVehicleLimit);
     editor.appendChild(schedule);
     goal.appendChild(editor);
     var solar = hasPV || lp.surplus_only ? buildPVModeSection(lp) : null;
@@ -4500,9 +4566,10 @@
       manual.el.hidden = !nextLp.plugged_in;
       manual.update(nextLp, d);
       var s = nextLp.schedule;
-      var hasGoal = !!(s && s.soc > 0);
+      var hasGoal = !!(s && (s.finish_at_vehicle_limit === true || s.soc > 0));
       summary.textContent = hasGoal
-        ? Math.round(s.soc * 100) + " % by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
+        ? (s.finish_at_vehicle_limit === true ? "Car's charge limit" : Math.round(s.soc * 100) + " %") +
+          " by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
           (s.recurring ? " · repeats" : " · once")
         : "No ready time set.";
       editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
