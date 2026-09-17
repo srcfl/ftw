@@ -301,18 +301,23 @@ func addSeriesHourSample(acc map[seriesHourKey]*seriesHourAcc, driverID, metricI
 }
 
 func (s *Store) upsertSeriesHoursTx(ctx context.Context, tx *sql.Tx, acc map[seriesHourKey]*seriesHourAcc) error {
+	return upsertSeriesHoursTableTx(ctx, tx, "ts_series_hour", acc)
+}
+
+// table is a compile-time constant at each call site.
+func upsertSeriesHoursTableTx(ctx context.Context, tx *sql.Tx, table string, acc map[seriesHourKey]*seriesHourAcc) error {
 	if len(acc) == 0 {
 		return nil
 	}
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO ts_series_hour (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
+		INSERT INTO `+table+` (driver_id, metric_id, hour_ms, sum_value, min_value, max_value, n, last_ts_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (driver_id, metric_id, hour_ms) DO UPDATE SET
-			sum_value = ts_series_hour.sum_value + excluded.sum_value,
-			min_value = MIN(ts_series_hour.min_value, excluded.min_value),
-			max_value = MAX(ts_series_hour.max_value, excluded.max_value),
-			n = ts_series_hour.n + excluded.n,
-			last_ts_ms = MAX(ts_series_hour.last_ts_ms, excluded.last_ts_ms)`)
+			sum_value = `+table+`.sum_value + excluded.sum_value,
+			min_value = MIN(`+table+`.min_value, excluded.min_value),
+			max_value = MAX(`+table+`.max_value, excluded.max_value),
+			n = `+table+`.n + excluded.n,
+			last_ts_ms = MAX(`+table+`.last_ts_ms, excluded.last_ts_ms)`)
 	if err != nil {
 		return err
 	}
@@ -350,10 +355,12 @@ func (s *Store) refreshSeriesHoursTx(ctx context.Context, tx *sql.Tx, hours []se
 }
 
 type seriesBucketAcc struct {
-	n        int64
-	sum      float64
-	min, max float64
-	last     int64
+	first, resolution int64
+	lastValue         *float64
+	n                 int64
+	sum               float64
+	min, max          float64
+	last              int64
 }
 
 func (a *seriesBucketAcc) add(n int64, sum, min, max float64, last int64) {
@@ -445,9 +452,9 @@ func (s *Store) loadSeriesBucketsFromHours(ctx context.Context, dID, mID, sinceM
 			}
 		}
 		s.ts.mu.RUnlock()
-		return s.walkMergedSeries(ctx, s.coldDir, driver, metric, from, to, func(ts int64, v float64) error {
-			if !math.IsNaN(v) {
-				add((ts-sinceMs)/bucketMs, 1, v, v, v, ts)
+		return s.walkMergedSeriesStats(ctx, s.coldDir, driver, metric, from, to, func(b BucketSummary) error {
+			if !math.IsNaN(b.Sum) {
+				add((b.LastMS-sinceMs)/bucketMs, b.N, b.Sum, b.Min, b.Max, b.LastMS)
 			}
 			return nil
 		})
@@ -477,12 +484,44 @@ func (s *Store) loadSeriesBucketsFromHours(ctx context.Context, dID, mID, sinceM
 			continue
 		}
 		out = append(out, SeriesPoint{
-			TsMs: b.last,
-			V:    b.sum / float64(b.n),
-			Min:  b.min,
-			Max:  b.max,
-			N:    b.n,
+			TsMs:         b.last,
+			ResolutionMS: seriesHourMs,
+			V:            b.sum / float64(b.n),
+			Min:          b.min,
+			Max:          b.max,
+			N:            b.n,
 		})
 	}
 	return out, nil
+}
+
+func bucketSeriesPoint(b BucketSummary) SeriesPoint {
+	p := SeriesPoint{TsMs: b.LastMS, V: b.Sum / float64(b.N), Min: b.Min, Max: b.Max, N: b.N}
+	if b.ResolutionMS > 1 {
+		p.ResolutionMS = b.ResolutionMS
+		p.FirstMS = b.FirstMS
+		v := b.Last
+		p.Last = &v
+	}
+	return p
+}
+func (a *seriesBucketAcc) addBucket(b BucketSummary) {
+	if a.n == 0 || b.FirstMS < a.first {
+		a.first = b.FirstMS
+	}
+	if a.n == 0 || b.LastMS >= a.last {
+		v := b.Last
+		a.lastValue = &v
+	}
+	a.resolution = max(a.resolution, b.ResolutionMS)
+	a.add(b.N, b.Sum, b.Min, b.Max, b.LastMS)
+}
+func (a *seriesBucketAcc) point() SeriesPoint {
+	p := SeriesPoint{TsMs: a.last, V: a.sum / float64(a.n), Min: a.min, Max: a.max, N: a.n}
+	if a.resolution > 1 {
+		p.FirstMS = a.first
+		p.ResolutionMS = a.resolution
+		p.Last = a.lastValue
+	}
+	return p
 }

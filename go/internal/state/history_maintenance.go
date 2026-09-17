@@ -47,8 +47,28 @@ func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int
 		{"dashboard_rollup", func() error { return s.Prune(ctx) }},
 		{"energy_rollup", func() error { _, _, err := s.PruneEnergyLedger(ctx, now); return err }},
 		{"diagnostic_archive", func() error { _, _, err := s.RolloffDiagnosticsToParquet(ctx, coldDir); return err }},
-		{"sample_archive", func() error { return s.PruneHistorySamples(ctx, days, now) }},
-		{"diagnostic_retention", func() error { _, err := PruneDiagnosticsParquet(coldDir, days, now); return err }},
+		{"aggregate_archive", func() error { return s.MaintainAggregateHistory(ctx, coldDir, now) }},
+		{"sample_archive", func() error {
+			if s.aggregateHistory.Load() {
+				_, _, err := s.rolloffSamples(ctx, coldDir, AggregateRecentRetention)
+				return err
+			}
+			return s.PruneHistorySamples(ctx, days, now)
+		}},
+		{"legacy_compaction", func() error {
+			if s.aggregateHistory.Load() {
+				return s.CompactLegacyHistory(ctx, coldDir, now)
+			}
+			return nil
+		}},
+		{"diagnostic_retention", func() error {
+			retention := days
+			if s.aggregateHistory.Load() {
+				retention = 30
+			}
+			_, err := PruneDiagnosticsParquet(coldDir, retention, now)
+			return err
+		}},
 	} {
 		s.maintenanceStatusMu.Lock()
 		s.maintenanceStatus.Phase = stage.name

@@ -104,20 +104,39 @@ error; health reports pending, committed and rejected ticks. Reads use WAL
 snapshots. Goals and session state use a separate database and sync their WAL
 before returning success, so history maintenance does not hold their writer.
 
-Recent raw samples stay in SQLite for 14 days. Archiving merges one complete
-UTC day through a temporary SQLite file and streams Parquet in bounded groups.
-It syncs the file, verifies row counts and values, renames it, syncs the directory
-and reads it back before pruning matching SQLite rows in small transactions.
-Failure keeps the raw source. Retried publication merges matching sample keys.
-Live SQLite values take precedence while both copies exist.
+Core writes scalar history as 10-second summaries in SQLite for the last
+24 hours. It also maintains minute summaries for verified publication to
+Parquet. Minute files cover days 1–30; five-minute files cover days 30–730.
+Hourly gauge summaries and the energy ledger remain after detailed history
+expires. The old `state.cold_retention_days` setting no longer controls this
+policy; startup reports a stored nonzero value. Dashboard and cost history
+still use their existing path until their energy integration can consume
+aggregates without changing import, export or gap accounting.
 
-Configured raw retention removes only verified Parquet files whose hourly
-summaries remain in SQLite. Every scalar series keeps count, sum, min, max
-and last observation time. Empty intervals stay empty. Generic counter averages
-are not energy: the ledger keeps counter deltas, reset/gap markers, power
-integration and source/quality separate. Five-minute energy detail becomes
-hourly after 30 days and daily after two years; totals remain. Long reads have
-time and output limits, and charts use summaries once raw data has expired.
+Every scalar bucket keeps count, sum, min, max, last value and the first and
+last observed timestamps. Means are weighted by sample count, not by elapsed
+time. An empty interval stays empty; observed bounds do not prove continuous
+coverage. The series API reports the source resolution. Latest-value reads use
+the last actual measurement. Gauge averages never replace counter deltas or
+power integration in the energy ledger, which consumes original observations.
+Five-minute energy detail becomes hourly after 30 days and daily after two
+years; totals remain. Reads have time and output limits.
+
+Archiving streams through a bounded SQLite staging file, reads the new Parquet
+back and checks its ordered contents before publishing by a synced rename.
+Pruning removes matching complete source minutes in short transactions. Live
+SQLite wins while both copies exist. A failed write, verification or prune
+keeps the source; a retry cannot count both copies. Admission and the archive
+boundary share a short memory lock so pending ticks finish before their
+interval closes. Later attempts to backdate into a closed interval return an
+explicit collection error without blocking the write queue.
+
+Old raw Parquet files convert in the background. Each staging transaction
+saves its input cursor with its summaries, so a restart resumes the file.
+Independent counts, sums, extrema and observation bounds must match before
+raw data is removed. The original file wins while both forms exist. Compacted
+history cannot accept individual raw corrections. Restore original history
+before importing corrections. Backup archives omit resumable scratch files.
 
 Fresh installations create SQLite directly. Earlier SQLite installations copy
 frozen history in bounded, restartable transactions and keep their Parquet
@@ -125,7 +144,7 @@ files. Only DuckDB beta installations need the separate offline
 [history converter](history-conversion.md). Core and normal release builds
 have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
 
-State schema 4 binds state.db to a specific history.db generation. Portable
+State schema 5 adds aggregate history and binds state.db to a specific history.db generation. Portable
 backups export a SQLite read snapshot with row counts and hashes checked, plus
 retained Parquet. The old beta files stay on the box for recovery. A config-only
 snapshot cannot recover missing history. To return to an older Core, stop Core

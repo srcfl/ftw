@@ -313,6 +313,14 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 		if err != nil {
 			return err
 		}
+		// Aggregate compaction scratch is derived from the retained source;
+		// restoring it is unnecessary and it may have an open SQLite journal.
+		if strings.HasPrefix(d.Name(), ".ftw-buckets-") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		first := strings.Split(rel, string(filepath.Separator))[0]
 		if first == "snapshots" || first == "backups" || isRestoreInternalName(first) || strings.HasPrefix(first, ".ftw-backup-") ||
 			(outputRel != "" && (rel == outputRel || strings.HasPrefix(rel, outputRel+string(filepath.Separator)))) {

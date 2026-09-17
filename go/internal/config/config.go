@@ -1192,16 +1192,9 @@ type HomeAssistant struct {
 	AllowUnverifiedLocal bool `yaml:"allow_unverified_local,omitempty" json:"allow_unverified_local,omitempty"`
 }
 
-// StateConf is the persistent state DB config.
-//
-// Path is the SQLite file (default "state.db"). ColdDir is the directory
-// where >14d-old time-series data is rolled off as Parquet, partitioned
-// YYYY/MM/DD.parquet (default "cold/" alongside Path).
-//
-// ColdRetentionDays bounds the cold Parquet tier: day files older than
-// this are deleted by the hourly rolloff. 0 (default) keeps everything —
-// a year of ~50 metrics is a few GB, so bounding is opt-in for small
-// SD cards.
+// StateConf locates local state and backup files. Core uses a fixed EMS
+// history policy. ColdRetentionDays remains readable for old configurations
+// but no longer controls retention; startup reports a nonzero retired value.
 type StateConf struct {
 	Path              string `yaml:"path" json:"path"`
 	ColdDir           string `yaml:"cold_dir" json:"cold_dir"`

@@ -2641,13 +2641,13 @@ func (s *Server) handleMPCDiagnoseAt(w http.ResponseWriter, r *http.Request) {
 //   - metric: one name, or several comma-separated (battery_w,heatsink_c)
 //   - range: relative window ending now (1h, 24h, 30d, ...), OR
 //   - since/until: absolute unix-ms bounds (until defaults to now)
-//   - points: downsampling budget; 0 = raw samples. Downsampled points carry
+//   - points: downsampling budget; 0 = stored resolution. Aggregate points carry
 //     the bucket envelope: v = avg, min/max = extremes, n = sample count
-//   - format=csv: long-format CSV (ts_ms,driver,metric,v,min,max,n) instead
+//   - format=csv: long-format CSV with the same observation metadata instead
 //     of JSON — for spreadsheet / ML export
 //
-// Windows reaching past the 14-day SQLite tier transparently include cold
-// Parquet data, bucketed on the same boundaries.
+// Reads include SQLite and Parquet. resolution_ms, first_ms and last describe
+// the stored evidence; bounds do not imply continuous coverage.
 func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	driver := r.URL.Query().Get("driver")
 	metricsParam := r.URL.Query().Get("metric")
@@ -2715,15 +2715,21 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition",
 			fmt.Sprintf("attachment; filename=%q", driver+"-series.csv"))
 		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"ts_ms", "driver", "metric", "v", "min", "max", "n"})
+		_ = cw.Write([]string{"ts_ms", "driver", "metric", "v", "min", "max", "n", "resolution_ms", "first_ms", "last"})
 		for _, ser := range all {
 			for _, p := range ser.Points {
+				last := ""
+				if p.Last != nil {
+					last = strconv.FormatFloat(*p.Last, 'g', -1, 64)
+				}
 				_ = cw.Write([]string{
 					strconv.FormatInt(p.TsMs, 10), driver, ser.Metric,
 					strconv.FormatFloat(p.V, 'g', -1, 64),
 					strconv.FormatFloat(p.Min, 'g', -1, 64),
 					strconv.FormatFloat(p.Max, 'g', -1, 64),
 					strconv.FormatInt(p.N, 10),
+					strconv.FormatInt(p.ResolutionMS, 10),
+					strconv.FormatInt(p.FirstMS, 10), last,
 				})
 			}
 		}

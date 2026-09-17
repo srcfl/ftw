@@ -468,6 +468,10 @@ func main() {
 		slog.Error("open state", "err", err)
 		os.Exit(1)
 	}
+	if err := st.EnableHistoryAggregation(); err != nil {
+		slog.Error("enable history aggregation", "err", err)
+		os.Exit(1)
+	}
 	defer func() {
 		if err := st.Close(); err != nil {
 			slog.Error("state shutdown failed", "err", err)
@@ -487,6 +491,10 @@ func main() {
 	if err != nil {
 		slog.Error("initialize config database", "err", err)
 		os.Exit(1)
+	}
+
+	if cfg.State != nil && cfg.State.ColdRetentionDays != 0 {
+		slog.Warn("state.cold_retention_days is retired; fixed EMS history retention applies", "previous_days", cfg.State.ColdRetentionDays)
 	}
 
 	// The repository is entirely local on startup: existing active symlinks are
@@ -3324,7 +3332,7 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 				slog.Error("disk space low — database writes are at risk",
 					"avail_mb", avail>>20)
 				if err := st.RecordEvent(fmt.Sprintf(
-					"disk space low: %d MB available — consider state.cold_retention_days", avail>>20)); err != nil {
+					"disk space low: %d MB available; review storage health and move verified backups to another disk", avail>>20)); err != nil {
 					slog.Warn("record disk-low event failed", "err", err)
 				}
 			}
