@@ -486,6 +486,18 @@ func (s *Store) mergeArchivedHour(ctx context.Context, d, m, hour int64, values 
 		for ts, v := range merged {
 			a.add(1, v, v, v, ts)
 		}
+		// Raw archive rebuilding must retain the separate contributions that
+		// Core has already stored as aggregates, including after their archive.
+		var n, last int64
+		var sum, lo, hi float64
+		err = tx.QueryRowContext(ctx, `SELECT n,sum_value,min_value,max_value,last_ts_ms FROM ts_aggregate_hours WHERE driver_id=? AND metric_id=? AND hour_ms=?`, d, m, hour).Scan(&n, &sum, &lo, &hi, &last)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			a.add(n, sum, lo, hi, last)
+		}
+
 		return nil
 	}, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO ts_series_hour VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(driver_id,metric_id,hour_ms) DO UPDATE SET sum_value=excluded.sum_value,min_value=excluded.min_value,max_value=excluded.max_value,n=excluded.n,last_ts_ms=excluded.last_ts_ms`, d, m, hour, a.sum, a.min, a.max, a.n, a.last)

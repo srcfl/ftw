@@ -285,6 +285,9 @@ func (s *Store) resolveSamples(samples []Sample) ([]resolvedSample, error) {
 }
 
 func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []resolvedSample) error {
+	if err := rejectCompactedSamples(ctx, tx, rs); err != nil {
+		return err
+	}
 	if len(rs) == 0 {
 		return nil
 	}
@@ -293,6 +296,29 @@ func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []reso
 		return err
 	}
 	defer stmt.Close()
+	if err := s.seedSeriesHours(ctx, tx, rs); err != nil {
+		return err
+	}
+
+	hours := make(map[seriesHourKey]*seriesHourAcc, 8)
+	for _, r := range rs {
+		res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		addSeriesHourSample(hours, r.dID, r.mID, r.ts, r.v)
+	}
+	return s.upsertSeriesHoursTx(ctx, tx, hours)
+}
+
+func (s *Store) seedSeriesHours(ctx context.Context, tx *sql.Tx, rs []resolvedSample) error {
 	// A live write can reach a converted hour before background backfill.
 	// Seed that hour from existing raw rows before adding the new samples.
 	seeded := make(map[seriesHourKey]bool)
@@ -313,22 +339,7 @@ func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []reso
 			return err
 		}
 	}
-	hours := make(map[seriesHourKey]*seriesHourAcc, 8)
-	for _, r := range rs {
-		res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			continue
-		}
-		addSeriesHourSample(hours, r.dID, r.mID, r.ts, r.v)
-	}
-	return s.upsertSeriesHoursTx(ctx, tx, hours)
+	return nil
 }
 
 // RecordTick persists one control-loop tick — the history snapshot plus the
@@ -436,7 +447,11 @@ func (s *Store) writeHistoryBatchTx(ctx context.Context, tx *sql.Tx, batchID, pa
 			return 0, false, err
 		}
 	}
-	if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
+	if s.aggregateHistory.Load() && batchID != "" {
+		if err := s.insertAggregateSamples(ctx, tx, rs); err != nil {
+			return 0, false, err
+		}
+	} else if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
 		return 0, false, err
 	}
 	if err := recordEnergyObservationsTx(tx, observations); err != nil {
@@ -597,11 +612,14 @@ func (s *Store) loadArchiveSeriesRaw(ctx context.Context, driver, metric string,
 // chart the way pick-every-Nth-sample downsampling made it), and the
 // number of raw samples that contributed.
 type SeriesPoint struct {
-	TsMs int64   `json:"ts"`
-	V    float64 `json:"v"`
-	Min  float64 `json:"min"`
-	Max  float64 `json:"max"`
-	N    int64   `json:"n"`
+	ResolutionMS int64    `json:"resolution_ms,omitempty"`
+	FirstMS      int64    `json:"first_ms,omitempty"`
+	Last         *float64 `json:"last,omitempty"`
+	TsMs         int64    `json:"ts"`
+	V            float64  `json:"v"`
+	Min          float64  `json:"min"`
+	Max          float64  `json:"max"`
+	N            int64    `json:"n"`
 }
 
 // LoadSeriesBucketsOrRaw is LoadSeriesBuckets with maxPoints=0 meaning "every
@@ -620,15 +638,7 @@ func (s *Store) LoadSeriesBucketsOrRawContext(ctx context.Context, driver, metri
 	if maxPoints > 0 {
 		return s.LoadSeriesBucketsContext(ctx, driver, metric, sinceMs, untilMs, maxPoints)
 	}
-	raw, err := s.LoadSeriesContext(ctx, driver, metric, sinceMs, untilMs, 0)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SeriesPoint, len(raw))
-	for i, sm := range raw {
-		out[i] = SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1}
-	}
-	return out, nil
+	return s.mergedSeries(ctx, s.coldDir, driver, metric, sinceMs, untilMs, 0)
 }
 
 // BucketWidthMs is the downsampling bucket width for a window and point
@@ -667,7 +677,7 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 	if maxPoints > maxSeriesBuckets {
 		return nil, ErrHistoryQueryLimit
 	}
-	if s.seriesHoursReady() && (useSeriesHourRollup(sinceMs, untilMs) || s.onlySeriesSummary(ctx, driver, metric, sinceMs, untilMs)) {
+	if s.seriesHoursReady() && ((useSeriesHourRollup(sinceMs, untilMs) && BucketWidthMs(sinceMs, untilMs, maxPoints) >= seriesHourMs) || s.onlySeriesSummary(ctx, driver, metric, sinceMs, untilMs)) {
 		if err := s.hydrateIntern(); err != nil {
 			return nil, err
 		}
@@ -725,41 +735,13 @@ func (s *Store) loadArchiveSeriesBuckets(ctx context.Context, driver, metric str
 // LatestSample returns the most recent value for one (driver, metric).
 // Returns sql.ErrNoRows if nothing has been recorded.
 func (s *Store) LatestSample(driver, metric string) (Sample, error) {
-	if s.hot != nil {
-		var sm Sample
-		err := s.hot.QueryRow(`SELECT s.ts_ms, s.value
-			FROM ts_samples s
-			JOIN ts_drivers d ON d.id = s.driver_id
-			JOIN ts_metrics m ON m.id = s.metric_id
-			WHERE d.name = ? AND m.name = ?
-			ORDER BY s.ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
-		if err == nil {
-			sm.Driver, sm.Metric = driver, metric
-			return sm, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return Sample{}, err
-		}
-	}
-	if err := s.hydrateIntern(); err != nil {
-		return Sample{}, err
-	}
-	ts := s.ts
-	ts.mu.RLock()
-	dID, dOK := ts.drivers[driver]
-	mEnt, mOK := ts.metrics[metric]
-	ts.mu.RUnlock()
-	if !dOK || !mOK {
-		return Sample{}, sql.ErrNoRows
-	}
 	var sm Sample
 	sm.Driver, sm.Metric = driver, metric
-	err := s.history.QueryRow(`SELECT ts_ms, value FROM ts_samples
-		WHERE driver_id = ? AND metric_id = ? ORDER BY ts_ms DESC LIMIT 1`,
-		dID, mEnt.id).Scan(&sm.TsMs, &sm.Value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sm, err
-	}
+	err := s.history.QueryRow(`WITH identity AS (SELECT d.id AS driver_id,m.id AS metric_id FROM ts_drivers d,ts_metrics m WHERE d.name=? AND m.name=?)
+ SELECT ts_ms,value FROM (
+ SELECT s.ts_ms,s.value FROM ts_samples s JOIN identity i USING(driver_id,metric_id)
+ UNION ALL SELECT b.last_ms,b.last_value FROM ts_buckets b JOIN identity i USING(driver_id,metric_id) WHERE b.resolution_ms=10000
+ ) ORDER BY ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
 	return sm, err
 }
 

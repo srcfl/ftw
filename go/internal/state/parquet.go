@@ -26,7 +26,11 @@ type parquetSampleRow struct {
 // (we accumulate strict-cutoff data, never lose anything).
 //
 // File layout: <coldDir>/YYYY/MM/DD.parquet
-func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRows int64, files []string, err error) {
+func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (int64, []string, error) {
+	return s.rolloffSamples(ctx, coldDir, RecentRetention)
+}
+
+func (s *Store) rolloffSamples(ctx context.Context, coldDir string, retention time.Duration) (rolledRows int64, files []string, err error) {
 	if coldDir == "" {
 		return 0, nil, fmt.Errorf("RolloffToParquet: coldDir must be set")
 	}
@@ -43,7 +47,7 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 	if err := cleanupArchiveTemps(ctx, coldDir, time.Now()); err != nil {
 		return 0, nil, err
 	}
-	cutoff := time.Now().Add(-RecentRetention).UTC()
+	cutoff := time.Now().Add(-retention).UTC()
 	// Only complete UTC days roll off, so a retry merges the same day boundary.
 	cutoff = time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
 	for {

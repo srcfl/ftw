@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -23,7 +24,7 @@ const (
 	// SchemaVersion identifies the on-disk state format for update rollback.
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
-	SchemaVersion = 4
+	SchemaVersion = 5
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -42,6 +43,7 @@ const (
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
+	aggregateHistory atomic.Bool
 	history          *sql.DB
 	historyPath      string
 	historyImportMu  sync.Mutex

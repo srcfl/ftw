@@ -46,6 +46,10 @@ func parquetPaths(coldDir string, since, until int64) ([]string, error) {
 // walkMergedSeries only holds one selected series/day in memory. Raw SQLite
 // wins on matching timestamps during a retry between file publish and prune.
 func (s *Store) walkMergedSeries(ctx context.Context, coldDir, driver, metric string, since, until int64, visit func(int64, float64) error) error {
+	return s.walkMergedSeriesStats(ctx, coldDir, driver, metric, since, until, func(b BucketSummary) error { return visit(b.LastMS, b.Sum/float64(b.N)) })
+}
+
+func (s *Store) walkMergedSeriesStats(ctx context.Context, coldDir, driver, metric string, since, until int64, visit func(BucketSummary) error) error {
 	// Keep the files and their raw overlap on one side of publication/pruning.
 	// Staging and compression do not need this lock; live writes never take it.
 	if err := lockContext(ctx, s.archiveViewMu.TryRLock); err != nil {
@@ -79,7 +83,7 @@ func (s *Store) walkMergedSeries(ctx context.Context, coldDir, driver, metric st
 				if _, ok := raw[r.TsMs]; ok {
 					continue
 				}
-				if err := visit(r.TsMs, r.Value); err != nil {
+				if err := visit(rawBucket(r.TsMs, r.Value)); err != nil {
 					return err
 				}
 			}
@@ -89,7 +93,7 @@ func (s *Store) walkMergedSeries(ctx context.Context, coldDir, driver, metric st
 			return err
 		}
 		for ts, v := range raw {
-			if err := visit(ts, v); err != nil {
+			if err := visit(rawBucket(ts, v)); err != nil {
 				return err
 			}
 		}
@@ -111,11 +115,14 @@ func (s *Store) walkMergedSeries(ctx context.Context, coldDir, driver, metric st
 		if covered[day] {
 			continue
 		}
-		if err := visit(ts, v); err != nil {
+		if err := visit(rawBucket(ts, v)); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	return s.walkAggregateSeries(ctx, coldDir, driver, metric, since, until, visit)
 }
 
 func (s *Store) rawSeriesMap(ctx context.Context, driver, metric string, from, to int64) (map[int64]float64, error) {
@@ -145,11 +152,11 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	}
 	if maxPoints <= 0 {
 		out := make([]SeriesPoint, 0)
-		err := s.walkMergedSeries(ctx, coldDir, driver, metric, since, until, func(ts int64, v float64) error {
+		err := s.walkMergedSeriesStats(ctx, coldDir, driver, metric, since, until, func(b BucketSummary) error {
 			if len(out) >= maxRawSeriesPoints {
 				return ErrHistoryQueryLimit
 			}
-			out = append(out, SeriesPoint{TsMs: ts, V: v, Min: v, Max: v, N: 1})
+			out = append(out, bucketSeriesPoint(b))
 			return nil
 		})
 		if err != nil {
@@ -160,14 +167,14 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	}
 	width := BucketWidthMs(since, until, maxPoints)
 	acc := make(map[int64]*seriesBucketAcc)
-	err := s.walkMergedSeries(ctx, coldDir, driver, metric, since, until, func(ts int64, v float64) error {
-		key := (ts - since) / width
+	err := s.walkMergedSeriesStats(ctx, coldDir, driver, metric, since, until, func(b BucketSummary) error {
+		key := (b.LastMS - since) / width
 		a := acc[key]
 		if a == nil {
 			a = &seriesBucketAcc{}
 			acc[key] = a
 		}
-		a.add(1, v, v, v, ts)
+		a.addBucket(b)
 		return nil
 	})
 	if err != nil {
@@ -181,7 +188,7 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	out := make([]SeriesPoint, 0, len(keys))
 	for _, k := range keys {
 		a := acc[k]
-		out = append(out, SeriesPoint{TsMs: a.last, V: a.sum / float64(a.n), Min: a.min, Max: a.max, N: a.n})
+		out = append(out, a.point())
 	}
 	return out, nil
 }
@@ -294,6 +301,9 @@ func (s *Store) ensureParquetHours(ctx context.Context) error {
 }
 
 func (s *Store) onlySeriesSummary(ctx context.Context, driver, metric string, since, until int64) bool {
+	if s.hasAggregateSeries(ctx, driver, metric, since, until) {
+		return false
+	}
 	paths, err := parquetPaths(s.coldDir, since, until)
 	if err != nil || len(paths) > 0 {
 		return false

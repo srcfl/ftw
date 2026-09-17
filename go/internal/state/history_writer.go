@@ -62,14 +62,16 @@ type HistoryWriterStatus struct {
 }
 
 type historyWriter struct {
-	store   *Store
-	mu      sync.Mutex
-	status  HistoryWriterStatus
-	queue   chan historyBatch
-	changed chan struct{}
-	done    chan struct{}
-	ctx     context.Context
-	cancel  context.CancelFunc
+	store                *Store
+	mu                   sync.Mutex
+	status               HistoryWriterStatus
+	aggregateBeforeMS    int64
+	pendingMeasurementMS map[string]int64
+	queue                chan historyBatch
+	changed              chan struct{}
+	done                 chan struct{}
+	ctx                  context.Context
+	cancel               context.CancelFunc
 	// Owned by run, outside the short status mutex. Tests set limits before
 	// sending the first tick; production uses bounded rows, time and retries.
 	maintenanceRows       int
@@ -192,6 +194,26 @@ func (s *Store) EnqueueTelemetryTick(p *HistoryPoint, samples []Sample, observat
 		w.signal()
 		return errors.New("history queue is full or stopping; tick was not accepted")
 	}
+	if s.aggregateHistory.Load() {
+		first := int64(1<<63 - 1)
+		if p != nil {
+			first = p.TsMs
+		}
+		for _, sm := range samples {
+			first = min(first, sm.TsMs)
+		}
+		if first < w.aggregateBeforeMS {
+			w.status.Rejected++
+			w.status.LastRejectMS = time.Now().UnixMilli()
+			w.status.LastRejectError = "history timestamp precedes the archived interval; tick was not accepted"
+			w.signal()
+			return errors.New(w.status.LastRejectError)
+		}
+		if w.pendingMeasurementMS == nil {
+			w.pendingMeasurementMS = make(map[string]int64)
+		}
+		w.pendingMeasurementMS[b.id] = first
+	}
 	w.status.Accepted++
 	w.status.Pending++
 	w.status.PendingBytes += b.bytes
@@ -259,6 +281,7 @@ func (w *historyWriter) run() {
 				}
 				w.status.LastCommitMS = time.Now().UnixMilli()
 				for _, b := range attempt {
+					delete(w.pendingMeasurementMS, b.id)
 					if b.payload.Point != nil {
 						w.status.LastMeasurementMS = max(w.status.LastMeasurementMS, b.payload.Point.TsMs)
 					}

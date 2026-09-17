@@ -23,7 +23,7 @@ var historyTables = []string{
 	"history_hot", "history_warm", "history_cold", "ts_drivers", "ts_metrics", "ts_samples",
 	"energy_daily", "energy_ledger_meta", "energy_assets", "energy_ledger_entries", "energy_ledger_cursors",
 }
-var sqliteHistoryTables = append(append([]string{}, historyTables...), "ts_series_hour", "ts_archive_days")
+var sqliteHistoryTables = append(append([]string{}, historyTables...), "ts_series_hour", "ts_archive_days", "ts_buckets", "ts_bucket_days", "ts_legacy_bucket_days", "ts_aggregate_hours")
 
 func ensureHistorySchema(exec func(string) error) error {
 	for _, stmt := range historySchema {
@@ -323,6 +323,9 @@ func historyFloatBits(value float64) uint64 {
 func (s *Store) HistoryBackend() map[string]any {
 	info := map[string]any{"engine": "sqlite", "archive": "parquet", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
 	info["maintenance"] = s.HistoryMaintenanceStatus()
+	if s.aggregateHistory.Load() {
+		info["policy"] = map[string]any{"id": "ems-v1", "recent_resolution_ms": HistoryResolutionMS, "recent_retention_hours": 24, "archive_resolution_ms": ArchiveResolutionMS, "archive_minute_days": 30, "older_resolution_ms": OldArchiveResolutionMS, "detailed_retention_days": 730}
+	}
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + "-wal"} {
 		if stat, err := os.Stat(path); err == nil {
 			info[key] = stat.Size()
@@ -349,7 +352,11 @@ func historyOrder(table string) string {
 		return " ORDER BY id"
 	case "ts_archive_days":
 		return " ORDER BY path"
-	case "ts_series_hour":
+	case "ts_buckets":
+		return " ORDER BY driver_id, metric_id, start_ms, resolution_ms"
+	case "ts_bucket_days", "ts_legacy_bucket_days":
+		return " ORDER BY day_ms"
+	case "ts_series_hour", "ts_aggregate_hours":
 		return " ORDER BY driver_id, metric_id, hour_ms"
 	case "ts_samples":
 		return " ORDER BY driver_id, metric_id, ts_ms"
@@ -620,6 +627,14 @@ func scanHistoryPages(ctx context.Context, db historyQueryer, table, filter stri
 				rows.Close()
 				return total, err
 			}
+			// Some SQLite drivers expose a zero-length BLOB as []byte(nil).
+			// Passing that back as a parameter means SQL NULL, which loses its type.
+			for i, v := range values {
+				if b, ok := v.([]byte); ok && b == nil {
+					values[i] = []byte{}
+				}
+			}
+
 			if err := visit(values); err != nil {
 				rows.Close()
 				return total, err
