@@ -91,6 +91,9 @@ Drivers are hot-editable and ship without a compilation step. See
 - Treat code, types, tests and driver metadata as the detailed documentation.
 - Add prose only for architecture, safety invariants or operator steps the code
   cannot explain.
+- When a feature needs semantic judgment rather than generated text, use
+  [`.agents/skills/typesafe-ai`](.agents/skills/typesafe-ai/SKILL.md). Keep
+  Core validation and dispatch in code.
 
 ## Working alongside other people
 
@@ -283,6 +286,7 @@ SDM630 as site meter. Its dashboard is `http://127.0.0.1:8762`; FTW is
 | Planner contract/fallback | [`go/internal/mpc`](go/internal/mpc) |
 | Optional optimizer | [`optimizer`](optimizer) |
 | Driver catalog | `DRIVER` blocks in `drivers/*.lua` |
+| Semantic judgments (proposed Jev / TypeSafe) | [`.agents/skills/typesafe-ai`](.agents/skills/typesafe-ai/SKILL.md), [`go/internal/typesafe`](go/internal/typesafe), [`go/internal/assistant/judgments.go`](go/internal/assistant/judgments.go) |
 
 When behavior looks wrong, inspect the source and its tests before adding a new
 document. Keep [docs/](docs/) small and current.

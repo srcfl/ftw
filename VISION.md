@@ -163,6 +163,16 @@ authorized cloud agent is an endpoint that can read the data the user grants
 it; do not describe that access as blind. The box keeps operating when the
 agent, MCP service or network is unavailable.
 
+Proposed, not shipped: TypeSafe's Jev model can turn a household sentence
+and current site facts into typed judgments — what they want, which existing
+Core operation that maps to, and how sure the judgment is. Code would then
+call the schedule, Charge now, vehicle-SoC and Ask why paths Core already
+has. Jev must not dispatch, set planner output on hardware, or replace
+admission. The box stays in charge when the judgment service is gone. The
+first intended use is Ask why routing (which tools, whether this is a
+control request, whether to draft an issue), then household intents once
+external write authority is defined.
+
 This document adds no new protocol operation, credential or access grant.
 New shared names belong in the contract registry and must ship with their
 validation and matching clients.
