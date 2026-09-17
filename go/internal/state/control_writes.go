@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"maps"
@@ -34,18 +35,19 @@ type controlWrite struct {
 // committed values and hide keys being replaced, including unplug tombstones.
 // Flush is for API acknowledgements and shutdown, never for a control tick.
 type ControlWrites struct {
-	mu       sync.Mutex
-	cache    map[string]string
-	jobs     map[string]*controlWrite
-	rejected map[string]error
-	overflow error
-	order    []string
-	seq      uint64
-	changed  chan struct{}
-	wake     chan struct{}
-	done     chan struct{}
-	closed   bool
-	write    func(map[string]string) error
+	mu          sync.Mutex
+	cache       map[string]string
+	committedAt map[string]time.Time
+	jobs        map[string]*controlWrite
+	rejected    map[string]error
+	overflow    error
+	order       []string
+	seq         uint64
+	changed     chan struct{}
+	wake        chan struct{}
+	done        chan struct{}
+	closed      bool
+	write       func(map[string]string) error
 }
 
 func newControlWrites(initial map[string]string, write func(map[string]string) error) *ControlWrites {
@@ -53,6 +55,7 @@ func newControlWrites(initial map[string]string, write func(map[string]string) e
 	if w.cache == nil {
 		w.cache = map[string]string{}
 	}
+	w.committedAt = map[string]time.Time{}
 	go w.run()
 	return w
 }
@@ -86,12 +89,16 @@ func (s *Store) NewEVControlWrites() (*ControlWrites, error) {
 
 func (s *Store) NewBatteryModelWrites() *ControlWrites {
 	return newControlWrites(nil, func(values map[string]string) error {
-		for name, value := range values {
-			if err := s.SaveBatteryModel(name, value); err != nil {
-				return err
+		// Keys were resolved from live identity before queue admission. Never
+		// bind an older queued snapshot to a replacement driver at write time.
+		return s.durableConfigWrite(func(tx *sql.Tx) error {
+			for key, value := range values {
+				if _, err := tx.Exec(`INSERT INTO battery_models (name,json) VALUES (?,?) ON CONFLICT(name) DO UPDATE SET json=excluded.json`, key, value); err != nil {
+					return err
+				}
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 }
 
@@ -229,6 +236,15 @@ func (w *ControlWrites) GroupStatus(group string) error {
 	return nil
 }
 
+// CommittedConfig is for checkpoint bookkeeping, not restoration: a newer
+// replacement may be pending. LoadConfig hides such obsolete restore values.
+func (w *ControlWrites) CommittedConfig(key string) (string, time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	value, ok := w.cache[key]
+	return value, w.committedAt[key], ok
+}
+
 func (w *ControlWrites) run() {
 	defer close(w.done)
 	for {
@@ -254,6 +270,10 @@ func (w *ControlWrites) run() {
 		if err == nil {
 			delete(w.rejected, group)
 			maps.Copy(w.cache, values)
+			committedAt := time.Now()
+			for key := range values {
+				w.committedAt[key] = committedAt
+			}
 			if job.seq == seq {
 				delete(w.jobs, group)
 			} else {

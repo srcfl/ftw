@@ -300,3 +300,113 @@ func TestControlWritesVehicleGoalRestoresPastDeadline(t *testing.T) {
 		t.Fatal("durable unfinished goal moved to tomorrow", st)
 	}
 }
+
+func TestControlWritesCommittedProgressKeepsCheckpointBound(t *testing.T) {
+	s := openTestStore(t)
+	var writes atomic.Int64
+	w := newControlWrites(nil, func(values map[string]string) error {
+		writes.Add(1)
+		return s.SaveConfigValues(values)
+	})
+	defer finishControlWrites(t, w)
+	m := loadpoint.NewManager()
+	m.Load([]loadpoint.Config{{ID: "garage", DriverName: "charger", VehicleCapacityWh: 75000}})
+	m.SetSessionStore(w)
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	m.SetNowFn(func() time.Time { return at })
+	sample := loadpoint.EVSample{Connected: true, RequestActive: true, DeviceID: "charger", SessionID: "session", PowerW: 3600, PowerAt: at, SessionWh: 1000, EnergyAt: at}
+	m.ObserveSample("garage", sample)
+	m.SetCurrentSoC("garage", .78)
+	if err := m.WaitForPersistence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 17; i++ {
+		at = at.Add(5 * time.Second)
+		sample.PowerAt = at
+		m.ObserveSample("garage", sample)
+		if err := m.WaitForPersistence(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := writes.Load(); n < 3 || n > 4 {
+		t.Fatal("commits must follow the 30 Wh / 30 s checkpoint bound, not every tick", n)
+	}
+	before, _ := m.State("garage")
+	if before.SoCRetention != "session" {
+		t.Fatal(before)
+	}
+	// Restore through the committed cache and verify the bounded energy gap.
+	m = loadpoint.NewManager()
+	m.Load([]loadpoint.Config{{ID: "garage", DriverName: "charger", VehicleCapacityWh: 75000}})
+	m.SetSessionStore(w)
+	m.SetNowFn(func() time.Time { return at })
+	m.ObserveSample("garage", sample)
+	after, _ := m.State("garage")
+	if before.DeliveredWhSession-after.DeliveredWhSession >= 30 {
+		t.Fatal("checkpoint reduction lost too much progress", before.DeliveredWhSession, after.DeliveredWhSession)
+	}
+}
+
+func TestControlDeviceCacheDoesNotWaitForDatabaseConnection(t *testing.T) {
+	s := openTestStore(t)
+	original := Device{DriverName: "meter", Make: "maker", Serial: "original", MAC: "aa:bb", Endpoint: "tcp://meter"}
+	if _, err := s.RegisterDevice(original); err != nil {
+		t.Fatal(err)
+	}
+	s.db.SetMaxOpenConns(1)
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	done := make(chan []Device, 1)
+	go func() { done <- s.CachedDevices() }()
+	select {
+	case devices := <-done:
+		if len(devices) != 1 || devices[0].Serial != "original" {
+			t.Fatal(devices)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("identity read waited for a database connection")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Match SQL's coalesce behavior when a driver reports only its serial.
+	if _, err := s.RegisterDevice(Device{DeviceID: "maker:original", DriverName: "renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	devices := s.CachedDevices()
+	if len(devices) != 1 || devices[0].DriverName != "renamed" || devices[0].Serial != "original" || devices[0].MAC != original.MAC {
+		t.Fatal(devices)
+	}
+}
+
+func TestControlBatteryModelQueueDoesNotResolveIdentityAfterAdmission(t *testing.T) {
+	s := openTestStore(t)
+	w := s.NewBatteryModelWrites()
+	defer finishControlWrites(t, w)
+	s.db.SetMaxOpenConns(1)
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := w.SaveConfig("battery", `{"generation":"before-identity"}`); !errors.Is(err, ErrWritePending) {
+		t.Fatal(err)
+	}
+	// A new identity is registered while the older model waits for disk.
+	if _, err := conn.ExecContext(context.Background(), `INSERT INTO devices(device_id,driver_name,make,serial,mac,endpoint,first_seen_ms,last_seen_ms) VALUES ('maker:new','battery','maker','new','','',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var key string
+	if err := s.db.QueryRow(`SELECT name FROM battery_models`).Scan(&key); err != nil || key != "battery" {
+		t.Fatal("queued model acquired another device's identity", key, err)
+	}
+}

@@ -2080,7 +2080,13 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 			if data, err := json.Marshal(m); err == nil {
 				snapshots[name] = string(data)
 				if s.deps.ModelWrites != nil {
-					if err := s.deps.ModelWrites.SaveConfig(name, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
+					key := name
+					if s.deps.BatteryIdentity != nil {
+						if id, ok := s.deps.BatteryIdentity(name); ok {
+							key = id
+						}
+					}
+					if err := s.deps.ModelWrites.SaveConfig(key, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
 						saveErr = err
 					}
 				}

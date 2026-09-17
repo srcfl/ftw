@@ -3223,7 +3223,11 @@ func main() {
 				modelsMu.Lock()
 				for name, m := range models {
 					if data, err := json.Marshal(m); err == nil {
-						if err := modelWrites.SaveConfig(name, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
+						key := name
+						if id, ok := batteryIdentity(name); ok {
+							key = id
+						}
+						if err := modelWrites.SaveConfig(key, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
 							slog.Warn("failed to persist battery model", "battery", name, "err", err)
 						}
 					}

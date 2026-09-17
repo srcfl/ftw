@@ -350,6 +350,7 @@ type loadpointRuntime struct {
 	powerUnavailable         bool
 	lastSavedEnergyWh        float64
 	lastSavedEnergyAt        time.Time
+	lastSessionCommitAt      time.Time
 	sessionDeviceID          string
 	sessionID                string
 	socRetention             string
@@ -570,6 +571,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.powerUnavailable = existing.powerUnavailable
 			lp.lastSavedEnergyWh = existing.lastSavedEnergyWh
 			lp.lastSavedEnergyAt = existing.lastSavedEnergyAt
+			lp.lastSessionCommitAt = existing.lastSessionCommitAt
 			lp.targetSoC = existing.targetSoC
 			lp.finishAtVehicleLimit = existing.finishAtVehicleLimit
 			lp.finishGoalCompleted = existing.finishGoalCompleted
