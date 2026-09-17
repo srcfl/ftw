@@ -10,7 +10,17 @@ import (
 // The caller still owns the file and must sync the final tail before publishing.
 // It must not wrap goal/session writes: those must never wait for this pacing.
 func NewMaintenanceWriter(ctx context.Context, f *os.File) io.Writer {
-	return &maintenanceWriter{ctx: ctx, file: f, limit: 1 << 20, pause: pauseMaintenance}
+	return NewMaintenanceWriterPaced(ctx, f, true)
+}
+
+// NewMaintenanceWriterPaced still syncs each bounded dirty batch. Live Core
+// backups then pause so goal writes can catch up; the offline helper does not.
+func NewMaintenanceWriterPaced(ctx context.Context, f *os.File, live bool) io.Writer {
+	pause := func(context.Context) error { return nil }
+	if live {
+		pause = pauseMaintenance
+	}
+	return &maintenanceWriter{ctx: ctx, file: f, limit: 1 << 20, pause: pause}
 }
 
 type maintenanceWriteSyncer interface {

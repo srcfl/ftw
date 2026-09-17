@@ -424,12 +424,10 @@ func hashHistoryRows(rows *sql.Rows) (string, int64, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), n, rows.Err()
 }
 
-func (s *Store) exportHistoryToSQLite(path string) error {
+func (s *Store) exportHistoryToSQLite(ctx context.Context, path string) error {
 	if s.history == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
 	if err := s.FlushHistory(ctx); err != nil {
 		return err
 	}
@@ -461,7 +459,7 @@ func (s *Store) exportHistoryToSQLite(path string) error {
 		if _, err := dest.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return err
 		}
-		if err := copyHistoryTablePaced(ctx, src, dest, table, func() error { return pauseMaintenance(ctx) }); err != nil {
+		if err := copyHistoryTablePaced(ctx, src, dest, table, s.backupCopyYield(ctx)); err != nil {
 			return err
 		}
 	}

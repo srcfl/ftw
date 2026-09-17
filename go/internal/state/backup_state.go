@@ -5,17 +5,98 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 )
 
+const liveBackupTimeout = 2 * time.Hour
+const backupScratchHeadroom = 64 << 20
+
+var backupDiskAvail = diskAvail
+
+// OfflineBackup reports whether this store is the read-only helper used by
+// ftw-backup. Live Core backups keep their 100 ms yield; the helper does not.
+func (s *Store) OfflineBackup() bool {
+	return s != nil && s.offlineBackup
+}
+
+func (s *Store) backupWorkContext() (context.Context, context.CancelFunc) {
+	if s.OfflineBackup() {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), liveBackupTimeout)
+}
+
+func (s *Store) backupCopyYield(ctx context.Context) func() error {
+	if s.OfflineBackup() {
+		return nil
+	}
+	pause := s.backupPause
+	if pause == nil {
+		pause = pauseMaintenance
+	}
+	return func() error { return pause(ctx) }
+}
+
+// BackupSourceBytes is the on-disk size of state and history files, including
+// WAL and SHM. Used to preflight scratch space before a portable export.
+func (s *Store) BackupSourceBytes() int64 {
+	if s == nil {
+		return 0
+	}
+	var n int64
+	for _, p := range []string{s.mainDBPath, s.historyPath} {
+		n += fileSizeOrZero(p) + fileSizeOrZero(p+"-wal") + fileSizeOrZero(p+"-shm")
+	}
+	return n
+}
+
+func fileSizeOrZero(path string) int64 {
+	if path == "" {
+		return 0
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+// backupCopyScratch is raw export plus gzip of that file, which coexist.
+func backupCopyScratch(sourceBytes int64) int64 {
+	return 2*sourceBytes + backupScratchHeadroom
+}
+
+// At verification, the staged database gzip, outer archive, copied database
+// gzip and extracted database coexist. Extra files also occupy the archive
+// and one temporary Parquet verification file. Do not assume compression.
+func BackupArchiveScratch(sourceBytes, extraBytes int64) int64 {
+	return 4*sourceBytes + 2*extraBytes + backupScratchHeadroom
+}
+
+// EnsureDiskSpace refuses to start a backup when dir cannot hold needed bytes.
+// A probe error (including Windows) does not block; the copy still fails if
+// the filesystem fills.
+func EnsureDiskSpace(dir string, needed int64) error {
+	if needed <= 0 {
+		return nil
+	}
+	avail, err := backupDiskAvail(dir)
+	if err != nil {
+		return nil
+	}
+	if avail < needed {
+		return fmt.Errorf("backup: need %d bytes free in %s for the raw export, compressed archive and verification extract; have %d", needed, dir, avail)
+	}
+	return nil
+}
+
 // Copy one coherent state snapshot without recopying frozen legacy history.
 // The selected history database is exported separately. The destination is
 // temporary until the complete backup has passed verification and fsync.
-func (s *Store) copyStateForBackup(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
+func (s *Store) copyStateForBackup(ctx context.Context, path string) error {
 	src, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -59,7 +140,7 @@ func (s *Store) copyStateForBackup(path string) error {
 		if _, err := dst.ExecContext(ctx, item.sqlText); err != nil {
 			return fmt.Errorf("backup create %s: %w", item.name, err)
 		}
-		if err := copyVerifiedTable(ctx, src, dst, item.name, scanSQLiteBackupTable, func() error { return pauseMaintenance(ctx) }); err != nil {
+		if err := copyVerifiedTable(ctx, src, dst, item.name, scanSQLiteBackupTable, s.backupCopyYield(ctx)); err != nil {
 			return err
 		}
 	}

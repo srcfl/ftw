@@ -86,6 +86,11 @@ type Store struct {
 
 	maintenanceStatusMu sync.Mutex
 	maintenanceStatus   HistoryMaintenanceStatus
+	// offlineBackup is set by OpenBackupSource. Live Core backups yield
+	// between copy batches so goal and control writes stay within latency
+	// limits; the offline helper must not inherit that 100 ms live pause.
+	offlineBackup bool
+	backupPause   func(context.Context) error
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -251,7 +256,7 @@ func OpenBackupSource(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	s := &Store{db: db, mainDBPath: abs, historyPath: historyDatabasePath(abs)}
+	s := &Store{db: db, mainDBPath: abs, historyPath: historyDatabasePath(abs), offlineBackup: true}
 	// Offline helpers must export the primary database, never frozen legacy rows.
 	var configTable int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='config'`).Scan(&configTable); err != nil {
@@ -627,15 +632,21 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 		return fmt.Errorf("backup: stat dst %s: %w", dstPath, err)
 	}
 
+	ctx, cancel := s.backupWorkContext()
+	defer cancel()
+	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(s.BackupSourceBytes())); err != nil {
+		return err
+	}
+
 	rawPath := dstPath + ".raw.tmp"
 	_ = os.Remove(rawPath)
 	defer os.Remove(rawPath)
 	reportBackupProgress(report, BackupProgress{Phase: BackupPhaseCopying})
-	if err := s.copyStateForBackup(rawPath); err != nil {
+	if err := s.copyStateForBackup(ctx, rawPath); err != nil {
 		return fmt.Errorf("backup state: %w", err)
 	}
 
-	if err := s.exportHistoryToSQLite(rawPath); err != nil {
+	if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
 		return fmt.Errorf("backup history: %w", err)
 	}
 
@@ -670,7 +681,7 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 		}
 	}()
 
-	zw, err := gzip.NewWriterLevel(NewMaintenanceWriter(context.Background(), out), gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(NewMaintenanceWriterPaced(ctx, out, !s.offlineBackup), gzip.BestSpeed)
 	if err != nil {
 		return fmt.Errorf("create gzip writer: %w", err)
 	}
