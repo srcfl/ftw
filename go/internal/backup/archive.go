@@ -31,6 +31,8 @@ const (
 	manifestPath  = "manifest.json"
 )
 
+var ensureBackupDiskSpace = state.EnsureDiskSpace
+
 // ComponentInventory records the independently versioned runtime that created
 // the backup. Driver artifacts themselves are also captured under data/.
 type ComponentInventory struct {
@@ -146,12 +148,24 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return Info{}, fmt.Errorf("backup: create output dir: %w", err)
 	}
-	if err := state.EnsureDiskSpace(outputDir, state.BackupArchiveScratch(opts.State.BackupSourceBytes(), 0)); err != nil {
-		return Info{}, err
-	}
 	if opts.Maintenance != nil {
 		opts.Maintenance.Lock()
 		defer opts.Maintenance.Unlock()
+	}
+	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
+	if err != nil {
+		return Info{}, err
+	}
+	sources, err := collectSources(dataDir, statePath, outputDir, importedHistory)
+	if err != nil {
+		return Info{}, err
+	}
+	extraBytes, err := backupExtraBytes(sources)
+	if err != nil {
+		return Info{}, err
+	}
+	if err := ensureBackupDiskSpace(outputDir, state.BackupArchiveScratch(opts.State.BackupSourceBytes(), extraBytes)); err != nil {
+		return Info{}, err
 	}
 
 	created := opts.Now.UTC()
@@ -183,14 +197,6 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	databaseFile = filepath.ToSlash(databaseFile)
 	databaseEntry := "data/" + databaseFile + ".gz"
-	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
-	if err != nil {
-		return Info{}, err
-	}
-	sources, err := collectSources(dataDir, statePath, outputDir, importedHistory)
-	if err != nil {
-		return Info{}, err
-	}
 	if hasStored {
 		configPath := opts.ConfigPath
 		if configPath == "" {
@@ -252,7 +258,7 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		_ = os.Remove(tmpPath)
 		return Info{}, err
 	}
-	if _, err := Verify(tmpPath); err != nil {
+	if _, err := verifyInWorkspace(tmpPath, outputDir); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, fmt.Errorf("backup: verify finished archive: %w", err)
 	}
@@ -272,6 +278,21 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		return Info{}, err
 	}
 	return Info{ID: id, Path: finalPath, CreatedAt: created, SizeBytes: info.Size(), SHA256: sum, Verified: true}, nil
+}
+
+// Count regular source bytes without following symlinks or hashing the archive.
+func backupExtraBytes(sources []sourceEntry) (int64, error) {
+	var total int64
+	for _, source := range sources {
+		info, err := os.Lstat(source.sourcePath)
+		if err != nil {
+			return 0, err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total, nil
 }
 
 func collectSources(dataDir, statePath, outputDir string, importedHistory map[string]bool) ([]sourceEntry, error) {
@@ -464,6 +485,13 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 // Verify checks archive structure, every file hash, SQLite quick_check and
 // Parquet readability. A matching hash alone cannot detect a damaged source.
 func Verify(archivePath string) (Manifest, error) {
+	return verifyInWorkspace(archivePath, "")
+}
+
+// Creation uses its preflighted output filesystem; restore uses its writable
+// target. Inspect/verify prefer the archive filesystem, then the caller's
+// temporary workspace (TMPDIR) when the source directory is read-only.
+func verifyInWorkspace(archivePath, workspace string) (Manifest, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return Manifest{}, err
@@ -494,9 +522,16 @@ func Verify(archivePath string) (Manifest, error) {
 		want[entry.Path] = entry
 	}
 	seen := make(map[string]bool, len(want))
-	tmpDir, err := os.MkdirTemp(filepath.Dir(archivePath), ".ftw-backup-verify-")
+	allowFallback := workspace == ""
+	if allowFallback {
+		workspace = filepath.Dir(archivePath)
+	}
+	tmpDir, err := os.MkdirTemp(workspace, ".ftw-backup-verify-")
+	if err != nil && allowFallback {
+		tmpDir, err = os.MkdirTemp("", ".ftw-backup-verify-")
+	}
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, fmt.Errorf("backup: create verification workspace: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 	dbGzip := filepath.Join(tmpDir, "database.gz")
@@ -685,15 +720,15 @@ func validateArchiveLink(name, target string, links map[string]string) error {
 // it into place while retaining the previous data directory beside it.
 // Callers must stop FTW before invoking this function.
 func Restore(archivePath, dataDir string, now time.Time) (RestoreResult, error) {
-	_, err := Verify(archivePath)
-	if err != nil {
-		return RestoreResult{}, err
-	}
+	var err error
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
 		return RestoreResult{}, err
 	}
 	parent := filepath.Dir(dataDir)
+	if _, err := verifyInWorkspace(archivePath, parent); err != nil {
+		return RestoreResult{}, err
+	}
 	staging, err := os.MkdirTemp(parent, ".ftw-restore-stage-")
 	if err != nil {
 		return RestoreResult{}, err
@@ -751,10 +786,7 @@ func Restore(archivePath, dataDir string, now time.Time) (RestoreResult, error) 
 // entries. If activation fails, the moves are reversed before returning.
 // Callers must stop FTW before invoking this function.
 func RestoreContents(archivePath, dataDir string, now time.Time) (RestoreResult, error) {
-	_, err := Verify(archivePath)
-	if err != nil {
-		return RestoreResult{}, err
-	}
+	var err error
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
 		return RestoreResult{}, err
@@ -765,6 +797,9 @@ func RestoreContents(archivePath, dataDir string, now time.Time) (RestoreResult,
 	}
 	if !info.IsDir() {
 		return RestoreResult{}, fmt.Errorf("backup: restore target is not a directory: %s", dataDir)
+	}
+	if _, err := verifyInWorkspace(archivePath, dataDir); err != nil {
+		return RestoreResult{}, err
 	}
 	staging, err := os.MkdirTemp(dataDir, ".ftw-restore-stage-")
 	if err != nil {

@@ -95,7 +95,7 @@ func TestOfflineBackupCopyDoesNotYieldBetweenBatches(t *testing.T) {
 func TestBackupArchiveScratchReservesRawGzipAndVerify(t *testing.T) {
 	const source, extra int64 = 100, 7
 	got := BackupArchiveScratch(source, extra)
-	if got < 3*source+extra+backupScratchHeadroom {
+	if got < 4*source+2*extra+backupScratchHeadroom {
 		t.Fatalf("scratch %d omits a coexistence phase", got)
 	}
 	// Issue #1259: 174,629,397 sample rows with a 100 ms pause every 1,024

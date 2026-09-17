@@ -69,10 +69,11 @@ func backupCopyScratch(sourceBytes int64) int64 {
 	return 2*sourceBytes + backupScratchHeadroom
 }
 
-// BackupArchiveScratch is raw export, gzip, and a later uncompressed
-// verification extract on the same filesystem as the published archive.
+// At verification, the staged database gzip, outer archive, copied database
+// gzip and extracted database coexist. Extra files also occupy the archive
+// and one temporary Parquet verification file. Do not assume compression.
 func BackupArchiveScratch(sourceBytes, extraBytes int64) int64 {
-	return 3*sourceBytes + extraBytes + backupScratchHeadroom
+	return 4*sourceBytes + 2*extraBytes + backupScratchHeadroom
 }
 
 // EnsureDiskSpace refuses to start a backup when dir cannot hold needed bytes.
