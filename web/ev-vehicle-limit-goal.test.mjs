@@ -120,3 +120,25 @@ test('Charge now sends a manual hold without a percent release in car-limit mode
   assert.equal(ui.requests[0].power_w, 11040);
   assert.equal('release_at_soc_pct' in ui.requests[0], false);
 });
+
+
+test('session write failure is visible without opening the goal editor', () => {
+  const ui = fixture({ schedule: { soc: .8, finish_at_vehicle_limit: true } });
+  const error = ui.find(el => el.textContent.startsWith('FTW could not save this charging session.'));
+  assert.equal(error.hidden, true);
+  ui.root.update({ ...ui.lp, goal_retention: 'error' }, null);
+  assert.equal(error.hidden, false);
+  assert.match(error.textContent, /Your schedule is still saved/);
+  assert.equal(ui.find(el => el.tag === 'section').children.includes(error), true);
+  ui.root.update({ ...ui.lp, goal_retention: 'session' }, null);
+  assert.equal(error.hidden, true);
+});
+
+test('unverified session identity stays in collapsed goal details', () => {
+  const ui = fixture({ schedule: { soc: .8, finish_at_vehicle_limit: true } });
+  ui.root.update({ ...ui.lp, goal_retention: 'unavailable' }, null);
+  const details = ui.find(el => el.tag === 'details' && el.children[0]?.textContent === 'How this goal works');
+  assert.notEqual(details.open, true);
+  assert.match(details.children.map(el => el.textContent).join(' '), /cannot identify this charging session/);
+  assert.equal(ui.find(el => el.textContent.startsWith('FTW could not save')).hidden, true);
+});

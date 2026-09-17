@@ -4280,6 +4280,8 @@
     var limitExplanation = document.createElement("p");
     limitExplanation.textContent = "FTW plans to the car's reported limit when available. Without it, FTW reserves time for up to 100%. An estimated battery level does not end this charge. This choice does not change the limit set in your car.";
     limitDetails.appendChild(limitExplanation);
+    var retentionDetail = document.createElement("p");
+    limitDetails.appendChild(retentionDetail);
 
     // Target: same header + full-width slider treatment as the car's
     // current charge above the goal.
@@ -4525,6 +4527,12 @@
 
     box.update = function (nextLp) {
       surplusBestEffortHint.style.display = nextLp.surplus_only && !nextLp.manual_active ? "" : "none";
+      retentionDetail.textContent = nextLp.goal_retention === "unavailable"
+        ? "Your schedule is saved. FTW cannot identify this charging session, so it may not restore this session's goal after a restart."
+        : nextLp.goal_retention === "session"
+        ? "This session's goal is saved and can be restored after a restart."
+        : "";
+      retentionDetail.hidden = !retentionDetail.textContent;
     };
     return box;
   }
@@ -4547,6 +4555,11 @@
     var summary = document.createElement("p");
     summary.style.cssText = "margin:0;font-size:0.9rem";
     goal.appendChild(summary);
+    var retentionError = document.createElement("p");
+    retentionError.setAttribute("role", "status");
+    retentionError.style.cssText = "margin:0.5rem 0;padding-left:0.5rem;border-left:2px solid var(--accent-e);font-size:0.85rem";
+    retentionError.textContent = "FTW could not save this charging session. Its goal may not be restored after a restart. Your schedule is still saved.";
+    goal.appendChild(retentionError);
     var suspended = document.createElement("small");
     suspended.style.cssText = "display:block;color:var(--text-dim);margin-top:0.3rem";
     goal.appendChild(suspended);
@@ -4565,6 +4578,7 @@
     container.update = function (nextLp, d) {
       manual.el.hidden = !nextLp.plugged_in;
       manual.update(nextLp, d);
+      retentionError.hidden = nextLp.goal_retention !== "error";
       var s = nextLp.schedule;
       var hasGoal = !!(s && (s.finish_at_vehicle_limit === true || s.soc > 0));
       summary.textContent = hasGoal
