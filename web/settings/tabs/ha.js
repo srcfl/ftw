@@ -39,6 +39,7 @@
     render: function (ctx) {
       var field = ctx.field, config = ctx.config;
       if (!config.homeassistant) config.homeassistant = {};
+      if (!config.modbus_proxy) config.modbus_proxy = {};
       return '<div id="ha-status-indicator" class="ha-status-indicator">checking…</div>' +
         '<fieldset><legend>Home Assistant MQTT</legend>' +
         '<label><input type="checkbox" data-checkbox-path="homeassistant.enabled"' + (config.homeassistant.enabled ? ' checked' : '') + '> Enabled</label>' +
@@ -55,6 +56,13 @@
         '</div></div>' +
         field("Publish interval (s)", "homeassistant.publish_interval_s", "number", 5,
           "How often state topics are pushed to HA. 5 s is a good default.") +
+        '</fieldset>' +
+        '<fieldset><legend>Modbus TCP proxy</legend>' +
+        '<p class="hint">FTW keeps the inverter\'s one Modbus socket and lets other tools on the LAN share it. Point Home Assistant at this box and the listen port, with the same unit id as the device. Reads are multiplexed; writes stay blocked unless you opt in — they bypass FTW\'s control loop.</p>' +
+        '<label><input type="checkbox" data-checkbox-path="modbus_proxy.enabled"' + (config.modbus_proxy && config.modbus_proxy.enabled ? ' checked' : '') + '> Enabled</label>' +
+        field("Listen", "modbus_proxy.listen", "text", ":1502",
+          "Local bind. Default :1502 when the site has one Modbus device. Several inverters need capabilities.modbus.proxy_listen on each driver.") +
+        '<label><input type="checkbox" data-checkbox-path="modbus_proxy.allow_write"' + (config.modbus_proxy && config.modbus_proxy.allow_write ? ' checked' : '') + '> Allow writes from the LAN (bypasses FTW control)</label>' +
         '</fieldset>';
     },
     after: function () {

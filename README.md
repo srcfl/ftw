@@ -25,9 +25,10 @@ while keeping expert controls and Lua drivers available.
 [docs/roadmap.md](docs/roadmap.md) lists the outcomes and proof needed. These
 include goals that have not shipped; the capability list below is separate.
 
-Sourceful Energy maintains FTW Community under Apache-2.0. External users
-report bugs, needs and evidence through [issues](https://github.com/srcfl/ftw/issues).
-We do not accept external pull requests, including documentation and drivers.
+Sourceful Energy maintains FTW Community under AGPL-3.0-only with the
+Energyplan combination permission. Contributions are welcome, preferably
+starting with [issues](https://github.com/srcfl/ftw/issues). Share a short
+Markdown proposal or a focused fix with relevant test evidence.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
 [SUPPORT.md](SUPPORT.md) describes separate commercial services.
 
@@ -50,7 +51,7 @@ the whole product. See [docs/architecture.md](docs/architecture.md).
 - multi-battery allocation with fuse, SoC, slew and stale-data protection;
 - price-, weather-, PV- and load-aware planning;
 - EV charging, V2X and thermal planning;
-- local web UI, DuckDB history and SQLite configuration;
+- local web UI, SQLite history and configuration, and Parquet archives;
 - Home Assistant MQTT discovery;
 - hot-reloadable, independently released Lua drivers;
 - a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
@@ -106,7 +107,9 @@ the connection if DHCP later hands the host a different address.
 
 Existing Forty Two Watts or older FTW deployments must use the
 [legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
-are preserved. Raspberry Pi image installation is covered by
+are preserved. A 2.x Compose site that already runs `ghcr.io/srcfl/ftw`
+and wants 3.x uses [upgrade-paired-release.md](docs/upgrade-paired-release.md),
+not orange Update. Raspberry Pi image installation is covered by
 [docs/rpi-image.md](docs/rpi-image.md).
 
 The on-box dashboard remains local. The optional
@@ -239,6 +242,7 @@ metadata are the detailed reference.
 - [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
 - [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Self-update and release channels](docs/self-update.md)
+- [Upgrade a Compose install to one Core + updater tag](docs/upgrade-paired-release.md)
 - [Home Assistant](docs/ha-integration.md)
 - [Calendar removal and existing schedules](docs/caldav-integration.md)
 
@@ -249,4 +253,7 @@ external-integration guides.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). User-visible changes need a Changeset.
 
-Apache-2.0 — see [LICENSE](LICENSE).
+AGPL-3.0-only with the Energyplan combination permission — see
+[LICENSE](LICENSE) and [LICENSING.md](LICENSING.md). Energyplan binaries have
+separate household-use terms; commercial use of those binaries needs a
+Sourceful agreement. Earlier versions retain their earlier licenses.

@@ -49,11 +49,11 @@ func TestHistoryPrimaryAndRetryReceipt(t *testing.T) {
 
 func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 	s := freshStore(t)
-	s.hotWriteMu.Lock()
+	s.historyWriteMu.Lock()
 	locked := true
 	defer func() {
 		if locked {
-			s.hotWriteMu.Unlock()
+			s.historyWriteMu.Unlock()
 		}
 	}()
 	samples := []Sample{{Driver: "meter", Metric: "power", TsMs: 1, Value: 17}}
@@ -80,7 +80,7 @@ func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 	if !errors.Is(s.FlushHistory(ctx), context.DeadlineExceeded) {
 		t.Fatal("flush claimed a blocked write was durable")
 	}
-	s.hotWriteMu.Unlock()
+	s.historyWriteMu.Unlock()
 	locked = false
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
@@ -97,7 +97,7 @@ func TestHistoryQueueDoesNotWaitOnDiskAndRejectsOverflow(t *testing.T) {
 		}
 	}
 	var receipts int
-	if err := s.hot.QueryRow(`SELECT COUNT(*) FROM hot_ticks`).Scan(&receipts); err != nil || receipts != 64 {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&receipts); err != nil || receipts < 1 || receipts > 32 {
 		t.Fatalf("serial writer retained %d receipts: %v", receipts, err)
 	}
 }
@@ -165,13 +165,13 @@ func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	if err := s.hot.QueryRow(`SELECT COUNT(*) FROM hot_ticks`).Scan(&n); err != nil || n != 1 {
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM history_receipts`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("retry receipts=%d %v", n, err)
 	}
 }
 
 func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
-	for _, kind := range []string{"missing", "unbound", "incomplete"} {
+	for _, kind := range []string{"missing", "unbound", "wrong-pending", "incomplete"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.db")
 			s, err := Open(path)
@@ -181,8 +181,13 @@ func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
 			if err := s.RecordHistory(HistoryPoint{TsMs: 1}); err != nil {
 				t.Fatal(err)
 			}
-			if kind == "unbound" {
+			if kind == "unbound" || kind == "wrong-pending" {
 				if _, err := s.db.Exec(`DELETE FROM config WHERE key LIKE 'history_%'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "wrong-pending" {
+				if err := s.SaveConfig("history_sqlite_pending_generation", "unrelated"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -207,7 +212,7 @@ func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
 	}
 }
 
-func TestOfflineBackupIncludesDuckDBCorrectionsAndRestoresBesideOldPrimary(t *testing.T) {
+func TestOfflineBackupIncludesSQLiteCorrectionsAndRestoresBesideOldPrimary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "custom.db")
 	s, err := Open(path)
 	if err != nil {
@@ -233,7 +238,7 @@ func TestOfflineBackupIncludesDuckDBCorrectionsAndRestoresBesideOldPrimary(t *te
 	if _, err := backup.db.Exec(`VACUUM INTO '` + dst + `'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := backup.exportHistoryToSQLite(dst); err != nil {
+	if err := backup.exportHistoryToSQLite(context.Background(), dst); err != nil {
 		t.Fatal(err)
 	}
 	backup.Close()
@@ -269,7 +274,7 @@ func TestOfflineBackupIncludesDuckDBCorrectionsAndRestoresBesideOldPrimary(t *te
 	}
 	prior, err := filepath.Glob(historyDatabasePath(path) + ".before-restore-*")
 	if err != nil || len(prior) == 0 {
-		t.Fatal("restore did not preserve previous DuckDB")
+		t.Fatal("restore did not preserve previous history")
 	}
 }
 
@@ -300,6 +305,7 @@ func TestHistoryRejectsNonFiniteAndCanonicalizesZero(t *testing.T) {
 
 func TestHistoryQueryCancellationAndRetention(t *testing.T) {
 	s := freshStore(t)
+	s.coldDir = t.TempDir()
 	now := time.Now().UTC()
 	if err := s.RecordSamples([]Sample{{Driver: "d", Metric: "m", TsMs: now.AddDate(0, 0, -40).UnixMilli(), Value: 1}, {Driver: "d", Metric: "m", TsMs: now.UnixMilli(), Value: 2}}); err != nil {
 		t.Fatal(err)

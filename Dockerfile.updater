@@ -47,7 +47,7 @@ COPY --from=docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4
                           /usr/local/libexec/docker/cli-plugins/docker-compose
 
 COPY --from=builder /out/ftw-updater /usr/local/bin/ftw-updater
-COPY LICENSE NOTICE THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
+COPY LICENSE NOTICE LICENSING.md THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
 
 # The sidecar runs as root so it can talk to /var/run/docker.sock. The
 # docker socket is the only privileged resource it touches — it has no

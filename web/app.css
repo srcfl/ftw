@@ -2958,3 +2958,32 @@ body.ftw-app .twin-profile-toggle button:focus-visible {
     height: var(--fill-pct, 0%);
   }
 }
+
+/* The same car plan appears in the charger view and the household plan. */
+.ev-charge-levels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 18px 0 10px; }
+.ev-charge-levels > div { display: flex; flex-direction: column; gap: 5px; }
+.ev-charge-levels span, .ev-charge-levels small { font-size: .78rem; color: var(--text-dim); }
+.ev-charge-levels strong { font-size: 1.8rem; font-weight: 600; line-height: 1.2; }
+.ev-timeline { --ev-plan-color: #22d3ee; margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.ev-timeline-heading { display: flex; justify-content: space-between; gap: 12px; font-size: .85rem; }
+.ev-timeline-heading > span { color: var(--text-dim); white-space: nowrap; }
+.ev-plan-track { position: relative; height: 28px; margin-top: 14px; border-radius: 5px; overflow: hidden; background: color-mix(in srgb, var(--line) 65%, transparent); }
+.ev-plan-window { position: absolute; top: 0; bottom: 0; background: var(--ev-plan-color); border-radius: 3px; }
+.ev-plan-ticks { display: flex; justify-content: space-between; margin: 5px 0 12px; color: var(--text-dim); font: .67rem var(--mono); }
+.ev-plan-windows { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.ev-plan-slot { display: flex; flex-direction: column; gap: 4px; border-left: 3px solid var(--ev-plan-color); padding: 4px 8px; }
+.ev-plan-slot strong { font-size: .8rem; font-weight: 600; }
+.ev-plan-slot span, .ev-timeline-note, .ev-plan-more { color: var(--text-dim); font-size: .76rem; line-height: 1.5; }
+.ev-timeline-note { display: block; margin: 10px 0 0; }
+.ev-timeline-note[hidden] { display: none; }
+.ev-plan-more { margin-top: 10px; }
+.ev-plan-more summary { cursor: pointer; }
+.ev-plan-more .ev-plan-windows { margin-top: 8px; }
+#overview-ev-plans .ev-timeline { margin-bottom: 0; }
+
+.ev-plan-ticks > span { text-align: center; }
+.ev-plan-ticks > span:first-child { text-align: left; }
+.ev-plan-ticks > span:last-child { text-align: right; }
+.ev-plan-ticks small { display: block; font: inherit; margin-top: 3px; }
+[data-theme="light"] .ev-timeline { --ev-plan-color: #0891b2; }
+.ev-charge-levels[hidden] { display: none; }

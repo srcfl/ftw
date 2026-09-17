@@ -1,7 +1,9 @@
 <!--
-Sourceful maintains implementation PRs. External users: please open an issue
-for bugs, needs and evidence instead, including documentation and driver work.
-See CONTRIBUTING.md. Acceptance of an issue does not invite an external PR.
+External PRs are welcome, preferably based on an issue. Broad proposals may
+be short Markdown PRs; concrete fixes should include relevant test evidence.
+Make scope and results clear for people and agents. See CONTRIBUTING.md.
+For a proposal, mark runtime-only checks as not applicable and state what
+evidence the implementation will need.
 -->
 
 ## Problem and result
@@ -14,7 +16,9 @@ See CONTRIBUTING.md. Acceptance of an issue does not invite an external PR.
 
 ## Verification
 
-<!-- Give the tests, runs, hardware evidence or rendered views that support the result. -->
+<!-- Give reproducible test steps and actual results. For device behaviour,
+include model, firmware and hardware evidence; keep missing HW checks explicit
+and the PR as a proposal/draft until complete. Separate simulations from HW. -->
 
 ## Checklist
 

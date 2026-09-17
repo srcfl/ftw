@@ -3,6 +3,7 @@
 (function () {
   "use strict";
 
+  const evPlanUI = import("/ev-plan.js").catch(function () { return null; });
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
   const historyMigrationUI = import("/history-migration.js").catch(function () { return null; });
   function updateHistoryMigration(health) {
@@ -2812,15 +2813,23 @@
     var text = null;
     var tone = "var(--text-dim)";
     var kwPlanned = lp.plan_total_wh > 0 ? " ~" + (lp.plan_total_wh / 1000).toFixed(1) + " kWh planned." : "";
-    var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
+    var winActive = !lp.plan_pending && !lp.plan_outdated && lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
     var charging = (lp.current_power_w || 0) >= 100;
-    var hasSchedule = lp.schedule && lp.schedule.soc > 0;
+    // API current_soc is the controller estimate, even when a car reports
+    // a separate vehicle_soc. Use the same level as the battery card.
+    var statusSoC = lp.soc_source === "vehicle"
+      ? (lp.vehicle_driver && !lp.vehicle_stale ? (lp.vehicle_soc == null ? 0 : lp.vehicle_soc) : NaN)
+      : lp.current_soc;
+    var hasSchedule = lp.schedule && (lp.schedule.finish_at_vehicle_limit === true || lp.schedule.soc > 0);
     if (lp.manual_restore_unconfirmed) {
       text = manualStatusText(lp, d);
     } else if (lp.charger && !lp.charger.available) {
       text = lp.charger.known
         ? "Charger status is out of date. FTW cannot confirm whether the car is charging."
         : "Waiting for the charger's first status report.";
+      tone = "var(--text)";
+    } else if (lp.power_unavailable) {
+      text = "Paused: charger power data is out of date. Charging resumes when readings recover.";
       tone = "var(--text)";
     } else if (lp.manual_active) {
       // The same sentence as the charge controls, so the charger's own reason is
@@ -2836,6 +2845,17 @@
       if (lp.commanded_reason === "fuse_limit") {
         text += " Rate is limited by the main fuse right now.";
       }
+    } else if (lp.goal_complete === true) {
+      text = "The car confirmed this charging goal is complete.";
+    } else if (lp.finish_at_vehicle_limit !== true && !(lp.schedule && lp.schedule.finish_at_vehicle_limit === true) &&
+        lp.commanded_known && lp.commanded_w === 0 && !lp.power_unavailable &&
+        typeof lp.target_soc === "number" && lp.target_soc > 0 && lp.target_soc <= 1 &&
+        typeof statusSoC === "number" && statusSoC >= lp.target_soc && statusSoC <= 1 &&
+        (lp.soc_source === "vehicle" || lp.soc_source === "inferred")) {
+      text = "Charge target reached (" + Math.round(lp.target_soc * 100) + "%).";
+      text += lp.soc_source === "vehicle"
+        ? " Battery level reported by the car."
+        : " Battery level is estimated by FTW; check the car to confirm.";
     } else if (lp.charging_declined) {
       text = "The car stopped asking for charge. Check its charge limit or schedule. This does not confirm the battery is full.";
     } else if (lp.commanded_known && lp.commanded_w > 0) {
@@ -2863,6 +2883,17 @@
       text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "pv_surplus_pause") {
       text = "Paused: waiting for PV surplus — solar is below the charger's minimum step right now." + kwPlanned;
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "no_plan_budget") {
+      var deadlineMs = lp.target_time ? Date.parse(lp.target_time) : NaN;
+      if (isFinite(deadlineMs) && deadlineMs <= Date.now()) {
+        text = "The ready time has passed, so FTW is not charging. Set a new ready time, or choose Charge now.";
+      } else {
+        text = "No charging energy in this interval. The plan will charge later, or choose Charge now.";
+      }
+      if (lp.soc_source === "assumed") {
+        text += " Battery level is assumed, not read from the car.";
+      }
+      tone = "var(--text)";
     } else if (winActive) {
       text = "Paused by the box — charging resumes on its own." + kwPlanned;
     } else if (lp.plan_next_start_ms > Date.now()) {
@@ -2879,6 +2910,7 @@
     }
     if (lp.plan_pending && !lp.manual_active && text && text.indexOf("Updating the charging plan") < 0) text += " Updating the charging plan…";
     if (lp.manual_save_error) text = (text ? text + " " : "") + "This choice is active now, but could not be saved for restart. FTW is retrying.";
+    else if (lp.manual_save_pending === true) text = (text ? text + " " : "") + "This choice is active now. Saving it for restart…";
     if (!text) return null;
     var p = document.createElement("p");
     p.style.color = tone;
@@ -3022,8 +3054,11 @@
           matched = lps.loadpoints[0];
         }
       }
-      if (!carConnected && matched && matched.schedule && matched.schedule.soc > 0) {
-        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
+      if (!carConnected && matched && matched.schedule && (matched.schedule.finish_at_vehicle_limit === true || matched.schedule.soc > 0)) {
+        freshStatus.textContent = matched.goal_complete === true
+          ? "No car connected. The car confirmed this goal is complete. " + (matched.schedule.recurring
+            ? "The recurring schedule remains saved." : "Set a new goal for the next charge.")
+          : "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
       }
       evLastLp = matched;
       if (matched && matched.charger && !matched.charger.available) {
@@ -3073,12 +3108,14 @@
       }
       if (matched) {
         // Rebuild only for a changed charger or a removed goal.
-        var lpChanged = evControlsEl == null || evControlsLpId !== matched.id;
+        var supportsVehicleLimit = lps.vehicle_limit_goal_supported === true;
+        var lpChanged = evControlsEl == null || evControlsLpId !== matched.id ||
+          evControlsEl.vehicleLimitSupported !== supportsVehicleLimit;
         if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
           if (evControlsEl && evControlsEl.parentNode === evModalBody) {
             evModalBody.removeChild(evControlsEl);
           }
-          evControlsEl = buildEvControls(matched, siteHasPV(status));
+          evControlsEl = buildEvControls(matched, siteHasPV(status), supportsVehicleLimit);
           evControlsLpId = matched.id;
           schedNeedsRebuild = false;
           manualNeedsRebuild = false;
@@ -3141,6 +3178,7 @@
       if (statusTableEl) statusTableEl.hidden = true;
       if (evLastLp) {
         var stale = Object.assign({}, evLastLp, {
+          read_unavailable: true,
           charger: { known: true, available: false },
           manual: Object.assign({}, evLastLp.manual, { state: "unavailable" }),
         });
@@ -3704,45 +3742,42 @@
   // screen moves with the value. No button. Mounted once per loadpoint;
   // update() runs on every poll and leaves the slider alone while the
   // operator is dragging it.
-  var EV_PLAN_HORIZON_MS = 24 * 3600 * 1000;
-
   function buildEvPlanView(lp, d) {
     var box = document.createElement("div");
     box.style.margin = "0 0 0.6rem 0";
 
     var headline = null; // <p> from renderEvPlanStatus, or null
 
-    // 24 h track: windows from lp.plan_windows placed by wall clock.
-    var track = document.createElement("div");
-    track.className = "ev-plan-track";
-    track.style.position = "relative";
-    track.style.height = "12px";
-    track.style.borderRadius = "3px";
-    track.style.background = "color-mix(in srgb, var(--line) 60%, transparent)";
-    track.style.margin = "0.5rem 0 0.25rem";
-    track.style.overflow = "hidden";
-
-    var ticks = document.createElement("div");
-    ticks.style.display = "flex";
-    ticks.style.justifyContent = "space-between";
-    ticks.style.fontFamily = "var(--mono)";
-    ticks.style.fontSize = "0.65rem";
-    ticks.style.color = "var(--text-dim)";
-
-    var caption = document.createElement("small");
-    caption.style.display = "block";
-    caption.style.color = "var(--text-dim)";
-    caption.style.marginTop = "0.3rem";
-
+    var levels = document.createElement("div");
+    levels.className = "ev-charge-levels";
+    function levelColumn(label) {
+      var col = document.createElement("div");
+      var name = document.createElement("span"); name.textContent = label;
+      var value = document.createElement("strong");
+      var source = document.createElement("small");
+      col.appendChild(name); col.appendChild(value); col.appendChild(source);
+      levels.appendChild(col);
+      return { value: value, source: source };
+    }
+    var currentLevel = levelColumn("Battery now");
+    var carLimit = levelColumn("Car’s charge limit");
+    var levelsNote = document.createElement("p");
+    levelsNote.className = "ev-timeline-note";
     var planWrap = document.createElement("div");
-    planWrap.appendChild(track);
-    planWrap.appendChild(ticks);
-    planWrap.appendChild(caption);
+    var timeline = null;
+    var planUI = null;
+    evPlanUI.then(function (ui) {
+      if (!ui) throw new Error("Charging view unavailable");
+      planUI = ui;
+      timeline = ui.createChargingTimeline();
+      planWrap.appendChild(timeline.el);
+      update(lastLp, lastDriver);
+    }).catch(function () { planWrap.textContent = "Charging details could not load. Reload to try again."; });
 
     // Car's current charge.
     var socWrap = document.createElement("div");
     socWrap.style.marginTop = "0.75rem";
-    var hdr = sliderHeader("Battery now", "—");
+    var hdr = sliderHeader("Update battery estimate", "—");
     socWrap.appendChild(hdr.row);
     var slider = fullWidthSlider(50, hdr.value);
     slider.setAttribute("aria-label", "Car's current charge, percent");
@@ -3754,8 +3789,10 @@
     note.style.minHeight = "1em";
     socWrap.appendChild(note);
 
-    box.appendChild(planWrap);
+    box.appendChild(levels);
+    box.appendChild(levelsNote);
     box.appendChild(socWrap);
+    box.appendChild(planWrap);
     var capacityView = buildEvCapacityView(lp);
     box.appendChild(capacityView.el);
 
@@ -3778,11 +3815,13 @@
       var src = (lpNow && lpNow.soc_source) || "";
       var retention = lpNow.soc_retention === "session"
         ? " FTW keeps this level for the same charging session, including after a box restart."
+        : lpNow.soc_retention === "pending"
+          ? " Saving this level for the current charging session…"
         : lpNow.soc_retention === "error"
           ? " This level could not be saved for a box restart. Enter it again before relying on the plan after restarting."
           : " This level must be entered again after a box restart.";
       if (src === "assumed") return "Battery level needs confirmation. The plan currently assumes " + Math.round(lpNow.current_soc * 100) + " %. Drag to match the car." + retention;
-      if (src === "vehicle") return "Reported by the car. Drag only to correct drift.";
+      if (src === "vehicle") return "The car reports its current level automatically.";
       if (src === "completed") return "The car stopped asking for charge. Its actual battery level is not confirmed. Drag to match the car.";
       return "Estimated from energy delivered. Drag to the real value and the plan follows." + retention;
     }
@@ -3805,7 +3844,7 @@
           if (!(res.ok && res.body && res.body.ok)) throw new Error((res.body && res.body.error) || "FTW refused the change.");
           if (revision !== socRevision) return;
           note.textContent = "Charge level saved: " + v + " %." +
-            (!(lastLp.schedule && lastLp.schedule.soc > 0) && !lastLp.manual_active && !lastLp.surplus_only
+            (!(lastLp.schedule && (lastLp.schedule.finish_at_vehicle_limit === true || lastLp.schedule.soc > 0)) && !lastLp.manual_active && !lastLp.surplus_only
               ? " Set a ready time, or choose Charge now." : " Reading the updated plan…");
           noteTimer = setTimeout(function () { noteTimer = null; if (!socFailed) note.textContent = sourceNote(lastLp); }, 6000);
           refreshEvModalAfterWrite().then(function () {
@@ -3835,73 +3874,41 @@
 
     var lastLp = lp;
 
-    function drawTrack(lpNow) {
-      track.textContent = "";
-      ticks.textContent = "";
-      var now = Date.now();
-      var windows = (lpNow && Array.isArray(lpNow.plan_windows)) ? lpNow.plan_windows : [];
-      planWrap.hidden = windows.length === 0 || !!lpNow.manual_active;
-      var shown = 0;
-      var shownWh = 0;
-      windows.forEach(function (w) {
-        var start = Math.max(w.start_ms, now);
-        var end = Math.min(w.end_ms, now + EV_PLAN_HORIZON_MS);
-        if (!(end > start)) return;
-        var seg = document.createElement("div");
-        seg.className = "ev-plan-window";
-        seg.style.position = "absolute";
-        seg.style.top = "0";
-        seg.style.bottom = "0";
-        seg.style.left = ((start - now) / EV_PLAN_HORIZON_MS * 100) + "%";
-        seg.style.width = Math.max(0.8, (end - start) / EV_PLAN_HORIZON_MS * 100) + "%";
-        seg.style.background = "var(--accent-e)";
-        seg.style.borderRadius = "2px";
-        seg.title = evFmtClock(w.start_ms) + "–" + evFmtClock(w.end_ms) + " · " + (w.wh / 1000).toFixed(1) + " kWh";
-        track.appendChild(seg);
-        shown++;
-        shownWh += w.wh;
-      });
-      for (var h = 0; h <= 24; h += 6) {
-        var t = document.createElement("span");
-        t.textContent = h === 0 ? "now" : evFmtClock(now + h * 3600 * 1000);
-        ticks.appendChild(t);
-      }
-      if (lpNow && lpNow.manual_active) {
-        caption.textContent = shown > 0
-          ? "Manual charge is selected. The plan below resumes when you return to it."
-          : "Manual charge is selected. Nothing else is planned in the next 24 h.";
-      } else if (shown > 0) {
-        var first = windows[0];
-        caption.textContent = "Charges " + evFmtClock(first.start_ms) + "–" + evFmtClock(first.end_ms) +
-          (shown > 1 ? " and " + (shown - 1) + " more window" + (shown > 2 ? "s" : "") : "") +
-          " · " + (shownWh / 1000).toFixed(1) + " kWh in the next 24 h.";
-      } else if (lpNow && lpNow.plugged_in) {
-        caption.textContent = "No charge window in the next 24 h.";
-      } else {
-        caption.textContent = "Plug in to see the plan for this car.";
-      }
-    }
+    var lastDriver = d;
 
     function update(lpNow, dNow) {
       lastLp = lpNow;
+      lastDriver = dNow;
       capacityView.update(lpNow);
       var fresh = renderEvPlanStatus(lpNow, dNow);
       if (headline && headline.parentNode === box) {
         if (fresh) { box.replaceChild(fresh, headline); } else { box.removeChild(headline); }
       } else if (fresh) {
-        box.insertBefore(fresh, planWrap);
+        box.insertBefore(fresh, levels);
       }
       headline = fresh;
-      drawTrack(lpNow);
+      if (timeline) timeline.update(lpNow);
+      var info = planUI && planUI.chargingLevels(lpNow);
+      if (info) {
+        currentLevel.value.textContent = info.now;
+        currentLevel.source.textContent = info.source;
+        carLimit.value.textContent = info.limit;
+        carLimit.source.textContent = info.limitSource;
+        levelsNote.textContent = info.explanation;
+      }
+      levels.hidden = !lpNow.plugged_in;
+      levelsNote.hidden = !lpNow.plugged_in;
       var plugged = !!(lpNow && lpNow.plugged_in);
-      socWrap.hidden = !plugged;
+      socWrap.hidden = !plugged || !!(info && info.fromCar);
+      slider.disabled = !!lpNow.read_unavailable;
       if (!plugged) return;
       var cur = (lpNow.current_soc != null) ? Math.max(0, Math.min(100, Math.round(lpNow.current_soc * 100))) : null;
       if (!operatorHolds() && cur != null) {
         slider.value = String(cur);
         hdr.value.textContent = lpNow.soc_source === "assumed" ? "Not confirmed" : cur + "%";
       }
-      if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
+      if (lpNow.read_unavailable) note.textContent = "Waiting for current charging data.";
+      else if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
     }
 
     update(lp, d);
@@ -4036,14 +4043,17 @@
   // restarts; the backend rolls the deadline forward daily when Recurring
   // is set and arms the surplus-grab when the home battery is at/above the
   // threshold (5 pp release hysteresis).
-  function buildScheduleSection(lp, hasPV) {
+  function buildScheduleSection(lp, hasPV, supportsVehicleLimit) {
     var sched = (lp && lp.schedule) || {};
     // Convert "minutes-of-day-UTC" to a "HH:MM" string in the browser's
     // local zone. The UI shows local time everywhere; we marshal back to
     // UTC minutes on save.
-    var hasSched = !!(sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
+    supportsVehicleLimit = supportsVehicleLimit === true;
+    var useVehicleLimit = sched.finish_at_vehicle_limit === true;
+    var hasSched = !!(useVehicleLimit || sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
     var initLocalHHMM = hasSched ? utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360) : "07:00";
     var initSoC = typeof sched.soc === "number" && sched.soc > 0 ? sched.soc * 100 : 80;
+    var percentSoC = useVehicleLimit && typeof sched.soc === "number" ? sched.soc : initSoC / 100;
     var initRec = !!sched.recurring;
     var savedUnlock = typeof sched.surplus_unlock_bat_soc === "number" ? sched.surplus_unlock_bat_soc * 100 : 0;
     // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
@@ -4226,16 +4236,57 @@
     }
     paintChips();
 
+    var targetMode = document.createElement("select");
+    targetMode.setAttribute("aria-label", "Charge target");
+    targetMode.style.cssText = "max-width:100%;padding:0.4rem;background:var(--ink-raised);color:var(--fg);border:1px solid var(--line);border-radius:4px;font:inherit;font-size:0.85rem";
+    [["vehicle", "Car's charge limit"], ["percent", "Choose percent"]].forEach(function (item) {
+      var option = document.createElement("option");
+      option.value = item[0];
+      option.textContent = item[1];
+      targetMode.appendChild(option);
+    });
+    targetMode.value = useVehicleLimit ? "vehicle" : "percent";
+    targetMode.disabled = !supportsVehicleLimit;
+    if (supportsVehicleLimit) box.appendChild(row("Charge to", targetMode));
+
+    var vehicleLimitHint = document.createElement("p");
+    vehicleLimitHint.textContent = "The car decides when to stop. Change its limit in the car or its app.";
+    vehicleLimitHint.style.cssText = "margin:0.3rem 0 0.7rem;font-size:0.8rem;color:var(--text-dim)";
+    box.appendChild(vehicleLimitHint);
+    var limitDetails = document.createElement("details");
+    limitDetails.style.cssText = "margin:0.5rem 0;color:var(--text-dim);font-size:0.8rem";
+    var limitSummary = document.createElement("summary");
+    limitSummary.textContent = "How this goal works";
+    limitSummary.style.cursor = "pointer";
+    limitDetails.appendChild(limitSummary);
+    var limitExplanation = document.createElement("p");
+    limitExplanation.textContent = "FTW plans to the car's reported limit when available. Without it, FTW reserves time for up to 100%. An estimated battery level does not end this charge. This choice does not change the limit set in your car.";
+    limitDetails.appendChild(limitExplanation);
+    var retentionDetail = document.createElement("p");
+    limitDetails.appendChild(retentionDetail);
+
     // Target: same header + full-width slider treatment as the car's
     // current charge above the goal.
     var targetHdr = sliderHeader("Charge to", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
     box.appendChild(targetHdr.row);
     var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
     targetSlider.min = "10";
-    targetSlider.step = "5";
+    targetSlider.step = "1";
     targetSlider.setAttribute("aria-label", "Target charge, percent");
     box.appendChild(targetSlider);
     box.appendChild(row("Ready by", timeInp));
+    timeInp.setAttribute("aria-label", "Ready by");
+    box.appendChild(limitDetails);
+
+    function applyTargetMode() {
+      useVehicleLimit = targetMode.value === "vehicle";
+      targetHdr.row.style.display = useVehicleLimit ? "none" : "flex";
+      targetSlider.hidden = useVehicleLimit;
+      targetSlider.disabled = useVehicleLimit;
+      vehicleLimitHint.hidden = !useVehicleLimit;
+      limitDetails.hidden = !useVehicleLimit;
+    }
+    applyTargetMode();
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -4312,7 +4363,10 @@
       b.style.color = "var(--fg)";
       return b;
     }
-    var chooseBtn = mkBtn("Use " + Math.round(initSoC) + " % by " + initLocalHHMM);
+    function chooseLabel() {
+      return "Use " + (useVehicleLimit ? "car's limit" : targetSlider.value + " %") + " by " + timeInp.value;
+    }
+    var chooseBtn = mkBtn(chooseLabel());
     chooseBtn.style.textTransform = "none";
     chooseBtn.style.letterSpacing = "normal";
     chooseBtn.addEventListener("click", scheduleSave);
@@ -4333,6 +4387,7 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.4rem";
     status.style.minHeight = "1em";
+    status.setAttribute("role", "status");
     status.textContent = hasSched
       ? "Changes save as you make them; the plan above follows."
       : "No goal set yet. Choose this goal, or change the level or time.";
@@ -4349,6 +4404,10 @@
     var writeQueue = Promise.resolve();
     var statusTimer = null;
     function scheduleSave() {
+      if (useVehicleLimit && !supportsVehicleLimit) {
+        status.textContent = "This Core version cannot save a car-limit goal.";
+        return;
+      }
       if (saveTimer) clearTimeout(saveTimer);
       if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
       saveSeq++;
@@ -4371,7 +4430,7 @@
       }
       var body = {
         schedule: {
-          soc: Number(targetSlider.value) / 100,
+          soc: percentSoC,
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
           // All seven days is the wire's zero.
@@ -4379,6 +4438,9 @@
           surplus_unlock_bat_soc: unlockVal > 0 ? unlockVal / 100 : 0,
         },
       };
+      // Older Core versions omit the support flag. Never offer or send an
+      // unsupported goal that their parser would silently ignore.
+      if (supportsVehicleLimit) body.schedule.finish_at_vehicle_limit = useVehicleLimit;
       // Complete writes in order, even when the charger or planner is slow.
       writeQueue = writeQueue.catch(function () {}).then(function () {
         if (seq !== saveSeq) return;
@@ -4396,14 +4458,23 @@
         }).catch(function (e) {
           if (seq === saveSeq) {
             chooseBtn.disabled = false;
-            chooseBtn.textContent = "Use " + targetSlider.value + " % by " + timeInp.value;
+            chooseBtn.textContent = chooseLabel();
             status.textContent = "Schedule not confirmed: " + e.message;
           }
         });
       });
     }
 
-    targetSlider.addEventListener("change", scheduleSave);
+    targetMode.addEventListener("change", function () {
+      applyTargetMode();
+      if (!useVehicleLimit && percentSoC <= 0) percentSoC = Number(targetSlider.value) / 100;
+      chooseBtn.textContent = chooseLabel();
+      scheduleSave();
+    });
+    targetSlider.addEventListener("change", function () {
+      percentSoC = Number(targetSlider.value) / 100;
+      scheduleSave();
+    });
     timeInp.addEventListener("change", scheduleSave);
     recCb.addEventListener("change", function () { applyDaysGate(); scheduleSave(); });
     dayChips.forEach(function (chip) {
@@ -4438,14 +4509,23 @@
 
     box.update = function (nextLp) {
       surplusBestEffortHint.style.display = nextLp.surplus_only && !nextLp.manual_active ? "" : "none";
+      retentionDetail.textContent = nextLp.goal_retention === "pending"
+        ? "Saving this session’s goal…"
+        : nextLp.goal_retention === "unavailable"
+        ? "Your schedule is saved. FTW cannot identify this charging session, so it may not restore this session's goal after a restart."
+        : nextLp.goal_retention === "session"
+        ? "This session's goal is saved and can be restored after a restart."
+        : "";
+      retentionDetail.hidden = !retentionDetail.textContent;
     };
     return box;
   }
 
   // One session view. Opening settings never changes the charging mode.
-  function buildEvControls(lp, hasPV) {
+  function buildEvControls(lp, hasPV, supportsVehicleLimit) {
     var container = document.createElement("div");
     container.className = "ev-controls";
+    container.vehicleLimitSupported = supportsVehicleLimit === true;
     var manual = buildManualChargeSection(lp);
     container.appendChild(manual.el);
 
@@ -4459,6 +4539,11 @@
     var summary = document.createElement("p");
     summary.style.cssText = "margin:0;font-size:0.9rem";
     goal.appendChild(summary);
+    var retentionError = document.createElement("p");
+    retentionError.setAttribute("role", "status");
+    retentionError.style.cssText = "margin:0.5rem 0;padding-left:0.5rem;border-left:2px solid var(--accent-e);font-size:0.85rem";
+    retentionError.textContent = "FTW could not save this charging session. Its goal may not be restored after a restart. Your schedule is still saved.";
+    goal.appendChild(retentionError);
     var suspended = document.createElement("small");
     suspended.style.cssText = "display:block;color:var(--text-dim);margin-top:0.3rem";
     goal.appendChild(suspended);
@@ -4467,7 +4552,7 @@
     var editLabel = document.createElement("summary");
     editLabel.style.cssText = "cursor:pointer;color:var(--accent-e);font-size:0.85rem;margin-top:0.65rem";
     editor.appendChild(editLabel);
-    var schedule = buildScheduleSection(lp, hasPV);
+    var schedule = buildScheduleSection(lp, hasPV, supportsVehicleLimit);
     editor.appendChild(schedule);
     goal.appendChild(editor);
     var solar = hasPV || lp.surplus_only ? buildPVModeSection(lp) : null;
@@ -4477,11 +4562,13 @@
     container.update = function (nextLp, d) {
       manual.el.hidden = !nextLp.plugged_in;
       manual.update(nextLp, d);
+      retentionError.hidden = nextLp.goal_retention !== "error";
       var s = nextLp.schedule;
-      var hasGoal = !!(s && s.soc > 0);
+      var hasGoal = !!(s && (s.finish_at_vehicle_limit === true || s.soc > 0));
       summary.textContent = hasGoal
-        ? Math.round(s.soc * 100) + " % by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
-          (s.recurring ? " · repeats" : " · once")
+        ? (s.finish_at_vehicle_limit === true ? "Car's charge limit" : Math.round(s.soc * 100) + " %") +
+          " by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
+          (nextLp.goal_complete === true ? " · completed" : s.recurring ? " · repeats" : " · once")
         : "No ready time set.";
       editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
       suspended.textContent = evIsPaused(nextLp) || nextLp.manual_restore_unconfirmed

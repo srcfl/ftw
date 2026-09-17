@@ -75,7 +75,8 @@
         field("Phases", "fuse.phases", "number", 3) +
         '</div></div>' +
         '<div class="field-row"><div>' +
-        field("Voltage (V)", "fuse.voltage", "number", 230) +
+        field("Phase-to-neutral voltage (V)", "fuse.voltage", "number", 230,
+          "Use phase-to-neutral voltage, normally 230 V on a 400/230 V three-phase supply. FTW multiplies this by the number of phases.") +
         '</div><div>' +
         decimalField("Safety margin (A)", "fuse.safety_margin_a", 0.5,
           "Headroom below max amps so the inverter's own per-phase limiter doesn't trip first. Defaults to 0.5 A.",

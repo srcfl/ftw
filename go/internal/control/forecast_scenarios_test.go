@@ -162,12 +162,8 @@ func assertFuseNotExceeded(t *testing.T, label string, targets []DispatchTarget,
 
 // ---- A. Regression for fixed bugs (T31 / T32 / T33 adaptations) --------
 
-// A1. T31 regression: passive_arbitrage + idle slot + PV miss → reactive
-// discharge. SlotDirective.BatteryEnergyWh=0 means plan is idle for this
-// slot. The NWP forecast wrongly said 2000 W PV; the trained twin (and
-// actual hardware) says ~140 W. Live grid imports 600 W because load > PV.
-// Expected: battery discharges to cover the import (≈ -600 W).
-func TestScenario_A1_PassiveArb_IdleSlot_PVMiss_Discharges(t *testing.T) {
+// A1. A PV miss does not consume energy reserved by an idle arbitrage slot.
+func TestScenario_A1_PassiveArb_IdleSlot_PVMiss_Holds(t *testing.T) {
 	store := makeSeedStore(600, -140, []batterySetup{
 		{name: "ferroamp", currentW: 0, soc: 0.70, online: true},
 	})
@@ -175,13 +171,11 @@ func TestScenario_A1_PassiveArb_IdleSlot_PVMiss_Discharges(t *testing.T) {
 	st.SlotDirective = slotDirective(0, "passive_arbitrage") // idle slot
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	assertSign(t, "A1", targets, "discharge")
+	assertSign(t, "A1", targets, "idle")
 }
 
-// A2. passive_arbitrage + idle slot + load miss → reactive discharge.
-// Plan forecasted 18 W load; actual is 800 W. Live grid imports 800 W.
-// Expected: battery discharges to cover the load.
-func TestScenario_A2_PassiveArb_IdleSlot_LoadMiss_Discharges(t *testing.T) {
+// A2. A load miss does not consume energy reserved by an idle arbitrage slot.
+func TestScenario_A2_PassiveArb_IdleSlot_LoadMiss_Holds(t *testing.T) {
 	store := makeSeedStore(800, 0, []batterySetup{
 		{name: "ferroamp", currentW: 0, soc: 0.60, online: true},
 	})
@@ -189,7 +183,7 @@ func TestScenario_A2_PassiveArb_IdleSlot_LoadMiss_Discharges(t *testing.T) {
 	st.SlotDirective = slotDirective(0, "passive_arbitrage")
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	assertSign(t, "A2", targets, "discharge")
+	assertSign(t, "A2", targets, "idle")
 }
 
 // A3. passive_arbitrage + charge slot + live import → keep charging.
@@ -791,11 +785,8 @@ func TestScenario_F28_StalePlan_FallbackGridZero(t *testing.T) {
 	}
 }
 
-// F29. Negative price slot + idle plan + import → reactive discharge.
-// The carve-out: passive_arbitrage idle slots (BatteryEnergyWh ≈ 0) STILL
-// allow reactive discharge — price signal is irrelevant, the idle plan carries
-// no protected charge intent.
-func TestScenario_F29_NegativePrice_IdlePlan_ReactiveDischarge(t *testing.T) {
+// F29. An idle arbitrage plan preserves energy even at a negative price.
+func TestScenario_F29_NegativePrice_IdlePlan_Holds(t *testing.T) {
 	store := makeSeedStore(650, 0, []batterySetup{
 		{name: "ferroamp", currentW: 0, soc: 0.70, online: true},
 	})
@@ -803,7 +794,7 @@ func TestScenario_F29_NegativePrice_IdlePlan_ReactiveDischarge(t *testing.T) {
 	st.SlotDirective = slotDirective(0, "passive_arbitrage") // idle slot, price irrelevant
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	assertSign(t, "F29", targets, "discharge")
+	assertSign(t, "F29", targets, "idle")
 }
 
 // F30. EV charging + battery has charge → battery covers when BatteryCoversEV=true.
@@ -840,8 +831,8 @@ func TestForecastScenarios(t *testing.T) {
 	}
 	scenarios := []scenario{
 		// A. Regression for fixed bugs
-		{"A1_PassiveArb_IdleSlot_PVMiss", TestScenario_A1_PassiveArb_IdleSlot_PVMiss_Discharges},
-		{"A2_PassiveArb_IdleSlot_LoadMiss", TestScenario_A2_PassiveArb_IdleSlot_LoadMiss_Discharges},
+		{"A1_PassiveArb_IdleSlot_PVMiss", TestScenario_A1_PassiveArb_IdleSlot_PVMiss_Holds},
+		{"A2_PassiveArb_IdleSlot_LoadMiss", TestScenario_A2_PassiveArb_IdleSlot_LoadMiss_Holds},
 		{"A3_PassiveArb_ChargeSlot_LiveImport", TestScenario_A3_PassiveArb_ChargeSlot_LiveImport_KeepsCharging},
 		{"A4_PlannerArb_DischargeSlot_LivePVSurplus", TestScenario_A4_PlannerArb_DischargeSlot_LivePVSurplus_KeepsDischarging},
 		{"A5_PlannerSelf_IdleSlot_PVMiss", TestScenario_A5_PlannerSelf_IdleSlot_PVMiss_Discharges},
@@ -873,7 +864,7 @@ func TestForecastScenarios(t *testing.T) {
 		{"F26_TwoBatteries_ProportionalSplit", TestScenario_F26_TwoBatteries_ProportionalSplit},
 		{"F27_TwoBatteries_OneOffline", TestScenario_F27_TwoBatteries_OneOffline_AllToRemaining},
 		{"F28_StalePlan_AllModes", TestScenario_F28_StalePlan_FallbackGridZero},
-		{"F29_NegativePrice_IdlePlan_Discharge", TestScenario_F29_NegativePrice_IdlePlan_ReactiveDischarge},
+		{"F29_NegativePrice_IdlePlan_Discharge", TestScenario_F29_NegativePrice_IdlePlan_Holds},
 		{"F30_EV_BatteryCoverEnabled", TestScenario_F30_EV_Charging_BatteryCoverEnabled},
 	}
 

@@ -1,3 +1,4 @@
+import { plannedEVWatts } from "./ev-plan.js";
 import { fillPlanSoC } from "./plan-soc.js";
 
 function formatClock(tsMs) {
@@ -25,8 +26,8 @@ function readableReason(reason) {
 
 function actionLabel(action) {
   if (!action) return "Hold current operation";
-  if ((action.loadpoint_w || 0) > 100) {
-    return `Charge EV at ${(action.loadpoint_w / 1000).toFixed(1)} kW`;
+  if (plannedEVWatts(action) > 100) {
+    return `Charge EV at ${(plannedEVWatts(action) / 1000).toFixed(1)} kW`;
   }
   if ((action.pv_limit_w || 0) > 0) {
     return `Limit solar output to ${(action.pv_limit_w / 1000).toFixed(1)} kW`;
@@ -217,7 +218,7 @@ export function derivePlanBrief({
   ));
   const meaningful = (action) => (
     Math.abs(action.battery_w || 0) > 100 ||
-    (action.loadpoint_w || 0) > 100 ||
+    plannedEVWatts(action) > 100 ||
     (action.pv_limit_w || 0) > 0
   );
   const futureMeaningful = actions.find((action) => (

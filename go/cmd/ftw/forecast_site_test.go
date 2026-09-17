@@ -209,6 +209,61 @@ func TestForecastEndpointFallbackAndIndependentPVIdentity(t *testing.T) {
 	}
 }
 
+func TestForecastLearningIgnoresChargerScriptPackaging(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	dir := t.TempDir()
+	meter := filepath.Join(dir, "meter.lua")
+	pv := filepath.Join(dir, "pv.lua")
+	ev := filepath.Join(dir, "easee.lua")
+	for _, p := range []string{meter, pv, ev} {
+		if err := os.WriteFile(p, []byte("measurement "+filepath.Base(p)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		Drivers: []config.Driver{
+			{Name: "meter", Lua: meter, IsSiteMeter: true},
+			{Name: "pv", Lua: pv},
+			{Name: "easee", Lua: ev},
+		},
+		Weather: &config.Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18},
+	}
+	catalog := []drivers.CatalogEntry{
+		{Filename: "meter.lua", Path: meter, Capabilities: []string{"meter"}},
+		{Filename: "pv.lua", Path: pv, Capabilities: []string{"pv"}},
+		{Filename: "easee.lua", Path: ev, Capabilities: []string{"ev"}},
+	}
+	ids := map[string]string{"meter": "meter:sn", "pv": "pv:sn", "easee": "easee:sn"}
+	s := newForecastSiteConfig(st)
+	s.identity = func(name string) (string, bool) { id := ids[name]; return id, id != "" }
+	s.Configure(cfg, catalog)
+	s.RefreshIdentity(s.configuredAt.Add(4 * time.Second))
+	first := s.Snapshot()
+	if first.IdentityPending || first.LearningRevision == "" {
+		t.Fatal("ready site did not bind a learning revision")
+	}
+	if err := os.WriteFile(ev, []byte("driver_default_mode changed, measurement unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.Configure(cfg, catalog)
+	s.RefreshIdentity(s.configuredAt.Add(4 * time.Second))
+	if s.Snapshot().LearningRevision != first.LearningRevision {
+		t.Fatal("charger packaging change wiped house and PV learning")
+	}
+	if err := os.WriteFile(meter, []byte("changed meter scaling"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.Configure(cfg, catalog)
+	s.RefreshIdentity(s.configuredAt.Add(4 * time.Second))
+	if s.Snapshot().LearningRevision == first.LearningRevision {
+		t.Fatal("meter measurement change kept the old learning identity")
+	}
+}
+
 func TestForecastWeatherGenerationReceiptSurvivesRestart(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

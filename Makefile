@@ -1,4 +1,4 @@
-# Top-level build for FTW (Go, DuckDB and Lua drivers).
+# Top-level build for FTW (Go, SQLite and Lua drivers).
 #
 # Common targets:
 #   make test                 — Go suites (full-stack e2e is separate)
@@ -7,21 +7,21 @@
 #   make build-amd64          — cross-compile for linux/amd64 (x86_64 server)
 #   make build-windows-amd64  — cross-compile for windows/amd64 (.exe)
 #   make release-linux        — linux arm64/amd64 tarballs
-#   make release-windows      — windows zip (UCRT64 compiler required)
-#   make release              — all archives (all target compilers required)
+#   make release-windows      — windows zip
+#   make release              — all archives
 #   make run-sim              — start both simulators locally
 #   make dev                  — start sims + main app (hot-reload workflow)
 #   make clean                — remove all build artifacts
 
 .PHONY: help test compose-migration-test container-boundary-test release-workflow-test build build-arm64 build-amd64 build-windows-amd64 release release-linux release-windows \
-        run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
+        run-sim sim-ocpp dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions \
         drivers drivers-present driver-versions-across-pin
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
-# DuckDB is part of Core. Builds and tests must include its C bindings.
-export CGO_ENABLED := 1
+# Ordinary Core has no native database or compiler dependency.
+export CGO_ENABLED := 0
 export VERSION
 GO_TAGS := netgo,osusergo
 
@@ -35,9 +35,10 @@ help:
 	@echo "  build-amd64          cross-compile for linux/amd64"
 	@echo "  build-windows-amd64  cross-compile for windows/amd64 (.exe)"
 	@echo "  release-linux        linux tarballs in release/"
-	@echo "  release-windows      Windows zip in release/ (UCRT64 compiler)"
-	@echo "  release              all archives (all target compilers required)"
-	@echo "  run-sim              start Ferroamp + Sungrow simulators"
+	@echo "  release-windows      Windows zip in release/"
+	@echo "  release              all archives"
+	@echo "  run-sim              start Ferroamp + Sungrow + PCS simulators"
+	@echo "  sim-ocpp             dial Evify OCPP chargers at a running FTW"
 	@echo "  dev                  start sims + main app against config.local.yaml"
 	@echo "  e2e                  run the full-stack e2e test"
 	@echo "  verify               fast pre-commit: test + compose + vet + build"
@@ -89,8 +90,9 @@ test: drivers-present
 	cd go && go test -tags=$(GO_TAGS) ./...
 
 compose-migration-test:
-	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh scripts/check-debian-base.sh
+	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/upgrade-paired-release.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh scripts/check-debian-base.sh
 	bash scripts/test-modular-compose.sh
+	bash scripts/test-upgrade-paired-release.sh
 
 container-boundary-test: release-workflow-test
 	bash scripts/test-container-boundaries.sh
@@ -169,6 +171,7 @@ build:
 	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
 	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-pcs ./cmd/sim-pcs
+	cd go && go build -tags=$(GO_TAGS) -ldflags="$(LDFLAGS)" -o ../bin/sim-ocpp ./cmd/sim-ocpp
 	@ls -la bin/
 
 build-arm64:
@@ -183,7 +186,6 @@ build-amd64:
 	@cp bin/linux-amd64/ftw-backup bin/ftw-backup-linux-amd64
 	@cp bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 
-# Set CC/CXX to DuckDB's MinGW GCC 14.2.0 compilers; CI installs that version.
 build-windows-amd64:
 	bash scripts/build-core.sh windows amd64 bin/windows-amd64
 	@cp bin/windows-amd64/ftw.exe bin/ftw-windows-amd64.exe
@@ -206,7 +208,7 @@ release-linux: drivers-present build-arm64 build-amd64
 		ln -sf ftw                              "$$stage/forty-two-watts"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
 			-C "$$stage" ftw ftw-backup forty-two-watts \
-			-C ../.. drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE THIRD-PARTY-NOTICES.txt; \
+			-C ../.. drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE LICENSING.md THIRD-PARTY-NOTICES.txt; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
@@ -227,7 +229,7 @@ release-windows: drivers-present build-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
 	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe ftw-backup.exe forty-two-watts.exe
-	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE THIRD-PARTY-NOTICES.txt
+	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/native/bundle config.example.yaml LICENSE NOTICE LICENSING.md THIRD-PARTY-NOTICES.txt
 	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@set -e; cd release; for f in \
 		ftw-windows-amd64.zip forty-two-watts-windows-amd64.zip; do \
@@ -250,6 +252,12 @@ run-sim:
 	(cd go && go run ./cmd/sim-sungrow) & \
 	(cd go && go run ./cmd/sim-pcs) & \
 	wait
+
+# Charge-point client: needs a running FTW with ocpp.enabled (see
+# config.local.example.yaml). Tesla Wall Connector is in the catalog but has
+# no OCPP and is skipped.
+sim-ocpp:
+	cd go && go run ./cmd/sim-ocpp -all -plug
 
 dev: config.local.yaml
 	@mkdir -p dev-data

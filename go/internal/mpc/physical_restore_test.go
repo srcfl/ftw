@@ -21,7 +21,8 @@ func physicalRestoreFixture(t *testing.T, batteries, evs int, pvSlot int) (Plan,
 	}
 	if pvSlot >= 0 {
 		p.PVCurtailment = PVCurtailment{Driver: "pv", Proof: "previous-process", MinW: 2, MaxW: 15000}
-		slots[pvSlot].PVW, slots[pvSlot].SpotOre = -6000, -100
+		slots[pvSlot].PVW, slots[pvSlot].SpotOre = -15000, -100
+		slots[pvSlot].Limits.MaxExportW = 0
 	}
 	plan, err := o.Optimize(context.Background(), slots, p)
 	if err != nil {

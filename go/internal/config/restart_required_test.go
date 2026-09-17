@@ -78,6 +78,7 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"ocpp enabled", func(c *Config) {
 			c.OCPP = &OCPP{Enabled: true, Port: 8887, Username: "ftw", Password: "long-random-string"}
 		}, "ocpp"},
+		{"modbus proxy enabled", func(c *Config) { c.ModbusProxy = &ModbusProxy{Enabled: true, Listen: ":1502"} }, "modbus_proxy"},
 		{"state cold_dir", func(c *Config) { c.State = &StateConf{ColdDir: "/var/lib/ftw/cold"} }, "state"},
 	}
 	for _, tc := range cases {

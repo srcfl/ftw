@@ -196,8 +196,12 @@ telemetry-only driver or require every house to supply a thermal model.
 
 ## How work enters the roadmap
 
-External users submit issues, not PRs. Sourceful implements selected work.
-Acceptance of an issue does not invite an external implementation PR.
+Contributions are welcome, preferably based on an issue. Broad ideas may
+start as short Markdown PRs; concrete fixes can include code and relevant
+test evidence. Hardware claims need hardware results. Work is agentic first:
+make the problem, scope and results clear enough for people and agents to
+assess and continue. Fredrik sets priority; Sourceful reviews and maintains
+changes. An accepted issue or proposal does not promise delivery.
 
 For each selected change, state the household need, the behaviour to change,
 the existing work it touches and the evidence that will establish completion.

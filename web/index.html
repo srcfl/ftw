@@ -30,7 +30,7 @@
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
-  <link rel="stylesheet" href="/style.css?v=history3">
+  <link rel="stylesheet" href="/style.css?v=forecasts1">
   <!-- Dashboard layout is layered on the shared base styles. -->
   <link rel="stylesheet" href="/app.css?v=ask3">
   <!-- Three.js bare-specifier resolution. Three is vendored under
@@ -234,6 +234,7 @@
         <p class="overview-plan-reason" id="overview-plan-reason">Waiting for planner state.</p>
         <p class="overview-plan-constraint" id="overview-plan-constraint">Safety limits remain active.</p>
         <p class="overview-plan-soc" id="overview-plan-soc" hidden></p>
+        <div id="overview-ev-plans" hidden></div>
         <a class="overview-detail-link" href="#plan">Open full plan <span aria-hidden="true">→</span></a>
       </section>
     </section>
@@ -542,6 +543,8 @@
           </form>
         </section>
 
+        <div id="plan-ev-plans" hidden></div>
+
         <!-- Household planner prefs — forecast trust + battery export.
              Passive/Active are no longer primary buttons (HA/app keep
              those keys). Manual fallbacks stay behind Manual…. -->
@@ -603,7 +606,7 @@
           <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
         <p class="plan-help">
-          Forecast-driven battery schedule for the next 48&nbsp;h, recomputed every few minutes.
+          Forecast-driven schedule for the home battery and cars over the next 48&nbsp;h, updated every few minutes.
           Each bar is a 15-minute slot. Prices after the day-ahead publication window are filled in by the ML price twin.
           Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
         </p>
@@ -618,6 +621,7 @@
           <span class="legend-item" title="Beyond day-ahead publication — price filled in by the ML price twin"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
           <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
           <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
+          <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:#22d3ee"></span> Car charging</span>
           <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
           <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
@@ -650,10 +654,10 @@
               title="Show advanced controls + diagnostics">Advanced</button>
     </section>
 
-    <!-- ML twin diagnostics — PV / load / price forecasters -->
-    <section id="twins-section" class="advanced-only">
+    <!-- Forecast status; model diagnostics sit behind Details. -->
+    <section id="twins-section">
       <div class="section-header">
-        <h2>ML twins</h2>
+        <h2>Forecasts</h2>
         <span id="twins-subtitle" class="plan-summary"></span>
       </div>
       <div class="twins-grid" id="twins-grid"></div>
@@ -868,6 +872,7 @@
     <span id="refresh-indicator" class="refresh-dot" title="Auto-refresh active">&#9679;</span>
     <span class="refresh-label">Auto-refresh active</span>
     <span id="last-update">Last update: --</span>
+    <a href="/source.html">Source &amp; licenses</a>
     <span class="footer-tagline">Don't Panic 🐬</span>
   </footer>
 
@@ -985,7 +990,7 @@
   <script src="/settings/tabs/weather.js?v=mlcov1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
   <script src="/settings/tabs/planner.js?v=cvxpy1"></script>
-  <script src="/settings/tabs/ha.js?v=tabsplit2"></script>
+  <script src="/settings/tabs/ha.js?v=modbusproxy2"></script>
   <script src="/settings/tabs/app.js?v=applink2"></script>
   <script src="/settings/tabs/fleet.js?v=fleetping2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
@@ -995,7 +1000,7 @@
   <script src="/assistant.js?v=ask6"></script>
   <script src="/models.js?v=diag2"></script>
   <script type="module" src="/plan.js?v=soc2"></script>
-  <script src="/twins.js?v=diag2"></script>
+  <script src="/twins.js?v=forecasts1"></script>
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=zones2"></script>
   <script src="/energy-history.js?v=story1"></script>

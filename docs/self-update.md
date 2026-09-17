@@ -122,6 +122,11 @@ newer updater, update Core and updater together using the paired commands below.
 A normal Core update also asks the updater to replace itself with the same tag
 after Core passes its health check.
 
+A 2.x site that wants a published 3.x pair must not use orange Update. That
+click moves Core only. Use the [paired upgrade script](upgrade-paired-release.md)
+so the updater is installed first. The commands below are the same ordering
+if you prefer to type them by hand.
+
 For manual updates, install the updater first while the existing Core still
 runs. Set `FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the published
 immutable release tag. Keep the current `FTW_IMAGE_TAG` until the updater is
@@ -142,7 +147,8 @@ the same tag, then pull and recreate only the Core service.
 
 ### First DuckDB upgrade
 
-The updater shipped before the fix for [#1164](https://github.com/srcfl/ftw/issues/1164)
+The [paired upgrade script](upgrade-paired-release.md) is the supported
+operator path from a 2.x Compose site. The updater shipped before the fix for [#1164](https://github.com/srcfl/ftw/issues/1164)
 waits only 30 minutes and can revert the Core image without its matching data.
 It replaces itself only after Core becomes ready. **Installing a new Core does
 not fix the old updater before that first upgrade.** Install an updater release

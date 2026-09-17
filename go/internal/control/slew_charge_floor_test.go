@@ -197,33 +197,23 @@ func TestChargeFloorLeavesUnblockedChargeAlone(t *testing.T) {
 	}
 }
 
-// The floor is one-sided. On a tick that forbids charging, a battery measured
-// mid-DISCHARGE still ramps back toward 0 at the slew rate rather than being
-// snapped to it — the charge block says nothing about discharge, and covering
-// live load must not become collateral damage.
-func TestChargeFloorLeavesDischargeAlone(t *testing.T) {
+// An idle arbitrage plan stops a prior discharge without waiting for slew.
+func TestIdlePlanWithdrawsDischargeDespiteSlew(t *testing.T) {
 	now := time.Now()
 	store := seedChargeFloorSite(t, -2000, []struct {
 		name          string
 		currentW, soc float64
 		capability    string
-	}{
-		{"ferroamp", -2000, 0.55, ""},
-	})
+	}{{"ferroamp", -2000, .55, ""}})
 	st := NewState(0, 60, "meter")
 	st.Mode = ModePlannerPassiveArbitrage
 	st.UseEnergyDispatch = true
 	st.SlewRateW = 500
 	st.MinDispatchIntervalS = 0
-	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
-		return idleArbitrageSlot(now, "passive_arbitrage"), true
-	}
-
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return idleArbitrageSlot(now, "passive_arbitrage"), true }
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	got := targetsByDriver(targets)
-	if math.Abs(got["ferroamp"].TargetW-(-1500)) > 0.01 {
-		t.Errorf("ferroamp TargetW = %.1f W, want -1500 W — the charge floor must not touch a discharging battery's ramp",
-			got["ferroamp"].TargetW)
+	if len(targets) != 1 || targets[0].TargetW != 0 {
+		t.Fatalf("idle plan must withdraw discharge, got %v", targets)
 	}
 }
 

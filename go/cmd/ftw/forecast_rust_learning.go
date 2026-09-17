@@ -70,7 +70,7 @@ func (r *rustForecast) applyLearningPeriodsLocked(ctx context.Context, site fore
 		if err != nil {
 			return err
 		}
-		if err = r.store.SaveConfig(forecastRustStateKey, string(data)); err != nil {
+		if err = r.store.SaveConfigContext(ctx, forecastRustStateKey, string(data)); err != nil {
 			return err
 		}
 		r.mu.Lock()

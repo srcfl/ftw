@@ -297,11 +297,13 @@ jobs:
           - target: main
             dockerfile: ./Dockerfile
             image_suffix: ""
+            licenses: "AGPL-3.0-only AND LicenseRef-Energyplan-Home-Use-1.0"
             build_required: ${{ needs.candidate.outputs.core_build }}
             existing_digest: ${{ needs.candidate.outputs.core_digest }}
           - target: updater
             dockerfile: ./Dockerfile.updater
             image_suffix: "-updater"
+            licenses: "AGPL-3.0-only"
             build_required: ${{ needs.candidate.outputs.updater_build }}
             existing_digest: ${{ needs.candidate.outputs.updater_digest }}
     steps:
@@ -346,7 +348,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/srcfl/ftw
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.tag.outputs.oci_version }}
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=${{ matrix.licenses }}
           build-args: |
             VERSION=${{ needs.tag.outputs.runtime_version }}
             CANDIDATE_TAG=${{ needs.tag.outputs.version }}

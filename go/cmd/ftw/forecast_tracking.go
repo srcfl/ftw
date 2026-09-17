@@ -53,31 +53,40 @@ type forecastJob struct {
 }
 
 type forecastTracker struct {
-	refreshIdentity func()
-	configMu        *sync.RWMutex
-	store           *state.Store
-	tele            *telemetry.Store
-	pv              *pvmodel.Service
-	load            *loadmodel.Service
-	site            func() forecastSite
-	away            func(time.Time) bool
-	curtailed       func(time.Time) bool
-	candidate       forecastCandidate
-	queue           chan forecastJob
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	mu              sync.RWMutex
-	errors          []forecasting.ErrorSample
-	observations    []forecasting.Observation
-	accumulator     telemetry.ForecastAccumulator
-	lastRevision    string
-	pvAccumulator   telemetry.ForecastAccumulator
-	stopped         bool
-	clock           func() time.Time
-	learningMu      sync.RWMutex
-	learningPeriods forecastLearningPeriods
-	learningErrors  map[string]error
-	requestReplan   func(string)
+	refreshIdentity      func()
+	configMu             *sync.RWMutex
+	store                *state.Store
+	tele                 *telemetry.Store
+	pv                   *pvmodel.Service
+	load                 *loadmodel.Service
+	site                 func() forecastSite
+	away                 func(time.Time) bool
+	curtailed            func(time.Time) bool
+	candidate            forecastCandidate
+	queue                chan forecastJob
+	scoreWake            chan struct{}
+	cancel               context.CancelFunc
+	wg                   sync.WaitGroup
+	mu                   sync.RWMutex
+	errors               []forecasting.ErrorSample
+	observations         []forecasting.Observation
+	accumulator          telemetry.ForecastAccumulator
+	lastRevision         string
+	pvAccumulator        telemetry.ForecastAccumulator
+	stopped              bool
+	clock                func() time.Time
+	learningMu           sync.RWMutex
+	learningPeriods      forecastLearningPeriods
+	learningErrors       map[string]error
+	requestReplan        func(string)
+	pendingObservations  []forecastObservationJob // owned by runObservations
+	observationError     string                   // guarded by mu
+	observationOverflow  bool
+	observationDrops     uint64
+	observationCheckedMS int64
+	observationPVValid   bool
+	observationLoadValid bool
+	issueArchiveError    bool
 }
 
 func (f *forecastTracker) Start(ctx context.Context) error {
@@ -91,10 +100,13 @@ func (f *forecastTracker) Start(ctx context.Context) error {
 		return err
 	}
 	f.queue = make(chan forecastJob, 8)
+	f.scoreWake = make(chan struct{}, 1)
 	workerCtx, stop := context.WithCancel(ctx)
 	f.cancel = stop
-	f.wg.Add(1)
+	f.wg.Add(3)
 	go func() { defer f.wg.Done(); f.run(workerCtx) }()
+	go func() { defer f.wg.Done(); f.runScoring(workerCtx) }()
+	go func() { defer f.wg.Done(); f.runObservations(workerCtx) }()
 	return nil
 }
 func (f *forecastTracker) Stop() {
@@ -148,8 +160,6 @@ func (f *forecastTracker) run(ctx context.Context) {
 		}
 	}()
 	f.refreshEvidence(ctx, f.now())
-	tick := time.NewTicker(10 * time.Second)
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,6 +167,9 @@ func (f *forecastTracker) run(ctx context.Context) {
 		case job := <-f.queue:
 			pending = &job
 			err := saveForecastIssueWithRetry(ctx, job.issue, f.store.SaveForecastIssue)
+			f.mu.Lock()
+			f.issueArchiveError = err != nil
+			f.mu.Unlock()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -166,8 +179,6 @@ func (f *forecastTracker) run(ctx context.Context) {
 				continue
 			}
 			pending = nil
-		case <-tick.C:
-			f.observe(ctx)
 		}
 	}
 }
@@ -250,33 +261,24 @@ func (f *forecastTracker) observe(ctx context.Context) {
 		r.PVValid = false
 		r.PVReason = "curtailed"
 	}
+	f.mu.Lock()
+	f.observationCheckedMS = now.UnixMilli()
+	f.observationPVValid, f.observationLoadValid = r.PVValid, r.Valid
+	f.mu.Unlock()
+	var jobs []forecastObservationJob
 	for _, o := range f.observationIntervals(r, site, now) {
-		writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := f.store.SaveForecastObservation(writeCtx, o)
-		cancel()
-		if err != nil {
-			slog.Warn("forecast archive: observation not saved", "err", err)
-			continue
+		job := forecastObservationJob{observation: o, site: site, away: f.away != nil && f.away(time.UnixMilli(o.StartMS))}
+		rows, _ := f.store.LoadForecasts(o.StartMS-time.Hour.Milliseconds(), o.EndMS)
+		if weather := forecastRow(usableTrackingWeather(rows, o.AvailableAtMS), o.StartMS, o.AvailableAtMS); weather != nil && weather.FetchedAtMs >= site.WeatherSinceMS {
+			frozen := *weather
+			job.weather = &frozen
 		}
-		if f.candidate != nil {
-			rows, _ := f.store.LoadForecasts(o.StartMS-time.Hour.Milliseconds(), o.EndMS)
-			weather := forecastRow(usableTrackingWeather(rows, now.UnixMilli()), o.StartMS, now.UnixMilli())
-			if weather != nil && weather.FetchedAtMs < site.WeatherSinceMS {
-				weather = nil
-			}
-			away := f.away != nil && f.away(time.UnixMilli(o.StartMS))
-			workCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			f.learningMu.RLock()
-			site = f.learningSiteLocked(site)
-			err = f.candidate.Update(workCtx, site, o, weather, away)
-			f.learningMu.RUnlock()
-			cancel()
-			if err != nil {
-				slog.Debug("forecast candidate update unavailable", "err", err)
-			}
-		}
-		f.score(ctx, now)
+		jobs = append(jobs, job)
 	}
+	// A slow disk must not make draining a backlog postpone measurement capture.
+	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	f.acceptObservations(flushCtx, jobs, f.flushObservations)
 }
 
 // observationIntervals keeps the two measurement claims independent. Unknown
@@ -311,31 +313,6 @@ func (f *forecastTracker) observationIntervals(r telemetry.ForecastReading, site
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartMS < out[j].StartMS })
 	return out
-}
-
-func (f *forecastTracker) score(ctx context.Context, now time.Time) {
-	scoreCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	observations, err := f.store.LoadForecastObservations(scoreCtx, now.Add(-2*time.Hour).UnixMilli(), now.UnixMilli())
-	if err != nil {
-		slog.Warn("forecast evaluation: observations unavailable", "err", err)
-		return
-	}
-	// Decode one archived model snapshot at a time. Only the last complete
-	// hour of outcomes can have become scoreable since the previous tick.
-	scores := make(map[forecastErrorKey]forecasting.ErrorSample)
-	err = f.store.VisitForecastIssues(scoreCtx, now.Add(-50*time.Hour).UnixMilli(), now.UnixMilli(), func(issue forecasting.Issue) error {
-		mergeForecastErrors(scores, forecasting.Errors([]forecasting.Issue{issue}, observations, now.UnixMilli()))
-		return nil
-	})
-	if err == nil {
-		err = f.store.SaveForecastErrors(scoreCtx, forecastErrorValues(scores), now.UnixMilli())
-	}
-	if err != nil {
-		slog.Warn("forecast evaluation failed", "err", err)
-		return
-	}
-	f.refreshEvidence(ctx, now)
 }
 
 type forecastErrorKey struct {

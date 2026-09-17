@@ -17,12 +17,12 @@ import (
 func newSeriesTestServer(t *testing.T) (*Server, *state.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := state.Open(filepath.Join(dir, "state.db"))
+	coldDir := filepath.Join(dir, "cold")
+	st, err := state.OpenWithLegacyHistory(filepath.Join(dir, "state.db"), coldDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	coldDir := filepath.Join(dir, "cold")
 	return New(&Deps{State: st, ColdDir: coldDir}), st, coldDir
 }
 
@@ -119,12 +119,12 @@ func TestHandleSeriesAbsoluteWindowAndCSV(t *testing.T) {
 	if len(lines) != 6 { // header + 5 rows
 		t.Fatalf("csv lines = %d, want 6: %q", len(lines), rr.Body.String())
 	}
-	if lines[0] != "ts_ms,driver,metric,v,min,max,n" {
+	if lines[0] != "ts_ms,driver,metric,v,min,max,n,resolution_ms,first_ms,last" {
 		t.Fatalf("csv header = %q", lines[0])
 	}
 }
 
-func TestHandleSeriesReadsImportedParquet(t *testing.T) {
+func TestHandleSeriesReadsParquetAndSQLite(t *testing.T) {
 	srv, st, coldDir := newSeriesTestServer(t)
 
 	// Old samples: destined for cold storage.
@@ -137,11 +137,7 @@ func TestHandleSeriesReadsImportedParquet(t *testing.T) {
 	if _, _, err := st.RolloffToParquet(context.Background(), coldDir); err != nil {
 		t.Fatal(err)
 	}
-	// Import the legacy file before serving requests, as Core does at startup.
-	if err := st.ImportLegacyParquet(context.Background(), coldDir); err != nil {
-		t.Fatal(err)
-	}
-	// Fresh samples use the same DuckDB database.
+	// The day file stays in place; fresh samples go to SQLite.
 	nowTs := time.Now().UnixMilli()
 	if err := st.RecordSamples([]state.Sample{
 		{Driver: "meter", Metric: "grid_w", TsMs: nowTs, Value: 222},
@@ -162,5 +158,38 @@ func TestHandleSeriesReadsImportedParquet(t *testing.T) {
 	last := pts[1].(map[string]any)
 	if first["v"].(float64) != 111 || last["v"].(float64) != 222 {
 		t.Fatalf("merged values = %v, %v; want 111 then 222", first["v"], last["v"])
+	}
+}
+
+func TestHandleSeriesCSVExposesStoredEvidence(t *testing.T) {
+	srv, st, cold := newSeriesTestServer(t)
+	if err := st.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Minute).Add(-48 * time.Hour).UnixMilli()
+	for i, v := range []float64{100, 900, 200} {
+		if err := st.EnqueueTelemetryTick(nil, []state.Sample{{Driver: "ev", Metric: "ev_w", TsMs: base + int64(i)*1000, Value: v}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.FlushHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		days       int
+		resolution int64
+	}{{0, 10000}, {3, 60000}, {40, 300000}} {
+		if check.days > 0 {
+			if err := st.MaintainAggregateHistory(context.Background(), cold, time.UnixMilli(base).Add(time.Duration(check.days)*24*time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		url := fmt.Sprintf("/api/series?driver=ev&metric=ev_w&since=%d&until=%d&points=0&format=csv", base, base+300000)
+		rr := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, url, nil))
+		want := fmt.Sprintf("%d,ev,ev_w,400,100,900,3,%d,%d,200", base+2000, check.resolution, base)
+		if rr.Code != 200 || !strings.Contains(rr.Body.String(), want) {
+			t.Fatalf("resolution %d: status %d CSV %s", check.resolution, rr.Code, rr.Body.String())
+		}
 	}
 }

@@ -90,6 +90,10 @@ func TestNativeExternalBoundaryRejectsLostIdentitiesAndTimeline(t *testing.T) {
 		{"wrong length", func(p *externalPlan) { p.Actions[0].SlotLenMin = 15 }},
 		{"extra action", func(p *externalPlan) { p.Actions = append(p.Actions, p.Actions[0]) }},
 		{"missed deadline", func(p *externalPlan) { p.Actions[1].FlexEnergyWh["ev-1"] = 2000 }},
+		{"shortfall without energy", func(p *externalPlan) {
+			p.Actions[1].FlexEnergyWh["ev-1"] = 2000
+			p.FlexShortfallWh = map[string]float64{"ev-other": 1000}
+		}},
 		{"PV without capability", func(p *externalPlan) { p.Actions[0].PVCurtailActive = true; p.Actions[0].PVLimitW = 100 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,6 +104,13 @@ func TestNativeExternalBoundaryRejectsLostIdentitiesAndTimeline(t *testing.T) {
 				t.Fatal("invalid worker contract accepted")
 			}
 		})
+	}
+	var admitted externalResponse
+	json.Unmarshal(raw, &admitted)
+	admitted.Plan.Actions[1].FlexEnergyWh["ev-1"] = 2000
+	admitted.Plan.FlexShortfallWh = map[string]float64{"ev-1": 1000}
+	if err := validateExternalAssets(req, admitted.Plan); err != nil {
+		t.Fatalf("reported shortfall still rejected: %v", err)
 	}
 	// The raw response gate checks the driver ceiling before translation.
 	minPV, maxPV := 2.0, 15000.0

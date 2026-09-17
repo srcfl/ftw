@@ -187,10 +187,8 @@ func TestTickBudgetMissingForLoadpointCommandsZero(t *testing.T) {
 	}
 }
 
-// TestTickMidSlotSubtractsAlreadyDelivered — if half the slot has
-// elapsed at 4 kW, the controller should treat the remaining budget
-// accordingly rather than re-issuing the full slot power. Locks in
-// the `alreadyWh = powerW * elapsed / 3600` approximation.
+// A measured 1 kWh in the first half leaves 3 kWh for the second half.
+// The power reading at the midpoint must not replace that measured energy.
 func TestTickMidSlotSubtractsAlreadyDelivered(t *testing.T) {
 	sender := &fakeSender{}
 	// Place `now` at the midpoint of a 30-min slot so the elapsed
@@ -215,6 +213,9 @@ func TestTickMidSlotSubtractsAlreadyDelivered(t *testing.T) {
 	// No AllowedStepsW → continuous passthrough after clamp.
 	c := newTestController(t, cfgs, directive, samples, sender)
 
+	c.Tick(context.Background(), slotStart)
+	sender.calls = nil
+	samples["easee"] = EVSample{PowerW: 0, SessionWh: 1000, Connected: true}
 	c.Tick(context.Background(), now)
 
 	if len(sender.calls) != 1 {

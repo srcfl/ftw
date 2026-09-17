@@ -7,8 +7,10 @@ requirements and [docs/roadmap.md](docs/roadmap.md) for acceptance evidence.
 These are direction, not claims that all planned behaviour has shipped.
 
 Fredrik owns FTW's direction. Sourceful develops and maintains it. External
-users submit issues; we do not accept external pull requests, including docs
-and drivers. See [CONTRIBUTING.md](CONTRIBUTING.md).
+PRs are welcome, preferably based on issues. Broad proposals may start as
+short Markdown PRs; concrete fixes need relevant test evidence. Work is
+agentic first: make the problem, scope and results clear enough for people
+and agents to assess and continue. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Product rules
 
@@ -129,10 +131,12 @@ landed on somebody else's finished work.
   enough.
 
 Keep VISION.md and the roadmap current as the maintained product direction.
-Task plans, design drafts, breakdowns and agent scratch notes stay out of the
-repository; [`.github/check-no-planning-docs.sh`](.github/check-no-planning-docs.sh) enforces
-this. Commit the change, its tests and a changeset; put the reasoning in the
-PR description, where it is read during review and then archived.
+Short Markdown proposals may update the relevant maintained docs or use the
+PR description. Mark proposed behaviour as proposed until it ships. Keep task
+breakdowns, run logs and agent scratch notes out of the repository;
+[`.github/check-no-planning-docs.sh`](.github/check-no-planning-docs.sh) checks known
+scratch paths. Code PRs include the change, relevant tests and a changeset
+when required. Put work reasoning in the PR description.
 
 ## Build and test
 

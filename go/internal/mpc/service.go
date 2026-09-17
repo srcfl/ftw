@@ -3,6 +3,7 @@ package mpc
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"sync"
@@ -76,17 +77,18 @@ type BatteryFleetMember struct {
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
-	now                func() time.Time // nil uses the wall clock
-	Store              *state.Store
-	Tele               *telemetry.Store
-	Zone               string
-	BaseLoad           float64 // baseline household load (W). 0 disables load assumption.
-	Horizon            time.Duration
-	Interval           time.Duration
-	PV                 PVPredictor         // optional — overrides stored pv_w_estimated
-	PVResidualCorrect  PVResidualCorrector // optional — additive short-horizon bias on top of PV
-	ForecastSnapshot   func(time.Time, []state.ForecastPoint) ForecastInputs
-	PVCurtailmentProbe func() PVCurtailment
+	now                  func() time.Time // nil uses the wall clock
+	Store                *state.Store
+	Tele                 *telemetry.Store
+	Zone                 string
+	BaseLoad             float64 // baseline household load (W). 0 disables load assumption.
+	Horizon              time.Duration
+	Interval             time.Duration
+	PV                   PVPredictor         // optional — overrides stored pv_w_estimated
+	PVResidualCorrect    PVResidualCorrector // optional — additive short-horizon bias on top of PV
+	ForecastSnapshot     func(time.Time, []state.ForecastPoint) ForecastInputs
+	HouseholdMeasurement func() telemetry.ForecastReading
+	PVCurtailmentProbe   func() PVCurtailment
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
 	// PVNameplateW accepts a verified AC generation ceiling. A configured
@@ -293,6 +295,37 @@ func (s *Service) driverOnline(name string) bool {
 	}
 	h := s.Tele.DriverHealth(name)
 	return h != nil && h.IsOnline()
+}
+
+// liveHouseLoadW uses the same complete, fresh balance as forecast learning.
+// Driver health alone does not establish power freshness or a known load.
+func (s *Service) liveHouseLoadW() (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	var reading telemetry.ForecastReading
+	if s.HouseholdMeasurement != nil {
+		reading = s.HouseholdMeasurement()
+	} else {
+		s.mu.RLock()
+		meter := s.SiteMeter
+		s.mu.RUnlock()
+		reading = s.Tele.ForecastMeasurementNow(meter, telemetry.ForecastOptions{})
+	}
+	return reading.HouseholdW, reading.Valid
+}
+
+// overlayLiveHouseLoad replaces the in-flight slot's modeled house load
+// with the live meter identity. Later slots keep the forecast. A stale
+// meter leaves the model in place; dispatch already stands down hardware.
+func overlayLiveHouseLoad(slots []Slot, loadW float64, ok bool) {
+	if !ok || len(slots) == 0 {
+		return
+	}
+	if math.IsNaN(loadW) || math.IsInf(loadW, 0) || loadW < 0 {
+		loadW = 0
+	}
+	slots[0].LoadW = loadW
 }
 
 // New constructs a service. Caller wires it in main.go after store + telemetry.
@@ -548,7 +581,8 @@ type SlotDirective struct {
 	// configured / active. The dispatch layer converts energy to
 	// instantaneous power via the same `remaining_wh × 3600 /
 	// remaining_s` formula it uses for the battery.
-	LoadpointEnergyWh map[string]float64
+	LoadpointEnergyWh  map[string]float64
+	LoadpointMaxPowerW map[string]float64
 
 	// LoadpointSoCTarget is the plan's EV SoC at SlotEnd per
 	// loadpoint. Used by the per-loadpoint divergence check.
@@ -613,6 +647,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			}
 		}
 		if len(a.LoadpointPowerW) > 0 {
+			d.LoadpointMaxPowerW = maps.Clone(a.LoadpointMaxPowerW)
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
 			d.LoadpointSoCTarget = make(map[string]float64, len(a.LoadpointPowerW))
 			for id, powerW := range a.LoadpointPowerW {
@@ -930,8 +965,12 @@ func (s *Service) loop(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
-	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
-		rt := time.NewTicker(s.ReactiveInterval)
+	reactiveInterval := s.ReactiveInterval
+	if reactiveInterval <= 0 && (s.Loadpoints != nil || s.Loadpoint != nil) {
+		reactiveInterval = 5 * time.Second
+	}
+	if reactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.Loadpoints != nil || s.Loadpoint != nil) {
+		rt := time.NewTicker(reactiveInterval)
 		defer rt.Stop()
 		reactiveTick = rt.C
 	}
@@ -964,13 +1003,17 @@ func (s *Service) loop(ctx context.Context) {
 func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
+	params := s.lastParams
 	last := s.lastReplanAt
-	siteMeter := s.SiteMeter
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
 	}
 	if time.Since(last) < s.MinReplanGap {
+		return
+	}
+	if s.loadpointStateDiverged(plan, params, time.Now()) {
+		s.replan(ctx, "loadpoint_soc_changed")
 		return
 	}
 	// Find the slot covering now.
@@ -998,31 +1041,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		pvW += r.SmoothedW
 	}
 
-	// Live load = grid - pv - bat - vehicle charging/storage when we
-	// have a site meter wired.
-	var loadW float64
-	haveLoad := false
-	if siteMeter != "" && s.driverOnline(siteMeter) {
-		if m := s.Tele.Get(siteMeter, telemetry.DerMeter); m != nil {
-			var batW float64
-			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-				if !s.driverOnline(r.Driver) {
-					continue
-				}
-				batW += r.SmoothedW
-			}
-			evW := s.Tele.SumOnlineEVW()
-			v2xW := s.Tele.SumOnlineV2XW()
-			// House-only load: subtract EV so the divergence detector
-			// compares actual house consumption against the plan's
-			// house-load forecast, not a moving "house + vehicle" target.
-			loadW = m.SmoothedW - pvW - batW - evW - v2xW
-			if loadW < 0 {
-				loadW = 0
-			}
-			haveLoad = true
-		}
-	}
+	loadW, haveLoad := s.liveHouseLoadW()
 
 	// Leaky integral of energy error (Wh). Decay with an 8-minute
 	// half-life so transients fade but a sustained offset accumulates.
@@ -1513,6 +1532,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
 	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	{
+		loadW, ok := s.liveHouseLoadW()
+		overlayLiveHouseLoad(slots, loadW, ok)
+	}
 	// Qualified load models own their level. Unqualified historic daily
 	// totals must not impose a floor on a changed or low-load household.
 	if len(slots) == 0 {
@@ -1744,8 +1767,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		// not bet on sun that may not arrive.
 		slots = fallbackSlots
 		solveStart := time.Now()
-		plan = Optimize(slots, p)
-		plan.Solver = coreSolverInfo(p, msSince(solveStart))
+		plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+		setCoreReserveSolver(&plan, p, msSince(solveStart))
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if request.wasCanceledByService() {
@@ -1824,8 +1847,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			slog.Error("mpc: primary optimizer failed; using Core DP fallback", "err", err)
 			slots = fallbackSlots
 			solveStart := time.Now()
-			plan = Optimize(slots, p)
-			plan.Solver = coreSolverInfo(p, msSince(solveStart))
+			plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+			setCoreReserveSolver(&plan, p, msSince(solveStart))
 			// Same solver, different standing: the operator asked for the
 			// external planner and did not get it. Everything that warns about
 			// a degraded optimizer keys on this flag, not on the engine name.
@@ -1861,6 +1884,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	for i := range plan.Actions {
 		mode, _, _ := actionToSlot(plan.Actions[i], p.Mode)
 		plan.Actions[i].EMSMode = mode
+		pvPoint, loadPoint := baseForecastSlots[i].PVW, baseForecastSlots[i].LoadW
+		plan.Actions[i].ForecastPVW = &pvPoint
+		plan.Actions[i].ForecastLoadW = &loadPoint
 	}
 
 	// Baselines — counter-factual dispatch costs over the same horizon
@@ -1868,7 +1894,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil {
+	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil && (plan.Solver == nil || plan.Solver.Backend != "ev_reserve") {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}

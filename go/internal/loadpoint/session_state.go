@@ -20,13 +20,15 @@ type SessionStore interface {
 }
 
 type savedSession struct {
-	Version            int     `json:"version"`
-	DeviceID           string  `json:"device_id"`
-	SessionID          string  `json:"session_id"`
-	AnchorSoC          float64 `json:"anchor_soc"`
-	ConfirmedAtWh      float64 `json:"confirmed_at_wh"`
-	CapacityWh         float64 `json:"capacity_wh"`
-	CompletionNotified bool    `json:"completion_notified,omitempty"`
+	Version            int       `json:"version"`
+	DeviceID           string    `json:"device_id"`
+	SessionID          string    `json:"session_id"`
+	AnchorSoC          float64   `json:"anchor_soc"`
+	ConfirmedAtWh      float64   `json:"confirmed_at_wh"`
+	CapacityWh         float64   `json:"capacity_wh"`
+	EstimatedWh        *float64  `json:"estimated_wh,omitempty"`
+	EstimatedAt        time.Time `json:"estimated_at,omitempty"`
+	CompletionNotified bool      `json:"completion_notified,omitempty"`
 }
 
 func sessionKey(deviceID string) string {
@@ -42,6 +44,8 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 func (m *Manager) SetSessionStore(store SessionStore) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sessionStore = store
 }
 
@@ -51,6 +55,18 @@ func (m *Manager) SetSessionStore(store SessionStore) {
 // restart and change after disconnect; missing or ambiguous IDs are empty.
 // Endpoint addresses, YAML names and timestamps invented by core are not IDs.
 func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool, deviceID, sessionID string) {
+	now := m.now()
+	m.ObserveSample(id, EVSample{PowerAt: now, EnergyAt: now, Connected: pluggedIn, PowerW: powerW, SessionWh: deliveredWh, RequestActive: requestActive, DeviceID: deviceID, SessionID: sessionID})
+}
+
+// ObserveSample retains measurement time and missing-counter state from the
+// driver. Missing data cannot reset a session or erase a confirmed level.
+func (m *Manager) ObserveSample(id string, sample EVSample) {
+	pluggedIn, powerW, deliveredWh, requestActive, deviceID, sessionID := sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive, sample.DeviceID, sample.SessionID
+	if sample.PowerUnavailable {
+		powerW = 0
+		requestActive = true
+	}
 	m.sessionMu.Lock()
 	var fired []events.Event
 	var bus *events.Bus
@@ -65,7 +81,7 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	if strings.HasPrefix(deviceID, "ep:") {
 		deviceID = ""
 	}
-	if !finite(deliveredWh) || deliveredWh < 0 {
+	if !sample.SessionWhUnavailable && (!finite(deliveredWh) || deliveredWh < 0) {
 		return
 	}
 
@@ -75,17 +91,23 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 		m.mu.Unlock()
 		return
 	}
+	m.refreshSessionCommitLocked(lp)
 	previousDevice, previousSession := lp.sessionDeviceID, lp.sessionID
-	regressed := pluggedIn && lp.pluggedIn && deliveredWh < lp.deliveredWhSession
+	wasPlugged := lp.pluggedIn
+	regressed := pluggedIn && lp.pluggedIn && lp.energy != nil && lp.energy.counterRegressed(sample)
 	firstSessionProof := deviceID != "" && previousDevice == deviceID && previousSession == "" && sessionID != "" &&
 		lp.pluggedIn && pluggedIn && !regressed
 	changed := previousDevice != deviceID || (previousSession != sessionID && !firstSessionProof)
 	// A changed session can arrive after an unseen unplug while core was
 	// offline. Run the ordinary plug-in reset even if connected stayed true.
 	if changed || regressed {
+		lp.finishGoalChecked = false
+		lp.finishGoalSaved = time.Time{}
+		lp.finishGoalRetention = "unavailable"
 		m.nextSessionGeneration++
 		lp.sessionGeneration = m.nextSessionGeneration
 		lp.pluggedIn = false
+		lp.energy = nil
 		lp.chargingSteadySince = time.Time{}
 		lp.stoppedSince = time.Time{}
 		lp.steadyRunArmed = false
@@ -97,10 +119,29 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 		}
 	}
 	lp.sessionDeviceID, lp.sessionID = deviceID, sessionID
+	if lp.energy == nil {
+		lp.energy = &sessionEnergy{}
+	}
+	if !pluggedIn {
+		lp.energy = &sessionEnergy{}
+	}
+	counterWasKnown := lp.energy.counterKnown
+	deliveredWh = lp.energy.observe(sample, m.now())
+	if !counterWasKnown && lp.energy.counterKnown && lp.socConfirmed && lp.pluggedIn && lp.VehicleCapacityWh > 0 {
+		// The first counter may include energy from before the owner entered
+		// a level. Keep that correction while joining the measured time line.
+		baseline := lp.energy.counterWh - lp.energy.integralAt(lp.energy.counterAt)
+		lp.sessionPluginSoC -= baseline * DefaultChargeEfficiency / lp.VehicleCapacityWh
+	}
+	lp.powerAt = sample.PowerAt
+	if lp.powerAt.IsZero() {
+		lp.powerAt = m.now()
+	}
+	lp.powerUnavailable = sample.PowerUnavailable
 	confirmed := lp.socConfirmed && lp.pluggedIn
 	m.mu.Unlock()
 
-	if !pluggedIn || regressed {
+	if (!pluggedIn && (wasPlugged || changed)) || regressed {
 		// Tombstone the hardware record. A later reconnect cannot resurrect a
 		// level from before an observed unplug or a session-counter reset.
 		if m.sessionStore != nil {
@@ -112,14 +153,24 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 		}
 	}
 	var restore *savedSession
-	if pluggedIn && !confirmed && !regressed && deviceID != "" && sessionID != "" && m.sessionStore != nil {
+	if pluggedIn && !confirmed && !regressed && !sample.SessionWhUnavailable && deviceID != "" && sessionID != "" && m.sessionStore != nil {
 		if raw, ok := m.sessionStore.LoadConfig(sessionKey(deviceID)); ok {
 			var saved savedSession
-			if json.Unmarshal([]byte(raw), &saved) == nil && saved.Version == 1 &&
+			if json.Unmarshal([]byte(raw), &saved) == nil && (saved.Version == 1 || saved.Version == 2) &&
 				saved.DeviceID == deviceID && saved.SessionID == sessionID &&
 				finite(saved.AnchorSoC) && finite(saved.ConfirmedAtWh) && saved.ConfirmedAtWh >= 0 &&
-				deliveredWh >= saved.ConfirmedAtWh && finite(saved.CapacityWh) && saved.CapacityWh > 0 {
-				atConfirmation := saved.AnchorSoC + saved.ConfirmedAtWh/saved.CapacityWh
+				sample.SessionWh >= saved.ConfirmedAtWh && finite(saved.CapacityWh) && saved.CapacityWh > 0 {
+				efficiency := DefaultChargeEfficiency
+				if saved.Version == 1 {
+					efficiency = 1
+				}
+				confirmationWh := saved.ConfirmedAtWh
+				if saved.EstimatedWh != nil && !saved.EstimatedAt.IsZero() && finite(*saved.EstimatedWh) && *saved.EstimatedWh >= confirmationWh {
+					confirmationWh = *saved.EstimatedWh
+				}
+				atConfirmation := saved.AnchorSoC + confirmationWh*efficiency/saved.CapacityWh
+				// Preserve the last confirmed level when migrating the old AC-only estimate.
+				saved.AnchorSoC = atConfirmation - confirmationWh*DefaultChargeEfficiency/saved.CapacityWh
 				if atConfirmation >= 0 && atConfirmation <= 1 {
 					restore = &saved
 				}
@@ -130,6 +181,11 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	m.mu.Lock()
 	lp = m.byID[id]
 	if restore != nil && lp.pluggedIn && lp.VehicleCapacityWh == restore.CapacityWh {
+		if restore.EstimatedWh != nil && finite(*restore.EstimatedWh) && *restore.EstimatedWh >= restore.ConfirmedAtWh && !restore.EstimatedAt.IsZero() {
+			lp.energy.floorWh, lp.energy.floorAt = *restore.EstimatedWh, restore.EstimatedAt
+			deliveredWh = lp.energy.observe(sample, m.now())
+			lp.deliveredWhSession = deliveredWh
+		}
 		lp.sessionPluginSoC = restore.AnchorSoC
 		lp.currentSoC = estimateSoC(restore.AnchorSoC, deliveredWh, restore.CapacityWh)
 		lp.socConfirmed = true
@@ -138,13 +194,52 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	} else if !lp.socConfirmed || deviceID == "" || sessionID == "" || m.sessionStore == nil {
 		lp.socRetention = "unavailable"
 	}
+	// Bound unsaved progress without writing state.db on every control tick.
+	// At 75 kWh, 30 Wh is 0.036 percentage points after charging loss. A stop,
+	// user correction or failed save still gets an immediate checkpoint.
+	progressChanged := lp.deliveredWhSession != lp.lastSavedEnergyWh
+	checkpointDue := math.Abs(lp.deliveredWhSession-lp.lastSavedEnergyWh) >= 30 ||
+		m.now().Sub(lp.lastSavedEnergyAt) >= 30*time.Second || lp.currentPowerW == 0
+	saveProgress := lp.socConfirmed && lp.sessionID != "" && lp.energy.counterKnown &&
+		(lp.socRetention != "session" || (lp.energy.source == "power" && progressChanged && checkpointDue))
 	m.mu.Unlock()
+	if saveProgress {
+		m.persistSession(id)
+	}
 	if firstSessionProof && confirmed {
 		// The driver can first verify a session when charging starts. Preserve
 		// the level the owner entered while waiting and now make it durable.
 		m.persistSession(id)
 	}
+	m.retainFinishGoal(id)
 	_ = m.flushManualHold(id)
+}
+
+// Caller holds Manager.mu and sessionMu. Only the memory-only writer exposes
+// committed snapshots. An older anchor must not confirm a newer user edit.
+func (m *Manager) refreshSessionCommitLocked(lp *loadpointRuntime) {
+	reader, ok := m.sessionStore.(interface {
+		CommittedConfig(string) (string, time.Time, bool)
+	})
+	if !ok || !lp.socConfirmed || lp.sessionDeviceID == "" || lp.sessionID == "" {
+		return
+	}
+	raw, committedAt, found := reader.CommittedConfig(sessionKey(lp.sessionDeviceID))
+	if !found || committedAt.IsZero() || !committedAt.After(lp.lastSessionCommitAt) {
+		return
+	}
+	var saved savedSession
+	if json.Unmarshal([]byte(raw), &saved) != nil || saved.Version != 2 || saved.DeviceID != lp.sessionDeviceID ||
+		saved.SessionID != lp.sessionID || saved.AnchorSoC != lp.sessionPluginSoC || saved.CapacityWh != lp.VehicleCapacityWh {
+		return
+	}
+	wh := saved.ConfirmedAtWh
+	if saved.EstimatedWh != nil && *saved.EstimatedWh > wh {
+		wh = *saved.EstimatedWh
+	}
+	lp.lastSavedEnergyWh, lp.lastSavedEnergyAt = wh, m.now()
+	lp.lastSessionCommitAt = committedAt
+	lp.socRetention = "session"
 }
 
 // persistSession runs outside Manager.mu, but sessionMu serializes it with
@@ -157,10 +252,21 @@ func (m *Manager) persistSession(id string) {
 		m.mu.RUnlock()
 		return
 	}
-	record := savedSession{Version: 1, DeviceID: lp.sessionDeviceID, SessionID: lp.sessionID,
+	record := savedSession{Version: 2, DeviceID: lp.sessionDeviceID, SessionID: lp.sessionID,
 		AnchorSoC: lp.sessionPluginSoC, ConfirmedAtWh: lp.deliveredWhSession,
 		CapacityWh: lp.VehicleCapacityWh, CompletionNotified: lp.completionNotified}
-	eligible := lp.pluggedIn && lp.socConfirmed && record.DeviceID != "" && record.SessionID != "" &&
+	if lp.energy != nil && lp.energy.counterKnown {
+		record.ConfirmedAtWh = lp.energy.counterWh
+		if lp.deliveredWhSession > lp.energy.counterWh {
+			value := lp.deliveredWhSession
+			record.EstimatedWh = &value
+			record.EstimatedAt = lp.energy.floorAt
+			if lp.energy.coverageAt.After(record.EstimatedAt) {
+				record.EstimatedAt = lp.energy.coverageAt
+			}
+		}
+	}
+	eligible := lp.pluggedIn && lp.socConfirmed && lp.energy != nil && lp.energy.counterKnown && record.DeviceID != "" && record.SessionID != "" &&
 		finite(record.AnchorSoC) && finite(record.ConfirmedAtWh) && record.ConfirmedAtWh >= 0 &&
 		finite(record.CapacityWh) && record.CapacityWh > 0
 	m.mu.RUnlock()
@@ -173,11 +279,18 @@ func (m *Manager) persistSession(id string) {
 		retention = "session"
 		if err != nil {
 			retention = "error"
+			if persistencePending(err) {
+				retention = "pending"
+			}
 		}
 	}
 	m.mu.Lock()
 	if lp := m.byID[id]; lp != nil {
 		lp.socRetention = retention
+		if retention == "session" {
+			lp.lastSavedEnergyWh = lp.deliveredWhSession
+			lp.lastSavedEnergyAt = m.now()
+		}
 	}
 	m.mu.Unlock()
 }

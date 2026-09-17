@@ -10,9 +10,9 @@ body:
         a thread in [Discussions](../../discussions) first — issues are
         best for concrete, actionable proposals.
 
-        Sourceful develops FTW. External users submit issues with needs and
-        evidence; we do not accept external pull requests, including docs and
-        drivers. You do not need to design an API or write code to make a request.
+        PRs are welcome, preferably based on an issue. A broad idea can also
+        start as a short Markdown PR; a concrete fix should include test evidence.
+        You do not need to design an API or write code to make a request.
   - type: textarea
     id: problem
     attributes:
@@ -64,10 +64,3 @@ body:
     attributes:
       label: Anything else?
       description: Hardware datasheets, protocol docs, screenshots, links.
-  - type: checkboxes
-    id: text-first
-    attributes:
-      label: Contribution path
-      options:
-        - label: I understand that Sourceful handles implementation and external contributions use issues, not pull requests.
-          required: true

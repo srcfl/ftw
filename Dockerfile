@@ -1,4 +1,4 @@
-# FTW core container — Go host with DuckDB, Lua drivers and web assets.
+# FTW core container — Go host with SQLite, Lua drivers and web assets.
 # The compiled Energyplan worker ships with Core; Core DP provides fallback.
 #
 # Multi-arch: linux/amd64 + linux/arm64 via docker buildx TARGETOS /
@@ -8,17 +8,8 @@
 # --- Builder ---------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
 
-# DuckDB ships glibc static libraries. Build against bookworm to keep the
-# libc requirement below the trixie runtime, using native cross compilers.
+# Pure Go builds cross-compile without a native database toolchain.
 ARG TARGETARCH
-RUN apt-get update && \
-    case "$TARGETARCH" in \
-      amd64) compiler=g++-x86-64-linux-gnu ;; \
-      arm64) compiler=g++-aarch64-linux-gnu ;; \
-      *) echo "Unsupported DuckDB target: $TARGETARCH" >&2; exit 1 ;; \
-    esac && \
-    apt-get install -y --no-install-recommends git "$compiler" && \
-    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
@@ -56,7 +47,6 @@ COPY --from=builder /out/ /
 FROM debian:trixie-slim
 
 # ca-certificates  — HTTPS integrations.
-# libstdc++6       — C++ runtime for the statically linked DuckDB library.
 # tzdata           — timezone-aware price/plan windows. Without a zoneinfo tree
 #                    time.Local silently degrades to UTC and mis-times plan
 #                    boundaries with no error, so this is load-bearing.
@@ -75,7 +65,7 @@ FROM debian:trixie-slim
 #                    itself: netgo/osusergo retain Go's name and user lookup.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ca-certificates tzdata wget libnss-mdns libstdc++6 && \
+        ca-certificates tzdata wget libnss-mdns && \
     rm -rf /var/lib/apt/lists/*
 
 # Image layout:
@@ -96,7 +86,7 @@ COPY --from=builder --chown=100:101 /out/ftw-backup /app/ftw-backup
 COPY --chown=100:101 drivers/ /app/drivers/
 COPY --chown=100:101 web/     /app/web/
 COPY --chown=100:101 optimizer/native/bundle/ /app/optimizer/native/bundle/
-COPY LICENSE NOTICE THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
+COPY LICENSE NOTICE LICENSING.md THIRD-PARTY-NOTICES.txt /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
     mkdir -p /app/data /app/data/drivers /run/ftw-update && \

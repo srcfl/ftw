@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	duckdb "github.com/duckdb/duckdb-go/v2"
 	"github.com/google/uuid"
+	"modernc.org/sqlite"
 )
 
 const (
@@ -20,7 +20,8 @@ const (
 	historyQueueBytes         = 16 << 20
 	historyBatchBytes         = 1 << 20
 	historyMaintenanceTimeout = 2 * time.Minute
-	historyCommitTimeout      = 2 * time.Minute
+	historyCommitTimeout      = 5 * time.Second
+	historyShutdownTimeout    = 20 * time.Second
 	historyCommitInterval     = 15 * time.Second
 	historyCommitMaxTicks     = 32
 )
@@ -49,6 +50,9 @@ type HistoryWriterStatus struct {
 	LastCommitMS      int64  `json:"last_commit_ms"`
 	LastMeasurementMS int64  `json:"last_measurement_ms"`
 	LastError         string `json:"last_error,omitempty"`
+	CommitFailures    uint64 `json:"commit_failures"`
+	LastFailureMS     int64  `json:"last_failure_ms,omitempty"`
+	LastFailureError  string `json:"last_failure_error,omitempty"`
 	LastRejectMS      int64  `json:"last_reject_ms,omitempty"`
 	LastRejectError   string `json:"last_reject_error,omitempty"`
 	Stopping          bool   `json:"stopping"`
@@ -58,14 +62,16 @@ type HistoryWriterStatus struct {
 }
 
 type historyWriter struct {
-	store   *Store
-	mu      sync.Mutex
-	status  HistoryWriterStatus
-	queue   chan historyBatch
-	changed chan struct{}
-	done    chan struct{}
-	ctx     context.Context
-	cancel  context.CancelFunc
+	store                *Store
+	mu                   sync.Mutex
+	status               HistoryWriterStatus
+	aggregateBeforeMS    int64
+	pendingMeasurementMS map[string]int64
+	queue                chan historyBatch
+	changed              chan struct{}
+	done                 chan struct{}
+	ctx                  context.Context
+	cancel               context.CancelFunc
 	// Owned by run, outside the short status mutex. Tests set limits before
 	// sending the first tick; production uses bounded rows, time and retries.
 	maintenanceRows       int
@@ -75,6 +81,9 @@ type historyWriter struct {
 	maintenanceRetryDelay time.Duration
 	maintenanceRunning    atomic.Bool
 	maintenanceMu         sync.Mutex
+	maintenanceCtx        context.Context
+	maintenanceCancel     context.CancelFunc
+	shutdownTimeout       time.Duration
 	maintenanceWG         sync.WaitGroup
 	commitInterval        time.Duration
 	commitTimeout         time.Duration
@@ -91,6 +100,7 @@ func newHistoryWriter(s *Store) *historyWriter {
 		maintenanceRowsLimit: 64 * historyImportRows, maintenanceDue: time.Now().Add(time.Hour), maintenanceRetryDelay: 30 * time.Second,
 		commitInterval: historyCommitInterval, commitTimeout: historyCommitTimeout, commitMaxTicks: historyCommitMaxTicks,
 		flushCh: make(chan struct{}, 1)}
+	w.maintenanceCtx, w.maintenanceCancel = context.WithCancel(ctx)
 	go w.run()
 	return w
 }
@@ -113,10 +123,10 @@ func (w *historyWriter) commitBatches(ctx context.Context, batches []historyBatc
 	if w.commitFn != nil {
 		return w.commitFn(ctx, batches, ack)
 	}
-	return w.store.recordHotBatches(ctx, batches, ack)
+	return w.store.recordHistoryBatches(ctx, batches, ack)
 }
 
-// historyCommitInterrupted is a deadline or DuckDB interrupt. Retrying the
+// historyCommitInterrupted is a deadline or SQLite interrupt. Retrying the
 // same batch under the same budget cannot finish; a smaller prefix can.
 func historyCommitInterrupted(err error) bool {
 	if err == nil {
@@ -125,8 +135,12 @@ func historyCommitInterrupted(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
-	var dbErr *duckdb.Error
-	return errors.As(err, &dbErr) && dbErr.Type == duckdb.ErrorTypeInterrupt
+	return false
+}
+
+func historyWriteBusy(err error) bool {
+	var busy *sqlite.Error
+	return errors.As(err, &busy) && (busy.Code()&0xff == 5 || busy.Code()&0xff == 6)
 }
 
 // EnqueueTelemetryTick copies a whole tick without waiting on disk. The caller
@@ -179,6 +193,26 @@ func (s *Store) EnqueueTelemetryTick(p *HistoryPoint, samples []Sample, observat
 		w.status.LastRejectError = "history queue is full or stopping; tick was not accepted"
 		w.signal()
 		return errors.New("history queue is full or stopping; tick was not accepted")
+	}
+	if s.aggregateHistory.Load() {
+		first := int64(1<<63 - 1)
+		if p != nil {
+			first = p.TsMs
+		}
+		for _, sm := range samples {
+			first = min(first, sm.TsMs)
+		}
+		if first < w.aggregateBeforeMS {
+			w.status.Rejected++
+			w.status.LastRejectMS = time.Now().UnixMilli()
+			w.status.LastRejectError = "history timestamp precedes the archived interval; tick was not accepted"
+			w.signal()
+			return errors.New(w.status.LastRejectError)
+		}
+		if w.pendingMeasurementMS == nil {
+			w.pendingMeasurementMS = make(map[string]int64)
+		}
+		w.pendingMeasurementMS[b.id] = first
 	}
 	w.status.Accepted++
 	w.status.Pending++
@@ -247,6 +281,7 @@ func (w *historyWriter) run() {
 				}
 				w.status.LastCommitMS = time.Now().UnixMilli()
 				for _, b := range attempt {
+					delete(w.pendingMeasurementMS, b.id)
 					if b.payload.Point != nil {
 						w.status.LastMeasurementMS = max(w.status.LastMeasurementMS, b.payload.Point.TsMs)
 					}
@@ -260,6 +295,9 @@ func (w *historyWriter) run() {
 					slog.Error("history commit failed; retaining tick for retry", "err", err)
 				}
 				w.status.LastError = err.Error()
+				w.status.CommitFailures++
+				w.status.LastFailureMS = time.Now().UnixMilli()
+				w.status.LastFailureError = err.Error()
 			}
 			w.signal()
 			w.mu.Unlock()
@@ -276,19 +314,19 @@ func (w *historyWriter) run() {
 				maxAttempt = w.maxTicks()
 				continue
 			}
-			var dbErr *duckdb.Error
-			if errors.As(err, &dbErr) && dbErr.Type == duckdb.ErrorTypeOutOfMemory {
-				w.maintenanceDue = time.Time{}
-				w.forceRotate.Store(true)
-				w.maintainHistory(0)
-			}
 			if historyCommitInterrupted(err) && n > 1 {
 				next := max(1, n/2)
 				slog.Warn("history commit interrupted; retrying a smaller batch", "ticks", n, "next", next, "err", err)
 				maxAttempt = next
 				continue
 			}
-			timer := time.NewTimer(time.Second)
+			retryDelay := time.Second
+			if historyWriteBusy(err) {
+				// A competing transaction can release its lock quickly. Keep the
+				// accepted batch and retry without a full second of dead time.
+				retryDelay = 100 * time.Millisecond
+			}
+			timer := time.NewTimer(retryDelay)
 			select {
 			case <-w.ctx.Done():
 				timer.Stop()
@@ -391,6 +429,9 @@ func (w *historyWriter) run() {
 // Hourly rotation runs in the background so a multi-GB reopen cannot stall
 // live commits past the site watchdog.
 func (w *historyWriter) scheduleMaintenance(rows int) {
+	if w.maintenanceCtx.Err() != nil {
+		return
+	}
 	w.maintenanceRows += rows
 	now := time.Now()
 	if now.Before(w.maintenanceRetry) || (w.maintenanceRows < w.maintenanceRowsLimit && now.Before(w.maintenanceDue)) {
@@ -419,7 +460,7 @@ func (w *historyWriter) maintainHistory(rows int) {
 func (w *historyWriter) runMaintenance() {
 	w.maintenanceMu.Lock()
 	defer w.maintenanceMu.Unlock()
-	ctx, cancel := context.WithTimeout(w.ctx, historyMaintenanceTimeout)
+	ctx, cancel := context.WithTimeout(w.maintenanceCtx, historyMaintenanceTimeout)
 	err := w.store.checkpointLiveHistory(ctx)
 	cancel()
 	if w.forceRotate.Load() {
@@ -482,7 +523,7 @@ func (s *Store) FlushHistory(ctx context.Context) error {
 	return nil
 }
 
-func (w *historyWriter) close() error {
+func (w *historyWriter) stopAdmission() {
 	w.mu.Lock()
 	target := w.status.Accepted
 	if !w.status.Stopping {
@@ -492,7 +533,16 @@ func (w *historyWriter) close() error {
 	}
 	w.mu.Unlock()
 	w.requestFlush(target)
-	timer := time.NewTimer(w.timeout())
+}
+
+func (w *historyWriter) close() error {
+	w.stopAdmission()
+	w.maintenanceCancel()
+	budget := w.shutdownTimeout
+	if budget <= 0 {
+		budget = historyShutdownTimeout
+	}
+	timer := time.NewTimer(budget)
 	defer timer.Stop()
 	select {
 	case <-w.done:

@@ -313,12 +313,13 @@ type externalError struct {
 }
 
 type externalPlan struct {
-	Mode         Mode             `json:"mode"`
-	HorizonSlots int              `json:"horizon_slots"`
-	CapacityWh   float64          `json:"capacity_wh"`
-	InitialSoC   float64          `json:"initial_soc_pct"`
-	TotalCostOre float64          `json:"total_cost_ore"`
-	Actions      []externalAction `json:"actions"`
+	FlexShortfallWh map[string]float64 `json:"flex_shortfall_wh,omitempty"`
+	Mode            Mode               `json:"mode"`
+	HorizonSlots    int                `json:"horizon_slots"`
+	CapacityWh      float64            `json:"capacity_wh"`
+	InitialSoC      float64            `json:"initial_soc_pct"`
+	TotalCostOre    float64            `json:"total_cost_ore"`
+	Actions         []externalAction   `json:"actions"`
 }
 
 type externalAction struct {
@@ -334,6 +335,7 @@ type externalAction struct {
 	StoragePowerW    map[string]float64 `json:"storage_power_w"`
 	StorageEnergy    map[string]float64 `json:"storage_energy_wh"`
 	FlexPowerW       map[string]float64 `json:"flex_power_w"`
+	FlexMaxPowerW    map[string]float64 `json:"flex_max_power_w,omitempty"`
 	FlexEnergyWh     map[string]float64 `json:"flex_energy_wh"`
 	ThermalPowerW    map[string]float64 `json:"thermal_power_w"`
 	ThermalState     map[string]float64 `json:"thermal_state"`
@@ -568,6 +570,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 		HorizonSlots: len(slots), CapacityWh: p.CapacityWh,
 		InitialSoC: p.InitialSoC, TotalCostOre: r.Plan.TotalCostOre,
 		Actions: make([]Action, 0, len(r.Plan.Actions)), Solver: &r.Solver,
+		LoadpointShortfallWh: r.Plan.FlexShortfallWh,
 	}
 	meanPrice := 0.0
 	for _, slot := range slots {
@@ -585,10 +588,11 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
 			SoC: candidate.SoCPct / 100, CostOre: candidate.CostOre,
-			PVLimitW:        candidate.PVLimitW,
-			PVCurtailActive: candidate.PVCurtailActive,
-			StoragePowerW:   candidate.StoragePowerW,
-			StorageEnergyWh: candidate.StorageEnergy,
+			PVLimitW:           candidate.PVLimitW,
+			PVCurtailActive:    candidate.PVCurtailActive,
+			StoragePowerW:      candidate.StoragePowerW,
+			LoadpointMaxPowerW: candidate.FlexMaxPowerW,
+			StorageEnergyWh:    candidate.StorageEnergy,
 		}
 		activeLoadpoints := p.activeLoadpoints()
 		if len(activeLoadpoints) > 0 {
@@ -657,6 +661,7 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 	upperSoCRecovery := math.Max(0, p.InitialSoC-p.SoCMax)
 	activeLoadpoints := p.activeLoadpoints()
 	evSoC := make(map[string]float64, len(activeLoadpoints))
+	deadlineShortfall := make(map[string]float64)
 	for _, lp := range activeLoadpoints {
 		evSoC[lp.ID] = lp.InitialSoC
 	}
@@ -744,7 +749,14 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				return fmt.Errorf("slot %d loadpoint %s contains non-finite output", i, lp.ID)
 			}
 			steps := lp.normalizedSteps()
-			if !slices.ContainsFunc(steps, func(step float64) bool { return math.Abs(step-powerW) <= 2 }) {
+			stepW := powerW
+			if peak, ok := a.LoadpointMaxPowerW[lp.ID]; ok {
+				if !finite(peak) || powerW < 0 || powerW > peak+1e-6 {
+					return fmt.Errorf("slot %d invalid EV on-power", i)
+				}
+				stepW = peak
+			}
+			if !slices.ContainsFunc(steps, func(step float64) bool { return math.Abs(step-stepW) <= 2 }) {
 				return fmt.Errorf("slot %d loadpoint %s power %.3f is not an allowed step", i, lp.ID, powerW)
 			}
 			eff := lp.ChargeEfficiency
@@ -761,6 +773,11 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			}
 			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.0002 {
 				return fmt.Errorf("slot %d loadpoint %s SoC %.4f inconsistent with replay %.4f", i, lp.ID, reportedSoC, evSoC[lp.ID])
+			}
+			if lp.TargetSoC > 0 && i == lp.TargetSlotIdx {
+				if missing := max(0, lp.TargetSoC-evSoC[lp.ID]) * lp.CapacityWh; missing > 1 {
+					deadlineShortfall[lp.ID] = missing
+				}
 			}
 			totalLoadpointW += powerW
 		}
@@ -828,13 +845,17 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			(slot.Limits.MaxExportW > 0 && a.GridW < -slot.Limits.MaxExportW-solverGridLimitToleranceW) {
 			return fmt.Errorf("slot %d grid_w %.3f violates grid limits", i, a.GridW)
 		}
-		gridKWh := a.GridW * dtH / 1000
-		wantCost := SlotGridCostOre(slot, gridKWh, p)
+		if err := validateEVPulse(slot, p, a, effectivePVW); err != nil {
+			return fmt.Errorf("slot %d: %w", i, err)
+		}
+		wantCost := reserveSlotCost(slot, p, a)
 		if math.Abs(a.CostOre-wantCost) > 0.05 {
 			return fmt.Errorf("slot %d cost %.4f, want %.4f", i, a.CostOre, wantCost)
 		}
 		totalCost += wantCost
 	}
+	// Derive the departure deficit from replay, not from a worker claim.
+	plan.LoadpointShortfallWh = deadlineShortfall
 	if math.Abs(plan.TotalCostOre-totalCost) > 0.1 {
 		return fmt.Errorf("total cost %.4f, want %.4f", plan.TotalCostOre, totalCost)
 	}

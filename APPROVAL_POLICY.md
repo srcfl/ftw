@@ -23,4 +23,6 @@ that check. Preserve the owner's release and beta-review rules in AGENTS.md.
 
 This policy grants no extra authority to approve, merge, release or operate a
 site. It also adds no confirmation requirement when the owner has already
-authorized the action. External users submit issues; Sourceful maintains PRs.
+authorized the action. External PRs are welcome under CONTRIBUTING.md;
+Sourceful reviews and maintains changes. Submission grants no merge or
+release authority, whether a person or an agent wrote the change.

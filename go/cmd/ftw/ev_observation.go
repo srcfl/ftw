@@ -20,14 +20,17 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 		return loadpoint.EVSample{}, false
 	}
 	var d struct {
-		ConnectionGeneration uint64  `json:"connection_generation"`
-		ConnectionUnknown    bool    `json:"connection_unknown"`
-		Connected            *bool   `json:"connected"`
-		SessionWh            float64 `json:"session_wh"`
-		RequestActive        *bool   `json:"request_active"`
-		SessionID            string  `json:"session_id"`
+		ConnectionGeneration uint64   `json:"connection_generation"`
+		ConnectionUnknown    bool     `json:"connection_unknown"`
+		Connected            *bool    `json:"connected"`
+		SessionWh            *float64 `json:"session_wh"`
+		RequestActive        *bool    `json:"request_active"`
+		SessionID            string   `json:"session_id"`
+		PowerAt              string   `json:"power_observed_at"`
+		PowerMaxAgeS         int      `json:"power_max_age_s"`
+		EnergyAt             string   `json:"energy_observed_at"`
 	}
-	if json.Unmarshal(r.Data, &d) != nil || d.SessionWh < 0 {
+	if json.Unmarshal(r.Data, &d) != nil || (d.SessionWh != nil && *d.SessionWh < 0) {
 		return loadpoint.EVSample{}, false
 	}
 	if d.ConnectionUnknown {
@@ -40,8 +43,23 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 	if d.RequestActive != nil {
 		active = *d.RequestActive
 	}
-	return loadpoint.EVSample{ConnectionGeneration: d.ConnectionGeneration, PowerW: r.SmoothedW, SessionWh: d.SessionWh,
-		Connected: *d.Connected, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID}, true
+	sample := loadpoint.EVSample{ConnectionGeneration: d.ConnectionGeneration, PowerW: r.RawW,
+		PowerAt: r.UpdatedAt, PowerMaxAge: time.Duration(min(max(d.PowerMaxAgeS, 0), 180)) * time.Second, Connected: *d.Connected, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID,
+		SessionWhUnavailable: d.SessionWh == nil}
+	if d.SessionWh != nil {
+		sample.SessionWh = *d.SessionWh
+	}
+	if d.PowerAt != "" {
+		at, err := time.Parse(time.RFC3339Nano, d.PowerAt)
+		sample.PowerAt = at
+		sample.PowerUnavailable = err != nil || at.After(now.Add(time.Second)) || (now.Sub(at) > sample.PowerWindow() && r.RawW > 0)
+	}
+	if d.EnergyAt != "" {
+		at, err := time.Parse(time.RFC3339Nano, d.EnergyAt)
+		sample.EnergyAt = at
+		sample.SessionWhUnavailable = sample.SessionWhUnavailable || err != nil || at.After(now.Add(time.Second))
+	}
+	return sample, true
 }
 
 // OCPP has no driver registry entry. Only the current adopted charger's

@@ -34,13 +34,15 @@ type forecastSiteConfig struct {
 	baseOptions           telemetry.ForecastOptions
 	required              map[string]bool // value identifies PV sources
 	accepted              forecastIdentityReceipt
+	bindingDirty          bool
 	configuredAt          time.Time
 	heatingPrior, ratedPV float64
 }
 
 type forecastIdentityReceipt struct {
-	BaseRevision string            `json:"base_revision"`
-	IDs          map[string]string `json:"ids"`
+	BaseRevision         string            `json:"base_revision"`
+	IDs                  map[string]string `json:"ids"`
+	LearningBaseRevision string            `json:"learning_base_revision,omitempty"`
 }
 
 const forecastIdentityReceiptKey = "forecast/live_identity_v1"
@@ -101,33 +103,27 @@ func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.Cat
 	}
 	driverInputs := append([]config.Driver(nil), cfg.Drivers...)
 	sort.Slice(driverInputs, func(i, j int) bool { return driverInputs[i].Name < driverInputs[j].Name })
-	scripts := make(map[string]string)
-	for _, d := range driverInputs {
-		if digest, err := forecastReleaseScriptDigest(d.Lua); err == nil {
-			scripts[d.Name] = digest
-		} else {
-			scripts[d.Name] = "unavailable"
-		}
-	}
-	// Only the digest leaves this function. Driver measurement settings and
-	// stable hardware bindings must invalidate learning when they change.
-	data, err := json.Marshal(struct {
-		Meter, Timezone string
-		Options         telemetry.ForecastOptions
-		Weather         *config.Weather
-		Drivers         []config.Driver
-		Scripts         map[string]string
-	}{v.Meter, v.Timezone, v.Options, weather, driverInputs, scripts})
+	learningDrivers := forecastLearningDrivers(v.Meter, v.Options.ExpectedFlows, driverInputs)
+	baseRevision, err := forecastStaticRevision(v, weather, learningDrivers)
+	// Beta.3 hashed every driver. Verify that exact old contract before
+	// retaining its learning ID under the narrower beta.4 hash policy.
+	legacyRevision, legacyErr := forecastStaticRevision(v, weather, driverInputs)
 	if err != nil {
 		slog.Warn("forecast configuration is not serializable", "err", err)
 		v.Options.HouseholdInvalidReason = "invalid_forecast_configuration"
 		v.HasLocation = false
-		data = []byte("invalid:" + uuid.NewString())
+		baseRevision = "invalid:" + uuid.NewString()
 	}
-	baseRevision := fmt.Sprintf("site-static-v1:%x", sha256.Sum256(data))
 	weatherData, _ := json.Marshal(weather)
 	weatherRevision := fmt.Sprintf("%x", sha256.Sum256(weatherData))
 	s.mu.Lock()
+	if err == nil && legacyErr == nil && s.accepted.BaseRevision == legacyRevision && legacyRevision != baseRevision {
+		if s.accepted.LearningBaseRevision == "" {
+			s.accepted.LearningBaseRevision = legacyRevision
+		}
+		s.accepted.BaseRevision = baseRevision
+		s.bindingDirty = true
+	}
 	if s.weatherRevision != weatherRevision || s.weatherSinceMS <= 0 {
 		s.weatherRevision = weatherRevision
 		s.weatherSinceMS = time.Now().UnixMilli()
@@ -199,7 +195,11 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 		}
 	}
 	data, _ := json.Marshal(ids)
-	learning := fmt.Sprintf("site-v2:%x", sha256.Sum256([]byte(s.baseRevision+"/"+string(data))))
+	learningBase := s.baseRevision
+	if s.accepted.BaseRevision == s.baseRevision && s.accepted.LearningBaseRevision != "" {
+		learningBase = s.accepted.LearningBaseRevision
+	}
+	learning := fmt.Sprintf("site-v2:%x", sha256.Sum256([]byte(learningBase+"/"+string(data))))
 	cohort := learning + "/" + Version + "/" + s.engineVersion + "/" + forecastPipelinePolicy
 	revision := fmt.Sprintf("forecast-v1:%x", sha256.Sum256([]byte(cohort)))
 	opts := s.baseOptions
@@ -211,11 +211,17 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 	}
 	changed := s.value.Revision != revision || s.value.IdentityPending != pending || s.value.Options.PVInvalidReason != opts.PVInvalidReason
 	s.value.LearningRevision, s.value.Revision, s.value.IdentityPending, s.value.Options = learning, revision, pending, opts
-	if !pending && (s.accepted.BaseRevision != s.baseRevision || !forecastIdentitiesEqual(s.accepted.IDs, ids)) {
-		s.accepted = forecastIdentityReceipt{s.baseRevision, ids}
+	if !pending && (s.bindingDirty || s.accepted.BaseRevision != s.baseRevision || !forecastIdentitiesEqual(s.accepted.IDs, ids)) {
+		s.accepted = forecastIdentityReceipt{BaseRevision: s.baseRevision, IDs: ids}
+		if learningBase != s.baseRevision {
+			s.accepted.LearningBaseRevision = learningBase
+		}
+		s.bindingDirty = true
 		if encoded, err := json.Marshal(s.accepted); err == nil {
 			if err = s.store.SaveConfig(forecastIdentityReceiptKey, string(encoded)); err != nil {
 				slog.Warn("forecast identity binding not saved", "err", err)
+			} else {
+				s.bindingDirty = false
 			}
 		}
 	}
@@ -225,6 +231,56 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 		}
 	}
 	return changed
+}
+
+// Keep this encoding compatible with beta.3 so an upgrade can prove that
+// only the hash policy changed. Never infer compatibility from a driver name.
+func forecastStaticRevision(v forecastSite, weather *config.Weather, inputs []config.Driver) (string, error) {
+	scripts := make(map[string]string)
+	for _, d := range inputs {
+		digest, err := forecastReleaseScriptDigest(d.Lua)
+		if err != nil {
+			digest = "unavailable"
+		}
+		scripts[d.Name] = digest
+	}
+	data, err := json.Marshal(struct {
+		Meter, Timezone string
+		Options         telemetry.ForecastOptions
+		Weather         *config.Weather
+		Drivers         []config.Driver
+		Scripts         map[string]string
+	}{v.Meter, v.Timezone, v.Options, weather, inputs, scripts})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("site-static-v1:%x", sha256.Sum256(data)), nil
+}
+
+// forecastLearningDrivers are the physical measurement sources whose script
+// or scaling change must reset learned PV/load models. EV/V2X chargers stay
+// in ExpectedFlows for household completeness, but their Lua packaging is
+// not a house or PV measurement contract.
+func forecastLearningDrivers(meter string, flows []telemetry.ForecastFlow, drivers []config.Driver) []config.Driver {
+	keep := map[string]bool{}
+	if meter != "" {
+		keep[meter] = true
+	}
+	for _, flow := range flows {
+		switch flow.DerType {
+		case telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery:
+			if flow.Driver != "" {
+				keep[flow.Driver] = true
+			}
+		}
+	}
+	out := make([]config.Driver, 0, len(keep))
+	for _, d := range drivers {
+		if keep[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func forecastIdentityStrength(id string) int {

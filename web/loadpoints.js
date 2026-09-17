@@ -145,6 +145,7 @@
     inferred: 'estimated',
     vehicle: 'from the car',
     completed: 'pinned after the car stopped asking',
+    assumed: 'not confirmed by the car',
   };
   function socSourceLabel(src) {
     return SOC_SOURCE_LABELS[src] || SOC_SOURCE_LABELS.inferred;
@@ -152,9 +153,10 @@
 
   function configBlock(lp) {
     const d = fmtDeadline(lp.target_time);
-    const target = (lp.target_soc > 0)
-      ? `${fmtPct(lp.target_soc)}${d ? ' by ' + d : ''}`
-      : 'opportunistic';
+    const vehicleLimit = lp.finish_at_vehicle_limit === true || lp.schedule?.finish_at_vehicle_limit === true;
+    const target = vehicleLimit
+      ? `Car's charge limit${lp.goal_complete === true ? ' · completed' : d ? ' by ' + d : ''}`
+      : (lp.target_soc > 0) ? `${fmtPct(lp.target_soc)}${d ? ' by ' + d : ''}` : 'opportunistic';
     const vehicle = (lp.vehicle_driver)
       ? `${escapeHtml(lp.vehicle_driver)}${lp.vehicle_charging_state ? ' · ' + escapeHtml(lp.vehicle_charging_state) : ''}${lp.vehicle_stale ? ' · stale' : ''}`
       : '—';
@@ -305,10 +307,11 @@
       refreshTimer = null;
     }
     function syncPolling() {
-      if (advancedVisible()) startPolling();
+      if (advancedVisible() && !document.hidden) startPolling();
       else stopPolling();
     }
     document.addEventListener('ftw-ui-mode-change', syncPolling);
+    document.addEventListener('visibilitychange', syncPolling);
     syncPolling();
   }
 

@@ -30,6 +30,9 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	if max > 0 && want > max {
 		want = max
 	}
+	if max > 0 && max < min {
+		return 0
+	}
 	if len(steps) == 0 {
 		return want
 	}

@@ -49,6 +49,7 @@ type LoadpointSpec struct {
 	// Electrical constraints. AllowedStepsW MUST include 0 (off) and
 	// should enumerate the discrete charger power levels. If empty,
 	// defaults to {0, MaxChargeW}.
+	MinChargeW    float64
 	MaxChargeW    float64
 	AllowedStepsW []float64
 
@@ -95,12 +96,15 @@ func (l *LoadpointSpec) normalizedSteps() []float64 {
 		if l.MaxChargeW <= 0 {
 			return []float64{0}
 		}
+		if l.MinChargeW > 0 && l.MinChargeW < l.MaxChargeW {
+			return []float64{0, l.MinChargeW, l.MaxChargeW}
+		}
 		return []float64{0, l.MaxChargeW}
 	}
 	seen := map[float64]struct{}{0: {}}
 	out := []float64{0}
 	for _, s := range l.AllowedStepsW {
-		if s < 0 {
+		if s < 0 || (s > 0 && s < l.MinChargeW) {
 			continue
 		}
 		if l.MaxChargeW > 0 && s > l.MaxChargeW {

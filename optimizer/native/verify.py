@@ -76,7 +76,7 @@ def verify_bundle(root):
 def host_key():
     machine = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64", "amd64": "amd64"}.get(platform.machine().lower())
     key = f"{platform.system().lower()}-{machine}"
-    return key if key in REQUIRED_PLATFORMS else None
+    return key if key in KNOWN_PLATFORMS else None
 
 
 def check_public_tree():

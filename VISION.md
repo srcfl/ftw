@@ -205,11 +205,18 @@ Agents work within the scope and authority given to them. Reviews should
 provide an independent assessment and evidence; file-based reviewer lists
 do not define product ownership.
 
-External users contribute through issues: bugs, needs, hardware evidence and
-suggestions. FTW does not accept external pull requests, including drivers,
-documentation and website changes. Sourceful maintains implementation PRs.
-Users may still inspect, run and adapt the software under its existing license.
-This contribution policy changes no license or copyright attribution.
+External contributions are welcome, including code, drivers, documentation
+and website PRs. Prefer an issue that states the need and evidence. A broad
+product or architecture proposal can start as a short Markdown PR; a concrete
+fix can include code and tests. Hardware changes need relevant hardware
+evidence before we claim working support.
+
+Development is agentic first. Make problems, scope, test steps and results
+clear enough for people and agents to assess and continue the work. The
+submitter checks the result; agent output alone is not test evidence.
+Sourceful reviews and maintains changes; Fredrik sets direction and priority.
+An accepted issue or proposal does not promise implementation or delivery.
+This policy changes no license, copyright attribution or release authority.
 
 The operating rules live in [AGENTS.md](AGENTS.md), review routing in
 [APPROVAL_POLICY.md](APPROVAL_POLICY.md), and contribution details in
