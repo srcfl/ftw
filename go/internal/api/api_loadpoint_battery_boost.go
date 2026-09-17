@@ -83,6 +83,9 @@ func (s *Server) handleLoadpointBatteryBoostEnable(w http.ResponseWriter, r *htt
 	if s.deps.MPC != nil {
 		go s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_battery_boost_enabled")
 	}
+	if !s.waitForLoadpointSave(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -92,6 +95,9 @@ func (s *Server) handleLoadpointBatteryBoostCancel(w http.ResponseWriter, r *htt
 		return
 	}
 	status := s.deps.LoadpointCtrl.CancelBatteryBoost(id, time.Now())
+	if !s.waitForLoadpointSave(w, r) {
+		return
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 

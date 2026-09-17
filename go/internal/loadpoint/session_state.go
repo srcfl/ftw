@@ -44,6 +44,8 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 func (m *Manager) SetSessionStore(store SessionStore) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sessionStore = store
 }
 
@@ -249,6 +251,9 @@ func (m *Manager) persistSession(id string) {
 		retention = "session"
 		if err != nil {
 			retention = "error"
+			if persistencePending(err) {
+				retention = "pending"
+			}
 		}
 	}
 	m.mu.Lock()

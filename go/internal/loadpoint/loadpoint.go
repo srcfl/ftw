@@ -124,6 +124,7 @@ func (f SiteFuse) Phases() int {
 type State struct {
 	ManualRestoreUnconfirmed bool    `json:"manual_restore_unconfirmed"`
 	ManualSaveError          bool    `json:"manual_save_error"`
+	ManualSavePending        bool    `json:"manual_save_pending,omitempty"`
 	VehicleCapacityWh        float64 `json:"vehicle_capacity_wh"`
 	CapacitySource           string  `json:"capacity_source"`
 	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
@@ -343,6 +344,7 @@ type loadpointRuntime struct {
 	connectionGeneration     uint64
 	manualRestoreUnconfirmed bool
 	manualSaveError          bool
+	manualSavePending        bool
 	energy                   *sessionEnergy
 	powerAt                  time.Time
 	powerUnavailable         bool
@@ -591,6 +593,7 @@ func (m *Manager) Load(cfgs []Config) {
 				lp.completionNotified = existing.completionNotified
 				lp.manualRestoreUnconfirmed = existing.manualRestoreUnconfirmed
 				lp.manualSaveError = existing.manualSaveError
+				lp.manualSavePending = existing.manualSavePending
 			} else {
 				lp.pluggedIn = false
 				lp.currentSoC = 0
@@ -658,7 +661,7 @@ func (m *Manager) State(id string) (State, bool) {
 	if !ok {
 		return State{}, false
 	}
-	return lp.snapshot(), true
+	return m.snapshot(lp), true
 }
 
 // States returns snapshots of every configured loadpoint, sorted by
@@ -669,7 +672,7 @@ func (m *Manager) States() []State {
 	out := make([]State, 0, len(m.order))
 	for _, id := range m.order {
 		if lp, ok := m.byID[id]; ok {
-			out = append(out, lp.snapshot())
+			out = append(out, m.snapshot(lp))
 		}
 	}
 	return out
@@ -986,11 +989,12 @@ func (m *Manager) SetSurplusOnlySaver(saver func(id string, v bool) error) {
 func (m *Manager) HydrateSurplusOnly(load func(id string) (bool, bool)) {
 	m.intentMu.Lock()
 	defer m.intentMu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, lp := range m.byID {
+	for _, state := range m.States() {
+		id := state.ID
 		if v, ok := load(id); ok {
-			lp.Config.SurplusOnly = v
+			m.mu.Lock()
+			m.byID[id].Config.SurplusOnly = v
+			m.mu.Unlock()
 		}
 	}
 }
@@ -1154,6 +1158,7 @@ func (lp *loadpointRuntime) snapshot() State {
 	st := State{
 		ManualRestoreUnconfirmed: lp.manualRestoreUnconfirmed,
 		ManualSaveError:          lp.manualSaveError,
+		ManualSavePending:        lp.manualSavePending,
 		VehicleCapacityWh:        lp.VehicleCapacityWh,
 		CapacitySource:           "configured",
 		ID:                       lp.ID,
@@ -1328,19 +1333,16 @@ func (m *Manager) ClearScheduleChecked(id string) (bool, error) {
 func (m *Manager) HydrateSchedules(loader func(id string) (Schedule, bool)) {
 	m.intentMu.Lock()
 	defer m.intentMu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, id := range m.order {
-		lp, ok := m.byID[id]
-		if !ok {
-			continue
-		}
+	for _, state := range m.States() {
+		id := state.ID
 		s, found := loader(id)
 		if !found || s.Empty() {
 			continue
 		}
 		s.Normalize()
-		lp.schedule = s
+		m.mu.Lock()
+		m.byID[id].schedule = s
+		m.mu.Unlock()
 	}
 }
 

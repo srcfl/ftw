@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -175,6 +176,9 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		hold.StartedAt = prev.StartedAt
 	}
 	s.deps.LoadpointCtrl.SetManualHold(id, hold)
+	if !s.waitForLoadpointSave(w, r) {
+		return
+	}
 	writeJSON(w, 200, manualHoldResponseFrom(hold, true))
 }
 
@@ -199,7 +203,20 @@ func (s *Server) handleLoadpointManualHoldClear(w http.ResponseWriter, r *http.R
 		return
 	}
 	s.deps.LoadpointCtrl.ClearManualHold(id)
+	if !s.waitForLoadpointSave(w, r) {
+		return
+	}
 	writeJSON(w, 200, manualHoldResponse{Active: false})
+}
+
+func (s *Server) waitForLoadpointSave(w http.ResponseWriter, r *http.Request) bool {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.deps.Loadpoints.WaitForPersistence(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "The choice is active, but FTW could not confirm it was saved. Check storage status before restarting."})
+		return false
+	}
+	return true
 }
 
 // handleLoadpointManualHoldGet returns the active hold (if any).
