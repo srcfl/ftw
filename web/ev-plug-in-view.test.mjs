@@ -11,16 +11,6 @@ const view = source.slice(
 // The plug-in moment (#1059): the modal shows what the box will do and
 // lets the car's charge level be corrected without a button.
 
-test('the plan view draws the planned windows on a 24 h track', () => {
-  assert.match(view, /lpNow\.plan_windows/);
-  assert.match(view, /EV_PLAN_HORIZON_MS/);
-  // Every window is placed by wall clock and names its energy.
-  assert.match(view, /w\.start_ms/);
-  assert.match(view, /w\.wh \/ 1000/);
-  // A manual hold is explained instead of drawn as a plan.
-  assert.match(view, /Manual charge is selected/);
-});
-
 test('the charge-level slider writes on release, with no button', () => {
   assert.match(view, /slider\.addEventListener\("change"/);
   assert.match(view, /\/soc"/);

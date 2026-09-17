@@ -3,6 +3,7 @@
 (function () {
   "use strict";
 
+  const evPlanUI = import("/ev-plan.js").catch(function () { return null; });
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
   const historyMigrationUI = import("/history-migration.js").catch(function () { return null; });
   function updateHistoryMigration(health) {
@@ -2812,8 +2813,13 @@
     var text = null;
     var tone = "var(--text-dim)";
     var kwPlanned = lp.plan_total_wh > 0 ? " ~" + (lp.plan_total_wh / 1000).toFixed(1) + " kWh planned." : "";
-    var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
+    var winActive = !lp.plan_pending && !lp.plan_outdated && lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
     var charging = (lp.current_power_w || 0) >= 100;
+    // API current_soc is the controller estimate, even when a car reports
+    // a separate vehicle_soc. Use the same level as the battery card.
+    var statusSoC = lp.soc_source === "vehicle"
+      ? (lp.vehicle_driver && !lp.vehicle_stale ? (lp.vehicle_soc == null ? 0 : lp.vehicle_soc) : NaN)
+      : lp.current_soc;
     var hasSchedule = lp.schedule && (lp.schedule.finish_at_vehicle_limit === true || lp.schedule.soc > 0);
     if (lp.manual_restore_unconfirmed) {
       text = manualStatusText(lp, d);
@@ -2844,7 +2850,7 @@
     } else if (lp.finish_at_vehicle_limit !== true && !(lp.schedule && lp.schedule.finish_at_vehicle_limit === true) &&
         lp.commanded_known && lp.commanded_w === 0 && !lp.power_unavailable &&
         typeof lp.target_soc === "number" && lp.target_soc > 0 && lp.target_soc <= 1 &&
-        typeof lp.current_soc === "number" && lp.current_soc >= lp.target_soc && lp.current_soc <= 1 &&
+        typeof statusSoC === "number" && statusSoC >= lp.target_soc && statusSoC <= 1 &&
         (lp.soc_source === "vehicle" || lp.soc_source === "inferred")) {
       text = "Charge target reached (" + Math.round(lp.target_soc * 100) + "%).";
       text += lp.soc_source === "vehicle"
@@ -3172,6 +3178,7 @@
       if (statusTableEl) statusTableEl.hidden = true;
       if (evLastLp) {
         var stale = Object.assign({}, evLastLp, {
+          read_unavailable: true,
           charger: { known: true, available: false },
           manual: Object.assign({}, evLastLp.manual, { state: "unavailable" }),
         });
@@ -3735,45 +3742,42 @@
   // screen moves with the value. No button. Mounted once per loadpoint;
   // update() runs on every poll and leaves the slider alone while the
   // operator is dragging it.
-  var EV_PLAN_HORIZON_MS = 24 * 3600 * 1000;
-
   function buildEvPlanView(lp, d) {
     var box = document.createElement("div");
     box.style.margin = "0 0 0.6rem 0";
 
     var headline = null; // <p> from renderEvPlanStatus, or null
 
-    // 24 h track: windows from lp.plan_windows placed by wall clock.
-    var track = document.createElement("div");
-    track.className = "ev-plan-track";
-    track.style.position = "relative";
-    track.style.height = "12px";
-    track.style.borderRadius = "3px";
-    track.style.background = "color-mix(in srgb, var(--line) 60%, transparent)";
-    track.style.margin = "0.5rem 0 0.25rem";
-    track.style.overflow = "hidden";
-
-    var ticks = document.createElement("div");
-    ticks.style.display = "flex";
-    ticks.style.justifyContent = "space-between";
-    ticks.style.fontFamily = "var(--mono)";
-    ticks.style.fontSize = "0.65rem";
-    ticks.style.color = "var(--text-dim)";
-
-    var caption = document.createElement("small");
-    caption.style.display = "block";
-    caption.style.color = "var(--text-dim)";
-    caption.style.marginTop = "0.3rem";
-
+    var levels = document.createElement("div");
+    levels.className = "ev-charge-levels";
+    function levelColumn(label) {
+      var col = document.createElement("div");
+      var name = document.createElement("span"); name.textContent = label;
+      var value = document.createElement("strong");
+      var source = document.createElement("small");
+      col.appendChild(name); col.appendChild(value); col.appendChild(source);
+      levels.appendChild(col);
+      return { value: value, source: source };
+    }
+    var currentLevel = levelColumn("Battery now");
+    var carLimit = levelColumn("Car’s charge limit");
+    var levelsNote = document.createElement("p");
+    levelsNote.className = "ev-timeline-note";
     var planWrap = document.createElement("div");
-    planWrap.appendChild(track);
-    planWrap.appendChild(ticks);
-    planWrap.appendChild(caption);
+    var timeline = null;
+    var planUI = null;
+    evPlanUI.then(function (ui) {
+      if (!ui) throw new Error("Charging view unavailable");
+      planUI = ui;
+      timeline = ui.createChargingTimeline();
+      planWrap.appendChild(timeline.el);
+      update(lastLp, lastDriver);
+    }).catch(function () { planWrap.textContent = "Charging details could not load. Reload to try again."; });
 
     // Car's current charge.
     var socWrap = document.createElement("div");
     socWrap.style.marginTop = "0.75rem";
-    var hdr = sliderHeader("Battery now", "—");
+    var hdr = sliderHeader("Update battery estimate", "—");
     socWrap.appendChild(hdr.row);
     var slider = fullWidthSlider(50, hdr.value);
     slider.setAttribute("aria-label", "Car's current charge, percent");
@@ -3785,8 +3789,10 @@
     note.style.minHeight = "1em";
     socWrap.appendChild(note);
 
-    box.appendChild(planWrap);
+    box.appendChild(levels);
+    box.appendChild(levelsNote);
     box.appendChild(socWrap);
+    box.appendChild(planWrap);
     var capacityView = buildEvCapacityView(lp);
     box.appendChild(capacityView.el);
 
@@ -3815,7 +3821,7 @@
           ? " This level could not be saved for a box restart. Enter it again before relying on the plan after restarting."
           : " This level must be entered again after a box restart.";
       if (src === "assumed") return "Battery level needs confirmation. The plan currently assumes " + Math.round(lpNow.current_soc * 100) + " %. Drag to match the car." + retention;
-      if (src === "vehicle") return "Reported by the car. Drag only to correct drift.";
+      if (src === "vehicle") return "The car reports its current level automatically.";
       if (src === "completed") return "The car stopped asking for charge. Its actual battery level is not confirmed. Drag to match the car.";
       return "Estimated from energy delivered. Drag to the real value and the plan follows." + retention;
     }
@@ -3868,73 +3874,41 @@
 
     var lastLp = lp;
 
-    function drawTrack(lpNow) {
-      track.textContent = "";
-      ticks.textContent = "";
-      var now = Date.now();
-      var windows = (lpNow && Array.isArray(lpNow.plan_windows)) ? lpNow.plan_windows : [];
-      planWrap.hidden = windows.length === 0 || !!lpNow.manual_active;
-      var shown = 0;
-      var shownWh = 0;
-      windows.forEach(function (w) {
-        var start = Math.max(w.start_ms, now);
-        var end = Math.min(w.end_ms, now + EV_PLAN_HORIZON_MS);
-        if (!(end > start)) return;
-        var seg = document.createElement("div");
-        seg.className = "ev-plan-window";
-        seg.style.position = "absolute";
-        seg.style.top = "0";
-        seg.style.bottom = "0";
-        seg.style.left = ((start - now) / EV_PLAN_HORIZON_MS * 100) + "%";
-        seg.style.width = Math.max(0.8, (end - start) / EV_PLAN_HORIZON_MS * 100) + "%";
-        seg.style.background = "var(--accent-e)";
-        seg.style.borderRadius = "2px";
-        seg.title = evFmtClock(w.start_ms) + "–" + evFmtClock(w.end_ms) + " · " + (w.wh / 1000).toFixed(1) + " kWh";
-        track.appendChild(seg);
-        shown++;
-        shownWh += w.wh;
-      });
-      for (var h = 0; h <= 24; h += 6) {
-        var t = document.createElement("span");
-        t.textContent = h === 0 ? "now" : evFmtClock(now + h * 3600 * 1000);
-        ticks.appendChild(t);
-      }
-      if (lpNow && lpNow.manual_active) {
-        caption.textContent = shown > 0
-          ? "Manual charge is selected. The plan below resumes when you return to it."
-          : "Manual charge is selected. Nothing else is planned in the next 24 h.";
-      } else if (shown > 0) {
-        var first = windows[0];
-        caption.textContent = "Charges " + evFmtClock(first.start_ms) + "–" + evFmtClock(first.end_ms) +
-          (shown > 1 ? " and " + (shown - 1) + " more window" + (shown > 2 ? "s" : "") : "") +
-          " · " + (shownWh / 1000).toFixed(1) + " kWh in the next 24 h.";
-      } else if (lpNow && lpNow.plugged_in) {
-        caption.textContent = "No charge window in the next 24 h.";
-      } else {
-        caption.textContent = "Plug in to see the plan for this car.";
-      }
-    }
+    var lastDriver = d;
 
     function update(lpNow, dNow) {
       lastLp = lpNow;
+      lastDriver = dNow;
       capacityView.update(lpNow);
       var fresh = renderEvPlanStatus(lpNow, dNow);
       if (headline && headline.parentNode === box) {
         if (fresh) { box.replaceChild(fresh, headline); } else { box.removeChild(headline); }
       } else if (fresh) {
-        box.insertBefore(fresh, planWrap);
+        box.insertBefore(fresh, levels);
       }
       headline = fresh;
-      drawTrack(lpNow);
+      if (timeline) timeline.update(lpNow);
+      var info = planUI && planUI.chargingLevels(lpNow);
+      if (info) {
+        currentLevel.value.textContent = info.now;
+        currentLevel.source.textContent = info.source;
+        carLimit.value.textContent = info.limit;
+        carLimit.source.textContent = info.limitSource;
+        levelsNote.textContent = info.explanation;
+      }
+      levels.hidden = !lpNow.plugged_in;
+      levelsNote.hidden = !lpNow.plugged_in;
       var plugged = !!(lpNow && lpNow.plugged_in);
-      socWrap.hidden = !plugged;
+      socWrap.hidden = !plugged || !!(info && info.fromCar);
+      slider.disabled = !!lpNow.read_unavailable;
       if (!plugged) return;
       var cur = (lpNow.current_soc != null) ? Math.max(0, Math.min(100, Math.round(lpNow.current_soc * 100))) : null;
       if (!operatorHolds() && cur != null) {
         slider.value = String(cur);
         hdr.value.textContent = lpNow.soc_source === "assumed" ? "Not confirmed" : cur + "%";
       }
-      if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
+      if (lpNow.read_unavailable) note.textContent = "Waiting for current charging data.";
+      else if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
     }
 
     update(lp, d);

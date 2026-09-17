@@ -59,7 +59,7 @@ test('reached goal explains a stopped charge and names the level source', () => 
   const estimated = planStatus(lp, {}).textContent;
   assert.match(estimated, /Charge target reached \(80%\).*estimated by FTW/);
   assert.doesNotMatch(estimated, /No charge window|Choose Charge now/);
-  assert.match(planStatus({ ...lp, soc_source: 'vehicle' }, {}).textContent, /reported by the car/);
+  assert.match(planStatus({ ...lp, soc_source: 'vehicle', vehicle_driver: 'car', vehicle_soc: .81 }, {}).textContent, /reported by the car/);
   for (const change of [
     { soc_source: 'assumed' }, { current_soc: .79 }, { target_soc: null },
     { power_unavailable: true }, { charger: { known: true, available: false } },
@@ -95,4 +95,21 @@ test('only the Core completion flag confirms a car-limit goal, even after restar
     assert.doesNotMatch(planStatus({ ...lp, goal_complete: flag }, {}).textContent, /car confirmed/);
   }
   assert.doesNotMatch(planStatus({ ...lp, goal_complete: true, manual_active: true }, {}).textContent, /car confirmed/);
+});
+
+
+test('target status uses the reported car level, not the separate controller estimate', () => {
+  const lp = { plugged_in: true, commanded_known: true, commanded_w: 0, target_soc: .8,
+    current_soc: .99, vehicle_soc: .45, soc_source: 'vehicle', vehicle_driver: 'car', schedule: { soc: .8 } };
+  assert.doesNotMatch(planStatus(lp, {}).textContent, /target reached/);
+  assert.match(planStatus({ ...lp, current_soc: .4, vehicle_soc: .81 }, {}).textContent, /target reached/);
+  assert.doesNotMatch(planStatus({ ...lp, vehicle_soc: .81, vehicle_stale: true }, {}).textContent, /target reached/);
+});
+
+test('live charging does not confirm an outdated planned end time', () => {
+  const lp = { plugged_in: true, current_power_w: 7000,
+    plan_next_start_ms: Date.now() - 1000, plan_next_end_ms: Date.now() + 3600000 };
+  assert.match(planStatus(lp, {}).textContent, /Charging on plan until/);
+  assert.doesNotMatch(planStatus({ ...lp, plan_outdated: true }, {}).textContent, /on plan until/);
+  assert.doesNotMatch(planStatus({ ...lp, plan_pending: true }, {}).textContent, /on plan until/);
 });
