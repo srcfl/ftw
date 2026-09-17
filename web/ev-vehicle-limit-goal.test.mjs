@@ -154,3 +154,12 @@ test('completed one-shot is labeled complete and server-owned identity stays out
   assert.equal('first_deadline_ms' in ui.requests[0].schedule, false);
   assert.equal(ui.requests[0].schedule.finish_at_vehicle_limit, true);
 });
+
+
+test('recurring goal follows Core completion and returns to repeats when Core reopens it', () => {
+  const ui = fixture({ schedule: { soc: .8, finish_at_vehicle_limit: true, recurring: true, time_of_day_min_utc: 420 } });
+  ui.root.update({ ...ui.lp, goal_complete: true }, null);
+  assert.match(ui.text(), /Car's charge limit by .* · completed/);
+  ui.root.update({ ...ui.lp, goal_complete: false }, null);
+  assert.match(ui.text(), /Car's charge limit by .* · repeats/);
+});

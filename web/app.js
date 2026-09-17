@@ -3049,7 +3049,8 @@
       }
       if (!carConnected && matched && matched.schedule && (matched.schedule.finish_at_vehicle_limit === true || matched.schedule.soc > 0)) {
         freshStatus.textContent = matched.goal_complete === true
-          ? "No car connected. The car confirmed this goal is complete. Set a new goal for the next charge."
+          ? "No car connected. The car confirmed this goal is complete. " + (matched.schedule.recurring
+            ? "The recurring schedule remains saved." : "Set a new goal for the next charge.")
           : "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
       }
       evLastLp = matched;
