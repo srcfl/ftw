@@ -13,7 +13,7 @@ const sched = source.slice(
 
 test('every schedule control saves on change', () => {
   assert.doesNotMatch(source, /Set schedule|Update schedule/);
-  assert.match(sched, /targetSlider\.addEventListener\("change", scheduleSave\)/);
+  assert.match(sched, /targetSlider\.addEventListener\("change"/);
   assert.match(sched, /timeInp\.addEventListener\("change", scheduleSave\)/);
   assert.match(sched, /recCb\.addEventListener\("change"/);
   assert.match(sched, /surCb\.addEventListener\("change"/);

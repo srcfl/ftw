@@ -234,6 +234,7 @@
         <p class="overview-plan-reason" id="overview-plan-reason">Waiting for planner state.</p>
         <p class="overview-plan-constraint" id="overview-plan-constraint">Safety limits remain active.</p>
         <p class="overview-plan-soc" id="overview-plan-soc" hidden></p>
+        <div id="overview-ev-plans" hidden></div>
         <a class="overview-detail-link" href="#plan">Open full plan <span aria-hidden="true">→</span></a>
       </section>
     </section>
@@ -542,6 +543,8 @@
           </form>
         </section>
 
+        <div id="plan-ev-plans" hidden></div>
+
         <!-- Household planner prefs — forecast trust + battery export.
              Passive/Active are no longer primary buttons (HA/app keep
              those keys). Manual fallbacks stay behind Manual…. -->
@@ -603,7 +606,7 @@
           <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
         <p class="plan-help">
-          Forecast-driven battery schedule for the next 48&nbsp;h, recomputed every few minutes.
+          Forecast-driven schedule for the home battery and cars over the next 48&nbsp;h, updated every few minutes.
           Each bar is a 15-minute slot. Prices after the day-ahead publication window are filled in by the ML price twin.
           Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
         </p>
@@ -618,6 +621,7 @@
           <span class="legend-item" title="Beyond day-ahead publication — price filled in by the ML price twin"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
           <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
           <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
+          <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:#22d3ee"></span> Car charging</span>
           <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
           <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>

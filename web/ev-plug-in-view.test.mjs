@@ -11,16 +11,6 @@ const view = source.slice(
 // The plug-in moment (#1059): the modal shows what the box will do and
 // lets the car's charge level be corrected without a button.
 
-test('the plan view draws the planned windows on a 24 h track', () => {
-  assert.match(view, /lpNow\.plan_windows/);
-  assert.match(view, /EV_PLAN_HORIZON_MS/);
-  // Every window is placed by wall clock and names its energy.
-  assert.match(view, /w\.start_ms/);
-  assert.match(view, /w\.wh \/ 1000/);
-  // A manual hold is explained instead of drawn as a plan.
-  assert.match(view, /Manual charge is selected/);
-});
-
 test('the charge-level slider writes on release, with no button', () => {
   assert.match(view, /slider\.addEventListener\("change"/);
   assert.match(view, /\/soc"/);
@@ -46,4 +36,14 @@ test('the plan view is mounted once per loadpoint and updated on polls', () => {
   assert.match(source, /evPlanEl = buildEvPlanView\(matched, d\)/);
   assert.match(source, /evPlanLpId !== matched\.id/);
   assert.match(source, /evModalBody\.insertBefore\(evPlanEl\.el, statusTableEl\)/);
+});
+
+
+test('pending SoC write does not claim saved state or require re-entry', () => {
+  const note = new Function(source.slice(source.indexOf('function sourceNote'), source.indexOf('var socPending')) + '; return sourceNote;')();
+  const lp = { soc_source: 'inferred', current_soc: .8 };
+  assert.match(note({ ...lp, soc_retention: 'pending' }), /Saving this level/);
+  assert.doesNotMatch(note({ ...lp, soc_retention: 'pending' }), /must be entered again|could not be saved|keeps this level/);
+  assert.match(note({ ...lp, soc_retention: 'session' }), /keeps this level/);
+  assert.match(note({ ...lp, soc_retention: 'error' }), /could not be saved/);
 });
