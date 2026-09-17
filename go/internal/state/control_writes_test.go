@@ -240,3 +240,63 @@ func TestControlWritesNewSafetyFaultRunsWhileDiskBlocked(t *testing.T) {
 		t.Fatal(stops)
 	}
 }
+
+func TestControlWritesVehicleGoalRestoresPastDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := s.NewEVControlWrites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := time.Date(2026, 9, 17, 4, 0, 0, 0, time.UTC)
+	newManager := func() *loadpoint.Manager {
+		m := loadpoint.NewManager()
+		m.Load([]loadpoint.Config{{ID: "garage", DriverName: "charger"}})
+		m.SetSessionStore(w)
+		m.SetNowFn(func() time.Time { return before })
+		return m
+	}
+	m := newManager()
+	m.SetScheduleSaver(func(id string, goal loadpoint.Schedule) error {
+		data, err := json.Marshal(goal)
+		if err != nil {
+			return err
+		}
+		return s.SaveConfig("loadpoint_schedule:"+id, string(data))
+	})
+	m.SetSchedule("garage", loadpoint.Schedule{FinishAtVehicleLimit: true, Recurring: true, TimeOfDayMinUTC: 300})
+	m.RollSchedules(before)
+	m.ObserveSession("garage", true, 3600, 100, true, "charger", "same-session")
+	if err := m.WaitForPersistence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	finishControlWrites(t, w)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w, err = s.NewEVControlWrites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finishControlWrites(t, w)
+	m = newManager()
+	m.HydrateSchedules(func(id string) (loadpoint.Schedule, bool) {
+		raw, found := s.LoadConfig("loadpoint_schedule:" + id)
+		var goal loadpoint.Schedule
+		err := json.Unmarshal([]byte(raw), &goal)
+		return goal, found && err == nil
+	})
+	m.RollSchedules(before.Add(2 * time.Hour))
+	m.ObserveSession("garage", true, 3600, 200, true, "charger", "same-session")
+	if st, _ := m.State("garage"); !st.TargetTime.Equal(before.Add(time.Hour)) || st.GoalRetention != "session" {
+		t.Fatal("durable unfinished goal moved to tomorrow", st)
+	}
+}
