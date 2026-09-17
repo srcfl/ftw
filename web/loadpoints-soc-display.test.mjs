@@ -122,3 +122,10 @@ test("car-limit goal never shows the runtime 100 percent reserve as the target",
   const percent = await renderCard({ ...base, target_soc: .8 });
   assert.match(percent, /Target<\/span><span class="lp-cfg-val">80\.0%/);
 });
+
+
+test("completed car-limit goal is not displayed as an upcoming charge target", async () => {
+  const html = await renderCard({ ...base, finish_at_vehicle_limit: true, goal_complete: true,
+    target_soc: 0, target_time: '2026-09-17T05:00:00Z' });
+  assert.match(html, /Target<\/span><span class="lp-cfg-val">Car's charge limit · completed<\/span>/);
+});

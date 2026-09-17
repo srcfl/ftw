@@ -142,3 +142,15 @@ test('unverified session identity stays in collapsed goal details', () => {
   assert.match(details.children.map(el => el.textContent).join(' '), /cannot identify this charging session/);
   assert.equal(ui.find(el => el.textContent.startsWith('FTW could not save')).hidden, true);
 });
+
+
+test('completed one-shot is labeled complete and server-owned identity stays out of writes', async () => {
+  const ui = fixture({ schedule: { soc: .8, finish_at_vehicle_limit: true, recurring: false,
+    time_of_day_min_utc: 420, intent_id: 'server-owned', first_deadline_ms: 1790000000000 } });
+  ui.root.update({ ...ui.lp, goal_complete: true, target_soc: 0 }, null);
+  assert.match(ui.text(), /Car's charge limit by .* · completed/);
+  ui.time.value = '08:15'; ui.time.emit('change'); await ui.flush();
+  assert.equal('intent_id' in ui.requests[0].schedule, false);
+  assert.equal('first_deadline_ms' in ui.requests[0].schedule, false);
+  assert.equal(ui.requests[0].schedule.finish_at_vehicle_limit, true);
+});

@@ -155,7 +155,7 @@
     const d = fmtDeadline(lp.target_time);
     const vehicleLimit = lp.finish_at_vehicle_limit === true || lp.schedule?.finish_at_vehicle_limit === true;
     const target = vehicleLimit
-      ? `Car's charge limit${d ? ' by ' + d : ''}`
+      ? `Car's charge limit${lp.goal_complete === true ? ' · completed' : d ? ' by ' + d : ''}`
       : (lp.target_soc > 0) ? `${fmtPct(lp.target_soc)}${d ? ' by ' + d : ''}` : 'opportunistic';
     const vehicle = (lp.vehicle_driver)
       ? `${escapeHtml(lp.vehicle_driver)}${lp.vehicle_charging_state ? ' · ' + escapeHtml(lp.vehicle_charging_state) : ''}${lp.vehicle_stale ? ' · stale' : ''}`

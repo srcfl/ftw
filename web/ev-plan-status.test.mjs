@@ -83,3 +83,16 @@ test('car-limit goal never declares completion from estimated target_soc', () =>
   assert.doesNotMatch(planStatus(lp, {}).textContent, /target reached|No charging plan yet/);
   assert.match(planStatus({ ...lp, charging_declined: true }, {}).textContent, /car stopped asking for charge/);
 });
+
+
+test('only the Core completion flag confirms a car-limit goal, even after restart', () => {
+  const lp = { plugged_in: true, charger: { available: true }, current_power_w: 0,
+    commanded_known: true, commanded_w: 0, target_soc: 0, current_soc: .8,
+    soc_source: 'inferred', finish_at_vehicle_limit: true,
+    schedule: { soc: .8, finish_at_vehicle_limit: true }, charging_declined: true };
+  assert.match(planStatus({ ...lp, goal_complete: true }, {}).textContent, /car confirmed.*goal is complete/);
+  for (const flag of [false, undefined, 1, 'true']) {
+    assert.doesNotMatch(planStatus({ ...lp, goal_complete: flag }, {}).textContent, /car confirmed/);
+  }
+  assert.doesNotMatch(planStatus({ ...lp, goal_complete: true, manual_active: true }, {}).textContent, /car confirmed/);
+});

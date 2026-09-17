@@ -2839,6 +2839,8 @@
       if (lp.commanded_reason === "fuse_limit") {
         text += " Rate is limited by the main fuse right now.";
       }
+    } else if (lp.goal_complete === true) {
+      text = "The car confirmed this charging goal is complete.";
     } else if (lp.finish_at_vehicle_limit !== true && !(lp.schedule && lp.schedule.finish_at_vehicle_limit === true) &&
         lp.commanded_known && lp.commanded_w === 0 && !lp.power_unavailable &&
         typeof lp.target_soc === "number" && lp.target_soc > 0 && lp.target_soc <= 1 &&
@@ -3046,7 +3048,9 @@
         }
       }
       if (!carConnected && matched && matched.schedule && (matched.schedule.finish_at_vehicle_limit === true || matched.schedule.soc > 0)) {
-        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
+        freshStatus.textContent = matched.goal_complete === true
+          ? "No car connected. The car confirmed this goal is complete. Set a new goal for the next charge."
+          : "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
       }
       evLastLp = matched;
       if (matched && matched.charger && !matched.charger.available) {
@@ -4584,7 +4588,7 @@
       summary.textContent = hasGoal
         ? (s.finish_at_vehicle_limit === true ? "Car's charge limit" : Math.round(s.soc * 100) + " %") +
           " by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
-          (s.recurring ? " · repeats" : " · once")
+          (nextLp.goal_complete === true ? " · completed" : s.recurring ? " · repeats" : " · once")
         : "No ready time set.";
       editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
       suspended.textContent = evIsPaused(nextLp) || nextLp.manual_restore_unconfirmed
