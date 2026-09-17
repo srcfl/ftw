@@ -169,3 +169,25 @@ func TestVehicleLimitOneShotCompletionSurvivesNewSessionAndRestart(t *testing.T)
 		t.Fatal(st)
 	}
 }
+
+func TestVehicleLimitReadsCompleteAfterChargerDecline(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := chargeNowLoadpoint()
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, RequestActive: false}}
+	c := newTestController(t, []Config{cfg}, &Directive{}, samples, &fakeSender{})
+	c.manager.SetSchedule(cfg.ID, Schedule{FinishAtVehicleLimit: true, TimeOfDayMinUTC: 300})
+	c.manager.RollSchedules(now)
+	c.manager.ObserveSample(cfg.ID, samples[cfg.DriverName])
+	c.manager.mu.Lock()
+	c.manager.byID[cfg.ID].chargingDeclined = true
+	c.manager.mu.Unlock()
+	c.SetVehicleChargeState(func(string) (VehicleChargeState, bool) {
+		return VehicleChargeState{SoC: .8, Limit: .8, State: "Complete"}, true
+	})
+	if watts, finish := c.vehicleCompletionOffer(cfg, now); watts != 0 || !finish {
+		t.Fatal(watts, finish)
+	}
+	if st, _ := c.manager.State(cfg.ID); !st.GoalComplete {
+		t.Fatal("fresh completion was hidden by charger refusal", st)
+	}
+}

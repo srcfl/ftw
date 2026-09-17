@@ -36,6 +36,7 @@ A separate module requires a concrete benefit and:
 ### Vehicle charge-limit goals
 
 A percentage goal and a goal to reach the car's own limit are distinct.
+State schema 7 blocks rollback to a Core that would ignore the saved goal mode.
 `GET /api/loadpoints` advertises `vehicle_limit_goal_supported`; clients must
 require that flag before saving `schedule.finish_at_vehicle_limit`. Existing
 percentage goals keep their meaning. In vehicle-limit mode, the planner uses
