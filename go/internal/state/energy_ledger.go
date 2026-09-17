@@ -500,47 +500,6 @@ func (s *Store) rollupEnergyLedgerChunk(ctx context.Context, fromMS, toMS int64)
 	return s.rollupEnergyLedgerWidth(ctx, fromMS, toMS, EnergyLedgerRollupBucketMS)
 }
 
-func (s *Store) rollupEnergyLedgerWidth(ctx context.Context, fromMS, toMS, width int64) (int64, error) {
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	tx, err := s.history.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO energy_ledger_entries(
-		schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms,
-		energy_wh, source, quality, provenance, sample_count, observed_at_ms
-	)
-	SELECT schema_version, asset_id, flow,
-		(bucket_start_ms / ?) * ?, ?, SUM(energy_wh), source, quality, provenance,
-		SUM(sample_count), MAX(observed_at_ms)
-	FROM energy_ledger_entries
-	WHERE bucket_len_ms < ? AND bucket_start_ms >= ? AND bucket_start_ms < ?
-	GROUP BY schema_version, asset_id, flow,
-		4, source, quality, provenance
-	ON CONFLICT(schema_version, asset_id, flow, bucket_start_ms, bucket_len_ms, source, quality, provenance)
-	DO UPDATE SET
-		energy_wh = energy_ledger_entries.energy_wh + excluded.energy_wh,
-		sample_count = energy_ledger_entries.sample_count + excluded.sample_count,
-		observed_at_ms = MAX(energy_ledger_entries.observed_at_ms, excluded.observed_at_ms)`,
-		width, width, width,
-		width, fromMS, toMS); err != nil {
-		return 0, err
-	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM energy_ledger_entries
-		WHERE bucket_len_ms < ? AND bucket_start_ms >= ? AND bucket_start_ms < ?`,
-		width, fromMS, toMS)
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
 func min64(a, b int64) int64 {
 	if a < b {
 		return a

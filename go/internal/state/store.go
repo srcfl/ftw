@@ -83,6 +83,9 @@ type Store struct {
 	seriesHourWG     sync.WaitGroup
 	seriesHourMu     sync.Mutex
 	seriesHourCancel context.CancelFunc
+
+	maintenanceStatusMu sync.Mutex
+	maintenanceStatus   HistoryMaintenanceStatus
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -1786,6 +1789,7 @@ func (s *Store) Prune(ctx context.Context) error {
 func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucketMs int64) (aged int64, chunks int, err error) {
 	// Only age complete buckets: align the cutoff down to a bucket boundary.
 	cutoffMs = (cutoffMs / bucketMs) * bucketMs
+	spanMS := pruneChunkSpanMS
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -1801,7 +1805,7 @@ func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucket
 		}
 		// Chunk upper bound: at most pruneChunkSpanMS of rows, never past the
 		// cutoff, always on a bucket boundary.
-		chunkEnd := minTs.Int64 + pruneChunkSpanMS
+		chunkEnd := minTs.Int64 + spanMS
 		if chunkEnd > cutoffMs {
 			chunkEnd = cutoffMs
 		}
@@ -1815,6 +1819,13 @@ func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucket
 
 		n, err := s.pruneChunk(ctx, src, dst, minTs.Int64, chunkEnd, bucketMs)
 		if err != nil {
+			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				spanMS = max(bucketMs, (chunkEnd-minTs.Int64)/2/bucketMs*bucketMs)
+				if err := pauseMaintenance(ctx); err != nil {
+					return aged, chunks, err
+				}
+				continue
+			}
 			return aged, chunks, err
 		}
 		aged += n
@@ -1837,42 +1848,6 @@ func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucket
 // pruneChunkPause is the writer-fairness gap between prune chunks. Var so
 // tests can shrink it.
 var pruneChunkPause = 250 * time.Millisecond
-
-// pruneChunk aggregates+deletes src rows in [fromMs, toMs) in one short
-// transaction.
-func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, bucketMs int64) (int64, error) {
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	tx, err := s.history.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-
-	// Bare-column rule: exactly one MAX() aggregate in the grouped inner
-	// query makes the un-aggregated json column come from that newest row.
-	q := fmt.Sprintf(`
-		INSERT OR REPLACE INTO %s (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-		SELECT b_ts, a_grid, a_pv, a_bat, a_load, a_soc, json FROM (
-			SELECT (ts_ms / %d) * %d + %d AS b_ts,
-			       AVG(grid_w) AS a_grid, AVG(pv_w) AS a_pv, AVG(bat_w) AS a_bat,
-			       AVG(load_w) AS a_load, AVG(bat_soc) AS a_soc,
-			       json AS json, MAX(ts_ms) AS newest
-			FROM %s
-			WHERE ts_ms >= ? AND ts_ms < ?
-			GROUP BY ts_ms / %d
-		)`, dst, bucketMs, bucketMs, bucketMs/2, src, bucketMs)
-	if _, err := tx.ExecContext(ctx, q, fromMs, toMs); err != nil {
-		return 0, fmt.Errorf("aggregate: %w", err)
-	}
-	res, err := tx.ExecContext(ctx,
-		`DELETE FROM `+src+` WHERE ts_ms >= ? AND ts_ms < ?`, fromMs, toMs)
-	if err != nil {
-		return 0, fmt.Errorf("delete: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n, tx.Commit()
-}
 
 // ---- Prices ----
 
