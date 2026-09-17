@@ -12,8 +12,11 @@ func TestStopHistoryCancelsBackfillAndDrainsMultipleSlowBatches(t *testing.T) {
 	w := s.historyWriter
 	w.commitInterval = time.Hour
 	w.commitMaxTicks = 1
-	w.commitTimeout = 100 * time.Millisecond
-	w.shutdownTimeout = time.Second
+	// Total drain exceeds one commit budget, while each real SQLite commit
+	// has room to run under a loaded CI host. This is a lifecycle test;
+	// target IO latency has separate opt-in admission fixtures.
+	w.commitTimeout = 2 * time.Second
+	w.shutdownTimeout = 10 * time.Second
 	backfill, cancel := context.WithCancel(context.Background())
 	s.seriesHourCancel = cancel
 	s.seriesHourWG.Add(1)
@@ -24,7 +27,7 @@ func TestStopHistoryCancelsBackfillAndDrainsMultipleSlowBatches(t *testing.T) {
 		case <-ctx.Done():
 			return historyBatchCommit{}, ctx.Err()
 		}
-		timer := time.NewTimer(40 * time.Millisecond)
+		timer := time.NewTimer(600 * time.Millisecond)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
