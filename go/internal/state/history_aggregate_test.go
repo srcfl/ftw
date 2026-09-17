@@ -427,3 +427,58 @@ func TestAggregateLegacyResumeAndMixedHour(t *testing.T) {
 		t.Fatal("accepted individual correction after compaction", err)
 	}
 }
+
+func TestAggregateRestartAfterPublishedArchiveBeforePrune(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "state.db")
+	cold := filepath.Join(root, "cold")
+	s, err := OpenWithLegacyHistory(path, cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	base := day.UnixMilli()
+	if err := s.EnqueueTelemetryTick(nil, []Sample{{Driver: "d", Metric: "m", TsMs: base + 1000, Value: 10}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.history.Exec(`CREATE TRIGGER fail_bucket_prune BEFORE DELETE ON ts_buckets BEGIN SELECT RAISE(ABORT,'injected prune failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintainAggregateHistory(context.Background(), cold, day.Add(48*time.Hour)); err == nil {
+		t.Fatal("ignored prune failure")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenWithLegacyHistory(path, cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnqueueTelemetryTick(nil, []Sample{{Driver: "d", Metric: "m", TsMs: base + 2000, Value: 20}}, nil); err == nil {
+		t.Fatal("forgot closed interval after restart")
+	}
+	points, err := s.LoadSeriesBucketsOrRaw("d", "m", base, base+60000, 0)
+	if err != nil || len(points) != 1 || points[0].N != 1 || points[0].ResolutionMS != 10000 {
+		t.Fatal(points, err)
+	}
+	if _, err := s.history.Exec(`DROP TRIGGER fail_bucket_prune`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintainAggregateHistory(context.Background(), cold, day.Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	points, err = s.LoadSeriesBucketsOrRaw("d", "m", base, base+60000, 0)
+	if err != nil || len(points) != 1 || points[0].N != 1 || points[0].ResolutionMS != 60000 {
+		t.Fatal(points, err)
+	}
+}
