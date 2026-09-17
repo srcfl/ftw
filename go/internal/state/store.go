@@ -94,6 +94,9 @@ type Store struct {
 	// limits; the offline helper must not inherit that 100 ms live pause.
 	offlineBackup bool
 	backupPause   func(context.Context) error
+	deviceWriteMu sync.Mutex
+	deviceCacheMu sync.RWMutex
+	deviceCache   map[string]Device
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -195,6 +198,11 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 		return nil, err
 	}
 	if err := s.migrateLegacyTierSplit(); err != nil {
+		db.Close()
+		cache.Close()
+		return nil, err
+	}
+	if err := s.loadDeviceCache(); err != nil {
 		db.Close()
 		cache.Close()
 		return nil, err

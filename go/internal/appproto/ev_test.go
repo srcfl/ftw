@@ -1,6 +1,7 @@
 package appproto
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -39,9 +40,26 @@ type fakeLoadpoints struct {
 	socCalls int
 	onSoC    func()
 
-	surplusOnly  bool
-	surplusCalls int
-	onSurplus    func()
+	surplusOnly    bool
+	surplusCalls   int
+	onSurplus      func()
+	persistenceErr error
+}
+
+func (f *fakeLoadpoints) WaitForPersistence(context.Context) error { return f.persistenceErr }
+
+func TestLoadpointWriteDoesNotConfirmUncommittedChoice(t *testing.T) {
+	h, lp, _, rec, _ := newEVRig(t)
+	subscribe(t, h, rec)
+	lp.persistenceErr = errors.New("disk write failed")
+	deliver(t, h, MsgCmd, nil, cmdLoadpoint(OpLoadpointHold, "pending-hold", holdArgs(), 7, 200_000))
+	res := body[CmdResult](t, rec.only(t, MsgCmdResult))
+	if res.State != CmdUnconfirmed || res.Error == nil || res.Error.Args["reason"] != "persistence_unconfirmed" {
+		t.Fatal(res)
+	}
+	if !lp.holdSet {
+		t.Fatal("unconfirmed persistence undid active choice")
+	}
 }
 
 func (f *fakeLoadpoints) Exists(id string) bool { return f.ids[id] }

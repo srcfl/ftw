@@ -108,6 +108,7 @@ type Deps struct {
 	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
 	Models        map[string]*battery.Model
 	ModelsMu      *sync.Mutex
+	ModelWrites   *state.ControlWrites
 	SelfTune      *selftune.Coordinator
 	DtS           float64                                   // control interval seconds (for model τ / age displays)
 	SaveConfig    func(path string, c *config.Config) error // injection for testability
@@ -2051,7 +2052,6 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.ModelsMu.Lock()
-	defer s.deps.ModelsMu.Unlock()
 	var reset []string
 	if req.All {
 		for name := range s.deps.Models {
@@ -2060,24 +2060,56 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if req.Battery != "" {
 		if _, ok := s.deps.Models[req.Battery]; !ok {
+			s.deps.ModelsMu.Unlock()
 			writeJSON(w, 404, map[string]string{"error": "battery not found: " + req.Battery})
 			return
 		}
 		s.deps.Models[req.Battery] = battery.New(req.Battery)
 		reset = append(reset, req.Battery)
 	} else {
+		s.deps.ModelsMu.Unlock()
 		writeJSON(w, 400, map[string]string{"error": "provide 'battery' or 'all'"})
 		return
 	}
-	// Persist fresh models
+	// Queue while the model lock still orders this reset against training.
+	// Disk work and the acknowledgement wait never hold ModelsMu.
+	snapshots := map[string]string{}
+	var saveErr error
 	for _, name := range reset {
 		if m, ok := s.deps.Models[name]; ok {
 			if data, err := json.Marshal(m); err == nil {
-				if err := s.deps.State.SaveBatteryModel(name, string(data)); err != nil {
-					slog.Warn("failed to persist battery model", "battery", name, "err", err)
+				snapshots[name] = string(data)
+				if s.deps.ModelWrites != nil {
+					key := name
+					if s.deps.BatteryIdentity != nil {
+						if id, ok := s.deps.BatteryIdentity(name); ok {
+							key = id
+						}
+					}
+					if err := s.deps.ModelWrites.SaveConfig(key, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
+						saveErr = err
+					}
 				}
 			}
 		}
+	}
+	s.deps.ModelsMu.Unlock()
+	if s.deps.ModelWrites != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.deps.ModelWrites.Flush(ctx); err != nil {
+			saveErr = err
+		}
+	} else {
+		for name, data := range snapshots {
+			if err := s.deps.State.SaveBatteryModel(name, data); err != nil {
+				saveErr = err
+			}
+		}
+	}
+	if saveErr != nil {
+		writeJSON(w, 503, map[string]string{"error": "Models reset in memory, but FTW could not confirm they were saved."})
+		return
 	}
 	writeJSON(w, 200, map[string]any{"reset": reset})
 }
@@ -3027,6 +3059,11 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	if (req.Action == "ev_start" || req.Action == "ev_resume" || req.Action == "ev_pause") && s.deps.Loadpoints != nil {
+		if !s.waitForLoadpointSave(w, r) {
+			return
+		}
+	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
@@ -3806,6 +3843,9 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.deps.MPC != nil {
 		s.deps.MPC.RequestReplan("loadpoint_soc_corrected")
+	}
+	if !s.waitForLoadpointSave(w, r) {
+		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

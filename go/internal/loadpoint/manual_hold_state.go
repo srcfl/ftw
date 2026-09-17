@@ -31,7 +31,7 @@ func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) (err 
 	defer m.sessionMu.Unlock()
 	defer func() {
 		if err != nil {
-			m.setManualSaveError(id, true)
+			m.setManualPersistenceError(id, err)
 		}
 	}()
 	if m.pendingManual == nil {
@@ -44,7 +44,7 @@ func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) (err 
 func (m *Manager) flushManualHold(id string) (err error) {
 	defer func() {
 		if err != nil {
-			m.setManualSaveError(id, true)
+			m.setManualPersistenceError(id, err)
 		}
 	}()
 	pending, ok := m.pendingManual[id]
@@ -61,8 +61,13 @@ func (m *Manager) flushManualHold(id string) (err error) {
 			restriction = "pause"
 		}
 	}
-	if err := m.sessionStore.SaveConfig("ev_manual_unbound:"+id, restriction); err != nil {
-		return err
+	batcher, batch := m.sessionStore.(interface {
+		SaveConfigGroup(string, map[string]string) error
+	})
+	if !batch {
+		if err := m.sessionStore.SaveConfig("ev_manual_unbound:"+id, restriction); err != nil {
+			return err
+		}
 	}
 	m.mu.RLock()
 	lp := m.byID[id]
@@ -72,6 +77,11 @@ func (m *Manager) flushManualHold(id string) (err error) {
 	}
 	m.mu.RUnlock()
 	if deviceID == "" {
+		if batch {
+			if err := batcher.SaveConfigGroup("manual:"+id, map[string]string{"ev_manual_unbound:" + id: restriction}); err != nil {
+				return err
+			}
+		}
 		m.setManualSaveError(id, false)
 		return nil
 	}
@@ -86,6 +96,20 @@ func (m *Manager) flushManualHold(id string) (err error) {
 			return err
 		}
 		body = string(b)
+	}
+	if batch {
+		if err := batcher.SaveConfigGroup("manual:"+id, map[string]string{
+			manualHoldKey(deviceID):       body,
+			"ev_manual_binding:" + id:     deviceID,
+			"loadpoint_manual_hold:" + id: "{}",
+			"ev_manual_clear:" + id:       "",
+			"ev_manual_unbound:" + id:     "",
+		}); err != nil {
+			return err
+		}
+		delete(m.pendingManual, id)
+		m.setManualSaveError(id, false)
+		return nil
 	}
 	if err := m.sessionStore.SaveConfig(manualHoldKey(deviceID), body); err != nil {
 		return err
@@ -116,6 +140,16 @@ func (m *Manager) setManualSaveError(id string, value bool) {
 	defer m.mu.Unlock()
 	if lp := m.byID[id]; lp != nil {
 		lp.manualSaveError = value
+		lp.manualSavePending = false
+	}
+}
+
+func (m *Manager) setManualPersistenceError(id string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp := m.byID[id]; lp != nil {
+		lp.manualSavePending = persistencePending(err)
+		lp.manualSaveError = !lp.manualSavePending
 	}
 }
 

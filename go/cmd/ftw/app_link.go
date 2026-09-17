@@ -365,6 +365,10 @@ type appLoadpoints struct {
 	mpc  *mpc.Service
 }
 
+func (a *appLoadpoints) WaitForPersistence(ctx context.Context) error {
+	return a.mgr.WaitForPersistence(ctx)
+}
+
 func (a *appLoadpoints) Exists(id string) bool {
 	_, ok := a.mgr.State(id)
 	return ok

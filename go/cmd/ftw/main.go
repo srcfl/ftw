@@ -802,7 +802,15 @@ func main() {
 	// The planner consumes loadpoint state so battery and EV can be
 	// co-optimized in one DP.
 	lpMgr := loadpoint.NewManager()
-	lpMgr.SetSessionStore(st)
+	evWrites, err := st.NewEVControlWrites()
+	if err != nil {
+		slog.Error("cannot load EV restart state", "err", err)
+		return
+	}
+	defer closeControlWrites(evWrites, "EV state")
+	modelWrites := st.NewBatteryModelWrites()
+	defer closeControlWrites(modelWrites, "battery models")
+	lpMgr.SetSessionStore(evWrites)
 	if len(cfg.Loadpoints) > 0 {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
@@ -2041,21 +2049,21 @@ func main() {
 		// The manager binds saved holds to charger hardware and session. The
 		// controller restores only after fresh telemetry supplies those IDs.
 		lpController.SetManualHoldSaver(func(id string, h loadpoint.ManualHold, cleared bool) {
-			if err := lpMgr.PersistManualHold(id, h, cleared); err != nil {
+			if err := lpMgr.PersistManualHold(id, h, cleared); err != nil && !errors.Is(err, state.ErrWritePending) {
 				slog.Warn("failed to persist manual charging choice", "lp", id, "err", err)
 			}
 		})
 		const lpBatteryBoostKeyPrefix = "loadpoint_battery_boost:"
 		for _, lpState := range lpMgr.States() {
 			key := lpBatteryBoostKeyPrefix + lpState.ID
-			v, ok := st.LoadConfig(key)
+			v, ok := evWrites.LoadConfig(key)
 			if !ok || v == "" || v == "{}" {
 				continue
 			}
 			var lease loadpoint.BatteryBoostLease
 			if err := json.Unmarshal([]byte(v), &lease); err != nil ||
 				!lpController.RestoreBatteryBoost(lpState.ID, lease, time.Now()) {
-				_ = st.SaveConfig(key, "{}")
+				_ = evWrites.SaveConfig(key, "{}")
 				slog.Warn("discarded invalid persisted battery boost lease", "lp", lpState.ID, "err", err)
 				continue
 			}
@@ -2064,7 +2072,7 @@ func main() {
 		lpController.SetBatteryBoostSaver(func(id string, lease loadpoint.BatteryBoostLease, cleared bool) {
 			key := lpBatteryBoostKeyPrefix + id
 			if cleared {
-				if err := st.SaveConfig(key, "{}"); err != nil {
+				if err := evWrites.SaveConfig(key, "{}"); err != nil && !errors.Is(err, state.ErrWritePending) {
 					slog.Warn("failed to clear persisted battery boost lease", "lp", id, "err", err)
 				}
 				return
@@ -2074,7 +2082,7 @@ func main() {
 				slog.Warn("failed to marshal battery boost lease", "lp", id, "err", err)
 				return
 			}
-			if err := st.SaveConfig(key, string(b)); err != nil {
+			if err := evWrites.SaveConfig(key, string(b)); err != nil && !errors.Is(err, state.ErrWritePending) {
 				slog.Warn("failed to persist battery boost lease", "lp", id, "err", err)
 			}
 		})
@@ -2449,7 +2457,7 @@ func main() {
 		DriverMQTTFactory:   reg.MQTTFactory,
 		DriverModbusFactory: reg.ModbusFactory,
 		DriverARPLookup:     reg.ARPLookup,
-		Models:              models, ModelsMu: modelsMu,
+		Models:              models, ModelsMu: modelsMu, ModelWrites: modelWrites,
 		SelfTune:          selfTune,
 		DtS:               float64(cfg.Site.ControlIntervalS),
 		SaveConfig:        func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
@@ -3215,7 +3223,11 @@ func main() {
 				modelsMu.Lock()
 				for name, m := range models {
 					if data, err := json.Marshal(m); err == nil {
-						if err := st.SaveBatteryModel(name, string(data)); err != nil {
+						key := name
+						if id, ok := batteryIdentity(name); ok {
+							key = id
+						}
+						if err := modelWrites.SaveConfig(key, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
 							slog.Warn("failed to persist battery model", "battery", name, "err", err)
 						}
 					}

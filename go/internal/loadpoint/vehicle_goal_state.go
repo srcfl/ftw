@@ -70,6 +70,9 @@ func (m *Manager) retainFinishGoal(id string) {
 	m.mu.Lock()
 	if err != nil {
 		lp.finishGoalRetention = "error"
+		if persistencePending(err) {
+			lp.finishGoalRetention = "pending"
+		}
 	} else {
 		lp.finishGoalSaved = record.Deadline
 		lp.finishGoalSavedCompleted = record.Completed

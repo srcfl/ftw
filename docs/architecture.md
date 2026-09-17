@@ -49,6 +49,7 @@ The current connection's deadline uses verified charger and session identity.
 It stays due after the deadline and survives restart when `goal_retention` is
 `session`. `unavailable` means that identity is missing; `error` means the
 session checkpoint failed. Neither means the saved schedule disappeared.
+`pending` means the checkpoint is queued and cannot yet be claimed durable.
 Core assigns each saved vehicle-limit goal an `intent_id` and a one-shot
 `first_deadline_ms`; clients send user choices, not those bookkeeping fields.
 A fresh vehicle Complete can finish a one-shot goal across restart and later
@@ -56,6 +57,21 @@ plug sessions. Completion requires one vehicle source, one connected loadpoint,
 a reading after the observed connection and no measured charging. An ambiguous
 match cannot finish the goal. A charger declining current is reported as a refusal, never
 as an invented battery level or proof that the target was reached.
+
+### Control state and disk writes
+
+Core loads EV restart records before starting control. During operation, a
+bounded queue writes immutable snapshots outside the loadpoint and model
+locks. Repeated updates replace a pending snapshot; an in-flight write keeps
+its order. Manual holds commit their hardware binding and old fallback keys
+in one FULL-sync transaction. Reads cannot restore a key being replaced.
+
+HTTP and app command acknowledgements wait up to two seconds for the relevant
+write queue outside control locks. A timeout reports an active but unconfirmed
+choice. It does not undo a Stop or claim that memory survived a power loss.
+Shutdown drains accepted writes and reports any failure. This removes disk
+waits from these control paths; it does not establish the SD card's goal-save
+latency under backup or other filesystem load.
 
 ## Product requirements across these boundaries
 

@@ -44,6 +44,8 @@ func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 func (m *Manager) SetSessionStore(store SessionStore) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sessionStore = store
 }
 
@@ -89,6 +91,7 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 		m.mu.Unlock()
 		return
 	}
+	m.refreshSessionCommitLocked(lp)
 	previousDevice, previousSession := lp.sessionDeviceID, lp.sessionID
 	wasPlugged := lp.pluggedIn
 	regressed := pluggedIn && lp.pluggedIn && lp.energy != nil && lp.energy.counterRegressed(sample)
@@ -212,6 +215,33 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 	_ = m.flushManualHold(id)
 }
 
+// Caller holds Manager.mu and sessionMu. Only the memory-only writer exposes
+// committed snapshots. An older anchor must not confirm a newer user edit.
+func (m *Manager) refreshSessionCommitLocked(lp *loadpointRuntime) {
+	reader, ok := m.sessionStore.(interface {
+		CommittedConfig(string) (string, time.Time, bool)
+	})
+	if !ok || !lp.socConfirmed || lp.sessionDeviceID == "" || lp.sessionID == "" {
+		return
+	}
+	raw, committedAt, found := reader.CommittedConfig(sessionKey(lp.sessionDeviceID))
+	if !found || committedAt.IsZero() || !committedAt.After(lp.lastSessionCommitAt) {
+		return
+	}
+	var saved savedSession
+	if json.Unmarshal([]byte(raw), &saved) != nil || saved.Version != 2 || saved.DeviceID != lp.sessionDeviceID ||
+		saved.SessionID != lp.sessionID || saved.AnchorSoC != lp.sessionPluginSoC || saved.CapacityWh != lp.VehicleCapacityWh {
+		return
+	}
+	wh := saved.ConfirmedAtWh
+	if saved.EstimatedWh != nil && *saved.EstimatedWh > wh {
+		wh = *saved.EstimatedWh
+	}
+	lp.lastSavedEnergyWh, lp.lastSavedEnergyAt = wh, m.now()
+	lp.lastSessionCommitAt = committedAt
+	lp.socRetention = "session"
+}
+
 // persistSession runs outside Manager.mu, but sessionMu serializes it with
 // observations, unplug and user edits. A slow write cannot block API reads or
 // allow an older edit to overwrite a newer one.
@@ -249,6 +279,9 @@ func (m *Manager) persistSession(id string) {
 		retention = "session"
 		if err != nil {
 			retention = "error"
+			if persistencePending(err) {
+				retention = "pending"
+			}
 		}
 	}
 	m.mu.Lock()
