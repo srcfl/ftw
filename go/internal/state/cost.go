@@ -318,7 +318,7 @@ func (s *Store) loadCostHistoryRows(ctx context.Context, sinceMs, untilMs int64)
 	return out, nil
 }
 
-func (s *Store) integrateHistoryRange(ctx context.Context, sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
+func (s *Store) integrateLegacyHistoryRange(ctx context.Context, sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
 	historyStartMs := sinceMs - maxCostIntegrationGap.Milliseconds()
 	rows, err := s.loadCostHistoryRows(ctx, historyStartMs, untilMs)
 	if err != nil {
@@ -402,7 +402,7 @@ func (s *Store) integrateHistoryRange(ctx context.Context, sinceMs, untilMs int6
 
 // ImportWhIntervals integrates grid import over each half-open interval in
 // one history scan. intervals must be sorted and non-overlapping.
-func (s *Store) ImportWhIntervals(ctx context.Context, intervals [][2]int64) ([]float64, []int64, error) {
+func (s *Store) legacyImportWhIntervals(ctx context.Context, intervals [][2]int64) ([]float64, []int64, error) {
 	wh := make([]float64, len(intervals))
 	covered := make([]int64, len(intervals))
 	if len(intervals) == 0 {
