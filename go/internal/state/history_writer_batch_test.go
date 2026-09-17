@@ -78,6 +78,9 @@ func TestHistoryWriterSplitsBatchAfterCommitTimeout(t *testing.T) {
 	if st.Accepted != 4 || st.Committed != 4 || st.Pending != 0 || st.LastError != "" {
 		t.Fatalf("split recovery status=%+v", st)
 	}
+	if st.CommitFailures == 0 || st.LastFailureMS == 0 || st.LastFailureError == "" {
+		t.Fatalf("recovered commit failures disappeared from diagnostics: %+v", st)
+	}
 	got, err := s.LoadSeries("live", "power", 0, 5, 0)
 	if err != nil || len(got) != 4 {
 		t.Fatalf("series=%v %v", got, err)

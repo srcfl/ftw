@@ -19,4 +19,6 @@ type LearningStatus struct {
 	StartedMS        int64  `json:"started_ms"`
 	LatestTrainingMS int64  `json:"latest_training_ms"`
 	ResetAvailable   bool   `json:"reset_available"`
+	Health           string `json:"health"`
+	HealthReason     string `json:"health_reason,omitempty"`
 }

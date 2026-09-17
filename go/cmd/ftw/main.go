@@ -3310,20 +3310,10 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 		if retentionDays != nil {
 			days = retentionDays()
 		}
-		doRolloff(ctx, st, coldDir)
-		if err := st.PruneHistorySamples(ctx, days, time.Now()); err != nil {
-			slog.Warn("history retention failed", "err", err)
+		if err := st.MaintainHistory(ctx, coldDir, days, time.Now()); err != nil {
+			slog.Warn("history maintenance incomplete", "err", err)
 		}
-
-		// The bulk DELETEs above just generated a WAL burst; reclaim it now
-		// instead of letting the -wal file ratchet upward on the SD card.
 		st.CheckpointWAL()
-
-		if removed, err := state.PruneDiagnosticsParquet(coldDir, days, time.Now()); err != nil {
-			slog.Warn("cold parquet retention prune failed", "err", err)
-		} else if len(removed) > 0 {
-			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", days)
-		}
 
 		// Disk watch: an SD card that fills up takes SQLite down with it.
 		// Warn loudly (log + event feed) at most once per day.
@@ -3349,36 +3339,6 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 		case <-tick.C:
 			run()
 		}
-	}
-}
-
-func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
-	// Age the fixed-column dashboard history on the same cadence as the
-	// long-format TS + diagnostics rolloff below. Prune is idempotent and pure
-	// SQL; without this call history_hot/history_warm grow forever even though
-	// ts_samples is correctly moved to Parquet.
-	if err := st.Prune(ctx); err != nil {
-		slog.Warn("history tier prune failed", "err", err)
-	}
-	if rolled, expired, err := st.PruneEnergyLedger(ctx, time.Now()); err != nil {
-		slog.Warn("energy ledger retention failed", "err", err)
-	} else if rolled > 0 || expired > 0 {
-		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "hourly_rows_rolled_to_days", expired)
-	}
-
-	// Planner diagnostics roll off on the same cadence but keep a
-	// longer hot tier (30 d vs. the 14 d of ts_samples) — they're
-	// sparse enough (~100/day) that the extra month in SQLite
-	// costs < 60 MB and makes the time-travel UI snappy for
-	// recent-incident debugging.
-	dRows, dFiles, err := st.RolloffDiagnosticsToParquet(ctx, coldDir)
-	if err != nil {
-		slog.Warn("diagnostics parquet rolloff failed", "err", err)
-		return
-	}
-	if dRows > 0 {
-		slog.Info("diagnostics parquet rolloff",
-			"rows", dRows, "files", len(dFiles))
 	}
 }
 

@@ -201,7 +201,7 @@ func (f *forecastTracker) RestartLearning(ctx context.Context, signal string) er
 }
 
 func (f *forecastTracker) LearningStatus(signal string) forecasting.LearningStatus {
-	status := forecasting.LearningStatus{Engine: "legacy", Status: "unavailable"}
+	status := forecasting.LearningStatus{Engine: "legacy", Status: "unavailable", Health: "unknown"}
 	if f == nil {
 		return status
 	}
@@ -249,7 +249,63 @@ func (f *forecastTracker) LearningStatus(signal string) forecasting.LearningStat
 	if site.IdentityPending || (f.learningPeriods.ConfigRevision == rustConfigRevision(site) && f.learningErrors[signal] != nil) {
 		status.Status = "unavailable"
 	}
+	status.Health, status.HealthReason = f.learningHealth(signal, status)
 	return status
+}
+
+// Health is current pipeline health, separate from the model's learning stage.
+// A ready model alone cannot establish working collection or persistence.
+func (f *forecastTracker) learningHealth(signal string, status forecasting.LearningStatus) (string, string) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.stopped {
+		return "unknown", "stopped"
+	}
+	if f.observationOverflow {
+		return "degraded", "observation_queue_full"
+	}
+	if f.observationError != "" {
+		return "degraded", f.observationError
+	}
+	if f.issueArchiveError {
+		return "degraded", "forecast_archive_pending"
+	}
+	if f.store != nil {
+		writer := f.store.HistoryWriterStatus()
+		if writer.LastError != "" {
+			return "degraded", "history_write_pending"
+		}
+		if writer.MaintenanceError != "" || f.store.HistoryMaintenanceStatus().LastError != "" {
+			return "degraded", "history_maintenance_failed"
+		}
+	}
+	if status.Status == "unavailable" {
+		return "unknown", "model_unavailable"
+	}
+	if f.observationCheckedMS == 0 {
+		return "unknown", "not_checked"
+	}
+	age := f.now().UnixMilli() - f.observationCheckedMS
+	valid := f.observationLoadValid
+	trainingAgeLimit := 2 * time.Hour
+	if signal == "pv" {
+		valid = f.observationPVValid
+		trainingAgeLimit = 36 * time.Hour
+	}
+	if age < 0 || age > (30*time.Second).Milliseconds() || !valid {
+		return "waiting_for_data", "measurements_unavailable"
+	}
+	if status.Status != "ready" {
+		return "unknown", "learning"
+	}
+	trainingAge := f.now().UnixMilli() - status.LatestTrainingMS
+	if status.LatestTrainingMS <= 0 || trainingAge < 0 || trainingAge > trainingAgeLimit.Milliseconds() {
+		return "waiting_for_data", "training_outdated"
+	}
+	if status.Engine != "energyplan" {
+		return "unknown", "model_persistence_unchecked"
+	}
+	return "healthy", ""
 }
 
 // Calibration is per signal: a PV reset also drops joint net errors, while

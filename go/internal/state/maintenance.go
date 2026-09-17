@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -8,18 +9,17 @@ import (
 	"time"
 )
 
-// CheckpointWAL runs a truncating WAL checkpoint on both DB files. The
-// hourly rolloff's bulk DELETEs generate a burst of WAL that auto-checkpoint
-// can fail to reclaim if any reader is mid-query at the time; calling this
-// right after the rolloff keeps the -wal file from ratcheting upward on an
-// SD card. Best-effort: a busy checkpoint just means a reader was active —
-// the next hourly run gets another chance.
+// CheckpointWAL copies committed pages without waiting for readers or taking
+// the writer lock while waiting for them. SQLite reuses the WAL after readers
+// release their snapshots; truncation is an offline maintenance operation.
 func (s *Store) CheckpointWAL() {
-	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
 		slog.Debug("state: WAL checkpoint (state.db) skipped", "err", err)
 	}
 	if s.cache != nil {
-		if _, err := s.cache.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		if _, err := s.cache.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
 			slog.Debug("state: WAL checkpoint (cache.db) skipped", "err", err)
 		}
 	}

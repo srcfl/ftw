@@ -368,8 +368,13 @@ func (s *Store) pruneArchivedSamples(ctx context.Context, batch []resolvedSample
 			return nil
 		})
 		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && n > 1 {
+			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				// Even one row can meet a busy reader or a slow sync. Retain
+				// this verified prefix instead of staging the whole day again.
 				limit = max(1, n/2)
+				if err := pauseMaintenance(ctx); err != nil {
+					return deleted, err
+				}
 				continue
 			}
 			return deleted, err

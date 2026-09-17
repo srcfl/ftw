@@ -50,6 +50,9 @@ type HistoryWriterStatus struct {
 	LastCommitMS      int64  `json:"last_commit_ms"`
 	LastMeasurementMS int64  `json:"last_measurement_ms"`
 	LastError         string `json:"last_error,omitempty"`
+	CommitFailures    uint64 `json:"commit_failures"`
+	LastFailureMS     int64  `json:"last_failure_ms,omitempty"`
+	LastFailureError  string `json:"last_failure_error,omitempty"`
 	LastRejectMS      int64  `json:"last_reject_ms,omitempty"`
 	LastRejectError   string `json:"last_reject_error,omitempty"`
 	Stopping          bool   `json:"stopping"`
@@ -269,6 +272,9 @@ func (w *historyWriter) run() {
 					slog.Error("history commit failed; retaining tick for retry", "err", err)
 				}
 				w.status.LastError = err.Error()
+				w.status.CommitFailures++
+				w.status.LastFailureMS = time.Now().UnixMilli()
+				w.status.LastFailureError = err.Error()
 			}
 			w.signal()
 			w.mu.Unlock()
