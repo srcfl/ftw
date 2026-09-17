@@ -1,6 +1,5 @@
-// twins.js — advanced-mode forecast-learning diagnostics.
-// Polls only while advanced mode is visible. The box owns the model state;
-// this view only asks it to begin a new learning period for one signal.
+// Forecast status with model diagnostics behind an explicit disclosure.
+// The box owns learning state; elapsed time never establishes model quality.
 
 (function () {
   'use strict';
@@ -18,6 +17,7 @@
   const availableActions = new Set();
   const actionMessages = new Map();
   const actionFocus = new Set();
+  const expanded = new Set();
 
   function apiFetch(path, opts) { return fetch(path, opts); }
 
@@ -39,7 +39,7 @@
     render(pv, load);
   }
 
-  function advancedVisible() { return !!(document.body && document.body.classList.contains('advanced')); }
+  function forecastsVisible() { return location.hash.split('/')[0] === '#more'; }
   function startPolling() {
     if (refreshTimer) return;
     fetchAll();
@@ -51,16 +51,17 @@
     refreshTimer = null;
   }
   function syncPolling() {
-    if (advancedVisible() && !document.hidden) startPolling();
+    if (forecastsVisible() && !document.hidden) startPolling();
     else stopPolling();
   }
 
   function fmtAge(ms) {
     if (!ms) return '—';
-    const s = Math.round((Date.now() - ms) / 1000);
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
     if (s < 60) return s + 's ago';
     if (s < 3600) return Math.round(s / 60) + 'm ago';
-    return Math.round(s / 3600) + 'h ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
   }
   function fmtLocalTime(ms) {
     if (!ms || !Number.isFinite(Number(ms))) return '—';
@@ -83,7 +84,7 @@
   }
   function engineLabel(learning) {
     if (!learning) return 'Unavailable';
-    return learning.engine === 'energyplan' ? 'Energyplan' : learning.engine === 'legacy' ? 'Legacy' : 'Unavailable';
+    return learning.engine === 'energyplan' ? 'Energyplan' : learning.engine === 'legacy' ? 'Local model' : 'Unavailable';
   }
   function actionAvailable(d) {
     const learning = d && d.learning;
@@ -103,54 +104,99 @@
 
   function loadProfileControl(d) {
     if (!d || !d.enabled) return '';
-    const active = d.profile || d.active_profile || 'home';
+    const active = d.profile || d.active_profile;
     function btn(profile, label) {
       const cls = profile === active ? ' class="active"' : '';
-      return `<button type="button" data-loadmodel-profile="${profile}"${cls}>${label}</button>`;
+      return `<button type="button" data-loadmodel-profile="${profile}" aria-pressed="${profile === active}"${cls}>${label}</button>`;
     }
-    return '<div class="twin-row twin-profile-row"><span>profile</span>' +
-      `<div class="twin-profile-toggle" role="tablist" data-active="${active}">` + btn('home', 'Home') + btn('away', 'Away') + '</div></div>';
+    return '<div class="twin-row twin-profile-row"><span>Household profile</span>' +
+      '<div class="twin-profile-toggle" role="group" aria-label="Household profile">' + btn('home', 'Home') + btn('away', 'Away') + '</div></div>';
   }
+
+  function row(label, value) {
+    return `<div class="twin-row"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;
+  }
+  function watts(value) { return Number.isFinite(value) ? Math.round(value).toLocaleString() + ' W' : 'Not available'; }
 
   function modelRows(d) {
-    const learning = d.learning;
-    const legacy = learning && learning.engine === 'energyplan';
-    const prefix = legacy ? 'legacy ' : '';
-    const rows = [];
-    if (legacy) rows.push('<div class="twin-row"><span>legacy model stats</span><b>secondary</b></div>');
-    rows.push(`<div class="twin-row"><span>${prefix}samples</span><b>${d.samples || 0}</b></div>`);
-    if (d.mae_w != null) rows.push(`<div class="twin-row"><span>${prefix}MAE</span><b>${d.mae_w.toFixed(0)} W</b></div>`);
-    if (d.peak_w != null) rows.push(`<div class="twin-row"><span>${prefix}peak ref</span><b>${(d.peak_w / 1000).toFixed(1)} kW</b></div>`);
-    if (d.rated_w != null) rows.push(`<div class="twin-row"><span>${prefix}rated</span><b>${(d.rated_w / 1000).toFixed(1)} kW</b></div>`);
-    if (d.heating_w_per_degc != null && d.heating_w_per_degc > 0) rows.push(`<div class="twin-row"><span>${prefix}heating</span><b>${d.heating_w_per_degc.toFixed(0)} W/°C</b></div>`);
-    if (d.buckets_warm != null) rows.push(`<div class="twin-row"><span>${prefix}buckets warm</span><b>${d.buckets_warm}/${d.buckets_total}</b></div>`);
-    rows.push(`<div class="twin-row"><span>${prefix}last update</span><b>${fmtAge(d.last_ms)}</b></div>`);
-    if (d.quality != null) {
-      const quality = Math.max(0, Math.min(1, d.quality));
-      const qualityPct = (quality * 100).toFixed(0);
-      const qualityColor = quality >= 0.7 ? '#22c55e' : quality >= 0.3 ? '#fbbf24' : '#ef4444';
-      rows.push(`<div class="twin-row"><span>${prefix}quality</span><b>${qualityPct}%</b></div>`);
-      rows.push(`<div class="twin-quality"><div class="twin-quality-fill" style="width:${qualityPct}%;background:${qualityColor}"></div></div>`);
-    }
-    return rows.join('');
+    const older = d.learning && d.learning.engine === 'energyplan';
+    const rows = [row('Training samples', d.samples ?? 'Not available')];
+    if (d.mae_w != null) rows.push(row('Average training error', watts(d.mae_w)));
+    if (Number.isFinite(d.peak_w)) rows.push(row('Load reference', (d.peak_w / 1000).toFixed(1) + ' kW'));
+    if (Number.isFinite(d.rated_w)) rows.push(row('Solar starting estimate', (d.rated_w / 1000).toFixed(1) + ' kW'));
+    if (d.heating_w_per_degc > 0) rows.push(row('Heating estimate below 18 °C', Math.round(d.heating_w_per_degc) + ' W/°C'));
+    if (d.buckets_warm != null) rows.push(row('Weekly hours with 8+ samples', d.buckets_warm + '/' + d.buckets_total));
+    rows.push(row('Last model update', fmtLocalTime(d.last_ms)));
+    return `<h4>${older ? 'Older local model' : 'Local model diagnostics'}</h4>` +
+      `<p class="forecast-note">${older ? 'Kept for comparison and fallback. These figures describe the older model, not Energyplan.' : 'These figures describe the model’s training data.'} Training error is not measured forecast accuracy.</p>` + rows.join('');
   }
 
-  function twinCard(title, d, endpoint, extraHtml) {
+  function overview(d, signal) {
+    if (!d || d.unavailable) return { label: 'Unavailable', tone: 'muted', note: 'Cannot read forecast status. Trying again.' };
+    if (!d.enabled) return { label: 'Off', tone: 'muted', note: 'This forecast model is turned off.' };
+    const l = d.learning;
+    if (l && l.health === 'degraded') {
+      return { label: 'Needs attention', tone: 'warning', note: 'Learning has a problem. Open details for more information.' };
+    }
+    if (l && l.health === 'waiting_for_data') {
+      return { label: 'Waiting for data', tone: 'warning', note: 'Waiting for usable measurements to continue learning.' };
+    }
+    if (!l || !['cold_start', 'learning', 'ready'].includes(l.status)) {
+      return { label: 'Needs attention', tone: 'warning', note: 'Forecast learning is unavailable. Open details to check its status.' };
+    }
+    // Training is normally quarter-hourly. Allow two hours for load data
+    // and 36 hours for solar, which does not train throughout the night.
+    const maxAge = (signal === 'pv' ? 36 : 2) * 3600000;
+    const latest = Number(l.latest_training_ms);
+    const started = Number(l.started_ms);
+    const reference = latest > 0 ? latest : started;
+    if (reference > 0 && Date.now() - reference > maxAge) {
+      return { label: 'Waiting for data', tone: 'warning', note: latest > 0 ? 'Last learned from new measurements ' + fmtAge(latest) + '.' : 'Waiting for usable measurements to begin learning.' };
+    }
+    if (latest > Date.now() || started > Date.now() || (l.status === 'ready' && !(latest > 0))) {
+      return { label: 'Status unknown', tone: 'muted', note: 'The box has not provided a valid training time.' };
+    }
+    if (l.status === 'ready' && l.health === 'healthy') return { label: 'Healthy', tone: 'healthy', note: 'Ready and continuing to learn from your home.' };
+    if (l.status === 'ready') return { label: 'Ready', tone: 'muted', note: 'The model is ready. Its health has not been confirmed.' };
+    return { label: 'Learning', tone: 'learning', note: l.status === 'cold_start' ? 'Getting started with your home’s measurements.' : 'Getting to know your home’s energy patterns.' };
+  }
+
+  function learningDuration(learning) {
+    const started = Number(learning && learning.started_ms);
+    if (!(started > 0) || started > Date.now()) return '';
+    const days = Math.floor((Date.now() - started) / 86400000);
+    return days < 1 ? 'First day of learning' : days + (days === 1 ? ' day learning' : ' days learning');
+  }
+
+  function twinCard(title, d, endpoint) {
     const action = actions[endpoint];
     const statusID = 'twin-status-' + action.id;
-    if (!d || d.unavailable) return `<div class="twin-card"><h3>${title}</h3><div class="twin-row"><span>model state</span><b>Unavailable</b></div><div id="${statusID}" role="status" aria-live="polite">The box did not provide this model state.</div></div>`;
-    if (!d.enabled) return `<div class="twin-card"><h3>${title}</h3><div class="twin-row"><span>model state</span><b>Disabled</b></div><div id="${statusID}" role="status" aria-live="polite">This model is disabled on the box.</div></div>`;
-    const learning = d.learning;
-    const message = actionMessages.get(endpoint) || (!actionAvailable(d) ? 'Relearning is unavailable for this model.' : '');
-    const learningRows = [
-      `<div class="twin-row"><span>engine</span><b>${engineLabel(learning)}</b></div>`,
-      `<div class="twin-row"><span>learning state</span><b>${learningStatus(learning)}</b></div>`,
-    ];
-    if (learning) {
-      learningRows.push(`<div class="twin-row"><span>learning started</span><b>${fmtLocalTime(learning.started_ms)}</b></div>`);
-      learningRows.push(`<div class="twin-row"><span>latest training</span><b>${fmtLocalTime(learning.latest_training_ms)}</b></div>`);
-    }
-    return `<div class="twin-card"><h3>${title}</h3>${extraHtml || ''}${learningRows.join('')}${modelRows(d)}${resetButton(endpoint, d)}<div id="${statusID}" role="status" aria-live="polite">${esc(message)}</div></div>`;
+    const state = overview(d, action.id);
+    const learning = d && d.learning;
+    const duration = learningDuration(learning);
+    const activeProfile = d && (d.profile || d.active_profile);
+    const profile = action.id === 'load' && d && d.enabled ? (activeProfile === 'away' ? 'Away profile' : activeProfile === 'home' ? 'Home profile' : '') : '';
+    const meta = [duration, profile].filter(Boolean).join(' · ');
+    const open = expanded.has(action.id);
+    const detailsID = 'forecast-details-' + action.id;
+    const usable = d && d.enabled && !d.unavailable;
+    const details = usable ? row('Learning model', engineLabel(learning)) +
+      row('Model state', learningStatus(learning)) +
+      row('Health check', learning && learning.health === 'healthy' ? 'Healthy' : learning && learning.health === 'degraded' ? 'Needs attention' : learning && learning.health === 'waiting_for_data' ? 'Waiting for data' : 'Not available') +
+      (learning && learning.health_reason ? `<p class="forecast-note">${esc(learning.health_reason)}</p>` : '') +
+      row('Learning period started', learning && learning.started_ms > 0 ? fmtLocalTime(learning.started_ms) : 'Start date not recorded') +
+      row('Latest training data', fmtLocalTime(learning && learning.latest_training_ms)) +
+      '<p class="forecast-note">Healthy requires a health check from the box, a ready model and recent training data. It is not a forecast accuracy score. Learning days count elapsed time, not data coverage.</p>' +
+      (action.id === 'load' ? loadProfileControl(d) : '') +
+      '<h4>Forecast accuracy</h4><p class="forecast-note">Measured forecast accuracy is not available in this view yet.</p>' + modelRows(d) +
+      '<h4>Restart learning</h4><p class="forecast-note">Use this after a lasting change to your home or solar system. It restarts this model and its fallback; measured history stays saved.</p>' +
+      resetButton(endpoint, d) + (!actionAvailable(d) ? '<p class="forecast-note">Relearning is unavailable for this model.</p>' : '') :
+      '<p class="forecast-note">' + esc(state.note) + '</p>';
+    return `<div class="twin-card forecast-card"><div class="forecast-card-heading"><h3>${title}</h3><span class="forecast-state" data-tone="${state.tone}">${state.label}</span></div>` +
+      `<p class="forecast-description">${esc(state.note)}</p>${meta ? `<p class="forecast-meta">${esc(meta)}</p>` : ''}` +
+      `<button type="button" class="forecast-details-button" data-twin-details="${action.id}" aria-expanded="${open}" aria-controls="${detailsID}">${open ? 'Hide details' : 'Details'} <span aria-hidden="true">${open ? '−' : '+'}</span></button>` +
+      `<div class="forecast-details" id="${detailsID}"${open ? '' : ' hidden'}>${details}</div>` +
+      `<div class="forecast-action-status" id="${statusID}" role="status" aria-live="polite">${esc(actionMessages.get(endpoint) || '')}</div></div>`;
   }
 
   function focusedAction() {
@@ -162,6 +208,7 @@
     if (!active || !active.dataset) return null;
     if (actions[active.dataset.resetTwin]) return `[data-reset-twin="${active.dataset.resetTwin}"]`;
     if (active.dataset.loadmodelProfile) return `[data-loadmodel-profile="${active.dataset.loadmodelProfile}"]`;
+    if (active.dataset.twinDetails) return `[data-twin-details="${active.dataset.twinDetails}"]`;
     return null;
   }
   function focusMayReturn() {
@@ -173,13 +220,13 @@
     if (!grid) return;
     const selector = restoreFocus || focusedControl();
     availableActions.clear();
-    grid.innerHTML = twinCard('Solar production', pv, '/api/pvmodel/reset') + twinCard('Consumption', load, '/api/loadmodel/reset', loadProfileControl(load));
+    grid.innerHTML = twinCard('Solar production', pv, '/api/pvmodel/reset') + twinCard('Consumption', load, '/api/loadmodel/reset');
     if (selector && grid.querySelector) {
       const button = grid.querySelector(selector);
       if (button && !button.disabled && typeof button.focus === 'function') button.focus();
     }
     const sub = document.getElementById('twins-subtitle');
-    if (sub) sub.textContent = 'Forecast learning for solar production and consumption';
+    if (sub) sub.textContent = 'Learning from your home';
   }
 
   async function failedResponse(response) {
@@ -224,22 +271,30 @@
   }
 
   function onGridClick(e) {
-    const profile = e.target && e.target.dataset && e.target.dataset.loadmodelProfile;
+    const target = e.target && e.target.closest ? e.target.closest('button') : e.target;
+    const details = target && target.dataset && target.dataset.twinDetails;
+    if (details) {
+      if (expanded.has(details)) expanded.delete(details);
+      else expanded.add(details);
+      render(lastPV, lastLoad, `[data-twin-details="${details}"]`);
+      return;
+    }
+    const profile = target && target.dataset && target.dataset.loadmodelProfile;
     if (profile) {
-      if (e.target.classList.contains('active')) return;
+      if (target.classList.contains('active')) return;
       apiFetch('/api/loadmodel/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile }) })
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(() => fetchAll())
         .catch(err => { actionMessages.set('/api/loadmodel/reset', 'Load profile switch failed: ' + err.message); render(lastPV, lastLoad); });
       return;
     }
-    const endpoint = e.target && e.target.dataset && e.target.dataset.resetTwin;
+    const endpoint = target && target.dataset && target.dataset.resetTwin;
     if (endpoint) startRelearn(endpoint);
   }
   function init() {
     const grid = document.getElementById('twins-grid');
     if (grid) grid.addEventListener('click', onGridClick);
-    document.addEventListener('ftw-ui-mode-change', syncPolling);
+    window.addEventListener('hashchange', syncPolling);
     document.addEventListener('visibilitychange', syncPolling);
     syncPolling();
   }

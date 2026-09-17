@@ -307,18 +307,6 @@ jobs:
           path-type: inherit
           install: make zip
 
-      - name: Match DuckDB's MinGW compiler
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          # DuckDB v1.5.5 BundleStaticLibs.yml uses this exact toolchain.
-          choco upgrade mingw --version=14.2.0 --allow-downgrade --force --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $compilerDir = 'C:/ProgramData/mingw64/mingw64/bin'
-          if ((& "$compilerDir/gcc.exe" -dumpfullversion) -ne '14.2.0') { throw 'Unexpected MinGW version' }
-          "CC=$compilerDir/gcc.exe" >> $env:GITHUB_ENV
-          "CXX=$compilerDir/g++.exe" >> $env:GITHUB_ENV
-          $compilerDir >> $env:GITHUB_PATH
 
       # drivers/ is gitignored and fetched from the commit pinned in
       # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,
@@ -329,7 +317,6 @@ jobs:
       - name: Build
         env:
           VERSION: ${{ needs.meta.outputs.tag }}
-          FTW_BUILD_DOCKER: ${{ matrix.goos == 'linux' && '1' || '0' }}
         run: |
           make ${{ matrix.build_target }}
           ls -la \

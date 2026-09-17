@@ -15,8 +15,7 @@ import (
 // memory so writes don't need a roundtrip per sample. The intern caches
 // hydrate from disk on first use.
 
-// RecentRetention describes the old SQLite/Parquet boundary for legacy exports.
-// Primary DuckDB storage uses the configured full-history retention.
+// RecentRetention is the SQLite/Parquet boundary for raw samples.
 const RecentRetention = 14 * 24 * time.Hour
 
 // Sample is one (driver, metric, ts, value) tuple — the canonical TS row.
@@ -163,7 +162,7 @@ func (s *Store) driverID(name string) (int64, error) {
 	// a caller that raced us before hydrate finished) resolves to the same
 	// id rather than failing the whole sample batch.
 	if _, err := s.history.Exec(
-		`INSERT INTO ts_drivers (id, name) VALUES (nextval('ts_drivers_next_id'), ?) ON CONFLICT(name) DO NOTHING`, name,
+		`INSERT INTO ts_drivers (name) VALUES (?) ON CONFLICT(name) DO NOTHING`, name,
 	); err != nil {
 		return 0, err
 	}
@@ -207,7 +206,7 @@ func (s *Store) metricID(name, unit string) (int64, error) {
 	// One statement covers both jobs: allocate the row, or relabel an
 	// existing one once the driver supplies a unit. An empty unit never
 	// erases a label already stored.
-	if _, err := s.history.Exec(`INSERT INTO ts_metrics (id, name, unit) VALUES (nextval('ts_metrics_next_id'), ?, NULLIF(?, ''))
+	if _, err := s.history.Exec(`INSERT INTO ts_metrics (name, unit) VALUES (?, NULLIF(?, ''))
 		ON CONFLICT(name) DO UPDATE SET unit = COALESCE(NULLIF(excluded.unit, ''), ts_metrics.unit)`,
 		name, unit,
 	); err != nil {
@@ -286,6 +285,9 @@ func (s *Store) resolveSamples(samples []Sample) ([]resolvedSample, error) {
 }
 
 func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []resolvedSample) error {
+	if err := rejectCompactedSamples(ctx, tx, rs); err != nil {
+		return err
+	}
 	if len(rs) == 0 {
 		return nil
 	}
@@ -294,6 +296,10 @@ func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []reso
 		return err
 	}
 	defer stmt.Close()
+	if err := s.seedSeriesHours(ctx, tx, rs); err != nil {
+		return err
+	}
+
 	hours := make(map[seriesHourKey]*seriesHourAcc, 8)
 	for _, r := range rs {
 		res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
@@ -310,6 +316,30 @@ func (s *Store) insertSamplesAndHours(ctx context.Context, tx *sql.Tx, rs []reso
 		addSeriesHourSample(hours, r.dID, r.mID, r.ts, r.v)
 	}
 	return s.upsertSeriesHoursTx(ctx, tx, hours)
+}
+
+func (s *Store) seedSeriesHours(ctx context.Context, tx *sql.Tx, rs []resolvedSample) error {
+	// A live write can reach a converted hour before background backfill.
+	// Seed that hour from existing raw rows before adding the new samples.
+	seeded := make(map[seriesHourKey]bool)
+	for _, r := range rs {
+		k := seriesHourKey{r.dID, r.mID, seriesHourOf(r.ts)}
+		if seeded[k] {
+			continue
+		}
+		seeded[k] = true
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ts_series_hour WHERE driver_id=? AND metric_id=? AND hour_ms=?)`, k.driverID, k.metricID, k.hourMs).Scan(&present); err != nil {
+			return err
+		}
+		if present != 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ts_series_hour SELECT driver_id,metric_id,?,SUM(value),MIN(value),MAX(value),COUNT(*),MAX(ts_ms) FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms>=? AND ts_ms<? GROUP BY driver_id,metric_id ON CONFLICT DO NOTHING`, k.hourMs, k.driverID, k.metricID, k.hourMs, k.hourMs+seriesHourMs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RecordTick persists one control-loop tick — the history snapshot plus the
@@ -408,7 +438,11 @@ func (s *Store) writeHistoryBatchTx(ctx context.Context, tx *sql.Tx, batchID, pa
 			return 0, false, err
 		}
 	}
-	if p != nil {
+	if s.aggregateHistory.Load() && batchID != "" {
+		if err := s.recordDashboardTx(ctx, tx, p); err != nil {
+			return 0, false, err
+		}
+	} else if p != nil {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -417,7 +451,11 @@ func (s *Store) writeHistoryBatchTx(ctx context.Context, tx *sql.Tx, batchID, pa
 			return 0, false, err
 		}
 	}
-	if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
+	if s.aggregateHistory.Load() && batchID != "" {
+		if err := s.insertAggregateSamples(ctx, tx, rs); err != nil {
+			return 0, false, err
+		}
+	} else if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
 		return 0, false, err
 	}
 	if err := recordEnergyObservationsTx(tx, observations); err != nil {
@@ -470,7 +508,9 @@ func (s *Store) recordHistoryBatches(ctx context.Context, batches []historyBatch
 		prep = append(prep, prepared{b: b, p: p, rs: rs})
 	}
 
-	s.historyWriteMu.Lock()
+	if err := lockContext(ctx, s.historyWriteMu.TryLock); err != nil {
+		return out, err
+	}
 	defer s.historyWriteMu.Unlock()
 	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {
@@ -526,15 +566,10 @@ func (s *Store) LoadSeriesContext(ctx context.Context, driver, metric string, si
 		}
 		return out, nil
 	}
-	hot, err := s.loadHotSeries(ctx, driver, metric, sinceMs, untilMs, 0)
+	merged, err := s.mergedSeries(ctx, s.coldDir, driver, metric, sinceMs, untilMs, 0)
 	if err != nil {
 		return nil, err
 	}
-	arch, err := s.loadArchiveSeriesRaw(ctx, driver, metric, sinceMs, untilMs)
-	if err != nil {
-		return nil, err
-	}
-	merged := mergeSeriesPoints(hot, arch)
 	out := make([]Sample, len(merged))
 	for i, p := range merged {
 		out[i] = Sample{Driver: driver, Metric: metric, TsMs: p.TsMs, Value: p.V}
@@ -581,16 +616,19 @@ func (s *Store) loadArchiveSeriesRaw(ctx context.Context, driver, metric string,
 // chart the way pick-every-Nth-sample downsampling made it), and the
 // number of raw samples that contributed.
 type SeriesPoint struct {
-	TsMs int64   `json:"ts"`
-	V    float64 `json:"v"`
-	Min  float64 `json:"min"`
-	Max  float64 `json:"max"`
-	N    int64   `json:"n"`
+	ResolutionMS int64    `json:"resolution_ms,omitempty"`
+	FirstMS      int64    `json:"first_ms,omitempty"`
+	Last         *float64 `json:"last,omitempty"`
+	TsMs         int64    `json:"ts"`
+	V            float64  `json:"v"`
+	Min          float64  `json:"min"`
+	Max          float64  `json:"max"`
+	N            int64    `json:"n"`
 }
 
-// LoadSeriesBucketsOrRaw is LoadSeriesBuckets with maxPoints=0 meaning "every
-// raw sample" (as degenerate single-sample buckets: v=min=max, n=1), so API
-// handlers can serve both shapes from one code path.
+// LoadSeriesBucketsOrRaw uses maxPoints=0 to return the stored resolution
+// without further downsampling. Raw samples, when retained, have n=1.
+// Aggregates carry their resolution, observed bounds and last actual value.
 func (s *Store) LoadSeriesBucketsOrRaw(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
 	return s.LoadSeriesBucketsOrRawContext(context.Background(), driver, metric, sinceMs, untilMs, maxPoints)
 }
@@ -604,15 +642,7 @@ func (s *Store) LoadSeriesBucketsOrRawContext(ctx context.Context, driver, metri
 	if maxPoints > 0 {
 		return s.LoadSeriesBucketsContext(ctx, driver, metric, sinceMs, untilMs, maxPoints)
 	}
-	raw, err := s.LoadSeriesContext(ctx, driver, metric, sinceMs, untilMs, 0)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SeriesPoint, len(raw))
-	for i, sm := range raw {
-		out[i] = SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1}
-	}
-	return out, nil
+	return s.mergedSeries(ctx, s.coldDir, driver, metric, sinceMs, untilMs, 0)
 }
 
 // BucketWidthMs is the downsampling bucket width for a window and point
@@ -648,25 +678,22 @@ func (s *Store) LoadSeriesBucketsContext(ctx context.Context, driver, metric str
 	if maxPoints <= 0 || untilMs < sinceMs {
 		return nil, nil
 	}
-	cut, hasHot, err := s.hotEarliestMs(ctx)
-	if err != nil {
-		return nil, err
+	if maxPoints > maxSeriesBuckets {
+		return nil, ErrHistoryQueryLimit
 	}
-	if hasHot && cut <= sinceMs {
-		return s.loadHotSeries(ctx, driver, metric, sinceMs, untilMs, maxPoints)
+	if s.seriesHoursReady() && ((useSeriesHourRollup(sinceMs, untilMs) && BucketWidthMs(sinceMs, untilMs, maxPoints) >= seriesHourMs) || s.onlySeriesSummary(ctx, driver, metric, sinceMs, untilMs)) {
+		if err := s.hydrateIntern(); err != nil {
+			return nil, err
+		}
+		s.ts.mu.RLock()
+		d, dOK := s.ts.drivers[driver]
+		m, mOK := s.ts.metrics[metric]
+		s.ts.mu.RUnlock()
+		if dOK && mOK {
+			return s.loadSeriesBucketsFromHours(ctx, d, m.id, sinceMs, untilMs, maxPoints)
+		}
 	}
-	arch, err := s.loadArchiveSeriesBuckets(ctx, driver, metric, sinceMs, untilMs, maxPoints)
-	if err != nil {
-		return nil, err
-	}
-	if !hasHot {
-		return arch, nil
-	}
-	hot, err := s.loadHotSeries(ctx, driver, metric, cut, untilMs, maxPoints)
-	if err != nil {
-		return nil, err
-	}
-	return downsampleSeries(mergeSeriesPoints(hot, arch), sinceMs, untilMs, maxPoints), nil
+	return s.mergedSeries(ctx, s.coldDir, driver, metric, sinceMs, untilMs, maxPoints)
 }
 
 func (s *Store) loadArchiveSeriesBuckets(ctx context.Context, driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
@@ -692,7 +719,7 @@ func (s *Store) loadArchiveSeriesBuckets(ctx context.Context, driver, metric str
 	rows, err := s.history.QueryContext(ctx, `SELECT MAX(ts_ms), AVG(value), MIN(value), MAX(value), COUNT(*)
 		FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
-		GROUP BY (ts_ms - ?) // ?
+		GROUP BY (ts_ms - ?) / ?
 		ORDER BY 1 ASC`, dID, mEnt.id, sinceMs, untilMs, sinceMs, bucketMs)
 	if err != nil {
 		return nil, err
@@ -712,41 +739,14 @@ func (s *Store) loadArchiveSeriesBuckets(ctx context.Context, driver, metric str
 // LatestSample returns the most recent value for one (driver, metric).
 // Returns sql.ErrNoRows if nothing has been recorded.
 func (s *Store) LatestSample(driver, metric string) (Sample, error) {
-	if s.hot != nil {
-		var sm Sample
-		err := s.hot.QueryRow(`SELECT s.ts_ms, s.value
-			FROM ts_samples s
-			JOIN ts_drivers d ON d.id = s.driver_id
-			JOIN ts_metrics m ON m.id = s.metric_id
-			WHERE d.name = ? AND m.name = ?
-			ORDER BY s.ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
-		if err == nil {
-			sm.Driver, sm.Metric = driver, metric
-			return sm, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return Sample{}, err
-		}
-	}
-	if err := s.hydrateIntern(); err != nil {
-		return Sample{}, err
-	}
-	ts := s.ts
-	ts.mu.RLock()
-	dID, dOK := ts.drivers[driver]
-	mEnt, mOK := ts.metrics[metric]
-	ts.mu.RUnlock()
-	if !dOK || !mOK {
-		return Sample{}, sql.ErrNoRows
-	}
 	var sm Sample
 	sm.Driver, sm.Metric = driver, metric
-	err := s.history.QueryRow(`SELECT ts_ms, value FROM ts_samples
-		WHERE driver_id = ? AND metric_id = ? ORDER BY ts_ms DESC LIMIT 1`,
-		dID, mEnt.id).Scan(&sm.TsMs, &sm.Value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sm, err
-	}
+	err := s.history.QueryRow(`WITH identity AS (SELECT d.id AS driver_id,m.id AS metric_id FROM ts_drivers d,ts_metrics m WHERE d.name=? AND m.name=?)
+ SELECT ts_ms,value FROM (
+ SELECT l.ts_ms,l.value FROM ts_latest l JOIN identity i USING(driver_id,metric_id)
+ UNION ALL SELECT s.ts_ms,s.value FROM ts_samples s JOIN identity i USING(driver_id,metric_id)
+ UNION ALL SELECT b.last_ms,b.last_value FROM ts_buckets b JOIN identity i USING(driver_id,metric_id) WHERE b.resolution_ms=10000
+ ) ORDER BY ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
 	return sm, err
 }
 
@@ -802,29 +802,13 @@ func (s *Store) DriverNames() ([]string, error) {
 	return out, nil
 }
 
-// PruneHistorySamples applies the configured raw-history retention in DuckDB.
-// A nonpositive retention keeps all samples. The oldest hour is removed per
-// transaction, releasing the writer between batches.
+// PruneHistorySamples archives before applying raw retention. Hourly summaries
+// remain; a nonpositive retention keeps all Parquet samples.
 func (s *Store) PruneHistorySamples(ctx context.Context, retentionDays int, now time.Time) error {
-	// Import receipts refer to committed source chunks. Do not delete their rows
-	// until every source has been verified, including after a failed import.
-	if retentionDays <= 0 || !s.HistoryMigrationStatus().HistoryComplete {
+	if !s.HistoryMigrationStatus().HistoryComplete {
 		return nil
 	}
-	cutoff := now.UTC().AddDate(0, 0, -retentionDays)
-	cutoff = time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
-	for {
-		var first sql.NullInt64
-		if err := s.history.QueryRowContext(ctx, `SELECT MIN(ts_ms) FROM ts_samples WHERE ts_ms < ?`, cutoff.UnixMilli()).Scan(&first); err != nil {
-			return err
-		}
-		if !first.Valid {
-			return nil
-		}
-		if err := s.deleteSamplesChunked(ctx, first.Int64, min(first.Int64+time.Hour.Milliseconds(), cutoff.UnixMilli())); err != nil {
-			return err
-		}
-	}
+	return s.retainSampleHistory(ctx, retentionDays, now)
 }
 
 // SamplesBefore streams every sample with ts_ms < cutoff in batches sorted

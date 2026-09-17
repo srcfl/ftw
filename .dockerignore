@@ -25,3 +25,6 @@ go/**/*_test.go
 **/state.db-*
 **/cold/
 **/.DS_Store
+
+# The offline beta converter is outside ordinary Core builds.
+go/tools/

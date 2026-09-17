@@ -95,3 +95,59 @@ func TestDutyPlanCommandsOnPowerThenStopsAtEnergyBudget(t *testing.T) {
 		t.Fatalf("spent budget still commands %.0f", got)
 	}
 }
+
+func TestDutyDispatchStopsForUnavailablePowerAndKeepsSpentBudget(t *testing.T) {
+	start := time.Now().Truncate(time.Minute)
+	cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}
+	dir := &Directive{SlotStart: start, SlotEnd: start.Add(15 * time.Minute), LoadpointEnergyWh: map[string]float64{"garage": 100}, LoadpointMaxPowerW: map[string]float64{"garage": 11000}}
+	samples := map[string]EVSample{"easee": {Connected: true, RequestActive: true, SessionWh: 1000, EnergyAt: start, PowerAt: start}}
+	sender := &fakeSender{}
+	c := newTestController(t, []Config{cfg}, dir, samples, sender)
+	c.Tick(context.Background(), start)
+	// A fresh counter proves that the whole pulse has been delivered.
+	s := samples["easee"]
+	s.SessionWh, s.EnergyAt, s.PowerAt = 1100, start.Add(35*time.Second), start.Add(35*time.Second)
+	samples["easee"] = s
+	c.Tick(context.Background(), s.PowerAt)
+	for sec := 40; sec <= 600; sec += 5 {
+		s.PowerUnavailable = true
+		samples["easee"] = s
+		c.Tick(context.Background(), start.Add(time.Duration(sec)*time.Second))
+		cmd, ok := lastSetCurrent(sender.calls)
+		if !ok || cmd.power != 0 {
+			t.Fatalf("missing power resumed a spent pulse at %ds: %+v", sec, cmd)
+		}
+	}
+	s.PowerUnavailable, s.PowerAt = false, start.Add(605*time.Second)
+	samples["easee"] = s
+	c.Tick(context.Background(), s.PowerAt)
+	if cmd, _ := lastSetCurrent(sender.calls); cmd.power != 0 {
+		t.Fatalf("recovery forgot the spent budget: %+v", cmd)
+	}
+}
+
+func TestUnavailablePowerPausesAndRetainsManualCharge(t *testing.T) {
+	start := time.Now().Truncate(time.Minute)
+	cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}
+	samples := map[string]EVSample{"easee": {Connected: true, RequestActive: true, DeviceID: "easee:A", SessionID: "session-1", SessionWh: 1000}}
+	sender := &fakeSender{}
+	c := newTestController(t, []Config{cfg}, nil, samples, sender)
+	c.Tick(context.Background(), start)
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 11000, Persistent: true})
+	s := samples["easee"]
+	s.PowerUnavailable = true
+	samples["easee"] = s
+	c.Tick(context.Background(), start.Add(5*time.Minute))
+	if cmd, _ := lastSetCurrent(sender.calls); cmd.power != 0 {
+		t.Fatalf("unavailable power did not pause manual charge: %+v", cmd)
+	}
+	if _, held := c.GetManualHold(cfg.ID, start.Add(5*time.Minute)); !held {
+		t.Fatal("stale measurements erased the manual request")
+	}
+	s.PowerUnavailable = false
+	samples["easee"] = s
+	c.Tick(context.Background(), start.Add(5*time.Minute+5*time.Second))
+	if cmd, _ := lastSetCurrent(sender.calls); cmd.power <= 0 {
+		t.Fatalf("recovered measurements did not resume the request: %+v", cmd)
+	}
+}

@@ -81,7 +81,7 @@
     append(energy, '.history-row');
     append(plan, '#plan-section');
     append(plan, '#plan-history-details');
-    ['#ui-mode-row', '#twins-section', '#loadpoints-section', '#drivers-section', '#models-section']
+    ['#twins-section', '#ui-mode-row', '#loadpoints-section', '#drivers-section', '#models-section']
       .forEach(selector => append(more, selector));
 
     const oldChartRow = document.getElementById('live-plan-row');

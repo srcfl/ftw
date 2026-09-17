@@ -159,7 +159,7 @@ func (r *rustForecast) Update(ctx context.Context, site forecastSite, o forecast
 		return err
 	}
 	// Persist the complete response atomically before exposing it to planning.
-	if err = r.store.SaveConfig(forecastRustStateKey, string(data)); err != nil {
+	if err = r.store.SaveConfigContext(ctx, forecastRustStateKey, string(data)); err != nil {
 		return err
 	}
 	r.mu.Lock()

@@ -965,8 +965,12 @@ func (s *Service) loop(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
-	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
-		rt := time.NewTicker(s.ReactiveInterval)
+	reactiveInterval := s.ReactiveInterval
+	if reactiveInterval <= 0 && (s.Loadpoints != nil || s.Loadpoint != nil) {
+		reactiveInterval = 5 * time.Second
+	}
+	if reactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.Loadpoints != nil || s.Loadpoint != nil) {
+		rt := time.NewTicker(reactiveInterval)
 		defer rt.Stop()
 		reactiveTick = rt.C
 	}
@@ -999,12 +1003,17 @@ func (s *Service) loop(ctx context.Context) {
 func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
+	params := s.lastParams
 	last := s.lastReplanAt
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
 	}
 	if time.Since(last) < s.MinReplanGap {
+		return
+	}
+	if s.loadpointStateDiverged(plan, params, time.Now()) {
+		s.replan(ctx, "loadpoint_soc_changed")
 		return
 	}
 	// Find the slot covering now.

@@ -1,6 +1,7 @@
 package appproto
 
 import (
+	"context"
 	"math"
 	"time"
 
@@ -171,6 +172,9 @@ func (h *Handler) loadpointHold(cmd Cmd, uptimeMs int64) error {
 	}
 
 	lp.Hold(id, hold)
+	if err := h.waitForEVSave(lp); err != nil {
+		return h.reportEVSaveUnconfirmed(cmd)
+	}
 
 	// Read back what the box now holds, never the echo of the request.
 	observed, held := lp.ObservedHold(id, h.cfg.Clock.Now())
@@ -205,6 +209,9 @@ func (h *Handler) clearHold(lp Loadpoints, id string, cmd Cmd, uptimeMs int64) e
 	}
 
 	lp.ClearHold(id)
+	if err := h.waitForEVSave(lp); err != nil {
+		return h.reportEVSaveUnconfirmed(cmd)
+	}
 
 	observed, held := lp.ObservedHold(id, h.cfg.Clock.Now())
 	readAtMs := h.cfg.Clock.UptimeMs()
@@ -291,6 +298,9 @@ func (h *Handler) loadpointBoost(cmd Cmd, uptimeMs int64) error {
 		})
 	}
 
+	if err := h.waitForEVSave(lp); err != nil {
+		return h.reportEVSaveUnconfirmed(cmd)
+	}
 	// Read back the status the box now reports: 1 means the boost is
 	// running, 0 means something stopped it between the write and the read.
 	status := lp.ObservedBoost(id, h.cfg.Clock.Now())
@@ -316,6 +326,9 @@ func (h *Handler) cancelBoost(lp Loadpoints, id string, cmd Cmd, uptimeMs int64)
 
 	now := h.cfg.Clock.Now()
 	lp.CancelBoost(id, now)
+	if err := h.waitForEVSave(lp); err != nil {
+		return h.reportEVSaveUnconfirmed(cmd)
+	}
 
 	status := lp.ObservedBoost(id, h.cfg.Clock.Now())
 	readAtMs := h.cfg.Clock.UptimeMs()
@@ -374,6 +387,9 @@ func (h *Handler) loadpointSoCSet(cmd Cmd, uptimeMs int64) error {
 		})
 	}
 
+	if err := h.waitForEVSave(lp); err != nil {
+		return h.reportEVSaveUnconfirmed(cmd)
+	}
 	// Read back the level the box now holds, never the echo of the request.
 	observed, known := lp.ObservedSoC(id)
 	readAtMs := h.cfg.Clock.UptimeMs()
@@ -397,6 +413,22 @@ func (h *Handler) loadpointSoCSet(cmd Cmd, uptimeMs int64) error {
 		}
 	}
 	return h.settleAndReport(cmd.CmdID, res)
+}
+
+func (h *Handler) waitForEVSave(lp Loadpoints) error {
+	if writer, ok := lp.(interface{ WaitForPersistence(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(h.ctx, 2*time.Second)
+		defer cancel()
+		return writer.WaitForPersistence(ctx)
+	}
+	return nil
+}
+
+func (h *Handler) reportEVSaveUnconfirmed(cmd Cmd) error {
+	return h.settleAndReport(cmd.CmdID, CmdResult{
+		CmdID: cmd.CmdID, State: CmdUnconfirmed,
+		Error: &ErrorBody{Code: ErrUnavailable, Retryable: ErrorRetryable[ErrUnavailable], Args: map[string]any{"op": cmd.Op, "reason": "persistence_unconfirmed"}},
+	})
 }
 
 // loadpointSurplusOnlySet turns PV-only charging on or off: the surplus_only

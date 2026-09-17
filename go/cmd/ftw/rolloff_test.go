@@ -9,7 +9,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
-func TestDoRolloffPrunesFixedColumnHistory(t *testing.T) {
+func TestHistoryMaintenancePrunesFixedColumnHistory(t *testing.T) {
 	dir := t.TempDir()
 	st, err := state.Open(filepath.Join(dir, "state.db"))
 	if err != nil {
@@ -30,7 +30,9 @@ func TestDoRolloffPrunesFixedColumnHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doRolloff(context.Background(), st, filepath.Join(dir, "cold"))
+	if err := st.MaintainHistory(context.Background(), filepath.Join(dir, "cold"), 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 
 	hot, warm, _, err := st.HistoryCounts()
 	if err != nil {

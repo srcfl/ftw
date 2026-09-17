@@ -80,8 +80,15 @@ ftw-backup revert  -data /var/lib/ftw -safety /var/lib/.ftw-pre-restore-... -yes
 
 Stop the native FTW service before `restore` or `revert`. `create` opens the
 existing database read-only and does not migrate or repair its schema.
-Pass `-config` to `create` when the seed has a name other than
-`<data>/config.yaml`. The config seed must be inside the data directory.
+It copies without the live 100 ms yield used while Core is collecting, and
+refuses to start when the destination cannot hold the database copies, full
+archive and verification extract, including cold Parquet and other saved files.
+Creation verifies on the output filesystem. Restore verifies on its writable
+target. Standalone `verify` and `inspect` prefer the archive filesystem and
+fall back to the system temporary directory when the source is read-only.
+Pass `-config` to `create` when the seed has
+a name other than `<data>/config.yaml`. The config seed must be inside the
+data directory.
 
 ## Svenska – kortversion att skicka till en användare
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const configurationKey = "settings/config_v1"
@@ -88,29 +89,53 @@ func (s *Store) ConfigValue(key string) (string, bool, error) {
 // History keeps its existing policy. FULL syncs the WAL before acknowledging
 // settings, rather than waiting for a later checkpoint.
 func (s *Store) durableConfigWrite(write func(*sql.Tx) error) error {
-	ctx := context.Background()
+	return s.durableConfigWriteContext(context.Background(), write)
+}
+
+func (s *Store) durableConfigWriteContext(parent context.Context, write func(*sql.Tx) error) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `PRAGMA synchronous=FULL`); err != nil {
+	var synchronous int
+	if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
 		return err
 	}
 	defer func() {
-		if _, err := conn.ExecContext(ctx, `PRAGMA synchronous=NORMAL`); err != nil {
+		restore, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		if _, err := conn.ExecContext(restore, fmt.Sprintf(`PRAGMA synchronous=%d`, synchronous)); err != nil {
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
+	if _, err := conn.ExecContext(ctx, `PRAGMA synchronous=FULL`); err != nil {
+		return err
+	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := write(tx); err != nil {
-		return err
+	err = write(tx)
+	if err == nil {
+		err = tx.Commit()
 	}
-	return tx.Commit()
+	if err != nil && ctx.Err() != nil {
+		return errors.Join(err, ctx.Err())
+	}
+	return err
+}
+
+// SaveConfigContext preserves the durable config contract while allowing a
+// background model update to cancel without spending another full five seconds.
+func (s *Store) SaveConfigContext(ctx context.Context, key, value string) error {
+	return s.durableConfigWriteContext(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO config (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+		return err
+	})
 }
 
 func saveConfigValues(tx *sql.Tx, values map[string]string) error {

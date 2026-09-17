@@ -128,7 +128,9 @@ func startFakeSidecar(t *testing.T, statusCode int) string {
 
 func waitUntil(t *testing.T, fn func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// These checks wait for update/backup state transitions, not a latency
+	// promise. Filesystem work can exceed two seconds on a busy CI runner.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if fn() {
 			return

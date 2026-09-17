@@ -34,8 +34,9 @@ retain copyright in their contributions.
 
 Third-party software
 --------------------
-DuckDB and its linked native libraries carry separate license terms and
-notices. See THIRD-PARTY-NOTICES.txt in this distribution.
+Third-party components carry their own license terms and notices. See
+THIRD-PARTY-NOTICES.txt in this distribution. The optional beta history
+converter carries its native library notices separately.
 
 Prior Apache license, retained verbatim
 --------------------------------------

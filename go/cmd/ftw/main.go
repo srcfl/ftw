@@ -298,6 +298,12 @@ func adoptGatewayIdentityWith(
 }
 
 func main() {
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	imageTag := os.Getenv("FTW_IMAGE_TAG")
 	builtVersion := Version
 	resolvedVersion, imageTagApplied := runtimeVersionFromImageTag(builtVersion, CandidateTag, imageTag)
@@ -462,9 +468,14 @@ func main() {
 		slog.Error("open state", "err", err)
 		os.Exit(1)
 	}
+	if err := st.EnableHistoryAggregation(); err != nil {
+		slog.Error("enable history aggregation", "err", err)
+		os.Exit(1)
+	}
 	defer func() {
 		if err := st.Close(); err != nil {
 			slog.Error("state shutdown failed", "err", err)
+			exitCode = 1
 		}
 	}()
 	if *retiredShadowSocket != "" {
@@ -480,6 +491,10 @@ func main() {
 	if err != nil {
 		slog.Error("initialize config database", "err", err)
 		os.Exit(1)
+	}
+
+	if cfg.State != nil && cfg.State.ColdRetentionDays != 0 {
+		slog.Warn("state.cold_retention_days is retired; fixed EMS history retention applies", "previous_days", cfg.State.ColdRetentionDays)
 	}
 
 	// The repository is entirely local on startup: existing active symlinks are
@@ -614,18 +629,12 @@ func main() {
 	// Closing restartCh from /api/restart drops the main control loop out
 	// of its select, which returns from main() so every defer (HA Stop,
 	// state.Close, http.Shutdown, …) runs in normal LIFO order. The
-	// bottom-of-stack `os.Exit` defer below then translates exitCode 1
+	// first registered `os.Exit` defer then translates exitCode 1
 	// into a non-zero process exit so docker (`unless-stopped`) and
 	// systemd (`Restart=on-failure`) bring the binary back up. SIGTERM /
 	// SIGINT take the same return path with exitCode 0.
 	restartCh := make(chan struct{})
 	var restartOnce sync.Once
-	exitCode := 0
-	defer func() {
-		if exitCode != 0 {
-			os.Exit(exitCode)
-		}
-	}()
 
 	// ---- Driver registry ----
 	ctx, cancel := context.WithCancel(context.Background())
@@ -793,7 +802,15 @@ func main() {
 	// The planner consumes loadpoint state so battery and EV can be
 	// co-optimized in one DP.
 	lpMgr := loadpoint.NewManager()
-	lpMgr.SetSessionStore(st)
+	evWrites, err := st.NewEVControlWrites()
+	if err != nil {
+		slog.Error("cannot load EV restart state", "err", err)
+		return
+	}
+	defer closeControlWrites(evWrites, "EV state")
+	modelWrites := st.NewBatteryModelWrites()
+	defer closeControlWrites(modelWrites, "battery models")
+	lpMgr.SetSessionStore(evWrites)
 	if len(cfg.Loadpoints) > 0 {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
@@ -1618,7 +1635,7 @@ func main() {
 				// no schedule, EV is left to the loadpoint controller's
 				// reactive surplus-only behaviour.
 				if effectiveTarget <= 0 || effectiveTargetTime.IsZero() ||
-					!effectiveTargetTime.After(time.Now()) {
+					(!effectiveTargetTime.After(time.Now()) && !st.FinishAtVehicleLimit) {
 					continue
 				}
 				// Pull capacity off the configured loadpoint.
@@ -1665,31 +1682,15 @@ func main() {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
-				// Operational ceiling: the lower of the user's target
-				// and the vehicle-configured charge limit. The car
-				// won't accept current beyond charge_limit_pct anyway,
-				// so planning past it is wasted DP grid space. When
-				// the limit is unknown, fall back to the deadline
-				// target itself; never plan beyond what was requested.
-				maxSoC := effectiveTarget
-				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxSoC {
-					maxSoC = vehicleChargeLimit
+				goal := st
+				goal.TargetSoC = effectiveTarget
+				if boostActive {
+					goal.FinishAtVehicleLimit = false
 				}
-				// Effective deadline target: when the operator asked
-				// for 100% but the vehicle (Tesla via TeslaBLEProxy
-				// etc.) is hard-capped at, say, 60%, the DP must plan
-				// against the cap — otherwise the deadline-shortfall
-				// penalty stays elevated forever (the SoC grid maxes
-				// at the cap, can never reach the operator target),
-				// and MPC keeps committing grid charging chasing an
-				// unreachable goal. Cap target_pct to whatever the
-				// car will physically accept.
-				targetSoC := effectiveTarget
-				if vehicleChargeLimit > 0 && vehicleChargeLimit < targetSoC {
-					targetSoC = vehicleChargeLimit
-					slog.Info("mpc: target capped to vehicle charge limit",
-						"lp", st.ID, "operator_target", effectiveTarget,
-						"vehicle_limit", vehicleChargeLimit)
+				targetSoC := loadpoint.PlanningTarget(goal, vehicleChargeLimit)
+				maxSoC := targetSoC
+				if st.FinishAtVehicleLimit && !effectiveTargetTime.After(time.Now()) {
+					targetSlot = 0
 				}
 				// Guard against degenerate grids: if current SoC > maxSoC
 				// (already over target), grow the ceiling to current so
@@ -2048,21 +2049,21 @@ func main() {
 		// The manager binds saved holds to charger hardware and session. The
 		// controller restores only after fresh telemetry supplies those IDs.
 		lpController.SetManualHoldSaver(func(id string, h loadpoint.ManualHold, cleared bool) {
-			if err := lpMgr.PersistManualHold(id, h, cleared); err != nil {
+			if err := lpMgr.PersistManualHold(id, h, cleared); err != nil && !errors.Is(err, state.ErrWritePending) {
 				slog.Warn("failed to persist manual charging choice", "lp", id, "err", err)
 			}
 		})
 		const lpBatteryBoostKeyPrefix = "loadpoint_battery_boost:"
 		for _, lpState := range lpMgr.States() {
 			key := lpBatteryBoostKeyPrefix + lpState.ID
-			v, ok := st.LoadConfig(key)
+			v, ok := evWrites.LoadConfig(key)
 			if !ok || v == "" || v == "{}" {
 				continue
 			}
 			var lease loadpoint.BatteryBoostLease
 			if err := json.Unmarshal([]byte(v), &lease); err != nil ||
 				!lpController.RestoreBatteryBoost(lpState.ID, lease, time.Now()) {
-				_ = st.SaveConfig(key, "{}")
+				_ = evWrites.SaveConfig(key, "{}")
 				slog.Warn("discarded invalid persisted battery boost lease", "lp", lpState.ID, "err", err)
 				continue
 			}
@@ -2071,7 +2072,7 @@ func main() {
 		lpController.SetBatteryBoostSaver(func(id string, lease loadpoint.BatteryBoostLease, cleared bool) {
 			key := lpBatteryBoostKeyPrefix + id
 			if cleared {
-				if err := st.SaveConfig(key, "{}"); err != nil {
+				if err := evWrites.SaveConfig(key, "{}"); err != nil && !errors.Is(err, state.ErrWritePending) {
 					slog.Warn("failed to clear persisted battery boost lease", "lp", id, "err", err)
 				}
 				return
@@ -2081,7 +2082,7 @@ func main() {
 				slog.Warn("failed to marshal battery boost lease", "lp", id, "err", err)
 				return
 			}
-			if err := st.SaveConfig(key, string(b)); err != nil {
+			if err := evWrites.SaveConfig(key, string(b)); err != nil && !errors.Is(err, state.ErrWritePending) {
 				slog.Warn("failed to persist battery boost lease", "lp", id, "err", err)
 			}
 		})
@@ -2139,6 +2140,14 @@ func main() {
 				return "", "", false
 			}
 			return pick.Driver, pick.ChargingState, true
+		})
+
+		lpController.SetVehicleChargeState(func(lpID string) (loadpoint.VehicleChargeState, bool) {
+			pick := telemetry.PickVehicleForCompletion(tel, time.Now())
+			if pick.Driver == "" || pick.Stale || !lpMgr.VehicleObservationApplies(lpID, pick.UpdatedAt) {
+				return loadpoint.VehicleChargeState{}, false
+			}
+			return loadpoint.VehicleChargeState{SoC: pick.SoC, Limit: pick.ChargeLimit, State: pick.ChargingState}, true
 		})
 
 		// Wire the EV-available surplus computation for the
@@ -2448,7 +2457,7 @@ func main() {
 		DriverMQTTFactory:   reg.MQTTFactory,
 		DriverModbusFactory: reg.ModbusFactory,
 		DriverARPLookup:     reg.ARPLookup,
-		Models:              models, ModelsMu: modelsMu,
+		Models:              models, ModelsMu: modelsMu, ModelWrites: modelWrites,
 		SelfTune:          selfTune,
 		DtS:               float64(cfg.Site.ControlIntervalS),
 		SaveConfig:        func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
@@ -3214,7 +3223,11 @@ func main() {
 				modelsMu.Lock()
 				for name, m := range models {
 					if data, err := json.Marshal(m); err == nil {
-						if err := st.SaveBatteryModel(name, string(data)); err != nil {
+						key := name
+						if id, ok := batteryIdentity(name); ok {
+							key = id
+						}
+						if err := modelWrites.SaveConfig(key, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
 							slog.Warn("failed to persist battery model", "battery", name, "err", err)
 						}
 					}
@@ -3309,20 +3322,10 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 		if retentionDays != nil {
 			days = retentionDays()
 		}
-		doRolloff(ctx, st, coldDir)
-		if err := st.PruneHistorySamples(ctx, days, time.Now()); err != nil {
-			slog.Warn("history retention failed", "err", err)
+		if err := st.MaintainHistory(ctx, coldDir, days, time.Now()); err != nil {
+			slog.Warn("history maintenance incomplete", "err", err)
 		}
-
-		// The bulk DELETEs above just generated a WAL burst; reclaim it now
-		// instead of letting the -wal file ratchet upward on the SD card.
 		st.CheckpointWAL()
-
-		if removed, err := state.PruneDiagnosticsParquet(coldDir, days, time.Now()); err != nil {
-			slog.Warn("cold parquet retention prune failed", "err", err)
-		} else if len(removed) > 0 {
-			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", days)
-		}
 
 		// Disk watch: an SD card that fills up takes SQLite down with it.
 		// Warn loudly (log + event feed) at most once per day.
@@ -3333,7 +3336,7 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 				slog.Error("disk space low — database writes are at risk",
 					"avail_mb", avail>>20)
 				if err := st.RecordEvent(fmt.Sprintf(
-					"disk space low: %d MB available — consider state.cold_retention_days", avail>>20)); err != nil {
+					"disk space low: %d MB available; review storage health and move verified backups to another disk", avail>>20)); err != nil {
 					slog.Warn("record disk-low event failed", "err", err)
 				}
 			}
@@ -3351,40 +3354,8 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 	}
 }
 
-func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
-	// Age the fixed-column dashboard history on the same cadence as the
-	// long-format TS + diagnostics rolloff below. Prune is idempotent and pure
-	// SQL; without this call history_hot/history_warm grow forever even though
-	// ts_samples is correctly moved to Parquet.
-	if err := st.Prune(ctx); err != nil {
-		slog.Warn("history tier prune failed", "err", err)
-	}
-	if rolled, expired, err := st.PruneEnergyLedger(ctx, time.Now()); err != nil {
-		slog.Warn("energy ledger retention failed", "err", err)
-	} else if rolled > 0 || expired > 0 {
-		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "expired_rows", expired)
-	}
-
-	// Planner diagnostics roll off on the same cadence but keep a
-	// longer hot tier (30 d vs. the 14 d of ts_samples) — they're
-	// sparse enough (~100/day) that the extra month in SQLite
-	// costs < 60 MB and makes the time-travel UI snappy for
-	// recent-incident debugging.
-	dRows, dFiles, err := st.RolloffDiagnosticsToParquet(ctx, coldDir)
-	if err != nil {
-		slog.Warn("diagnostics parquet rolloff failed", "err", err)
-		return
-	}
-	if dRows > 0 {
-		slog.Info("diagnostics parquet rolloff",
-			"rows", dRows, "files", len(dFiles))
-	}
-}
-
 func flushHistoryOnStop(st *state.Store) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := st.FlushHistory(ctx); err != nil {
+	if err := st.StopHistory(); err != nil {
 		slog.Warn("history flush on shutdown", "err", err)
 	}
 }

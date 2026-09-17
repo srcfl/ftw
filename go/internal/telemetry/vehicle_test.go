@@ -28,6 +28,25 @@ func TestVehicleConnectedRankOrdering(t *testing.T) {
 	}
 }
 
+func TestVehicleCompletionRequiresUnambiguousConnectedSource(t *testing.T) {
+	s := NewStore()
+	pushVehicle(t, s, "one", .8, .8, "Complete", false, 0)
+	if got := PickVehicleForCompletion(s, time.Now()); got.Driver != "one" {
+		t.Fatal(got)
+	}
+	pushVehicle(t, s, "two", .5, .8, "Charging", false, 0)
+	if got := PickVehicleForCompletion(s, time.Now()); got.Driver != "" {
+		t.Fatal("rank is not a car-to-charger binding", got)
+	}
+	for _, state := range []string{"", "Disconnected"} {
+		s = NewStore()
+		pushVehicle(t, s, "one", .8, .8, state, false, 0)
+		if got := PickVehicleForCompletion(s, time.Now()); got.Driver != "" {
+			t.Fatal("missing connection proof", got)
+		}
+	}
+}
+
 // pushVehicle publishes a DerVehicle reading. soc and limit are 0–1
 // fractions (core SI). charge_limit_pct in the driver blob is the
 // legacy vendor door and is converted at PickBestVehicle.

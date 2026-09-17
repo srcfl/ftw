@@ -30,9 +30,6 @@ func TestCounterReturnAfterLongGapCommitsWholeTick(t *testing.T) {
 	if err := s.CheckpointHistory(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.history.Exec(`SET memory_limit='256MB'`); err != nil {
-		t.Fatal(err)
-	}
 	for i := range observations {
 		observations[i].AtMs, observations[i].CounterWh = to, energyPtr(7300)
 	}
@@ -67,8 +64,10 @@ func TestCounterReturnAfterLongGapCommitsWholeTick(t *testing.T) {
 	}
 	var total, first, last, counter float64
 	var buckets, count, history, scalar, receipts, allBuckets, counters int
-	if err := s.history.QueryRow(`SELECT COUNT(*), SUM(energy_wh), SUM(sample_count), arg_min(energy_wh,bucket_start_ms), arg_max(energy_wh,bucket_start_ms)
-		FROM energy_ledger_entries WHERE provenance='counter_gap' AND asset_id='returning-battery' AND flow='battery_charge'`).Scan(&buckets, &total, &count, &first, &last); err != nil {
+	if err := s.history.QueryRow(`WITH entries AS (SELECT * FROM energy_ledger_entries WHERE provenance='counter_gap' AND asset_id='returning-battery' AND flow='battery_charge')
+ SELECT COUNT(*), SUM(energy_wh), SUM(sample_count),
+ (SELECT energy_wh FROM entries ORDER BY bucket_start_ms ASC LIMIT 1),
+ (SELECT energy_wh FROM entries ORDER BY bucket_start_ms DESC LIMIT 1) FROM entries`).Scan(&buckets, &total, &count, &first, &last); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.history.QueryRow(`SELECT value FROM energy_ledger_cursors WHERE asset_id='returning-battery' AND flow='battery_charge' AND cursor_kind='counter'`).Scan(&counter); err != nil {

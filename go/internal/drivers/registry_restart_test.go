@@ -254,7 +254,16 @@ end
 	}
 
 	waitRegistryMetric(t, tel, "d1", "default_attempt", 2)
-	status, ok = r.ControlStatus("d1")
+	// The metric is emitted inside driver_default_mode, before the registry
+	// records its successful return. Wait for that observable transition.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, ok = r.ControlStatus("d1")
+		if ok && !status.Blocked && status.DefaultConfirmed && !status.RecoveryPending {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !ok || status.Blocked || !status.DefaultConfirmed || status.RecoveryPending {
 		t.Fatalf("new generation status after recovery = %+v, running=%v", status, ok)
 	}
