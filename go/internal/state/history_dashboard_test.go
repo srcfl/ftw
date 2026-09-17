@@ -273,3 +273,18 @@ func TestDashboardOldEnergyRetainsLocalDayBoundary(t *testing.T) {
 	near(t, "previous local day", before.ImportWh, 60)
 	near(t, "next local day", after.ImportWh, 60)
 }
+
+func TestDashboardSparseIntervalsAreNotMultipliedByMinuteSplits(t *testing.T) {
+	s := freshStore(t)
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	for i := 0; i < 4; i++ {
+		dashboardTick(t, s, fmt.Sprint(i), &HistoryPoint{TsMs: base.Add(time.Duration(i) * 20 * time.Minute).UnixMilli(), GridW: 3600, JSON: "{}"})
+	}
+	got, err := s.DailyEnergy(base.UnixMilli(), base.Add(time.Hour).UnixMilli())
+	if err != nil || got.Intervals != 3 || got.ImportWh != 3600 {
+		t.Fatal(got, err)
+	}
+}

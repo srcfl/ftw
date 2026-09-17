@@ -91,11 +91,17 @@ func addSiteIntervalTx(ctx context.Context, tx *sql.Tx, previous int64, p *Histo
 		start := bucketStart(from, ArchiveResolutionMS)
 		to := min(p.TsMs, start+ArchiveResolutionMS)
 		ms := to - from
+		var intervals int64
+		// A split interval contributes one observation, at its end. Counting
+		// every minute fragment would make sparse data look well sampled.
+		if to == p.TsMs {
+			intervals = 1
+		}
 		hours := float64(ms) / 3600000
 		_, err := tx.ExecContext(ctx, `INSERT INTO history_site_energy VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
  ON CONFLICT(start_ms,resolution_ms) DO UPDATE SET first_ms=MIN(first_ms,excluded.first_ms),last_ms=MAX(last_ms,excluded.last_ms),covered_ms=covered_ms+excluded.covered_ms,n=n+excluded.n,
  import_wh=import_wh+excluded.import_wh,export_wh=export_wh+excluded.export_wh,pv_wh=pv_wh+excluded.pv_wh,bat_charge_wh=bat_charge_wh+excluded.bat_charge_wh,bat_discharge_wh=bat_discharge_wh+excluded.bat_discharge_wh,load_wh=load_wh+excluded.load_wh,ev_wh=ev_wh+excluded.ev_wh`,
-			start, ArchiveResolutionMS, from, to, ms, 1, math.Max(0, p.GridW)*hours, math.Max(0, -p.GridW)*hours, -p.PVW*hours, math.Max(0, p.BatW)*hours, math.Max(0, -p.BatW)*hours, p.LoadW*hours, math.Max(0, p.GridW-p.BatW-p.PVW-p.LoadW)*hours)
+			start, ArchiveResolutionMS, from, to, ms, intervals, math.Max(0, p.GridW)*hours, math.Max(0, -p.GridW)*hours, -p.PVW*hours, math.Max(0, p.BatW)*hours, math.Max(0, -p.BatW)*hours, p.LoadW*hours, math.Max(0, p.GridW-p.BatW-p.PVW-p.LoadW)*hours)
 		if err != nil {
 			return err
 		}
