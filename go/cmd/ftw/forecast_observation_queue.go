@@ -43,10 +43,24 @@ func (f *forecastTracker) runObservations(ctx context.Context) {
 	}
 }
 
+// Capture new intervals before disk work, but let a recovered backlog free
+// capacity before rejecting the captured evidence. The same deadline bounds
+// both drains; recovery never postpones the next observation indefinitely.
+func (f *forecastTracker) acceptObservations(ctx context.Context, jobs []forecastObservationJob, flush func(context.Context)) {
+	if len(f.pendingObservations)+len(jobs) > maxPendingForecastObservations {
+		flush(ctx)
+	}
+	for _, job := range jobs {
+		f.enqueueObservation(job)
+	}
+	flush(ctx)
+}
+
 func (f *forecastTracker) enqueueObservation(job forecastObservationJob) {
 	if len(f.pendingObservations) == maxPendingForecastObservations {
 		f.mu.Lock()
 		f.observationOverflow = true
+		f.observationDrops++
 		f.mu.Unlock()
 		slog.Error("forecast archive: observation queue full", "start_ms", job.observation.StartMS)
 		return
@@ -100,6 +114,12 @@ func (f *forecastTracker) flushObservationsWith(ctx context.Context,
 		f.pendingObservations = f.pendingObservations[1:]
 		f.requestScoring()
 	}
+	f.mu.Lock()
+	if f.observationOverflow {
+		slog.Info("forecast archive: observation queue recovered", "dropped_intervals", f.observationDrops)
+	}
+	f.observationOverflow = false
+	f.mu.Unlock()
 }
 
 func (f *forecastTracker) updateObservation(ctx context.Context, job forecastObservationJob) error {

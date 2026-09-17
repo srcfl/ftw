@@ -204,3 +204,38 @@ func TestForecastObservationOldRevisionCannotReplaceCurrentModel(t *testing.T) {
 		t.Fatal("current observation did not update model")
 	}
 }
+
+func TestForecastObservationQueueRecoversBeforeAcceptingNewInterval(t *testing.T) {
+	f := trackerFixture(time.Now())
+	old := observationJobFixture()
+	for i := 0; i < maxPendingForecastObservations; i++ {
+		f.enqueueObservation(old)
+	}
+	newJob := old
+	newJob.observation.StartMS++
+	var saved []int64
+	drain := func(ctx context.Context) {
+		f.flushObservationsWith(ctx, func(_ context.Context, o forecasting.Observation) error {
+			saved = append(saved, o.StartMS)
+			return nil
+		}, func(context.Context, forecastObservationJob) error { return nil })
+	}
+	f.acceptObservations(context.Background(), []forecastObservationJob{newJob}, drain)
+	if len(saved) != maxPendingForecastObservations+1 || saved[len(saved)-1] != newJob.observation.StartMS || f.observationDrops != 0 {
+		t.Fatalf("recovery discarded new evidence: saved=%v drops=%d", saved, f.observationDrops)
+	}
+}
+
+func TestForecastObservationQueueOverflowHealthRecovers(t *testing.T) {
+	f := trackerFixture(time.Now())
+	for i := 0; i <= maxPendingForecastObservations; i++ {
+		f.enqueueObservation(observationJobFixture())
+	}
+	if !f.observationOverflow || f.observationDrops != 1 {
+		t.Fatal("overflow was not recorded")
+	}
+	f.flushObservationsWith(context.Background(), func(context.Context, forecasting.Observation) error { return nil }, func(context.Context, forecastObservationJob) error { return nil })
+	if f.observationOverflow || len(f.pendingObservations) != 0 || f.observationDrops != 1 {
+		t.Fatal("current health did not recover or historical loss was erased")
+	}
+}

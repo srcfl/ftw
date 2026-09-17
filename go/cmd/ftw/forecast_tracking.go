@@ -82,6 +82,7 @@ type forecastTracker struct {
 	pendingObservations  []forecastObservationJob // owned by runObservations
 	observationError     string                   // guarded by mu
 	observationOverflow  bool
+	observationDrops     uint64
 	observationCheckedMS int64
 	observationPVValid   bool
 	observationLoadValid bool
@@ -264,6 +265,7 @@ func (f *forecastTracker) observe(ctx context.Context) {
 	f.observationCheckedMS = now.UnixMilli()
 	f.observationPVValid, f.observationLoadValid = r.PVValid, r.Valid
 	f.mu.Unlock()
+	var jobs []forecastObservationJob
 	for _, o := range f.observationIntervals(r, site, now) {
 		job := forecastObservationJob{observation: o, site: site, away: f.away != nil && f.away(time.UnixMilli(o.StartMS))}
 		rows, _ := f.store.LoadForecasts(o.StartMS-time.Hour.Milliseconds(), o.EndMS)
@@ -271,12 +273,12 @@ func (f *forecastTracker) observe(ctx context.Context) {
 			frozen := *weather
 			job.weather = &frozen
 		}
-		f.enqueueObservation(job)
+		jobs = append(jobs, job)
 	}
 	// A slow disk must not make draining a backlog postpone measurement capture.
 	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	f.flushObservations(flushCtx)
+	f.acceptObservations(flushCtx, jobs, f.flushObservations)
 }
 
 // observationIntervals keeps the two measurement claims independent. Unknown
