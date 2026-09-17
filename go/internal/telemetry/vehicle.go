@@ -103,6 +103,16 @@ func PickBestVehicleForLoadpoint(s *Store, lpDeliveringPower bool, now time.Time
 	return pickBestVehicle(s, minRank, now)
 }
 
+// PickVehicleForCompletion requires one vehicle source. Rank and freshness
+// cannot bind one of several cars to a charger or prove that its goal is done.
+// Callers must also check that only one loadpoint is connected.
+func PickVehicleForCompletion(s *Store, now time.Time) VehiclePick {
+	if s == nil || len(s.ReadingsByType(DerVehicle)) != 1 {
+		return VehiclePick{}
+	}
+	return pickBestVehicle(s, 1, now)
+}
+
 func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 	if s == nil {
 		return VehiclePick{}

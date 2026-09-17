@@ -79,18 +79,35 @@ func (m *Manager) retainFinishGoal(id string) {
 }
 
 // A one-shot goal stays finished across restart and later plug sessions.
-// Recurring goals keep their ordinary daily schedule.
+// A recurring goal can roll to the next deadline once this one is complete.
 func (m *Manager) completeVehicleGoal(id string) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 	m.mu.Lock()
 	lp := m.byID[id]
-	if lp == nil || !lp.finishAtVehicleLimit || lp.schedule.Recurring || !lp.pluggedIn {
+	if lp == nil || !lp.finishAtVehicleLimit || !lp.pluggedIn {
 		m.mu.Unlock()
 		return
 	}
 	lp.finishGoalCompleted = true
 	lp.targetSoC = 0
+	m.mu.Unlock()
+	m.retainFinishGoal(id)
+}
+
+// Fresh evidence of renewed demand reopens a recurring goal, for example
+// when the owner raises the car's limit while it stays connected.
+func (m *Manager) resumeRecurringVehicleGoal(id string) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	m.mu.Lock()
+	lp := m.byID[id]
+	if lp == nil || !lp.finishAtVehicleLimit || !lp.schedule.Recurring || !lp.pluggedIn {
+		m.mu.Unlock()
+		return
+	}
+	lp.finishGoalCompleted = false
+	lp.targetSoC = 1
 	m.mu.Unlock()
 	m.retainFinishGoal(id)
 }

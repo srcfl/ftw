@@ -2135,12 +2135,8 @@ func main() {
 		})
 
 		lpController.SetVehicleChargeState(func(lpID string) (loadpoint.VehicleChargeState, bool) {
-			st, ok := lpMgr.State(lpID)
-			if !ok || !st.PluggedIn {
-				return loadpoint.VehicleChargeState{}, false
-			}
-			pick := telemetry.PickBestVehicleForLoadpoint(tel, st.CurrentPowerW > loadpoint.DeliveringW, time.Now())
-			if pick.Driver == "" || pick.Stale {
+			pick := telemetry.PickVehicleForCompletion(tel, time.Now())
+			if pick.Driver == "" || pick.Stale || !lpMgr.VehicleObservationApplies(lpID, pick.UpdatedAt) {
 				return loadpoint.VehicleChargeState{}, false
 			}
 			return loadpoint.VehicleChargeState{SoC: pick.SoC, Limit: pick.ChargeLimit, State: pick.ChargingState}, true

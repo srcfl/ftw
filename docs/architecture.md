@@ -52,7 +52,9 @@ session checkpoint failed. Neither means the saved schedule disappeared.
 Core assigns each saved vehicle-limit goal an `intent_id` and a one-shot
 `first_deadline_ms`; clients send user choices, not those bookkeeping fields.
 A fresh vehicle Complete can finish a one-shot goal across restart and later
-plug sessions. A charger declining current is reported as a refusal, never
+plug sessions. Completion requires one vehicle source, one connected loadpoint,
+a reading after the observed connection and no measured charging. An ambiguous
+match cannot finish the goal. A charger declining current is reported as a refusal, never
 as an invented battery level or proof that the target was reached.
 
 ## Product requirements across these boundaries

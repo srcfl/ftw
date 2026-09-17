@@ -355,6 +355,7 @@ type loadpointRuntime struct {
 	Config
 
 	pluggedIn                bool
+	connectionObservedAt     time.Time
 	currentSoC               float64
 	currentPowerW            float64
 	deliveredWhSession       float64
@@ -558,6 +559,7 @@ func (m *Manager) Load(cfgs []Config) {
 			// SoC reference and reset the estimate back to
 			// PluginSoC even though delivered_wh has grown.
 			lp.pluggedIn = existing.pluggedIn
+			lp.connectionObservedAt = existing.connectionObservedAt
 			lp.currentSoC = existing.currentSoC
 			lp.currentPowerW = existing.currentPowerW
 			lp.deliveredWhSession = existing.deliveredWhSession
@@ -744,6 +746,7 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		fired = append(fired, events.ChargingConnected{LoadpointID: id, At: now})
 	}
 	if pluggedIn && !lp.pluggedIn {
+		lp.connectionObservedAt = now
 		// Plug-in transition: seed the session anchor and clear any
 		// session-completion latched from a prior session.
 		anchor := lp.PluginSoC
@@ -1359,7 +1362,11 @@ func (m *Manager) RollSchedules(now time.Time) {
 		// An unfinished vehicle-limit goal remains due after its deadline.
 		// Moving it to tomorrow would defer the remaining charge again.
 		if lp.finishGoalCompleted {
-			continue
+			if !s.Recurring || lp.targetTime.After(now) {
+				continue
+			}
+			lp.finishGoalCompleted = false
+			lp.targetTime = time.Time{}
 		}
 		if lp.finishAtVehicleLimit && lp.pluggedIn && !lp.chargingDeclined && !lp.targetTime.IsZero() {
 			continue

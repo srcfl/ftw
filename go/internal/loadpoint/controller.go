@@ -1846,7 +1846,10 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			}
 		}
 		if finishing && finishW == 0 {
-			cmdW, cmdReason = 0, "vehicle_complete"
+			cmdW, cmdReason = 0, "vehicle_not_requesting"
+			if state, ok := c.manager.State(lpCfg.ID); ok && state.GoalComplete {
+				cmdReason = "vehicle_complete"
+			}
 		}
 		// Fuse protection: applied LAST (after MPC budget, surplus
 		// clamp, wake-kick) so all upstream sources see their nominal

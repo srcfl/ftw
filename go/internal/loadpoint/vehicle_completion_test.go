@@ -70,11 +70,11 @@ func TestVehicleLimitCompletionKeepsChargingAndSafetyWins(t *testing.T) {
 	})
 	samples[cfg.DriverName] = EVSample{Connected: true, RequestActive: false}
 	check(now.Add(2*time.Hour+time.Second), true, false)
-	// Stale vehicle information must not hold a false Complete indefinitely.
+	// Losing telemetry must not erase a completion already confirmed.
 	c.SetVehicleChargeState(func(string) (VehicleChargeState, bool) {
 		return VehicleChargeState{SoC: .8, Limit: .8, State: "Complete"}, false
 	})
-	check(now.Add(2*time.Hour+2*time.Second), true, true)
+	check(now.Add(2*time.Hour+2*time.Second), true, false)
 }
 
 func TestVehicleLimitKeepsPricePauseBeforeFinishing(t *testing.T) {
@@ -189,5 +189,82 @@ func TestVehicleLimitReadsCompleteAfterChargerDecline(t *testing.T) {
 	}
 	if st, _ := c.manager.State(cfg.ID); !st.GoalComplete {
 		t.Fatal("fresh completion was hidden by charger refusal", st)
+	}
+}
+
+func TestVehicleLimitRejectsPreviousConnectionAndAmbiguousLoadpoint(t *testing.T) {
+	m := NewManager()
+	now := time.Now().UTC()
+	m.SetNowFn(func() time.Time { return now })
+	m.Load([]Config{{ID: "one", DriverName: "charger-one"}, {ID: "two", DriverName: "charger-two"}})
+	m.ObserveSession("one", true, 0, 0, true, "device-one", "session-a")
+	if m.VehicleObservationApplies("one", now.Add(-time.Second)) || m.VehicleObservationApplies("one", time.Time{}) {
+		t.Fatal("reading from before this connection could finish the goal")
+	}
+	if !m.VehicleObservationApplies("one", now) {
+		t.Fatal("fresh reading for only connected loadpoint rejected")
+	}
+	m.ObserveSession("two", true, 0, 0, true, "device-two", "session-b")
+	if m.VehicleObservationApplies("one", now) {
+		t.Fatal("several connected loadpoints cannot share completion proof")
+	}
+	m.ObserveSession("two", false, 0, 0, false, "device-two", "")
+	now = now.Add(time.Minute)
+	m.ObserveSession("one", true, 0, 0, true, "device-one", "session-c")
+	if m.VehicleObservationApplies("one", now.Add(-time.Second)) {
+		t.Fatal("old reading crossed a hardware session change")
+	}
+}
+
+func TestVehicleLimitMeasuredDeliveryRejectsComplete(t *testing.T) {
+	cfg := chargeNowLoadpoint()
+	m := sessionManager(&sessionMemory{data: map[string]string{}}, cfg.ID, cfg.DriverName)
+	m.SetSchedule(cfg.ID, Schedule{FinishAtVehicleLimit: true, TimeOfDayMinUTC: 300})
+	m.RollSchedules(time.Now())
+	m.ObserveSession(cfg.ID, true, 3600, 1000, true, "charger", "session")
+	c := &Controller{manager: m}
+	c.SetVehicleChargeState(func(string) (VehicleChargeState, bool) {
+		return VehicleChargeState{SoC: .8, Limit: .8, State: "Complete"}, true
+	})
+	if watts, finish := c.vehicleCompletionOffer(cfg, time.Now()); watts <= 0 || !finish {
+		t.Fatal(watts, finish)
+	}
+	if st, _ := m.State(cfg.ID); st.GoalComplete {
+		t.Fatal("retained completion while charger still measured delivery")
+	}
+}
+
+func TestVehicleLimitRecurringCompleteRollsAndNewDemandReopens(t *testing.T) {
+	cfg := chargeNowLoadpoint()
+	now := time.Date(2026, 9, 17, 4, 0, 0, 0, time.UTC)
+	m := sessionManager(&sessionMemory{data: map[string]string{}}, cfg.ID, cfg.DriverName)
+	m.SetNowFn(func() time.Time { return now })
+	m.SetSchedule(cfg.ID, Schedule{FinishAtVehicleLimit: true, Recurring: true, TimeOfDayMinUTC: 300})
+	m.RollSchedules(now)
+	m.ObserveSession(cfg.ID, true, 0, 0, true, "charger", "session")
+	c := &Controller{manager: m}
+	car := VehicleChargeState{SoC: .8, Limit: .8, State: "Complete"}
+	c.SetVehicleChargeState(func(string) (VehicleChargeState, bool) { return car, true })
+	c.vehicleCompletionOffer(cfg, now)
+	if st, _ := m.State(cfg.ID); !st.GoalComplete {
+		t.Fatal("recurring completion not recorded", st)
+	}
+	// Raising the car limit while it stays plugged in reopens today's goal.
+	car = VehicleChargeState{SoC: .8, Limit: .9, State: "NoPower"}
+	c.vehicleCompletionOffer(cfg, now)
+	if st, _ := m.State(cfg.ID); st.GoalComplete || st.TargetSoC != 1 {
+		t.Fatal("new vehicle demand did not reopen recurring goal", st)
+	}
+	car = VehicleChargeState{SoC: .9, Limit: .9, State: "Complete"}
+	c.vehicleCompletionOffer(cfg, now)
+	now = now.Add(2 * time.Hour)
+	m.RollSchedules(now)
+	st, _ := m.State(cfg.ID)
+	if st.GoalComplete || !st.TargetTime.After(now) || st.TargetTime.Hour() != 5 {
+		t.Fatal("completed recurring goal kept old deadline", st)
+	}
+	c.SetVehicleChargeState(nil)
+	if watts, override := c.vehicleCompletionOffer(cfg, now); override || watts != 0 {
+		t.Fatal("missing telemetry converted next day's goal to immediate max charge", watts, override)
 	}
 }
