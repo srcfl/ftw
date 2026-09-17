@@ -10,6 +10,7 @@
 package loadpoint
 
 import (
+	"crypto/rand"
 	"sort"
 	"sync"
 	"time"
@@ -128,20 +129,23 @@ type State struct {
 	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
 	ChargingDeclined bool `json:"charging_declined"`
 	// SoCRetention reports whether the confirmed estimate can survive restart.
-	EnergySource       string    `json:"energy_source,omitempty"`
-	EnergyUpdatedAtMs  int64     `json:"energy_updated_at_ms,omitempty"`
-	PowerUpdatedAtMs   int64     `json:"power_updated_at_ms,omitempty"`
-	PowerUnavailable   bool      `json:"power_unavailable,omitempty"`
-	SoCRetention       string    `json:"soc_retention,omitempty"`
-	ID                 string    `json:"id"`
-	DriverName         string    `json:"driver_name"`
-	PluggedIn          bool      `json:"plugged_in"`
-	CurrentSoC         float64   `json:"current_soc"`           // observed or estimated
-	CurrentPowerW      float64   `json:"current_power_w"`       // actual draw (site sign: + = charging)
-	DeliveredWhSession float64   `json:"delivered_wh_session"`  // since plug-in
-	TargetSoC          float64   `json:"target_soc"`            // user intent
-	TargetTime         time.Time `json:"target_time,omitempty"` // user intent
-	UpdatedAtMs        int64     `json:"updated_at_ms"`
+	EnergySource         string    `json:"energy_source,omitempty"`
+	EnergyUpdatedAtMs    int64     `json:"energy_updated_at_ms,omitempty"`
+	PowerUpdatedAtMs     int64     `json:"power_updated_at_ms,omitempty"`
+	PowerUnavailable     bool      `json:"power_unavailable,omitempty"`
+	SoCRetention         string    `json:"soc_retention,omitempty"`
+	ID                   string    `json:"id"`
+	DriverName           string    `json:"driver_name"`
+	PluggedIn            bool      `json:"plugged_in"`
+	CurrentSoC           float64   `json:"current_soc"`          // observed or estimated
+	CurrentPowerW        float64   `json:"current_power_w"`      // actual draw (site sign: + = charging)
+	DeliveredWhSession   float64   `json:"delivered_wh_session"` // since plug-in
+	FinishAtVehicleLimit bool      `json:"finish_at_vehicle_limit,omitempty"`
+	GoalComplete         bool      `json:"goal_complete,omitempty"`
+	GoalRetention        string    `json:"goal_retention,omitempty"`
+	TargetSoC            float64   `json:"target_soc"`            // user intent
+	TargetTime           time.Time `json:"target_time,omitempty"` // user intent
+	UpdatedAtMs          int64     `json:"updated_at_ms"`
 
 	// Vehicle-side telemetry, populated by the API layer from the most
 	// recent DerVehicle reading whose charging_state indicates a likely
@@ -350,13 +354,21 @@ type loadpointRuntime struct {
 	completionNotified       bool
 	Config
 
-	pluggedIn          bool
-	currentSoC         float64
-	currentPowerW      float64
-	deliveredWhSession float64
-	targetSoC          float64
-	targetTime         time.Time
-	updatedAtMs        int64
+	pluggedIn                bool
+	connectionObservedAt     time.Time
+	currentSoC               float64
+	currentPowerW            float64
+	deliveredWhSession       float64
+	finishAtVehicleLimit     bool
+	finishGoalCompleted      bool
+	finishGoalSavedCompleted bool
+	finishGoalChecked        bool
+	finishGoalExplicit       bool
+	finishGoalSaved          time.Time
+	finishGoalRetention      string
+	targetSoC                float64
+	targetTime               time.Time
+	updatedAtMs              int64
 
 	// Plug-in anchor: the SoC we believe the vehicle was at when
 	// this session began. Persisted across Observe() calls so SoC
@@ -547,6 +559,7 @@ func (m *Manager) Load(cfgs []Config) {
 			// SoC reference and reset the estimate back to
 			// PluginSoC even though delivered_wh has grown.
 			lp.pluggedIn = existing.pluggedIn
+			lp.connectionObservedAt = existing.connectionObservedAt
 			lp.currentSoC = existing.currentSoC
 			lp.currentPowerW = existing.currentPowerW
 			lp.deliveredWhSession = existing.deliveredWhSession
@@ -556,6 +569,13 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.lastSavedEnergyWh = existing.lastSavedEnergyWh
 			lp.lastSavedEnergyAt = existing.lastSavedEnergyAt
 			lp.targetSoC = existing.targetSoC
+			lp.finishAtVehicleLimit = existing.finishAtVehicleLimit
+			lp.finishGoalCompleted = existing.finishGoalCompleted
+			lp.finishGoalSavedCompleted = existing.finishGoalSavedCompleted
+			lp.finishGoalChecked = existing.finishGoalChecked
+			lp.finishGoalExplicit = existing.finishGoalExplicit
+			lp.finishGoalSaved = existing.finishGoalSaved
+			lp.finishGoalRetention = existing.finishGoalRetention
 			lp.targetTime = existing.targetTime
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoC = existing.sessionPluginSoC
@@ -726,6 +746,13 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		fired = append(fired, events.ChargingConnected{LoadpointID: id, At: now})
 	}
 	if pluggedIn && !lp.pluggedIn {
+		lp.connectionObservedAt = now
+		if lp.finishAtVehicleLimit && lp.schedule.Recurring && lp.finishGoalCompleted {
+			lp.finishGoalCompleted = false
+			lp.targetSoC = 1
+			lp.targetTime = lp.schedule.NextDeadlineUTC(now, m.loc)
+			lp.lastRolledFor = lp.targetTime
+		}
 		// Plug-in transition: seed the session anchor and clear any
 		// session-completion latched from a prior session.
 		anchor := lp.PluginSoC
@@ -901,6 +928,8 @@ func (m *Manager) SetTarget(id string, soc float64, targetTime time.Time) bool {
 		lp.chargingDeclined = false
 		lp.notRequestingSince = time.Time{}
 	}
+	lp.finishAtVehicleLimit = false
+	lp.finishGoalCompleted = false
 	lp.targetSoC = units.ClampFraction(soc)
 	lp.targetTime = targetTime
 	return true
@@ -1134,6 +1163,9 @@ func (lp *loadpointRuntime) snapshot() State {
 		CurrentPowerW:            lp.currentPowerW,
 		DeliveredWhSession:       lp.deliveredWhSession,
 		TargetSoC:                lp.targetSoC,
+		FinishAtVehicleLimit:     lp.finishAtVehicleLimit,
+		GoalRetention:            lp.finishGoalRetention,
+		GoalComplete:             lp.finishGoalCompleted,
 		TargetTime:               lp.targetTime,
 		UpdatedAtMs:              lp.updatedAtMs,
 		MinChargeW:               lp.MinChargeW,
@@ -1203,6 +1235,17 @@ func (m *Manager) SetScheduleChecked(id string, s Schedule) (bool, error) {
 		return false, nil
 	}
 	s.Normalize()
+	if s.FinishAtVehicleLimit {
+		s.IntentID = rand.Text()
+		if !s.Recurring {
+			s.FirstDeadlineMS = s.NextDeadlineUTC(m.now(), m.loc).UnixMilli()
+		} else {
+			s.FirstDeadlineMS = 0
+		}
+	} else {
+		s.IntentID = ""
+		s.FirstDeadlineMS = 0
+	}
 	// The weekday mask is 7 bits; a stray high bit from a future
 	// client is dropped rather than left to confuse the roll.
 	s.Days &= 0x7F
@@ -1220,6 +1263,10 @@ func (m *Manager) SetScheduleChecked(id string, s Schedule) (bool, error) {
 		lp.notRequestingSince = time.Time{}
 	}
 	lp.schedule = s
+	lp.finishGoalCompleted = false
+	lp.finishGoalSavedCompleted = false
+	lp.finishGoalExplicit = true
+	lp.finishGoalSaved = time.Time{}
 	// Force RollSchedules to re-evaluate on next call — operator just
 	// changed the contract so any previous idempotence cache is stale.
 	lp.lastRolledFor = time.Time{}
@@ -1234,6 +1281,7 @@ func (m *Manager) SetScheduleChecked(id string, s Schedule) (bool, error) {
 	// non-recurring saves.
 	lp.targetTime = time.Time{}
 	lp.targetSoC = 0
+	lp.finishAtVehicleLimit = false
 	return true, nil
 }
 
@@ -1317,13 +1365,32 @@ func (m *Manager) RollSchedules(now time.Time) {
 		if s.Empty() {
 			continue
 		}
+		// An unfinished vehicle-limit goal remains due after its deadline.
+		// Moving it to tomorrow would defer the remaining charge again.
+		if lp.finishGoalCompleted {
+			if !s.Recurring || lp.targetTime.After(now) {
+				continue
+			}
+			lp.finishGoalCompleted = false
+			lp.targetTime = time.Time{}
+		}
+		if lp.finishAtVehicleLimit && lp.pluggedIn && !lp.chargingDeclined && !lp.targetTime.IsZero() {
+			continue
+		}
 		next := s.NextDeadlineUTC(now, m.loc)
+		if s.FinishAtVehicleLimit && !s.Recurring && s.FirstDeadlineMS > 0 {
+			next = time.UnixMilli(s.FirstDeadlineMS)
+		}
 		if s.Recurring {
 			if !lp.targetTime.IsZero() && lp.targetTime.After(now) {
 				continue
 			}
 			lp.targetTime = next
+			lp.finishAtVehicleLimit = s.FinishAtVehicleLimit
 			lp.targetSoC = s.SoC
+			if s.FinishAtVehicleLimit {
+				lp.targetSoC = 1
+			}
 			lp.lastRolledFor = next
 			continue
 		}
@@ -1332,7 +1399,11 @@ func (m *Manager) RollSchedules(now time.Time) {
 		// re-save with a non-recurring schedule re-seeds.
 		if lp.lastRolledFor.IsZero() {
 			lp.targetTime = next
+			lp.finishAtVehicleLimit = s.FinishAtVehicleLimit
 			lp.targetSoC = s.SoC
+			if s.FinishAtVehicleLimit {
+				lp.targetSoC = 1
+			}
 			lp.lastRolledFor = next
 		}
 	}

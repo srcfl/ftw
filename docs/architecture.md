@@ -33,6 +33,30 @@ A separate module requires a concrete benefit and:
 - no authority to bypass core's validation or safety limits;
 - a useful fallback or a cleanly unavailable state.
 
+### Vehicle charge-limit goals
+
+A percentage goal and a goal to reach the car's own limit are distinct.
+State schema 7 blocks rollback to a Core that would ignore the saved goal mode.
+`GET /api/loadpoints` advertises `vehicle_limit_goal_supported`; clients must
+require that flag before saving `schedule.finish_at_vehicle_limit`. Existing
+percentage goals keep their meaning. In vehicle-limit mode, the planner uses
+a fresh vehicle limit where available. Without one, 100% is a planning bound,
+not a claimed vehicle setting. Final charging continues through Core's safety
+clamps until the car stops accepting current; an estimate cannot prove it is
+finished. A manual Stop still wins.
+
+The current connection's deadline uses verified charger and session identity.
+It stays due after the deadline and survives restart when `goal_retention` is
+`session`. `unavailable` means that identity is missing; `error` means the
+session checkpoint failed. Neither means the saved schedule disappeared.
+Core assigns each saved vehicle-limit goal an `intent_id` and a one-shot
+`first_deadline_ms`; clients send user choices, not those bookkeeping fields.
+A fresh vehicle Complete can finish a one-shot goal across restart and later
+plug sessions. Completion requires one vehicle source, one connected loadpoint,
+a reading after the observed connection and no measured charging. An ambiguous
+match cannot finish the goal. A charger declining current is reported as a refusal, never
+as an invented battery level or proof that the target was reached.
+
 ## Product requirements across these boundaries
 
 Discovery, first-day models and controlled commissioning should establish

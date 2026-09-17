@@ -90,6 +90,7 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 		return
 	}
 	previousDevice, previousSession := lp.sessionDeviceID, lp.sessionID
+	wasPlugged := lp.pluggedIn
 	regressed := pluggedIn && lp.pluggedIn && lp.energy != nil && lp.energy.counterRegressed(sample)
 	firstSessionProof := deviceID != "" && previousDevice == deviceID && previousSession == "" && sessionID != "" &&
 		lp.pluggedIn && pluggedIn && !regressed
@@ -97,6 +98,9 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 	// A changed session can arrive after an unseen unplug while core was
 	// offline. Run the ordinary plug-in reset even if connected stayed true.
 	if changed || regressed {
+		lp.finishGoalChecked = false
+		lp.finishGoalSaved = time.Time{}
+		lp.finishGoalRetention = "unavailable"
 		m.nextSessionGeneration++
 		lp.sessionGeneration = m.nextSessionGeneration
 		lp.pluggedIn = false
@@ -134,7 +138,7 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 	confirmed := lp.socConfirmed && lp.pluggedIn
 	m.mu.Unlock()
 
-	if !pluggedIn || regressed {
+	if (!pluggedIn && (wasPlugged || changed)) || regressed {
 		// Tombstone the hardware record. A later reconnect cannot resurrect a
 		// level from before an observed unplug or a session-counter reset.
 		if m.sessionStore != nil {
@@ -204,6 +208,7 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 		// the level the owner entered while waiting and now make it durable.
 		m.persistSession(id)
 	}
+	m.retainFinishGoal(id)
 	_ = m.flushManualHold(id)
 }
 
