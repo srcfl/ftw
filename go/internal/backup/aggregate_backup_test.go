@@ -28,7 +28,7 @@ func TestBackupRestoresAggregateEvidenceAndDuplicateIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := time.Now().UTC().Truncate(time.Minute).UnixMilli()
-	for _, sm := range []state.Sample{{Driver: "ev", Metric: "power", TsMs: base - 48*time.Hour.Milliseconds(), Value: 300}, {Driver: "ev", Metric: "power", TsMs: base + 1000, Value: 100}, {Driver: "ev", Metric: "power", TsMs: base + 2000, Value: 500}} {
+	for _, sm := range []state.Sample{{Driver: "idle", Metric: "ev_w", TsMs: base - 48*time.Hour.Milliseconds(), Value: 17}, {Driver: "ev", Metric: "power", TsMs: base - 48*time.Hour.Milliseconds(), Value: 300}, {Driver: "ev", Metric: "power", TsMs: base + 1000, Value: 100}, {Driver: "ev", Metric: "power", TsMs: base + 2000, Value: 500}} {
 		if err := st.EnqueueTelemetryTick(nil, []state.Sample{sm}, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -75,6 +75,9 @@ func TestBackupRestoresAggregateEvidenceAndDuplicateIdentity(t *testing.T) {
 	}
 	if err := restored.FlushHistory(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if latest, err := restored.LatestSample("idle", "ev_w"); err != nil || latest.Value != 17 || latest.TsMs != base-48*time.Hour.Milliseconds() {
+		t.Fatal(latest, err)
 	}
 	points, err := restored.LoadSeriesBucketsOrRaw("ev", "power", base-72*time.Hour.Milliseconds(), base+60000, 0)
 	if err != nil || len(points) != 2 || points[0].N != 1 || points[0].V != 300 || points[1].N != 2 || points[1].V != 300 || points[1].Min != 100 || points[1].Max != 500 {

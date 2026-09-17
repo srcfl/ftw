@@ -207,6 +207,14 @@ func (s *Store) insertAggregateSamples(ctx context.Context, tx *sql.Tx, rs []res
 		if err != nil {
 			return err
 		}
+		if k.width == HistoryResolutionMS {
+			// Keep one actual observation per series after its chart buckets
+			// leave SQLite. Status codes must never come from a bucket mean.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO ts_latest(driver_id,metric_id,ts_ms,value) VALUES(?,?,?,?)
+ ON CONFLICT(driver_id,metric_id) DO UPDATE SET ts_ms=excluded.ts_ms,value=excluded.value WHERE excluded.ts_ms>ts_latest.ts_ms`, k.driver, k.metric, b.LastMS, b.Last); err != nil {
+				return err
+			}
+		}
 	}
 	if err := upsertSeriesHoursTableTx(ctx, tx, "ts_aggregate_hours", hours); err != nil {
 		return err

@@ -482,3 +482,42 @@ func TestAggregateRestartAfterPublishedArchiveBeforePrune(t *testing.T) {
 		t.Fatal(points, err)
 	}
 }
+
+func TestAggregateLatestSurvivesArchiveRetentionAndRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	cold := filepath.Join(t.TempDir(), "cold")
+	s, err := OpenWithLegacyHistory(path, cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Minute).UnixMilli()
+	for i, v := range []float64{100, 900, 200} {
+		if err := s.EnqueueTelemetryTick(nil, []Sample{{Driver: "ev", Metric: "ev_w", TsMs: base + int64(i)*1000, Value: v}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.FlushHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintainAggregateHistory(context.Background(), cold, time.UnixMilli(base).Add(800*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenWithLegacyHistory(path, cold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.LatestSample("ev", "ev_w")
+	if err != nil || got.TsMs != base+2000 || got.Value != 200 {
+		t.Fatal(got, err)
+	}
+	if got := s.InferDerKinds("ev"); !reflect.DeepEqual(got, []string{"ev"}) {
+		t.Fatal(got)
+	}
+}

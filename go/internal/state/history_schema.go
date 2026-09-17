@@ -1,6 +1,7 @@
 package state
 
 var historySchema = append(append([]string{}, sqliteLegacyHistoryStmts...),
+	`CREATE TABLE IF NOT EXISTS ts_latest (driver_id INTEGER NOT NULL,metric_id INTEGER NOT NULL,ts_ms INTEGER NOT NULL,value REAL NOT NULL,PRIMARY KEY(driver_id,metric_id)) WITHOUT ROWID`,
 	`CREATE TABLE IF NOT EXISTS ts_archive_days(path TEXT PRIMARY KEY,sha256 TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS history_receipts (sequence INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL UNIQUE, payload_hash TEXT NOT NULL, committed_at TEXT NOT NULL DEFAULT current_timestamp)`,
 	`CREATE TABLE IF NOT EXISTS history_sqlite_progress (source TEXT PRIMARY KEY, rows_done INTEGER NOT NULL, driver_id INTEGER NOT NULL, metric_id INTEGER NOT NULL, ts_ms INTEGER NOT NULL)`,

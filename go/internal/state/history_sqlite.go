@@ -23,7 +23,7 @@ var historyTables = []string{
 	"history_hot", "history_warm", "history_cold", "ts_drivers", "ts_metrics", "ts_samples",
 	"energy_daily", "energy_ledger_meta", "energy_assets", "energy_ledger_entries", "energy_ledger_cursors",
 }
-var sqliteHistoryTables = append(append([]string{}, historyTables...), "ts_series_hour", "ts_archive_days", "ts_buckets", "ts_bucket_days", "ts_legacy_bucket_days", "ts_aggregate_hours")
+var sqliteHistoryTables = append(append([]string{}, historyTables...), "ts_series_hour", "ts_archive_days", "ts_buckets", "ts_bucket_days", "ts_legacy_bucket_days", "ts_aggregate_hours", "ts_latest")
 
 func ensureHistorySchema(exec func(string) error) error {
 	for _, stmt := range historySchema {
@@ -352,6 +352,8 @@ func historyOrder(table string) string {
 		return " ORDER BY id"
 	case "ts_archive_days":
 		return " ORDER BY path"
+	case "ts_latest":
+		return " ORDER BY driver_id, metric_id"
 	case "ts_buckets":
 		return " ORDER BY driver_id, metric_id, start_ms, resolution_ms"
 	case "ts_bucket_days", "ts_legacy_bucket_days":

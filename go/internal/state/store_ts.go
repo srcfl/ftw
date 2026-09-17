@@ -622,9 +622,9 @@ type SeriesPoint struct {
 	N            int64    `json:"n"`
 }
 
-// LoadSeriesBucketsOrRaw is LoadSeriesBuckets with maxPoints=0 meaning "every
-// raw sample" (as degenerate single-sample buckets: v=min=max, n=1), so API
-// handlers can serve both shapes from one code path.
+// LoadSeriesBucketsOrRaw uses maxPoints=0 to return the stored resolution
+// without further downsampling. Raw samples, when retained, have n=1.
+// Aggregates carry their resolution, observed bounds and last actual value.
 func (s *Store) LoadSeriesBucketsOrRaw(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
 	return s.LoadSeriesBucketsOrRawContext(context.Background(), driver, metric, sinceMs, untilMs, maxPoints)
 }
@@ -739,7 +739,8 @@ func (s *Store) LatestSample(driver, metric string) (Sample, error) {
 	sm.Driver, sm.Metric = driver, metric
 	err := s.history.QueryRow(`WITH identity AS (SELECT d.id AS driver_id,m.id AS metric_id FROM ts_drivers d,ts_metrics m WHERE d.name=? AND m.name=?)
  SELECT ts_ms,value FROM (
- SELECT s.ts_ms,s.value FROM ts_samples s JOIN identity i USING(driver_id,metric_id)
+ SELECT l.ts_ms,l.value FROM ts_latest l JOIN identity i USING(driver_id,metric_id)
+ UNION ALL SELECT s.ts_ms,s.value FROM ts_samples s JOIN identity i USING(driver_id,metric_id)
  UNION ALL SELECT b.last_ms,b.last_value FROM ts_buckets b JOIN identity i USING(driver_id,metric_id) WHERE b.resolution_ms=10000
  ) ORDER BY ts_ms DESC LIMIT 1`, driver, metric).Scan(&sm.TsMs, &sm.Value)
 	return sm, err
