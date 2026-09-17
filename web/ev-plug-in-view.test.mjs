@@ -47,3 +47,13 @@ test('the plan view is mounted once per loadpoint and updated on polls', () => {
   assert.match(source, /evPlanLpId !== matched\.id/);
   assert.match(source, /evModalBody\.insertBefore\(evPlanEl\.el, statusTableEl\)/);
 });
+
+
+test('pending SoC write does not claim saved state or require re-entry', () => {
+  const note = new Function(source.slice(source.indexOf('function sourceNote'), source.indexOf('var socPending')) + '; return sourceNote;')();
+  const lp = { soc_source: 'inferred', current_soc: .8 };
+  assert.match(note({ ...lp, soc_retention: 'pending' }), /Saving this level/);
+  assert.doesNotMatch(note({ ...lp, soc_retention: 'pending' }), /must be entered again|could not be saved|keeps this level/);
+  assert.match(note({ ...lp, soc_retention: 'session' }), /keeps this level/);
+  assert.match(note({ ...lp, soc_retention: 'error' }), /could not be saved/);
+});

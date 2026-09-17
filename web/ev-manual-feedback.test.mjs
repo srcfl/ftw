@@ -125,3 +125,17 @@ test('failed hold persistence stays visible until the box reports recovery', () 
   // must remain visible even though there is no active hold anymore.
   assert.match(render({ ...paused, manual_active: false }).textContent, /could not be saved for restart/);
 });
+
+
+test('pending manual save is distinct from an actual write failure', () => {
+  const strip = source.slice(source.indexOf('function renderEvPlanStatus'), source.indexOf('// Keep controls mounted while polling'));
+  const render = new Function('document', 'manualStatusText', strip + '; return renderEvPlanStatus;')(
+    { createElement: () => ({ style: {} }) }, describeManual,
+  );
+  const paused = { ...lp, plugged_in: true, manual_save_pending: true,
+    manual: { ...lp.manual, state: 'paused', requested_a: 0, requested_w: 0 } };
+  assert.match(render(paused).textContent, /Saving it for restart/);
+  assert.doesNotMatch(render(paused).textContent, /could not be saved/);
+  assert.doesNotMatch(render({ ...paused, manual_save_pending: false }).textContent, /Saving it/);
+  assert.match(render({ ...paused, manual_save_error: true }).textContent, /could not be saved/);
+});

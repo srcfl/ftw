@@ -163,3 +163,16 @@ test('recurring goal follows Core completion and returns to repeats when Core re
   ui.root.update({ ...ui.lp, goal_complete: false }, null);
   assert.match(ui.text(), /Car's charge limit by .* · repeats/);
 });
+
+
+test('pending goal write is saving, not failed or confirmed saved', () => {
+  const ui = fixture({ schedule: { soc: .8, finish_at_vehicle_limit: true } });
+  ui.root.update({ ...ui.lp, goal_retention: 'pending' }, null);
+  const details = ui.find(el => el.tag === 'details' && el.children[0]?.textContent === 'How this goal works');
+  assert.notEqual(details.open, true);
+  const note = details.children.at(-1);
+  assert.match(note.textContent, /Saving this session’s goal/);
+  assert.equal(ui.find(el => el.textContent.startsWith('FTW could not save')).hidden, true);
+  ui.root.update({ ...ui.lp, goal_retention: 'session' }, null);
+  assert.match(note.textContent, /goal is saved and can be restored/);
+});

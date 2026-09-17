@@ -2,4 +2,4 @@
 "ftw": patch
 ---
 
-Let users choose the car's charge limit in their charging goal while keeping existing percent targets unchanged.
+Let users choose the car's charge limit in their charging goal while keeping existing percent targets unchanged. Show pending saves separately from saved state and write failures.

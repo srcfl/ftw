@@ -2904,6 +2904,7 @@
     }
     if (lp.plan_pending && !lp.manual_active && text && text.indexOf("Updating the charging plan") < 0) text += " Updating the charging plan…";
     if (lp.manual_save_error) text = (text ? text + " " : "") + "This choice is active now, but could not be saved for restart. FTW is retrying.";
+    else if (lp.manual_save_pending === true) text = (text ? text + " " : "") + "This choice is active now. Saving it for restart…";
     if (!text) return null;
     var p = document.createElement("p");
     p.style.color = tone;
@@ -3808,6 +3809,8 @@
       var src = (lpNow && lpNow.soc_source) || "";
       var retention = lpNow.soc_retention === "session"
         ? " FTW keeps this level for the same charging session, including after a box restart."
+        : lpNow.soc_retention === "pending"
+          ? " Saving this level for the current charging session…"
         : lpNow.soc_retention === "error"
           ? " This level could not be saved for a box restart. Enter it again before relying on the plan after restarting."
           : " This level must be entered again after a box restart.";
@@ -4532,7 +4535,9 @@
 
     box.update = function (nextLp) {
       surplusBestEffortHint.style.display = nextLp.surplus_only && !nextLp.manual_active ? "" : "none";
-      retentionDetail.textContent = nextLp.goal_retention === "unavailable"
+      retentionDetail.textContent = nextLp.goal_retention === "pending"
+        ? "Saving this session’s goal…"
+        : nextLp.goal_retention === "unavailable"
         ? "Your schedule is saved. FTW cannot identify this charging session, so it may not restore this session's goal after a restart."
         : nextLp.goal_retention === "session"
         ? "This session's goal is saved and can be restored after a restart."
