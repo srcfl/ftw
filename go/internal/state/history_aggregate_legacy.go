@@ -106,7 +106,11 @@ func (s *Store) compactLegacyFile(ctx context.Context, path string, now time.Tim
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+	}()
 	info, err := f.Stat()
 	if err != nil {
 		return err
@@ -122,7 +126,11 @@ func (s *Store) compactLegacyFile(ctx context.Context, path string, now time.Tim
 		return errors.New("legacy aggregate cursor exceeds source rows")
 	}
 	r := parquet.NewGenericReader[parquetSampleRow](pf)
-	defer r.Close()
+	defer func() {
+		if r != nil {
+			r.Close()
+		}
+	}()
 	if err := r.SeekToRow(cursor); err != nil {
 		return err
 	}
@@ -168,6 +176,15 @@ func (s *Store) compactLegacyFile(ctx context.Context, path string, now time.Tim
 	if cursor != pf.NumRows() {
 		return errors.New("legacy source was not read completely")
 	}
+	// Windows will not remove an archive while this reader owns its handle.
+	// Verification below opens its own bounded reads before source retirement.
+	closeErr := errors.Join(r.Close(), f.Close())
+	r = nil
+	f = nil
+	if closeErr != nil {
+		return closeErr
+	}
+
 	evidence := bucketEvidenceSet{}
 	if err := walkParquetRows(ctx, path, func(rows []parquetSampleRow) error {
 		for _, v := range rows {
