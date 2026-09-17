@@ -3429,7 +3429,7 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 // among by charging_state ranking — see decorateWithVehicle.
 func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}})
+		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}, "vehicle_limit_goal_supported": true})
 		return
 	}
 	states := s.deps.Loadpoints.States()
@@ -3440,8 +3440,9 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	s.decorateLoadpointsWithBatteryBoost(states)
 	s.decorateLoadpointsWithPlan(states)
 	writeJSON(w, 200, map[string]any{
-		"enabled":    true,
-		"loadpoints": states,
+		"enabled":                      true,
+		"vehicle_limit_goal_supported": true,
+		"loadpoints":                   states,
 	})
 }
 

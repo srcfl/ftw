@@ -155,7 +155,8 @@ type Controller struct {
 	// trigger a charge_start command when the EV detached mid-
 	// session ("Stopped") while we're trying to deliver power.
 	// nil disables the wake feature.
-	vehicleStatus func(loadpointID string) (driver, chargingState string, ok bool)
+	vehicleStatus      func(loadpointID string) (driver, chargingState string, ok bool)
+	vehicleChargeState func(loadpointID string) (VehicleChargeState, bool)
 
 	// peakRemainingSurplusW returns the peak PV-minus-load surplus
 	// expected for the rest of the local day, used by surplus_only
@@ -1759,6 +1760,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			cmdW = 0
 			cmdReason = "no_plan_budget"
 		}
+		finishW, finishing := c.vehicleCompletionOffer(lpCfg, now)
+		if finishing {
+			cmdW = finishW
+			cmdReason = "vehicle_limit_completion"
+		}
 		// Surplus-only live clamp: regardless of what the MPC slot
 		// budget said for this 15-minute window, the EV must not
 		// import grid right now. We smooth the pause/resume decision
@@ -1838,6 +1844,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 				cmdW = minKick
 				cmdReason = "wake_kick"
 			}
+		}
+		if finishing && finishW == 0 {
+			cmdW, cmdReason = 0, "vehicle_complete"
 		}
 		// Fuse protection: applied LAST (after MPC budget, surplus
 		// clamp, wake-kick) so all upstream sources see their nominal

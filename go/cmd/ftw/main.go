@@ -1627,7 +1627,7 @@ func main() {
 				// no schedule, EV is left to the loadpoint controller's
 				// reactive surplus-only behaviour.
 				if effectiveTarget <= 0 || effectiveTargetTime.IsZero() ||
-					!effectiveTargetTime.After(time.Now()) {
+					(!effectiveTargetTime.After(time.Now()) && !st.FinishAtVehicleLimit) {
 					continue
 				}
 				// Pull capacity off the configured loadpoint.
@@ -1674,31 +1674,15 @@ func main() {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
-				// Operational ceiling: the lower of the user's target
-				// and the vehicle-configured charge limit. The car
-				// won't accept current beyond charge_limit_pct anyway,
-				// so planning past it is wasted DP grid space. When
-				// the limit is unknown, fall back to the deadline
-				// target itself; never plan beyond what was requested.
-				maxSoC := effectiveTarget
-				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxSoC {
-					maxSoC = vehicleChargeLimit
+				goal := st
+				goal.TargetSoC = effectiveTarget
+				if boostActive {
+					goal.FinishAtVehicleLimit = false
 				}
-				// Effective deadline target: when the operator asked
-				// for 100% but the vehicle (Tesla via TeslaBLEProxy
-				// etc.) is hard-capped at, say, 60%, the DP must plan
-				// against the cap — otherwise the deadline-shortfall
-				// penalty stays elevated forever (the SoC grid maxes
-				// at the cap, can never reach the operator target),
-				// and MPC keeps committing grid charging chasing an
-				// unreachable goal. Cap target_pct to whatever the
-				// car will physically accept.
-				targetSoC := effectiveTarget
-				if vehicleChargeLimit > 0 && vehicleChargeLimit < targetSoC {
-					targetSoC = vehicleChargeLimit
-					slog.Info("mpc: target capped to vehicle charge limit",
-						"lp", st.ID, "operator_target", effectiveTarget,
-						"vehicle_limit", vehicleChargeLimit)
+				targetSoC := loadpoint.PlanningTarget(goal, vehicleChargeLimit)
+				maxSoC := targetSoC
+				if st.FinishAtVehicleLimit && !effectiveTargetTime.After(time.Now()) {
+					targetSlot = 0
 				}
 				// Guard against degenerate grids: if current SoC > maxSoC
 				// (already over target), grow the ceiling to current so
@@ -2148,6 +2132,18 @@ func main() {
 				return "", "", false
 			}
 			return pick.Driver, pick.ChargingState, true
+		})
+
+		lpController.SetVehicleChargeState(func(lpID string) (loadpoint.VehicleChargeState, bool) {
+			st, ok := lpMgr.State(lpID)
+			if !ok || !st.PluggedIn {
+				return loadpoint.VehicleChargeState{}, false
+			}
+			pick := telemetry.PickBestVehicleForLoadpoint(tel, st.CurrentPowerW > loadpoint.DeliveringW, time.Now())
+			if pick.Driver == "" || pick.Stale {
+				return loadpoint.VehicleChargeState{}, false
+			}
+			return loadpoint.VehicleChargeState{SoC: pick.SoC, Limit: pick.ChargeLimit, State: pick.ChargingState}, true
 		})
 
 		// Wire the EV-available surplus computation for the
