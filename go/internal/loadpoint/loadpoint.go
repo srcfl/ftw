@@ -747,6 +747,12 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	}
 	if pluggedIn && !lp.pluggedIn {
 		lp.connectionObservedAt = now
+		if lp.finishAtVehicleLimit && lp.schedule.Recurring && lp.finishGoalCompleted {
+			lp.finishGoalCompleted = false
+			lp.targetSoC = 1
+			lp.targetTime = lp.schedule.NextDeadlineUTC(now, m.loc)
+			lp.lastRolledFor = lp.targetTime
+		}
 		// Plug-in transition: seed the session anchor and clear any
 		// session-completion latched from a prior session.
 		anchor := lp.PluginSoC

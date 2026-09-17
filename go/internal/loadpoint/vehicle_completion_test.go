@@ -267,4 +267,10 @@ func TestVehicleLimitRecurringCompleteRollsAndNewDemandReopens(t *testing.T) {
 	if watts, override := c.vehicleCompletionOffer(cfg, now); override || watts != 0 {
 		t.Fatal("missing telemetry converted next day's goal to immediate max charge", watts, override)
 	}
+	m.completeVehicleGoal(cfg.ID)
+	m.ObserveSession(cfg.ID, false, 0, 0, false, "charger", "")
+	m.ObserveSession(cfg.ID, true, 0, 0, true, "charger", "next-session")
+	if st, _ := m.State(cfg.ID); st.GoalComplete || st.TargetSoC != 1 || !st.TargetTime.After(now) {
+		t.Fatal("completed recurring goal suppressed a new car session", st)
+	}
 }
