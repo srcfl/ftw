@@ -19,6 +19,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -323,6 +324,96 @@ func TestAConfigureWithoutStepUpAsksForOne(t *testing.T) {
 	}
 	if rig.ctrl.BatteryCoversEV {
 		t.Fatal("a request that was told to step up changed the box anyway")
+	}
+}
+
+// The charging schedule is still configuration — a late save is the same
+// instruction — but login already proved who is asking. Face ID on that
+// write is the wrong cost.
+func TestAnOwnerSavesAScheduleWithoutACeremony(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee"}})
+	rig := newAppSession(t, apiauth.RoleOwner, func(d *Deps) {
+		d.Loadpoints = mgr
+	})
+
+	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
+		Method: appproto.APIPut,
+		Path:   "/api/loadpoints/garage/schedule",
+		Body:   []byte(`{"soc_pct":80,"time_of_day_min_utc":360,"recurring":true,"days":31}`),
+	})
+	head := decode[appproto.APIHeadMsg](t, rig.frames.await(t, appproto.MsgAPIHead))
+	if head.Status != 200 {
+		t.Fatalf("status = %d, want 200", head.Status)
+	}
+	got, ok := mgr.GetSchedule("garage")
+	if !ok {
+		t.Fatal("the schedule write reached a 200 but the box did not store it")
+	}
+	if got.TimeOfDayMinUTC != 360 {
+		t.Fatalf("stored time = %d, want 360", got.TimeOfDayMinUTC)
+	}
+}
+
+func TestAnOwnerClearsAScheduleWithoutACeremony(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee"}})
+	mgr.SetSchedule("garage", loadpoint.Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true})
+	rig := newAppSession(t, apiauth.RoleOwner, func(d *Deps) {
+		d.Loadpoints = mgr
+	})
+
+	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
+		Method: appproto.APIDelete,
+		Path:   "/api/loadpoints/garage/schedule",
+	})
+	head := decode[appproto.APIHeadMsg](t, rig.frames.await(t, appproto.MsgAPIHead))
+	if head.Status != 200 {
+		t.Fatalf("status = %d, want 200", head.Status)
+	}
+	if _, ok := mgr.GetSchedule("garage"); ok {
+		t.Fatal("DELETE without a ceremony left the schedule in place")
+	}
+}
+
+func TestAViewerCannotSaveASchedule(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee"}})
+	rig := newAppSession(t, apiauth.RoleViewer, func(d *Deps) {
+		d.Loadpoints = mgr
+	})
+
+	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
+		Method: appproto.APIPut,
+		Path:   "/api/loadpoints/garage/schedule",
+		Body:   []byte(`{"soc_pct":80,"time_of_day_min_utc":360,"recurring":true}`),
+	})
+	refusal := decode[appproto.ErrorBody](t, rig.frames.await(t, appproto.MsgError))
+	if refusal.Code != appproto.ErrScopeDenied {
+		t.Fatalf("refusal = %+v, want E_SCOPE_DENIED", refusal)
+	}
+	if _, ok := mgr.GetSchedule("garage"); ok {
+		t.Fatal("a viewer stored a schedule")
+	}
+}
+
+func TestScheduleConfigureSkipsTheCeremony(t *testing.T) {
+	srv := New(&Deps{})
+	for _, tc := range []struct{ method, path string }{
+		{"PUT", "/api/loadpoints/1/schedule"},
+		{"DELETE", "/api/loadpoints/1/schedule"},
+	} {
+		facts := srv.Route(newSyntheticRequest(tc.method, tc.path))
+		if facts.Tier != apiauth.TierConfigure {
+			t.Fatalf("%s %s tier = %q, want configure", tc.method, tc.path, facts.Tier)
+		}
+		if !facts.NoStepUp {
+			t.Fatalf("%s %s still needs a ceremony; a ready-time write must not", tc.method, tc.path)
+		}
+	}
+	rules := srv.Route(newSyntheticRequest("PUT", "/api/notifications/rules"))
+	if rules.NoStepUp {
+		t.Fatal("notification rules skipped the ceremony")
 	}
 }
 
@@ -667,6 +758,10 @@ func TestEveryMarkedRouteIsReachable(t *testing.T) {
 		if facts.ReplacesAll != mark.replacesAll {
 			t.Fatalf("%s resolves to replacesAll=%v, but is marked %v",
 				pattern, facts.ReplacesAll, mark.replacesAll)
+		}
+		if facts.NoStepUp != mark.noStepUp {
+			t.Fatalf("%s resolves to noStepUp=%v, but is marked %v",
+				pattern, facts.NoStepUp, mark.noStepUp)
 		}
 		if facts.Static != mark.static {
 			t.Fatalf("%s resolves to static=%v, but is marked %v",
