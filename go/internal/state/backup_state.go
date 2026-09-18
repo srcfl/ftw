@@ -53,6 +53,21 @@ func (s *Store) BackupSourceBytes() int64 {
 	return n
 }
 
+// stateSourceBytes is the on-disk size of the settings database alone,
+// including WAL and SHM. The update rollback point copies only this file.
+func (s *Store) stateSourceBytes() int64 {
+	if s == nil {
+		return 0
+	}
+	return fileSizeOrZero(s.mainDBPath) + fileSizeOrZero(s.mainDBPath+"-wal") + fileSizeOrZero(s.mainDBPath+"-shm")
+}
+
+// HistoryInPlace reports whether history lives in its own database file that
+// a state rollback leaves untouched.
+func (s *Store) HistoryInPlace() bool {
+	return s != nil && s.history != nil
+}
+
 func fileSizeOrZero(path string) int64 {
 	if path == "" {
 		return 0

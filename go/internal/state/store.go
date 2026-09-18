@@ -613,12 +613,28 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
-	return s.backupToCompressed(dstPath, report, nil)
+	return s.backupToCompressed(dstPath, report, nil, true)
 }
 
 // BackupWithConfiguration returns settings from the same SQLite snapshot as
 // the archive, so its YAML export remains correct even for an older Core.
 func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	return s.backupWithConfiguration(dstPath, report, true)
+}
+
+// BackupStateWithConfiguration is the Core update rollback point: the
+// settings database and its configuration export, without the history
+// database. History lives in its own file, which an update does not replace
+// and a rollback leaves in place, so copying it here only bounded the update
+// by months of telemetry. A schema-change update on a Raspberry Pi could not
+// finish that copy inside the live export deadline (#1302). A store that
+// still keeps legacy history inside state.db is copied whole, so the point
+// stays complete for that layout.
+func (s *Store) BackupStateWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	return s.backupWithConfiguration(dstPath, report, false)
+}
+
+func (s *Store) backupWithConfiguration(dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
 	var configuration Configuration
 	var found bool
 	err := s.backupToCompressed(dstPath, report, func(rawPath string) error {
@@ -629,11 +645,11 @@ func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgre
 		}
 		found = err == nil
 		return err
-	})
+	}, includeHistory)
 	return configuration, found, err
 }
 
-func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -645,7 +661,11 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 
 	ctx, cancel := s.backupWorkContext()
 	defer cancel()
-	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(s.BackupSourceBytes())); err != nil {
+	sourceBytes := s.BackupSourceBytes()
+	if !includeHistory {
+		sourceBytes = s.stateSourceBytes()
+	}
+	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(sourceBytes)); err != nil {
 		return err
 	}
 
@@ -657,8 +677,10 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 		return fmt.Errorf("backup state: %w", err)
 	}
 
-	if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
-		return fmt.Errorf("backup history: %w", err)
+	if includeHistory {
+		if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
+			return fmt.Errorf("backup history: %w", err)
+		}
 	}
 
 	if capture != nil {
