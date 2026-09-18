@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.7.2
+
+### Patch Changes
+
+- 14dd79f: On the Home Assistant app, **Restart now** re-execs Core in-process after a clean shutdown instead of exiting. Supervisor does not restart a stopped app unless Watchdog is on, so the old exit left FTW stopped until someone pressed Start.
+
 ## 3.7.1
 
 ### Patch Changes
