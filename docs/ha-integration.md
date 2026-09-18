@@ -46,6 +46,15 @@ include:
 
 Autodiscovery is preferred over hard-coding generated entity IDs.
 
+The Plan sensor's attributes (`forty-two-watts/plan_json`) carry the next 24
+hours as a compact schedule: start, action, battery and grid power, state of
+charge, price and confidence per slot, rounded to one decimal. Home Assistant's
+recorder refuses attributes above 16 KB, so the payload is bounded; with slots
+shorter than 15 minutes the horizon is shortened first and
+`schedule_truncated` says so. The full schedule with every field is published
+on `forty-two-watts/plan_schedule_json` for MQTT consumers. It is not attached
+to an entity because it can exceed that limit.
+
 ## Troubleshooting
 
 1. Verify broker reachability and credentials from the FTW host.
