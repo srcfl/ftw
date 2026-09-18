@@ -39,7 +39,7 @@ migration (#1164) and the images that are never pruned (#1305) all come from
 this shape.
 
 **Transition code never left.** Retiring Python, migrating legacy Compose
-layouts, the paired 2.x → 3.x upgrade and the `forty-two-watts` alias are
+layouts, the paired 2.x → 3.x upgrade and the old product-name alias are
 still built, tested and documented for boxes that have already moved.
 
 **Data migration landed inside the updater.** The SQLite → DuckDB change made
@@ -114,7 +114,7 @@ the box holds the Docker socket, and no Docker engine is required.**
 
 9. **Transition code is deleted once every known box runs 3.5 or later.**
    Python retirement, legacy Compose migration, the paired upgrade script and
-   the `forty-two-watts` alias go. The legacy state-schema marker path goes
+   the old product-name alias go. The legacy state-schema marker path goes
    when no 3.5.x box remains.
 
 ## What is lost
