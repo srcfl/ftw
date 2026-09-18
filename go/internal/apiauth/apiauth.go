@@ -89,7 +89,9 @@ const (
 	// that could be replayed as authority. A shared viewer may ask for it.
 	TierRead Tier = "read"
 	// TierConfigure changes a setting. A late execution is the same
-	// instruction, only later. Owner, with a step-up.
+	// instruction, only later. Owner, and usually a step-up. A route
+	// marked NoStepUp skips the ceremony: the session already proved
+	// who is asking.
 	TierConfigure Tier = "configure"
 	// TierActuate moves energy, or takes control of what is moving it. It
 	// never travels over the passthrough, because an HTTP request carries no
@@ -143,6 +145,12 @@ type RouteFacts struct {
 	// where at least the browser had just loaded the whole document from the
 	// same box. A phone on a relay has no such guarantee.
 	ReplacesAll bool
+
+	// NoStepUp marks a configure route that needs owner but not a fresh
+	// passkey ceremony. The charging schedule is the case: changing when
+	// the car should be ready is a household setting, and the session
+	// already proved who is asking.
+	NoStepUp bool
 }
 
 // ScopeSet is what a caller may ask for.
