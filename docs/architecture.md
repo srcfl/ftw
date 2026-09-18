@@ -33,6 +33,46 @@ A separate module requires a concrete benefit and:
 - no authority to bypass core's validation or safety limits;
 - a useful fallback or a cleanly unavailable state.
 
+### Vehicle charge-limit goals
+
+A percentage goal and a goal to reach the car's own limit are distinct.
+State schema 7 blocks rollback to a Core that would ignore the saved goal mode.
+`GET /api/loadpoints` advertises `vehicle_limit_goal_supported`; clients must
+require that flag before saving `schedule.finish_at_vehicle_limit`. Existing
+percentage goals keep their meaning. In vehicle-limit mode, the planner uses
+a fresh vehicle limit where available. Without one, 100% is a planning bound,
+not a claimed vehicle setting. Final charging continues through Core's safety
+clamps until the car stops accepting current; an estimate cannot prove it is
+finished. A manual Stop still wins.
+
+The current connection's deadline uses verified charger and session identity.
+It stays due after the deadline and survives restart when `goal_retention` is
+`session`. `unavailable` means that identity is missing; `error` means the
+session checkpoint failed. Neither means the saved schedule disappeared.
+`pending` means the checkpoint is queued and cannot yet be claimed durable.
+Core assigns each saved vehicle-limit goal an `intent_id` and a one-shot
+`first_deadline_ms`; clients send user choices, not those bookkeeping fields.
+A fresh vehicle Complete can finish a one-shot goal across restart and later
+plug sessions. Completion requires one vehicle source, one connected loadpoint,
+a reading after the observed connection and no measured charging. An ambiguous
+match cannot finish the goal. A charger declining current is reported as a refusal, never
+as an invented battery level or proof that the target was reached.
+
+### Control state and disk writes
+
+Core loads EV restart records before starting control. During operation, a
+bounded queue writes immutable snapshots outside the loadpoint and model
+locks. Repeated updates replace a pending snapshot; an in-flight write keeps
+its order. Manual holds commit their hardware binding and old fallback keys
+in one FULL-sync transaction. Reads cannot restore a key being replaced.
+
+HTTP and app command acknowledgements wait up to two seconds for the relevant
+write queue outside control locks. A timeout reports an active but unconfirmed
+choice. It does not undo a Stop or claim that memory survived a power loss.
+Shutdown drains accepted writes and reports any failure. This removes disk
+waits from these control paths; it does not establish the SD card's goal-save
+latency under backup or other filesystem load.
+
 ## Product requirements across these boundaries
 
 Discovery, first-day models and controlled commissioning should establish
@@ -82,12 +122,14 @@ device
 Lua driver                 optional optimizer
   ↕ site-convention data       ↓ proposed trajectory
 telemetry → control/planner → core validation and safety → driver command
-     ↘ DuckDB history       ↘ API/UI and integrations
+     ↘ SQLite + Parquet       ↘ API/UI and integrations
 ```
 
-The in-memory telemetry store owns latest readings and driver health. DuckDB
-owns time-series samples, site history and the energy ledger. SQLite owns
-configuration, forecasts, prices, device identity and learned model state.
+The in-memory telemetry store owns latest readings and driver health.
+SQLite history.db owns samples, hourly summaries, dashboard history and the
+energy ledger. A separate state.db owns goals, device identity and learned
+state. Rebuildable prices and forecasts live in cache.db. Older samples use
+daily Parquet files.
 Database access stays in
 [`go/internal/state`](../go/internal/state).
 
@@ -95,31 +137,67 @@ The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
 
-Core embeds DuckDB in the Go process. A bounded queue copies each telemetry
-tick before the writer commits its history, samples, energy ledger and retry
-receipt in one transaction. Admission to memory is separate from durable
-commit. A full queue returns a collection error; health reports pending,
-committed and rejected ticks. Queries use separate connections to the same
-database instance. They do not hold the writer's lock.
-The serial writer retires a previous retry receipt only after it has observed
-that commit succeed. The current receipt survives an uncertain commit and a
-retry; receipts do not grow with every tick for the lifetime of the box.
+A bounded queue copies each telemetry tick before the SQLite writer commits
+its history, samples, energy ledger and retry receipt in one transaction.
+Admission to memory is separate from commit. A full queue returns a collection
+error; health reports pending, committed and rejected ticks. Reads use WAL
+snapshots. Goals and session state use a separate database and sync their WAL
+before returning success, so history maintenance does not hold their writer.
 
-On first boot, Core imports a fixed SQLite snapshot and the existing daily
-sample Parquet files. It checks row counts and values before it accepts the
-new history generation. Samples keep their first value for a key; history
-snapshots keep their last value. Signed zero becomes zero; all other finite
-floating-point values keep their precision. Invalid values stop the import.
-Original files remain available as migration evidence. Live reads and writes
-use DuckDB after migration. The [FTWDB experiment is retired](ftwdb-shadow.md).
+Core writes scalar history as 10-second summaries in SQLite for the last
+24 hours. It also maintains minute summaries for verified publication to
+Parquet. Minute files cover days 1–30; five-minute files cover days 30–730.
+Hourly gauge summaries and the energy ledger remain after detailed history
+expires. The old `state.cold_retention_days` setting no longer controls this
+policy; startup reports a stored nonzero value.
 
-State schema 3 requires a full backup on upgrade. Full backups export one
-DuckDB read snapshot into portable SQLite, with counts and hashes checked.
-They omit imported sample Parquet files to prevent duplicate reads by an
-older Core. A config-only snapshot cannot restore a missing history database.
-To return to an older Core, stop Core and restore a verified full backup with
-its matching version. Changing only the image would use frozen SQLite history
-and is refused.
+Dashboard charts use the same 10-second, one-minute and five-minute ages in
+SQLite. These small site summaries stay separate from scalar Parquet archives.
+Energy and cost consume original observed intervals recorded before chart
+averaging. Minute energy totals remain for two years, then quarter-hour totals
+preserve local day boundaries and normal tariff periods. A range edge or price
+change inside a retained interval stays uncovered; no reader invents a split.
+Missing site observations break integration. Chart detail keeps the last
+observed JSON and its timestamp; the reader marks it as aggregate data that
+forecast training must not use. Existing legacy chart tiers remain readable.
+
+Every scalar bucket keeps count, sum, min, max, last value and the first and
+last observed timestamps. Means are weighted by sample count, not by elapsed
+time. An empty interval stays empty; observed bounds do not prove continuous
+coverage. The series API reports the source resolution. Latest-value reads use
+the last actual measurement. Gauge averages never replace counter deltas or
+power integration in the energy ledger, which consumes original observations.
+Five-minute energy detail becomes hourly after 30 days and daily after two
+years; totals remain. Reads have time and output limits.
+
+Archiving streams through a bounded SQLite staging file, reads the new Parquet
+back and checks its ordered contents before publishing by a synced rename.
+Pruning removes matching complete source minutes in short transactions. Live
+SQLite wins while both copies exist. A failed write, verification or prune
+keeps the source; a retry cannot count both copies. Admission and the archive
+boundary share a short memory lock so pending ticks finish before their
+interval closes. Later attempts to backdate into a closed interval return an
+explicit collection error without blocking the write queue.
+
+Old raw Parquet files convert in the background. Each staging transaction
+saves its input cursor with its summaries, so a restart resumes the file.
+Independent counts, sums, extrema and observation bounds must match before
+raw data is removed. The original file wins while both forms exist. Compacted
+history cannot accept individual raw corrections. Restore original history
+before importing corrections. Backup archives omit resumable scratch files.
+
+Fresh installations create SQLite directly. Earlier SQLite installations copy
+frozen history in bounded, restartable transactions and keep their Parquet
+files. Only DuckDB beta installations need the separate offline
+[history converter](history-conversion.md). Core and normal release builds
+have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
+
+State schema 5 adds aggregate history and binds state.db to a specific history.db generation. Portable
+backups export a SQLite read snapshot with row counts and hashes checked, plus
+retained Parquet. The old beta files stay on the box for recovery. A config-only
+snapshot cannot recover missing history. To return to an older Core, stop Core
+and restore a verified full backup with its matching version; image-only
+rollback across the format boundary is refused.
 
 ## Drivers
 

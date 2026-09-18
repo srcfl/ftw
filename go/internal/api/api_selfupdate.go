@@ -126,12 +126,18 @@ func (s *Server) handleVersionUnskip(w http.ResponseWriter, r *http.Request) {
 // polls /api/version/update/status for progress.
 //
 // Before handing off to the sidecar we capture a rollback-point snapshot
-// (state.db + config.yaml) into SnapshotDir. A failed snapshot aborts
-// the update — the whole point of offering "Update" is that the user
+// (settings database + config.yaml) into SnapshotDir. A failed snapshot
+// aborts the update — the whole point of offering "Update" is that the user
 // knows they can back out, and shipping without the safety net breaks
 // that promise. SnapshotDir being disabled at deployment time is the only
 // exception. The legacy skip_snapshot request field is deliberately ignored:
 // an old client cannot silently remove the safety net from a new server.
+//
+// The point never copies history.db. It is bounded by the settings
+// database, so it is taken for every update, including ones that keep the
+// state schema. Going back across a history-format change still needs a
+// full backup made before the update; handleVersionRollback refuses such a
+// point and says so.
 func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
@@ -139,8 +145,8 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := s.deps.SelfUpdate.Info()
-	if info.CurrentStateSchema >= 3 && info.TargetStateSchema < 3 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "This Core stores history in DuckDB. Stop Core and restore a verified full backup with the matching older Core version; changing only the image would omit new history."})
+	if info.CurrentStateSchema >= 3 && info.TargetStateSchema < info.CurrentStateSchema {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "This Core uses a newer history format. Stop Core and restore a verified full backup with the matching older Core version; changing only the image would omit new history."})
 		return
 	}
 	if info.TargetStateSchema > 0 && info.TargetStateSchema < 2 && s.deps.Cfg != nil && s.deps.CfgMu != nil {
@@ -167,11 +173,7 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now()
-	fullBackupRequired := info.FullBackupRequired
 	startMessage := "starting update"
-	if !fullBackupRequired {
-		startMessage = "Database schema unchanged; full history backup not needed"
-	}
 	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
 		State:          "starting",
 		Action:         "update",
@@ -190,19 +192,17 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 		Message: startMessage, Step: 1, TotalSteps: 4,
 	}, info.Current)
 
-	go s.runVersionUpdate(startedAt, info.Current, info.Latest, fullBackupRequired)
+	go s.runVersionUpdate(startedAt, info.Current, info.Latest)
 
 	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if !fullBackupRequired {
+	if s.deps.SnapshotDir == "" {
 		resp["snapshot_skipped"] = true
-		resp["snapshot_skip_reason"] = "database schema unchanged"
-	} else if s.deps.SnapshotDir == "" {
-		resp["snapshot_skipped"] = true
+		resp["snapshot_skip_reason"] = "snapshots disabled"
 	}
 	writeJSON(w, 202, resp)
 }
 
-func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, fullBackupRequired bool) {
+func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 	defer s.versionUpdateMu.Unlock()
 
 	writeUpdateStatus := func(updateState, message string) {
@@ -220,13 +220,12 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, f
 		})
 	}
 
-	snapshotSkipped := s.deps.SnapshotDir == "" || !fullBackupRequired
-	if !snapshotSkipped {
+	if s.deps.SnapshotDir != "" {
 		phaseStarted := time.Now()
 		status := selfupdate.UpdateStatus{
 			State: "snapshotting", Action: "update", Component: "core", Target: latest,
 			StartedAt: startedAt, PhaseStartedAt: phaseStarted, UpdatedAt: phaseStarted,
-			Message: "Copying full history database", Step: 1, TotalSteps: 4,
+			Message: snapshotCopyMessage, Step: 1, TotalSteps: 4,
 		}
 		s.writeVersionUpdateStatus(status)
 		heartbeat := newUpdateStatusHeartbeat(s.deps.SelfUpdate, status)
@@ -289,6 +288,10 @@ func (h *updateStatusHeartbeat) Stop() {
 	<-h.done
 }
 
+// snapshotCopyMessage names what the rollback point copies. History is not
+// part of it; saying so stops an operator from waiting for a history copy.
+const snapshotCopyMessage = "Saving rollback point: settings database and config (history stays in place)"
+
 func (h *updateStatusHeartbeat) SetBackupProgress(progress state.BackupProgress) {
 	h.publish(func(status *selfupdate.UpdateStatus) {
 		if progress.Phase != h.phase {
@@ -300,7 +303,7 @@ func (h *updateStatusHeartbeat) SetBackupProgress(progress state.BackupProgress)
 		status.ProgressUnit = ""
 		switch progress.Phase {
 		case state.BackupPhaseCopying:
-			status.Message = "Copying full history database"
+			status.Message = snapshotCopyMessage
 		case state.BackupPhaseCompressing:
 			status.Message = "Compressing rollback backup"
 			status.ProgressUnit = "bytes"
@@ -388,8 +391,8 @@ func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "snapshot has no files recorded; cannot restore safely"})
 		return
 	}
-	if s.deps.SelfUpdate.Info().CurrentStateSchema >= 3 && meta.DatabaseSchema < 3 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "This snapshot predates DuckDB history. Restore its verified full backup offline with the matching Core version."})
+	if s.deps.SelfUpdate.Info().CurrentStateSchema >= 3 && meta.DatabaseSchema < s.deps.SelfUpdate.Info().CurrentStateSchema {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "This snapshot predates the current history format. Restore its verified full backup offline with the matching Core version."})
 		return
 	}
 	if !snapshotMetaRestorable(meta) {

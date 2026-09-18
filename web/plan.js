@@ -1,3 +1,4 @@
+import { plannedEVWatts, createChargingTimeline } from "./ev-plan.js";
 // plan.js — MPC plan + prices + forecast visualization.
 // Renders a stacked canvas chart: price bars on top, battery+grid bars in
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
@@ -152,12 +153,13 @@ import {
   }
 
   async function fetchPlanData() {
-    const [p, f, m, c, s] = await Promise.all([
+    const [p, f, m, c, s, l] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/config').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/status').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/loadpoints').then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
     state.prices = (p && p.items) || [];
     // /api/prices says which currency the stored minor units are in, so
@@ -176,6 +178,7 @@ import {
     // stacked as spot + grid tariff + VAT instead of one opaque number.
     state.priceCfg = (c && c.price) || null;
     state.status = s || {};
+    state.loadpoints = l && Array.isArray(l.loadpoints) ? l.loadpoints : null;
     state.prefs = prefsFromStatus(s);
     state.enabled = {
       prices: p && p.enabled,
@@ -199,7 +202,7 @@ import {
       window.dispatchEvent(new CustomEvent("ftw-plan-data", {
         detail: { plan: state.plan },
       }));
-      render();
+      await fetchAll();
     } catch (e) { /* ignore */ }
   }
 
@@ -258,6 +261,39 @@ import {
     setText('plan-soc-detail', brief.soc ? brief.soc.detail : '');
     renderOverviewPlanBrief(brief);
     syncPrefsUI();
+  }
+
+  const carPlanViews = new Map();
+  function renderCarPlans() {
+    for (const id of ['plan-ev-plans', 'overview-ev-plans']) {
+      const host = document.getElementById(id);
+      if (!host) continue;
+      const points = state.loadpoints;
+      if (!points) {
+        host.hidden = false;
+        host.textContent = 'Car charging plan unavailable. Trying again…';
+        carPlanViews.delete(id);
+        continue;
+      }
+      const views = carPlanViews.get(id) || new Map();
+      if (!carPlanViews.has(id)) host.replaceChildren();
+      carPlanViews.set(id, views);
+      host.hidden = !points.length;
+      for (const [key, view] of views) {
+        if (!points.some(lp => lp.id === key)) { view.el.remove(); views.delete(key); }
+      }
+      const now = Date.now();
+      const bounds = id === 'plan-ev-plans' ? horizonBounds(state.horizon) : { tMin: now, tMax: now + 24 * 3600000 };
+      for (const lp of points) {
+        let view = views.get(lp.id);
+        if (!view) { view = createChargingTimeline(); views.set(lp.id, view); host.appendChild(view.el); }
+        view.update({ ...lp,
+          plan_outdated: lp.plan_outdated || state.planMeta?.outdated || state.status?.plan_stale,
+          plan_pending: lp.plan_pending || state.planMeta?.replanning,
+        }, { start: Math.max(now, bounds.tMin), end: bounds.tMax,
+          label: 'Car charging' + (points.length > 1 ? ' · ' + (lp.vehicle_name || lp.id) : '') });
+      }
+    }
   }
 
   function renderOptimizerFallbackAlert(plan) {
@@ -361,6 +397,7 @@ import {
     // needs it too; several later sections ("Plan battery bars", "Load
     // forecast", predicted-zone shade) reference it directly.
     renderPlanBrief(plan);
+    renderCarPlans();
     renderOptimizerFallbackAlert(plan);
     const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
@@ -635,36 +672,28 @@ import {
     }
     renderHedge(state.prefs?.safety_k);
 
-    // Planned EV charging — site-signed load (always ≥ 0, plotted above
-    // zero). Solid cyan so it's distinguishable from the dashed amber
-    // load forecast and the green PV trace. Only drawn when the plan
-    // carries a loadpoint dimension (loadpoint_w field present).
-    if (plan && plan.actions && plan.actions.some(a => a.loadpoint_w != null)) {
-      ctx.strokeStyle = 'rgba(34,211,238,0.95)';
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      let fEv = true;
-      for (const a of plan.actions) {
-        if (a.slot_start_ms > tMax) break;
-        if (a.loadpoint_w == null) continue;
-        const x = xScale(a.slot_start_ms);
-        const y = powerY(a.loadpoint_w);
-        if (fEv) { ctx.moveTo(x, y); fEv = false; }
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-      // EV step-fill at low opacity makes the on/off slots readable at a
-      // glance — the line alone hides the "off between two on" slots.
-      ctx.fillStyle = 'rgba(34,211,238,0.12)';
-      for (const a of plan.actions) {
-        if (a.slot_start_ms > tMax) break;
-        if (!a.loadpoint_w || a.loadpoint_w <= 0) continue;
-        const x0 = xScale(a.slot_start_ms);
-        const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        const yTop = powerY(a.loadpoint_w);
-        ctx.fillRect(x0, yTop, Math.max(1, x1 - x0 - 1), powerYCenter - yTop);
-      }
+    // Slot-average EV power, including all configured cars. Draw steps so
+    // gaps stay visible rather than connecting two charges across idle time.
+    const evActions = plan && plan.actions || [];
+    const evLegend = document.getElementById('plan-ev-legend');
+    if (evLegend) evLegend.hidden = !evActions.some(a => plannedEVWatts(a) > 0);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(pad.l, powerY0, plotW, powerH); ctx.clip();
+    ctx.strokeStyle = 'rgba(34,211,238,0.95)';
+    ctx.fillStyle = 'rgba(34,211,238,0.15)';
+    ctx.lineWidth = 1.8;
+    for (const a of evActions) {
+      const watts = plannedEVWatts(a);
+      const start = Math.max(a.slot_start_ms, a.execution_start_ms || a.slot_start_ms);
+      const end = a.slot_start_ms + a.slot_len_min * 60000;
+      if (watts <= 0 || end <= tMin || start >= tMax || end <= start) continue;
+      const x0 = xScale(Math.max(start, tMin)), x1 = xScale(Math.min(end, tMax));
+      const y = powerY(watts);
+      ctx.fillRect(x0, y, x1 - x0, powerYCenter - y);
+      ctx.beginPath(); ctx.moveTo(x0, powerYCenter); ctx.lineTo(x0, y);
+      ctx.lineTo(x1, y); ctx.lineTo(x1, powerYCenter); ctx.stroke();
     }
+    ctx.restore();
 
     // Power zero-line
     ctx.strokeStyle = C.line;
@@ -987,10 +1016,9 @@ import {
         const loadW = siteLoadWCapped(a.load_w, state.plan && state.plan.load_max_w);
         lines.push(`<div class="tip-row"><span title="Household load used for planning after the forecast margin">Load used by plan</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
       }
-      if (a.loadpoint_w != null && a.loadpoint_w > 0) {
-        const lpSoc = socPercent(a.loadpoint_soc);
-        const evSoc = lpSoc != null ? ` → ${lpSoc.toFixed(0)}%` : '';
-        lines.push(`<div class="tip-row"><span title="Planned EV charging power for this slot">EV charging</span><b>${(a.loadpoint_w / 1000).toFixed(1)} kW${evSoc}</b></div>`);
+      const evWatts = plannedEVWatts(a);
+      if (evWatts > 0) {
+        lines.push(`<div class="tip-row"><span title="Average planned charging power across all cars in this slot">Car charging</span><b>${(evWatts / 1000).toFixed(1)} kW average</b></div>`);
       }
       if (a.battery_w != null) {
         const dir = a.battery_w > 100 ? 'charge' : a.battery_w < -100 ? 'discharge' : 'idle';
@@ -1314,6 +1342,8 @@ import {
       .then(function (d) {
         const el = document.getElementById('strategy-hint');
         if (!el) return;
+        // The status read can finish before the first plan batch.
+        if (!state.enabled) { el.textContent = ''; return; }
         const enabled = !!(state.enabled && state.enabled.mpc);
         const plannerMode = String(d.mode || '').indexOf('planner_') === 0;
         if (!enabled && plannerMode) {

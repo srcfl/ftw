@@ -307,18 +307,6 @@ jobs:
           path-type: inherit
           install: make zip
 
-      - name: Match DuckDB's MinGW compiler
-        if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          # DuckDB v1.5.5 BundleStaticLibs.yml uses this exact toolchain.
-          choco upgrade mingw --version=14.2.0 --allow-downgrade --force --yes --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $compilerDir = 'C:/ProgramData/mingw64/mingw64/bin'
-          if ((& "$compilerDir/gcc.exe" -dumpfullversion) -ne '14.2.0') { throw 'Unexpected MinGW version' }
-          "CC=$compilerDir/gcc.exe" >> $env:GITHUB_ENV
-          "CXX=$compilerDir/g++.exe" >> $env:GITHUB_ENV
-          $compilerDir >> $env:GITHUB_PATH
 
       # drivers/ is gitignored and fetched from the commit pinned in
       # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,
@@ -329,7 +317,6 @@ jobs:
       - name: Build
         env:
           VERSION: ${{ needs.meta.outputs.tag }}
-          FTW_BUILD_DOCKER: ${{ matrix.goos == 'linux' && '1' || '0' }}
         run: |
           make ${{ matrix.build_target }}
           ls -la \
@@ -910,3 +897,32 @@ jobs:
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}" \
             "${DISCORD_WEBHOOK}"
+
+  addon:
+    name: notify the Home Assistant app repository
+    runs-on: ubuntu-latest
+    needs: [meta, publish]
+    # Same contract as the beta workflow: srcfl/home-assistant-addons verifies
+    # the stable release against ftw-promotion-receipt.json and the registry;
+    # this event only shortens the wait for its hourly sync.
+    if: ${{ github.repository == 'srcfl/ftw' }}
+    steps:
+      - name: Dispatch ftw-release to srcfl/home-assistant-addons
+        env:
+          GH_TOKEN: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          SOURCE_BETA: ${{ needs.meta.outputs.source_beta }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::HA_ADDON_DISPATCH_TOKEN is not set; srcfl/home-assistant-addons picks up ${TAG} on its hourly sync."
+            exit 0
+          fi
+          gh api repos/srcfl/home-assistant-addons/dispatches \
+            --method POST \
+            -f event_type=ftw-release \
+            -f "client_payload[channel]=stable" \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[source_beta]=${SOURCE_BETA}" \
+            -f "client_payload[commit]=${GITHUB_SHA}"
+          echo "Dispatched ftw-release for ${TAG} (stable, from ${SOURCE_BETA})."

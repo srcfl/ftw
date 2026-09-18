@@ -1,4 +1,4 @@
-# Top-level build for FTW (Go, DuckDB and Lua drivers).
+# Top-level build for FTW (Go, SQLite and Lua drivers).
 #
 # Common targets:
 #   make test                 — Go suites (full-stack e2e is separate)
@@ -7,8 +7,8 @@
 #   make build-amd64          — cross-compile for linux/amd64 (x86_64 server)
 #   make build-windows-amd64  — cross-compile for windows/amd64 (.exe)
 #   make release-linux        — linux arm64/amd64 tarballs
-#   make release-windows      — windows zip (UCRT64 compiler required)
-#   make release              — all archives (all target compilers required)
+#   make release-windows      — windows zip
+#   make release              — all archives
 #   make run-sim              — start both simulators locally
 #   make dev                  — start sims + main app (hot-reload workflow)
 #   make clean                — remove all build artifacts
@@ -20,8 +20,8 @@
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
-# DuckDB is part of Core. Builds and tests must include its C bindings.
-export CGO_ENABLED := 1
+# Ordinary Core has no native database or compiler dependency.
+export CGO_ENABLED := 0
 export VERSION
 GO_TAGS := netgo,osusergo
 
@@ -35,8 +35,8 @@ help:
 	@echo "  build-amd64          cross-compile for linux/amd64"
 	@echo "  build-windows-amd64  cross-compile for windows/amd64 (.exe)"
 	@echo "  release-linux        linux tarballs in release/"
-	@echo "  release-windows      Windows zip in release/ (UCRT64 compiler)"
-	@echo "  release              all archives (all target compilers required)"
+	@echo "  release-windows      Windows zip in release/"
+	@echo "  release              all archives"
 	@echo "  run-sim              start Ferroamp + Sungrow + PCS simulators"
 	@echo "  sim-ocpp             dial Evify OCPP chargers at a running FTW"
 	@echo "  dev                  start sims + main app against config.local.yaml"
@@ -186,7 +186,6 @@ build-amd64:
 	@cp bin/linux-amd64/ftw-backup bin/ftw-backup-linux-amd64
 	@cp bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 
-# Set CC/CXX to DuckDB's MinGW GCC 14.2.0 compilers; CI installs that version.
 build-windows-amd64:
 	bash scripts/build-core.sh windows amd64 bin/windows-amd64
 	@cp bin/windows-amd64/ftw.exe bin/ftw-windows-amd64.exe

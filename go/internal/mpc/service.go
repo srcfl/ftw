@@ -77,17 +77,18 @@ type BatteryFleetMember struct {
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
-	now                func() time.Time // nil uses the wall clock
-	Store              *state.Store
-	Tele               *telemetry.Store
-	Zone               string
-	BaseLoad           float64 // baseline household load (W). 0 disables load assumption.
-	Horizon            time.Duration
-	Interval           time.Duration
-	PV                 PVPredictor         // optional — overrides stored pv_w_estimated
-	PVResidualCorrect  PVResidualCorrector // optional — additive short-horizon bias on top of PV
-	ForecastSnapshot   func(time.Time, []state.ForecastPoint) ForecastInputs
-	PVCurtailmentProbe func() PVCurtailment
+	now                  func() time.Time // nil uses the wall clock
+	Store                *state.Store
+	Tele                 *telemetry.Store
+	Zone                 string
+	BaseLoad             float64 // baseline household load (W). 0 disables load assumption.
+	Horizon              time.Duration
+	Interval             time.Duration
+	PV                   PVPredictor         // optional — overrides stored pv_w_estimated
+	PVResidualCorrect    PVResidualCorrector // optional — additive short-horizon bias on top of PV
+	ForecastSnapshot     func(time.Time, []state.ForecastPoint) ForecastInputs
+	HouseholdMeasurement func() telemetry.ForecastReading
+	PVCurtailmentProbe   func() PVCurtailment
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
 	// PVNameplateW accepts a verified AC generation ceiling. A configured
@@ -296,34 +297,22 @@ func (s *Service) driverOnline(name string) bool {
 	return h != nil && h.IsOnline()
 }
 
-// liveHouseLoadW is house-only consumption from a live site meter:
-// grid − pv − battery − EV − V2X, floored at 0. False when the meter
-// is missing or offline. The current planning slot uses this instead of
-// a cold-start hour-of-week prior.
+// liveHouseLoadW uses the same complete, fresh balance as forecast learning.
+// Driver health alone does not establish power freshness or a known load.
 func (s *Service) liveHouseLoadW() (float64, bool) {
-	if s == nil || s.Tele == nil || s.SiteMeter == "" || !s.driverOnline(s.SiteMeter) {
+	if s == nil {
 		return 0, false
 	}
-	m := s.Tele.Get(s.SiteMeter, telemetry.DerMeter)
-	if m == nil {
-		return 0, false
+	var reading telemetry.ForecastReading
+	if s.HouseholdMeasurement != nil {
+		reading = s.HouseholdMeasurement()
+	} else {
+		s.mu.RLock()
+		meter := s.SiteMeter
+		s.mu.RUnlock()
+		reading = s.Tele.ForecastMeasurementNow(meter, telemetry.ForecastOptions{})
 	}
-	var pvW, batW float64
-	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
-		if s.driverOnline(r.Driver) {
-			pvW += r.SmoothedW
-		}
-	}
-	for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-		if s.driverOnline(r.Driver) {
-			batW += r.SmoothedW
-		}
-	}
-	loadW := m.SmoothedW - pvW - batW - s.Tele.SumOnlineEVW() - s.Tele.SumOnlineV2XW()
-	if loadW < 0 || math.IsNaN(loadW) || math.IsInf(loadW, 0) {
-		loadW = 0
-	}
-	return loadW, true
+	return reading.HouseholdW, reading.Valid
 }
 
 // overlayLiveHouseLoad replaces the in-flight slot's modeled house load
@@ -976,8 +965,12 @@ func (s *Service) loop(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
-	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
-		rt := time.NewTicker(s.ReactiveInterval)
+	reactiveInterval := s.ReactiveInterval
+	if reactiveInterval <= 0 && (s.Loadpoints != nil || s.Loadpoint != nil) {
+		reactiveInterval = 5 * time.Second
+	}
+	if reactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.Loadpoints != nil || s.Loadpoint != nil) {
+		rt := time.NewTicker(reactiveInterval)
 		defer rt.Stop()
 		reactiveTick = rt.C
 	}
@@ -1010,12 +1003,17 @@ func (s *Service) loop(ctx context.Context) {
 func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
+	params := s.lastParams
 	last := s.lastReplanAt
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
 	}
 	if time.Since(last) < s.MinReplanGap {
+		return
+	}
+	if s.loadpointStateDiverged(plan, params, time.Now()) {
+		s.replan(ctx, "loadpoint_soc_changed")
 		return
 	}
 	// Find the slot covering now.

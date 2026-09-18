@@ -301,3 +301,25 @@ func waitForSchedulePlan(t *testing.T, svc *mpc.Service) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestVehicleLimitGoalCapabilityAndSchedule(t *testing.T) {
+	srv, mgr, _ := newScheduleServer(t)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/loadpoints", nil))
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || response["vehicle_limit_goal_supported"] != true {
+		t.Fatal(rr.Body.String(), err)
+	}
+	saved := loadpoint.Schedule{}
+	mgr.SetScheduleSaver(func(_ string, s loadpoint.Schedule) error { saved = s; return nil })
+	rr = putSchedule(t, srv, "garage", `{"soc":0.8,"finish_at_vehicle_limit":true,"time_of_day_min_utc":300,"recurring":true}`)
+	st, _ := mgr.State("garage")
+	if rr.Code != 200 || !saved.FinishAtVehicleLimit || saved.SoC != .8 || !st.FinishAtVehicleLimit || st.TargetSoC != 1 {
+		t.Fatal(rr.Code, saved, st)
+	}
+	rr = putSchedule(t, srv, "garage", `{"soc":0.8,"finish_at_vehicle_limit":false,"time_of_day_min_utc":300,"recurring":true}`)
+	st, _ = mgr.State("garage")
+	if rr.Code != 200 || st.FinishAtVehicleLimit || st.TargetSoC != .8 {
+		t.Fatal(rr.Code, st)
+	}
+}

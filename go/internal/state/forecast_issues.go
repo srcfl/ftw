@@ -106,6 +106,35 @@ func gzipForecastModelState(state json.RawMessage) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// Identity belongs to the uncompressed record. Gzip headers and encoder
+// versions may change without changing a model or an issued forecast.
+func sameForecastPayload(a, b []byte, compressedLimit, expandedLimit int) bool {
+	if len(a) > compressedLimit || len(b) > compressedLimit {
+		return false
+	}
+	if bytes.Equal(a, b) {
+		return true
+	}
+	expand := func(data []byte) ([]byte, error) {
+		z, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		plain, readErr := io.ReadAll(io.LimitReader(z, int64(expandedLimit)+1))
+		closeErr := z.Close()
+		if len(plain) > expandedLimit {
+			return nil, errors.New("oversized forecast payload")
+		}
+		return plain, errors.Join(readErr, closeErr)
+	}
+	plainA, err := expand(a)
+	if err != nil {
+		return false
+	}
+	plainB, err := expand(b)
+	return err == nil && bytes.Equal(plainA, plainB)
+}
+
 type preparedForecastModelState struct {
 	id            string
 	expandedBytes int
@@ -185,44 +214,12 @@ func storePreparedForecastModelStates(ctx context.Context, tx *sql.Tx, prepared 
 			if err = tx.QueryRowContext(ctx, "SELECT expanded_bytes,payload FROM forecast_model_states WHERE id=?", state.id).Scan(&expanded, &old); err != nil {
 				return err
 			}
-			if expanded != state.expandedBytes || !bytes.Equal(old, state.payload) {
+			if expanded != state.expandedBytes || !sameForecastPayload(old, state.payload, maxForecastModelCompressed, forecasting.MaxModelStateBytes) {
 				return errors.New("forecast model state ID is immutable")
 			}
 		}
 	}
 	return nil
-}
-
-func cleanForecastModelStateRefs(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM forecast_issue_model_states
- WHERE issue_id NOT IN (SELECT id FROM forecast_issues)`); err != nil {
-		return err
-	}
-	_, err := tx.ExecContext(ctx, `DELETE FROM forecast_model_states
- WHERE id NOT IN (SELECT state_id FROM forecast_issue_model_states)`)
-	return err
-}
-
-func enforceForecastModelStateBudget(ctx context.Context, tx *sql.Tx) error {
-	for {
-		var total int64
-		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(length(payload)),0) FROM forecast_model_states").Scan(&total); err != nil {
-			return err
-		}
-		if total <= MaxForecastModelStateBytes {
-			return nil
-		}
-		var oldest string
-		if err := tx.QueryRowContext(ctx, "SELECT id FROM forecast_issues ORDER BY issued_at_ms,id LIMIT 1").Scan(&oldest); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM forecast_issues WHERE id=?", oldest); err != nil {
-			return err
-		}
-		if err := cleanForecastModelStateRefs(ctx, tx); err != nil {
-			return err
-		}
-	}
 }
 
 // SaveForecastIssue is append-only within a bounded retention window.
@@ -261,7 +258,7 @@ func (s *Store) SaveForecastIssue(ctx context.Context, issue forecasting.Issue) 
 		if err = tx.QueryRowContext(ctx, "SELECT payload FROM forecast_issues WHERE id=?", prepared.issue.ID).Scan(&old); err != nil {
 			return fmt.Errorf("read existing forecast issue: %w", err)
 		}
-		if !bytes.Equal(old, prepared.payload) {
+		if !sameForecastPayload(old, prepared.payload, maxForecastCompressedBytes, forecasting.MaxPayloadBytes) {
 			return errors.New("forecast issue ID is immutable")
 		}
 	}
@@ -273,25 +270,12 @@ func (s *Store) SaveForecastIssue(ctx context.Context, issue forecasting.Issue) 
 			return fmt.Errorf("store forecast model state reference: %w", err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM forecast_issues WHERE issued_at_ms < ?", now-ForecastIssueRetention.Milliseconds()); err != nil {
-		return fmt.Errorf("prune expired forecast issues: %w", err)
-	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM forecast_issues WHERE id IN (
- SELECT id FROM (SELECT id,ROW_NUMBER() OVER (ORDER BY issued_at_ms DESC,id DESC) AS n,
- SUM(length(payload)) OVER (ORDER BY issued_at_ms DESC,id DESC) AS bytes FROM forecast_issues)
- WHERE n>? OR bytes>?)`, MaxForecastIssues, MaxForecastArchiveBytes); err != nil {
-		return fmt.Errorf("prune forecast issue budget: %w", err)
-	}
-	if err = cleanForecastModelStateRefs(ctx, tx); err != nil {
-		return fmt.Errorf("clean forecast model states: %w", err)
-	}
-	if err = enforceForecastModelStateBudget(ctx, tx); err != nil {
-		return fmt.Errorf("enforce forecast model state budget: %w", err)
-	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit forecast issue: %w", err)
 	}
-	return nil
+	// The immutable record is committed before retention starts. If maintenance
+	// fails, an identical retry completes it without changing the issued plan.
+	return s.pruneForecastIssues(ctx, now)
 }
 
 func (s *Store) SaveForecastObservation(ctx context.Context, observation forecasting.Observation) error {
@@ -329,16 +313,10 @@ func (s *Store) SaveForecastObservation(ctx context.Context, observation forecas
 			return errors.New("forecast observation is immutable")
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM forecast_observations WHERE available_at_ms < ?", now-ForecastIssueRetention.Milliseconds()); err != nil {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM forecast_observations WHERE rowid IN (
- SELECT rowid FROM (SELECT rowid,ROW_NUMBER() OVER (ORDER BY available_at_ms DESC,start_ms DESC,end_ms DESC,config_version DESC) AS n,
- SUM(length(payload)) OVER (ORDER BY available_at_ms DESC,start_ms DESC,end_ms DESC,config_version DESC) AS bytes FROM forecast_observations)
- WHERE n>? OR bytes>?)`, MaxForecastObservations, MaxForecastObservationBytes); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.pruneForecastRecords(ctx, "forecast_observations", "available_at_ms DESC,start_ms DESC,end_ms DESC,config_version DESC", "available_at_ms", now, MaxForecastObservations, MaxForecastObservationBytes)
 }
 
 func decodeForecastIssue(data []byte) (forecasting.Issue, int, error) {
@@ -517,25 +495,36 @@ func (s *Store) SaveForecastErrors(ctx context.Context, samples []forecasting.Er
 	if now <= 0 {
 		return errors.New("invalid forecast score time")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	// Validate and encode the full page before taking SQLite's writer lock.
+	if len(samples) > MaxForecastErrors {
+		return errors.New("forecast score page exceeds row limit")
 	}
-	defer tx.Rollback()
-	for _, sample := range samples {
-		if err = sample.Validate(); err != nil {
+	payloads := make([]string, len(samples))
+	totalBytes := 0
+	for i, sample := range samples {
+		if err := sample.Validate(); err != nil {
 			return err
 		}
 		if sample.AvailableAtMS > now || sample.EndMS > now {
 			return errors.New("future forecast score")
 		}
-		data, marshalErr := json.Marshal(sample)
-		if marshalErr != nil {
-			return marshalErr
+		data, err := json.Marshal(sample)
+		if err != nil {
+			return err
 		}
-		if len(data) > maxForecastRecordBytes {
-			return errors.New("forecast error exceeds payload limit")
+		totalBytes += len(data)
+		if len(data) > maxForecastRecordBytes || totalBytes > maxForecastSliceBytes {
+			return errors.New("forecast score page exceeds payload limit")
 		}
+		payloads[i] = string(data)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, sample := range samples {
+		data := payloads[i]
 		result, execErr := tx.ExecContext(ctx, `INSERT INTO forecast_errors(series,config_version,lead,start_ms,end_ms,origin_ms,issued_at_ms,issue_id,available_at_ms,payload)
  VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(series,config_version,lead,start_ms,end_ms) DO UPDATE SET
  origin_ms=excluded.origin_ms,issued_at_ms=excluded.issued_at_ms,issue_id=excluded.issue_id,
@@ -562,16 +551,10 @@ func (s *Store) SaveForecastErrors(ctx context.Context, samples []forecasting.Er
 			}
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "DELETE FROM forecast_errors WHERE end_ms < ?", now-ForecastIssueRetention.Milliseconds()); err != nil {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM forecast_errors WHERE rowid IN (
- SELECT rowid FROM (SELECT rowid,ROW_NUMBER() OVER (ORDER BY end_ms DESC,start_ms DESC,series DESC,lead DESC) AS n,
- SUM(length(payload)) OVER (ORDER BY end_ms DESC,start_ms DESC,series DESC,lead DESC) AS bytes FROM forecast_errors)
- WHERE n>? OR bytes>?)`, MaxForecastErrors, MaxForecastErrorBytes); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.pruneForecastRecords(ctx, "forecast_errors", "end_ms DESC,start_ms DESC,series DESC,lead DESC,config_version DESC", "end_ms", now, MaxForecastErrors, MaxForecastErrorBytes)
 }
 
 // LoadForecastErrors reads a bounded set of valid residuals. With hourly set,

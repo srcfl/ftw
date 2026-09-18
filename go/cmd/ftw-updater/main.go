@@ -125,6 +125,10 @@ type server struct {
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
+	// listImages and usedImageIDs feed the image cleanup after a verified
+	// update; nil disables it. See image_prune.go.
+	listImages   func(ctx context.Context, repository string) ([]imageTag, error)
+	usedImageIDs func(ctx context.Context) (map[string]bool, error)
 }
 
 // composeArgs returns the common prefix of every `docker compose` invocation
@@ -275,6 +279,8 @@ func main() {
 	}
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
+	srv.listImages = dockerImagesInRepository
+	srv.usedImageIDs = dockerUsedImageIDs
 	if *retirePython {
 		// This is an interactive command. Preserve the helper's complete output,
 		// including the final error or backup path after its startup messages.
@@ -472,7 +478,7 @@ func (s *server) restartExisting(spec componentSpec, startedAt time.Time) {
 	s.writeState(st)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	err := s.runWithStateHeartbeat(st, func() error {
-		return s.runner(ctx, nil, s.composeArgs("restart", "--no-deps", spec.service)...)
+		return s.runner(ctx, nil, s.composeArgs("restart", "--no-deps", "--timeout", "60", spec.service)...)
 	})
 	cancel()
 	if err == nil && s.healthCheck != nil {
@@ -608,7 +614,7 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer upCancel()
 
-	upArgs := s.composeArgs("up", "-d", spec.service)
+	upArgs := s.composeArgs("up", "-d", "--timeout", "60", spec.service)
 	if err := s.runWithStateHeartbeat(restartState, func() error {
 		return s.runner(upCtx, env, upArgs...)
 	}); err != nil {
@@ -640,6 +646,20 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	done := phaseState("done", "Update completed and service is ready", totalSteps)
 	done.PreviousImageID = previousImageID
 	s.writeState(done)
+
+	// The update is finished. Reclaim the images it replaced, keeping every
+	// image a container uses and every image this site could roll back to.
+	// This runs before the sidecar replaces itself, because that helper
+	// recreates this container.
+	if action == "update" {
+		keep := map[string]bool{previousImageID: true}
+		for _, imageID := range s.readState().PreviousImages {
+			keep[imageID] = true
+		}
+		pruneCtx, cancelPrune := context.WithTimeout(context.Background(), 5*time.Minute)
+		s.pruneReplacedImages(pruneCtx, keep)
+		cancelPrune()
+	}
 
 	// Core is updated and healthy, and the terminal state is written. Only now
 	// bring the sidecar to the same release, so a future fix inside the updater
@@ -940,7 +960,7 @@ func (s *server) runRollback(snapshotID string, files []string, safetySnapshotID
 
 	// 1. Stop the main service so SQLite isn't holding a file handle
 	// while we swap state.db under it.
-	if err := s.runner(ctx, nil, "stop", "--time", "30", containerID); err != nil {
+	if err := s.runner(ctx, nil, "stop", "--time", "60", containerID); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "container stop failed: " + err.Error()})
 		return
 	}
@@ -1200,7 +1220,7 @@ func decompressGzipFile(src, dst string) error {
 
 func (s *server) recoverRollbackSafety(ctx context.Context, base State, safetySnapshotID string, safetyFiles []string, containerID, imageRef, cause string) {
 	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: base.StartedAt, UpdatedAt: time.Now(), Message: "rollback failed; restoring pre-rollback safety backup"})
-	_ = s.runner(ctx, nil, "stop", "--time", "30", containerID)
+	_ = s.runner(ctx, nil, "stop", "--time", "60", containerID)
 	restoreErr := s.restoreSnapshotFiles(ctx, safetySnapshotID, safetyFiles, containerID, imageRef)
 	var startErr error
 	if restoreErr == nil {

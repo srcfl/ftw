@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 )
 
 // HealEvent records a corruption-recovery action taken at boot, for surfacing
@@ -37,12 +38,20 @@ const (
 // busy_timeout(5000) lets contenders wait for the WAL lock instead of failing
 // SQLITE_BUSY immediately; the small pool (set in openRaw) lets reads run in
 // parallel while writers queue safely behind it.
-const sqlitePragmas = "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+const sqlitePragmas = "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=cache_size(-2048)&_pragma=temp_store(FILE)"
 
 // openRaw opens a SQLite file with the standard pragmas + pool sizing. It does
 // NOT run migrations or integrity checks.
 func openRaw(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+sqlitePragmas)
+	return openRawPragmas(path, sqlitePragmas)
+}
+
+func openDurableHistory(path string) (*sql.DB, error) {
+	return openRawPragmas(path, strings.Replace(sqlitePragmas, "synchronous(NORMAL)", "synchronous(FULL)", 1))
+}
+
+func openRawPragmas(path, pragmas string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path+pragmas)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}

@@ -33,6 +33,10 @@ type SnapshotMeta struct {
 	ToVersion        string    `json:"to_version,omitempty"`
 	Action           string    `json:"action,omitempty"` // "update" | "manual" | "pre-rollback"
 	CompleteDatabase bool      `json:"complete_database"`
+	// HistoryInPlace records that history lived in its own database file
+	// when the point was taken. The point holds the settings database only;
+	// a rollback restores it and leaves history.db where it is.
+	HistoryInPlace bool `json:"history_in_place,omitempty"`
 	// Files lists what was captured so a reader can distinguish a
 	// state-only snapshot (old) from a state+config one (current) and
 	// refuse to restore a partial set.
@@ -57,8 +61,9 @@ type SnapshotInfo struct {
 	Restorable  bool      `json:"restorable"`
 }
 
-// createPreUpdateSnapshot captures state.db + config.yaml into
+// createPreUpdateSnapshot captures the settings database + config.yaml into
 // `<SnapshotDir>/<id>/` before the self-update flow pulls a new image.
+// History stays in history.db; see BackupStateWithConfiguration.
 // Returns the snapshot ID on success so the caller can surface it to
 // the UI / log it / reference it from an eventual rollback request.
 //
@@ -103,10 +108,13 @@ func (s *Server) createPreUpdateSnapshotWithProgress(
 
 	captured := []string{}
 
-	// 1. A complete state.db via VACUUM INTO + gzip. Rollback backups must
-	// include history and samples; the compact daily corruption-recovery
-	// snapshot deliberately excludes those large tables and is not safe here.
-	stored, hasStored, err := s.deps.State.BackupWithConfiguration(filepath.Join(dir, "state.db.gz"), report)
+	// 1. The settings database via verified row copy + gzip. History stays
+	// in history.db, which the update does not replace and a rollback leaves
+	// in place. Copying it into this point made a schema-change update wait
+	// hours on a Raspberry Pi for a file the UI rollback could not use
+	// (#1302). A store that still keeps legacy history inside state.db is
+	// copied whole.
+	stored, hasStored, err := s.deps.State.BackupStateWithConfiguration(filepath.Join(dir, "state.db.gz"), report)
 	if err != nil {
 		return SnapshotInfo{}, fmt.Errorf("state snapshot: %w", err)
 	}
@@ -147,6 +155,7 @@ func (s *Server) createPreUpdateSnapshotWithProgress(
 		ToVersion:        toVersion,
 		Action:           action,
 		CompleteDatabase: true,
+		HistoryInPlace:   s.deps.State.HistoryInPlace(),
 		Files:            captured,
 	}
 	metaPath := filepath.Join(dir, "meta.json")
@@ -287,8 +296,8 @@ func pruneSnapshotsExcept(snapshotDir string, keep int, protected map[string]boo
 }
 
 // handleVersionSnapshotCreate gives the operator an explicit rollback point
-// without requiring an update to be available. It uses the same complete,
-// compressed database path as automatic pre-update snapshots. Creation holds
+// without requiring an update to be available. It uses the same compressed
+// settings-database path as automatic pre-update snapshots. Creation holds
 // the update mutex because pruning, deletion, update and rollback all operate
 // on the same bounded snapshot set.
 func (s *Server) handleVersionSnapshotCreate(w http.ResponseWriter, _ *http.Request) {

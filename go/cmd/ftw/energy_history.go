@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log/slog"
 	"math"
 
 	"github.com/srcfl/ftw/go/internal/control"
@@ -55,11 +54,7 @@ func buildEnergyObservations(st *state.Store, tel *telemetry.Store, ctrl *contro
 		return nil
 	}
 	out := make([]state.EnergyObservation, 0, 16)
-	known, err := st.AllDevices()
-	if err != nil {
-		slog.Warn("energy device identity unavailable; skipping device counters", "err", err)
-		identity = nil
-	}
+	known := st.CachedDevices()
 	ids := make(map[string]string)
 	usable := func(driver string) bool {
 		h := tel.DriverHealth(driver)

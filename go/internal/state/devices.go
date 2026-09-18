@@ -50,6 +50,8 @@ func ResolveDeviceID(make, serial, mac, endpoint string) string {
 // are refreshed (so renames and protocol-detected SN updates are reflected).
 // Returns the canonical device_id (non-empty on success).
 func (s *Store) RegisterDevice(d Device) (string, error) {
+	s.deviceWriteMu.Lock()
+	defer s.deviceWriteMu.Unlock()
 	if d.DeviceID == "" {
 		d.DeviceID = ResolveDeviceID(d.Make, d.Serial, d.MAC, d.Endpoint)
 	}
@@ -75,7 +77,53 @@ func (s *Store) RegisterDevice(d Device) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("upsert device: %w", err)
 	}
+	s.deviceCacheMu.Lock()
+	if s.deviceCache == nil {
+		s.deviceCache = map[string]Device{}
+	}
+	if old, ok := s.deviceCache[d.DeviceID]; ok {
+		d.FirstSeenMs = old.FirstSeenMs
+		if d.Make == "" {
+			d.Make = old.Make
+		}
+		if d.Serial == "" {
+			d.Serial = old.Serial
+		}
+		if d.MAC == "" {
+			d.MAC = old.MAC
+		}
+		if d.Endpoint == "" {
+			d.Endpoint = old.Endpoint
+		}
+	}
+	s.deviceCache[d.DeviceID] = d
+	s.deviceCacheMu.Unlock()
 	return d.DeviceID, nil
+}
+
+func (s *Store) loadDeviceCache() error {
+	devices, err := s.AllDevices()
+	if err != nil {
+		return err
+	}
+	s.deviceCache = make(map[string]Device, len(devices))
+	for _, device := range devices {
+		s.deviceCache[device.DeviceID] = device
+	}
+	return nil
+}
+
+// CachedDevices is the committed identity history used by the control tick.
+// RegisterDevice publishes only after its SQL write, without holding this
+// read lock during disk work. Readers cannot wait behind an fsync.
+func (s *Store) CachedDevices() []Device {
+	s.deviceCacheMu.RLock()
+	defer s.deviceCacheMu.RUnlock()
+	devices := make([]Device, 0, len(s.deviceCache))
+	for _, device := range s.deviceCache {
+		devices = append(devices, device)
+	}
+	return devices
 }
 
 // LookupDeviceByDriverName finds the most recently-seen device bound to a

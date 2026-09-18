@@ -357,8 +357,8 @@ func TestEnergyLedgerRollupBoundaryPreservesTotalsAndResolution(t *testing.T) {
 	// Exactly on the tier boundary remains five-minute detail.
 	insertLedgerEntryTest(t, s, assetID, FlowGridImport, cutoff,
 		EnergyLedgerBucketMS, 2, "power_telemetry", "integrated", "power", 1)
-	// This source is first rolled up and then removed by hard retention.
-	ancient := now.Add(-EnergyLedgerRetention - time.Hour).UnixMilli()
+	// Old energy remains as a daily total after its hourly detail expires.
+	ancient := now.Add(-EnergyLedgerRetention - 48*time.Hour).UnixMilli()
 	insertLedgerEntryTest(t, s, assetID, FlowGridImport, ancient,
 		EnergyLedgerBucketMS, 99, "hardware_counter", "measured", "counter", 1)
 
@@ -368,6 +368,10 @@ func TestEnergyLedgerRollupBoundaryPreservesTotalsAndResolution(t *testing.T) {
 	}
 	if rolled != 25 || expired != 1 {
 		t.Fatalf("maintenance counts rolled=%d expired=%d, want 25/1", rolled, expired)
+	}
+	ancientPoints, _, err := s.LoadEnergyHistory(EnergyHistoryQuery{AssetID: assetID, SinceMS: ancient / EnergyLedgerDailyBucketMS * EnergyLedgerDailyBucketMS, UntilMS: ancient + EnergyLedgerDailyBucketMS, BucketMS: EnergyLedgerBucketMS, Limit: 10})
+	if err != nil || len(ancientPoints) != 1 || ancientPoints[0].EnergyWh != 99 || ancientPoints[0].BucketLenMS != EnergyLedgerDailyBucketMS || ancientPoints[0].Provenance != "counter" {
+		t.Fatalf("old energy lost: %+v %v", ancientPoints, err)
 	}
 	rolled, expired, err = s.PruneEnergyLedger(context.Background(), now)
 	if err != nil || rolled != 0 || expired != 0 {
@@ -552,7 +556,7 @@ func TestEnergyLedgerRejectsNewerSchemaWithoutChangingIt(t *testing.T) {
 	if _, err := Open(path); err == nil {
 		t.Fatal("opening a newer ledger schema should fail safely")
 	}
-	db, err := sql.Open("duckdb", historyDatabasePath(path))
+	db, err := sql.Open("sqlite", historyDatabasePath(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,5 +567,25 @@ func TestEnergyLedgerRejectsNewerSchemaWithoutChangingIt(t *testing.T) {
 	}
 	if version != "2" {
 		t.Fatalf("newer schema was modified: %q", version)
+	}
+}
+
+func TestLateLedgerObservationKeepsCurrentAssetIdentity(t *testing.T) {
+	s := freshStore(t)
+	asset := "ev:stable"
+	newer := ledgerObservation(asset, AssetVehicleCharger, FlowVehicleDischarge, 1800000300000, energyPtr(100), nil)
+	newer.DeviceID = "easee:stable"
+	newer.Label = "Current car"
+	recordEnergyTestTick(t, s, newer.AtMs, newer)
+	older := ledgerObservation(asset, AssetVehicleCharger, FlowVehicleCharge, 1800000000000, energyPtr(200), nil)
+	older.DeviceID = "old-driver-name"
+	older.Label = "Old name"
+	recordEnergyTestTick(t, s, older.AtMs, older)
+	var id, label string
+	if err := s.history.QueryRow(`SELECT device_id,label FROM energy_assets WHERE asset_id=?`, asset).Scan(&id, &label); err != nil {
+		t.Fatal(err)
+	}
+	if id != "easee:stable" || label != "Current car" {
+		t.Fatalf("old observation rewrote identity: %s %s", id, label)
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/coverage"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
@@ -108,6 +109,7 @@ type Deps struct {
 	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
 	Models        map[string]*battery.Model
 	ModelsMu      *sync.Mutex
+	ModelWrites   *state.ControlWrites
 	SelfTune      *selftune.Coordinator
 	DtS           float64                                   // control interval seconds (for model τ / age displays)
 	SaveConfig    func(path string, c *config.Config) error // injection for testability
@@ -486,6 +488,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/prices", Read, s.handlePrices)
 	s.handle("GET  /api/prices/zones", Read, s.handlePriceZones)
 	s.handle("GET  /api/forecast", Read, s.handleForecast)
+	s.handle("GET  /api/data-sources", Read, s.handleDataSources)
 	s.handle("GET  /api/mpc/plan", Read, s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", Configure, s.handleMPCReplan)
 	s.handle("GET  /api/mpc/diagnose", Read, s.handleMPCDiagnose)
@@ -719,7 +722,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State != nil {
 		resp["history_storage"] = s.deps.State.HistoryBackend()
 		writer := s.deps.State.HistoryWriterStatus()
-		if writer.LastError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
+		if writer.LastError != "" || writer.MaintenanceError != "" || s.deps.State.HistoryMaintenanceStatus().LastError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
 			resp["status"] = "degraded"
 		}
 	}
@@ -2063,7 +2066,6 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.ModelsMu.Lock()
-	defer s.deps.ModelsMu.Unlock()
 	var reset []string
 	if req.All {
 		for name := range s.deps.Models {
@@ -2072,24 +2074,56 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if req.Battery != "" {
 		if _, ok := s.deps.Models[req.Battery]; !ok {
+			s.deps.ModelsMu.Unlock()
 			writeJSON(w, 404, map[string]string{"error": "battery not found: " + req.Battery})
 			return
 		}
 		s.deps.Models[req.Battery] = battery.New(req.Battery)
 		reset = append(reset, req.Battery)
 	} else {
+		s.deps.ModelsMu.Unlock()
 		writeJSON(w, 400, map[string]string{"error": "provide 'battery' or 'all'"})
 		return
 	}
-	// Persist fresh models
+	// Queue while the model lock still orders this reset against training.
+	// Disk work and the acknowledgement wait never hold ModelsMu.
+	snapshots := map[string]string{}
+	var saveErr error
 	for _, name := range reset {
 		if m, ok := s.deps.Models[name]; ok {
 			if data, err := json.Marshal(m); err == nil {
-				if err := s.deps.State.SaveBatteryModel(name, string(data)); err != nil {
-					slog.Warn("failed to persist battery model", "battery", name, "err", err)
+				snapshots[name] = string(data)
+				if s.deps.ModelWrites != nil {
+					key := name
+					if s.deps.BatteryIdentity != nil {
+						if id, ok := s.deps.BatteryIdentity(name); ok {
+							key = id
+						}
+					}
+					if err := s.deps.ModelWrites.SaveConfig(key, string(data)); err != nil && !errors.Is(err, state.ErrWritePending) {
+						saveErr = err
+					}
 				}
 			}
 		}
+	}
+	s.deps.ModelsMu.Unlock()
+	if s.deps.ModelWrites != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.deps.ModelWrites.Flush(ctx); err != nil {
+			saveErr = err
+		}
+	} else {
+		for name, data := range snapshots {
+			if err := s.deps.State.SaveBatteryModel(name, data); err != nil {
+				saveErr = err
+			}
+		}
+	}
+	if saveErr != nil {
+		writeJSON(w, 503, map[string]string{"error": "Models reset in memory, but FTW could not confirm they were saved."})
+		return
 	}
 	writeJSON(w, 200, map[string]any{"reset": reset})
 }
@@ -2178,6 +2212,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		inner["bat_w"] = row.BatW
 		inner["load_w"] = row.LoadW
 		inner["bat_soc"] = row.BatSoC
+		inner["n"] = row.N
+		inner["resolution_ms"] = row.ResolutionMS
+		inner["first_ms"] = row.FirstMS
+		inner["detail_ts"] = row.TsMs
 		items = append(items, inner)
 	}
 	writeJSON(w, 200, map[string]any{"items": items, "range": rangeStr})
@@ -2653,13 +2691,13 @@ func (s *Server) handleMPCDiagnoseAt(w http.ResponseWriter, r *http.Request) {
 //   - metric: one name, or several comma-separated (battery_w,heatsink_c)
 //   - range: relative window ending now (1h, 24h, 30d, ...), OR
 //   - since/until: absolute unix-ms bounds (until defaults to now)
-//   - points: downsampling budget; 0 = raw samples. Downsampled points carry
+//   - points: downsampling budget; 0 = stored resolution. Aggregate points carry
 //     the bucket envelope: v = avg, min/max = extremes, n = sample count
-//   - format=csv: long-format CSV (ts_ms,driver,metric,v,min,max,n) instead
+//   - format=csv: long-format CSV with the same observation metadata instead
 //     of JSON — for spreadsheet / ML export
 //
-// Windows reaching past the 14-day SQLite tier transparently include cold
-// Parquet data, bucketed on the same boundaries.
+// Reads include SQLite and Parquet. resolution_ms, first_ms and last describe
+// the stored evidence; bounds do not imply continuous coverage.
 func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	driver := r.URL.Query().Get("driver")
 	metricsParam := r.URL.Query().Get("metric")
@@ -2727,15 +2765,21 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition",
 			fmt.Sprintf("attachment; filename=%q", driver+"-series.csv"))
 		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"ts_ms", "driver", "metric", "v", "min", "max", "n"})
+		_ = cw.Write([]string{"ts_ms", "driver", "metric", "v", "min", "max", "n", "resolution_ms", "first_ms", "last"})
 		for _, ser := range all {
 			for _, p := range ser.Points {
+				last := ""
+				if p.Last != nil {
+					last = strconv.FormatFloat(*p.Last, 'g', -1, 64)
+				}
 				_ = cw.Write([]string{
 					strconv.FormatInt(p.TsMs, 10), driver, ser.Metric,
 					strconv.FormatFloat(p.V, 'g', -1, 64),
 					strconv.FormatFloat(p.Min, 'g', -1, 64),
 					strconv.FormatFloat(p.Max, 'g', -1, 64),
 					strconv.FormatInt(p.N, 10),
+					strconv.FormatInt(p.ResolutionMS, 10),
+					strconv.FormatInt(p.FirstMS, 10), last,
 				})
 			}
 		}
@@ -2885,7 +2929,97 @@ func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 	s.handleForecastLearningReset(w, r, "pv")
 }
 
+// ---- /api/data-sources ----
+//
+// Where each external data source works, and whether it covers this site.
+// Response: {latitude, longitude, sources:[{id, kind, label, area, countries,
+// worldwide, requires_key, license, note, covers}]}. `covers` is advisory: for
+// a bounded source it is a lat/lon box test, so true means "worth trying".
+// False is reliable — that location is definitely not served.
+//
+// This exists because some sources are regional (every price provider is
+// European) and nothing previously said so: a site outside those areas got an
+// empty result and no explanation. See #726.
+func (s *Server) handleDataSources(w http.ResponseWriter, r *http.Request) {
+	var lat, lon float64
+	var haveSite bool
+	// Weather is an optional config section, so it is nil on a site that has
+	// never configured one — which is exactly the site most likely to be
+	// looking at this endpoint.
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+		if s.deps.Cfg != nil && s.deps.Cfg.Weather != nil {
+			lat, lon = s.deps.Cfg.Weather.Latitude, s.deps.Cfg.Weather.Longitude
+			haveSite = lat != 0 || lon != 0
+		}
+		s.deps.CfgMu.RUnlock()
+	}
+
+	// An explicit ?lat=&lon= overrides the configured site so the Weather tab
+	// can preview coverage for a pin the operator is still dragging around,
+	// before they save it.
+	if v := r.URL.Query().Get("lat"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lat, haveSite = f, true
+		}
+	}
+	if v := r.URL.Query().Get("lon"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			lon, haveSite = f, true
+		}
+	}
+
+	items := make([]map[string]any, 0, len(coverage.All()))
+	for _, src := range coverage.All() {
+		item := map[string]any{
+			"id":           src.ID,
+			"kind":         string(src.Kind),
+			"label":        src.Label,
+			"area":         src.Area,
+			"worldwide":    src.Worldwide(),
+			"requires_key": src.RequiresKey,
+		}
+		if len(src.Countries) > 0 {
+			item["countries"] = src.Countries
+		}
+		if src.License != "" {
+			item["license"] = src.License
+		}
+		if src.Note != "" {
+			item["note"] = src.Note
+		}
+		// Without a site location there is nothing to test against, so omit
+		// `covers` entirely rather than defaulting it to a misleading true.
+		if haveSite {
+			item["covers"] = src.Covers(lat, lon)
+		}
+		items = append(items, item)
+	}
+	resp := map[string]any{"sources": items}
+	if haveSite {
+		resp["latitude"], resp["longitude"] = lat, lon
+	}
+	writeJSON(w, 200, resp)
+}
+
 // ---- static ----
+
+// staticContentTypes pins the Content-Type of every asset kind the web tree
+// ships. Without it, http.ServeFile asks the operating system's MIME table —
+// the registry on Windows — and a host that maps .mjs (or .js) to text/plain
+// does not merely mislabel the file: the app sends X-Content-Type-Options:
+// nosniff, so the browser is required to refuse it, and the vendored MapLibre
+// dies with "failed to fetch dynamically imported module". ES modules are the
+// strictest case; the rest are pinned so no asset depends on host state.
+var staticContentTypes = map[string]string{
+	".html": "text/html; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".js":   "text/javascript; charset=utf-8",
+	".mjs":  "text/javascript; charset=utf-8",
+	".svg":  "image/svg+xml",
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+}
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -2905,6 +3039,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	// Always-revalidate so version bumps land immediately
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(clean))]; ok {
+		w.Header().Set("Content-Type", ct)
+	}
 	http.ServeFile(w, r, clean)
 }
 
@@ -3028,6 +3165,11 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	if err := s.sendEV(r.Context(), driverName, payload); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
+	}
+	if (req.Action == "ev_start" || req.Action == "ev_resume" || req.Action == "ev_pause") && s.deps.Loadpoints != nil {
+		if !s.waitForLoadpointSave(w, r) {
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
@@ -3431,7 +3573,7 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 // among by charging_state ranking — see decorateWithVehicle.
 func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}})
+		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}, "vehicle_limit_goal_supported": true})
 		return
 	}
 	states := s.deps.Loadpoints.States()
@@ -3442,8 +3584,9 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	s.decorateLoadpointsWithBatteryBoost(states)
 	s.decorateLoadpointsWithPlan(states)
 	writeJSON(w, 200, map[string]any{
-		"enabled":    true,
-		"loadpoints": states,
+		"enabled":                      true,
+		"vehicle_limit_goal_supported": true,
+		"loadpoints":                   states,
 	})
 }
 
@@ -3809,6 +3952,9 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.deps.MPC != nil {
 		s.deps.MPC.RequestReplan("loadpoint_soc_corrected")
+	}
+	if !s.waitForLoadpointSave(w, r) {
+		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

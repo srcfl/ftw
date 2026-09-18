@@ -155,7 +155,8 @@ type Controller struct {
 	// trigger a charge_start command when the EV detached mid-
 	// session ("Stopped") while we're trying to deliver power.
 	// nil disables the wake feature.
-	vehicleStatus func(loadpointID string) (driver, chargingState string, ok bool)
+	vehicleStatus      func(loadpointID string) (driver, chargingState string, ok bool)
+	vehicleChargeState func(loadpointID string) (VehicleChargeState, bool)
 
 	// peakRemainingSurplusW returns the peak PV-minus-load surplus
 	// expected for the rest of the local day, used by surplus_only
@@ -447,6 +448,11 @@ type EVSample struct {
 	ConnectionGeneration uint64 // process-local transport epoch, not durable session proof
 	PowerW               float64
 	SessionWh            float64
+	SessionWhUnavailable bool
+	PowerUnavailable     bool
+	PowerAt              time.Time
+	PowerMaxAge          time.Duration
+	EnergyAt             time.Time
 	Connected            bool
 	RequestActive        bool
 	DeviceID             string
@@ -1490,29 +1496,58 @@ func (c *Controller) Tick(ctx context.Context, now time.Time) {
 // wake or contactor-cycle side effects are emitted. The caller owns the site
 // freshness decision so EV and storage share one pre-dispatch safety boundary.
 func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispatchAllowed bool) {
-	if c == nil || c.manager == nil {
+	if c == nil || c.manager == nil || c.tel == nil {
 		return
+	}
+	// Stop every affected charger before observing any session. Observation
+	// may restore or sync state.db; a stalled disk must not delay standdown,
+	// including the chargers after the one whose checkpoint is blocked.
+	type observation struct {
+		config Config
+		sample EVSample
+	}
+	var observations []observation
+	for _, cfg := range c.manager.Configs() {
+		sample, observed := c.tel(cfg.DriverName)
+		if !observed {
+			continue
+		}
+		observations = append(observations, observation{cfg, sample})
+		if sample.Connected && !sample.ConnectionUnknown && (!dispatchAllowed || sample.PowerUnavailable) && c.driverCanDispatch(cfg.DriverName) {
+			c.standDownBeforeStorage(ctx, now, cfg, sample, dispatchAllowed)
+		}
 	}
 	if c.plan == nil && dispatchAllowed {
 		return
 	}
-	for _, lpCfg := range c.manager.Configs() {
-		c.tickOne(ctx, now, lpCfg, dispatchAllowed)
+	for _, observed := range observations {
+		c.tickOne(ctx, now, observed.config, observed.sample, dispatchAllowed)
 	}
 }
 
-func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, dispatchAllowed bool) {
-	if c.tel == nil {
+func (c *Controller) standDownBeforeStorage(ctx context.Context, now time.Time, cfg Config, sample EVSample, dispatchAllowed bool) {
+	var manualUpdatedAt time.Time
+	if hold, held := c.GetManualHold(cfg.ID, now); held {
+		manualUpdatedAt = hold.UpdatedAt
+	}
+	reason := "site_meter_stale"
+	if dispatchAllowed && sample.PowerUnavailable {
+		reason = "charger_power_stale"
+	}
+	c.manager.setCommandedForManual(cfg.ID, 0, reason, manualUpdatedAt)
+	if c.send == nil {
 		return
 	}
-	sample, observed := c.tel(lpCfg.DriverName)
-	if !observed {
-		// No reading is not an unplug. In particular, startup must not
-		// clear a restored manual hold while the driver is still logging in.
-		// Core's driver-health owner handles autonomous recovery; without
-		// an EV sample this loop cannot confirm a session or send a setpoint.
-		return
+	// A safety withdrawal does not report a normal dispatch outcome: the
+	// driver-health owner already handles the unavailable measurement.
+	if err := c.sendDispatchWithDeadline(ctx, cfg.DriverName, []byte(`{"action":"ev_set_current","power_w":0}`)); err != nil {
+		slog.Warn("loadpoint safety standdown", "lp", cfg.ID, "driver", cfg.DriverName, "err", err)
+	} else {
+		c.resumeAfterZeroOffer(ctx, cfg, sample, 0, now)
 	}
+}
+
+func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, sample EVSample, dispatchAllowed bool) {
 	c.observeEnergy(lpCfg, sample, now)
 	c.manager.observeConnectionProof(lpCfg.ID, sample.ConnectionGeneration, sample.ConnectionUnknown)
 	if sample.ConnectionUnknown {
@@ -1560,9 +1595,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
 	selfWithheld := surplusOn && enteringSurplusPaused
 	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
-	c.manager.ObserveSession(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive, sample.DeviceID, sample.SessionID)
+	c.manager.ObserveSample(lpCfg.ID, sample)
 	c.restoreManualHoldForSession(lpCfg.ID)
-	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
+	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed && !sample.PowerUnavailable)
 	if !sample.Connected {
 		delete(c.resumeOffers, lpCfg.ID)
 		c.resetSurplusSession(lpCfg.ID)
@@ -1583,36 +1618,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// outcome here; driverActuationTracker.update owns the timed retry.
 		return
 	}
-	if !dispatchAllowed {
-		// The observation above is deliberately retained: dashboards, SoC
-		// inference and plug/unplug state must stay live while the site-meter
-		// safety gate is closed. Do not advance manual-hold completion timers
-		// or auto-wake state while we are the reason current is withheld; a
-		// persistent hold or schedule must resume normally after recovery.
-		// The outcome is deliberately not reported to dispatchOutcome: this
-		// is core withdrawing under a stale site meter, not core actuating,
-		// and the staleness tracker already owns that transition. A charger
-		// that refuses the standdown must not be excluded for it — the fault
-		// being handled is the meter's.
-		// The standdown is still the box ordering zero; record it so the
-		// interruption latch knows this stop is ours.
-		var manualUpdatedAt time.Time
-		if hold, held := c.GetManualHold(lpCfg.ID, now); held {
-			manualUpdatedAt = hold.UpdatedAt
-		}
-		c.manager.setCommandedForManual(lpCfg.ID, 0, "site_meter_stale", manualUpdatedAt)
-		payload, err := json.Marshal(map[string]any{
-			"action":  "ev_set_current",
-			"power_w": 0,
-		})
-		if err == nil && c.send != nil {
-			if err := c.sendDispatchWithDeadline(ctx, lpCfg.DriverName, payload); err != nil {
-				slog.Warn("loadpoint safety standdown", "lp", lpCfg.ID,
-					"driver", lpCfg.DriverName, "err", err)
-			} else {
-				c.resumeAfterZeroOffer(ctx, lpCfg, sample, 0, now)
-			}
-		}
+	if !dispatchAllowed || sample.PowerUnavailable {
+		// Standdown already ran before storage. Keep observations and goals,
+		// but do not advance completion timers or perform wake side effects.
 		return
 	}
 	// Wallbox just started delivering current: fire a wake at the
@@ -1752,6 +1760,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 			cmdW = 0
 			cmdReason = "no_plan_budget"
 		}
+		finishW, finishing := c.vehicleCompletionOffer(lpCfg, now)
+		if finishing {
+			cmdW = finishW
+			cmdReason = "vehicle_limit_completion"
+		}
 		// Surplus-only live clamp: regardless of what the MPC slot
 		// budget said for this 15-minute window, the EV must not
 		// import grid right now. We smooth the pause/resume decision
@@ -1830,6 +1843,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 					"prev_cmd_w", cmdW, "kick_w", minKick)
 				cmdW = minKick
 				cmdReason = "wake_kick"
+			}
+		}
+		if finishing && finishW == 0 {
+			cmdW, cmdReason = 0, "vehicle_not_requesting"
+			if state, ok := c.manager.State(lpCfg.ID); ok && state.GoalComplete {
+				cmdReason = "vehicle_complete"
 			}
 		}
 		// Fuse protection: applied LAST (after MPC budget, surplus

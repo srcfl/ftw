@@ -27,22 +27,28 @@ async function settle() {
   for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
 }
 
-function load({ pv = model(), loadModel = model("ready"), confirm = () => true, post } = {}) {
+function load({ pv = model(), loadModel = model("ready"), confirm = () => true, post, hash = '#more', hidden = false } = {}) {
   const listeners = new Map();
+  const documentListeners = new Map();
+  const windowListeners = new Map();
+  const timers = new Map();
+  let nextTimer = 0;
+  const location = { hash };
   let html = "";
   let focused = null;
   let document;
   const grid = {
     addEventListener(type, handler) { listeners.set(type, handler); },
     querySelector(selector) {
-      const match = selector.match(/data-(reset-twin|loadmodel-profile)="([^"]+)"/);
+      const match = selector.match(/data-(reset-twin|loadmodel-profile|twin-details)="([^"]+)"/);
       if (!match || !html.includes(`data-${match[1]}="${match[2]}"`)) return null;
       const tag = html.match(new RegExp(`<button[^>]*data-${match[1]}="${match[2]}"[^>]*>`));
       return {
         disabled: /\sdisabled(?:\s|=|>)/.test(tag?.[0] || ""),
         focus() {
-          document.activeElement = { dataset: { [match[1]]: match[2] } };
-          focused = match[1] === "reset-twin" ? match[2] : "profile:" + match[2];
+          const key = { 'reset-twin': 'resetTwin', 'loadmodel-profile': 'loadmodelProfile', 'twin-details': 'twinDetails' }[match[1]];
+          document.activeElement = { dataset: { [key]: match[2] } };
+          focused = match[1] === "reset-twin" ? match[2] : (match[1] === 'twin-details' ? 'details:' : 'profile:') + match[2];
         },
       };
     },
@@ -50,7 +56,7 @@ function load({ pv = model(), loadModel = model("ready"), confirm = () => true, 
   Object.defineProperty(grid, "innerHTML", {
     get() { return html; },
     set(value) {
-      if (document?.activeElement?.dataset?.resetTwin || document?.activeElement?.dataset?.loadmodelProfile) document.activeElement = document.body;
+      if (document?.activeElement?.dataset) document.activeElement = document.body;
       html = String(value);
     },
   });
@@ -58,9 +64,10 @@ function load({ pv = model(), loadModel = model("ready"), confirm = () => true, 
   const requests = [];
   document = {
     readyState: "complete",
+    hidden,
     body: { classList: { contains: value => value === "advanced" } },
     activeElement: null,
-    addEventListener() {},
+    addEventListener(type, handler) { documentListeners.set(type, handler); },
     getElementById(id) {
       return id === "twins-grid" ? grid : id === "twins-subtitle" ? subtitle : null;
     },
@@ -74,12 +81,18 @@ function load({ pv = model(), loadModel = model("ready"), confirm = () => true, 
     return Promise.resolve(response({}));
   };
   vm.runInNewContext(source, {
-    document, fetch, confirm, setInterval: () => 1, clearInterval() {}, Date: class extends Date {
+    document, location, window: { addEventListener(type, handler) { windowListeners.set(type, handler); } }, fetch, confirm,
+    setInterval(fn) { timers.set(++nextTimer, fn); return nextTimer; }, clearInterval(id) { timers.delete(id); }, Date: class extends Date {
       static now() { return now; }
     }, Number, Math, String, Map, Set, Promise, Error,
   }, { filename: "twins.js" });
   return {
     grid, subtitle, requests,
+    details(id) { listeners.get('click')({ target: { dataset: { twinDetails: id } } }); },
+    navigate(hash) { location.hash = hash; windowListeners.get('hashchange')(); },
+    visibility(hidden) { document.hidden = hidden; documentListeners.get('visibilitychange')(); },
+    poll() { for (const fn of timers.values()) fn(); },
+    timers: () => timers.size,
     click(endpoint) {
       listeners.get("click")({ target: { dataset: { resetTwin: endpoint } } });
     },
@@ -92,19 +105,105 @@ function load({ pv = model(), loadModel = model("ready"), confirm = () => true, 
   };
 }
 
-test("renders the Energyplan learning state, local training times, and legacy stats as secondary", async () => {
+test("shows simple status and keeps model internals and resets behind Details", async () => {
   const ui = load();
   await settle();
 
   assert.match(ui.grid.innerHTML, /<h3>Solar production<\/h3>/);
-  assert.match(ui.grid.innerHTML, /<span>engine<\/span><b>Energyplan<\/b>/);
-  assert.match(ui.grid.innerHTML, /<span>learning state<\/span><b>Learning<\/b>/);
-  assert.match(ui.grid.innerHTML, /<span>learning started<\/span><b>.*2026.*<\/b>/);
-  assert.match(ui.grid.innerHTML, /legacy model stats/);
-  assert.match(ui.grid.innerHTML, /legacy samples/);
+  assert.match(ui.grid.innerHTML, /data-tone="learning">Learning<\/span>/);
+  assert.match(ui.grid.innerHTML, /First day of learning/);
+  assert.match(ui.grid.innerHTML, /id="forecast-details-pv" hidden/);
+  const main = ui.grid.innerHTML.split('id="forecast-details-pv"')[0];
+  assert.doesNotMatch(main, /Energyplan|samples|quality|MAE|Relearn/);
+  assert.match(ui.grid.innerHTML, /<span>Learning model<\/span><b>Energyplan<\/b>/);
+  assert.match(ui.grid.innerHTML, /Older local model/);
+  assert.doesNotMatch(ui.grid.innerHTML, /twin-quality|legacy quality|60%/);
   assert.match(ui.grid.innerHTML, /role="status" aria-live="polite"/);
   assert.doesNotMatch(ui.grid.innerHTML, /50 minutes/i);
-  assert.equal(ui.subtitle.textContent, "Forecast learning for solar production and consumption");
+  assert.equal(ui.subtitle.textContent, "Learning from your home");
+  ui.details('pv');
+  assert.match(ui.grid.innerHTML, /data-twin-details="pv" aria-expanded="true"/);
+  assert.doesNotMatch(ui.grid.innerHTML, /id="forecast-details-pv" hidden/);
+  ui.poll();
+  await settle();
+  assert.match(ui.grid.innerHTML, /data-twin-details="pv" aria-expanded="true"/);
+  assert.equal(ui.focused(), 'details:pv');
+  ui.details('pv');
+  assert.match(ui.grid.innerHTML, /id="forecast-details-pv" hidden/);
+});
+
+test('learning age uses only a recorded start and never implies readiness', async () => {
+  const pv = model();
+  pv.learning.started_ms = now - 3 * 86400000;
+  const ui = load({ pv });
+  await settle();
+  assert.match(ui.grid.innerHTML, /3 days learning/);
+  assert.doesNotMatch(ui.grid.innerHTML, /data-tone="healthy"/);
+  for (const start of [0, null, undefined, now + 86400000, NaN]) {
+    pv.learning.started_ms = start;
+    const missing = load({ pv, loadModel: { enabled: false } });
+    await settle();
+    assert.doesNotMatch(missing.grid.innerHTML, /\d+ days? learning|First day of learning/);
+  }
+});
+
+test('Healthy requires confirmed health, ready state, and recent valid training', async () => {
+  const pv = model('ready');
+  pv.learning.health = 'healthy';
+  let ui = load({ pv });
+  await settle();
+  assert.match(ui.grid.innerHTML, /data-tone="healthy">Healthy/);
+  for (const health of [undefined, 'unknown', 'degraded', 'waiting_for_data']) {
+    pv.learning.health = health;
+    ui = load({ pv });
+    await settle();
+    assert.doesNotMatch(ui.grid.innerHTML, /data-tone="healthy"/);
+    if (health === 'degraded') assert.match(ui.grid.innerHTML, /Needs attention/);
+  }
+  pv.learning.health = 'healthy';
+  for (const latest of [0, now + 1, now - 37 * 3600000]) {
+    pv.learning.latest_training_ms = latest;
+    ui = load({ pv });
+    await settle();
+    assert.doesNotMatch(ui.grid.innerHTML, /data-tone="healthy"/);
+  }
+});
+
+test('solar can pause overnight while missing load training needs attention', async () => {
+  const pv = model('ready');
+  pv.learning.health = 'healthy';
+  pv.learning.latest_training_ms = now - 12 * 3600000;
+  const ui = load({ pv, loadModel: pv });
+  await settle();
+  assert.equal((ui.grid.innerHTML.match(/data-tone="healthy"/g) || []).length, 1);
+  assert.match(ui.grid.innerHTML, /Waiting for data/);
+});
+
+test('polls only the visible More destination, including simple mode', async () => {
+  const ui = load({ hash: '#overview' });
+  await settle();
+  assert.equal(ui.requests.length, 0);
+  ui.navigate('#more');
+  await settle();
+  assert.equal(ui.requests.length, 2);
+  assert.equal(ui.timers(), 1);
+  ui.visibility(true);
+  assert.equal(ui.timers(), 0);
+  ui.visibility(false);
+  await settle();
+  assert.equal(ui.requests.length, 4);
+  assert.equal(ui.timers(), 1);
+  ui.navigate('#plan');
+  assert.equal(ui.timers(), 0);
+});
+
+test('escapes health details from the box', async () => {
+  const pv = model();
+  pv.learning.health_reason = '<img src=x onerror=alert(1)>';
+  const ui = load({ pv });
+  await settle();
+  assert.doesNotMatch(ui.grid.innerHTML, /<img/);
+  assert.match(ui.grid.innerHTML, /&lt;img/);
 });
 
 test("confirmation cancellation sends no reset and names the protected history and other model", async () => {

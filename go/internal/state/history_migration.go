@@ -3,15 +3,12 @@ package state
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"sync"
 	"time"
-
-	duckdb "github.com/duckdb/duckdb-go/v2"
 )
 
 // HistoryMigrationStatus describes historical coverage, independently of Core
@@ -42,6 +39,8 @@ type HistoryMigrationStatus struct {
 	Activity         string  `json:"activity,omitempty"`
 	BytesEstimated   bool    `json:"bytes_estimated"`
 }
+
+const historyImportRows = 2048
 
 type historyMigration struct {
 	mu           sync.Mutex
@@ -141,9 +140,6 @@ func (s *Store) runHistoryMigration(coldDir string) {
 	})
 	err := s.importSQLiteSamples(m.ctx)
 	if err == nil {
-		err = s.ImportLegacyParquet(m.ctx, coldDir)
-	}
-	if err == nil {
 		err = s.checkpointHistoryImport(m.ctx)
 	}
 	if err == nil {
@@ -167,13 +163,10 @@ func (s *Store) runHistoryMigration(coldDir string) {
 		st.IncompleteFromMS, st.IncompleteUntilMS = nil, nil
 	})
 	slog.Info("historical import complete; all source rows verified")
-	if err := s.retireLegacyHistorySources(); err != nil {
-		slog.Error("verified history import left legacy sources in place", "err", err)
-	}
 	s.startSeriesHourBackfill()
 }
 
-// SQLite's legacy sample table is frozen after Core selects DuckDB. Each
+// SQLite's legacy sample table stays frozen after Core selects history.db. Each
 // verified merge commits its source cursor in the same primary transaction.
 // A restart never clears primary rows written by the live collector.
 func (s *Store) importSQLiteSamples(ctx context.Context) error {
@@ -300,46 +293,34 @@ func (s *Store) mergeHistoricalSamples(ctx context.Context, samples []Sample, re
 	if err := validateHistorySamples(samples); err != nil {
 		return err
 	}
-	if err := s.hydrateIntern(); err != nil {
-		return err
-	}
-	values := make([][]driver.Value, 0, len(samples))
-	for _, sm := range samples {
-		d, err := s.driverID(sm.Driver)
-		if err != nil {
-			return err
-		}
-		m, err := s.metricID(sm.Metric, "")
-		if err != nil {
-			return err
-		}
-		values = append(values, []driver.Value{sm.TsMs, d, m, canonicalHistoryFloat(sm.Value)})
-	}
-	s.historyWriteMu.Lock()
-	defer s.historyWriteMu.Unlock()
-	conn, err := s.history.Conn(ctx)
+	rs, err := s.resolveSamples(samples)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE history_import_source (ts_ms BIGINT NOT NULL,driver_id BIGINT NOT NULL,metric_id BIGINT NOT NULL,value DOUBLE NOT NULL)`); err != nil {
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	tx, err := s.history.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	defer conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS history_import_source`)
-	if err := conn.Raw(func(raw any) error {
-		app, err := duckdb.NewAppender(nativeHistoryConn(raw), "temp", "main", "history_import_source")
-		if err != nil {
+	defer tx.Rollback()
+	if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
+		return err
+	}
+	// Verify each imported sample before committing its progress cursor.
+	for _, r := range rs {
+		var got float64
+		if err := tx.QueryRowContext(ctx, `SELECT value FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms=?`, r.dID, r.mID, r.ts).Scan(&got); err != nil {
 			return err
 		}
-		var appendErr error
-		for _, row := range values {
-			if appendErr = app.AppendRow(row...); appendErr != nil {
-				break
-			}
+		if historyFloatBits(got) != historyFloatBits(r.v) {
+			return fmt.Errorf("history conflict for %d/%d/%d", r.dID, r.mID, r.ts)
 		}
-		return errors.Join(appendErr, app.Close())
-	}); err != nil {
-		return err
 	}
-	return importHistoryChunkCommit(ctx, conn, 0, int64(len(samples)), receipt)
+	if receipt != nil {
+		if err := receipt(tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

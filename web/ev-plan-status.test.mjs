@@ -51,3 +51,65 @@ test('pending and failed plans do not pretend that charging windows are ready', 
   assert.doesNotMatch(failed, /Updating|Charging planned/);
   assert.equal(planStatus({ ...lp, manual_active: true, plan_pending: true }, {}).textContent, 'Paused by you.');
 });
+
+test('reached goal explains a stopped charge and names the level source', () => {
+  const lp = { plugged_in: true, charger: { available: true }, current_power_w: 0,
+    commanded_known: true, commanded_w: 0, target_soc: .8, current_soc: .8014,
+    soc_source: 'inferred', schedule: { soc: .8 } };
+  const estimated = planStatus(lp, {}).textContent;
+  assert.match(estimated, /Charge target reached \(80%\).*estimated by FTW/);
+  assert.doesNotMatch(estimated, /No charge window|Choose Charge now/);
+  assert.match(planStatus({ ...lp, soc_source: 'vehicle', vehicle_driver: 'car', vehicle_soc: .81 }, {}).textContent, /reported by the car/);
+  for (const change of [
+    { soc_source: 'assumed' }, { current_soc: .79 }, { target_soc: null },
+    { power_unavailable: true }, { charger: { known: true, available: false } },
+    { current_power_w: 6900 }, { commanded_w: 6900 }, { commanded_known: false },
+  ]) {
+    assert.doesNotMatch(planStatus({ ...lp, ...change }, {}).textContent, /target reached/);
+  }
+});
+
+test('unavailable charger power explains the pause without declaring completion', () => {
+  const text = planStatus({ plugged_in: true, power_unavailable: true,
+    charger: { available: true }, manual_active: true }, {}).textContent;
+  assert.match(text, /Paused: charger power data is out of date/);
+  assert.doesNotMatch(text, /target reached|Charging on plan/);
+});
+
+test('car-limit goal never declares completion from estimated target_soc', () => {
+  const lp = { plugged_in: true, charger: { available: true }, current_power_w: 0,
+    commanded_known: true, commanded_w: 0, target_soc: 1, current_soc: 1,
+    soc_source: 'inferred', schedule: { soc: 0, finish_at_vehicle_limit: true } };
+  assert.doesNotMatch(planStatus(lp, {}).textContent, /target reached|No charging plan yet/);
+  assert.match(planStatus({ ...lp, charging_declined: true }, {}).textContent, /car stopped asking for charge/);
+});
+
+
+test('only the Core completion flag confirms a car-limit goal, even after restart', () => {
+  const lp = { plugged_in: true, charger: { available: true }, current_power_w: 0,
+    commanded_known: true, commanded_w: 0, target_soc: 0, current_soc: .8,
+    soc_source: 'inferred', finish_at_vehicle_limit: true,
+    schedule: { soc: .8, finish_at_vehicle_limit: true }, charging_declined: true };
+  assert.match(planStatus({ ...lp, goal_complete: true }, {}).textContent, /car confirmed.*goal is complete/);
+  for (const flag of [false, undefined, 1, 'true']) {
+    assert.doesNotMatch(planStatus({ ...lp, goal_complete: flag }, {}).textContent, /car confirmed/);
+  }
+  assert.doesNotMatch(planStatus({ ...lp, goal_complete: true, manual_active: true }, {}).textContent, /car confirmed/);
+});
+
+
+test('target status uses the reported car level, not the separate controller estimate', () => {
+  const lp = { plugged_in: true, commanded_known: true, commanded_w: 0, target_soc: .8,
+    current_soc: .99, vehicle_soc: .45, soc_source: 'vehicle', vehicle_driver: 'car', schedule: { soc: .8 } };
+  assert.doesNotMatch(planStatus(lp, {}).textContent, /target reached/);
+  assert.match(planStatus({ ...lp, current_soc: .4, vehicle_soc: .81 }, {}).textContent, /target reached/);
+  assert.doesNotMatch(planStatus({ ...lp, vehicle_soc: .81, vehicle_stale: true }, {}).textContent, /target reached/);
+});
+
+test('live charging does not confirm an outdated planned end time', () => {
+  const lp = { plugged_in: true, current_power_w: 7000,
+    plan_next_start_ms: Date.now() - 1000, plan_next_end_ms: Date.now() + 3600000 };
+  assert.match(planStatus(lp, {}).textContent, /Charging on plan until/);
+  assert.doesNotMatch(planStatus({ ...lp, plan_outdated: true }, {}).textContent, /on plan until/);
+  assert.doesNotMatch(planStatus({ ...lp, plan_pending: true }, {}).textContent, /on plan until/);
+});

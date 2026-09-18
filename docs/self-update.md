@@ -72,9 +72,12 @@ socket.
 
 Before every Core update, Core creates a mandatory, consistent local rollback
 point for `state.db` and configuration. An older client request cannot skip it.
+The point never copies `history.db`; that file stays in place through update
+and rollback, so the step is bounded by settings size, not history size.
 These bounded points remain on the same disk and are deliberately labelled
 **Local rollback points**, not full backups. Older incomplete snapshots are
-visible but cannot be restored.
+visible but cannot be restored. Going back across a history-format change
+needs a full backup made before that update.
 
 Core updates include the compiled Energyplan worker. They require no Python
 service. Core DP remains available if the worker fails or returns an invalid plan.
@@ -95,8 +98,23 @@ system component changes.
 Status is written atomically to the shared volume and is reconciled into the
 persistent component history after Core recreation.
 
+After a verified Core update the updater removes the Core, updater and
+optimizer images that no container uses, except the images this site could
+roll back to. It never touches other repositories or user-built images, and a
+failed cleanup never turns a finished update into a failure.
+
 The updater accepts only known components and `vX.Y.Z` or
 `vX.Y.Z-beta.N` targets.
+
+Release notes carry two hidden markers. `<!-- ftw-state-schema-v2:N -->` is
+the release's on-disk state schema; Cores newer than v3.6.0-beta.1 read it to
+refuse a downgrade. `<!-- ftw-state-schema:4 -->` is read only by older Cores.
+Those Cores copied their whole history before any update whose marker differed
+from their own schema, and on a Raspberry Pi with a large history that copy
+could not finish (#1302). The legacy marker stays at 4, the last schema those
+Cores use, so they update without the copy. `state-schema.json` pins both
+values, a Go test checks them, and the stable release guard refuses notes
+that carry anything else.
 
 ## Scope: the host is not updated here
 
