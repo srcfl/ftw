@@ -115,8 +115,15 @@ steer it. Polling must not keep re-emitting an indefinitely cached value as
 fresh telemetry: age vendor data and stop emitting when it is stale, or core's
 watchdog cannot see the fault.
 
+This includes PV drivers with a command hook: curtailment must also have a safe
+default. A `read_only` declaration prevents the Lua command hook from running;
+it does not merely hide the control in the catalog. Read-only telemetry drivers
+may omit the default hook because Core cannot dispatch commands to them.
+
 `driver_fingerprint(target)` is an optional passive setup probe. It must never
-reconfigure the device.
+reconfigure the device. The host denies mutating verbs (`modbus_write`,
+`mqtt_pub`, `http_post`, `http_patch`) for that VM, including bundled drivers
+that otherwise have no signed write scope.
 
 Call `host.set_make` and `host.set_sn` as soon as stable identity is known.
 Core then keys durable device state by hardware identity rather than the YAML

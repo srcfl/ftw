@@ -35,7 +35,7 @@
     if (!optimizer.configured) {
       return { label: "Core planner", degraded: false, warning: "", lastPlanAtMs: 0 };
     }
-    var runtimeLabel = (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
+    var runtimeLabel = (optimizer.bundled_with_core ? "Energyplan " : "") + (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
     if (optimizer.role === "shadow") runtimeLabel += " · shadow";
     var solverLabel = [solver.engine, solver.backend].filter(Boolean).join(" / ");
     var reason = optimizer.fallback_reason || solver.fallback_reason || optimizer.health_error || optimizer.error || "";
@@ -321,32 +321,11 @@
             el.innerHTML =
               '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
                 ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
-              '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerState.label) +
-                '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
-                ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
               warningHTML +
               driversHTML +
               actionHTML;
           }
           var status = document.getElementById("sys-component-action");
-          var optimizerBtn = document.getElementById("sys-update-optimizer");
-          if (optimizerBtn) optimizerBtn.onclick = function () {
-            optimizerBtn.disabled = true;
-            if (status) status.textContent = "Starting optimizer update…";
-            apiFetch("/api/components/optimizer/update", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
-              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "update failed"); return body; }); })
-              .then(function () { if (status) status.textContent = "Optimizer update started; core remains online."; })
-              .catch(function (err) { if (status) status.textContent = err.message; optimizerBtn.disabled = false; });
-          };
-          var rollbackBtn = document.getElementById("sys-rollback-optimizer");
-          if (rollbackBtn) rollbackBtn.onclick = function () {
-            rollbackBtn.disabled = true;
-            if (status) status.textContent = "Restoring previous optimizer image…";
-            apiFetch("/api/components/optimizer/rollback", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
-              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
-              .then(function () { if (status) status.textContent = "Optimizer rollback started; core remains online."; })
-              .catch(function (err) { if (status) status.textContent = err.message; rollbackBtn.disabled = false; });
-          };
           var driverBtn = document.getElementById("sys-refresh-drivers");
           if (driverBtn) driverBtn.onclick = function () {
             driverBtn.disabled = true;
@@ -441,11 +420,49 @@
         });
       };
 
-      refresh();
+      function settingsOpen() {
+        var modal = document.getElementById("settings-modal");
+        return !!(modal && !modal.classList.contains("hidden"));
+      }
+      function stopTimer() {
+        if (window._systemStatusTimer) {
+          clearInterval(window._systemStatusTimer);
+          window._systemStatusTimer = null;
+        }
+      }
+      function shouldPoll() {
+        return !document.hidden && settingsOpen() && !!document.getElementById("sys-hostname");
+      }
+      function syncPolling() {
+        if (!shouldPoll()) {
+          stopTimer();
+          return;
+        }
+        refresh();
+        if (!window._systemStatusTimer) {
+          window._systemStatusTimer = setInterval(function () {
+            if (!shouldPoll()) {
+              stopTimer();
+              return;
+            }
+            refresh();
+          }, 5000);
+        }
+      }
+      if (window._systemOnVisibility) {
+        document.removeEventListener("visibilitychange", window._systemOnVisibility);
+      }
+      window._systemOnVisibility = syncPolling;
+      document.addEventListener("visibilitychange", syncPolling);
+      if (window._systemModalObserver) window._systemModalObserver.disconnect();
+      var modal = document.getElementById("settings-modal");
+      if (modal && typeof MutationObserver === "function") {
+        window._systemModalObserver = new MutationObserver(syncPolling);
+        window._systemModalObserver.observe(modal, { attributes: true, attributeFilter: ["class"] });
+      }
       refreshComponents();
       refreshLanAuth();
-      if (window._systemStatusTimer) clearInterval(window._systemStatusTimer);
-      window._systemStatusTimer = setInterval(refresh, 5000);
+      syncPolling();
     },
   };
   S.tabs.system._pure = { optimizerStatus: optimizerStatus, bundleDisplay: bundleDisplay };

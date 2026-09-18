@@ -3,6 +3,7 @@ package ocpp
 import (
 	"encoding/json"
 	"log/slog"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -56,6 +57,11 @@ type Handler struct {
 	// the connect and boot triggers — which arrive milliseconds apart, long
 	// before any answer — ask once between them rather than twice.
 	probing map[string]bool
+	// identityProbe asks for a fresh BootNotification; only that message can
+	// establish hardware identity on a new socket. See identity_probe.go.
+	identityProbe        func(string, Version, func(error)) error
+	identityProbeTiming  identityProbeTiming
+	identityProbeStopped bool
 }
 
 // chargerState is what we accumulate from successive OCPP messages for one
@@ -72,6 +78,8 @@ type chargerState struct {
 	sessionStartMeterWh float64
 	sessionMeterWh      float64
 	lastPowerW          float64
+	forecastPower       telemetry.ForecastPowerSample
+	powerConnectedAt    time.Time
 	// lastAmps is the most recent per-phase limit this charger accepted.
 	// A resume with no rate of its own restores it.
 	lastAmps float64
@@ -90,6 +98,14 @@ type chargerState struct {
 	model    string
 	serial   string
 	firmware string
+	// identityCurrent is set only by BootNotification on this connection.
+	connectionGeneration  uint64 // process-local socket epoch; never a physical session ID
+	connectedKnown        bool   // physical status received on the current socket
+	identityCurrent       bool
+	identityProbeTimer    *time.Timer
+	identityProbeEpoch    uint64
+	identityProbeAttempts int
+	identityProbeAfter    time.Time
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -115,12 +131,13 @@ type chargerState struct {
 // BootNotification confirmation.
 func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 	return &Handler{
-		tel:                tel,
-		heartbeatIntervalS: heartbeatIntervalS,
-		chargers:           map[string]*chargerState{},
-		approved:           map[string]bool{},
-		probing:            map[string]bool{},
-		nextTxID:           1,
+		tel:                 tel,
+		heartbeatIntervalS:  heartbeatIntervalS,
+		chargers:            map[string]*chargerState{},
+		approved:            map[string]bool{},
+		probing:             map[string]bool{},
+		identityProbeTiming: defaultIdentityProbeTiming,
+		nextTxID:            1,
 	}
 }
 
@@ -145,17 +162,31 @@ func (h *Handler) SetApprovedIDs(ids []string) {
 	}
 	h.mu.Lock()
 	var revoked []string
-	for id := range h.chargers {
+	for id, charger := range h.chargers {
 		if h.approved[id] && !m[id] {
 			revoked = append(revoked, id)
+			h.cancelIdentityProbeLocked(charger)
 		}
 	}
 	h.approved = m
+	for id, charger := range h.chargers {
+		h.scheduleIdentityProbeLocked(id, charger)
+	}
 	h.mu.Unlock()
 	for _, id := range revoked {
-		blob, _ := json.Marshal(map[string]any{"type": "ev", "w": 0.0})
+		blob, _ := json.Marshal(map[string]any{"type": "ev", "w": 0.0, "forecast_power": telemetry.ForecastPowerSample{Version: 1}})
 		h.tel.Update(id, telemetry.DerEV, 0, nil, blob)
 	}
+}
+
+// IsApproved reports whether a charger id is on the site allowlist and may
+// therefore feed telemetry and accept commands. Pending connectors stay
+// visible in Snapshot but are not adopted.
+func (h *Handler) IsApproved(id string) bool {
+	if h == nil {
+		return false
+	}
+	return h.isApproved(id)
 }
 
 // isApproved reports whether a charger id is named by a charger entry
@@ -364,7 +395,19 @@ func (h *Handler) OnConnect(id string) {
 	s := h.state(id)
 	h.mu.Lock()
 	s.online = true
+	s.powerConnectedAt = time.Now().Truncate(time.Second)
+	s.connectionGeneration++
+	s.connectedKnown = false
+	s.charging = false
+	s.clearMeasuredPower()
+	s.identityCurrent = false
+	s.featureProfiles = ""
+	s.steerable = nil
+	h.cancelIdentityProbeLocked(s)
+	s.identityProbeAttempts = 0
+	h.scheduleIdentityProbeLocked(id, s)
 	h.mu.Unlock()
+	h.pushReading(id, s)
 	h.telSuccess(id)
 	h.maybeProbeCapability(id)
 }
@@ -378,9 +421,11 @@ func (h *Handler) OnDisconnect(id string) {
 	// reconnect is exactly when we want to ask again, so clear it here.
 	delete(h.probing, id)
 	s.online = false
-	s.connected = false
+	s.identityCurrent = false
+	h.cancelIdentityProbeLocked(s)
+	s.connectedKnown = false
 	s.charging = false
-	s.lastPowerW = 0
+	s.clearMeasuredPower()
 	h.mu.Unlock()
 	// Push a zero so the dispatch clamp releases — otherwise the last known
 	// non-zero w would survive until staleness kicks in.
@@ -409,6 +454,8 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	s.vendor = req.ChargePointVendor
 	s.model = req.ChargePointModel
 	s.serial = serial
+	s.identityCurrent = true
+	h.cancelIdentityProbeLocked(s)
 	s.firmware = req.FirmwareVersion
 	h.mu.Unlock()
 	h.noteIdentity(id)
@@ -444,10 +491,12 @@ func (h *Handler) OnDataTransfer(id string, req *core.DataTransferRequest) (*cor
 func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRequest) (*core.StatusNotificationConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	s.connectedKnown = true
 	switch req.Status {
 	case core.ChargePointStatusAvailable, core.ChargePointStatusUnavailable:
 		s.connected = false
 		s.charging = false
+		s.clearMeasuredPower()
 	case core.ChargePointStatusPreparing,
 		core.ChargePointStatusFinishing,
 		core.ChargePointStatusSuspendedEV,
@@ -461,6 +510,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 	case core.ChargePointStatusFaulted:
 		s.connected = true
 		s.charging = false
+		s.clearMeasuredPower()
 	}
 	h.mu.Unlock()
 
@@ -479,7 +529,13 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.MeterValuesConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	received := time.Now()
 	for _, mv := range req.MeterValue {
+		measured := received
+		if mv.Timestamp != nil {
+			measured = mv.Timestamp.Time
+		}
+		var samples []powerSample
 		for _, sv := range mv.SampledValue {
 			measurand := sv.Measurand
 			// OCPP 1.6 default measurand if unspecified.
@@ -492,10 +548,13 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 			}
 			switch measurand {
 			case types.MeasurandPowerActiveImport:
+				if sv.Unit != "" && sv.Unit != types.UnitOfMeasureW && sv.Unit != types.UnitOfMeasureKW {
+					continue
+				}
 				if sv.Unit == types.UnitOfMeasureKW {
 					val *= 1000
 				}
-				s.lastPowerW = val
+				samples = append(samples, powerSample{w: val, phase: string(sv.Phase)})
 			case types.MeasurandEnergyActiveImportRegister:
 				if sv.Unit == types.UnitOfMeasureKWh {
 					val *= 1000
@@ -504,6 +563,9 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 					s.sessionMeterWh = val - s.sessionStartMeterWh
 				}
 			}
+		}
+		if w, ok := meterPowerW(samples); ok {
+			s.recordPower(w, measured, received)
 		}
 	}
 	h.mu.Unlock()
@@ -522,6 +584,7 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 	s.sessionStartMeterWh = float64(req.MeterStart)
 	s.sessionMeterWh = 0
 	s.connected = true
+	s.connectedKnown = true
 	s.charging = true
 	h.mu.Unlock()
 
@@ -544,7 +607,7 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 	sessionWh := float64(req.MeterStop) - s.sessionStartMeterWh
 	s.transactionID = -1
 	s.charging = false
-	s.lastPowerW = 0
+	s.clearMeasuredPower()
 	s.sessionMeterWh = sessionWh
 	h.mu.Unlock()
 
@@ -575,12 +638,23 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 	h.mu.Lock()
 	approved := h.approved[id]
 	w := s.lastPowerW
+	s.forecastPower.Version = 1
 	data := map[string]any{
-		"type":       "ev",
-		"w":          w,
-		"connected":  s.connected,
-		"charging":   s.charging,
-		"session_wh": s.sessionMeterWh,
+		"type":           "ev",
+		"w":              w,
+		"charging":       s.charging,
+		"session_wh":     s.sessionMeterWh,
+		"forecast_power": s.forecastPower,
+	}
+	data["connection_generation"] = s.connectionGeneration
+	if s.online && s.connectedKnown {
+		data["connected"] = s.connected
+	} else {
+		// A socket transition says nothing about the physical cable. Keep
+		// the zero out of manual-command acknowledgements in both clients.
+		data["connection_unknown"] = true
+		data["is_online"] = false
+		data["reason_no_current_label"] = "Waiting for charger connection status"
 	}
 	h.mu.Unlock()
 	if !approved {
@@ -589,4 +663,56 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 	}
 	blob, _ := json.Marshal(data)
 	h.tel.Update(id, telemetry.DerEV, w, nil, blob)
+}
+
+// powerSample is one Power.Active.Import after unit conversion. An empty phase
+// is the charger total; anything else is one phase of that total.
+type powerSample struct {
+	w     float64
+	phase string
+}
+
+// meterPowerW picks one watts value for a MeterValue: the unphased total when
+// present, otherwise the sum of finite, non-negative phase samples.
+func meterPowerW(samples []powerSample) (float64, bool) {
+	var total, sum float64
+	hasTotal, hasPhase := false, false
+	for _, s := range samples {
+		if math.IsNaN(s.w) || math.IsInf(s.w, 0) || s.w < 0 {
+			continue
+		}
+		if s.phase == "" {
+			total = s.w
+			hasTotal = true
+		} else {
+			sum += s.w
+			hasPhase = true
+		}
+	}
+	if hasTotal {
+		return total, true
+	}
+	if hasPhase {
+		return sum, true
+	}
+	return 0, false
+}
+
+// recordPower is the shared accept rule for forecast and dispatch lastPowerW.
+// Present, unphased-or-summed, finite, >= 0, and not older than the last
+// accepted timestamp. Samples from before this socket or in the future cannot
+// revive a stale or synthesized reading. The caller holds h.mu.
+func (s *chargerState) recordPower(w float64, measured, received time.Time) bool {
+	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 || measured.IsZero() || measured.After(received) || measured.Before(s.powerConnectedAt) || measured.UnixMilli() <= s.forecastPower.MeasuredAtMS {
+		return false
+	}
+	s.lastPowerW = w
+	s.forecastPower = telemetry.ForecastPowerSample{Version: 1, Known: true, Watts: w, MeasuredAtMS: measured.UnixMilli(), ReceivedAtMS: received.UnixMilli()}
+	return true
+}
+
+// clearMeasuredPower zeros dispatch watts without recording a measured sample.
+func (s *chargerState) clearMeasuredPower() {
+	s.lastPowerW = 0
+	s.forecastPower.Known = false
 }

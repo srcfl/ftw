@@ -101,3 +101,18 @@ func (h *Handler) noteIdentity(id string) {
 	}
 	fn(ident)
 }
+
+// CurrentIdentity returns only an adopted charger's identity reported on its
+// current connection. Historical UI labels cannot bind a new control request.
+func (h *Handler) CurrentIdentity(id string) (ChargerIdentity, bool) {
+	if h == nil {
+		return ChargerIdentity{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.chargers[id]
+	if s == nil || !h.approved[id] || !s.online || !s.identityCurrent {
+		return ChargerIdentity{}, false
+	}
+	return ChargerIdentity{ID: id, Vendor: s.vendor, Model: s.model, Serial: s.serial, Firmware: s.firmware}, true
+}

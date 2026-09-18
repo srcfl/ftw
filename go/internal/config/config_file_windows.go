@@ -301,3 +301,34 @@ func syncDir(dir string) error {
 	}
 	return nil
 }
+
+// Existing SQLite files must receive the same protected ACL as the old seed
+// before a settings transaction writes credentials into the WAL.
+func restrictConfigFile(path string) error {
+	owner, err := currentProcessUserSID()
+	if err != nil {
+		return err
+	}
+	sd, err := ownerOnlyConfigSecurityDescriptor(owner)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	path, err = normalizeWindowsConfigPath(path)
+	if err != nil {
+		return err
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil); err != nil {
+		return err
+	}
+	actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, configSecurityQuery)
+	if err != nil {
+		return err
+	}
+	return validateOwnerOnlyConfigSecurityDescriptor(actual, owner)
+}

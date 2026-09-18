@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/srcfl/ftw/go/internal/optimizercontract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,13 +28,13 @@ type Config struct {
 	Drivers          []Driver           `yaml:"drivers" json:"drivers"`
 	API              API                `yaml:"api" json:"api"`
 	HomeAssistant    *HomeAssistant     `yaml:"homeassistant,omitempty" json:"homeassistant,omitempty"`
+	ModbusProxy      *ModbusProxy       `yaml:"modbus_proxy,omitempty" json:"modbus_proxy,omitempty"`
 	State            *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
 	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
-	CalDAV           *CalDAV            `yaml:"caldav,omitempty" json:"caldav,omitempty"`
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	Vehicles         []Vehicle          `yaml:"vehicles,omitempty" json:"vehicles,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
@@ -53,6 +52,11 @@ type Config struct {
 	// write path (Settings save, bootstrap) never populates this — it calls
 	// Validate directly and stays strict. Never serialized.
 	LoadWarnings []string `yaml:"-" json:"-"`
+	// Used once at startup to end an old calendar's persisted away selection.
+	RetiredCalendarEnabled bool   `yaml:"-" json:"-"`
+	ConfigDatabase         string `yaml:"config_database,omitempty" json:"-"`
+	Revision               int64  `yaml:"-" json:"-"`
+	LANPasswordHash        string `yaml:"-" json:"-"`
 }
 
 // OCPP configures the built-in OCPP 1.6J and 2.0.1 Central System. Chargers connect to
@@ -100,9 +104,9 @@ type OCPPTLS struct {
 	KeyFile  string `yaml:"key_file,omitempty" json:"key_file,omitempty"`
 
 	// ClientCAFile turns on mutual TLS: every charge point must present a
-	// certificate signed by this CA. That is OCPP 2.0.1 security profile 3,
-	// and the only identity here that cannot be copied out of one charger's
-	// configuration and replayed by another device.
+	// certificate signed by this CA, and that cert's CN or DNS SAN must
+	// match the identity in the URL. That is OCPP 2.0.1 security profile 3.
+	// A per-charger password, if set, is an additional gate.
 	ClientCAFile string `yaml:"client_ca_file,omitempty" json:"client_ca_file,omitempty"`
 }
 
@@ -677,148 +681,6 @@ type EVChargerModbus struct {
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"`
 }
 
-// CalDAV configures the calendar-constraints feature (issue #498). FTW hosts
-// its own in-process, pure-Go CalDAV server (emersion/go-webdav, MIT — see
-// internal/caldavserver) and runs a CalDAV *client* against it that polls the
-// calendar collection and maps events into planner intents:
-//
-//   - an "away"/vacation event switches the load model to its away profile
-//     for the interval, so the planner conserves battery while the house is
-//     empty;
-//   - an EV "charged-by-departure" event sets the matching loadpoint's
-//     target SoC + deadline, which the MPC already honours.
-//
-// Events are classified by case-insensitive keyword match on the event
-// title (SUMMARY). Keyword lists are configurable so non-English calendars
-// work. The whole feature is opt-in (Enabled) and fail-soft: an unreachable
-// server never blocks control.
-//
-// Password is stored in state.db (key "caldav_password"), NOT in config.yaml,
-// mirroring EVCharger.Password.
-type CalDAV struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
-
-	// URL is the base URL of the CalDAV server. Defaults to the in-process
-	// native server at http://localhost:5232.
-	URL string `yaml:"url,omitempty" json:"url,omitempty"`
-
-	Username string `yaml:"username,omitempty" json:"username,omitempty"`
-	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
-
-	// CalendarPath is the collection path polled for events, relative to URL
-	// (e.g. "/ftw/energy/" for new configs). The runtime fallback below keeps
-	// the former path for configs that omitted this field before the rebrand.
-	CalendarPath string `yaml:"calendar_path,omitempty" json:"calendar_path,omitempty"`
-
-	// PollIntervalS is how often the collection is re-fetched. Default 300s.
-	PollIntervalS int `yaml:"poll_interval_s,omitempty" json:"poll_interval_s,omitempty"`
-
-	// HorizonDays bounds the calendar-query time range (recurrences are
-	// expanded server-side within it). Default 7.
-	HorizonDays int `yaml:"horizon_days,omitempty" json:"horizon_days,omitempty"`
-
-	// EVLoadpointID is the loadpoint an EV event targets when the title
-	// names no specific one. Empty = the first/only configured loadpoint.
-	EVLoadpointID string `yaml:"ev_loadpoint_id,omitempty" json:"ev_loadpoint_id,omitempty"`
-
-	EVDefaultTargetSoC    float64 `yaml:"ev_default_target_soc,omitempty" json:"ev_default_target_soc,omitempty"`
-	EVDefaultTargetSoCPct float64 `yaml:"ev_default_target_soc_pct,omitempty" json:"ev_default_target_soc_pct,omitempty"`
-
-	// AwayKeywords / EVKeywords classify an event by its title. Matching is
-	// case-insensitive substring. Empty lists fall back to the built-in
-	// defaults (see DefaultAwayKeywords / DefaultEVKeywords).
-	AwayKeywords []string `yaml:"away_keywords,omitempty" json:"away_keywords,omitempty"`
-	EVKeywords   []string `yaml:"ev_keywords,omitempty" json:"ev_keywords,omitempty"`
-
-	// EVSEHistory (default ON when enabled) makes FTW *write* a calendar
-	// event for each completed EV charging session into HistoryPath. This is
-	// an outbound capability — the user subscribes to HistoryPath to see when
-	// the charger was used. HistoryPath MUST differ from CalendarPath so FTW
-	// never re-reads its own history events as inbound intents.
-	EVSEHistory *bool  `yaml:"evse_history,omitempty" json:"evse_history,omitempty"`
-	HistoryPath string `yaml:"history_path,omitempty" json:"history_path,omitempty"`
-
-	// PublishPlan (default ON when enabled) makes FTW write its forward-looking
-	// plan — upcoming battery charge/discharge windows from the MPC — as
-	// read-only events into PlanPath (a SEPARATE collection), so you can see
-	// what FTW intends to do. Reconciled each publish so stale events are
-	// removed rather than piling up.
-	PublishPlan          *bool  `yaml:"publish_plan,omitempty" json:"publish_plan,omitempty"`
-	PlanPath             string `yaml:"plan_path,omitempty" json:"plan_path,omitempty"`
-	PlanPublishIntervalS int    `yaml:"plan_publish_interval_s,omitempty" json:"plan_publish_interval_s,omitempty"`
-
-	// ManageCredentials (default ON when enabled) makes FTW generate a random
-	// password on first enable, which the in-process CalDAV server then
-	// authenticates against. The credential is shown in the Settings → Calendar
-	// tab (with a QR) to paste into a calendar app, so the operator never has to
-	// set one by hand.
-	ManageCredentials *bool `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
-
-	// Listen is the bind address for the in-process CalDAV server. Default
-	// ":5232". FTW binds it on the LAN.
-	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
-}
-
-// ListenAddr returns the native CalDAV server bind address (default ":5232").
-func (cv *CalDAV) ListenAddr() string {
-	if cv != nil && strings.TrimSpace(cv.Listen) != "" {
-		return strings.TrimSpace(cv.Listen)
-	}
-	return ":5232"
-}
-
-// ManageCredentialsEnabled reports whether FTW should auto-generate the managed
-// CalDAV credential. Nil-safe; defaults ON when the feature is on.
-func (cv *CalDAV) ManageCredentialsEnabled() bool {
-	return cv != nil && cv.Enabled && (cv.ManageCredentials == nil || *cv.ManageCredentials)
-}
-
-// EVSEHistoryEnabled reports whether FTW should write EV-session history
-// events. Nil-safe; defaults ON when the feature is enabled.
-func (cv *CalDAV) EVSEHistoryEnabled() bool {
-	return cv != nil && cv.Enabled && (cv.EVSEHistory == nil || *cv.EVSEHistory)
-}
-
-// PublishPlanEnabled reports whether FTW should publish its forward-looking
-// plan calendar. Nil-safe; defaults ON when the feature is enabled.
-func (cv *CalDAV) PublishPlanEnabled() bool {
-	return cv != nil && cv.Enabled && (cv.PublishPlan == nil || *cv.PublishPlan)
-}
-
-// CalDAV defaults. Keyword identifiers are English; operators may override
-// with localised terms via config (the values are user-facing).
-var (
-	DefaultCalDAVURL          = "http://localhost:5232"
-	DefaultCalDAVCalendarPath = "/fortytwowatts/energy/"
-	DefaultCalDAVHistoryPath  = "/fortytwowatts/history/"
-	DefaultCalDAVPlanPath     = "/fortytwowatts/plan/"
-	DefaultCalDAVPlanPublishS = 900
-	DefaultCalDAVUsername     = "fortytwowatts"
-	DefaultCalDAVPollS        = 300
-	DefaultCalDAVHorizonDays  = 7
-	DefaultCalDAVEVTargetSoC  = 0.8
-	DefaultAwayKeywords       = []string{"away", "vacation", "holiday"}
-	DefaultEVKeywords         = []string{"ev", "car", "charge"}
-)
-
-// Validate enforces range rules. Defaults are applied by the calendar
-// service at construction time, so unset fields are legal here.
-func (cv *CalDAV) Validate() error {
-	if cv == nil || !cv.Enabled {
-		return nil
-	}
-	if cv.PollIntervalS < 0 {
-		return errors.New("caldav.poll_interval_s must be >= 0")
-	}
-	if cv.HorizonDays < 0 {
-		return errors.New("caldav.horizon_days must be >= 0")
-	}
-	if cv.EVDefaultTargetSoC < 0 || cv.EVDefaultTargetSoC > 1 {
-		return errors.New("caldav.ev_default_target_soc must be in [0, 1]")
-	}
-	return nil
-}
-
 // Normalize folds the legacy `email:` YAML key into Username and clears
 // it so subsequent writes use the canonical key. Idempotent.
 func (e *EVCharger) Normalize() {
@@ -887,26 +749,6 @@ func (e *EVCharger) Validate() error {
 	return nil
 }
 
-type OptimizerMultistage struct {
-	ScenarioLimit          int      `yaml:"scenario_limit,omitempty" json:"scenario_limit,omitempty"`
-	BranchIntervalSlots    int      `yaml:"branch_interval_slots,omitempty" json:"branch_interval_slots,omitempty"`
-	BranchHorizonSlots     int      `yaml:"branch_horizon_slots,omitempty" json:"branch_horizon_slots,omitempty"`
-	MaxBranching           int      `yaml:"max_branching,omitempty" json:"max_branching,omitempty"`
-	NearHorizonSlots       int      `yaml:"near_horizon_slots,omitempty" json:"near_horizon_slots,omitempty"`
-	MidHorizonSlots        int      `yaml:"mid_horizon_slots,omitempty" json:"mid_horizon_slots,omitempty"`
-	MidBlockSlots          int      `yaml:"mid_block_slots,omitempty" json:"mid_block_slots,omitempty"`
-	FarBlockSlots          int      `yaml:"far_block_slots,omitempty" json:"far_block_slots,omitempty"`
-	ServiceCVaRWeight      *float64 `yaml:"service_cvar_weight,omitempty" json:"service_cvar_weight,omitempty"`
-	ServiceCVaRAlpha       float64  `yaml:"service_cvar_alpha,omitempty" json:"service_cvar_alpha,omitempty"`
-	EconomicCVaRWeight     float64  `yaml:"economic_cvar_weight,omitempty" json:"economic_cvar_weight,omitempty"`
-	EconomicCVaRAlpha      float64  `yaml:"economic_cvar_alpha,omitempty" json:"economic_cvar_alpha,omitempty"`
-	DecompositionThreshold int      `yaml:"decomposition_threshold,omitempty" json:"decomposition_threshold,omitempty"`
-	DecompositionMethod    string   `yaml:"decomposition_method,omitempty" json:"decomposition_method,omitempty"`
-	PHMaxIterations        int      `yaml:"ph_max_iterations,omitempty" json:"ph_max_iterations,omitempty"`
-	PHRho                  float64  `yaml:"ph_rho,omitempty" json:"ph_rho,omitempty"`
-	PHToleranceW           float64  `yaml:"ph_tolerance_w,omitempty" json:"ph_tolerance_w,omitempty"`
-}
-
 // Planner configures the MPC scheduler (optional — disabled if omitted).
 // Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
 type Planner struct {
@@ -918,42 +760,17 @@ type Planner struct {
 	// BatteryExport is the first-boot battery-sale permission:
 	// unknown | not_allowed | allowed. Live value is SQLite battery_export.
 	BatteryExport string `yaml:"battery_export,omitempty" json:"battery_export,omitempty"`
-	// Engine selects the planner that produces the active plan: "core"
-	// (default) solves in process with the Go DP; "python" hands the
-	// champion role to the CVXPY/HiGHS worker. "go" and "dp" are accepted
-	// spellings of "core". Read it through EngineName.
-	Engine string `yaml:"engine,omitempty" json:"engine,omitempty"`
-	// ShadowPython runs the Python/HiGHS worker after each Core replan, on
-	// the inputs the champion solved, and records the terminal-corrected
-	// cost difference. Shadow output never reaches dispatch. Pointer so an
-	// unset field keeps the default (on) and an explicit false turns the
-	// comparison off. Ignored when Engine is python.
-	ShadowPython *bool `yaml:"shadow_python,omitempty" json:"shadow_python,omitempty"`
-	// OptimizerCommand is the Python executable used for the local worker.
-	// It is an executable path, not a shell command. The module invocation is
-	// fixed by the host to avoid shell parsing and configuration injection.
-	OptimizerCommand                      string               `yaml:"optimizer_command,omitempty" json:"optimizer_command,omitempty"`
-	OptimizerDir                          string               `yaml:"optimizer_dir,omitempty" json:"optimizer_dir,omitempty"`
-	OptimizerTransport                    string               `yaml:"optimizer_transport,omitempty" json:"optimizer_transport,omitempty"`
-	OptimizerSocket                       string               `yaml:"optimizer_socket,omitempty" json:"optimizer_socket,omitempty"`
-	OptimizerSolver                       string               `yaml:"optimizer_solver,omitempty" json:"optimizer_solver,omitempty"`
-	OptimizerFormulation                  string               `yaml:"optimizer_formulation,omitempty" json:"optimizer_formulation,omitempty"`
-	OptimizerTimeoutS                     float64              `yaml:"optimizer_timeout_s,omitempty" json:"optimizer_timeout_s,omitempty"`
-	OptimizerIdleTimeoutS                 float64              `yaml:"optimizer_idle_timeout_s,omitempty" json:"optimizer_idle_timeout_s,omitempty"`
-	OptimizerMIPRelGap                    float64              `yaml:"optimizer_mip_rel_gap,omitempty" json:"optimizer_mip_rel_gap,omitempty"`
-	OptimizerCVaRWeight                   *float64             `yaml:"optimizer_cvar_weight,omitempty" json:"optimizer_cvar_weight,omitempty"`
-	OptimizerCVaRAlpha                    float64              `yaml:"optimizer_cvar_alpha,omitempty" json:"optimizer_cvar_alpha,omitempty"`
-	OptimizerRecourseShadow               bool                 `yaml:"optimizer_recourse_shadow,omitempty" json:"optimizer_recourse_shadow,omitempty"`
-	OptimizerRecourseNonAnticipativeSlots int                  `yaml:"optimizer_recourse_non_anticipative_slots,omitempty" json:"optimizer_recourse_non_anticipative_slots,omitempty"`
-	OptimizerChallengerPolicy             string               `yaml:"optimizer_challenger_policy,omitempty" json:"optimizer_challenger_policy,omitempty"`
-	OptimizerMultistage                   *OptimizerMultistage `yaml:"optimizer_multistage,omitempty" json:"optimizer_multistage,omitempty"`
-	BaseLoadW                             float64              `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
-	HorizonHours                          int                  `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
-	IntervalMin                           int                  `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
-	SoCMin                                float64              `yaml:"soc_min,omitempty" json:"soc_min,omitempty"`
-	SoCMax                                float64              `yaml:"soc_max,omitempty" json:"soc_max,omitempty"`
-	SoCMinPct                             float64              `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
-	SoCMaxPct                             float64              `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+	// Engine selects core or energyplan. An unset value uses
+	// Energyplan in beta releases on supported hosts and Core otherwise.
+	// go and dp are aliases for core. The launcher resolves release defaults.
+	Engine       string  `yaml:"engine,omitempty" json:"engine,omitempty"`
+	BaseLoadW    float64 `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
+	HorizonHours int     `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
+	IntervalMin  int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
+	SoCMin       float64 `yaml:"soc_min,omitempty" json:"soc_min,omitempty"`
+	SoCMax       float64 `yaml:"soc_max,omitempty" json:"soc_max,omitempty"`
+	SoCMinPct    float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
+	SoCMaxPct    float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
 	// Deprecated: SoCSafetyFloorPct / SafetyFloorPenaltyOreKwhHour. The
 	// SoC-percentage safety floor was replaced by downside-PV planning
@@ -1020,44 +837,25 @@ type Planner struct {
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
-// PlannerEngineCore and PlannerEnginePython are the two planners that can hold
-// the champion role.
+// Planner engines accepted by configuration.
 const (
-	PlannerEngineCore   = "core"
-	PlannerEnginePython = "python"
+	PlannerEngineCore       = "core"
+	PlannerEngineEnergyplan = "energyplan"
 )
 
-// EngineName resolves planner.engine to one of the two champions. Unset means
-// core: the Go DP measured within öre of the external MILP on replayed site
-// snapshots, and it needs no sidecar to be running to produce a plan.
+// EngineName resolves an explicit engine. The launcher applies beta defaults
+// before calling this method; an unset value here keeps Core for other callers.
 func (p *Planner) EngineName() string {
 	if p == nil {
 		return PlannerEngineCore
 	}
-	if strings.EqualFold(strings.TrimSpace(p.Engine), PlannerEnginePython) {
-		return PlannerEnginePython
+	if strings.EqualFold(strings.TrimSpace(p.Engine), PlannerEngineEnergyplan) {
+		return PlannerEngineEnergyplan
+	}
+	if strings.EqualFold(strings.TrimSpace(p.Engine), "python") {
+		return PlannerEngineEnergyplan
 	}
 	return PlannerEngineCore
-}
-
-// ShadowPythonEnabled reports whether the external optimizer runs behind a Core
-// champion as a comparison shadow. Default on: the per-replan cost difference
-// it records is the field evidence for retiring the external stack.
-func (p *Planner) ShadowPythonEnabled() bool {
-	if p == nil || p.ShadowPython == nil {
-		return true
-	}
-	return *p.ShadowPython
-}
-
-// OptimizerTimeout returns the runtime contract value for an unset timeout.
-// Parsing also fills it so API clients do not invent a shorter default when
-// they save an otherwise unchanged planner.
-func (p *Planner) OptimizerTimeout() time.Duration {
-	if p == nil || p.OptimizerTimeoutS <= 0 {
-		return optimizercontract.DefaultTimeout
-	}
-	return time.Duration(p.OptimizerTimeoutS * float64(time.Second))
 }
 
 // Site is the top-level control loop config.
@@ -1300,6 +1098,11 @@ type ModbusConfig struct {
 	Host   string `yaml:"host" json:"host"`
 	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`       // default 502
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
+	// ProxyListen is the local Modbus TCP address FTW binds for this
+	// backend when modbus_proxy is enabled. Required when the site has
+	// more than one unique host:port; a single-endpoint site uses
+	// modbus_proxy.listen.
+	ProxyListen string `yaml:"proxy_listen,omitempty" json:"proxy_listen,omitempty"`
 	// AllowUnverifiedLocal is copied from capabilities.allow_unverified_local
 	// by the core before this config reaches the transport factory. It is
 	// runtime-only and never comes from this nested YAML block.
@@ -1389,16 +1192,9 @@ type HomeAssistant struct {
 	AllowUnverifiedLocal bool `yaml:"allow_unverified_local,omitempty" json:"allow_unverified_local,omitempty"`
 }
 
-// StateConf is the persistent state DB config.
-//
-// Path is the SQLite file (default "state.db"). ColdDir is the directory
-// where >14d-old time-series data is rolled off as Parquet, partitioned
-// YYYY/MM/DD.parquet (default "cold/" alongside Path).
-//
-// ColdRetentionDays bounds the cold Parquet tier: day files older than
-// this are deleted by the hourly rolloff. 0 (default) keeps everything —
-// a year of ~50 metrics is a few GB, so bounding is opt-in for small
-// SD cards.
+// StateConf locates local state and backup files. Core uses a fixed EMS
+// history policy. ColdRetentionDays remains readable for old configurations
+// but no longer controls retention; startup reports a nonzero retired value.
 type StateConf struct {
 	Path              string `yaml:"path" json:"path"`
 	ColdDir           string `yaml:"cold_dir" json:"cold_dir"`
@@ -1438,6 +1234,33 @@ type Price struct {
 	// most Swedish customer agreements pass through. Set to a pointer
 	// to 0.0 if you have a guaranteed-zero-floor agreement.
 	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
+
+	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
+	// minor units per kW as grid_tariff_ore_kwh is per kWh, excluding VAT.
+	// Zero leaves demand charges off. Core expands local clock hours.
+	DemandPricePerKW float64 `yaml:"demand_price_per_kw,omitempty" json:"demand_price_per_kw,omitempty"`
+	// DemandTopN is how many highest hours are averaged. Zero means 3.
+	DemandTopN int `yaml:"demand_top_n,omitempty" json:"demand_top_n,omitempty"`
+	// DemandNightWeight, when > 0, uses Ellevio-style hours: every local
+	// clock hour, all days, with 22:00–06:00 multiplied by this weight.
+	// Zero keeps weekday 06–20 only.
+	DemandNightWeight float64 `yaml:"demand_night_weight,omitempty" json:"demand_night_weight,omitempty"`
+}
+
+func (p *Price) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.DemandPricePerKW < 0 || math.IsNaN(p.DemandPricePerKW) || math.IsInf(p.DemandPricePerKW, 0) {
+		return errors.New("price.demand_price_per_kw must be finite and >= 0")
+	}
+	if p.DemandTopN < 0 || p.DemandTopN > 64 {
+		return errors.New("price.demand_top_n must be 0..64")
+	}
+	if p.DemandNightWeight < 0 || p.DemandNightWeight > 1 || math.IsNaN(p.DemandNightWeight) || math.IsInf(p.DemandNightWeight, 0) {
+		return errors.New("price.demand_night_weight must be finite and 0..1")
+	}
+	return nil
 }
 
 // Weather is the weather-forecast source config.
@@ -1447,11 +1270,9 @@ type Weather struct {
 	Longitude float64 `yaml:"longitude" json:"longitude"`
 	APIKey    string  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
 
-	// PVRatedW is the system's nameplate PV output (W) — used as the
-	// initial twin prior AND the ceiling for naive PV estimates. If 0,
-	// we fall back to a heuristic (sum of battery_capacity_wh / 3),
-	// which is only roughly right for homes where PV and storage were
-	// sized together. Set explicitly for accurate day-1 forecasts.
+	// PVRatedW is an optional DC nameplate prior for weather conversion and
+	// cold start. Zero leaves scale unknown until telemetry establishes it.
+	// It is not a verified inverter AC limit.
 	PVRatedW float64 `yaml:"pv_rated_w,omitempty" json:"pv_rated_w,omitempty"`
 
 	// PVTiltDeg / PVAzimuthDeg describe the physical orientation of a
@@ -1530,11 +1351,6 @@ func (c Config) MaskSecrets() Config {
 		cp := *out.EVCharger
 		cp.Password = ""
 		out.EVCharger = &cp
-	}
-	if out.CalDAV != nil {
-		cp := *out.CalDAV
-		cp.Password = ""
-		out.CalDAV = &cp
 	}
 	if out.HomeAssistant != nil {
 		cp := *out.HomeAssistant
@@ -1631,11 +1447,11 @@ func (c Config) MaskSecrets() Config {
 // wherever the incoming value is empty (the UI sends "" for masked fields).
 // Call this before saving a config received from the API.
 func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
+	incoming.ConfigDatabase = existing.ConfigDatabase
+	incoming.Revision = existing.Revision
+	incoming.LANPasswordHash = existing.LANPasswordHash
 	if incoming.EVCharger != nil && existing.EVCharger != nil && incoming.EVCharger.Password == "" {
 		incoming.EVCharger.Password = existing.EVCharger.Password
-	}
-	if incoming.CalDAV != nil && existing.CalDAV != nil && incoming.CalDAV.Password == "" {
-		incoming.CalDAV.Password = existing.CalDAV.Password
 	}
 	// Masked out on the way to the UI, so an unchanged password comes back
 	// empty. Without this a save from the settings tab would blank it, and an
@@ -1710,7 +1526,29 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if cfg, ok := loadSettingsBesideSeed(path); ok {
+				return cfg, nil
+			}
+		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var source struct {
+		Database string `yaml:"config_database"`
+	}
+	if err := yaml.Unmarshal(data, &source); err != nil {
+		return nil, fmt.Errorf("config source: %w", err)
+	}
+	if source.Database != "" {
+		database := source.Database
+		if !filepath.IsAbs(database) {
+			database = filepath.Join(filepath.Dir(path), database)
+		}
+		database, err = filepath.Abs(database)
+		if err != nil {
+			return nil, err
+		}
+		return loadStored(database, filepath.Dir(path))
 	}
 	return Parse(data, filepath.Dir(path))
 }
@@ -1724,6 +1562,17 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	var c Config
 	if err := doc.Decode(&c); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	// Old calendars no longer supply occupancy or charging targets. Read only
+	// the enable flag so obsolete settings cannot prevent an upgrade from booting.
+	var retired struct {
+		CalDAV struct {
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"caldav"`
+	}
+	if doc.Decode(&retired) == nil && retired.CalDAV.Enabled {
+		c.RetiredCalendarEnabled = true
+		c.LoadWarnings = append(c.LoadWarnings, "Calendar support has been removed. Set future charging targets under Loadpoints; calendar events no longer change charging or occupancy. Stored calendar data remains in state.db.")
 	}
 	// An omitted app_link section follows the new default. An explicit YAML
 	// null was a valid opt-out before that default changed, so retain it as an
@@ -2003,9 +1852,6 @@ func applyDefaults(c *Config) {
 		// minimum, so the holdoff is a no-op debouncer in practice.
 		c.Site.MinDispatchIntervalS = 2
 	}
-	if c.Planner != nil && c.Planner.OptimizerTimeoutS == 0 {
-		c.Planner.OptimizerTimeoutS = optimizercontract.DefaultTimeout.Seconds()
-	}
 	if c.Fuse.Phases == 0 {
 		c.Fuse.Phases = 3
 	}
@@ -2065,6 +1911,9 @@ func applyDefaults(c *Config) {
 		if c.HomeAssistant.PublishIntervalS == 0 {
 			c.HomeAssistant.PublishIntervalS = 5
 		}
+	}
+	if c.ModbusProxy != nil && strings.TrimSpace(c.ModbusProxy.Listen) == "" {
+		c.ModbusProxy.Listen = DefaultModbusProxyListen
 	}
 	// Backfill for configs that predate notifications: — lands a
 	// populated-but-disabled stub so upgrading an existing install
@@ -2158,10 +2007,10 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	if err := c.CalDAV.Validate(); err != nil {
+	if err := c.FleetPing.Validate(); err != nil {
 		return err
 	}
-	if err := c.FleetPing.Validate(); err != nil {
+	if err := c.validateModbusProxy(); err != nil {
 		return err
 	}
 	if err := c.OCPP.Validate(); err != nil {
@@ -2171,6 +2020,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateVehicles(); err != nil {
+		return err
+	}
+	if err := c.Price.Validate(); err != nil {
 		return err
 	}
 
@@ -2372,6 +2224,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Planner != nil {
 		p := c.Planner
+		// Migrate the retired engine when loading or saving an older config.
+		if strings.EqualFold(strings.TrimSpace(p.Engine), "python") {
+			p.Engine = PlannerEngineEnergyplan
+		}
 		if p.ForecastTrust != "" {
 			if _, ok := ParseForecastTrust(p.ForecastTrust); !ok {
 				return fmt.Errorf("planner.forecast_trust must be cautious, balanced, or bold, got %q", p.ForecastTrust)
@@ -2383,68 +2239,12 @@ func (c *Config) Validate() error {
 			}
 		}
 		switch strings.ToLower(strings.TrimSpace(p.Engine)) {
-		case "", PlannerEngineCore, "go", "dp", PlannerEnginePython:
+		case "", PlannerEngineCore, "go", "dp", PlannerEngineEnergyplan:
 		default:
 			return fmt.Errorf("planner.engine must be %q or %q, got %q",
-				PlannerEngineCore, PlannerEnginePython, p.Engine)
+				PlannerEngineCore, PlannerEngineEnergyplan, p.Engine)
 		}
-		switch strings.ToUpper(p.OptimizerSolver) {
-		case "", "HIGHS", "CLARABEL":
-		default:
-			return fmt.Errorf("planner.optimizer_solver must be \"HIGHS\" or \"CLARABEL\", got %q", p.OptimizerSolver)
-		}
-		switch p.OptimizerFormulation {
-		case "", "auto", "milp", "relaxed":
-		default:
-			return fmt.Errorf("planner.optimizer_formulation must be auto, milp, or relaxed, got %q", p.OptimizerFormulation)
-		}
-		switch p.OptimizerTransport {
-		case "", "auto", "unix", "process":
-		default:
-			return fmt.Errorf("planner.optimizer_transport must be auto, unix, or process, got %q", p.OptimizerTransport)
-		}
-		if p.OptimizerTimeoutS < 0 || p.OptimizerIdleTimeoutS < 0 || p.OptimizerMIPRelGap < 0 || (p.OptimizerCVaRWeight != nil && *p.OptimizerCVaRWeight < 0) {
-			return errors.New("planner optimizer timeout, idle timeout, MIP gap, and CVaR weight must be non-negative")
-		}
-		if p.OptimizerMIPRelGap > 1 {
-			return fmt.Errorf("planner.optimizer_mip_rel_gap must be <= 1, got %g", p.OptimizerMIPRelGap)
-		}
-		if p.OptimizerCVaRAlpha < 0 || p.OptimizerCVaRAlpha >= 1 {
-			return fmt.Errorf("planner.optimizer_cvar_alpha must be 0 (default) or in (0,1), got %g", p.OptimizerCVaRAlpha)
-		}
-		if p.OptimizerRecourseNonAnticipativeSlots < 0 {
-			return errors.New("planner.optimizer_recourse_non_anticipative_slots must be non-negative")
-		}
-		switch p.OptimizerChallengerPolicy {
-		case "", "recourse", "multistage":
-		default:
-			return fmt.Errorf("planner.optimizer_challenger_policy must be recourse or multistage, got %q", p.OptimizerChallengerPolicy)
-		}
-		if ms := p.OptimizerMultistage; ms != nil {
-			ints := []int{ms.ScenarioLimit, ms.BranchIntervalSlots, ms.BranchHorizonSlots,
-				ms.MaxBranching, ms.NearHorizonSlots, ms.MidHorizonSlots, ms.MidBlockSlots,
-				ms.FarBlockSlots, ms.DecompositionThreshold, ms.PHMaxIterations}
-			for _, value := range ints {
-				if value < 0 {
-					return errors.New("planner.optimizer_multistage integer settings must be non-negative")
-				}
-			}
-			if ms.MaxBranching == 1 {
-				return errors.New("planner.optimizer_multistage.max_branching must be 0 (default) or at least 2")
-			}
-			if (ms.ServiceCVaRWeight != nil && *ms.ServiceCVaRWeight < 0) || ms.EconomicCVaRWeight < 0 || ms.PHRho < 0 || ms.PHToleranceW < 0 {
-				return errors.New("planner.optimizer_multistage risk weights, PH rho, and PH tolerance must be non-negative")
-			}
-			if (ms.ServiceCVaRAlpha < 0 || ms.ServiceCVaRAlpha >= 1) ||
-				(ms.EconomicCVaRAlpha < 0 || ms.EconomicCVaRAlpha >= 1) {
-				return errors.New("planner.optimizer_multistage CVaR alpha must be 0 (default) or in (0,1)")
-			}
-			switch ms.DecompositionMethod {
-			case "", "auto", "extensive", "progressive_hedging":
-			default:
-				return fmt.Errorf("planner.optimizer_multistage.decomposition_method is invalid: %q", ms.DecompositionMethod)
-			}
-		}
+
 	}
 	if repoCfg := c.DeviceRepository; repoCfg != nil {
 		if repoCfg.RefreshIntervalH < 0 {
@@ -2611,6 +2411,13 @@ func saveAtomic(w durableWriter, path string, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("yaml marshal: %w", err)
 	}
+	if out.ConfigDatabase != "" {
+		data = append([]byte("# Settings live in SQLite. Use FTW Settings to change them.\n# This file locates the database. The values below are a recovery export.\n"), data...)
+	}
+	return writeConfigAtomic(w, path, data)
+}
+
+func writeConfigAtomic(w durableWriter, path string, data []byte) error {
 	saveMu.Lock()
 	defer saveMu.Unlock()
 

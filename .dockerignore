@@ -7,7 +7,12 @@
 !Dockerfile
 !.dockerignore
 !LICENSE
+!LICENSING.md
 !NOTICE
+!THIRD-PARTY-NOTICES.txt
+!scripts/
+scripts/*
+!scripts/build-core.sh
 !go/
 !drivers/
 !web/
@@ -20,5 +25,6 @@ go/**/*_test.go
 **/state.db-*
 **/cold/
 **/.DS_Store
-optimizer/.venv/
-optimizer/tests/
+
+# The offline beta converter is outside ordinary Core builds.
+go/tools/

@@ -18,7 +18,7 @@
 //
 // ctx is built fresh on each render and exposes the shell's helpers
 // (field, selectField, help, escHtml, getByPath, setByPath,
-// captureCurrentTab, renderTab, bodyEl, config).
+// captureCurrentTab, rememberFieldValue, renderTab, bodyEl, config).
 (function () {
   "use strict";
 
@@ -42,50 +42,109 @@
   S.tabs = S.tabs || {};
 
   var currentConfig = null;
+  var configETag = null;
   var currentTab = "control";
+  var fieldValues = new WeakMap();
+  var returnFocus = null;
+
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-label", "Settings");
 
   openBtn.addEventListener("click", function () {
+    // More delegates to the header button, so remember the focused opener
+    // before the async config request instead of using the click target.
+    var opener = document.activeElement;
     apiFetch("/api/config")
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        configETag = r.headers && r.headers.get ? r.headers.get("ETag") : null;
+        return r.json();
+      })
       .then(function (cfg) {
         currentConfig = cfg;
         modal.classList.remove("hidden");
         renderTab(currentTab);
         setStatus("");
+        returnFocus = opener;
+        closeBtn.focus();
       })
       .catch(function (e) {
         setStatus("Failed to load config: " + e, "error");
       });
   });
 
-  closeBtn.addEventListener("click", function () {
+  function closeSettings() {
     modal.classList.add("hidden");
-  });
+    if (returnFocus && returnFocus.isConnected && returnFocus.getClientRects().length) {
+      returnFocus.focus();
+    }
+    returnFocus = null;
+  }
+
+  closeBtn.addEventListener("click", closeSettings);
   modal.addEventListener("click", function (e) {
-    if (e.target === modal) modal.classList.add("hidden");
+    if (e.target === modal) closeSettings();
+  });
+  // Scope this to Settings so a separate dialog can own its keyboard input.
+  modal.addEventListener("keydown", function (e) {
+    if (modal.classList.contains("hidden") || e.defaultPrevented) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettings();
+      return;
+    }
+    if (e.key !== "Tab") return;
+    var controls = Array.from(modal.querySelectorAll("button, a[href], input, select, textarea, summary, [tabindex]"))
+      .filter(function (el) {
+        // Closed details can still report layout boxes for their contents.
+        for (var parent = el.parentElement; parent && parent !== modal; parent = parent.parentElement) {
+          if (parent.tagName === "DETAILS" && !parent.open) {
+            var summary = parent.querySelector(":scope > summary");
+            if (!summary || !summary.contains(el)) return false;
+          }
+        }
+        return el.tabIndex >= 0 && !el.matches(":disabled") && el.getClientRects().length &&
+          getComputedStyle(el).visibility !== "hidden";
+      });
+    var first = controls[0], last = controls[controls.length - 1];
+    if (first && ((e.shiftKey && document.activeElement === first) ||
+        (!e.shiftKey && document.activeElement === last))) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
   });
 
   tabsEl.addEventListener("click", function (e) {
     if (e.target.tagName === "BUTTON" && e.target.dataset.tab) {
-      tabsEl.querySelectorAll("button").forEach(function (b) {
-        b.classList.toggle("active", b === e.target);
-      });
-      captureCurrentTab();
-      currentTab = e.target.dataset.tab;
-      renderTab(currentTab);
+      navigateTab(e.target.dataset.tab);
     }
   });
 
-  saveBtn.addEventListener("click", function () {
+  function navigateTab(tab) {
+    captureCurrentTab();
+    currentTab = tab;
+    tabsEl.querySelectorAll("button").forEach(function (button) {
+      button.classList.toggle("active", button.dataset.tab === tab);
+    });
+    renderTab(tab);
+  }
+
+  saveBtn.addEventListener("click", function () { saveSettings().catch(function () {}); });
+
+  function saveSettings() {
     captureCurrentTab();
     setStatus("Saving...");
-    apiFetch("/api/config", {
+    var headers = { "Content-Type": "application/json" };
+    if (configETag) headers["If-Match"] = configETag;
+    return apiFetch("/api/config", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers,
       body: JSON.stringify(currentConfig),
     })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+        configETag = r.headers && r.headers.get ? r.headers.get("ETag") : configETag;
         return r.json();
       })
       .then(function (res) {
@@ -106,11 +165,13 @@
         if (res && res.restart_required) {
           showRestartModal(res.restart_reasons || []);
         }
+        return res;
       })
       .catch(function (e) {
         setStatus("Save failed: " + e.message, "error");
+        throw e;
       });
-  });
+  }
 
   // ---- Restart-required modal ----
 
@@ -122,6 +183,15 @@
     var progressEl = document.getElementById("restart-progress");
     var progressTextEl = document.getElementById("restart-progress-text");
     if (!modalEl || !listEl || !laterBtn || !nowBtn) return;
+    // A second save response must not reset an open or pending prompt.
+    if (!modalEl.classList.contains("hidden")) return;
+
+    var dialogEl = modalEl.querySelector(".modal-content");
+    dialogEl.setAttribute("role", "dialog");
+    dialogEl.setAttribute("aria-modal", "true");
+    dialogEl.setAttribute("aria-label", "Restart required");
+    dialogEl.setAttribute("tabindex", "-1");
+    progressEl.setAttribute("role", "status");
 
     listEl.innerHTML = "";
     if (reasons.length === 0) {
@@ -143,15 +213,46 @@
     laterBtn.disabled = false;
     modalEl.classList.remove("hidden");
 
-    laterBtn.onclick = function () { modalEl.classList.add("hidden"); };
-    nowBtn.onclick = function () { triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl); };
+    var restartOpener = document.activeElement;
+    // The restart prompt sits above Settings. Keep all other body children
+    // out of keyboard navigation and the accessibility tree until it closes.
+    var background = Array.from(document.body.children).filter(function (el) {
+      return el !== modalEl && !el.contains(modalEl) && !el.inert;
+    });
+    background.forEach(function (el) { el.inert = true; });
+    laterBtn.focus();
+    function closeRestart() {
+      if (laterBtn.disabled) return;
+      modalEl.classList.add("hidden");
+      modalEl.onkeydown = null;
+      background.forEach(function (el) { el.inert = false; });
+      if (restartOpener && restartOpener.isConnected) restartOpener.focus();
+    }
+    laterBtn.onclick = closeRestart;
+    modalEl.onkeydown = function (e) {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRestart();
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        var buttons = [laterBtn, nowBtn].filter(function (button) { return !button.disabled; });
+        var index = buttons.indexOf(document.activeElement);
+        var next = index < 0 ? (e.shiftKey ? buttons.length - 1 : 0) :
+          (index + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+        (buttons[next] || dialogEl).focus();
+      }
+    };
+    nowBtn.onclick = function () { triggerRestart(dialogEl, nowBtn, laterBtn, progressEl, progressTextEl); };
   }
 
-  function triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl) {
+  function triggerRestart(dialogEl, nowBtn, laterBtn, progressEl, progressTextEl) {
     nowBtn.disabled = true;
     laterBtn.disabled = true;
     progressEl.classList.remove("hidden");
     progressTextEl.textContent = "Restarting…";
+    dialogEl.focus();
 
     apiFetch("/api/restart", { method: "POST" })
       .then(function (r) {
@@ -170,6 +271,7 @@
         laterBtn.disabled = false;
         progressEl.classList.add("hidden");
         alert("Restart failed: " + e.message);
+        laterBtn.focus();
       });
   }
 
@@ -205,9 +307,21 @@
     statusEl.className = "settings-status" + (kind ? " " + kind : "");
   }
 
+  // Async tabs register a field when they insert it, before the user can edit it.
+  function rememberFieldValue(input) {
+    fieldValues.set(input, input.dataset.checkboxPath ? input.checked : input.value);
+  }
+
+  function fieldValue(input, defaultValue) {
+    // Late inputs can also use their DOM default; selects have no defaultValue.
+    return fieldValues.has(input) ? fieldValues.get(input) : defaultValue;
+  }
+
   function captureCurrentTab() {
     var inputs = bodyEl.querySelectorAll("[data-path]");
     inputs.forEach(function (input) {
+      // A displayed default must not become a saved setting on an unchanged form.
+      if (fieldValue(input, input.defaultValue) === input.value) return;
       var path = input.dataset.path;
       var val = input.type === "number" ? parseFloat(input.value) : input.value;
       if (input.type === "number" && isNaN(val)) val = 0;
@@ -217,9 +331,12 @@
       // Preserve a stored password when the user hasn't typed over it.
       if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
+      fieldValues.set(input, input.value);
     });
     bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (input) {
+      if (fieldValue(input, input.defaultChecked) === input.checked) return;
       setByPath(currentConfig, input.dataset.checkboxPath, input.checked);
+      fieldValues.set(input, input.checked);
     });
   }
 
@@ -269,6 +386,9 @@
   }
 
   function renderTab(tab) {
+    var hadBodyFocus = bodyEl.contains(document.activeElement);
+    saveBtn.hidden = tab === "loadpoints" || (tab === "devices" && !!S.chargerSetup);
+    saveBtn.style.display = saveBtn.hidden ? "none" : "";
     var def = S.tabs[tab];
     if (!def) {
       bodyEl.innerHTML = '<p style="color:var(--text-dim)">Unknown tab: ' + escHtml(tab) + '</p>';
@@ -284,7 +404,10 @@
       getByPath: getByPath,
       setByPath: setByPath,
       captureCurrentTab: captureCurrentTab,
+      rememberFieldValue: rememberFieldValue,
       renderTab: renderTab,
+      navigateTab: navigateTab,
+      saveConfig: saveSettings,
       apiFetch: apiFetch,
     };
     var html = "";
@@ -295,9 +418,11 @@
       console.error("tab render:", tab, e);
     }
     bodyEl.innerHTML = html;
+    bodyEl.querySelectorAll("[data-path]").forEach(rememberFieldValue);
 
     // Generic handler for data-checkbox-path — shared across every tab.
     bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (cb) {
+      rememberFieldValue(cb);
       cb.addEventListener("change", function () {
         setByPath(currentConfig, cb.dataset.checkboxPath, cb.checked);
       });
@@ -305,6 +430,10 @@
 
     if (def.after) {
       try { def.after(ctx); } catch (e) { console.error("tab after:", tab, e); }
+    }
+    // In-tab actions can replace their own focused button while rendering.
+    if (hadBodyFocus && !modal.contains(document.activeElement)) {
+      (tabsEl.querySelector("button.active") || closeBtn).focus();
     }
   }
 })();

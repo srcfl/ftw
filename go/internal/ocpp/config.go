@@ -35,9 +35,10 @@ type Config struct {
 	HeartbeatIntervalS int    `yaml:"heartbeat_interval_s"`
 
 	// TLS, when set, serves wss:// instead of ws://. Optional client
-	// certificate verification implements OCPP 2.0.1 security profile 3,
-	// where the certificate — not a shared password — is what identifies a
-	// charge point.
+	// certificate verification implements OCPP 2.0.1 security profile 3:
+	// the TLS stack requires a cert from ClientCAFile, and checkClient
+	// binds that cert's CN or DNS SAN to the charge-point identity in the
+	// URL. A per-charger password, if configured, is an additional gate.
 	TLS *TLSConfig `yaml:"tls"`
 
 	// ChargerSecrets maps a charge point identity to a password of its own.
@@ -64,9 +65,8 @@ type TLSConfig struct {
 
 	// ClientCAFile, when set, requires every charge point to present a
 	// certificate signed by this CA and rejects the handshake otherwise.
-	// That is a far stronger identity than a shared password: it cannot be
-	// copied out of one charger's config and replayed by another device
-	// unless its private key was copied too.
+	// The cert's CN or DNS SAN must then match the identity in the URL —
+	// any cert from the CA is not enough to claim another charger's name.
 	ClientCAFile string `yaml:"client_ca_file"`
 }
 

@@ -354,6 +354,22 @@ func TestActuationThroughThePassthroughIsRefused(t *testing.T) {
 			},
 		},
 		{
+			name: "correcting the car's charge level, which has a command",
+			req: appproto.APIReq{
+				Method: appproto.APIPost, Path: "/api/loadpoints/1/soc",
+				Body: []byte(`{"soc":0.6}`), StepUp: true,
+			},
+			wantOp: appproto.OpLoadpointSoCSet,
+		},
+		{
+			name: "the loadpoint target, whose PV-only flag has a command",
+			req: appproto.APIReq{
+				Method: appproto.APIPost, Path: "/api/loadpoints/1/target",
+				Body: []byte(`{"surplus_only":false}`), StepUp: true,
+			},
+			wantOp: appproto.OpLoadpointSurplusOnlySet,
+		},
+		{
 			name: "holding the battery",
 			req: appproto.APIReq{
 				Method: appproto.APIPost, Path: "/api/battery/manual_hold",

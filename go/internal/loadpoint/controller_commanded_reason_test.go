@@ -127,7 +127,14 @@ func TestCommandedReasonSiteMeterStale(t *testing.T) {
 	samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 0, RequestActive: true}}
 	c := newTestController(t, []Config{cfg}, nil, samples, sender)
 
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4140, Persistent: true})
 	c.TickWithDispatch(context.Background(), base, false)
+	h, _ := c.GetManualHold(cfg.ID, base)
+	st, _ := c.manager.State(cfg.ID)
+	got := ManualStatusFrom(h, true, st, ChargerReading{Known: true, UpdatedAt: time.Now()}, time.Now())
+	if got.State != ManualLimited || got.LimitReason != "site_meter_stale" {
+		t.Fatalf("manual standdown lost its known reason: %+v", got)
+	}
 
 	if w, r := commandedReason(t, c, cfg.ID); w != 0 || r != "site_meter_stale" {
 		t.Errorf("standdown: want (0, site_meter_stale), got (%.0f, %q)", w, r)
@@ -144,7 +151,7 @@ func TestCommandedReasonManualHold(t *testing.T) {
 
 	c.Tick(context.Background(), base)
 
-	if w, r := commandedReason(t, c, cfg.ID); w != 11040 || r != "manual_hold" {
-		t.Errorf("hold: want (11040, manual_hold), got (%.0f, %q)", w, r)
+	if w, r := commandedReason(t, c, cfg.ID); w != 11000 || r != "charger_limit" {
+		t.Errorf("hold: want (11000, charger_limit), got (%.0f, %q)", w, r)
 	}
 }

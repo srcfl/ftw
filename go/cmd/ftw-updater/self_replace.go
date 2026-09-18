@@ -35,6 +35,7 @@ import (
 
 const (
 	canonicalUpdaterImage = "ghcr.io/srcfl/ftw-updater"
+	legacyUpdaterImage    = "ghcr.io/frahlg/forty-two-watts-updater"
 	// updaterTagEnv pins the sidecar image the same way mainTagEnv pins Core.
 	// These must match the tagEnv values in componentSpec.
 	updaterTagEnv = "FTW_UPDATER_IMAGE_TAG"
@@ -215,7 +216,7 @@ func isUpdaterImage(image string) bool {
 	if idx := strings.Index(repo[slash+1:], ":"); idx >= 0 {
 		repo = repo[:slash+1+idx]
 	}
-	if repo == canonicalUpdaterImage {
+	if repo == canonicalUpdaterImage || repo == legacyUpdaterImage {
 		return true
 	}
 	return strings.HasSuffix(repo, "/ftw-updater")

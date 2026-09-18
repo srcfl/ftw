@@ -5731,15 +5731,8 @@ func TestPVSurplusAbsorberDoesNotReverseDischarge(t *testing.T) {
 	}
 }
 
-// Regression guard for the production v0.87.0 incident: PV forecast was off
-// by 7×, plan said battery idle (export the imaginary PV surplus), batteries
-// sat at 0 W while the site imported 648 W. The carve-out was only in
-// planner_self so passive_arbitrage didn't benefit.
-//
-// Fix: passive_arbitrage now participates in the reactive-discharge carve-out
-// when the plan slot is idle (non-charge). The battery should discharge to
-// cover the live import just as planner_self would.
-func TestPlannerPassiveArbitrageIdleSlotReactsToForecastMiss(t *testing.T) {
+// Idle in an arbitrage plan preserves energy for later slots even after a load miss.
+func TestPlannerPassiveArbitrageIdleSlotPreservesEnergy(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -5766,12 +5759,8 @@ func TestPlannerPassiveArbitrageIdleSlotReactsToForecastMiss(t *testing.T) {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
 	got := targets[0].TargetW
-	// Reactive PI on grid=+600 W with Kp=0.5 yields ~-300 W discharge
-	// after one tick. The key assertion is that the battery discharged at
-	// all — before the fix planHasNonDischargeIntent returned true and
-	// floored the target to 0.
-	if got >= 0 {
-		t.Errorf("TargetW = %.0f W — passive_arbitrage idle slot must discharge reactively when meter imports (forecast miss). Before fix: target was floored to 0.", got)
+	if got != 0 {
+		t.Errorf("TargetW = %.0f W, want idle to preserve planned energy", got)
 	}
 }
 
@@ -6017,7 +6006,7 @@ func TestSlotMetricsAccumulatesActualWhAcrossTicks(t *testing.T) {
 //     the next slot's measurement.
 func TestSlotMetricsResetsOnSlotRollover(t *testing.T) {
 	now := time.Now()
-	slot1Start := now.Add(-30 * time.Second)
+	slot1Start := now.Add(-2 * time.Minute)
 	slot1 := SlotDirective{
 		SlotStart:       slot1Start,
 		SlotEnd:         slot1Start.Add(15 * time.Minute),
@@ -6089,6 +6078,7 @@ func TestSlotMetricsLogsOverDeliveryAtSlotEnd(t *testing.T) {
 	// Anchor slot 1.
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	// Force accumulator to -850 Wh (2 × planned magnitude → ratio 2.0).
+	st.slotPlannedPastWh = -425
 	st.slotActualWh = -850
 
 	// Rollover into slot 2 — should log + increment OverDeliveryCount.
@@ -6136,6 +6126,7 @@ func TestSlotMetricsDetectsSignMismatch(t *testing.T) {
 
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	// Same magnitude as planned, opposite direction.
+	st.slotPlannedPastWh = -425
 	st.slotActualWh = +425
 
 	active = slot2
@@ -6184,6 +6175,7 @@ func TestSlotMetricsLogsUnderDelivery(t *testing.T) {
 	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
 
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotPlannedPastWh = -425
 	st.slotActualWh = -100 // ratio = 100/425 ≈ 0.235 < 0.5
 
 	active = slot2
@@ -6265,6 +6257,7 @@ func TestSlotMetricsCounterSurvivesMultipleSlots(t *testing.T) {
 	// For each of slots 0,1,2: force over-delivery on the in-flight slot,
 	// then advance idx → next tick triggers rollover evaluation.
 	for i := 0; i < 3; i++ {
+		st.slotPlannedPastWh = -400
 		st.slotActualWh = -1000 // ratio = 1000/400 = 2.5 → over
 		idx++
 		_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -6275,14 +6268,8 @@ func TestSlotMetricsCounterSurvivesMultipleSlots(t *testing.T) {
 	}
 }
 
-// TestPlannerArbitrageIdleSlotCoversLiveImport is the planner_arbitrage
-// companion to TestPlannerPassiveArbitrageIdleSlotReactsToForecastMiss. On an
-// idle planner_arbitrage slot (BatteryEnergyWh ≈ 0 — the DP planned neither
-// charge nor discharge, expecting PV to cover load) a forecast miss that
-// leaves the meter importing must be covered reactively by the battery, not
-// imported. Before this fix the idle slot stayed on the energy path
-// (targetTotalW = 0) and the battery sat idle while the site imported.
-func TestPlannerArbitrageIdleSlotCoversLiveImport(t *testing.T) {
+// Active arbitrage keeps the same idle contract as passive arbitrage.
+func TestPlannerArbitrageIdleSlotPreservesEnergy(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -6311,8 +6298,8 @@ func TestPlannerArbitrageIdleSlotCoversLiveImport(t *testing.T) {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
 	got := targets[0].TargetW
-	if got >= 0 {
-		t.Errorf("TargetW = %.0f W — planner_arbitrage idle slot must discharge reactively to cover a live import (forecast miss), not sit at 0 and import", got)
+	if got != 0 {
+		t.Errorf("TargetW = %.0f W, want idle to preserve planned energy", got)
 	}
 }
 

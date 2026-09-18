@@ -70,7 +70,7 @@ function buttonsOf(el) {
 // What /api/drivers/catalog will say after the switch under test.
 let catalogEntry = {};
 
-function load() {
+function load(mutationBody = { status: "ok", runtime_verified: true, restarted_drivers: ["p1"] }) {
   const calls = [];
   const window = { FTWSettings: { tabs: {} } };
   vm.runInNewContext(source, {
@@ -83,7 +83,7 @@ function load() {
       if (path === "/api/drivers/catalog") {
         return { ok: true, json: async () => ({ entries: [catalogEntry] }) };
       }
-      return { ok: true, json: async () => ({ status: "ok" }) };
+      return { ok: true, json: async () => mutationBody };
     },
     window,
   });
@@ -177,7 +177,7 @@ test("the panel says what is running and what can be switched to", () => {
   const text = textOf(panel);
   assert.match(text, /v1\.1\.1/);
   assert.match(text, /untested/);
-  assert.match(text, /running now/);
+  assert.match(text, /selected/);
   assert.match(text, /verified on hardware/);
 });
 
@@ -410,7 +410,7 @@ test("only one row claims to be running", async () => {
     runningVersion: "1.0.0", runningSource: "bundled", logicalPath: "drivers/ferroamp.lua",
   });
 
-  assert.match(textOf(panel), /running now/);
+  assert.match(textOf(panel), /selected/);
   buttonsOf(panel)[0].click();
   await settle();
 
@@ -533,4 +533,47 @@ test("manifest data and driver source become text, never markup", () => {
   assert.match(builders, /createElement\("button"\)/);
   assert.match(builders, /pre\.textContent = body\.lua/,
     "driver source is set as text so it renders as code, not as HTML");
+});
+
+for (const result of [
+  {status: "installed"},
+  {runtime_verified: false, restarted_drivers: []},
+  {runtime_verified: true, restarted_drivers: []},
+  {runtime_verified: true, restarted_drivers: ["another-device"]},
+]) {
+  test(`a successful download needs proof for this runtime: ${JSON.stringify(result)}`, async () => {
+    const {api} = load(result);
+    const panel = element("div");
+    api.render(panel, "ferroamp", PAYLOAD, {driverName: "p1", runningVersion: "1.0.0", runningSource: "bundled"});
+    buttonsOf(panel)[0].click();
+    await settle();
+    assert.match(textOf(panel), /Installed. No running instance was verified/);
+    assert.doesNotMatch(textOf(panel), /is running|fresh telemetry verified|Undo/);
+  });
+}
+
+test("a filename change refreshes the summary from the verified target path", async () => {
+  const {api, calls} = load({runtime_verified: true, restarted_drivers: ["p1"], logical_path: "drivers/esphome-dsmr.lua"});
+  const panel = element("div");
+  const headlineEl = element("span");
+  headlineEl.textContent = "v1.0.2";
+  catalogEntry = {id: "esphome-dsmr", path: "drivers/esphome-dsmr.lua", version: "1.0.3", source: "managed"};
+  const pathChanges = [];
+  const opts = {driverName: "p1", runningVersion: "1.0.2", runningSource: "bundled", logicalPath: "drivers/esphome_dsmr.lua", headlineEl, onPathChanged: (a,b) => pathChanges.push([a,b])};
+  api.render(panel, "esphome-dsmr", {available: [{repository_id: "test", driver: {version: "1.0.3"}}]}, opts);
+  buttonsOf(panel)[0].click();
+  await settle();
+  assert.match(headlineEl.textContent, /1.0.3/);
+  assert.deepEqual(pathChanges, [["drivers/esphome_dsmr.lua", "drivers/esphome-dsmr.lua"]]);
+  assert.ok(calls.some(c => c.path === "/api/drivers/catalog"));
+});
+
+
+test("a saved filename change tells the open Settings dialog to reload before Save", async () => {
+  const {api} = load({runtime_verified: true, restarted_drivers: ["p1"], config_changed: true});
+  const panel = element("div");
+  api.render(panel, "ferroamp", PAYLOAD, {driverName: "p1", runningVersion: "1.0.0"});
+  buttonsOf(panel)[0].click();
+  await settle();
+  assert.match(textOf(panel), /fresh telemetry verified. Settings changed. Close and reopen Settings before saving/);
 });

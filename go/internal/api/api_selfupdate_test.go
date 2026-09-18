@@ -2,6 +2,8 @@ package api
 
 import (
 	"compress/gzip"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net"
@@ -128,7 +130,9 @@ func startFakeSidecar(t *testing.T, statusCode int) string {
 
 func waitUntil(t *testing.T, fn func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// These checks wait for update/backup state transitions, not a latency
+	// promise. Filesystem work can exceed two seconds on a busy CI runner.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if fn() {
 			return
@@ -318,17 +322,15 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 			t.Errorf("snapshot missing %s: %v", f, err)
 		}
 	}
-	// The compressed state.db in the snapshot must be usable.
+	// The compressed settings database must carry the seeded config. It is
+	// read as a plain SQLite file here: a Core open expects the live
+	// history.db beside it, which a real rollback leaves in place (see
+	// TestRollbackPointRestoresBesideHistoryInPlace).
 	restoredPath := filepath.Join(t.TempDir(), "state.db")
 	gunzipTestFile(t, filepath.Join(snapPath, "state.db.gz"), restoredPath)
-	snap, err := state.Open(restoredPath)
-	if err != nil {
-		t.Fatalf("snapshot state.db unusable: %v", err)
+	if v := readSnapshotConfigValue(t, restoredPath, "mode"); v != "planner_self" {
+		t.Errorf("snapshot missing seeded mode config: %q", v)
 	}
-	if v, ok := snap.LoadConfig("mode"); !ok || v != "planner_self" {
-		t.Errorf("snapshot missing seeded mode config: %q ok=%v", v, ok)
-	}
-	snap.Close()
 
 	gotStatus := c.Status()
 	if gotStatus.State != "failed" || gotStatus.Action != "update" || gotStatus.Target != "v1.5.0" {
@@ -336,7 +338,9 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	}
 }
 
-func TestVersionUpdateSkipsFullHistoryBackupWhenSchemaIsUnchanged(t *testing.T) {
+// The rollback point is bounded by the settings database, so every update
+// takes one, including an update that keeps the state schema (#1302).
+func TestVersionUpdateSavesRollbackPointWhenSchemaIsUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	statusPath := filepath.Join(dir, "update-state.json")
 	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
@@ -362,14 +366,122 @@ func TestVersionUpdateSkipsFullHistoryBackupWhenSchemaIsUnchanged(t *testing.T) 
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response["snapshot_skipped"] != true ||
-		response["snapshot_skip_reason"] != "database schema unchanged" {
-		t.Fatalf("response = %+v", response)
+	if _, skipped := response["snapshot_skipped"]; skipped {
+		t.Fatalf("schema-compatible update skipped its rollback point: %+v", response)
 	}
 	waitUntil(t, func() bool { return c.Status().State == "failed" })
-	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
-		t.Fatalf("schema-compatible update created snapshot dir: %v", err)
+	entries, err := os.ReadDir(snapDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("rollback point dir = %v %v, want one entry", entries, err)
 	}
+	if _, err := os.Stat(filepath.Join(snapDir, entries[0].Name(), "state.db.gz")); err != nil {
+		t.Fatalf("rollback point missing its settings database: %v", err)
+	}
+}
+
+// A rollback replaces state.db and leaves history.db where it is. The point
+// therefore holds no history rows, and every row written before or after it
+// survives the rollback (#1302).
+func TestRollbackPointRestoresBesideHistoryInPlace(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.db")
+	st, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			st.Close()
+		}
+	})
+	if err := st.SaveConfig("mode", "planner_self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BulkRecordHistory(recentHistoryPoints(500, 0)); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: filepath.Join(dir, "snapshots")})
+	snap, err := srv.createPreUpdateSnapshot("update", "v1.4.0", "v1.5.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := readSnapshotMeta(snap.Path)
+	if err != nil || !meta.HistoryInPlace || !snapshotMetaRestorable(meta) {
+		t.Fatalf("rollback point meta = %+v %v", meta, err)
+	}
+	raw := filepath.Join(t.TempDir(), "point.db")
+	gunzipTestFile(t, filepath.Join(snap.Path, "state.db.gz"), raw)
+	if n := countSnapshotRows(t, raw, `SELECT COUNT(*) FROM sqlite_master WHERE name='history_hot'`); n != 0 {
+		t.Fatalf("rollback point copied the history table")
+	}
+
+	// History written after the point must survive the rollback too.
+	if err := st.BulkRecordHistory(recentHistoryPoints(500, 500)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FlushHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore the way ftw-updater does: replace state.db, drop its WAL and
+	// SHM, and leave history.db untouched.
+	gunzipTestFile(t, filepath.Join(snap.Path, "state.db.gz"), statePath)
+	_ = os.Remove(statePath + "-wal")
+	_ = os.Remove(statePath + "-shm")
+	restored, err := state.Open(statePath)
+	if err != nil {
+		t.Fatalf("rollback with history in place failed to open: %v", err)
+	}
+	defer restored.Close()
+	if v, ok := restored.LoadConfig("mode"); !ok || v != "planner_self" {
+		t.Fatalf("restored settings = %q ok=%v", v, ok)
+	}
+	if n := countSnapshotRows(t, filepath.Join(dir, "history.db"), `SELECT COUNT(*) FROM history_hot`); n != 1000 {
+		t.Fatalf("history rows after rollback = %d, want 1000", n)
+	}
+}
+
+func recentHistoryPoints(n, offset int) []state.HistoryPoint {
+	base := time.Now().Add(-time.Hour).UnixMilli()
+	points := make([]state.HistoryPoint, n)
+	for i := range points {
+		points[i] = state.HistoryPoint{TsMs: base + int64(offset+i)*1000, GridW: float64(i)}
+	}
+	return points
+}
+
+func readSnapshotConfigValue(t *testing.T, path, key string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value string
+	if err := db.QueryRow(`SELECT value FROM config WHERE key=?`, key).Scan(&value); err != nil {
+		t.Fatalf("read %s from %s: %v", key, path, err)
+	}
+	return value
+}
+
+func countSnapshotRows(t *testing.T, path, query string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(query).Scan(&n); err != nil {
+		t.Fatalf("%s on %s: %v", query, path, err)
+	}
+	return n
 }
 
 func TestUpdateStatusHeartbeatPublishesBackupProgress(t *testing.T) {
@@ -881,5 +993,25 @@ func TestVersionUpdateStatus_Idle(t *testing.T) {
 	}
 	if out.State != "idle" {
 		t.Errorf("state = %q, want idle (no StatusPath configured)", out.State)
+	}
+}
+
+func TestVersionRestartSurfacesOldUpdaterRefusal(t *testing.T) {
+	checker := selfupdate.New(selfupdate.Config{
+		CurrentVersion: "v2.14.0-beta.1",
+		SocketPath:     startFakeSidecar(t, http.StatusBadRequest),
+	}, newMemStore())
+	srv := New(&Deps{SelfUpdate: checker})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/restart", nil))
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body["error"], "safe restart requires a newer updater") {
+		t.Fatalf("missing user recovery instruction: %v", body)
 	}
 }

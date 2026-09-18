@@ -2,14 +2,151 @@ package backup
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+func writeTestParquet(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := parquet.WriteFile(path, []struct {
+		Ts    int64
+		Value float64
+	}{{Ts: 1, Value: 123}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRejectsUnreadableParquetWithMatchingHash(t *testing.T) {
+	for _, corruption := range []string{"truncated", "pages"} {
+		t.Run(corruption, func(t *testing.T) {
+			root := t.TempDir()
+			statePath := filepath.Join(root, "state.db")
+			st, err := state.Open(statePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			pq := filepath.Join(root, "cold", "2026", "01", "01.parquet")
+			writeTestParquet(t, pq)
+			data, err := os.ReadFile(pq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if corruption == "truncated" {
+				data = data[:len(data)/2]
+			} else {
+				footer := int(binary.LittleEndian.Uint32(data[len(data)-8:]))
+				clear(data[4 : len(data)-8-footer])
+			}
+			if err := os.WriteFile(pq, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if info, err := Create(context.Background(), CreateOptions{State: st, StatePath: statePath, DataDir: root, OutputDir: filepath.Join(root, "backups")}); err == nil {
+				t.Errorf("published unreadable Parquet as verified: %+v", info)
+			}
+			// A hash only proves that the archive kept the bytes it received.
+			// Also exercise verification of an archive produced elsewhere.
+			db := filepath.Join(t.TempDir(), "state.db.gz")
+			if _, _, err := st.BackupWithConfiguration(db, nil); err != nil {
+				t.Fatal(err)
+			}
+			sources := []sourceEntry{{archivePath: "data/state.db.gz", sourcePath: db}, {archivePath: "data/cold/2026/01/01.parquet", sourcePath: pq}}
+			manifest := Manifest{Format: Format, SchemaVersion: SchemaVersion, CreatedAt: time.Now(), DatabaseFile: "state.db", DatabaseEntry: "data/state.db.gz"}
+			for i := range sources {
+				entry, err := describeSource(context.Background(), root, sources[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				sources[i].entry = entry
+				manifest.Files = append(manifest.Files, entry)
+			}
+			archive := filepath.Join(t.TempDir(), "bad.ftwbak")
+			if err := writeArchive(context.Background(), archive, manifest, sources, true); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(archive); err == nil {
+				t.Fatal("accepted matching hashes for unreadable Parquet")
+			}
+		})
+	}
+}
+
+func TestOfflineBackupCreateVerifyRestore(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dataDir, "state.db")
+	st, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveConfig("ev_goal", "80% by 07:00"); err != nil {
+		t.Fatal(err)
+	}
+	points := make([]state.HistoryPoint, 2500)
+	for i := range points {
+		points[i] = state.HistoryPoint{TsMs: int64(i + 1), GridW: float64(i)}
+	}
+	if err := st.BulkRecordHistory(points); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	src, err := state.OpenBackupSource(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if !src.OfflineBackup() {
+		t.Fatal("offline helper was treated as a live Core store")
+	}
+	info, err := Create(context.Background(), CreateOptions{
+		State: src, StatePath: statePath, DataDir: dataDir,
+		OutputDir: filepath.Join(root, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+	t.Setenv("TMP", blocked)
+	t.Setenv("TEMP", blocked)
+	if _, err := Verify(info.Path); err != nil {
+		t.Fatal(err)
+	}
+	restoredDir := filepath.Join(root, "restored")
+	if _, err := Restore(info.Path, restoredDir, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := state.Open(filepath.Join(restoredDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if goal, ok := restored.LoadConfig("ev_goal"); !ok || goal != "80% by 07:00" {
+		t.Fatalf("restored goal = %q ok=%v", goal, ok)
+	}
+	h, err := restored.LoadHistory(0, 3000, 0)
+	if err != nil || len(h) != 2500 || h[0].GridW != 0 || h[2499].GridW != 2499 {
+		t.Fatalf("restored history = %d %v %+v", len(h), err, h)
+	}
+}
 
 func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	root := t.TempDir()
@@ -28,11 +165,12 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.SaveConfig("backup-test", "preserved"); err != nil {
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(dataDir, "config.yaml"), "site:\n  name: backup-test\n")
-	writeTestFile(t, filepath.Join(dataDir, "cold", "2026", "07", "17.parquet"), "parquet-test")
+	writeTestParquet(t, filepath.Join(dataDir, "cold", "2026", "07", "17.parquet"))
 	installed := filepath.Join(dataDir, "driver-repository", "installed", "official", "meter", "1.2.3", "meter.lua")
 	writeTestFile(t, installed, "DRIVER = { id = 'meter', version = '1.2.3' }")
 	active := filepath.Join(dataDir, "driver-repository", "active", "meter.lua")
@@ -116,6 +254,65 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	}
 }
 
+func TestSQLiteBackupKeepsParquetAndOmitsLiveDatabaseFiles(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "source")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dataDir, "custom.db")
+	st, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	oldTS := time.Now().Add(-40 * 24 * time.Hour).UnixMilli()
+	if err := st.RecordSamples([]state.Sample{{Driver: "meter", Metric: "power", TsMs: oldTS, Value: 123, Unit: "W"}}); err != nil {
+		t.Fatal(err)
+	}
+	coldDir := filepath.Join(dataDir, "cold")
+	_, files, err := st.RolloffToParquet(context.Background(), coldDir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("legacy source: %v %v", files, err)
+	}
+	liveTmp := state.HistoryDatabasePath(statePath) + ".tmp"
+	if err := os.MkdirAll(liveTmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(liveTmp, "spill.bin"), "transient history data")
+	writeTestFile(t, filepath.Join(state.HistoryDatabasePath(statePath)+".import-abandoned", "staging.duckdb"), "abandoned import staging")
+	writeTestParquet(t, filepath.Join(coldDir, "diagnostics", "2026", "01", "01.parquet"))
+	info, err := Create(context.Background(), CreateOptions{State: st, StatePath: statePath, DataDir: dataDir, OutputDir: filepath.Join(root, "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := Verify(info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range manifest.Files {
+		if strings.Contains(f.Path, ".duckdb") || strings.Contains(f.Path, ".history.db") {
+			t.Fatalf("live or duplicated history in archive: %s", f.Path)
+		}
+	}
+	st.Close()
+	restoredDir := filepath.Join(root, "restored")
+	if _, err := Restore(info.Path, restoredDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// A SQLite-only Core reads the portable database, with no overlapping
+	// daily sample files that could make its old merge count samples twice.
+	restored, err := state.OpenWithLegacyHistory(filepath.Join(restoredDir, "custom.db"), filepath.Join(restoredDir, "cold"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	samples, err := restored.LoadSeries("meter", "power", 0, time.Now().UnixMilli(), 0)
+	if err != nil || len(samples) != 1 || samples[0].Value != 123 {
+		t.Fatalf("restored history: %+v %v", samples, err)
+	}
+}
+
 func TestVerifyRejectsCorruptArchive(t *testing.T) {
 	filename := filepath.Join(t.TempDir(), "broken.ftwbak")
 	if err := os.WriteFile(filename, []byte("not a backup"), 0o600); err != nil {
@@ -180,6 +377,7 @@ func TestRestoreContentsAndRevertPreserveBothStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.SaveConfig("generation", "backup"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,5 +429,118 @@ func writeTestFile(t *testing.T, filename, body string) {
 	}
 	if err := os.WriteFile(filename, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAbsoluteManagedDriverBackupRestoresAtAnotherPath(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "original-data")
+	installed := filepath.Join(dataDir, "driver-repository", "installed", "ftw-official", "goodwe", "1.0.1", strings.Repeat("a", 64), "goodwe.lua")
+	active := filepath.Join(dataDir, "driver-repository", "active", "goodwe.lua")
+	if err := os.MkdirAll(filepath.Dir(installed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(active), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, installed, "DRIVER = { id = 'goodwe', version = '1.0.1' }")
+	if err := os.Symlink(installed, active); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dataDir, "state.db")
+	st, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	archive, err := Create(context.Background(), CreateOptions{State: st, StatePath: statePath, DataDir: dataDir, OutputDir: filepath.Join(root, "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := Verify(archive.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range manifest.Files {
+		if entry.Type == "symlink" && filepath.IsAbs(entry.LinkTarget) {
+			t.Fatalf("archive kept host link: %+v", entry)
+		}
+	}
+	// The archive may not silently alter the active installation.
+	if target, _ := os.Readlink(active); target != installed {
+		t.Fatalf("source link changed: %q", target)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Remove the source completely before reading the restored link. Otherwise
+	// a link back to the old host path could make this test pass by accident.
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	restoredDir := filepath.Join(root, "new-installation", "data")
+	if err := os.MkdirAll(filepath.Dir(restoredDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(archive.Path, restoredDir, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	restoredLink := filepath.Join(restoredDir, "driver-repository", "active", "goodwe.lua")
+	body, err := os.ReadFile(restoredLink)
+	if err != nil || !strings.Contains(string(body), "goodwe") {
+		t.Fatalf("restored driver = %q, %v", body, err)
+	}
+	restoredRoot, err := filepath.EvalSymlinks(restoredDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := filepath.EvalSymlinks(restoredLink)
+	if err != nil || !pathInside(restoredRoot, target) {
+		t.Fatalf("restored link escapes: %s, %v", target, err)
+	}
+}
+
+func TestValidateManifestChecksSymlinkChains(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		links map[string]string
+		valid bool
+	}{
+		{"internal driver chain", map[string]string{"data/active.lua": "installed.lua", "data/installed.lua": "version/driver.lua"}, true},
+		{"cycle", map[string]string{"data/a": "b", "data/b": "a"}, false},
+		// Lexically each target stays inside data/. Resolving alias first
+		// changes the depth, so ../.. then escapes the archive root.
+		{"dotdot after directory link", map[string]string{"data/dir/alias": "../target", "data/escape": "dir/alias/../../outside"}, false},
+		{"absolute host path", map[string]string{"data/active.lua": "/app/data/driver.lua"}, false},
+		{"direct escape", map[string]string{"data/active.lua": "../outside"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := Manifest{Format: Format, SchemaVersion: SchemaVersion, CreatedAt: time.Now(), DatabaseFile: "state.db", DatabaseEntry: "data/state.db.gz", Files: []FileEntry{{Path: "data/state.db.gz", Type: "file", SHA256: strings.Repeat("a", 64)}}}
+			for name, target := range tc.links {
+				m.Files = append(m.Files, FileEntry{Path: name, Type: "symlink", LinkTarget: target, SHA256: strings.Repeat("b", 64)})
+			}
+			err := validateManifest(m)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v, err=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestDescribeSourceRejectsExternalAbsoluteLinkWithoutReadingIt(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "secret")
+	writeTestFile(t, outside, "must not enter the backup")
+	link := filepath.Join(dataDir, "driver.lua")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := describeSource(context.Background(), dataDir, sourceEntry{archivePath: "data/driver.lua", sourcePath: link})
+	if err == nil || !strings.Contains(err.Error(), "escapes data dir") {
+		t.Fatalf("external link error = %v", err)
 	}
 }

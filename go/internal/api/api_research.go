@@ -76,6 +76,16 @@ func (s *Server) handleLoadResearchDump(w http.ResponseWriter, r *http.Request) 
 	}
 
 	buckets := buildLoadResearchBuckets(history)
+	excluded := 0
+	for _, row := range history {
+		if !researchOriginalObservation(row) {
+			excluded++
+		}
+	}
+	if len(buckets) == 0 && excluded > 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Only dashboard summaries remain in this range. They cannot be exported as original training observations."})
+		return
+	}
 	stamp := now.Format("20060102-150405")
 	root := "ftw-load-research-" + stamp
 
@@ -100,18 +110,20 @@ func (s *Server) handleLoadResearchDump(w http.ResponseWriter, r *http.Request) 
 	}
 
 	manifest := map[string]any{
-		"format":         "forty-two-watts-load-research",
-		"format_version": loadResearchFormatVersion,
-		"generated_at":   now.Format(time.RFC3339),
-		"version":        s.deps.Version,
-		"site_id":        s.researchSiteID(),
-		"since_ms":       sinceMs,
-		"until_ms":       untilMs,
-		"days":           days,
-		"bucket_min":     loadResearchBucketMin,
-		"timezone":       time.Local.String(),
-		"privacy":        "no logs, no raw config, no hostnames, no driver names, no device identifiers",
-		"load_semantics": "house_load_w = max(grid_w - pv_w - bat_w - ev_w - v2x_w, 0); site convention: import/charge positive, PV/battery discharge/V2X discharge negative",
+		"format":                          "forty-two-watts-load-research",
+		"format_version":                  loadResearchFormatVersion,
+		"generated_at":                    now.Format(time.RFC3339),
+		"version":                         s.deps.Version,
+		"site_id":                         s.researchSiteID(),
+		"since_ms":                        sinceMs,
+		"until_ms":                        untilMs,
+		"days":                            days,
+		"bucket_min":                      loadResearchBucketMin,
+		"excluded_dashboard_summary_rows": excluded,
+		"observation_policy":              "original site observations only; dashboard summaries are excluded",
+		"timezone":                        time.Local.String(),
+		"privacy":                         "no logs, no raw config, no hostnames, no driver names, no device identifiers",
+		"load_semantics":                  "house_load_w = max(grid_w - pv_w - bat_w - ev_w - v2x_w, 0); site convention: import/charge positive, PV/battery discharge/V2X discharge negative",
 		"contents": []string{
 			"manifest.json",
 			"site.json",
@@ -134,10 +146,24 @@ func (s *Server) handleLoadResearchDump(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func researchOriginalObservation(row state.HistoryPoint) bool {
+	if row.ResolutionMS > 1 || row.N > 1 {
+		return false
+	}
+	var detail struct {
+		Quality string `json:"forecast_measurement_quality"`
+	}
+	_ = json.Unmarshal([]byte(row.JSON), &detail)
+	return detail.Quality != "aggregate_not_for_training"
+}
+
 func buildLoadResearchBuckets(rows []state.HistoryPoint) []loadResearchBucket {
 	const bucketMs = int64(loadResearchBucketMin * 60 * 1000)
 	byStart := make(map[int64]*loadResearchBucket)
 	for _, row := range rows {
+		if !researchOriginalObservation(row) {
+			continue
+		}
 		start := (row.TsMs / bucketMs) * bucketMs
 		b := byStart[start]
 		if b == nil {

@@ -134,3 +134,47 @@ func TestLoadCatalogReadsWriteCapabilities(t *testing.T) {
 		t.Errorf("reader declared no write path but got %v", byID["reader"].WriteCapabilities)
 	}
 }
+
+func TestLoadCatalogReadsAuthPostPath(t *testing.T) {
+	dir := t.TempDir()
+	oauth := "DRIVER = {\n  id = \"myuplink\",\n  name = \"MyUplink\",\n" +
+		"  read_only = true,\n  auth_post_path = \"/oauth/token\",\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "myuplink.lua"), []byte(oauth), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plain := "DRIVER = {\n  id = \"meter\",\n  name = \"Meter\",\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "meter.lua"), []byte(plain), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := LoadCatalog(dir)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	byID := make(map[string]CatalogEntry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+	if byID["myuplink"].AuthPostPath != "/oauth/token" {
+		t.Errorf("myuplink AuthPostPath = %q, want /oauth/token", byID["myuplink"].AuthPostPath)
+	}
+	if byID["meter"].AuthPostPath != "" {
+		t.Errorf("meter AuthPostPath = %q, want empty", byID["meter"].AuthPostPath)
+	}
+}
+
+func TestCatalogMyUplinkDeclaresAuthPostPath(t *testing.T) {
+	entries, err := LoadCatalog("../../../drivers")
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	for _, e := range entries {
+		if e.ID == "myuplink" {
+			if e.AuthPostPath != "/oauth/token" {
+				t.Fatalf("myuplink AuthPostPath = %q, want /oauth/token", e.AuthPostPath)
+			}
+			return
+		}
+	}
+	t.Fatal("myuplink missing from catalog")
+}

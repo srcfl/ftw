@@ -1,22 +1,50 @@
 # Contributing to FTW
 
-Thanks for helping build the local energy coordination layer. This document
-covers the legal bits — for how the code is organized and how to add a driver,
-start with [`AGENTS.md`](AGENTS.md) and
-[`docs/writing-a-driver.md`](docs/writing-a-driver.md).
+Sourceful develops and maintains FTW; Fredrik owns its direction. External
+PRs are welcome, including code, drivers, documentation and website changes.
+Prefer an [issue](https://github.com/srcfl/ftw/issues) that states the need and
+evidence, and link it from the PR. Small fixes do not need a separate issue.
+The [product vision](VISION.md) guides scope and priority.
+
+For a broad product or architecture idea, a short Markdown PR is a useful
+start. Explain the problem, proposed result and how we could test it in the
+PR description or relevant maintained docs. Mark proposals as proposed;
+keep agent scratch notes and task breakdowns out of the repository. Concrete
+fixes can include code and tests. No proposal promises a delivery date.
+
+## Agentic first
+
+People and agents should be able to assess and continue the work from its
+record. State the problem, scope, relevant issue, test steps and results.
+Use focused changes and reproducible evidence. The submitter checks agent
+output and remains responsible for the contribution and its sign-off.
+
+Test evidence should fit the change. For device behaviour, include hardware
+model, firmware, test steps and observed results before merge. State missing
+hardware tests and keep the PR as a proposal or draft until they are done.
+Simulator tests help catch bugs but do not prove physical support. Docs do
+not need hardware tests; UI changes need a browser review. Driver control
+keeps its separate safety and hardware acceptance gates.
+
+This policy changes no license, past attribution or release authority.
 
 ## Website
 
-The public website (<https://ftw.sourceful.energy>) lives in its own
+The public website (<https://ftw.energy>) lives in its own
 repository, [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web). Landing-page
-copy, install instructions and other site content are edited there, not in this
-repo — open a pull request against `srcfl/ftw-web` for website changes.
+copy, install instructions and other site content live there. Use
+[its issue tracker](https://github.com/srcfl/ftw-web/issues) and PRs for website
+changes. Shared Lua drivers belong in
+[`srcfl/device-drivers`](https://github.com/srcfl/device-drivers).
 
 ## License of contributions
 
-This project is licensed under the **Apache License, Version 2.0** (see
-[`LICENSE`](LICENSE)). By submitting a contribution, you agree that your
-contribution is licensed under the Apache License, Version 2.0.
+This version uses **GNU AGPL v3 only with the Energyplan combination
+permission** in [`LICENSE`](LICENSE). Contributions to this version must
+carry those terms, including that permission. Preserve all third-party licenses and
+attributions. A sign-off does not assign copyright or authorize commercial
+relicensing; Sourceful must separately hold those rights where needed.
+See [LICENSING.md](LICENSING.md).
 
 ## Developer Certificate of Origin (DCO)
 
@@ -76,37 +104,25 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
-## Start with text
+## Report a need or bug
 
-External code contributions start with a written proposal, not an
-implementation pull request. Open an issue or Discussion before writing code
-and describe:
+Describe the result you expected, what happened and the version and equipment
+involved. Add relevant logs, screenshots or protocol documents when available.
+Do not post credentials or private site data. You do not need to design an API
+or write a patch to report a problem.
 
-- the problem and current behaviour;
-- the result you want and what stays out of scope;
-- real hardware, tariff, protocol or user evidence where it applies;
-- safety and failure behaviour;
-- the test, run or rendered view that would prove the change;
-- related issues and open pull requests that touch the same area.
-
-Wait for a maintainer to accept the scope in that thread. An accepted proposal
-covers one focused change; it does not approve a stack of follow-on pull
-requests. Once the scope is agreed, link the thread from the implementation
-pull request and keep the code within it.
-
-This review protects contributor time and keeps new work aligned with current
-architecture and work already in progress. We may close an unsolicited code
-pull request and invite the author to bring the proposal back as text first.
-Documentation-only corrections may go straight to a pull request, but the pull
-request must still explain the change and why it is correct.
+Fredrik sets direction and priority; Sourceful reviews and maintains changes.
+Link related issues and PRs so the evidence stays easy to follow. General
+questions can use Discussions or Discord.
 
 ## Pull requests
 
-- Link the written proposal and the maintainer comment that accepted its scope.
-- Keep PRs focused on one logical change.
-- New code needs tests; `make verify` must pass before review.
-- User-visible changes need a Changeset entry (`npx changeset`) — see the
-  Releases section in [`README.md`](README.md).
+- State the household need, selected scope and relevant issue or owner request.
+- Keep the change focused and coordinate overlap with open work.
+- Test changed behaviour and failure paths; run the relevant repository checks.
+- Review changed UI in a browser.
+- Add a Changeset for user-visible runtime changes; documentation is exempt.
+- Keep VISION.md, the roadmap and current-behaviour docs consistent.
 
 ## Betas, issues and releases
 

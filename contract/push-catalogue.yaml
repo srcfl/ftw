@@ -13,6 +13,9 @@
 # lost every notification that mattered.
 version: 1
 events:
+  - kind: charging.connected
+    title: Car plugged in
+    body: "Open to see charging status, check the battery level and set a ready time."
   - kind: charging.session_complete
     title: Car charged
     body: "{kwh} kWh delivered — ready to go."

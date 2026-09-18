@@ -117,15 +117,19 @@ type PlanTargetFunc func(now time.Time) (string, float64, string, bool)
 // control package import-cycle free. Populated by main.go's injected
 // SlotDirectiveFunc adapter.
 type SlotDirective struct {
+	PriceSlotStart time.Time // optional price bucket; SlotStart is execution start
 	// DecisionID identifies the accepted plan that produced this directive.
 	// It is report metadata only; dispatch math never reads it.
 	DecisionID      string
 	SlotStart       time.Time
 	SlotEnd         time.Time
-	BatteryEnergyWh float64 // site-signed: + = charge, − = discharge
+	BatteryEnergyWh float64            // site-signed: + = charge, − = discharge
+	StorageEnergyWh map[string]float64 // validated per-storage AC energy budgets
 	SoCTarget       float64
 	Strategy        string  // echoed for logging / API; mirrors mpc.Mode
 	PVLimitW        float64 // 0 = no curtail; > 0 = cap aggregate PV output
+	PVCurtailActive bool
+	PVCurtailment   mpc.PVCurtailment
 
 	// PlannedGridW is the plan's forecast of slot-average gridW given the
 	// planned battery / load / PV mix (site-signed: + = import). The
@@ -169,6 +173,11 @@ type SlotDirective struct {
 	// Runtime uses planned EV energy to keep surplus-only EV from being
 	// satisfied by home-battery discharge if a stale plan tries.
 	LoadpointEnergyWh map[string]float64
+	// LoadpointMaxPowerW is the legal on-power for each loadpoint's duty
+	// cycle. Fuse sharing must reserve this instantaneous demand, not the
+	// slot-average Wh/time, or a short pulse can share the fuse with a
+	// battery charge that no longer fits when the charger actually turns on.
+	LoadpointMaxPowerW map[string]float64
 }
 
 // SlotDirectiveFunc returns the plan's energy-allocation directive for
@@ -533,6 +542,7 @@ type State struct {
 	// accounting. Reset when the slot rolls over (by SlotStart equality).
 	// Zero-valued until UseEnergyDispatch fires its first cycle.
 	currentDirective SlotDirective
+	storageDelivery  storageSlotDelivery
 	slotDelivered    float64   // Wh delivered to batteries since slot start
 	lastTickTs       time.Time // for ∫ battery_w dt
 	// controlSlotDecisionID is the accepted plan used to choose the last
@@ -558,6 +568,10 @@ type State struct {
 	// resulting counters surface on /api/status so operators can spot
 	// systemic forecast vs reality drift. Site-signed: negative = the
 	// fleet discharged Wh during the slot.
+	slotActualReplans   uint64
+	slotActualDirective SlotDirective
+	slotPlannedPastWh   float64
+
 	slotActualWh        float64
 	slotActualLastTs    time.Time
 	slotActualSlotStart time.Time
@@ -592,6 +606,7 @@ type State struct {
 	// Populated from config.Driver.SupportsPVCurtail in main.go;
 	// hot-swappable via the config-reload watcher.
 	SupportsPVCurtail map[string]bool
+	PVGenerationLimit func(string) mpc.PVCurtailment
 
 	// SolarFeedDrivers flags drivers whose operator armed an opt-in
 	// `solar_pv` write path (e.g. the NIBE S-series Solar PV surplus
@@ -628,6 +643,15 @@ type State struct {
 	// plan no longer wants curtailment — without this we'd silently
 	// leave the inverter capped after a slot rolls over.
 	LastCurtailedDrivers map[string]bool
+
+	// PVExportGuardActive says fresh meter data showed solar-attributable
+	// export above the effective site ceiling on this tick.
+	// PVExportResidualW is the part of that overage which Core could not
+	// remove with safe, positive caps on online curtail-capable PV. It stays
+	// non-zero when PV is unsupported or when clearing the overage would
+	// require the still-ambiguous zero-watt curtail command.
+	PVExportGuardActive bool
+	PVExportResidualW   float64
 
 	// FuseEVMaxW is the joint allocator's verdict for the EV's allowed
 	// wattage this tick. Only meaningful when FuseSaturated is true.
@@ -730,30 +754,26 @@ func (s *State) GetBatteryManualHold(now time.Time) (BatteryManualHold, bool) {
 	return s.ManualHold, true
 }
 
-// SlotEnergySnapshot is the per-slot energy accounting, exposed for
-// diagnostics. Both accumulators are here because they answer different
-// questions and can disagree — which is itself the interesting signal.
-//
-// ActualWh updates on every dispatch tick regardless of which path ran,
-// so it is the honest record of what the fleet moved. EnergyPathWh is
-// what the energy-allocation path believes it delivered, and only moves
-// while that path is executing. A slot with a real PlannedWh, an
-// EnergyPathWh of zero and an ActualWh going nowhere means the plan is
-// not reaching the hardware — a case a support report otherwise cannot
-// distinguish from "the plan asked for nothing".
+// SlotEnergySnapshot exposes measured energy and plan accounting for diagnostics.
+// ActualWh and PlannedSoFarWh cover the same observed intervals. EnergyPathWh
+// belongs to the current execution budget and may include unmeasured credits.
 type SlotEnergySnapshot struct {
 	HasSlot bool
 	// DecisionID is the accepted plan used to choose the last battery
 	// control tick's slot. Empty means that tick used no slot identity.
 	DecisionID string
-	// PlannedWh is the plan's BatteryEnergyWh for the slot in flight.
+	// PlannedWh combines the decisions observed so far with the current
+	// decision for the rest of the price interval. Unobserved time is excluded.
 	// Site-signed: positive charges.
 	PlannedWh float64
-	// ActualWh is what the fleet has moved since the slot began, counted
-	// on every tick and every path.
+	// PlannedSoFarWh integrates the decisions observed over the same time
+	// as ActualWh. It excludes the current decision's future energy.
+	PlannedSoFarWh float64
+	// ActualWh integrates measured fleet power over observed intervals,
+	// regardless of which dispatch path ran. It excludes missing observations.
 	ActualWh float64
-	// EnergyPathWh is the energy path's own delivered count. Zero when
-	// that path has not run this slot.
+	// EnergyPathWh is the current execution budget's count. It includes
+	// rebase and elapsed-time credits, which are not measured energy.
 	EnergyPathWh float64
 	SlotStart    time.Time
 	SlotEnd      time.Time
@@ -763,12 +783,13 @@ type SlotEnergySnapshot struct {
 // hold the outer ctrlMu.
 func (s *State) SlotEnergy() SlotEnergySnapshot {
 	out := SlotEnergySnapshot{
-		DecisionID:   s.controlSlotDecisionID,
-		PlannedWh:    s.slotActualPlannedWh,
-		ActualWh:     s.slotActualWh,
-		EnergyPathWh: s.slotDelivered,
-		SlotStart:    s.slotActualSlotStart,
-		SlotEnd:      s.currentDirective.SlotEnd,
+		DecisionID:     s.controlSlotDecisionID,
+		PlannedWh:      s.slotActualPlannedWh,
+		PlannedSoFarWh: s.slotPlannedPastWh,
+		ActualWh:       s.slotActualWh,
+		EnergyPathWh:   s.slotDelivered,
+		SlotStart:      s.slotActualSlotStart,
+		SlotEnd:        s.slotActualDirective.SlotEnd,
 	}
 	// The path-agnostic accumulator carries the authoritative slot start;
 	// the energy path's directive carries the end. Either being unset
@@ -860,98 +881,104 @@ const (
 	slotDeliveryMaxTickDtS     = 300.0
 )
 
-// updateSlotDeliveryMetrics is the path-agnostic per-slot Wh tracker.
-// It runs on EVERY dispatch tick (every mode, every path) so reactive
-// paths that bypass the energy-allocation bookkeeping still feed an
-// independent record of "what did the fleet actually deliver this
-// slot, and how does that compare to the plan?". See State.slotActualWh
-// for the rationale and the cover-load carve-out (PR #378) context.
-//
-// When SlotDirective is unset or returns ok=false the accumulator is
-// paused for this tick: there's no slot context to attribute Wh to.
-//
-// When the directive's SlotStart advances the just-ended slot is
-// scored: |actual| / max(|planned|, 1). Ratios > 1.5 log an
-// over-delivery and bump OverDeliveryCount; ratios < 0.5 log
-// under-delivery and bump UnderDeliveryCount. Idle/charge slots
-// where |planned| ≤ slotDeliveryIdleWhCutoff are skipped — measuring
-// a ratio against ~0 is meaningless.
-//
-// The first-ever tick (zero-value slotActualSlotStart) initialises
-// the accumulator without emitting anything.
+// updateSlotDeliveryMetrics compares measured energy with the decisions that
+// applied during the same observed time. A replan changes only the remaining
+// part of the price interval; it never replaces earlier planned energy.
+// Missing plans and gaps of five minutes or more are excluded from both sums.
+// At the price boundary, score the completed observed intervals and reset.
 func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Time) {
 	if state == nil || state.SlotDirective == nil {
 		return
 	}
 	dir, ok := plannerSelfDirectiveAt(state, now)
 	if !ok {
-		return
-	}
-
-	if state.slotActualSlotStart.IsZero() {
-		state.slotActualSlotStart = dir.SlotStart
 		state.slotActualLastTs = now
-		state.slotActualWh = 0
-		state.slotActualPlannedWh = dir.BatteryEnergyWh
+		state.slotActualDirective = SlotDirective{}
 		return
 	}
-
-	if !dir.SlotStart.Equal(state.slotActualSlotStart) {
-		// Slot rollover: evaluate the just-ended slot using the
-		// planned Wh cached from prior ticks. Reactive paths don't
-		// touch state.currentDirective (that's energy-path bookkeeping),
-		// so this accumulator keeps its own slotActualPlannedWh.
-		plannedWh := state.slotActualPlannedWh
-		if math.Abs(plannedWh) > slotDeliveryIdleWhCutoff {
-			actualWh := state.slotActualWh
-			// Sign mismatch is the categorical failure mode: we moved
-			// energy in the opposite direction from the plan. Caught
-			// before the magnitude-ratio check below, which would
-			// otherwise treat opposite-sign-equal-magnitude (planned
-			// −425, actual +425) as ratio 1.0 = on target.
-			if plannedWh*actualWh < 0 && math.Abs(actualWh) > slotDeliveryIdleWhCutoff {
-				slog.Info("dispatch slot sign mismatch",
-					"mode", state.Mode,
-					"planned_wh", plannedWh,
-					"actual_wh", actualWh,
-					"slot_start", state.slotActualSlotStart)
-				state.SlotDeliveryStats.SignMismatchCount++
-			} else {
-				ratio := math.Abs(actualWh) / math.Max(math.Abs(plannedWh), 1)
-				switch {
-				case ratio > slotDeliveryOverThreshold:
-					slog.Info("dispatch slot over-delivery",
-						"mode", state.Mode,
-						"planned_wh", plannedWh,
-						"actual_wh", actualWh,
-						"ratio", ratio,
-						"slot_start", state.slotActualSlotStart)
-					state.SlotDeliveryStats.OverDeliveryCount++
-				case ratio < slotDeliveryUnderThreshold:
-					slog.Info("dispatch slot under-delivery",
-						"mode", state.Mode,
-						"planned_wh", plannedWh,
-						"actual_wh", actualWh,
-						"ratio", ratio,
-						"slot_start", state.slotActualSlotStart)
-					state.SlotDeliveryStats.UnderDeliveryCount++
-				}
+	bucket := dir.priceSlotStart()
+	if !state.slotActualSlotStart.IsZero() {
+		previous := state.slotActualDirective
+		dt := now.Sub(state.slotActualLastTs).Seconds()
+		if dt > 0 && dt < slotDeliveryMaxTickDtS && !previous.SlotStart.IsZero() {
+			start := state.slotActualLastTs
+			if start.Before(previous.SlotStart) {
+				start = previous.SlotStart
+			}
+			end := now
+			if end.After(previous.SlotEnd) {
+				end = previous.SlotEnd
+			}
+			if end.After(start) {
+				hours := end.Sub(start).Hours()
+				state.slotActualWh += currentTotalW * hours
+				state.slotPlannedPastWh += previous.averageBatteryW() * hours
 			}
 		}
-		state.slotActualSlotStart = dir.SlotStart
-		state.slotActualLastTs = now
-		state.slotActualWh = 0
-		state.slotActualPlannedWh = dir.BatteryEnergyWh
-		return
+		if !bucket.Equal(state.slotActualSlotStart) {
+			state.slotActualPlannedWh = state.slotPlannedPastWh
+			scoreSlotDeliveryMetrics(state)
+			state.slotActualWh = 0
+			state.slotPlannedPastWh = 0
+			state.slotActualReplans = 0
+		} else if !previous.SlotStart.IsZero() && (previous.DecisionID != dir.DecisionID || !previous.SlotStart.Equal(dir.SlotStart) || previous.BatteryEnergyWh != dir.BatteryEnergyWh) {
+			state.slotActualReplans++
+		}
 	}
-
-	dt := now.Sub(state.slotActualLastTs).Seconds()
-	if dt > 0 && dt < slotDeliveryMaxTickDtS {
-		state.slotActualWh += currentTotalW * dt / 3600.0
-	}
+	state.slotActualSlotStart = bucket
 	state.slotActualLastTs = now
-	// Keep the planned value fresh in case a mid-slot replan changed it.
-	state.slotActualPlannedWh = dir.BatteryEnergyWh
+	state.slotActualDirective = dir
+	remaining := dir.SlotEnd.Sub(now).Hours()
+	if remaining < 0 {
+		remaining = 0
+	}
+	state.slotActualPlannedWh = state.slotPlannedPastWh + dir.averageBatteryW()*remaining
+}
+
+func scoreSlotDeliveryMetrics(state *State) {
+	plannedWh := state.slotActualPlannedWh
+	if math.Abs(plannedWh) > slotDeliveryIdleWhCutoff {
+		actualWh := state.slotActualWh
+		// Sign mismatch is the categorical failure mode: we moved
+		// energy in the opposite direction from the plan. Caught
+		// before the magnitude-ratio check below, which would
+		// otherwise treat opposite-sign-equal-magnitude (planned
+		// −425, actual +425) as ratio 1.0 = on target.
+		if plannedWh*actualWh < 0 && math.Abs(actualWh) > slotDeliveryIdleWhCutoff {
+			slog.Info("dispatch slot sign mismatch",
+				"mode", state.Mode,
+				"replans", state.slotActualReplans,
+				"planned_basis", "accepted_intervals",
+				"planned_wh", plannedWh,
+				"actual_wh", actualWh,
+				"slot_start", state.slotActualSlotStart)
+			state.SlotDeliveryStats.SignMismatchCount++
+		} else {
+			ratio := math.Abs(actualWh) / math.Max(math.Abs(plannedWh), 1)
+			switch {
+			case ratio > slotDeliveryOverThreshold:
+				slog.Info("dispatch slot over-delivery",
+					"mode", state.Mode,
+					"replans", state.slotActualReplans,
+					"planned_basis", "accepted_intervals",
+					"planned_wh", plannedWh,
+					"actual_wh", actualWh,
+					"ratio", ratio,
+					"slot_start", state.slotActualSlotStart)
+				state.SlotDeliveryStats.OverDeliveryCount++
+			case ratio < slotDeliveryUnderThreshold:
+				slog.Info("dispatch slot under-delivery",
+					"mode", state.Mode,
+					"replans", state.slotActualReplans,
+					"planned_basis", "accepted_intervals",
+					"planned_wh", plannedWh,
+					"actual_wh", actualWh,
+					"ratio", ratio,
+					"slot_start", state.slotActualSlotStart)
+				state.SlotDeliveryStats.UnderDeliveryCount++
+			}
+		}
+	}
 }
 
 type plannerSelfDecision struct {
@@ -1456,16 +1483,9 @@ func ComputeDispatch(
 				state.controlSlotDecisionID = dir.DecisionID
 				state.controlPlanSnapshot.source = controlPlanDirective
 				currentDirective = dir
-				// planner_arbitrage and planner_passive_arbitrage idle slots: skip the energy path and
-				// fall through to reactive PI (same as planner_self does always).
-				// When the plan slot is idle (BatteryEnergyWh ≈ 0), the energy
-				// formula produces targetTotalW=0 and cannot react to live
-				// conditions — a PV forecast miss leaves the site importing while
-				// the battery sits at 0 W. The reactive PI path handles this
-				// correctly, and planHasNonDischargeIntent (below) permits
-				// discharge for non-charge arbitrage-family slots.
-				// Charge slots (BatteryEnergyWh > idleWh) still use the energy
-				// path so the DP's deliberate grid-charge intent is honoured.
+				// Idle arbitrage slots use live control subject to the idle
+				// charge and discharge gates. Fuse protection may still spend
+				// energy reserved for a later slot.
 				const idleWhGate = 50.0
 				// |BatteryEnergyWh| ≤ idleWhGate — true idle only. A
 				// planned-discharge slot is also ≤ idleWhGate by the
@@ -1477,7 +1497,7 @@ func ComputeDispatch(
 				// follow-up.
 				arbitrageFamilyIdleSlot = (state.Mode == ModePlannerPassiveArbitrage ||
 					state.Mode == ModePlannerArbitrage) &&
-					math.Abs(dir.BatteryEnergyWh) <= idleWhGate
+					math.Abs(dir.intentEnergyWh()) <= idleWhGate
 				// planner_arbitrage cover-load discharge slots: same fallthrough.
 				// The energy path's "extra export is bonus revenue" carve-out
 				// (see SlotDirective.PlannedGridW doc) is correct for peak-export
@@ -1505,7 +1525,7 @@ func ComputeDispatch(
 				coverLoadDischargeSlot = (state.Mode == ModePlannerArbitrage ||
 					state.Mode == ModePlannerPassiveArbitrage) &&
 					dir.HasPlannedGridW &&
-					dir.BatteryEnergyWh < -idleWhGate &&
+					dir.intentEnergyWh() < -idleWhGate &&
 					dir.PlannedGridW > -coverLoadExportToleranceW
 				if !arbitrageFamilyIdleSlot && !coverLoadDischargeSlot {
 					useEnergyPath = true
@@ -1661,15 +1681,16 @@ func ComputeDispatch(
 		if r == nil || h == nil {
 			continue
 		}
-		// Default to near-empty SoC so dispatch errs on the side of
-		// caution (no discharge) if a battery never reports SoC.
-		// Using 0.5 would allow discharge of a potentially empty battery.
-		soc := 0.1
-		if r.SoC != nil {
-			soc = *r.SoC
-		}
+		soc := 0.0
 		lim := state.DriverLimits[name]
 		dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
+		if r.SoC != nil {
+			soc = *r.SoC
+		} else {
+			// Never reported SoC: do not discharge a pack we cannot
+			// prove has energy. Charge-from-surplus stays allowed.
+			dischargeBlocked = true
+		}
 		// A configured zero is a hard direction block, not the legacy
 		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
 		// the clamps so capable siblings receive the blocked battery's share.
@@ -1779,7 +1800,7 @@ func ComputeDispatch(
 		// Slot rollover: new slot → reset the delivered accumulator.
 		if !currentDirective.SlotStart.Equal(state.currentDirective.SlotStart) {
 			state.currentDirective = currentDirective
-			state.slotDelivered = 0
+			state.slotDelivered = elapsedDirectiveEnergy(currentDirective, now)
 			state.lastTickTs = now
 		} else {
 			// Accumulate energy delivered since the last tick, using live
@@ -2346,36 +2367,14 @@ func ComputeDispatch(
 		}
 	}
 
-	// ---- Joint fuse-budget allocator ----
-	// When EV draw + commanded battery charge would exceed the site fuse,
-	// scale BOTH proportionally so they share the budget rather than
-	// oscillating against each other (battery ramps up per plan → fuse
-	// guard cuts it → plan ramps again next tick — operator report
-	// 2026-04-27). The battery side is mutated here; the EV side is
-	// published via state.FuseEVMaxW + FuseSaturated for the loadpoint
-	// controller to read on its next Tick.
-	//
-	// Math (site sign, + = import):
-	//   targetTotal = currentTotal + totalCorrection
-	//   B  = max(0, targetTotal)        battery charge component (≥0)
-	//   Bn = min(0, targetTotal)        battery discharge component (≤0)
-	//   E  = state.EVChargingW          EV draw (≥0)
-	//   H  = rawGridW − currentTotal − E   "house" net (load + PV)
-	//   newGrid' = H + (Bn + B*scale) + E*scale
-	//   solve newGrid' ≤ fuseMaxW  ⇒  scale ≤ (fuseMaxW − H − Bn) / (B + E)
-	//
-	// Discharge alone never trips this — Bn is negative, so it lifts the
-	// numerator (more headroom). Only positive battery demand competes
-	// with EV.
-	//
-	// BatteryCoversEV mode: H is computed from rawGridW (the raw meter,
-	// unchanged regardless of BatteryCoversEV) so H stays correct in
-	// both modes. The PI's gridW is the only place that branches on
-	// BatteryCoversEV; the joint allocator's geometry is independent
-	// of that. Regression: TestJointFuseAllocatorWithBatteryCoversEV.
+	// Share the site ceiling between EV and battery charge. An accepted
+	// EV plan reserves its demand before optional battery charge, including
+	// while the car ramps up. Unscheduled EV draw retains proportional sharing.
+	// Infer house net power from measured EV draw, never from planned demand.
 	state.FuseEVMaxW = 0
 	state.FuseSaturated = false
-	if fuseMaxW > 0 && state.EVChargingW > 0 {
+	plannedEVW := scheduledEVPowerW(state)
+	if fuseMaxW > 0 && math.Max(state.EVChargingW, plannedEVW) > 0 {
 		// Use the effective import ceiling (fuse minus safety margin,
 		// or tariff peak when tighter) so PeakImportCeilingW throttles
 		// the EV through the same surface as the fuse. Steady-state
@@ -2386,20 +2385,21 @@ func ComputeDispatch(
 		targetTotal := currentTotal + totalCorrection
 		B := math.Max(0, targetTotal)
 		Bn := math.Min(0, targetTotal)
-		E := state.EVChargingW
-		H := rawGridW - currentTotal - E
+		E := math.Max(state.EVChargingW, plannedEVW)
+		H := rawGridW - currentTotal - state.EVChargingW
 		projectedGrid := H + targetTotal + E
 		if projectedGrid > ceilingW && (B+E) > 0 {
-			scale := (ceilingW - H - Bn) / (B + E)
-			if scale < 0 {
-				scale = 0
+			if plannedEVW > 0 {
+				// A timed EV goal takes its share before optional battery charge.
+				available := math.Max(0, ceilingW-H-Bn)
+				state.FuseEVMaxW = math.Min(E, available)
+				newBattery := Bn + math.Min(B, math.Max(0, available-state.FuseEVMaxW))
+				totalCorrection = newBattery - currentTotal
+			} else {
+				scale := math.Max(0, math.Min(1, (ceilingW-H-Bn)/(B+E)))
+				totalCorrection = Bn + B*scale - currentTotal
+				state.FuseEVMaxW = E * scale
 			}
-			if scale > 1 {
-				scale = 1
-			}
-			newBattery := Bn + B*scale
-			totalCorrection = newBattery - currentTotal
-			state.FuseEVMaxW = E * scale
 			state.FuseSaturated = true
 		}
 	}
@@ -2431,6 +2431,8 @@ func ComputeDispatch(
 	var raw []DispatchTarget
 	if manualHoldActive && manualHold.Driver != "" {
 		raw = distributeScopedManualHold(onlineBats, manualHold.Driver, currentTotal+totalCorrection)
+	} else if allocated, ok := distributePlannedStorages(state, onlineBats, currentTotal+totalCorrection, manualHoldActive); ok {
+		raw = allocated
 	} else {
 		switch effectiveMode {
 		case ModeSelfConsumption, ModePeakShaving:
@@ -2704,8 +2706,29 @@ func applyDispatchSafetyPipeline(
 	if state != nil {
 		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
 	}
+	targets = floorMissingSoCDischarge(targets, store)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
+	return targets
+}
+
+// Unknown battery energy cannot support a discharge command, even during
+// fuse relief. Check the final targets so slew cannot restore live discharge
+// and EV headroom reflects only the battery commands we can actually send.
+func floorMissingSoCDischarge(targets []DispatchTarget, store *telemetry.Store) []DispatchTarget {
+	for i := range targets {
+		if targets[i].TargetW >= 0 {
+			continue
+		}
+		if store != nil {
+			r := store.Get(targets[i].Driver, telemetry.DerBattery)
+			if r != nil && r.SoC != nil {
+				continue
+			}
+		}
+		targets[i].TargetW = 0
+		targets[i].Clamped = true
+	}
 	return targets
 }
 
@@ -2746,8 +2769,8 @@ func republishFuseEVCapAfterFuseDischarge(targets []DispatchTarget, store *telem
 		headroom = 0
 	}
 	newCap := headroom
-	if newCap > state.EVChargingW {
-		newCap = state.EVChargingW
+	if demand := math.Max(state.EVChargingW, scheduledEVPowerW(state)); newCap > demand {
+		newCap = demand
 	}
 	state.FuseEVMaxW = newCap
 }
@@ -2927,9 +2950,12 @@ func protectiveCurtailLimitW(state *State, store *telemetry.Store) (float64, boo
 
 // siteLoadW reads the household load (W) from the site meter when
 // available. Mirrors the formula main.go uses for status: load =
-// gridW - battery - PV - EV - V2X (site convention). Falls back to 0 on
-// missing telemetry, which makes protectiveCurtailLimitW degrade
-// safely to "don't engage" rather than to a bogus tiny limit.
+// gridW - battery - PV - EV - V2X (site convention). Battery and PV
+// follow SumOnlineEVW: watchdog-offline last-known watts are ignored
+// so a dead inverter cannot inflate load and skip export protection.
+// Falls back to 0 on missing telemetry, which makes
+// protectiveCurtailLimitW degrade safely to "don't engage" rather than
+// to a bogus tiny limit.
 func siteLoadW(state *State, store *telemetry.Store) float64 {
 	if state == nil || store == nil || state.SiteMeterDriver == "" {
 		return 0
@@ -2939,18 +2965,31 @@ func siteLoadW(state *State, store *telemetry.Store) float64 {
 		return 0
 	}
 	gridW := mtr.SmoothedW
-	var batW, pvW float64
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		batW += r.SmoothedW
-	}
-	for _, r := range store.ReadingsByType(telemetry.DerPV) {
-		pvW += r.SmoothedW
-	}
-	load := gridW - batW - pvW - store.SumOnlineEVW() - store.SumOnlineV2XW()
+	load := gridW -
+		sumOnlineSignedW(store, telemetry.DerBattery) -
+		sumOnlineSignedW(store, telemetry.DerPV) -
+		store.SumOnlineEVW() -
+		store.SumOnlineV2XW()
 	if load < 0 {
 		return 0
 	}
 	return load
+}
+
+// sumOnlineSignedW mirrors telemetry.SumOnlineEVW for one DER type:
+// last-known watts from a watchdog-offline driver do not enter load math.
+func sumOnlineSignedW(store *telemetry.Store, t telemetry.DerType) float64 {
+	if store == nil {
+		return 0
+	}
+	var sum float64
+	for _, r := range store.ReadingsByType(t) {
+		if !store.DriverHealth(r.Driver).TelemetryLive() {
+			continue
+		}
+		sum += r.SmoothedW
+	}
+	return sum
 }
 
 func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
@@ -2959,6 +2998,7 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	}
 
 	now := state.now()
+	var plannedCap *SlotDirective
 
 	// Operator-installed manual hold takes precedence over the planner
 	// directive. Driver-scoped → cap only that driver. Site-aggregate
@@ -2982,7 +3022,7 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		// headroom, EVs on PV charging mode). When live absorbable W
 		// covers everything PV can produce, the curtail effectively
 		// suppresses itself.
-		if dir, ok := state.SlotDirective(now); ok {
+		if dir, ok := state.SlotDirective(now); ok && PlanningPVDirectiveValid(state, store, dir) {
 			if dir.PVLimitW > 0 {
 				if live, ok := liveCurtailLimitW(state, store); ok {
 					limit = live
@@ -2990,6 +3030,10 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 					// Live state incomplete (e.g. meter offline) — fall
 					// back to the planner's static cap.
 					limit = dir.PVLimitW
+				}
+				if dir.PVCurtailActive {
+					limit = dir.PVLimitW
+					plannedCap = &dir
 				}
 			}
 		}
@@ -3014,13 +3058,16 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		}
 	}
 
+	guard := computePVExportGuard(state, store)
+
 	// Decide which drivers should be curtailed this tick. A hold with
 	// LimitW == 0 is still a valid cap (force PV off on the scoped
 	// surface) — only release entirely when there is no active hold AND
 	// the planner isn't asking for curtail.
 	next := map[string]float64{}
-	wantCurtail := holdActive || limit > 0
-	if wantCurtail && store != nil && len(state.SupportsPVCurtail) > 0 {
+	baseCurtailActive := holdActive || limit > 0
+	wantCurtail := baseCurtailActive || guard.active
+	if baseCurtailActive && store != nil && len(state.SupportsPVCurtail) > 0 {
 		if scopedDriver != "" {
 			// Driver-scoped hold: cap that one driver only, regardless
 			// of its live |PV| (operator may want to force a verified-
@@ -3068,6 +3115,34 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 				}
 			}
 		}
+	}
+
+	if plannedCap != nil && !holdActive {
+		if caps, ok := plannedPVCaps(state, store, *plannedCap, limit); ok {
+			next = caps
+		}
+	}
+	// The live export guard is a safety overlay, not another planner. Merge
+	// its per-driver caps after the economic/manual allocation and keep the
+	// tighter positive cap. An existing zero cannot win here: it is not an
+	// active zero cap in today's wire contract and would be filtered below.
+	for driver, limitW := range guard.caps {
+		current, ok := next[driver]
+		if !ok || current <= 0 || limitW < current {
+			next[driver] = limitW
+		}
+	}
+	guard.residualW = pvExportResidualAfterCaps(guard.overageW, state, store, next)
+	previousResidualW := state.PVExportResidualW
+	state.PVExportGuardActive = guard.active
+	state.PVExportResidualW = guard.residualW
+	if guard.residualW > 0 && previousResidualW <= 0 {
+		slog.Warn("pv export guard left an uncontrollable residual",
+			"pv_export_w", guard.exportW,
+			"export_ceiling_w", guard.ceilingW,
+			"residual_w", guard.residualW)
+	} else if guard.residualW <= 0 && previousResidualW > 0 {
+		slog.Info("pv export guard residual cleared")
 	}
 
 	// Release path. A previously-curtailed driver gets an explicit
@@ -3176,6 +3251,11 @@ const curtailMinPerDriverW = 1.0
 // anywhere meaningful to put it.
 const pvCurtailBatterySoCMax = 0.99
 
+// liveMeterMaxAge is the inner freshness window for liveCurtailLimitW.
+// Matches the PV generation proof window in pv_plan.go. The main-loop
+// watchdog still gates dispatch; this catches callers that skipped it.
+const liveMeterMaxAge = 90 * time.Second
+
 // liveCurtailLimitW computes the cap PV may produce *right now* given
 // the planner's decision that curtail is economically warranted for
 // this slot. It rolls together three runtime quantities the planner
@@ -3202,27 +3282,11 @@ const pvCurtailBatterySoCMax = 0.99
 // curtail dispatch upstream skips curtail entirely (the cap doesn't
 // bind anything).
 func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
-	if state == nil || store == nil {
+	m, ok := liveSiteMeter(state, store)
+	if !ok {
 		return 0, false
 	}
-
-	// Require a fresh site-meter reading. Without it we can't compute
-	// live load and shouldn't be making live decisions — defer to the
-	// planner's static value instead.
-	var gridW float64
-	if state.SiteMeterDriver == "" {
-		return 0, false
-	}
-	if m := store.Get(state.SiteMeterDriver, telemetry.DerMeter); m != nil {
-		gridW = m.RawW
-	} else if m := store.Get(state.SiteMeterDriver, telemetry.DerBattery); m != nil {
-		// Some site-meter drivers (e.g. ferroamp) emit grid flow on
-		// the battery channel because the same driver also owns the
-		// battery. Accept that as the meter reading.
-		gridW = m.RawW
-	} else {
-		return 0, false
-	}
+	gridW := m.RawW
 
 	// Live PV (positive watts of generation).
 	var pvW float64
@@ -3285,6 +3349,33 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	}
 
 	return liveLoadW + batHeadroomW + evReserveW, true
+}
+
+// liveSiteMeter returns the configured site meter's live reading.
+// Missing, watchdog-offline, or older-than-liveMeterMaxAge → ok=false.
+// DerBattery is accepted only for that same configured driver when it
+// has no DerMeter channel (Ferroamp combined owner). Any other battery
+// is not the grid.
+func liveSiteMeter(state *State, store *telemetry.Store) (*telemetry.DerReading, bool) {
+	if state == nil || store == nil || state.SiteMeterDriver == "" {
+		return nil, false
+	}
+	m := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if m == nil {
+		m = store.Get(state.SiteMeterDriver, telemetry.DerBattery)
+	}
+	if m == nil {
+		return nil, false
+	}
+	if !store.DriverHealth(state.SiteMeterDriver).TelemetryLive() {
+		return nil, false
+	}
+	now := state.now()
+	age := now.Sub(m.UpdatedAt)
+	if m.UpdatedAt.IsZero() || age < 0 || age > liveMeterMaxAge {
+		return nil, false
+	}
+	return m, true
 }
 
 func distributeScopedManualHold(bats []batteryInfo, driver string, powerW float64) []DispatchTarget {
@@ -3721,7 +3812,7 @@ func coverLoadChargeSlot(state *State, dir SlotDirective) bool {
 	const gridChargeImportW = 100.0 // PlannedGridW ≥ this ⇒ deliberate grid-charge
 	if state == nil ||
 		!dir.HasPlannedGridW ||
-		dir.BatteryEnergyWh <= idleWhGate ||
+		dir.intentEnergyWh() <= idleWhGate ||
 		dir.PlannedGridW >= gridChargeImportW {
 		return false
 	}
@@ -3755,20 +3846,8 @@ func planHasNonDischargeIntent(state *State) bool {
 	// overriding it with reactive discharge would undo that decision.
 	// Operators who want strict "never grid-charge regardless of price"
 	// should keep planner_self.
-	//
-	// However, that rationale only applies when the plan slot's intent
-	// is to charge. When the slot is idle (battery_w ≈ 0, e.g. "export
-	// the PV surplus") there is no protected charge decision — reactive
-	// discharge is safe and correct. Without the carve-out for idle
-	// slots, a forecast miss (PV overestimated, load underestimated)
-	// leaves the site importing while batteries sit at 0 W. Found in
-	// production v0.87.0: PV forecast off by 7×, plan idle, site
-	// imported 648 W continuously through the slot.
-	//
-	// Fix: planner_passive_arbitrage now participates in the carve-out
-	// for non-charge slots (BatteryEnergyWh ≤ idleWh). Charge slots
-	// remain authoritative — except explicit BatteryCoversEV PV-surplus
-	// slots (coverLoadChargeSlot), where the EV-cover contract wins.
+	// Idle in an arbitrage plan preserves energy for later. A forecast miss
+	// requests a new plan; it must not silently spend that stored energy.
 	if state.Mode == ModePlannerSelf {
 		return false
 	}
@@ -3776,29 +3855,15 @@ func planHasNonDischargeIntent(state *State) bool {
 	const idleGridW = 100.0
 	if state.SlotDirective != nil {
 		if dir, ok := planDirectiveForIntent(state); ok {
-			// For passive_arbitrage: only block reactive discharge when the
-			// plan slot has explicit charge intent. Idle and discharge slots
-			// get no non-discharge block — reactive discharge may cover load.
-			if state.Mode == ModePlannerPassiveArbitrage {
+			if state.Mode == ModePlannerPassiveArbitrage || state.Mode == ModePlannerArbitrage {
 				if coverLoadChargeSlot(state, dir) {
 					return false
 				}
-				return dir.BatteryEnergyWh > idleWh
-			}
-			if state.Mode == ModePlannerArbitrage {
-				// A charge-from-PV-surplus slot (coverLoadChargeSlot) and an
-				// idle slot both carry no protected charge decision, so reactive
-				// discharge may cover a forecast-missed load. Only a deliberate
-				// grid-charge slot (BatteryEnergyWh > idleWh and not a PV-surplus
-				// charge) keeps the non-discharge block.
-				if coverLoadChargeSlot(state, dir) {
-					return false
-				}
-				return dir.BatteryEnergyWh > idleWh
+				return dir.intentEnergyWh() >= -idleWh
 			}
 			// planner_cheap (and any other planner mode): idle slots keep the
 			// non-discharge block; only deliberate discharge slots are exempt.
-			return dir.BatteryEnergyWh >= -idleWh
+			return dir.intentEnergyWh() >= -idleWh
 		}
 	}
 	if state.PlanTarget != nil {
@@ -4417,7 +4482,7 @@ func planSignIntent(state *State) int {
 	const idleGridW = 100.0 // matches mpc.IdleGateThresholdW for sign decisions
 	if state.SlotDirective != nil {
 		if dir, ok := planDirectiveForIntent(state); ok {
-			if dir.BatteryEnergyWh > idleWh {
+			if dir.intentEnergyWh() > idleWh {
 				// A charge-from-PV-surplus slot has no hard charge commitment
 				// (see coverLoadChargeSlot) — report idle intent so the sign
 				// floor doesn't clamp a legitimate cover-load discharge.
@@ -4426,7 +4491,7 @@ func planSignIntent(state *State) int {
 				}
 				return +1
 			}
-			if dir.BatteryEnergyWh < -idleWh {
+			if dir.intentEnergyWh() < -idleWh {
 				return -1
 			}
 			return 0
@@ -4520,12 +4585,8 @@ func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []Di
 func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper float64) {
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
-	soc := 0.1
-	if r.SoC != nil {
-		soc = *r.SoC
-	}
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if soc < 0.05 || dischargeBlocked {
+	if r.SoC == nil || *r.SoC < 0.05 || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked {

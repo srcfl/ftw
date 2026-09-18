@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -255,7 +256,7 @@ func TestPublishCarriesVAPIDAndDecryptablePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wp.Publish(context.Background(), Message{Title: "Car charged", Body: "7.4 kWh delivered — ready to go.", Priority: 3}); err != nil {
+	if err := wp.Publish(context.Background(), Message{Title: "Car charged", Body: "7.4 kWh delivered — ready to go.", Priority: 3, Kind: PushChargingSessionComplete, LoadpointID: "garage"}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -277,6 +278,10 @@ func TestPublishCarriesVAPIDAndDecryptablePayload(t *testing.T) {
 	}
 	if payload["title"] != "Car charged" || !strings.Contains(payload["body"], "7.4 kWh") {
 		t.Fatalf("payload = %v", payload)
+	}
+
+	if payload["kind"] != PushChargingSessionComplete || payload["loadpoint_id"] != "garage" {
+		t.Fatalf("charger destination lost in encryption: %v", payload)
 	}
 
 	// The Authorization header verifies against the published key.
@@ -420,6 +425,36 @@ func TestPublishSweepsGoneSubscriptions(t *testing.T) {
 	}
 	if ids := store.ids(); len(ids) != 1 || ids[0] != "alive" {
 		t.Fatalf("rows after sweep = %v, want [alive]", ids)
+	}
+}
+
+// A stored https endpoint that 302s onto the LAN must not be followed:
+// the encrypted body stays on the enrolled origin, or the publish fails.
+func TestPublishDoesNotFollowRedirects(t *testing.T) {
+	sub := newTestSubscriber(t)
+	key := newTestVAPIDKey(t)
+
+	var loopHits atomic.Int32
+	loop := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		loopHits.Add(1)
+	}))
+	defer loop.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, loop.URL, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	store := &memSubs{rows: []PushSubscription{sub.subscription("s1", srv.URL+"/push")}}
+	wp, err := NewWebPush(key, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wp.Publish(context.Background(), Message{Title: "t", Body: "b"}); err == nil {
+		t.Fatal("a redirect must be refused")
+	}
+	if got := loopHits.Load(); got != 0 {
+		t.Fatalf("the payload was resent to loopback %d time(s)", got)
 	}
 }
 

@@ -8,6 +8,7 @@ const PushCatalogueVersion = 1
 // Push event kinds. Hand-writing one of these strings is what the
 // catalogue exists to stop.
 const (
+	PushChargingConnected       = "charging.connected"
 	PushChargingSessionComplete = "charging.session_complete"
 	PushChargingInterrupted     = "charging.interrupted"
 	PushUpdateInstalled         = "update.installed"
@@ -25,6 +26,7 @@ type PushSentence struct {
 
 // PushSentences is every sentence a push may carry, keyed by kind.
 var PushSentences = map[string]PushSentence{
+	PushChargingConnected:       {Title: "Car plugged in", Body: "Open to see charging status, check the battery level and set a ready time."},
 	PushChargingSessionComplete: {Title: "Car charged", Body: "{kwh} kWh delivered — ready to go."},
 	PushChargingInterrupted:     {Title: "Charging stopped early", Body: "The car stopped charging before it was done."},
 	PushUpdateInstalled:         {Title: "Your box updated itself", Body: "Now running {version}. Everything came back on its own."},

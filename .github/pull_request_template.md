@@ -1,36 +1,30 @@
-## Accepted text proposal
-
-Issue or Discussion:
-
-Maintainer comment that accepted this scope:
-
 <!--
-External code contributions need an accepted written proposal before code.
-If this is a documentation-only correction, write "documentation-only" and
-explain the change below.
+External PRs are welcome, preferably based on an issue. Broad proposals may
+be short Markdown PRs; concrete fixes should include relevant test evidence.
+Make scope and results clear for people and agents. See CONTRIBUTING.md.
+For a proposal, mark runtime-only checks as not applicable and state what
+evidence the implementation will need.
 -->
 
-## What changed
+## Problem and result
 
-<!-- Describe the code and the exact behaviour it changes. -->
+<!-- State the household need, what changes and why. Link the issue or owner request. -->
 
-## Why
+## Scope and safety
 
-<!-- State the observed problem and the evidence behind it. -->
-
-## Boundaries and safety
-
-<!-- State what is out of scope and what happens on stale data, errors, timeout or restart. -->
+<!-- Explain overlap, relevant limits, stale-data behaviour and failure/recovery. -->
 
 ## Verification
 
-<!-- List exact tests, runs, HIL evidence or browser views. Do not write only "tests pass". -->
+<!-- Give reproducible test steps and actual results. For device behaviour,
+include model, firmware and hardware evidence; keep missing HW checks explicit
+and the PR as a proposal/draft until complete. Separate simulations from HW. -->
 
 ## Checklist
 
-- [ ] The diff implements one accepted scope and does not add follow-on work.
-- [ ] I checked open pull requests that touch the same files.
-- [ ] Tests cover the changed behaviour and its failure path.
-- [ ] A human reviewed every changed web/UI view in a browser, or no UI changed.
+- [ ] The change follows VISION.md and one selected scope.
+- [ ] I checked overlapping PRs and coordinated shared files/contracts.
+- [ ] Relevant checks cover the changed behaviour and failure paths.
+- [ ] A human reviewed changed UI in a browser, or no UI changed.
 - [ ] A Changeset is included, or the change is exempt.
 - [ ] Every commit has a DCO sign-off.

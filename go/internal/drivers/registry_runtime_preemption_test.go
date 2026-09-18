@@ -260,6 +260,96 @@ end
 	}
 }
 
+func TestSendDefaultCancelsHungLegacyPoll(t *testing.T) {
+	var defaultCalls atomic.Int32
+	var pollCompleted atomic.Bool
+	pollEntered := make(chan struct{})
+	releasePoll := make(chan struct{})
+	var enteredOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releasePoll) }) }
+	t.Cleanup(release)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/default":
+			defaultCalls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case "/poll":
+			enteredOnce.Do(func() { close(pollEntered) })
+			select {
+			case <-releasePoll:
+			case <-req.Context().Done():
+			}
+			if req.Context().Err() == nil {
+				pollCompleted.Store(true)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	driverPath := writeTestDriver(t, `
+function driver_init()
+    host.set_poll_interval(50)
+end
+function driver_poll()
+    host.http_get("`+srv.URL+`/poll")
+    return 60000
+end
+function driver_default_mode()
+    local _, err = host.http_patch("`+srv.URL+`/default", "{}")
+    return err
+end
+`)
+	r := NewRegistry(telemetry.NewStore())
+	cfg := config.Driver{
+		Name: "hung-poll",
+		Lua:  driverPath,
+		Capabilities: config.Capabilities{
+			HTTP: &config.HTTPCapability{AllowWrite: true},
+		},
+	}
+	if err := r.Add(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		release()
+		r.ShutdownAll()
+	})
+	if got := defaultCalls.Load(); got != 1 {
+		t.Fatalf("startup default calls = %d, want 1", got)
+	}
+
+	select {
+	case <-pollEntered:
+	case <-time.After(time.Second):
+		t.Fatal("legacy poll did not enter host.http_get")
+	}
+
+	defaultCtx, cancelDefault := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelDefault()
+	started := time.Now()
+	if err := r.SendDefault(defaultCtx, cfg.Name); err != nil {
+		t.Fatalf("SendDefault = %v, want success while poll is hung", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("SendDefault returned after %s, want poll cancellation well under 1s", elapsed)
+	}
+	if pollCompleted.Load() {
+		t.Fatal("hung poll completed instead of being cancelled")
+	}
+	if got := defaultCalls.Load(); got < 2 {
+		t.Fatalf("default calls = %d, want startup and the requested default", got)
+	}
+	status, ok := r.ControlStatus(cfg.Name)
+	if !ok || status.Blocked || !status.DefaultConfirmed || status.RecoveryPending {
+		t.Fatalf("status after confirmed default = %+v, running=%v", status, ok)
+	}
+}
+
 func TestLuaHostSleepHonorsCommandContext(t *testing.T) {
 	driverPath := writeTestDriver(t, `
 function driver_command(action, w, cmd)

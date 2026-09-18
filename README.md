@@ -4,18 +4,33 @@
 
 > Local-first home energy coordination.
 
-FTW coordinates solar, batteries, grid power, EV charging and thermal assets
-on a Raspberry Pi or Linux host. The safety-critical runtime is one Go binary,
-hardware integrations are sandboxed Lua drivers, and an optional Python/CVXPY
-optimizer handles long-horizon planning.
+FTW is a local-first home energy management system (EMS). It coordinates
+solar, batteries, grid power, EV charging and thermal assets on a Raspberry Pi
+or Linux host. The safety-critical runtime is one Go binary,
+hardware integrations are sandboxed Lua drivers, and a compiled Energyplan
+worker handles long-horizon planning.
 
 The control path stays on the local network. Cloud price, weather and device
 integrations degrade independently; they are not required for safe local
 operation.
 
-FTW Community is Apache-2.0 software maintained by Sourceful Energy and project
-contributors. Community help is best effort. See [SUPPORT.md](SUPPORT.md) for
-the boundary between community use and separate commercial services.
+## Product direction
+
+FTW should make mixed equipment simple to live with: useful first-day
+planning, reliable daily charging, fast and honest live feedback, and
+structured access for agents. The default experience should need few choices
+while keeping expert controls and Lua drivers available.
+
+[VISION.md](VISION.md) is the product direction set by Fredrik.
+[docs/roadmap.md](docs/roadmap.md) lists the outcomes and proof needed. These
+include goals that have not shipped; the capability list below is separate.
+
+Sourceful Energy maintains FTW Community under AGPL-3.0-only with the
+Energyplan combination permission. Contributions are welcome, preferably
+starting with [issues](https://github.com/srcfl/ftw/issues). Share a short
+Markdown proposal or a focused fix with relevant test evidence.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
+[SUPPORT.md](SUPPORT.md) describes separate commercial services.
 
 ## Architecture
 
@@ -26,9 +41,9 @@ FTW has three explicit modules:
 - **Optimizer** proposes plans over a versioned contract; core validates every
   result and keeps a Go fallback.
 
-This separation lets drivers and the optimizer evolve independently without
-moving safety authority out of core. New module types should follow the same
-rule. See [docs/architecture.md](docs/architecture.md).
+Drivers and the optimizer can evolve without moving safety authority out of
+Core. A new module needs a concrete reason and must reduce the complexity of
+the whole product. See [docs/architecture.md](docs/architecture.md).
 
 ## Capabilities
 
@@ -36,9 +51,8 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - multi-battery allocation with fuse, SoC, slew and stale-data protection;
 - price-, weather-, PV- and load-aware planning;
 - EV charging, V2X and thermal planning;
-- local web UI, SQLite history and Parquet rolloff;
+- local web UI, SQLite history and configuration, and Parquet archives;
 - Home Assistant MQTT discovery;
-- CalDAV planning intents and published schedules;
 - hot-reloadable, independently released Lua drivers;
 - a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
 
@@ -83,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh
 ```
 
 It installs Docker when needed, creates `~/ftw`, downloads the Compose file
-and starts core, optimizer, updater and the local MQTT broker. Open
+and starts core, updater and the local MQTT broker. Open
 `http://<host>:8080/setup` on the LAN.
 
 Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
@@ -93,12 +107,15 @@ the connection if DHCP later hands the host a different address.
 
 Existing Forty Two Watts or older FTW deployments must use the
 [legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
-are preserved. Raspberry Pi image installation is covered by
+are preserved. A 2.x Compose site that already runs `ghcr.io/srcfl/ftw`
+and wants 3.x uses [upgrade-paired-release.md](docs/upgrade-paired-release.md),
+not orange Update. Raspberry Pi image installation is covered by
 [docs/rpi-image.md](docs/rpi-image.md).
 
-The dashboard is intentionally local. Use a VPN or another operator-managed
-private network when access is needed away from home; FTW does not ship a
-public relay.
+The on-box dashboard remains local. The optional
+[FTW webapp](https://github.com/srcfl/ftw-webapp) connects through an encrypted
+session and blind relay; relay loss does not stop local control. Cloud MCP
+access is a product goal, not an endpoint provided by this installation guide.
 
 ## Install on Home Assistant
 
@@ -127,8 +144,8 @@ faults to [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers/issue
 
 ## Local development
 
-Requirements are Go, Python 3 and Node.js. The optimizer environment is cached
-after its first install.
+Requirements are Go and Node.js. Python 3 verifies release artifacts during
+development; no Python interpreter or service runs the planner.
 
 ```bash
 git clone https://github.com/srcfl/ftw.git
@@ -139,7 +156,7 @@ make dev
 Useful checks:
 
 ```bash
-make test      # Go + Python, parallel where independent
+make test      # Go tests
 npm test       # web
 make verify    # fast test, compose, vet and build checks
 make e2e       # simulator-backed full stack
@@ -225,8 +242,9 @@ metadata are the detailed reference.
 - [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
 - [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Self-update and release channels](docs/self-update.md)
+- [Upgrade a Compose install to one Core + updater tag](docs/upgrade-paired-release.md)
 - [Home Assistant](docs/ha-integration.md)
-- [CalDAV](docs/caldav-integration.md)
+- [Calendar removal and existing schedules](docs/caldav-integration.md)
 
 Other files under [`docs/`](docs/) are focused installation or
 external-integration guides.
@@ -235,4 +253,7 @@ external-integration guides.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). User-visible changes need a Changeset.
 
-Apache-2.0 — see [LICENSE](LICENSE).
+AGPL-3.0-only with the Energyplan combination permission — see
+[LICENSE](LICENSE) and [LICENSING.md](LICENSING.md). Energyplan binaries have
+separate household-use terms; commercial use of those binaries needs a
+Sourceful agreement. Earlier versions retain their earlier licenses.

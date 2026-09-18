@@ -218,3 +218,18 @@ func TestNormalizeWindowsConfigPathKeepsShortPathsAndPrefixesLongUNC(t *testing.
 		t.Fatalf("long UNC path = %q, want \\?\\UNC prefix", got)
 	}
 }
+
+func TestSettingsDatabaseFilesHaveOwnerOnlyACL(t *testing.T) {
+	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, nil, 0666); err != nil {
+			t.Fatal(err)
+		}
+		if err := restrictConfigFile(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyConfigFileOwnerOnly(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

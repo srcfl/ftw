@@ -87,6 +87,27 @@ func TestLuaDriverLifecycle(t *testing.T) {
 	}
 }
 
+func TestLuaDriverMissingCommandIsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nocommand.lua")
+	src := `
+function driver_init(config) end
+function driver_poll() return 1000 end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewLuaDriver(path, NewHostEnv("nocommand", telemetry.NewStore()))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+	err = d.Command(context.Background(), []byte(`{"action":"battery","power_w":1000}`))
+	if err == nil || !strings.Contains(err.Error(), "driver_command is not defined") {
+		t.Fatalf("Command error = %v, want driver_command is not defined", err)
+	}
+}
+
 func TestLuaDriverCommandAndDefaultModeReturnErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "failing.lua")
@@ -151,6 +172,44 @@ end
 		t.Fatalf("default after cancelled command: %v", err)
 	}
 	if got, _, ok := tel.LatestMetric("loop", "default_called"); !ok || got != 1 {
+		t.Fatalf("default metric = %v/%v, want 1", got, ok)
+	}
+}
+
+func TestLuaLegacyPollHonorsContextAndDefaultCanRunAfterCancel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "poll-loop.lua")
+	src := `
+function driver_poll()
+    host.emit_metric("poll_started", 1)
+    while true do end
+end
+function driver_default_mode()
+    host.emit_metric("default_called", 1)
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	d, err := NewLuaDriver(path, NewHostEnv("poll-loop", tel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, err = d.Poll(ctx)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("cancellable legacy poll error = %v, want context deadline exceeded", err)
+	}
+	if got, _, ok := tel.LatestMetric("poll-loop", "poll_started"); !ok || got != 1 {
+		t.Fatalf("poll started metric = %v/%v, want 1", got, ok)
+	}
+	if err := d.DefaultModeContext(context.Background()); err != nil {
+		t.Fatalf("default after cancelled poll: %v", err)
+	}
+	if got, _, ok := tel.LatestMetric("poll-loop", "default_called"); !ok || got != 1 {
 		t.Fatalf("default metric = %v/%v, want 1", got, ok)
 	}
 }

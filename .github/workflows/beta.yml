@@ -58,6 +58,7 @@ jobs:
       runtime_version: ${{ steps.version.outputs.runtime_version }}
       oci_version: ${{ steps.version.outputs.oci_version }}
       state_schema: ${{ steps.version.outputs.state_schema }}
+      legacy_marker: ${{ steps.version.outputs.legacy_marker }}
       created: ${{ steps.version.outputs.created }}
     steps:
       - name: Checkout selected commit
@@ -91,6 +92,13 @@ jobs:
             echo "state-schema.json must contain a positive integer version" >&2
             exit 1
           fi
+          # Cores before v3.6.0-beta.1 read only the legacy marker and copy
+          # their whole history when it differs from their schema (#1302).
+          LEGACY_MARKER="$(node -p "require('./state-schema.json').legacy_marker")"
+          if [[ ! "${LEGACY_MARKER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "state-schema.json must contain a positive integer legacy_marker" >&2
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -111,6 +119,7 @@ jobs:
           echo "runtime_version=${RUNTIME_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "oci_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "state_schema=${STATE_SCHEMA}" >> "${GITHUB_OUTPUT}"
+          echo "legacy_marker=${LEGACY_MARKER}" >> "${GITHUB_OUTPUT}"
           echo "created=${TAG_CREATED}" >> "${GITHUB_OUTPUT}"
 
   candidate:
@@ -297,11 +306,13 @@ jobs:
           - target: main
             dockerfile: ./Dockerfile
             image_suffix: ""
+            licenses: "AGPL-3.0-only AND LicenseRef-Energyplan-Home-Use-1.0"
             build_required: ${{ needs.candidate.outputs.core_build }}
             existing_digest: ${{ needs.candidate.outputs.core_digest }}
           - target: updater
             dockerfile: ./Dockerfile.updater
             image_suffix: "-updater"
+            licenses: "AGPL-3.0-only"
             build_required: ${{ needs.candidate.outputs.updater_build }}
             existing_digest: ${{ needs.candidate.outputs.updater_digest }}
     steps:
@@ -346,7 +357,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/srcfl/ftw
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.tag.outputs.oci_version }}
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.licenses=${{ matrix.licenses }}
           build-args: |
             VERSION=${{ needs.tag.outputs.runtime_version }}
             CANDIDATE_TAG=${{ needs.tag.outputs.version }}
@@ -443,6 +454,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.tag.outputs.version }}
           STATE_SCHEMA: ${{ needs.tag.outputs.state_schema }}
+          LEGACY_MARKER: ${{ needs.tag.outputs.legacy_marker }}
         run: |
           set -euo pipefail
           CORE_DIGEST="$(scripts/inspect-image-digest.sh "ghcr.io/srcfl/ftw:${TAG}")"
@@ -473,7 +485,7 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
               --prerelease \
-              --notes "<!-- ftw-state-schema:${STATE_SCHEMA} -->" \
+              --notes "$(printf '<!-- ftw-state-schema:%s -->\n<!-- ftw-state-schema-v2:%s -->' "${LEGACY_MARKER}" "${STATE_SCHEMA}")" \
               --generate-notes
           fi
           gh release upload "${TAG}" ftw-image-digests.json \
@@ -609,3 +621,31 @@ jobs:
               --tag "${compatibility}:beta" "${canonical_version}@${expected}"
             test "$(scripts/inspect-image-digest.sh "${compatibility}:beta")" = "${expected}"
           done
+
+  addon:
+    name: notify the Home Assistant app repository
+    runs-on: ubuntu-latest
+    needs: [tag, release]
+    # srcfl/home-assistant-addons follows every release on its own hourly
+    # sync; this dispatch only makes its next check immediate. It reads the
+    # GitHub release and the registry rather than this payload, and a missing
+    # secret is a notice, never a failed release.
+    if: ${{ github.repository == 'srcfl/ftw' }}
+    steps:
+      - name: Dispatch ftw-release to srcfl/home-assistant-addons
+        env:
+          GH_TOKEN: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
+          TAG: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::HA_ADDON_DISPATCH_TOKEN is not set; srcfl/home-assistant-addons picks up ${TAG} on its hourly sync."
+            exit 0
+          fi
+          gh api repos/srcfl/home-assistant-addons/dispatches \
+            --method POST \
+            -f event_type=ftw-release \
+            -f "client_payload[channel]=beta" \
+            -f "client_payload[tag]=${TAG}" \
+            -f "client_payload[commit]=${GITHUB_SHA}"
+          echo "Dispatched ftw-release for ${TAG} (beta)."

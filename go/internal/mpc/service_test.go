@@ -213,7 +213,7 @@ func TestForecastPriceFadesTowardClimatologyOverHours(t *testing.T) {
 
 func TestBuildSlotsWeatherProvenanceFollowsTwinCloudInput(t *testing.T) {
 	weatherStart := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
-	priceStart := weatherStart.Add(75 * time.Minute)
+	priceStart := weatherStart.Add(45 * time.Minute)
 	cloud := 25.0
 	prices := []state.PricePoint{{
 		SlotTsMs: priceStart.UnixMilli(), SlotLenMin: 15,
@@ -235,7 +235,7 @@ func TestBuildSlotsWeatherProvenanceFollowsTwinCloudInput(t *testing.T) {
 	}
 }
 
-func TestBuildSlotsWeatherProvenanceKeepsNearestNilCloudRow(t *testing.T) {
+func TestBuildSlotsDoesNotUseFutureWeatherBeforeCoverage(t *testing.T) {
 	firstTs := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
 	laterCloud := 91.0
 	priceTs := firstTs - int64(15*time.Minute/time.Millisecond)
@@ -259,9 +259,62 @@ func TestBuildSlotsWeatherProvenanceKeepsNearestNilCloudRow(t *testing.T) {
 	if len(slots) != 1 {
 		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
 	}
-	if got := slots[0]; got.PVW != -500 || got.WeatherRowSource != "nearest" ||
-		got.WeatherRowAvailableAtMs != 111 {
-		t.Fatalf("nearest nil-cloud provenance = %+v", got)
+	if got := slots[0]; got.PVW != 0 || got.WeatherRowSource != "" || got.WeatherRowAvailableAtMs != 0 {
+		t.Fatalf("future weather manufactured PV or provenance = %+v", got)
+	}
+}
+
+func TestBuildSlotsDoesNotCreatePVAcrossWeatherGap(t *testing.T) {
+	start := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	cloud := 10.0
+	pvW := 3000.0
+	forecasts := []state.ForecastPoint{
+		{SlotTsMs: start.UnixMilli(), SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &pvW, Source: "before"},
+		{SlotTsMs: start.Add(2 * time.Hour).UnixMilli(), SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &pvW, Source: "after"},
+	}
+	target := start.Add(time.Hour).UnixMilli()
+	slots := buildSlots(
+		[]state.PricePoint{{SlotTsMs: target, SlotLenMin: 15, SpotOreKwh: 50, TotalOreKwh: 100}},
+		forecasts, 500, target,
+		func(time.Time, float64) float64 { return 5000 }, nil, nil,
+	)
+	if len(slots) != 1 {
+		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
+	}
+	if got := slots[0]; got.PVW != 0 || got.WeatherRowSource != "" || got.WeatherRowAvailableAtMs != 0 {
+		t.Fatalf("weather gap manufactured learned PV or provenance = %+v", got)
+	}
+}
+
+func TestSnapshotPredictionsUsesFrozenPlanPredictors(t *testing.T) {
+	start := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	cloud := 25.0
+	weather := []state.ForecastPoint{{SlotTsMs: start.UnixMilli(), SlotLenMin: 60, CloudCoverPct: &cloud}}
+	service := &Service{
+		PV:   func(time.Time, float64) float64 { return 9000 },
+		Load: func(time.Time) float64 { return 8000 },
+	}
+	points := service.snapshotPredictions(
+		[]Slot{{StartMs: start.UnixMilli(), LenMin: 60}}, weather,
+		func(time.Time, float64) float64 { return 1000 },
+		func(time.Time) float64 { return 700 },
+	)
+	if points == nil || len(points.pv) != 1 || points.pv[0] != 1000 || len(points.load) != 1 || points.load[0] != 700 {
+		t.Fatalf("drift baseline re-read live predictors: %+v", points)
+	}
+	loadOnly := service.snapshotPredictions(
+		[]Slot{{StartMs: start.UnixMilli(), LenMin: 60}}, nil,
+		nil, func(time.Time) float64 { return 700 },
+	)
+	if loadOnly == nil || loadOnly.pv != nil || len(loadOnly.load) != 1 {
+		t.Fatalf("nil frozen PV fell through to live service predictor: %+v", loadOnly)
+	}
+	withoutWeather := service.snapshotPredictions(
+		[]Slot{{StartMs: start.UnixMilli(), LenMin: 60}}, nil,
+		func(time.Time, float64) float64 { return 1000 }, nil,
+	)
+	if withoutWeather == nil || len(withoutWeather.pv) != 1 || len(withoutWeather.pvCovered) != 1 || withoutWeather.pvCovered[0] {
+		t.Fatalf("missing weather created a PV drift baseline: %+v", withoutWeather)
 	}
 }
 
@@ -880,52 +933,26 @@ func TestSelectPlannerPVWRadiationBlendClampsWildTwin(t *testing.T) {
 	}
 }
 
-// When forecast is radiation-backed but zero (night), the legacy cloud
-// path takes over — we don't want to emit 0.3*predicted for a slot
-// where the forecast correctly says "no sun".
-func TestSelectPlannerPVWRadiationZeroForecastIgnoresBlend(t *testing.T) {
-	// Twin predicts 300W at night (probably garbage); radiation says 0.
-	// With the guard, we fall through to cloud-only logic: forecast <
-	// 200 threshold → use twin. That's the original behaviour and
-	// matches "we have no sun, twin is the only signal left".
-	got := selectPlannerPVW(0, 300, true)
-	if got != 300 {
-		t.Errorf("zero-forecast with radiation flag should fall through, got %f", got)
+// A provider's explicit zero is a valid signal, including night.
+func TestSelectPlannerPVWRadiationZeroDoesNotInventPV(t *testing.T) {
+	if got := selectPlannerPVW(0, 300, true); got != 0 {
+		t.Fatalf("provider zero became %v W", got)
 	}
 }
 
-// T33 regression: open_meteo predicted 2002 W (solar_wm2=154, cloud=1%) for a
-// 13 kW site while the trained RLS twin (NowAnchor-corrected via live telemetry)
-// predicted 290 W — actual measured PV was ~290 W.  The old code produced
-// 0.7*2002 + 0.3*290 = 1488 W (5× actual).  With the forecast cap, the forecast
-// is limited to PlannerForecastCapRatio (3×) × twin before blending:
-//
-//	cappedForecast = 3 × 290 = 870
-//	result         = 0.7×870 + 0.3×290 = 696 W   (2.4× actual — still an overshoot
-//	                                                but far better than 5×)
-//
-// The residual over-prediction is expected and acceptable: the cap only activates
-// when the NWP cloud forecast was catastrophically wrong.  On a normal day (forecast
-// and twin agree within 3×) the cap is a no-op and accuracy is unchanged.
-func TestSelectPlannerPVWForecastCapActivatesOnWildForecast(t *testing.T) {
-	// Reproduce T33 inputs (scaled to round numbers).
-	forecast := 2002.0
-	twin := 290.0 // NowAnchor-corrected RLS twin value
-
-	got := selectPlannerPVW(forecast, twin, true)
-
-	// With the cap at PlannerForecastCapRatio=3: capped = 3*290 = 870.
-	cappedForecast := PlannerForecastCapRatio * twin
-	want := (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*twin
-	if math.Abs(got-want) > 0.5 {
-		t.Errorf("T33 forecast-cap: got %.1f, want %.1f (capped at %.0fx twin=%g)",
-			got, want, PlannerForecastCapRatio, twin)
+func TestSelectPlannerPVWContinuousAtLegacyThreshold(t *testing.T) {
+	before := selectPlannerPVW(6000, 50, true)
+	after := selectPlannerPVW(6000, 51, true)
+	if math.Abs((after-before)-PlannerRadiationWeight) > 1e-9 {
+		t.Fatalf("one watt changed blend %v -> %v", before, after)
 	}
+}
 
-	// Result must be materially less than the uncapped blend.
-	uncapped := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
-	if got >= uncapped {
-		t.Errorf("capped result %.1f should be less than uncapped %.1f", got, uncapped)
+func TestPlannerPVWeightRequiresBoundedTrust(t *testing.T) {
+	for _, tc := range []struct{ weight, want float64 }{{0, 6000}, {1, 50}, {-1, 6000}, {2, 50}, {math.NaN(), 6000}} {
+		if got := selectPlannerPVWithWeight(6000, 50, true, tc.weight); got != tc.want {
+			t.Fatalf("weight %v: got%v want%v", tc.weight, got, tc.want)
+		}
 	}
 }
 

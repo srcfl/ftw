@@ -40,8 +40,8 @@ func planFrom(p *mpc.Plan, rev uint64, ceilingW *int64, uptimeMs int64, now time
 	for _, a := range p.Actions {
 		price := int64(math.Round(a.PriceOre))
 		out.Slots = append(out.Slots, PlanSlot{
-			StartMs:    a.SlotStartMs,
-			DurationMs: int64(a.SlotLenMin) * int64(time.Minute/time.Millisecond),
+			StartMs:    a.ExecutionStart(),
+			DurationMs: int64(math.Round(a.DurationHours() * 3600000)),
 			BatteryW:   roundW(a.BatteryW),
 			GridW:      roundW(a.GridW),
 			PriceMinor: &price,
@@ -58,7 +58,7 @@ func planFrom(p *mpc.Plan, rev uint64, ceilingW *int64, uptimeMs int64, now time
 func meanPriceOre(actions []mpc.Action) float64 {
 	var sum, weight float64
 	for _, a := range actions {
-		w := float64(a.SlotLenMin)
+		w := a.DurationHours() * 60
 		if w <= 0 {
 			w = 1
 		}

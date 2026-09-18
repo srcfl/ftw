@@ -30,7 +30,8 @@ func TestLoadpointPlanWindowsMergesContiguousSlots(t *testing.T) {
 	now := time.Now().UTC().Truncate(15 * time.Minute)
 	start := now.Add(-30 * time.Minute)
 	// Slots: [past 11 kW] [past 0] [current 4 kW] [4 kW] [0] [11 kW]
-	svc := &Service{last: planWithActions(start, []float64{11000, 0, 4000, 4000, 0, 11000})}
+	svc := &Service{}
+	svc.InstallPlan(*planWithActions(start, []float64{11000, 0, 4000, 4000, 0, 11000}), Params{}, "garage")
 
 	windows, totalWh := svc.LoadpointPlanWindows("garage", now.Add(1*time.Minute), 1)
 	if len(windows) != 1 {
@@ -69,7 +70,8 @@ func TestLoadpointPlanWindowsLegacySingleLP(t *testing.T) {
 	p := &Plan{GeneratedAtMs: time.Now().UnixMilli(), Actions: []Action{
 		{SlotStartMs: now.UnixMilli(), SlotLenMin: 15, LoadpointW: 6000},
 	}}
-	svc := &Service{last: p, lastLoadpointID: "carport"}
+	svc := &Service{}
+	svc.InstallPlan(*p, Params{}, "carport")
 
 	windows, totalWh := svc.LoadpointPlanWindows("carport", now, 0)
 	if len(windows) != 1 || totalWh != 1500 {
@@ -87,7 +89,8 @@ func TestLoadpointPlanWindowsStalePlan(t *testing.T) {
 	now := time.Now().UTC().Truncate(15 * time.Minute)
 	p := planWithActions(now, []float64{4000})
 	p.GeneratedAtMs = time.Now().Add(-MaxPlanAge - time.Minute).UnixMilli()
-	svc := &Service{last: p}
+	svc := &Service{}
+	svc.InstallPlan(*p, Params{}, "garage")
 	if windows, totalWh := svc.LoadpointPlanWindows("garage", now, 0); len(windows) != 0 || totalWh != 0 {
 		t.Fatalf("stale plan: want nothing, got %+v / %v", windows, totalWh)
 	}

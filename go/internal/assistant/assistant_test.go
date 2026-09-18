@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -90,11 +91,142 @@ func TestCompletePostsChatCompletions(t *testing.T) {
 	if !strings.Contains(gotBody, `"role":"system"`) {
 		t.Fatalf("system skill missing from %s", gotBody)
 	}
+	if !strings.Contains(gotBody, `"stream":true`) {
+		t.Fatalf("stream not requested: %s", gotBody)
+	}
 	if reply.Answer != "Idle as planned." {
 		t.Fatalf("answer = %q", reply.Answer)
 	}
 	if strings.Contains(reply.Answer, "sk-or-v1-test") {
 		t.Fatal("API key leaked into the reply")
+	}
+}
+
+func TestCompleteStreamsTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		write := func(content string) {
+			b, _ := json.Marshal(map[string]any{
+				"model": "openrouter/free",
+				"choices": []any{map[string]any{
+					"delta": map[string]any{"content": content},
+				}},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			fl.Flush()
+		}
+		write("## Answer\n")
+		write("Idle as planned.")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	var deltas []string
+	cli := &Client{HTTP: srv.Client()}
+	reply, err := cli.Complete(context.Background(), Request{
+		APIKey:   "k",
+		BaseURL:  srv.URL,
+		Question: "why idle?",
+		Report:   "idle",
+		Progress: func(kind, text string) {
+			if kind == "delta" {
+				deltas = append(deltas, text)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deltas, "") != "## Answer\nIdle as planned." {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+	if reply.Answer != "Idle as planned." {
+		t.Fatalf("answer = %q", reply.Answer)
+	}
+}
+
+// A model often narrates before it calls a tool. That text is not the
+// answer, so each round is announced and the UI drops what it holds.
+func TestCompleteMarksEachRoundSoStaleTokensAreDropped(t *testing.T) {
+	round := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		write := func(v map[string]any) {
+			b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": v}}})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			fl.Flush()
+		}
+		round++
+		if round == 1 {
+			write(map[string]any{"content": "Let me check the drivers."})
+			write(map[string]any{"tool_calls": []any{map[string]any{
+				"index": 0, "id": "call_1", "type": "function",
+				"function": map[string]string{"name": "get_driver_health", "arguments": "{}"},
+			}}})
+		} else {
+			write(map[string]any{"content": "## Answer\nSungrow is offline."})
+		}
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	var kinds []string
+	var deltas []string
+	cli := &Client{HTTP: srv.Client()}
+	reply, err := cli.Complete(context.Background(), Request{
+		APIKey:   "k",
+		BaseURL:  srv.URL,
+		Question: "why is sungrow down?",
+		Run: func(name string, args json.RawMessage) (string, error) {
+			return "sungrow status=offline", nil
+		},
+		Progress: func(kind, text string) {
+			kinds = append(kinds, kind)
+			if kind == "delta" {
+				deltas = append(deltas, text)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Answer != "Sungrow is offline." {
+		t.Fatalf("answer = %q", reply.Answer)
+	}
+	// Two rounds ran, so the UI was told twice to start a fresh answer.
+	rounds := 0
+	for _, k := range kinds {
+		if k == "round" {
+			rounds++
+		}
+	}
+	if rounds != 2 {
+		t.Fatalf("round markers = %d, want 2; kinds = %v", rounds, kinds)
+	}
+	// The narration streamed, but a round marker separates it from the answer.
+	if len(deltas) != 2 || deltas[0] != "Let me check the drivers." {
+		t.Fatalf("deltas = %#v", deltas)
+	}
+	firstDelta := -1
+	secondRound := -1
+	seenRound := 0
+	for i, k := range kinds {
+		if k == "delta" && firstDelta < 0 {
+			firstDelta = i
+		}
+		if k == "round" {
+			seenRound++
+			if seenRound == 2 {
+				secondRound = i
+			}
+		}
+	}
+	if !(firstDelta < secondRound) {
+		t.Fatalf("the second round must follow the narration; kinds = %v", kinds)
 	}
 }
 

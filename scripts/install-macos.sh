@@ -40,7 +40,6 @@ else
 fi
 RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 COMPOSE_FILE="docker-compose.macos.yml"
-ENABLE_MODULAR_URL="${RAW}/scripts/enable-modular-stack.sh"
 
 # Banner
 cat <<'BANNER'
@@ -143,20 +142,7 @@ if [ -f "$COMPOSE_PATH" ]; then
   cp "$COMPOSE_PATH" "$COMPOSE_PATH.pre-ftw.bak"
   echo "    Existing safe deployment layout retained."
 
-  if ! printf '%s\n' "$SERVICES" | grep -qx 'ftw-optimizer'; then
-    echo "    Adding the independently updatable optimizer sidecar..."
-    ENABLE_SCRIPT="$(mktemp)"
-    trap 'rm -f "$ENABLE_SCRIPT"' EXIT
-    curl -fsSL "$ENABLE_MODULAR_URL" -o "$ENABLE_SCRIPT"
-    if ! bash "$ENABLE_SCRIPT" "$COMPOSE_PATH"; then
-      echo "ERROR: could not add the modular optimizer without changing an existing override." >&2
-      echo "       Merge it manually using docs/operations.md, then rerun this installer." >&2
-      exit 1
-    fi
-    rm -f "$ENABLE_SCRIPT"
-    trap - EXIT
-    refresh_compose_args
-  fi
+
 else
   curl -fsSL "${RAW}/${COMPOSE_FILE}" -o "$COMPOSE_PATH"
   refresh_compose_args

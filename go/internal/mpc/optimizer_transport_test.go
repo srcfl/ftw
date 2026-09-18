@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,6 +85,58 @@ func TestProcessTransportRejectsCanceledContextBeforeWorkerLookup(t *testing.T) 
 	_, err = transport.RoundTrip(ctx, []byte(`{}`))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+	}
+}
+
+func TestProcessTransportWriteCancellationRestartsWorker(t *testing.T) {
+	if len(os.Args) >= 2 && os.Args[len(os.Args)-2] == "process-write-helper" {
+		marker := os.Args[len(os.Args)-1]
+		first, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_ = first.Close()
+			// The first worker never reads stdin. Its parent must kill it when the
+			// request deadline expires and the pipe write is still blocked.
+			time.Sleep(10 * time.Second)
+			return
+		}
+		if !errors.Is(err, os.ErrExist) {
+			os.Exit(2)
+		}
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			_, _ = os.Stdout.WriteString(`{"ok":true}` + "\n")
+		}
+		return
+	}
+
+	marker := t.TempDir() + "/worker-started"
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{os.Args[0], "-test.run=TestProcessTransportWriteCancellationRestartsWorker", "--", "process-write-helper", marker},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transport.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	started := time.Now()
+	_, err = transport.RoundTrip(ctx, bytes.Repeat([]byte("x"), 2<<20))
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RoundTrip error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("blocked write returned after %v, want at most 2s", elapsed)
+	}
+
+	restartCtx, restartCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer restartCancel()
+	response, err := transport.RoundTrip(restartCtx, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip after canceled write: %v", err)
+	}
+	if string(response) != `{"ok":true}` {
+		t.Fatalf("RoundTrip after canceled write = %s, want healthy worker response", response)
 	}
 }
 

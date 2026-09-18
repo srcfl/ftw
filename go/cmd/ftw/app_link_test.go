@@ -1,11 +1,13 @@
 package main
 
 import (
+	"math"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -238,5 +240,63 @@ func TestAppSetModeRefusesAModeTheBoxDoesNotHave(t *testing.T) {
 	}
 	if ctrl.Mode != control.ModeSelfConsumption {
 		t.Fatalf("a refused mode still changed the state to %q", ctrl.Mode)
+	}
+}
+
+// The port's charge-level path is the HTTP route's: SetCurrentSoC on the
+// manager, refused while no car is plugged in, and read back from the
+// manager's own state — within the half-permille the handler allows, because
+// the manager re-anchors through the session's delivered energy.
+func TestAppLoadpointsCorrectTheChargeLevelThroughTheManager(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{
+		ID: "garage", DriverName: "easee-cloud",
+		VehicleCapacityWh: 60000, PluginSoC: 0.4,
+	}})
+	lp := &appLoadpoints{mgr: mgr}
+
+	if lp.SetSoC("garage", 0.62) {
+		t.Fatal("an unplugged car's level was set")
+	}
+
+	mgr.Observe("garage", true, 7400, 1200, true) // 1.2 kWh into the session
+	if !lp.SetSoC("garage", 0.62) {
+		t.Fatal("a plugged-in car's level was refused")
+	}
+	got, ok := lp.ObservedSoC("garage")
+	if !ok || math.Abs(got-0.62) > 0.0005 {
+		t.Fatalf("read back %v (known %v), want 0.62", got, ok)
+	}
+	if _, ok := lp.ObservedSoC("street"); ok {
+		t.Fatal("a loadpoint the box does not have read back a level")
+	}
+}
+
+// The port's PV-only path is the HTTP target route's SetSurplusOnly: the
+// previous value comes back so the caller knows the direction, and the
+// read-back is the manager's own flag.
+func TestAppLoadpointsFlipSurplusOnlyThroughTheManager(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee-cloud", SurplusOnly: true}})
+	lp := &appLoadpoints{mgr: mgr}
+
+	prev, ok := lp.SetSurplusOnly("garage", false)
+	if !ok || !prev {
+		t.Fatalf("SetSurplusOnly = (%v, %v), want the previous true", prev, ok)
+	}
+	if v, ok := lp.ObservedSurplusOnly("garage"); !ok || v {
+		t.Fatalf("read back %v (known %v), want off", v, ok)
+	}
+
+	prev, ok = lp.SetSurplusOnly("garage", true)
+	if !ok || prev {
+		t.Fatalf("SetSurplusOnly = (%v, %v), want the previous false", prev, ok)
+	}
+	if v, ok := lp.ObservedSurplusOnly("garage"); !ok || !v {
+		t.Fatalf("read back %v (known %v), want on", v, ok)
+	}
+
+	if _, ok := lp.SetSurplusOnly("street", true); ok {
+		t.Fatal("a loadpoint the box does not have took a flag")
 	}
 }

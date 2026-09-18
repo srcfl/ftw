@@ -211,7 +211,11 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 		amps = 0
 	}
 
-	r, err := s.attemptLimit(ctx, id, amps, numberPhases, allConnectors)
+	alias, err := s.sockets.currentID(id)
+	if err != nil {
+		return err
+	}
+	r, err := s.attemptLimit(ctx, id, alias, amps, numberPhases, allConnectors)
 	if err != nil {
 		return err
 	}
@@ -225,7 +229,7 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 	if r.answered && !r.accepted {
 		slog.Info("ocpp: charger refused a charge-point-wide profile, retrying on connector 1",
 			"charger", id, "status", r.status)
-		retry, retryErr := s.attemptLimit(ctx, id, amps, numberPhases, firstConnector)
+		retry, retryErr := s.attemptLimit(ctx, id, alias, amps, numberPhases, firstConnector)
 		if retryErr != nil {
 			return retryErr
 		}
@@ -245,8 +249,14 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 	// from a pause would erase the rate a later resume is supposed to
 	// restore, and the charger would come back at the fallback ceiling
 	// instead of where it left off.
-	if amps > 0 {
-		s.handler.SetLastAmps(id, amps)
+	_, err = boundCall(s.sockets, alias, func(id string) (bool, error) {
+		if amps > 0 {
+			s.handler.SetLastAmps(id, amps)
+		}
+		return true, nil
+	})
+	if err != nil {
+		return err
 	}
 	slog.Info("ocpp: charging limit applied", "charger", id, "amps", amps)
 	return nil
@@ -257,7 +267,7 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 // The returned profileResult carries the charger's verdict, including a
 // refusal; the error is reserved for the cases where no verdict exists —
 // transport failure, cancellation, silence.
-func (s *Server) attemptLimit(ctx context.Context, id string, amps float64, numberPhases *int, connectorID int) (profileResult, error) {
+func (s *Server) attemptLimit(ctx context.Context, id, alias string, amps float64, numberPhases *int, connectorID int) (profileResult, error) {
 	// Buffered: the library's callback must never block if we have already
 	// stopped waiting.
 	done := make(chan profileResult, 1)
@@ -267,9 +277,9 @@ func (s *Server) attemptLimit(ctx context.Context, id string, amps float64, numb
 	var err error
 	switch version, _ := s.handler.Version(id); version {
 	case Version201:
-		err = s.sendProfileV201(id, amps, numberPhases, connectorID, done)
+		err = s.sendProfileV201(alias, amps, numberPhases, connectorID, done)
 	default:
-		err = s.sendProfileV16(id, amps, numberPhases, connectorID, done)
+		err = s.sendProfileV16(alias, amps, numberPhases, connectorID, done)
 	}
 	if err != nil {
 		return profileResult{}, fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)

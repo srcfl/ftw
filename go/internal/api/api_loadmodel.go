@@ -44,6 +44,7 @@ func (s *Server) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 		"heating_w_per_degc": stats.HeatingWPerDegC,
 		"buckets_warm":       stats.BucketsWarm,
 		"buckets_total":      stats.BucketsTotal,
+		"learning":           s.forecastLearningStatus("load"),
 	})
 }
 
@@ -80,16 +81,7 @@ func (s *Server) handleLoadModelProfile(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleLoadModelReset(w http.ResponseWriter, r *http.Request) {
-	if s.deps.LoadModel == nil {
-		writeJSON(w, 400, map[string]string{"error": "loadmodel disabled"})
-		return
-	}
-	profile := s.deps.LoadModel.Profile()
-	s.deps.LoadModel.Reset()
-	if s.deps.MPC != nil {
-		s.deps.MPC.ReplanWithReason(r.Context(), "load_profile_reset")
-	}
-	writeJSON(w, 200, map[string]any{"status": "reset", "profile": profile})
+	s.handleForecastLearningReset(w, r, "load")
 }
 
 func loadModelStatsFrom(m loadmodel.Model) loadModelStats {

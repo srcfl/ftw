@@ -82,7 +82,8 @@ func (m *controlV2Modbus) setWriteError(err error) {
 }
 
 const controlV2Lua = `
-assert(os == nil and io == nil and debug == nil and package == nil)
+assert(io == nil and debug == nil and package == nil)
+assert(os.execute == nil and os.remove == nil and os.getenv == nil)
 assert(load == nil and loadfile == nil and dofile == nil and require == nil and getfenv == nil and setfenv == nil)
 
 init_write_error = nil

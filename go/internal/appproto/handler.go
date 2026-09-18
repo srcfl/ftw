@@ -870,6 +870,10 @@ func (h *Handler) onCmd(ctx context.Context, env Envelope) error {
 		return h.loadpointHold(cmd, uptimeMs)
 	case OpLoadpointBoost:
 		return h.loadpointBoost(cmd, uptimeMs)
+	case OpLoadpointSoCSet:
+		return h.loadpointSoCSet(cmd, uptimeMs)
+	case OpLoadpointSurplusOnlySet:
+		return h.loadpointSurplusOnlySet(cmd, uptimeMs)
 	default:
 		return fmt.Errorf("appproto: op %q is in the table but has no handler", cmd.Op)
 	}

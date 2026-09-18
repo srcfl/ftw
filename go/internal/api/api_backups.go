@@ -107,7 +107,7 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := backup.Create(r.Context(), backup.CreateOptions{
-		State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
+		ConfigPath: s.deps.ConfigPath, State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
 		OutputDir: dir, Components: s.backupComponentInventory(r.Context()),
 		Maintenance: s.deps.DataMaintenanceMu,
 	})

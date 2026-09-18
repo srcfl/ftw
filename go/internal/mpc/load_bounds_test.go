@@ -101,6 +101,23 @@ func TestRainCheckLoadNoHistoryNoOp(t *testing.T) {
 	}
 }
 
+func TestForecastLoadWhUsesRemainingHours(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 9, 8, 4, 45, 0, 0, time.UTC)
+	slots := []Slot{{
+		StartMs: start.UnixMilli(), LenMin: 15,
+		ExecutionStartMs: start.Add(10 * time.Minute).UnixMilli(),
+		LoadW:            1200,
+	}}
+	if got := forecastLoadWh(slots); math.Abs(got-100) > 1e-9 {
+		t.Fatalf("rain-check energy=%g Wh, want 100 (5 min of 1200 W), not 300", got)
+	}
+	slots[0].ExecutionStartMs = 0
+	if got := forecastLoadWh(slots); math.Abs(got-300) > 1e-9 {
+		t.Fatalf("full slot energy=%g Wh, want 300", got)
+	}
+}
+
 func TestRecentDailyLoadWhSkipsEmptyDays(t *testing.T) {
 	st, err := state.Open(t.TempDir() + "/t.db")
 	if err != nil {

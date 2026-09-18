@@ -66,7 +66,7 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.applyPlannerPrefs(r.Context(), safetyK, export); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	trust, _, resolvedK, mappedMode := s.plannerPrefsSnapshot()
@@ -81,27 +81,31 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) applyPlannerPrefs(ctx context.Context, safetyK float64, export config.BatteryExport) error {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	safetyK = config.ClampSafetyK(safetyK)
 	trust := config.TrustFromSafetyK(safetyK)
+	mapped := control.Mode(export.PlannerModeKey())
+	if s.deps.State != nil {
+		var plannerModes []string
+		for _, mode := range control.AllModes() {
+			if mode.IsPlannerMode() {
+				plannerModes = append(plannerModes, string(mode))
+			}
+		}
+		if err := s.deps.State.SavePlannerPreferences(map[string]string{
+			config.StateKeySafetyK:       config.FormatSafetyK(safetyK),
+			config.StateKeyForecastTrust: string(trust),
+			config.StateKeyBatteryExport: string(export),
+		}, plannerModes, string(mapped)); err != nil {
+			return err
+		}
+	}
 	if s.deps.PlannerPrefs == nil {
 		s.deps.PlannerPrefs = config.NewPlannerPrefs(trust, export, safetyK)
 	} else {
 		s.deps.PlannerPrefs.Set(trust, export, safetyK)
 	}
-	if s.deps.State != nil {
-		// Both keys are written on every change: the float is the truth, the
-		// enum keeps a downgrade to an older Core reading the nearest step.
-		if err := s.deps.State.SaveConfig(config.StateKeySafetyK, config.FormatSafetyK(safetyK)); err != nil {
-			return err
-		}
-		if err := s.deps.State.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {
-			return err
-		}
-		if err := s.deps.State.SaveConfig(config.StateKeyBatteryExport, string(export)); err != nil {
-			return err
-		}
-	}
-	mapped := control.Mode(export.PlannerModeKey())
 	if s.deps.Ctrl != nil && s.deps.CtrlMu != nil {
 		s.deps.CtrlMu.Lock()
 		inPlanner := s.deps.Ctrl.Mode.IsPlannerMode()
@@ -112,9 +116,6 @@ func (s *Server) applyPlannerPrefs(ctx context.Context, safetyK float64, export 
 			s.deps.CtrlMu.Unlock()
 			if err != nil {
 				return err
-			}
-			if s.deps.State != nil {
-				_ = s.deps.State.SaveConfig("mode", string(mapped))
 			}
 			if mm, ok := control.PlannerMPCMode(mapped); ok && s.deps.MPC != nil {
 				s.deps.MPC.SetMode(ctx, mm)

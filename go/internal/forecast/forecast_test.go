@@ -111,7 +111,9 @@ func TestEstimatePVWCloudReduction(t *testing.T) {
 func TestEstimatePVWNilCloudIsMid(t *testing.T) {
 	tt := time.Date(2026, 6, 21, 11, 0, 0, 0, time.UTC)
 	pv := EstimatePVW(59.3293, 18.0686, tt, nil, 10000)
-	if pv == 0 { t.Error("nil cloud should default to mid-range, not zero") }
+	if pv == 0 {
+		t.Error("nil cloud should default to mid-range, not zero")
+	}
 }
 
 // ---- met.no HTTP ----
@@ -130,7 +132,7 @@ func TestMetNoFetchParses(t *testing.T) {
 							"instant": map[string]any{
 								"details": map[string]any{
 									"cloud_area_fraction": 75.0,
-									"air_temperature":      8.5,
+									"air_temperature":     8.5,
 								},
 							},
 						},
@@ -141,7 +143,7 @@ func TestMetNoFetchParses(t *testing.T) {
 							"instant": map[string]any{
 								"details": map[string]any{
 									"cloud_area_fraction": 20.0,
-									"air_temperature":      7.2,
+									"air_temperature":     7.2,
 								},
 							},
 						},
@@ -156,8 +158,12 @@ func TestMetNoFetchParses(t *testing.T) {
 	p := NewMetNo("test-ua")
 	p.BaseURL = srv.URL
 	rows, err := p.Fetch(context.Background(), 59.3, 18.1)
-	if err != nil { t.Fatal(err) }
-	if len(rows) != 2 { t.Fatalf("got %d rows, want 2", len(rows)) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
 	if rows[0].CloudCoverPct == nil || *rows[0].CloudCoverPct != 75 {
 		t.Errorf("cloud cover: %+v", rows[0].CloudCoverPct)
 	}
@@ -174,7 +180,9 @@ func TestMetNoErrorsOn500(t *testing.T) {
 	p := NewMetNo("test")
 	p.BaseURL = srv.URL
 	_, err := p.Fetch(context.Background(), 59, 18)
-	if err == nil { t.Error("expected error on 500") }
+	if err == nil {
+		t.Error("expected error on 500")
+	}
 }
 
 // ---- OpenWeather HTTP ----
@@ -193,16 +201,26 @@ func TestOpenWeatherFetchParses(t *testing.T) {
 	p := NewOpenWeather("test-key")
 	p.BaseURL = srv.URL
 	rows, err := p.Fetch(context.Background(), 59, 18)
-	if err != nil { t.Fatal(err) }
-	if len(rows) != 2 { t.Fatalf("got %d", len(rows)) }
-	if *rows[0].CloudCoverPct != 40 { t.Errorf("cloud: %f", *rows[0].CloudCoverPct) }
-	if *rows[1].TempC != 10.5 { t.Errorf("temp: %f", *rows[1].TempC) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d", len(rows))
+	}
+	if *rows[0].CloudCoverPct != 40 {
+		t.Errorf("cloud: %f", *rows[0].CloudCoverPct)
+	}
+	if *rows[1].TempC != 10.5 {
+		t.Errorf("temp: %f", *rows[1].TempC)
+	}
 }
 
 func TestOpenWeatherRequiresKey(t *testing.T) {
 	p := NewOpenWeather("")
 	_, err := p.Fetch(context.Background(), 59, 18)
-	if err == nil { t.Error("expected API key error") }
+	if err == nil {
+		t.Error("expected API key error")
+	}
 }
 
 // ---- Service integration ----
@@ -241,8 +259,12 @@ func TestServiceFetchesAndStoresWithPVEstimate(t *testing.T) {
 	// Load back
 	tt := time.Date(2026, 6, 21, 11, 0, 0, 0, time.UTC)
 	rows, err := st.LoadForecasts(tt.UnixMilli(), tt.Add(time.Hour).UnixMilli())
-	if err != nil { t.Fatal(err) }
-	if len(rows) != 1 { t.Fatalf("got %d forecasts", len(rows)) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d forecasts", len(rows))
+	}
 	// Stockholm summer clear-ish sky at noon with 10kW array should give ~4-8 kW estimate
 	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated < 1000 {
 		t.Errorf("PV estimate should be substantial for clear summer, got %+v", rows[0].PVWEstimated)
@@ -253,18 +275,30 @@ func TestServiceFetchesAndStoresWithPVEstimate(t *testing.T) {
 // ---- FromConfig ----
 
 func TestFromConfigNilWhenDisabled(t *testing.T) {
-	if FromConfig(nil, 10000, nil, "") != nil { t.Error("nil cfg → nil svc") }
-	if FromConfig(&config.Weather{Provider: "none"}, 10000, nil, "") != nil { t.Error("none → nil svc") }
-	if FromConfig(&config.Weather{Provider: ""}, 10000, nil, "") != nil { t.Error("empty → nil svc") }
+	if FromConfig(nil, 10000, nil, "") != nil {
+		t.Error("nil cfg → nil svc")
+	}
+	if FromConfig(&config.Weather{Provider: "none"}, 10000, nil, "") != nil {
+		t.Error("none → nil svc")
+	}
+	if FromConfig(&config.Weather{Provider: ""}, 10000, nil, "") != nil {
+		t.Error("empty → nil svc")
+	}
 }
 
 func TestFromConfigBuildsMetNo(t *testing.T) {
 	st, _ := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	defer st.Close()
 	s := FromConfig(&config.Weather{Provider: "met_no", Latitude: 59, Longitude: 18}, 10000, st, "ua")
-	if s == nil { t.Fatal("expected service") }
-	if s.Lat != 59 { t.Errorf("lat: %f", s.Lat) }
-	if s.RatedPVW != 10000 { t.Errorf("rated: %f", s.RatedPVW) }
+	if s == nil {
+		t.Fatal("expected service")
+	}
+	if s.Lat != 59 {
+		t.Errorf("lat: %f", s.Lat)
+	}
+	if s.RatedPVW != 10000 {
+		t.Errorf("rated: %f", s.RatedPVW)
+	}
 }
 
 func TestFromConfigPopulatesArrays(t *testing.T) {
@@ -279,7 +313,9 @@ func TestFromConfigPopulatesArrays(t *testing.T) {
 		},
 	}
 	s := FromConfig(cfg, 10000, st, "ua")
-	if s == nil { t.Fatal("expected service") }
+	if s == nil {
+		t.Fatal("expected service")
+	}
 	if len(s.Arrays) != 2 {
 		t.Fatalf("expected 2 arrays (kWp>0 only), got %d", len(s.Arrays))
 	}
@@ -430,7 +466,7 @@ func TestServicePOAPathDiffersFromFlat(t *testing.T) {
 	}
 	s.fetchAndStore(context.Background())
 
-	tt := time.Date(2026, 6, 21, 11, 0, 0, 0, time.UTC)
+	tt := time.Date(2026, 6, 21, 10, 0, 0, 0, time.UTC)
 	rows, err := st.LoadForecasts(tt.UnixMilli(), tt.Add(time.Hour).UnixMilli())
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +476,7 @@ func TestServicePOAPathDiffersFromFlat(t *testing.T) {
 	}
 	got := *rows[0].PVWEstimated
 	flat := 10000 * 700.0 / 1000.0 // orientation-blind estimate = 7000 W
-	want := poaPVWattsFromGHI(59.3293, 18.0686, tt, 700, s.Arrays)
+	want := poaPVWattsFromGHI(59.3293, 18.0686, tt.Add(30*time.Minute), 700, s.Arrays)
 	if math.Abs(got-want) > 1.0 {
 		t.Errorf("service should use POA path: got %.1f want %.1f", got, want)
 	}
@@ -588,7 +624,7 @@ func TestBjorn18960WTooltipIsPastedKWpNotDisplayScale(t *testing.T) {
 	}
 }
 
-func TestLoadClampsStoredMegawattForecast(t *testing.T) {
+func TestLoadUsesVerifiedACLimit(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -604,6 +640,7 @@ func TestLoadClampsStoredMegawattForecast(t *testing.T) {
 	s := &Service{
 		Store:    st,
 		RatedPVW: 10000,
+		ACLimitW: 10000,
 		Arrays:   []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}},
 	}
 	rows, err := s.Load(ts, ts+3600*1000)

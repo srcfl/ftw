@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -30,6 +30,8 @@ const (
 	SchemaVersion = 1
 	manifestPath  = "manifest.json"
 )
+
+var ensureBackupDiskSpace = state.EnsureDiskSpace
 
 // ComponentInventory records the independently versioned runtime that created
 // the backup. Driver artifacts themselves are also captured under data/.
@@ -70,6 +72,7 @@ type Manifest struct {
 }
 
 type CreateOptions struct {
+	ConfigPath  string // Defaults to config.yaml inside DataDir.
 	State       *state.Store
 	StatePath   string
 	DataDir     string
@@ -149,6 +152,21 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		opts.Maintenance.Lock()
 		defer opts.Maintenance.Unlock()
 	}
+	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
+	if err != nil {
+		return Info{}, err
+	}
+	sources, err := collectSources(dataDir, statePath, outputDir, importedHistory)
+	if err != nil {
+		return Info{}, err
+	}
+	extraBytes, err := backupExtraBytes(sources)
+	if err != nil {
+		return Info{}, err
+	}
+	if err := ensureBackupDiskSpace(outputDir, state.BackupArchiveScratch(opts.State.BackupSourceBytes(), extraBytes)); err != nil {
+		return Info{}, err
+	}
 
 	created := opts.Now.UTC()
 	if created.IsZero() {
@@ -168,7 +186,8 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	defer os.RemoveAll(stageDir)
 	databaseGzip := filepath.Join(stageDir, "database.gz")
-	if err := opts.State.BackupToCompressed(databaseGzip); err != nil {
+	stored, hasStored, err := opts.State.BackupWithConfiguration(databaseGzip, nil)
+	if err != nil {
 		return Info{}, err
 	}
 
@@ -178,9 +197,35 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	databaseFile = filepath.ToSlash(databaseFile)
 	databaseEntry := "data/" + databaseFile + ".gz"
-	sources, err := collectSources(dataDir, statePath, outputDir)
-	if err != nil {
-		return Info{}, err
+	if hasStored {
+		configPath := opts.ConfigPath
+		if configPath == "" {
+			configPath = filepath.Join(dataDir, "config.yaml")
+		}
+		configPath, err = filepath.Abs(configPath)
+		if err != nil {
+			return Info{}, err
+		}
+		configFile, err := filepath.Rel(dataDir, configPath)
+		if err != nil || configFile == ".." || strings.HasPrefix(configFile, ".."+string(filepath.Separator)) {
+			return Info{}, errors.New("backup config is outside data directory")
+		}
+		databaseRef, err := filepath.Rel(filepath.Dir(configPath), filepath.Join(dataDir, databaseFile))
+		if err != nil {
+			return Info{}, err
+		}
+		exported := filepath.Join(stageDir, "config.yaml")
+		if err := config.ExportStored(exported, stored, databaseRef); err != nil {
+			return Info{}, err
+		}
+		archivePath := "data/" + filepath.ToSlash(configFile)
+		filtered := sources[:0]
+		for _, source := range sources {
+			if source.archivePath != archivePath {
+				filtered = append(filtered, source)
+			}
+		}
+		sources = append(filtered, sourceEntry{archivePath: archivePath, sourcePath: exported})
 	}
 	sources = append(sources, sourceEntry{
 		archivePath: databaseEntry,
@@ -209,11 +254,11 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 
 	tmpPath := filepath.Join(outputDir, "."+id+".tmp")
-	if err := writeArchive(ctx, tmpPath, manifest, sources); err != nil {
+	if err := writeArchive(ctx, tmpPath, manifest, sources, !opts.State.OfflineBackup()); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, err
 	}
-	if _, err := Verify(tmpPath); err != nil {
+	if _, err := verifyInWorkspace(tmpPath, outputDir); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, fmt.Errorf("backup: verify finished archive: %w", err)
 	}
@@ -235,7 +280,22 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	return Info{ID: id, Path: finalPath, CreatedAt: created, SizeBytes: info.Size(), SHA256: sum, Verified: true}, nil
 }
 
-func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error) {
+// Count regular source bytes without following symlinks or hashing the archive.
+func backupExtraBytes(sources []sourceEntry) (int64, error) {
+	var total int64
+	for _, source := range sources {
+		info, err := os.Lstat(source.sourcePath)
+		if err != nil {
+			return 0, err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total, nil
+}
+
+func collectSources(dataDir, statePath, outputDir string, importedHistory map[string]bool) ([]sourceEntry, error) {
 	stateRel, _ := filepath.Rel(dataDir, statePath)
 	outputRel, outputInside := filepath.Rel(dataDir, outputDir)
 	if outputInside != nil || outputRel == ".." || strings.HasPrefix(outputRel, ".."+string(filepath.Separator)) {
@@ -253,12 +313,39 @@ func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error)
 		if err != nil {
 			return err
 		}
+		// Aggregate compaction scratch is derived from the retained source;
+		// restoring it is unnecessary and it may have an open SQLite journal.
+		if strings.HasPrefix(d.Name(), ".ftw-buckets-") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		first := strings.Split(rel, string(filepath.Separator))[0]
 		if first == "snapshots" || first == "backups" || isRestoreInternalName(first) || strings.HasPrefix(first, ".ftw-backup-") ||
 			(outputRel != "" && (rel == outputRel || strings.HasPrefix(rel, outputRel+string(filepath.Separator)))) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Primary history is exported from one read transaction into the
+		// SQLite backup above. Never copy a live database file or WAL.
+		historyRel, _ := filepath.Rel(dataDir, state.HistoryDatabasePath(statePath))
+		if rel == historyRel || rel == historyRel+"-wal" || rel == historyRel+"-shm" || strings.HasPrefix(rel, historyRel+".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Beta originals remain on disk for recovery; the converter verified
+		// their rows into the canonical history exported above.
+		betaRel, _ := filepath.Rel(dataDir, state.BetaHistoryDatabasePath(statePath))
+		if rel == betaRel || rel == betaRel+".wal" || first == state.HotHistoryFilename || first == state.HotHistoryFilename+"-wal" || first == state.HotHistoryFilename+"-shm" {
+			return nil
+		}
+
+		if importedHistory[p] {
 			return nil
 		}
 		if rel == stateRel || rel == stateRel+"-wal" || rel == stateRel+"-shm" {
@@ -299,6 +386,23 @@ func describeSource(ctx context.Context, dataDir string, source sourceEntry) (Fi
 		if err != nil || !pathInside(dataDir, resolved) {
 			return FileEntry{}, fmt.Errorf("backup: symlink escapes data dir: %s -> %s", source.sourcePath, target)
 		}
+		// Managed driver activations use absolute paths in the running
+		// container. Store an internal relative link so restore can relocate
+		// data without referring back to /app/data or the original machine.
+		// Do not follow the link; validate the complete archive graph below.
+		if filepath.IsAbs(target) {
+			rootPrefix := dataDir + string(filepath.Separator)
+			if !strings.HasPrefix(target, rootPrefix) {
+				return FileEntry{}, fmt.Errorf("backup: absolute symlink is outside data dir: %s", source.sourcePath)
+			}
+			back, relErr := filepath.Rel(filepath.Dir(source.sourcePath), dataDir)
+			if relErr != nil {
+				return FileEntry{}, relErr
+			}
+			// Preserve .. until archive graph validation has expanded links.
+			target = back + string(filepath.Separator) + strings.TrimPrefix(target, rootPrefix)
+		}
+		target = filepath.ToSlash(target)
 		entry.Type, entry.LinkTarget = "symlink", target
 		h := sha256.Sum256([]byte(target))
 		entry.SHA256 = hex.EncodeToString(h[:])
@@ -309,7 +413,7 @@ func describeSource(ctx context.Context, dataDir string, source sourceEntry) (Fi
 	return entry, err
 }
 
-func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []sourceEntry) error {
+func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []sourceEntry, live bool) error {
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -321,7 +425,7 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 			_ = os.Remove(dst)
 		}
 	}()
-	zw, err := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	zw, err := gzip.NewWriterLevel(state.NewMaintenanceWriterPaced(ctx, f, live), gzip.BestSpeed)
 	if err != nil {
 		return err
 	}
@@ -386,8 +490,16 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 	return nil
 }
 
-// Verify checks archive structure, every file hash, and SQLite quick_check.
+// Verify checks archive structure, every file hash, SQLite quick_check and
+// Parquet readability. A matching hash alone cannot detect a damaged source.
 func Verify(archivePath string) (Manifest, error) {
+	return verifyInWorkspace(archivePath, "")
+}
+
+// Creation uses its preflighted output filesystem; restore uses its writable
+// target. Inspect/verify prefer the archive filesystem, then the caller's
+// temporary workspace (TMPDIR) when the source directory is read-only.
+func verifyInWorkspace(archivePath, workspace string) (Manifest, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return Manifest{}, err
@@ -418,9 +530,16 @@ func Verify(archivePath string) (Manifest, error) {
 		want[entry.Path] = entry
 	}
 	seen := make(map[string]bool, len(want))
-	tmpDir, err := os.MkdirTemp("", ".ftw-backup-verify-")
+	allowFallback := workspace == ""
+	if allowFallback {
+		workspace = filepath.Dir(archivePath)
+	}
+	tmpDir, err := os.MkdirTemp(workspace, ".ftw-backup-verify-")
+	if err != nil && allowFallback {
+		tmpDir, err = os.MkdirTemp("", ".ftw-backup-verify-")
+	}
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, fmt.Errorf("backup: create verification workspace: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 	dbGzip := filepath.Join(tmpDir, "database.gz")
@@ -456,11 +575,18 @@ func Verify(archivePath string) (Manifest, error) {
 		h := sha256.New()
 		var writer io.Writer = h
 		var dbFile *os.File
+		parquetPath := ""
 		if entry.Path == manifest.DatabaseEntry {
 			dbFile, err = os.OpenFile(dbGzip, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if err != nil {
-				return Manifest{}, err
-			}
+		} else if strings.HasSuffix(strings.ToLower(entry.Path), ".parquet") {
+			// Stage and remove one day at a time, not the entire cold archive.
+			parquetPath = filepath.Join(tmpDir, "parquet.tmp")
+			dbFile, err = os.OpenFile(parquetPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		}
+		if err != nil {
+			return Manifest{}, err
+		}
+		if dbFile != nil {
 			writer = io.MultiWriter(h, dbFile)
 		}
 		if _, err := io.Copy(writer, tr); err != nil {
@@ -477,11 +603,19 @@ func Verify(archivePath string) (Manifest, error) {
 		if got := hex.EncodeToString(h.Sum(nil)); got != entry.SHA256 {
 			return Manifest{}, fmt.Errorf("backup: hash mismatch for %s", entry.Path)
 		}
+		if parquetPath != "" {
+			if err := state.VerifyParquetFile(context.Background(), parquetPath); err != nil {
+				return Manifest{}, fmt.Errorf("backup: unreadable Parquet %s: %w", entry.Path, err)
+			}
+			if err := os.Remove(parquetPath); err != nil {
+				return Manifest{}, err
+			}
+		}
 	}
 	if len(seen) != len(want) {
 		return Manifest{}, errors.New("backup: archive is missing one or more manifest files")
 	}
-	if err := verifyCompressedDatabase(dbGzip); err != nil {
+	if err := verifyCompressedDatabase(dbGzip, tmpDir); err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
@@ -495,7 +629,7 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("backup: invalid manifest identity or database path")
 	}
 	seen := make(map[string]bool, len(manifest.Files))
-	symlinks := make(map[string]bool)
+	symlinks := make(map[string]string)
 	databaseFound := false
 	for _, entry := range manifest.Files {
 		if !safeDataPath(entry.Path) || entry.Path == manifestPath || seen[entry.Path] {
@@ -528,19 +662,63 @@ func validateManifest(manifest Manifest) error {
 			if !safeDataPath(resolved) {
 				return fmt.Errorf("backup: symlink target escapes data root: %s -> %s", entry.Path, entry.LinkTarget)
 			}
-			symlinks[entry.Path] = true
+			symlinks[entry.Path] = entry.LinkTarget
 		}
 	}
 	if !databaseFound {
 		return errors.New("backup: compressed database missing from manifest")
 	}
+	// A lexical path check alone misses `alias/../outside`: .. applies
+	// after alias is followed. Resolve each link against archive entries,
+	// never the host filesystem, and reject cycles or escape chains.
+	for name, target := range symlinks {
+		if err := validateArchiveLink(name, target, symlinks); err != nil {
+			return err
+		}
+	}
 	for _, entry := range manifest.Files {
 		parent := path.Dir(entry.Path)
 		for parent != "." && parent != "/" {
-			if symlinks[parent] {
+			if _, ok := symlinks[parent]; ok {
 				return fmt.Errorf("backup: entry %s is nested below symlink %s", entry.Path, parent)
 			}
 			parent = path.Dir(parent)
+		}
+	}
+	return nil
+}
+
+// validateArchiveLink models relative symlink traversal without cleaning away
+// .. before symlink expansion. Archive paths start at the data root.
+func validateArchiveLink(name, target string, links map[string]string) error {
+	parts := strings.Split(strings.TrimPrefix(path.Dir(name), "data/"), "/")
+	if path.Dir(name) == "data" {
+		parts = nil
+	}
+	pending := strings.Split(target, "/")
+	expansions := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) == 0 {
+				return fmt.Errorf("backup: symlink chain escapes data root: %s", name)
+			}
+			parts = parts[:len(parts)-1]
+		default:
+			candidate := "data/" + strings.Join(append(append([]string{}, parts...), part), "/")
+			if next, ok := links[candidate]; ok {
+				expansions++
+				if expansions > 40 {
+					return fmt.Errorf("backup: cyclic or excessive symlink chain: %s", name)
+				}
+				pending = append(strings.Split(next, "/"), pending...)
+			} else {
+				parts = append(parts, part)
+			}
 		}
 	}
 	return nil
@@ -550,15 +728,15 @@ func validateManifest(manifest Manifest) error {
 // it into place while retaining the previous data directory beside it.
 // Callers must stop FTW before invoking this function.
 func Restore(archivePath, dataDir string, now time.Time) (RestoreResult, error) {
-	_, err := Verify(archivePath)
-	if err != nil {
-		return RestoreResult{}, err
-	}
+	var err error
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
 		return RestoreResult{}, err
 	}
 	parent := filepath.Dir(dataDir)
+	if _, err := verifyInWorkspace(archivePath, parent); err != nil {
+		return RestoreResult{}, err
+	}
 	staging, err := os.MkdirTemp(parent, ".ftw-restore-stage-")
 	if err != nil {
 		return RestoreResult{}, err
@@ -616,10 +794,7 @@ func Restore(archivePath, dataDir string, now time.Time) (RestoreResult, error) 
 // entries. If activation fails, the moves are reversed before returning.
 // Callers must stop FTW before invoking this function.
 func RestoreContents(archivePath, dataDir string, now time.Time) (RestoreResult, error) {
-	_, err := Verify(archivePath)
-	if err != nil {
-		return RestoreResult{}, err
-	}
+	var err error
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
 		return RestoreResult{}, err
@@ -630,6 +805,9 @@ func RestoreContents(archivePath, dataDir string, now time.Time) (RestoreResult,
 	}
 	if !info.IsDir() {
 		return RestoreResult{}, fmt.Errorf("backup: restore target is not a directory: %s", dataDir)
+	}
+	if _, err := verifyInWorkspace(archivePath, dataDir); err != nil {
+		return RestoreResult{}, err
 	}
 	staging, err := os.MkdirTemp(dataDir, ".ftw-restore-stage-")
 	if err != nil {
@@ -923,8 +1101,8 @@ func extractArchive(archivePath, staging string) error {
 	return verifyDatabase(filepath.Join(staging, filepath.FromSlash(manifest.DatabaseFile)))
 }
 
-func verifyCompressedDatabase(src string) error {
-	tmp, err := os.CreateTemp("", ".ftw-backup-db-*.sqlite")
+func verifyCompressedDatabase(src, workDir string) error {
+	tmp, err := os.CreateTemp(workDir, ".ftw-backup-db-*.sqlite")
 	if err != nil {
 		return err
 	}
@@ -938,8 +1116,7 @@ func verifyCompressedDatabase(src string) error {
 }
 
 func verifyDatabase(dbPath string) error {
-	u := url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", state.ReadOnlyDatabaseURI(dbPath))
 	if err != nil {
 		return err
 	}
@@ -1044,13 +1221,4 @@ func pathInside(root, candidate string) bool {
 	}
 	rel, err := filepath.Rel(rootAbs, candidateAbs)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
 }

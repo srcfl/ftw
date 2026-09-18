@@ -44,6 +44,15 @@ func defaultOps() map[string]opSpec {
 		// same routes give.
 		OpLoadpointHold:  {scope: ScopeDispatchWrite, dispatchWrite: true},
 		OpLoadpointBoost: {scope: ScopeDispatchWrite, dispatchWrite: true},
+		// The two loadpoint settings carry the same scope — their HTTP
+		// routes are priced Actuate, and a viewer must not change what the
+		// car may draw — but not the dispatch gate, for the mode's reason:
+		// each is state the box holds, and the planner output it reshapes
+		// still meets the gate before anything moves. Refusing a corrected
+		// charge level or a PV-only toggle while a meter is sick would keep
+		// the plan wrong for exactly as long as the box cannot act on it.
+		OpLoadpointSoCSet:         {scope: ScopeDispatchWrite, dispatchWrite: false},
+		OpLoadpointSurplusOnlySet: {scope: ScopeDispatchWrite, dispatchWrite: false},
 	}
 }
 

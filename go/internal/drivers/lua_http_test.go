@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -107,6 +108,113 @@ func TestLuaHTTPAllowlistEnforcement(t *testing.T) {
 				t.Errorf("wantBody=%v, got=%v (err=%s)", tc.wantBody, got, errMsg)
 			}
 		})
+	}
+}
+
+func runPostDriver(t *testing.T, env *HostEnv, targetURL string) (ok bool, errText string) {
+	t.Helper()
+	src := `
+		function driver_init() end
+		function driver_poll()
+			local body, err = host.http_post("` + targetURL + `", "{}")
+			if err then
+				host.emit_metric("post_err", 1)
+				local e = tostring(err)
+				if string.find(e, "redirect", 1, true) then
+					host.emit_metric("denied_redirect", 1)
+				end
+				host.log("info", "ERR:" .. e)
+			else
+				host.emit_metric("post_ok", 1)
+			end
+			return 60000
+		end
+		function driver_command() end
+		function driver_default_mode() end
+		function driver_cleanup() end
+	`
+	path := filepath.Join(t.TempDir(), "post.lua")
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	defer d.Cleanup()
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if v, _, found := env.Telemetry.LatestMetric(env.DriverName, "post_ok"); found && v == 1 {
+		return true, ""
+	}
+	if v, _, found := env.Telemetry.LatestMetric(env.DriverName, "denied_redirect"); found && v == 1 {
+		return false, "denied_redirect"
+	}
+	return false, "other"
+}
+
+func TestLuaHTTPPost302DoesNotWriteAck(t *testing.T) {
+	var followUps atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followUps.Add(1)
+		if r.Method != http.MethodGet {
+			t.Errorf("follow-up method = %s, want GET (Go converted the POST)", r.Method)
+		}
+		_, _ = w.Write([]byte(`ok`))
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	env := NewHostEnv("post-302", telemetry.NewStore()).WithHTTP()
+	env.RuntimePolicy = &RuntimePolicy{
+		PackageID:   "com.sourceful.driver.test",
+		Permissions: map[string]bool{"http.post": true},
+	}
+	env.writePhase = "command"
+	env.writeDeadline = time.Now().Add(time.Minute)
+
+	ok, deniedBy := runPostDriver(t, env, redirector.URL)
+	if ok {
+		t.Fatal("a 302 POST must not report success")
+	}
+	if deniedBy != "denied_redirect" {
+		t.Errorf("denied by %q, want the redirect refusal", deniedBy)
+	}
+	if followUps.Load() != 0 {
+		t.Fatalf("redirect target was reached %d times — the write was converted to a GET", followUps.Load())
+	}
+	if env.writeEvidence["write_ack"] {
+		t.Fatal("302 GET must not record write_ack")
+	}
+}
+
+func TestLuaHTTPPost307OffListHostFails(t *testing.T) {
+	var followUps atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		followUps.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	allowed := strings.TrimPrefix(redirector.URL, "http://")
+	env := NewHostEnv("post-307", telemetry.NewStore()).WithHTTP().WithHTTPAllowedHosts([]string{allowed})
+	ok, _ := runPostDriver(t, env, redirector.URL)
+	if ok {
+		t.Fatal("a 307 POST to a host outside allowed_hosts must fail")
+	}
+	if followUps.Load() != 0 {
+		t.Fatalf("off-list 307 target was reached %d times", followUps.Load())
 	}
 }
 

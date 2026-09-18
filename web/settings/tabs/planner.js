@@ -36,24 +36,32 @@
     return label;
   }
 
-  // hedgeLine renders the live "what does k actually do" readout under
-  // the k input: σ (the live PV-forecast error std from /api/pvmodel)
-  // and the resulting hedge k·σ in watts. Returns null when σ is
-  // missing/invalid — the caller keeps the line hidden.
-  function hedgeLine(k, sigmaW) {
-    if (sigmaW == null || typeof sigmaW !== "number" || isNaN(sigmaW) || sigmaW < 0) return null;
-    var sigma = Math.round(sigmaW);
-    if (sigma < 1) return "σ right now ≈ 0 W — no hedge";
-    var kn = parseFloat(k);
-    if (isNaN(kn) || kn < 0) kn = 0;
-    return "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
+  // The active forecast owns its interval margin; the legacy PV residual
+  // cannot quantify it. The Plan chart shows the actual paired inputs.
+  function hedgeLine(k) {
+    return Number(k) === 0
+      ? "No forecast margin requested."
+      : "The margin varies by interval. See forecast and planning values on the Plan chart.";
+  }
+
+  function engineSelect(engine, help) {
+    var selected = String(engine == null ? "" : engine).trim().toLowerCase();
+    if (selected === "go" || selected === "dp") selected = "core";
+    if (selected === "python") selected = "energyplan";
+    var options = [["", "Automatic (release default)"], ["energyplan", "Energyplan"],
+      ["core", "Core DP"]];
+    return '<label for="planner-engine">Engine ' +
+      help("Automatic uses Energyplan in supported beta builds and Core DP elsewhere. Energyplan runs Core DP as a shadow and uses it as fallback. Changing the engine requires a restart.") +
+      '</label><select id="planner-engine" data-path="planner.engine">' +
+      options.map(function (option) {
+        return '<option value="' + option[0] + '"' + (selected === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';
+      }).join("") + '</select>';
   }
 
   S.tabs.planner = {
     render: function (ctx) {
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
-      if (!config.planner) config.planner = {};
-      var planner = config.planner;
+      var planner = config.planner || {};
       if (planner.soc_min == null && planner.soc_min_pct != null) {
         planner.soc_min = planner.soc_min_pct / 100;
       }
@@ -72,14 +80,14 @@
           '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
       }
       return '<fieldset><legend>MPC Planner</legend>' +
-        '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
+        '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
         '<div class="field-row"><div>' +
         field("House reserve (min SoC, 0–1)", "planner.soc_min", "number", 0.10,
           "Lowest SoC the planner will discharge to, so the house keeps a reserve. 0.10 = 10%.") +
         '</div><div>' +
-        field("Max SoC (0–1)", "planner.soc_max", "number", 0.90,
-          "Highest SoC the planner will charge to. 0.90 = 90%.") +
+        field("Max SoC (0–1)", "planner.soc_max", "number", 0.95,
+          "Highest SoC the planner will charge to. The default is 0.95 = 95%.") +
         '</div></div>' +
         '</fieldset>' +
         '<details class="engine-details">' +
@@ -90,63 +98,9 @@
         '</label>' +
         '<div id="planner-active-strategy" style="font-family:var(--mono);margin:2px 0 12px">—</div>' +
         '<div class="field-row"><div>' +
-        selectField("Engine", "planner.engine", ["python", "dp"], "python",
-          "Python runs the CVXPY mathematical optimizer. DP is the emergency rollback engine.") +
-        '</div><div>' +
-        selectField("Solver", "planner.optimizer_solver", ["HIGHS", "CLARABEL"], "HIGHS",
-          "HiGHS handles LP and MILP. CLARABEL is available only for continuous convex formulations.") +
+        engineSelect(planner.engine, help) +
         '</div></div>' +
-        '<div class="field-row"><div>' +
-        selectField("Formulation", "planner.optimizer_formulation", ["auto", "milp", "relaxed"], "auto",
-          "Auto introduces integer variables only when physics or discrete asset steps require them.") +
-        '</div><div>' +
-        field("Solver timeout (s)", "planner.optimizer_timeout_s", "number", 5,
-          "Whole worker deadline. A timeout activates the validated Go-DP fallback for that replan.") +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("MIP relative gap", "planner.optimizer_mip_rel_gap", "number", 0.005,
-          "Accepted HiGHS MILP optimality gap. 0.005 means 0.5 percent.") +
-        '</div><div>' +
-        field("CVaR risk weight", "planner.optimizer_cvar_weight", "number", 0.15,
-          "Weight on expensive forecast-tail scenarios. 0 disables tail-risk cost.") +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("CVaR alpha", "planner.optimizer_cvar_alpha", "number", 0.9,
-          "Tail confidence level. 0.9 optimizes the worst ten percent of scenario cost.") +
-        '</div><div>' +
-        selectField("Shadow policy", "planner.optimizer_challenger_policy", ["recourse", "multistage"], "recourse",
-          "Recourse is the two-stage reference. Multistage uses a hierarchical scenario tree, move-blocking, service risk, and scenario reduction.") +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("Shared prefix (slots)", "planner.optimizer_recourse_non_anticipative_slots", "number", 1,
-          "Initial slots that use the same action in every scenario. One slot means the next 15-minute action is executable before replanning.") +
-        '</div><div>' +
-        field("Scenario limit", "planner.optimizer_multistage.scenario_limit", "number", 12,
-          "Maximum representative trajectories retained by energy-weighted scenario reduction.") +
-        '</div></div>' +
-        '<label class="checkbox-row"><input type="checkbox" data-checkbox-path="planner.optimizer_recourse_shadow"' + (config.planner.optimizer_recourse_shadow ? ' checked' : '') + '> Stochastic shadow ' +
-        help('Run the stochastic storage challenger and stateful score it against the active champion. It never controls dispatch and pauses while flexible assets are active.') + '</label>' +
-        '<div class="field-row"><div>' +
-        field("Branch interval (slots)", "planner.optimizer_multistage.branch_interval_slots", "number", 4,
-          "How often the near-horizon scenario tree may reveal new information.") +
-        '</div><div>' +
-        field("Branch horizon (slots)", "planner.optimizer_multistage.branch_horizon_slots", "number", 48,
-          "Stop adding new scenario branches after this many slots to bound edge complexity.") +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("Near horizon (slots)", "planner.optimizer_multistage.near_horizon_slots", "number", 16,
-          "Slots kept at full 15-minute control resolution.") +
-        '</div><div>' +
-        field("Far move block (slots)", "planner.optimizer_multistage.far_block_slots", "number", 4,
-          "Far-horizon actions tied into blocks. Four slots give hourly decisions.") +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("Service CVaR weight", "planner.optimizer_multistage.service_cvar_weight", "number", 1,
-          "Risk weight on target and operating-bound violations, optimized before economic cost.") +
-        '</div><div>' +
-        field("Decomposition threshold", "planner.optimizer_multistage.decomposition_threshold", "number", 20,
-          "Scenario count above which auto mode uses eligible Progressive Hedging or reduces to the exact extensive budget.") +
-        '</div></div>' +
+        '<p>Energyplan uses a 500 ms solve limit. Core DP runs in the background for comparison and supplies a fallback if needed.</p>' +
         '<div class="field-row"><div>' + kHtml + '</div></div>' +
         '<div class="field-row"><div>' +
         field("Base load (W)", "planner.base_load_w", "number", 0,
@@ -225,5 +179,5 @@
   };
 
   // Escape hatch for node --test (planner.test.mjs); not a public API.
-  S.tabs.planner._pure = { strategyLabel: strategyLabel, hedgeLine: hedgeLine };
+  S.tabs.planner._pure = { strategyLabel: strategyLabel, hedgeLine: hedgeLine, engineSelect: engineSelect };
 })();

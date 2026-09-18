@@ -153,6 +153,8 @@ func (s *Server) handleNotificationsRulesGet(w http.ResponseWriter, r *http.Requ
 // top-level enabled flips the master switch. Nothing here can wipe a setting
 // its sender never knew about.
 func (s *Server) handleNotificationsRulesPut(w http.ResponseWriter, r *http.Request) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	if s.deps.Cfg == nil || s.deps.CfgMu == nil || s.deps.SaveConfig == nil {
 		writeJSON(w, 503, map[string]string{"error": "configuration is not writable here"})
 		return
@@ -210,8 +212,7 @@ func (s *Server) handleNotificationsRulesPut(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
 	}
-	// One apply path, shared with the file watcher and POST /api/config —
-	// see #760 for what hand-applying a subset cost last time.
+	// Share the Settings apply path so runtime services see the saved config.
 	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
 		&newCfg, s.deps.ConfigApplier)
 	slog.Info("notification rules updated via API", "events", len(req.Events))

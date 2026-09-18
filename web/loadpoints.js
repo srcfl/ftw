@@ -18,10 +18,6 @@
 
   const REFRESH_MS = 10000;
   let refreshTimer = null;
-  // While an inline SoC editor is open, render() skips re-rendering so the
-  // poll doesn't clobber the input. Self-healing: cleared if the editor DOM
-  // is gone (see render()).
-  let socEditingId = null;
   // How many forward slots of the schedule to render. The plan is
   // 193 slots × 15 min = 48 h. 4 h was too narrow — operators looking
   // at "why does the plan chart show grid burst at 13:00 but my schedule
@@ -117,37 +113,21 @@
     restart_lease_invalid: 'Saved lease was no longer safe',
   };
 
+  // Battery boost is started and stopped in the EV modal (the plug
+  // icon). The Devices card only reports it, so there is one place that
+  // writes the lease.
   function batteryBoostBlock(lp) {
     const boost = lp.battery_boost || { state: 'inactive', active: false };
     if (boost.active) {
-      const target = boost.ev_target_soc > 0 ? ` · EV target ${fmtPct(boost.ev_target_soc)}` : '';
       return '<div class="lp-boost lp-boost-active">' +
         '<div class="lp-boost-title">Battery boost ' + badge('ACTIVE', true) + '</div>' +
-        `<div class="lp-boost-copy">${fmtRemaining(boost.expires_at_ms)} left · home reserve ${fmtPct(boost.min_battery_soc)}${target}</div>` +
-        `<button class="lp-boost-cancel" type="button" data-lp="${escapeHtml(lp.id)}">Stop boost</button>` +
+        `<div class="lp-boost-copy">${fmtRemaining(boost.expires_at_ms)} left · home reserve ${fmtPct(boost.min_battery_soc)} · stop it from the EV modal</div>` +
         '</div>';
     }
-    const stopped = boost.stop_reason
-      ? `<div class="lp-boost-reason">Last stop: ${BOOST_STOP_LABELS[boost.stop_reason] || escapeHtml(boost.stop_reason)}</div>`
-      : '';
-    const blocked = !lp.plugged_in || lp.manual_active || lp.surplus_only;
-    let why = '';
-    if (!lp.plugged_in) why = 'Plug in a vehicle first.';
-    else if (lp.manual_active) why = 'Release the charger hold first.';
-    else if (lp.surplus_only) why = 'Turn off surplus-only first.';
-    return '<div class="lp-boost">' +
-      '<div class="lp-boost-title">Battery boost</div>' +
-      '<div class="lp-boost-copy">Temporarily let the home battery support this car. Core fuse, reserve, health and operator limits still apply.</div>' +
-      '<div class="lp-boost-fields">' +
-        '<label>Reserve %<input class="lp-boost-reserve" type="number" min="5" max="100" step="1" value="30"></label>' +
-        '<label>Duration<select class="lp-boost-duration"><option value="1800">30 min</option><option value="3600" selected>1 h</option><option value="7200">2 h</option><option value="14400">4 h</option></select></label>' +
-        '<label>EV target %<input class="lp-boost-target" type="number" min="1" max="100" step="1" placeholder="optional"></label>' +
-        '<label>Departure<input class="lp-boost-departure" type="datetime-local"></label>' +
-      '</div>' +
-      `<button class="lp-boost-enable" type="button" data-lp="${escapeHtml(lp.id)}" ${blocked ? 'disabled' : ''}>Enable boost</button>` +
-      (why ? `<span class="lp-boost-blocked">${why}</span>` : '') + stopped +
-      '<div class="lp-boost-msg" aria-live="polite"></div>' +
-      '</div>';
+    if (boost.stop_reason) {
+      return `<div class="lp-boost"><div class="lp-boost-reason">Last boost stop: ${BOOST_STOP_LABELS[boost.stop_reason] || escapeHtml(boost.stop_reason)}</div></div>`;
+    }
+    return '';
   }
 
   // Badge: small pill matching the existing .ftw-badge convention from
@@ -159,39 +139,35 @@
     return `<span class="${cls}">${label}</span>`;
   }
 
+  // soc_source in operator words. Unknown values fall back to
+  // "estimated" so an internal token never reaches the screen.
+  const SOC_SOURCE_LABELS = {
+    inferred: 'estimated',
+    vehicle: 'from the car',
+    completed: 'pinned after the car stopped asking',
+    assumed: 'not confirmed by the car',
+  };
+  function socSourceLabel(src) {
+    return SOC_SOURCE_LABELS[src] || SOC_SOURCE_LABELS.inferred;
+  }
+
   function configBlock(lp) {
     const d = fmtDeadline(lp.target_time);
-    const target = (lp.target_soc > 0)
-      ? `${fmtPct(lp.target_soc)}${d ? ' by ' + d : ''}`
-      : 'opportunistic';
+    const vehicleLimit = lp.finish_at_vehicle_limit === true || lp.schedule?.finish_at_vehicle_limit === true;
+    const target = vehicleLimit
+      ? `Car's charge limit${lp.goal_complete === true ? ' · completed' : d ? ' by ' + d : ''}`
+      : (lp.target_soc > 0) ? `${fmtPct(lp.target_soc)}${d ? ' by ' + d : ''}` : 'opportunistic';
     const vehicle = (lp.vehicle_driver)
       ? `${escapeHtml(lp.vehicle_driver)}${lp.vehicle_charging_state ? ' · ' + escapeHtml(lp.vehicle_charging_state) : ''}${lp.vehicle_stale ? ' · stale' : ''}`
       : '—';
-    // When soc_source is "vehicle", the BMS reading (vehicle_soc)
-    // is ground truth and what the operator expects to see — render
-    // that. current_soc stays as the controller's inference state
-    // (the planner's input for stability across ticks) and is shown
-    // in parens as "(inferred: 65.1%)" so the discrepancy is visible
-    // when it exists. When soc_source is "inferred" the inference
-    // value is the only one we have, so display it directly.
+    // One number — current_soc, the same value the EV modal's slider
+    // follows — with its source in words. The modal owns corrections
+    // (its slider is only shown while a car is plugged in); this card
+    // reads.
     let soc = '—';
-    if (lp.soc_source === 'vehicle' && lp.vehicle_soc != null) {
-      soc = `${fmtPct(lp.vehicle_soc)} (vehicle)`;
-      if (lp.current_soc != null &&
-          Math.abs(lp.vehicle_soc - lp.current_soc) >= 0.01) {
-        soc += ` · inferred ${fmtPct(lp.current_soc)}`;
-      }
-    } else if (lp.current_soc != null) {
-      soc = `${fmtPct(lp.current_soc)}${lp.soc_source ? ' (' + escapeHtml(lp.soc_source) + ')' : ''}`;
-    }
-    // Inline manual SoC correction. The backend (POST /api/loadpoints/{id}/soc)
-    // re-anchors the inferred SoC, so it only works during an active session —
-    // show the ✎ affordance only when plugged in.
-    let socCell = soc;
-    if (lp.plugged_in) {
-      const cur = (lp.current_soc != null) ? (lp.current_soc * 100).toFixed(1) : '';
-      socCell = `${soc} <button class="lp-soc-edit" type="button" data-lp="${escapeHtml(lp.id)}" data-cur="${cur}" title="Set SoC manually" ` +
-        `style="background:none;border:none;cursor:pointer;color:var(--accent-e);font-size:0.9em;padding:0 4px">✎</button>`;
+    if (lp.current_soc != null) {
+      soc = `${fmtPct(lp.current_soc)} · ${socSourceLabel(lp.soc_source)}`;
+      if (lp.plugged_in) soc += '<span class="lp-cfg-hint">Set in the EV card on the dashboard.</span>';
     }
     const rows = [
       ['Driver',       lp.driver_name ? escapeHtml(lp.driver_name) : '—'],
@@ -202,7 +178,7 @@
       ['Min',          fmtW(lp.min_charge_w)],
       ['Target',       target],
       ['Vehicle',      vehicle],
-      ['SoC',          socCell],
+      ['SoC',          soc],
     ];
     const html = rows.map(([k, v]) =>
       `<div class="lp-cfg-row"><span class="lp-cfg-key">${k}</span><span class="lp-cfg-val">${v}</span></div>`
@@ -270,13 +246,6 @@
     const grid = document.getElementById('loadpoints-grid');
     if (!grid) return;
 
-    // Don't clobber an open inline SoC editor. If the editor DOM is gone
-    // (mode toggled, card removed), resume normal rendering.
-    if (socEditingId) {
-      if (grid.querySelector('.lp-soc-input')) return;
-      socEditingId = null;
-    }
-
     // Capture scroll positions BEFORE swapping innerHTML — otherwise the
     // 5 s auto-refresh yanks the page (and any per-card schedule scroll)
     // back to the top mid-read. Page scroll comes from the document's
@@ -322,121 +291,8 @@
     }
   }
 
-  // ---- Inline manual SoC editing ----
-
-  function openSocEditor(btn) {
-    const cell = btn.closest('.lp-cfg-val');
-    if (!cell) return;
-    socEditingId = btn.dataset.lp;
-    const cur = btn.dataset.cur || '';
-    cell.innerHTML =
-      `<input type="number" class="lp-soc-input" min="0" max="100" step="0.1" value="${cur}" ` +
-      `style="width:64px;font-family:var(--mono)"> ` +
-      `<button class="lp-soc-save" type="button" data-lp="${escapeHtml(socEditingId)}" title="Save">✓</button> ` +
-      `<button class="lp-soc-cancel" type="button" title="Cancel">✗</button> ` +
-      `<span class="lp-soc-msg" style="color:var(--red-e,#c23b3b);font-size:0.8em;margin-left:6px"></span>`;
-    const inp = cell.querySelector('.lp-soc-input');
-    if (inp) { inp.focus(); inp.select(); }
-  }
-
-  function saveSoc(btn) {
-    const cell = btn.closest('.lp-cfg-val');
-    const inp = cell && cell.querySelector('.lp-soc-input');
-    const msg = cell && cell.querySelector('.lp-soc-msg');
-    if (!inp) return;
-    const val = parseFloat(inp.value);
-    if (!isFinite(val) || val < 0 || val > 100) { if (msg) msg.textContent = '0–100 only'; return; }
-    btn.disabled = true;
-    apiFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/soc', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ soc: val / 100 }),
-    })
-      .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
-      .then(res => {
-        if (res.ok && res.body && res.body.ok) { socEditingId = null; fetchAll(); }
-        else { if (msg) msg.textContent = (res.body && res.body.error) || 'failed'; btn.disabled = false; }
-      })
-      .catch(e => { if (msg) msg.textContent = e.message; btn.disabled = false; });
-  }
-
-  function cancelSoc() { socEditingId = null; fetchAll(); }
-
-  function boostRequest(btn) {
-    const panel = btn.closest('.lp-boost');
-    const msg = panel && panel.querySelector('.lp-boost-msg');
-    const reserve = panel && parseFloat(panel.querySelector('.lp-boost-reserve').value);
-    const duration = panel && parseInt(panel.querySelector('.lp-boost-duration').value, 10);
-    const targetText = panel && panel.querySelector('.lp-boost-target').value;
-    const departureText = panel && panel.querySelector('.lp-boost-departure').value;
-    const target = targetText ? parseFloat(targetText) : 0;
-    const departure = departureText ? new Date(departureText).getTime() : 0;
-    if (!isFinite(reserve) || reserve < 5 || reserve > 100) {
-      if (msg) msg.textContent = 'Reserve must be 5–100%.';
-      return;
-    }
-    if (targetText && (!isFinite(target) || target < 1 || target > 100)) {
-      if (msg) msg.textContent = 'EV target must be 1–100%.';
-      return;
-    }
-    btn.disabled = true;
-    apiFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/battery_boost', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        duration_s: duration,
-        min_battery_soc: reserve / 100,
-        ev_target_soc: target ? target / 100 : 0,
-        departure_at_ms: departure,
-      }),
-    })
-      .then(r => r.json().then(body => ({ ok: r.ok, body })))
-      .then(res => {
-        if (res.ok) fetchAll();
-        else { if (msg) msg.textContent = (res.body && res.body.error) || 'Boost could not start.'; btn.disabled = false; }
-      })
-      .catch(err => { if (msg) msg.textContent = err.message; btn.disabled = false; });
-  }
-
-  function boostCancel(btn) {
-    btn.disabled = true;
-    apiFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/battery_boost', { method: 'DELETE' })
-      .then(r => r.json().then(body => ({ ok: r.ok, body })))
-      .then(res => { if (res.ok) fetchAll(); else btn.disabled = false; })
-      .catch(() => { btn.disabled = false; });
-  }
-
-  function onGridClick(e) {
-    const edit = e.target.closest && e.target.closest('.lp-soc-edit');
-    if (edit) { openSocEditor(edit); return; }
-    const save = e.target.closest && e.target.closest('.lp-soc-save');
-    if (save) { saveSoc(save); return; }
-    const cancel = e.target.closest && e.target.closest('.lp-soc-cancel');
-    if (cancel) { cancelSoc(); return; }
-    const boostEnable = e.target.closest && e.target.closest('.lp-boost-enable');
-    if (boostEnable) { boostRequest(boostEnable); return; }
-    const boostStop = e.target.closest && e.target.closest('.lp-boost-cancel');
-    if (boostStop) { boostCancel(boostStop); return; }
-  }
-
-  function onGridKey(e) {
-    if (!e.target.classList || !e.target.classList.contains('lp-soc-input')) return;
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const save = e.target.closest('.lp-cfg-val').querySelector('.lp-soc-save');
-      if (save) saveSoc(save);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelSoc();
-    }
-  }
-
   function init() {
     const grid = document.getElementById('loadpoints-grid');
-    if (grid) {
-      grid.addEventListener('click', onGridClick);
-      grid.addEventListener('keydown', onGridKey);
-    }
     function advancedVisible() {
       return !!(document.body && document.body.classList.contains('advanced'));
     }
@@ -451,10 +307,11 @@
       refreshTimer = null;
     }
     function syncPolling() {
-      if (advancedVisible()) startPolling();
+      if (advancedVisible() && !document.hidden) startPolling();
       else stopPolling();
     }
     document.addEventListener('ftw-ui-mode-change', syncPolling);
+    document.addEventListener('visibilitychange', syncPolling);
     syncPolling();
   }
 

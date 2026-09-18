@@ -3,8 +3,8 @@ package mpc
 // Replay bench (#1020): re-solve recorded /api/mpc/diagnose/at blobs so
 // solver claims are measured, not argued. Point FTW_MPC_SNAPSHOT_DIR at
 // a directory of downloaded blobs and the bench re-solves each with the
-// Go DP — and, when FTW_TEST_OPTIMIZER_PYTHON is also set, with the
-// Python champion — on IDENTICAL inputs, reporting terminal-corrected
+// Go DP — and, when FTW_TEST_ENERGYPLAN_BIN is also set, with the
+// Energyplan champion — on IDENTICAL inputs, reporting terminal-corrected
 // cost: raw grid cost minus the terminal-SoC credit both solvers
 // optimize with but neither reports. Without that correction a solver
 // that parks the horizon with a fuller battery looks expensive when it
@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"testing"
@@ -57,14 +56,14 @@ func loadDiagnosticBlob(data []byte) (*Diagnostic, error) {
 	return &d, nil
 }
 
-// terminalCorrectedOre and planEndSoC now live in mpc.go: the Python
+// terminalCorrectedOre and planEndSoC now live in mpc.go: the Energyplan
 // field shadow reports the same correction every replan, so the bench
 // and the running planner must not drift apart on the formula.
 
 // TestReplayBenchSnapshots is the A/B instrument. Skipped without
 // FTW_MPC_SNAPSHOT_DIR. Optional knobs:
 //
-//	FTW_TEST_OPTIMIZER_PYTHON  — adds the Python champion leg
+//	FTW_TEST_ENERGYPLAN_BIN  — adds the Energyplan champion leg
 //	FTW_MPC_BENCH_SPREAD_ORE   — MinArbitrageSpreadOreKwh fallback for
 //	                             blobs written before the diagnostic
 //	                             persisted it. A spread carried by the
@@ -91,20 +90,10 @@ func TestReplayBenchSnapshots(t *testing.T) {
 	}
 
 	var ext *ExternalOptimizer
-	if python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON"); python != "" {
-		_, file, _, ok := runtime.Caller(0)
-		if !ok {
-			t.Fatal("runtime.Caller failed")
-		}
-		moduleDir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer"))
+	if binary := os.Getenv("FTW_TEST_ENERGYPLAN_BIN"); binary != "" {
 		ext, err = NewExternalOptimizer(ExternalOptimizerConfig{
-			Command:     []string{python, "-m", "ftw_optimizer.worker"},
-			ModuleDir:   moduleDir,
-			Timeout:     60 * time.Second,
-			Solver:      "HIGHS",
-			Formulation: "auto",
-			MIPRelGap:   0.001,
-			IdleTimeout: 5 * time.Second,
+			Command:   []string{binary, "--time-limit=500ms"},
+			ModuleDir: filepath.Dir(binary), Timeout: 2 * time.Second,
 		})
 		if err != nil {
 			t.Fatalf("external optimizer: %v", err)
@@ -113,7 +102,7 @@ func TestReplayBenchSnapshots(t *testing.T) {
 	}
 
 	t.Logf("%-15s %-18s %10s %10s %10s %10s %10s %10s",
-		"snapshot", "mode", "rec_corr", "dp_corr", "dp-rec", "py_corr", "py-dp", "dp_ms")
+		"snapshot", "mode", "rec_corr", "dp_corr", "dp-rec", "native_corr", "native-dp", "dp_ms")
 	var sumDPvsRec, sumPYvsDP float64
 	var nDP, nPY int
 	for _, path := range paths {
@@ -184,7 +173,7 @@ func TestReplayBenchSnapshots(t *testing.T) {
 	}
 }
 
-// ---- CI-runnable fixture tests (no external data, no Python) ----
+// ---- CI-runnable fixture tests (no external data, no Energyplan) ----
 
 func benchFixtureDiagnostic() *Diagnostic {
 	slots := make([]DiagnosticSlot, 8)

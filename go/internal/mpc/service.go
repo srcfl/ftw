@@ -2,8 +2,8 @@ package mpc
 
 import (
 	"context"
-	"errors"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"sync"
@@ -77,43 +77,33 @@ type BatteryFleetMember struct {
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
-	Store             *state.Store
-	Tele              *telemetry.Store
-	Zone              string
-	BaseLoad          float64 // baseline household load (W). 0 disables load assumption.
-	Horizon           time.Duration
-	Interval          time.Duration
-	PV                PVPredictor         // optional — overrides stored pv_w_estimated
-	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
-	// PVNameplateW is the site PV ceiling (W). Forecast and plan PV
-	// above this are cut to the nameplate so a kWp-as-watts paste
-	// cannot schedule megawatts. 0 disables the cut.
+	now                  func() time.Time // nil uses the wall clock
+	Store                *state.Store
+	Tele                 *telemetry.Store
+	Zone                 string
+	BaseLoad             float64 // baseline household load (W). 0 disables load assumption.
+	Horizon              time.Duration
+	Interval             time.Duration
+	PV                   PVPredictor         // optional — overrides stored pv_w_estimated
+	PVResidualCorrect    PVResidualCorrector // optional — additive short-horizon bias on top of PV
+	ForecastSnapshot     func(time.Time, []state.ForecastPoint) ForecastInputs
+	HouseholdMeasurement func() telemetry.ForecastReading
+	PVCurtailmentProbe   func() PVCurtailment
+	// Set before Start. Called without s.mu; must not acquire the control lock.
+	PVExecutionAllowed func(PVCurtailment) bool
+	// PVNameplateW accepts a verified AC generation ceiling. A configured
+	// DC rating or learned scale is not a hard limit. Zero disables the cut.
 	PVNameplateW float64
 	Load         LoadPredictor // optional — overrides flat BaseLoad
-	// LoadMaxW is the site fuse ceiling (W). Slot and published load
-	// forecasts are hard-cut to this so a wild twin cannot plan 50 kW
-	// of house load. 0 disables the upper cut.
+	// LoadMaxW is an independently verified gross-load limit, not the
+	// grid fuse: local generation may supply load above grid import.
+	// Zero disables the upper cut.
 	LoadMaxW float64
 	// Optimizer is the external mathematical planning engine. Nil — the
 	// default since #1020 — makes the in-process Go DP the champion. When
 	// non-nil, any engine/process/validation failure falls back to the DP for
 	// this replan and is recorded in Plan.Solver.
 	Optimizer PlanOptimizer
-	// ShadowOptimizer runs the external optimizer AFTER a Core plan is
-	// published, on the same slots and params, and records the
-	// terminal-corrected cost difference. It is never consulted for dispatch,
-	// never promoted to champion, and never allowed to fail or delay a replan.
-	// Ignored while Optimizer is set — the external engine cannot shadow
-	// itself.
-	ShadowOptimizer PlanOptimizer
-	// EnableRecourseShadow runs a storage-only stochastic recourse challenger
-	// after each successful champion solve. It shares the primary worker and is
-	// diagnostic-only: no challenger action is ever read by SlotDirectiveAt.
-	EnableRecourseShadow         bool
-	RecourseNonAnticipativeSlots int
-	// ChallengerPolicy selects "recourse" (two-stage reference) or
-	// "multistage" (scenario tree + move blocking). Both remain shadow-only.
-	ChallengerPolicy string
 
 	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
@@ -207,10 +197,14 @@ type Service struct {
 	// latestReplanGeneration identifies the newest requested solve. Starting a
 	// newer generation cancels the older request; the generation check remains
 	// the final guard for work that does not stop promptly on context cancel.
-	latestReplanGeneration uint64 // guarded by mu
-	activeReplanCancel     context.CancelFunc
-	stopping               bool
-	replanWG               sync.WaitGroup
+	latestReplanGeneration    uint64 // guarded by mu
+	publishedReplanGeneration uint64
+	failedReplanGeneration    uint64
+	activeReplanCancel        context.CancelFunc
+	queuedReplan              *replanRequest
+	requestedReplanRunning    bool
+	stopping                  bool
+	replanWG                  sync.WaitGroup
 	// decisionIDFactory is a test seam. Production uses a random UUID for every
 	// accepted plan. It is read only while mu is held at the publish gate.
 	decisionIDFactory func() string
@@ -235,27 +229,30 @@ type Service struct {
 	// using s.Price. Mirrors prices.Applier semantics.
 	GridTariffOreKwh float64
 	VATPercent       float64
+	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
+	// minor units as slot prices, excluding VAT. Zero disables it.
+	DemandPricePerKW float64
+	DemandTopN       int
+	// DemandNightWeight, when > 0, includes every local hour (all days).
+	// Hours 22:00–06:00 are scaled by this factor (Ellevio uses 0.5).
+	DemandNightWeight float64
+	// Timezone is the household IANA zone used to expand weekday 06–20.
+	Timezone string
 
 	Defaults     Params
 	BatteryFleet []BatteryFleetMember
 
 	mu              sync.RWMutex
 	last            *Plan
+	executionPlan   *Plan  // Current physical inputs; preserved by metadata copies.
 	lastSlots       []Slot // inputs that went into the most recent Optimize call
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
-	shadowEvaluator *StatefulShadowEvaluator
 
-	// Python field shadow, all guarded by mu. lastPythonShadow belongs to the
-	// decision named by lastPythonShadowFor and is dropped once a newer plan
-	// takes over; shadowBusy keeps at most one challenger solve in flight so a
-	// slow worker cannot pile up behind a 15-minute replan interval.
-	shadowBusy          bool
-	shadowCancel        context.CancelFunc
-	shadowWG            sync.WaitGroup
-	lastPythonShadow    *ShadowPlan
-	lastPythonShadowFor string
-	shadowErrWindows    map[string]shadowErrWindow
+	shadowBusy        bool
+	shadowCancel      context.CancelFunc
+	shadowWG          sync.WaitGroup
+	pendingCoreShadow *coreDPShadowRequest
 
 	stop chan struct{}
 	done chan struct{}
@@ -271,6 +268,7 @@ type Service struct {
 // running on a forecast the twins have since corrected away from.
 type plannedPredictions struct {
 	pv        []float64   // per-slot W (magnitude, ≥ 0)
+	pvCovered []bool      // the issued plan had weather for this PV sample
 	load      []float64   // per-slot W (≥ 0)
 	slotStart []time.Time // slot-start timestamps for re-sampling
 	builtAt   time.Time
@@ -299,6 +297,37 @@ func (s *Service) driverOnline(name string) bool {
 	return h != nil && h.IsOnline()
 }
 
+// liveHouseLoadW uses the same complete, fresh balance as forecast learning.
+// Driver health alone does not establish power freshness or a known load.
+func (s *Service) liveHouseLoadW() (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	var reading telemetry.ForecastReading
+	if s.HouseholdMeasurement != nil {
+		reading = s.HouseholdMeasurement()
+	} else {
+		s.mu.RLock()
+		meter := s.SiteMeter
+		s.mu.RUnlock()
+		reading = s.Tele.ForecastMeasurementNow(meter, telemetry.ForecastOptions{})
+	}
+	return reading.HouseholdW, reading.Valid
+}
+
+// overlayLiveHouseLoad replaces the in-flight slot's modeled house load
+// with the live meter identity. Later slots keep the forecast. A stale
+// meter leaves the model in place; dispatch already stands down hardware.
+func overlayLiveHouseLoad(slots []Slot, loadW float64, ok bool) {
+	if !ok || len(slots) == 0 {
+		return
+	}
+	if math.IsNaN(loadW) || math.IsInf(loadW, 0) || loadW < 0 {
+		loadW = 0
+	}
+	slots[0].LoadW = loadW
+}
+
 // New constructs a service. Caller wires it in main.go after store + telemetry.
 func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 	return &Service{
@@ -315,17 +344,16 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		// Pi 4 (51 SoC × 21 action × 193 slots DP, sub-1 % CPU) — being
 		// stingy was leaving stale plans in place every time the cover-
 		// load reactive carve-out fired (PR #378).
-		MinReplanGap:                 30 * time.Second,
-		PVDivergenceWh:               250, // 250 Wh sustained gap over ~8 min
-		LoadDivergenceWh:             200,
-		TwinDriftPVW:                 250,
-		TwinDriftLoadW:               200,
-		TwinDriftHorizonSlots:        16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
-		RecourseNonAnticipativeSlots: 1,
-		decisionIDFactory:            uuid.NewString,
-		stop:                         make(chan struct{}),
-		done:                         make(chan struct{}),
-		stopped:                      make(chan struct{}),
+		MinReplanGap:          30 * time.Second,
+		PVDivergenceWh:        250, // 250 Wh sustained gap over ~8 min
+		LoadDivergenceWh:      200,
+		TwinDriftPVW:          250,
+		TwinDriftLoadW:        200,
+		TwinDriftHorizonSlots: 16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
+		decisionIDFactory:     uuid.NewString,
+		stop:                  make(chan struct{}),
+		done:                  make(chan struct{}),
+		stopped:               make(chan struct{}),
 	}
 }
 
@@ -360,6 +388,9 @@ func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) 
 	s.Defaults.CapacityWh = totalCapWh
 	s.Defaults.MaxChargeW = maxChargeW
 	s.Defaults.MaxDischargeW = maxDischargeW
+	if totalCapWh == 0 {
+		s.Defaults.InitialSoC = 0
+	}
 	s.mu.Unlock()
 }
 
@@ -382,6 +413,42 @@ func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, max
 	s.Defaults.CapacityWh = totalCapWh
 	s.Defaults.MaxChargeW = maxChargeW
 	s.Defaults.MaxDischargeW = maxDischargeW
+	if totalCapWh == 0 && len(cp) == 0 {
+		s.Defaults.InitialSoC = 0
+	}
+	s.mu.Unlock()
+}
+
+// UpdatePlannerScalars pushes operator planner knobs that do not rebuild
+// the optimizer process: SoC window, efficiency, export value, base load,
+// horizon and replan interval. The next replan (and the next ticker fire
+// for Interval) uses them. Engine / optimizer path still need a restart.
+func (s *Service) UpdatePlannerScalars(p Params, baseLoad float64, horizon, interval time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if p.SoCMin > 0 {
+		s.Defaults.SoCMin = p.SoCMin
+	}
+	if p.SoCMax > 0 {
+		s.Defaults.SoCMax = p.SoCMax
+	}
+	if p.ChargeEfficiency > 0 {
+		s.Defaults.ChargeEfficiency = p.ChargeEfficiency
+	}
+	if p.DischargeEfficiency > 0 {
+		s.Defaults.DischargeEfficiency = p.DischargeEfficiency
+	}
+	s.Defaults.PVChargeBonusOreKwh = p.PVChargeBonusOreKwh
+	s.Defaults.ExportOrePerKWh = p.ExportOrePerKWh
+	s.BaseLoad = baseLoad
+	if horizon > 0 {
+		s.Horizon = horizon
+	}
+	if interval > 0 {
+		s.Interval = interval
+	}
 	s.mu.Unlock()
 }
 
@@ -393,6 +460,62 @@ func (s *Service) Latest() *Plan {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.last
+}
+
+// PlanSnapshot keeps the visible plan and its freshness in one read. Outdated
+// remains true if the latest request fails; Pending only describes active work.
+type PlanSnapshot struct {
+	Plan        *Plan
+	ReplanAt    time.Time
+	Reason      string
+	Pending     bool
+	Outdated    bool
+	loadpointID string
+}
+
+func (s *Service) PlanSnapshot() PlanSnapshot {
+	if s == nil {
+		return PlanSnapshot{}
+	}
+	s.mu.RLock()
+	outdated := s.publishedReplanGeneration != s.latestReplanGeneration
+	proof := s.lastParams.PVCurtailment
+	currentContract := s.executionPlan == s.last
+	out := PlanSnapshot{
+		Plan: s.last, ReplanAt: s.lastReplanAt, Reason: s.lastReason,
+		Pending: outdated && s.activeReplanCancel != nil, Outdated: outdated,
+		loadpointID: s.lastLoadpointID,
+	}
+	s.mu.RUnlock()
+	if !s.planExecutionAllowed(out.Plan, proof, currentContract) {
+		out.Outdated = true
+		out.Reason = "Plan requires fresh physical inputs or PV control"
+	}
+	return out
+}
+
+// InstallPlan puts a plan in the cache SlotDirectiveAt and Latest read.
+// A successful solve publishes with current inputs; restored diagnostics
+// remain archives. Tests that inject a known Action use the same seam
+// so the charger and battery cannot be given two different mappings of
+// one slot.
+//
+// GeneratedAtMs is aged against the wall clock (MaxPlanAge), not the
+// slot clock passed to SlotDirectiveAt. A simulated site clock must
+// still stamp GeneratedAtMs with time.Now().
+func (s *Service) InstallPlan(plan Plan, params Params, loadpointID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copied := plan
+	s.last = &copied
+	s.executionPlan = s.last
+	s.lastParams = params
+	s.lastLoadpointID = loadpointID
+	s.lastReplanAt = time.Now()
+	s.publishedReplanGeneration = s.latestReplanGeneration
 }
 
 // MaxPlanAge is the staleness cutoff. Once a plan's `generated_at_ms`
@@ -411,6 +534,7 @@ const MaxPlanAge = 30 * time.Minute
 // = discharge. Magnitude is the total energy expected to move into (or
 // out of) the battery fleet across the slot.
 type SlotDirective struct {
+	PriceSlotStart time.Time // original price interval; SlotStart is execution start
 	// DecisionID pairs this slot instruction with the accepted plan that
 	// produced it. DecisionID plus SlotStart identifies the planned action;
 	// later control and command layers can carry that pair without relying on
@@ -418,16 +542,19 @@ type SlotDirective struct {
 	DecisionID      string
 	SlotStart       time.Time
 	SlotEnd         time.Time
-	BatteryEnergyWh float64 // total energy for the slot (site-signed)
-	SoCTarget       float64 // plan's SoC at SlotEnd — used by divergence detector
-	Strategy        Mode    // echoed for logging + API
+	BatteryEnergyWh float64            // total energy for the slot (site-signed)
+	StorageEnergyWh map[string]float64 // per physical storage, site-signed AC Wh
+	SoCTarget       float64            // plan's SoC at SlotEnd — used by divergence detector
+	Strategy        Mode               // echoed for logging + API
 
 	// PVLimitW is the recommended cap on aggregate PV inverter output
 	// for this slot (W, positive). 0 means "no curtailment". Set by
 	// annotateCurtailment when exporting at zero / negative revenue
 	// would lose money — the dispatch layer divides this across the
 	// site's PV-supporting drivers and sends `curtail` commands.
-	PVLimitW float64
+	PVLimitW        float64
+	PVCurtailActive bool
+	PVCurtailment   PVCurtailment
 
 	// GridW is the plan's forecast of slot-average grid power given the
 	// planned battery / load / PV mix (site-signed: + = import). The
@@ -454,7 +581,8 @@ type SlotDirective struct {
 	// configured / active. The dispatch layer converts energy to
 	// instantaneous power via the same `remaining_wh × 3600 /
 	// remaining_s` formula it uses for the battery.
-	LoadpointEnergyWh map[string]float64
+	LoadpointEnergyWh  map[string]float64
+	LoadpointMaxPowerW map[string]float64
 
 	// LoadpointSoCTarget is the plan's EV SoC at SlotEnd per
 	// loadpoint. Used by the per-loadpoint divergence check.
@@ -473,6 +601,8 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	// plan under one lock so a concurrent replan cannot mix generations.
 	s.mu.RLock()
 	p := s.last
+	currentContract := s.executionPlan == p
+	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	lpID := s.lastLoadpointID
 	params := s.lastParams
 	if params.Mode == "" {
@@ -481,7 +611,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil {
+	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return SlotDirective{}, false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -491,31 +621,41 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	for i, a := range p.Actions {
 		slotLenMs := int64(a.SlotLenMin) * 60 * 1000
 		endMs := a.SlotStartMs + slotLenMs
-		if nowMs < a.SlotStartMs || nowMs >= endMs {
+		if nowMs < a.ExecutionStart() || nowMs >= endMs {
 			continue
 		}
-		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
-		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
+		// Only the modeled execution interval contributes energy.
+		energyWh := a.BatteryW * a.DurationHours()
 		d := SlotDirective{
 			DecisionID:          p.DecisionID,
-			SlotStart:           time.UnixMilli(a.SlotStartMs),
+			SlotStart:           time.UnixMilli(a.ExecutionStart()),
+			PriceSlotStart:      time.UnixMilli(a.SlotStartMs),
 			SlotEnd:             time.UnixMilli(endMs),
 			BatteryEnergyWh:     energyWh,
 			SoCTarget:           a.SoC,
 			Strategy:            params.Mode,
 			PVLimitW:            a.PVLimitW,
+			PVCurtailActive:     a.PVCurtailActive,
+			PVCurtailment:       params.PVCurtailment,
 			GridW:               a.GridW,
 			LivePVSurplusSoCCap: livePVSurplusSoCCap(p.Actions, i, params),
 		}
+		if len(params.Storages) > 0 && len(a.StoragePowerW) > 0 {
+			d.StorageEnergyWh = make(map[string]float64, len(a.StoragePowerW))
+			for id, w := range a.StoragePowerW {
+				d.StorageEnergyWh[id] = w * a.DurationHours()
+			}
+		}
 		if len(a.LoadpointPowerW) > 0 {
+			d.LoadpointMaxPowerW = maps.Clone(a.LoadpointMaxPowerW)
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
 			d.LoadpointSoCTarget = make(map[string]float64, len(a.LoadpointPowerW))
 			for id, powerW := range a.LoadpointPowerW {
-				d.LoadpointEnergyWh[id] = powerW * float64(a.SlotLenMin) / 60.0
+				d.LoadpointEnergyWh[id] = powerW * a.DurationHours()
 				d.LoadpointSoCTarget[id] = a.LoadpointSoCByID[id]
 			}
 		} else if a.LoadpointW > 0 && lpID != "" {
-			lpEnergyWh := a.LoadpointW * float64(a.SlotLenMin) / 60.0
+			lpEnergyWh := a.LoadpointW * a.DurationHours()
 			d.LoadpointEnergyWh = map[string]float64{
 				lpID: lpEnergyWh,
 			}
@@ -547,13 +687,16 @@ type PlanWindow struct {
 // there is no fresh plan — same MaxPlanAge cutoff as SlotDirectiveAt,
 // because a stale plan must not promise start times.
 func (s *Service) LoadpointPlanWindows(id string, now time.Time, max int) ([]PlanWindow, float64) {
-	if s == nil || id == "" {
+	return s.PlanSnapshot().LoadpointPlanWindows(id, now, max)
+}
+
+// LoadpointPlanWindows uses the plan captured with this snapshot's status.
+func (snapshot PlanSnapshot) LoadpointPlanWindows(id string, now time.Time, max int) ([]PlanWindow, float64) {
+	if snapshot.Outdated || id == "" {
 		return nil, 0
 	}
-	s.mu.RLock()
-	p := s.last
-	legacyID := s.lastLoadpointID
-	s.mu.RUnlock()
+	p := snapshot.Plan
+	legacyID := snapshot.loadpointID
 	if p == nil || time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
 		return nil, 0
 	}
@@ -574,9 +717,10 @@ func (s *Service) LoadpointPlanWindows(id string, now time.Time, max int) ([]Pla
 		if powerW <= 0 {
 			continue
 		}
-		wh := powerW * float64(a.SlotLenMin) / 60.0
+		startMs := a.ExecutionStart()
+		wh := powerW * float64(endMs-startMs) / 3600000
 		totalWh += wh
-		start := time.UnixMilli(a.SlotStartMs)
+		start := time.UnixMilli(startMs)
 		end := time.UnixMilli(endMs)
 		if n := len(windows); n > 0 && windows[n-1].End.Equal(start) {
 			windows[n-1].End = end
@@ -641,7 +785,7 @@ func livePVSurplusSoCCap(actions []Action, current int, p Params) float64 {
 			a.SlotLenMin <= 0 {
 			continue
 		}
-		replaceableStoredWh += gridFundedChargeW * float64(a.SlotLenMin) / 60.0 * chargeEfficiency
+		replaceableStoredWh += gridFundedChargeW * a.DurationHours() * chargeEfficiency
 	}
 	if replaceableStoredWh <= 0 {
 		return 0
@@ -669,12 +813,14 @@ func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	}
 	s.mu.RLock()
 	p := s.last
+	currentContract := s.executionPlan == p
+	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	params := s.lastParams
 	if params.Mode == "" {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil {
+	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return "", 0, "", false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -683,7 +829,7 @@ func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	nowMs := now.UnixMilli()
 	for _, a := range p.Actions {
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < end {
+		if nowMs >= a.ExecutionStart() && nowMs < end {
 			mode, gridW, ok := actionToSlot(a, params.Mode)
 			return mode, gridW, p.DecisionID, ok
 		}
@@ -783,25 +929,16 @@ func (s *Service) Stop() {
 	// beginReplanLocked performs Add while holding the same lock that set
 	// stopping, so no new Add can race with this Wait.
 	s.replanWG.Wait()
-	// startPythonShadow adds under the same lock that set stopping, so no new
+	// startCoreDPShadow adds under the same lock that set stopping, so no new
 	// challenger can start after this point; closing the worker before its
 	// in-flight call returned would only manufacture a shadow error.
 	s.shadowWG.Wait()
 	if s.Optimizer != nil {
 		_ = s.Optimizer.Close()
 	}
-	if s.ShadowOptimizer != nil {
-		_ = s.ShadowOptimizer.Close()
-	}
 	close(s.stopped)
 }
 
-// ConfiguredOptimizer returns the external optimizer attached to this service
-// in either role, champion or shadow. Health, version and update surfaces use
-// it: the sidecar has to stay visible and updatable while it runs as a
-// measurement, or the soak that justifies retiring it cannot be maintained.
-// Which engine actually produced the active plan is a separate question, and
-// Plan.Solver answers it.
 func (s *Service) ConfiguredOptimizer() PlanOptimizer {
 	if s == nil {
 		return nil
@@ -809,7 +946,7 @@ func (s *Service) ConfiguredOptimizer() PlanOptimizer {
 	if s.Optimizer != nil {
 		return s.Optimizer
 	}
-	return s.ShadowOptimizer
+	return nil
 }
 
 // OptimizerIsChampion reports whether the external optimizer produces the
@@ -821,11 +958,19 @@ func (s *Service) OptimizerIsChampion() bool {
 func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
 	s.replan(ctx, "scheduled")
-	t := time.NewTicker(s.Interval)
+	interval := s.Interval
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
-	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.EnableRecourseShadow) {
-		rt := time.NewTicker(s.ReactiveInterval)
+	reactiveInterval := s.ReactiveInterval
+	if reactiveInterval <= 0 && (s.Loadpoints != nil || s.Loadpoint != nil) {
+		reactiveInterval = 5 * time.Second
+	}
+	if reactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.Loadpoints != nil || s.Loadpoint != nil) {
+		rt := time.NewTicker(reactiveInterval)
 		defer rt.Stop()
 		reactiveTick = rt.C
 	}
@@ -836,9 +981,15 @@ func (s *Service) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			s.mu.RLock()
+			next := s.Interval
+			s.mu.RUnlock()
+			if next > 0 && next != interval {
+				t.Reset(next)
+				interval = next
+			}
 			s.replan(ctx, "scheduled")
 		case <-reactiveTick:
-			s.observeShadow(time.Now())
 			s.checkDivergence(ctx)
 			s.checkTwinDrift(ctx)
 		}
@@ -852,13 +1003,17 @@ func (s *Service) loop(ctx context.Context) {
 func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
+	params := s.lastParams
 	last := s.lastReplanAt
-	siteMeter := s.SiteMeter
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
 	}
 	if time.Since(last) < s.MinReplanGap {
+		return
+	}
+	if s.loadpointStateDiverged(plan, params, time.Now()) {
+		s.replan(ctx, "loadpoint_soc_changed")
 		return
 	}
 	// Find the slot covering now.
@@ -867,7 +1022,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < end {
+		if nowMs >= a.ExecutionStart() && nowMs < end {
 			slot = a
 			break
 		}
@@ -886,31 +1041,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		pvW += r.SmoothedW
 	}
 
-	// Live load = grid - pv - bat - vehicle charging/storage when we
-	// have a site meter wired.
-	var loadW float64
-	haveLoad := false
-	if siteMeter != "" && s.driverOnline(siteMeter) {
-		if m := s.Tele.Get(siteMeter, telemetry.DerMeter); m != nil {
-			var batW float64
-			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-				if !s.driverOnline(r.Driver) {
-					continue
-				}
-				batW += r.SmoothedW
-			}
-			evW := s.Tele.SumOnlineEVW()
-			v2xW := s.Tele.SumOnlineV2XW()
-			// House-only load: subtract EV so the divergence detector
-			// compares actual house consumption against the plan's
-			// house-load forecast, not a moving "house + vehicle" target.
-			loadW = m.SmoothedW - pvW - batW - evW - v2xW
-			if loadW < 0 {
-				loadW = 0
-			}
-			haveLoad = true
-		}
-	}
+	loadW, haveLoad := s.liveHouseLoadW()
 
 	// Leaky integral of energy error (Wh). Decay with an 8-minute
 	// half-life so transients fade but a sustained offset accumulates.
@@ -970,8 +1101,8 @@ func (s *Service) checkDivergence(ctx context.Context) {
 // grid so the twin-drift detector can later re-sample at the same
 // timestamps and compute RMSE. Returns nil when neither predictor is
 // wired — twin-drift is a no-op in that case.
-func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPoint) *plannedPredictions {
-	if s == nil || (s.PV == nil && s.Load == nil) {
+func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPoint, pvFn PVPredictor, loadFn LoadPredictor) *plannedPredictions {
+	if s == nil || (pvFn == nil && loadFn == nil) {
 		return nil
 	}
 	horizon := s.TwinDriftHorizonSlots
@@ -986,24 +1117,36 @@ func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPo
 		return nil
 	}
 	pp := &plannedPredictions{
-		pv:        make([]float64, n),
-		load:      make([]float64, n),
 		slotStart: make([]time.Time, n),
 		builtAt:   time.Now(),
+	}
+	if pvFn != nil {
+		pp.pv = make([]float64, n)
+		pp.pvCovered = make([]bool, n)
+	}
+	if loadFn != nil {
+		pp.load = make([]float64, n)
 	}
 	for i := 0; i < n; i++ {
 		ts := time.UnixMilli(slots[i].StartMs).UTC()
 		pp.slotStart[i] = ts
-		if s.PV != nil {
-			cloud := lookupCloud(forecasts, slots[i].StartMs)
-			pv := s.PV(ts, cloud)
-			if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
-				pv = 0
+		if pvFn != nil {
+			_, directInput := lookupPVInput(forecasts, slots[i].StartMs)
+			cloud, cloudInput := lookupCloudInput(forecasts, slots[i].StartMs)
+			if directInput == nil && cloudInput == nil {
+				// The plan did not call the twin without a covered weather
+				// interval, so this slot has no model-drift baseline either.
+			} else {
+				pp.pvCovered[i] = true
+				pv := pvFn(ts, cloud)
+				if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
+					pv = 0
+				}
+				pp.pv[i] = pv
 			}
-			pp.pv[i] = pv
 		}
-		if s.Load != nil {
-			ld := s.Load(ts)
+		if loadFn != nil {
+			ld := loadFn(ts)
 			if math.IsNaN(ld) || math.IsInf(ld, 0) || ld < 0 {
 				ld = 0
 			}
@@ -1059,17 +1202,20 @@ func (s *Service) checkTwinDrift(ctx context.Context) {
 	var pvSumSq, loadSumSq float64
 	pvCount, loadCount := 0, 0
 	for i, ts := range pp.slotStart {
-		if pvFn != nil && pvThresh > 0 {
-			cloud := lookupCloud(forecasts, ts.UnixMilli())
-			pv := pvFn(ts, cloud)
-			if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
-				pv = 0
+		if pvFn != nil && pvThresh > 0 && len(pp.pv) == len(pp.slotStart) {
+			covered := len(pp.pvCovered) == 0 || (len(pp.pvCovered) == len(pp.slotStart) && pp.pvCovered[i])
+			if covered {
+				cloud := lookupCloud(forecasts, ts.UnixMilli())
+				pv := pvFn(ts, cloud)
+				if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
+					pv = 0
+				}
+				d := pv - pp.pv[i]
+				pvSumSq += d * d
+				pvCount++
 			}
-			d := pv - pp.pv[i]
-			pvSumSq += d * d
-			pvCount++
 		}
-		if loadFn != nil && loadThresh > 0 {
+		if loadFn != nil && loadThresh > 0 && len(pp.load) == len(pp.slotStart) {
 			ld := loadFn(ts)
 			if math.IsNaN(ld) || math.IsInf(ld, 0) || ld < 0 {
 				ld = 0
@@ -1117,6 +1263,61 @@ func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
 	return s.replan(ctx, reason)
 }
 
+// RequestReplan registers the new generation before returning and computes it
+// in the background. A saved setting must not wait for the planner to finish.
+// One worker keeps only the latest waiting request. Cancellation may not stop
+// a Go solve already in progress, so starting a worker per edit would pile up
+// obsolete solves. Stop waits for accepted work, including the queued request.
+func (s *Service) RequestReplan(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	request := s.beginReplanLocked(context.Background(), reason)
+	if !request.accepted {
+		s.mu.Unlock()
+		request.cancel()
+		return
+	}
+	previous := s.queuedReplan
+	s.queuedReplan = &request
+	startWorker := !s.requestedReplanRunning
+	s.requestedReplanRunning = true
+	s.mu.Unlock()
+	if previous != nil {
+		s.finishReplan(*previous)
+	}
+	if startWorker {
+		go s.runRequestedReplans()
+	}
+}
+
+func (s *Service) runRequestedReplans() {
+	for {
+		s.mu.Lock()
+		request := s.queuedReplan
+		s.queuedReplan = nil
+		if request == nil {
+			s.requestedReplanRunning = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		s.runReplan(*request)
+	}
+}
+
+// IsReplanning reports whether the newest request is queued or running,
+// including diagnostic writes after its plan has been published.
+func (s *Service) IsReplanning() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeReplanCancel != nil
+}
+
 func (s *Service) replan(ctx context.Context, reason string) *Plan {
 	return s.runReplan(s.beginReplan(ctx, reason))
 }
@@ -1151,6 +1352,9 @@ func (s *Service) beginReplanLocked(ctx context.Context, reason string) replanRe
 	if s.activeReplanCancel != nil {
 		s.activeReplanCancel()
 	}
+	if usesDownsidePV(s.Optimizer) && s.shadowCancel != nil {
+		s.shadowCancel()
+	}
 	canceledByService := &atomic.Bool{}
 	serviceCancel := func() {
 		canceledByService.Store(true)
@@ -1181,6 +1385,12 @@ func (s *Service) finishReplan(request replanRequest) {
 	s.mu.Lock()
 	if request.generation == s.latestReplanGeneration {
 		s.activeReplanCancel = nil
+		if s.publishedReplanGeneration != request.generation {
+			// Keep the last plan during a normal recalculation, but stop using
+			// it when the replacement fails. A later retry must publish a new
+			// plan before dispatch resumes; queuing work alone is not enough.
+			s.failedReplanGeneration = request.generation
+		}
 	}
 	s.mu.Unlock()
 }
@@ -1237,8 +1447,15 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"err", err)
 		return s.Latest()
 	}
-	now := time.Now()
-	untilMs := now.Add(s.Horizon).UnixMilli()
+	now := s.planningNow()
+	s.mu.RLock()
+	horizon := s.Horizon
+	baseLoad := s.BaseLoad
+	s.mu.RUnlock()
+	if horizon <= 0 {
+		horizon = 48 * time.Hour
+	}
+	untilMs := now.Add(horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
 
 	prices, err := s.Store.LoadPrices(s.Zone, sinceMs, untilMs)
@@ -1273,14 +1490,54 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		slog.Warn("mpc: load forecasts", "err", err)
 		// continue without PV forecast
 	}
+	forecasts = usableForecasts(forecasts, now.UnixMilli())
 	forecasts = clampForecastPV(forecasts, s.PVNameplateW)
 
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.PVResidualCorrect, s.Load)
+	pv, correct, load := s.PV, s.PVResidualCorrect, s.Load
+	var captured ForecastInputs
+	if s.ForecastSnapshot != nil {
+		captured = s.ForecastSnapshot(now, forecasts)
+		pv, correct, load = captured.PV, captured.PVResidualCorrect, captured.Load
+		if captured.Weather != nil {
+			forecasts = captured.Weather
+		}
+	}
+	slots := buildSlots(prices, forecasts, baseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
+	// Resolve receives the complete legacy forecast, including verified limits,
+	// so its frozen shadow matches what the previous pipeline would have used.
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
 	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
-	if recent := recentDailyLoadWh(s.Store, now, loadRainCheckDays); recent > 0 {
-		slots = rainCheckLoadSlots(slots, recent, s.LoadMaxW)
+	if captured.Resolve != nil && len(slots) > 0 {
+		if request.wasCanceledByService() {
+			return s.canceledReplan(request, "forecast-start")
+		}
+		forecastCtx, cancelForecast := context.WithTimeout(ctx, 2*time.Second)
+		resolved := captured.Resolve(forecastCtx, append([]Slot(nil), slots...))
+		cancelForecast()
+		if request.wasCanceledByService() {
+			return s.canceledReplan(request, "forecast-resolve")
+		}
+		if len(resolved) != len(slots) {
+			slog.Error("mpc: forecast changed horizon length; keeping previous plan")
+			return s.Latest()
+		}
+		for i := range slots {
+			if resolved[i].StartMs != slots[i].StartMs || resolved[i].LenMin != slots[i].LenMin {
+				slog.Error("mpc: forecast changed interval; keeping previous plan", "slot", i)
+				return s.Latest()
+			}
+			// Forecast selection cannot replace market data or physical limits.
+			slots[i].PVW, slots[i].LoadW = resolved[i].PVW, resolved[i].LoadW
+		}
 	}
+	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
+	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	{
+		loadW, ok := s.liveHouseLoadW()
+		overlayLiveHouseLoad(slots, loadW, ok)
+	}
+	// Qualified load models own their level. Unqualified historic daily
+	// totals must not impose a floor on a changed or low-load household.
 	if len(slots) == 0 {
 		return nil
 	}
@@ -1304,6 +1561,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if pvRelative != nil {
 		pvRelativeUncertainty = pvRelative()
 	}
+	if s.ForecastSnapshot != nil {
+		pvUncertaintyW, pvRelativeUncertainty = captured.PVUncertaintyW, captured.PVRelativeUncertainty
+	}
 
 	// Plumb the site fuse + export ceiling into per-slot limits so the DP
 	// joint-plans battery + EV under the grid constraints instead of
@@ -1319,6 +1579,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	clampSlotGridLimits(fallbackSlots, fuseMaxW, maxExportW)
 
 	p := request.params
+	if s.PVCurtailmentProbe != nil {
+		p.PVCurtailment = s.PVCurtailmentProbe()
+	}
 	if p.Mode == "" {
 		p.Mode = ModeSelfConsumption
 	}
@@ -1334,8 +1597,18 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			slog.Warn("mpc: no online battery capacity with SoC — keeping previous plan")
 			return s.Latest()
 		}
-	} else {
+	} else if p.CapacityWh > 0 {
 		p.InitialSoC = currentSoC(s.Tele, p.InitialSoC)
+	} else {
+		p.InitialSoC = 0
+	}
+
+	executionNow := s.planningNow()
+	if !trimFirstExecutionSlot(slots, executionNow) {
+		return s.expiredReplan(request)
+	}
+	if len(fallbackSlots) > 0 {
+		fallbackSlots[0].ExecutionStartMs = slots[0].ExecutionStartMs
 	}
 
 	// Export pricing is per-slot now: pass bonus/fee into Params so
@@ -1347,14 +1620,21 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 	p.PVForecastSafetyK = s.PVForecastSafetyK
-	if pvUncertainty != nil {
+	p.DemandCharges = s.demandChargesFor(slots, executionNow)
+	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}
-	if pvRelative != nil {
+	if pvRelative != nil || s.ForecastSnapshot != nil {
 		p.PVRelativeUncertainty = pvRelativeUncertainty
 	}
 	applyPVDownsidePerSlot(fallbackSlots, p.PVForecastSafetyK,
 		p.PVRelativeUncertainty, p.PVUncertaintyW)
+	if captured.Risk != nil {
+		captured.Risk(slots, fallbackSlots, p.PVForecastSafetyK)
+	}
+	// Keep the point forecast distinct from the downside inputs passed to the
+	// solver. Calibrating point errors against the risk adjustment biases them.
+	baseForecastSlots := append([]Slot(nil), slots...)
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
@@ -1476,29 +1756,31 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.canceledReplan(request, "build-input")
 	}
 	var plan Plan
-	var shadowRecoursePlan *Plan
-	var shadowError string
-	publishShadow := false
 	coreChampion := s.Optimizer == nil
+	downsidePrimary := usesDownsidePV(s.Optimizer)
+	if downsidePrimary {
+		slots = fallbackSlots
+	}
 	if coreChampion {
 		// Core is the planner. It solves the downside-PV slots — forecast
 		// minus k·σ per slot — so the plan it publishes is the one that does
 		// not bet on sun that may not arrive.
 		slots = fallbackSlots
 		solveStart := time.Now()
-		plan = Optimize(slots, p)
-		plan.Solver = coreSolverInfo(p, msSince(solveStart))
+		plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+		setCoreReserveSolver(&plan, p, msSince(solveStart))
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if request.wasCanceledByService() {
 			return s.canceledReplan(request, "primary-solve")
 		}
 		if err == nil {
-			if recoveryRequired {
+			if recoveryRequired || downsidePrimary || coreDPModelError(p) != nil {
 				candidate.DPEvaluationShadow = nil
 				candidate.DPShadow = nil
 				candidate.Baselines = nil
-				slog.Info("mpc: skipping Go DP shadows while battery state recovers into operating bounds",
+				slog.Debug("mpc: deferring Core DP comparison",
+					"background", downsidePrimary,
 					"soc_start", p.InitialSoC,
 					"soc_min", p.SoCMin,
 					"soc_max", p.SoCMax)
@@ -1545,66 +1827,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 				return s.canceledReplan(request, "dp-shadow")
 			}
 
-			if s.EnableRecourseShadow {
-				publishShadow = true
-				if len(p.activeLoadpoints()) > 0 {
-					shadowError = "recourse shadow skipped while flexible loads are active"
-				} else {
-					policy := s.ChallengerPolicy
-					if policy == "" {
-						policy = "recourse"
-					}
-					var recourse Plan
-					var recourseErr error
-					switch policy {
-					case "multistage":
-						challenger, ok := s.Optimizer.(MultistageOptimizer)
-						if !ok {
-							recourseErr = errors.New("primary optimizer does not implement multistage")
-						} else {
-							recourse, recourseErr = challenger.OptimizeMultistage(ctx, slots, p, s.RecourseNonAnticipativeSlots)
-						}
-					default:
-						challenger, ok := s.Optimizer.(RecourseOptimizer)
-						if !ok {
-							recourseErr = errors.New("primary optimizer does not implement recourse")
-						} else {
-							recourse, recourseErr = challenger.OptimizeRecourse(ctx, slots, p, s.RecourseNonAnticipativeSlots)
-						}
-					}
-					if request.wasCanceledByService() {
-						return s.canceledReplan(request, "recourse-shadow")
-					}
-					if recourseErr != nil {
-						slog.Warn("mpc: stochastic challenger failed", "policy", policy, "err", recourseErr)
-						shadowError = recourseErr.Error()
-					} else {
-						shadowRecoursePlan = &recourse
-						candidate.RecourseShadow = compareDPShadow(candidate, recourse)
-						candidate.RecourseShadow.ForecastBasis = "same stochastic scenario input; conditional decisions after non-anticipative prefix"
-						candidate.RecourseShadow.Solver = recourse.Solver
-						candidate.RecourseShadow.TotalCostOre = recourse.TotalCostOre
-						candidate.RecourseShadow.ActiveMinusShadowOre = candidate.TotalCostOre - recourse.TotalCostOre
-						if candidate.RecourseShadow.FirstAction != nil {
-							mode, _, _ := actionToSlot(*candidate.RecourseShadow.FirstAction, p.Mode)
-							candidate.RecourseShadow.FirstAction.EMSMode = mode
-						}
-					}
-				}
-			}
-			if candidate.RecourseShadow != nil {
-				slog.Info("mpc: champion vs stochastic shadow",
-					"champion_cost_ore", candidate.TotalCostOre,
-					"recourse_cost_ore", candidate.RecourseShadow.TotalCostOre,
-					"champion_minus_recourse_ore", candidate.RecourseShadow.ActiveMinusShadowOre,
-					"recourse_solve_ms", candidate.RecourseShadow.Solver.SolveMs)
-			}
 			plan = candidate
 		} else {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
 			}
-			if recoveryRequired {
+			if recoveryRequired && !downsidePrimary {
 				slog.Error("mpc: primary optimizer failed and Go DP cannot model operating-bound recovery; keeping previous plan",
 					"err", err,
 					"soc_start", p.InitialSoC,
@@ -1612,11 +1840,15 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 					"soc_max", p.SoCMax)
 				return s.Latest()
 			}
+			if modelErr := coreDPModelError(p); modelErr != nil {
+				slog.Error("mpc: primary failed and fallback cannot represent this site; keeping previous plan", "err", err, "fallback", modelErr)
+				return s.Latest()
+			}
 			slog.Error("mpc: primary optimizer failed; using Core DP fallback", "err", err)
 			slots = fallbackSlots
 			solveStart := time.Now()
-			plan = Optimize(slots, p)
-			plan.Solver = coreSolverInfo(p, msSince(solveStart))
+			plan = coreReservePlan(context.WithoutCancel(ctx), slots, p)
+			setCoreReserveSolver(&plan, p, msSince(solveStart))
 			// Same solver, different standing: the operator asked for the
 			// external planner and did not get it. Everything that warns about
 			// a degraded optimizer keys on this flag, not on the engine name.
@@ -1633,12 +1865,28 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"err", err)
 		return s.Latest()
 	}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		engine := "go-dp"
+		if plan.Solver != nil && plan.Solver.Engine != "" {
+			engine = plan.Solver.Engine
+		}
+		slog.Error("mpc: rejected plan that failed physical replay",
+			"generation", request.generation,
+			"mode", p.Mode,
+			"reason", request.reason,
+			"engine", engine,
+			"err", err)
+		return s.Latest()
+	}
 
 	// Tag each action with the effective EMS mode so the UI can render
 	// a mode-band showing which strategy drives each slot.
 	for i := range plan.Actions {
 		mode, _, _ := actionToSlot(plan.Actions[i], p.Mode)
 		plan.Actions[i].EMSMode = mode
+		pvPoint, loadPoint := baseForecastSlots[i].PVW, baseForecastSlots[i].LoadW
+		plan.Actions[i].ForecastPVW = &pvPoint
+		plan.Actions[i].ForecastLoadW = &loadPoint
 	}
 
 	// Baselines — counter-factual dispatch costs over the same horizon
@@ -1646,7 +1894,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired {
+	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil && (plan.Solver == nil || plan.Solver.Backend != "ev_reserve") {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}
@@ -1657,7 +1905,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// timestamps buildSlots used. forecasts cloud lookup mirrors the
 	// path buildSlots takes for the PV predictor so the snapshot is
 	// apples-to-apples with what's re-sampled later.
-	pp := s.snapshotPredictions(slots, forecasts)
+	var pp *plannedPredictions
+	if captured.Resolve == nil {
+		pp = s.snapshotPredictions(slots, forecasts, pv, load)
+	}
+	// The legacy shadow must not trigger drift replans for a primary forecast
+	// it did not produce. Scheduled and live-power replan triggers still apply.
 
 	s.mu.Lock()
 	if s.stopping || request.wasCanceledByService() {
@@ -1674,30 +1927,30 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"reason", request.reason)
 		return s.Latest()
 	}
+	if firstSlotExpired(plan.Actions, s.planningNow()) {
+		s.mu.Unlock()
+		return s.expiredReplan(request)
+	}
+
 	capPlanPVToNameplate(&plan, s.PVNameplateW)
 	capPlanLoad(&plan, 0, s.LoadMaxW)
 	plan.DecisionID = s.nextDecisionIDLocked()
-	if publishShadow {
-		if s.shadowEvaluator == nil {
-			s.shadowEvaluator = newStatefulShadowEvaluator()
-		}
-		if shadowError != "" {
-			s.shadowEvaluator.SetError(shadowError, now)
-		}
-		s.shadowEvaluator.SetPlans(&plan, shadowRecoursePlan, slots, p, time.Now())
-		plan.ShadowEvaluation = s.shadowEvaluator.Snapshot()
-	}
 	s.last = &plan
+	s.executionPlan = s.last
 	s.lastSlots = slots
 	s.lastParams = p
 	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
 	s.plannedPredictions = pp
 	s.lastReason = request.reason
+	s.publishedReplanGeneration = request.generation
 	reason := request.reason
 	replanAtMs := s.lastReplanAt.UnixMilli()
 	saveDiag := s.SaveDiag
 	s.mu.Unlock()
+	if captured.Record != nil {
+		captured.Record(baseForecastSlots, fallbackSlots, plan.DecisionID, replanAtMs)
+	}
 	// Horizon statistics — surfaced in logs so operators can
 	// reconstruct "what did the DP know?" without pulling the full
 	// Diagnostic JSON. Captures the three factors most likely to
@@ -1751,8 +2004,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// The plan is published and persisted before the challenger starts, so the
 	// shadow can only ever add a measurement to it. `plan` is copied by value
 	// and its actions are read-only from here on.
-	if coreChampion {
-		s.startPythonShadow(plan, slots, p, reason, replanAtMs)
+	if downsidePrimary && !plan.Solver.Fallback {
+		s.startCoreDPShadow(plan, slots, p, reason, replanAtMs)
 	}
 	return &plan
 }
@@ -1788,52 +2041,6 @@ func (s *Service) nextDecisionIDLocked() string {
 		}
 	}
 	return uuid.NewString()
-}
-
-// observeShadow samples realized exogenous power for closed-loop scoring. It
-// deliberately derives house load without battery or vehicle power so both
-// virtual policies receive the same uncontrollable input.
-func (s *Service) observeShadow(now time.Time) {
-	if s == nil || !s.EnableRecourseShadow || s.Tele == nil {
-		return
-	}
-	s.mu.RLock()
-	evaluator := s.shadowEvaluator
-	siteMeter := s.SiteMeter
-	s.mu.RUnlock()
-	if evaluator == nil || siteMeter == "" || !s.driverOnline(siteMeter) {
-		return
-	}
-	meter := s.Tele.Get(siteMeter, telemetry.DerMeter)
-	if meter == nil {
-		return
-	}
-	var pvW, batteryW float64
-	for _, reading := range s.Tele.ReadingsByType(telemetry.DerPV) {
-		if s.driverOnline(reading.Driver) {
-			pvW += reading.SmoothedW
-		}
-	}
-	for _, reading := range s.Tele.ReadingsByType(telemetry.DerBattery) {
-		if s.driverOnline(reading.Driver) {
-			batteryW += reading.SmoothedW
-		}
-	}
-	loadW := meter.SmoothedW - pvW - batteryW - s.Tele.SumOnlineEVW() - s.Tele.SumOnlineV2XW()
-	if loadW < 0 {
-		loadW = 0
-	}
-	summary := evaluator.Observe(now, loadW, pvW)
-	s.mu.Lock()
-	if s.last != nil {
-		// Latest returns a plan pointer after dropping s.mu, so published plans
-		// must remain immutable. Replace the plan snapshot instead of mutating
-		// the object an API handler may currently be marshaling.
-		updated := *s.last
-		updated.ShadowEvaluation = &summary
-		s.last = &updated
-	}
-	s.mu.Unlock()
 }
 
 func compareDPShadow(active, shadow Plan) *ShadowPlan {
@@ -1958,7 +2165,7 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 // that the forecast service stored at fetch time. This lets the model
 // learn system-specific orientation/shading/soiling and drive planning
 // off the better signal without re-fetching weather.
-func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, pvCorrect PVResidualCorrector, load LoadPredictor) []Slot {
+func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, pvCorrect PVResidualCorrector, load LoadPredictor, weights ...func(time.Time) float64) []Slot {
 	out := make([]Slot, 0, len(prices))
 	now := time.UnixMilli(nowMs).UTC()
 	for _, pr := range prices {
@@ -1983,20 +2190,30 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if pv != nil {
 			cloud, cloudInput := lookupCloudInput(forecasts, pr.SlotTsMs)
 			weatherInput = cloudInput
-			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
-			base := pv(slotT, cloud)
-			if pvCorrect != nil {
-				// Correction returns generation-positive W (same as `base`).
-				// Floor the corrected base at 0 — a residual large enough
-				// to push it negative is a sign-flip, not a plausible PV
-				// prediction.
-				corrected := base + pvCorrect(now, slotMidT, base)
-				if corrected < 0 {
-					corrected = 0
+			if forecastInput == nil && cloudInput == nil {
+				// A learned model may refine a covered weather row. It cannot
+				// turn a missing provider interval into valid forecast PV.
+				pvW = 0
+			} else {
+				radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
+				base := pv(slotT, cloud)
+				if pvCorrect != nil {
+					// Correction returns generation-positive W (same as `base`).
+					// Floor the corrected base at 0 — a residual large enough
+					// to push it negative is a sign-flip, not a plausible PV
+					// prediction.
+					corrected := base + pvCorrect(now, slotMidT, base)
+					if corrected < 0 {
+						corrected = 0
+					}
+					base = corrected
 				}
-				base = corrected
+				weight := PlannerRadiationWeight
+				if len(weights) > 0 && weights[0] != nil {
+					weight = weights[0](slotT)
+				}
+				pvW = selectPlannerPVWithWeight(forecastPVW, base, radiationBacked, weight)
 			}
-			pvW = selectPlannerPVW(forecastPVW, base, radiationBacked)
 		} else {
 			weatherInput = forecastInput
 			pvW = forecastPVW
@@ -2198,73 +2415,34 @@ func upperHalfMeanPrice(prices []state.PricePoint) float64 {
 // non-representative training data).
 const PlannerRadiationWeight = 0.3
 
-// PlannerForecastCapRatio caps how much the radiation-backed forecast may
-// exceed the twin's prediction before it's treated as a NWP error rather
-// than a calibration gap.
-//
-// When the NWP model is confidently wrong (e.g. predicts 1% cloud while
-// the site measures 300 W from a 13 kW array), the forecast can be 5–10×
-// higher than reality. The RLS twin — especially when its NowAnchor
-// correction has pulled it close to the live reading — is a more reliable
-// signal in those moments. Capping the forecast at this multiple prevents
-// the 70 % NWP weight from swamping the calibrated twin.
-//
-// 3× is chosen empirically: it covers a 2–3 string orientation difference
-// and a heavy soiling scenario, which are legitimate reasons for the twin
-// to under-predict relative to the NWP GHI × rated-kWp estimate. Beyond
-// 3× the NWP forecast is more likely wrong (cloud/shading mis-model) than
-// the twin is. This constant is intentionally conservative — tightening
-// it below ~2 risks degrading performance on normal sunny days where the
-// forecast is right and the twin is under-trained.
-const PlannerForecastCapRatio = 3.0
-
 func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
-	// Invalid predicted → fall back to forecast (unchanged).
-	switch {
-	case math.IsNaN(predictedPVW), math.IsInf(predictedPVW, 0), predictedPVW < 0:
-		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) {
-			return 0
-		}
+	return selectPlannerPVWithWeight(forecastPVW, predictedPVW, radiationBacked, PlannerRadiationWeight)
+}
+
+func selectPlannerPVWithWeight(forecastPVW, predictedPVW float64, radiationBacked bool, weight float64) float64 {
+	if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) || forecastPVW < 0 {
+		forecastPVW = 0
+	}
+	if math.IsNaN(predictedPVW) || math.IsInf(predictedPVW, 0) || predictedPVW < 0 {
 		return forecastPVW
 	}
-
-	// Radiation-backed forecasts (open_meteo, forecast_solar) have the
-	// correct diurnal shape and cloud response already. Blend the twin's
-	// prediction in as a thin per-site calibration instead of letting it
-	// override the forecast. Typical picture on homelab-rpi after the
-	// switch: forecast shows smooth bell curve 0–8 kW, an under-trained
-	// twin still spits random spikes from overfit feature vectors — and
-	// we want the smooth curve.
-	//
-	// Guard: if the forecast exceeds PlannerForecastCapRatio × the twin's
-	// prediction, and the twin has a meaningful signal (> 50 W — i.e. it
-	// is not night-gated or collapsed), cap the forecast before blending.
-	// This prevents a confidently-wrong NWP cloud-cover forecast from
-	// dominating the plan — the twin's NowAnchor-corrected value already
-	// reflects live irradiance conditions, and a 3–10× divergence between
-	// forecast and twin is a stronger signal of NWP error than calibration
-	// gap. Production incident T33 (2026-05-25) observed open_meteo predicting
-	// 154 W/m2 / 1% cloud while
-	// site measured ~22 W/m2 effective irradiance → 7× blend over-shoot).
-	if radiationBacked && forecastPVW > 0 {
-		cappedForecast := forecastPVW
-		if predictedPVW > 50 && forecastPVW > PlannerForecastCapRatio*predictedPVW {
-			cappedForecast = PlannerForecastCapRatio * predictedPVW
+	if radiationBacked {
+		if forecastPVW == 0 {
+			return 0
 		}
-		return (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*predictedPVW
+		if math.IsNaN(weight) || math.IsInf(weight, 0) {
+			weight = 0
+		}
+		weight = math.Max(0, math.Min(1, weight))
+		return (1-weight)*forecastPVW + weight*predictedPVW
 	}
-
-	// Cloud-only legacy path: prefer the twin when forecast is near zero
-	// (forecast probably missing), fall back to forecast when the twin
-	// collapsed to ~0 (twin probably broken).
 	if forecastPVW < plannerMinForecastPVFallbackW {
 		return predictedPVW
 	}
-	collapseCeil := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
-	if predictedPVW <= collapseCeil {
-		return forecastPVW
-	}
-	return predictedPVW
+	// Fade a collapsed cloud-only model into the provider continuously.
+	ceiling := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
+	trust := math.Min(1, predictedPVW/ceiling)
+	return (1-trust)*forecastPVW + trust*predictedPVW
 }
 
 // lookupHasRadiation reports whether the forecast row covering `ts` has
@@ -2280,15 +2458,14 @@ func lookupHasRadiation(forecasts []state.ForecastPoint, ts int64) bool {
 		}
 		end := f.SlotTsMs + int64(slotLen)*60*1000
 		if ts >= f.SlotTsMs && ts < end {
-			return f.SolarWm2 != nil
+			return f.PVWEstimated != nil && (f.SolarWm2 != nil || f.Source == "forecast_solar")
 		}
 	}
 	return false
 }
 
 // lookupCloud returns the cloud cover (%) for the forecast row covering
-// `ts`, falling back to the nearest neighbour. 50% is the neutral
-// prior if no forecast is available at all.
+// `ts`. 50% is the neutral prior if no forecast covers the interval.
 func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 	cloud, _ := lookupCloudInput(forecasts, ts)
 	return cloud
@@ -2316,24 +2493,10 @@ func lookupCloudInput(forecasts []state.ForecastPoint, ts int64) (float64, *stat
 			return 50, f
 		}
 		if ts < f.SlotTsMs {
-			if i == 0 {
-				if f.CloudCoverPct != nil {
-					return *f.CloudCoverPct, f
-				}
-				return 50, f
-			}
-			prev := &forecasts[i-1]
-			if prev.CloudCoverPct != nil {
-				return *prev.CloudCoverPct, prev
-			}
-			return 50, prev
+			return 50, nil
 		}
 	}
-	last := &forecasts[len(forecasts)-1]
-	if last.CloudCoverPct != nil {
-		return *last.CloudCoverPct, last
-	}
-	return 50, last
+	return 50, nil
 }
 
 // lookupPV finds the forecast row whose slot covers ts and returns its PV
@@ -2367,17 +2530,8 @@ func lookupPVInput(forecasts []state.ForecastPoint, ts int64) (float64, *state.F
 			}
 			return 0, f
 		}
-		// Fall back: if between rows, use the preceding row (interpolation
-		// within the forecast range only).
 		if ts < f.SlotTsMs {
-			if i == 0 {
-				return 0, nil
-			}
-			prev := &forecasts[i-1]
-			if prev.PVWEstimated != nil {
-				return *prev.PVWEstimated, prev
-			}
-			return 0, prev
+			return 0, nil
 		}
 	}
 	// After last row — return 0 (no forecast coverage).

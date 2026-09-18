@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -62,36 +64,94 @@ func (o *OpenMeteoProvider) Fetch(ctx context.Context, lat, lon float64) ([]RawF
 	}
 	var doc struct {
 		Hourly struct {
-			Time               []string   `json:"time"`
-			ShortwaveRadiation []*float64 `json:"shortwave_radiation"` // W/m²
-			CloudCover         []*float64 `json:"cloud_cover"`         // %
-			Temperature2m      []*float64 `json:"temperature_2m"`      // °C
+			Time               []string          `json:"time"`
+			ShortwaveRadiation []json.RawMessage `json:"shortwave_radiation"` // W/m²
+			CloudCover         []json.RawMessage `json:"cloud_cover"`         // %
+			Temperature2m      []json.RawMessage `json:"temperature_2m"`      // °C
 		} `json:"hourly"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("open-meteo: decode: %w", err)
 	}
-	n := len(doc.Hourly.Time)
-	out := make([]RawForecast, 0, n)
-	for i := 0; i < n; i++ {
+	type sample struct {
+		at         time.Time
+		radiation  *float64
+		cloudCover *float64
+		tempC      *float64
+	}
+	samples := make([]sample, 0, len(doc.Hourly.Time))
+	for i, ts := range doc.Hourly.Time {
 		// Open-Meteo returns naive local times per the &timezone= param;
 		// with &timezone=UTC they're UTC-zoned ISO8601 without offset.
-		t, err := time.Parse("2006-01-02T15:04", doc.Hourly.Time[i])
+		t, err := parseOpenMeteoTime(ts)
 		if err != nil {
 			continue
 		}
-		t = t.UTC()
-		row := RawForecast{HourStart: t}
+		s := sample{at: t}
+		if i < len(doc.Hourly.ShortwaveRadiation) {
+			s.radiation = parseOpenMeteoNumber(doc.Hourly.ShortwaveRadiation[i], func(v float64) bool { return v >= 0 })
+		}
 		if i < len(doc.Hourly.CloudCover) {
-			row.CloudCoverPct = doc.Hourly.CloudCover[i]
+			s.cloudCover = parseOpenMeteoNumber(doc.Hourly.CloudCover[i], func(v float64) bool { return v >= 0 && v <= 100 })
 		}
 		if i < len(doc.Hourly.Temperature2m) {
-			row.TempC = doc.Hourly.Temperature2m[i]
+			s.tempC = parseOpenMeteoNumber(doc.Hourly.Temperature2m[i], func(float64) bool { return true })
 		}
-		if i < len(doc.Hourly.ShortwaveRadiation) {
-			row.SolarWm2 = doc.Hourly.ShortwaveRadiation[i]
+		samples = append(samples, s)
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i].at.Before(samples[j].at) })
+
+	// Open-Meteo timestamps shortwave_radiation at the end of the hour it
+	// averages. Normalize it to that interval's start. Cloud cover and air
+	// temperature are instantaneous, so align them to the same hour with a
+	// trapezoidal mean of the two endpoints. If an endpoint is absent, leave
+	// that field absent instead of moving one instant to another hour.
+	out := make([]RawForecast, 0, len(samples))
+	byTime := make(map[int64]sample, len(samples))
+	for _, s := range samples {
+		byTime[s.at.UnixMilli()] = s
+	}
+	for _, end := range samples {
+		startTime := end.at.Add(-time.Hour)
+		row := RawForecast{HourStart: startTime}
+		row.SolarWm2 = end.radiation
+		if start, ok := byTime[startTime.UnixMilli()]; ok {
+			row.CloudCoverPct = meanOpenMeteoEndpoints(start.cloudCover, end.cloudCover)
+			row.TempC = meanOpenMeteoEndpoints(start.tempC, end.tempC)
 		}
-		out = append(out, row)
+		if row.SolarWm2 != nil || row.CloudCoverPct != nil || row.TempC != nil {
+			out = append(out, row)
+		}
 	}
 	return out, nil
+}
+
+func parseOpenMeteoTime(value string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02T15:04", value); err == nil {
+		return t.UTC(), nil
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t.UTC(), nil
+}
+
+func parseOpenMeteoNumber(raw json.RawMessage, valid func(float64) bool) *float64 {
+	var value *float64
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || value == nil || math.IsNaN(*value) || math.IsInf(*value, 0) || !valid(*value) {
+		return nil
+	}
+	return value
+}
+
+func meanOpenMeteoEndpoints(start, end *float64) *float64 {
+	if start == nil || end == nil {
+		return nil
+	}
+	mean := (*start + *end) / 2
+	if math.IsNaN(mean) || math.IsInf(mean, 0) {
+		return nil
+	}
+	return &mean
 }

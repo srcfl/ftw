@@ -49,16 +49,16 @@ func TestChargeNowHoldReleasesAtTargetSoC(t *testing.T) {
 	if _, active := c.GetManualHold(cfg.ID, base); !active {
 		t.Fatalf("hold released below its target SoC")
 	}
-	if n := len(sender.calls); n == 0 || sender.calls[n-1].power != 11040 {
-		t.Fatalf("below target: want the 11040 W hold dispatched, got %+v", sender.calls)
+	if n := len(sender.calls); n == 0 || sender.calls[n-1].power != 11000 {
+		t.Fatalf("below target: want the 11000 W charger limit dispatched, got %+v", sender.calls)
 	}
 
-	// Session energy grows past the target: SoC = 0.5 + 18300/60000 =
+	// Session energy grows past the target: SoC = 0.5 + 20334*0.9/60000 =
 	// 0.805 ≥ 0.8 — the hold releases and the SAME tick dispatches the
 	// plan's allocation (0 Wh here → explicit 0 W standdown), not the
 	// hold wattage.
 	samples[cfg.DriverName] = EVSample{
-		Connected: true, PowerW: 11000, SessionWh: 18300, RequestActive: true,
+		Connected: true, PowerW: 11000, SessionWh: 20334, RequestActive: true,
 	}
 	later := base.Add(30 * time.Second)
 	c.Tick(context.Background(), later)

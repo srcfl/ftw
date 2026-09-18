@@ -17,6 +17,7 @@ package ocpp
 
 import (
 	"crypto/subtle"
+	"crypto/x509"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,7 +36,13 @@ type authorizer struct {
 	// charger listed here must present that password AND connect under
 	// that identity — see checkClient. This is what makes an adopted
 	// charger un-impersonable by anything holding only the shared secret.
+	// When mTLS is on, the password is an additional gate, not the only one.
 	perCharger map[string]string
+
+	// requireClientCert is set when a client CA is configured. The TLS
+	// stack has already checked the CA; checkClient then requires the
+	// certificate's CN or DNS SAN to be the identity in the URL.
+	requireClientCert bool
 
 	// bindIP is the address the operator asked the listener to serve on.
 	// Nil, unspecified (0.0.0.0 / ::) means every interface.
@@ -58,6 +65,9 @@ func newAuthorizer(cfg *Config) *authorizer {
 	}
 	if ip := net.ParseIP(cfg.Bind); ip != nil && !ip.IsUnspecified() {
 		a.bindIP = ip
+	}
+	if cfg.TLS != nil && cfg.TLS.ClientCAFile != "" {
+		a.requireClientCert = true
 	}
 	return a
 }
@@ -111,10 +121,17 @@ func (a *authorizer) basicAuth(user, pass string) bool {
 // checkClient is the second gate, and the one that closes impersonation.
 //
 // A charge point picks its own identity — it is the last segment of the URL it
-// dialled — so "it authenticated" has never proved which device it is. Where a
-// charger has its own credential, this requires the connection to present that
-// exact credential under that exact identity: the shared password no longer
-// buys an attacker an adopted charger's name, only a pending row.
+// dialled — so "it authenticated" has never proved which device it is.
+//
+// When a client CA is configured, the connection must present a certificate
+// whose CN or DNS SAN is exactly that identity. The TLS stack already checked
+// the CA; this is what stops any cert from that CA claiming any name.
+//
+// Where a charger has its own credential, this also requires the connection
+// to present that exact credential under that exact identity: the shared
+// password no longer buys an attacker an adopted charger's name, only a
+// pending row. A per-charger password is an additional gate, not a substitute
+// for the certificate binding.
 //
 // It also enforces the configured bind address. The library builds its listen
 // address from the port alone, so the socket itself is unavoidably on every
@@ -130,6 +147,9 @@ func (a *authorizer) checkClient(id string, r *http.Request) bool {
 			"charger", id, "bind", a.bindIP.String(), "arrived_on", localAddr(r))
 		return false
 	}
+	if a.requireClientCert && !clientCertIdentifies(id, r) {
+		return false
+	}
 	secret, hasOwn := a.perCharger[id]
 	if !hasOwn {
 		return true
@@ -141,6 +161,42 @@ func (a *authorizer) checkClient(id string, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// clientCertIdentifies reports whether the verified leaf certificate names
+// this charge-point identity. The TLS handshake has already required a cert
+// from the configured CA; matching CN or DNS SAN is what binds that cert to
+// the URL. Logs and returns false when no cert is present or none of its
+// names is the identity.
+func clientCertIdentifies(id string, r *http.Request) bool {
+	if r == nil || r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		slog.Warn("ocpp: refused a charge point that presented no client certificate",
+			"charger", id)
+		return false
+	}
+	cert := r.TLS.PeerCertificates[0]
+	if certNames(cert, id) {
+		return true
+	}
+	slog.Warn("ocpp: refused a charge point whose client certificate does not name the identity it claimed",
+		"charger", id, "cert_cn", cert.Subject.CommonName)
+	return false
+}
+
+// certNames reports whether the certificate's CN or a DNS SAN is exactly id.
+func certNames(cert *x509.Certificate, id string) bool {
+	if cert == nil || id == "" {
+		return false
+	}
+	if cert.Subject.CommonName == id {
+		return true
+	}
+	for _, name := range cert.DNSNames {
+		if name == id {
+			return true
+		}
+	}
+	return false
 }
 
 // allowedLocalAddr reports whether the connection landed on the interface the
