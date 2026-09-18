@@ -124,6 +124,10 @@ curl -X POST -H "Authorization: Bearer <same-random-secret>" \
   https://ftw.example.net/api/restart
 ```
 
+On the Home Assistant app the same call shuts Core down and re-execs the
+binary in-process. Supervisor does not restart a stopped app unless Watchdog
+is on, so exiting would leave the app stopped.
+
 The same Bearer is accepted on the LAN when `api.lan_auth` is on. `FTW_API_TOKEN`
 and the house password are independent secrets: the token is not hashed as a
 password guess, and a mismatch does not lock Settings.

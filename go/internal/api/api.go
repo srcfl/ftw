@@ -215,6 +215,10 @@ type Deps struct {
 	//   - production (docker compose): dispatch to the ftw-updater sidecar
 	//     so the running container is force-recreated against the same
 	//     image — exact same code path as the post-update restart.
+	//   - Home Assistant add-on: signal main() to shut down cleanly, then
+	//     re-exec the binary in-process. Supervisor does not restart a
+	//     stopped app unless Watchdog is on, so exiting would leave the
+	//     app stopped.
 	//   - dev / systemd: signal main() to return with a non-zero exit
 	//     code; docker (unless-stopped) and systemd (on-failure) bring
 	//     the binary back up.
