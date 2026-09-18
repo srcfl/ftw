@@ -533,7 +533,7 @@ function escapeHTML(s) {
 
 function stateLabel(state) {
   switch (state) {
-    case "snapshotting": return "Creating backup";
+    case "snapshotting": return "Saving rollback point";
     case "pulling":    return "Pulling new image";
     case "restarting": return "Applying update";
     case "checking":   return "Checking service health";

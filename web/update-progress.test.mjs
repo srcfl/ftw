@@ -14,7 +14,8 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /case "checking":\s+return "Checking service health"/);
   assert.match(badge, /This step:/);
   assert.match(badge, /Total:/);
-  assert.match(badge, /Database schema unchanged; full history backup not needed/);
+  assert.match(badge, /Saving rollback point \(settings and config; history stays in place\)/);
+  assert.doesNotMatch(badge, /full history backup/);
 });
 
 test("update history shows failure message not only outcome", () => {
@@ -26,7 +27,7 @@ test("setup keeps polling when a safe update takes longer", () => {
   assert.match(setup, /SNAPSHOT_SOFT_TIMEOUT_MS = 15 \* 60 \* 1000/);
   assert.match(setup, /timed_out: true/);
   assert.doesNotMatch(setup, /this\._stopPolling\(\);\s+this\._phase = "timedOut"/);
-  assert.match(setup, /case "snapshotting": return "Creating backup"/);
+  assert.match(setup, /case "snapshotting": return "Saving rollback point"/);
   assert.match(setup, /case "checking":\s+return "Checking service health"/);
 });
 
