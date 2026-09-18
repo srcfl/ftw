@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.7.1
+
+### Patch Changes
+
+- de7aaae: When the Sourceful price harvest is stale, FTW takes tomorrow's day-ahead from Nord Pool instead of filling the night with the ML twin.
+- 30669ab: Keep the Home Assistant Plan sensor's attributes under the recorder's 16 KB limit: a compact, rounded 24-hour schedule in the entity and the full schedule on the `plan_schedule_json` topic. Home Assistant stops discarding the attributes and logging a warning on every plan update.
+- 8acbfa9: A signed-in owner can save the car's charging schedule without a second Face ID. Login still uses a passkey. Minting access, replacing the whole config, and moving energy still need the extra proof.
+
 ## 3.7.0
 
 ### Minor Changes
