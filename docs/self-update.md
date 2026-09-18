@@ -106,6 +106,16 @@ failed cleanup never turns a finished update into a failure.
 The updater accepts only known components and `vX.Y.Z` or
 `vX.Y.Z-beta.N` targets.
 
+Release notes carry two hidden markers. `<!-- ftw-state-schema-v2:N -->` is
+the release's on-disk state schema; Cores newer than v3.6.0-beta.1 read it to
+refuse a downgrade. `<!-- ftw-state-schema:4 -->` is read only by older Cores.
+Those Cores copied their whole history before any update whose marker differed
+from their own schema, and on a Raspberry Pi with a large history that copy
+could not finish (#1302). The legacy marker stays at 4, the last schema those
+Cores use, so they update without the copy. `state-schema.json` pins both
+values, a Go test checks them, and the stable release guard refuses notes
+that carry anything else.
+
 ## Scope: the host is not updated here
 
 Self-update covers Core, the updater sidecar, the Optimizer and signed
