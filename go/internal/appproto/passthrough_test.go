@@ -768,6 +768,72 @@ func TestAConfigureWithNoCeremonyIsRefused(t *testing.T) {
 	}
 }
 
+// Owner is enough for a route marked NoStepUp. The charging schedule is
+// the case: login already proved who is asking.
+func TestANoStepUpConfigureRunsWithoutACeremony(t *testing.T) {
+	h, _, rec, _ := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure, NoStepUp: true},
+		serve: text(`{"ok":true}`),
+	})
+
+	deliver(t, h, MsgAPIReq, ptrU32(27), APIReq{
+		Method: APIPut, Path: "/api/loadpoints/1/schedule",
+	})
+	if head := body[APIHeadMsg](t, waitFor(t, rec, MsgAPIHead)); head.Status != http.StatusOK {
+		t.Fatalf("answered %d, want 200", head.Status)
+	}
+	if rec.has(MsgError) {
+		t.Fatal("a NoStepUp configure was refused a ceremony")
+	}
+}
+
+func TestANoStepUpConfigureStillNeedsTheOwner(t *testing.T) {
+	h, _, rec, grants := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure, NoStepUp: true},
+		serve: text(`{"ok":true}`),
+	})
+	grants.setRole(apiauth.RoleViewer)
+
+	deliver(t, h, MsgAPIReq, ptrU32(28), APIReq{
+		Method: APIPut, Path: "/api/loadpoints/1/schedule",
+	})
+	if err := body[ErrorBody](t, waitFor(t, rec, MsgError)); err.Code != ErrScopeDenied {
+		t.Fatalf("refusal was %+v, want E_SCOPE_DENIED", err)
+	}
+	if rec.has(MsgAPIHead) {
+		t.Fatal("a viewer's NoStepUp write reached the handler")
+	}
+}
+
+// A ready-time save must not open the window that lets an unmarked
+// configure through. Otherwise an unlocked phone could change access
+// after touching the schedule.
+func TestANoStepUpWriteDoesNotOpenTheWindow(t *testing.T) {
+	api := &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure, NoStepUp: true},
+		serve: text(`{}`),
+	}
+	h, _, rec, _ := newAPIRig(t, api)
+
+	deliver(t, h, MsgAPIReq, ptrU32(29), APIReq{
+		Method: APIPut, Path: "/api/loadpoints/1/schedule",
+	})
+	waitFor(t, rec, MsgAPIEnd)
+	waitIdle(t, h)
+
+	api.facts = apiauth.RouteFacts{Tier: apiauth.TierConfigure}
+	rec.reset()
+	deliver(t, h, MsgAPIReq, ptrU32(30), APIReq{
+		Method: APIPost, Path: "/api/app-link/pairing",
+	})
+	if err := body[ErrorBody](t, waitFor(t, rec, MsgError)); err.Code != ErrNeedsStepUp {
+		t.Fatalf("a later unmarked configure was %+v, want E_NEEDS_STEP_UP", err)
+	}
+	if rec.has(MsgAPIHead) {
+		t.Fatal("a schedule save opened the step-up window for a privileged write")
+	}
+}
+
 // The whole point: one ceremony, then the writes that follow it on the same
 // session cost nothing. A settings screen that subscribes, saves and tests is
 // three configure calls; this is what turns three Face IDs into one.
