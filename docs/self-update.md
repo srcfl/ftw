@@ -72,9 +72,12 @@ socket.
 
 Before every Core update, Core creates a mandatory, consistent local rollback
 point for `state.db` and configuration. An older client request cannot skip it.
+The point never copies `history.db`; that file stays in place through update
+and rollback, so the step is bounded by settings size, not history size.
 These bounded points remain on the same disk and are deliberately labelled
 **Local rollback points**, not full backups. Older incomplete snapshots are
-visible but cannot be restored.
+visible but cannot be restored. Going back across a history-format change
+needs a full backup made before that update.
 
 Core updates include the compiled Energyplan worker. They require no Python
 service. Core DP remains available if the worker fails or returns an invalid plan.

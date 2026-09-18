@@ -5,13 +5,20 @@ names them separately:
 
 | Protection | Contains | Survives a failed SD card? | Used for |
 |---|---|---:|---|
-| Local rollback point | consistent SQLite database and configuration | No | quickly undo a Core update or state rollback |
+| Local rollback point | settings database and configuration; history stays in place | No | quickly undo a Core update or state rollback |
 | Full backup (`.ftwbak`) | all persistent data, cold history, custom/managed drivers and component versions | Only after downloading/copying it elsewhere | disk loss, reinstall or complete recovery |
 
 A Core update always creates a local rollback point when snapshots are enabled.
 There is no skip control in the UI, and old clients cannot disable the server's
 rollback point with `skip_snapshot`. Local points remain on the same disk, so
 they are not a substitute for an exported full backup.
+
+The point copies the settings database and configuration only. `history.db`
+stays where it is: the update does not replace it and a rollback leaves it in
+place. The step is therefore bounded by the size of the settings, not by years
+of telemetry, and takes minutes on a Raspberry Pi. Going back across a
+history-format change needs a full backup made before that update; the Update
+Center refuses such a rollback and says so.
 
 ## Create and export a full backup
 

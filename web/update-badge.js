@@ -575,10 +575,8 @@
               action,
               target: this._expectedRun.target,
               message: skipped
-                ? (skipReason === "database schema unchanged"
-                  ? "Database schema unchanged; full history backup not needed"
-                  : "Backup snapshot skipped for this update")
-                : "Creating backup snapshot",
+                ? "Rollback point skipped: snapshots are disabled on this installation"
+                : "Saving rollback point (settings and config; history stays in place)",
             };
             this._render();
           }
@@ -855,7 +853,7 @@
       // configured. Full, portable backups are managed separately below.
       const snapshotHint = hasUpdate
         ? `<div class="snapshot-hint">
-             <p>🛟 A local rollback point with a consistent database and config is saved before each Core update.</p>
+             <p>🛟 A local rollback point with the settings database and config is saved before each Core update. History stays in place and is not copied.</p>
            </div>`
         : "";
 
@@ -1763,7 +1761,7 @@
 
   function actionLabel(state, action) {
     switch (state) {
-      case "snapshotting": return "Creating backup";
+      case "snapshotting": return "Saving rollback point";
       case "pulling":    return "Pulling new image";
       case "restoring":  return "Restoring snapshot";
       case "restarting":
