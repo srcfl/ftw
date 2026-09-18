@@ -26,6 +26,14 @@ const (
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
 	SchemaVersion = 7
+	// LegacyReleaseMarker is the value release notes publish in the legacy
+	// `<!-- ftw-state-schema:N -->` marker. Only Cores before v3.6.0-beta.1
+	// (schema 4 and older) read it. Those Cores copied their whole history
+	// before any update whose marker differed from their own schema, and on
+	// a Raspberry Pi with a large history that copy could not finish
+	// (#1302). Keep this at 4 so they skip the copy and update. Newer Cores
+	// read `<!-- ftw-state-schema-v2:N -->`, which carries SchemaVersion.
+	LegacyReleaseMarker = 4
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets

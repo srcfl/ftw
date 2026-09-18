@@ -347,7 +347,14 @@ jobs:
             echo "state-schema.json must contain a positive integer version" >&2
             exit 1
           fi
-          printf '\n\n<!-- ftw-state-schema:%s -->\n' "${STATE_SCHEMA}" >> release-notes.md
+          # Cores before v3.6.0-beta.1 read only the legacy marker and copy
+          # their whole history when it differs from their schema (#1302).
+          LEGACY_MARKER="$(node -p "require('./state-schema.json').legacy_marker")"
+          if [[ ! "${LEGACY_MARKER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "state-schema.json must contain a positive integer legacy_marker" >&2
+            exit 1
+          fi
+          printf '\n\n<!-- ftw-state-schema:%s -->\n<!-- ftw-state-schema-v2:%s -->\n' "${LEGACY_MARKER}" "${STATE_SCHEMA}" >> release-notes.md
           echo "--- release-notes.md ---"
           cat release-notes.md
           echo "--- end ---"

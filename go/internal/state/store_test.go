@@ -17,13 +17,20 @@ func TestSchemaVersionMatchesReleaseMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	var metadata struct {
-		Version int `json:"version"`
+		Version      int `json:"version"`
+		LegacyMarker int `json:"legacy_marker"`
 	}
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		t.Fatal(err)
 	}
 	if metadata.Version != SchemaVersion {
 		t.Fatalf("state-schema.json version = %d, Go schema version = %d", metadata.Version, SchemaVersion)
+	}
+	// The legacy marker is what Cores before v3.6.0-beta.1 compare with their
+	// own schema (4). Any other value makes them copy their whole history
+	// before updating, which cannot finish on a Raspberry Pi (#1302).
+	if metadata.LegacyMarker != LegacyReleaseMarker || LegacyReleaseMarker != 4 {
+		t.Fatalf("state-schema.json legacy_marker = %d, Go LegacyReleaseMarker = %d, want 4", metadata.LegacyMarker, LegacyReleaseMarker)
 	}
 }
 
