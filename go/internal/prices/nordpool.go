@@ -50,11 +50,11 @@ func (n *NordPoolProvider) Fetch(ctx context.Context, zone string, day time.Time
 	if zone == "" {
 		zone = "SE3"
 	}
-	loc, err := time.LoadLocation("Europe/Stockholm")
-	if err != nil {
-		loc = time.UTC
-	}
-	date := day.In(loc).Format("2006-01-02")
+	// Ask for the same calendar day the primary provider was asked for.
+	// Formatting it in Europe/Stockholm moved the request to the next date
+	// late in the evening for UTC callers, and to the previous date for
+	// Finnish and Baltic sites, so the fallback missed the published day.
+	date := day.Format("2006-01-02")
 	apiCur := n.apiCurrency()
 	base := n.BaseURL
 	if base == "" {

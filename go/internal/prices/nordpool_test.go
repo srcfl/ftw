@@ -136,3 +136,29 @@ func TestNordPoolRejectsCurrencyMismatch(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// The fallback must request the calendar day it was asked for, in the
+// caller's own zone, or it fetches a different day than the primary did.
+func TestNordPoolRequestsTheCallersCalendarDay(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		day  time.Time
+	}{
+		{"late evening UTC", time.Date(2026, 9, 2, 23, 30, 0, 0, time.UTC)},
+		{"midnight in Helsinki", time.Date(2026, 9, 2, 0, 0, 0, 0, time.FixedZone("EEST", 3*3600))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.URL.Query().Get("date")
+				_ = json.NewEncoder(w).Encode(map[string]any{"currency": "SEK", "multiAreaEntries": []map[string]any{}})
+			}))
+			defer srv.Close()
+			p := &NordPoolProvider{Client: srv.Client(), BaseURL: srv.URL, Currency: "SEK"}
+			_, _ = p.Fetch(context.Background(), "SE3", tc.day)
+			if got != "2026-09-02" {
+				t.Fatalf("requested date = %q, want 2026-09-02", got)
+			}
+		})
+	}
+}
