@@ -1,5 +1,9 @@
 # Updates and release channels
 
+[ADR 0007](adr/0007-self-updating-binary.md) proposes replacing the updater
+sidecar with a Core that updates itself as a static binary. It is a proposal.
+This page describes what ships today.
+
 FTW has two channels:
 
 | Channel | Tag form | Purpose |
