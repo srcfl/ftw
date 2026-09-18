@@ -58,6 +58,7 @@ jobs:
       runtime_version: ${{ steps.version.outputs.runtime_version }}
       oci_version: ${{ steps.version.outputs.oci_version }}
       state_schema: ${{ steps.version.outputs.state_schema }}
+      legacy_marker: ${{ steps.version.outputs.legacy_marker }}
       created: ${{ steps.version.outputs.created }}
     steps:
       - name: Checkout selected commit
@@ -91,6 +92,13 @@ jobs:
             echo "state-schema.json must contain a positive integer version" >&2
             exit 1
           fi
+          # Cores before v3.6.0-beta.1 read only the legacy marker and copy
+          # their whole history when it differs from their schema (#1302).
+          LEGACY_MARKER="$(node -p "require('./state-schema.json').legacy_marker")"
+          if [[ ! "${LEGACY_MARKER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "state-schema.json must contain a positive integer legacy_marker" >&2
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -111,6 +119,7 @@ jobs:
           echo "runtime_version=${RUNTIME_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "oci_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "state_schema=${STATE_SCHEMA}" >> "${GITHUB_OUTPUT}"
+          echo "legacy_marker=${LEGACY_MARKER}" >> "${GITHUB_OUTPUT}"
           echo "created=${TAG_CREATED}" >> "${GITHUB_OUTPUT}"
 
   candidate:
@@ -445,6 +454,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.tag.outputs.version }}
           STATE_SCHEMA: ${{ needs.tag.outputs.state_schema }}
+          LEGACY_MARKER: ${{ needs.tag.outputs.legacy_marker }}
         run: |
           set -euo pipefail
           CORE_DIGEST="$(scripts/inspect-image-digest.sh "ghcr.io/srcfl/ftw:${TAG}")"
@@ -475,7 +485,7 @@ jobs:
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
               --prerelease \
-              --notes "<!-- ftw-state-schema:${STATE_SCHEMA} -->" \
+              --notes "$(printf '<!-- ftw-state-schema:%s -->\n<!-- ftw-state-schema-v2:%s -->' "${LEGACY_MARKER}" "${STATE_SCHEMA}")" \
               --generate-notes
           fi
           gh release upload "${TAG}" ftw-image-digests.json \
