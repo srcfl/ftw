@@ -3,6 +3,9 @@
 - Status: proposed
 - Date: 2026-09-18
 - Issue: [#1308](https://github.com/srcfl/ftw/issues/1308)
+- Also decides the version scheme, tracked in
+  [#1314](https://github.com/srcfl/ftw/issues/1314). The stable-channel defect
+  is [#1313](https://github.com/srcfl/ftw/issues/1313) and is independent
 - Replaces, when accepted: the `ftw-updater` sidecar, the update IPC volume
   and the Compose and `.env` pinning described in
   [self-update.md](../self-update.md). That document stays the description of
@@ -49,6 +52,20 @@ six-hour readiness budget. That is a storage concern living in delivery code.
 **Every merge became a release.** Changesets bumps the version on each Version
 Packages merge, and each bump is a beta. A tester's box sees a new update
 almost daily.
+
+**The version number stopped measuring anything.** FTW was 0.x from `v0.1.0`
+on 12 April to `v0.130.4` on 16 July. On 17 July one PR (#574, a removal of
+the legacy remote-access stack) merged with a `major` changeset, and
+Changesets turned 0.130.4 into 1.0.0. Nobody decided FTW was 1.0. The Home
+Link removal (ADR 0006) made 2.0.0, and the calendar removal made 3.0.0.
+Every major is a removal. Of the 437 changesets merged so far, 3 are major,
+97 minor and 337 patch, because
+[`.changeset/README.md`](../../.changeset/README.md) maps every new driver,
+flag, endpoint or UI piece to `minor`. No client compares Core's version; the
+state schema, the app protocol and the driver host API carry their own
+numbers. The only code that reads it is the update checker's ordering. And
+the stable channel resolves to `v2.3.2` from 29 August, a major behind beta,
+while the docs call it the default (#1313).
 
 Two facts make a simpler shape available now. Core is already a static binary:
 [`scripts/build-core.sh`](../../scripts/build-core.sh) builds with
@@ -117,6 +134,29 @@ the box holds the Docker socket, and no Docker engine is required.**
    the old product-name alias go. The legacy state-schema marker path goes
    when no 3.5.x box remains.
 
+## Versions
+
+**The version returns to 0.x on the binary line.** Semver's major 0 means
+anything may change, and that is the true state of FTW.
+
+1. **The first binary release is `v0.131.0`.** It continues the counter that
+   stopped at `v0.130.4`; those tags exist and cannot be reused. The Docker
+   line ends at its last 3.x release.
+
+2. **The reset happens at the cutover, and nowhere else.** The checker never
+   offers 0.x to a 3.x box, because 0 is less than 3. The cutover is a
+   reinstall, and the two lines are never compared, so there is no epoch rule
+   and no transitional release.
+
+3. **There is no major bump in 0.x.** `major` leaves the changeset rules, and
+   the changeset check rejects it.
+
+4. **Minor means a person notices it or must act:** a removal, a changed
+   default, new hardware support. Patch is everything else and the default.
+   The owner approves a minor in the PR; the author does not choose it.
+
+5. **Betas stay `v0.Y.Z-beta.N`**, weekly, as decided above.
+
 ## What is lost
 
 - **In-app update on Docker installs.** They keep the version notice and get a
@@ -158,6 +198,11 @@ the box holds the Docker socket, and no Docker engine is required.**
 - **Disk.** Two or three release directories, tens of megabytes each, instead
   of gigabytes of images (#1305).
 - **RAM on the Pi.** No Docker engine, no containerd, no sidecar.
+- **Changeset rules change.** `.changeset/README.md` and
+  `changeset-check.yml` lose `major`, and the README states the minor rule
+  above.
+- **The stable channel needs a fix before any of this.** #1313 is independent
+  and should land first.
 - **Risk: the launcher is new and small, and it must be right.** It gets a
   shell test suite that runs every branch of its decision, and the home box
   runs an induced crash during a trial before this is accepted.
@@ -177,6 +222,13 @@ the box holds the Docker socket, and no Docker engine is required.**
 - **Debian package and `apt`, the evcc model.** Good for servers and easy to
   add later by packaging the same tarball. It gives no UI rollback and no
   health-gated commit, so it does not replace the slot model. Deferred.
+- **Calendar versions (`2026.9.x`).** They sort after 3.x with the existing
+  comparator and claim nothing about maturity, so they could land on the
+  Docker line today. They drop the signal a minor carries in 0.x: that a
+  person must act. Not chosen.
+- **Reset to 0.x before the cutover.** Needs an epoch rule in the checker and
+  a transitional release every box must pass through, the paired pattern
+  that #1164 and #1302 made painful. Rejected.
 - **Moving tags with a container watcher.** No immutability, no rollback.
   Rejected.
 
