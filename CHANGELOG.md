@@ -1,5 +1,41 @@
 # Changelog
 
+## 3.7.0
+
+### Minor Changes
+
+- dc728c4: Save the Core update rollback point from the settings database and configuration only. History stays in its own file, which the update does not replace and a rollback leaves in place, so the step is bounded by settings size and no longer waits hours on a full history export that could not meet its deadline on a Raspberry Pi. Every update now takes a rollback point. Going back across a history-format change still needs a full backup made before that update.
+
+### Patch Changes
+
+- 646a52e: Every external data source now declares where in the world it works, and the
+  Settings map says so before you commit to a location. `GET /api/data-sources`
+  reports each source's kind, coverage area, countries and licence, plus an
+  advisory `covers` verdict for the configured site (or an explicit `?lat=&lon=`
+  preview). The Weather tab renders it under the location picker and refreshes
+  as the pin drags, so a site outside Europe learns up front that price-driven
+  planning has no source there instead of getting an empty price curve with no
+  explanation.
+  
+  The registry's European price-country list is held in lockstep with
+  `prices/zones.go` by a test, so a bidding zone added there cannot silently
+  go missing from the coverage answer.
+- 6af12e8: Let Cores before v3.6.0-beta.1 update without the full history copy that could not finish on a Raspberry Pi. Release notes now carry a fixed legacy state-schema marker for those Cores and a second marker with the real schema, which newer Cores read to refuse downgrades. The stable release guard checks both.
+- 191dd88: Remove replaced Core, updater and optimizer images after a verified Core update, keeping every image a container uses and the rollback image. Beta boxes stop filling their disk with one image per update.
+- 646a52e: The Settings location picker moves from Leaflet to MapLibre GL JS 6.9.0,
+  vendored on the box: the map keeps the same OpenStreetMap raster tiles and
+  attribution, but the UI now executes no third-party CDN JavaScript and the
+  picker loads even when the gateway cannot reach the internet — the same
+  policy as `/vendor/three` and `/vendor/ace`. Leaflet's now-unused copy is
+  removed. If WebGL is unavailable the numeric latitude/longitude fields stay
+  authoritative, exactly as before.
+  
+  Static assets are also served with pinned Content-Types instead of whatever
+  the host OS's MIME table says: on a Windows host whose registry maps `.mjs`
+  to text/plain, the browser (correctly, under `nosniff`) refuses the vendored
+  ES module and the map dies with "failed to fetch dynamically imported
+  module".
+
 ## 3.6.0
 
 ### Minor Changes
