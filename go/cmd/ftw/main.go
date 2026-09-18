@@ -299,10 +299,9 @@ func adoptGatewayIdentityWith(
 
 func main() {
 	exitCode := 0
+	reexecAfterShutdown := false
 	defer func() {
-		if exitCode != 0 {
-			os.Exit(exitCode)
-		}
+		afterShutdown(reexecAfterShutdown, exitCode, syscall.Exec, os.Exit)
 	}()
 	imageTag := os.Getenv("FTW_IMAGE_TAG")
 	builtVersion := Version
@@ -629,10 +628,11 @@ func main() {
 	// Closing restartCh from /api/restart drops the main control loop out
 	// of its select, which returns from main() so every defer (HA Stop,
 	// state.Close, http.Shutdown, …) runs in normal LIFO order. The
-	// first registered `os.Exit` defer then translates exitCode 1
-	// into a non-zero process exit so docker (`unless-stopped`) and
+	// first registered defer then either re-execs the binary (Home
+	// Assistant add-on: Supervisor will not restart a stopped app unless
+	// Watchdog is on) or os.Exit(1) so docker (`unless-stopped`) and
 	// systemd (`Restart=on-failure`) bring the binary back up. SIGTERM /
-	// SIGINT take the same return path with exitCode 0.
+	// SIGINT take the same return path with exitCode 0 and no re-exec.
 	restartCh := make(chan struct{})
 	var restartOnce sync.Once
 
@@ -2442,6 +2442,7 @@ func main() {
 	}
 	lanAuth.Bind(mutationPolicy.LANAuthEnabled, mutationPolicy.VerifyLANSecret)
 
+	bundle := components.BundleFromEnv()
 	deps = &api.Deps{
 		MutationPolicy: mutationPolicy,
 		Tel:            tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
@@ -2491,9 +2492,11 @@ func main() {
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
 		Restart: func(reqCtx context.Context) error {
-			// Restart the existing container through the updater.
+			// Compose: restart the existing container through the updater.
 			// An old updater refuses this action before touching Docker.
-			if selfUpdater != nil {
+			// The Home Assistant bundle has no sidecar and must not exit:
+			// Supervisor leaves a stopped app stopped unless Watchdog is on.
+			if selfUpdater != nil && !bundle.ReexecOnRestart() {
 				if err := selfUpdater.TriggerRestart(reqCtx); err == nil {
 					slog.Info("restart: dispatched via updater sidecar")
 					return nil
@@ -2501,18 +2504,16 @@ func main() {
 					slog.Info("restart: sidecar unavailable, falling back to in-process exit", "err", err)
 				}
 			}
-			// Fallback: drop the main control loop out of its select so
-			// every defer (HA Stop, st.Close, http.Shutdown, …) runs
-			// cleanly. The os.Exit(1) at the bottom of the defer stack
-			// then makes docker (`unless-stopped`) and systemd
-			// (`Restart=on-failure`) bring the binary back up.
+			// Drop the main control loop out of its select so every defer
+			// (HA Stop, st.Close, http.Shutdown, …) runs cleanly. The
+			// first defer then re-execs or os.Exit(1) per restartPlan.
 			restartOnce.Do(func() {
-				exitCode = 1
+				reexecAfterShutdown, exitCode = restartPlan(bundle)
 				close(restartCh)
 			})
 			return nil
 		},
-		Bundle:  components.BundleFromEnv(),
+		Bundle:  bundle,
 		Version: Version,
 	}
 	srv := api.New(deps)
@@ -2777,7 +2778,11 @@ func main() {
 			}
 			return
 		case <-restartCh:
-			slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
+			if reexecAfterShutdown {
+				slog.Info("restart requested via API — shutting down to re-exec in-process")
+			} else {
+				slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
+			}
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)
