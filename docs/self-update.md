@@ -98,6 +98,11 @@ system component changes.
 Status is written atomically to the shared volume and is reconciled into the
 persistent component history after Core recreation.
 
+After a verified Core update the updater removes the Core, updater and
+optimizer images that no container uses, except the images this site could
+roll back to. It never touches other repositories or user-built images, and a
+failed cleanup never turns a finished update into a failure.
+
 The updater accepts only known components and `vX.Y.Z` or
 `vX.Y.Z-beta.N` targets.
 

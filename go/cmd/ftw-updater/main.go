@@ -125,6 +125,10 @@ type server struct {
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
+	// listImages and usedImageIDs feed the image cleanup after a verified
+	// update; nil disables it. See image_prune.go.
+	listImages   func(ctx context.Context, repository string) ([]imageTag, error)
+	usedImageIDs func(ctx context.Context) (map[string]bool, error)
 }
 
 // composeArgs returns the common prefix of every `docker compose` invocation
@@ -275,6 +279,8 @@ func main() {
 	}
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
+	srv.listImages = dockerImagesInRepository
+	srv.usedImageIDs = dockerUsedImageIDs
 	if *retirePython {
 		// This is an interactive command. Preserve the helper's complete output,
 		// including the final error or backup path after its startup messages.
@@ -640,6 +646,20 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	done := phaseState("done", "Update completed and service is ready", totalSteps)
 	done.PreviousImageID = previousImageID
 	s.writeState(done)
+
+	// The update is finished. Reclaim the images it replaced, keeping every
+	// image a container uses and every image this site could roll back to.
+	// This runs before the sidecar replaces itself, because that helper
+	// recreates this container.
+	if action == "update" {
+		keep := map[string]bool{previousImageID: true}
+		for _, imageID := range s.readState().PreviousImages {
+			keep[imageID] = true
+		}
+		pruneCtx, cancelPrune := context.WithTimeout(context.Background(), 5*time.Minute)
+		s.pruneReplacedImages(pruneCtx, keep)
+		cancelPrune()
+	}
 
 	// Core is updated and healthy, and the terminal state is written. Only now
 	// bring the sidecar to the same release, so a future fix inside the updater
