@@ -82,3 +82,25 @@ describe("weather household path", () => {
     assert.doesNotMatch(source, /observed.*pv_rated_w|peak.*pv_rated_w/i);
   });
 });
+
+describe("data-source coverage under the map", () => {
+  it("renders the coverage host and asks the API about the current pin", () => {
+    const html = tab.render(stubCtx());
+    assert.ok(html.includes('id="data-coverage"'));
+    // The panel must ask for the pin being previewed, not only the saved site.
+    assert.match(source, /\/api\/data-sources/);
+    assert.match(source, /encodeURIComponent\(lat\)/);
+    assert.match(source, /encodeURIComponent\(lon\)/);
+  });
+
+  it("keeps only the newest response while the marker is dragged", () => {
+    // Coordinates change on every drag; a slow early response must not
+    // overwrite a fast later one.
+    assert.match(source, /var seq = \+\+coverageSeq/);
+    assert.match(source, /seq !== coverageSeq/);
+  });
+
+  it("never breaks the tab when the endpoint is missing", () => {
+    assert.match(source, /coverage is advisory; never break the tab/);
+  });
+});
