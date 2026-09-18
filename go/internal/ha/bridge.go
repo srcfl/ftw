@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1148,112 +1147,27 @@ func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
 
 // publishPlan reads the current MPC plan and publishes:
 //   - plan_action: current slot action string (charge/discharge/idle)
-//   - plan_json: full attributes including 24 h schedule with price/cost data
+//   - plan_json: current slot plus a compact 24 h schedule, bounded so Home
+//     Assistant's recorder keeps it (#1296)
+//   - plan_schedule_json: the full schedule with every field, own topic
 //   - price_ore: current consumer electricity price (öre/kWh)
 //   - price_json: price attributes (spot_ore, cost_ore, confidence, reason, ems_mode)
 func (b *Bridge) publishPlan() {
 	actions := b.plan.LatestActions()
 	now := time.Now()
-	nowMs := now.UnixMilli()
 
-	type slotJSON struct {
-		Start      string  `json:"start"`
-		End        string  `json:"end"`
-		Action     string  `json:"action"`
-		BatteryW   float64 `json:"battery_w"`
-		GridW      float64 `json:"grid_w"`
-		SoCPct     float64 `json:"soc_pct"`
-		PVW        float64 `json:"pv_w,omitempty"`
-		LoadW      float64 `json:"load_w,omitempty"`
-		PriceOre   float64 `json:"price_ore,omitempty"`
-		SpotOre    float64 `json:"spot_ore,omitempty"`
-		CostOre    float64 `json:"cost_ore,omitempty"`
-		Confidence float64 `json:"confidence,omitempty"`
-		Reason     string  `json:"reason,omitempty"`
-		EMSMode    string  `json:"ems_mode,omitempty"`
-	}
-
-	currentAction := "unavailable"
-	var curBatW, curGridW, curSoCPct float64
-	var curPVW, curLoadW float64
-	var curStart, curEnd string
-	var curPriceOre, curSpotOre, curCostOre, curConfidence float64
-	var curReason, curEMSMode string
-
-	var schedule []slotJSON
-	horizon := nowMs + 24*60*60*1000 // 24 h ahead
-
-	sort.Slice(actions, func(i, j int) bool {
-		return actions[i].SlotStartMs < actions[j].SlotStartMs
-	})
-
-	for _, a := range actions {
-		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if endMs <= nowMs {
-			continue // past slot
-		}
-		if a.SlotStartMs > horizon {
-			break // beyond 24 h
-		}
-
-		label := planActionLabel(a.BatteryW)
-		start := time.UnixMilli(a.SlotStartMs).UTC().Format(time.RFC3339)
-		end := time.UnixMilli(endMs).UTC().Format(time.RFC3339)
-
-		if a.SlotStartMs <= nowMs && nowMs < endMs {
-			currentAction = label
-			curBatW = a.BatteryW
-			curGridW = a.GridW
-			curSoCPct = a.SoCPct
-			curPVW = a.PVW
-			curLoadW = a.LoadW
-			curStart = start
-			curEnd = end
-			curPriceOre = a.PriceOre
-			curSpotOre = a.SpotOre
-			curCostOre = a.CostOre
-			curConfidence = a.Confidence
-			curReason = a.Reason
-			curEMSMode = a.EMSMode
-		}
-		schedule = append(schedule, slotJSON{
-			Start:      start,
-			End:        end,
-			Action:     label,
-			BatteryW:   a.BatteryW,
-			GridW:      a.GridW,
-			SoCPct:     a.SoCPct,
-			PVW:        a.PVW,
-			LoadW:      a.LoadW,
-			PriceOre:   a.PriceOre,
-			SpotOre:    a.SpotOre,
-			CostOre:    a.CostOre,
-			Confidence: a.Confidence,
-			Reason:     a.Reason,
-			EMSMode:    a.EMSMode,
-		})
-	}
+	snapshot := buildPlanSnapshot(actions, now)
+	currentAction := snapshot.Action
+	cur := snapshot.Current
+	curPVW, curLoadW := cur.PVW, cur.LoadW
+	curPriceOre, curSpotOre, curCostOre, curConfidence := cur.PriceOre, cur.SpotOre, cur.CostOre, cur.Confidence
+	curReason, curEMSMode := cur.Reason, cur.EMSMode
 
 	b.publishString("plan_action", currentAction)
-
-	planAttrs := map[string]any{
-		"action":     currentAction,
-		"battery_w":  curBatW,
-		"grid_w":     curGridW,
-		"soc_pct":    curSoCPct,
-		"slot_start": curStart,
-		"slot_end":   curEnd,
-		"price_ore":  curPriceOre,
-		"spot_ore":   curSpotOre,
-		"cost_ore":   curCostOre,
-		"confidence": curConfidence,
-		"reason":     curReason,
-		"ems_mode":   curEMSMode,
-		"schedule":   schedule,
-	}
-	if d, err := json.Marshal(planAttrs); err == nil {
-		b.publish(b.stateTopic("plan_json"), d, false)
-	}
+	// plan_json is the sensor's attribute set and stays under the recorder
+	// limit; plan_schedule_json carries the full schedule for MQTT consumers.
+	b.publish(b.stateTopic("plan_json"), snapshot.Attributes, false)
+	b.publish(b.stateTopic("plan_schedule_json"), snapshot.Schedule, false)
 
 	// Price sensor: standalone value + rich attributes for HA energy dashboard.
 	b.publishValue("price_ore", curPriceOre)
