@@ -95,6 +95,13 @@ what its grant allows, and its access must be revocable. Protocol extensions
 require registry changes and paired implementation tests; this section does
 not introduce wire names or bypass existing admission rules.
 
+Proposed, not shipped: a System One model (Jev) may classify a household
+sentence and fill arguments for operations Core already admits. It is an
+optional cloud judgment service, not a fourth module. When it is missing,
+Ask why and the typed APIs keep working. Judgments never dispatch, never
+apply planner output to hardware, and never bypass admission or freshness
+checks. See [`go/internal/assistant/judgments.go`](../go/internal/assistant/judgments.go).
+
 ## Power convention
 
 Above the driver boundary, positive power flows into the site and negative
