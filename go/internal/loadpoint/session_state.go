@@ -219,13 +219,13 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 // committed snapshots. An older anchor must not confirm a newer user edit.
 func (m *Manager) refreshSessionCommitLocked(lp *loadpointRuntime) {
 	reader, ok := m.sessionStore.(interface {
-		CommittedConfig(string) (string, time.Time, bool)
+		CommittedConfig(string) (string, uint64, bool)
 	})
 	if !ok || !lp.socConfirmed || lp.sessionDeviceID == "" || lp.sessionID == "" {
 		return
 	}
-	raw, committedAt, found := reader.CommittedConfig(sessionKey(lp.sessionDeviceID))
-	if !found || committedAt.IsZero() || !committedAt.After(lp.lastSessionCommitAt) {
+	raw, committedSeq, found := reader.CommittedConfig(sessionKey(lp.sessionDeviceID))
+	if !found || committedSeq == 0 || committedSeq <= lp.lastSessionCommitSeq {
 		return
 	}
 	var saved savedSession
@@ -238,7 +238,7 @@ func (m *Manager) refreshSessionCommitLocked(lp *loadpointRuntime) {
 		wh = *saved.EstimatedWh
 	}
 	lp.lastSavedEnergyWh, lp.lastSavedEnergyAt = wh, m.now()
-	lp.lastSessionCommitAt = committedAt
+	lp.lastSessionCommitSeq = committedSeq
 	lp.socRetention = "session"
 }
 
