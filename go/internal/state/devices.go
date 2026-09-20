@@ -51,14 +51,11 @@ func ResolveDeviceID(make, serial, mac, endpoint string) string {
 type DeviceIDRelation int
 
 const (
-	// DeviceIDPending means the new id is empty or weaker (serial/MAC still
-	// arriving). Keep waiting.
+	// DeviceIDPending means identity facts are still missing. Keep waiting.
 	DeviceIDPending DeviceIDRelation = iota
-	// DeviceIDMatch means the same id, or a refinement along ResolveDeviceID
-	// priority (ep: → mac: → make:serial).
+	// DeviceIDMatch means the same id, or a refinement backed by shared facts.
 	DeviceIDMatch
-	// DeviceIDConflict means a different serial, MAC, or endpoint at the
-	// same strength — a different device.
+	// DeviceIDConflict means the new facts contradict the previous identity.
 	DeviceIDConflict
 )
 
@@ -90,9 +87,8 @@ func deviceIDRank(id string) int {
 
 // RelateDeviceIDs compares two results of ResolveDeviceID.
 //
-// A driver often knows only a MAC (or endpoint) until the first successful
-// serial read. That later make:serial is the same hardware becoming better
-// identified, not a swap. A different make:serial or a different MAC is.
+// A stronger id alone cannot prove that it belongs to the same hardware.
+// Use RelateDeviceIdentities when the full before/after facts are available.
 func RelateDeviceIDs(expected, actual string) DeviceIDRelation {
 	if expected == "" || actual == expected {
 		return DeviceIDMatch
@@ -102,12 +98,38 @@ func RelateDeviceIDs(expected, actual string) DeviceIDRelation {
 	}
 	expRank, actRank := deviceIDRank(expected), deviceIDRank(actual)
 	if actRank > expRank {
-		return DeviceIDMatch
+		return DeviceIDPending
 	}
 	if actRank < expRank {
 		return DeviceIDPending
 	}
 	return DeviceIDConflict
+}
+
+// RelateDeviceIdentities accepts a stronger id only when the old anchor is
+// still present and unchanged. Keep missing facts pending; reject conflicts.
+func RelateDeviceIdentities(expected, actual Device) DeviceIDRelation {
+	expectedID := ResolveDeviceID(expected.Make, expected.Serial, expected.MAC, expected.Endpoint)
+	actualID := ResolveDeviceID(actual.Make, actual.Serial, actual.MAC, actual.Endpoint)
+	if expectedID == "" || deviceIDRank(actualID) <= deviceIDRank(expectedID) {
+		return RelateDeviceIDs(expectedID, actualID)
+	}
+	expectedMAC := ResolveDeviceID("", "", expected.MAC, "")
+	actualMAC := ResolveDeviceID("", "", actual.MAC, "")
+	if expectedMAC != "" && actualMAC != "" && expectedMAC != actualMAC {
+		return DeviceIDConflict
+	}
+	if expected.Endpoint != "" && actual.Endpoint != "" && expected.Endpoint != actual.Endpoint {
+		return DeviceIDConflict
+	}
+	if expectedMAC != "" {
+		if actualMAC == "" {
+			return DeviceIDPending
+		}
+	} else if expected.Endpoint == "" || actual.Endpoint == "" {
+		return DeviceIDPending
+	}
+	return DeviceIDMatch
 }
 
 // RegisterDevice records or updates a device. If the device_id already

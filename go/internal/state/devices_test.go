@@ -202,12 +202,12 @@ func TestRelateDeviceIDs(t *testing.T) {
 		{name: "empty actual waits for identity", expected: "mac:b827b9358d1a", actual: "", want: DeviceIDPending},
 		{
 			// Live Pixii update: ARP MAC until 2.1.4 actually called set_sn.
-			name:     "serial after mac is the same device",
+			name:     "serial after mac needs shared evidence",
 			expected: "mac:b827b9358d1a", actual: "pixii:234301002749",
-			want: DeviceIDMatch,
+			want: DeviceIDPending,
 		},
-		{name: "mac after endpoint is the same device", expected: "ep:modbus://192.168.1.10:502", actual: "mac:b827b9358d1a", want: DeviceIDMatch},
-		{name: "serial after endpoint is the same device", expected: "ep:modbus://192.168.1.10:502", actual: "pixii:234301002749", want: DeviceIDMatch},
+		{name: "mac after endpoint needs shared evidence", expected: "ep:modbus://192.168.1.10:502", actual: "mac:b827b9358d1a", want: DeviceIDPending},
+		{name: "serial after endpoint needs shared evidence", expected: "ep:modbus://192.168.1.10:502", actual: "pixii:234301002749", want: DeviceIDPending},
 		{name: "weaker mac after serial waits", expected: "pixii:234301002749", actual: "mac:b827b9358d1a", want: DeviceIDPending},
 		{name: "weaker endpoint after mac waits", expected: "mac:b827b9358d1a", actual: "ep:modbus://192.168.1.10:502", want: DeviceIDPending},
 		{name: "different serial is a different device", expected: "pixii:234301002749", actual: "pixii:OTHER", want: DeviceIDConflict},
