@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.7.5
+
+### Patch Changes
+
+- f6afa4f: Require shared MAC or endpoint evidence before a driver update accepts a newly learned serial number. Keep missing identity evidence pending and reject conflicting hardware instead of accepting any stronger identifier.
+- a86482c: Bundle Energyplan 0.4.6 so EV plans account for the import cost of charging pulses into solar surplus. Keep Core validation and fallback in place, with verified Linux ARM64, Linux AMD64 and macOS ARM64 workers.
+- 89b51e3: Track completed EV session writes with a sequence number so equal timestamps or clock changes cannot trigger extra writes to disk.
+
 ## 3.7.4
 
 ### Patch Changes
