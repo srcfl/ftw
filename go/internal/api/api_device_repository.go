@@ -593,18 +593,29 @@ func (s *Server) awaitDriverTelemetry(ctx context.Context, name, expectedID stri
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
+			actualID := s.runningDriverIdentity(name)
+			switch state.RelateDeviceIDs(expectedID, actualID) {
+			case state.DeviceIDMatch:
+				if health := s.deps.Tel.DriverHealth(name); health != nil && health.LastSuccess != nil {
+					return nil
+				}
+			case state.DeviceIDConflict:
+				return fmt.Errorf("driver %s reported hardware identity %s after update, expected %s", name, actualID, expectedID)
+			case state.DeviceIDPending:
+				if actualID != "" {
+					return fmt.Errorf("driver %s hardware identity still %s after update, expected %s", name, actualID, expectedID)
+				}
+			}
 			return fmt.Errorf("driver %s produced no fresh telemetry within %s", name, window)
 		case <-ticker.C:
 			health := s.deps.Tel.DriverHealth(name)
 			if health != nil && health.LastSuccess != nil {
-				if expectedID == "" {
-					return nil
-				}
+				// Same hardware may only now report a serial (mac: → make:sn).
 				actualID := s.runningDriverIdentity(name)
-				if actualID == expectedID {
+				switch state.RelateDeviceIDs(expectedID, actualID) {
+				case state.DeviceIDMatch:
 					return nil
-				}
-				if actualID != "" {
+				case state.DeviceIDConflict:
 					return fmt.Errorf("driver %s reported hardware identity %s after update, expected %s", name, actualID, expectedID)
 				}
 			}

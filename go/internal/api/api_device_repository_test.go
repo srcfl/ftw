@@ -234,6 +234,34 @@ func (f *driverUpdateFixture) assertReload(path string, watts float64) {
 	f.reading(watts)
 }
 
+func TestManagedDriverUpdateAcceptsSerialAfterMAC(t *testing.T) {
+	f := newDriverUpdateFixture(t, "running")
+	macOnly := updateDriverLua("1.0.2", "", `host.emit("meter", {w=102})`)
+	if err := os.WriteFile(f.bundled, macOnly, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.deps.Registry.Restart(context.Background(), f.s.deps.Cfg.Drivers[0]); err != nil {
+		t.Fatal(err)
+	}
+	env := f.s.deps.Registry.Env("p1")
+	if env == nil {
+		t.Fatal("mac-only driver is not running")
+	}
+	env.SetMAC("b8:27:b9:35:8d:1a")
+	f.reading(102)
+	if got := f.s.runningDriverIdentity("p1"); got != "mac:b827b9358d1a" {
+		t.Fatalf("pre-update identity = %q, want mac:b827b9358d1a", got)
+	}
+	response := f.request(context.Background(), "install", `{"repository_id":"test"}`, 200)
+	if response["runtime_verified"] != true {
+		t.Fatalf("serial-after-mac treated as a different device: %v", response)
+	}
+	f.reading(103)
+	if got := f.s.runningDriverIdentity("p1"); got != "esphome:P1-123" {
+		t.Fatalf("post-update identity = %q, want esphome:P1-123", got)
+	}
+}
+
 func TestManagedDriverUpdateWithoutRecipient(t *testing.T) {
 	for _, mode := range []string{"disabled", "stopped", "override"} {
 		t.Run(mode, func(t *testing.T) {

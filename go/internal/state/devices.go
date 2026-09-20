@@ -45,6 +45,71 @@ func ResolveDeviceID(make, serial, mac, endpoint string) string {
 	return ""
 }
 
+// DeviceIDRelation is how a newly resolved device_id compares to one
+// captured earlier. Used when a driver update restarts the same configured
+// instance and must not treat a better identity as a different device.
+type DeviceIDRelation int
+
+const (
+	// DeviceIDPending means the new id is empty or weaker (serial/MAC still
+	// arriving). Keep waiting.
+	DeviceIDPending DeviceIDRelation = iota
+	// DeviceIDMatch means the same id, or a refinement along ResolveDeviceID
+	// priority (ep: → mac: → make:serial).
+	DeviceIDMatch
+	// DeviceIDConflict means a different serial, MAC, or endpoint at the
+	// same strength — a different device.
+	DeviceIDConflict
+)
+
+func (r DeviceIDRelation) String() string {
+	switch r {
+	case DeviceIDPending:
+		return "pending"
+	case DeviceIDMatch:
+		return "match"
+	case DeviceIDConflict:
+		return "conflict"
+	default:
+		return fmt.Sprintf("DeviceIDRelation(%d)", r)
+	}
+}
+
+func deviceIDRank(id string) int {
+	switch {
+	case id == "":
+		return 0
+	case strings.HasPrefix(id, "ep:"):
+		return 1
+	case strings.HasPrefix(id, "mac:"):
+		return 2
+	default:
+		return 3
+	}
+}
+
+// RelateDeviceIDs compares two results of ResolveDeviceID.
+//
+// A driver often knows only a MAC (or endpoint) until the first successful
+// serial read. That later make:serial is the same hardware becoming better
+// identified, not a swap. A different make:serial or a different MAC is.
+func RelateDeviceIDs(expected, actual string) DeviceIDRelation {
+	if expected == "" || actual == expected {
+		return DeviceIDMatch
+	}
+	if actual == "" {
+		return DeviceIDPending
+	}
+	expRank, actRank := deviceIDRank(expected), deviceIDRank(actual)
+	if actRank > expRank {
+		return DeviceIDMatch
+	}
+	if actRank < expRank {
+		return DeviceIDPending
+	}
+	return DeviceIDConflict
+}
+
 // RegisterDevice records or updates a device. If the device_id already
 // exists, the row's last_seen_ms is bumped + driver_name/make/serial/mac
 // are refreshed (so renames and protocol-detected SN updates are reflected).
