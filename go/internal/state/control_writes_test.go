@@ -70,6 +70,52 @@ func TestControlWritesCoalescesWithoutClaimingDurability(t *testing.T) {
 	}
 }
 
+func TestControlWritesCommitSequenceTracksOnlyFinishedWrites(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var writes atomic.Int64
+	w := newControlWrites(nil, func(map[string]string) error {
+		if writes.Add(1) == 2 {
+			close(entered)
+			<-release
+		}
+		return nil
+	})
+	defer finishControlWrites(t, w)
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	if err := w.SaveConfig("session", "first"); !errors.Is(err, ErrWritePending) {
+		t.Fatal(err)
+	}
+	if err := w.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, first, ok := w.CommittedConfig("session")
+	if !ok || first == 0 {
+		t.Fatal("finished write has no sequence", first, ok)
+	}
+	if err := w.SaveConfig("session", "second"); !errors.Is(err, ErrWritePending) {
+		t.Fatal(err)
+	}
+	<-entered
+	if value, seq, ok := w.CommittedConfig("session"); !ok || value != "first" || seq != first {
+		t.Fatal("unfinished write advanced committed state", value, seq, ok)
+	}
+	once.Do(func() { close(release) })
+	if err := w.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	value, second, ok := w.CommittedConfig("session")
+	if !ok || value != "second" || second <= first {
+		t.Fatal("finished replacement did not advance sequence", value, second, ok)
+	}
+	if err := w.SaveConfig("session", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if _, seq, _ := w.CommittedConfig("session"); seq != second || writes.Load() != 2 {
+		t.Fatal("unchanged value caused another write", seq, writes.Load())
+	}
+}
+
 func TestControlWritesAtomicHoldAndSQLiteRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s, err := Open(path)
