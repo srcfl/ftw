@@ -235,30 +235,50 @@ func (f *driverUpdateFixture) assertReload(path string, watts float64) {
 }
 
 func TestManagedDriverUpdateAcceptsSerialAfterMAC(t *testing.T) {
-	f := newDriverUpdateFixture(t, "running")
-	macOnly := updateDriverLua("1.0.2", "", `host.emit("meter", {w=102})`)
-	if err := os.WriteFile(f.bundled, macOnly, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.s.deps.Registry.Restart(context.Background(), f.s.deps.Cfg.Drivers[0]); err != nil {
-		t.Fatal(err)
-	}
-	env := f.s.deps.Registry.Env("p1")
-	if env == nil {
-		t.Fatal("mac-only driver is not running")
-	}
-	env.SetMAC("b8:27:b9:35:8d:1a")
-	f.reading(102)
-	if got := f.s.runningDriverIdentity("p1"); got != "mac:b827b9358d1a" {
-		t.Fatalf("pre-update identity = %q, want mac:b827b9358d1a", got)
-	}
-	response := f.request(context.Background(), "install", `{"repository_id":"test"}`, 200)
-	if response["runtime_verified"] != true {
-		t.Fatalf("serial-after-mac treated as a different device: %v", response)
-	}
-	f.reading(103)
-	if got := f.s.runningDriverIdentity("p1"); got != "esphome:P1-123" {
-		t.Fatalf("post-update identity = %q, want esphome:P1-123", got)
+	for _, changedMAC := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed_MAC_%v", changedMAC), func(t *testing.T) {
+			f := newDriverUpdateFixture(t, "running")
+			macOnly := updateDriverLua("1.0.2", "", `host.emit("meter", {w=102})`)
+			if err := os.WriteFile(f.bundled, macOnly, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f.s.deps.Cfg.Drivers[0].Config = map[string]any{"host": "192.0.2.10"}
+			f.s.deps.Cfg.Drivers[0].Capabilities.HTTP = &config.HTTPCapability{}
+			lookups := 0
+			f.s.deps.Registry.ARPLookup = func(string) (string, bool) {
+				lookups++
+				if changedMAC && lookups == 2 {
+					return "aa:bb:cc:dd:ee:ff", true
+				}
+				return "b8:27:b9:35:8d:1a", true
+			}
+			if err := f.s.deps.Registry.Restart(context.Background(), f.s.deps.Cfg.Drivers[0]); err != nil {
+				t.Fatal(err)
+			}
+			f.reading(102)
+			if got := f.s.runningDriverIdentity("p1"); got != "mac:b827b9358d1a" {
+				t.Fatalf("pre-update identity = %q", got)
+			}
+			if changedMAC {
+				response := f.request(context.Background(), "install", `{"repository_id":"test"}`, 502)
+				if !strings.Contains(response["error"].(string), "hardware identity") {
+					t.Fatalf("wrong failure: %v", response)
+				}
+				f.reading(102)
+				if f.s.activeManagedDriverVersion("esphome-dsmr") != "" {
+					t.Fatal("wrong hardware left the new artifact active")
+				}
+				return
+			}
+			response := f.request(context.Background(), "install", `{"repository_id":"test"}`, 200)
+			if response["runtime_verified"] != true {
+				t.Fatalf("same MAC with serial did not verify: %v", response)
+			}
+			f.reading(103)
+			if got := f.s.runningDriverIdentity("p1"); got != "esphome:P1-123" {
+				t.Fatalf("post-update identity = %q", got)
+			}
+		})
 	}
 }
 

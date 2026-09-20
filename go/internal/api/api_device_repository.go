@@ -114,14 +114,14 @@ func (s *Server) handleDeviceRepositoryInstall(w http.ResponseWriter, r *http.Re
 	if restartErr != nil {
 		rolledBack, rollbackErr := s.deps.DriverRepository.Rollback(installed.LogicalPath)
 		if rollbackErr == nil {
-			if _, recoveryErr := s.restartManagedDriversExpected(context.Background(), rolledBack, restartState.ExpectedIDs); recoveryErr != nil {
+			if _, recoveryErr := s.restartManagedDriversExpected(context.Background(), rolledBack, restartState.ExpectedIdentities); recoveryErr != nil {
 				rollbackErr = fmt.Errorf("previous artifact reactivated but did not recover: %w", recoveryErr)
 			}
 		} else {
 			// First managed activation: no managed predecessor exists, so remove
 			// the active symlink and restore the bundled configs captured above.
 			deactivateErr := s.deps.DriverRepository.Deactivate(installed.LogicalPath)
-			restoreErr := s.restoreDriverConfigs(context.Background(), restartState.Originals, restartState.ExpectedIDs)
+			restoreErr := s.restoreDriverConfigs(context.Background(), restartState.Originals, restartState.ExpectedIdentities)
 			if deactivateErr == nil && restoreErr == nil {
 				rollbackErr = nil
 			} else {
@@ -181,7 +181,7 @@ func (s *Server) handleDeviceRepositoryRollback(w http.ResponseWriter, r *http.R
 		// against current hardware/config.
 		recoveryMessage := ""
 		if recovered, recoveryErr := s.deps.DriverRepository.Rollback(rolledBack.LogicalPath); recoveryErr == nil {
-			if _, restartErr := s.restartManagedDriversExpected(context.Background(), recovered, restartState.ExpectedIDs); restartErr != nil {
+			if _, restartErr := s.restartManagedDriversExpected(context.Background(), recovered, restartState.ExpectedIdentities); restartErr != nil {
 				recoveryMessage = "; roll-forward restart failed: " + restartErr.Error()
 			}
 		} else {
@@ -251,7 +251,7 @@ func (s *Server) handleDeviceRepositoryUseBundled(w http.ResponseWriter, r *http
 		recoveryMessage := ""
 		if _, recoveryErr := s.deps.DriverRepository.ActivateInstalled(r.PathValue("id"), replaced.Version, replaced.SHA256); recoveryErr != nil {
 			recoveryMessage = "; restoring v" + replaced.Version + " failed: " + recoveryErr.Error()
-		} else if _, err := s.restartManagedDriversExpected(context.Background(), replaced, restartState.ExpectedIDs); err != nil {
+		} else if _, err := s.restartManagedDriversExpected(context.Background(), replaced, restartState.ExpectedIdentities); err != nil {
 			recoveryMessage = "; restarting v" + replaced.Version + " failed: " + err.Error()
 		}
 		message := restartErr.Error() + recoveryMessage
@@ -327,11 +327,11 @@ func (s *Server) handleDeviceRepositoryActivate(w http.ResponseWriter, r *http.R
 			var recovered state.DriverRepoInstall
 			recovered, recoveryErr = s.deps.DriverRepository.ActivateInstalled(driverID, original.Version, original.SHA256)
 			if recoveryErr == nil {
-				_, recoveryErr = s.restartManagedDriversExpected(context.Background(), recovered, restartState.ExpectedIDs)
+				_, recoveryErr = s.restartManagedDriversExpected(context.Background(), recovered, restartState.ExpectedIdentities)
 			}
 		} else {
 			deactivateErr := s.deps.DriverRepository.Deactivate(activated.LogicalPath)
-			restoreErr := s.restoreDriverConfigs(context.Background(), restartState.Originals, restartState.ExpectedIDs)
+			restoreErr := s.restoreDriverConfigs(context.Background(), restartState.Originals, restartState.ExpectedIdentities)
 			recoveryErr = errors.Join(deactivateErr, restoreErr)
 		}
 		message := restartErr.Error()
@@ -388,11 +388,11 @@ func (s *Server) activeDriverLogicalPath(id, requested string) (string, error) {
 }
 
 type managedDriverRestartState struct {
-	Originals     []config.Driver
-	ExpectedIDs   map[string]string
-	Restarted     []string
-	LogicalPath   string
-	ConfigChanged bool
+	Originals          []config.Driver
+	ExpectedIdentities map[string]state.Device
+	Restarted          []string
+	LogicalPath        string
+	ConfigChanged      bool
 }
 
 func (r managedDriverRestartState) message() string {
@@ -442,8 +442,8 @@ func (s *Server) restartManagedDrivers(ctx context.Context, artifact state.Drive
 	return s.restartManagedDriversExpected(ctx, artifact, nil)
 }
 
-func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact state.DriverRepoInstall, expectedIDs map[string]string) (managedDriverRestartState, error) {
-	restartState := managedDriverRestartState{ExpectedIDs: expectedIDs, LogicalPath: artifact.LogicalPath}
+func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact state.DriverRepoInstall, expectedIdentities map[string]state.Device) (managedDriverRestartState, error) {
+	restartState := managedDriverRestartState{ExpectedIdentities: expectedIdentities, LogicalPath: artifact.LogicalPath}
 	rel := filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/"))
 	activePath := filepath.Join(s.managedDriverDir(), rel)
 	targetPath := activePath
@@ -460,8 +460,8 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 	next := *s.deps.Cfg
 	next.Drivers = append([]config.Driver(nil), next.Drivers...)
 	s.deps.CfgMu.RUnlock()
-	if restartState.ExpectedIDs == nil {
-		restartState.ExpectedIDs = make(map[string]string)
+	if restartState.ExpectedIdentities == nil {
+		restartState.ExpectedIdentities = make(map[string]state.Device)
 	}
 	var affected []config.Driver
 	changed := false
@@ -487,12 +487,12 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 		// Recovery retains the original recipients even if failed init left
 		// one absent from the registry. An initial install does not start a
 		// stopped or disabled instance just to produce a success claim.
-		if expectedIDs == nil {
+		if expectedIdentities == nil {
 			if s.deps.Registry.Env(current.Name) == nil {
 				continue
 			}
-			restartState.ExpectedIDs[current.Name] = s.runningDriverIdentity(current.Name)
-		} else if _, ok := expectedIDs[current.Name]; !ok {
+			restartState.ExpectedIdentities[current.Name] = s.runningDriverDevice(current.Name)
+		} else if _, ok := expectedIdentities[current.Name]; !ok {
 			continue
 		}
 		affected = append(affected, next.Drivers[i])
@@ -501,7 +501,7 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 		if err := s.restartDriverWithBatterySoCBounds(ctx, driver); err != nil {
 			return restartState, fmt.Errorf("restart driver %s: %w", driver.Name, err)
 		}
-		if err := s.awaitDriverTelemetry(ctx, driver.Name, restartState.ExpectedIDs[driver.Name]); err != nil {
+		if err := s.awaitDriverTelemetry(ctx, driver.Name, restartState.ExpectedIdentities[driver.Name]); err != nil {
 			return restartState, err
 		}
 		restartState.Restarted = append(restartState.Restarted, driver.Name)
@@ -533,9 +533,9 @@ func (s *Server) restartDriverWithBatterySoCBounds(ctx context.Context, driver c
 	return s.deps.Registry.Restart(ctx, runtimeDriver)
 }
 
-func (s *Server) restoreDriverConfigs(ctx context.Context, originals []config.Driver, expectedIDs map[string]string) error {
+func (s *Server) restoreDriverConfigs(ctx context.Context, originals []config.Driver, expectedIdentities map[string]state.Device) error {
 	for _, original := range originals {
-		if _, running := expectedIDs[original.Name]; !running || original.Disabled {
+		if _, running := expectedIdentities[original.Name]; !running || original.Disabled {
 			continue
 		}
 		s.deps.CfgMu.Lock()
@@ -549,7 +549,7 @@ func (s *Server) restoreDriverConfigs(ctx context.Context, originals []config.Dr
 		if err := s.restartDriverWithBatterySoCBounds(ctx, original); err != nil {
 			return err
 		}
-		if err := s.awaitDriverTelemetry(ctx, original.Name, expectedIDs[original.Name]); err != nil {
+		if err := s.awaitDriverTelemetry(ctx, original.Name, expectedIdentities[original.Name]); err != nil {
 			return err
 		}
 	}
@@ -572,7 +572,8 @@ func pathWithin(root, path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (s *Server) awaitDriverTelemetry(ctx context.Context, name, expectedID string) error {
+func (s *Server) awaitDriverTelemetry(ctx context.Context, name string, expected state.Device) error {
+	expectedID := expected.DeviceID
 	interval, ok := s.deps.Registry.PollInterval(name)
 	if !ok {
 		return fmt.Errorf("driver %s is not running", name)
@@ -593,8 +594,9 @@ func (s *Server) awaitDriverTelemetry(ctx context.Context, name, expectedID stri
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			actualID := s.runningDriverIdentity(name)
-			switch state.RelateDeviceIDs(expectedID, actualID) {
+			actual := s.runningDriverDevice(name)
+			actualID := actual.DeviceID
+			switch state.RelateDeviceIdentities(expected, actual) {
 			case state.DeviceIDMatch:
 				if health := s.deps.Tel.DriverHealth(name); health != nil && health.LastSuccess != nil {
 					return nil
@@ -611,8 +613,9 @@ func (s *Server) awaitDriverTelemetry(ctx context.Context, name, expectedID stri
 			health := s.deps.Tel.DriverHealth(name)
 			if health != nil && health.LastSuccess != nil {
 				// Same hardware may only now report a serial (mac: → make:sn).
-				actualID := s.runningDriverIdentity(name)
-				switch state.RelateDeviceIDs(expectedID, actualID) {
+				actual := s.runningDriverDevice(name)
+				actualID := actual.DeviceID
+				switch state.RelateDeviceIdentities(expected, actual) {
 				case state.DeviceIDMatch:
 					return nil
 				case state.DeviceIDConflict:
@@ -624,13 +627,18 @@ func (s *Server) awaitDriverTelemetry(ctx context.Context, name, expectedID stri
 }
 
 func (s *Server) runningDriverIdentity(name string) string {
+	return s.runningDriverDevice(name).DeviceID
+}
+
+func (s *Server) runningDriverDevice(name string) state.Device {
 	if s.deps.Registry == nil {
-		return ""
+		return state.Device{}
 	}
 	env := s.deps.Registry.Env(name)
 	if env == nil {
-		return ""
+		return state.Device{}
 	}
 	makeName, serial, mac, endpoint := env.FullIdentity()
-	return state.ResolveDeviceID(makeName, serial, mac, endpoint)
+	return state.Device{DeviceID: state.ResolveDeviceID(makeName, serial, mac, endpoint),
+		Make: makeName, Serial: serial, MAC: mac, Endpoint: endpoint}
 }
