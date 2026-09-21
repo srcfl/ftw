@@ -32,6 +32,14 @@ systemd and a 64-bit OS. The package needs no Go toolchain or Docker engine.
 Run `uname -m`: `aarch64` needs arm64; `x86_64` needs amd64. A 32-bit OS cannot
 run these packages.
 
+Install the download tools and the OS certificate store first. Core uses that
+store for HTTPS services such as prices and driver downloads:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+```
+
 If FTW already runs on the host, stop here. A Compose, Home Assistant or older
 native installation needs a verified backup and a planned handover. Do not
 start a second Core against the same equipment. The older native template
