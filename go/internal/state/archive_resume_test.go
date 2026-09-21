@@ -276,3 +276,49 @@ func TestArchiveResumePreservesReplacementSource(t *testing.T) {
 		t.Fatalf("lost source rows: %d", count)
 	}
 }
+
+func TestLegacyCompactionWaitsForReaderWithoutFailingSeal(t *testing.T) {
+	s := freshStore(t)
+	cold := t.TempDir()
+	day := time.Now().UTC().Truncate(24 * time.Hour).Add(-72 * time.Hour)
+	path := filepath.Join(cold, day.Format("2006/01/02.parquet"))
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeParquetDay(path, []parquetSampleRow{{Driver: "meter", Metric: "power", TsMs: day.UnixMilli() + 1, Value: 42}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.summarizeParquetDay(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	s.archiveViewMu.RLock()
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(archiveWriteTimeout + 500*time.Millisecond)
+		s.archiveViewMu.RUnlock()
+		close(released)
+	}()
+	defer func() { <-released }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.compactLegacyFile(ctx, path, time.Now()); err != nil {
+		t.Fatal("reader wait abandoned verified legacy file:", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source was not retired: %v", err)
+	}
+	target := filepath.Join(cold, day.Format("2006/01/02.legacy-buckets.parquet"))
+	var count int64
+	if err := walkBucketFile(ctx, target, func(b metricBucket) error {
+		count += b.N
+		if b.Sum != 42 {
+			return errors.New("changed value")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("lost source", count)
+	}
+}

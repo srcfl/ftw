@@ -223,7 +223,7 @@ func (s *Store) compactLegacyFile(ctx context.Context, path string, now time.Tim
 	}
 	// This lock serializes the transition from raw to aggregate for readers
 	// and rejects individual late corrections before removing their source.
-	if err := s.writeArchiveBatch(ctx, func(ctx context.Context, tx *sql.Tx) error {
+	if err := s.archiveTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		var pending int
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ts_samples WHERE ts_ms>=? AND ts_ms<?)`, day.UnixMilli(), day.Add(24*time.Hour).UnixMilli()).Scan(&pending); err != nil {
 			return err
@@ -231,10 +231,12 @@ func (s *Store) compactLegacyFile(ctx context.Context, path string, now time.Tim
 		if pending != 0 {
 			return errors.New("late raw samples arrived during compaction; source retained")
 		}
+		return nil
+	}, func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO ts_legacy_bucket_days VALUES(?,?,?) ON CONFLICT(day_ms) DO UPDATE SET source_sha256=excluded.source_sha256,sha256=excluded.sha256`, day.UnixMilli(), digest, targetHash)
 		return err
 	}); err != nil {
-		return err
+		return fmt.Errorf("seal legacy day %s: %w", day.Format("2006-01-02"), err)
 	}
 	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
 		return err
