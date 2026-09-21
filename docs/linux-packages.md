@@ -8,7 +8,7 @@ packages. Existing published assets remain available.
 The archive contains Core, `ftw-backup`, web files, the pinned recovery
 drivers, the compiled Energyplan bundle, license notices, an example config
 and `deploy/ftw.service`. Keep these files together when changing versions.
-The `forty-two-watts` download names remain aliases during the transition.
+Existing Linux download names remain aliases during the transition.
 
 Download the archive and its checksum from the same explicit release. For
 an arm64 host, verify and inspect the package with:
