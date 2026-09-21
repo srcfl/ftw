@@ -85,8 +85,6 @@ required_asset_names=(
   forty-two-watts-linux-amd64.tar.gz forty-two-watts-linux-amd64.tar.gz.sha256
   ftw-linux-arm64.tar.gz ftw-linux-arm64.tar.gz.sha256
   forty-two-watts-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz.sha256
-  ftw-windows-amd64.zip ftw-windows-amd64.zip.sha256
-  forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.zip.sha256
 )
 release_assets_json="$(
   printf '%s\n' "${required_asset_names[@]}" | jq -Rn --arg tag v2.2.0 '
@@ -197,7 +195,7 @@ grep -Fq -- '--ref master -f tag=vX.Y.Z -f source_beta=vX.Y.Z-beta.N -f release_
 grep -Fq -- '--ref master -f tag=vX.Y.Z -f release_id=123' "${assets}"
 grep -Fq 'name: verify complete draft assets' "${assets}"
 grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
-grep -Fq 'python3 scripts/check-stable-release.py assets "${TAG}"' "${assets}"
+grep -Fq 'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' "${assets}"
 grep -Fq 'name: verify and publish complete stable release' "${assets}"
 grep -Fq 'needs: [meta, assets-ready, docker]' "${assets}"
 if [ "$(grep -Fc 'GH_TOKEN: ${{ secrets.CI_TOKEN }}' "${assets}")" -ne 6 ]; then
@@ -467,7 +465,7 @@ asset_gate_job="$(grep -n '^  assets-ready:$' "${assets}" | cut -d: -f1)"
 asset_gate_block="$(sed -n "${asset_gate_job},$((docker_start - 1))p" "${assets}")"
 for required in \
   'needs: [meta, binaries, imager-metadata]' \
-  'python3 scripts/check-stable-release.py assets "${TAG}"' \
+  'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' \
   'asset_name="${checksum_name%.sha256}"' \
   '[ "${recorded_name}" != "${asset_name}" ]' \
   'sha256sum -c "${checksum_name}"' \

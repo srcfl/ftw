@@ -20,10 +20,6 @@ REQUIRED_ASSETS = sorted(
         "ftw-linux-arm64.tar.gz.sha256",
         "forty-two-watts-linux-arm64.tar.gz",
         "forty-two-watts-linux-arm64.tar.gz.sha256",
-        "ftw-windows-amd64.zip",
-        "ftw-windows-amd64.zip.sha256",
-        "forty-two-watts-windows-amd64.zip",
-        "forty-two-watts-windows-amd64.zip.sha256",
     ]
 )
 
@@ -87,7 +83,7 @@ def check_assets(tag: str, release: object) -> None:
     if len(assets) != len(REQUIRED_ASSETS) or any(
         not isinstance(asset.get("name"), str) for asset in assets
     ):
-        raise ValueError("release must contain exactly 14 named assets")
+        raise ValueError(f"release must contain exactly {len(REQUIRED_ASSETS)} named assets")
     names = sorted(asset["name"] for asset in assets)
     if names != REQUIRED_ASSETS:
         raise ValueError(f"release asset names differ: got {names!r}")

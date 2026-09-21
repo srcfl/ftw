@@ -1,7 +1,7 @@
 name: release-assets
 
 # Publish the artefacts that accompany a tagged release:
-#   - cross-platform main binaries (linux amd64/arm64, windows amd64)
+#   - Linux packages (amd64/arm64)
 #   - validated beta manifests promoted unchanged for Core + updater
 #   - a versioned os_list.json alias for Raspberry Pi Imager
 #   - Discord release announcement
@@ -245,46 +245,19 @@ jobs:
           echo "Publishing assets for ${TAG} from exact candidate ${BETA_TAG}"
 
   binaries:
-    name: build + upload release binaries
-    runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        shell: ${{ matrix.shell }}
+    name: Linux release package (${{ matrix.arch }})
+    runs-on: ubuntu-latest
     needs: meta
     permissions:
-      contents: write  # upload assets to the release
+      contents: write
     strategy:
-      # fail-fast off: if one platform breaks, still get assets for the
-      # others uploaded so users aren't blocked by a single bad target.
       fail-fast: false
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-            archive: tar.gz
-            runner: ubuntu-latest
-            shell: bash
-            build_target: build-amd64
-          - goos: linux
-            goarch: arm64
-            ext: ""
-            archive: tar.gz
-            runner: ubuntu-latest
-            shell: bash
-            build_target: build-arm64
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
-            archive: zip
-            runner: windows-latest
-            shell: 'msys2 {0}'
-            build_target: build-windows-amd64
+        arch: [amd64, arm64]
     steps:
       - name: Checkout tag
         uses: actions/checkout@v7
         with:
-          # Check out the tag so -X main.Version matches what users install.
           ref: ${{ needs.meta.outputs.tag }}
 
       - name: Checkout release workflow helpers
@@ -299,82 +272,29 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
-      - name: Set up Windows build tools
-        if: matrix.goos == 'windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          path-type: inherit
-          install: make zip
-
-
-      # drivers/ is gitignored and fetched from the commit pinned in
-      # drivers/BUNDLED_SOURCE.json. Both the tarballs and the image carry it,
-      # so it has to exist before either is built.
       - name: Fetch the bundled drivers
         run: make drivers
 
       - name: Build
         env:
           VERSION: ${{ needs.meta.outputs.tag }}
-        run: |
-          make ${{ matrix.build_target }}
-          ls -la \
-            "bin/ftw-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" \
-            "bin/ftw-backup-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          ARCH: ${{ matrix.arch }}
+        run: make "build-${ARCH}"
 
       - name: Package
         env:
-          PLATFORM: ${{ matrix.goos }}-${{ matrix.goarch }}
-          BINARY: ftw-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-          ARCHIVE: ${{ matrix.archive }}
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          STAGE="bin/stage-${PLATFORM}"
-          rm -rf "${STAGE}"
-          mkdir -p "${STAGE}"
-          # Stable draft recovery can still package an older immutable tag.
-          notices=(LICENSE NOTICE)
-          if [[ -f LICENSING.md ]]; then
-            notices+=(LICENSING.md)
-          fi
-          if [[ -f THIRD-PARTY-NOTICES.txt ]]; then
-            notices+=(THIRD-PARTY-NOTICES.txt)
-          fi
-          if [[ "${ARCHIVE}" == "zip" ]]; then
-            cp "bin/${BINARY}" "${STAGE}/ftw.exe"
-            cp "bin/ftw-backup-${PLATFORM}.exe" "${STAGE}/ftw-backup.exe"
-            cp "bin/${BINARY}" "${STAGE}/forty-two-watts.exe"
-            (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe ftw-backup.exe forty-two-watts.exe)
-            zip -qr "release/ftw-${PLATFORM}.zip" \
-              drivers web optimizer/native/bundle config.example.yaml "${notices[@]}"
-            cp "release/ftw-${PLATFORM}.zip" "release/forty-two-watts-${PLATFORM}.zip"
-          else
-            cp "bin/${BINARY}" "${STAGE}/ftw"
-            cp "bin/ftw-backup-${PLATFORM}" "${STAGE}/ftw-backup"
-            ln -s ftw "${STAGE}/forty-two-watts"
-            tar czf "release/ftw-${PLATFORM}.tar.gz" \
-              -C "${STAGE}" ftw ftw-backup forty-two-watts \
-              -C ../.. drivers web optimizer/native/bundle config.example.yaml "${notices[@]}"
-            cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
-          fi
-          (
-            cd release
-            sha256sum "ftw-${PLATFORM}.${ARCHIVE}" > "ftw-${PLATFORM}.${ARCHIVE}.sha256"
-            sha256sum "forty-two-watts-${PLATFORM}.${ARCHIVE}" > "forty-two-watts-${PLATFORM}.${ARCHIVE}.sha256"
-          )
-          ls -la release/
+          ARCH: ${{ matrix.arch }}
+        run: python3 .release-workflow/scripts/package-linux.py "${ARCH}" --root .
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
           RELEASE_ID: ${{ needs.meta.outputs.release_id }}
-          ASSET: release/ftw-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
-          LEGACY_ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
-        # --clobber lets a workflow re-run replace a prior upload without
-        # failing — useful when this workflow is re-dispatched manually.
-        run: .release-workflow/scripts/github-release-by-id.sh upload "${RELEASE_ID}" --clobber "${ASSET}" "${ASSET}.sha256" "${LEGACY_ASSET}" "${LEGACY_ASSET}.sha256"
+          ARCH: ${{ matrix.arch }}
+        run: |
+          .release-workflow/scripts/github-release-by-id.sh upload "${RELEASE_ID}" --clobber \
+            "release/ftw-linux-${ARCH}.tar.gz" "release/ftw-linux-${ARCH}.tar.gz.sha256" \
+            "release/forty-two-watts-linux-${ARCH}.tar.gz" "release/forty-two-watts-linux-${ARCH}.tar.gz.sha256"
 
   imager-metadata:
     name: attach Raspberry Pi Imager metadata
@@ -460,7 +380,7 @@ jobs:
             publishedAt: .published_at,
             assets: .assets
           }' | \
-            python3 scripts/check-stable-release.py assets "${TAG}"
+            python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"
 
           verify_dir="${RUNNER_TEMP}/stable-release-verification"
           mkdir -p "${verify_dir}"
