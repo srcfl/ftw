@@ -174,11 +174,15 @@ func TestArchiveTurnsFinishWithoutRepeatingPublishedFiles(t *testing.T) {
 				samples[i] = Sample{Driver: fmt.Sprint("meter", i%3), Metric: "power", TsMs: day.UnixMilli() + int64(i/3)*60000, Value: float64(i)}
 			}
 			if aggregate {
-				if err := s.EnqueueTelemetryTick(nil, samples, nil); err != nil {
-					t.Fatal(err)
-				}
-				if err := s.FlushHistory(context.Background()); err != nil {
-					t.Fatal(err)
+				// Seed normal-sized ticks; a single 3,000-metric tick exceeds
+				// the writer transaction budget under the race detector.
+				for start := 0; start < len(samples); start += 64 {
+					if err := s.EnqueueTelemetryTick(nil, samples[start:min(start+64, len(samples))], nil); err != nil {
+						t.Fatal(err)
+					}
+					if err := s.FlushHistory(context.Background()); err != nil {
+						t.Fatal(err)
+					}
 				}
 			} else if err := s.RecordSamples(samples); err != nil {
 				t.Fatal(err)
