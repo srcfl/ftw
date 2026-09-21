@@ -75,6 +75,18 @@ test("the dialog and update progress render outside the header badge", () => {
   assert.equal(rig.body.children.length, 0, "closing removes the overlay");
 });
 
+test("full backup displays phase and row progress while the request is pending", () => {
+  const rig = fixture();
+  rig.badge._creatingBackup = true;
+  rig.badge._backups.progress = { phase: "copying_database", rows_done: 8192 };
+  rig.badge._render();
+  assert.match(rig.root().innerHTML, /Copying saved data/);
+  assert.match(rig.root().innerHTML, /8,192 records processed/);
+  rig.badge._backups.progress = { phase: "verifying_archive" };
+  rig.badge._render();
+  assert.match(rig.root().innerHTML, /Verifying the full backup/);
+});
+
 for (const [method, path] of [["_createBackup", "/api/backups"], ["_createSnapshot", "/api/version/snapshots"]]) {
   for (const ok of [true, false]) {
     test(method + " keeps the open section and scroll through progress and " + (ok ? "success" : "failure"), async () => {

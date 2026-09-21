@@ -4,25 +4,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 )
 
 type HistoryMaintenanceStatus struct {
-	State            string `json:"state"`
-	Phase            string `json:"phase,omitempty"`
-	StartedMS        int64  `json:"started_ms,omitempty"`
-	LastSuccessMS    int64  `json:"last_success_ms,omitempty"`
-	LastError        string `json:"last_error,omitempty"`
-	LastFailureMS    int64  `json:"last_failure_ms,omitempty"`
-	LastFailureError string `json:"last_failure_error,omitempty"`
-	Runs             uint64 `json:"runs"`
-	Failures         uint64 `json:"failures"`
+	State            string                                `json:"state"`
+	Phase            string                                `json:"phase,omitempty"`
+	StartedMS        int64                                 `json:"started_ms,omitempty"`
+	LastSuccessMS    int64                                 `json:"last_success_ms,omitempty"`
+	LastError        string                                `json:"last_error,omitempty"`
+	LastFailureMS    int64                                 `json:"last_failure_ms,omitempty"`
+	LastFailureError string                                `json:"last_failure_error,omitempty"`
+	Runs             uint64                                `json:"runs"`
+	Failures         uint64                                `json:"failures"`
+	File             string                                `json:"file,omitempty"`
+	Operation        string                                `json:"operation,omitempty"`
+	RowsDone         int64                                 `json:"rows_done"`
+	RowsTotal        int64                                 `json:"rows_total,omitempty"`
+	UpdatedMS        int64                                 `json:"updated_ms,omitempty"`
+	Work             map[string]HistoryMaintenanceProgress `json:"work,omitempty"`
+}
+
+type HistoryMaintenanceProgress struct {
+	File      string `json:"file,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	RowsDone  int64  `json:"rows_done"`
+	RowsTotal int64  `json:"rows_total,omitempty"`
+	UpdatedMS int64  `json:"updated_ms,omitempty"`
+}
+
+// PauseHistoryMaintenance stops archive work before a full backup captures
+// its database and files. Live telemetry and durable user goals keep writing.
+func (s *Store) PauseHistoryMaintenance(ctx context.Context) (func(), error) {
+	s.maintenanceStatusMu.Lock()
+	s.maintenancePaused++
+	if s.maintenanceCancel != nil {
+		s.maintenanceCancel()
+	}
+	s.maintenanceStatusMu.Unlock()
+	resume := func() { s.maintenanceStatusMu.Lock(); s.maintenancePaused--; s.maintenanceStatusMu.Unlock() }
+	if err := lockContext(ctx, s.maintenanceRunMu.TryLock); err != nil {
+		resume()
+		return nil, err
+	}
+	s.maintenanceRunMu.Unlock()
+	return resume, nil
 }
 
 func (s *Store) HistoryMaintenanceStatus() HistoryMaintenanceStatus {
 	s.maintenanceStatusMu.Lock()
 	defer s.maintenanceStatusMu.Unlock()
 	status := s.maintenanceStatus
+	status.Work = maps.Clone(status.Work)
 	if status.State == "" {
 		status.State = "not_started"
 	}
@@ -30,16 +64,29 @@ func (s *Store) HistoryMaintenanceStatus() HistoryMaintenanceStatus {
 }
 
 // MaintainHistory runs the existing retention work and records its result.
-// The caller serializes it with backup/restore. Each stage must yield to live
-// writes; the overall deadline also bounds a permanently stalled archive.
+// The caller serializes it with backup/restore. Archives yield at committed
+// cursors; other stages have a deadline. Real failures remain visible.
 func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int, now time.Time) error {
-	ctx, cancel := context.WithTimeout(parent, 2*time.Hour)
+	if !s.maintenanceRunMu.TryLock() {
+		if err := lockContext(parent, s.maintenanceRunMu.TryLock); err != nil {
+			return err
+		}
+	}
+	defer s.maintenanceRunMu.Unlock()
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	s.maintenanceStatusMu.Lock()
+	if s.maintenancePaused > 0 {
+		s.maintenanceStatus.State = "paused"
+		s.maintenanceStatusMu.Unlock()
+		return nil
+	}
+	s.maintenanceCancel = cancel
 	s.maintenanceStatus.State, s.maintenanceStatus.StartedMS = "running", time.Now().UnixMilli()
 	s.maintenanceStatus.Runs++
 	s.maintenanceStatusMu.Unlock()
 	var failures []error
+	pending := false
 	for _, stage := range []struct {
 		name string
 		run  func() error
@@ -72,12 +119,37 @@ func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int
 	} {
 		s.maintenanceStatusMu.Lock()
 		s.maintenanceStatus.Phase = stage.name
+		s.maintenanceStatus.File, s.maintenanceStatus.Operation = "", ""
+		s.maintenanceStatus.RowsDone, s.maintenanceStatus.RowsTotal = 0, 0
 		s.maintenanceStatusMu.Unlock()
 		if err := ctx.Err(); err != nil {
+			if parent.Err() == nil {
+				pending = true
+				break
+			}
 			failures = append(failures, err)
 			break
 		}
-		if err := stage.run(); err != nil {
+		parentCtx := ctx
+		stop := func() {}
+		switch stage.name {
+		case "aggregate_archive", "sample_archive", "legacy_compaction":
+			ctx = context.WithValue(parentCtx, archiveTurnKey{}, time.Now().Add(30*time.Second))
+		default:
+			ctx, stop = context.WithTimeout(parentCtx, 30*time.Second)
+		}
+		err := stage.run()
+		stop()
+		ctx = parentCtx
+		if errors.Is(err, errArchiveTurnComplete) {
+			pending = true
+			continue
+		}
+		if err != nil {
+			if parent.Err() == nil && ctx.Err() != nil {
+				pending = true
+				break
+			}
 			failures = append(failures, fmt.Errorf("%s: %w", stage.name, err))
 			// A later archive stage may run for a long time. Report this
 			// failure now, rather than hiding it until the full cycle ends.
@@ -92,7 +164,10 @@ func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int
 	s.maintenanceStatusMu.Lock()
 	defer s.maintenanceStatusMu.Unlock()
 	s.maintenanceStatus.Phase = ""
-	if err == nil {
+	s.maintenanceCancel = nil
+	if err == nil && pending {
+		s.maintenanceStatus.State, s.maintenanceStatus.LastError = "pending", ""
+	} else if err == nil {
 		s.maintenanceStatus.State, s.maintenanceStatus.LastError = "complete", ""
 		s.maintenanceStatus.LastSuccessMS = time.Now().UnixMilli()
 	} else {

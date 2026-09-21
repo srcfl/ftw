@@ -122,6 +122,7 @@
       clearTimeout(this._errorRetryTimer);
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
+      clearInterval(this._backupProgressTimer);
     }
 
     // Public: called by app.js on every poll tick. The header's liveness
@@ -254,6 +255,10 @@
       if (this._creatingBackup) return;
       this._creatingBackup = true;
       this._render();
+      const progressTimer = setInterval(() => {
+        if (this.isConnected && this._creatingBackup) this._refreshBackups();
+      }, 2000);
+      this._backupProgressTimer = progressTimer;
       apiFetch("/api/backups", { method: "POST" })
         .then(async (resp) => {
           const body = await resp.json().catch(() => ({}));
@@ -263,6 +268,7 @@
         .then(() => this._refreshBackups())
         .catch((err) => window.alert("Full backup failed: " + err.message))
         .finally(() => {
+          clearInterval(progressTimer);
           this._creatingBackup = false;
           this._render();
         });
@@ -438,6 +444,7 @@
     _disable() {
       if (this._disabled) return;
       this._disabled = true;
+      clearInterval(this._backupProgressTimer);
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
@@ -998,12 +1005,18 @@
         ? "Backups are currently staged on this device. Download them to another device or configure an external backup path; local files do not survive SD-card failure."
         : "Backups are written to the configured external backup target.";
       const rows = backups.map((b) => this._backupRowHTML(b)).join("");
+      const progress = payload.progress || {};
+      const phases = { waiting_for_maintenance: "Pausing history maintenance", copying_database: "Copying saved data", verifying_database: "Checking copied data", compressing_database: "Compressing saved data", syncing_backup: "Saving backup", packing_archive: "Packing backup files", verifying_archive: "Verifying the full backup" };
+      const amount = progress.rows_done > 0 ? `${Number(progress.rows_done).toLocaleString()} records processed in this step`
+        : progress.completed_bytes > 0 ? `${(progress.completed_bytes / 1e6).toFixed(1)}${progress.total_bytes > 0 ? ` of ${(progress.total_bytes / 1e6).toFixed(1)}` : ""} MB processed` : "";
+      const progressText = this._creatingBackup ? `<p role="status">${escapeHTML(phases[progress.phase] || "Starting backup")}${amount ? ` · ${escapeHTML(amount)}` : ""}</p>` : "";
       return `<div class="storage-block full-backups">
                 <h4 class="storage-title">Full backups (${backups.length})</h4>
                 <div class="snapshots-intro backup-intro">
                   <p class="dim">${escapeHTML(location)}</p>
                   <button class="btn btn-small" data-action="create-backup" ${this._creatingBackup ? "disabled" : ""}>${this._creatingBackup ? "Creating and verifying…" : "Create full backup"}</button>
                 </div>
+                ${progressText}
                 ${backups.length ? `<table class="snapshots-table">
                   <thead><tr><th>Created</th><th>Size</th><th>Status</th><th></th></tr></thead>
                   <tbody>${rows}</tbody>

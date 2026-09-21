@@ -22,7 +22,7 @@ func (s *Store) maintainDashboard(ctx context.Context, now time.Time) error {
 	for {
 		var n int64
 		err := s.writeArchiveBatch(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			result, err := tx.ExecContext(ctx, `DELETE FROM history_dashboard WHERE (start_ms,resolution_ms) IN (SELECT start_ms,resolution_ms FROM history_dashboard WHERE last_ms<? ORDER BY start_ms LIMIT 128)`, now.Add(-AggregateRetention).UnixMilli())
+			result, err := tx.ExecContext(ctx, `DELETE FROM history_dashboard WHERE (start_ms,resolution_ms) IN (SELECT start_ms,resolution_ms FROM history_dashboard WHERE last_ms<? ORDER BY last_ms LIMIT 128)`, now.Add(-AggregateRetention).UnixMilli())
 			if err != nil {
 				return err
 			}

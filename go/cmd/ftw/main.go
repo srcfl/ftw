@@ -3330,6 +3330,12 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 		if err := st.MaintainHistory(ctx, coldDir, days, time.Now()); err != nil {
 			slog.Warn("history maintenance incomplete", "err", err)
 		}
+		switch st.HistoryMaintenanceStatus().State {
+		case "pending", "paused":
+			tick.Reset(5 * time.Second)
+		default:
+			tick.Reset(time.Hour)
+		}
 		st.CheckpointWAL()
 
 		// Disk watch: an SD card that fills up takes SQLite down with it.

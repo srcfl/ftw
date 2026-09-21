@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { migrationHTML, migrationView } from "./history-migration.js";
+import { migrationHTML, migrationView, maintenanceHTML } from "./history-migration.js";
 
 const running = { state:"running", phase:"parquet", history_complete:false, files_done:3, files_total:12, rows_done:6000, updated_at_ms:100000 };
+
+test("maintenance shows saved progress, write freshness and failures without a false percentage", () => {
+  const status = { state: "pending", work: { sample_archive: { file: "2026-06-04", operation: "copy_samples", rows_done: 10240 } } };
+  const html = maintenanceHTML(status, { last_commit_ms: 99000 }, { now: 100000 });
+  assert.match(html, /continue from saved progress/);
+  assert.match(html, /10,240 records processed/);
+  assert.match(html, /saved 1 s ago/);
+  assert.doesNotMatch(html, /%|<progress/);
+  assert.match(maintenanceHTML({ ...status, last_error: "disk <failed>" }), /disk &lt;failed&gt;/);
+  assert.match(maintenanceHTML(status, null, { connected: false }), /status unavailable/);
+  assert.equal(maintenanceHTML({ state: "complete" }), "");
+});
 test("unknown totals stay indeterminate and incomplete history stays explicit", () => {
   const view = migrationView(running, {now:130000});
   assert.equal(view.progress, null);

@@ -41,6 +41,9 @@ func (s *Store) CompactLegacyHistory(ctx context.Context, cold string, now time.
 		if err := s.compactLegacyFile(ctx, path, now); err != nil {
 			return err
 		}
+		if err := archiveCheckpoint(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -159,6 +162,10 @@ func (s *Store) compactLegacyFile(ctx context.Context, path string, now time.Tim
 				return err
 			}
 			cursor += int64(n)
+			s.archiveProgress(day.Format("2006-01-02"), "aggregate_legacy", cursor, pf.NumRows())
+			if err := archiveCheckpoint(ctx); err != nil {
+				return err
+			}
 			if err := pauseMaintenance(ctx); err != nil {
 				return err
 			}
