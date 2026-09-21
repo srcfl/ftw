@@ -11,6 +11,7 @@ on:
       - 'scripts/build-core.sh'
       - 'scripts/package-linux.py'
       - 'scripts/test_package_linux.py'
+      - 'optimizer/native/**'
       - 'deploy/ftw.service'
       - '.github/workflows/core-binaries.yml'
       - '.github/workflows/release-assets.yml'
@@ -24,6 +25,7 @@ on:
       - 'scripts/build-core.sh'
       - 'scripts/package-linux.py'
       - 'scripts/test_package_linux.py'
+      - 'optimizer/native/**'
       - 'deploy/ftw.service'
       - '.github/workflows/core-binaries.yml'
       - '.github/workflows/release-assets.yml'
@@ -59,6 +61,13 @@ jobs:
           (cd release && sha256sum -c "ftw-linux-${ARCH}.tar.gz.sha256")
           mkdir -p bin/unpacked
           tar xzf "release/ftw-linux-${ARCH}.tar.gz" -C bin/unpacked
+          python3 - "$ARCH" <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, "optimizer/native")
+          from verify import verify_bundle
+          verify_bundle(Path("bin/unpacked/optimizer/native/bundle"), target=f"linux-{sys.argv[1]}")
+          PY
       - name: Verify pure Go build and absence of DuckDB
         run: |
           set -euo pipefail

@@ -20,7 +20,7 @@ RUNTIME_LICENSES = {
 }
 
 
-def verify_bundle(root):
+def verify_bundle(root, *, target=None):
     manifest = json.loads((root / "manifest.json").read_text())
     if (manifest.get("schema_version") != 1 or manifest.get("product") != "energyplan"
             or manifest.get("protocol_version") != 1
@@ -31,7 +31,9 @@ def verify_bundle(root):
         raise ValueError("Invalid Energyplan manifest identity")
     artifacts, files = manifest["artifacts"], manifest["files"]
     names = set(artifacts)
-    if not REQUIRED_PLATFORMS <= names:
+    if target is not None and (target not in KNOWN_PLATFORMS or names != {target}):
+        raise ValueError("The package must contain only its target platform")
+    if target is None and not REQUIRED_PLATFORMS <= names:
         raise ValueError("The bundle must contain every required platform")
     if not names <= KNOWN_PLATFORMS:
         raise ValueError("Unknown platform in the bundle")

@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -23,19 +24,46 @@ class LinuxPackageTest(unittest.TestCase):
         for name in packager.RESOURCES:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            if name in ("drivers", "web", "optimizer/native/bundle"):
+            if name in ("drivers", "web"):
                 path.mkdir(parents=True, exist_ok=True)
             else:
                 path.write_text(name)
         (self.root / "drivers/BUNDLED_SOURCE.json").write_text(json.dumps({"drivers": ["fixture"]}))
         (self.root / "drivers/fixture.lua").write_text("-- pinned fixture")
         (self.root / "web/index.html").write_text("<title>FTW</title>")
-        (self.root / "optimizer/native/bundle/manifest.json").write_text("{}")
+        shutil.copytree(Path(__file__).resolve().parents[1] / packager.ENERGYPLAN_DIR,
+                        self.root / packager.ENERGYPLAN_DIR)
         for name in ("ftw", "ftw-backup"):
             (self.binaries / name).write_bytes(b"\x7fELF\x02\x01" + bytes(12) + (62).to_bytes(2, "little"))
 
-    def build(self):
-        return packager.package(self.root, self.binaries, self.root / "release", "amd64")
+    def build(self, arch="amd64"):
+        return packager.package(self.root, self.binaries, self.root / "release", arch)
+
+    def test_only_target_solver_is_shipped_with_valid_metadata_and_notices(self):
+        source = self.root / packager.ENERGYPLAN_DIR
+        original = (source / "manifest.json").read_bytes()
+        original_manifest = json.loads(original)
+        for arch in ("amd64", "arm64"):
+            with self.subTest(arch=arch):
+                for name in ("ftw", "ftw-backup"):
+                    (self.binaries / name).write_bytes(
+                        b"\x7fELF\x02\x01" + bytes(12) + packager.MACHINES[arch].to_bytes(2, "little"))
+                archive = self.build(arch)
+                extracted = self.root / f"unpacked-{arch}"
+                with tarfile.open(archive) as tar:
+                    workers = [name for name in tar.getnames() if "/ftw-solver-" in name]
+                    self.assertEqual(workers, [f"{packager.ENERGYPLAN_DIR}/ftw-solver-linux-{arch}"])
+                    tar.extractall(extracted)
+                manifest = packager.energyplan_verify.verify_bundle(
+                    extracted / packager.ENERGYPLAN_DIR, target=f"linux-{arch}")
+                for key in ("version", "source_commit", "source_repository",
+                            "protocol_version", "forecast_protocol_version"):
+                    self.assertEqual(manifest[key], original_manifest[key])
+                for name, info in manifest["files"].items():
+                    self.assertEqual(info, original_manifest["files"][name])
+                self.assertEqual((source / "manifest.json").read_bytes(), original)
+        # Distribution filtering must not weaken the source-bundle requirement.
+        packager.energyplan_verify.verify_bundle(source)
 
     def test_archive_has_runtime_backup_service_and_checksums(self):
         archive = self.build()
@@ -75,6 +103,24 @@ class LinuxPackageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected resource link"):
             self.build()
         self.assertFalse((self.root / "release/ftw-linux-amd64.tar.gz").exists())
+
+    def test_corrupt_solver_does_not_replace_a_good_archive(self):
+        first = self.build().read_bytes()
+        solver = self.root / packager.ENERGYPLAN_DIR / "ftw-solver-linux-amd64"
+        solver.write_bytes(solver.read_bytes() + b"corrupt")
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            self.build()
+        self.assertEqual((self.root / "release/ftw-linux-amd64.tar.gz").read_bytes(), first)
+
+    def test_private_source_cannot_enter_the_archive(self):
+        (self.root / packager.ENERGYPLAN_DIR / "solver.rs").write_text("private source")
+        with self.assertRaisesRegex(ValueError, "Unlisted files"):
+            self.build()
+
+    def test_missing_solver_notice_fails(self):
+        (self.root / packager.ENERGYPLAN_DIR / "LICENSE.txt").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing or unsafe artifact"):
+            self.build()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@
 import argparse
 import gzip
 import hashlib
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -13,11 +15,18 @@ import tempfile
 
 
 RESOURCES = (
-    "drivers", "web", "optimizer/native/bundle", "config.example.yaml",
+    "drivers", "web", "config.example.yaml",
     "deploy/ftw.service", "LICENSE", "NOTICE", "LICENSING.md",
     "THIRD-PARTY-NOTICES.txt",
 )
 MACHINES = {"amd64": 62, "arm64": 183}
+ENERGYPLAN_DIR = "optimizer/native/bundle"
+# Use the reviewed verifier beside this helper, including when --root selects
+# an older release checkout. Keep the pinned source bundle unchanged.
+spec = importlib.util.spec_from_file_location(
+    "energyplan_verify", Path(__file__).resolve().parents[1] / "optimizer/native/verify.py")
+energyplan_verify = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(energyplan_verify)
 
 
 def package(root, binaries, output, arch):
@@ -35,6 +44,14 @@ def package(root, binaries, output, arch):
     for name in RESOURCES:
         if not (root / name).exists():
             raise ValueError(f"missing runtime resource: {name}")
+    manifest = energyplan_verify.verify_bundle(root / ENERGYPLAN_DIR)
+    target = f"linux-{arch}"
+    selected = manifest["artifacts"][target]
+    omitted = {entry["path"] for platform, entry in manifest["artifacts"].items()
+               if platform != target}
+    manifest["artifacts"] = {target: selected}
+    manifest["files"] = {name: info for name, info in manifest["files"].items()
+                         if name not in omitted}
 
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"ftw-linux-{arch}.tar.gz"
@@ -67,6 +84,14 @@ def package(root, binaries, output, arch):
                     tar.addfile(alias)
                     for name in RESOURCES:
                         tar.add(root / name, arcname=name, filter=normalized)
+                    for name in sorted(manifest["files"]):
+                        path = f"{ENERGYPLAN_DIR}/{name}"
+                        tar.add(root / path, arcname=path, filter=normalized)
+                    data = (json.dumps(manifest, indent=2) + "\n").encode()
+                    info = tarfile.TarInfo(f"{ENERGYPLAN_DIR}/manifest.json")
+                    info.size = len(data)
+                    info.mode = 0o644
+                    tar.addfile(normalized(info), io.BytesIO(data))
         os.replace(pending, archive)
         pending = None
     finally:

@@ -10,6 +10,12 @@ drivers, the compiled Energyplan bundle, license notices, an example config
 and `deploy/ftw.service`. Keep these files together when changing versions.
 Existing Linux download names remain aliases during the transition.
 
+Each package includes only the Energyplan executable for its Linux
+architecture. Its manifest lists that executable and the shared schemas,
+licenses and notices, with the original version, source commit and file
+checksums. Other Linux architectures and macOS executables are excluded.
+The full pinned bundle in the source checkout stays unchanged.
+
 Download the archive and its checksum from the same explicit release. For
 an arm64 host, verify and inspect the package with:
 
