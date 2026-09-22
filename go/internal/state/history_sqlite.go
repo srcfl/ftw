@@ -336,10 +336,10 @@ func historyFloatBits(value float64) uint64 {
 }
 
 func (s *Store) HistoryBackend() map[string]any {
-	info := map[string]any{"engine": "sqlite", "archive": "parquet", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
+	info := map[string]any{"engine": "sqlite", "archive": "sqlite", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
 	info["maintenance"] = s.HistoryMaintenanceStatus()
 	if s.aggregateHistory.Load() {
-		info["policy"] = map[string]any{"id": "ems-v1", "recent_resolution_ms": HistoryResolutionMS, "recent_retention_hours": 24, "archive_resolution_ms": ArchiveResolutionMS, "archive_minute_days": 30, "older_resolution_ms": OldArchiveResolutionMS, "detailed_retention_days": 730}
+		info["policy"] = map[string]any{"id": "sqlite-v1", "recent_resolution_ms": HistoryResolutionMS, "recent_retention_hours": int(plainTenSecondKeep.Hours()), "archive_resolution_ms": ArchiveResolutionMS, "archive_minute_days": int(plainMinuteKeep.Hours() / 24), "older_resolution_ms": HistoryHourResolutionMS, "detailed_retention_days": int(plainHourKeep.Hours() / 24)}
 	}
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + "-wal"} {
 		if stat, err := os.Stat(path); err == nil {

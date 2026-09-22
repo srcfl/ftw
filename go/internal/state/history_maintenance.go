@@ -79,6 +79,10 @@ var historyStageForTest func(name string, ctx context.Context) (replaced bool, e
 // cursors; other stages have a deadline. A spent budget stays pending so the
 // caller can resume; real failures remain visible.
 func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int, now time.Time) error {
+	return s.maintainHistory(parent, coldDir, days, now, false)
+}
+
+func (s *Store) maintainHistory(parent context.Context, coldDir string, days int, now time.Time, plain bool) error {
 	if !s.maintenanceRunMu.TryLock() {
 		if err := lockContext(parent, s.maintenanceRunMu.TryLock); err != nil {
 			return err
@@ -99,10 +103,11 @@ func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int
 	s.maintenanceStatusMu.Unlock()
 	var failures []error
 	pending := false
-	for _, stage := range []struct {
+	type maintenanceStage struct {
 		name string
 		run  func() error
-	}{
+	}
+	stages := []maintenanceStage{
 		{"dashboard_rollup", func() error { return s.Prune(ctx) }},
 		{"energy_rollup", func() error { _, _, err := s.PruneEnergyLedger(ctx, now); return err }},
 		{"diagnostic_archive", func() error { _, _, err := s.RolloffDiagnosticsToParquet(ctx, coldDir); return err }},
@@ -128,7 +133,20 @@ func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int
 			_, err := PruneDiagnosticsParquet(coldDir, retention, now)
 			return err
 		}},
-	} {
+	}
+	if plain {
+		stages = []maintenanceStage{
+			{"plain_buckets", func() error { return s.maintainPlainBuckets(ctx, now) }},
+			{"dashboard_rollup", func() error {
+				if !s.aggregateHistory.Load() {
+					return nil
+				}
+				return s.maintainDashboard(ctx, now)
+			}},
+			{"energy_rollup", func() error { _, _, err := s.PruneEnergyLedger(ctx, now); return err }},
+		}
+	}
+	for _, stage := range stages {
 		s.maintenanceStatusMu.Lock()
 		s.maintenanceStatus.Phase = stage.name
 		s.maintenanceStatus.File, s.maintenanceStatus.Operation = "", ""

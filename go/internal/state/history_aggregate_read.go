@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -126,4 +127,61 @@ func (s *Store) hasAggregateSeries(ctx context.Context, driver, metric string, s
 	var n int
 	err = s.history.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ts_buckets b JOIN ts_drivers d ON d.id=b.driver_id JOIN ts_metrics m ON m.id=b.metric_id WHERE d.name=? AND m.name=? AND b.start_ms>=? AND b.start_ms<=?)`, driver, metric, bucketStart(since, ArchiveResolutionMS), until).Scan(&n)
 	return err == nil && n > 0
+}
+
+// Downsample chart rows in SQLite, so Go receives only the requested buckets.
+// Pin finer-bucket probes to the series primary key: the age index reads
+// every device in that interval and makes a chart scale with site size.
+// Use the same source precedence as the export path, including fine rows just
+// outside a partial query edge. Keep the last observed value, not its mean.
+func (s *Store) walkSQLiteSeriesBuckets(ctx context.Context, driver, metric string, since, until, width int64, visit func(BucketSummary) error) error {
+	var driverID, metricID int64
+	if err := s.history.QueryRowContext(ctx, `SELECT d.id,m.id FROM ts_drivers d,ts_metrics m WHERE d.name=? AND m.name=?`, driver, metric).Scan(&driverID, &metricID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	rows, err := s.history.QueryContext(ctx, `WITH
+ ten AS NOT MATERIALIZED (
+ SELECT b.* FROM ts_buckets b WHERE b.driver_id=? AND b.metric_id=?
+ AND b.resolution_ms=10000 AND b.start_ms>=? AND b.start_ms<?),
+ minute AS NOT MATERIALIZED (
+ SELECT b.* FROM ts_buckets b WHERE b.driver_id=? AND b.metric_id=?
+ AND b.resolution_ms=60000 AND b.start_ms>=? AND b.start_ms<?),
+ chosen AS (
+ SELECT * FROM ten
+ UNION ALL
+ SELECT * FROM minute b WHERE NOT EXISTS (SELECT 1 FROM ts_buckets f INDEXED BY sqlite_autoindex_ts_buckets_1 WHERE f.driver_id=b.driver_id AND f.metric_id=b.metric_id AND f.resolution_ms=10000 AND f.start_ms>=b.start_ms AND f.start_ms<b.start_ms+60000)
+ UNION ALL
+ SELECT b.* FROM ts_buckets b WHERE b.driver_id=? AND b.metric_id=?
+ AND b.resolution_ms=3600000 AND b.start_ms>=? AND b.start_ms<?
+ AND NOT EXISTS (SELECT 1 FROM ts_buckets f INDEXED BY sqlite_autoindex_ts_buckets_1 WHERE f.driver_id=b.driver_id AND f.metric_id=b.metric_id AND f.resolution_ms=10000 AND f.start_ms>=MAX(b.start_ms,?) AND f.start_ms<MIN(b.start_ms+3600000,?))
+ AND NOT EXISTS (SELECT 1 FROM ts_buckets f INDEXED BY sqlite_autoindex_ts_buckets_1 WHERE f.driver_id=b.driver_id AND f.metric_id=b.metric_id AND f.resolution_ms=60000 AND f.start_ms>=MAX(b.start_ms,?) AND f.start_ms<MIN(b.start_ms+3600000,?))),
+ grouped AS (SELECT MIN(start_ms) AS start_ms,MAX(resolution_ms) AS resolution_ms,MIN(first_ms) AS first_ms,
+ MAX(last_ms) AS last_ms,SUM(n) AS n,SUM(sum_value) AS sum_value,MIN(min_value) AS min_value,MAX(max_value) AS max_value
+ FROM chosen WHERE last_ms>=? AND last_ms<=? GROUP BY (last_ms-?)/?)
+ SELECT g.*, (SELECT last_value FROM ts_buckets b WHERE b.driver_id=? AND b.metric_id=?
+ AND b.start_ms IN (g.last_ms-(g.last_ms%10000+10000)%10000,g.last_ms-(g.last_ms%60000+60000)%60000,g.last_ms-(g.last_ms%3600000+3600000)%3600000)
+ AND b.last_ms=g.last_ms ORDER BY b.resolution_ms LIMIT 1) FROM grouped g`,
+		driverID, metricID, bucketStart(since, ArchiveResolutionMS), bucketStart(until, ArchiveResolutionMS)+ArchiveResolutionMS,
+		driverID, metricID, bucketStart(since, ArchiveResolutionMS), bucketStart(until, ArchiveResolutionMS)+ArchiveResolutionMS,
+		driverID, metricID, bucketStart(since, HistoryHourResolutionMS), bucketStart(until, HistoryHourResolutionMS)+HistoryHourResolutionMS,
+		bucketStart(since, ArchiveResolutionMS), bucketStart(until, ArchiveResolutionMS)+ArchiveResolutionMS,
+		bucketStart(since, ArchiveResolutionMS), bucketStart(until, ArchiveResolutionMS)+ArchiveResolutionMS,
+		since, until, since, width, driverID, metricID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b BucketSummary
+		if err := rows.Scan(&b.StartMS, &b.ResolutionMS, &b.FirstMS, &b.LastMS, &b.N, &b.Sum, &b.Min, &b.Max, &b.Last); err != nil {
+			return err
+		}
+		if err := visit(b); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
