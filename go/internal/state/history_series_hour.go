@@ -131,7 +131,9 @@ func (s *Store) ensureSeriesHours(ctx context.Context) error {
 	if err := s.ensureParquetHours(ctx); err != nil {
 		return err
 	}
-	s.historyWriteMu.Lock()
+	if err := lockContext(ctx, s.historyWriteMu.TryLock); err != nil {
+		return err
+	}
 	defer s.historyWriteMu.Unlock()
 	tx, err := s.history.BeginTx(ctx, nil)
 	if err != nil {
@@ -230,7 +232,9 @@ func (s *Store) backfillSeriesHoursSnapshot(ctx context.Context, maxHours int) (
 	}
 	writeCtx, cancelWrite := context.WithTimeout(txCtx, historyCommitTimeout)
 	defer cancelWrite()
-	s.historyWriteMu.Lock()
+	if err := lockContext(writeCtx, s.historyWriteMu.TryLock); err != nil {
+		return false, err
+	}
 	defer s.historyWriteMu.Unlock()
 	stmt, err := tx.PrepareContext(writeCtx, `INSERT INTO ts_series_hour
 		(driver_id,metric_id,hour_ms,sum_value,min_value,max_value,n,last_ts_ms)

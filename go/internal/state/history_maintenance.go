@@ -146,7 +146,11 @@ func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int
 		stop := func() {}
 		switch stage.name {
 		case "aggregate_archive", "sample_archive", "legacy_compaction":
-			ctx = context.WithValue(parentCtx, archiveTurnKey{}, time.Now().Add(historyArchiveTurn))
+			// The turn key yields between committed batches. The timeout
+			// cancels a query that is still running when that budget ends,
+			// so one slow read cannot sit on the card until it finishes.
+			ctx, stop = context.WithTimeout(parentCtx, historyArchiveTurn)
+			ctx = context.WithValue(ctx, archiveTurnKey{}, time.Now().Add(historyArchiveTurn))
 		default:
 			ctx, stop = context.WithTimeout(parentCtx, historyStageBudget)
 		}
