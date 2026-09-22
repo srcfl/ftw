@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.8.0
+
+### Minor Changes
+
+- 704c7cd: Calculate historical savings from the energy ledger. One comparison buys all use from the grid. The other is a blind self-use battery on the same solar: conversion losses, a small reserve, and stored energy counted at the import price. It does not trade on price and it does not curtail.
+- bac41f0: Keep history as chart buckets and the energy ledger in one SQLite file. On boot, fold older cold bucket files into hourly rows, then remove those files and the retired raw database.
+
+### Patch Changes
+
+- bac41f0: Resume history archive work from saved progress, bound each maintenance turn, and let full backups pause maintenance. A stage that uses up its time budget stays pending and resumes, instead of being reported as a failure. A running archive query is cancelled with that same budget. Avoid repeated history scans and show archive and backup progress while preserving live writes and verified archive checks.
+- 6c79443: Publish Linux arm64 and amd64 packages on beta as well as stable. Both use the same package builder and include Core, backup, web, drivers, Energyplan and the systemd service. Each package includes only its target Energyplan executable, with matching metadata and licenses. New releases no longer build Windows packages.
+- 6855d85: Plan charging in periods at allowed current steps, using fresh charging state across replans. Favor runs of at least five minutes after departure energy and safety needs, allow a short final top-up, and avoid extra starts for tiny savings. Update the bundled Energyplan worker with joint EV cost decisions and faster tariff planning.
+- a5f6f4d: Keep scalar history for seven days at ten seconds, 90 days at one minute and five years at one hour. Remove expired hourly summaries, yield maintenance to live writes and downsample charts in SQLite. Preserve recent imported archives, resume energy rollups and report the active SQLite policy. Include older hourly summaries in charts that also contain recent detail. Reconcile archive overlap and record each import atomically so retries and later rollups cannot count the same observations twice.
+
 ## 3.7.5
 
 ### Patch Changes
