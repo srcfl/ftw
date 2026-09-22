@@ -71,7 +71,8 @@ class FtwSavingsCard extends FtwElement {
       transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
       z-index: 0;
     }
-    .toggle[data-active="month"]::before { transform: translateX(100%); }
+    .toggle[data-active="month"]::before,
+    .baseline-toggle[data-active="self"]::before { transform: translateX(100%); }
     .toggle button {
       position: relative;
       z-index: 1;
@@ -243,7 +244,7 @@ class FtwSavingsCard extends FtwElement {
       border-radius: var(--radius-md, 10px);
       padding: 12px 14px;
     }
-    :host([compact]) .toggle,
+    :host([compact]) .range-toggle,
     :host([compact]) .headline,
     :host([compact]) .pct,
     :host([compact]) .sub,
@@ -417,10 +418,14 @@ class FtwSavingsCard extends FtwElement {
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Saved vs no PV/battery"}</div>
-          <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
+          <div class="label" title="No solar buys the recorded house and vehicle use from the grid. Self-use keeps the solar and a battery that only stores surplus solar and covers the house, with no price trading.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : (this._baseline === "self" ? "Saved vs self-use" : "Saved vs no PV/battery")}</div>
+          <div class="toggle range-toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
+          </div>
+          <div class="toggle baseline-toggle" role="tablist" data-active="${this._baseline === "self" ? "self" : "none"}">
+            <button type="button" role="tab" data-baseline="none" aria-selected="${this._baseline === "self" ? "false" : "true"}">No solar</button>
+            <button type="button" role="tab" data-baseline="self" aria-selected="${this._baseline === "self" ? "true" : "false"}">Self-use</button>
           </div>
         </div>
         <div class="compact-periods" data-role="compact-periods" role="list" aria-label="Savings by period" aria-live="polite">
@@ -466,7 +471,7 @@ class FtwSavingsCard extends FtwElement {
   }
 
   afterRender() {
-    const toggle = this.shadowRoot.querySelector('.toggle');
+    const toggle = this.shadowRoot.querySelector('.range-toggle');
     if (toggle) {
       toggle.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-range]');
@@ -480,6 +485,18 @@ class FtwSavingsCard extends FtwElement {
           detail: { range: next },
           bubbles: true, composed: true,
         }));
+      });
+    }
+    const baseline = this.shadowRoot.querySelector('.baseline-toggle');
+    if (baseline) {
+      baseline.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-baseline]');
+        if (!btn) return;
+        const next = btn.getAttribute('data-baseline');
+        if (!next || next === this._baseline) return;
+        this._baseline = next;
+        this.update();
+        this._paint();
       });
     }
     const spark = this.shadowRoot.querySelector('[data-role="spark"]');
@@ -597,7 +614,7 @@ class FtwSavingsCard extends FtwElement {
     statusEl.hidden = true;
     statusEl.textContent = "";
 
-    const periods = buildSavingsPeriods(days);
+    const periods = buildSavingsPeriods(days, this._baseline === "self" ? "self_consumption_saved_ore" : "saved_ore");
     const specs = [
       ["today", "Today", periods.today],
       ["week", "Last 7 days", periods.week],
@@ -688,7 +705,19 @@ class FtwSavingsCard extends FtwElement {
       return;
     }
 
-    const { days, totals } = this._payload;
+    const rawDays = this._payload.days;
+    const rawTotals = this._payload.totals;
+    const self = this._baseline === "self";
+    const days = self ? rawDays.map((d) => ({
+      ...d,
+      saved_ore: d.self_consumption_saved_ore,
+      baseline_cost_ore: d.self_consumption_cost_ore,
+    })) : rawDays;
+    const totals = self && rawTotals ? {
+      ...rawTotals,
+      saved_ore: rawTotals.self_consumption_saved_ore,
+      baseline_cost_ore: rawTotals.self_consumption_cost_ore,
+    } : rawTotals;
     if (compact) {
       this._paintCompact(days);
       return;
