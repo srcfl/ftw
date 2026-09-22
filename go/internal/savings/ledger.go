@@ -4,12 +4,16 @@ import "github.com/srcfl/ftw/go/internal/gridcost"
 
 // FlowBucket is one ledger interval. Energies are watt-hours, never negative.
 // LoadWh is household use and does not include vehicle charging.
+// AvailablePVWh is panel output before curtailment. Zero means PVWh is all
+// that was recorded. The blind battery uses the higher figure only while
+// exporting pays nothing or costs money.
 type FlowBucket struct {
 	StartMs       int64
 	LenMs         int64
 	ImportWh      float64
 	ExportWh      float64
 	PVWh          float64
+	AvailablePVWh float64
 	LoadWh        float64
 	EVChargeWh    float64
 	EVDischargeWh float64
@@ -24,15 +28,20 @@ type PriceSlot struct {
 	SpotOreKwh   float64
 }
 
-// Battery is the household battery a self-consumption counterfactual may use.
-// Zero capacity means solar is used immediately and the rest is exchanged
-// with the grid. The simulation starts half full and carries the charge
-// across the whole window.
+// Battery is the household battery a blind self-consumption counterfactual
+// may use. Zero capacity means solar is used immediately and the rest is
+// exchanged with the grid. The charge starts at StartWh, clamped into
+// [ReserveWh, CapacityWh], and carries across the whole window.
+// ChargeEfficiency and DischargeEfficiency are fractions in (0, 1].
+// Zero means no loss.
 type Battery struct {
-	CapacityWh    float64
-	MaxChargeW    float64
-	MaxDischargeW float64
-	StartWh       float64
+	CapacityWh          float64
+	MaxChargeW          float64
+	MaxDischargeW       float64
+	StartWh             float64
+	ReserveWh           float64
+	ChargeEfficiency    float64
+	DischargeEfficiency float64
 }
 
 // DayWindow is one local day, or the part of today that has already elapsed.
@@ -54,6 +63,7 @@ type LedgerDay struct {
 	SelfCostOre      float64
 	SelfImportWh     float64
 	SelfExportWh     float64
+	SelfEndWh        float64
 	CoveredMs        int64
 	PricedMs         int64
 }
@@ -75,17 +85,15 @@ func (d LedgerDay) SelfSavedOre() float64 {
 // spread evenly across the price slots it overlaps.
 func EvaluateLedger(buckets []FlowBucket, slots []PriceSlot, days []DayWindow, bat Battery, ep gridcost.ExportPricing) []LedgerDay {
 	out := make([]LedgerDay, len(days))
-	charge := bat.StartWh
-	if charge < 0 {
-		charge = 0
-	}
-	if bat.CapacityWh > 0 && charge > bat.CapacityWh {
-		charge = bat.CapacityWh
-	}
-	if bat.CapacityWh <= 0 {
-		charge = 0
-	}
+	charge := bat.OpeningWh()
 	di := 0
+	closed := 0
+	closeThrough := func(until int) {
+		for closed < until && closed < len(out) {
+			out[closed].SelfEndWh = charge
+			closed++
+		}
+	}
 	for _, b := range buckets {
 		for di+1 < len(days) && b.StartMs >= days[di].EndMs {
 			di++
@@ -93,9 +101,29 @@ func EvaluateLedger(buckets []FlowBucket, slots []PriceSlot, days []DayWindow, b
 		if di >= len(days) || b.StartMs < days[di].StartMs || b.StartMs >= days[di].EndMs {
 			continue
 		}
+		closeThrough(di)
 		addLedgerBucket(&out[di], b, slots, &charge, bat, ep)
 	}
+	closeThrough(len(out))
 	return out
+}
+
+// OpeningWh is the stored energy the blind battery starts with.
+func (b Battery) OpeningWh() float64 {
+	if b.CapacityWh <= 0 {
+		return 0
+	}
+	charge := b.StartWh
+	if charge < 0 {
+		charge = 0
+	}
+	if charge > b.CapacityWh {
+		charge = b.CapacityWh
+	}
+	if floor := b.reserveWh(); charge < floor {
+		charge = floor
+	}
+	return charge
 }
 
 func addLedgerBucket(day *LedgerDay, b FlowBucket, slots []PriceSlot, charge *float64, bat Battery, ep gridcost.ExportPricing) {
@@ -121,11 +149,54 @@ func addLedgerBucket(day *LedgerDay, b FlowBucket, slots []PriceSlot, charge *fl
 	}
 	day.NoPVCostOre += pricedWhMust(b.StartMs, b.LenMs, demand, slots, false, ep)
 
-	selfImp, selfExp := selfConsumption(b, charge, bat)
+	dumb := b
+	dumb.PVWh = dumbPVWh(b, slots, ep)
+	selfImp, selfExp := selfConsumption(dumb, charge, bat)
 	day.SelfImportWh += selfImp
 	day.SelfExportWh += selfExp
 	day.SelfCostOre += pricedWhMust(b.StartMs, b.LenMs, selfImp, slots, false, ep)
 	day.SelfCostOre -= pricedWhMust(b.StartMs, b.LenMs, selfExp, slots, true, ep)
+}
+
+// dumbPVWh is what a controller that cannot curtail would have produced.
+// Extra panel output counts only when exporting it earns nothing.
+func dumbPVWh(b FlowBucket, slots []PriceSlot, ep gridcost.ExportPricing) float64 {
+	if b.AvailablePVWh <= b.PVWh {
+		return b.PVWh
+	}
+	ore, ok := bucketExportOre(b.StartMs, b.LenMs, slots, ep)
+	if !ok || ore > 0 {
+		return b.PVWh
+	}
+	return b.AvailablePVWh
+}
+
+func bucketExportOre(start, length int64, slots []PriceSlot, ep gridcost.ExportPricing) (float64, bool) {
+	if length <= 0 {
+		return 0, false
+	}
+	end := start + length
+	var weight, sum float64
+	for _, sl := range slots {
+		if sl.EndMs <= start || sl.StartMs >= end {
+			continue
+		}
+		a := start
+		if sl.StartMs > a {
+			a = sl.StartMs
+		}
+		b := end
+		if sl.EndMs < b {
+			b = sl.EndMs
+		}
+		w := float64(b - a)
+		weight += w
+		sum += w * gridcost.ExportPriceOre(sl.SpotOreKwh, ep)
+	}
+	if weight <= 0 {
+		return 0, false
+	}
+	return sum / weight, true
 }
 
 func selfConsumption(b FlowBucket, charge *float64, bat Battery) (importWh, exportWh float64) {
@@ -136,23 +207,27 @@ func selfConsumption(b FlowBucket, charge *float64, bat Battery) (importWh, expo
 	hours := float64(b.LenMs) / 3_600_000
 	surplus := b.PVWh - demand
 	if surplus >= 0 {
-		room := bat.CapacityWh - *charge
-		if room < 0 {
-			room = 0
-		}
 		take := surplus
 		if bat.CapacityWh <= 0 {
 			take = 0
 		} else {
-			if room < take {
-				take = room
+			room := bat.CapacityWh - *charge
+			if room < 0 {
+				room = 0
+			}
+			maxTake := room / bat.chargeEff()
+			if maxTake < take {
+				take = maxTake
 			}
 			limit := bat.MaxChargeW * hours
 			if limit < take {
 				take = limit
 			}
 		}
-		*charge += take
+		*charge += take * bat.chargeEff()
+		if bat.CapacityWh > 0 && *charge > bat.CapacityWh {
+			*charge = bat.CapacityWh
+		}
 		return 0, surplus - take
 	}
 	need := -surplus
@@ -160,16 +235,48 @@ func selfConsumption(b FlowBucket, charge *float64, bat Battery) (importWh, expo
 	if bat.CapacityWh <= 0 {
 		give = 0
 	} else {
-		if *charge < give {
-			give = *charge
+		avail := *charge - bat.reserveWh()
+		if avail < 0 {
+			avail = 0
+		}
+		maxGive := avail * bat.dischargeEff()
+		if maxGive < give {
+			give = maxGive
 		}
 		limit := bat.MaxDischargeW * hours
 		if limit < give {
 			give = limit
 		}
 	}
-	*charge -= give
+	*charge -= give / bat.dischargeEff()
+	if floor := bat.reserveWh(); *charge < floor {
+		*charge = floor
+	}
 	return need - give, 0
+}
+
+func (b Battery) chargeEff() float64 {
+	if b.ChargeEfficiency <= 0 || b.ChargeEfficiency > 1 {
+		return 1
+	}
+	return b.ChargeEfficiency
+}
+
+func (b Battery) dischargeEff() float64 {
+	if b.DischargeEfficiency <= 0 || b.DischargeEfficiency > 1 {
+		return 1
+	}
+	return b.DischargeEfficiency
+}
+
+func (b Battery) reserveWh() float64 {
+	if b.ReserveWh <= 0 || b.CapacityWh <= 0 {
+		return 0
+	}
+	if b.ReserveWh > b.CapacityWh {
+		return b.CapacityWh
+	}
+	return b.ReserveWh
 }
 
 func pricedWh(start, length int64, wh float64, slots []PriceSlot, export bool, ep gridcost.ExportPricing) (ore float64, pricedMs int64) {

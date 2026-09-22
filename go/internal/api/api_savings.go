@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -15,6 +16,12 @@ import (
 const (
 	savingsValueScope = "site_total"
 	savingsBaseline   = "no_pv_no_battery_vehicle_energy_at_daily_average"
+	// A built-in self-use mode on the same cells runs a bit below the
+	// planner's nameplate efficiency and keeps a backup it will not spend.
+	dumbEffHaircut   = 0.05
+	dumbEffFloor     = 0.80
+	dumbReserveFrac  = 0.10
+	batterySOCMetric = "battery_soc"
 )
 
 // daySavings is the cached per-local-day cost breakdown that powers
@@ -329,7 +336,14 @@ func (s *Server) writeLedgerSavings(w http.ResponseWriter, r *http.Request, days
 		windows[i] = savings.DayWindow{StartMs: start.UnixMilli(), EndMs: end.UnixMilli()}
 		keys[i] = start.Format("2006-01-02")
 	}
-	priced := savings.EvaluateLedger(flows, slots, windows, ledgerBattery(s.deps.Cfg), ep)
+	bat, socDrivers := ledgerBattery(s.deps.Cfg)
+	socPts := s.batterySOCSamples(r.Context(), socDrivers, windowStart.UnixMilli(), now.UnixMilli())
+	if bat.CapacityWh > 0 {
+		if wh, ok := socWhAt(socPts, windowStart.UnixMilli(), bat.CapacityWh); ok && wh > bat.StartWh {
+			bat.StartWh = wh
+		}
+	}
+	priced := savings.EvaluateLedger(flows, slots, windows, bat, ep)
 	out := make([]map[string]any, 0, days)
 	var tImp, tExp, tLoad, tActual, tBase, tSaved, tSelf, tSelfSaved float64
 	var tExpected, tHist, tPrice int64
@@ -352,6 +366,7 @@ func (s *Server) writeLedgerSavings(w http.ResponseWriter, r *http.Request, days
 		if slotCount > 0 {
 			resolution = "slot"
 		}
+		selfSaved := d.SelfSavedOre()
 		row := map[string]any{
 			"day": keys[i], "import_wh": d.ImportWh, "export_wh": d.ExportWh,
 			"load_wh": d.LoadWh, "ev_wh": d.EVWh, "pv_wh": d.PVWh,
@@ -361,7 +376,7 @@ func (s *Server) writeLedgerSavings(w http.ResponseWriter, r *http.Request, days
 			"baseline_cost_ore": d.NoPVCostOre, "flat_cost_ore": d.NoPVCostOre,
 			"saved_ore":                  d.NoPVSavedOre(),
 			"self_consumption_cost_ore":  d.SelfCostOre,
-			"self_consumption_saved_ore": d.SelfSavedOre(),
+			"self_consumption_saved_ore": selfSaved,
 			"self_consumption_import_wh": d.SelfImportWh,
 			"self_consumption_export_wh": d.SelfExportWh,
 			"avg_import_ore_kwh":         divOrZero(importSum, importMs),
@@ -381,7 +396,7 @@ func (s *Server) writeLedgerSavings(w http.ResponseWriter, r *http.Request, days
 		tBase += d.NoPVCostOre
 		tSaved += d.NoPVSavedOre()
 		tSelf += d.SelfCostOre
-		tSelfSaved += d.SelfSavedOre()
+		tSelfSaved += selfSaved
 		tExpected += expected
 		tHist += d.CoveredMs
 		tPrice += d.PricedMs
@@ -403,11 +418,12 @@ func (s *Server) writeLedgerSavings(w http.ResponseWriter, r *http.Request, days
 	return true, nil
 }
 
-func ledgerBattery(cfg *config.Config) savings.Battery {
+func ledgerBattery(cfg *config.Config) (savings.Battery, []string) {
 	if cfg == nil {
-		return savings.Battery{}
+		return savings.Battery{}, nil
 	}
 	var capacity, chargeW, dischargeW float64
+	var names []string
 	for _, d := range cfg.Drivers {
 		if d.BatteryCapacityWh <= 0 || d.BatteryTelemetryOnly {
 			continue
@@ -422,8 +438,107 @@ func ledgerBattery(cfg *config.Config) savings.Battery {
 		}
 		chargeW += c
 		dischargeW += dis
+		if d.Name != "" {
+			names = append(names, d.Name)
+		}
 	}
-	return savings.Battery{CapacityWh: capacity, MaxChargeW: chargeW, MaxDischargeW: dischargeW, StartWh: capacity / 2}
+	chg, disEff := dumbEfficiency(0), dumbEfficiency(0)
+	if cfg.Planner != nil {
+		if cfg.Planner.ChargeEfficiency > 0 {
+			chg = dumbEfficiency(cfg.Planner.ChargeEfficiency)
+		}
+		if cfg.Planner.DischargeEfficiency > 0 {
+			disEff = dumbEfficiency(cfg.Planner.DischargeEfficiency)
+		}
+	}
+	reserve := capacity * dumbReserveFrac
+	return savings.Battery{
+		CapacityWh: capacity, MaxChargeW: chargeW, MaxDischargeW: dischargeW,
+		StartWh: reserve, ReserveWh: reserve,
+		ChargeEfficiency: chg, DischargeEfficiency: disEff,
+	}, names
+}
+
+func dumbEfficiency(configured float64) float64 {
+	if configured <= 0 || configured > 1 {
+		configured = 0.95
+	}
+	v := configured - dumbEffHaircut
+	if v < dumbEffFloor {
+		return dumbEffFloor
+	}
+	return v
+}
+
+func (s *Server) batterySOCSamples(ctx context.Context, drivers []string, since, until int64) []state.SeriesPoint {
+	if s == nil || s.deps.State == nil || len(drivers) == 0 || until <= since {
+		return nil
+	}
+	var best []state.SeriesPoint
+	for _, name := range drivers {
+		// Coarse on purpose. A fine cap returns only the latest day, and the
+		// stored-energy correction would then land on that day alone.
+		span := until - since
+		points := int(span/(2*time.Hour.Milliseconds())) + 2
+		if points < 8 {
+			points = 8
+		}
+		if points > 1500 {
+			points = 1500
+		}
+		pts, err := s.deps.State.LoadSeriesBucketsContext(ctx, name, batterySOCMetric, since, until, points)
+		if err != nil {
+			slog.Warn("savings battery soc", "driver", name, "err", err)
+			continue
+		}
+		if len(pts) > len(best) {
+			best = pts
+		}
+	}
+	return best
+}
+
+func socWhAt(points []state.SeriesPoint, at int64, capacityWh float64) (float64, bool) {
+	frac, ok := socFractionAt(points, at)
+	if !ok || capacityWh <= 0 {
+		return 0, false
+	}
+	return frac * capacityWh, true
+}
+
+func socFractionAt(points []state.SeriesPoint, at int64) (float64, bool) {
+	if len(points) == 0 {
+		return 0, false
+	}
+	best := 0
+	bestAbs := int64(1 << 62)
+	for i, p := range points {
+		d := p.TsMs - at
+		if d < 0 {
+			d = -d
+		}
+		if d < bestAbs {
+			bestAbs = d
+			best = i
+		}
+	}
+	if bestAbs > 6*time.Hour.Milliseconds() {
+		return 0, false
+	}
+	v := points[best].V
+	if points[best].Last != nil {
+		v = *points[best].Last
+	}
+	if v > 1.5 {
+		v /= 100
+	}
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+	return v, true
 }
 
 func divOrZero(sum, weight float64) float64 {

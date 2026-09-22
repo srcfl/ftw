@@ -24,6 +24,16 @@ import {
   formatCompactMinor,
 } from "./savings-periods.js";
 
+const SAVINGS_BASELINE_KEY = "ftw.savings.baseline";
+
+function readSavingsBaseline() {
+  try {
+    return localStorage.getItem(SAVINGS_BASELINE_KEY) === "self" ? "self" : "none";
+  } catch {
+    return "none";
+  }
+}
+
 class FtwSavingsCard extends FtwElement {
   static styles = `
     :host { display: block; }
@@ -71,8 +81,13 @@ class FtwSavingsCard extends FtwElement {
       transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
       z-index: 0;
     }
-    .toggle[data-active="month"]::before,
-    .baseline-toggle[data-active="self"]::before { transform: translateX(100%); }
+    .toggle[data-active="month"]::before { transform: translateX(100%); }
+    .compare {
+      color: var(--fg-muted);
+      font-family: var(--sans);
+      font-size: 0.75rem;
+      line-height: 1.3;
+    }
     .toggle button {
       position: relative;
       z-index: 1;
@@ -251,11 +266,19 @@ class FtwSavingsCard extends FtwElement {
     :host([compact]) .spark-wrap {
       display: none !important;
     }
+    :host([compact]) .head {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 2px;
+    }
     :host([compact]) .label {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 6px;
+    }
+    :host([compact]) .compare {
+      font-size: 0.72rem;
     }
     :host([compact]) .compact-currency {
       color: var(--fg-muted);
@@ -349,6 +372,7 @@ class FtwSavingsCard extends FtwElement {
   constructor() {
     super();
     this._range = null;
+    this._baseline = readSavingsBaseline();
     this._timer = null;
     this._reqSeq = 0;
     this._abort = null;
@@ -362,6 +386,16 @@ class FtwSavingsCard extends FtwElement {
       this._onVisibility = () => this._syncPolling();
       document.addEventListener("visibilitychange", this._onVisibility);
     }
+    if (!this._onBaseline) {
+      this._onBaseline = (event) => {
+        const next = event.detail && event.detail.baseline === "self" ? "self" : "none";
+        if (next === this._baseline) return;
+        this._baseline = next;
+        this.update();
+        this._paint();
+      };
+      window.addEventListener("ftw-savings-baseline", this._onBaseline);
+    }
     this._syncPolling();
   }
   disconnectedCallback() {
@@ -370,6 +404,10 @@ class FtwSavingsCard extends FtwElement {
     if (this._onVisibility) {
       document.removeEventListener("visibilitychange", this._onVisibility);
       this._onVisibility = null;
+    }
+    if (this._onBaseline) {
+      window.removeEventListener("ftw-savings-baseline", this._onBaseline);
+      this._onBaseline = null;
     }
   }
 
@@ -415,17 +453,18 @@ class FtwSavingsCard extends FtwElement {
     }
     const wk = this._range === "week";
     const compact = this.hasAttribute("compact");
+    const self = this._baseline === "self";
+    const compare = self ? "Compared to self-use" : "Compared to no system";
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label" title="No solar buys the recorded house and vehicle use from the grid. Self-use keeps the solar and a battery that only stores surplus solar and covers the house, with no price trading.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : (this._baseline === "self" ? "Saved vs self-use" : "Saved vs no PV/battery")}</div>
+          <div>
+            <div class="label" title="No system buys the recorded house and vehicle use from the grid. Self-use is the same solar and battery run blind: it stores surplus, covers the house, wastes a little on conversion, keeps a small reserve, and keeps exporting when that export costs money.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Savings"}</div>
+            <div class="compare" data-role="compare">${compare}</div>
+          </div>
           <div class="toggle range-toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
-          </div>
-          <div class="toggle baseline-toggle" role="tablist" data-active="${this._baseline === "self" ? "self" : "none"}">
-            <button type="button" role="tab" data-baseline="none" aria-selected="${this._baseline === "self" ? "false" : "true"}">No solar</button>
-            <button type="button" role="tab" data-baseline="self" aria-selected="${this._baseline === "self" ? "true" : "false"}">Self-use</button>
           </div>
         </div>
         <div class="compact-periods" data-role="compact-periods" role="list" aria-label="Savings by period" aria-live="polite">
@@ -485,18 +524,6 @@ class FtwSavingsCard extends FtwElement {
           detail: { range: next },
           bubbles: true, composed: true,
         }));
-      });
-    }
-    const baseline = this.shadowRoot.querySelector('.baseline-toggle');
-    if (baseline) {
-      baseline.addEventListener('click', (e) => {
-        const btn = e.target.closest('button[data-baseline]');
-        if (!btn) return;
-        const next = btn.getAttribute('data-baseline');
-        if (!next || next === this._baseline) return;
-        this._baseline = next;
-        this.update();
-        this._paint();
       });
     }
     const spark = this.shadowRoot.querySelector('[data-role="spark"]');
@@ -764,8 +791,9 @@ class FtwSavingsCard extends FtwElement {
     // operator the two numbers the delta is derived from.
     const actualSek = actualOre / 100;
     const baselineSek = baselineOre / 100;
+    const compared = self ? "self-use" : "no system";
     subEl.innerHTML =
-      `Actual <b>${fmtSek(actualSek)} ${cur}</b>, no PV/battery <b>${fmtSek(baselineSek)} ${cur}</b>`;
+      `Actual <b>${fmtSek(actualSek)} ${cur}</b>, ${compared} <b>${fmtSek(baselineSek)} ${cur}</b>`;
 
     // ---- Sparkline -----------------------------------------------------
     // Bars on a zero baseline, full height split 50/50 above/below.

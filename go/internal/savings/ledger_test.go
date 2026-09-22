@@ -50,3 +50,71 @@ func TestCheapChargeBeatsEmptySelfConsumption(t *testing.T) {
 		t.Fatalf("saved vs no pv %v", d.NoPVSavedOre())
 	}
 }
+
+func TestNegativeExportDumbSystemPays(t *testing.T) {
+	// Measured PV was curtailed to nothing. A blind battery would still
+	// have produced 1 kWh and paid to export it at -80 öre/kWh.
+	slots := []PriceSlot{{StartMs: 0, EndMs: 3_600_000, ImportOreKwh: 100, SpotOreKwh: -80}}
+	buckets := []FlowBucket{{
+		StartMs: 0, LenMs: 3_600_000, AvailablePVWh: 1000,
+	}}
+	days := EvaluateLedger(buckets, slots, []DayWindow{{StartMs: 0, EndMs: 3_600_000}}, Battery{}, gridcost.ExportPricing{})
+	d := days[0]
+	if d.ImportCostOre-d.ExportRevenueOre > 0.01 {
+		t.Fatalf("actual cost %v", d.ImportCostOre-d.ExportRevenueOre)
+	}
+	if d.SelfExportWh < 999 || d.SelfExportWh > 1001 {
+		t.Fatalf("dumb export %v", d.SelfExportWh)
+	}
+	if d.SelfSavedOre() < 79 || d.SelfSavedOre() > 81 {
+		t.Fatalf("saved vs self %v", d.SelfSavedOre())
+	}
+}
+
+func TestPositivePriceIgnoresUncurtailedPV(t *testing.T) {
+	slots := []PriceSlot{{StartMs: 0, EndMs: 3_600_000, ImportOreKwh: 100, SpotOreKwh: 80}}
+	buckets := []FlowBucket{{
+		StartMs: 0, LenMs: 3_600_000, AvailablePVWh: 1000,
+	}}
+	days := EvaluateLedger(buckets, slots, []DayWindow{{StartMs: 0, EndMs: 3_600_000}}, Battery{}, gridcost.ExportPricing{})
+	if days[0].SelfExportWh > 0.01 {
+		t.Fatalf("dumb export %v, want the measured 0", days[0].SelfExportWh)
+	}
+}
+
+func TestLossySelfUseImportsTheRoundTrip(t *testing.T) {
+	slots := []PriceSlot{
+		{StartMs: 0, EndMs: 3_600_000, ImportOreKwh: 100, SpotOreKwh: 80},
+		{StartMs: 3_600_000, EndMs: 7_200_000, ImportOreKwh: 100, SpotOreKwh: 80},
+	}
+	buckets := []FlowBucket{
+		{StartMs: 0, LenMs: 3_600_000, PVWh: 1000},
+		{StartMs: 3_600_000, LenMs: 3_600_000, LoadWh: 1000},
+	}
+	bat := Battery{
+		CapacityWh: 5000, MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.9, DischargeEfficiency: 0.9,
+	}
+	days := EvaluateLedger(buckets, slots, []DayWindow{{StartMs: 0, EndMs: 7_200_000}}, bat, gridcost.ExportPricing{})
+	d := days[0]
+	if d.SelfImportWh < 180 || d.SelfImportWh > 200 {
+		t.Fatalf("self import %v, want about 190", d.SelfImportWh)
+	}
+	if d.SelfEndWh < -0.01 || d.SelfEndWh > 0.01 {
+		t.Fatalf("end charge %v, want empty", d.SelfEndWh)
+	}
+}
+
+func TestReserveLimitsBlindDischarge(t *testing.T) {
+	slots := []PriceSlot{{StartMs: 0, EndMs: 3_600_000, ImportOreKwh: 100, SpotOreKwh: 80}}
+	buckets := []FlowBucket{{StartMs: 0, LenMs: 3_600_000, LoadWh: 1000}}
+	bat := Battery{CapacityWh: 1000, MaxDischargeW: 5000, ReserveWh: 400, StartWh: 1000}
+	days := EvaluateLedger(buckets, slots, []DayWindow{{StartMs: 0, EndMs: 3_600_000}}, bat, gridcost.ExportPricing{})
+	d := days[0]
+	if d.SelfImportWh < 399 || d.SelfImportWh > 401 {
+		t.Fatalf("self import %v, want 400", d.SelfImportWh)
+	}
+	if d.SelfEndWh < 399 || d.SelfEndWh > 401 {
+		t.Fatalf("end charge %v, want the reserve", d.SelfEndWh)
+	}
+}
