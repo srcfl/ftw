@@ -83,9 +83,10 @@ type ExternalOptimizerConfig struct {
 // serialized to keep request and response ownership unambiguous. An optional idle timeout releases the worker's solver memory
 // between planning bursts.
 type ExternalOptimizer struct {
-	cfg        ExternalOptimizerConfig
-	transport  OptimizerTransport
-	timeBudget func([]Slot, Params) time.Duration
+	cfg            ExternalOptimizerConfig
+	transport      OptimizerTransport
+	timeBudget     func([]Slot, Params) time.Duration
+	prepareRequest func(context.Context, *externalRequest, Params) error
 }
 
 func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, error) {
@@ -285,17 +286,18 @@ type externalDemandHour struct {
 }
 
 type externalFlexLoad struct {
-	ID               string    `json:"id"`
-	CapacityWh       float64   `json:"capacity_wh"`
-	InitialEnergyWh  float64   `json:"initial_energy_wh"`
-	MaxEnergyWh      float64   `json:"max_energy_wh"`
-	TargetEnergyWh   float64   `json:"target_energy_wh"`
-	TargetSlot       int       `json:"target_slot"`
-	ChargeEfficiency float64   `json:"charge_efficiency"`
-	MaxChargeW       float64   `json:"max_charge_w"`
-	AllowedStepsW    []float64 `json:"allowed_steps_w"`
-	SurplusOnly      bool      `json:"surplus_only"`
-	NoStorageToLoad  bool      `json:"no_storage_to_load"`
+	ID               string           `json:"id"`
+	CapacityWh       float64          `json:"capacity_wh"`
+	InitialEnergyWh  float64          `json:"initial_energy_wh"`
+	MaxEnergyWh      float64          `json:"max_energy_wh"`
+	TargetEnergyWh   float64          `json:"target_energy_wh"`
+	TargetSlot       int              `json:"target_slot"`
+	ChargeEfficiency float64          `json:"charge_efficiency"`
+	MaxChargeW       float64          `json:"max_charge_w"`
+	AllowedStepsW    []float64        `json:"allowed_steps_w"`
+	SurplusOnly      bool             `json:"surplus_only"`
+	NoStorageToLoad  bool             `json:"no_storage_to_load"`
+	Charging         *ChargingPeriods `json:"charging,omitempty"`
 }
 
 type externalResponse struct {
@@ -388,6 +390,11 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 		request.Settings.PHMaxIterations = ms.PHMaxIterations
 		request.Settings.PHRho = ms.PHRho
 		request.Settings.PHToleranceW = ms.PHToleranceW
+	}
+	if o.prepareRequest != nil {
+		if err := o.prepareRequest(ctx, &request, p); err != nil {
+			return Plan{}, fmt.Errorf("prepare optimizer request: %w", err)
+		}
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
