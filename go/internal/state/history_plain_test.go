@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/parquet-go/parquet-go"
 )
 
 func TestPlainHistoryKeepsBucketsNotRawPolls(t *testing.T) {
@@ -109,6 +111,59 @@ func TestPlainHistoryRollsOldMinutesIntoHours(t *testing.T) {
 	if err != nil || len(points) != 1 || points[0].N != 2 || points[0].V != 20 {
 		t.Fatalf("chart=%+v err=%v", points, err)
 	}
+}
+
+func TestAbsorbColdHistoryBecomesHours(t *testing.T) {
+	s := freshStore(t)
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().UTC().Add(-40 * 24 * time.Hour).Truncate(24 * time.Hour)
+	hour := day.Add(3 * time.Hour)
+	cold := t.TempDir()
+	path := filepath.Join(cold, day.Format("2006/01"), day.Format("02")+".buckets.parquet")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestBuckets(path, []metricBucket{
+		{Driver: "meter", Metric: "grid_w", BucketSummary: BucketSummary{StartMS: hour.UnixMilli(), ResolutionMS: ArchiveResolutionMS, FirstMS: hour.UnixMilli(), LastMS: hour.UnixMilli() + 1000, N: 1, Sum: 10, Min: 10, Max: 10, Last: 10}},
+		{Driver: "meter", Metric: "grid_w", BucketSummary: BucketSummary{StartMS: hour.Add(time.Minute).UnixMilli(), ResolutionMS: ArchiveResolutionMS, FirstMS: hour.Add(time.Minute).UnixMilli(), LastMS: hour.Add(time.Minute).UnixMilli() + 1000, N: 1, Sum: 30, Min: 30, Max: 30, Last: 30}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	diag := filepath.Join(cold, "diagnostics", "keep.parquet")
+	if err := os.MkdirAll(filepath.Dir(diag), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(diag, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AbsorbColdHistory(context.Background(), cold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("bucket file still present: %v", err)
+	}
+	if _, err := os.Stat(diag); err != nil {
+		t.Fatal(err)
+	}
+	points, err := s.LoadSeriesBucketsOrRaw("meter", "grid_w", hour.UnixMilli(), hour.UnixMilli()+HistoryHourResolutionMS-1, 0)
+	if err != nil || len(points) != 1 || points[0].N != 2 || points[0].V != 20 {
+		t.Fatalf("points=%+v err=%v", points, err)
+	}
+}
+
+func writeTestBuckets(path string, rows []metricBucket) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := parquet.NewGenericWriter[metricBucket](f)
+	if _, err := w.Write(rows); err != nil {
+		return err
+	}
+	return w.Close()
 }
 
 func pathDirHistory(statePath string) string {

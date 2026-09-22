@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -143,6 +145,137 @@ func (s *Store) RetireRawHistory(ctx context.Context) error {
 	}
 	slog.Info("history raw polls retired", "kept_ledger_rows", dstN, "retired_bytes", retiredBytes, "retired", retired)
 	return nil
+}
+
+// AbsorbColdHistory folds sealed bucket files into hourly rows in history.db.
+// Days still held as minutes stay as they are. The files are removed only
+// after every day has been stored. Sample files and archive scratch go with
+// them. Diagnostics files are left in place.
+func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
+	if s == nil || s.history == nil || strings.TrimSpace(cold) == "" {
+		return nil
+	}
+	paths, err := aggregatePaths(cold, 0, time.Now().Add(24*time.Hour).UnixMilli())
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-plainMinuteKeep)
+	var imported int
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if strings.Contains(path, ".legacy-buckets.") {
+			original := strings.Replace(path, ".legacy-buckets.parquet", ".buckets.parquet", 1)
+			if _, statErr := os.Stat(original); statErr == nil {
+				continue
+			}
+		}
+		day, err := aggregateDay(path)
+		if err != nil {
+			return err
+		}
+		if !day.Before(cutoff) {
+			continue
+		}
+		hours := map[string]*namedHour{}
+		if err := walkBucketFile(ctx, path, func(b metricBucket) error {
+			hour := bucketStart(b.StartMS, HistoryHourResolutionMS)
+			key := b.Driver + "\x00" + b.Metric + "\x00" + strconv.FormatInt(hour, 10)
+			h := hours[key]
+			if h == nil {
+				h = &namedHour{driver: b.Driver, metric: b.Metric, hour: hour}
+				hours[key] = h
+			}
+			h.bucket.merge(b.BucketSummary)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("read %s: %w", filepath.Base(path), err)
+		}
+		if err := s.writeHourBuckets(ctx, hours); err != nil {
+			return err
+		}
+		imported++
+	}
+	if err := removeColdHistory(cold); err != nil {
+		return err
+	}
+	removed, err := removeRetiredHistory(s.historyPath)
+	if err != nil {
+		return err
+	}
+	slog.Info("history cold files absorbed", "days", imported, "retired_files", removed)
+	return nil
+}
+
+type namedHour struct {
+	driver, metric string
+	hour           int64
+	bucket         BucketSummary
+}
+
+func (s *Store) writeHourBuckets(ctx context.Context, hours map[string]*namedHour) error {
+	if len(hours) == 0 {
+		return nil
+	}
+	ids := map[string][2]int64{}
+	for _, h := range hours {
+		key := h.driver + "\x00" + h.metric
+		if _, ok := ids[key]; ok {
+			continue
+		}
+		d, err := s.driverID(h.driver)
+		if err != nil {
+			return err
+		}
+		m, err := s.metricID(h.metric, "")
+		if err != nil {
+			return err
+		}
+		ids[key] = [2]int64{d, m}
+	}
+	tx, err := s.history.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, h := range hours {
+		id := ids[h.driver+"\x00"+h.metric]
+		b := h.bucket
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ts_buckets(driver_id,metric_id,start_ms,resolution_ms,first_ms,last_ms,n,sum_value,min_value,max_value,last_value,seen_ms)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,X'')
+			ON CONFLICT(driver_id,metric_id,start_ms,resolution_ms) DO NOTHING`,
+			id[0], id[1], h.hour, HistoryHourResolutionMS, b.FirstMS, b.LastMS, b.N, b.Sum, b.Min, b.Max, b.Last); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func removeColdHistory(cold string) error {
+	years, err := filepath.Glob(filepath.Join(cold, "[0-9][0-9][0-9][0-9]"))
+	if err != nil {
+		return err
+	}
+	for _, year := range years {
+		if err := os.RemoveAll(year); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeRetiredHistory(historyPath string) (int, error) {
+	matches, err := filepath.Glob(historyPath + ".raw-retired*")
+	if err != nil {
+		return 0, err
+	}
+	for _, path := range matches {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return 0, err
+		}
+	}
+	return len(matches), nil
 }
 
 func ledgerDigest(ctx context.Context, db *sql.DB) (int64, float64, error) {

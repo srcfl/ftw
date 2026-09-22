@@ -80,7 +80,7 @@ func (s *Store) walkAggregateSeries(ctx context.Context, cold, driver, metric st
 			if b.Driver != driver || b.Metric != metric || b.LastMS < since || b.LastMS > until {
 				return nil
 			}
-			if !legacy && minutes[b.StartMS] {
+			if hours[bucketStart(b.StartMS, HistoryHourResolutionMS)] || minutes[b.StartMS] {
 				return nil
 			}
 			return visit(b.BucketSummary)

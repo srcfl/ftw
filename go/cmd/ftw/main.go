@@ -472,6 +472,10 @@ func main() {
 		slog.Error("enable history aggregation", "err", err)
 		os.Exit(1)
 	}
+	if err := st.AbsorbColdHistory(context.Background(), coldDir); err != nil {
+		slog.Error("absorb cold history", "err", err)
+		os.Exit(1)
+	}
 	defer func() {
 		if err := st.Close(); err != nil {
 			slog.Error("state shutdown failed", "err", err)
