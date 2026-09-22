@@ -135,6 +135,11 @@ func (s *Store) openHistory() error {
 	if err := os.Chmod(s.historyPath, 0600); err != nil {
 		return err
 	}
+	if RetireRawOnOpen {
+		if err := s.RetireRawHistory(context.Background()); err != nil {
+			return err
+		}
+	}
 	ok = true
 	return nil
 }

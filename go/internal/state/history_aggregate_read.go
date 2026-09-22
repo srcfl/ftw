@@ -37,6 +37,31 @@ func (s *Store) walkAggregateSeries(ctx context.Context, cold, driver, metric st
 	if err != nil {
 		return err
 	}
+	hours := map[int64]bool{}
+	for minute := range minutes {
+		hours[bucketStart(minute, HistoryHourResolutionMS)] = true
+	}
+	coarse, err := s.storedBuckets(ctx, driver, metric, ArchiveResolutionMS, since, until)
+	if err != nil {
+		return err
+	}
+	for _, b := range coarse {
+		if minutes[b.StartMS] {
+			continue
+		}
+		hot = append(hot, b)
+		hours[bucketStart(b.StartMS, HistoryHourResolutionMS)] = true
+	}
+	hourly, err := s.storedBuckets(ctx, driver, metric, HistoryHourResolutionMS, since, until)
+	if err != nil {
+		return err
+	}
+	for _, b := range hourly {
+		if hours[b.StartMS] {
+			continue
+		}
+		hot = append(hot, b)
+	}
 	paths, err := aggregatePaths(cold, since, until)
 	if err != nil {
 		return err
@@ -71,6 +96,26 @@ func (s *Store) walkAggregateSeries(ctx context.Context, cold, driver, metric st
 		}
 	}
 	return nil
+}
+
+func (s *Store) storedBuckets(ctx context.Context, driver, metric string, resolution, since, until int64) ([]BucketSummary, error) {
+	rows, err := s.history.QueryContext(ctx, `SELECT b.start_ms,b.resolution_ms,b.first_ms,b.last_ms,b.n,b.sum_value,b.min_value,b.max_value,b.last_value FROM ts_buckets b JOIN ts_drivers d ON d.id=b.driver_id JOIN ts_metrics m ON m.id=b.metric_id WHERE d.name=? AND m.name=? AND b.resolution_ms=? AND b.start_ms>=? AND b.start_ms<? ORDER BY b.start_ms`, driver, metric, resolution, bucketStart(since, resolution), bucketStart(until, resolution)+resolution)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]BucketSummary, 0)
+	for rows.Next() {
+		var b BucketSummary
+		if err := rows.Scan(&b.StartMS, &b.ResolutionMS, &b.FirstMS, &b.LastMS, &b.N, &b.Sum, &b.Min, &b.Max, &b.Last); err != nil {
+			return nil, err
+		}
+		if len(out) >= maxRawSeriesPoints {
+			return nil, ErrHistoryQueryLimit
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) hasAggregateSeries(ctx context.Context, driver, metric string, since, until int64) bool {

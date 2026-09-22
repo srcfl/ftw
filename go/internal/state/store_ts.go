@@ -438,25 +438,26 @@ func (s *Store) writeHistoryBatchTx(ctx context.Context, tx *sql.Tx, batchID, pa
 			return 0, false, err
 		}
 	}
-	if s.aggregateHistory.Load() && batchID != "" {
+	if s.aggregateHistory.Load() {
 		if err := s.recordDashboardTx(ctx, tx, p); err != nil {
 			return 0, false, err
 		}
-	} else if p != nil {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
-		); err != nil {
-			return 0, false, err
-		}
-	}
-	if s.aggregateHistory.Load() && batchID != "" {
 		if err := s.insertAggregateSamples(ctx, tx, rs); err != nil {
 			return 0, false, err
 		}
-	} else if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
-		return 0, false, err
+	} else {
+		if p != nil {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
+			); err != nil {
+				return 0, false, err
+			}
+		}
+		if err := s.insertSamplesAndHours(ctx, tx, rs); err != nil {
+			return 0, false, err
+		}
 	}
 	if err := recordEnergyObservationsTx(tx, observations); err != nil {
 		return 0, false, err
