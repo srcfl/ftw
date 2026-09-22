@@ -383,7 +383,7 @@ func (a *seriesBucketAcc) add(n int64, sum, min, max float64, last int64) {
 	}
 	a.n += n
 	a.sum += sum
-	if last > a.last {
+	if a.n == n || last > a.last {
 		a.last = last
 	}
 }

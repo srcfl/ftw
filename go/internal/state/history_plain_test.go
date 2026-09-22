@@ -81,7 +81,7 @@ func TestPlainHistoryRollsOldMinutesIntoHours(t *testing.T) {
 	if err := s.EnableHistoryAggregation(); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Hour)
+	old := time.Now().UTC().Add(-plainMinuteKeep - 24*time.Hour).Truncate(time.Hour)
 	for i, v := range []float64{10, 30} {
 		ts := old.Add(time.Duration(i) * time.Minute).UnixMilli()
 		if err := s.EnqueueTelemetryTick(nil, []Sample{{Driver: "meter", Metric: "grid_w", TsMs: ts, Value: v}}, nil); err != nil {
