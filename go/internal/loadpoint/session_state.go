@@ -316,6 +316,11 @@ func (m *Manager) observeConnectionProof(id string, generation uint64, unknown b
 	if generation != 0 {
 		lp.connectionGeneration = generation
 	}
+	if unknown || changed {
+		// A fresh cached power sample cannot prove charging across a lost
+		// connection. Reset this even when no session identity is known.
+		lp.chargingPeriodSince = time.Time{}
+	}
 	if (!unknown && !changed) || (!changed && lp.sessionDeviceID == "" && lp.sessionID == "") {
 		m.mu.Unlock()
 		return

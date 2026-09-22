@@ -35,7 +35,7 @@ func observeChargingPeriod(lp *loadpointRuntime, sample EVSample, now time.Time)
 	if window <= 0 {
 		window = (EVSample{}).PowerWindow()
 	}
-	if !sample.Connected || sample.PowerUnavailable || !finite(sample.PowerW) || sample.PowerW < steadyChargeFloorW ||
+	if !sample.Connected || sample.ConnectionUnknown || sample.PowerUnavailable || !finite(sample.PowerW) || sample.PowerW < steadyChargeFloorW ||
 		at.After(now.Add(time.Second)) || now.Sub(at) > sample.PowerWindow() {
 		lp.chargingPeriodSince = time.Time{}
 		return
