@@ -4,7 +4,7 @@ This directory contains the optional proprietary Sourceful Energyplan worker,
 its license and third-party notices, and public integration checks. Rust source,
 source tests and builds live in the private `srcfl/energyplan` repository.
 
-Energyplan 0.4.6 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
+Energyplan 0.4.8 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
 permits private household use with FTW and free noncommercial redistribution
 for that use. Commercial use, OEM bundles, paid installation and services need
 a separate written license from Sourceful Labs AB. FTW's AGPL code has a
@@ -68,6 +68,15 @@ reserve or above the charge limit. Each action must hold or reduce any existing
 violation; after recovery the plan must stay within the configured limits.
 Core independently checks that recovery and validates fallback plans too.
 The compiled worker updates with Core.
+
+Core negotiates `charging_periods` before sending the current observed charging
+state and the charging preference. The default favors periods of at least five
+minutes after departure energy and physical reserves, and prices an extra start
+at five ore in the objective. A final top-up can be shorter. These preferences
+never override safety or prevent a partial plan when a target is unreachable.
+They do not enter the reported electricity bill. Missing or stale observations
+cannot prove a continuous run. Earlier workers receive the existing request.
+
 
 Supported requests can contain zero, one or several batteries and EVs, with
 each device's own physical limits and EV deadline. The worker supports the

@@ -133,6 +133,11 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 		baseline := lp.energy.counterWh - lp.energy.integralAt(lp.energy.counterAt)
 		lp.sessionPluginSoC -= baseline * DefaultChargeEfficiency / lp.VehicleCapacityWh
 	}
+	if changed {
+		lp.chargingPeriodSince = time.Time{}
+	}
+	observeChargingPeriod(lp, sample, m.now())
+	lp.powerWindow = sample.PowerWindow()
 	lp.powerAt = sample.PowerAt
 	if lp.powerAt.IsZero() {
 		lp.powerAt = m.now()

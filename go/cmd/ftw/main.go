@@ -1761,6 +1761,7 @@ func main() {
 				ctrlMu.Lock()
 				noBatteryToEV := !(ctrl.BatteryCoversEV || boostActive)
 				ctrlMu.Unlock()
+				charging, chargeDuration := lpMgr.ChargingPeriod(st.ID)
 				specs = append(specs, &mpc.LoadpointSpec{
 					ID:               st.ID,
 					CapacityWh:       capWh,
@@ -1777,6 +1778,7 @@ func main() {
 					ChargeEfficiency: loadpoint.DefaultChargeEfficiency,
 					SurplusOnly:      loadpoint.PlannerTreatsLoadpointAsSurplusOnly(st.SurplusOnly, deferGridPlan),
 					NoBatteryToEV:    noBatteryToEV,
+					Charging:         mpc.DefaultChargingPeriods(charging, chargeDuration.Seconds()),
 				})
 			}
 			return specs

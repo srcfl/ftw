@@ -453,6 +453,18 @@ func validateLoadpointSpecs(loadpoints []*LoadpointSpec, assetIDs map[string]str
 		if err := requirePlanningEfficiency(field+".charge_efficiency", loadpoint.ChargeEfficiency, true); err != nil {
 			return err
 		}
+		for _, value := range []struct {
+			name   string
+			v, max float64
+		}{
+			{"min_charge_seconds", loadpoint.Charging.MinChargeSeconds, 86400},
+			{"start_cost_ore", loadpoint.Charging.StartCostOre, 1e6},
+			{"initial_charge_seconds", loadpoint.Charging.InitialChargeSeconds, 31536000},
+		} {
+			if !finite(value.v) || value.v < 0 || value.v > value.max {
+				return fmt.Errorf("%s.charging.%s is outside its finite bounds", field, value.name)
+			}
+		}
 		for stepIdx, stepW := range loadpoint.AllowedStepsW {
 			if !finite(stepW) || stepW < 0 {
 				return fmt.Errorf("%s.allowed_steps_w[%d] must be finite and non-negative", field, stepIdx)
