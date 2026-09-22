@@ -185,3 +185,55 @@ func (s *Store) walkSQLiteSeriesBuckets(ctx context.Context, driver, metric stri
 	}
 	return rows.Err()
 }
+
+// Earlier versions may have retired source detail while retaining its hourly
+// summary. Fill those source-free hours even when recent detail exists in the
+// same request. Do not invent first/last observations absent from that table.
+func (s *Store) addSummaryOnlySeriesBuckets(ctx context.Context, cold, driver, metric string, since, until, width int64, acc map[int64]*seriesBucketAcc) error {
+	for _, pathsFn := range []func(string, int64, int64) ([]string, error){parquetPaths, aggregatePaths} {
+		paths, err := pathsFn(cold, since, until)
+		if err != nil {
+			return err
+		}
+		if len(paths) > 0 {
+			return nil
+		}
+	}
+	if err := lockContext(ctx, s.archiveViewMu.TryRLock); err != nil {
+		return err
+	}
+	defer s.archiveViewMu.RUnlock()
+	rows, err := s.history.QueryContext(ctx, `SELECT (h.last_ts_ms-?)/?,MIN(h.hour_ms),MAX(h.last_ts_ms),SUM(h.n),SUM(h.sum_value),MIN(h.min_value),MAX(h.max_value)
+ FROM ts_series_hour h JOIN ts_drivers d ON d.id=h.driver_id JOIN ts_metrics m ON m.id=h.metric_id
+ WHERE d.name=? AND m.name=? AND h.hour_ms>=? AND h.hour_ms<=? AND h.last_ts_ms>=? AND h.last_ts_ms<=?
+ AND NOT EXISTS (SELECT 1 FROM ts_buckets b INDEXED BY sqlite_autoindex_ts_buckets_1
+ WHERE b.driver_id=h.driver_id AND b.metric_id=h.metric_id AND b.start_ms>=h.hour_ms AND b.start_ms<h.hour_ms+3600000)
+ AND NOT EXISTS (SELECT 1 FROM ts_samples r
+ WHERE r.driver_id=h.driver_id AND r.metric_id=h.metric_id AND r.ts_ms>=h.hour_ms AND r.ts_ms<h.hour_ms+3600000)
+ GROUP BY 1`, since, width, driver, metric, bucketStart(since, HistoryHourResolutionMS), bucketStart(until, HistoryHourResolutionMS), since, until)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, firstHour, last, n int64
+		var sum, minV, maxV float64
+		if err := rows.Scan(&key, &firstHour, &last, &n, &sum, &minV, &maxV); err != nil {
+			return err
+		}
+		a := acc[key]
+		if a == nil {
+			a = &seriesBucketAcc{}
+			acc[key] = a
+		}
+		if a.n == 0 || firstHour < a.first {
+			a.first = 0
+		}
+		if a.n == 0 || last >= a.last {
+			a.lastValue = nil
+		}
+		a.resolution = max(a.resolution, HistoryHourResolutionMS)
+		a.add(n, sum, minV, maxV, last)
+	}
+	return rows.Err()
+}

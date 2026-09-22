@@ -190,6 +190,11 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	if err != nil {
 		return nil, err
 	}
+	if s.seriesHoursReady() {
+		if err := s.addSummaryOnlySeriesBuckets(ctx, coldDir, driver, metric, since, until, width, acc); err != nil {
+			return nil, err
+		}
+	}
 	keys := make([]int64, 0, len(acc))
 	for k := range acc {
 		keys = append(keys, k)

@@ -243,3 +243,44 @@ func TestPlainMaintenanceHonorsBackupPauseAndRollsEnergy(t *testing.T) {
 		t.Fatalf("wrong policy: %v", policy)
 	}
 }
+
+func TestSQLiteChartIncludesRetiredHoursBesideRecentDetail(t *testing.T) {
+	s := freshStore(t)
+	old := time.Now().UTC().Add(-15 * 24 * time.Hour).Truncate(time.Hour).UnixMilli()
+	recent := old + 14*86400000
+	if err := s.RecordSamples([]Sample{{Driver: "meter", Metric: "amps", TsMs: old, Value: 8}, {Driver: "meter", Metric: "amps", TsMs: old + 5000, Value: 32}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ensureSeriesHours(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Match an upgraded box: raw rows are gone, but their hourly record remains.
+	if _, err := s.history.Exec(`DELETE FROM ts_samples`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnqueueTelemetryTick(nil, []Sample{{Driver: "meter", Metric: "amps", TsMs: recent, Value: 16}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushHistory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	points, err := s.LoadSeriesBucketsOrRaw("meter", "amps", old, recent+1000, 1000)
+	if err != nil || len(points) != 2 {
+		t.Fatalf("mixed chart: %+v %v", points, err)
+	}
+	if p := points[0]; p.N != 2 || p.V != 20 || p.Min != 8 || p.Max != 32 || p.Last != nil || p.FirstMS != 0 || p.ResolutionMS != HistoryHourResolutionMS {
+		t.Fatalf("retired evidence changed: %+v", p)
+	}
+	if p := points[1]; p.N != 1 || p.V != 16 || p.Last == nil || *p.Last != 16 {
+		t.Fatalf("recent evidence changed or doubled: %+v", p)
+	}
+	// The direct merged path must also combine both contributions when they
+	// share one output bucket, preserving the actual newest observation.
+	points, err = s.mergedSeries(context.Background(), s.coldDir, "meter", "amps", old, recent+1000, 1)
+	if err != nil || len(points) != 1 || points[0].N != 3 || math.Abs(points[0].V-56.0/3) > 1e-9 || points[0].Last == nil || *points[0].Last != 16 || points[0].FirstMS != 0 {
+		t.Fatalf("combined chart: %+v %v", points, err)
+	}
+}
