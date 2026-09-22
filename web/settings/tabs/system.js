@@ -116,6 +116,11 @@
 		'  .sys-help-secondary { margin:10px 0 0; color:var(--text-dim); font-size:0.8rem; }' +
         '</style>' +
         '<fieldset>' +
+        '<legend>Savings</legend>' +
+        '<label class="checkbox-row"><input type="checkbox" id="savings-compare-self"> Compare with a plain self-use battery</label>' +
+        '<p class="sys-help-secondary">The card compares with no solar and no battery. Tick this to compare with a battery that only stores surplus solar and covers the house. It changes at once.</p>' +
+        '</fieldset>' +
+        '<fieldset>' +
         '<legend>LAN password</legend>' +
         '<p class="sys-meta" id="sys-lan-auth-status">…</p>' +
         '<label for="sys-lan-auth-password">Password</label>' +
@@ -207,6 +212,17 @@
     },
 
     after: function (ctx) {
+      var savingsCompare = document.getElementById("savings-compare-self");
+      if (savingsCompare) {
+        var savedBaseline = "none";
+        try { savedBaseline = localStorage.getItem("ftw.savings.baseline") || "none"; } catch (e) {}
+        savingsCompare.checked = savedBaseline === "self";
+        savingsCompare.addEventListener("change", function () {
+          var baseline = savingsCompare.checked ? "self" : "none";
+          try { localStorage.setItem("ftw.savings.baseline", baseline); } catch (e) {}
+          window.dispatchEvent(new CustomEvent("ftw-savings-baseline", { detail: { baseline: baseline } }));
+        });
+      }
       var keyEl = document.getElementById("sys-assistant-key");
       if (keyEl) {
         keyEl.addEventListener("input", function () {

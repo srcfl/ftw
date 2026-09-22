@@ -4,7 +4,8 @@
 
 export const SAVINGS_LOOKBACK_DAYS = 31;
 
-export function buildSavingsPeriods(days) {
+export function buildSavingsPeriods(days, savedKey) {
+  const key = savedKey || "saved_ore";
   const rows = (Array.isArray(days) ? days : [])
     .filter((row) => row && /^\d{4}-\d{2}-\d{2}$/.test(String(row.day || "")))
     .slice()
@@ -14,18 +15,18 @@ export function buildSavingsPeriods(days) {
   const monthKey = latest ? String(latest.day).slice(0, 7) : "";
 
   return {
-    today: summarize(rows.slice(-1)),
-    week: summarize(rows.slice(-7)),
+    today: summarize(rows.slice(-1), key),
+    week: summarize(rows.slice(-7), key),
     month: summarize(monthKey
       ? rows.filter((row) => String(row.day).startsWith(monthKey + "-"))
-      : []),
+      : [], key),
   };
 }
 
-function summarize(rows) {
+function summarize(rows, savedKey) {
   const priced = rows.filter((row) => row.resolution !== "no_prices");
   return {
-    savedMinor: sum(priced, "saved_ore"),
+    savedMinor: sum(priced, savedKey),
     pricedDays: priced.length,
     totalDays: rows.length,
     available: priced.length > 0,
