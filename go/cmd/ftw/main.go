@@ -462,6 +462,7 @@ func main() {
 		}
 	}()
 
+	state.RetireRawOnOpen = true
 	st, err := state.OpenWithBackgroundHistory(statePath, coldDir, boot.setMigration)
 	if err != nil {
 		slog.Error("open state", "err", err)
@@ -469,6 +470,10 @@ func main() {
 	}
 	if err := st.EnableHistoryAggregation(); err != nil {
 		slog.Error("enable history aggregation", "err", err)
+		os.Exit(1)
+	}
+	if err := st.AbsorbColdHistory(context.Background(), coldDir); err != nil {
+		slog.Error("absorb cold history", "err", err)
 		os.Exit(1)
 	}
 	defer func() {
@@ -3323,13 +3328,10 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retention
 			dataMaintenanceMu.Lock()
 			defer dataMaintenanceMu.Unlock()
 		}
-		days := 0
-		if retentionDays != nil {
-			days = retentionDays()
-		}
-		if err := st.MaintainHistory(ctx, coldDir, days, time.Now()); err != nil {
+		if err := st.MaintainPlainHistory(ctx, time.Now()); err != nil {
 			slog.Warn("history maintenance incomplete", "err", err)
 		}
+		tick.Reset(time.Hour)
 		st.CheckpointWAL()
 
 		// Disk watch: an SD card that fills up takes SQLite down with it.

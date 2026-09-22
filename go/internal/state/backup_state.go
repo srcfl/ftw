@@ -23,10 +23,14 @@ func (s *Store) OfflineBackup() bool {
 }
 
 func (s *Store) backupWorkContext() (context.Context, context.CancelFunc) {
+	return s.backupWorkContextParent(context.Background())
+}
+
+func (s *Store) backupWorkContextParent(parent context.Context) (context.Context, context.CancelFunc) {
 	if s.OfflineBackup() {
-		return context.WithCancel(context.Background())
+		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(context.Background(), liveBackupTimeout)
+	return context.WithTimeout(parent, liveBackupTimeout)
 }
 
 func (s *Store) backupCopyYield(ctx context.Context) func() error {
@@ -37,7 +41,22 @@ func (s *Store) backupCopyYield(ctx context.Context) func() error {
 	if pause == nil {
 		pause = pauseMaintenance
 	}
-	return func() error { return pause(ctx) }
+	last := time.Now()
+	return func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// A fixed sleep per 1,024 rows alone exceeded the two-hour budget
+		// for the Pi's 161 million samples. Keep dirty commits bounded, but
+		// pace wall time and give queued live measurements immediate priority.
+		if s.backupPause != nil || time.Since(last) >= time.Second || s.HistoryWriterStatus().Pending >= historyCommitMaxTicks/2 {
+			if err := pause(ctx); err != nil {
+				return err
+			}
+			last = time.Now()
+		}
+		return nil
+	}
 }
 
 // BackupSourceBytes is the on-disk size of state and history files, including

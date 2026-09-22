@@ -135,6 +135,11 @@ func (s *Store) openHistory() error {
 	if err := os.Chmod(s.historyPath, 0600); err != nil {
 		return err
 	}
+	if RetireRawOnOpen {
+		if err := s.RetireRawHistory(context.Background()); err != nil {
+			return err
+		}
+	}
 	ok = true
 	return nil
 }
@@ -187,6 +192,7 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 	var tx *sql.Tx
 	var stmt *sql.Stmt
 	var pending, pendingBytes int
+	var copied int64
 	defer func() {
 		if stmt != nil {
 			stmt.Close()
@@ -215,6 +221,7 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 			return err
 		}
 		pending++
+		copied++
 		pendingBytes += conversionRowBytes(values)
 		if pending == 1024 || pendingBytes >= batchBytes {
 			stmt.Close()
@@ -223,6 +230,7 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 				return err
 			}
 			tx = nil
+			reportBackupRows(ctx, BackupPhaseCopying, table, copied)
 			pending, pendingBytes = 0, 0
 			if yield != nil {
 				if err := yield(); err != nil {
@@ -244,7 +252,14 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 		tx = nil
 	}
 	actual := sha256.New()
-	got, err := scan(ctx, dest, table, func(v []any) error { return hashHistoryRow(actual, v) })
+	var checked int64
+	got, err := scan(ctx, dest, table, func(v []any) error {
+		checked++
+		if checked%8192 == 0 {
+			reportBackupRows(ctx, "verifying_database", table, checked)
+		}
+		return hashHistoryRow(actual, v)
+	})
 	if err != nil {
 		return err
 	}

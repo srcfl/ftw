@@ -97,157 +97,6 @@ func walkParquetRows(ctx context.Context, path string, visit func([]parquetSampl
 	}
 }
 
-// A disposable SQLite merge file handles old day files whose equal-timestamp
-// rows were not sorted. It bounds both RAM and transaction size, and records
-// precisely which live rows may be pruned after verified publication.
-func (s *Store) archiveSampleDay(ctx context.Context, coldDir string, from, to int64) (int64, string, error) {
-	day := time.UnixMilli(from).UTC()
-	dir := filepath.Join(coldDir, day.Format("2006/01"))
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return 0, "", err
-	}
-	f, err := os.CreateTemp(dir, ".ftw-samples-*.db")
-	if err != nil {
-		return 0, "", err
-	}
-	stagePath := f.Name()
-	f.Close()
-	defer os.Remove(stagePath)
-	defer os.Remove(stagePath + "-journal")
-	stage, err := openArchiveStage(stagePath)
-	if err != nil {
-		return 0, "", err
-	}
-	defer stage.Close()
-	path := filepath.Join(dir, day.Format("02.parquet"))
-	if _, err := os.Stat(path); err == nil {
-		if err := s.summarizeParquetDay(ctx, path); err != nil {
-			return 0, "", err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return 0, "", err
-	}
-	err = walkParquetRows(ctx, path, func(rows []parquetSampleRow) error { return insertArchiveRows(ctx, stage, rows) })
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return 0, "", fmt.Errorf("read existing archive: %w", err)
-	}
-	var lastTs, lastD, lastM int64
-	started := false
-	var copied int64
-	for {
-		q := `SELECT s.ts_ms,d.name,m.name,s.value,s.driver_id,s.metric_id FROM ts_samples s JOIN ts_drivers d ON d.id=s.driver_id JOIN ts_metrics m ON m.id=s.metric_id WHERE s.ts_ms>=? AND s.ts_ms<?`
-		args := []any{from, to}
-		if started {
-			q += ` AND (s.ts_ms,s.driver_id,s.metric_id)>(?,?,?)`
-			args = append(args, lastTs, lastD, lastM)
-		}
-		q += ` ORDER BY s.ts_ms,s.driver_id,s.metric_id LIMIT 1024`
-		rows, err := s.history.QueryContext(ctx, q, args...)
-		if err != nil {
-			return copied, "", err
-		}
-		type row struct {
-			parquetSampleRow
-			d, m int64
-		}
-		batch := make([]row, 0, archiveBatchRows)
-		for rows.Next() {
-			var r row
-			if err := rows.Scan(&r.TsMs, &r.Driver, &r.Metric, &r.Value, &r.d, &r.m); err != nil {
-				rows.Close()
-				return copied, "", err
-			}
-			batch = append(batch, r)
-		}
-		err = errors.Join(rows.Err(), rows.Close())
-		if err != nil {
-			return copied, "", err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		tx, err := stage.BeginTx(ctx, nil)
-		if err != nil {
-			return copied, "", err
-		}
-		stmt, err := tx.PrepareContext(ctx, `INSERT INTO samples VALUES(?,?,?,?,?,?) ON CONFLICT(ts_ms,driver,metric) DO UPDATE SET value=excluded.value,driver_id=excluded.driver_id,metric_id=excluded.metric_id`)
-		if err == nil {
-			for _, r := range batch {
-				_, err = stmt.ExecContext(ctx, r.TsMs, r.Driver, r.Metric, r.Value, r.d, r.m)
-				if err != nil {
-					break
-				}
-			}
-			err = errors.Join(err, stmt.Close())
-		}
-		if err != nil {
-			tx.Rollback()
-			return copied, "", err
-		}
-		if err = tx.Commit(); err != nil {
-			return copied, "", err
-		}
-		copied += int64(len(batch))
-		last := batch[len(batch)-1]
-		lastTs, lastD, lastM, started = last.TsMs, last.d, last.m, true
-	}
-	if copied == 0 {
-		return 0, "", nil
-	}
-	if err := s.publishStagedSamples(ctx, path, stage); err != nil {
-		return copied, "", err
-	}
-	// Hourly totals already include live samples and any prior archive. Do
-	// not rebuild from this file: a late day can outlive its old raw retention.
-	if err := s.markParquetSummary(ctx, path); err != nil {
-		return copied, "", err
-	}
-	var deleted int64
-	started = false
-	for {
-		q := `SELECT ts_ms,driver_id,metric_id,value FROM samples WHERE driver_id IS NOT NULL`
-		var args []any
-		if started {
-			q += ` AND (ts_ms,driver_id,metric_id)>(?,?,?)`
-			args = []any{lastTs, lastD, lastM}
-		}
-		q += ` ORDER BY ts_ms,driver_id,metric_id LIMIT 1024`
-		rows, err := stage.QueryContext(ctx, q, args...)
-		if err != nil {
-			return deleted, "", err
-		}
-		var batch []resolvedSample
-		for rows.Next() {
-			var r resolvedSample
-			if err := rows.Scan(&r.ts, &r.dID, &r.mID, &r.v); err != nil {
-				rows.Close()
-				return deleted, "", err
-			}
-			batch = append(batch, r)
-		}
-		err = errors.Join(rows.Err(), rows.Close())
-		if err != nil {
-			return deleted, "", err
-		}
-		if len(batch) == 0 {
-			break
-		}
-		// Deleting only copied keys and values preserves late inserts/corrections
-		// that arrive while the file is being compressed and verified.
-		n, err := s.pruneArchivedSamples(ctx, batch)
-		deleted += n
-		if err != nil {
-			return deleted, "", err
-		}
-		last := batch[len(batch)-1]
-		lastTs, lastD, lastM, started = last.ts, last.dID, last.mID, true
-		if err := pauseMaintenance(ctx); err != nil {
-			return deleted, "", err
-		}
-	}
-	return deleted, path, nil
-}
-
 func (s *Store) publishStagedSamples(ctx context.Context, path string, stage *sql.DB) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".ftw-parquet-*.tmp")
 	if err != nil {
@@ -343,7 +192,7 @@ func (s *Store) publishStagedSamples(ctx context.Context, path string, stage *sq
 
 func (s *Store) pruneArchivedSamples(ctx context.Context, batch []resolvedSample) (int64, error) {
 	var deleted int64
-	limit := 64
+	limit := 1024
 	for len(batch) > 0 {
 		n := min(len(batch), limit)
 		var removed int64
@@ -381,7 +230,7 @@ func (s *Store) pruneArchivedSamples(ctx context.Context, batch []resolvedSample
 		}
 		deleted += removed
 		batch = batch[n:]
-		if len(batch) > 0 && s.HistoryWriterStatus().Pending > 0 {
+		if len(batch) > 0 && s.HistoryWriterStatus().Pending >= historyCommitMaxTicks/2 {
 			if err := pauseMaintenance(ctx); err != nil {
 				return deleted, err
 			}

@@ -105,6 +105,7 @@ export function updateMigrationBanner(health) {
   const current = health?.history_storage?.migration || health?.migration;
   if (current && (current.history_complete === true || !lastMigration || count(current.updated_at_ms) >= count(lastMigration.updated_at_ms))) lastMigration = current;
   if (health) lastHealth = health;
+  updateMaintenanceBanner(health, lastHealth);
   const view = migrationView(lastMigration, { boot: lastHealth?.status === "starting", connected: !!health, writer: health?.history_storage?.writer });
   let banner = document.getElementById("history-import-banner");
   if (!view) { banner?.remove(); return; }
@@ -128,4 +129,35 @@ export function updateMigrationBanner(health) {
   progress.setAttribute("aria-label", view.progress?.label || "History import progress");
   if (view.progress) { progress.max = view.progress.max; progress.value = view.progress.value; }
   else progress.removeAttribute("value");
+}
+
+export function maintenanceHTML(status, writer, { connected = true, now = Date.now() } = {}) {
+  if (!status || status.state === "complete" || status.state === "not_started") return "";
+  if (status.state === "running" && !status.last_error && now - count(status.started_ms) < 30000) return "";
+  const steps = { read_archive: "Reading saved history", copy_samples: "Preparing older readings", copy_buckets: "Preparing history summaries", verify_samples: "Verifying saved readings", verify_buckets: "Verifying history summaries", prune_samples: "Removing verified source readings", prune_buckets: "Removing verified source summaries", aggregate_legacy: "Summarizing older readings" };
+  const work = status.work || {};
+  const current = work[status.phase] || work.sample_archive || work.aggregate_archive || status;
+  const detail = [current.file, steps[current.operation] || "", count(current.rows_done) > 0 ? `${number(current.rows_done)}${count(current.rows_total) > 0 ? ` of ${number(current.rows_total)}` : ""} records processed in this step` : ""].filter(Boolean).join(" · ");
+  const title = !connected ? "History maintenance status unavailable" : status.last_error ? "History maintenance needs attention" : status.state === "paused" ? "History maintenance paused for backup" : status.state === "pending" ? "Older history will continue from saved progress" : "Maintaining saved history";
+  const age = writer?.last_commit_ms ? duration(Math.max(0, now - writer.last_commit_ms) / 1000) : "";
+  const writes = !connected ? "The box is not responding. Showing its last report." : writer?.last_error ? "New readings could not be saved: " + writer.last_error : age ? `Latest measurement batch saved ${age} ago.` : "";
+  return `<strong role="status">${escape(title)}</strong>${detail ? `<p>${escape(detail)}</p>` : ""}${writes ? `<p>${escape(writes)}</p>` : ""}${status.last_error ? `<p class="err">${escape(status.last_error)}</p>` : ""}`;
+}
+
+function updateMaintenanceBanner(health, lastHealth) {
+  const saved = lastHealth?.history_storage;
+  const html = maintenanceHTML(saved?.maintenance, saved?.writer, { connected: !!health });
+  let banner = document.getElementById("history-maintenance-banner");
+  if (!html) { banner?.remove(); return; }
+  if (!banner) {
+    const main = document.querySelector("main");
+    if (!main) return;
+    banner = document.createElement("section");
+    banner.id = "history-maintenance-banner";
+    banner.className = "storage-banner";
+    banner.setAttribute("aria-label", "History maintenance");
+    banner.style.cssText = "display:block;text-align:left;padding:12px 24px";
+    main.parentNode.insertBefore(banner, main);
+  }
+  if (banner.innerHTML !== html) banner.innerHTML = html;
 }

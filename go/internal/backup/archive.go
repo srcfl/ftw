@@ -79,6 +79,7 @@ type CreateOptions struct {
 	OutputDir   string
 	Components  ComponentInventory
 	Maintenance *sync.Mutex
+	Progress    func(state.BackupProgress)
 	Now         time.Time
 }
 
@@ -148,8 +149,22 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return Info{}, fmt.Errorf("backup: create output dir: %w", err)
 	}
+	if opts.Progress != nil {
+		opts.Progress(state.BackupProgress{Phase: "waiting_for_maintenance"})
+	}
+	resume, err := opts.State.PauseHistoryMaintenance(ctx)
+	if err != nil {
+		return Info{}, err
+	}
+	defer resume()
 	if opts.Maintenance != nil {
-		opts.Maintenance.Lock()
+		for !opts.Maintenance.TryLock() {
+			select {
+			case <-ctx.Done():
+				return Info{}, ctx.Err()
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
 		defer opts.Maintenance.Unlock()
 	}
 	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
@@ -186,7 +201,7 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 	defer os.RemoveAll(stageDir)
 	databaseGzip := filepath.Join(stageDir, "database.gz")
-	stored, hasStored, err := opts.State.BackupWithConfiguration(databaseGzip, nil)
+	stored, hasStored, err := opts.State.BackupWithConfigurationContext(ctx, databaseGzip, opts.Progress)
 	if err != nil {
 		return Info{}, err
 	}
@@ -254,11 +269,17 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 
 	tmpPath := filepath.Join(outputDir, "."+id+".tmp")
+	if opts.Progress != nil {
+		opts.Progress(state.BackupProgress{Phase: "packing_archive"})
+	}
 	if err := writeArchive(ctx, tmpPath, manifest, sources, !opts.State.OfflineBackup()); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, err
 	}
-	if _, err := verifyInWorkspace(tmpPath, outputDir); err != nil {
+	if opts.Progress != nil {
+		opts.Progress(state.BackupProgress{Phase: "verifying_archive"})
+	}
+	if _, err := verifyInWorkspaceContext(ctx, tmpPath, outputDir); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, fmt.Errorf("backup: verify finished archive: %w", err)
 	}
@@ -315,7 +336,7 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 		}
 		// Aggregate compaction scratch is derived from the retained source;
 		// restoring it is unnecessary and it may have an open SQLite journal.
-		if strings.HasPrefix(d.Name(), ".ftw-buckets-") {
+		if strings.HasPrefix(d.Name(), ".ftw-buckets-") || strings.HasPrefix(d.Name(), ".ftw-archive-") || strings.HasPrefix(d.Name(), ".ftw-samples-") || strings.HasPrefix(d.Name(), ".ftw-summary-") || strings.HasPrefix(d.Name(), ".ftw-parquet-") {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -500,12 +521,16 @@ func Verify(archivePath string) (Manifest, error) {
 // target. Inspect/verify prefer the archive filesystem, then the caller's
 // temporary workspace (TMPDIR) when the source directory is read-only.
 func verifyInWorkspace(archivePath, workspace string) (Manifest, error) {
+	return verifyInWorkspaceContext(context.Background(), archivePath, workspace)
+}
+
+func verifyInWorkspaceContext(ctx context.Context, archivePath, workspace string) (Manifest, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return Manifest{}, err
 	}
 	defer f.Close()
-	zr, err := gzip.NewReader(f)
+	zr, err := gzip.NewReader(backupContextReader{ctx, f})
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -604,7 +629,7 @@ func verifyInWorkspace(archivePath, workspace string) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("backup: hash mismatch for %s", entry.Path)
 		}
 		if parquetPath != "" {
-			if err := state.VerifyParquetFile(context.Background(), parquetPath); err != nil {
+			if err := state.VerifyParquetFile(ctx, parquetPath); err != nil {
 				return Manifest{}, fmt.Errorf("backup: unreadable Parquet %s: %w", entry.Path, err)
 			}
 			if err := os.Remove(parquetPath); err != nil {
@@ -615,7 +640,7 @@ func verifyInWorkspace(archivePath, workspace string) (Manifest, error) {
 	if len(seen) != len(want) {
 		return Manifest{}, errors.New("backup: archive is missing one or more manifest files")
 	}
-	if err := verifyCompressedDatabase(dbGzip, tmpDir); err != nil {
+	if err := verifyCompressedDatabaseContext(ctx, dbGzip, tmpDir); err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
@@ -1102,6 +1127,10 @@ func extractArchive(archivePath, staging string) error {
 }
 
 func verifyCompressedDatabase(src, workDir string) error {
+	return verifyCompressedDatabaseContext(context.Background(), src, workDir)
+}
+
+func verifyCompressedDatabaseContext(ctx context.Context, src, workDir string) error {
 	tmp, err := os.CreateTemp(workDir, ".ftw-backup-db-*.sqlite")
 	if err != nil {
 		return err
@@ -1109,20 +1138,29 @@ func verifyCompressedDatabase(src, workDir string) error {
 	name := tmp.Name()
 	_ = tmp.Close()
 	defer os.Remove(name)
-	if err := gunzipFile(src, name); err != nil {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := gunzipTo(backupContextReader{ctx, in}, name, 0600); err != nil {
 		return fmt.Errorf("backup: database gzip: %w", err)
 	}
-	return verifyDatabase(name)
+	return verifyDatabaseContext(ctx, name)
 }
 
 func verifyDatabase(dbPath string) error {
+	return verifyDatabaseContext(context.Background(), dbPath)
+}
+
+func verifyDatabaseContext(ctx context.Context, dbPath string) error {
 	db, err := sql.Open("sqlite", state.ReadOnlyDatabaseURI(dbPath))
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	var result string
-	if err := db.QueryRow("PRAGMA quick_check").Scan(&result); err != nil {
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
 		return fmt.Errorf("backup: SQLite quick_check: %w", err)
 	}
 	if result != "ok" {
@@ -1221,4 +1259,17 @@ func pathInside(root, candidate string) bool {
 	}
 	rel, err := filepath.Rel(rootAbs, candidateAbs)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// Keep cancellation effective while tar/gzip verification reads large files.
+type backupContextReader struct {
+	ctx context.Context
+	io.Reader
+}
+
+func (r backupContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(p)
 }

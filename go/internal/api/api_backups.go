@@ -14,6 +14,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/backup"
 	"github.com/srcfl/ftw/go/internal/components"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 type backupListEntry struct {
@@ -58,6 +59,7 @@ func (s *Server) handleBackups(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"enabled": true, "backups": backups, "dir": dir,
 		"on_device": s.deps.DataDir != "" && pathWithin(s.deps.DataDir, dir),
+		"progress":  s.deps.State.BackupProgress(),
 	})
 }
 
@@ -110,11 +112,14 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 		ConfigPath: s.deps.ConfigPath, State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
 		OutputDir: dir, Components: s.backupComponentInventory(r.Context()),
 		Maintenance: s.deps.DataMaintenanceMu,
+		Progress:    s.deps.State.ReportBackupProgress,
 	})
 	if err != nil {
+		s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "failed", Error: err.Error()})
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "complete", CompletedBytes: info.SizeBytes, TotalBytes: info.SizeBytes})
 	warning := ""
 	if err := writeVerification(info.Path, info); err != nil {
 		warning = "backup verified, but verification metadata could not be saved: " + err.Error()
