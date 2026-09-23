@@ -22,6 +22,16 @@ Linux archive and checksum. A 3.x Docker site never receives 0.x through the
 Update button. The last 3.x Docker release remains available for installed
 sites and urgent fixes while migration is tested.
 
+The public `latest` release and Docker `:latest` aliases must stay on the
+2.x line while boxes with the old updater remain. Their first 2.x to 3.x
+move needs the updater-first, verified-backup path below; the old Update
+button changes Core first. Publish the final 3.x stable under its exact tag
+without moving those aliases. Publish native 0.x releases with GitHub
+`make_latest=false` too. The new 3.x checker selects only 3.x releases,
+and the native checker selects only 0.x packages. The current stable
+workflow moves `latest`, so it must change before either new stable line
+can be published safely.
+
 A native beta is first validated on the home box and at least one other site.
 Only then does the owner promote the same tested source commit to
 `v0.131.0` stable. The beta and stable packages have different embedded
