@@ -822,7 +822,7 @@
       // with a waiting driver update should not read "up to date".
       const subtitle = pending.total === 0
         ? (info.native && info.channel === "stable" && /-beta\./.test(info.current || "")
-          ? "No newer 0.x stable release is published yet."
+          ? "No newer 0.x stable package is ready yet."
           : "Everything is up to date.")
         : pending.total === 1
         ? "1 update available."
@@ -1116,7 +1116,7 @@
       const coreStatus = info.update_available
         ? `<span class="status-pending">${escapeHTML(info.latest || "update")} available</span>`
         : info.native && info.channel === "stable" && /-beta\./.test(info.current || "")
-        ? `<span class="dim">beta installed; stable not published</span>`
+        ? `<span class="dim">beta installed; stable package not ready</span>`
         : `<span class="dim">up to date</span>`;
 
       // One table listing every component, whether or not it has work waiting.

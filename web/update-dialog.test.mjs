@@ -84,8 +84,8 @@ test("native beta shows the stable gap and offers binary rollback without online
   rig.badge._components = { core: { version: "v0.131.0-beta.1" } };
   rig.badge._snapshots.snapshots = [{ id: "pre-update", restorable: true }];
   rig.badge._render();
-  assert.match(rig.root().innerHTML, /No newer 0\.x stable release is published yet/);
-  assert.match(rig.root().innerHTML, /beta installed; stable not published/);
+  assert.match(rig.root().innerHTML, /No newer 0\.x stable package is ready yet/);
+  assert.match(rig.root().innerHTML, /beta installed; stable package not ready/);
   assert.match(rig.root().innerHTML, /Return to v0\.130\.4/);
   assert.match(rig.root().innerHTML, /Offline restore/);
   assert.doesNotMatch(rig.root().innerHTML, /data-action="rollback-snapshot"/);
