@@ -3,11 +3,11 @@
 [ADR 0007](adr/0007-self-updating-binary.md) sets the direction for native Core
 updates. That change has not shipped. This page describes what ships today.
 
-The old Docker release path is reserved for 2.x maintenance. A native 0.x
-release needs its own path and must leave GitHub `releases/latest` and the old
-Docker `:latest` aliases on 2.x for installed boxes. A Docker 1.x or 2.x box
-must use the guided migration to reach native 0.x; Update Center must not
-offer a cross-major Core update.
+The old Docker release path is frozen. A native 0.x release needs its own path
+and must leave GitHub `releases/latest` and the old Docker `:latest` aliases
+on 2.x for installed boxes. A Docker box on 1.x, 2.x or 3.x uses the same
+guided migration to reach native 0.x directly, with no update through an
+intermediate Docker version. An urgent old-line repair remains possible.
 
 FTW has two channels:
 
@@ -24,21 +24,21 @@ migrated to `beta`; no edge releases are published or accepted.
 The native binary line starts at `v0.131.0-beta.1`. It has its own stable and
 beta selection: it only considers published 0.x releases with the matching
 Linux archive and checksum. A 3.x Docker site never receives 0.x through the
-Update button. The last 3.x Docker release remains available for installed
-sites and urgent fixes while migration is tested.
+Update button. Existing Docker releases remain available for installed sites
+while migration is tested; no new old-line release is planned.
 
-Installed 1.x and 2.x boxes stay on their own release lines until the new
-guided migration installer is ready. They must not use Update to enter 3.x.
+Installed 1.x, 2.x and 3.x boxes stay where they are until their owners use
+the guided migration installer. A 1.x or 2.x box must not use Update to enter 3.x.
 The guard in new Core code hides cross-line offers and rejects direct update
 requests, but it cannot change an older binary already installed on a box.
 In particular, an older beta box can still display a 3.x release: do not
 start that update. Keep the public `latest` release and Docker `:latest`
-aliases on the 2.x line. Publish the final 3.x stable under its exact tag
-without moving those aliases. Publish native 0.x releases with GitHub
-`make_latest=false` too. The new 3.x checker selects only 3.x releases,
-and the native checker selects only 0.x packages. The current stable
-workflow moves `latest`, so it must change before either new stable line
-can be published safely.
+aliases on the 2.x line. Publish native 0.x releases with GitHub
+`make_latest=false`. The native checker selects only 0.x packages. The old
+stable workflow moves `latest`, so a separate native workflow is required.
+Older installed code cannot have its Update button removed after the fact;
+it may still show an already published release. That button is not the way
+to migrate.
 
 A native beta is first validated on the home box and at least one other site.
 Only then does the owner promote the same tested source commit to
@@ -46,7 +46,8 @@ Only then does the owner promote the same tested source commit to
 version strings, so each published package needs its own hash and release
 receipt. A tag or green CI run alone is not a deployed release.
 
-Existing Docker users move through a separate installer, not a version check.
+Existing Docker users on any old version move through one installer, not a
+version check.
 The installer must make and verify a full off-device backup, stop the old
 service, keep the data directory and site identity, install the native
 service, then verify Core, history, drivers and control on that site. It must

@@ -128,8 +128,8 @@ to it. No native update needs a Docker socket or Docker engine.**
 7. **New Docker packaging becomes a plain image.** The Compose file has one
    Core service and Mosquitto, no sidecar and no `update-ipc` volume. The
    version notice stays, and `docker compose pull` is the documented path.
-   Existing 1.x and 2.x installs keep their supported release line until the
-   guided migration is ready. The Home Assistant add-on stays on Supervisor.
+   Existing 1.x, 2.x and 3.x Docker installs remain in place until their owners
+   use the guided migration. The Home Assistant add-on stays on Supervisor.
 
 8. **Betas are weekly.** `beta.yml` runs on a schedule, not after every
    Version Packages merge. A hotfix beta needs a `release-blocker`. Stable
@@ -147,15 +147,17 @@ to it. No native update needs a Docker socket or Docker engine.**
 anything may change, and that is the true state of FTW.
 
 1. **The first binary release is `v0.131.0`.** It continues the counter that
-   stopped at `v0.130.4`; those tags exist and cannot be reused. The Docker
-   feature line ends at its last 3.x release; 2.x maintenance may continue.
+   stopped at `v0.130.4`; those tags exist and cannot be reused. The old
+   Docker lines stop receiving routine releases. A critical safety fix may
+   still need an old-line release before a site can migrate.
 
 2. **The reset happens at the native cutover, and nowhere else.** No Docker
    box uses Update Center to move between the 1.x/2.x, 3.x and native 0.x
-   lines. Existing 1.x and 2.x boxes do not need a 3.x hop. A separate guided
-   installer performs the move after a verified full backup off the box and
-   checks that the new service, data and devices work. It must retain a way
-   back to the old installation if that check fails. No epoch rule or
+   lines. Every old Docker box, whether on 1.x, 2.x or 3.x, moves directly to
+   native 0.x through the same guided installer. It performs the move after
+   a verified full backup off the box and checks that the new service, data
+   and devices work. It must retain a way back to the old installation if
+   that check fails. No epoch rule or
    transitional release is needed.
 
 3. **There is no major bump in 0.x.** `major` leaves the changeset rules, and
@@ -171,16 +173,16 @@ anything may change, and that is the true state of FTW.
    `releases/latest` response and the old Docker `:latest` aliases remain on
    safe 2.x releases while old stable clients read them. A native 0.x stable
    release must use exact tags without taking over that global latest slot.
-   A maintenance release adds the cross-major guard to 2.x Core; binaries
-   shipped before that release cannot be changed in place. Old betas can
-   still offer 3.x until they receive the guard, so no one should use that
-   Update button for migration.
+   New Core code has a cross-major guard, but that cannot change a binary
+   already installed on a box. Old stable boxes may still see an already
+   published 2.x release, and old betas may still offer 3.x. Those buttons
+   are not the migration path.
 
 ## What is lost
 
-- **In-app update on new Docker installs.** They keep the version notice and
-  get a command. Older supported Docker installs keep same-line maintenance
-  until the guided migration exists.
+- **In-app update on Docker installs.** Old installations stay where they are.
+  An owner who wants a new version uses the guided move to native 0.x.
+  The old code cannot have its update button removed retroactively.
 - **In-app update on Windows and macOS.** Manual replacement stays until a
   launcher exists for those platforms.
 - **The capability handshake and the six-hour readiness budget.** Both existed
@@ -211,10 +213,10 @@ anything may change, and that is the true state of FTW.
 - **Added:** download and verify, the slot swap and commit, a launcher script
   and its tests, and installer support for the binary layout. Rough size:
   a few hundred lines of Go and under a hundred of shell.
-- **Existing Docker boxes.** A same-line maintenance release can point users
-  at the installer. The installer first creates and verifies a full backup
-  kept off the box. It preserves config, history, site identity and device
-  goals, checks the new service and connected devices, and can return to the
+- **Existing Docker boxes.** The same guided installer accepts 1.x, 2.x and
+  3.x without an intermediate update. It first creates and verifies a full
+  backup kept off the box. It preserves config, history, site identity and
+  device goals, checks the new service and connected devices, and can return to the
   prior installation on failure. Whether it reuses or copies the data path is
   an installer choice that must be tested on real layouts.
 - **Disk.** Two or three release directories, tens of megabytes each, instead
