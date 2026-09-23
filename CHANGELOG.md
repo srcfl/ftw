@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.3
+
+### Patch Changes
+
+- Keep existing 1.x and 2.x Core installs on their own update line until the guided native migration is ready.
+
 ## 2.3.2
 
 ### Patch Changes

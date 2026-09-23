@@ -41,6 +41,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -363,11 +364,16 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		repo:       c.cfg.Image,
 		service:    c.cfg.RegistryService,
 	}
-	rel, deployable, err := c.resolveChannel(ctx, channel)
+	rel, deployable, err := c.resolveChannel(ctx, channel, cached.Current)
 	if err != nil {
 		return c.recordErr(err)
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
+	if c.cfg.ReleaseTagPrefix == "" && legacyCoreReleaseLocked(cached.Current, targetTag) {
+		// A legacy Core stays on its own release line until the guided
+		// migration path is ready, even when beta lists a newer major.
+		rel, targetTag, deployable = ghRelease{}, "", false
+	}
 	if targetTag != "" {
 		ok, err := rp.hasTag(ctx, targetTag)
 		if err != nil {
@@ -425,7 +431,8 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	return info, nil
 }
 
-func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghRelease, bool, error) {
+func (c *Checker) resolveChannel(ctx context.Context, channel Channel, current string) (ghRelease, bool, error) {
+	legacyCore := c.cfg.ReleaseTagPrefix == "" && legacyCoreMajor(current) != 0
 	switch channel {
 	case ChannelStable:
 		if c.cfg.ReleaseTagPrefix != "" {
@@ -433,8 +440,24 @@ func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghReleas
 			return rel, rel.TagName != "", err
 		}
 		rel, err := c.fetchLatestRelease(ctx)
+		if err == nil && legacyCore && rel.TagName != "" && legacyCoreReleaseLocked(current, rel.TagName) {
+			// GitHub's public latest may move past an older Docker line.
+			// Search its published releases for maintenance on this line.
+			rel, err = c.fetchReleaseList(ctx, func(candidate ghRelease) bool {
+				return !candidate.Prerelease && isStableTag(candidate.TagName) &&
+					!legacyCoreReleaseLocked(current, candidate.TagName)
+			})
+		}
 		return rel, rel.TagName != "", err
 	case ChannelBeta:
+		if legacyCore {
+			rel, err := c.fetchReleaseList(ctx, func(candidate ghRelease) bool {
+				return ((!candidate.Prerelease && isStableTag(candidate.TagName)) ||
+					(candidate.Prerelease && isBetaTag(candidate.TagName))) &&
+					!legacyCoreReleaseLocked(current, candidate.TagName)
+			})
+			return rel, rel.TagName != "", err
+		}
 		rel, err := c.fetchBetaRelease(ctx)
 		return rel, rel.TagName != "", err
 	default:
@@ -556,28 +579,58 @@ func (c *Checker) fetchPrefixedRelease(ctx context.Context, includeBeta bool) (g
 }
 
 func (c *Checker) fetchReleaseList(ctx context.Context, accept func(ghRelease) bool) (ghRelease, error) {
-	resp, err := c.getGitHub(ctx, c.cfg.ReleasesURL)
-	if err != nil {
-		return ghRelease{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return ghRelease{}, fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var releases []ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases); err != nil {
-		return ghRelease{}, err
-	}
-	for _, rel := range releases {
-		if rel.Draft {
-			continue
+	rawURL := c.cfg.ReleasesURL
+	seen := make(map[string]bool)
+	for rawURL != "" {
+		if seen[rawURL] {
+			return ghRelease{}, errors.New("github releases list: repeated page")
 		}
-		if accept(rel) {
-			return rel, nil
+		seen[rawURL] = true
+		resp, err := c.getGitHub(ctx, rawURL)
+		if err != nil {
+			return ghRelease{}, err
+		}
+		if resp.StatusCode >= 400 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+			_ = resp.Body.Close()
+			return ghRelease{}, fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		var releases []ghRelease
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return ghRelease{}, decodeErr
+		}
+		for _, rel := range releases {
+			if !rel.Draft && accept(rel) {
+				return rel, nil
+			}
+		}
+		rawURL, err = nextReleasePage(resp.Header.Get("Link"), rawURL)
+		if err != nil {
+			return ghRelease{}, err
 		}
 	}
 	return ghRelease{}, nil
+}
+
+func nextReleasePage(linkHeader, currentURL string) (string, error) {
+	current, err := url.Parse(currentURL)
+	if err != nil {
+		return "", err
+	}
+	for _, link := range strings.Split(linkHeader, ",") {
+		parts := strings.Split(link, ";")
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) != `rel="next"` {
+			continue
+		}
+		next, err := url.Parse(strings.Trim(strings.TrimSpace(parts[0]), "<>"))
+		if err != nil || next.Scheme != current.Scheme || next.Host != current.Host {
+			return "", errors.New("github releases list: invalid next page")
+		}
+		return next.String(), nil
+	}
+	return "", nil
 }
 
 func (c *Checker) releaseTargetTag(releaseTag string) string {
@@ -731,6 +784,9 @@ func (c *Checker) TriggerComponent(ctx context.Context, action, target, componen
 // TriggerComponentAt preserves the audit operation's start time across a Core
 // container recreation so the new process finishes the same history record.
 func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, component string, startedAt time.Time) error {
+	if action == "update" && component == "core" && legacyCoreReleaseLocked(c.Info().Current, target) {
+		return errors.New("selfupdate: this Core release line is locked; use the guided migration installer")
+	}
 	if c.cfg.SocketPath == "" {
 		return errors.New("selfupdate: sidecar socket not configured")
 	}
@@ -925,6 +981,23 @@ func channelUpdateAvailable(latest, current string) bool {
 		return false
 	}
 	return isNewer(latest, current)
+}
+
+func legacyCoreReleaseLocked(current, target string) bool {
+	major := legacyCoreMajor(current)
+	if major == 0 || target == "" {
+		return false
+	}
+	candidate := parseSemanticVersion(target)
+	return candidate == nil || candidate.numbers[0] != major
+}
+
+func legacyCoreMajor(current string) int {
+	running := parseSemanticVersion(current)
+	if running == nil || (running.numbers[0] != 1 && running.numbers[0] != 2) {
+		return 0
+	}
+	return running.numbers[0]
 }
 
 func isBetaTag(tag string) bool {
