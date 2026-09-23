@@ -1,225 +1,154 @@
 #!/usr/bin/env bash
-# FTW one-shot installer.
-#
-# Designed for a fresh Raspberry Pi OS (arm64) host but works on any
-# Debian/Ubuntu-flavoured Linux with curl + sudo. Existing installations use
-# scripts/migrate-legacy-compose.sh instead.
-#
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-#
-# What this does:
-#   1. Installs Docker Engine + the `docker compose` plugin via
-#      get.docker.com (skipped if Docker is already present).
-#   2. Adds your user to the `docker` group.
-#   3. Creates ~/ftw with data/ owned by the in-container ftw user
-#      (uid 100 / gid 101).
-#   4. Fetches docker-compose.yml from the repo.
-#   5. Pulls the multi-arch image from GHCR and starts the container.
-#
-# Override via env vars (optional):
-#   FTW_DIR=/srv/ftw       # explicit install location
-#   FTW_BRANCH=some-branch # pull docker-compose.yml from a non-master branch
-
+# Install one published native 0.x release on a fresh Linux host.
+# Existing FTW installations need the separate guided migration.
 set -euo pipefail
 
-# ---- Config (override via env) ----
-REPO="srcfl/ftw"
-BRANCH="${FTW_BRANCH:-master}"
-if [ -n "${FTW_DIR:-}" ]; then
-  INSTALL_DIR="$FTW_DIR"
-elif [ -f "$HOME/ftw/docker-compose.yml" ]; then
-  INSTALL_DIR="$HOME/ftw"
-elif [ -f "$HOME/forty-two-watts/docker-compose.yml" ]; then
-  INSTALL_DIR="$HOME/forty-two-watts"
-elif [ -d "$HOME/ftw" ]; then
-  INSTALL_DIR="$HOME/ftw"
-else
-  INSTALL_DIR="$HOME/ftw"
-fi
-COMPOSE_URL="${FTW_COMPOSE_URL:-https://raw.githubusercontent.com/${REPO}/${BRANCH}/docker-compose.yml}"
-MIGRATION_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/scripts/migrate-legacy-compose.sh"
+usage() {
+  cat <<'EOF'
+Usage: install.sh --tag v0.X.Y[-beta.N]
 
-# Banner
-cat <<'BANNER'
-
-  ┌─────────────────────────────────────────────────┐
-  │     FTW installer                               │
-  │     Local-first home energy coordination.       │
-  └─────────────────────────────────────────────────┘
-
-BANNER
-
-# ---- Platform guard ----
-# This installer is Linux-only (apt-get, get.docker.com, `hostname -I`,
-# usermod, host networking). On macOS the deploy story is different —
-# Docker Desktop + the dedicated macOS compose file. Bail early with a
-# pointer instead of failing halfway through with cryptic errors.
-if [ "$(uname -s)" = "Darwin" ]; then
-  cat >&2 <<'EOF'
-This installer is for Linux only.
-
-On macOS, install Docker Desktop and use docker-compose.macos.yml:
-
-  mkdir -p ~/ftw/data && cd ~/ftw
-  curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/docker-compose.macos.yml -o docker-compose.macos.yml
-  docker compose -f docker-compose.macos.yml up -d
-
-Operational notes: https://github.com/srcfl/ftw/blob/master/docs/operations.md
+Install one exact published native 0.x release on a fresh 64-bit Linux host.
+There is no default tag: GitHub releases/latest still serves old Docker boxes.
+An existing FTW installation must wait for the guided 0.x migration. This
+script will not replace it or update a Docker container.
 EOF
-  exit 1
+}
+
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+  usage
+  exit 0
 fi
-
-if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
-  cat >&2 <<EOF
-An existing FTW Docker Compose installation was found at:
-  $INSTALL_DIR
-
-The fresh installer will not overwrite it. Run the rollback-safe migration:
-
-  curl -fsSL $MIGRATION_URL -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh --dir "$INSTALL_DIR"
-
-Guide: https://github.com/srcfl/ftw/blob/$BRANCH/docs/upgrade-from-legacy.md
-EOF
+if [[ "$#" != 2 || "${1:-}" != --tag ]]; then
+  usage >&2
+  exit 2
+fi
+tag="$2"
+if [[ ! "$tag" =~ ^v0\.([1-9][0-9]*)\.(0|[1-9][0-9]*)(-beta\.([1-9][0-9]*))?$ ]] ||
+   (( ${BASH_REMATCH[1]:-0} < 131 )); then
+  echo "A native release tag v0.131.0 or later is required: $tag" >&2
   exit 2
 fi
 
-# ---- Prerequisites ----
-if ! command -v curl >/dev/null 2>&1; then
-  echo "ERROR: 'curl' is required. Install with:" >&2
-  echo "       sudo apt-get update && sudo apt-get install -y curl" >&2
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "The native installer requires Linux and systemd." >&2
+  exit 2
+fi
+case "$(uname -m)" in
+  aarch64|arm64) arch=arm64 ;;
+  x86_64|amd64) arch=amd64 ;;
+  *) echo "A 64-bit ARM or AMD64 host is required." >&2; exit 2 ;;
+esac
+for tool in curl tar sha256sum mktemp systemctl; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Missing required tool: $tool" >&2
+    exit 2
+  fi
+done
+
+# Refuse a known running site before asking for sudo. The root check below
+# repeats the path check in case a directory was hidden from this account.
+existing_paths=(
+  /opt/ftw /var/lib/ftw /etc/systemd/system/ftw.service
+  /etc/systemd/system/forty-two-watts.service
+  "$HOME/ftw/docker-compose.yml"
+  "$HOME/forty-two-watts/docker-compose.yml"
+)
+for path in "${existing_paths[@]}"; do
+  if [[ -e "$path" || -L "$path" ]]; then
+    echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
+    exit 2
+  fi
+done
+if systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
+   systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
+   id ftw >/dev/null 2>&1; then
+  echo "An FTW service or account already exists; refusing a fresh install." >&2
+  exit 2
+fi
+
+if (( EUID == 0 )); then
+  as_root() { "$@"; }
+else
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "sudo is required to install the service." >&2
+    exit 2
+  fi
+  sudo -v
+  as_root() { sudo "$@"; }
+fi
+
+# A fresh installer must never take ownership of a site that is already
+# controlling equipment. Check known native paths, old Compose homes and both
+# service names before downloading or changing any host state.
+for path in "${existing_paths[@]}"; do
+  if as_root test -e "$path" || as_root test -L "$path"; then
+    echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
+    exit 2
+  fi
+done
+if as_root systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
+   as_root systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
+   id ftw >/dev/null 2>&1; then
+  echo "An FTW service or account already exists; refusing a fresh install." >&2
+  exit 2
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+archive="ftw-linux-${arch}.tar.gz"
+url="https://github.com/srcfl/ftw/releases/download/${tag}"
+curl --fail --silent --show-error --location --retry 3 --proto '=https' \
+  --proto-redir '=https' "${url}/${archive}" -o "${work}/${archive}"
+curl --fail --silent --show-error --location --retry 3 --proto '=https' \
+  --proto-redir '=https' "${url}/${archive}.sha256" -o "${work}/${archive}.sha256"
+
+checksum="$(cat "${work}/${archive}.sha256")"
+expected="${checksum:0:64}"
+if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ||
+      "${checksum:64:2}" != "  " || "${checksum:66}" != "$archive" ]]; then
+  echo "The release checksum does not name the expected package." >&2
+  exit 1
+fi
+actual="$(sha256sum "${work}/${archive}" | cut -d ' ' -f 1)"
+if [[ "$actual" != "$expected" ]]; then
+  echo "The release package checksum does not match." >&2
   exit 1
 fi
 
-# Docker install + chown need root. Prime sudo up-front so we don't
-# interrupt the flow mid-way with a password prompt that the user
-# might miss when the script is piped from curl.
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  if ! command -v sudo >/dev/null 2>&1; then
-    echo "ERROR: 'sudo' is required when not running as root." >&2
+# The package's launcher checks every archive entry, the embedded version,
+# architecture and state schema before it makes a complete release visible.
+tar -xOf "${work}/${archive}" ftw-launcher > "${work}/ftw-launcher"
+chmod 0755 "${work}/ftw-launcher"
+stage="${work}/slot-root"
+mkdir -p "$stage"
+"${work}/ftw-launcher" -root "$stage" install "$tag" \
+  "${work}/${archive}" "${work}/${archive}.sha256"
+"${work}/ftw-launcher" -root "$stage" init "$tag"
+"${work}/ftw-launcher" -root "$stage" status >/dev/null
+
+# No host write occurs until the whole package has passed verification.
+as_root useradd --system --user-group --home-dir /var/lib/ftw --no-create-home ftw
+as_root install -d -m 0755 /opt/ftw
+as_root cp -a "${stage}/." /opt/ftw/
+as_root install -m 0755 "${work}/ftw-launcher" /opt/ftw/ftw-launcher
+as_root chown -R ftw:ftw /opt/ftw
+as_root install -m 0644 \
+  "${stage}/releases/${tag}/deploy/ftw-native.service" \
+  /etc/systemd/system/ftw.service
+as_root systemctl daemon-reload
+if ! as_root systemctl enable --now ftw.service; then
+  as_root systemctl disable --now ftw.service || true
+  echo "FTW did not start; the verified package remains at /opt/ftw for inspection." >&2
+  exit 1
+fi
+for _ in 1 2 3; do
+  sleep 2
+  if ! as_root systemctl is-active --quiet ftw.service; then
+    as_root systemctl disable --now ftw.service || true
+    echo "FTW stopped during startup; inspect journalctl -u ftw before retrying." >&2
     exit 1
   fi
-  SUDO="sudo"
-  echo "This installer needs sudo to install Docker. You may be prompted for your password."
-  echo ""
-  sudo -v
-fi
+done
 
-# ---- 1. Docker ----
-echo "==[1/5]== Installing Docker Engine + compose plugin"
-if command -v docker >/dev/null 2>&1; then
-  echo "    Docker is already installed — skipping."
-else
-  curl -fsSL https://get.docker.com | $SUDO sh
-fi
-
-# get.docker.com ships the compose plugin on current Debian/Raspbian,
-# but older systems may need it installed separately.
-if ! $SUDO docker compose version >/dev/null 2>&1; then
-  echo "    Installing docker-compose-plugin separately..."
-  $SUDO apt-get update -qq
-  $SUDO apt-get install -y -qq docker-compose-plugin
-fi
-
-# uidmap (newuidmap/newgidmap) is required if the user later wants to
-# switch to rootless Docker via `dockerd-rootless-setuptool.sh install`.
-# Tiny package, harmless to have, saves a confusing second-step detour.
-if ! command -v newuidmap >/dev/null 2>&1; then
-  echo "    Installing uidmap (needed for rootless Docker)..."
-  $SUDO apt-get update -qq
-  $SUDO apt-get install -y -qq uidmap
-fi
-
-# ---- 2. Docker group ----
-echo ""
-echo "==[2/5]== Adding $USER to the docker group"
-if id -nG "$USER" 2>/dev/null | grep -qw docker; then
-  echo "    $USER is already in the docker group — skipping."
-  NEED_RELOGIN=0
-else
-  $SUDO usermod -aG docker "$USER"
-  echo "    Done. You'll need to run 'newgrp docker' or log out + back in"
-  echo "    before 'docker' works without sudo in your shell."
-  NEED_RELOGIN=1
-fi
-
-# ---- 3. Install directory ----
-echo ""
-echo "==[3/5]== Preparing install directory: $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR/data"
-# The image runs as uid 100 / gid 101 — a bare numeric USER, no account is
-# created in the image at all (see Dockerfile). A bind-mounted host dir must
-# match those IDs so SQLite can create state.db inside it.
-$SUDO chown -R 100:101 "$INSTALL_DIR/data"
-
-# ---- 4. docker-compose.yml ----
-echo ""
-echo "==[4/5]== Preparing docker-compose.yml from $BRANCH"
-COMPOSE_PATH="$INSTALL_DIR/docker-compose.yml"
-curl -fsSL "$COMPOSE_URL" -o "$COMPOSE_PATH"
-
-# ---- 5. Pull + start ----
-# Run Docker as the invoking user when its current shell already has access.
-# If the user was just added to the docker group, use sudo for this first run;
-# the next login picks up group membership. NEED_RELOGIN from step 2 is authoritative:
-# `id -nG "$USER"` reads /etc/group (already updated by usermod), not the
-# current process's credentials, so it can't answer this question.
-if [ "$(id -u)" -eq 0 ] || [ "$NEED_RELOGIN" = "0" ]; then
-  run_docker() { docker "$@"; }
-else
-  run_docker() { sudo docker "$@"; }
-fi
-
-echo ""
-echo "==[5/5]== Pulling image + starting container"
-cd "$INSTALL_DIR"
-# Pull the newest images, but don't let a GitHub/GHCR outage block the install:
-# GHCR is GitHub-hosted, so when GitHub is degraded `compose pull` fails, and
-# under `set -e` that would abort the whole install before anything starts.
-# Fall through to `up -d`, which starts from any locally-present image
-# (last-known-good) instead — only a genuinely fresh host with no local image
-# still needs GHCR reachable.
-if ! run_docker compose pull; then
-  echo "  ! image pull failed (GHCR/GitHub unreachable?) — starting with locally-present images if any"
-fi
-run_docker compose up -d
-
-# ---- Summary ----
-HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-[ -z "$HOST_IP" ] && HOST_IP="localhost"
-
-cat <<EOF
-
-──────────────────────────────────────────────────────────────────
-  ✓ FTW is running.
-
-  Open the dashboard:
-     http://${HOST_IP}:8080/         (from another device on the LAN)
-     http://localhost:8080/          (from this machine)
-
-  First-time setup wizard:
-     http://${HOST_IP}:8080/setup
-
-  Install directory:    ${INSTALL_DIR}
-  Persistent data:      ${INSTALL_DIR}/data/
-    └── config.yaml, state.db, battery models, cold/ rolloff
-
-  Manage the container (from ${INSTALL_DIR}):
-     docker compose logs -f                      # tail logs
-     docker compose pull; docker compose up -d   # upgrade (a failed pull keeps the current image running)
-     docker compose down                         # stop
-
-EOF
-
-if [ "$NEED_RELOGIN" = "1" ]; then
-  cat <<'EOF'
-  NOTE: your current shell isn't in the docker group yet. Until you log
-        out + back in (or run 'newgrp docker'), prefix docker commands
-        with sudo, e.g.  `sudo docker compose logs -f`.
-
-EOF
-fi
-
-echo "──────────────────────────────────────────────────────────────────"
+echo "Native FTW $tag is running. Open http://<host>:8080/setup to finish setup."
+echo "Check the reported version, storage health and live device readings before use."

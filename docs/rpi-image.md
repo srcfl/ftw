@@ -1,8 +1,9 @@
-# Raspberry Pi image
+# Legacy Raspberry Pi image
 
-The recommended Raspberry Pi 4/5 installation uses Raspberry Pi Imager and the
-FTW image repository. Imager downloads the image and lets you set hostname, SSH
-credentials and Wi-Fi before writing the card.
+The published Raspberry Pi image uses the older Docker install path. It is
+kept for existing sites and is not the new native 0.x install path. Do not
+flash it to start a new 0.x site. The native image has not shipped. The steps
+below describe the former Raspberry Pi Imager path and remain for reference.
 
 ## Install
 

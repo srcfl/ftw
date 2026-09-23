@@ -118,17 +118,13 @@ Bien hecho — ya estás "dentro" de la Raspberry Pi.
 
 ## Paso 11 — Instalar FTW
 
-Copia esta línea EXACTAMENTE tal como está:
+El instalador antiguo de Docker de una sola línea ya no se usa. Native 0.x
+sigue en pruebas; esta guía aún no ofrece una instalación general. Si participas
+en la beta y tienes una Pi nueva de 64 bits, sigue los pasos con una versión
+exacta en la [guía de instalación](../operations.md#install). Si FTW ya se
+ejecuta en tu Pi, conserva su versión hasta que esté lista la migración guiada.
 
-```
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-```
-
-Pégala en la terminal o PuTTY (el clic derecho suele pegar) y pulsa enter.
-
-Escribe tu contraseña una vez más. Ahora se instala todo. Tarda unos minutos. **Y ya está listo.**
-
-## Terminado
+## Después de la instalación
 
 Abre el navegador en tu ordenador normal y ve a la interfaz web:
 

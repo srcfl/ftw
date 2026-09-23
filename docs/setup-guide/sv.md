@@ -118,17 +118,13 @@ Grattis — du är nu "inne" i Raspberry Pin.
 
 ## Steg 11 — Installera FTW
 
-Kopiera denna rad EXAKT som den står:
+Den gamla Docker-installationen med ett kommando är avslutad. Native 0.x
+testas ännu och den här guiden ger därför ingen allmän installation just nu.
+Om du deltar i betan och har en ny 64-bitars Pi, följ stegen med exakt tagg i
+[installationsguiden](../operations.md#install). Kör FTW redan på din Pi, låt
+den vara kvar på sin version tills den styrda flytten är klar.
 
-```
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-```
-
-Klistra in i terminalen eller PuTTY (högerklicka brukar fungera för att klistra in) och tryck enter.
-
-Skriv in ditt lösenord en gång till. Nu installeras allt. Det tar några minuter. **Sen är det klart.**
-
-## Klart
+## Efter installationen
 
 Öppna webbläsaren på din vanliga dator och gå till webb-gränssnittet:
 
