@@ -22,10 +22,13 @@ Linux archive and checksum. A 3.x Docker site never receives 0.x through the
 Update button. The last 3.x Docker release remains available for installed
 sites and urgent fixes while migration is tested.
 
-The public `latest` release and Docker `:latest` aliases must stay on the
-2.x line while boxes with the old updater remain. Their first 2.x to 3.x
-move needs the updater-first, verified-backup path below; the old Update
-button changes Core first. Publish the final 3.x stable under its exact tag
+Installed 1.x and 2.x boxes stay on their own release lines until the new
+guided migration installer is ready. They must not use Update to enter 3.x.
+The guard in new Core code hides cross-line offers and rejects direct update
+requests, but it cannot change an older binary already installed on a box.
+In particular, an older beta box can still display a 3.x release: do not
+start that update. Keep the public `latest` release and Docker `:latest`
+aliases on the 2.x line. Publish the final 3.x stable under its exact tag
 without moving those aliases. Publish native 0.x releases with GitHub
 `make_latest=false` too. The new 3.x checker selects only 3.x releases,
 and the native checker selects only 0.x packages. The current stable
@@ -42,7 +45,7 @@ Existing Docker users move through a separate installer, not a version check.
 The installer must make and verify a full off-device backup, stop the old
 service, keep the data directory and site identity, install the native
 service, then verify Core, history, drivers and control on that site. It must
-leave a tested path back to the matching 3.x image and backup. Docker and
+leave a tested path back to the site's prior image and backup. Docker and
 Home Assistant users who do not migrate stay on their current delivery path.
 The installer and 0.x release gate are still being built; do not use a local
 native pilot package as a public migration release.
@@ -184,10 +187,10 @@ newer updater, update Core and updater together using the paired commands below.
 A normal Core update also asks the updater to replace itself with the same tag
 after Core passes its health check.
 
-A 2.x site that wants a published 3.x pair must not use orange Update. That
-click moves Core only. Use the [paired upgrade script](upgrade-paired-release.md)
-so the updater is installed first. The commands below are the same ordering
-if you prefer to type them by hand.
+The 2.x to 3.x steps below document the earlier operator-led transition.
+They are not the path for installed users in the 0.x cutover. A 1.x or 2.x
+box waits for the guided installer. Orange Update must not move it to 3.x:
+that click changes Core before its updater.
 
 For manual updates, install the updater first while the existing Core still
 runs. Set `FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the published
@@ -209,7 +212,7 @@ the same tag, then pull and recreate only the Core service.
 
 ### First DuckDB upgrade
 
-The [paired upgrade script](upgrade-paired-release.md) is the supported
+The [paired upgrade script](upgrade-paired-release.md) records the earlier
 operator path from a 2.x Compose site. The updater shipped before the fix for [#1164](https://github.com/srcfl/ftw/issues/1164)
 waits only 30 minutes and can revert the Core image without its matching data.
 It replaces itself only after Core becomes ready. **Installing a new Core does

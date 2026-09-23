@@ -1,10 +1,15 @@
 # Upgrade a Compose install to one Core + updater tag
 
-Use this when an existing Linux Docker Compose site already runs the
-canonical `ghcr.io/srcfl/ftw` images and you want a published 3.x pair
-(or any later pair). Orange **Update** recreates Core first. The first
-DuckDB hop needs the new updater already running, so that button is not
-the upgrade path. Choose [Svenska](#svenska) or [English](#english).
+This page records the earlier operator-led 2.x to 3.x procedure. It is not
+the upgrade path for existing users in the native 0.x cutover. If your box
+runs 1.x or 2.x, leave it on that release line until the guided migration
+installer is ready. Do not use the orange Update button or this script to
+move it to 3.x.
+
+The procedure below was used for Linux Docker Compose sites running the
+canonical `ghcr.io/srcfl/ftw` images. Orange **Update** recreates Core first.
+The first 2.x to 3.x hop needed the new updater already running. Choose
+[Svenska](#svenska) or [English](#english) to read the old operator steps.
 
 Older image names (`frahlg/forty-two-watts` and similar) still start at
 [upgrade-from-legacy.md](upgrade-from-legacy.md).

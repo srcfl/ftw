@@ -106,6 +106,51 @@ func TestDocker3xCheckerKeepsItsReleaseLine(t *testing.T) {
 	}
 }
 
+func TestLegacyDockerDoesNotOffer3xOnEitherChannel(t *testing.T) {
+	client := &http.Client{Transport: nativeRoundTrip(func(req *http.Request) (*http.Response, error) {
+		var body string
+		switch req.URL.Path {
+		case "/latest":
+			body = `{"tag_name":"v3.8.0","prerelease":false}`
+		case "/releases":
+			body = `[{"tag_name":"v3.8.0-beta.1","prerelease":true}]`
+		default:
+			t.Fatalf("unexpected request: %s", req.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	for _, current := range []string{"v1.9.1-beta.1", "v2.3.2-beta.1", "v2.3.2"} {
+		c := New(Config{CurrentVersion: current, HTTPClient: client,
+			LatestReleaseURL: "https://test.invalid/latest", ReleasesURL: "https://test.invalid/releases"}, newMemStore())
+		for _, channel := range []Channel{ChannelBeta, ChannelStable} {
+			if err := c.SetChannel(channel); err != nil {
+				t.Fatal(err)
+			}
+			info, err := c.Check(context.Background(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.UpdateAvailable || info.Latest != "" {
+				t.Fatalf("%s %s offered a cross-line release: %+v", current, channel, info)
+			}
+		}
+	}
+}
+
+func TestLegacyDockerRejectsDirect3xUpdate(t *testing.T) {
+	c := New(Config{CurrentVersion: "v2.3.2", SocketPath: "/missing-updater"}, newMemStore())
+	err := c.TriggerComponentAt(context.Background(), "update", "v3.8.0-beta.1", "core", time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "guided migration installer") {
+		t.Fatalf("cross-line update was not blocked: %v", err)
+	}
+	if legacyCoreReleaseLocked("v2.3.2", "v2.3.3") {
+		t.Fatal("same-line maintenance release was blocked")
+	}
+	if legacyCoreReleaseLocked("v0.131.0", "v0.131.1") {
+		t.Fatal("native release was blocked as legacy Docker")
+	}
+}
+
 func nativeArchive(t *testing.T, tag string) ([]byte, []byte) {
 	t.Helper()
 	var buf bytes.Buffer

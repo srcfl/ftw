@@ -534,7 +534,7 @@ func TestCheck_RetriesTransientGitHub504(t *testing.T) {
 	withoutGitHubBackoff(t)
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
-	reg.addTag("v2.0.0")
+	reg.addTag("v1.16.0")
 	rsrv := reg.server()
 	defer rsrv.Close()
 
@@ -547,8 +547,8 @@ func TestCheck_RetriesTransientGitHub504(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     "v2.0.0",
-			"html_url":     "https://example/releases/v2.0.0",
+			"tag_name":     "v1.16.0",
+			"html_url":     "https://example/releases/v1.16.0",
 			"body":         "ok",
 			"published_at": time.Now().Format(time.RFC3339),
 		})
@@ -560,7 +560,7 @@ func TestCheck_RetriesTransientGitHub504(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check after 504s: %v", err)
 	}
-	if info.Latest != "v2.0.0" || info.Err != "" {
+	if info.Latest != "v1.16.0" || info.Err != "" {
 		t.Fatalf("info = %+v", info)
 	}
 	if calls != 3 {
@@ -572,7 +572,7 @@ func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
 	withoutGitHubBackoff(t)
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
-	reg.addTag("v2.0.0")
+	reg.addTag("v1.16.0")
 	rsrv := reg.server()
 	defer rsrv.Close()
 
@@ -585,8 +585,8 @@ func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     "v2.0.0",
-			"html_url":     "https://example/releases/v2.0.0",
+			"tag_name":     "v1.16.0",
+			"html_url":     "https://example/releases/v1.16.0",
 			"body":         "ok",
 			"published_at": time.Now().Format(time.RFC3339),
 		})
@@ -602,7 +602,7 @@ func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry after recorded 504: %v", err)
 	}
-	if info.Latest != "v2.0.0" || info.Err != "" {
+	if info.Latest != "v1.16.0" || info.Err != "" {
 		t.Fatalf("info after retry = %+v", info)
 	}
 	if calls <= failedCalls {
@@ -841,7 +841,7 @@ func TestIsNewer(t *testing.T) {
 func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
-	reg.addTag("v2.0.0")
+	reg.addTag("v1.16.0")
 	rsrv := reg.server()
 	defer rsrv.Close()
 
@@ -849,7 +849,7 @@ func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
 	if len(huge) <= MaxReleaseBodyBytes {
 		t.Fatalf("test fixture too small: %d bytes", len(huge))
 	}
-	rls := fakeReleasesServer(t, fakeRelease{tag: "v2.0.0", body: huge})
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.16.0", body: huge})
 	defer rls.Close()
 
 	c := newCheckerOnFakes("v1.0.0", rsrv, rls, repo, newMemStore())
