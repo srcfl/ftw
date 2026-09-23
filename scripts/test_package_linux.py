@@ -75,7 +75,8 @@ class LinuxPackageTest(unittest.TestCase):
                 self.assertTrue(tar.getmember(name).isfile(), name)
             self.assertEqual(tar.getmember("ftw").mode, 0o755)
             self.assertEqual(json.load(tar.extractfile("release-version.json")),
-                             {"version": "dev", "arch": "amd64", "state_schema": 7})
+                             {"version": os.environ.get("VERSION", "dev"),
+                              "arch": "amd64", "state_schema": 7})
             self.assertEqual(tar.getmember("forty-two-watts").linkname, "ftw")
             self.assertFalse(any(name.startswith(("data/", "bin/")) for name in tar.getnames()))
         legacy = archive.with_name("forty-two-watts-linux-amd64.tar.gz")
