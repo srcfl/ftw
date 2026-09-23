@@ -3,11 +3,12 @@
 [ADR 0007](adr/0007-self-updating-binary.md) sets the direction for native Core
 updates. That change has not shipped. This page describes what ships today.
 
-The old Docker release path is frozen. A native 0.x release needs its own path
-and must leave GitHub `releases/latest` and the old Docker `:latest` aliases
-on 2.x for installed boxes. A Docker box on 1.x, 2.x or 3.x uses the same
-guided migration to reach native 0.x directly, with no update through an
-intermediate Docker version. An urgent old-line repair remains possible.
+The old Docker release path is frozen. Native 0.x uses
+`.github/workflows/native-release.yml`, which leaves GitHub `releases/latest`
+and the old Docker `:latest` aliases on 2.x for installed boxes. A Docker box
+on 1.x, 2.x or 3.x uses the same guided migration to reach native 0.x directly,
+without an intermediate Docker version. An urgent old-line repair remains
+possible.
 
 FTW has two channels:
 
@@ -33,9 +34,9 @@ The guard in new Core code hides cross-line offers and rejects direct update
 requests, but it cannot change an older binary already installed on a box.
 In particular, an older beta box can still display a 3.x release: do not
 start that update. Keep the public `latest` release and Docker `:latest`
-aliases on the 2.x line. Publish native 0.x releases with GitHub
-`make_latest=false`. The native checker selects only 0.x packages. The old
-stable workflow moves `latest`, so a separate native workflow is required.
+aliases on the 2.x line. The native workflow creates beta and stable releases
+with `latest=false`, and the native checker selects only 0.x packages. The old
+stable workflow moves `latest` and must not publish a 0.x release.
 Older installed code cannot have its Update button removed after the fact;
 it may still show an already published release. That button is not the way
 to migrate.
@@ -53,8 +54,19 @@ service, keep the data directory and site identity, install the native
 service, then verify Core, history, drivers and control on that site. It must
 leave a tested path back to the site's prior image and backup. Docker and
 Home Assistant users who do not migrate stay on their current delivery path.
-The installer and 0.x release gate are still being built; do not use a local
-native pilot package as a public migration release.
+The 0.x version reset and guided installer are still being built. The native
+workflow has not published a migration release; do not use a local native
+pilot package as one.
+
+The native release workflow runs by hand from `master`. A beta tag must match
+the package version and points to the exact source commit used for both Linux
+packages. The workflow runs `make verify`, checks build revision and hashes,
+rejects a tag older than a published 0.x release, then publishes the files
+from a draft. A retry keeps any uploaded asset only
+when its bytes match. Stable requires a published beta, checks that beta's
+receipt and both packages, and builds its stable version string from the same
+source commit. A `dry_run` checks the full build without creating a tag or
+release. Stable still needs the site validation above before dispatch.
 
 On a native site, Update Center can stage a verified 0.x package and restart
 through the launcher. It retains the previous binary for a same-schema

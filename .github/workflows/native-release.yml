@@ -1,0 +1,271 @@
+name: native 0.x release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Publish a native beta, or promote a tested beta commit to stable"
+        required: true
+        type: choice
+        options: [beta, stable]
+      tag:
+        description: "Exact v0.X.Y-beta.N or v0.X.Y tag"
+        required: true
+        type: string
+      source_beta:
+        description: "Published and site-tested beta tag (stable only)"
+        required: false
+        type: string
+      dry_run:
+        description: "Verify and build the packages without creating a tag or release"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: native-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: verify, package and publish native ${{ inputs.channel }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - name: Bind the candidate to its source
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_BETA: ${{ inputs.source_beta }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/master
+          test -n "${GH_TOKEN}"
+          [[ "${CHANNEL}" = beta || "${CHANNEL}" = stable ]]
+          latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          if [[ ! "${latest}" =~ ^v2\.[0-9]+\.[0-9]+$ ]]; then
+            echo "public latest must stay on a 2.x stable release (found ${latest})" >&2
+            exit 1
+          fi
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            > "${RUNNER_TEMP}/native-release-pages.json"
+          python3 scripts/check-native-release-order.py "${TAG}" \
+            "${RUNNER_TEMP}/native-release-pages.json"
+          if [ "${CHANNEL}" = stable ]; then
+            if [[ ! "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+$ ]] ||
+               [[ ! "${SOURCE_BETA}" =~ ^v0\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] ||
+               [[ "${SOURCE_BETA}" != "${TAG}-beta."* ]]; then
+              echo "stable needs a v0.X.Y tag and matching beta" >&2
+              exit 1
+            fi
+            git fetch origin "refs/tags/${SOURCE_BETA}:refs/tags/${SOURCE_BETA}"
+            beta_commit=$(git rev-list -n 1 "${SOURCE_BETA}")
+            mkdir -p "${RUNNER_TEMP}/beta-receipt"
+            beta_json=$(gh release view "${SOURCE_BETA}" --repo "${GITHUB_REPOSITORY}" \
+              --json tagName,isDraft,isPrerelease,assets)
+            jq -e --arg tag "${SOURCE_BETA}" '
+              .tagName == $tag and .isDraft == false and .isPrerelease == true and
+              ([.assets[].name] | index("ftw-native-release.json") != null) and
+              ([.assets[].name] | index("ftw-linux-amd64.tar.gz") != null) and
+              ([.assets[].name] | index("ftw-linux-arm64.tar.gz") != null)
+            ' <<<"${beta_json}" >/dev/null
+            gh release download "${SOURCE_BETA}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern ftw-native-release.json --dir "${RUNNER_TEMP}/beta-receipt"
+            jq -e --arg tag "${SOURCE_BETA}" --arg commit "${beta_commit}" '
+              .schema == 1 and .channel == "beta" and .tag == $tag and .commit == $commit and
+              (.sha256.amd64 | test("^[0-9a-f]{64}$")) and
+              (.sha256.arm64 | test("^[0-9a-f]{64}$"))
+            ' "${RUNNER_TEMP}/beta-receipt/ftw-native-release.json" >/dev/null
+            for arch in amd64 arm64; do
+              name="ftw-linux-${arch}.tar.gz"
+              gh release download "${SOURCE_BETA}" --repo "${GITHUB_REPOSITORY}" \
+                --pattern "${name}" --pattern "${name}.sha256" \
+                --dir "${RUNNER_TEMP}/beta-receipt"
+              (cd "${RUNNER_TEMP}/beta-receipt" && sha256sum -c "${name}.sha256")
+              actual=$(sha256sum "${RUNNER_TEMP}/beta-receipt/${name}" | cut -d ' ' -f 1)
+              recorded=$(jq -r --arg arch "${arch}" '.sha256[$arch]' \
+                "${RUNNER_TEMP}/beta-receipt/ftw-native-release.json")
+              test "${actual}" = "${recorded}"
+            done
+            git checkout --detach "${beta_commit}"
+          else
+            if [[ ! "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] ||
+               [ -n "${SOURCE_BETA}" ]; then
+              echo "beta needs a v0.X.Y-beta.N tag and no source_beta" >&2
+              exit 1
+            fi
+          fi
+          source_commit=$(git rev-parse HEAD)
+          package_version=$(node -p "require('./package.json').version")
+          base_version=${TAG#v}
+          base_version=${base_version%-beta.*}
+          if [ "${base_version}" != "${package_version}" ]; then
+            echo "${TAG} does not match package.json ${package_version}" >&2
+            exit 1
+          fi
+          schema=$(node -p "require('./state-schema.json').version")
+          [[ "${schema}" =~ ^[1-9][0-9]*$ ]]
+          printf 'tag=%s\ncommit=%s\nschema=%s\n' "${TAG}" "${source_commit}" "${schema}" >> "${GITHUB_OUTPUT}"
+        id: source
+      - name: Build complete ARM64 and AMD64 packages
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          make drivers
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+          release_dir="${RUNNER_TEMP}/native-release"
+          for arch in amd64 arm64; do
+            VERSION="${TAG}" CANDIDATE_TAG="${TAG}" \
+              bash scripts/build-core.sh linux "${arch}" "${RUNNER_TEMP}/native-bin-${arch}"
+            build_info=$(go version -m "${RUNNER_TEMP}/native-bin-${arch}/ftw")
+            git_rev=$(awk '$1 == "build" && $2 ~ /^vcs.revision=/ {sub(/^vcs.revision=/, "", $2); print $2}' <<<"${build_info}")
+            if [ "${git_rev}" != "${{ steps.source.outputs.commit }}" ]; then
+              echo "linux/${arch} build has source ${git_rev}, not ${{ steps.source.outputs.commit }}" >&2
+              exit 1
+            fi
+            grep -F 'vcs.modified=false' <<<"${build_info}" >/dev/null
+          done
+          for arch in amd64 arm64; do
+            VERSION="${TAG}" python3 scripts/package-linux.py "${arch}" \
+              --binaries "${RUNNER_TEMP}/native-bin-${arch}" --output "${release_dir}"
+            (cd "${release_dir}" && sha256sum -c "ftw-linux-${arch}.tar.gz.sha256")
+            tar -xOf "${release_dir}/ftw-linux-${arch}.tar.gz" release-version.json | \
+              jq -e --arg tag "${TAG}" --arg arch "${arch}" \
+                '.version == $tag and .arch == $arch and .state_schema > 0' >/dev/null
+          done
+      - name: Verify the exact source
+        run: |
+          make verify
+          git diff --exit-code
+      - name: Create release receipt and notes
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_BETA: ${{ inputs.source_beta }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          STATE_SCHEMA: ${{ steps.source.outputs.schema }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          release = Path(os.environ["RUNNER_TEMP"]) / "native-release"
+          assets = {}
+          for arch in ("amd64", "arm64"):
+              path = release / f"ftw-linux-{arch}.tar.gz"
+              assets[arch] = hashlib.sha256(path.read_bytes()).hexdigest()
+          receipt = {
+              "schema": 1,
+              "channel": os.environ["CHANNEL"],
+              "tag": os.environ["TAG"],
+              "commit": os.environ["SOURCE_COMMIT"],
+              "state_schema": int(os.environ["STATE_SCHEMA"]),
+              "source_beta": os.environ["SOURCE_BETA"],
+              "sha256": assets,
+          }
+          (release / "ftw-native-release.json").write_text(json.dumps(receipt, indent=2) + "\n")
+          notes = f"Native FTW {receipt['tag']} from {receipt['commit']}.\n\n"
+          if receipt["source_beta"]:
+              notes += f"Promoted from site-tested {receipt['source_beta']}.\n\n"
+          notes += f"<!-- ftw-state-schema-v2:{receipt['state_schema']} -->\n"
+          (release / "notes.md").write_text(notes)
+          PY
+      - name: Anchor immutable tag and publish without moving legacy latest
+        if: ${{ !inputs.dry_run }}
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_dir="${RUNNER_TEMP}/native-release"
+          if git ls-remote --exit-code --tags --refs origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            if [ "$(git rev-list -n 1 "${TAG}")" != "${SOURCE_COMMIT}" ]; then
+              echo "${TAG} already points at another commit" >&2
+              exit 1
+            fi
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "${TAG}" -m "Native ${CHANNEL} ${TAG}" "${SOURCE_COMMIT}"
+            git push origin "refs/tags/${TAG}"
+          fi
+
+          release_json="${RUNNER_TEMP}/native-release.json"
+          status=$(curl -sS -L -o "${release_json}" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+          case "${status}" in
+            200) ;;
+            404)
+              # Tag lookup may omit a draft. Find it before trying to create
+              # another release for the same immutable candidate.
+              drafts=$(gh api --paginate --slurp \
+                "repos/${GITHUB_REPOSITORY}/releases?per_page=100")
+              matches=$(jq --arg tag "${TAG}" '[.[][] | select(.tag_name == $tag)] | length' <<<"${drafts}")
+              if [ "${matches}" -gt 1 ]; then
+                echo "more than one release uses ${TAG}" >&2
+                exit 1
+              fi
+              if [ "${matches}" -eq 0 ]; then
+                args=(--repo "${GITHUB_REPOSITORY}" --title "${TAG}" --notes-file "${release_dir}/notes.md" \
+                  --draft --latest=false --verify-tag)
+                if [ "${CHANNEL}" = beta ]; then args+=(--prerelease); fi
+                gh release create "${TAG}" "${args[@]}"
+              fi
+              ;;
+            *) echo "release lookup failed (HTTP ${status})" >&2; exit 1 ;;
+          esac
+          release_info=$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease,body)
+          expected_prerelease=false
+          if [ "${CHANNEL}" = beta ]; then expected_prerelease=true; fi
+          jq -e --arg tag "${TAG}" --argjson prerelease "${expected_prerelease}" \
+            --arg marker "<!-- ftw-state-schema-v2:${{ steps.source.outputs.schema }} -->" '
+              .tagName == $tag and .isPrerelease == $prerelease and
+              (.body | contains($marker))
+            ' <<<"${release_info}" >/dev/null
+          if jq -e '.isDraft == false' <<<"${release_info}" >/dev/null; then
+            gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets | \
+              jq -e '([.assets[].name] | . as $names |
+                ["ftw-linux-amd64.tar.gz", "ftw-linux-amd64.tar.gz.sha256",
+                 "ftw-linux-arm64.tar.gz", "ftw-linux-arm64.tar.gz.sha256",
+                 "ftw-native-release.json"] | all(. as $name | $names | index($name) != null))' >/dev/null
+          fi
+          GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+            bash scripts/upload-release-assets.sh "${TAG}" \
+              "${release_dir}/ftw-linux-amd64.tar.gz" "${release_dir}/ftw-linux-amd64.tar.gz.sha256" \
+              "${release_dir}/ftw-linux-arm64.tar.gz" "${release_dir}/ftw-linux-arm64.tar.gz.sha256" \
+              "${release_dir}/ftw-native-release.json"
+          if jq -e '.isDraft == true' <<<"${release_info}" >/dev/null; then
+            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --draft=false --latest=false --verify-tag
+          fi
+          latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          if [[ ! "${latest}" =~ ^v2\.[0-9]+\.[0-9]+$ ]]; then
+            echo "native publication changed the old latest slot to ${latest}" >&2
+            exit 1
+          fi
+      - name: Report verified dry run
+        if: ${{ inputs.dry_run }}
+        run: echo "Verified native packages without creating a tag or release."
