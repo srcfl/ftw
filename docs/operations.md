@@ -26,17 +26,16 @@ cd ~/ftw
 docker compose ps
 docker compose logs -f ftw
 docker compose restart ftw
-docker compose pull
-docker compose up -d
 ```
 
 The UI updater performs an immutable pull and recreate through the updater
 sidecar; it never patches the host OS or Docker engine — that is the
 operator's job on a self-managed host, and automatic on the
 [Raspberry Pi image](rpi-image.md#host-os-security-updates). See
-[self-update.md](self-update.md). A 2.x site moving to 3.x must follow
-[upgrade-paired-release.md](upgrade-paired-release.md) instead of orange
-Update.
+[self-update.md](self-update.md). Existing 1.x, 2.x and 3.x sites stay on
+their current version until their owner uses the guided native 0.x installer.
+Do not use Update or the retired paired-upgrade procedure to move 1.x or 2.x
+to 3.x. Do not pull a moving Docker alias as a way to migrate.
 
 ## Persistent state
 
