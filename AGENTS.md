@@ -155,10 +155,14 @@ Lua drivers have syntax and contract checks in the Go test suite.
 
 ## Releases
 
-Changesets drive versioning. Every user-visible code change needs a
+Changesets drive the native 0.x line. Every user-visible code change needs a
 [`.changeset/*.md`](.changeset/) entry; documentation- and CI-only changes are
-auto-exempt. Do not edit [`package.json`](package.json) version or
-[`CHANGELOG.md`](CHANGELOG.md) manually.
+auto-exempt. Use `patch` for fixes and `minor` for a visible new capability or
+change that needs user action. The owner approves a `minor` in the PR. Never
+use `major`. Core versions on `master` start at `0.131.0` and stay in 0.x.
+Changesets generates the next [`package.json`](package.json) version and
+[`CHANGELOG.md`](CHANGELOG.md); the one-time return from 3.8.0 to 0.131.0 is
+the cutover exception.
 
 Only two release channels exist:
 
@@ -168,12 +172,23 @@ Only two release channels exist:
 There is no edge channel. Core and signed driver artifacts can release
 independently but follow the same beta-to-stable progression.
 
-Normal path:
+Native 0.x path:
 
 1. Merge the Version Packages PR.
-2. Publish beta `vX.Y.Z-beta.N` from that exact commit.
-3. Validate that beta on real sites.
-4. Promote the same commit to stable `vX.Y.Z`.
+2. Dispatch [`native-release.yml`](.github/workflows/native-release.yml) on
+   `master` for `v0.X.Y-beta.N` from that exact commit.
+3. Validate the beta on the home box and at least one other real site for a
+   week, with no open `release-blocker`.
+4. Dispatch the same workflow for `v0.X.Y` stable, naming the tested beta.
+   The workflow checks the source commit and release assets, and keeps GitHub
+   `releases/latest` on the old 2.x line.
+
+Do not publish routine Docker releases. Existing 1.x, 2.x and 3.x installs
+remain on their current version until their owner uses the guided installer
+to move straight to native 0.x. Their in-app update is not the migration path.
+Old beta clients may still show an already published 3.x candidate; code on
+those boxes cannot be changed retroactively. The native installer must prove
+backup, restore and rollback before it is offered to them.
 
 ### Who releases, and when
 
@@ -190,15 +205,16 @@ implementation PRs. Label a finding `release-blocker` when the line must not
 promote to stable until it is fixed. Green CI alone does not set product
 priority.
 
-There is no release calendar. A beta promotes once it has run on the
-validation sites for a few days with no open `release-blocker`, and
-betas should promote often enough that beta and stable never drift far
-apart — weeks, not months.
+The native workflow is dispatched by the owner. The weekly beta cadence in
+[ADR 0007](docs/adr/0007-self-updating-binary.md) is the target after the
+first native pilot; a merge does not publish a beta. Stable follows the
+week-long site check above.
 
-### Hotfixing a stable while beta is ahead
+### Exceptional repair on the old Docker line
 
-When the newest stable has a critical bug and master has moved on, do
-not promote the moving beta line. Patch the stable line in place:
+Only a critical safety fix that cannot wait for guided migration may use the
+old 2.x workflows. This is a separate owner decision, not part of the native
+release path. Start from the affected stable 2.x tag:
 
 1. `git checkout -b hotfix/vX.Y vX.Y.Z` from the affected stable tag.
 2. Land the fix on the branch — cherry-pick from master when it is
@@ -208,20 +224,16 @@ not promote the moving beta line. Patch the stable line in place:
    then commit. The Version Packages bot only serves master; on a
    hotfix branch changesets runs by hand, which still counts as
    "changesets edits the version, not you".
-4. If the old line's release workflows predate current fixes,
-   cherry-pick `.github/workflows/beta.yml` and `release.yml` from
-   master first — the draft-recovery principle: workflow code from
-   master, binaries from the immutable tag.
+4. If the old branch needs workflow fixes, use the checked workflow code from
+   master while keeping binaries tied to the immutable hotfix tag.
 5. `gh workflow run beta.yml --ref hotfix/vX.Y -f version=vX.Y.<Z+1>-beta.1`
 6. Validate on an affected site, pinned explicitly via
    `POST /api/version/update`.
 7. `gh workflow run release.yml --ref vX.Y.<Z+1>-beta.1 -f source_beta=vX.Y.<Z+1>-beta.1`
 
-The channels then do the right thing on their own: stable boxes see the
-hotfix because it is the newest published stable, and beta boxes are
-never offered a downgrade (the updater's `isNewer` guard). A hotfix
-beta briefly occupies the "latest beta" slot until the next main-line
-beta publishes — keep that window short.
+The old public latest and Docker aliases stay on 2.x. Do not use this path
+for 1.x, 3.x or native 0.x. The new native release workflow never moves those
+old discovery targets.
 
 Do not create a new beta, tag, draft or candidate to recover a failed
 stable publish. Resume the existing draft by its numeric GitHub Release
@@ -232,7 +244,9 @@ the candidate.
 See [docs/self-update.md](docs/self-update.md).
 
 A release is one workflow dispatch, not a manual list of registry commands.
-The `srcfl/*` images use the job-scoped `GITHUB_TOKEN`; each package must grant
+The following registry and Home Assistant dispatch steps apply only to an
+exceptional old Docker release. The `srcfl/*` images use the job-scoped
+`GITHUB_TOKEN`; each package must grant
 the `srcfl/ftw` repository GitHub Actions write access. The compatibility
 `frahlg/*` mirror uses the dedicated `LEGACY_GHCR_TOKEN`, with only
 `write:packages`. Never use a developer's local `gh` token, create a new token

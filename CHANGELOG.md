@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.131.0
+
+### Minor Changes
+
+- 2ac7d33: Let a native Core stage and start a verified 0.x release, show its progress, and return to the previous same-schema binary. Keep data restore offline. Block 1.x and 2.x Core updates into another major release line while the guided migration path is built.
+- 8ede8b9: Add verified Linux release slots and a native launcher for the planned 0.x install path. The running Core and Docker update flow stay unchanged until native update and migration checks are complete.
+
+### Patch Changes
+
+- e035250: Serialize direct binding installs so cleanup cannot remove a temp file another writer just created.
+
 ## 3.8.0
 
 ### Minor Changes

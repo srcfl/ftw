@@ -131,9 +131,11 @@ to it. No native update needs a Docker socket or Docker engine.**
    Existing 1.x, 2.x and 3.x Docker installs remain in place until their owners
    use the guided migration. The Home Assistant add-on stays on Supervisor.
 
-8. **Betas are weekly.** `beta.yml` runs on a schedule, not after every
-   Version Packages merge. A hotfix beta needs a `release-blocker`. Stable
-   promotes after one week on the home box and at least one other site.
+8. **Betas aim for a weekly cadence.** The owner dispatches
+   `native-release.yml` after a Version Packages merge. Once the first
+   native pilot is proven, it may run weekly; a merge alone does not publish.
+   A hotfix beta needs a `release-blocker`. Stable promotes after one week
+   on the home box and at least one other site.
 
 9. **Transition code is deleted only after the affected boxes have migrated
    or left support.** A 3.5 version check is not enough: 1.x and 2.x boxes
