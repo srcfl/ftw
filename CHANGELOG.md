@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.132.0
+
+### Minor Changes
+
+- a8f3fab: Install a verified native 0.x release on a fresh Linux host from an exact tag.
+  The old one-line Docker installer is retired; existing installations remain
+  untouched until the guided migration is ready.
+- 7784ffd: Retire the old Docker installers and Docker-to-Docker migration commands.
+  Existing sites stay on their installed version until the guided native 0.x
+  migration is tested and published.
+- 7b36d79: Add an operator CLI that shows full backup and native update progress, copies a verified backup to another computer, and pilots a guarded move from an older native systemd install to one exact 0.x release.
+
 ## 0.131.0
 
 ### Minor Changes
