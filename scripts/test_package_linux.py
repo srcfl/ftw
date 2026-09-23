@@ -31,9 +31,10 @@ class LinuxPackageTest(unittest.TestCase):
         (self.root / "drivers/BUNDLED_SOURCE.json").write_text(json.dumps({"drivers": ["fixture"]}))
         (self.root / "drivers/fixture.lua").write_text("-- pinned fixture")
         (self.root / "web/index.html").write_text("<title>FTW</title>")
+        (self.root / "state-schema.json").write_text('{"version": 7}')
         shutil.copytree(Path(__file__).resolve().parents[1] / packager.ENERGYPLAN_DIR,
                         self.root / packager.ENERGYPLAN_DIR)
-        for name in ("ftw", "ftw-backup"):
+        for name in ("ftw", "ftw-backup", "ftw-launcher"):
             (self.binaries / name).write_bytes(b"\x7fELF\x02\x01" + bytes(12) + (62).to_bytes(2, "little"))
 
     def build(self, arch="amd64"):
@@ -45,7 +46,7 @@ class LinuxPackageTest(unittest.TestCase):
         original_manifest = json.loads(original)
         for arch in ("amd64", "arm64"):
             with self.subTest(arch=arch):
-                for name in ("ftw", "ftw-backup"):
+                for name in ("ftw", "ftw-backup", "ftw-launcher"):
                     (self.binaries / name).write_bytes(
                         b"\x7fELF\x02\x01" + bytes(12) + packager.MACHINES[arch].to_bytes(2, "little"))
                 archive = self.build(arch)
@@ -68,10 +69,14 @@ class LinuxPackageTest(unittest.TestCase):
     def test_archive_has_runtime_backup_service_and_checksums(self):
         archive = self.build()
         with tarfile.open(archive) as tar:
-            for name in ("ftw", "ftw-backup", "web/index.html", "drivers/fixture.lua",
+            for name in ("ftw", "ftw-backup", "ftw-launcher", "release-version.json",
+                         "web/index.html", "drivers/fixture.lua",
                          "optimizer/native/bundle/manifest.json", "deploy/ftw.service", "LICENSE"):
                 self.assertTrue(tar.getmember(name).isfile(), name)
             self.assertEqual(tar.getmember("ftw").mode, 0o755)
+            self.assertEqual(json.load(tar.extractfile("release-version.json")),
+                             {"version": os.environ.get("VERSION", "dev"),
+                              "arch": "amd64", "state_schema": 7})
             self.assertEqual(tar.getmember("forty-two-watts").linkname, "ftw")
             self.assertFalse(any(name.startswith(("data/", "bin/")) for name in tar.getnames()))
         legacy = archive.with_name("forty-two-watts-linux-amd64.tar.gz")

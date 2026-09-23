@@ -1,0 +1,21 @@
+[Unit]
+Description=FTW local energy runtime (native release slots)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ftw
+Group=ftw
+WorkingDirectory=/var/lib/ftw
+ExecStart=/opt/ftw/ftw-launcher -root /opt/ftw -config /var/lib/ftw/config.yaml -user-drivers /var/lib/ftw/drivers
+Environment=FTW_SELFUPDATE_ENABLED=0
+Restart=always
+RestartSec=5
+StateDirectory=ftw
+StateDirectoryMode=0700
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
+Alias=forty-two-watts.service

@@ -11,7 +11,7 @@ cd "$root/go"
 if [[ "${FTW_BUILD_ALL:-0}" == 1 ]]; then
   set -- ./...
 else
-  set -- ./cmd/ftw ./cmd/ftw-backup
+  set -- ./cmd/ftw ./cmd/ftw-backup ./cmd/ftw-launcher
 fi
 go build -trimpath -tags=netgo,osusergo \
   -ldflags "-s -w -X main.Version=${VERSION:-dev} -X main.CandidateTag=${CANDIDATE_TAG:-}" \
