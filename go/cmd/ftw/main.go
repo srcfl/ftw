@@ -325,7 +325,7 @@ func main() {
 	}
 
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
-	retiredShadowSocket := flag.String("ftwdb-shadow-socket", os.Getenv("FTWDB_SHADOW_SOCKET"), "Retired; DuckDB now owns time-series storage")
+	retiredShadowSocket := flag.String("ftwdb-shadow-socket", os.Getenv("FTWDB_SHADOW_SOCKET"), "Retired and ignored; history is stored in SQLite")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
 	userDriversDirFlag := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory (overlay on top of -drivers). Searched first; falls back to -drivers when a file isn't found here. Designed for docker deploys.")

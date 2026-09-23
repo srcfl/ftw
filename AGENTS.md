@@ -271,7 +271,7 @@ and the app repository picks the release up on its hourly sync. The dispatch
 never blocks a release, and the app repository verifies the release against
 its digest receipt and the registry rather than trusting the payload.
 
-`CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
+This file is the agent guide. Claude, Codex and other agents follow it directly.
 
 ## Cursor Cloud specific instructions
 
