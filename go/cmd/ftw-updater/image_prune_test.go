@@ -27,6 +27,8 @@ func imageRemovals(calls [][]string) []string {
 // (#1305).
 func TestHandleUpdate_RemovesReplacedImages(t *testing.T) {
 	s, runner := newTestServer(t)
+	replaced := make(chan string, 1)
+	s.selfReplace = func(target string) error { replaced <- target; return nil }
 	s.listImages = func(_ context.Context, repository string) ([]imageTag, error) {
 		switch repository {
 		case canonicalMainImage:
@@ -57,6 +59,16 @@ func TestHandleUpdate_RemovesReplacedImages(t *testing.T) {
 	st := waitForState(t, s, "done")
 	if st.PreviousImageID != "sha256:current" {
 		t.Fatalf("rollback image = %q", st.PreviousImageID)
+	}
+	// The done state is recorded before image cleanup and updater replacement.
+	// Wait for the latter so the runner snapshot includes the cleanup calls.
+	select {
+	case target := <-replaced:
+		if target != "v1.2.3" {
+			t.Fatalf("updater self-replace target = %q", target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("updater self-replacement was not called")
 	}
 
 	calls := runner.snapshot()
