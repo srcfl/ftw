@@ -4,9 +4,9 @@ name: test
 # behind one another. The final job keeps the historical required-check name.
 on:
   pull_request:
-    branches: [master, hotfix/v2.3]
+    branches: [master]
   push:
-    branches: [master, hotfix/v2.3]
+    branches: [master]
 
 permissions:
   contents: read
