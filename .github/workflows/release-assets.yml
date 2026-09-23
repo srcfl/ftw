@@ -125,6 +125,7 @@ jobs:
             echo "Tag ${TAG} doesn't look like a vX.Y.Z release tag" >&2
             exit 1
           fi
+          bash scripts/check-legacy-release-line.sh "${TAG}"
           VERSION="${TAG#v}"
           STABLE_COMMIT="$(git rev-list -n 1 "${TAG}")"
           if [ -z "${STABLE_COMMIT}" ]; then

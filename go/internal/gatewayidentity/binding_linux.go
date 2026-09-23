@@ -383,12 +383,26 @@ func (s *linuxBindingStorage) read(name string, allowCleanup bool) ([]byte, erro
 	return data, nil
 }
 
-func (s *linuxBindingStorage) InstallNoReplace(name string, data []byte) error {
+func (s *linuxBindingStorage) InstallNoReplace(name string, data []byte) (returnErr error) {
 	if err := validBindingName(name); err != nil {
 		return err
 	}
 	if len(data) == 0 || len(data) > maxBindingFileBytes {
 		return fmt.Errorf("binding file %s has invalid size", name)
+	}
+	// A direct caller has no transaction lock. Hold the directory lock from
+	// before temp creation through cleanup so another writer cannot mistake
+	// the new temp for one left by a crashed process. Callers that already
+	// hold Lock keep it until their full binding transaction is complete.
+	if !s.transactionLockHeld {
+		if err := lockLinuxBindingDirectory(s.dir); err != nil {
+			return fmt.Errorf("lock binding directory: %w", err)
+		}
+		defer func() {
+			if err := unlockLinuxBindingDirectory(s.dir); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("unlock binding directory: %w", err))
+			}
+		}()
 	}
 	if err := s.Revalidate(); err != nil {
 		return err

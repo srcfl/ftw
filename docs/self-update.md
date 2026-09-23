@@ -1,5 +1,14 @@
 # Updates and release channels
 
+[ADR 0007](adr/0007-self-updating-binary.md) sets the direction for native Core
+updates. That change has not shipped. This page describes what ships today.
+
+The old Docker release path is frozen. A native 0.x release needs its own path
+and must leave GitHub `releases/latest` and the old Docker `:latest` aliases
+on 2.x for installed boxes. A Docker box on 1.x, 2.x or 3.x uses the same
+guided migration to reach native 0.x directly, with no update through an
+intermediate Docker version. An urgent old-line repair remains possible.
+
 FTW has two channels:
 
 | Channel | Tag form | Purpose |
@@ -9,6 +18,50 @@ FTW has two channels:
 
 Stable is the default. Persisted installations that still say `edge` are
 migrated to `beta`; no edge releases are published or accepted.
+
+## 0.x cutover plan (not yet released)
+
+The native binary line starts at `v0.131.0-beta.1`. It has its own stable and
+beta selection: it only considers published 0.x releases with the matching
+Linux archive and checksum. A 3.x Docker site never receives 0.x through the
+Update button. Existing Docker releases remain available for installed sites
+while migration is tested; no new old-line release is planned.
+
+Installed 1.x, 2.x and 3.x boxes stay where they are until their owners use
+the guided migration installer. A 1.x or 2.x box must not use Update to enter 3.x.
+The guard in new Core code hides cross-line offers and rejects direct update
+requests, but it cannot change an older binary already installed on a box.
+In particular, an older beta box can still display a 3.x release: do not
+start that update. Keep the public `latest` release and Docker `:latest`
+aliases on the 2.x line. Publish native 0.x releases with GitHub
+`make_latest=false`. The native checker selects only 0.x packages. The old
+stable workflow moves `latest`, so a separate native workflow is required.
+Older installed code cannot have its Update button removed after the fact;
+it may still show an already published release. That button is not the way
+to migrate.
+
+A native beta is first validated on the home box and at least one other site.
+Only then does the owner promote the same tested source commit to
+`v0.131.0` stable. The beta and stable packages have different embedded
+version strings, so each published package needs its own hash and release
+receipt. A tag or green CI run alone is not a deployed release.
+
+Existing Docker users on any old version move through one installer, not a
+version check.
+The installer must make and verify a full off-device backup, stop the old
+service, keep the data directory and site identity, install the native
+service, then verify Core, history, drivers and control on that site. It must
+leave a tested path back to the site's prior image and backup. Docker and
+Home Assistant users who do not migrate stay on their current delivery path.
+The installer and 0.x release gate are still being built; do not use a local
+native pilot package as a public migration release.
+
+On a native site, Update Center can stage a verified 0.x package and restart
+through the launcher. It retains the previous binary for a same-schema
+rollback. That button keeps current data; restoring older data is an offline
+backup operation. Core saves a local settings/config rollback point before
+each update, but the point does not contain history and is not an off-device
+backup.
 
 ## Release progression
 
@@ -140,10 +193,10 @@ newer updater, update Core and updater together using the paired commands below.
 A normal Core update also asks the updater to replace itself with the same tag
 after Core passes its health check.
 
-A 2.x site that wants a published 3.x pair must not use orange Update. That
-click moves Core only. Use the [paired upgrade script](upgrade-paired-release.md)
-so the updater is installed first. The commands below are the same ordering
-if you prefer to type them by hand.
+The 2.x to 3.x steps below document the earlier operator-led transition.
+They are not the path for installed users in the 0.x cutover. A 1.x or 2.x
+box waits for the guided installer. Orange Update must not move it to 3.x:
+that click changes Core before its updater.
 
 For manual updates, install the updater first while the existing Core still
 runs. Set `FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the published
@@ -165,7 +218,7 @@ the same tag, then pull and recreate only the Core service.
 
 ### First DuckDB upgrade
 
-The [paired upgrade script](upgrade-paired-release.md) is the supported
+The [paired upgrade script](upgrade-paired-release.md) records the earlier
 operator path from a 2.x Compose site. The updater shipped before the fix for [#1164](https://github.com/srcfl/ftw/issues/1164)
 waits only 30 minutes and can revert the Core image without its matching data.
 It replaces itself only after Core becomes ready. **Installing a new Core does

@@ -11,10 +11,8 @@
 //      blocked by the check.
 //   3. The banner only renders when the response has
 //      update_available && !skipped && sidecar_ready. sidecar_ready
-//      is true exclusively in docker-compose deploys where the
-//      ftw-updater sidecar's Unix socket is reachable; native installs
-//      and dev runs keep the banner hidden so we don't offer an Update
-//      button that can only fail.
+//      is true when Docker's updater socket is reachable or a native
+//      release slot is ready. Dev runs keep the banner hidden.
 //   4. Update-now posts /api/version/update, opens an <ftw-modal>-based
 //      progress overlay, polls /api/version/update/status, and
 //      cache-busts reloads on `done`. Long phases keep polling while the
@@ -260,7 +258,15 @@ class FtwUpdateCheck extends FtwElement {
         }
         this._startPolling();
       })
-      .catch((e) => this._fail(String(e)));
+      .catch((e) => {
+        // Native Core may exit for the accepted update before the reply
+        // reaches this browser. Its saved status tells us what happened.
+        if (this._info?.native) {
+          this._startPolling();
+          return;
+        }
+        this._fail(String(e));
+      });
   }
 
   _dismiss() {
@@ -368,10 +374,8 @@ class FtwUpdateCheck extends FtwElement {
   render() {
     const info = this._info;
     // Banner is only useful when the full pull+restart flow is actionable.
-    // sidecar_ready is true in docker-compose deploys where the ftw-updater
-    // sidecar exposes its Unix socket at the configured SocketPath; native
-    // installs and dev runs leave the socket absent, so we stay invisible
-    // instead of offering an Update button that can only fail.
+    // sidecar_ready also means a native release slot is ready. Both paths
+    // must be actionable before we offer the update button.
     const showBanner =
       !!info &&
       info.update_available &&

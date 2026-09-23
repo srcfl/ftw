@@ -76,6 +76,7 @@ jobs:
             echo "version must match vX.Y.Z-beta.N" >&2
             exit 1
           fi
+          bash scripts/check-legacy-release-line.sh "${TAG}"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           BASE_VERSION="${TAG#v}"
           BASE_VERSION="${BASE_VERSION%-beta.*}"

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func imageRemovals(calls [][]string) []string {
@@ -90,18 +91,23 @@ func TestHandleUpdate_ImageCleanupFailureKeepsUpdateDone(t *testing.T) {
 	s.usedImageIDs = func(context.Context) (map[string]bool, error) {
 		return nil, errors.New("docker ps unavailable")
 	}
-	replaced := ""
-	s.selfReplace = func(target string) error { replaced = target; return nil }
+	replaced := make(chan string, 1)
+	s.selfReplace = func(target string) error { replaced <- target; return nil }
 
 	req := httptest.NewRequest(http.MethodPost, "/update", bytes.NewBufferString(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	waitForState(t, s, "done")
+	select {
+	case target := <-replaced:
+		if target != "v1.2.3" {
+			t.Fatalf("updater self-replace target = %q", target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("updater self-replacement was not called")
+	}
 	if got := imageRemovals(runner.snapshot()); len(got) != 0 {
 		t.Fatalf("cleanup removed images without a container inventory: %v", got)
-	}
-	if replaced != "v1.2.3" {
-		t.Fatalf("updater self-replace target = %q", replaced)
 	}
 }
 
