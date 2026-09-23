@@ -61,8 +61,15 @@ for path in "${existing_paths[@]}"; do
 done
 if systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
    systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
+   systemctl cat ftw.service >/dev/null 2>&1 ||
+   systemctl cat forty-two-watts.service >/dev/null 2>&1 ||
    id ftw >/dev/null 2>&1; then
   echo "An FTW service or account already exists; refusing a fresh install." >&2
+  exit 2
+fi
+if command -v ss >/dev/null 2>&1 &&
+   ss -ltnH | awk '$4 ~ /:8080$/ { found = 1 } END { exit !found }'; then
+  echo "Port 8080 is already in use; refusing a fresh install." >&2
   exit 2
 fi
 
