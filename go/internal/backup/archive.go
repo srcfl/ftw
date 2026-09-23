@@ -247,12 +247,30 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		sourcePath:  databaseGzip,
 		isDatabase:  true,
 	})
+	var sourceBytes int64
+	for _, source := range sources {
+		info, err := os.Lstat(source.sourcePath)
+		if err != nil {
+			return Info{}, err
+		}
+		if info.Mode().IsRegular() {
+			sourceBytes += info.Size()
+		}
+	}
+	var checkedBytes int64
+	if opts.Progress != nil {
+		opts.Progress(state.BackupProgress{Phase: "checking_sources", TotalBytes: sourceBytes})
+	}
 	for i := range sources {
 		entry, err := describeSource(ctx, dataDir, sources[i])
 		if err != nil {
 			return Info{}, err
 		}
 		sources[i].entry = entry
+		checkedBytes += entry.Size
+		if opts.Progress != nil {
+			opts.Progress(state.BackupProgress{Phase: "checking_sources", CompletedBytes: checkedBytes, TotalBytes: sourceBytes})
+		}
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].archivePath < sources[j].archivePath })
 	files := make([]FileEntry, len(sources))
@@ -269,17 +287,11 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	}
 
 	tmpPath := filepath.Join(outputDir, "."+id+".tmp")
-	if opts.Progress != nil {
-		opts.Progress(state.BackupProgress{Phase: "packing_archive"})
-	}
-	if err := writeArchive(ctx, tmpPath, manifest, sources, !opts.State.OfflineBackup()); err != nil {
+	if err := writeArchiveWithProgress(ctx, tmpPath, manifest, sources, !opts.State.OfflineBackup(), opts.Progress); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, err
 	}
-	if opts.Progress != nil {
-		opts.Progress(state.BackupProgress{Phase: "verifying_archive"})
-	}
-	if _, err := verifyInWorkspaceContext(ctx, tmpPath, outputDir); err != nil {
+	if _, err := verifyInWorkspaceProgressContext(ctx, tmpPath, outputDir, opts.Progress); err != nil {
 		_ = os.Remove(tmpPath)
 		return Info{}, fmt.Errorf("backup: verify finished archive: %w", err)
 	}
@@ -435,6 +447,17 @@ func describeSource(ctx context.Context, dataDir string, source sourceEntry) (Fi
 }
 
 func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []sourceEntry, live bool) error {
+	return writeArchiveWithProgress(ctx, dst, manifest, sources, live, nil)
+}
+
+func writeArchiveWithProgress(ctx context.Context, dst string, manifest Manifest, sources []sourceEntry, live bool, report func(state.BackupProgress)) error {
+	var total int64
+	for _, source := range sources {
+		if source.entry.Type == "file" {
+			total += source.entry.Size
+		}
+	}
+	progress := newArchiveProgress("packing_archive", total, report)
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -483,7 +506,7 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 			return err
 		}
 		h := sha256.New()
-		_, copyErr := copyContext(ctx, io.MultiWriter(tw, h), in)
+		_, copyErr := copyContext(ctx, io.MultiWriter(tw, h), io.TeeReader(in, progress))
 		closeErr := in.Close()
 		if copyErr != nil {
 			return copyErr
@@ -501,6 +524,10 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 	if err := zw.Close(); err != nil {
 		return err
 	}
+	progress.finish()
+	if report != nil {
+		report(state.BackupProgress{Phase: "syncing_archive"})
+	}
 	if err := f.Sync(); err != nil {
 		return err
 	}
@@ -509,6 +536,39 @@ func writeArchive(ctx context.Context, dst string, manifest Manifest, sources []
 	}
 	committed = true
 	return nil
+}
+
+type archiveProgress struct {
+	phase  string
+	total  int64
+	done   int64
+	last   time.Time
+	report func(state.BackupProgress)
+}
+
+func newArchiveProgress(phase string, total int64, report func(state.BackupProgress)) *archiveProgress {
+	p := &archiveProgress{phase: phase, total: total, last: time.Now(), report: report}
+	p.publish()
+	return p
+}
+
+func (p *archiveProgress) Write(data []byte) (int, error) {
+	p.done += int64(len(data))
+	if time.Since(p.last) >= time.Second || p.done == p.total {
+		p.publish()
+		p.last = time.Now()
+	}
+	return len(data), nil
+}
+
+func (p *archiveProgress) finish() {
+	p.publish()
+}
+
+func (p *archiveProgress) publish() {
+	if p.report != nil {
+		p.report(state.BackupProgress{Phase: p.phase, CompletedBytes: p.done, TotalBytes: p.total})
+	}
 }
 
 // Verify checks archive structure, every file hash, SQLite quick_check and
@@ -525,12 +585,21 @@ func verifyInWorkspace(archivePath, workspace string) (Manifest, error) {
 }
 
 func verifyInWorkspaceContext(ctx context.Context, archivePath, workspace string) (Manifest, error) {
+	return verifyInWorkspaceProgressContext(ctx, archivePath, workspace, nil)
+}
+
+func verifyInWorkspaceProgressContext(ctx context.Context, archivePath, workspace string, report func(state.BackupProgress)) (Manifest, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return Manifest{}, err
 	}
 	defer f.Close()
-	zr, err := gzip.NewReader(backupContextReader{ctx, f})
+	archiveInfo, err := f.Stat()
+	if err != nil {
+		return Manifest{}, err
+	}
+	progress := newArchiveProgress("verifying_archive", archiveInfo.Size(), report)
+	zr, err := gzip.NewReader(backupContextReader{ctx, io.TeeReader(f, progress)})
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -639,6 +708,10 @@ func verifyInWorkspaceContext(ctx context.Context, archivePath, workspace string
 	}
 	if len(seen) != len(want) {
 		return Manifest{}, errors.New("backup: archive is missing one or more manifest files")
+	}
+	progress.finish()
+	if report != nil {
+		report(state.BackupProgress{Phase: "checking_database"})
 	}
 	if err := verifyCompressedDatabaseContext(ctx, dbGzip, tmpDir); err != nil {
 		return Manifest{}, err

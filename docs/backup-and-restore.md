@@ -40,6 +40,22 @@ Choose **Download**, save the `.ftwbak` file on another computer or USB disk,
 and keep at least one older known-good copy. **Verify** rechecks the server copy;
 it does not prove that a download exists elsewhere.
 
+From another computer, [`scripts/ftwctl.py`](../scripts/ftwctl.py) can do all
+three steps in one command: create the archive, wait for Core's verification,
+then download it and compare SHA-256 before naming the local file. Use an SSH
+tunnel to the box API if it is not directly reachable:
+
+```bash
+ssh -N -L 18080:127.0.0.1:8080 box.example
+python3 scripts/ftwctl.py --url http://127.0.0.1:18080 backup --output-dir ~/FTW-backups
+```
+
+The CLI prints each phase and elapsed time. It prints completed and total
+bytes when Core knows both, and says `total unknown` while SQLite scans rows
+without a safe total. A terminal closing before the final SHA-256 comparison
+does not leave a file that looks like a finished backup. Set `FTW_API_TOKEN`
+in the CLI environment if the site requires LAN auth.
+
 The default Compose installation stores on-device archives under
 `data/backups/`. Set `state.backup_dir` to a mounted external directory if that
 directory is available to the FTW container. The Update Center warns when the
@@ -84,6 +100,9 @@ ftw-backup inspect -archive /mnt/backup/example.ftwbak
 ftw-backup restore -archive /mnt/backup/example.ftwbak -data /var/lib/ftw -yes
 ftw-backup revert  -data /var/lib/ftw -safety /var/lib/.ftw-pre-restore-... -yes
 ```
+
+Add `-progress` to `ftw-backup create` for elapsed-time JSON progress on
+stderr. The final verified archive metadata remains JSON on stdout.
 
 Stop the native FTW service before `restore` or `revert`. `create` opens the
 existing database read-only and does not migrate or repair its schema.
