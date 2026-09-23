@@ -2,9 +2,9 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
-> **Alternative manual path:** the recommended installation uses the ready-made FTW image and Raspberry Pi Imager repository in [`../rpi-image.md`](../rpi-image.md). Continue here only when you specifically want generic Raspberry Pi OS + Docker.
+> **Native 0.x beta:** the old FTW image and Docker installer are retired for new sites. This guide covers Pi setup; beta testers with a fresh 64-bit host use the [native Linux installer](../operations.md#install). Existing sites wait for the guided migration.
 
-> **Don't have a Raspberry Pi?** You can also run FTW on a NUC, an old laptop, or any other hardware you have lying around — as long as it can run Docker. This guide focuses on getting started with a Raspberry Pi; if you're on another box, skim the hardware steps and jump to **Step 11 — Install FTW** (the install script assumes Debian or Ubuntu).
+> **Don't have a Raspberry Pi?** A fresh 64-bit Debian or Ubuntu host can use the same native beta installer. Skip the Pi hardware steps and read **Step 11 — Install FTW**.
 
 ## What you'll need
 

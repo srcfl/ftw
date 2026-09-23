@@ -12,14 +12,18 @@ an agreed test site:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh -o /tmp/ftw-install.sh
-bash /tmp/ftw-install.sh --tag v0.131.0-beta.1
+bash /tmp/ftw-install.sh --fresh-host --tag v0.131.0-beta.1
 ```
 
-Use the exact tag chosen for the site; do not use GitHub `releases/latest`,
-which remains on 2.x for old boxes. The installer checks the package and
+`--fresh-host` confirms that no FTW site exists, including a stopped Docker
+site installed in a custom directory. Use the exact tag chosen for the site;
+do not use GitHub `releases/latest`, which remains on 2.x for old boxes. The
+installer checks the package and
 checksum, creates `/opt/ftw` with version slots, and starts `ftw.service`.
 Persistent data is under `/var/lib/ftw`. Open `http://<host>:8080/setup` on
-the LAN, then check health and live device readings.
+the LAN, then check health and live device readings. If setup stops partway,
+inspect `journalctl -u ftw`, then rerun with `--resume --tag` and the same
+tag. The installer checks its pending record and keeps any data already saved.
 
 Existing Docker, Home Assistant and earlier native installations must stay
 on their current version until the guided 0.x migration is tested. The fresh

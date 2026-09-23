@@ -90,27 +90,33 @@ driver actually changed.
 
 ## Install on Linux
 
-The installer supports Raspberry Pi OS, Debian and Ubuntu:
+Native 0.x is in beta. On a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu
+host that is part of the beta test, install one exact published tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh -o /tmp/ftw-install.sh
+bash /tmp/ftw-install.sh --fresh-host --tag v0.131.0-beta.1
 ```
 
-It installs Docker when needed, creates `~/ftw`, downloads the Compose file
-and starts core, updater and the local MQTT broker. Open
-`http://<host>:8080/setup` on the LAN.
+Use the tag chosen for that test site. `--fresh-host` confirms there is no
+existing FTW site, even a stopped Docker site in a custom directory. The
+installer checks the package and checksum, creates native release slots under
+`/opt/ftw`, and starts the local
+Core service. It does not install Docker. Open `http://<host>:8080/setup` on
+the LAN, then check storage health and live device readings. If the first
+install is interrupted, use `--resume --tag` with the same tag after checking
+the service log; it keeps any data the first attempt created.
 
 Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
 that dial in to FTW — OCPP chargers store their backend URL at commissioning,
 and some hardware whitelists which addresses may talk to it — silently lose
 the connection if DHCP later hands the host a different address.
 
-Existing Forty Two Watts or older FTW deployments must use the
-[legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
-are preserved. A 2.x Compose site that already runs `ghcr.io/srcfl/ftw`
-and wants 3.x uses [upgrade-paired-release.md](docs/upgrade-paired-release.md),
-not orange Update. Raspberry Pi image installation is covered by
-[docs/rpi-image.md](docs/rpi-image.md).
+Existing 1.x, 2.x, 3.x and earlier native sites stay on their current version
+until the guided 0.x migration is ready. The fresh installer refuses them; do
+not use Update or old Docker migration scripts to cross release lines. The
+published [Raspberry Pi image](docs/rpi-image.md) still uses the older Docker
+path and is not a way to start a new native 0.x site.
 
 The on-box dashboard remains local. The optional
 [FTW webapp](https://github.com/srcfl/ftw-webapp) connects through an encrypted
