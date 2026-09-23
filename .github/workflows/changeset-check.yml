@@ -80,6 +80,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Node for version policy
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
       - name: Reject Core major bumps
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -87,8 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}"
-          mapfile -t changed_changesets < <(git diff --name-only --diff-filter=ACM "${BASE_SHA}"..."${HEAD_SHA}" -- '.changeset/*.md')
-          python3 .github/scripts/check-changeset-bumps.py "${changed_changesets[@]}"
+          mapfile -t changed_changesets < <(git diff -M --name-only --diff-filter=ACMR "${BASE_SHA}"..."${HEAD_SHA}" -- '.changeset/*.md')
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test .github/scripts/check-changeset-bumps.test.mjs
+          node .github/scripts/check-changeset-bumps.mjs "${changed_changesets[@]}"
 
       - name: Validate package and lockfile metadata
         run: node --test web/release-metadata.test.mjs
