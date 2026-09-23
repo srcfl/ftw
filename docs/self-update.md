@@ -32,6 +32,36 @@ the native service, check data and connected devices, and retain a tested way
 back. It is not ready for users. The [fresh Linux installer](../scripts/install.sh)
 is only for an empty 64-bit host and refuses a known existing site.
 
+The [operator CLI](../scripts/ftwctl.py) now supports a **legacy native/systemd
+pilot**. Run it on another computer, through an SSH tunnel to the box's API:
+
+```bash
+ssh -N -L 18080:127.0.0.1:8080 box.example
+python3 scripts/ftwctl.py --url http://127.0.0.1:18080 status
+python3 scripts/ftwctl.py --url http://127.0.0.1:18080 backup --output-dir ~/FTW-backups
+python3 scripts/ftwctl.py --url http://127.0.0.1:18080 migrate-native \
+  --host box.example --tag v0.131.0-beta.1 \
+  --data-dir /srv/ftw/data --config /app/data/config.yaml \
+  --user-drivers /app/data/drivers --check-only
+```
+
+Remove `--check-only` and pass `--backup ~/FTW-backups/<printed-name>.ftwbak`
+only after checking the paths against that box. The CLI requires a backup from
+the last 24 hours whose size and SHA-256 match Core's verified archive. It
+stages the exact release beside the old binary, then changes only the systemd
+start override. It compares version, health, driver names and working driver
+count. On failure it tries the old start command. If old Core cannot read the
+data after a failed trial, it restores the verified archive before retrying
+old Core. Keep the printed recovery-copy path if automatic recovery fails.
+The CLI prints the active phase, elapsed time and completed/total bytes when
+known; it says when a total is unknown. If LAN auth is on, set `FTW_API_TOKEN`
+in the CLI process environment. Never paste that token into a command line.
+
+This pilot accepts an older **direct native systemd** site only. Docker and
+Home Assistant installations remain on their current line while their own
+layout and recovery path are tested. A successful empty-data smoke test does
+not prove migration of a live household.
+
 GitHub `releases/latest` and the old Docker `:latest` aliases remain on the
 2.x line for installed boxes. Native beta and stable releases use exact tags
 without moving that global latest slot. An urgent safety repair may still
@@ -66,6 +96,18 @@ a failed trial falls back to the previous Core. A local rollback point does
 not include history and stays on the same disk. A history-format change needs
 a full backup made before the update. See
 [full backup and restore](backup-and-restore.md).
+
+The same operator CLI can show the native path from a terminal:
+
+```bash
+python3 scripts/ftwctl.py --url http://127.0.0.1:18080 update --channel beta
+```
+
+It asks Core to update through its normal API and follows the local rollback
+point, download, restart and health result. If Core says a full backup is
+required, pass `--backup-dir ~/FTW-backups` so the CLI first creates, verifies
+and downloads one to this computer. The `update` command refuses old 1.x,
+2.x and 3.x installs before changing their channel.
 
 Core and the compiled Energyplan worker ship in one package. Core validates
 plans and keeps its Go fallback. Signed Lua drivers follow their own beta and

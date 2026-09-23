@@ -8,8 +8,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/backup"
@@ -46,12 +50,17 @@ func run(args []string) error {
 }
 
 func create(args []string) error {
+	return createWithProgress(args, os.Stderr)
+}
+
+func createWithProgress(args []string, progressOutput io.Writer) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	statePath := fs.String("state", "state.db", "path to state.db")
 	configPath := fs.String("config", "", "config seed path (default: <data>/config.yaml)")
 	dataDir := fs.String("data", "", "persistent data directory (default: state.db directory)")
 	outputDir := fs.String("output", "", "backup destination (default: <data>/backups)")
 	coreVersion := fs.String("core-version", Version, "core version recorded in component inventory")
+	showProgress := fs.Bool("progress", false, "write JSON progress and periodic elapsed-time updates to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -70,15 +79,82 @@ func create(args []string) error {
 		return err
 	}
 	defer st.Close()
-	info, err := backup.Create(context.Background(), backup.CreateOptions{
+	var report func(state.BackupProgress)
+	if *showProgress {
+		printer := newBackupProgressPrinter(progressOutput)
+		defer printer.stop()
+		report = printer.report
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	info, err := backup.Create(ctx, backup.CreateOptions{
 		State: st, StatePath: absState, DataDir: *dataDir, OutputDir: *outputDir,
 		ConfigPath: *configPath,
 		Components: backup.ComponentInventory{Core: backup.ComponentVersion{Version: *coreVersion}},
+		Progress:   report,
 	})
 	if err != nil {
+		if report != nil {
+			report(state.BackupProgress{Phase: "failed", Error: err.Error()})
+		}
 		return err
 	}
+	if report != nil {
+		report(state.BackupProgress{Phase: "complete", CompletedBytes: info.SizeBytes, TotalBytes: info.SizeBytes})
+	}
 	return printJSON(info)
+}
+
+type backupProgressPrinter struct {
+	mu      sync.Mutex
+	output  *json.Encoder
+	started time.Time
+	latest  state.BackupProgress
+	done    chan struct{}
+	stopped chan struct{}
+}
+
+func newBackupProgressPrinter(output io.Writer) *backupProgressPrinter {
+	p := &backupProgressPrinter{
+		output: json.NewEncoder(output), started: time.Now(),
+		done: make(chan struct{}), stopped: make(chan struct{}),
+	}
+	go func() {
+		defer close(p.stopped)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.mu.Lock()
+				p.write("heartbeat", p.latest)
+				p.mu.Unlock()
+			case <-p.done:
+				return
+			}
+		}
+	}()
+	return p
+}
+
+func (p *backupProgressPrinter) report(progress state.BackupProgress) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.latest = progress
+	p.write("progress", progress)
+}
+
+func (p *backupProgressPrinter) write(event string, progress state.BackupProgress) {
+	_ = p.output.Encode(struct {
+		Event     string `json:"event"`
+		ElapsedMS int64  `json:"elapsed_ms"`
+		state.BackupProgress
+	}{Event: event, ElapsedMS: time.Since(p.started).Milliseconds(), BackupProgress: progress})
+}
+
+func (p *backupProgressPrinter) stop() {
+	close(p.done)
+	<-p.stopped
 }
 
 func verify(args []string, includeManifest bool) error {
