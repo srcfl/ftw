@@ -10,6 +10,16 @@ FTW has two channels:
 Stable is the default. Persisted installations that still say `edge` are
 migrated to `beta`; no edge releases are published or accepted.
 
+Existing 1.x and 2.x Core installations stay on their current major line.
+The Update Center must not offer 3.x or 0.x to them, and Core rejects a
+direct update request for either. Moving to native 0.x needs a separate,
+guided migration installer with an off-box backup and a verified restore
+path. The old Docker update button is not that migration path. Binaries
+published before this guard cannot gain it until they receive a maintenance
+release on their own line; keep GitHub `releases/latest` and the old Docker
+`:latest` aliases on a safe 2.x release in the meantime. An older beta may
+still show 3.x, so users must not start that update.
+
 ## Release progression
 
 User-visible changes land with a Changeset. The Changesets workflow opens the

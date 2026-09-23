@@ -368,6 +368,11 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return c.recordErr(err)
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
+	if c.cfg.ReleaseTagPrefix == "" && legacyCoreReleaseLocked(cached.Current, targetTag) {
+		// A legacy Core stays on its own release line until the guided
+		// migration path is ready, even when beta lists a newer major.
+		rel, targetTag, deployable = ghRelease{}, "", false
+	}
 	if targetTag != "" {
 		ok, err := rp.hasTag(ctx, targetTag)
 		if err != nil {
@@ -731,6 +736,9 @@ func (c *Checker) TriggerComponent(ctx context.Context, action, target, componen
 // TriggerComponentAt preserves the audit operation's start time across a Core
 // container recreation so the new process finishes the same history record.
 func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, component string, startedAt time.Time) error {
+	if action == "update" && component == "core" && legacyCoreReleaseLocked(c.Info().Current, target) {
+		return errors.New("selfupdate: this Core release line is locked; use the guided migration installer")
+	}
 	if c.cfg.SocketPath == "" {
 		return errors.New("selfupdate: sidecar socket not configured")
 	}
@@ -925,6 +933,15 @@ func channelUpdateAvailable(latest, current string) bool {
 		return false
 	}
 	return isNewer(latest, current)
+}
+
+func legacyCoreReleaseLocked(current, target string) bool {
+	running := parseSemanticVersion(current)
+	if running == nil || (running.numbers[0] != 1 && running.numbers[0] != 2) || target == "" {
+		return false
+	}
+	candidate := parseSemanticVersion(target)
+	return candidate == nil || candidate.numbers[0] != running.numbers[0]
 }
 
 func isBetaTag(tag string) bool {
