@@ -196,6 +196,25 @@ assert_digest() {
   fi
 }
 
+for allowed_tag in v2.3.3 v2.3.3-beta.1; do
+  bash scripts/check-legacy-release-line.sh "${allowed_tag}"
+done
+
+# Another Docker major or native 0.x release must not touch old latest aliases.
+for blocked_tag in v1.9.9 v3.8.0 v0.131.0; do
+  write_initial_state
+  if run_subject "FTW_RELEASE_TAG=${blocked_tag}"; then
+    echo "${blocked_tag} unexpectedly entered the legacy latest channel" >&2
+    exit 1
+  fi
+  if [ -s "${log}" ] || [ -e "${final_state}" ]; then
+    echo "${blocked_tag} changed release state before its line check" >&2
+    exit 1
+  fi
+  assert_digest ghcr.io/srcfl/ftw:latest "${old_core}"
+  assert_digest ghcr.io/srcfl/ftw-updater:latest "${old_updater}"
+done
+
 # Fail after updater canonical latest moved. The trap must restore updater and leave
 # every other member of both namespaces at its captured digest.
 write_initial_state

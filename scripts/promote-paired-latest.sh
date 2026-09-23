@@ -20,6 +20,8 @@ set -eEuo pipefail
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
+bash scripts/check-legacy-release-line.sh "${FTW_RELEASE_TAG}"
+
 docker_command="${FTW_DOCKER_COMMAND:-docker}"
 inspect_command="${FTW_INSPECT_IMAGE_DIGEST:-scripts/inspect-image-digest.sh}"
 gh_command="${FTW_GH_COMMAND:-gh}"
