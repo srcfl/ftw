@@ -73,24 +73,7 @@ else
     echo "sudo is required to install the service." >&2
     exit 2
   fi
-  sudo -v
   as_root() { sudo "$@"; }
-fi
-
-# A fresh installer must never take ownership of a site that is already
-# controlling equipment. Check known native paths, old Compose homes and both
-# service names before downloading or changing any host state.
-for path in "${existing_paths[@]}"; do
-  if as_root test -e "$path" || as_root test -L "$path"; then
-    echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
-    exit 2
-  fi
-done
-if as_root systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
-   as_root systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
-   id ftw >/dev/null 2>&1; then
-  echo "An FTW service or account already exists; refusing a fresh install." >&2
-  exit 2
 fi
 
 work="$(mktemp -d)"
@@ -127,6 +110,19 @@ mkdir -p "$stage"
 "${work}/ftw-launcher" -root "$stage" status >/dev/null
 
 # No host write occurs until the whole package has passed verification.
+if (( EUID != 0 )); then sudo -v; fi
+for path in "${existing_paths[@]}"; do
+  if as_root test -e "$path" || as_root test -L "$path"; then
+    echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
+    exit 2
+  fi
+done
+if as_root systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
+   as_root systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
+   id ftw >/dev/null 2>&1; then
+  echo "An FTW service or account already exists; refusing a fresh install." >&2
+  exit 2
+fi
 as_root useradd --system --user-group --home-dir /var/lib/ftw --no-create-home ftw
 as_root install -d -m 0755 /opt/ftw
 as_root cp -a "${stage}/." /opt/ftw/
