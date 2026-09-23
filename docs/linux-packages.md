@@ -1,15 +1,20 @@
 # Linux packages
 
-New beta and stable releases provide `ftw-linux-arm64.tar.gz` for 64-bit
+Native 0.x beta and stable releases provide `ftw-linux-arm64.tar.gz` for 64-bit
 Raspberry Pi/Linux hosts and `ftw-linux-amd64.tar.gz` for x86-64 Linux hosts.
 Each archive has a matching `.sha256` file. New releases do not build Windows
 packages. Existing published assets remain available.
+
+This page describes package contents and a manual, fresh installation. It is
+not the guided migration for an existing Docker or Home Assistant box. Those
+boxes stay on their current version until the guided 0.x installer has been
+tested and published.
 
 The archive contains Core, `ftw-backup`, `ftw-launcher`, web files, the pinned
 recovery drivers, the compiled Energyplan bundle, license notices, an example
 config, `deploy/ftw.service` and `deploy/ftw-native.service`. Keep these files
 together when changing versions. The native slot service is not yet the default
-install path; it needs the Core update and migration work in ADR 0007.
+install path; it needs the migration work in ADR 0007.
 Existing Linux download names remain aliases during the transition.
 
 Each package includes only the Energyplan executable for its Linux
@@ -108,9 +113,10 @@ in place; do not copy example config over it or replace only the executable.
 If startup fails, stop the service and inspect the logs. Before restoring the
 old program, check whether the new version changed the data format. When it
 did, restore the verified pre-update data with `ftw-backup` as well. Do not
-start an older program against an unsupported data format. The native path
-has no automatic rollback; retain both packages and the backup until the new
-version has passed these checks.
+start an older program against an unsupported data format. This manual
+`/opt/ftw` path has no automatic rollback; retain both packages and the backup
+until the new version has passed these checks. The separate 0.x slot service
+keeps the previous same-schema binary for rollback.
 
 Native builds leave the container updater disabled. Do not set
 `FTW_SELFUPDATE_ENABLED=1`: it enables the existing container update path,

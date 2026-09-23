@@ -14,9 +14,10 @@ The first 2.x to 3.x hop needed the new updater already running. Choose
 Older image names (`frahlg/forty-two-watts` and similar) still start at
 [upgrade-from-legacy.md](upgrade-from-legacy.md).
 
-This is the operator path for people who want to move. The Update Center
-guard in [#1223](https://github.com/srcfl/ftw/issues/1223) does not retrofit
-the 2.14 button.
+The steps below are kept as a record of the old procedure, not as current
+instructions. The Update Center guard in
+[#1223](https://github.com/srcfl/ftw/issues/1223) does not retrofit the
+2.14 button.
 
 ---
 

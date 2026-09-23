@@ -76,6 +76,21 @@ function runWorkflowStep(stepName, env) {
 }
 
 describe("release metadata", () => {
+  it("keeps master on the native 0.x line and reserves Docker dispatch for 2.x", () => {
+    const version = /^0\.(\d+)\.(\d+)$/.exec(packageJSON.version);
+    assert.ok(version, `Core must use a native 0.x version, got ${packageJSON.version}`);
+    assert.ok(Number(version[1]) >= 131, "native versions start at 0.131.0");
+
+    const dockerGuard = releaseWorkflow.indexOf(
+      'bash scripts/check-legacy-release-line.sh "v${version}"',
+    );
+    const versionAction = releaseWorkflow.indexOf("uses: changesets/action@v2");
+    const stableTagWrite = releaseWorkflow.indexOf('git tag -a "${TAG}"');
+    assert.ok(dockerGuard >= 0 && dockerGuard < versionAction);
+    assert.ok(dockerGuard < stableTagWrite);
+    assert.match(betaWorkflow, /bash scripts\/check-legacy-release-line\.sh "\$\{TAG\}"/);
+  });
+
   it("keeps package.json and package-lock.json root identity in sync", () => {
     assert.ok(lockRoot, "package-lock.json must describe the root package");
     assert.equal(packageLock.name, packageJSON.name);

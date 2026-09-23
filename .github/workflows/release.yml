@@ -1,9 +1,12 @@
 name: release
 
-# Changesets-driven release. Pattern lifted from umara/u-front.
+# Changesets version PRs for native 0.x; manual stable publication is reserved
+# for an exceptional 2.x Docker safety repair. Native 0.x beta and stable
+# releases use native-release.yml and never use this workflow's dispatch.
 #
-# This workflow ONLY handles the changesets flow + tag + draft GitHub Release
-# preparation. The cross-platform binaries, docker images, and
+# On push, this workflow handles the Changesets Version Packages PR only.
+# On an explicit 2.x dispatch, it handles a tag + draft GitHub Release.
+# The cross-platform binaries, docker images, and
 # Discord announcement live in `release-assets.yml` and are triggered
 # explicitly via `gh workflow run release-assets.yml --ref vX.Y.Z` at
 # the end of the draft step. release-assets.yml publishes the release only
@@ -21,13 +24,13 @@ name: release
 #        `changeset publish` / `changeset tag` silently no-op'd in
 #        CI, and the action's built-in `createGithubReleases` defaults
 #        to true and 422-collides with our own `gh release create`.
-#      - After the Version PR merges, dispatch beta.yml from that exact commit
-#        and validate it on real sites.
-#      - Manually dispatch this workflow with the exact tested beta tag.
-#        Promotion refuses a beta that does not point to this commit.
+#      - After the Version PR merges, dispatch native-release.yml from that
+#        exact commit for a native 0.x beta. This workflow does not publish it.
+#      - Only for an exceptional 2.x repair, dispatch beta.yml and then this
+#        workflow with the exact tested 2.x beta tag.
 #
-# Stable publication is deliberately workflow_dispatch-only. A merge creates
-# the version candidate; an operator chooses when its beta is ready to promote.
+# Old Docker stable publication is workflow_dispatch-only. A merge creates a
+# native version candidate; it does not publish a Docker release.
 
 on:
   push:
@@ -91,6 +94,13 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: package-lock.json
+
+      - name: Reserve manual Docker publication for 2.x
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          bash scripts/check-legacy-release-line.sh "v${version}"
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit --no-fund
