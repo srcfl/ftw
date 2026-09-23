@@ -40,6 +40,9 @@ assert_paths '.github/workflows/release-assets.yml' \
 assert_paths 'scripts/promote-paired-latest.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
+assert_paths 'scripts/check-legacy-release-line.sh' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
 assert_paths 'scripts/github-release-by-id.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 

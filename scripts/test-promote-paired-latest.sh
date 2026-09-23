@@ -196,6 +196,46 @@ assert_digest() {
   fi
 }
 
+for allowed_tag in v2.3.3 v2.3.3-beta.1; do
+  bash scripts/check-legacy-release-line.sh "${allowed_tag}"
+done
+
+# A recovery run checks out the release helpers beside the old tag's files.
+# The guard must come from the helper checkout, not from the working directory.
+mkdir -p "${tmp}/release-workflow/scripts"
+cp "${subject}" "${tmp}/release-workflow/scripts/promote-paired-latest.sh"
+cp "${root}/scripts/check-legacy-release-line.sh" "${tmp}/release-workflow/scripts/check-legacy-release-line.sh"
+subject="${tmp}/release-workflow/scripts/promote-paired-latest.sh"
+write_initial_state
+guard_error="$(cd "${tmp}" && run_subject FTW_RELEASE_TAG=v3.8.0 2>&1)" && {
+  echo "recovery helper allowed a cross-line release" >&2
+  exit 1
+}
+if [[ "${guard_error}" != *"cannot use the legacy Docker release channel"* ]]; then
+  echo "recovery helper did not find its own release-line guard" >&2
+  exit 1
+fi
+if [ -s "${log}" ] || [ -e "${final_state}" ]; then
+  echo "recovery helper changed release state before its line check" >&2
+  exit 1
+fi
+subject="${root}/scripts/promote-paired-latest.sh"
+
+# Another Docker major or native 0.x release must not touch old latest aliases.
+for blocked_tag in v1.9.9 v3.8.0 v0.131.0; do
+  write_initial_state
+  if run_subject "FTW_RELEASE_TAG=${blocked_tag}"; then
+    echo "${blocked_tag} unexpectedly entered the legacy latest channel" >&2
+    exit 1
+  fi
+  if [ -s "${log}" ] || [ -e "${final_state}" ]; then
+    echo "${blocked_tag} changed release state before its line check" >&2
+    exit 1
+  fi
+  assert_digest ghcr.io/srcfl/ftw:latest "${old_core}"
+  assert_digest ghcr.io/srcfl/ftw-updater:latest "${old_updater}"
+done
+
 # Fail after updater canonical latest moved. The trap must restore updater and leave
 # every other member of both namespaces at its captured digest.
 write_initial_state
