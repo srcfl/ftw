@@ -1,8 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
+
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // swappableHandler lets the API port be bound before slow boot work (state
@@ -28,21 +34,61 @@ func (s *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	(*s.h.Load()).ServeHTTP(w, r)
 }
 
-// bootPhaseHandler answers health probes 200 while the process initializes,
-// so a legitimately slow boot is distinguishable from a dead one. Everything
-// else gets 503 + Retry-After so clients and the UI know to come back.
+type bootHandler struct {
+	webDir    string
+	migration atomic.Pointer[json.RawMessage]
+}
+
 func bootPhaseHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"starting","phase":"initializing state"}`))
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Retry-After", "10")
+	return newBootPhaseHandler("")
+}
+
+func newBootPhaseHandler(webDir string) *bootHandler {
+	return &bootHandler{webDir: webDir}
+}
+
+func (b *bootHandler) setMigration(progress state.HistoryMigrationStatus) {
+	data, err := json.Marshal(progress)
+	if err != nil {
+		return
+	}
+	snapshot := json.RawMessage(data)
+	b.migration.Store(&snapshot)
+}
+
+// Health proves process liveness. Every other API stays unavailable until
+// the fully wired handler replaces this one. Browser reloads get a progress
+// page instead of a JSON error, without changing the updater's readiness test.
+func (b *bootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if b.webDir != "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		if r.URL.Path == "/history-migration.js" {
+			http.ServeFile(w, r, filepath.Join(b.webDir, "history-migration.js"))
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			if page, err := os.ReadFile(filepath.Join(b.webDir, "boot.html")); err == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("Retry-After", "2")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				if r.Method != http.MethodHead {
+					_, _ = w.Write(page)
+				}
+				return
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	payload := map[string]any{"phase": "initializing state"}
+	if migration := b.migration.Load(); migration != nil {
+		payload["migration"] = *migration
+	}
+	if r.URL.Path == "/api/health" {
+		payload["status"] = "starting"
+	} else {
+		payload["error"] = "starting"
+		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":"starting","phase":"initializing state"}`))
-	})
-	return mux
+	}
+	_ = json.NewEncoder(w).Encode(payload)
 }

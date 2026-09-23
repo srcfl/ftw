@@ -128,9 +128,9 @@ describe("charger state labels", () => {
 describe("OCPP section", () => {
   it("lets the operator turn a disabled server on, rather than sending them to config.yaml", () => {
     const html = ocppSection({ enabled: false, chargers: [] }, "192.168.1.209", escHtml, [], {});
-    assert.match(html, /data-checkbox-path="ocpp\.enabled"/);
-    assert.match(html, /data-path="ocpp\.password"/);
-    assert.match(html, /ws:\/\/192\.168\.1\.209:8887/);
+    assert.match(html, /Set up OCPP/);
+    assert.doesNotMatch(html, /data-path="ocpp\.password"/);
+    assert.doesNotMatch(html, /data-checkbox-path="ocpp\.enabled"/);
   });
 
   it("offers the server settings when it is already on", () => {
@@ -159,7 +159,7 @@ describe("OCPP section", () => {
     assert.match(html, /intruder/);
     assert.match(html, /· pending/);
     assert.match(html, /ignores their telemetry/);
-    assert.match(html, /joins the site on that save/);
+    assert.match(html, /FTW saves and adds it to the site/);
   });
 
   it("shows no quarantine note when every charger is adopted", () => {
@@ -219,5 +219,29 @@ describe("OCPP server form", () => {
   it("escapes values it puts back into the page", () => {
     const html = ocppServerForm({ ocpp: { username: '"><script>x</script>' } }, escHtml);
     assert.doesNotMatch(html, /<script>/);
+  });
+});
+
+
+describe("first charger connection", () => {
+  const settings = window.FTWSettings;
+  const render = config => settings.tabs.loadpoints.render({ config, escHtml, help: () => '' });
+  it("offers a connection action instead of an empty Add form", () => {
+    settings.ocppStatus = { enabled: false, chargers: [] };
+    const html = render({ drivers: [], loadpoints: [] });
+    assert.match(html, /id="connect-charger"/);
+    assert.doesNotMatch(html, /id="new-lp-add"/);
+    assert.doesNotMatch(html, /ctek_hybrid|EV-capable driver/);
+    assert.match(html, /Save OCPP connection settings/);
+    assert.match(html, /Save car profiles/);
+  });
+  it("does not offer an unsaved connection as a usable charger", () => {
+    settings.catalogByLua = { 'drivers/easee.lua': { capabilities: ['ev'] } };
+    const config = { drivers: [{ name: 'easee', lua: 'drivers/easee.lua' }], loadpoints: [] };
+    settings.chargerSetupPending = 'easee';
+    assert.doesNotMatch(render(config), /id="new-lp-add"/);
+    settings.chargerSetupPending = null;
+    assert.match(render(config), /id="new-lp-add"/);
+    assert.match(render(config), /value="easee" selected/);
   });
 });

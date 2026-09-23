@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +146,48 @@ func TestValidatePlanAcceptsSubWattSolverResidueInPassiveMode(t *testing.T) {
 	}}}
 	if err := ValidatePlan(slots, p, &plan); err != nil {
 		t.Fatalf("ValidatePlan rejected numerical solver residue: %v", err)
+	}
+}
+
+func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
+	const limitW = 11040.0
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	tests := []struct {
+		name    string
+		gridW   float64
+		wantErr bool
+	}{
+		{name: "import solver residue", gridW: limitW + 0.000001},
+		{name: "export solver residue", gridW: -limitW - 0.000001},
+		{name: "import real violation", gridW: limitW + 1, wantErr: true},
+		{name: "export real violation", gridW: -limitW - 1, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			slot := Slot{
+				StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 50, Confidence: 1,
+				Limits: PowerLimits{MaxImportW: limitW, MaxExportW: limitW},
+			}
+			if tc.gridW > 0 {
+				slot.LoadW = tc.gridW
+			} else {
+				slot.PVW = tc.gridW
+			}
+			costOre := SlotGridCostOre(slot, tc.gridW*0.25/1000, p)
+			plan := Plan{TotalCostOre: costOre, Actions: []Action{{
+				SlotStartMs: 1, SlotLenMin: 15, GridW: tc.gridW,
+				SoC: 0.5, CostOre: costOre,
+			}}}
+			err := ValidatePlan([]Slot{slot}, p, &plan)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidatePlan() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -351,137 +391,58 @@ func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
 	}
 }
 
-func TestExternalOptimizerEndToEnd(t *testing.T) {
-	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
-	if python == "" {
-		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
+func TestValidatePlanAllowsEVPVWithBatteryGridCharge(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 4140,
+			AllowedStepsW: []float64{0, 4140}, ChargeEfficiency: 1,
+			SurplusOnly: true, NoBatteryToEV: true,
+		},
 	}
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	moduleDir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer"))
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{python, "-m", "ftw_optimizer.worker"},
-		ModuleDir: moduleDir, Timeout: 20 * time.Second,
-		Solver: "HIGHS", Formulation: "auto", MIPRelGap: 0.001,
-		IdleTimeout: 30 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer optimizer.Close()
-	slots, p := externalTestFixture()
-	plan, err := optimizer.Optimize(context.Background(), slots, p)
-	if err != nil {
-		t.Fatalf("Optimize: %v", err)
-	}
-	if plan.Solver == nil || plan.Solver.Engine != "highspy" || plan.Solver.Backend != "highs" ||
-		plan.Solver.ScenarioPolicy != "shared" || plan.Solver.PolicyVersion != "shared-v1" {
-		t.Fatalf("unexpected solver metadata: %+v", plan.Solver)
-	}
-	if plan.Actions[0].BatteryW <= 0 || plan.Actions[1].BatteryW >= 0 {
-		t.Fatalf("expected cheap-charge/expensive-discharge plan: %+v", plan.Actions)
-	}
-	recourse, err := optimizer.OptimizeRecourse(context.Background(), slots, p, 1)
-	if err != nil {
-		t.Fatalf("OptimizeRecourse: %v", err)
-	}
-	if recourse.Solver == nil || recourse.Solver.ScenarioPolicy != "recourse" || recourse.Solver.NonAnticipativeSlots != 1 {
-		t.Fatalf("unexpected recourse metadata: %+v", recourse.Solver)
-	}
-	multistage, err := optimizer.OptimizeMultistage(context.Background(), slots, p, 1)
-	if err != nil {
-		t.Fatalf("OptimizeMultistage: %v", err)
-	}
-	if multistage.Solver == nil || multistage.Solver.ScenarioPolicy != "multistage" || multistage.Solver.PolicyVersion != "storage-multistage-v1" {
-		t.Fatalf("unexpected multistage metadata: %+v", multistage.Solver)
-	}
-	if multistage.Solver.PolicyConfig == "" || multistage.Solver.ModelVariables == 0 || multistage.Solver.ModelConstraints == 0 {
-		t.Fatalf("missing direct multistage topology metadata: %+v", multistage.Solver)
-	}
-	transport, ok := optimizer.transport.(*ProcessTransport)
-	if !ok {
-		t.Fatalf("transport = %T, want *ProcessTransport", optimizer.transport)
-	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		transport.mu.Lock()
-		stopped := transport.cmd == nil
-		transport.mu.Unlock()
-		if stopped {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("real optimizer worker remained running after idle timeout")
-}
-
-func TestExternalOptimizerPlansMultipleLoadpoints(t *testing.T) {
-	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
-	if python == "" {
-		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
-	}
-	_, file, _, _ := runtime.Caller(0)
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{python, "-m", "ftw_optimizer.worker"},
-		ModuleDir: filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer")),
-		Timeout:   20 * time.Second, Solver: "HIGHS", Formulation: "auto",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer optimizer.Close()
-	slots, p := externalTestFixture()
-	p.Loadpoints = []*LoadpointSpec{
-		{ID: "car-a", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1.0, InitialSoC: 0.25, PluggedIn: true, TargetSoC: 0.3, TargetSlotIdx: 1, MaxChargeW: 4000, AllowedStepsW: []float64{0, 2000, 4000}, ChargeEfficiency: 1},
-		{ID: "car-b", CapacityWh: 60000, Levels: 11, SoCMin: 0, SoCMax: 1.0, InitialSoC: 0.2, PluggedIn: true, TargetSoC: 0.25, TargetSlotIdx: 1, MaxChargeW: 3000, AllowedStepsW: []float64{0, 3000}, ChargeEfficiency: 1},
-	}
-	plan, err := optimizer.Optimize(context.Background(), slots, p)
-	if err != nil {
-		t.Fatalf("Optimize: %v", err)
-	}
-	last := plan.Actions[len(plan.Actions)-1]
-	if last.LoadpointSoCByID["car-a"] < 0.30-0.02 || last.LoadpointSoCByID["car-b"] < 0.25-0.02 {
-		t.Fatalf("targets not met: %+v", last.LoadpointSoCByID)
-	}
-	if len(last.LoadpointPowerW) != 2 {
-		t.Fatalf("expected two loadpoint schedules, got %+v", last.LoadpointPowerW)
+	// leftover PV after house = 6000 W. EV 4140 + battery 5000 →
+	// grid = 500-6500+5000+4140 = 3140 import. Battery SoC: 0.20 + 0.475 = 0.675.
+	// EV SoC: 0.25 + 4140/40000 = 0.3535.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
+		TotalCostOre: 62.8, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 5000, GridW: 3140, SoC: 0.675,
+			LoadpointW: 4140, LoadpointSoC: 0.3535, CostOre: 62.8,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected leftover-PV EV beside battery grid-charge: %v", err)
 	}
 }
 
-func TestExternalOptimizerPlansAndValidatesMultipleStorages(t *testing.T) {
-	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
-	if python == "" {
-		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
+func TestValidatePlanRejectsSurplusOnlyEVAboveLeftoverPV(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 11000,
+			AllowedStepsW: []float64{0, 7000}, ChargeEfficiency: 1,
+			SurplusOnly: true, NoBatteryToEV: true,
+		},
 	}
-	_, file, _, _ := runtime.Caller(0)
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{python, "-m", "ftw_optimizer.worker"},
-		ModuleDir: filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer")),
-		Timeout:   20 * time.Second, Solver: "HIGHS", Formulation: "auto",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer optimizer.Close()
-	slots, p := externalTestFixture()
-	p.Storages = []StorageAssetSpec{
-		{ID: "battery-a", CapacityWh: 4000, InitialEnergyWh: 800, MinEnergyWh: 400, MaxEnergyWh: 3800, MaxChargeW: 1500, MaxDischargeW: 2000, ChargeEfficiency: 0.95, DischargeEfficiency: 0.95},
-		{ID: "battery-b", CapacityWh: 6000, InitialEnergyWh: 1200, MinEnergyWh: 600, MaxEnergyWh: 5700, MaxChargeW: 3500, MaxDischargeW: 3000, ChargeEfficiency: 0.95, DischargeEfficiency: 0.95},
-	}
-	plan, err := optimizer.Optimize(context.Background(), slots, p)
-	if err != nil {
-		t.Fatalf("Optimize: %v", err)
-	}
-	for i, action := range plan.Actions {
-		if len(action.StoragePowerW) != 2 || len(action.StorageEnergyWh) != 2 {
-			t.Fatalf("slot %d missing per-storage result: power=%+v energy=%+v", i, action.StoragePowerW, action.StorageEnergyWh)
-		}
-	}
-	plan.Actions[0].StorageEnergyWh["battery-a"] += 100
+	// leftover after house = 6000 W. EV 7000 exceeds it even though
+	// the home battery is the one importing.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
+		TotalCostOre: 120, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 5000, GridW: 6000, SoC: 0.675,
+			LoadpointW: 7000, LoadpointSoC: 0.425, CostOre: 120,
+		}}}
 	if err := ValidatePlan(slots, p, &plan); err == nil {
-		t.Fatal("ValidatePlan accepted a corrupted per-storage energy trajectory")
+		t.Fatal("ValidatePlan accepted surplus-only EV above leftover PV")
 	}
 }
 

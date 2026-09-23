@@ -1,0 +1,10 @@
+FTW third-party notices
+=======================
+
+Core no longer links DuckDB or its native dependencies. The separate, optional
+beta history converter carries those license texts in
+ go/tools/history-migrate/THIRD-PARTY-NOTICES.txt.
+
+The compiled Energyplan workers carry their own license and third-party
+notices in optimizer/. Core source and Go dependency versions are recorded
+in go/go.mod and go/go.sum. FTW's own terms are in LICENSE and LICENSING.md.

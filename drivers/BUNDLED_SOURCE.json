@@ -17,7 +17,7 @@
     "for coverage. Run scripts/sync-bundled-drivers.sh to update."
   ],
   "repository": "srcfl/device-drivers",
-  "commit": "f98d5c5f3519fa90f010a69573aa8fcf8595c8b0",
+  "commit": "d44fda113f171b5824ecbe178073731dfcf1c031",
   "source_dir": "drivers/lua",
   "drivers": [
     "ambibox_v2x", "ctek", "ctek_hybrid", "ctek_v2", "deye", "easee_cloud",
@@ -27,6 +27,7 @@
     "pixii", "pixii_pv",
     "sdm630", "sma", "sma_pv", "sofar", "solaredge", "solaredge_legacy",
     "solaredge_pv", "solis", "solis_string", "sonnen", "sungrow",
-    "tesla_vehicle", "tibber", "victron", "zap", "zuidwijk_p1"
+    "tesla_vehicle", "tesla_wall_connector", "tibber", "victron", "zap",
+    "zaptec_cloud", "zuidwijk_p1"
   ]
 }

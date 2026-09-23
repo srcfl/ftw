@@ -130,7 +130,7 @@ if [ -n "$compose_project" ]; then
 fi
 compose() {
   if [ "$canonical_tags" = true ]; then
-    FTW_IMAGE_TAG=latest FTW_UPDATER_IMAGE_TAG=latest FTW_OPTIMIZER_IMAGE_TAG=latest \
+    FTW_IMAGE_TAG=latest FTW_UPDATER_IMAGE_TAG=latest \
       "${compose_command[@]}" "$@"
   else
     "${compose_command[@]}" "$@"
@@ -153,18 +153,13 @@ containers_changed=false
 config_check=""
 expected_data_source=""
 new_main_id=""
-optimizer_service_added=false
 release_identity_override_needed=false
-optimizer_container_changed=false
 modular_override_created=""
 modular_tmp=""
-optimizer_id=""
 previous_main_image_id=""
 previous_main_image_ref=""
 previous_updater_image_id=""
 previous_updater_image_ref=""
-previous_optimizer_image_id=""
-previous_optimizer_image_ref=""
 
 restore_image_reference() {
   local image_id="$1"
@@ -188,11 +183,6 @@ restore_after_failure() {
 
   printf '[FTW migration] Migration failed; restoring the previous deployment.\n' >&2
   canonical_tags=false
-  if [ "$optimizer_container_changed" = true ] && [ -n "$modular_override_created" ]; then
-    if ! compose rm -s -f ftw-optimizer >/dev/null 2>&1; then
-      restore_ok=false
-    fi
-  fi
   if [ -n "$modular_tmp" ]; then
     if ! rm -f "$modular_tmp"; then
       restore_ok=false
@@ -219,9 +209,6 @@ restore_after_failure() {
     restore_ok=false
   fi
   if ! restore_image_reference "$previous_updater_image_id" "$previous_updater_image_ref"; then
-    restore_ok=false
-  fi
-  if ! restore_image_reference "$previous_optimizer_image_id" "$previous_optimizer_image_ref"; then
     restore_ok=false
   fi
 
@@ -258,11 +245,6 @@ restore_after_failure() {
       restore_ok=false
     fi
   fi
-  if [ "$optimizer_container_changed" = true ] && [ "$optimizer_service_added" = false ]; then
-    if ! compose up -d --no-deps --force-recreate ftw-optimizer >/dev/null 2>&1; then
-      restore_ok=false
-    fi
-  fi
 
   if [ -n "$renamed_container" ]; then
     if ! docker container inspect "$main_service" >/dev/null 2>&1; then
@@ -278,10 +260,6 @@ restore_after_failure() {
   fi
   if [ "$containers_changed" = true ] && \
     [ -z "$(compose ps -q --status running ftw-updater 2>/dev/null)" ]; then
-    restore_ok=false
-  fi
-  if [ "$optimizer_container_changed" = true ] && [ "$optimizer_service_added" = false ] && \
-    [ -z "$(compose ps -q --status running ftw-optimizer 2>/dev/null)" ]; then
     restore_ok=false
   fi
 
@@ -321,18 +299,6 @@ if ! printf '%s\n' "$services" | grep -qx 'ftw-updater'; then
   die "ftw-updater is missing; this layout needs manual review"
 fi
 
-if ! printf '%s\n' "$services" | grep -qx 'ftw-optimizer'; then
-  optimizer_service_added=true
-  for candidate in \
-    docker-compose.override.yml \
-    docker-compose.override.yaml \
-    compose.override.yml \
-    compose.override.yaml; do
-    if [ -e "$candidate" ]; then
-      die "ftw-optimizer is missing and $candidate already exists; merge the modular service into that override manually"
-    fi
-  done
-fi
 
 config_check="$(mktemp)"
 # Scope the mount check to the selected main service. A global grep could be
@@ -340,7 +306,7 @@ config_check="$(mktemp)"
 identity_probe="ftw-image-tag-probe"
 FTW_IMAGE_TAG="$identity_probe" "${compose_command[@]}" config "$main_service" >"$config_check"
 if ! grep -Eq "^[[:space:]]+FTW_IMAGE_TAG:[[:space:]]*[\"']?${identity_probe}[\"']?[[:space:]]*$" "$config_check"; then
-  if [ "$optimizer_service_added" = false ]; then
+  if true; then
     for candidate in \
       docker-compose.override.yml \
       docker-compose.override.yaml \
@@ -395,7 +361,7 @@ esac
 # deliberately performs no schema migration on the legacy database.
 state_path="$expected_data_source/state.db"
 [ -f "$state_path" ] || die "missing $state_path; use the manual backup procedure for a custom state.path"
-log "phase 1/4: pulling the backup helper (the running deployment is unchanged)"
+log "phase 1/3: pulling the backup helper (the running deployment is unchanged)"
 docker pull ghcr.io/srcfl/ftw:latest >/dev/null
 backup_json="$(docker run --rm --user 0:0 \
   -v "$expected_data_source:/app/data:ro" \
@@ -439,7 +405,7 @@ done
 cp -p "${compose_files[@]}" "$compose_backup_dir/"
 log "Compose rollback backup: $compose_backup_dir"
 
-if [ "$optimizer_service_added" = true ] || [ "$release_identity_override_needed" = true ]; then
+if [ "$release_identity_override_needed" = true ]; then
   modular_override_created="$install_dir/docker-compose.override.yml"
   modular_tmp="$modular_override_created.tmp"
   {
@@ -448,23 +414,6 @@ if [ "$optimizer_service_added" = true ] || [ "$release_identity_override_needed
     echo "  ${main_service}:"
     echo '    environment:'
     echo '      FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}'
-    if [ "$optimizer_service_added" = true ]; then
-      echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}'
-      echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
-      echo '    volumes:'
-      echo '      - optimizer-ipc:/run/ftw-optimizer'
-      echo '  ftw-optimizer:'
-      echo '    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}'
-      echo '    container_name: ftw-optimizer'
-      echo '    restart: unless-stopped'
-      echo '    network_mode: none'
-      echo '    environment:'
-      echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
-      echo '    volumes:'
-      echo '      - optimizer-ipc:/run/ftw-optimizer'
-      echo 'volumes:'
-      echo '  optimizer-ipc:'
-    fi
   } >"$modular_tmp"
   docker compose -f "$compose_file" -f "$modular_tmp" config >/dev/null
   mv "$modular_tmp" "$modular_override_created"
@@ -477,11 +426,7 @@ if [ "$optimizer_service_added" = true ] || [ "$release_identity_override_needed
     die "generated override does not pass FTW_IMAGE_TAG into $main_service"
   fi
   rm -f "$identity_check"
-  if [ "$optimizer_service_added" = true ]; then
-    log "added modular optimizer override: $modular_override_created"
-  else
-    log "added release identity override: $modular_override_created"
-  fi
+  log "added release identity override: $modular_override_created"
 fi
 
 capture_service_image() {
@@ -502,13 +447,9 @@ previous_main_image_ref="$captured_image_ref"
 capture_service_image ftw-updater
 previous_updater_image_id="$captured_image_id"
 previous_updater_image_ref="$captured_image_ref"
-capture_service_image ftw-optimizer
-previous_optimizer_image_id="$captured_image_id"
-previous_optimizer_image_ref="$captured_image_ref"
 printf '%s\t%s\t%s\n' \
   "$main_service" "$previous_main_image_id" "$previous_main_image_ref" \
   ftw-updater "$previous_updater_image_id" "$previous_updater_image_ref" \
-  ftw-optimizer "$previous_optimizer_image_id" "$previous_optimizer_image_ref" \
   >"$compose_backup_dir/previous-images.tsv"
 
 rewrite_service_image() {
@@ -594,7 +535,6 @@ rewrite_service_image() {
 for file in "${compose_files[@]}"; do
   rewrite_service_image "$file" "$main_service" 'ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}'
   rewrite_service_image "$file" 'ftw-updater' 'ghcr.io/srcfl/ftw-updater:latest'
-  rewrite_service_image "$file" 'ftw-optimizer' 'ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}'
 done
 
 # A caller's shell or old .env file may contain a development tag. Use the
@@ -604,7 +544,6 @@ canonical_tags=true
 compose config >/dev/null
 effective_main_image="$(compose config --images "$main_service")"
 effective_updater_image="$(compose config --images ftw-updater)"
-effective_optimizer_image="$(compose config --images ftw-optimizer)"
 case "$effective_main_image" in
   ghcr.io/srcfl/ftw:*) ;;
   *) die "the effective $main_service image is not ghcr.io/srcfl/ftw: $effective_main_image" ;;
@@ -613,12 +552,9 @@ case "$effective_updater_image" in
   ghcr.io/srcfl/ftw-updater:*) ;;
   *) die "the effective ftw-updater image is not ghcr.io/srcfl/ftw-updater: $effective_updater_image" ;;
 esac
-case "$effective_optimizer_image" in
-  ghcr.io/srcfl/ftw-optimizer:*) ;;
-  *) die "the effective ftw-optimizer image is not ghcr.io/srcfl/ftw-optimizer: $effective_optimizer_image" ;;
-esac
 
-log "phase 2/4: pulling the paired Core + updater control plane"
+
+log "phase 2/3: pulling the paired Core + updater control plane"
 compose pull "$main_service" ftw-updater
 
 # Some developer installations replaced the Compose-managed main container
@@ -692,60 +628,9 @@ while [ "$SECONDS" -lt "$health_deadline" ]; do
 done
 [ "$healthy" = true ] || die "FTW did not finish initialization at $ready_url within 30 minutes"
 
-# Phase 3 deliberately starts only after Core + updater have passed their
-# health gate. Optimizer has its own release and compatibility handshake; a
-# failed optimizer must never roll back a healthy Core or touch persistent
-# data. Core remains safe on its Go fallback while this phase is repaired.
-optimizer_image="unavailable (Core is using its safe fallback)"
-log "phase 3/4: updating Optimizer independently"
-if compose pull ftw-optimizer && \
-  compose up -d --no-deps --force-recreate ftw-optimizer; then
-  optimizer_container_changed=true
-  optimizer_id="$(compose ps -q --status running ftw-optimizer | tail -n 1)"
-  optimizer_healthy=false
-  if [ -n "$optimizer_id" ]; then
-    for _ in $(seq 1 60); do
-      optimizer_health="$(docker inspect "$optimizer_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' 2>/dev/null || true)"
-      if [ "$optimizer_health" = healthy ]; then
-        optimizer_healthy=true
-        break
-      fi
-      sleep 2
-    done
-  fi
-  if [ "$optimizer_healthy" = true ]; then
-    optimizer_image="$(docker inspect "$optimizer_id" --format '{{.Config.Image}}')"
-    case "$optimizer_image" in
-      ghcr.io/srcfl/ftw-optimizer:*) ;;
-      *) optimizer_healthy=false ;;
-    esac
-  fi
-else
-  optimizer_healthy=false
-fi
-
-if [ "${optimizer_healthy:-false}" != true ]; then
-  log "WARNING: Optimizer did not become healthy; Core stays online on its Go fallback"
-  if [ -n "$previous_optimizer_image_id" ]; then
-    # Restore the old image bits under the effective optimizer reference only.
-    # Core/updater and their Compose definitions remain committed.
-    if docker image tag "$previous_optimizer_image_id" "$effective_optimizer_image" && \
-      compose up -d --no-deps --force-recreate ftw-optimizer; then
-      optimizer_id="$(compose ps -q --status running ftw-optimizer | tail -n 1)"
-      if [ -n "$optimizer_id" ]; then
-        optimizer_image="restored previous image ($previous_optimizer_image_ref)"
-      fi
-    else
-      log "WARNING: previous Optimizer could not be restarted; Core remains healthy without it"
-    fi
-  else
-    compose rm -s -f ftw-optimizer >/dev/null 2>&1 || true
-  fi
-fi
-
-# Phase 4 refreshes signed metadata only. It does not activate or restart a
+# Phase 3 refreshes signed metadata only. It does not activate or restart a
 # driver; drivers are updated one at a time later from the Update Center.
-log "phase 4/4: refreshing the signed driver catalog (no driver is activated)"
+log "phase 3/3: refreshing the signed driver catalog (no driver is activated)"
 if curl -fsS --max-time 10 -X POST "${health_url%/api/health}/api/device_repository/refresh" >/dev/null 2>&1; then
   log "signed driver catalog refreshed"
 else
@@ -759,7 +644,6 @@ trap - EXIT INT TERM
 log "migration complete"
 log "main image: $main_image"
 log "updater image: $updater_image"
-log "optimizer image: $optimizer_image"
 log "verified full backup: $full_backup_archive"
 log "Compose rollback backup: $compose_backup_dir"
 if [ -n "$renamed_container" ]; then

@@ -191,8 +191,8 @@ func TestPredictAtNightReturnsZero(t *testing.T) {
 
 	t02 := time.Date(2026, 4, 20, 2, 0, 0, 0, time.UTC)
 	cases := []struct {
-		name       string
-		clearSkyW  float64
+		name      string
+		clearSkyW float64
 	}{
 		{"pitch-dark-midnight", 0},
 		{"astronomical-twilight", 10},

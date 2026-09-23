@@ -650,13 +650,10 @@ func TestHandleEnergyDailyBucketsByLocalDay(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	// Drop two samples inside today, separated by `gap`, both strictly
-	// between todayMidnight and now. The two-sample slice integrates to
-	// GridW * gap == 1000 * gapHours Wh of import attributed to today.
-	// Sizing the gap off `elapsed` keeps the test robust when CI runs
-	// early in the morning (e.g. 01:46 local — the original hard-coded
-	// "now - 1h, now - 2h" scheme fell before midnight and got filtered
-	// out by LoadHistory's [firstDayStart, now] range).
+	// Drop two samples inside today, separated by a short gap, both
+	// strictly between todayMidnight and now. The two-sample slice
+	// integrates to GridW * gap Wh of import. Keep the gap under
+	// maxCostIntegrationGap so a long hole is not treated as energy.
 	now := time.Now()
 	loc := now.Location()
 	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
@@ -664,9 +661,12 @@ func TestHandleEnergyDailyBucketsByLocalDay(t *testing.T) {
 	if elapsed < 15*time.Minute {
 		t.Skip("too close to local midnight; skipping bucket test")
 	}
-	gap := elapsed / 3
-	t0 := todayMidnight.Add(gap)
-	t1 := t0.Add(gap)
+	gap := 5 * time.Minute
+	t1 := now.Add(-time.Minute)
+	t0 := t1.Add(-gap)
+	if t0.Before(todayMidnight) {
+		t.Skip("too close to local midnight; skipping bucket test")
+	}
 	gapHours := gap.Seconds() / 3600.0
 	expectedImport := 1000.0 * gapHours
 	for _, p := range []state.HistoryPoint{

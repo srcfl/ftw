@@ -3,8 +3,13 @@
 FTW is a local-first home energy management system. Its architecture has
 three explicit modules: **core**, **drivers**, and **optimizer**. Core is the
 safety boundary. Drivers translate hardware protocols. The optimizer proposes
-plans. A failure or upgrade outside core must never stop local measurement or
-make dispatch unsafe.
+plans and supplies primary forecasts. A failure or upgrade outside core must
+never stop local measurement or make dispatch unsafe.
+
+[VISION.md](../VISION.md) defines the product direction and
+[the roadmap](roadmap.md) defines acceptance evidence. This document describes
+the running system. Product requirements below guide future work and do not
+by themselves add runtime behaviour or new protocol capabilities.
 
 ## Module boundaries
 
@@ -12,19 +17,83 @@ make dispatch unsafe.
 |---|---|---|---|
 | Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
 | Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
-| Optimizer | [`optimizer`](../optimizer), contract in [`go/internal/mpc`](../go/internal/mpc) | Optional Python service/process | Solve the long-horizon mathematical plan |
+| Optimizer | [`optimizer`](../optimizer), contracts in [`go/internal/mpc`](../go/internal/mpc) and [`go/internal/energyforecast`](../go/internal/energyforecast) | Compiled Energyplan worker | Solve the long-horizon plan and supply primary PV and household-load forecasts |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
 driver, but one failed driver is isolated from the others. Optional
-integrations such as Home Assistant, CalDAV, notifications and Nova attach at
+integrations such as Home Assistant, notifications and Nova attach at
 core's API, state or telemetry boundaries; they do not own dispatch safety.
 
-A future module belongs outside core only when it has:
+Choose the design with the least total complexity. Moving code out of Core
+is useful only when it improves the product's operation or maintenance.
+A separate module requires a concrete benefit and:
 
 - a small, explicit and versioned contract;
 - independent failure and update semantics;
 - no authority to bypass core's validation or safety limits;
 - a useful fallback or a cleanly unavailable state.
+
+### Vehicle charge-limit goals
+
+A percentage goal and a goal to reach the car's own limit are distinct.
+State schema 7 blocks rollback to a Core that would ignore the saved goal mode.
+`GET /api/loadpoints` advertises `vehicle_limit_goal_supported`; clients must
+require that flag before saving `schedule.finish_at_vehicle_limit`. Existing
+percentage goals keep their meaning. In vehicle-limit mode, the planner uses
+a fresh vehicle limit where available. Without one, 100% is a planning bound,
+not a claimed vehicle setting. Final charging continues through Core's safety
+clamps until the car stops accepting current; an estimate cannot prove it is
+finished. A manual Stop still wins.
+
+The current connection's deadline uses verified charger and session identity.
+It stays due after the deadline and survives restart when `goal_retention` is
+`session`. `unavailable` means that identity is missing; `error` means the
+session checkpoint failed. Neither means the saved schedule disappeared.
+`pending` means the checkpoint is queued and cannot yet be claimed durable.
+Core assigns each saved vehicle-limit goal an `intent_id` and a one-shot
+`first_deadline_ms`; clients send user choices, not those bookkeeping fields.
+A fresh vehicle Complete can finish a one-shot goal across restart and later
+plug sessions. Completion requires one vehicle source, one connected loadpoint,
+a reading after the observed connection and no measured charging. An ambiguous
+match cannot finish the goal. A charger declining current is reported as a refusal, never
+as an invented battery level or proof that the target was reached.
+
+### Control state and disk writes
+
+Core loads EV restart records before starting control. During operation, a
+bounded queue writes immutable snapshots outside the loadpoint and model
+locks. Repeated updates replace a pending snapshot; an in-flight write keeps
+its order. Manual holds commit their hardware binding and old fallback keys
+in one FULL-sync transaction. Reads cannot restore a key being replaced.
+
+HTTP and app command acknowledgements wait up to two seconds for the relevant
+write queue outside control locks. A timeout reports an active but unconfirmed
+choice. It does not undo a Stop or claim that memory survived a power loss.
+Shutdown drains accepted writes and reports any failure. This removes disk
+waits from these control paths; it does not establish the SD card's goal-save
+latency under backup or other filesystem load.
+
+## Product requirements across these boundaries
+
+Discovery, first-day models and controlled commissioning should establish
+useful operation without extensive configuration. Keep verified limits,
+learned capabilities and user estimates distinct. A failed control integration
+must not remain available to planning merely because it still emits telemetry.
+
+The UI and agent clients need a trace from requested intent through acceptance,
+dispatch, device result and measured effect, including age and uncertainty.
+Reading a value and controlling its source are separate capabilities.
+
+Agents and external automation follow the same Core authority as the planner.
+The target includes durable schedule changes and submitted plans, alongside
+renewable temporary control. Expired temporary control returns to local
+operation; disconnecting a client does not delete a stored household goal.
+
+Cloud MCP should reuse the encrypted client/session path where it fits. The
+relay and escrow remain blind. An authorized agent endpoint can read only
+what its grant allows, and its access must be revocable. Protocol extensions
+require registry changes and paired implementation tests; this section does
+not introduce wire names or bypass existing admission rules.
 
 ## Power convention
 
@@ -53,17 +122,82 @@ device
 Lua driver                 optional optimizer
   ↕ site-convention data       ↓ proposed trajectory
 telemetry → control/planner → core validation and safety → driver command
-     ↘ SQLite/history       ↘ API/UI and integrations
+     ↘ SQLite + Parquet       ↘ API/UI and integrations
 ```
 
-The in-memory telemetry store owns latest readings and driver health. SQLite
-owns durable configuration state, history, forecasts, prices, device identity
-and learned model state. Database access stays in
+The in-memory telemetry store owns latest readings and driver health.
+SQLite history.db owns samples, hourly summaries, dashboard history and the
+energy ledger. A separate state.db owns goals, device identity and learned
+state. Rebuildable prices and forecasts live in cache.db. Older samples use
+daily Parquet files.
+Database access stays in
 [`go/internal/state`](../go/internal/state).
 
 The control loop computes a site target, allocates it across capable assets,
 applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
+
+A bounded queue copies each telemetry tick before the SQLite writer commits
+its history, samples, energy ledger and retry receipt in one transaction.
+Admission to memory is separate from commit. A full queue returns a collection
+error; health reports pending, committed and rejected ticks. Reads use WAL
+snapshots. Goals and session state use a separate database and sync their WAL
+before returning success, so history maintenance does not hold their writer.
+
+Core writes scalar history as 10-second summaries in SQLite for the last
+24 hours. It also maintains minute summaries for verified publication to
+Parquet. Minute files cover days 1–30; five-minute files cover days 30–730.
+Hourly gauge summaries and the energy ledger remain after detailed history
+expires. The old `state.cold_retention_days` setting no longer controls this
+policy; startup reports a stored nonzero value.
+
+Dashboard charts use the same 10-second, one-minute and five-minute ages in
+SQLite. These small site summaries stay separate from scalar Parquet archives.
+Energy and cost consume original observed intervals recorded before chart
+averaging. Minute energy totals remain for two years, then quarter-hour totals
+preserve local day boundaries and normal tariff periods. A range edge or price
+change inside a retained interval stays uncovered; no reader invents a split.
+Missing site observations break integration. Chart detail keeps the last
+observed JSON and its timestamp; the reader marks it as aggregate data that
+forecast training must not use. Existing legacy chart tiers remain readable.
+
+Every scalar bucket keeps count, sum, min, max, last value and the first and
+last observed timestamps. Means are weighted by sample count, not by elapsed
+time. An empty interval stays empty; observed bounds do not prove continuous
+coverage. The series API reports the source resolution. Latest-value reads use
+the last actual measurement. Gauge averages never replace counter deltas or
+power integration in the energy ledger, which consumes original observations.
+Five-minute energy detail becomes hourly after 30 days and daily after two
+years; totals remain. Reads have time and output limits.
+
+Archiving streams through a bounded SQLite staging file, reads the new Parquet
+back and checks its ordered contents before publishing by a synced rename.
+Pruning removes matching complete source minutes in short transactions. Live
+SQLite wins while both copies exist. A failed write, verification or prune
+keeps the source; a retry cannot count both copies. Admission and the archive
+boundary share a short memory lock so pending ticks finish before their
+interval closes. Later attempts to backdate into a closed interval return an
+explicit collection error without blocking the write queue.
+
+Old raw Parquet files convert in the background. Each staging transaction
+saves its input cursor with its summaries, so a restart resumes the file.
+Independent counts, sums, extrema and observation bounds must match before
+raw data is removed. The original file wins while both forms exist. Compacted
+history cannot accept individual raw corrections. Restore original history
+before importing corrections. Backup archives omit resumable scratch files.
+
+Fresh installations create SQLite directly. Earlier SQLite installations copy
+frozen history in bounded, restartable transactions and keep their Parquet
+files. Only DuckDB beta installations need the separate offline
+[history converter](history-conversion.md). Core and normal release builds
+have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
+
+State schema 5 adds aggregate history and binds state.db to a specific history.db generation. Portable
+backups export a SQLite read snapshot with row counts and hashes checked, plus
+retained Parquet. The old beta files stay on the box for recovery. A config-only
+snapshot cannot recover missing history. To return to an older Core, stop Core
+and restore a verified full backup with its matching version; image-only
+rollback across the format boundary is refused.
 
 ## Drivers
 
@@ -96,26 +230,49 @@ artifact, while activation remains explicit and atomic. See
 
 ## Optimizer
 
-Core plans. Its DP solves the same problem the Python/CVXPY optimizer does, in
-process, against the per-slot PV downside — measured within öre per plan of the
-external MILP on replayed site snapshots (#1020).
+Beta releases use the bundled Energyplan worker when `planner.engine` is unset
+on a supported host. It solves Core's downside PV forecast. Core validates its
+plan before publishing it, then runs a bounded Core DP shadow on the same input.
+A worker error, timeout or rejected plan invokes Core DP fallback. Core validates
+fallback plans too; a failed validation leaves the prior plan in place.
 
-The Python/CVXPY optimizer is optional and separately deployable. By default it
-runs behind Core as a comparison shadow: after each replan it solves the same
-inputs, and the terminal-corrected cost difference is logged and recorded on
-the diagnostic. Shadow output never reaches dispatch, never delays a replan and
-cannot fail one. `planner.engine: python` restores it as the champion during
-the transition; then core sends a versioned planning request, accepts only a
-complete valid trajectory, and falls back to its own DP if the socket/process
-fails, times out or returns invalid output.
-
+`planner.engine: core` or `energyplan` selects an engine explicitly.
+Stable and development builds default to Core. Older `engine: python` values
+migrate to Energyplan; retired optimizer settings are ignored and omitted
+when the configuration is saved.
+Energyplan ships as compiled binaries with its own license; source and builds
+stay in the private Energyplan repository. It updates with the Core image.
 The optimizer never reads hardware or issues commands, so its deployment and
 dependency churn do not enlarge the safety-critical runtime.
 
+The same worker also supplies the primary PV and household-load forecast through
+a separate versioned contract. At the start of each replan, Core freezes the
+legacy forecast, weather, occupancy and saved model state. It calls the forecast
+worker once under a deadline, outside control and dispatch locks. Core accepts
+PV and load independently for each covered interval. If either signal is
+missing, late, partial or invalid, Core retains the matching legacy value. The
+resulting `champion` can therefore contain Energyplan PV with legacy load, or
+the reverse. `legacy_shadow` keeps both legacy signals from the same frozen
+capture for a fair later comparison.
+
+Complete qualified 15-minute observations update the local models outside
+dispatch. SQLite stores the latest Energyplan state under
+`forecast/energyplan_state_v1`; an update becomes visible only after its full
+state has been saved, and startup restores that saved state. The learning
+revision binds state to forecast inputs and stable hardware identities. A
+binding or input change starts fresh learning, while a compatible program
+upgrade can reuse the state. Issued forecasts use a stricter revision that also
+includes the Core build, worker bytes and pipeline policy.
+
+Core keeps issued forecasts, frozen inputs, model-state references and qualified
+truth in a bounded local archive. The read-only `ftw-forecast-evaluate` source
+command defaults to matched `champion` versus `legacy_shadow` results from the
+same issue. It does not treat missing or censored truth as evidence.
+
 ## Versioning a module contract
 
-Drivers and the optimizer release on their own schedules, so core cannot assume
-the version on the other side of either contract. Both use the same rule.
+Drivers release independently. Energyplan ships with Core, but Core still
+checks the worker contract before accepting plans.
 
 Each side declares the **window** of contract versions it speaks — core in
 [`go/internal/components`](../go/internal/components) and
@@ -158,10 +315,35 @@ schema. The handlers registered in
 [`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
-Some startup bindings cannot be hot-reloaded, including state paths, API
-listener and selected integration transports. Normal device and control
-configuration is reloaded through
-[`go/internal/configreload`](../go/internal/configreload).
+Core imports YAML into a versioned document in SQLite once. The seed file then
+holds `config_database`, a path relative to that file. Settings saves commit
+the document and credential rows together with SQLite `synchronous=FULL`
+before applying them through [`go/internal/configreload`](../go/internal/configreload).
+The file watcher has been removed; editing the seed does not change live settings.
+The first import keeps older YAML fields so a failed update can return to its
+previous Core image. If that older Core later saves settings, it removes the
+unknown database locator. The next upgrade detects that changed source and
+imports the newer save. An interrupted import with unchanged source bytes
+reuses the committed document.
+An unreadable settings database stops startup instead of restoring old seed values.
+
+The first import needs write access to the seed file so Core can record which
+database owns it. For a read-only mount, copy the seed into the data directory
+and point `-config` there before upgrading. Keep a full backup before migration.
+Use Settings for later edits. Moving the state database is an offline operation;
+API listener and selected integration changes still need a restart.
+
+State schema 2 marks this settings migration, so an update from older Core
+versions takes a full backup first. To return to a Core that reads YAML, stop
+Core and restore a full backup with its matching Core version. An image-only
+downgrade to state schema 1 is refused; the import seed can be older than the
+settings saved in SQLite.
+
+
+Document revisions only prevent stale Settings forms from overwriting a newer
+save. They do not change forecast learning revisions, hardware identity, model
+weights or the exact bytes of stored forecast snapshots. Backups export YAML
+from the same SQLite snapshot so older Core versions also read current settings.
 
 ## Remote access boundary
 
@@ -370,8 +552,10 @@ The honest limits, which belong here rather than in a comment nobody reads:
   cannot verify that a passkey ceremony happened — it has no relationship with
   the authenticator, and being a WebAuthn relying party would need an origin,
   which the box deliberately never has. It stops a phone left unlocked on a
-  table from being used to reconfigure the site. It stops nothing that a
-  modified client on an enrolled device could not already do through `cmd`;
+  table from being used to reconfigure the site. Routes marked `NoStepUp` skip
+  the ceremony: owner is enough. The charging schedule is the case. It stops
+  nothing that a modified client on an enrolled device could not already do
+  through `cmd`;
 - **revocation is immediate at the box.** Three layers: the session is torn
   down and the call it was making is cancelled, the grant is re-read from
   `appenroll` on every privileged request so a socket cannot outlive a revoke,
@@ -464,8 +648,8 @@ There are two channels:
 - `beta`: every new release candidate, used for real-site validation;
 - `stable`: promotion of the exact commit already published and tested as beta.
 
-Core, Optimizer and signed Drivers may release independently, but all use the
-same beta-to-stable progression. Core and its privileged updater remain a
+Core includes Energyplan. Core and signed Drivers use the same
+beta-to-stable progression. Core and its privileged updater remain a
 paired control plane; optional components negotiate compatibility with Core.
 There is no edge channel. See [self-update.md](self-update.md).
 

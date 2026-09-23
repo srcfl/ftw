@@ -44,7 +44,7 @@ func (s *Server) handleEnergyHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	points, truncated, err := s.deps.State.LoadEnergyHistory(q)
+	points, truncated, err := s.deps.State.LoadEnergyHistoryContext(r.Context(), q)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -76,7 +76,7 @@ func (s *Server) handleEnergyHistoryCSV(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	points, truncated, err := s.deps.State.LoadEnergyHistory(q)
+	points, truncated, err := s.deps.State.LoadEnergyHistoryContext(r.Context(), q)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

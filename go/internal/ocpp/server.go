@@ -58,6 +58,7 @@ type Server struct {
 	cs      ocpp16.CentralSystem
 	csms    ocpp201.CSMS
 	handler *Handler
+	sockets *socketSessions
 	// done closes when the 1.6 listener goroutine exits; doneV201 likewise for
 	// 2.0.1. A nil channel means that version was not enabled.
 	done     chan struct{}
@@ -81,7 +82,8 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	cfg.Defaults()
 
 	auth := newAuthorizer(cfg)
-	wsServer, err := newListener(cfg, auth)
+	sockets := newSocketSessions()
+	wsServer, err := newListener(cfg, auth, sockets)
 	if err != nil {
 		return nil, err
 	}
@@ -89,28 +91,28 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	cs := ocpp16.NewCentralSystem(nil, wsServer)
 	h := NewHandler(tel, cfg.HeartbeatIntervalS)
 	h.SetApprovedIDs(cfg.ApprovedIDs)
-	cs.SetCoreHandler(h)
+	cs.SetCoreHandler(&boundHandler16{inner: h, sessions: sockets})
 	cs.SetNewChargePointHandler(func(cp ocpp16.ChargePointConnection) {
 		// Which listener a charger reached is what identifies its dialect, so
 		// record it here rather than inferring it from a later message — and
 		// before OnConnect, whose capability probe dispatches on it.
-		h.setVersion(cp.ID(), Version16)
-		h.OnConnect(cp.ID())
+		_, _ = boundCall(sockets, cp.ID(), func(id string) (bool, error) { h.setVersion(id, Version16); h.OnConnect(id); return true, nil })
 	})
 	cs.SetChargePointDisconnectedHandler(func(cp ocpp16.ChargePointConnection) {
-		h.OnDisconnect(cp.ID())
+		sockets.disconnected(cp.ID(), h.OnDisconnect)
 	})
 
-	s := &Server{cfg: cfg, cs: cs, handler: h, done: make(chan struct{})}
+	s := &Server{cfg: cfg, cs: cs, handler: h, sockets: sockets, done: make(chan struct{})}
+	h.identityProbe = s.requestBootNotification
 
 	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
 	// the same charger state and telemetry — only the message encoding differs.
 	if cfg.PortV201 > 0 {
-		wsServer201, err := newListener(cfg, auth)
+		wsServer201, err := newListener(cfg, auth, sockets)
 		if err != nil {
 			return nil, err
 		}
-		h201 := &handlerV201{Handler: h}
+		h201 := &boundHandler201{inner: &handlerV201{Handler: h}, sessions: sockets}
 		csms := ocpp201.NewCSMS(nil, wsServer201)
 		csms.SetProvisioningHandler(h201)
 		csms.SetAvailabilityHandler(h201)
@@ -124,11 +126,10 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		// and dropped. See charging_needs.go.
 		csms.SetSmartChargingHandler(h201)
 		csms.SetNewChargingStationHandler(func(cs ocpp201.ChargingStationConnection) {
-			h.setVersion(cs.ID(), Version201)
-			h.OnConnect(cs.ID())
+			_, _ = boundCall(sockets, cs.ID(), func(id string) (bool, error) { h.setVersion(id, Version201); h.OnConnect(id); return true, nil })
 		})
 		csms.SetChargingStationDisconnectedHandler(func(cs ocpp201.ChargingStationConnection) {
-			h.OnDisconnect(cs.ID())
+			sockets.disconnected(cs.ID(), h.OnDisconnect)
 		})
 
 		s.csms = csms
@@ -155,10 +156,10 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		ver := h.chargersLocked(id).version
 		h.mu.Unlock()
 		if ver == Version201 && s.csms != nil {
-			probeSmartChargingV201(s.csms, h, id)
+			probeSmartChargingV201(s.csms, h, id, sockets)
 			return
 		}
-		probeFeatureProfiles16(cs, h, id)
+		probeFeatureProfiles16(cs, h, id, sockets)
 	}
 
 	go func() {
@@ -174,7 +175,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		// layer up, in authorizer.checkClient, which refuses the handshake
 		// for a connection that arrived somewhere else.
 		// cs.Start blocks until cs.Stop is called.
-		s.cs.Start(cfg.Port, fmt.Sprintf("%s{ws}", cfg.Path))
+		cs.Start(cfg.Port, fmt.Sprintf("%s{ws}", cfg.Path))
 	}()
 	go func() {
 		<-ctx.Done()
@@ -192,7 +193,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 // would lock out every charger on a server with no username instead of
 // admitting them all. checkClient is always safe to register; it authorizes
 // everything when nothing is configured.
-func newListener(cfg *Config, auth *authorizer) (ws.WsServer, error) {
+func newListener(cfg *Config, auth *authorizer, sockets *socketSessions) (ws.WsServer, error) {
 	var srv *ws.Server
 	if cfg.TLS.configured() {
 		// Half a TLS section is an error, not a reason to serve plaintext:
@@ -210,7 +211,7 @@ func newListener(cfg *Config, auth *authorizer) (ws.WsServer, error) {
 		srv.SetBasicAuthHandler(auth.basicAuth)
 	}
 	srv.SetCheckClientHandler(auth.checkClient)
-	return &guardedServer{Server: srv, check: auth.checkClient}, nil
+	return &guardedServer{Server: srv, check: auth.checkClient, sessions: sockets}, nil
 }
 
 // guardedServer keeps our connection check installed.
@@ -224,15 +225,16 @@ func newListener(cfg *Config, auth *authorizer) (ws.WsServer, error) {
 // the library's own check still runs after.
 type guardedServer struct {
 	*ws.Server
-	check func(id string, r *http.Request) bool
+	check    func(id string, r *http.Request) bool
+	sessions *socketSessions
 }
 
 func (g *guardedServer) SetCheckClientHandler(handler func(id string, r *http.Request) bool) {
 	g.Server.SetCheckClientHandler(func(id string, r *http.Request) bool {
-		if !g.check(id, r) {
+		if !g.check(id, r) || (handler != nil && !handler(id, r)) {
 			return false
 		}
-		return handler == nil || handler(id, r)
+		return g.sessions.reserveConnection(id, r)
 	})
 }
 
@@ -243,6 +245,7 @@ func (s *Server) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
+		s.handler.stopIdentityProbes()
 		s.cs.Stop()
 		if s.csms != nil {
 			s.csms.Stop()

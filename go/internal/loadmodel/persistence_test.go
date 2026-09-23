@@ -60,7 +60,7 @@ func requireLegacyAdoption(t *testing.T) {
 // purpose, and moving it would restore pre-envelope coefficients under the
 // new features, which is the exact fault this guards against.
 func TestFeatureHashPinned(t *testing.T) {
-	const want = "f79385ff0412d66b"
+	const want = "f2c6a746704f8ab0"
 	if got := FeatureHash(); got != want {
 		t.Errorf("load feature hash = %q, pinned at %q\n"+
 			"the feature definition changed: every deployed site will cold-start", got, want)

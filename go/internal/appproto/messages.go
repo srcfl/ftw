@@ -45,6 +45,14 @@ const (
 	// lease, or withdraws it with `cancel`. Same lease and same preflight
 	// as the HTTP route.
 	OpLoadpointBoost = "loadpoint.boost"
+	// OpLoadpointSoCSet corrects the car's current state of charge, a
+	// fraction in [0,1], the way POST /api/loadpoints/{id}/soc does: the
+	// session's estimate is re-anchored and the plan remade from it.
+	OpLoadpointSoCSet = "loadpoint.soc.set"
+	// OpLoadpointSurplusOnlySet turns PV-only charging on or off for one
+	// loadpoint — the `surplus_only` field of the HTTP target route, and
+	// only that field: the target level and its deadline have no command.
+	OpLoadpointSurplusOnlySet = "loadpoint.surplus_only.set"
 )
 
 // BoxMode is what the box is able to offer this session.

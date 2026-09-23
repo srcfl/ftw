@@ -23,6 +23,7 @@ package ocpp
 
 import (
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp2.0.1/authorization"
@@ -57,6 +58,8 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	s.vendor = vendor
 	s.model = model
 	s.serial = serial
+	s.identityCurrent = true
+	h.cancelIdentityProbeLocked(s)
 	if req != nil && req.ChargingStation.FirmwareVersion != "" {
 		s.firmware = req.ChargingStation.FirmwareVersion
 	}
@@ -94,19 +97,22 @@ func (h *handlerV201) OnHeartbeat(id string, _ *availability.HeartbeatRequest) (
 func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNotificationRequest) (*availability.StatusNotificationResponse, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	s.connectedKnown = true
 	switch req.ConnectorStatus {
 	case availability.ConnectorStatusAvailable, availability.ConnectorStatusUnavailable:
 		s.connected = false
 		s.charging = false
-		s.lastPowerW = 0
+		s.clearMeasuredPower()
 	case availability.ConnectorStatusOccupied, availability.ConnectorStatusReserved:
 		s.connected = true
+		s.connectedKnown = true
 	case availability.ConnectorStatusFaulted:
 		// Matches the 1.6 path: a faulted connector still has a cable in it,
 		// so it stays connected while charging stops.
 		s.connected = true
+		s.connectedKnown = true
 		s.charging = false
-		s.lastPowerW = 0
+		s.clearMeasuredPower()
 	}
 	faulted := req.ConnectorStatus == availability.ConnectorStatusFaulted
 	h.mu.Unlock()
@@ -132,9 +138,13 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 	s := h.state(id)
 
 	// Meter samples ride along with every event type.
-	powerW, energyWh, hasEnergy := sampledValuesV201(req.MeterValue)
+	energyWh, hasEnergy := sampledEnergyV201(req.MeterValue)
 
 	h.mu.Lock()
+	acceptedPower := false
+	if req.EventType != transactions.TransactionEventEnded {
+		acceptedPower = s.recordPowerV201(req.MeterValue, time.Now())
+	}
 	switch req.EventType {
 	case transactions.TransactionEventStarted:
 		// 2.0.1 transaction ids are strings; the shared state keeps an int for
@@ -146,16 +156,20 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		s.sessionStartMeterWh = energyWh
 		s.sessionMeterWh = 0
 		s.connected = true
+		s.connectedKnown = true
 		s.charging = true
 
 	case transactions.TransactionEventUpdated:
 		s.connected = true
+		s.connectedKnown = true
 		if hasEnergy && s.transactionID >= 0 {
 			s.sessionMeterWh = energyWh - s.sessionStartMeterWh
 		}
 		// A zero power sample during a live transaction is a genuine pause,
-		// not a missing reading, so it is taken at face value.
-		s.charging = powerW > 0
+		// not a missing reading. Energy/current without power keeps last watts.
+		if acceptedPower {
+			s.charging = s.lastPowerW > 0
+		}
 
 	case transactions.TransactionEventEnded:
 		if hasEnergy {
@@ -164,13 +178,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		s.transactionID = -1
 		s.transactionRef = ""
 		s.charging = false
-		s.lastPowerW = 0
-		powerW = 0
+		s.clearMeasuredPower()
 	}
 
-	if req.EventType != transactions.TransactionEventEnded {
-		s.lastPowerW = powerW
-	}
+	powerW := s.lastPowerW
 	sessionWh := s.sessionMeterWh
 	ended := req.EventType == transactions.TransactionEventEnded
 	h.mu.Unlock()
@@ -198,10 +209,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 
 func (h *handlerV201) OnMeterValues(id string, req *meter.MeterValuesRequest) (*meter.MeterValuesResponse, error) {
 	s := h.state(id)
-	powerW, energyWh, hasEnergy := sampledValuesV201(req.MeterValue)
+	energyWh, hasEnergy := sampledEnergyV201(req.MeterValue)
 
 	h.mu.Lock()
-	s.lastPowerW = powerW
+	s.recordPowerV201(req.MeterValue, time.Now())
 	if hasEnergy && s.transactionID >= 0 {
 		s.sessionMeterWh = energyWh - s.sessionStartMeterWh
 	}
@@ -224,33 +235,29 @@ func (h *handlerV201) OnAuthorize(id string, _ *authorization.AuthorizeRequest) 
 	}), nil
 }
 
-// sampledValuesV201 pulls active-import power and energy out of a 2.0.1 meter
-// value set, normalising kW/kWh to W/Wh.
+// sampledEnergyV201 pulls active-import energy out of a 2.0.1 meter value set,
+// normalising kWh to Wh. Power goes through recordPowerV201 so a missing
+// measurand cannot write 0 W.
 //
 // 2.0.1 always states the measurand, so unlike 1.6 there is no default to
 // assume. hasEnergy distinguishes "no energy sample in this batch" from a
 // genuine zero reading, which matters because session energy is a difference
 // against the transaction's starting register.
-func sampledValuesV201(values []types201.MeterValue) (powerW, energyWh float64, hasEnergy bool) {
+func sampledEnergyV201(values []types201.MeterValue) (energyWh float64, hasEnergy bool) {
 	for _, mv := range values {
 		for _, sv := range mv.SampledValue {
-			val := sv.Value
-			switch sv.Measurand {
-			case types201.MeasurandPowerActiveImport:
-				if unitIsKilo(sv.UnitOfMeasure) {
-					val *= 1000
-				}
-				powerW = val
-			case types201.MeasurandEnergyActiveImportRegister:
-				if unitIsKilo(sv.UnitOfMeasure) {
-					val *= 1000
-				}
-				energyWh = val
-				hasEnergy = true
+			if sv.Measurand != types201.MeasurandEnergyActiveImportRegister {
+				continue
 			}
+			val := sv.Value
+			if unitIsKilo(sv.UnitOfMeasure) {
+				val *= 1000
+			}
+			energyWh = val
+			hasEnergy = true
 		}
 	}
-	return powerW, energyWh, hasEnergy
+	return energyWh, hasEnergy
 }
 
 // unitIsKilo reports whether a sample is expressed in kW or kWh. An absent unit
@@ -265,4 +272,41 @@ func unitIsKilo(u *types201.UnitOfMeasure) bool {
 	default:
 		return false
 	}
+}
+
+func (s *chargerState) recordPowerV201(values []types201.MeterValue, received time.Time) bool {
+	accepted := false
+	for _, mv := range values {
+		var samples []powerSample
+		for _, sv := range mv.SampledValue {
+			if sv.Measurand != types201.MeasurandPowerActiveImport {
+				continue
+			}
+			w := sv.Value
+			if unit := sv.UnitOfMeasure; unit != nil {
+				if unit.Unit != "" && unit.Unit != "W" && unit.Unit != "kW" {
+					continue
+				}
+				if unit.Unit == "kW" {
+					w *= 1000
+				}
+				if unit.Multiplier != nil {
+					w *= math.Pow10(*unit.Multiplier)
+				}
+			}
+			samples = append(samples, powerSample{w: w, phase: string(sv.Phase)})
+		}
+		w, ok := meterPowerW(samples)
+		if !ok {
+			continue
+		}
+		measured := mv.Timestamp.Time
+		if measured.IsZero() {
+			measured = received
+		}
+		if s.recordPower(w, measured, received) {
+			accepted = true
+		}
+	}
+	return accepted
 }

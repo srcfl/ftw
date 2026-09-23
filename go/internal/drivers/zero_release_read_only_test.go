@@ -3,7 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
-	"strings"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -76,7 +76,7 @@ func TestReleaseOnZeroHybridsAreWriteInert(t *testing.T) {
 				t.Fatalf("%s must declare read_only=true", name)
 			}
 			for i, err := range commandErrors {
-				if err == nil || !strings.Contains(err.Error(), "returned false") {
+				if !errors.Is(err, ErrReadOnlyDriver) {
 					t.Fatalf("command %v: got %v, want read-only refusal", commands[i], err)
 				}
 			}

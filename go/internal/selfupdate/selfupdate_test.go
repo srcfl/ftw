@@ -3,12 +3,14 @@ package selfupdate
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -160,6 +162,9 @@ func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing
 	}{
 		{name: "same", body: "<!-- ftw-state-schema:7 -->", targetSchema: 7, backupRequired: false},
 		{name: "different", body: "<!-- ftw-state-schema:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "v2 wins over the legacy floor", body: "<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:7 -->", targetSchema: 7, backupRequired: false},
+		{name: "v2 differs", body: "<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "invalid v2 falls back to legacy", body: "<!-- ftw-state-schema:7 -->\n<!-- ftw-state-schema-v2:no -->", targetSchema: 7, backupRequired: false},
 		{name: "missing", body: "ordinary release notes", targetSchema: 0, backupRequired: true},
 		{name: "invalid", body: "<!-- ftw-state-schema:no -->", targetSchema: 0, backupRequired: true},
 	} {
@@ -191,6 +196,26 @@ func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing
 				t.Fatalf("internal schema marker leaked into release notes: %q", info.ReleaseBody)
 			}
 		})
+	}
+}
+
+// The beta and stable workflows publish both markers. A Core before
+// v3.6.0-beta.1 reads only the legacy one and must see its own schema, 4,
+// so it skips the full history copy that cannot finish on a Raspberry Pi
+// (#1302). A newer Core reads the real schema from the v2 marker.
+func TestReleaseStateSchemaReadsV2BeforeLegacyMarker(t *testing.T) {
+	body := "FTW 3.7.0\n\n<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:7 -->\n"
+	if got := releaseStateSchema(body); got != 7 {
+		t.Fatalf("v2 marker = %d, want 7", got)
+	}
+	if got := parseStateSchemaMarker(body, stateSchemaMarkerLegacy); got != 4 {
+		t.Fatalf("legacy marker seen by an old Core = %d, want 4", got)
+	}
+	if got := releaseBodyWithoutStateSchema(body); got != "FTW 3.7.0" {
+		t.Fatalf("stripped body = %q", got)
+	}
+	if got := releaseStateSchema("<!-- ftw-state-schema:7 -->"); got != 7 {
+		t.Fatalf("legacy-only marker = %d, want 7", got)
 	}
 }
 
@@ -406,6 +431,67 @@ func TestNew_MigratesPersistedEdgeChannelToBeta(t *testing.T) {
 	}
 }
 
+func TestLegacyCoreFindsSameMajorMaintenanceRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name, current string
+		channel       Channel
+		want          string
+	}{
+		{"v1 stable", "v1.9.0", ChannelStable, "v1.9.1"},
+		{"v2 stable", "v2.3.2", ChannelStable, "v2.3.3"},
+		{"v2 beta", "v2.3.2-beta.1", ChannelBeta, "v2.3.3-beta.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const repo = "srcfl/ftw"
+			reg := newFakeRegistry(t, repo)
+			reg.addTag(tc.want)
+			registry := reg.server()
+			defer registry.Close()
+
+			var releases *httptest.Server
+			releases = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/latest" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v3.8.0"})
+					return
+				}
+				if r.URL.Query().Get("page") == "2" {
+					_ = json.NewEncoder(w).Encode([]map[string]any{
+						{"tag_name": "v2.3.3-beta.1", "prerelease": true},
+						{"tag_name": "v2.3.3"},
+						{"tag_name": "v1.9.1"},
+					})
+					return
+				}
+				w.Header().Set("Link", "<"+releases.URL+"/list?page=2>; rel=\"next\"")
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"tag_name": "v3.8.0-beta.1", "prerelease": true},
+					{"tag_name": "v3.8.0"},
+				})
+			}))
+			defer releases.Close()
+
+			c := New(Config{
+				Repo: repo, CurrentVersion: tc.current,
+				RegistryBaseURL:  registry.URL,
+				LatestReleaseURL: releases.URL + "/latest", ReleasesURL: releases.URL + "/list",
+			}, newMemStore())
+			if err := c.SetChannel(tc.channel); err != nil {
+				t.Fatal(err)
+			}
+			info, err := c.Check(context.Background(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.UpdateAvailable || info.Latest != tc.want {
+				t.Fatalf("compatible maintenance release not offered: %+v", info)
+			}
+			if reg.listCalls != 1 {
+				t.Fatalf("compatible release was not checked in registry: %d", reg.listCalls)
+			}
+		})
+	}
+}
+
 func TestCheck_SameVersion(t *testing.T) {
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
@@ -509,7 +595,7 @@ func TestCheck_RetriesTransientGitHub504(t *testing.T) {
 	withoutGitHubBackoff(t)
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
-	reg.addTag("v2.0.0")
+	reg.addTag("v1.16.0")
 	rsrv := reg.server()
 	defer rsrv.Close()
 
@@ -522,8 +608,8 @@ func TestCheck_RetriesTransientGitHub504(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     "v2.0.0",
-			"html_url":     "https://example/releases/v2.0.0",
+			"tag_name":     "v1.16.0",
+			"html_url":     "https://example/releases/v1.16.0",
 			"body":         "ok",
 			"published_at": time.Now().Format(time.RFC3339),
 		})
@@ -535,7 +621,7 @@ func TestCheck_RetriesTransientGitHub504(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check after 504s: %v", err)
 	}
-	if info.Latest != "v2.0.0" || info.Err != "" {
+	if info.Latest != "v1.16.0" || info.Err != "" {
 		t.Fatalf("info = %+v", info)
 	}
 	if calls != 3 {
@@ -547,7 +633,7 @@ func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
 	withoutGitHubBackoff(t)
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
-	reg.addTag("v2.0.0")
+	reg.addTag("v1.16.0")
 	rsrv := reg.server()
 	defer rsrv.Close()
 
@@ -560,8 +646,8 @@ func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     "v2.0.0",
-			"html_url":     "https://example/releases/v2.0.0",
+			"tag_name":     "v1.16.0",
+			"html_url":     "https://example/releases/v1.16.0",
 			"body":         "ok",
 			"published_at": time.Now().Format(time.RFC3339),
 		})
@@ -577,7 +663,7 @@ func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retry after recorded 504: %v", err)
 	}
-	if info.Latest != "v2.0.0" || info.Err != "" {
+	if info.Latest != "v1.16.0" || info.Err != "" {
 		t.Fatalf("info after retry = %+v", info)
 	}
 	if calls <= failedCalls {
@@ -816,7 +902,7 @@ func TestIsNewer(t *testing.T) {
 func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
 	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
-	reg.addTag("v2.0.0")
+	reg.addTag("v1.16.0")
 	rsrv := reg.server()
 	defer rsrv.Close()
 
@@ -824,7 +910,7 @@ func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
 	if len(huge) <= MaxReleaseBodyBytes {
 		t.Fatalf("test fixture too small: %d bytes", len(huge))
 	}
-	rls := fakeReleasesServer(t, fakeRelease{tag: "v2.0.0", body: huge})
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.16.0", body: huge})
 	defer rls.Close()
 
 	c := newCheckerOnFakes("v1.0.0", rsrv, rls, repo, newMemStore())
@@ -851,6 +937,76 @@ func TestTrigger_NoSocket(t *testing.T) {
 	c := New(Config{}, newMemStore())
 	if err := c.Trigger(context.Background(), "update", ""); err == nil {
 		t.Error("expected 'socket not configured' error")
+	}
+}
+
+// Reported versions, including QA overrides and baked stable identities,
+// cannot select another image when a user presses Restart.
+func TestTriggerRestartPreservesContainerRegardlessOfReportedVersion(t *testing.T) {
+	for _, current := range []string{"v2.14.0-beta.1", "v2.14.0", "v2.0.0", "dev", "edge-20260101"} {
+		t.Run(current, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "ftw-su-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(dir) })
+			sock := filepath.Join(dir, "sock")
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			got := make(chan map[string]any, 1)
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				got <- body
+				w.WriteHeader(202)
+			})}
+			go srv.Serve(ln)
+			t.Cleanup(func() { srv.Close() })
+			c := New(Config{SocketPath: sock, CurrentVersion: current}, newMemStore())
+			if err := c.TriggerRestart(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			body := <-got
+			if body["action"] != "restart_existing" || body["target"] != "" {
+				t.Fatalf("unsafe restart request: %v", body)
+			}
+		})
+	}
+}
+
+func TestTriggerRestartFailsClosedOnOldUpdater(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ftw-su-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["action"] != "restart_existing" {
+			t.Errorf("unsafe fallback: %v", body)
+		}
+		http.Error(w, "action must be update, restart, rollback, or component_rollback", http.StatusBadRequest)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	c := New(Config{SocketPath: sock, CurrentVersion: "v2.14.0-beta.1"}, newMemStore())
+	err = c.TriggerRestart(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "safe restart requires a newer updater") {
+		t.Fatalf("restart error = %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("restart requests = %d", calls.Load())
 	}
 }
 

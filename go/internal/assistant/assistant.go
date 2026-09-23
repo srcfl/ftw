@@ -3,6 +3,7 @@
 package assistant
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -21,7 +22,7 @@ const (
 	// Timeout covers a slow free-tier completion, including a few tool rounds.
 	Timeout = 90 * time.Second
 	// maxReportRunes keeps a stuffed one-shot inside a free-model context.
-	maxReportRunes = 80_000
+	maxReportRunes  = 80_000
 	maxQuestion     = 2000
 	maxTokens       = 2500
 	maxIssueTitle   = 80
@@ -47,7 +48,9 @@ type Request struct {
 	// Run executes read-only tools. Nil means no tool loop: the report is
 	// stuffed into the first user message, matching the original one-shot.
 	Run Runner
-	// Progress is optional live status for the UI. kind is "status" or "tool".
+	// Progress is optional live status for the UI. kind is "status",
+	// "tool", "delta" (a token of the answer), or "round" (a new model
+	// round starts, so deltas so far were not the answer).
 	Progress func(kind, text string)
 }
 
@@ -109,6 +112,7 @@ type chatRequest struct {
 	Messages    []chatMessage `json:"messages"`
 	MaxTokens   int           `json:"max_tokens"`
 	Temperature float64       `json:"temperature"`
+	Stream      bool          `json:"stream,omitempty"`
 	Tools       []ToolDef     `json:"tools,omitempty"`
 	ToolChoice  string        `json:"tool_choice,omitempty"`
 }
@@ -211,15 +215,20 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 			Messages:    messages,
 			MaxTokens:   maxTokens,
 			Temperature: 0.2,
+			Stream:      true,
 		}
 		if useTools {
 			wire.Tools = tools
 			wire.ToolChoice = "auto"
 		}
 		if req.Progress != nil {
+			// A round starts its own answer. Text streamed before a tool
+			// call belongs to that round, not to the reply the operator
+			// ends up reading, so the UI drops what it has so far.
+			req.Progress("round", "")
 			req.Progress("status", "Asking the model")
 		}
-		msg, resolved, err := c.post(ctx, httpClient, endpoint, key, wire)
+		msg, resolved, err := c.post(ctx, httpClient, endpoint, key, wire, req.Progress)
 		if err != nil {
 			return zero, err
 		}
@@ -272,7 +281,7 @@ func runTool(run Runner, call toolCall) string {
 	return out
 }
 
-func (c *Client) post(ctx context.Context, httpClient *http.Client, endpoint, key string, wire chatRequest) (chatMessage, string, error) {
+func (c *Client) post(ctx context.Context, httpClient *http.Client, endpoint, key string, wire chatRequest, progress func(kind, text string)) (chatMessage, string, error) {
 	var zero chatMessage
 	body, err := json.Marshal(wire)
 	if err != nil {
@@ -284,6 +293,7 @@ func (c *Client) post(ctx context.Context, httpClient *http.Client, endpoint, ke
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+key)
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("HTTP-Referer", "https://github.com/srcfl/ftw")
 	httpReq.Header.Set("X-Title", "FTW")
 
@@ -292,7 +302,6 @@ func (c *Client) post(ctx context.Context, httpClient *http.Client, endpoint, ke
 		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "could not reach the model API"}
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
@@ -307,6 +316,125 @@ func (c *Client) post(ctx context.Context, httpClient *http.Client, endpoint, ke
 		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API error"}
 	}
 
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		return readStream(resp.Body, progress)
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	msg, model, err := parseChatJSON(raw)
+	if err != nil {
+		return zero, "", err
+	}
+	if progress != nil && msg.Content != "" && len(msg.ToolCalls) == 0 {
+		progress("delta", msg.Content)
+	}
+	return msg, model, nil
+}
+
+type streamChunk struct {
+	Model   string `json:"model"`
+	Choices []struct {
+		Delta struct {
+			Content   string           `json:"content"`
+			ToolCalls []streamToolCall `json:"tool_calls"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type streamToolCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type toolAcc struct {
+	id, typ, name, args string
+}
+
+func readStream(body io.Reader, progress func(kind, text string)) (chatMessage, string, error) {
+	var zero chatMessage
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	var content strings.Builder
+	resolved := ""
+	accs := map[int]*toolAcc{}
+	var order []int
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		if chunk.Error != nil && chunk.Error.Message != "" {
+			return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API error"}
+		}
+		if chunk.Model != "" {
+			resolved = strings.TrimSpace(chunk.Model)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		d := chunk.Choices[0].Delta
+		if d.Content != "" {
+			content.WriteString(d.Content)
+			if progress != nil {
+				progress("delta", d.Content)
+			}
+		}
+		for _, tc := range d.ToolCalls {
+			a, ok := accs[tc.Index]
+			if !ok {
+				a = &toolAcc{typ: "function"}
+				accs[tc.Index] = a
+				order = append(order, tc.Index)
+			}
+			if tc.ID != "" {
+				a.id = tc.ID
+			}
+			if tc.Type != "" {
+				a.typ = tc.Type
+			}
+			if tc.Function.Name != "" {
+				a.name = tc.Function.Name
+			}
+			a.args += tc.Function.Arguments
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API stream failed"}
+	}
+	msg := chatMessage{Role: "assistant", Content: content.String()}
+	for _, idx := range order {
+		a := accs[idx]
+		tc := toolCall{ID: a.id, Type: a.typ}
+		tc.Function.Name = a.name
+		tc.Function.Arguments = a.args
+		msg.ToolCalls = append(msg.ToolCalls, tc)
+	}
+	if msg.Content == "" && len(msg.ToolCalls) == 0 {
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model returned no answer"}
+	}
+	return msg, resolved, nil
+}
+
+func parseChatJSON(raw []byte) (chatMessage, string, error) {
+	var zero chatMessage
 	var parsed chatResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API returned unreadable JSON"}

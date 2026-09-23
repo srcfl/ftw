@@ -1,7 +1,7 @@
 {
   "family": "seeded_planner",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
+  "ftw_commit": "15f9edc3b973d7b9151e88d63575a9b7d615a0b3",
   "record_count": 100,
   "records": [
     {
@@ -2235,12 +2235,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1372.722580645161,
+          "target_w": 0,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -2173.4774193548387,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -2263,9 +2263,9 @@
       },
       "site_totals": {
         "battery_current_w": -437,
-        "battery_target_sum_w": -3546.2,
+        "battery_target_sum_w": 0,
         "raw_grid_w": 5182,
-        "projected_grid_w": 2072.8
+        "projected_grid_w": 5619
       }
     },
     {
@@ -3110,7 +3110,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 1069,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.61,
+          "live_pv_surplus_soc_cap": 0.6134947655449627,
           "elapsed_s": 167,
           "remaining_s": 702
         }
@@ -3118,7 +3118,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4373.6,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -3141,9 +3141,9 @@
       },
       "site_totals": {
         "battery_current_w": -3617,
-        "battery_target_sum_w": -4373.6,
+        "battery_target_sum_w": 0,
         "raw_grid_w": 1261,
-        "projected_grid_w": 504.39999999999964
+        "projected_grid_w": 4878
       }
     },
     {
@@ -6869,7 +6869,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 99,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.89,
+          "live_pv_surplus_soc_cap": 0.8941343264091409,
           "elapsed_s": 204,
           "remaining_s": 246
         }
@@ -6877,7 +6877,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1314.1999999999998,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -6900,9 +6900,9 @@
       },
       "site_totals": {
         "battery_current_w": 2122,
-        "battery_target_sum_w": -1314.1999999999998,
+        "battery_target_sum_w": 0,
         "raw_grid_w": 5727,
-        "projected_grid_w": 2290.8
+        "projected_grid_w": 3605
       }
     },
     {
@@ -8187,7 +8187,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": -1552,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.67,
+          "live_pv_surplus_soc_cap": 0.6664592496073395,
           "elapsed_s": 105,
           "remaining_s": 488
         }
@@ -8195,12 +8195,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1678.3741935483872,
+          "target_w": 0,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -2657.425806451613,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -8223,9 +8223,9 @@
       },
       "site_totals": {
         "battery_current_w": -2888,
-        "battery_target_sum_w": -4335.8,
+        "battery_target_sum_w": 0,
         "raw_grid_w": 2413,
-        "projected_grid_w": 965.1999999999998
+        "projected_grid_w": 5301
       }
     },
     {

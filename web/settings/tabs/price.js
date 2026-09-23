@@ -98,6 +98,13 @@
         field("VAT (%)", "price.vat_percent", "number", 25) +
         '</div></div>' +
         '<div class="field-row"><div>' +
+        field("Demand charge weekday 06–20 excl. VAT (" + escHtml(unit) + "/kW)", "price.demand_price_per_kw", "number", 0,
+          "Peak-power tariff on mean import during local weekday 06–20, excluding VAT. Same units as the grid tariff, per kW. 0 disables it. Core expands clock hours, including DST.") +
+        '</div><div>' +
+        field("Demand charge top hours", "price.demand_top_n", "number", 3,
+          "How many highest weekday hours are averaged. Empty or 0 means 3.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
         field("Export bonus (" + escHtml(unit) + "/kWh)", "price.export_bonus_ore_kwh", "number", 0) +
         '</div><div>' +
         field("Export fee (" + escHtml(unit) + "/kWh)", "price.export_fee_ore_kwh", "number", 0) +

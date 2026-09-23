@@ -123,6 +123,10 @@ type HostEnv struct {
 	// signed read-only policy denies writes in every phase. A signed v2 control
 	// policy also limits writes to a bounded command/default-mode call.
 	RuntimePolicy *RuntimePolicy
+	// ProbeReadOnly denies every mutating host verb. Fingerprint probes set
+	// this so a buggy driver_fingerprint cannot reconfigure hardware: bundled
+	// drivers otherwise have allowWrite as a no-op.
+	ProbeReadOnly bool
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
 	// declaration for this driver. Zero means "no physical battery
@@ -169,12 +173,12 @@ type HostEnv struct {
 	// in driver_init; read once by the registry's run loop.
 	WarmupS float64
 
-	// PersistSecret, when non-nil, lets a driver durably write a config
-	// secret (e.g. a rotated OAuth refresh_token) back into its own
-	// config block so it survives a restart. nil → host.persist_secret
+	// PersistSecret, when non-nil, lets a driver write a secret (e.g. a
+	// rotated OAuth refresh_token) into its own persisted KV namespace.
+	// nil → host.persist_secret
 	// returns ok=false + an error. Wired by the Registry to a per-driver
-	// closure (see registry.go SecretPersister). Keep the value small:
-	// it is round-tripped through config.yaml as a plain string.
+	// closure (see registry.go SecretPersister). The host limits each value
+	// to 1 MiB and checks signed secret-key grants for managed drivers.
 	PersistSecret func(key, value string) error
 	writePhase    string
 	writeDeadline time.Time
@@ -302,8 +306,14 @@ func (h *HostEnv) allowAuthPost(rawURL string) bool {
 }
 
 func (h *HostEnv) allowWrite(permission string) error {
+	if h.ProbeReadOnly {
+		return fmt.Errorf("%s: fingerprint probe cannot write", permission)
+	}
 	if h.RuntimePolicy == nil {
 		return nil
+	}
+	if h.RuntimePolicy.IsReadOnly() {
+		return fmt.Errorf("%s: read-only driver cannot write", permission)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

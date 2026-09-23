@@ -9,8 +9,11 @@ const index = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 describe("lan-auth UI", () => {
   it("does not store the house password in localStorage", () => {
     assert.doesNotMatch(lanAuth, /localStorage/);
-    assert.doesNotMatch(system, /localStorage/);
     assert.doesNotMatch(lanAuth, /sessionStorage/);
+    const start = system.indexOf('var enableBtn = document.getElementById("sys-lan-auth-enable")');
+    const end = system.indexOf('var disableBtn = document.getElementById("sys-lan-auth-disable")', start);
+    assert.ok(start >= 0 && end > start, "LAN password handler must be present");
+    assert.doesNotMatch(system.slice(start, end), /localStorage|sessionStorage/);
   });
 
   it("logs in through POST /api/auth/login", () => {

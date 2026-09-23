@@ -115,6 +115,9 @@ func claimAndProvision(
 	if cfg.State != nil && cfg.State.Path != "" {
 		statePath = cfg.State.Path
 	}
+	if cfg.ConfigDatabase != "" {
+		statePath = cfg.ConfigDatabase
+	}
 	keyPath := cfg.Nova.KeyPath
 	if keyPath == "" {
 		keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
@@ -156,6 +159,15 @@ func claimAndProvision(
 		return fmt.Errorf("open state: %w", err)
 	}
 	defer st.Close()
+	if cfg.RetiredCalendarEnabled {
+		if err := st.RetireCalendarProfile(); err != nil {
+			return fmt.Errorf("retire calendar profile: %w", err)
+		}
+	}
+	cfg, err = config.InitializeStorage(configPath, statePath, cfg, st)
+	if err != nil {
+		return fmt.Errorf("initialize config: %w", err)
+	}
 
 	devices, err := st.AllDevices()
 	if err != nil {
@@ -238,7 +250,7 @@ func claimAndProvision(
 	if mqttTLS {
 		cfg.Nova.MQTTTLS = true
 	}
-	if err := config.SaveAtomic(configPath, cfg); err != nil {
+	if err := config.SaveStored(st, configPath, cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 	slog.Info("nova config saved", "config", configPath, "serial", gatewaySerial)

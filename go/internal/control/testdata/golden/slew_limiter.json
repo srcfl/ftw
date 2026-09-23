@@ -1,7 +1,7 @@
 {
   "family": "slew_limiter",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "303f86818a95f056f68e0b652db131a33074a421",
+  "ftw_commit": "15f9edc3b973d7b9151e88d63575a9b7d615a0b3",
   "record_count": 155,
   "records": [
     {
@@ -11951,7 +11951,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1119,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -11974,9 +11974,9 @@
       },
       "site_totals": {
         "battery_current_w": -3627,
-        "battery_target_sum_w": -1119,
+        "battery_target_sum_w": 0,
         "raw_grid_w": -4180,
-        "projected_grid_w": -1672
+        "projected_grid_w": -553
       }
     },
     {
@@ -13671,7 +13671,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1815,
+          "target_w": 0,
           "clamped": true
         },
         {
@@ -13681,7 +13681,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": -2633,
+          "target_w": 0,
           "clamped": true
         }
       ],
@@ -13708,9 +13708,9 @@
       },
       "site_totals": {
         "battery_current_w": -4835,
-        "battery_target_sum_w": -4085,
+        "battery_target_sum_w": 363,
         "raw_grid_w": -2051,
-        "projected_grid_w": -1301
+        "projected_grid_w": 3147
       }
     },
     {

@@ -8,6 +8,8 @@
 ^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
 ^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
 ^go/cmd/ftw-updater/main\.go:.*legacyMainServiceName.*= "forty-two-watts"$
+# Published compatibility updater image remains supported during migration.
+^go/cmd/ftw-updater/self_replace\.go:.*legacyUpdaterImage.*= "ghcr.io/frahlg/forty-two-watts-updater"$
 ^go/cmd/ftw/main\.go:// caldavUsername resolves the CalDAV username \(default fortytwowatts\)\.$
 ^go/internal/ha/bridge\.go:.*topicPrefix string // stable wire ID, e\.g\. "forty-two-watts"$
 ^scripts/deploy-go\.sh:.*ln -sf ftw forty-two-watts$
@@ -15,6 +17,17 @@
 ^scripts/install-macos\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
 ^scripts/enable-modular-stack\.sh:.*forty-two-watts.*$
 ^scripts/migrate-legacy-compose\.sh:.*forty-two-watts.*$
-^Makefile:.*-C "\$\$stage" ftw ftw-backup forty-two-watts.*$
+# Migrated Compose installs may keep the legacy service name; this script
+# must detect it without guessing when both names exist.
+^scripts/upgrade-paired-release\.sh:.*forty-two-watts.*$
+# The Linux package builder preserves the executable alias from older archives.
+^go/internal/nativeupdate/install\.go:[[:space:]]*if header\.Typeflag == tar\.TypeSymlink && name == "forty-two-watts" && header\.Linkname == "ftw" \{$
+^scripts/package-linux\.py:[[:space:]]*alias = tarfile\.TarInfo\("forty-two-watts"\)$
+^scripts/test_package_linux\.py:[[:space:]]*self\.assertEqual\(tar\.getmember\("forty-two-watts"\)\.linkname, "ftw"\)$
 ^scripts/restore-full-backup\.sh:for candidate in ftw forty-two-watts; do$
 ^README\.md:Existing Forty Two Watts or older FTW deployments must use the$
+# Rust's upstream runtime notices describe third-party licenses, not FTW's license.
+^optimizer/native/bundle/rust-runtime/COPYRIGHT-library\.html:[[:space:]]*This project is triple-licensed under the MIT License, the Apache$
+# Upstream DuckDB component notices describe their own licenses, not FTW's.
+^go/tools/history-migrate/THIRD-PARTY-NOTICES\.txt:   is licensed under the MIT License\. See$
+^go/tools/history-migrate/THIRD-PARTY-NOTICES\.txt:Portions of the following files are licensed under the MIT License:$

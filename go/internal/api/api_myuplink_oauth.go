@@ -373,43 +373,43 @@ func (s *Server) exchangeMyUplinkCode(code, clientID, clientSecret, redirectURI,
 // SecretOverride supersedes any stale rotated value), then restarts the
 // driver so it picks up the token immediately.
 func (s *Server) persistMyUplinkRefreshToken(r *http.Request, driver, refreshToken string) error {
-	// 1. KV first — this is what SecretOverride reads at driver_init and what
-	//    the runtime rotation persists to. Writing it before the config save
-	//    guarantees the post-restart override matches the fresh token.
-	if s.deps.State != nil {
-		if err := s.deps.State.SaveConfig("driver_secret:"+driver+":refresh_token", refreshToken); err != nil {
-			return err
-		}
-	}
-
-	// 2. Driver config + atomic save.
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	s.deps.CfgMu.RLock()
+	next := *s.deps.Cfg
+	next.Drivers = append([]config.Driver(nil), next.Drivers...)
+	s.deps.CfgMu.RUnlock()
 	var restartCfg *config.Driver
-	s.deps.CfgMu.Lock()
-	for i := range s.deps.Cfg.Drivers {
-		if s.deps.Cfg.Drivers[i].Name == driver {
-			if s.deps.Cfg.Drivers[i].Config == nil {
-				s.deps.Cfg.Drivers[i].Config = map[string]any{}
+	for i := range next.Drivers {
+		if next.Drivers[i].Name == driver {
+			values := make(map[string]any)
+			for k, v := range next.Drivers[i].Config {
+				values[k] = v
 			}
-			s.deps.Cfg.Drivers[i].Config["refresh_token"] = refreshToken
-			c := s.deps.Cfg.Drivers[i]
-			restartCfg = &c
+			values["refresh_token"] = refreshToken
+			next.Drivers[i].Config = values
+			restartCfg = &next.Drivers[i]
 			break
 		}
-	}
-	var saveErr error
-	if s.deps.SaveConfig != nil {
-		saveErr = s.deps.SaveConfig(s.deps.ConfigPath, s.deps.Cfg)
-	}
-	s.deps.CfgMu.Unlock()
-	if saveErr != nil {
-		return saveErr
 	}
 	if restartCfg == nil {
 		return fmt.Errorf("driver %q not found in config", driver)
 	}
-
-	// 3. Restart so the driver re-auths now (best-effort; the config watcher
-	//    would also reload, but the explicit restart is deterministic).
+	if s.deps.SaveConfig == nil {
+		return fmt.Errorf("config store unavailable")
+	}
+	// The persistence callback commits the document and changed token override
+	// together. A failed consent save cannot change the live driver or KV.
+	if err := s.deps.SaveConfig(s.deps.ConfigPath, &next); err != nil {
+		return err
+	}
+	s.deps.CfgMu.Lock()
+	old := *s.deps.Cfg
+	*s.deps.Cfg = next
+	s.deps.CfgMu.Unlock()
+	if s.deps.ConfigApplier != nil {
+		s.deps.ConfigApplier(&next, &old)
+	}
 	if s.deps.Registry != nil {
 		if err := s.deps.Registry.Restart(r.Context(), *restartCfg); err != nil {
 			return fmt.Errorf("driver restart: %w", err)

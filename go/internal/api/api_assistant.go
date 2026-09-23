@@ -24,6 +24,8 @@ type assistantAskRequest struct {
 	Question string            `json:"question"`
 	Trigger  *assistantTrigger `json:"trigger,omitempty"`
 	History  []assistant.Turn  `json:"history,omitempty"`
+	// ThreadID continues a stored conversation. Empty starts a new one.
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 type assistantTrigger struct {
@@ -38,6 +40,7 @@ type assistantAskResponse struct {
 	IssueURL      string `json:"issue_url,omitempty"`
 	Model         string `json:"model"`
 	ResolvedModel string `json:"resolved_model,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
 }
 
 type assistantStatusResponse struct {
@@ -138,6 +141,9 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	progress("status", "Reading the site")
+	facts := s.assistantFacts()
+	// Complete emits "Asking the model" once per round. Saying it here
+	// too would double every line in the activity log.
 	cli := &assistant.Client{HTTP: s.deps.AssistantHTTP}
 	reply, err := cli.Complete(r.Context(), assistant.Request{
 		APIKey:   asst.APIKey,
@@ -146,7 +152,7 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 		Question: body.Question,
 		Trigger:  formatAssistantTrigger(body.Trigger),
 		History:  body.History,
-		Snapshot: s.assistantFacts(),
+		Snapshot: facts,
 		Run:      s.runAssistantTool,
 		Progress: progress,
 	})
@@ -183,6 +189,7 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 	if out.IssueTitle != "" {
 		out.IssueURL = filledIssueURL(out.IssueTitle, out.IssueBody)
 	}
+	out.ThreadID = s.recordAssistantTurn(body, out.Answer, out.ResolvedModel)
 	slog.Info("assistant ask",
 		"model", out.ResolvedModel,
 		"ms", time.Since(start).Milliseconds(),
@@ -197,6 +204,7 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 			"issue_url":      out.IssueURL,
 			"model":          out.Model,
 			"resolved_model": out.ResolvedModel,
+			"thread_id":      out.ThreadID,
 		})
 		return
 	}
@@ -218,6 +226,7 @@ func writeAssistantSSE(w http.ResponseWriter, flush http.Flusher, v any) {
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 	}
 	raw, err := json.Marshal(v)

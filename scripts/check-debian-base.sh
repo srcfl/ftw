@@ -25,13 +25,11 @@ RELEASE_URL="${DEBIAN_RELEASE_URL:-https://deb.debian.org/debian/dists/stable/Re
 # Read the pin out of the Dockerfiles instead of hard-coding it here, so this
 # check cannot drift away from what actually ships.
 pinned_debian() { sed -n 's/^FROM debian:\([a-z][a-z]*\)-slim.*/\1/p' "$1" | head -1; }
-pinned_python() { sed -n 's/^FROM python:[0-9.][0-9.]*-slim-\([a-z][a-z]*\).*/\1/p' "$1" | head -1; }
 
 core=$(pinned_debian Dockerfile)
 updater=$(pinned_debian Dockerfile.updater)
-optimizer=$(pinned_python Dockerfile.optimizer)
 
-for pair in "Dockerfile:$core" "Dockerfile.updater:$updater" "Dockerfile.optimizer:$optimizer"; do
+for pair in "Dockerfile:$core" "Dockerfile.updater:$updater"; do
   if [ -z "${pair#*:}" ]; then
     echo "could not read a Debian suite from ${pair%%:*}" >&2
     exit 2
@@ -39,11 +37,11 @@ for pair in "Dockerfile:$core" "Dockerfile.updater:$updater" "Dockerfile.optimiz
 done
 
 echo "pinned suite:"
-printf '  %-22s %s\n' "Dockerfile" "$core" "Dockerfile.updater" "$updater" "Dockerfile.optimizer" "$optimizer"
+printf '  %-22s %s\n' "Dockerfile" "$core" "Dockerfile.updater" "$updater"
 
-if [ "$core" != "$updater" ] || [ "$core" != "$optimizer" ]; then
+if [ "$core" != "$updater" ]; then
   echo ""
-  echo "The three images no longer agree on one Debian suite. Sharing a single"
+  echo "The two images no longer agree on one Debian suite. Sharing a single"
   echo "base layer is the reason they were aligned, and that benefit is lost"
   echo "while they differ."
   exit 1
@@ -72,15 +70,11 @@ fi
 echo ""
 echo "A newer Debian stable is available: $core -> $stable"
 
-# Advisory only. A new Debian stable is tagged in the official images promptly,
-# but python:<ver>-slim-<suite> can lag by days, and moving core without the
-# optimizer would split the shared base layer. Never fail the check on this —
-# it is a readiness note, not the finding.
+# Probe availability before moving both Core and updater together.
 if command -v docker >/dev/null 2>&1; then
   echo ""
   echo "image readiness:"
-  python_tag=$(sed -n 's/^FROM \(python:[0-9.][0-9.]*\)-slim-[a-z][a-z]*.*/\1/p' Dockerfile.optimizer | head -1)
-  for image in "debian:${stable}-slim" "${python_tag}-slim-${stable}"; do
+  for image in "debian:${stable}-slim"; do
     if docker manifest inspect "$image" >/dev/null 2>&1; then
       printf '  %-32s available\n' "$image"
     else

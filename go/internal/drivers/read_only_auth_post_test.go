@@ -1,8 +1,17 @@
 package drivers
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // A read-only driver that reads a vendor cloud cannot read anything until it
@@ -16,9 +25,104 @@ func readOnlyAuthPostPolicy(path string) *RuntimePolicy {
 		PackageID:      "com.sourceful.driver.myuplink",
 		Version:        "1.2.0",
 		ArtifactSHA256: strings.Repeat("a", 64),
-		ReadOnly:       true,
-		Permissions:    map[string]bool{"http.get": true, "http.post": true},
-		AuthPostPath:   path,
+		RuntimeABI:     "gopher-lua-source-v1", HostAPIProfile: "sourceful.host/ftw-core/v1",
+		ReadOnly:     true,
+		Permissions:  map[string]bool{"http.get": true, "http.post": true},
+		AuthPostPath: path,
+	}
+}
+
+func TestManagedReadOnlyOAuthHTTPBoundary(t *testing.T) {
+	var requests atomic.Int32
+	var deviceRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != "POST" || r.URL.Path != "/oauth/token" {
+			deviceRequests.Add(1)
+		}
+		if r.URL.Path == "/oauth/token" {
+			switch r.URL.Query().Get("redirect") {
+			case "307":
+				w.Header().Set("Location", "/v2/devices/1/points")
+				w.WriteHeader(http.StatusTemporaryRedirect)
+				return
+			case "308":
+				w.Header().Set("Location", "/v2/devices/1/points")
+				w.WriteHeader(http.StatusPermanentRedirect)
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"access_token":"synthetic"}`))
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "oauth.lua")
+	if err := os.WriteFile(path, []byte(`function driver_init(config)
+local body, err = host.http_post(config.url, "synthetic")
+host.emit_metric("post_ok", body and 1 or 0)
+if not body and not err then error("missing denial reason") end
+end`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, url             string
+		noPermission, allowed bool
+	}{
+		{"auth", server.URL + "/oauth/token", false, true},
+		{"auth_query", server.URL + "/oauth/token?x=1", false, true},
+		{"device_write", server.URL + "/v2/devices/1/points", false, false},
+		{"path_traversal", server.URL + "/oauth/token/../device", false, false},
+		{"path_suffix", server.URL + "/oauth/token/extra", false, false},
+		{"other_host", "http://not-allowed.invalid/oauth/token", false, false},
+		{"invalid_url", ":bad", false, false},
+		{"missing_post_permission", server.URL + "/oauth/token", true, false},
+		{"redirect_307", server.URL + "/oauth/token?redirect=307", false, false},
+		{"redirect_308", server.URL + "/oauth/token?redirect=308", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := readOnlyAuthPostPolicy("/oauth/token")
+			if tc.noPermission {
+				delete(policy.Permissions, "http.post")
+			}
+			tel := telemetry.NewStore()
+			env := NewHostEnv("oauth", tel).WithHTTP().WithHTTPAllowedHosts([]string{strings.TrimPrefix(server.URL, "http://")})
+			d, err := NewLuaDriverWithPolicy(path, env, policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Cleanup()
+			before := requests.Load()
+			if err := d.Init(context.Background(), map[string]any{"url": tc.url}); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if tc.allowed {
+				want = 1
+			}
+			if value, _, ok := tel.LatestMetric("oauth", "post_ok"); !ok || value != float64(want) {
+				t.Fatalf("HTTP result = %v, present=%v, want %d", value, ok, want)
+			}
+			wantRequests := want
+			if strings.HasPrefix(tc.name, "redirect_") {
+				wantRequests = 1
+			}
+			if got := requests.Load() - before; got != int32(wantRequests) {
+				t.Fatalf("HTTP requests = %d, want %d", got, wantRequests)
+			}
+			if deviceRequests.Load() != 0 {
+				t.Fatal("OAuth exception reached a device write path")
+			}
+			// A write scope must not turn a read-only OAuth grant into a device
+			// write grant, even when local HTTP write capability is configured.
+			env.WithHTTPAllowWrite()
+			env.writePhase = "command"
+			env.writeDeadline = time.Now().Add(time.Minute)
+			if err := env.allowWrite("http.post"); err == nil {
+				t.Fatal("read-only POST escaped through command write scope")
+			}
+			if env.writeAttempts != 0 {
+				t.Fatal("auth or rejected device POST spent the write budget")
+			}
+		})
 	}
 }
 

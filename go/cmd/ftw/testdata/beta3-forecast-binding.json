@@ -1,0 +1,8 @@
+{
+  "evaluation": "forecast-v1:185db400f793ee94b9b4c988ca1f68dc1e15875aae3da6d0afdf83232ecb9b43",
+  "learning": "site-v2:7c9056c8f82fd6a4354ea062882530f170079a3d87366bc0b6505cb273cd1efb",
+  "receipt": {
+    "base_revision": "site-static-v1:9cf3100e8413cb7339cfee3732351b773c8a8e23a9a66699c35f98f60c17c051",
+    "ids": {"ev": "ev:serial-fixture", "meter": "meter:serial-fixture"}
+  }
+}

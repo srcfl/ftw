@@ -1,0 +1,524 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sourceful:energyplan:forecast:1",
+  "title": "Energyplan forecasting request v1",
+  "description": "One JSON object per stdin line, at most 2 MiB including the newline. The caller must split update batches by encoded byte size, not just count; a larger line terminates the worker. Update consumes complete UTC-aligned 15-minute means available by origin_ms and returns an opaque model snapshot. Predict uses an immutable snapshot. Reset starts a new learning period for exactly one enabled signal while retaining the other signal's state. Each requested future segment lasts 1..900000 ms and stays within one UTC quarter-hour; full aligned quarters remain valid. Returned bounds are the actual requested segment. For prediction, site-local clock, weather and occupancy fields refer to the containing quarter-hour start. The caller splits longer spans at each UTC quarter boundary and handles timezone or DST changes. Site/config identity, interval order, state bounds and causal availability are checked at runtime. Household load excludes EV, battery and V2X. PV denotes nonnegative available AC generation, distinct from signed planner pv_w. The caller records actual completion/issue time and persists the snapshot. See forecast-v1.response.schema.json for responses.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "op": {
+      "const": "forecast"
+    },
+    "version": {
+      "const": 1
+    },
+    "action": {
+      "enum": [
+        "update",
+        "predict",
+        "reset"
+      ]
+    },
+    "request_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "site_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "config_revision": {
+      "$ref": "#/$defs/identifier"
+    },
+    "origin_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pv": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "latitude_deg": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            },
+            "longitude_deg": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            },
+            "ac_limit_w": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "exclusiveMinimum": 0,
+              "maximum": 1000000000000.0,
+              "description": "Optional verified AC power limit. Never infer this limit from the largest observed value. Normal inverter clipping at this limit remains Good available generation."
+            }
+          },
+          "required": [
+            "latitude_deg",
+            "longitude_deg"
+          ]
+        },
+        "load": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "cold_start_w": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10000000.0,
+              "default": 500,
+              "description": "Explicit prior when recent site evidence is absent. Must not exceed max_load_w; it does not imply trained confidence."
+            },
+            "max_load_w": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 10000000.0,
+              "default": 100000,
+              "description": "Configured accepted observation/estimate bound, not an inferred hardware rating."
+            },
+            "history_days": {
+              "type": "integer",
+              "minimum": 7,
+              "maximum": 90,
+              "default": 56
+            },
+            "ready_days": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 90,
+              "default": 8,
+              "description": "Independent local days needed for full coverage; must not exceed history_days."
+            },
+            "stale_after_days": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 365,
+              "default": 30
+            },
+            "residual_decay_hours": {
+              "type": "number",
+              "minimum": 0.1,
+              "maximum": 24,
+              "default": 2
+            },
+            "max_residual_w": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10000000.0,
+              "default": 3000,
+              "description": "Bound for short-term adjustment; must not exceed max_load_w."
+            },
+            "max_temperature_slope_w_per_c": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 500
+            }
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "pv"
+          ],
+          "properties": {
+            "pv": {
+              "type": "object"
+            }
+          }
+        },
+        {
+          "required": [
+            "load"
+          ],
+          "properties": {
+            "load": {
+              "type": "object"
+            }
+          }
+        }
+      ],
+      "description": "Enable PV, household load, or both. Null or omitted disables a model. Restored state must match the full normalized configuration, site_id and config_revision. Changing configuration requires a new state."
+    },
+    "state": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Opaque, versioned snapshot returned by update. Persist unchanged. Null or omitted starts cold. Forecast origin must not precede the snapshot update origin."
+    },
+    "observations": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/observation"
+      },
+      "description": "Bad-quality intervals still advance the input cursor. Later corrections to consumed intervals require an explicit rebuild from an earlier snapshot or a cold state. Failed batches return no replacement state."
+    },
+    "horizon": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/horizon"
+      }
+    },
+    "signal": {
+      "enum": [
+        "pv",
+        "load"
+      ],
+      "description": "The one enabled model whose learned state reset replaces. Only valid for action reset."
+    },
+    "learning_started_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Durable start cutoff for the selected signal. It must not be later than origin_ms; runtime validates that relation. A replay may return a later already-applied cutoff. Only valid for action reset."
+    }
+  },
+  "required": [
+    "op",
+    "version",
+    "action",
+    "request_id",
+    "site_id",
+    "config_revision",
+    "origin_ms",
+    "config"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "update"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "observations"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "horizon"
+              ]
+            },
+            {
+              "required": [
+                "signal"
+              ]
+            },
+            {
+              "required": [
+                "learning_started_ms"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "predict"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "horizon"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "observations"
+              ]
+            },
+            {
+              "required": [
+                "signal"
+              ]
+            },
+            {
+              "required": [
+                "learning_started_ms"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "reset"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "signal",
+          "learning_started_ms"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "observations"
+              ]
+            },
+            {
+              "required": [
+                "horizon"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "valid_start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 253402300799999,
+          "multipleOf": 900000
+        },
+        "valid_end_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 253402300799999,
+          "multipleOf": 900000
+        },
+        "ghi_w_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 3000
+        },
+        "cloud_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "temp_c": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -100,
+          "maximum": 80
+        },
+        "weather_available_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "When these weather values became available. Defaults to available_at_ms when weather exists. Must not exceed origin_ms."
+        },
+        "local_day": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 3000000,
+          "description": "Civil date as days since local 1970-01-01, independent of UTC date."
+        },
+        "local_weekday": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6,
+          "description": "Monday=0 through Sunday=6; must equal (local_day+3) modulo 7."
+        },
+        "local_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1439,
+          "multipleOf": 15,
+          "description": "Minute of interval start in local civil time. The caller resolves timezone and DST."
+        },
+        "home": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "available_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "When the complete mean and its quality became available. At least valid_end_ms, and no later than origin_ms."
+        },
+        "household_load_w": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "pv_available_w": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "load_quality": {
+          "enum": [
+            "good",
+            "missing",
+            "stale",
+            "incomplete",
+            "curtailed",
+            "clipped"
+          ],
+          "description": "Good means a complete, trusted interval mean, including zero and normal inverter AC clipping. Curtailed, clipped (censored measurement), stale, missing and incomplete intervals do not train the model. Use null power with missing quality, never a fabricated zero."
+        },
+        "pv_quality": {
+          "enum": [
+            "good",
+            "missing",
+            "stale",
+            "incomplete",
+            "curtailed",
+            "clipped"
+          ],
+          "description": "Good means a complete, trusted interval mean, including zero and normal inverter AC clipping. Curtailed, clipped (censored measurement), stale, missing and incomplete intervals do not train the model. Use null power with missing quality, never a fabricated zero."
+        }
+      },
+      "required": [
+        "valid_start_ms",
+        "valid_end_ms",
+        "local_day",
+        "local_weekday",
+        "local_minute",
+        "available_at_ms",
+        "load_quality",
+        "pv_quality"
+      ],
+      "description": "Exactly 900000 ms, UTC start divisible by 900000. Slots are sorted and do not overlap. Local fields describe the interval start in the site time zone."
+    },
+    "horizon": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "valid_start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 253402300799999
+        },
+        "valid_end_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 253402300799999
+        },
+        "ghi_w_m2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 3000
+        },
+        "cloud_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "temp_c": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": -100,
+          "maximum": 80
+        },
+        "weather_available_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Required when weather fields exist; must not exceed origin_ms. Keep the forecast weather snapshot as issued."
+        },
+        "local_day": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 3000000,
+          "description": "Civil date at the containing quarter-hour start, as days since local 1970-01-01."
+        },
+        "local_weekday": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6,
+          "description": "Monday=0 through Sunday=6; must equal (local_day+3) modulo 7."
+        },
+        "local_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1439,
+          "multipleOf": 15,
+          "description": "Minute of the containing quarter-hour start in local civil time, including for a partial first segment. The caller resolves timezone and DST."
+        },
+        "home": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "valid_start_ms",
+        "valid_end_ms",
+        "local_day",
+        "local_weekday",
+        "local_minute"
+      ],
+      "description": "Future segment of 1..900000 ms contained in one UTC quarter-hour: floor(valid_start_ms/900000) equals floor((valid_end_ms-1)/900000). Segments are sorted, do not overlap and start at or after origin_ms. Local clock, weather and occupancy describe the containing quarter-hour start. Duration and containment are checked at runtime."
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "allOf": [
+        {
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        {
+          "pattern": "\\S"
+        }
+      ],
+      "description": "Nonblank identifier, at most 128 UTF-8 bytes. The byte bound is checked at runtime."
+    }
+  }
+}

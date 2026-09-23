@@ -67,50 +67,10 @@ func TestComponentsReportsWorkerHealthFailure(t *testing.T) {
 	}
 }
 
-// TestComponentsKeepsAShadowOptimizerVisible — the sidecar must stay
-// inspectable and updatable while it runs as a measurement behind Core, and a
-// Core-produced plan is not a degradation.
-func TestComponentsKeepsAShadowOptimizerVisible(t *testing.T) {
-	svc := &mpc.Service{ShadowOptimizer: &componentTestOptimizer{}}
-	srv := New(&Deps{MPC: svc})
-	req := httptest.NewRequest(http.MethodGet, "/api/components", nil)
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
-	}
-	var body struct {
-		Optimizer struct {
-			Configured bool   `json:"configured"`
-			Role       string `json:"role"`
-			Healthy    bool   `json:"healthy"`
-			Degraded   bool   `json:"degraded"`
-		} `json:"optimizer"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if !body.Optimizer.Configured || body.Optimizer.Role != "shadow" {
-		t.Fatalf("shadow optimizer status = %+v", body.Optimizer)
-	}
-	if !body.Optimizer.Healthy || body.Optimizer.Degraded {
-		t.Fatalf("healthy shadow reported as degraded: %+v", body.Optimizer)
-	}
-
-	status := map[string]any{"healthy": true}
-	applyLatestOptimizerPlanStatus(status, &mpc.Plan{
-		GeneratedAtMs: 7,
-		Solver:        &mpc.SolverInfo{Engine: "core", Backend: "dp", Status: "optimal"},
-	})
-	if status["degraded"] == true || status["healthy"] == false {
-		t.Fatalf("core champion marked the optimizer degraded: %#v", status)
-	}
-}
-
 func TestComponentsReportsBundlePackaging(t *testing.T) {
 	srv := New(&Deps{
 		Version: "v1.10.0-beta.1",
-		Bundle:  &components.Bundle{Kind: "home_assistant_addon", Version: "0.1.0-beta.1"},
+		Bundle:  &components.Bundle{Kind: components.KindHomeAssistantAddon, Version: "0.1.0-beta.1"},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/components", nil)
 	rr := httptest.NewRecorder()
@@ -127,7 +87,7 @@ func TestComponentsReportsBundlePackaging(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Bundle == nil || body.Bundle.Kind != "home_assistant_addon" || body.Bundle.Version != "0.1.0-beta.1" {
+	if body.Bundle == nil || body.Bundle.Kind != components.KindHomeAssistantAddon || body.Bundle.Version != "0.1.0-beta.1" {
 		t.Fatalf("bundle = %+v, want home_assistant_addon 0.1.0-beta.1", body.Bundle)
 	}
 	if body.Core.Version != "v1.10.0-beta.1" {

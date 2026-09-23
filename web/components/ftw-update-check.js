@@ -11,10 +11,8 @@
 //      blocked by the check.
 //   3. The banner only renders when the response has
 //      update_available && !skipped && sidecar_ready. sidecar_ready
-//      is true exclusively in docker-compose deploys where the
-//      ftw-updater sidecar's Unix socket is reachable; native installs
-//      and dev runs keep the banner hidden so we don't offer an Update
-//      button that can only fail.
+//      is true when Docker's updater socket is reachable or a native
+//      release slot is ready. Dev runs keep the banner hidden.
 //   4. Update-now posts /api/version/update, opens an <ftw-modal>-based
 //      progress overlay, polls /api/version/update/status, and
 //      cache-busts reloads on `done`. Long phases keep polling while the
@@ -32,6 +30,7 @@
 
 import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
+import { migrationHTML } from "../history-migration.js";
 import "./ftw-modal.js";
 
 const STATUS_POLL_MS = 2000;
@@ -193,6 +192,9 @@ class FtwUpdateCheck extends FtwElement {
     this._statusTimer = null;
     this._pollAbort = null;  // AbortController for in-flight status fetches
     this._updateStartedAt = 0;
+    this._bootHealth = null;
+    this._bootConnected = true;
+    this._healthInFlight = false;
     this.classList.add("hidden");
   }
 
@@ -203,6 +205,15 @@ class FtwUpdateCheck extends FtwElement {
 
   disconnectedCallback() {
     this._stopPolling();
+  }
+
+  update() {
+    const action = this.shadowRoot.activeElement?.dataset?.action;
+    super.update();
+    if (action) {
+      const button = [...this.shadowRoot.querySelectorAll("[data-action]")].find(el => el.dataset.action === action);
+      if (button && !button.disabled) button.focus({ preventScroll:true });
+    }
   }
 
   // ---- data ----
@@ -236,12 +247,26 @@ class FtwUpdateCheck extends FtwElement {
       .then((r) => r.json().then((b) => ({ ok: r.ok, body: b })))
       .then((res) => {
         if (!res.ok) {
+          if (res.body?.error === "starting") {
+            this._bootHealth = { status:"starting", migration:res.body.migration };
+            this._startPolling();
+            this.update();
+            return;
+          }
           this._fail((res.body && res.body.error) || "failed to start");
           return;
         }
         this._startPolling();
       })
-      .catch((e) => this._fail(String(e)));
+      .catch((e) => {
+        // Native Core may exit for the accepted update before the reply
+        // reaches this browser. Its saved status tells us what happened.
+        if (this._info?.native) {
+          this._startPolling();
+          return;
+        }
+        this._fail(String(e));
+      });
   }
 
   _dismiss() {
@@ -274,6 +299,23 @@ class FtwUpdateCheck extends FtwElement {
 
   _tick() {
     const signal = this._pollAbort ? this._pollAbort.signal : undefined;
+    if (!this._healthInFlight) {
+      this._healthInFlight = true;
+      apiFetch("/api/health", { cache:"no-store", signal:AbortSignal.timeout(8000) })
+        .then(r => r.ok ? r.json() : null)
+        .then(health => {
+          if (signal?.aborted || this._phase !== "updating") return;
+          this._bootConnected = !!health;
+          if (health) this._bootHealth = health.status === "starting" ? health : null;
+          this.update();
+        })
+        .catch(() => {
+          if (signal?.aborted || this._phase !== "updating") return;
+          this._bootConnected = false;
+          this.update();
+        })
+        .finally(() => { this._healthInFlight = false; });
+    }
     apiFetch("/api/version/update/status", { signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((st) => {
@@ -309,7 +351,7 @@ class FtwUpdateCheck extends FtwElement {
     const timeout = this._status && this._status.state === "snapshotting"
       ? SNAPSHOT_SOFT_TIMEOUT_MS
       : UPDATE_SOFT_TIMEOUT_MS;
-    if (Date.now() - timeoutStartedAt > timeout && this._phase === "updating") {
+    if (!this._bootHealth && Date.now() - timeoutStartedAt > timeout && this._phase === "updating") {
       this._status = Object.assign({}, this._status, { timed_out: true });
       this.update();
     }
@@ -332,10 +374,8 @@ class FtwUpdateCheck extends FtwElement {
   render() {
     const info = this._info;
     // Banner is only useful when the full pull+restart flow is actionable.
-    // sidecar_ready is true in docker-compose deploys where the ftw-updater
-    // sidecar exposes its Unix socket at the configured SocketPath; native
-    // installs and dev runs leave the socket absent, so we stay invisible
-    // instead of offering an Update button that can only fail.
+    // sidecar_ready also means a native release slot is ready. Both paths
+    // must be actionable before we offer the update button.
     const showBanner =
       !!info &&
       info.update_available &&
@@ -411,6 +451,13 @@ class FtwUpdateCheck extends FtwElement {
   }
 
   _overlayHTML() {
+    if (this._bootHealth) {
+      return `<ftw-modal open class="busy"><span slot="title">Starting FTW</span><div class="progress">
+        ${migrationHTML(this._bootHealth.migration, {boot:true, connected:this._bootConnected}) || '<p>Core is preparing to start. Control has not started yet. Keep the box powered.</p>'}
+        <p class="hint">${this._bootConnected ? "The box is responding." : "Cannot reach the box. The last report may be out of date."}</p></div>
+        <div class="overlay-actions" slot="footer"><button class="btn-primary" data-action="reload">Reload status</button>
+        <span>Reloading this page does not restart the box.</span></div></ftw-modal>`;
+    }
     const st = this._status || { state: "starting" };
     const busy = this._phase === "updating";
     const failed = this._phase === "failed";
@@ -490,7 +537,7 @@ function escapeHTML(s) {
 
 function stateLabel(state) {
   switch (state) {
-    case "snapshotting": return "Creating backup";
+    case "snapshotting": return "Saving rollback point";
     case "pulling":    return "Pulling new image";
     case "restarting": return "Applying update";
     case "checking":   return "Checking service health";

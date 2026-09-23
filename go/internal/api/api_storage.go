@@ -21,6 +21,7 @@ type storageInventoryResponse struct {
 	Format        string                `json:"format"`
 	GeneratedAtMs int64                 `json:"generated_at_ms"`
 	ReadOnly      bool                  `json:"read_only"`
+	History       map[string]any        `json:"history"`
 	Databases     state.SQLiteInventory `json:"databases"`
 	Filesystem    storageFilesystem     `json:"filesystem"`
 }
@@ -49,6 +50,7 @@ func (s *Server) handleStorageInventory(w http.ResponseWriter, r *http.Request) 
 		GeneratedAtMs: time.Now().UnixMilli(),
 		ReadOnly:      true,
 		Databases:     databases,
+		History:       s.deps.State.HistoryBackend(),
 		Filesystem: storageFilesystem{
 			TotalBytes: usage.Total, UsedBytes: usage.Used,
 			AvailableBytes: usage.Free, UsedPercent: usage.UsedPercent,

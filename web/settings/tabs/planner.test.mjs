@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 globalThis.window = {};
 await import("./planner.js");
 const tab = globalThis.window.FTWSettings.tabs.planner;
-const { strategyLabel, hedgeLine } = tab._pure;
+const { strategyLabel, hedgeLine, engineSelect } = tab._pure;
 
 describe("strategyLabel", () => {
   it("maps every planner mode via the local fallback", () => {
@@ -46,26 +46,10 @@ describe("strategyLabel", () => {
 });
 
 describe("hedgeLine", () => {
-  it("formats a normal σ with the hedge product", () => {
-    assert.equal(hedgeLine("1", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 432 W");
-    assert.equal(hedgeLine("2", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 864 W");
-  });
-
-  it("treats empty or junk k as 0", () => {
-    assert.equal(hedgeLine("", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 0 W");
-    assert.equal(hedgeLine("abc", 432.16), "σ right now ≈ 432 W → hedge = k·σ ≈ 0 W");
-  });
-
-  it("reports no hedge when σ is ~0", () => {
-    assert.equal(hedgeLine("1", 0), "σ right now ≈ 0 W — no hedge");
-    assert.equal(hedgeLine("1", 0.4), "σ right now ≈ 0 W — no hedge");
-  });
-
-  it("returns null when σ is missing or invalid (line stays hidden)", () => {
-    assert.equal(hedgeLine("1", null), null);
-    assert.equal(hedgeLine("1", undefined), null);
-    assert.equal(hedgeLine("1", NaN), null);
-    assert.equal(hedgeLine("1", -5), null);
+  it("does not infer the active margin from the legacy residual", () => {
+    assert.match(hedgeLine("1", 0), /margin varies by interval/);
+    assert.match(hedgeLine("1", 432), /Plan chart/);
+    assert.equal(hedgeLine("0", 432), "No forecast margin requested.");
   });
 });
 
@@ -99,15 +83,15 @@ describe("render", () => {
     assert.ok(top.includes('data-checkbox-path="planner.enabled"'));
     assert.ok(top.includes("[field:planner.soc_min]"));
     assert.ok(top.includes("[field:planner.soc_max]"));
-    assert.ok(!top.includes("[select:planner.engine]"));
+    assert.ok(!top.includes('data-path="planner.engine"'));
     assert.ok(!top.includes("CLARABEL"));
     assert.ok(!top.includes("[select:planner.optimizer_solver]"));
     assert.match(rest, /<details class="engine-details">/);
     assert.doesNotMatch(html, /<details[^>]*\sopen\b/);
     assert.ok(rest.includes("Engine controls — leave these unless you are debugging."));
-    assert.ok(rest.includes("[select:planner.engine]"));
-    assert.ok(rest.includes("[select:planner.optimizer_solver]"));
-    assert.ok(rest.includes("[field:planner.optimizer_cvar_weight]"));
+    assert.ok(rest.includes('data-path="planner.engine"'));
+    assert.ok(!rest.includes("planner.optimizer_"));
+    assert.ok(rest.includes("Energyplan uses a 500 ms solve limit"));
   });
 
   it("does not bind pv_forecast_safety_k when YAML left it unset", () => {
@@ -123,20 +107,9 @@ describe("render", () => {
     assert.ok(rest.includes("[field:planner.pv_forecast_safety_k]"));
   });
 
-  it("renders mathematical optimizer controls", () => {
+  it("renders Energyplan controls without retired Python settings", () => {
     const html = tab.render(stubCtx());
-    assert.ok(html.includes("[select:planner.engine]"));
-    assert.ok(html.includes("[select:planner.optimizer_solver]"));
-    assert.ok(html.includes("[select:planner.optimizer_formulation]"));
-    assert.ok(html.includes("[field:planner.optimizer_timeout_s]"));
-    assert.ok(html.includes("[field:planner.optimizer_cvar_weight]"));
-    assert.ok(html.includes("[select:planner.optimizer_challenger_policy]"));
-    assert.ok(html.includes("[field:planner.optimizer_recourse_non_anticipative_slots]"));
-    assert.ok(html.includes("[field:planner.optimizer_multistage.scenario_limit]"));
-    assert.ok(html.includes("[field:planner.optimizer_multistage.branch_interval_slots]"));
-    assert.ok(html.includes("[field:planner.optimizer_multistage.near_horizon_slots]"));
-    assert.ok(html.includes("[field:planner.optimizer_multistage.service_cvar_weight]"));
-    assert.ok(html.includes('data-checkbox-path="planner.optimizer_recourse_shadow"'));
+    assert.ok(html.includes('data-path="planner.engine"'));
   });
 
   it("binds SoC bounds as 0–1 fractions", () => {
@@ -145,6 +118,17 @@ describe("render", () => {
     assert.ok(html.includes("[field:planner.soc_max]"));
     assert.ok(!html.includes("planner.soc_min_pct"));
     assert.ok(!html.includes("planner.soc_max_pct"));
+  });
+
+  it("shows Core's default bounds without adding a planner config", () => {
+    const ctx = stubCtx();
+    ctx.config = {};
+    const defaults = {};
+    ctx.field = (label, path, type, value) => { defaults[path] = value; return ""; };
+    tab.render(ctx);
+    assert.equal(defaults["planner.soc_min"], 0.1);
+    assert.equal(defaults["planner.soc_max"], 0.95);
+    assert.deepEqual(ctx.config, {});
   });
 
   it("promotes legacy soc_min_pct / soc_max_pct into 0–1 fields", () => {
@@ -164,4 +148,18 @@ describe("render", () => {
     assert.equal(ctx.config.planner.soc_min, 0.15);
     assert.equal(ctx.config.planner.soc_max, 0.92);
   });
+});
+
+// Exercise the rendered values that captureCurrentTab saves, including old aliases.
+describe("engine selection", () => {
+  for (const engine of [undefined, null, "", " ", "core", "go", "dp", "python", "energyplan"]) {
+    it("preserves the configured choice on save: " + String(engine), () => {
+      const html = engineSelect(engine, () => "");
+      const selected = [...html.matchAll(/<option value="([^"]*)" selected>/g)].map(m => m[1]);
+      const expected = engine === "python" ? "energyplan" : ["go", "dp"].includes(engine) ? "core" : String(engine ?? "").trim();
+      assert.deepEqual(selected, [expected]);
+      assert.match(html, /value="energyplan"/);
+      assert.match(html, /Automatic \(release default\)/);
+    });
+  }
 });

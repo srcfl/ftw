@@ -368,7 +368,7 @@ func shadowActionAt(plan *Plan, now time.Time) (Action, bool) {
 	nowMs := now.UnixMilli()
 	for i, action := range plan.Actions {
 		endMs := action.SlotStartMs + int64(action.SlotLenMin)*60*1000
-		if nowMs >= action.SlotStartMs && nowMs < endMs {
+		if nowMs >= action.ExecutionStart() && nowMs < endMs {
 			if plan.Solver != nil && (plan.Solver.ScenarioPolicy == "recourse" || plan.Solver.ScenarioPolicy == "multistage") &&
 				plan.Solver.NonAnticipativeSlots > 0 && i >= plan.Solver.NonAnticipativeSlots {
 				return Action{}, false
@@ -383,7 +383,7 @@ func shadowSlotAt(slots []Slot, now time.Time) (Slot, bool) {
 	nowMs := now.UnixMilli()
 	for _, slot := range slots {
 		endMs := slot.StartMs + int64(slot.LenMin)*60*1000
-		if nowMs >= slot.StartMs && nowMs < endMs {
+		if nowMs >= slot.ExecutionStart() && nowMs < endMs {
 			return slot, true
 		}
 	}

@@ -45,11 +45,100 @@ func ResolveDeviceID(make, serial, mac, endpoint string) string {
 	return ""
 }
 
+// DeviceIDRelation is how a newly resolved device_id compares to one
+// captured earlier. Used when a driver update restarts the same configured
+// instance and must not treat a better identity as a different device.
+type DeviceIDRelation int
+
+const (
+	// DeviceIDPending means identity facts are still missing. Keep waiting.
+	DeviceIDPending DeviceIDRelation = iota
+	// DeviceIDMatch means the same id, or a refinement backed by shared facts.
+	DeviceIDMatch
+	// DeviceIDConflict means the new facts contradict the previous identity.
+	DeviceIDConflict
+)
+
+func (r DeviceIDRelation) String() string {
+	switch r {
+	case DeviceIDPending:
+		return "pending"
+	case DeviceIDMatch:
+		return "match"
+	case DeviceIDConflict:
+		return "conflict"
+	default:
+		return fmt.Sprintf("DeviceIDRelation(%d)", r)
+	}
+}
+
+func deviceIDRank(id string) int {
+	switch {
+	case id == "":
+		return 0
+	case strings.HasPrefix(id, "ep:"):
+		return 1
+	case strings.HasPrefix(id, "mac:"):
+		return 2
+	default:
+		return 3
+	}
+}
+
+// RelateDeviceIDs compares two results of ResolveDeviceID.
+//
+// A stronger id alone cannot prove that it belongs to the same hardware.
+// Use RelateDeviceIdentities when the full before/after facts are available.
+func RelateDeviceIDs(expected, actual string) DeviceIDRelation {
+	if expected == "" || actual == expected {
+		return DeviceIDMatch
+	}
+	if actual == "" {
+		return DeviceIDPending
+	}
+	expRank, actRank := deviceIDRank(expected), deviceIDRank(actual)
+	if actRank > expRank {
+		return DeviceIDPending
+	}
+	if actRank < expRank {
+		return DeviceIDPending
+	}
+	return DeviceIDConflict
+}
+
+// RelateDeviceIdentities accepts a stronger id only when the old anchor is
+// still present and unchanged. Keep missing facts pending; reject conflicts.
+func RelateDeviceIdentities(expected, actual Device) DeviceIDRelation {
+	expectedID := ResolveDeviceID(expected.Make, expected.Serial, expected.MAC, expected.Endpoint)
+	actualID := ResolveDeviceID(actual.Make, actual.Serial, actual.MAC, actual.Endpoint)
+	if expectedID == "" || deviceIDRank(actualID) <= deviceIDRank(expectedID) {
+		return RelateDeviceIDs(expectedID, actualID)
+	}
+	expectedMAC := ResolveDeviceID("", "", expected.MAC, "")
+	actualMAC := ResolveDeviceID("", "", actual.MAC, "")
+	if expectedMAC != "" && actualMAC != "" && expectedMAC != actualMAC {
+		return DeviceIDConflict
+	}
+	if expected.Endpoint != "" && actual.Endpoint != "" && expected.Endpoint != actual.Endpoint {
+		return DeviceIDConflict
+	}
+	if expectedMAC != "" {
+		if actualMAC == "" {
+			return DeviceIDPending
+		}
+	} else if expected.Endpoint == "" || actual.Endpoint == "" {
+		return DeviceIDPending
+	}
+	return DeviceIDMatch
+}
+
 // RegisterDevice records or updates a device. If the device_id already
 // exists, the row's last_seen_ms is bumped + driver_name/make/serial/mac
 // are refreshed (so renames and protocol-detected SN updates are reflected).
 // Returns the canonical device_id (non-empty on success).
 func (s *Store) RegisterDevice(d Device) (string, error) {
+	s.deviceWriteMu.Lock()
+	defer s.deviceWriteMu.Unlock()
 	if d.DeviceID == "" {
 		d.DeviceID = ResolveDeviceID(d.Make, d.Serial, d.MAC, d.Endpoint)
 	}
@@ -75,7 +164,53 @@ func (s *Store) RegisterDevice(d Device) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("upsert device: %w", err)
 	}
+	s.deviceCacheMu.Lock()
+	if s.deviceCache == nil {
+		s.deviceCache = map[string]Device{}
+	}
+	if old, ok := s.deviceCache[d.DeviceID]; ok {
+		d.FirstSeenMs = old.FirstSeenMs
+		if d.Make == "" {
+			d.Make = old.Make
+		}
+		if d.Serial == "" {
+			d.Serial = old.Serial
+		}
+		if d.MAC == "" {
+			d.MAC = old.MAC
+		}
+		if d.Endpoint == "" {
+			d.Endpoint = old.Endpoint
+		}
+	}
+	s.deviceCache[d.DeviceID] = d
+	s.deviceCacheMu.Unlock()
 	return d.DeviceID, nil
+}
+
+func (s *Store) loadDeviceCache() error {
+	devices, err := s.AllDevices()
+	if err != nil {
+		return err
+	}
+	s.deviceCache = make(map[string]Device, len(devices))
+	for _, device := range devices {
+		s.deviceCache[device.DeviceID] = device
+	}
+	return nil
+}
+
+// CachedDevices is the committed identity history used by the control tick.
+// RegisterDevice publishes only after its SQL write, without holding this
+// read lock during disk work. Readers cannot wait behind an fsync.
+func (s *Store) CachedDevices() []Device {
+	s.deviceCacheMu.RLock()
+	defer s.deviceCacheMu.RUnlock()
+	devices := make([]Device, 0, len(s.deviceCache))
+	for _, device := range s.deviceCache {
+		devices = append(devices, device)
+	}
+	return devices
 }
 
 // LookupDeviceByDriverName finds the most recently-seen device bound to a

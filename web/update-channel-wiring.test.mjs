@@ -12,13 +12,9 @@ test("update dialog exposes stable and beta as a segmented channel control", () 
   assert.doesNotMatch(badge, /grid-template-columns: repeat\(3,/);
 });
 
-test("both channel controls sit together so a split channel is visible", () => {
-  assert.match(badge, /_channelSectionHTML\(\)/);
-  assert.match(badge, /role="group" aria-label="Optimizer update channel"/);
-  assert.match(badge, /Optimizer tracks \$\{escapeHTML\(optimizerChannel\)\} while Core tracks/);
-  // The optimizer channel used to be a second, unlabelled control buried in
-  // the component row with no stated relation to the global one.
-  assert.doesNotMatch(badge, /mini-channel/);
+test("Energyplan follows Core's update channel", () => {
+  assert.doesNotMatch(badge, /optimizer-row|<th scope="row">Optimizer<\/th>/);
+  assert.doesNotMatch(badge, /set-optimizer-channel|optimizer-update|optimizer-rollback/);
 });
 
 test("the channel control does not claim to govern drivers", () => {
@@ -48,7 +44,6 @@ test("every component keeps a row whether or not it has an update", () => {
   assert.match(badge, /<table class="inventory-table">/);
   assert.match(badge, /<th scope="col">Component<\/th><th scope="col">Version<\/th><th scope="col">Status<\/th>/);
   assert.match(badge, /const coreStatus = info\.update_available/);
-  assert.match(badge, /const optimizerStatus = !optimizer\.configured/);
   // Internal wording that told the operator nothing they could act on.
   assert.doesNotMatch(badge, /safety authority · updated with updater/);
 });
@@ -64,15 +59,9 @@ test("the inventory is one table so its columns line up across rows", () => {
   assert.match(badge, /@media \(max-width: 560px\)[\s\S]*?white-space: normal;/);
 });
 
-test("the optimizer row only draws an arrow when the versions differ", () => {
-  assert.match(badge, /optimizerUpdates\.latest !== optimizerCurrent/);
-  // The old row rendered "v1.3.2 → v1.3.2" beside the words "up to date".
-  assert.doesNotMatch(badge, /optimizerUpdates\.latest \? " → " \+ escapeHTML\(optimizerUpdates\.latest\)/);
-});
-
 test("restart asks first because it drops dispatch", () => {
   assert.match(badge, /Restart the service\? Dispatch stops until Core is back and healthy\./);
-  assert.match(badge, /<button class="btn btn-ghost" data-action="restart">Restart<\/button>/);
+  assert.match(badge, /<button class="btn btn-ghost" data-action="restart"[^>]*>Restart<\/button>/);
   // Restart must not carry the same weight as the primary update action.
   assert.doesNotMatch(badge, /<button class="btn" data-action="restart">/);
 });
@@ -112,11 +101,11 @@ test("a failed GitHub check retries a few times instead of waiting three hours",
   assert.match(badge, /github releases \(429\|5\\d\\d\)\|temporar\|timeout/);
 });
 
-test("Update dialog wires independent Optimizer and Driver history actions", () => {
+test("Update dialog keeps component history and independent driver actions", () => {
   assert.match(badge, /<h3 id="ftw-upd-title">Updates<\/h3>/);
   assert.match(badge, /\/api\/components\/history\?limit=20/);
-  assert.match(badge, /\/api\/components\/optimizer\/channel/);
-  assert.match(badge, /\/api\/components\/optimizer\/update/);
+  assert.doesNotMatch(badge, /\/api\/components\/optimizer\/channel/);
+  assert.doesNotMatch(badge, /\/api\/components\/optimizer\/update/);
   assert.match(badge, /\/api\/device_repository\/drivers\//);
   assert.match(badge, /\/versions/);
   assert.match(badge, /\/activate/);

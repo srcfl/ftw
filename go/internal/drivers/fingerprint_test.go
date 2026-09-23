@@ -95,6 +95,33 @@ func TestFingerprintConfidenceIsBounded(t *testing.T) {
 	}
 }
 
+func TestFingerprintProbeCannotWrite(t *testing.T) {
+	body := `
+function driver_fingerprint()
+    local err = host.modbus_write(1, 99)
+    if err ~= nil and err ~= "" then
+        return false
+    end
+    return true
+end
+`
+	m := newRecordingModbus()
+	env := NewHostEnv("probe", telemetry.NewStore()).WithModbus(m)
+	fp, err := RunFingerprint(writeTempDriver(t, body), env, FingerprintTarget{Protocol: "modbus"})
+	if err != nil {
+		t.Fatalf("RunFingerprint: %v", err)
+	}
+	if len(m.writes) != 0 {
+		t.Fatalf("fingerprint wrote %v, want none", m.writes)
+	}
+	if fp.Match != MatchNo {
+		t.Fatalf("Match = %q, want no_match when the write is denied", fp.Match)
+	}
+	if !env.ProbeReadOnly {
+		t.Fatal("fingerprint env should stay probe-read-only")
+	}
+}
+
 func TestFingerprintErrorIsUnknown(t *testing.T) {
 	body := `function driver_fingerprint() error("boom") end`
 	env := NewHostEnv("probe", telemetry.NewStore())

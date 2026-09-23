@@ -161,6 +161,24 @@ type Loadpoints interface {
 	CancelBoost(id string, now time.Time)
 	// ObservedBoost is the boost as the box reports it right now.
 	ObservedBoost(id string, now time.Time) loadpoint.BatteryBoostStatus
+	// SetSoC re-anchors the car's current state of charge, a fraction in
+	// [0,1]. False when the loadpoint is not plugged in — there is no
+	// session to correct — which is the HTTP route's 409. The
+	// implementation replans before returning, as the HTTP route does, so
+	// the plan pushed after the result is already drawn from the corrected
+	// level.
+	SetSoC(id string, soc float64) bool
+	// ObservedSoC is the state of charge the box holds for the car now.
+	ObservedSoC(id string) (soc float64, ok bool)
+	// SetSurplusOnly turns PV-only charging on or off and reports the value
+	// it replaced, or ok=false if the loadpoint is missing or the save fails.
+	// The implementation carries the replan the HTTP target
+	// route does — synchronous when the flag turns off, because the car may
+	// now draw from the grid and the plan must say so before the app reads
+	// it back.
+	SetSurplusOnly(id string, v bool) (prev bool, ok bool)
+	// ObservedSurplusOnly is the flag as the box holds it now.
+	ObservedSurplusOnly(id string) (v bool, ok bool)
 }
 
 // PlanReader hands over the planner's current output.

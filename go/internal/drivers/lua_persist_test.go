@@ -2,12 +2,95 @@ package drivers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
+
+func TestManagedPersistSecretScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, key        string
+		valueBytes       int
+		change           func(*RuntimePolicy)
+		unwired, allowed bool
+	}{
+		{name: "declared", key: "refresh_token", allowed: true},
+		{name: "undeclared", key: "other_token"},
+		{name: "other_namespace", key: "other:refresh_token"},
+		{name: "listed_colon", key: "other:refresh_token", change: func(p *RuntimePolicy) { p.ConfigSecrets = []string{"other:refresh_token"} }},
+		{name: "listed_path", key: "../refresh_token", change: func(p *RuntimePolicy) { p.ConfigSecrets = []string{"../refresh_token"} }},
+		{name: "listed_long_key", key: strings.Repeat("a", 65), change: func(p *RuntimePolicy) { p.ConfigSecrets = []string{strings.Repeat("a", 65)} }},
+		{name: "no_auth_path", key: "refresh_token", change: func(p *RuntimePolicy) { p.AuthPostPath = "" }},
+		{name: "no_http_get", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions = nil }},
+		{name: "not_read_only", key: "refresh_token", change: func(p *RuntimePolicy) { p.ReadOnly = false }},
+		{name: "broad_http_write", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions["http.patch"] = true }},
+		{name: "unwired", key: "refresh_token", unwired: true},
+		{name: "at_value_limit", key: "refresh_token", valueBytes: 1 << 20, allowed: true},
+		{name: "above_value_limit", key: "refresh_token", valueBytes: (1 << 20) + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := &RuntimePolicy{
+				PackageID: "com.sourceful.driver.myuplink", Version: "1.2.2",
+				ArtifactSHA256: strings.Repeat("a", 64), RuntimeABI: "gopher-lua-source-v1",
+				HostAPIProfile: "sourceful.host/ftw-core/v1", ReadOnly: true,
+				Permissions: map[string]bool{"http.get": true, "http.post": true}, AuthPostPath: "/oauth/token",
+				ConfigSecrets: []string{"refresh_token"},
+			}
+			if tc.change != nil {
+				tc.change(policy)
+			}
+			tel := telemetry.NewStore()
+			env := NewHostEnv("managed", tel)
+			calls := 0
+			if !tc.unwired {
+				env.PersistSecret = func(key, value string) error {
+					calls++
+					if key != tc.key || len(value) != tc.valueBytes {
+						t.Error("callback arguments changed")
+					}
+					return nil
+				}
+			}
+			path := filepath.Join(t.TempDir(), "managed.lua")
+			source := fmt.Sprintf(`function driver_init()
+local ok, err = host.persist_secret(%q, string.rep("x", %d))
+host.emit_metric("persist_ok", ok and 1 or 0)
+if not ok and not err then error("missing denial reason") end
+end`, tc.key, tc.valueBytes)
+			if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			d, err := NewLuaDriverWithPolicy(path, env, policy)
+			if err != nil {
+				if tc.name == "not_read_only" || tc.name == "broad_http_write" {
+					return
+				}
+				if tc.name == "no_auth_path" || tc.name == "no_http_get" {
+					return
+				}
+				t.Fatal(err)
+			}
+			defer d.Cleanup()
+			if err := d.Init(context.Background(), nil); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if tc.allowed {
+				want = 1
+			}
+			if calls != want {
+				t.Fatalf("persistence calls = %d, want %d", calls, want)
+			}
+			if value, _, ok := tel.LatestMetric("managed", "persist_ok"); !ok || value != float64(want) {
+				t.Fatalf("persist result = %v, present=%v, want %d", value, ok, want)
+			}
+		})
+	}
+}
 
 // TestHostPersistSecret verifies a driver can durably write a config
 // secret (e.g. a rotated OAuth refresh_token) back through the

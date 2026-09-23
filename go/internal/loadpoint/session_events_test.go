@@ -81,6 +81,10 @@ func TestSessionCompletePublishesOnceWithSessionKWh(t *testing.T) {
 		t.Fatal("latched before the timeout")
 	}
 	r.tick(SessionCompletionTimeout, true, 0, 7_420, false)
+	if c, _ := r.log.counts(); c != 0 {
+		t.Fatal("refusal invented a completed goal")
+	}
+	r.mgr.AnchorVehicleSoC("garage", .8)
 	if c, _ := r.log.counts(); c != 1 {
 		t.Fatalf("complete events = %d, want 1", c)
 	}
@@ -102,6 +106,7 @@ func TestSessionCompletePublishesOnceWithSessionKWh(t *testing.T) {
 	r.tick(time.Minute, true, 11_000, 0, true)
 	r.tick(time.Minute, true, 0, 500, false)
 	r.tick(SessionCompletionTimeout, true, 0, 500, false)
+	r.mgr.AnchorVehicleSoC("garage", .8)
 	if c, _ := r.log.counts(); c != 2 {
 		t.Fatalf("complete events = %d after replug, want 2", c)
 	}
@@ -189,8 +194,8 @@ func TestVehicleDeclineIsNotAnInterruption(t *testing.T) {
 	r.tick(time.Second, true, 0, 8_000, false)
 	r.tick(interruptConfirm+SessionCompletionTimeout, true, 0, 8_000, false)
 	c, i := r.log.counts()
-	if c != 1 {
-		t.Fatalf("complete events = %d, want 1", c)
+	if c != 0 {
+		t.Fatalf("complete events = %d, want 0", c)
 	}
 	if i != 0 {
 		t.Fatalf("interrupted events = %d for a finished car, want 0", i)

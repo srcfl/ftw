@@ -144,6 +144,10 @@ var RegistryOps = map[string]string{
 	"loadpoint.hold": "ftw.dispatch.write",
 	// loadpoint.boost — Boost the car from the house battery.
 	"loadpoint.boost": "ftw.dispatch.write",
+	// loadpoint.soc.set — Correct the car's current charge level.
+	"loadpoint.soc.set": "ftw.dispatch.write",
+	// loadpoint.surplus_only.set — Charge the car from surplus PV only.
+	"loadpoint.surplus_only.set": "ftw.dispatch.write",
 }
 
 // Error codes. The box sends the code and machine-readable args; the app

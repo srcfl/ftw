@@ -21,6 +21,15 @@ echo "[$(date -Is)] ftw-firstboot starting"
 
 cd /opt/ftw
 
+# The image build parks Docker's apt source so pi-gen's export-image apt
+# step cannot OOM on it (see 01-ftw-setup/00-run.sh). Restore it on the
+# real device: without it the engine is frozen at the image's build
+# version for the appliance's whole service life (srcfl/ftw#770). The
+# signing key at /etc/apt/keyrings/docker.asc was never removed.
+if [ -f /etc/apt/sources.list.d/docker.list.disabled ]; then
+    mv /etc/apt/sources.list.d/docker.list.disabled /etc/apt/sources.list.d/docker.list
+fi
+
 # Bring the stack up on whatever images are already present FIRST, so a box
 # that already has them (a reboot mid-provision, a re-run, or a future
 # pre-baked image) is never held hostage by GHCR: GHCR is GitHub-hosted, so a

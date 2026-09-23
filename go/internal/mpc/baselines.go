@@ -48,7 +48,7 @@ func ComputeBaselines(slots []Slot, p Params) Baselines {
 	var importPriceWtMin, exportPriceWtMin float64
 	var lenMinSum float64
 	for _, s := range slots {
-		dt := float64(s.LenMin) / 60.0
+		dt := s.DurationHours()
 		gridKWh := (s.LoadW + s.PVW) * dt / 1000.0
 		b.NoBatteryOre += SlotGridCostOre(s, gridKWh, p)
 		if gridKWh > 0 {
@@ -56,7 +56,7 @@ func ComputeBaselines(slots []Slot, p Params) Baselines {
 		} else {
 			exportKWh += -gridKWh
 		}
-		lm := float64(s.LenMin)
+		lm := s.DurationHours() * 60
 		importPriceWtMin += s.PriceOre * lm
 		exportPriceWtMin += SlotExportPriceOre(s, p) * lm
 		lenMinSum += lm

@@ -1,0 +1,101 @@
+name: Core Linux binaries
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'go/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'Makefile'
+      - 'scripts/build-core.sh'
+      - 'scripts/package-linux.py'
+      - 'scripts/test_package_linux.py'
+      - 'optimizer/native/**'
+      - 'deploy/ftw.service'
+      - 'deploy/ftw-native.service'
+      - '.github/workflows/core-binaries.yml'
+      - '.github/workflows/release-assets.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'go/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'Makefile'
+      - 'scripts/build-core.sh'
+      - 'scripts/package-linux.py'
+      - 'scripts/test_package_linux.py'
+      - 'optimizer/native/**'
+      - 'deploy/ftw.service'
+      - 'deploy/ftw-native.service'
+      - '.github/workflows/core-binaries.yml'
+      - '.github/workflows/release-assets.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    name: Core + backup (linux/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build with the release toolchain
+        run: bash scripts/build-core.sh linux '${{ matrix.arch }}' bin/linux
+      - name: Package the Linux runtime
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          make drivers
+          python3 scripts/package-linux.py "${ARCH}" --binaries bin/linux
+          (cd release && sha256sum -c "ftw-linux-${ARCH}.tar.gz.sha256")
+          mkdir -p bin/unpacked
+          tar xzf "release/ftw-linux-${ARCH}.tar.gz" -C bin/unpacked
+          python3 - "$ARCH" <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, "optimizer/native")
+          from verify import verify_bundle
+          verify_bundle(Path("bin/unpacked/optimizer/native/bundle"), target=f"linux-{sys.argv[1]}")
+          PY
+      - name: Verify pure Go build and absence of DuckDB
+        run: |
+          set -euo pipefail
+          for binary in bin/linux/ftw bin/linux/ftw-backup bin/linux/ftw-launcher; do
+            go version -m "$binary" | tee "$binary.buildinfo"
+            if grep -F 'github.com/duckdb/' "$binary.buildinfo"; then exit 1; fi
+            grep -F 'CGO_ENABLED=0' "$binary.buildinfo"
+            grep -F -- '-tags=netgo,osusergo' "$binary.buildinfo"
+          done
+      - name: Start Core, backup and Energyplan from the package
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm --network none --read-only \
+            --platform 'linux/${{ matrix.arch }}' \
+            -e ARCH \
+            -v "$PWD/bin/unpacked:/binaries:ro" debian:bookworm-slim \
+            sh -ec '
+              /binaries/ftw -h
+              /binaries/ftw-launcher -h
+              set +e
+              output=$(/binaries/ftw-backup 2>&1)
+              status=$?
+              set -e
+              test "$status" -eq 1
+              printf "%s\n" "$output" | grep -F "usage: ftw-backup"
+              printf "{\"type\":\"handshake\"}\n" | \
+                "/binaries/optimizer/native/bundle/ftw-solver-linux-$ARCH"
+            '

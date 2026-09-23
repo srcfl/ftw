@@ -45,8 +45,6 @@ FTW_COMPOSE="${FTW_COMPOSE:-${REPO_ROOT}/docker-compose.yml}"
 
 install -m 0644 "${FTW_COMPOSE}"                                "${FILES_DIR}/docker-compose.yml"
 install -m 0644 "${REPO_ROOT}/mosquitto/config/mosquitto.conf"  "${FILES_DIR}/mosquitto.conf"
-# Calendar (#498) needs nothing shipped here: FTW's CalDAV server is in-process
-# (no sidecar) and persists its objects in state.db.
 
 if [ ! -d "${PI_GEN_DIR}" ]; then
     # `git clone --branch` only accepts branch/tag names, not arbitrary

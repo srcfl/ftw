@@ -5,10 +5,12 @@
 //   - sourceful — Default. Keyless European day-ahead prices through
 //     Sourceful's cached ENTSO-E API, for every zone in zones.go.
 //     Resolution varies per bidding zone (currently 15m in most of Europe).
+//     When that harvest has not stored a day Nord Pool has already
+//     published, Fetch falls back to Nord Pool's public dataportal.
 //   - elprisetjustnu — Sweden, zones SE1-SE4, no API key. Since late 2025
 //     NordPool publishes in 15-minute PTU (quarterly) resolution; this
 //     package defaults to the quarterly endpoint and can fall back to
-//     hourly if the provider returns that.
+//     hourly if the provider returns that. Same Nord Pool fallback.
 //   - entsoe — All EU, needs ENTSO-E transparency platform API key.
 //     Resolution varies per bidding zone (15m or 60m).
 //
@@ -34,6 +36,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
@@ -535,16 +538,28 @@ func (a Applier) Apply(sekPerKwh float64) (spotOre, totalOre float64) {
 
 // Service wraps a provider + store + scheduler.
 type Service struct {
-	Provider Provider
-	Store    *state.Store
-	Applier  Applier
-	Zone     string
+	Provider  Provider
+	Store     *state.Store
+	Applier   Applier
+	applierMu sync.Mutex
+	Zone      string
 	// Currency the stored minor units are in. Read by the API so the UI
 	// can label them.
 	Currency string
 
 	stop chan struct{}
 	done chan struct{}
+}
+
+// SetApplier swaps tariff + VAT as one value so a fetch in flight cannot
+// persist a mixed old/new pair.
+func (s *Service) SetApplier(a Applier) {
+	if s == nil {
+		return
+	}
+	s.applierMu.Lock()
+	s.Applier = a
+	s.applierMu.Unlock()
 }
 
 // FXConverter abstracts currency conversion so the prices package
@@ -574,15 +589,18 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 	if currency == "" {
 		currency = "SEK"
 	}
+	np := NewNordPool()
+	np.Currency = currency
+	np.FX = fx
 	var p Provider
 	switch cfg.Provider {
 	case "sourceful":
 		sp := NewSourceful()
 		sp.Currency = currency
 		sp.FX = fx
-		p = sp
+		p = withFallback(sp, np)
 	case "elprisetjustnu":
-		p = NewElpriser()
+		p = withFallback(NewElpriser(), np)
 	case "entsoe":
 		ep := NewENTSOE(cfg.APIKey)
 		ep.Currency = currency
@@ -652,18 +670,39 @@ func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
 	// Initial fetch (today + tomorrow in case day-ahead is already published)
 	s.fetchAndStore(ctx)
-	t := time.NewTicker(time.Hour)
-	defer t.Stop()
+	hourly := time.NewTicker(time.Hour)
+	defer hourly.Stop()
+	catch := time.NewTimer(time.Until(nextDayAheadCatch(time.Now())))
+	defer catch.Stop()
 	for {
 		select {
 		case <-s.stop:
 			return
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-hourly.C:
 			s.fetchAndStore(ctx)
+		case <-catch.C:
+			s.fetchAndStore(ctx)
+			catch.Reset(time.Until(nextDayAheadCatch(time.Now().Add(time.Minute))))
 		}
 	}
+}
+
+// nextDayAheadCatch is 13:05 Europe/Stockholm, when tomorrow's Nord Pool
+// day-ahead is normally on the dataportal. Hourly ticks alone can miss
+// that window for up to an hour.
+func nextDayAheadCatch(now time.Time) time.Time {
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		loc = time.FixedZone("CET", 3600)
+	}
+	now = now.In(loc)
+	target := time.Date(now.Year(), now.Month(), now.Day(), 13, 5, 0, 0, loc)
+	if !now.Before(target) {
+		target = target.Add(24 * time.Hour)
+	}
+	return target
 }
 
 func (s *Service) fetchAndStore(ctx context.Context) {
@@ -680,8 +719,11 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		}
 		points := make([]state.PricePoint, 0, len(rows))
 		nowMs := time.Now().UnixMilli()
+		s.applierMu.Lock()
+		applier := s.Applier
+		s.applierMu.Unlock()
 		for _, r := range rows {
-			spotOre, totalOre := s.Applier.Apply(r.SEKPerKWh)
+			spotOre, totalOre := applier.Apply(r.SEKPerKWh)
 			slot := r.SlotLenMin
 			if slot <= 0 {
 				slot = 60

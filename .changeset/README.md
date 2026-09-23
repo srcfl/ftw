@@ -2,7 +2,7 @@
 
 This directory holds [changeset](https://github.com/changesets/changesets)
 files — one per PR — that describe the user-visible impact of a change and
-the semver bump it should drive (`patch` / `minor` / `major`).
+the version bump it should drive (`patch` or `minor`).
 
 ## Why we use this
 
@@ -26,7 +26,7 @@ From the repo root:
 pnpm changeset       # or: npx changeset
 ```
 
-The CLI will ask you what bump (`patch` / `minor` / `major`) and a
+When the CLI asks for a bump, choose `patch` or `minor`, then write a
 summary line. It writes a markdown file under `.changeset/` that you
 commit along with your change.
 
@@ -45,13 +45,16 @@ Optional follow-on paragraph(s) with detail, migration notes, etc.
 
 ## Choosing the bump
 
-- `patch` — bug fix, perf tweak, internal refactor, doc fix that
-  affects user-visible content.
-- `minor` — new driver, new feature flag, new API endpoint, new UI
-  surface, expanded device support.
-- `major` — breaking change (config schema rename, removed endpoint,
-  removed driver capability, sign-convention change at the boundary).
-  Pair with `BREAKING CHANGE:` notes in the changeset body.
+- `patch` — the default for bug fixes, performance changes and work that
+  adds no new visible capability or user action.
+- `minor` — a new visible capability or a change a user must act on, such
+  as removed behavior, a changed default or new hardware support. The owner
+  approves this bump in the PR.
+
+Do not use `major` for the new 0.x line. State schema, app protocol and
+driver host API compatibility each have their own checks; a Core version
+bump does not replace them. A breaking change still needs clear migration
+notes and tests.
 
 ## Skipping a release
 

@@ -23,6 +23,13 @@ import (
 // Zero value (Empty) means "no schedule configured". Persistence keys
 // off this — Empty schedules are not written to disk.
 type Schedule struct {
+	// FinishAtVehicleLimit keeps the goal pending until the car ends charging.
+	// SoC remains the explicit percentage goal when this option is false.
+	FinishAtVehicleLimit bool `json:"finish_at_vehicle_limit,omitempty"`
+	// Core assigns these when the owner saves a vehicle-limit goal. They
+	// keep a completed one-shot goal distinct from a later explicit request.
+	IntentID        string  `json:"intent_id,omitempty"`
+	FirstDeadlineMS int64   `json:"first_deadline_ms,omitempty"`
 	SoC             float64 `json:"soc"`
 	TimeOfDayMinUTC int     `json:"time_of_day_min_utc"` // 0..1439
 	Recurring       bool    `json:"recurring"`
@@ -73,12 +80,19 @@ func (s *Schedule) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// HasTarget reports whether the schedule commits to a SoC by a deadline.
+// A target makes the plan the floor of automatic dispatch: the runtime
+// surplus clamps may add to it but never throttle it (see
+// Controller.surplusActive and surplusAddsToPlan, and the planner spec
+// gate in main.go).
+func (s Schedule) HasTarget() bool { return s.SoC > 0 || s.FinishAtVehicleLimit }
+
 // Empty reports whether the schedule carries no operator intent. The
 // persistence layer writes nothing on Empty so a stale-loadpoint
 // schedule on disk is naturally GC'd when the operator clears it via
 // the API.
 func (s Schedule) Empty() bool {
-	return s.SoC == 0 && s.TimeOfDayMinUTC == 0 && !s.Recurring && s.SurplusUnlockBatSoC == 0
+	return !s.FinishAtVehicleLimit && s.SoC == 0 && s.TimeOfDayMinUTC == 0 && !s.Recurring && s.SurplusUnlockBatSoC == 0
 }
 
 // NextDailyUTC returns the next time-of-day deadline (in UTC) strictly

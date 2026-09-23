@@ -1,18 +1,19 @@
 {
   "name": "ftw",
-  "version": "2.12.1",
+  "version": "3.8.0",
   "private": true,
   "type": "module",
-  "description": "FTW — local-first home energy coordination. Version metadata only; the runtime is Go and the mathematical planner is Python/CVXPY.",
+  "description": "FTW — local-first home energy coordination. Version metadata only; the runtime is Go and the mathematical planner is the compiled Energyplan worker.",
   "scripts": {
     "test": "node --test 'web/**/*.test.mjs'",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts --no-audit --no-fund"
   },
   "devDependencies": {
-    "@changesets/cli": "^3.0.1"
+    "@changesets/cli": "^3.0.3"
   },
   "overrides": {
     "js-yaml@^3.0.0": "3.15.1",
     "js-yaml@^4.0.0": "4.3.1"
-  }
+  },
+  "license": "SEE LICENSE IN LICENSE"
 }

@@ -1,6 +1,9 @@
 package mpc
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestStrictSelfConsumptionDischargesWhenSoCHealthy mirrors Fredrik's
 // 2026-04-19 08:19 incident: self_consumption mode, ~50% SoC of a
@@ -73,10 +76,10 @@ func TestStrictSelfConsumptionDoesNotStarveEVDeadline(t *testing.T) {
 		CapacityWh:       10000,
 		Levels:           11,
 		SoCMax:           1.0,
-		InitialSoC: 0.2,
+		InitialSoC:       0.2,
 		PluggedIn:        true,
-		TargetSoC: 0.4, // need 2 kWh
-		TargetSlotIdx:    0,  // deadline = slot 0
+		TargetSoC:        0.4, // need 2 kWh
+		TargetSlotIdx:    0,   // deadline = slot 0
 		MaxChargeW:       2500,
 		AllowedStepsW:    []float64{0, 2500},
 		ChargeEfficiency: 0.95,
@@ -113,6 +116,25 @@ func TestUpdateCapacityPropagatesToDefaults(t *testing.T) {
 	// Nil receiver must no-op, not panic.
 	var nilSvc *Service
 	nilSvc.UpdateCapacity(1, 2, 3)
+}
+
+func TestUpdatePlannerScalarsPropagatesToDefaults(t *testing.T) {
+	s := &Service{Defaults: Params{SoCMin: 0.10, SoCMax: 0.95, ChargeEfficiency: 0.95, DischargeEfficiency: 0.95}, Horizon: 48 * time.Hour, Interval: 15 * time.Minute}
+	s.UpdatePlannerScalars(Params{SoCMin: 0.15, SoCMax: 0.90, ChargeEfficiency: 0.92, DischargeEfficiency: 0.93, ExportOrePerKWh: 40}, 400, 24*time.Hour, 10*time.Minute)
+	if s.Defaults.SoCMin != 0.15 || s.Defaults.SoCMax != 0.90 {
+		t.Fatalf("SoC window = %v..%v, want 0.15..0.90", s.Defaults.SoCMin, s.Defaults.SoCMax)
+	}
+	if s.Defaults.ChargeEfficiency != 0.92 || s.Defaults.DischargeEfficiency != 0.93 {
+		t.Fatalf("efficiency = %v/%v", s.Defaults.ChargeEfficiency, s.Defaults.DischargeEfficiency)
+	}
+	if s.Defaults.ExportOrePerKWh != 40 || s.BaseLoad != 400 {
+		t.Fatalf("export/base = %v/%v", s.Defaults.ExportOrePerKWh, s.BaseLoad)
+	}
+	if s.Horizon != 24*time.Hour || s.Interval != 10*time.Minute {
+		t.Fatalf("horizon/interval = %s/%s", s.Horizon, s.Interval)
+	}
+	var nilSvc *Service
+	nilSvc.UpdatePlannerScalars(Params{SoCMin: 0.2}, 0, 0, 0)
 }
 
 // TestStrictSelfConsumptionRespectsFloor — replaces the old
@@ -163,7 +185,7 @@ func TestStrictSelfConsumptionDischargesBelowOldBufferAtHighPrice(t *testing.T) 
 			LoadW: 5300, PVW: 0, Confidence: 1.0},
 	}
 	p := baseParams(ModeSelfConsumption)
-	p.InitialSoC = 0.28     // just below the old floor+20 threshold (10+20)
+	p.InitialSoC = 0.28      // just below the old floor+20 threshold (10+20)
 	p.TerminalSoCPrice = 100 // modest terminal; not strong enough to dominate
 	plan := Optimize(slots, p)
 	if len(plan.Actions) == 0 {

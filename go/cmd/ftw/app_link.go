@@ -216,7 +216,7 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 	}
 	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
 		// Forced replan, off this goroutine. mpc.SetMode replans before it
-		// returns, and the Python optimizer can take longer than the app
+		// returns, and planning can take longer than the app
 		// waits for a command result — so a mode change that had already
 		// been applied and read back was reported "unconfirmed" purely
 		// because the planner was slow. The mode itself is already set and
@@ -365,6 +365,10 @@ type appLoadpoints struct {
 	mpc  *mpc.Service
 }
 
+func (a *appLoadpoints) WaitForPersistence(ctx context.Context) error {
+	return a.mgr.WaitForPersistence(ctx)
+}
+
 func (a *appLoadpoints) Exists(id string) bool {
 	_, ok := a.mgr.State(id)
 	return ok
@@ -392,7 +396,7 @@ func (a *appLoadpoints) Boost(id string, lease loadpoint.BatteryBoostLease, now 
 		// its next scheduled run. Off this goroutine and unattached to the
 		// session — a phone that drops its socket right after tapping must
 		// not abort the planner mid-run.
-		go a.mpc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_enabled")
+		a.mpc.RequestReplan("loadpoint_battery_boost_enabled")
 	}
 	return nil
 }
@@ -404,6 +408,42 @@ func (a *appLoadpoints) CancelBoost(id string, now time.Time) {
 func (a *appLoadpoints) ObservedBoost(id string, now time.Time) loadpoint.BatteryBoostStatus {
 	_, status := a.ctrl.BatteryBoost(id, now)
 	return status
+}
+
+func (a *appLoadpoints) SetSoC(id string, soc float64) bool {
+	if !a.mgr.SetCurrentSoC(id, soc) {
+		return false
+	}
+	if a.mpc != nil {
+		a.mpc.RequestReplan("loadpoint_soc_corrected")
+	}
+	return true
+}
+
+func (a *appLoadpoints) ObservedSoC(id string) (float64, bool) {
+	st, ok := a.mgr.State(id)
+	return st.CurrentSoC, ok
+}
+
+func (a *appLoadpoints) SetSurplusOnly(id string, v bool) (bool, bool) {
+	prev, ok := a.mgr.SetSurplusOnly(id, v)
+	if !ok {
+		return false, false
+	}
+	if a.mpc != nil {
+		if prev && !v {
+			slog.Info("loadpoint surplus_only disabled — requesting replan", "lp", id)
+			a.mpc.RequestReplan("surplus_only_disabled")
+		} else {
+			a.mpc.RequestReplan("loadpoint_target_changed")
+		}
+	}
+	return prev, true
+}
+
+func (a *appLoadpoints) ObservedSurplusOnly(id string) (bool, bool) {
+	st, ok := a.mgr.State(id)
+	return st.SurplusOnly, ok
 }
 
 // appPlans hands over the planner's current output.

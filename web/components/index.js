@@ -25,7 +25,7 @@ import "./ftw-price-chart.js?v=zones1";
 import "./ftw-energy-cake.js";
 import "./ftw-bar-chart.js";
 import "./ftw-history-card.js?v=apiread2";
-import "./ftw-savings-card.js?v=zones1";
+import "./ftw-savings-card.js?v=ledger3";
 import "./ftw-update-check.js?v=apifetch1";
 import "./ftw-notif-status.js?v=apifetch1";
 import "./ftw-notif-test-button.js";

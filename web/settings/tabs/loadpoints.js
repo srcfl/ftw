@@ -164,6 +164,11 @@
       return html;
     }
 
+    if (!status.enabled && config && !config.ocpp) {
+      return html + '<p>For chargers that connect directly to FTW using OCPP.</p>' +
+        '<button type="button" id="configure-ocpp">Set up OCPP</button></fieldset>';
+    }
+
     if (!status.enabled) {
       html +=
         '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
@@ -262,8 +267,7 @@
           '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
           '<b>Pending</b> chargers are connected but not part of the site: FTW ignores their ' +
           'telemetry and never commands them, so an unknown device cannot influence dispatch. ' +
-          'To adopt one, add a charger entry below with its id as the charger driver and save ' +
-          '— it joins the site on that save.' +
+          'To use one, choose it under Add charger. FTW saves and adds it to the site.' +
           '</p>';
       }
     }
@@ -366,28 +370,95 @@
     });
   }
 
+  var chargerSaveQueue = Promise.resolve();
+  var chargerSaveText = '';
+  var chargerSaveFailed = false;
+  function persistChargers(ctx) {
+    var snapshot = JSON.parse(JSON.stringify(ctx.config.loadpoints || []));
+    var button = document.getElementById('settings-save');
+    var status = document.getElementById('settings-status');
+    function feedback(text, kind) {
+      chargerSaveText = text;
+      chargerSaveFailed = kind === 'error';
+      var inline = document.getElementById('charger-save-status');
+      if (inline) inline.textContent = text;
+      var retry = document.getElementById('charger-save-retry');
+      if (retry) retry.hidden = !chargerSaveFailed;
+      var added = document.getElementById('new-lp-status');
+      if (added && /^Adding /.test(added.textContent) && kind) added.textContent = text;
+      if (status) {
+        status.textContent = text;
+        status.className = 'settings-status' + (kind ? ' ' + kind : '');
+        status.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+      }
+    }
+    if (button) button.disabled = true;
+    feedback('Applying charger settings…');
+    var operation = chargerSaveQueue.catch(function () {}).then(function () {
+      // Read the current config so this save never commits another tab's draft.
+      function request(opts) {
+        var abort = new AbortController();
+        var timeout = setTimeout(function () { abort.abort(); }, 30000);
+        return ctx.apiFetch('/api/config', Object.assign({}, opts, { signal: abort.signal }))
+          .then(function (r) { return r.json().then(function (body) {
+            if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+            return body;
+          }); })
+          .catch(function (e) {
+            if (abort.signal.aborted) throw new Error('FTW did not answer within 30 seconds');
+            throw e;
+          })
+          .finally(function () { clearTimeout(timeout); });
+      }
+      return request().then(function (latest) {
+        latest.loadpoints = snapshot;
+        return request({
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(latest),
+        });
+      });
+    });
+    chargerSaveQueue = operation;
+    return operation.then(function (result) {
+      if (chargerSaveQueue !== operation) return;
+      if (button) button.disabled = false;
+      feedback(result && result.restart_required
+        ? 'Charger settings saved. FTW requires a restart to apply them.'
+        : 'Charger settings saved. No Save button needed.', 'success');
+    }).catch(function (e) {
+      if (chargerSaveQueue !== operation) return;
+      if (button) button.disabled = false;
+      feedback('Charger settings not confirmed: ' + e.message + '. Try again when ready.', 'error');
+    });
+  }
+
   S.tabs.loadpoints = {
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
       if (!config.loadpoints) config.loadpoints = [];
       var ocppIds = ocppChargerIds(S.ocppStatus);
-      var drivers = evDriverNames(config, S.ocppStatus);
+      var drivers = evDriverNames(config, S.ocppStatus).filter(function (name) {
+        return name !== S.chargerSetupPending;
+      });
 
       var html =
         '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 12px">' +
-        'A <b>charger</b> entry binds an EV charger to the planner so it can schedule charging against your tariff + PV forecast. ' +
-        'The power source is either a driver added under <b>Devices</b>, or an OCPP charge point from the list below — ' +
-        'pick it here and set the electrical envelope. (Config files call this binding a <code>loadpoint</code>.)' +
+        'Choose the charger FTW will control, then check its power limit and your car’s battery size. ' +
+        'Charger settings apply as you change them. Set when to charge from the car on Overview.' +
         '</p>';
 
-      html += ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml, config.vehicles, config, help);
+      html += '<p id="charger-save-status" role="status" aria-live="polite">' + escHtml(chargerSaveText) + '</p>' +
+        '<button type="button" id="charger-save-retry"' + (chargerSaveFailed ? '' : ' hidden') + '>Try again</button>';
+
+      var ocppHtml = ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml, config.vehicles, config, help);
 
       if (!drivers.length) {
         html +=
-          '<div class="ha-status-indicator ha-warn" style="margin:12px 0">' +
-          '⚠ No EV-capable driver configured and no OCPP charger connected. Add a driver under <b>Devices</b> ' +
-          '(e.g. drivers/ctek_hybrid.lua), or point an OCPP charger at the URL above.' +
-          '</div>';
+          '<section aria-label="Connect a charger" style="margin:12px 0">' +
+          '<h3>Connect a charger</h3>' +
+          '<p>Choose your charger and enter its connection details. Then check its power limit and your car’s battery size here.</p>' +
+          '<button type="button" class="btn-add" id="connect-charger">Connect a charger</button>' +
+          '<p style="color:var(--text-dim);font-size:0.8rem">If your charger connects directly using OCPP, open OCPP connection settings below.</p>' +
+          '</section>';
       }
 
       html += '<div class="devices-list">';
@@ -405,7 +476,7 @@
           // that is not connected right now). Operator can re-pick from
           // the list to fix it.
           driverOpts = '<option value="' + escHtml(lp.driver_name) + '" selected>' +
-            escHtml(lp.driver_name) + ' (not connected?)</option>' + driverOpts;
+            escHtml(lp.driver_name) + ' (saved connection)</option>' + driverOpts;
         }
 
         html +=
@@ -414,13 +485,13 @@
 
           '<div class="field-row">' +
           '<div>' +
-          '<label>ID ' + help("Stable identifier referenced by the planner and the dashboard EV modal. Letters/digits/dashes only.") + '</label>' +
+          '<label>Name ' + help("Name used to identify this charger.") + '</label>' +
           '<input type="text" data-path="' + prefix + '.id" value="' + escHtml(lp.id || "") + '" placeholder="garage">' +
           '</div>' +
           '<div>' +
-          '<label>Charger driver ' + help("Which power source this charger entry commands. The dropdown lists drivers with the `ev` capability plus every OCPP charge point the built-in server has seen.") + '</label>' +
+          '<label>Charger ' + help("The charger FTW controls.") + '</label>' +
           '<select data-path="' + prefix + '.driver_name">' +
-          '<option value="">— select driver —</option>' +
+          '<option value="">— choose charger —</option>' +
           driverOpts +
           '</select>' +
           '</div>' +
@@ -462,30 +533,75 @@
       });
       html += '</div>';
 
-      html +=
+      if (drivers.length) html +=
         '<fieldset><legend>Add charger</legend>' +
         '<div class="field-row"><div>' +
-        '<label>ID</label><input type="text" id="new-lp-id" placeholder="garage">' +
+        '<label for="new-lp-id">Name (optional)</label><input type="text" id="new-lp-id" placeholder="Uses the charger name">' +
         '</div><div>' +
-        '<label>Charger driver</label>' +
+        '<label for="new-lp-driver">Charger</label>' +
         '<select id="new-lp-driver">' +
-        '<option value="">— select driver —</option>' +
+        '<option value="">— choose charger —</option>' +
         drivers.map(function (n) {
           var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "");
-          return '<option value="' + escHtml(n) + '">' + escHtml(label) + '</option>';
+          return '<option value="' + escHtml(n) + '"' + (drivers.length === 1 ? ' selected' : '') + '>' + escHtml(label) + '</option>';
         }).join('') +
         '</select>' +
         '</div></div>' +
-        '<button class="btn-add" id="new-lp-add">+ Add charger</button>' +
+        '<button class="btn-add" id="new-lp-add" type="button">+ Add charger</button>' +
+        '<p id="new-lp-status" role="status" aria-live="polite" style="margin:8px 0 0"></p>' +
         '</fieldset>';
 
-      html += vehiclesSection(config, escHtml, help);
+      html += '<details><summary>OCPP connection settings</summary>' + ocppHtml +
+        '<button type="button" class="btn-add" data-save-charger-extra="OCPP connection settings">Save OCPP connection settings</button><p role="status" data-extra-save-status></p></details>';
+      html += '<details><summary>Cars that share a charger</summary>' + vehiclesSection(config, escHtml, help) +
+        '<button type="button" class="btn-add" data-save-charger-extra="Car profiles">Save car profiles</button><p role="status" data-extra-save-status></p></details>';
 
       return html;
     },
 
     after: function (ctx) {
       var bodyEl = ctx.bodyEl, config = ctx.config;
+
+      var connectCharger = document.getElementById('connect-charger');
+      if (connectCharger) connectCharger.addEventListener('click', function () {
+        S.chargerSetup = true;
+        ctx.navigateTab('devices');
+      });
+      bodyEl.querySelectorAll('[data-save-charger-extra]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          var status = button.parentElement.querySelector('[data-extra-save-status]');
+          button.disabled = true;
+          status.textContent = 'Saving ' + button.dataset.saveChargerExtra.toLowerCase() + '…';
+          chargerSaveQueue.catch(function () {}).then(function () { return ctx.saveConfig(); }).then(function (result) {
+            status.textContent = button.dataset.saveChargerExtra + (result && result.restart_required ? ' saved. Restart FTW to apply them.' : ' saved.');
+          }).catch(function (error) {
+            status.textContent = 'Not saved: ' + error.message + '. Try again.';
+          }).finally(function () { button.disabled = false; });
+        });
+      });
+
+      var configureOcpp = document.getElementById('configure-ocpp');
+      if (configureOcpp) configureOcpp.addEventListener('click', function () {
+        ctx.captureCurrentTab();
+        config.ocpp = { enabled: true, port: 8887, username: 'ftw', path: '/' };
+        ctx.renderTab('loadpoints');
+        var button = bodyEl.querySelector('[data-checkbox-path="ocpp.enabled"]');
+        if (button) button.closest('details').open = true;
+      });
+
+      function refreshTab() {
+        var idInput = document.getElementById('new-lp-id');
+        var driverInput = document.getElementById('new-lp-driver');
+        if (!driverInput) return;
+        var name = idInput ? idInput.value : '';
+        var driver = driverInput ? driverInput.value : '';
+        ctx.captureCurrentTab();
+        ctx.renderTab('loadpoints');
+        var nextName = document.getElementById('new-lp-id');
+        var nextDriver = document.getElementById('new-lp-driver');
+        if (nextName) nextName.value = name;
+        if (nextDriver && driver) nextDriver.value = driver;
+      }
 
       // Live OCPP view. Re-render only when the answer actually changed,
       // so the refetch on every tab open cannot loop.
@@ -497,8 +613,7 @@
           if (raw === S._ocppStatusRaw) return;
           S._ocppStatusRaw = raw;
           S.ocppStatus = data;
-          ctx.captureCurrentTab();
-          ctx.renderTab('loadpoints');
+          refreshTab();
         })
         .catch(function () { /* section keeps its last known state */ });
 
@@ -515,11 +630,19 @@
             });
             S.catalogByLua = byLua;
             // Re-render so driver dropdowns populate.
-            ctx.captureCurrentTab();
-            ctx.renderTab('loadpoints');
+            refreshTab();
           })
           .catch(function () { /* leave dropdowns empty; user can still type */ });
       }
+
+      function applyChargers(skipCapture) {
+        if (skipCapture !== true) ctx.captureCurrentTab();
+        (config.loadpoints || []).forEach(function (lp) { delete lp.allowed_steps_w__str; });
+        persistChargers(ctx);
+      }
+
+      var retry = document.getElementById('charger-save-retry');
+      if (retry) retry.addEventListener('click', applyChargers);
 
       // Remove handlers.
       bodyEl.querySelectorAll('[data-action="remove-lp"]').forEach(function (btn) {
@@ -528,6 +651,7 @@
           if (!isFinite(idx)) return;
           ctx.captureCurrentTab();
           config.loadpoints.splice(idx, 1);
+          applyChargers(true);
           ctx.renderTab('loadpoints');
         });
       });
@@ -540,11 +664,23 @@
           var drvEl = document.getElementById('new-lp-driver');
           var id = (idEl && idEl.value || '').trim();
           var drv = (drvEl && drvEl.value || '').trim();
-          if (!id) { idEl && idEl.focus(); return; }
+          var message = document.getElementById('new-lp-status');
+          if (!drv) {
+            if (message) message.textContent = 'Choose a charger first. If it is missing, add it under Devices.';
+            if (drvEl) drvEl.focus();
+            return;
+          }
+          if (!id) id = drv;
+          var bound = (config.loadpoints || []).some(function (lp) { return lp.driver_name === drv; });
+          if (bound) {
+            if (message) message.textContent = 'This charger is already in the list above.';
+            return;
+          }
           // Reject duplicates — the controller treats id as the join key.
           var exists = (config.loadpoints || []).some(function (lp) { return lp.id === id; });
           if (exists) {
-            alert('A charger with id "' + id + '" already exists.');
+            if (message) message.textContent = 'That name is already in use. Choose another name.';
+            if (idEl) idEl.focus();
             return;
           }
           ctx.captureCurrentTab();
@@ -558,7 +694,12 @@
             phase_mode: '3p',
             allowed_steps_w: [],
           });
+          applyChargers(true);
           ctx.renderTab('loadpoints');
+          var added = document.getElementById('new-lp-status');
+          if (added) added.textContent = 'Adding ' + id + ' to FTW… Check its power limit and battery size above.';
+          var card = bodyEl.querySelector('[data-action="remove-lp"][data-idx="' + (config.loadpoints.length - 1) + '"]');
+          if (card) card.closest('fieldset').scrollIntoView({ block: 'nearest' });
         });
       }
 
@@ -577,7 +718,7 @@
         addVehicleBtn.addEventListener('click', function () {
           var idEl = document.getElementById('new-vehicle-id');
           var id = (idEl && idEl.value || '').trim();
-          if (!id) { idEl && idEl.focus(); return; }
+          if (!id) { if (idEl) idEl.focus(); return; }
           var exists = (config.vehicles || []).some(function (v) { return v.id === id; });
           if (exists) {
             alert('A vehicle with id "' + id + '" already exists.');
@@ -626,6 +767,9 @@
         inp.addEventListener('blur', function () {
           inp.dispatchEvent(new Event('change'));
         });
+      });
+      bodyEl.querySelectorAll('[data-path^="loadpoints."]').forEach(function (input) {
+        input.addEventListener('change', applyChargers);
       });
     },
 

@@ -100,6 +100,27 @@ func outcomeFixture(t *testing.T, now time.Time, sender *outcomeSender) (*Contro
 // The charger answers every poll and refuses every setpoint. Before this was
 // wired the controller logged the refusal and moved on, so nothing upstream
 // ever learned that the EV load the plan booked was not being drawn.
+func TestTickUsesOutcomeSenderNotPlainSend(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	plain := &outcomeSender{}
+	c, _, _ := outcomeFixture(t, now, plain)
+	var outcomeN int
+	c.SetOutcomeSender(func(_ context.Context, _ string, _ []byte, outcome func(error)) error {
+		outcomeN++
+		if outcome != nil {
+			outcome(nil)
+		}
+		return nil
+	})
+	c.Tick(context.Background(), now)
+	if n := len(plain.sent()); n != 0 {
+		t.Fatalf("plain send used %d times; periodic dispatch must use the outcome sender", n)
+	}
+	if outcomeN != 1 {
+		t.Fatalf("outcome sender used %d times, want 1", outcomeN)
+	}
+}
+
 func TestRefusedEVSetCurrentIsReported(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	refusal := errors.New("driver_command returned false")

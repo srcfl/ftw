@@ -94,6 +94,7 @@ func DefaultRules() []config.NotificationRule {
 		// fires once per plug-in. interrupted keeps an hour on top of the
 		// emitter's hysteresis, because a charger failing repeatedly is
 		// one fact, not a feed.
+		{Type: PushChargingConnected, Enabled: false, Priority: 3, CooldownS: 60},
 		{Type: PushChargingSessionComplete, Enabled: false, Priority: 3},
 		{Type: PushChargingInterrupted, Enabled: false, Priority: 4, CooldownS: 3600},
 		{Type: PushUpdateInstalled, Enabled: false, Priority: 2},
@@ -114,7 +115,7 @@ func KnownRuleTypes() []string {
 	return []string{
 		EventDriverOffline, EventDriverRecovered, EventUpdateAvailable,
 		EventFuseOverLimit, EventConcurrentDriversOffline,
-		PushChargingSessionComplete, PushChargingInterrupted,
+		PushChargingConnected, PushChargingSessionComplete, PushChargingInterrupted,
 		PushUpdateInstalled, PushDriverOffline, PushFuseOverLimit,
 	}
 }
@@ -131,10 +132,12 @@ type FuseReader = func() (amps map[string]float64, limitA float64, ok bool)
 
 // Message is a rendered notification payload.
 type Message struct {
-	Title    string
-	Body     string
-	Priority int
-	Tags     []string
+	Kind        string
+	LoadpointID string
+	Title       string
+	Body        string
+	Priority    int
+	Tags        []string
 }
 
 // Publisher dispatches a rendered Message to its transport.
@@ -386,6 +389,11 @@ func (s *Service) Subscribe(bus *events.Bus) {
 	// real-world moment — the loadpoint latches, the boot version check —
 	// so the rule adds only the operator's gate: enabled, priority,
 	// cooldown. Words come from the catalogue and nowhere else.
+	bus.Subscribe(events.KindChargingConnected, func(e events.Event) {
+		if ev, ok := e.(events.ChargingConnected); ok {
+			go s.handleCatalogued(PushChargingConnected, ev.LoadpointID, nil)
+		}
+	})
 	bus.Subscribe(events.KindChargingSessionComplete, func(e events.Event) {
 		ev, ok := e.(events.ChargingSessionComplete)
 		if !ok {
@@ -452,7 +460,12 @@ func (s *Service) handleCatalogued(kind, device string, args map[string]string) 
 		s.emitDispatched(kind, device, Message{Priority: prio}, "failed", err.Error())
 		return
 	}
+	loadpointID := ""
+	if strings.HasPrefix(kind, "charging.") {
+		loadpointID = device
+	}
 	s.deliver(kind, device, Message{
+		Kind: kind, LoadpointID: loadpointID,
 		Title:    title,
 		Body:     body,
 		Priority: prio,

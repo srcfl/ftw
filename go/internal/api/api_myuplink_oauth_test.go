@@ -22,24 +22,36 @@ import (
 // *config.Config (so tests can read the persisted refresh_token back).
 func buildMyUplinkOAuthServer(t *testing.T) (*Server, *config.Config, *state.Store) {
 	t.Helper()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	st, err := state.Open(statePath)
 	if err != nil {
 		t.Fatalf("open state: %v", err)
 	}
 	cfg := &config.Config{Drivers: []config.Driver{{
-		Name: "myuplink",
-		Lua:  "drivers/myuplink.lua",
+		Name:         "myuplink",
+		Lua:          "drivers/myuplink.lua",
+		Capabilities: config.Capabilities{Standalone: true},
 		Config: map[string]any{
 			"client_id":     "the-client-id",
 			"client_secret": "the-client-secret",
 		},
 	}}}
+	cfg.Drivers = append(cfg.Drivers, config.Driver{Name: "meter", Lua: "drivers/meter.lua", IsSiteMeter: true, Capabilities: config.Capabilities{Standalone: true}})
+	cfg.Site.SmoothingAlpha = .3
+	cfg.Fuse = config.Fuse{MaxAmps: 16, Phases: 3, Voltage: 230}
+	cfg.API.Port = 8080
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err = config.InitializeStorage(configPath, statePath, cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
 	srv := New(&Deps{
 		Cfg:        cfg,
 		CfgMu:      &sync.RWMutex{},
-		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"),
+		ConfigPath: configPath,
 		State:      st,
-		SaveConfig: func(string, *config.Config) error { return nil }, // in-memory cfg is the source of truth here
+		SaveConfig: func(path string, cfg *config.Config) error { return config.SaveStored(st, path, cfg) },
 	})
 	return srv, cfg, st
 }

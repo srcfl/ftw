@@ -40,6 +40,9 @@ assert_paths '.github/workflows/release-assets.yml' \
 assert_paths 'scripts/promote-paired-latest.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
+assert_paths 'scripts/check-legacy-release-line.sh' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
 assert_paths 'scripts/github-release-by-id.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
@@ -47,6 +50,12 @@ assert_paths 'scripts/test-github-release-by-id.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
 assert_paths 'scripts/check-stable-release.py' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
+assert_paths 'scripts/upgrade-paired-release.sh' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
+assert_paths 'scripts/test-upgrade-paired-release.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
 echo "test workflow path classifier contract passed"

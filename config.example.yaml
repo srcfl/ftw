@@ -1,3 +1,5 @@
+# First boot imports this file into SQLite. After import, use FTW Settings.
+# Core records config_database here; later edits to these values do not reload.
 # FTW config example
 # Copy to config.yaml and edit for your site.
 
@@ -42,6 +44,7 @@ drivers:
         host: 192.168.1.10
         port: 502
         unit_id: 1
+        # proxy_listen: ":1502"  # only needed when modbus_proxy is on and this is not the only Modbus device
 
   # Pixii PowerShaper. When troubleshooting mode is enabled in Settings,
   # Pixii also exposes calibration/control status and setpoint readback metrics.
@@ -134,7 +137,7 @@ drivers:
 
 api:
   port: 8080
-  # lan_auth: false  # when true, protected LAN routes need Authorization: Bearer <house-password>
+  # lan_auth: false  # when true, protected LAN routes need the house password (Bearer/cookie) or FTW_API_TOKEN
 
 # Home Assistant MQTT bridge (optional)
 homeassistant:
@@ -146,35 +149,20 @@ homeassistant:
   password: homeems
   publish_interval_s: 5
 
-# Calendar-based planner constraints (#498). FTW hosts its OWN in-process,
-# pure-Go CalDAV server (emersion/go-webdav, MIT — no sidecar, works in a
-# single container incl. a Home Assistant add-on; objects persist in state.db)
-# and turns the events you add into planner intents: "Away"/"Vacation" → away
-# load profile; "Charge car 80%" → EV target SoC by the event time. It also
-# writes EVSE usage-history and forward-looking plan calendars you subscribe
-# to. Recurring events are expanded server-side. Opt-in + fail-soft; the
-# password is stored in state.db. See docs/caldav-integration.md.
-caldav:
-  enabled: false
-  # listen: ":5232"          # bind address for the in-process CalDAV server
-  url: http://localhost:5232
-  username: ftw
-  # manage_credentials (default true): FTW generates the password and the
-  # in-process server authenticates against it, then shows it (with a QR) in
-  # Settings → Calendar. Set false to set `password` here by hand.
-  manage_credentials: true
-  password: ""
-  calendar_path: /ftw/energy/
-  poll_interval_s: 300
-  ev_default_target_soc: 0.80
-  # ev_loadpoint_id: ""            # defaults to the first configured loadpoint
-  # away_keywords: [away, vacation, holiday]
-  # ev_keywords:   [ev, car, charge]
-  evse_history: true               # write a calendar event per EV charge session
-  history_path: /ftw/history/
-  publish_plan: true               # publish upcoming charge/discharge windows (read-only)
-  plan_path: /ftw/plan/
-  # plan_publish_interval_s: 900   # how often the plan calendar is reconciled
+# Modbus TCP proxy. FTW already holds the inverter's single socket; other
+# integrations (Home Assistant's native Modbus / Sungrow / SolarEdge
+# integrations, Node-RED, …) share it by talking to this box instead of the
+# device. Off by default: the listener has no Modbus authentication, and
+# writes would bypass FTW's control loop.
+# modbus_proxy:
+#   enabled: true
+#   listen: ":1502"     # used when the site has one unique Modbus TCP endpoint
+#   allow_write: false  # keep off unless you trust every host on the LAN
+#
+# Two inverters (different host:port) each need their own listen address:
+#   capabilities.modbus.proxy_listen: ":1502"  /  ":1503"
+# Docker host-networking already publishes 1502; other compose files need
+# the port mapped.
 
 # Built-in OCPP Central System, speaking 1.6J and 2.0.1. EV chargers that speak
 # OCPP connect to FTW directly — there is no driver to write and nothing to add
@@ -201,8 +189,8 @@ ocpp:
   password: ""                     # required when enabled; use a long random string
   heartbeat_interval_s: 60
   # Serve wss:// instead of ws://. client_ca_file additionally requires each
-  # charger to present a certificate signed by that CA — OCPP 2.0.1 security
-  # profile 3, and the only identity here that cannot be copied between devices.
+  # charger to present a certificate signed by that CA whose CN or DNS SAN
+  # matches the identity in the URL — OCPP 2.0.1 security profile 3.
   # tls:
   #   cert_file: /etc/ftw/ocpp/server.crt
   #   key_file: /etc/ftw/ocpp/server.key
@@ -280,17 +268,11 @@ fleet_ping:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
-# The planner. Core solves it in process; the Python/HiGHS optimizer is the
-# legacy external engine, still shipped as the independently updatable
-# ftw-optimizer service (native installs point optimizer_command at their
-# venv's Python executable). Every optimizer_* setting below applies to that
-# worker in either role, champion or shadow.
+# Energyplan ships with Core and runs first in supported beta builds.
+# Core DP provides shadow comparisons and validated fallback plans.
 # planner:
 #   enabled: true
-#   engine: core        # core (default) | python (legacy external champion)
-#   shadow_python: true # run the external optimizer after each Core replan on
-#                       # the same inputs and log the terminal-corrected cost
-#                       # difference. Measurement only — never dispatched.
+#   # engine: energyplan # beta default; core selects the Go planner
 #   mode: passive_arbitrage
 #   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
 #   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)
@@ -298,33 +280,9 @@ fleet_ping:
 #   interval_min: 15
 #   soc_min: 0.10
 #   soc_max: 0.95
-#   optimizer_solver: HIGHS
-#   optimizer_formulation: auto
-#   optimizer_transport: process # process | auto | unix; official Compose sets unix
-#   optimizer_socket: /run/ftw-optimizer/optimizer.sock
-#   optimizer_timeout_s: 30
-#   optimizer_idle_timeout_s: 120 # release Python/CVXPY memory between planning bursts
-#   optimizer_mip_rel_gap: 0.005
-#   optimizer_cvar_weight: 0.15
-#   optimizer_cvar_alpha: 0.90
-#   optimizer_recourse_shadow: false # diagnostic only; never controls dispatch
-#   optimizer_recourse_non_anticipative_slots: 1
-#   optimizer_challenger_policy: multistage # recourse | multistage
-#   optimizer_multistage:
-#     scenario_limit: 12
-#     branch_interval_slots: 4
-#     branch_horizon_slots: 48
-#     max_branching: 2
-#     near_horizon_slots: 16
-#     mid_horizon_slots: 96
-#     mid_block_slots: 2
-#     far_block_slots: 4
-#     service_cvar_weight: 1.0
-#     service_cvar_alpha: 0.95
-#     economic_cvar_weight: 0
-#     economic_cvar_alpha: 0.90
-#     decomposition_threshold: 20
-#     decomposition_method: auto # auto | extensive | progressive_hedging
-#     ph_max_iterations: 8
-#     ph_rho: 50
-#     ph_tolerance_w: 5
+
+# Peak-power tariff (weekday 06–20 local time). Same minor units as
+# grid_tariff_ore_kwh, per kW, excluding VAT. 0 disables it.
+# price:
+#   demand_price_per_kw: 7000
+#   demand_top_n: 3

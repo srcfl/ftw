@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -122,5 +123,32 @@ func TestPostConfigRunsTheSharedApplierWithOldSnapshot(t *testing.T) {
 	}
 	if got := gotOld.SiteMeterDriver(); got != "" {
 		t.Fatalf("applier oldCfg.SiteMeterDriver() = %q, want the pre-POST snapshot %q", got, "")
+	}
+}
+
+func TestPostConfigResolvesDriverPathsBeforeApply(t *testing.T) {
+	for _, bundled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "relative-to-config", true: "container-driver-directory"}[bundled], func(t *testing.T) {
+			oldOverride := config.DriversDirOverride
+			if bundled {
+				config.DriversDirOverride = t.TempDir()
+			} else {
+				config.DriversDirOverride = ""
+			}
+			t.Cleanup(func() { config.DriversDirOverride = oldOverride })
+			var appliedPath string
+			srv, _, cfg := postConfigServer(t, func(next, old *config.Config) { appliedPath = next.Drivers[0].Lua })
+			srv.deps.SaveConfig = config.SaveAtomic
+			if code := postConfig(t, srv, firstSiteMeterConfig); code != 200 {
+				t.Fatalf("status %d", code)
+			}
+			loaded, err := config.Load(srv.deps.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !filepath.IsAbs(appliedPath) || appliedPath != loaded.Drivers[0].Lua || cfg.Drivers[0].Lua != appliedPath {
+				t.Fatalf("API apply %q, file watcher %q, live %q must agree", appliedPath, loaded.Drivers[0].Lua, cfg.Drivers[0].Lua)
+			}
+		})
 	}
 }

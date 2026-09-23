@@ -24,6 +24,16 @@ import {
   formatCompactMinor,
 } from "./savings-periods.js";
 
+const SAVINGS_BASELINE_KEY = "ftw.savings.baseline";
+
+function readSavingsBaseline() {
+  try {
+    return localStorage.getItem(SAVINGS_BASELINE_KEY) === "self" ? "self" : "none";
+  } catch {
+    return "none";
+  }
+}
+
 class FtwSavingsCard extends FtwElement {
   static styles = `
     :host { display: block; }
@@ -72,6 +82,12 @@ class FtwSavingsCard extends FtwElement {
       z-index: 0;
     }
     .toggle[data-active="month"]::before { transform: translateX(100%); }
+    .compare {
+      color: var(--fg-muted);
+      font-family: var(--sans);
+      font-size: 0.75rem;
+      line-height: 1.3;
+    }
     .toggle button {
       position: relative;
       z-index: 1;
@@ -243,18 +259,26 @@ class FtwSavingsCard extends FtwElement {
       border-radius: var(--radius-md, 10px);
       padding: 12px 14px;
     }
-    :host([compact]) .toggle,
+    :host([compact]) .range-toggle,
     :host([compact]) .headline,
     :host([compact]) .pct,
     :host([compact]) .sub,
     :host([compact]) .spark-wrap {
       display: none !important;
     }
+    :host([compact]) .head {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 2px;
+    }
     :host([compact]) .label {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 6px;
+    }
+    :host([compact]) .compare {
+      font-size: 0.72rem;
     }
     :host([compact]) .compact-currency {
       color: var(--fg-muted);
@@ -348,6 +372,7 @@ class FtwSavingsCard extends FtwElement {
   constructor() {
     super();
     this._range = null;
+    this._baseline = readSavingsBaseline();
     this._timer = null;
     this._reqSeq = 0;
     this._abort = null;
@@ -357,12 +382,33 @@ class FtwSavingsCard extends FtwElement {
 
   connectedCallback() {
     super.connectedCallback();
-    this._refresh();
-    this._restartPolling();
+    if (!this._onVisibility) {
+      this._onVisibility = () => this._syncPolling();
+      document.addEventListener("visibilitychange", this._onVisibility);
+    }
+    if (!this._onBaseline) {
+      this._onBaseline = (event) => {
+        const next = event.detail && event.detail.baseline === "self" ? "self" : "none";
+        if (next === this._baseline) return;
+        this._baseline = next;
+        this.update();
+        this._paint();
+      };
+      window.addEventListener("ftw-savings-baseline", this._onBaseline);
+    }
+    this._syncPolling();
   }
   disconnectedCallback() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
     if (this._abort) { this._abort.abort(); this._abort = null; }
+    if (this._onVisibility) {
+      document.removeEventListener("visibilitychange", this._onVisibility);
+      this._onVisibility = null;
+    }
+    if (this._onBaseline) {
+      window.removeEventListener("ftw-savings-baseline", this._onBaseline);
+      this._onBaseline = null;
+    }
   }
 
   attributeChangedCallback(name) {
@@ -376,19 +422,18 @@ class FtwSavingsCard extends FtwElement {
     }
     this.update();
     if (name === "poll-ms") {
-      this._refresh();
-      this._restartPolling();
+      this._syncPolling();
     }
     if (rangeChanged) this._refresh();
   }
 
-  _restartPolling() {
+  _syncPolling() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    if (!this.isConnected || document.hidden) return;
+    this._refresh();
     const raw = this.getAttribute("poll-ms");
     const ms = Number(raw ?? 300000);
-    if (ms > 0 && this.isConnected) {
-      this._timer = setInterval(() => this._refresh(), ms);
-    }
+    if (ms > 0) this._timer = setInterval(() => this._refresh(), ms);
   }
 
   _daysFor(range) {
@@ -408,11 +453,16 @@ class FtwSavingsCard extends FtwElement {
     }
     const wk = this._range === "week";
     const compact = this.hasAttribute("compact");
+    const self = this._baseline === "self";
+    const compare = self ? "Compared to self-use" : "Compared to no system";
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Saved vs no PV/battery"}</div>
-          <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
+          <div>
+            <div class="label" title="No system buys the recorded house and vehicle use from the grid. Self-use is the same solar and battery run blind: it stores surplus, covers the house, wastes a little on conversion, keeps a small reserve, and keeps exporting when that export costs money.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Savings"}</div>
+            <div class="compare" data-role="compare">${compare}</div>
+          </div>
+          <div class="toggle range-toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
           </div>
@@ -460,7 +510,7 @@ class FtwSavingsCard extends FtwElement {
   }
 
   afterRender() {
-    const toggle = this.shadowRoot.querySelector('.toggle');
+    const toggle = this.shadowRoot.querySelector('.range-toggle');
     if (toggle) {
       toggle.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-range]');
@@ -591,7 +641,7 @@ class FtwSavingsCard extends FtwElement {
     statusEl.hidden = true;
     statusEl.textContent = "";
 
-    const periods = buildSavingsPeriods(days);
+    const periods = buildSavingsPeriods(days, this._baseline === "self" ? "self_consumption_saved_ore" : "saved_ore");
     const specs = [
       ["today", "Today", periods.today],
       ["week", "Last 7 days", periods.week],
@@ -682,7 +732,19 @@ class FtwSavingsCard extends FtwElement {
       return;
     }
 
-    const { days, totals } = this._payload;
+    const rawDays = this._payload.days;
+    const rawTotals = this._payload.totals;
+    const self = this._baseline === "self";
+    const days = self ? rawDays.map((d) => ({
+      ...d,
+      saved_ore: d.self_consumption_saved_ore,
+      baseline_cost_ore: d.self_consumption_cost_ore,
+    })) : rawDays;
+    const totals = self && rawTotals ? {
+      ...rawTotals,
+      saved_ore: rawTotals.self_consumption_saved_ore,
+      baseline_cost_ore: rawTotals.self_consumption_cost_ore,
+    } : rawTotals;
     if (compact) {
       this._paintCompact(days);
       return;
@@ -729,8 +791,9 @@ class FtwSavingsCard extends FtwElement {
     // operator the two numbers the delta is derived from.
     const actualSek = actualOre / 100;
     const baselineSek = baselineOre / 100;
+    const compared = self ? "self-use" : "no system";
     subEl.innerHTML =
-      `Actual <b>${fmtSek(actualSek)} ${cur}</b>, no PV/battery <b>${fmtSek(baselineSek)} ${cur}</b>`;
+      `Actual <b>${fmtSek(actualSek)} ${cur}</b>, ${compared} <b>${fmtSek(baselineSek)} ${cur}</b>`;
 
     // ---- Sparkline -----------------------------------------------------
     // Bars on a zero baseline, full height split 50/50 above/below.

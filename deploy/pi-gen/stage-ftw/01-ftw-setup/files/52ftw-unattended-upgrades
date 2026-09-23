@@ -1,0 +1,18 @@
+// FTW appliance policy for unattended-upgrades (srcfl/ftw#770). APT
+// config lists append across files, so these patterns extend the Debian
+// defaults in 50unattended-upgrades rather than replacing them.
+//
+// The Raspberry Pi archive is where the kernel, firmware and bootloader
+// come from, and it has no separate security pocket — omitting it would
+// leave exactly the packages this policy exists for unpatched. Docker's
+// repository is deliberately NOT listed: an engine upgrade restarts every
+// container, so it stays a manual, operator-timed `apt upgrade`.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        "origin=Raspberry Pi Foundation,codename=${distro_codename}";
+};
+
+// This is an energy controller: a reboot stops dispatch. A staged kernel
+// waits for an operator-chosen reboot; everything else in the origins
+// above takes effect without one.
+Unattended-Upgrade::Automatic-Reboot "false";

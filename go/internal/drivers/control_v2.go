@@ -19,6 +19,9 @@ const (
 
 var controlTokenRE = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 var controlHashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var persistSecretKeyRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+func validPersistSecretKey(key string) bool { return persistSecretKeyRE.MatchString(key) }
 
 // RuntimePolicy is the verified, signed package policy bound to one managed
 // artifact. SiteEnabled becomes true only when the local config pins the same
@@ -42,6 +45,24 @@ type RuntimePolicy struct {
 	// init or poll -- the phases allowWrite refuses. Empty for every driver
 	// that does not declare one, which is all of them by default.
 	AuthPostPath string
+	// ConfigSecrets comes from verified signed metadata. A read-only OAuth
+	// driver may persist only these keys in its own secret namespace.
+	ConfigSecrets []string
+}
+
+func (p *RuntimePolicy) allowsSecretPersistence(key string) bool {
+	if p == nil {
+		return true
+	}
+	if !p.IsReadOnly() || p.AuthPostPath == "" || !p.Permissions["http.get"] {
+		return false
+	}
+	for _, allowed := range p.ConfigSecrets {
+		if key == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 type RuntimeCommand struct {
@@ -82,6 +103,10 @@ func (p *RuntimePolicy) validate() error {
 			}
 			switch permission {
 			case "http.get", "modbus.read", "mqtt.subscribe", "serial.read":
+			case "http.post":
+				if p.AuthPostPath == "" || !p.Permissions["http.get"] {
+					return errors.New("read-only HTTP POST requires a declared auth path and http.get")
+				}
 			default:
 				return fmt.Errorf("read-only runtime has write-capable permission %q", permission)
 			}

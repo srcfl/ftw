@@ -1,7 +1,7 @@
 # Operations
 
 FTW is normally deployed with Docker Compose on Linux. The core control loop
-remains local; the Python optimizer is optional and core falls back safely when
+remains local; Energyplan ships with Core and Core falls back safely when
 it is unavailable.
 
 ## Install
@@ -31,7 +31,12 @@ docker compose up -d
 ```
 
 The UI updater performs an immutable pull and recreate through the updater
-sidecar. See [self-update.md](self-update.md).
+sidecar; it never patches the host OS or Docker engine — that is the
+operator's job on a self-managed host, and automatic on the
+[Raspberry Pi image](rpi-image.md#host-os-security-updates). See
+[self-update.md](self-update.md). A 2.x site moving to 3.x must follow
+[upgrade-paired-release.md](upgrade-paired-release.md) instead of orange
+Update.
 
 ## Persistent state
 
@@ -53,8 +58,9 @@ the current data and automatically reverts it if the restored service does not
 become healthy. See [backup-and-restore.md](backup-and-restore.md).
 
 The updater also retains bounded local pre-update rollback points. They protect
-configuration and SQLite state during a Core update but remain on the same
-disk; they cannot recover a failed SD card.
+configuration and the settings database during a Core update; history stays in
+its own file and is left in place. They remain on the same disk and cannot
+recover a failed SD card.
 
 Core exposes a read-only storage check at
 `GET /api/storage/inventory`. It reports allocated, live and free SQLite pages
@@ -118,6 +124,14 @@ curl -X POST -H "Authorization: Bearer <same-random-secret>" \
   https://ftw.example.net/api/restart
 ```
 
+On the Home Assistant app the same call shuts Core down and re-execs the
+binary in-process. Supervisor does not restart a stopped app unless Watchdog
+is on, so exiting would leave the app stopped.
+
+The same Bearer is accepted on the LAN when `api.lan_auth` is on. `FTW_API_TOKEN`
+and the house password are independent secrets: the token is not hashed as a
+password guess, and a mismatch does not lock Settings.
+
 The built-in browser UI does not store API tokens. For a public/FQDN browser
 deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
@@ -157,11 +171,13 @@ Do not treat that gateway as loopback: Desktop SNAT uses the same peer
 for every published-port client, including LAN visitors. A first enable
 from another LAN address is refused, so a visitor cannot set the
 password. `POST /api/config` cannot flip the flag. When on,
-protected LAN routes need the house password. `curl` sends
-`Authorization: Bearer <house-password>`. The browser login form
+protected LAN routes need the house password or `FTW_API_TOKEN`.
+`curl` sends `Authorization: Bearer <house-password>` or
+`Authorization: Bearer <FTW_API_TOKEN>`. The browser login form
 sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
 never asks. Live status stays readable without the password; a viewer
-caller is minted for those reads.
+caller is minted for those reads. The two secrets do not share a lockout:
+retrying the API token cannot lock the household out of Settings.
 
 An owner pairing QR is minted only from loopback or with the house
 password. Promoting a paired phone to owner uses the same gate. The
@@ -174,11 +190,49 @@ The FTW app and Home Assistant MQTT are unchanged.
 Recovery: `curl` to `127.0.0.1`, or set `api.lan_auth: false` in
 `config.yaml` and restart Core.
 
+### "remote access to protected API routes is disabled"
+
+The full message is `remote access to protected API routes is disabled;
+configure FTW_API_TOKEN or use a local address`. The dashboard still loads —
+the message appears when a protected request (saving settings, starting an
+update, a scan) is refused. It means the request failed the locality rules
+above, and "local" is judged on the request, not on which network the
+browser sits on:
+
+1. **The address in the browser's address bar** must be a private or
+   loopback IP, `localhost`, or a `.local`/`.localhost`/`.home.arpa` name.
+2. **The address the connection arrives from** must be loopback, private, or
+   link-local.
+
+Being on the same LAN as the box satisfies neither by itself. The common
+ways to trip the boundary from the couch next to the Pi:
+
+- **A plain hostname without a dot** — `http://myhost:8080`. Since v2.2.1
+  a no-dot name is deliberately not local (a DNS-rebinding guard), so an
+  address that worked before an update stops working. Use the `.local`
+  name or the IP instead.
+- **A router-issued name with a dot in it** — `pi.lan`, `ftw.fritz.box`,
+  `box.home`. Only the suffixes listed above count as local names.
+- **Tailscale** — both `100.x.y.z` addresses (CGNAT space) and `*.ts.net`
+  names count as remote.
+- **IPv6** — when the name resolves to a global IPv6 address, the browser
+  connects from a global address and fails the second rule, even with a
+  `.local` name in the address bar.
+- **A reverse proxy or Home Assistant ingress reached through a public
+  URL** — the request arrives carrying the public hostname.
+
+The reliable fix for a browser is to open the UI through the box's private
+IPv4 address, for example `http://192.168.1.123:8080`. Setting
+`FTW_API_TOKEN` does not change what the built-in UI sends — the token is
+only for API clients that attach the `Authorization: Bearer` header, as
+described above — and a `?token=...` query parameter in the URL does
+nothing.
+
 ## Logs and health
 
 ```bash
 docker compose logs --tail=200 ftw
-docker compose logs -f ftw ftw-optimizer
+docker compose logs -f ftw ftw-updater
 curl -fsS http://localhost:8080/api/health
 ```
 
@@ -217,8 +271,8 @@ limit until the physical installation and configuration agree.
 
 ### Optimizer unavailable
 
-Inspect `ftw-optimizer` logs and the shared socket volume. Core continues with
-the Go fallback; optimizer recovery does not require a core data reset.
+Inspect Core logs and `/api/components` for the Energyplan worker status.
+Core uses its Go fallback when needed; recovery needs no data reset.
 
 ### MQTT device missing
 
@@ -348,8 +402,8 @@ conventional layout is:
 /var/lib/ftw/             state, history, custom/managed drivers
 ```
 
-Run the binary with `-help` for its current flags. Native installs that omit
-Python use the Go planner fallback and normally leave container self-update
+Run the binary with `-help` for its current flags. Native installs without a supported
+Energyplan worker use the Go planner fallback and normally leave container self-update
 disabled.
 
 ## Release recovery

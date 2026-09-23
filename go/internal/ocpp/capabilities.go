@@ -40,22 +40,31 @@ func profilesIncludeSmartCharging(csv string) bool {
 
 // probeFeatureProfiles16 asks a 1.6 charge point for its feature profiles.
 // Async: the library delivers the confirmation on its own goroutine.
-func probeFeatureProfiles16(cs ocpp16.CentralSystem, h *Handler, id string) {
-	err := cs.GetConfiguration(id, func(conf *core.GetConfigurationConfirmation, err error) {
-		defer h.probeFinished(id)
-		if err != nil || conf == nil {
-			slog.Info("ocpp: charger did not answer GetConfiguration — control capability stays unknown",
-				"charger", id, "err", err)
-			return
-		}
-		for _, kv := range conf.ConfigurationKey {
-			if kv.Key == "SupportedFeatureProfiles" && kv.Value != nil {
-				h.setControlCapability(id, *kv.Value, profilesIncludeSmartCharging(*kv.Value))
-				return
+func probeFeatureProfiles16(cs ocpp16.CentralSystem, h *Handler, id string, sockets *socketSessions) {
+	alias, err := sockets.currentID(id)
+	if err != nil {
+		h.probeFinished(id)
+		return
+	}
+	err = cs.GetConfiguration(alias, func(conf *core.GetConfigurationConfirmation, err error) {
+		_, _ = boundCall(sockets, alias, func(id string) (bool, error) {
+			defer h.probeFinished(id)
+			if err != nil || conf == nil {
+				slog.Info("ocpp: charger did not answer GetConfiguration — control capability stays unknown",
+					"charger", id, "err", err)
+				return false, nil
 			}
-		}
-		slog.Info("ocpp: charger answered GetConfiguration without SupportedFeatureProfiles — control capability stays unknown",
-			"charger", id)
+			for _, kv := range conf.ConfigurationKey {
+				if kv.Key == "SupportedFeatureProfiles" && kv.Value != nil {
+					h.setControlCapability(id, *kv.Value, profilesIncludeSmartCharging(*kv.Value))
+					return true, nil
+				}
+			}
+			slog.Info("ocpp: charger answered GetConfiguration without SupportedFeatureProfiles — control capability stays unknown",
+				"charger", id)
+
+			return true, nil
+		})
 	}, []string{"SupportedFeatureProfiles"})
 	if err != nil {
 		// The request never left, so no callback will clear the marker.
@@ -66,22 +75,31 @@ func probeFeatureProfiles16(cs ocpp16.CentralSystem, h *Handler, id string) {
 
 // probeSmartChargingV201 asks a 2.0.1 station whether SmartChargingCtrlr is
 // available — the 2.0.1 shape of the SmartCharging feature profile.
-func probeSmartChargingV201(csms ocpp201.CSMS, h *Handler, id string) {
-	err := csms.GetVariables(id, func(resp *provisioning.GetVariablesResponse, err error) {
-		defer h.probeFinished(id)
-		if err != nil || resp == nil || len(resp.GetVariableResult) == 0 {
-			slog.Info("ocpp: station did not answer GetVariables — control capability stays unknown",
-				"charger", id, "err", err)
-			return
-		}
-		r := resp.GetVariableResult[0]
-		if r.AttributeStatus != provisioning.GetVariableStatusAccepted {
-			slog.Info("ocpp: SmartChargingCtrlr not reported — control capability stays unknown",
-				"charger", id, "status", r.AttributeStatus)
-			return
-		}
-		available := strings.EqualFold(strings.TrimSpace(r.AttributeValue), "true")
-		h.setControlCapability(id, "SmartChargingCtrlr.Available="+strings.TrimSpace(r.AttributeValue), available)
+func probeSmartChargingV201(csms ocpp201.CSMS, h *Handler, id string, sockets *socketSessions) {
+	alias, err := sockets.currentID(id)
+	if err != nil {
+		h.probeFinished(id)
+		return
+	}
+	err = csms.GetVariables(alias, func(resp *provisioning.GetVariablesResponse, err error) {
+		_, _ = boundCall(sockets, alias, func(id string) (bool, error) {
+			defer h.probeFinished(id)
+			if err != nil || resp == nil || len(resp.GetVariableResult) == 0 {
+				slog.Info("ocpp: station did not answer GetVariables — control capability stays unknown",
+					"charger", id, "err", err)
+				return false, nil
+			}
+			r := resp.GetVariableResult[0]
+			if r.AttributeStatus != provisioning.GetVariableStatusAccepted {
+				slog.Info("ocpp: SmartChargingCtrlr not reported — control capability stays unknown",
+					"charger", id, "status", r.AttributeStatus)
+				return false, nil
+			}
+			available := strings.EqualFold(strings.TrimSpace(r.AttributeValue), "true")
+			h.setControlCapability(id, "SmartChargingCtrlr.Available="+strings.TrimSpace(r.AttributeValue), available)
+
+			return true, nil
+		})
 	}, []provisioning.GetVariableData{{
 		Component: types201.Component{Name: "SmartChargingCtrlr"},
 		Variable:  types201.Variable{Name: "Available"},

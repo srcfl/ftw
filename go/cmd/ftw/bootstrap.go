@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/config"
@@ -164,19 +162,13 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		slog.Info("config written by setup wizard — restarting", "path", configPath)
 		writeBootstrapJSON(w, http.StatusOK, map[string]string{"status": "ok", "restart": "true"})
 		go func() {
-			exe, err := os.Executable()
-			if err != nil {
-				exe = os.Args[0]
+			if err := execCurrentProcess(nil); err != nil {
+				slog.Error("bootstrap re-exec failed", "err", err)
 			}
-			_ = syscall.Exec(exe, os.Args, os.Environ())
 		}()
 	})
 
-	srv := &http.Server{
-		Addr:              ":8080",
-		Handler:           secureBootstrapMutations(mux),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newHTTPServer(":8080", secureBootstrapMutations(mux))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("bootstrap server", "err", err)
 		os.Exit(1)

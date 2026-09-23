@@ -19,6 +19,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -191,6 +192,14 @@ func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
 	}))
 	defer server.Close()
 	fixture.setVersion(server.URL, "1.1.0-beta.1")
+	fixture.mu.Lock()
+	fixture.manifest.Repository = "https://github.com/srcfl/device-drivers"
+	fixture.manifest.Drivers[0].ReadOnly = true
+	fixture.manifest.Drivers[0].Permissions = []string{"http.get", "http.post"}
+	fixture.manifest.Drivers[0].Metadata.ReadOnly = true
+	fixture.manifest.Drivers[0].Metadata.AuthPostPath = "/oauth/token"
+	fixture.manifest.Drivers[0].Metadata.ConfigSecrets = []string{"client_secret", "refresh_token"}
+	fixture.mu.Unlock()
 
 	dir := t.TempDir()
 	store, err := state.Open(filepath.Join(dir, "state.db"))
@@ -198,7 +207,12 @@ func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	manager := New(nil, dir, store)
+	// The box config lists only stable; InstallChannel owns its separate,
+	// already trusted beta source.
+	configured := &config.DeviceRepository{Repositories: []config.DriverRepositorySource{{
+		ID: config.DefaultDriverRepositoryID, ManifestURL: config.DefaultDriverRepositoryManifestURL,
+	}}}
+	manager := New(configured, dir, store)
 	manager.betaRepo = config.DriverRepositorySource{
 		ID:            config.DefaultDriverRepositoryBetaID,
 		Name:          config.DefaultDriverRepositoryBetaName,
@@ -233,6 +247,52 @@ func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
 		!strings.Contains(err.Error(), "unsupported driver channel") {
 		t.Fatalf("unsupported channel error = %v", err)
 	}
+	for _, repo := range manager.cfg.Repositories {
+		if repo.ID == manager.betaRepo.ID {
+			t.Fatal("beta leaked into configured repositories")
+		}
+	}
+	driverCfg := config.Driver{Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua")}
+	checkPolicy := func(m *Manager) {
+		t.Helper()
+		policy, err := m.RuntimePolicy(driverCfg)
+		if err != nil || policy == nil || !policy.IsReadOnly() || policy.AuthPostPath != "/oauth/token" ||
+			len(policy.ConfigSecrets) != 2 || policy.ConfigSecrets[1] != "refresh_token" {
+			t.Fatalf("installed beta OAuth policy = %+v, %v", policy, err)
+		}
+	}
+	checkPolicy(manager)
+	// A new process must reconstruct the same policy from the signed cache.
+	reloaded := New(configured, dir, store)
+	reloaded.betaRepo = manager.betaRepo
+	checkPolicy(reloaded)
+	t.Run("unknown_repository", func(t *testing.T) {
+		unknown := New(configured, dir, store)
+		unknown.betaRepo = manager.betaRepo
+		unknown.betaRepo.ID = "other-beta-source"
+		if policy, err := unknown.RuntimePolicy(driverCfg); err != nil || policy != nil {
+			t.Fatalf("unknown installed repository gained a policy: %+v, %v", policy, err)
+		}
+	})
+	t.Run("invalid_signature", func(t *testing.T) {
+		var envelope ManifestEnvelope
+		if err := json.Unmarshal(fixture.envelope(t), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		envelope.Signature = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+		raw, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(manager.root, "cache", manager.betaRepo.ID+".json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		invalid := New(configured, dir, store)
+		invalid.betaRepo = manager.betaRepo
+		if policy, err := invalid.RuntimePolicy(driverCfg); err == nil || policy != nil {
+			t.Fatalf("invalid beta signature gained a policy: %+v, %v", policy, err)
+		}
+	})
 }
 
 func TestOfficialBetaChannelDoesNotShareConfiguredRepositoryState(t *testing.T) {
@@ -270,8 +330,10 @@ func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
 	fixture.mu.Lock()
 	fixture.manifest.Repository = "https://github.com/srcfl/device-drivers"
 	fixture.manifest.Drivers[0].ReadOnly = true
-	fixture.manifest.Drivers[0].Permissions = []string{"http.get"}
+	fixture.manifest.Drivers[0].Permissions = []string{"http.get", "http.post"}
 	fixture.manifest.Drivers[0].Metadata.ReadOnly = true
+	fixture.manifest.Drivers[0].Metadata.AuthPostPath = "/oauth/token"
+	fixture.manifest.Drivers[0].Metadata.ConfigSecrets = []string{"client_secret", "refresh_token"}
 	fixture.mu.Unlock()
 
 	dir := t.TempDir()
@@ -302,6 +364,17 @@ func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
 		policy.PackageID != "com.sourceful.driver.demo" {
 		t.Fatalf("direct runtime identity = %+v", policy)
 	}
+	if policy.AuthPostPath != "/oauth/token" || !policy.Permissions["http.post"] || len(policy.ConfigSecrets) != 2 || policy.ConfigSecrets[1] != "refresh_token" {
+		t.Fatalf("signed OAuth secret policy = %+v", policy)
+	}
+	// These are the policy fields in signed myUplink 1.2.2. Exercise the
+	// actual Lua constructor as well: inspecting a policy alone misses its
+	// startup validation, which previously rejected the auth POST grant.
+	luaDriver, err := drivers.NewLuaDriverWithPolicy(filepath.Join(manager.ActiveDir(), "demo.lua"), drivers.NewHostEnv("demo", nil), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	luaDriver.Cleanup()
 
 	// read_only and control_enabled are two spellings of one fact. A driver
 	// that may control while claiming to be read-only reads as safe to
