@@ -147,7 +147,7 @@ class FTWCTLTests(unittest.TestCase):
                 ("GET", "/api/version/check"): {"current": "v3.8.0-beta.1", "native": False},
                 ("GET", "/api/health"): {"status": "ok", "drivers_ok": 3},
                 ("GET", "/api/drivers"): {"easee": {}, "myuplink": {}, "sungrow": {}},
-                ("GET", "/api/backups"): {"backups": [{"id": name, "verified": True,
+                ("GET", "/api/backups"): {"dir": "/app/data/backups", "backups": [{"id": name, "verified": True,
                     "sha256": digest, "size_bytes": backup.stat().st_size,
                     "created_at": datetime.now(timezone.utc).isoformat()}]},
             })
@@ -171,6 +171,8 @@ class FTWCTLTests(unittest.TestCase):
                     return "aarch64"
                 if command[:2] == ("mktemp", "-d"):
                     return "/tmp/ftw-migrate.ABC12345"
+                if command[:4] == ("sudo", "-n", "stat", "-c"):
+                    return str(backup.stat().st_size)
                 if "sha256sum" in command:
                     return digest + "  backup"
                 if command[-1:] == ("status",):
@@ -184,18 +186,24 @@ class FTWCTLTests(unittest.TestCase):
                 return files
 
             with mock.patch.object(ftwctl, "remote", side_effect=fake_remote), \
-                 mock.patch.object(ftwctl, "remote_copy"), \
+                 mock.patch.object(ftwctl, "remote_copy") as copied, \
                  mock.patch.object(ftwctl, "published_package", side_effect=fake_package), \
-                 mock.patch.object(ftwctl, "wait_for_version", side_effect=[False, True]), \
+                 mock.patch.object(ftwctl, "wait_for_version", side_effect=[False, False, True]), \
                  mock.patch.object(ftwctl.socket, "getfqdn", return_value="mac.example"):
                 with self.assertRaisesRegex(ftwctl.FTWError, "rolled back"):
                     ftwctl.migrate_native(api, args)
+            on_box_backup = "/srv/ftw/data/backups/" + name
+            self.assertIn(("sudo", "-n", "sha256sum", on_box_backup), commands)
+            self.assertEqual(copied.call_count, 3)
+            self.assertTrue(all(call.args[1] != backup for call in copied.call_args_list))
+            self.assertIn(("sudo", "-n", "/opt/ftw-native/releases/v0.131.0-beta.1/ftw-backup",
+                           "restore", "-archive", on_box_backup, "-data", "/srv/ftw/data", "-yes"), commands)
             stop = ("sudo", "-n", "systemctl", "stop", "ftw.service")
             remove = ("sudo", "-n", "rm", "-f", "/etc/systemd/system/ftw.service.d/zz-native-migration.conf")
             start = ("sudo", "-n", "systemctl", "start", "ftw.service")
             self.assertIn(remove, commands)
-            self.assertEqual(commands.count(stop), 2)
-            self.assertEqual(commands.count(start), 2)
+            self.assertEqual(commands.count(stop), 3)
+            self.assertEqual(commands.count(start), 3)
             self.assertLess(commands.index(stop), commands.index(remove))
 
 

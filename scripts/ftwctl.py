@@ -330,10 +330,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verified_backup(api: API, path: Path) -> tuple[str, str]:
+def verified_backup(api: API, path: Path) -> tuple[str, str, int, str]:
     if not path.is_file() or not path.name.endswith(".ftwbak"):
         raise FTWError("--backup must name a downloaded .ftwbak file")
-    entries = api.json("GET", "/api/backups").get("backups", [])
+    listing = api.json("GET", "/api/backups")
+    entries = listing.get("backups", [])
     entry = next((item for item in entries if item.get("id") == path.name), None)
     if not entry or not entry.get("verified"):
         raise FTWError("the running site has no matching verified backup")
@@ -348,7 +349,18 @@ def verified_backup(api: API, path: Path) -> tuple[str, str]:
     digest = sha256_file(path)
     if digest != entry.get("sha256") or path.stat().st_size != entry.get("size_bytes"):
         raise FTWError("local backup bytes do not match the site's verified backup")
-    return path.name, digest
+    return path.name, digest, entry["size_bytes"], listing.get("dir", "")
+
+
+def backup_on_host(backup_dir: str, name: str, data_dir: str, config: str) -> str:
+    if not backup_dir.startswith("/") or os.path.normpath(backup_dir) != backup_dir:
+        raise FTWError("Core reported an invalid backup directory")
+    service_data_dir = os.path.dirname(config)
+    if backup_dir == service_data_dir or backup_dir.startswith(service_data_dir + "/"):
+        return data_dir + backup_dir[len(service_data_dir):] + "/" + name
+    if backup_dir == data_dir or backup_dir.startswith(data_dir + "/"):
+        return backup_dir + "/" + name
+    raise FTWError("backup directory is outside the supported data bind; keep the old site and inspect its backup path")
 
 
 def published_package(tag: str, arch: str, work: Path) -> tuple[Path, Path, Path]:
@@ -443,7 +455,9 @@ def migrate_native(api: API, args) -> None:
     unit = remote(args.host, "systemctl", "show", args.unit, "-p", "ExecStart", "-p", "User", "-p", "Group", "-p", "BindPaths", "--no-pager")
     if "User=ftw" not in unit or "Group=ftw" not in unit or not re.search(r"path=/opt/ftw/ftw(?:\s|;)", unit) or "ftw-launcher" in unit or "docker" in unit.lower():
         raise FTWError("this service is not the supported older native/systemd layout; Docker stays untouched")
-    if args.data_dir not in unit and not args.config.startswith(args.data_dir + "/"):
+    service_data_dir = os.path.dirname(args.config)
+    if (not args.config.startswith(args.data_dir + "/") and
+            f"{args.data_dir}:{service_data_dir}" not in unit):
         raise FTWError("data directory does not match the unit's bind mount or config path")
     remote(args.host, "sudo", "-n", "true")
     remote(args.host, "sudo", "-n", "test", "-f", args.data_dir + "/state.db")
@@ -455,7 +469,14 @@ def migrate_native(api: API, args) -> None:
         return
     if args.backup is None:
         raise FTWError("run backup --output-dir on this computer, then pass --backup to migrate-native")
-    backup_name, backup_sha = verified_backup(api, args.backup)
+    backup_name, backup_sha, backup_size, backup_dir = verified_backup(api, args.backup)
+    on_box_backup = backup_on_host(backup_dir, backup_name, args.data_dir, args.config)
+    remote(args.host, "sudo", "-n", "test", "-f", on_box_backup)
+    if int(remote(args.host, "sudo", "-n", "stat", "-c", "%s", on_box_backup)) != backup_size:
+        raise FTWError("on-box backup size differs from the verified off-box copy")
+    say(f"Checking on-box archive SHA-256 ({size(backup_size)}); hash progress is not available.")
+    if remote(args.host, "sudo", "-n", "sha256sum", on_box_backup).split()[0] != backup_sha:
+        raise FTWError("on-box backup differs from the verified off-box copy")
     remote(args.host, "sudo", "-n", "test", "!", "-e", args.root)
     remote(args.host, "sudo", "-n", "test", "!", "-L", args.root)
     remote(args.host, "sudo", "-n", "test", "!", "-e", override)
@@ -472,20 +493,18 @@ def migrate_native(api: API, args) -> None:
         identity_sha = remote(args.host, "sudo", "-n", "sha256sum", identity_path).split()[0]
     except FTWError:
         identity_sha = None
-    say(f"Migrating {info['current']} -> {args.tag}; old service remains active until the verified package and backup are ready.")
+    say(f"Migrating {info['current']} -> {args.tag}; old service remains active until the verified package is ready.")
+    say(f"Recovery archive on box: {on_box_backup}; verified copy off box: {args.backup}")
     with tempfile.TemporaryDirectory(prefix="ftw-migrate-") as work_name:
         work = Path(work_name)
         archive, checksum, launcher = published_package(args.tag, arch, work)
         remote_dir = remote(args.host, "mktemp", "-d", "/tmp/ftw-migrate.XXXXXXXX")
         if not re.fullmatch(r"/tmp/ftw-migrate\.[A-Za-z0-9]+", remote_dir):
             raise FTWError("SSH host returned an unexpected staging directory")
-        say(f"Recovery copy on box during migration: {remote_dir}/{backup_name}")
         remote(args.host, "sudo", "-n", "chgrp", "ftw", remote_dir)
         remote(args.host, "sudo", "-n", "chmod", "0750", remote_dir)
-        for source in (archive, checksum, launcher, args.backup):
+        for source in (archive, checksum, launcher):
             remote_copy(args.host, source, remote_dir + "/" + source.name, "copying_" + source.name)
-        if remote(args.host, "sha256sum", remote_dir + "/" + backup_name).split()[0] != backup_sha:
-            raise FTWError("recovery copy changed in transit")
         for source in (archive, checksum):
             remote(args.host, "sudo", "-n", "chgrp", "ftw", remote_dir + "/" + source.name)
             remote(args.host, "sudo", "-n", "chmod", "0640", remote_dir + "/" + source.name)
@@ -528,10 +547,10 @@ def migrate_native(api: API, args) -> None:
                 say("Old Core did not recover from the binary switch. Restoring verified data while stopped.")
                 remote(args.host, "sudo", "-n", "systemctl", "stop", args.unit)
                 restored_bin = f"{args.root}/releases/{args.tag}/ftw-backup"
-                remote(args.host, "sudo", "-n", restored_bin, "restore", "-archive", remote_dir + "/" + backup_name, "-data", args.data_dir, "-yes")
+                remote(args.host, "sudo", "-n", restored_bin, "restore", "-archive", on_box_backup, "-data", args.data_dir, "-yes")
                 remote(args.host, "sudo", "-n", "systemctl", "start", args.unit)
                 if not wait_for_version(api, info["current"], baseline, 180):
-                    raise FTWError(f"automatic recovery failed; keep {remote_dir}/{backup_name} and inspect {args.unit}") from exc
+                    raise FTWError(f"automatic recovery failed; keep {on_box_backup} and {args.backup}, then inspect {args.unit}") from exc
             raise FTWError("migration rolled back; old Core and data are running") from exc
         say(f"Migration complete: {args.tag}; old binary remains at its original path.")
         say(f"Verified backup remains on this computer: {args.backup}")
