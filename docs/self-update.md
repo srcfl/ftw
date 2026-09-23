@@ -1,7 +1,9 @@
 # Updates and release channels
 
 [ADR 0007](adr/0007-self-updating-binary.md) sets the direction for native Core
-updates. That change has not shipped. This page describes what ships today.
+updates. The native updater and release workflow are in source, but no 0.x
+release or guided migration installer has shipped. The sections below mark
+the old Docker path separately.
 
 The old Docker release path is frozen. Native 0.x uses
 `.github/workflows/native-release.yml`, which leaves GitHub `releases/latest`
@@ -41,8 +43,9 @@ Older installed code cannot have its Update button removed after the fact;
 it may still show an already published release. That button is not the way
 to migrate.
 
-A native beta is first validated on the home box and at least one other site.
-Only then does the owner promote the same tested source commit to
+A native beta must run for a week on the home box and at least one other site
+with no open `release-blocker`. Only then does the owner promote the same
+tested source commit to
 `v0.131.0` stable. The beta and stable packages have different embedded
 version strings, so each published package needs its own hash and release
 receipt. A tag or green CI run alone is not a deployed release.
@@ -54,9 +57,8 @@ service, keep the data directory and site identity, install the native
 service, then verify Core, history, drivers and control on that site. It must
 leave a tested path back to the site's prior image and backup. Docker and
 Home Assistant users who do not migrate stay on their current delivery path.
-The 0.x version reset and guided installer are still being built. The native
-workflow has not published a migration release; do not use a local native
-pilot package as one.
+The guided installer is still being built. The native workflow has not
+published a migration release; do not use a local native pilot package as one.
 
 The native release workflow runs by hand from `master`. A beta tag must match
 the package version and points to the exact source commit used for both Linux
@@ -75,13 +77,28 @@ backup operation. Core saves a local settings/config rollback point before
 each update, but the point does not contain history and is not an off-device
 backup.
 
-## Release progression
+## Native 0.x release progression
 
 User-visible changes land with a Changeset. The Changesets workflow opens the
 Version Packages PR and updates [`package.json`](../package.json) plus
 [`CHANGELOG.md`](../CHANGELOG.md).
 
-After that PR merges:
+After the Version Packages PR merges, the owner dispatches
+[`native-release.yml`](../.github/workflows/native-release.yml) on `master`
+for the matching `v0.X.Y-beta.N` tag. The workflow checks the source commit,
+builds complete ARM64 and AMD64 packages, runs `make verify`, checks the
+hashes and publishes a prerelease without moving GitHub `releases/latest`.
+
+After a week on the home box and another real site with no open
+`release-blocker`, the owner dispatches the same workflow for `v0.X.Y` stable
+and names the tested `source_beta`. Stable uses the same source commit and
+checks the published beta receipt and packages. No merge publishes a release
+on its own. Docker aliases remain on 2.x.
+
+## Legacy Docker release progression (critical 2.x repair only)
+
+The old workflows remain for an owner-approved critical safety repair on 2.x.
+They are not a path to native 0.x. For such a repair:
 
 1. run [`beta.yml`](../.github/workflows/beta.yml) with `vX.Y.Z-beta.N`;
 2. validate that immutable build on real sites;
