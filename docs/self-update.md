@@ -1,8 +1,13 @@
 # Updates and release channels
 
-[ADR 0007](adr/0007-self-updating-binary.md) proposes replacing the updater
-sidecar with a Core that updates itself as a static binary. It is a proposal.
-This page describes what ships today.
+[ADR 0007](adr/0007-self-updating-binary.md) sets the direction for native Core
+updates. That change has not shipped. This page describes what ships today.
+
+The old Docker release path is reserved for 2.x maintenance. A native 0.x
+release needs its own path and must leave GitHub `releases/latest` and the old
+Docker `:latest` aliases on 2.x for installed boxes. A Docker 1.x or 2.x box
+must use the guided migration to reach native 0.x; Update Center must not
+offer a cross-major Core update.
 
 FTW has two channels:
 

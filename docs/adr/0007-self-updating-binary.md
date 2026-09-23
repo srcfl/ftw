@@ -1,12 +1,12 @@
 # ADR 0007: Core updates itself as a static binary
 
-- Status: proposed
+- Status: accepted as direction on 2026-09-23; rollout pending
 - Date: 2026-09-18
 - Issue: [#1308](https://github.com/srcfl/ftw/issues/1308)
 - Also decides the version scheme, tracked in
   [#1314](https://github.com/srcfl/ftw/issues/1314). The stable-channel defect
-  is [#1313](https://github.com/srcfl/ftw/issues/1313) and is independent
-- Replaces, when accepted: the `ftw-updater` sidecar, the update IPC volume
+  is tracked separately in [#1313](https://github.com/srcfl/ftw/issues/1313).
+- Replaces, when shipped: the `ftw-updater` sidecar, the update IPC volume
   and the Compose and `.env` pinning described in
   [self-update.md](../self-update.md). That document stays the description of
   what ships until this one is implemented.
@@ -43,7 +43,9 @@ this shape.
 
 **Transition code never left.** Retiring Python, migrating legacy Compose
 layouts, the paired 2.x → 3.x upgrade and the old product-name alias are
-still built, tested and documented for boxes that have already moved.
+still built, tested and documented. Existing 1.x and 2.x boxes will wait for
+the new migration path; their support code cannot be removed merely because
+the 3.x line has moved on.
 
 **Data migration landed inside the updater.** The SQLite → DuckDB change made
 the rollback point a copy of the whole history (#1302) and gave the sidecar a
@@ -81,14 +83,16 @@ and restart. The Home Assistant add-on model lets Supervisor own updates.
 
 ## Decision
 
-**Core downloads its next release, verifies it and swaps to it. No process on
-the box holds the Docker socket, and no Docker engine is required.**
+**On native installs, Core downloads its next release, verifies it and swaps
+to it. No native update needs a Docker socket or Docker engine.**
 
 1. **The release artifact is the existing tarball.** Core fetches
    `ftw-linux-<arch>.tar.gz` and its `.sha256` from the GitHub Release the
    checker already resolves, verifies the digest, and unpacks into
    `releases/<tag>/` under the install root. Only `vX.Y.Z` and
-   `vX.Y.Z-beta.N` tags are accepted, as today.
+   `vX.Y.Z-beta.N` tags are accepted, as today. The beta workflow must
+   publish the complete native package before any native beta can install
+   itself; stable must promote the exact package tested on beta.
 
 2. **Two slots and a launcher.** The install root holds `current`, and during
    an update `next`. systemd starts a launcher, not Core. On each start the
@@ -99,14 +103,15 @@ the box holds the Docker socket, and no Docker engine is required.**
    readiness (API up, state open, drivers loaded) within a bounded time and
    then commits by renaming `trial` to `current` and the old `current` to
    `previous`. If it crashes or times out, it exits and systemd restarts the
-   launcher, which falls back. Directory renames are atomic on one file
-   system, so there is no half state.
+   launcher, which falls back. Each rename is atomic on one file system, but
+   the series is not one atomic operation. The launcher needs durable intent
+   and recovery for a crash between renames.
 
-3. **Rollback is the same swap in reverse.** The UI offers `previous`. Core
-   renames it to `next`, restores the state rollback point when the schema
-   requires it, and exits. The launcher runs `previous` as a trial. The
-   rollback point stays what #1302 made it: `state.db` and config, taken before
-   every Core update, never a copy of history.
+3. **Rollback is the same swap in reverse.** The UI offers `previous` only
+   when that binary can read the current state schema. Core renames it to
+   `next` and exits; the launcher runs it as a trial. The rollback point stays
+   what #1302 made it: `state.db` and config, taken before every Core update,
+   never a copy of history. A full data restore is an offline operation.
 
 4. **Restart is an exit.** The unit has `Restart=always`. "Restart" in the UI
    makes Core shut down cleanly and exit; systemd starts the launcher, which
@@ -120,19 +125,21 @@ the box holds the Docker socket, and no Docker engine is required.**
    becomes the shipped unit. The image drops the Docker engine and Compose.
    Mosquitto comes from `apt`, on the same host port as today.
 
-7. **Docker becomes a plain image.** The Compose file has one Core service and
-   Mosquitto, no sidecar and no `update-ipc` volume. Self-update is off, the
-   version notice stays, and `docker compose pull` is the documented path. The
-   Home Assistant add-on stays on Supervisor.
+7. **New Docker packaging becomes a plain image.** The Compose file has one
+   Core service and Mosquitto, no sidecar and no `update-ipc` volume. The
+   version notice stays, and `docker compose pull` is the documented path.
+   Existing 1.x and 2.x installs keep their supported release line until the
+   guided migration is ready. The Home Assistant add-on stays on Supervisor.
 
 8. **Betas are weekly.** `beta.yml` runs on a schedule, not after every
    Version Packages merge. A hotfix beta needs a `release-blocker`. Stable
    promotes after one week on the home box and at least one other site.
 
-9. **Transition code is deleted once every known box runs 3.5 or later.**
-   Python retirement, legacy Compose migration, the paired upgrade script and
-   the old product-name alias go. The legacy state-schema marker path goes
-   when no 3.5.x box remains.
+9. **Transition code is deleted only after the affected boxes have migrated
+   or left support.** A 3.5 version check is not enough: 1.x and 2.x boxes
+   stay on their line until the new installer is proven. Remove each old path
+   after checking the box inventory and its recovery need. Keep the legacy
+   state-schema marker while any supported reader still needs it.
 
 ## Versions
 
@@ -141,12 +148,15 @@ anything may change, and that is the true state of FTW.
 
 1. **The first binary release is `v0.131.0`.** It continues the counter that
    stopped at `v0.130.4`; those tags exist and cannot be reused. The Docker
-   line ends at its last 3.x release.
+   feature line ends at its last 3.x release; 2.x maintenance may continue.
 
-2. **The reset happens at the cutover, and nowhere else.** The checker never
-   offers 0.x to a 3.x box, because 0 is less than 3. The cutover is a
-   reinstall, and the two lines are never compared, so there is no epoch rule
-   and no transitional release.
+2. **The reset happens at the native cutover, and nowhere else.** No Docker
+   box uses Update Center to move between the 1.x/2.x, 3.x and native 0.x
+   lines. Existing 1.x and 2.x boxes do not need a 3.x hop. A separate guided
+   installer performs the move after a verified full backup off the box and
+   checks that the new service, data and devices work. It must retain a way
+   back to the old installation if that check fails. No epoch rule or
+   transitional release is needed.
 
 3. **There is no major bump in 0.x.** `major` leaves the changeset rules, and
    the changeset check rejects it.
@@ -157,10 +167,20 @@ anything may change, and that is the true state of FTW.
 
 5. **Betas stay `v0.Y.Z-beta.N`**, weekly, as decided above.
 
+6. **Old discovery stays on the old line.** The published GitHub
+   `releases/latest` response and the old Docker `:latest` aliases remain on
+   safe 2.x releases while old stable clients read them. A native 0.x stable
+   release must use exact tags without taking over that global latest slot.
+   A maintenance release adds the cross-major guard to 2.x Core; binaries
+   shipped before that release cannot be changed in place. Old betas can
+   still offer 3.x until they receive the guard, so no one should use that
+   Update button for migration.
+
 ## What is lost
 
-- **In-app update on Docker installs.** They keep the version notice and get a
-  command. Anyone who wants the button installs the binary.
+- **In-app update on new Docker installs.** They keep the version notice and
+  get a command. Older supported Docker installs keep same-line maintenance
+  until the guided migration exists.
 - **In-app update on Windows and macOS.** Manual replacement stays until a
   launcher exists for those platforms.
 - **The capability handshake and the six-hour readiness budget.** Both existed
@@ -191,18 +211,21 @@ anything may change, and that is the true state of FTW.
 - **Added:** download and verify, the slot swap and commit, a launcher script
   and its tests, and installer support for the binary layout. Rough size:
   a few hundred lines of Go and under a hundred of shell.
-- **Existing Docker boxes.** One last Docker release shows a banner that points
-  at the installer. The installer stops the Compose project, leaves `./data`
-  where it is, unpacks the tarball, writes the unit with that data directory
-  and starts it. No data moves.
+- **Existing Docker boxes.** A same-line maintenance release can point users
+  at the installer. The installer first creates and verifies a full backup
+  kept off the box. It preserves config, history, site identity and device
+  goals, checks the new service and connected devices, and can return to the
+  prior installation on failure. Whether it reuses or copies the data path is
+  an installer choice that must be tested on real layouts.
 - **Disk.** Two or three release directories, tens of megabytes each, instead
   of gigabytes of images (#1305).
 - **RAM on the Pi.** No Docker engine, no containerd, no sidecar.
 - **Changeset rules change.** `.changeset/README.md` and
   `changeset-check.yml` lose `major`, and the README states the minor rule
   above.
-- **The stable channel needs a fix before any of this.** #1313 is independent
-  and should land first.
+- **Release publication must preserve the old stable slot.** #1313 remains a
+  user-visible gap. Native 0.x publication must not move GitHub latest or old
+  Docker latest away from the 2.x maintenance line.
 - **Risk: the launcher is new and small, and it must be right.** It gets a
   shell test suite that runs every branch of its decision, and the home box
   runs an induced crash during a trial before this is accepted.
@@ -232,7 +255,7 @@ anything may change, and that is the true state of FTW.
 - **Moving tags with a container watcher.** No immutability, no rollback.
   Rejected.
 
-## Evidence required before acceptance
+## Evidence required before rollout
 
 - Update and rollback on the home box (Raspberry Pi 4, 7.5 GB history) with
   timings for download, swap and readiness.
@@ -240,3 +263,7 @@ anything may change, and that is the true state of FTW.
   action, and the UI reports it.
 - Disk use after ten updates stays at the retained slots.
 - The Docker-to-binary installer path on a box with data in `~/ftw/data`.
+- A verified full backup copied off the box before cutover, plus a tested
+  restore or return to the old installation after a failed cutover.
+- Checks that history, site identity, device goals and live device state
+  survive the move without two Core processes controlling the same site.
