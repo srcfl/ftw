@@ -15,8 +15,9 @@ import tempfile
 
 
 RESOURCES = (
-    "drivers", "web", "config.example.yaml",
-    "deploy/ftw.service", "LICENSE", "NOTICE", "LICENSING.md",
+    "drivers", "web", "config.example.yaml", "state-schema.json",
+    "deploy/ftw.service", "deploy/ftw-native.service",
+    "LICENSE", "NOTICE", "LICENSING.md",
     "THIRD-PARTY-NOTICES.txt",
 )
 MACHINES = {"amd64": 62, "arm64": 183}
@@ -31,7 +32,7 @@ spec.loader.exec_module(energyplan_verify)
 
 def package(root, binaries, output, arch):
     # Catch an accidentally reused host build before it reaches the release.
-    for name in ("ftw", "ftw-backup"):
+    for name in ("ftw", "ftw-backup", "ftw-launcher"):
         with (binaries / name).open("rb") as source:
             header = source.read(20)
         if (len(header) != 20 or header[:6] != b"\x7fELF\x02\x01"
@@ -72,7 +73,7 @@ def package(root, binaries, output, arch):
             pending = Path(raw.name)
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
                 with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as tar:
-                    for name in ("ftw", "ftw-backup"):
+                    for name in ("ftw", "ftw-backup", "ftw-launcher"):
                         info = normalized(tar.gettarinfo(str(binaries / name), name))
                         info.mode = 0o755
                         with (binaries / name).open("rb") as binary:
@@ -92,6 +93,16 @@ def package(root, binaries, output, arch):
                     info.size = len(data)
                     info.mode = 0o644
                     tar.addfile(normalized(info), io.BytesIO(data))
+                    state_schema = json.loads((root / "state-schema.json").read_text())["version"]
+                    if not isinstance(state_schema, int) or state_schema <= 0:
+                        raise ValueError("invalid state-schema.json version")
+                    version = (json.dumps({"version": os.environ.get("VERSION", "dev"),
+                                           "arch": arch, "state_schema": state_schema},
+                                          sort_keys=True) + "\n").encode()
+                    info = tarfile.TarInfo("release-version.json")
+                    info.size = len(version)
+                    info.mode = 0o644
+                    tar.addfile(normalized(info), io.BytesIO(version))
         os.replace(pending, archive)
         pending = None
     finally:

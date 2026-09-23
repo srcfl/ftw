@@ -5,9 +5,11 @@ Raspberry Pi/Linux hosts and `ftw-linux-amd64.tar.gz` for x86-64 Linux hosts.
 Each archive has a matching `.sha256` file. New releases do not build Windows
 packages. Existing published assets remain available.
 
-The archive contains Core, `ftw-backup`, web files, the pinned recovery
-drivers, the compiled Energyplan bundle, license notices, an example config
-and `deploy/ftw.service`. Keep these files together when changing versions.
+The archive contains Core, `ftw-backup`, `ftw-launcher`, web files, the pinned
+recovery drivers, the compiled Energyplan bundle, license notices, an example
+config, `deploy/ftw.service` and `deploy/ftw-native.service`. Keep these files
+together when changing versions. The native slot service is not yet the default
+install path; it needs the Core update and migration work in ADR 0007.
 Existing Linux download names remain aliases during the transition.
 
 Each package includes only the Energyplan executable for its Linux
