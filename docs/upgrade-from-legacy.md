@@ -1,133 +1,15 @@
-# Upgrade an older installation to Sourceful FTW
+# Older Docker installations
 
-This page records the old Docker-to-Docker migration. It is not the path to
-native 0.x and should not be run for an existing 1.x, 2.x or 3.x site. Leave
-that site on its current version until the guided 0.x migration is ready. The
-commands below remain as a record of the former procedure, which preserved
-the Compose directory, service name, config and data bind.
+The Docker-to-Docker migration from Forty Two Watts to Sourceful FTW is
+retired. `scripts/migrate-legacy-compose.sh` now exits before reading or
+changing a site. Do not run an older copy of that script to move an existing
+box to another Docker release line.
 
----
+Keep a 1.x, 2.x or 3.x site on its current version. The planned guided
+migration will take any of these sites directly to native 0.x after it has
+been tested. The fresh native installer is for an empty host; it refuses an
+existing site and does not preserve its data.
 
-## Svenska
-
-### Innan du börjar
-
-Anslut helst ett USB-minne eller montera en nätverkskatalog för backupen. Den
-verifierade `.ftwbak`-filen måste ligga utanför den aktiva `data/`-katalogen.
-Utan `--backup-dir` används `<installationen>/ftw-backups`, vilket skyddar mot
-en felaktig migrering men inte mot att hela SD-kortet går sönder.
-
-Kör från installationskatalogen:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
-  -o /tmp/ftw-migrate.sh
-bash /tmp/ftw-migrate.sh \
-  --dir "$PWD" \
-  --backup-dir /media/$USER/FTW-BACKUP
-```
-
-Om du saknar extern disk kan du utelämna `--backup-dir`, men kopiera den
-utskrivna `.ftwbak`-filen från `ftw-backups/` till en annan dator direkt efter
-migreringen. Skriptet letar annars i aktuell katalog, `~/ftw` och
-`~/forty-two-watts`; om flera installationer hittas måste `--dir` anges.
-
-### Fyra oberoende faser
-
-1. **Full backup.** Den nya backuphjälparen öppnar den äldre databasen
-   skrivskyddat, gör ingen schemamigrering, bygger en komplett `.ftwbak`,
-   verifierar filhashar och SQLite och stoppar vid minsta fel.
-2. **Core + updater.** Det parade kontrollplanet hämtas och återskapas med
-   samma data-bind. Core måste både vara frisk på `/api/health` och helt
-   startklar på `/api/status`; annars återställs Compose, tidigare
-   oföränderliga image-ID:n och containrar automatiskt.
-3. **Drivers.** Endast det signerade katalogmanifestet uppdateras. Ingen driver
-   installeras, aktiveras eller startas om under migreringen. Senare driverbyte
-   sker en driver i taget i Update Center.
-
-Compose-kopior och tidigare image-ID:n sparas dessutom i
-`.ftw-migration-backup-<tid>`. De är en snabb distributionsrollback; `.ftwbak`
-är den portabla datakopian.
-
-### Verifiera
-
-```bash
-docker compose config --images
-docker compose ps
-curl -fsS http://127.0.0.1:8080/api/health
-curl -fsS http://127.0.0.1:8080/api/status
-```
-
-Core och updater ska vara igång på `ghcr.io/srcfl/ftw` respektive
-`ghcr.io/srcfl/ftw-updater`. Energyplan följer med Core. Felsökning kräver inte att data eller
-data rullas tillbaka. Det är normalt att en migrerad installation behåller
-katalogen `~/forty-two-watts` och servicenamnet `forty-two-watts`.
-
-Skriptet stoppar hellre än att gissa vid tvetydig layout, saknad updater,
-annan `state.path`, icke-beständig `/app/data` eller en override som kräver
-manuell sammanslagning. Dela hela felmeddelandet i en
-[GitHub issue](https://github.com/srcfl/ftw/issues). Installera inte en tom
-kopia ovanpå den gamla och radera inte `data/`.
-
----
-
-## English
-
-### Before starting
-
-Prefer a mounted USB disk or network share for the backup. The verified
-`.ftwbak` must be outside the live `data/` directory. Without `--backup-dir`,
-the script uses `<installation>/ftw-backups`; that protects against a bad
-migration but not loss of the whole SD card.
-
-Run from the installation directory:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
-  -o /tmp/ftw-migrate.sh
-bash /tmp/ftw-migrate.sh \
-  --dir "$PWD" \
-  --backup-dir /media/$USER/FTW-BACKUP
-```
-
-If no external disk is available, omit `--backup-dir` and copy the printed
-archive from `ftw-backups/` to another computer immediately afterwards. The
-script can also discover the current directory, `~/ftw`, or
-`~/forty-two-watts`; ambiguous installations require `--dir`.
-
-### Four independent phases
-
-1. **Full backup.** The new helper opens the legacy database read-only, performs
-   no schema migration, creates a complete archive, and verifies file hashes
-   plus SQLite before any deployment change.
-2. **Core + updater.** The paired control plane is recreated on the same data
-   bind and must pass both `/api/health` and full readiness on `/api/status`.
-   Failure restores Compose, the prior immutable image IDs, and the previous
-   containers automatically.
-3. **Drivers.** Only signed catalog metadata is refreshed. No driver is
-   installed, activated, or restarted during migration; later changes happen
-   one driver at a time in Update Center.
-
-Compose copies and prior image IDs are also retained under
-`.ftw-migration-backup-<time>`. They are a deployment rollback point; the
-`.ftwbak` is the portable data recovery copy.
-
-### Verify
-
-```bash
-docker compose config --images
-docker compose ps
-curl -fsS http://127.0.0.1:8080/api/health
-curl -fsS http://127.0.0.1:8080/api/status
-```
-
-Core and updater must be running from `ghcr.io/srcfl/ftw` and
-`ghcr.io/srcfl/ftw-updater`. Energyplan ships with Core. Troubleshooting does not require
-rolling back Core or persistent data. Keeping a legacy directory or the
-`forty-two-watts` service name is intentional.
-
-The script stops instead of guessing for ambiguous layouts, a missing updater,
-a custom `state.path`, non-persistent `/app/data`, or an override that needs a
-manual merge. Share the complete error in a
-[GitHub issue](https://github.com/srcfl/ftw/issues). Do not install an empty
-copy over the old one and do not delete `data/`.
+Before any manual recovery, make and verify a full backup, then copy it off
+the box. See [backup and restore](backup-and-restore.md) and the current
+[update policy](self-update.md).
