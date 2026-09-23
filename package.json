@@ -9,7 +9,7 @@
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts --no-audit --no-fund"
   },
   "devDependencies": {
-    "@changesets/cli": "^3.0.1"
+    "@changesets/cli": "^3.0.3"
   },
   "overrides": {
     "js-yaml@^3.0.0": "3.15.1",
