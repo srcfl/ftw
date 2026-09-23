@@ -558,6 +558,7 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/backups/{id}", Configure, s.handleBackupDelete)
 	s.handle("POST /api/backups/{id}/verify", Configure, s.handleBackupVerify)
 	s.handle("POST /api/version/rollback", Configure, s.handleVersionRollback)
+	s.handle("POST /api/version/binary-rollback", Configure, s.handleVersionBinaryRollback)
 	s.handle("POST /api/restart", Configure, s.handleRestart)
 
 	// ---- Static web UI ----

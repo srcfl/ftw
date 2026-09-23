@@ -38,7 +38,7 @@ function fixture({ get } = {}) {
     document: { body, createElement: () => new Element() },
     customElements: { define: (_, cls) => { Badge = cls; } },
     CustomEvent: class {},
-    window: { alert: message => alerts.push(message) },
+    window: { alert: message => alerts.push(message), confirm: () => true },
     fetch: (url, options) => {
       requests.push({ url, options });
       if (options?.method === "POST") return new Promise(resolve => { finish = resolve; });
@@ -73,6 +73,28 @@ test("the dialog and update progress render outside the header badge", () => {
   rig.badge._phase = "idle";
   rig.badge._render();
   assert.equal(rig.body.children.length, 0, "closing removes the overlay");
+});
+
+test("native beta shows the stable gap and offers binary rollback without online data restore", () => {
+  const rig = fixture();
+  rig.badge._info = {
+    native: true, current: "v0.131.0-beta.1", previous: "v0.130.4",
+    channel: "stable", update_available: false,
+  };
+  rig.badge._components = { core: { version: "v0.131.0-beta.1" } };
+  rig.badge._snapshots.snapshots = [{ id: "pre-update", restorable: true }];
+  rig.badge._render();
+  assert.match(rig.root().innerHTML, /No newer 0\.x stable release is published yet/);
+  assert.match(rig.root().innerHTML, /beta installed; stable not published/);
+  assert.match(rig.root().innerHTML, /Return to v0\.130\.4/);
+  assert.match(rig.root().innerHTML, /Offline restore/);
+  assert.doesNotMatch(rig.root().innerHTML, /data-action="rollback-snapshot"/);
+
+  const rollback = rig.root().actions.find(action => action.dataset.action === "rollback-binary");
+  rollback.click({ currentTarget: rollback });
+  assert.equal(rig.requests.find(request => request.options?.method === "POST")?.url,
+    "/api/version/binary-rollback");
+  assert.equal(rig.badge._expectedRun.target, "v0.130.4");
 });
 
 test("full backup displays phase and row progress while the request is pending", () => {

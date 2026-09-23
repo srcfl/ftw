@@ -58,8 +58,14 @@ func TestTrialCommitAndRollback(t *testing.T) {
 	if err != nil || state.Current != tag || state.Previous != "v3.8.0-beta.1" || state.Trial != "" {
 		t.Fatalf("committed slots: %+v %v", state, err)
 	}
+	if previous, err := manager.RollbackCandidate(); err != nil || previous != "v3.8.0-beta.1" {
+		t.Fatalf("rollback candidate: %q %v", previous, err)
+	}
 	if _, err := manager.PrepareRollback(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := manager.RollbackCandidate(); err == nil {
+		t.Fatal("offered rollback while a trial was pending")
 	}
 	_, tag, trial, err = manager.Select()
 	if err != nil || tag != "v3.8.0-beta.1" || !trial {
@@ -71,6 +77,37 @@ func TestTrialCommitAndRollback(t *testing.T) {
 	state, err = manager.Read()
 	if err != nil || state.Current != "v3.8.0-beta.1" || state.Previous != "v0.131.0-beta.1" {
 		t.Fatalf("rolled back slots: %+v %v", state, err)
+	}
+}
+
+func TestRollbackCandidateHidesDifferentStateSchema(t *testing.T) {
+	root := t.TempDir()
+	manager := Manager{Root: root}
+	current, previous := "v0.131.0-beta.2", "v0.131.0-beta.1"
+	release(t, root, current)
+	release(t, root, previous)
+	if err := manager.Init(previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Prepare(current); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := manager.Select(); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Commit(current); err != nil {
+		t.Fatal(err)
+	}
+	receipt := filepath.Join(root, "releases", previous, receiptFile)
+	data, err := os.ReadFile(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipt, []byte(strings.Replace(string(data), `"state_schema":7`, `"state_schema":8`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RollbackCandidate(); err == nil {
+		t.Fatal("offered binary rollback across a state schema change")
 	}
 }
 

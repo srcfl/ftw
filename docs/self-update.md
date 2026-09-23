@@ -14,6 +14,36 @@ FTW has two channels:
 Stable is the default. Persisted installations that still say `edge` are
 migrated to `beta`; no edge releases are published or accepted.
 
+## 0.x cutover plan (not yet released)
+
+The native binary line starts at `v0.131.0-beta.1`. It has its own stable and
+beta selection: it only considers published 0.x releases with the matching
+Linux archive and checksum. A 3.x Docker site never receives 0.x through the
+Update button. The last 3.x Docker release remains available for installed
+sites and urgent fixes while migration is tested.
+
+A native beta is first validated on the home box and at least one other site.
+Only then does the owner promote the same tested source commit to
+`v0.131.0` stable. The beta and stable packages have different embedded
+version strings, so each published package needs its own hash and release
+receipt. A tag or green CI run alone is not a deployed release.
+
+Existing Docker users move through a separate installer, not a version check.
+The installer must make and verify a full off-device backup, stop the old
+service, keep the data directory and site identity, install the native
+service, then verify Core, history, drivers and control on that site. It must
+leave a tested path back to the matching 3.x image and backup. Docker and
+Home Assistant users who do not migrate stay on their current delivery path.
+The installer and 0.x release gate are still being built; do not use a local
+native pilot package as a public migration release.
+
+On a native site, Update Center can stage a verified 0.x package and restart
+through the launcher. It retains the previous binary for a same-schema
+rollback. That button keeps current data; restoring older data is an offline
+backup operation. Core saves a local settings/config rollback point before
+each update, but the point does not contain history and is not an off-device
+backup.
+
 ## Release progression
 
 User-visible changes land with a Changeset. The Changesets workflow opens the

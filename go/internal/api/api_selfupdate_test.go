@@ -1015,3 +1015,27 @@ func TestVersionRestartSurfacesOldUpdaterRefusal(t *testing.T) {
 		t.Fatalf("missing user recovery instruction: %v", body)
 	}
 }
+
+func TestNativeVersionRoutesFailBeforeSnapshotWithoutAvailableRelease(t *testing.T) {
+	root := t.TempDir()
+	checker := selfupdate.New(selfupdate.Config{
+		CurrentVersion: "v0.131.0-beta.1", NativeRoot: root,
+		StatusPath: filepath.Join(root, "update-status.json"),
+		NativeRestart: func() error { return nil },
+	}, newMemStore())
+	snapshotDir := filepath.Join(root, "snapshots")
+	srv := New(&Deps{SelfUpdate: checker, SnapshotDir: snapshotDir})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/update", nil))
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "no newer native release") {
+		t.Fatalf("native update without target: %d %s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(snapshotDir); !os.IsNotExist(err) {
+		t.Fatalf("created snapshot directory for unavailable release: %v", err)
+	}
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/binary-rollback", nil))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("native rollback without previous release: %d %s", rr.Code, rr.Body.String())
+	}
+}
