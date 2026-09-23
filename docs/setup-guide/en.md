@@ -2,9 +2,9 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
-> **Alternative manual path:** the recommended installation uses the ready-made FTW image and Raspberry Pi Imager repository in [`../rpi-image.md`](../rpi-image.md). Continue here only when you specifically want generic Raspberry Pi OS + Docker.
+> **Native 0.x beta:** the old FTW image and Docker installer are retired for new sites. This guide covers Pi setup; beta testers with a fresh 64-bit host use the [native Linux installer](../operations.md#install). Existing sites wait for the guided migration.
 
-> **Don't have a Raspberry Pi?** You can also run FTW on a NUC, an old laptop, or any other hardware you have lying around — as long as it can run Docker. This guide focuses on getting started with a Raspberry Pi; if you're on another box, skim the hardware steps and jump to **Step 11 — Install FTW** (the install script assumes Debian or Ubuntu).
+> **Don't have a Raspberry Pi?** A fresh 64-bit Debian or Ubuntu host can use the same native beta installer. Skip the Pi hardware steps and read **Step 11 — Install FTW**.
 
 ## What you'll need
 
@@ -118,17 +118,13 @@ Well done — you're now "inside" the Raspberry Pi.
 
 ## Step 11 — Install FTW
 
-Copy this line EXACTLY as it is:
+The old one-line Docker installer has been retired. Native 0.x is being tested;
+this beginner guide does not yet offer a general install. If you are part of
+the beta and this is a fresh 64-bit Pi, follow the exact-tag steps in the
+[Linux install guide](../operations.md#install). If FTW already runs on this
+Pi, leave it on its current version until the guided migration is ready.
 
-```
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-```
-
-Paste it into the terminal or PuTTY (right-click usually pastes) and press enter.
-
-Type your password one more time. Everything installs now. It takes a few minutes. **Then you're done.**
-
-## All done
+## After installation
 
 Open the browser on your regular computer and go to the web interface:
 

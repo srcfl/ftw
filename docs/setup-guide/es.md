@@ -2,9 +2,9 @@
 
 Esta guía es para ti que nunca has configurado una Raspberry Pi antes. Tranquila — es más fácil de lo que parece. Basta con seguir los pasos, uno a uno.
 
-> **Ruta manual alternativa:** la instalación recomendada usa la imagen FTW preparada que se describe en [`../rpi-image.md`](../rpi-image.md). Continúa aquí solo si quieres instalar Raspberry Pi OS + Docker manualmente.
+> **Beta nativa 0.x:** la antigua imagen FTW y el instalador Docker ya no se usan en equipos nuevos. Esta guía cubre la preparación de la Pi. Quienes prueben la beta en un equipo nuevo de 64 bits deben seguir la [instalación nativa para Linux](../operations.md#install). Los equipos existentes esperan la migración guiada.
 
-> **¿No tienes Raspberry Pi?** También puedes ejecutar FTW en un NUC, un portátil viejo o cualquier otro hardware que tengas por ahí — siempre que pueda ejecutar Docker. Esta guía se centra en empezar con una Raspberry Pi; si usas otra máquina, echa un vistazo rápido a los pasos de hardware y pasa directamente al **Paso 11 — Instalar FTW** (el script de instalación asume Debian o Ubuntu).
+> **¿No tienes Raspberry Pi?** Un equipo nuevo de 64 bits con Debian o Ubuntu puede usar el mismo instalador de la beta nativa. Salta los pasos de la Pi y lee el **Paso 11 — Instalar FTW**.
 
 ## Lo que necesitas
 
@@ -118,17 +118,13 @@ Bien hecho — ya estás "dentro" de la Raspberry Pi.
 
 ## Paso 11 — Instalar FTW
 
-Copia esta línea EXACTAMENTE tal como está:
+El instalador antiguo de Docker de una sola línea ya no se usa. Native 0.x
+sigue en pruebas; esta guía aún no ofrece una instalación general. Si participas
+en la beta y tienes una Pi nueva de 64 bits, sigue los pasos con una versión
+exacta en la [guía de instalación](../operations.md#install). Si FTW ya se
+ejecuta en tu Pi, conserva su versión hasta que esté lista la migración guiada.
 
-```
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-```
-
-Pégala en la terminal o PuTTY (el clic derecho suele pegar) y pulsa enter.
-
-Escribe tu contraseña una vez más. Ahora se instala todo. Tarda unos minutos. **Y ya está listo.**
-
-## Terminado
+## Después de la instalación
 
 Abre el navegador en tu ordenador normal y ve a la interfaz web:
 

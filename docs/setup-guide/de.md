@@ -2,9 +2,9 @@
 
 Diese Anleitung ist für dich, wenn du noch nie einen Raspberry Pi eingerichtet hast. Keine Sorge — es ist leichter, als es klingt. Folge den Schritten einfach einer nach dem anderen.
 
-> **Alternativer manueller Weg:** empfohlen wird das fertige FTW-Image aus [`../rpi-image.md`](../rpi-image.md). Fahre hier nur fort, wenn du ausdrücklich Raspberry Pi OS + Docker selbst installieren möchtest.
+> **Native 0.x-Beta:** Das alte FTW-Image und der Docker-Installer sind für neue Geräte eingestellt. Diese Anleitung zeigt die Pi-Einrichtung. Betatester mit einem neuen 64-Bit-Rechner nutzen den [nativen Linux-Installer](../operations.md#install). Bestehende Geräte warten auf die geführte Migration.
 
-> **Kein Raspberry Pi?** Du kannst FTW auch auf einem NUC, einem alten Laptop oder anderer Hardware laufen lassen, die du herumliegen hast — solange sie Docker ausführen kann. Diese Anleitung konzentriert sich auf die Einrichtung mit einem Raspberry Pi; wenn du eine andere Maschine nutzt, überspringe die Hardware-Schritte und gehe direkt zu **Schritt 11 — FTW installieren** (das Installationsskript setzt Debian oder Ubuntu voraus).
+> **Kein Raspberry Pi?** Ein neuer 64-Bit-Rechner mit Debian oder Ubuntu kann denselben nativen Beta-Installer nutzen. Überspringe die Pi-Hardware-Schritte und lies **Schritt 11 — FTW installieren**.
 
 ## Was du brauchst
 
@@ -118,17 +118,14 @@ Gut gemacht — du bist jetzt "im" Raspberry Pi.
 
 ## Schritt 11 — FTW installieren
 
-Kopiere diese Zeile GENAU so, wie sie ist:
+Der alte Docker-Installer mit einem Befehl wird nicht mehr verwendet. Native
+0.x wird noch getestet; diese Anleitung bietet derzeit keine allgemeine
+Installation. Wenn du am Beta-Test teilnimmst und einen neuen 64-Bit-Pi hast,
+folge der Anleitung mit festem Tag in den
+[Installationsschritten](../operations.md#install). Läuft FTW schon auf dem
+Pi, behalte die aktuelle Version bis zur geführten Migration.
 
-```
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-```
-
-Füge sie im Terminal oder in PuTTY ein (Rechtsklick fügt meistens ein) und drücke Enter.
-
-Gib dein Passwort noch einmal ein. Jetzt wird alles installiert. Das dauert ein paar Minuten. **Dann bist du fertig.**
-
-## Fertig
+## Nach der Installation
 
 Öffne den Browser auf deinem normalen Computer und rufe die Web-Oberfläche auf:
 

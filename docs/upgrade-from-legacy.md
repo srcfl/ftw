@@ -1,11 +1,10 @@
 # Upgrade an older installation to Sourceful FTW
 
-Use this guide for an existing Linux Docker Compose installation with a
-`docker-compose.yml` that still uses older image names. Sites that already run
-`ghcr.io/srcfl/ftw` and want a published 3.x pair should follow
-[upgrade-paired-release.md](upgrade-paired-release.md) instead. The migration
-preserves its directory, Compose project, service name, configuration, database, history, hardware identities and
-persistent `data/` bind. Choose [Svenska](#svenska) or [English](#english).
+This page records the old Docker-to-Docker migration. It is not the path to
+native 0.x and should not be run for an existing 1.x, 2.x or 3.x site. Leave
+that site on its current version until the guided 0.x migration is ready. The
+commands below remain as a record of the former procedure, which preserved
+the Compose directory, service name, config and data bind.
 
 ---
 

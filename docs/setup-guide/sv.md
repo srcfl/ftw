@@ -2,9 +2,9 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
-> **Alternativ manuell väg:** den rekommenderade installationen använder den färdiga FTW-imagen och Raspberry Pi Imager-katalogen i [`../rpi-image.md`](../rpi-image.md). Fortsätt här bara om du uttryckligen vill köra generell Raspberry Pi OS + Docker.
+> **Native 0.x-beta:** den gamla FTW-imagen och Docker-installationen används inte för nya boxar. Den här guiden visar Pi-stegen. Betatestare med en ny 64-bitars värd följer [installationen för Linux](../operations.md#install). Befintliga boxar väntar på den styrda flytten.
 
-> **Ingen Raspberry Pi?** Du kan lika gärna köra FTW på en NUC, en gammal bärbar, eller annan hårdvara du har liggande — så länge den kan köra Docker. Den här guiden fokuserar på att komma igång med en Raspberry Pi; är du på en annan burk kan du skumma hårdvarustegen och gå direkt till **Steg 11 — Installera FTW** (installationsskriptet förutsätter Debian eller Ubuntu).
+> **Ingen Raspberry Pi?** En ny 64-bitars värd med Debian eller Ubuntu kan använda samma native beta. Hoppa över Pi-stegen och läs **Steg 11 — Installera FTW**.
 
 ## Vad du behöver
 
@@ -118,17 +118,13 @@ Grattis — du är nu "inne" i Raspberry Pin.
 
 ## Steg 11 — Installera FTW
 
-Kopiera denna rad EXAKT som den står:
+Den gamla Docker-installationen med ett kommando är avslutad. Native 0.x
+testas ännu och den här guiden ger därför ingen allmän installation just nu.
+Om du deltar i betan och har en ny 64-bitars Pi, följ stegen med exakt tagg i
+[installationsguiden](../operations.md#install). Kör FTW redan på din Pi, låt
+den vara kvar på sin version tills den styrda flytten är klar.
 
-```
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
-```
-
-Klistra in i terminalen eller PuTTY (högerklicka brukar fungera för att klistra in) och tryck enter.
-
-Skriv in ditt lösenord en gång till. Nu installeras allt. Det tar några minuter. **Sen är det klart.**
-
-## Klart
+## Efter installationen
 
 Öppna webbläsaren på din vanliga dator och gå till webb-gränssnittet:
 

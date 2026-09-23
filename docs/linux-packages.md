@@ -5,16 +5,18 @@ Raspberry Pi/Linux hosts and `ftw-linux-amd64.tar.gz` for x86-64 Linux hosts.
 Each archive has a matching `.sha256` file. New releases do not build Windows
 packages. Existing published assets remain available.
 
-This page describes package contents and a manual, fresh installation. It is
-not the guided migration for an existing Docker or Home Assistant box. Those
-boxes stay on their current version until the guided 0.x installer has been
-tested and published.
+This page describes package contents and manual recovery. Fresh native 0.x
+beta sites use [`scripts/install.sh`](../scripts/install.sh) with an exact
+published tag; it verifies the package, initializes release slots and starts
+the native `ftw.service`. It is not the guided migration for an existing Docker,
+Home Assistant or earlier native box. Those boxes stay on their current version
+until the guided 0.x migration has been tested and published.
 
 The archive contains Core, `ftw-backup`, `ftw-launcher`, web files, the pinned
 recovery drivers, the compiled Energyplan bundle, license notices, an example
 config, `deploy/ftw.service` and `deploy/ftw-native.service`. Keep these files
-together when changing versions. The native slot service is not yet the default
-install path; it needs the migration work in ADR 0007.
+together when changing versions. The native slot service is the path for new
+0.x installs; existing sites still need the migration work in ADR 0007.
 Existing Linux download names remain aliases during the transition.
 
 Each package includes only the Energyplan executable for its Linux
@@ -38,7 +40,11 @@ Use `amd64` instead on an x86-64 host. Extracting the archive does not install
 or start the systemd service. Keep configuration and data outside the
 directory replaced on update.
 
-## First native installation
+## Manual direct installation without 0.x self-update
+
+The fresh 0.x installer above is the path for beta sites. These older manual
+steps keep the direct `/opt/ftw/ftw` layout available for recovery. They do
+not set up the 0.x release slots or in-app native update.
 
 These steps target a fresh Debian 12 or Raspberry Pi OS Bookworm host with
 systemd and a 64-bit OS. The package needs no Go toolchain or Docker engine.
