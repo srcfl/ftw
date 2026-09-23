@@ -49,8 +49,9 @@ Remove `--check-only` and pass `--backup ~/FTW-backups/<printed-name>.ftwbak`
 only after checking the paths against that box. The CLI requires a backup from
 the last 24 hours whose size and SHA-256 match Core's verified archive. It
 checks that the same archive still exists under the service's data bind on the
-box, so it does not copy a large archive back to `/tmp`. It stages the exact
-release beside the old binary, then changes only the systemd
+box and that its site identity matches the SSH host. This avoids copying a
+large archive back to `/tmp` or mixing up two boxes on the same version. It
+stages the exact release beside the old binary, then changes only the systemd
 start override. It compares version, health, driver names and working driver
 count. On failure it tries the old start command. If old Core cannot read the
 data after a failed trial, it restores the verified archive before retrying

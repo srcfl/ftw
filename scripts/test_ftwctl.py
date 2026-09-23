@@ -1,10 +1,12 @@
 import hashlib
 import importlib.util
 import io
+import json
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -101,7 +103,8 @@ class FTWCTLTests(unittest.TestCase):
         entry = {"id": "ftw-full-backup-20260923T120000Z.ftwbak", "sha256": digest,
                  "size_bytes": len(payload), "verified": True}
         with tempfile.TemporaryDirectory() as directory:
-            target = ftwctl.download_backup(BackupAPI(payload), entry, Path(directory), ftwctl.time.monotonic())
+            with mock.patch.object(ftwctl.os, "link", side_effect=OSError("hard links unsupported")):
+                target = ftwctl.download_backup(BackupAPI(payload), entry, Path(directory), ftwctl.time.monotonic())
             self.assertEqual(target.read_bytes(), payload)
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
         with tempfile.TemporaryDirectory() as directory:
@@ -141,7 +144,12 @@ class FTWCTLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             name = "ftw-full-backup-20260923T120000Z.ftwbak"
             backup = Path(directory) / name
-            backup.write_bytes(b"verified backup")
+            site_sha = hashlib.sha256(b"site key").hexdigest()
+            manifest = json.dumps({"files": [{"path": "data/nova.key", "type": "file", "sha256": site_sha}]}).encode()
+            with tarfile.open(backup, "w:gz") as tar:
+                header = tarfile.TarInfo("manifest.json")
+                header.size = len(manifest)
+                tar.addfile(header, io.BytesIO(manifest))
             digest = hashlib.sha256(backup.read_bytes()).hexdigest()
             api = FakeAPI({
                 ("GET", "/api/version/check"): {"current": "v3.8.0-beta.1", "native": False},
@@ -156,6 +164,7 @@ class FTWCTLTests(unittest.TestCase):
                 user_drivers="/app/data/drivers", unit="ftw.service", check_only=False,
                 backup=backup, max_wait=60)
             commands = []
+            reported_site_sha = ["0" * 64]
 
             def fake_remote(host, *command, **kwargs):
                 commands.append(command)
@@ -174,6 +183,8 @@ class FTWCTLTests(unittest.TestCase):
                 if command[:4] == ("sudo", "-n", "stat", "-c"):
                     return str(backup.stat().st_size)
                 if "sha256sum" in command:
+                    if command[-1] == "/srv/ftw/data/nova.key":
+                        return reported_site_sha[0] + "  nova.key"
                     return digest + "  backup"
                 if command[-1:] == ("status",):
                     return '{"current":"v0.131.0-beta.1"}'
@@ -190,6 +201,11 @@ class FTWCTLTests(unittest.TestCase):
                  mock.patch.object(ftwctl, "published_package", side_effect=fake_package), \
                  mock.patch.object(ftwctl, "wait_for_version", side_effect=[False, False, True]), \
                  mock.patch.object(ftwctl.socket, "getfqdn", return_value="mac.example"):
+                with self.assertRaisesRegex(ftwctl.FTWError, "different site identities"):
+                    ftwctl.migrate_native(api, args)
+                self.assertFalse(any("stop" in call for call in commands))
+                reported_site_sha[0] = site_sha
+                commands.clear()
                 with self.assertRaisesRegex(ftwctl.FTWError, "rolled back"):
                     ftwctl.migrate_native(api, args)
             on_box_backup = "/srv/ftw/data/backups/" + name

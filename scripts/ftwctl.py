@@ -164,7 +164,7 @@ def download_backup(api: API, entry: dict, output_dir: Path, start: float) -> Pa
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = output_dir / backup_id
     pending = output_dir / (backup_id + ".part")
-    if target.exists() or pending.exists():
+    if os.path.lexists(target) or os.path.lexists(pending):
         raise FTWError(f"backup target already exists: {target}")
     digest = hashlib.sha256()
     copied = 0
@@ -185,8 +185,9 @@ def download_backup(api: API, entry: dict, output_dir: Path, start: float) -> Pa
                 os.fsync(dest.fileno())
         if digest.hexdigest() != expected or (entry.get("size_bytes") and copied != entry["size_bytes"]):
             raise FTWError("downloaded backup does not match the server's verified size and SHA-256")
-        os.link(pending, target)
-        pending.unlink()
+        if os.path.lexists(target):
+            raise FTWError(f"backup target appeared during download: {target}")
+        os.rename(pending, target)
     except BaseException:
         pending.unlink(missing_ok=True)
         raise
@@ -363,6 +364,26 @@ def backup_on_host(backup_dir: str, name: str, data_dir: str, config: str) -> st
     raise FTWError("backup directory is outside the supported data bind; keep the old site and inspect its backup path")
 
 
+def backup_identity_sha(path: Path) -> str:
+    try:
+        with tarfile.open(path, "r|gz") as tar:
+            header = tar.next()
+            if header is None or header.name != "manifest.json" or header.size > 1024 * 1024:
+                raise FTWError("backup has no readable manifest")
+            source = tar.extractfile(header)
+            if source is None:
+                raise FTWError("backup has no readable manifest")
+            manifest = json.load(source)
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise FTWError("backup manifest could not be read") from exc
+    key = next((entry for entry in manifest.get("files", [])
+                if entry.get("path") == "data/nova.key" and entry.get("type") == "file"), None)
+    digest = key.get("sha256", "") if key else ""
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise FTWError("backup has no verified site identity; native migration cannot bind it to this box")
+    return digest
+
+
 def published_package(tag: str, arch: str, work: Path) -> tuple[Path, Path, Path]:
     name = f"ftw-linux-{arch}.tar.gz"
     base = f"https://github.com/srcfl/ftw/releases/download/{tag}/"
@@ -471,6 +492,11 @@ def migrate_native(api: API, args) -> None:
         raise FTWError("run backup --output-dir on this computer, then pass --backup to migrate-native")
     backup_name, backup_sha, backup_size, backup_dir = verified_backup(api, args.backup)
     on_box_backup = backup_on_host(backup_dir, backup_name, args.data_dir, args.config)
+    backup_site_sha = backup_identity_sha(args.backup)
+    identity_path = args.data_dir + "/nova.key"
+    identity_sha = remote(args.host, "sudo", "-n", "sha256sum", identity_path).split()[0]
+    if identity_sha != backup_site_sha:
+        raise FTWError("API backup and SSH host have different site identities; check --url and --host")
     remote(args.host, "sudo", "-n", "test", "-f", on_box_backup)
     if int(remote(args.host, "sudo", "-n", "stat", "-c", "%s", on_box_backup)) != backup_size:
         raise FTWError("on-box backup size differs from the verified off-box copy")
@@ -487,12 +513,6 @@ def migrate_native(api: API, args) -> None:
         raise FTWError("native release supports only ARM64 and AMD64")
     baseline = int(health.get("drivers_ok") or 0)
     before_drivers = set(api.json("GET", "/api/drivers"))
-    identity_path = args.data_dir + "/nova.key"
-    try:
-        remote(args.host, "sudo", "-n", "test", "-f", identity_path)
-        identity_sha = remote(args.host, "sudo", "-n", "sha256sum", identity_path).split()[0]
-    except FTWError:
-        identity_sha = None
     say(f"Migrating {info['current']} -> {args.tag}; old service remains active until the verified package is ready.")
     say(f"Recovery archive on box: {on_box_backup}; verified copy off box: {args.backup}")
     with tempfile.TemporaryDirectory(prefix="ftw-migrate-") as work_name:
@@ -534,7 +554,7 @@ def migrate_native(api: API, args) -> None:
             after_drivers = set(api.json("GET", "/api/drivers"))
             if not before_drivers.issubset(after_drivers):
                 raise FTWError("one or more configured drivers are missing after migration")
-            if identity_sha and remote(args.host, "sudo", "-n", "sha256sum", identity_path).split()[0] != identity_sha:
+            if remote(args.host, "sudo", "-n", "sha256sum", identity_path).split()[0] != identity_sha:
                 raise FTWError("site identity changed after migration")
         except BaseException as exc:
             say(f"Migration failed: {exc}. Restoring the old start command.")
