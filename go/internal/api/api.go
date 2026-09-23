@@ -215,6 +215,10 @@ type Deps struct {
 	//   - production (docker compose): dispatch to the ftw-updater sidecar
 	//     so the running container is force-recreated against the same
 	//     image — exact same code path as the post-update restart.
+	//   - Home Assistant add-on: signal main() to shut down cleanly, then
+	//     re-exec the binary in-process. Supervisor does not restart a
+	//     stopped app unless Watchdog is on, so exiting would leave the
+	//     app stopped.
 	//   - dev / systemd: signal main() to return with a non-zero exit
 	//     code; docker (unless-stopped) and systemd (on-failure) bring
 	//     the binary back up.
@@ -363,6 +367,7 @@ func (s *Server) Route(r *http.Request) apiauth.RouteFacts {
 			}
 			facts.CmdOp = mark.cmdOp
 			facts.ReplacesAll = mark.replacesAll
+			facts.NoStepUp = mark.noStepUp
 			facts.Static = mark.static
 		}
 	}
@@ -376,8 +381,9 @@ func (s *Server) Route(r *http.Request) apiauth.RouteFacts {
 //
 //	Read      answers a question, changes nothing, and hands back nothing that
 //	          could be replayed as authority. A shared viewer may ask for it.
-//	Configure changes a setting. Owner, with a step-up. A late execution is
-//	          the same instruction, only later.
+//	Configure changes a setting. Owner. A late execution is the same
+//	          instruction, only later. Usually with a step-up; mark
+//	          NoStepUp when login is already enough.
 //	Actuate   moves energy, or takes control of what is moving it. Refused
 //	          through the passthrough — the app sends a cmd, which carries an
 //	          expiry the box revalidates. Add Via(op) to name that command.
@@ -391,7 +397,8 @@ func (s *Server) Route(r *http.Request) apiauth.RouteFacts {
 // as ordinary from their verb alone. Neither is.
 //
 // ReplacesAll is a separate mark rather than a tier: it says the body replaces
-// a whole document instead of editing part of one.
+// a whole document instead of editing part of one. NoStepUp is the same kind
+// of mark: owner is still required, the ceremony is not.
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", Read, s.handleHealth)
@@ -515,10 +522,12 @@ func (s *Server) routes() {
 	// The schedule is configuration where its sibling target is
 	// actuation: a schedule saved late is the same instruction, only
 	// later, while target/soc/force_start move energy now. The split is
-	// what lets a phone save one through the passthrough.
+	// what lets a phone save one through the passthrough. NoStepUp:
+	// the session already proved who is asking, and Face ID is the
+	// wrong cost for a ready time.
 	s.handle("POST /api/loadpoints/{id}/vehicle", Configure, s.handleLoadpointVehicle)
-	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut)
-	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear)
+	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut, NoStepUp)
+	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear, NoStepUp)
 	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC, Via(appproto.OpLoadpointSoCSet))
 	s.handle("POST /api/loadpoints/{id}/force_start", Actuate, s.handleLoadpointForceStart)
 	s.handle("POST /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHold)
@@ -613,6 +622,7 @@ type routeMark struct {
 	tier        apiauth.Tier
 	cmdOp       string
 	replacesAll bool
+	noStepUp    bool
 	static      bool
 }
 
@@ -643,6 +653,12 @@ func Via(op string) RouteMark {
 // by a year, it is a way to wipe settings its caller never knew about. The
 // passthrough refuses these outright rather than trusting the round trip.
 func ReplacesAll(m *routeMark) { m.replacesAll = true }
+
+// NoStepUp marks a configure route that needs owner but not a ceremony.
+// The charging schedule is the case: login already proved who is asking,
+// and a second Face ID is the wrong cost for a ready time. A write
+// accepted this way does not open the step-up window.
+func NoStepUp(m *routeMark) { m.noStepUp = true }
 
 // ---- Common helpers ----
 
@@ -3843,10 +3859,11 @@ func (s *Server) replanForScheduleChange(id string) {
 //
 // Priced Configure where its sibling POST …/target is Actuate, because
 // a schedule is a standing instruction about future days: saved late,
-// it is the same instruction, only later. The target route also
-// carries one-shot fields that move energy now, which is why it stays
-// on Actuate and why the app's passthrough needed this route to save a
-// schedule at all.
+// it is the same instruction, only later. Marked NoStepUp: an owner
+// session is enough, and a second Face ID is the wrong cost for a
+// ready time. The target route also carries one-shot fields that move
+// energy now, which is why it stays on Actuate and why the app's
+// passthrough needed this route to save a schedule at all.
 func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
@@ -3872,8 +3889,9 @@ func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Reque
 }
 
 // DELETE /api/loadpoints/{id}/schedule clears the schedule. Same price
-// as PUT: removing the standing instruction is configuration too. Its derived
-// target clears after storage succeeds. Manual charging remains active.
+// as PUT: removing the standing instruction is configuration too, and
+// owner is enough — NoStepUp, same as the PUT. Its derived target
+// clears after storage succeeds. Manual charging remains active.
 func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})

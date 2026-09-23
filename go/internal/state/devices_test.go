@@ -190,3 +190,36 @@ func TestLookupDeviceByDriverName(t *testing.T) {
 		t.Error("lookup of an unregistered driver name returned a device")
 	}
 }
+
+func TestRelateDeviceIDs(t *testing.T) {
+	cases := []struct {
+		name             string
+		expected, actual string
+		want             DeviceIDRelation
+	}{
+		{name: "identical hardware ids match", expected: "pixii:234301002749", actual: "pixii:234301002749", want: DeviceIDMatch},
+		{name: "no expected id accepts anything", expected: "", actual: "pixii:234301002749", want: DeviceIDMatch},
+		{name: "empty actual waits for identity", expected: "mac:b827b9358d1a", actual: "", want: DeviceIDPending},
+		{
+			// Live Pixii update: ARP MAC until 2.1.4 actually called set_sn.
+			name:     "serial after mac needs shared evidence",
+			expected: "mac:b827b9358d1a", actual: "pixii:234301002749",
+			want: DeviceIDPending,
+		},
+		{name: "mac after endpoint needs shared evidence", expected: "ep:modbus://192.168.1.10:502", actual: "mac:b827b9358d1a", want: DeviceIDPending},
+		{name: "serial after endpoint needs shared evidence", expected: "ep:modbus://192.168.1.10:502", actual: "pixii:234301002749", want: DeviceIDPending},
+		{name: "weaker mac after serial waits", expected: "pixii:234301002749", actual: "mac:b827b9358d1a", want: DeviceIDPending},
+		{name: "weaker endpoint after mac waits", expected: "mac:b827b9358d1a", actual: "ep:modbus://192.168.1.10:502", want: DeviceIDPending},
+		{name: "different serial is a different device", expected: "pixii:234301002749", actual: "pixii:OTHER", want: DeviceIDConflict},
+		{name: "different mac is a different device", expected: "mac:b827b9358d1a", actual: "mac:aabbccddeeff", want: DeviceIDConflict},
+		{name: "different endpoint is a different device", expected: "ep:modbus://192.168.1.10:502", actual: "ep:modbus://192.168.1.11:502", want: DeviceIDConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RelateDeviceIDs(tc.expected, tc.actual)
+			if got != tc.want {
+				t.Errorf("RelateDeviceIDs(%q, %q) = %v, want %v", tc.expected, tc.actual, got, tc.want)
+			}
+		})
+	}
+}

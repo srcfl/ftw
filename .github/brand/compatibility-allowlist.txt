@@ -20,7 +20,9 @@
 # Migrated Compose installs may keep the legacy service name; this script
 # must detect it without guessing when both names exist.
 ^scripts/upgrade-paired-release\.sh:.*forty-two-watts.*$
-^Makefile:.*-C "\$\$stage" ftw ftw-backup forty-two-watts.*$
+# The Linux package builder preserves the executable alias from older archives.
+^scripts/package-linux\.py:[[:space:]]*alias = tarfile\.TarInfo\("forty-two-watts"\)$
+^scripts/test_package_linux\.py:[[:space:]]*self\.assertEqual\(tar\.getmember\("forty-two-watts"\)\.linkname, "ftw"\)$
 ^scripts/restore-full-backup\.sh:for candidate in ftw forty-two-watts; do$
 ^README\.md:Existing Forty Two Watts or older FTW deployments must use the$
 # Rust's upstream runtime notices describe third-party licenses, not FTW's license.

@@ -58,8 +58,9 @@ the current data and automatically reverts it if the restored service does not
 become healthy. See [backup-and-restore.md](backup-and-restore.md).
 
 The updater also retains bounded local pre-update rollback points. They protect
-configuration and SQLite state during a Core update but remain on the same
-disk; they cannot recover a failed SD card.
+configuration and the settings database during a Core update; history stays in
+its own file and is left in place. They remain on the same disk and cannot
+recover a failed SD card.
 
 Core exposes a read-only storage check at
 `GET /api/storage/inventory`. It reports allocated, live and free SQLite pages
@@ -122,6 +123,10 @@ docker compose up -d ftw
 curl -X POST -H "Authorization: Bearer <same-random-secret>" \
   https://ftw.example.net/api/restart
 ```
+
+On the Home Assistant app the same call shuts Core down and re-execs the
+binary in-process. Supervisor does not restart a stopped app unless Watchdog
+is on, so exiting would leave the app stopped.
 
 The same Bearer is accepted on the LAN when `api.lan_auth` is on. `FTW_API_TOKEN`
 and the house password are independent secrets: the token is not hashed as a

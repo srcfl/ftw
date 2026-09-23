@@ -347,10 +347,12 @@ type loadpointRuntime struct {
 	manualSavePending        bool
 	energy                   *sessionEnergy
 	powerAt                  time.Time
+	powerWindow              time.Duration
+	chargingPeriodSince      time.Time
 	powerUnavailable         bool
 	lastSavedEnergyWh        float64
 	lastSavedEnergyAt        time.Time
-	lastSessionCommitAt      time.Time
+	lastSessionCommitSeq     uint64
 	sessionDeviceID          string
 	sessionID                string
 	socRetention             string
@@ -568,10 +570,12 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.deliveredWhSession = existing.deliveredWhSession
 			lp.energy = existing.energy
 			lp.powerAt = existing.powerAt
+			lp.powerWindow = existing.powerWindow
+			lp.chargingPeriodSince = existing.chargingPeriodSince
 			lp.powerUnavailable = existing.powerUnavailable
 			lp.lastSavedEnergyWh = existing.lastSavedEnergyWh
 			lp.lastSavedEnergyAt = existing.lastSavedEnergyAt
-			lp.lastSessionCommitAt = existing.lastSessionCommitAt
+			lp.lastSessionCommitSeq = existing.lastSessionCommitSeq
 			lp.targetSoC = existing.targetSoC
 			lp.finishAtVehicleLimit = existing.finishAtVehicleLimit
 			lp.finishGoalCompleted = existing.finishGoalCompleted

@@ -135,6 +135,11 @@ func (s *Store) openHistory() error {
 	if err := os.Chmod(s.historyPath, 0600); err != nil {
 		return err
 	}
+	if RetireRawOnOpen {
+		if err := s.RetireRawHistory(context.Background()); err != nil {
+			return err
+		}
+	}
 	ok = true
 	return nil
 }
@@ -187,6 +192,7 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 	var tx *sql.Tx
 	var stmt *sql.Stmt
 	var pending, pendingBytes int
+	var copied int64
 	defer func() {
 		if stmt != nil {
 			stmt.Close()
@@ -215,6 +221,7 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 			return err
 		}
 		pending++
+		copied++
 		pendingBytes += conversionRowBytes(values)
 		if pending == 1024 || pendingBytes >= batchBytes {
 			stmt.Close()
@@ -223,6 +230,7 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 				return err
 			}
 			tx = nil
+			reportBackupRows(ctx, BackupPhaseCopying, table, copied)
 			pending, pendingBytes = 0, 0
 			if yield != nil {
 				if err := yield(); err != nil {
@@ -244,7 +252,14 @@ func copyVerifiedTable(ctx context.Context, source historyQueryer, dest *sql.DB,
 		tx = nil
 	}
 	actual := sha256.New()
-	got, err := scan(ctx, dest, table, func(v []any) error { return hashHistoryRow(actual, v) })
+	var checked int64
+	got, err := scan(ctx, dest, table, func(v []any) error {
+		checked++
+		if checked%8192 == 0 {
+			reportBackupRows(ctx, "verifying_database", table, checked)
+		}
+		return hashHistoryRow(actual, v)
+	})
 	if err != nil {
 		return err
 	}
@@ -321,10 +336,10 @@ func historyFloatBits(value float64) uint64 {
 }
 
 func (s *Store) HistoryBackend() map[string]any {
-	info := map[string]any{"engine": "sqlite", "archive": "parquet", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
+	info := map[string]any{"engine": "sqlite", "archive": "sqlite", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
 	info["maintenance"] = s.HistoryMaintenanceStatus()
 	if s.aggregateHistory.Load() {
-		info["policy"] = map[string]any{"id": "ems-v1", "recent_resolution_ms": HistoryResolutionMS, "recent_retention_hours": 24, "archive_resolution_ms": ArchiveResolutionMS, "archive_minute_days": 30, "older_resolution_ms": OldArchiveResolutionMS, "detailed_retention_days": 730}
+		info["policy"] = map[string]any{"id": "sqlite-v1", "recent_resolution_ms": HistoryResolutionMS, "recent_retention_hours": int(plainTenSecondKeep.Hours()), "archive_resolution_ms": ArchiveResolutionMS, "archive_minute_days": int(plainMinuteKeep.Hours() / 24), "older_resolution_ms": HistoryHourResolutionMS, "detailed_retention_days": int(plainHourKeep.Hours() / 24)}
 	}
 	for key, path := range map[string]string{"file_bytes": s.historyPath, "wal_bytes": s.historyPath + "-wal"} {
 		if stat, err := os.Stat(path); err == nil {

@@ -28,6 +28,14 @@ class BundleBoundaryTest(unittest.TestCase):
     def test_valid_bundle(self):
         self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
 
+    def test_platform_package_rejects_extra_platforms(self):
+        with self.assertRaisesRegex(ValueError, "only its target platform"):
+            verify_bundle(self.root, target="linux-arm64")
+
+    def test_platform_package_rejects_unknown_target(self):
+        with self.assertRaisesRegex(ValueError, "only its target platform"):
+            verify_bundle(self.root, target="linux-riscv64")
+
     def test_linux_only_bundle(self):
         darwin = self.root / "ftw-solver-darwin-arm64"
         if darwin.exists():

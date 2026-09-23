@@ -8,11 +8,12 @@ Type=simple
 User=ftw
 Group=ftw
 WorkingDirectory=/var/lib/ftw
-ExecStart=/opt/ftw/ftw -config /etc/ftw/config.yaml -web /opt/ftw/web -drivers /opt/ftw/drivers -user-drivers /var/lib/ftw/drivers
+ExecStart=/opt/ftw/ftw -config /var/lib/ftw/config.yaml -web /opt/ftw/web -drivers /opt/ftw/drivers -user-drivers /var/lib/ftw/drivers
+Environment=FTW_SELFUPDATE_ENABLED=0
 Restart=on-failure
 RestartSec=5
 StateDirectory=ftw
-ConfigurationDirectory=ftw
+StateDirectoryMode=0700
 MemoryMax=512M
 
 [Install]

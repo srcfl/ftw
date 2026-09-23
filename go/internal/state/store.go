@@ -26,6 +26,14 @@ const (
 	// Increase it before a release that cannot safely reopen the same state.db
 	// with the prior Core version.
 	SchemaVersion = 7
+	// LegacyReleaseMarker is the value release notes publish in the legacy
+	// `<!-- ftw-state-schema:N -->` marker. Only Cores before v3.6.0-beta.1
+	// (schema 4 and older) read it. Those Cores copied their whole history
+	// before any update whose marker differed from their own schema, and on
+	// a Raspberry Pi with a large history that copy could not finish
+	// (#1302). Keep this at 4 so they skip the copy and update. Newer Cores
+	// read `<!-- ftw-state-schema-v2:N -->`, which carries SchemaVersion.
+	LegacyReleaseMarker = 4
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets
@@ -44,13 +52,16 @@ const (
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
-	aggregateHistory atomic.Bool
-	history          *sql.DB
-	historyPath      string
-	historyImportMu  sync.Mutex
-	historyWriteMu   sync.Mutex
-	historyWriter    *historyWriter
-	historyMigration *historyMigration
+	aggregateHistory  atomic.Bool
+	history           *sql.DB
+	historyPath       string
+	historyImportMu   sync.Mutex
+	historyWriteMu    sync.Mutex
+	historyWriter     *historyWriter
+	historyMigration  *historyMigration
+	maintenanceRunMu  sync.Mutex
+	maintenanceCancel context.CancelFunc // guarded by maintenanceStatusMu
+	maintenancePaused int                // guarded by maintenanceStatusMu
 
 	hot        *sql.DB
 	hotPath    string
@@ -92,11 +103,13 @@ type Store struct {
 	// offlineBackup is set by OpenBackupSource. Live Core backups yield
 	// between copy batches so goal and control writes stay within latency
 	// limits; the offline helper must not inherit that 100 ms live pause.
-	offlineBackup bool
-	backupPause   func(context.Context) error
-	deviceWriteMu sync.Mutex
-	deviceCacheMu sync.RWMutex
-	deviceCache   map[string]Device
+	offlineBackup  bool
+	backupPause    func(context.Context) error
+	backupStatusMu sync.Mutex
+	backupStatus   BackupProgress
+	deviceWriteMu  sync.Mutex
+	deviceCacheMu  sync.RWMutex
+	deviceCache    map[string]Device
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -585,9 +598,13 @@ func (s *Store) SnapshotTo(dstPath string) error {
 // BackupProgress reports the current phase of a complete database backup.
 // TotalBytes is known once SQLite has produced the consistent raw copy.
 type BackupProgress struct {
-	Phase          string
-	CompletedBytes int64
-	TotalBytes     int64
+	Phase          string `json:"phase"`
+	CompletedBytes int64  `json:"completed_bytes"`
+	TotalBytes     int64  `json:"total_bytes,omitempty"`
+	Table          string `json:"table,omitempty"`
+	RowsDone       int64  `json:"rows_done,omitempty"`
+	UpdatedMS      int64  `json:"updated_ms,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 const (
@@ -613,15 +630,39 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
-	return s.backupToCompressed(dstPath, report, nil)
+	return s.backupToCompressed(dstPath, report, nil, true)
 }
 
 // BackupWithConfiguration returns settings from the same SQLite snapshot as
 // the archive, so its YAML export remains correct even for an older Core.
 func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	return s.backupWithConfiguration(dstPath, report, true)
+}
+
+func (s *Store) BackupWithConfigurationContext(ctx context.Context, dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	return s.backupWithConfigurationContext(ctx, dstPath, report, true)
+}
+
+// BackupStateWithConfiguration is the Core update rollback point: the
+// settings database and its configuration export, without the history
+// database. History lives in its own file, which an update does not replace
+// and a rollback leaves in place, so copying it here only bounded the update
+// by months of telemetry. A schema-change update on a Raspberry Pi could not
+// finish that copy inside the live export deadline (#1302). A store that
+// still keeps legacy history inside state.db is copied whole, so the point
+// stays complete for that layout.
+func (s *Store) BackupStateWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
+	return s.backupWithConfiguration(dstPath, report, false)
+}
+
+func (s *Store) backupWithConfiguration(dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
+	return s.backupWithConfigurationContext(context.Background(), dstPath, report, includeHistory)
+}
+
+func (s *Store) backupWithConfigurationContext(ctx context.Context, dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
 	var configuration Configuration
 	var found bool
-	err := s.backupToCompressed(dstPath, report, func(rawPath string) error {
+	err := s.backupToCompressedContext(ctx, dstPath, report, func(rawPath string) error {
 		var err error
 		configuration, err = ReadConfiguration(rawPath)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -629,11 +670,15 @@ func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgre
 		}
 		found = err == nil
 		return err
-	})
+	}, includeHistory)
 	return configuration, found, err
 }
 
-func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
+	return s.backupToCompressedContext(context.Background(), dstPath, report, capture, includeHistory)
+}
+
+func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -643,9 +688,14 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 		return fmt.Errorf("backup: stat dst %s: %w", dstPath, err)
 	}
 
-	ctx, cancel := s.backupWorkContext()
+	ctx, cancel := s.backupWorkContextParent(parent)
 	defer cancel()
-	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(s.BackupSourceBytes())); err != nil {
+	ctx = context.WithValue(ctx, backupReportKey{}, report)
+	sourceBytes := s.BackupSourceBytes()
+	if !includeHistory {
+		sourceBytes = s.stateSourceBytes()
+	}
+	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(sourceBytes)); err != nil {
 		return err
 	}
 
@@ -657,8 +707,10 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 		return fmt.Errorf("backup state: %w", err)
 	}
 
-	if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
-		return fmt.Errorf("backup history: %w", err)
+	if includeHistory {
+		if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
+			return fmt.Errorf("backup history: %w", err)
+		}
 	}
 
 	if capture != nil {

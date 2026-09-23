@@ -1076,8 +1076,27 @@ func truncateBody(b string) string {
 	return b[:MaxReleaseBodyBytes] + "\n\n…(truncated — see release notes for full changelog)"
 }
 
+// Release notes carry two hidden markers. Cores newer than v3.6.0-beta.1
+// read stateSchemaMarkerV2, the release's real on-disk state schema. Older
+// Cores read only stateSchemaMarkerLegacy. Those Cores copied their whole
+// history before any update whose marker differed from their own schema,
+// and on a Raspberry Pi with a large history that copy could not finish
+// (#1302). The release workflows therefore keep the legacy marker at
+// state-schema.json's legacy_marker, the last schema those Cores use, so
+// they skip the copy and update.
+const (
+	stateSchemaMarkerV2     = "<!-- ftw-state-schema-v2:"
+	stateSchemaMarkerLegacy = "<!-- ftw-state-schema:"
+)
+
 func releaseStateSchema(body string) int {
-	const prefix = "<!-- ftw-state-schema:"
+	if schema := parseStateSchemaMarker(body, stateSchemaMarkerV2); schema > 0 {
+		return schema
+	}
+	return parseStateSchemaMarker(body, stateSchemaMarkerLegacy)
+}
+
+func parseStateSchemaMarker(body, prefix string) int {
 	start := strings.Index(body, prefix)
 	if start < 0 {
 		return 0
@@ -1095,7 +1114,13 @@ func releaseStateSchema(body string) int {
 }
 
 func releaseBodyWithoutStateSchema(body string) string {
-	const prefix = "<!-- ftw-state-schema:"
+	for _, prefix := range []string{stateSchemaMarkerV2, stateSchemaMarkerLegacy} {
+		body = stripStateSchemaMarker(body, prefix)
+	}
+	return body
+}
+
+func stripStateSchemaMarker(body, prefix string) string {
 	start := strings.Index(body, prefix)
 	if start < 0 {
 		return body

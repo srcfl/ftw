@@ -26,7 +26,10 @@ active symlink.
 
 SQLite records the active and previous content-addressed files. During an
 update, Core sends the safe default mode, restarts the driver and waits for
-fresh telemetry and the same hardware identity. A failed check restores the
+fresh telemetry and the same hardware. A newly reported serial or MAC must
+retain the previous MAC or endpoint as matching evidence. Missing evidence
+keeps verification pending; conflicting evidence fails the update.
+A failed check restores the
 last verified version. Core matches the signed driver ID to bundled metadata even when filenames
 differ, and saves the selected path after the runtime checks pass. Disabled
 or stopped instances do not count as verified updates. The API returns

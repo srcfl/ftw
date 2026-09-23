@@ -1,5 +1,89 @@
 # Changelog
 
+## 3.8.0
+
+### Minor Changes
+
+- 704c7cd: Calculate historical savings from the energy ledger. One comparison buys all use from the grid. The other is a blind self-use battery on the same solar: conversion losses, a small reserve, and stored energy counted at the import price. It does not trade on price and it does not curtail.
+- bac41f0: Keep history as chart buckets and the energy ledger in one SQLite file. On boot, fold older cold bucket files into hourly rows, then remove those files and the retired raw database.
+
+### Patch Changes
+
+- bac41f0: Resume history archive work from saved progress, bound each maintenance turn, and let full backups pause maintenance. A stage that uses up its time budget stays pending and resumes, instead of being reported as a failure. A running archive query is cancelled with that same budget. Avoid repeated history scans and show archive and backup progress while preserving live writes and verified archive checks.
+- 6c79443: Publish Linux arm64 and amd64 packages on beta as well as stable. Both use the same package builder and include Core, backup, web, drivers, Energyplan and the systemd service. Each package includes only its target Energyplan executable, with matching metadata and licenses. New releases no longer build Windows packages.
+- 6855d85: Plan charging in periods at allowed current steps, using fresh charging state across replans. Favor runs of at least five minutes after departure energy and safety needs, allow a short final top-up, and avoid extra starts for tiny savings. Update the bundled Energyplan worker with joint EV cost decisions and faster tariff planning.
+- a5f6f4d: Keep scalar history for seven days at ten seconds, 90 days at one minute and five years at one hour. Remove expired hourly summaries, yield maintenance to live writes and downsample charts in SQLite. Preserve recent imported archives, resume energy rollups and report the active SQLite policy. Include older hourly summaries in charts that also contain recent detail. Reconcile archive overlap and record each import atomically so retries and later rollups cannot count the same observations twice.
+
+## 3.7.5
+
+### Patch Changes
+
+- f6afa4f: Require shared MAC or endpoint evidence before a driver update accepts a newly learned serial number. Keep missing identity evidence pending and reject conflicting hardware instead of accepting any stronger identifier.
+- a86482c: Bundle Energyplan 0.4.6 so EV plans account for the import cost of charging pulses into solar surplus. Keep Core validation and fallback in place, with verified Linux ARM64, Linux AMD64 and macOS ARM64 workers.
+- 89b51e3: Track completed EV session writes with a sequence number so equal timestamps or clock changes cannot trigger extra writes to disk.
+
+## 3.7.4
+
+### Patch Changes
+
+- 3d347c2: Allow a driver update when the device first known by MAC (or endpoint) starts reporting its serial. That is the same hardware becoming better identified, not a swap; a different serial or MAC still rolls the update back.
+
+## 3.7.3
+
+### Patch Changes
+
+- 8ef33c0: Keep dashboard rollups within their source range so a large recent history cannot make every retention attempt time out. Read summaries outside the live writer lock, preserve late rows on retry, and report a bucket that cannot fit its write budget instead of retrying it for hours.
+
+## 3.7.2
+
+### Patch Changes
+
+- 14dd79f: On the Home Assistant app, **Restart now** re-execs Core in-process after a clean shutdown instead of exiting. Supervisor does not restart a stopped app unless Watchdog is on, so the old exit left FTW stopped until someone pressed Start.
+
+## 3.7.1
+
+### Patch Changes
+
+- de7aaae: When the Sourceful price harvest is stale, FTW takes tomorrow's day-ahead from Nord Pool instead of filling the night with the ML twin.
+- 30669ab: Keep the Home Assistant Plan sensor's attributes under the recorder's 16 KB limit: a compact, rounded 24-hour schedule in the entity and the full schedule on the `plan_schedule_json` topic. Home Assistant stops discarding the attributes and logging a warning on every plan update.
+- 8acbfa9: A signed-in owner can save the car's charging schedule without a second Face ID. Login still uses a passkey. Minting access, replacing the whole config, and moving energy still need the extra proof.
+
+## 3.7.0
+
+### Minor Changes
+
+- dc728c4: Save the Core update rollback point from the settings database and configuration only. History stays in its own file, which the update does not replace and a rollback leaves in place, so the step is bounded by settings size and no longer waits hours on a full history export that could not meet its deadline on a Raspberry Pi. Every update now takes a rollback point. Going back across a history-format change still needs a full backup made before that update.
+
+### Patch Changes
+
+- 646a52e: Every external data source now declares where in the world it works, and the
+  Settings map says so before you commit to a location. `GET /api/data-sources`
+  reports each source's kind, coverage area, countries and licence, plus an
+  advisory `covers` verdict for the configured site (or an explicit `?lat=&lon=`
+  preview). The Weather tab renders it under the location picker and refreshes
+  as the pin drags, so a site outside Europe learns up front that price-driven
+  planning has no source there instead of getting an empty price curve with no
+  explanation.
+  
+  The registry's European price-country list is held in lockstep with
+  `prices/zones.go` by a test, so a bidding zone added there cannot silently
+  go missing from the coverage answer.
+- 6af12e8: Let Cores before v3.6.0-beta.1 update without the full history copy that could not finish on a Raspberry Pi. Release notes now carry a fixed legacy state-schema marker for those Cores and a second marker with the real schema, which newer Cores read to refuse downgrades. The stable release guard checks both.
+- 191dd88: Remove replaced Core, updater and optimizer images after a verified Core update, keeping every image a container uses and the rollback image. Beta boxes stop filling their disk with one image per update.
+- 646a52e: The Settings location picker moves from Leaflet to MapLibre GL JS 6.9.0,
+  vendored on the box: the map keeps the same OpenStreetMap raster tiles and
+  attribution, but the UI now executes no third-party CDN JavaScript and the
+  picker loads even when the gateway cannot reach the internet — the same
+  policy as `/vendor/three` and `/vendor/ace`. Leaflet's now-unused copy is
+  removed. If WebGL is unavailable the numeric latitude/longitude fields stay
+  authoritative, exactly as before.
+  
+  Static assets are also served with pinned Content-Types instead of whatever
+  the host OS's MIME table says: on a Windows host whose registry maps `.mjs`
+  to text/plain, the browser (correctly, under `nosniff`) refuses the vendored
+  ES module and the map dies with "failed to fetch dynamically imported
+  module".
+
 ## 3.6.0
 
 ### Minor Changes

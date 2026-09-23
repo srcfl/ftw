@@ -4,6 +4,7 @@
 import json
 import re
 import sys
+from pathlib import Path
 
 
 STABLE_TAG = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
@@ -19,10 +20,6 @@ REQUIRED_ASSETS = sorted(
         "ftw-linux-arm64.tar.gz.sha256",
         "forty-two-watts-linux-arm64.tar.gz",
         "forty-two-watts-linux-arm64.tar.gz.sha256",
-        "ftw-windows-amd64.zip",
-        "ftw-windows-amd64.zip.sha256",
-        "forty-two-watts-windows-amd64.zip",
-        "forty-two-watts-windows-amd64.zip.sha256",
     ]
 )
 
@@ -86,7 +83,7 @@ def check_assets(tag: str, release: object) -> None:
     if len(assets) != len(REQUIRED_ASSETS) or any(
         not isinstance(asset.get("name"), str) for asset in assets
     ):
-        raise ValueError("release must contain exactly 14 named assets")
+        raise ValueError(f"release must contain exactly {len(REQUIRED_ASSETS)} named assets")
     names = sorted(asset["name"] for asset in assets)
     if names != REQUIRED_ASSETS:
         raise ValueError(f"release asset names differ: got {names!r}")
@@ -106,10 +103,22 @@ def check_draft(
         raise ValueError("state schema must be a positive integer")
     with open(expected_body_path, encoding="utf-8") as body_file:
         expected_body = body_file.read()
-    marker_prefix = "<!-- ftw-state-schema:"
-    marker = f"<!-- ftw-state-schema:{state_schema} -->"
-    if expected_body.count(marker_prefix) != 1 or expected_body.count(marker) != 1:
-        raise ValueError("release body must contain only the expected state-schema marker")
+    # Cores before v3.6.0-beta.1 read only the legacy marker and copy their
+    # whole history when it differs from their own schema, 4 (#1302). It must
+    # stay at state-schema.json's legacy_marker; newer Cores read the v2 one.
+    legacy_prefix = "<!-- ftw-state-schema:"
+    legacy_marker = f"<!-- ftw-state-schema:{legacy_marker_value()} -->"
+    marker_prefix = "<!-- ftw-state-schema-v2:"
+    marker = f"<!-- ftw-state-schema-v2:{state_schema} -->"
+    if (
+        expected_body.count(legacy_prefix) != 1
+        or expected_body.count(legacy_marker) != 1
+        or expected_body.count(marker_prefix) != 1
+        or expected_body.count(marker) != 1
+    ):
+        raise ValueError(
+            "release body must contain exactly the legacy floor marker and the expected v2 state-schema marker"
+        )
     if not isinstance(release, dict) or (
         release.get("tagName") != tag
         or release.get("name") != tag
@@ -119,6 +128,15 @@ def check_draft(
         or release.get("body") != expected_body
     ):
         raise ValueError(f"{tag} draft title, body or channel state is stale")
+
+
+def legacy_marker_value() -> str:
+    schema_path = Path(__file__).resolve().parent.parent / "state-schema.json"
+    with open(schema_path, encoding="utf-8") as schema_file:
+        value = json.load(schema_file).get("legacy_marker")
+    if type(value) is not int or value <= 0:
+        raise ValueError("state-schema.json must contain a positive integer legacy_marker")
+    return str(value)
 
 
 def main() -> None:

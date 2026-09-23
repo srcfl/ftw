@@ -94,12 +94,20 @@ describe("release metadata", () => {
 
   it("publishes the state schema in beta and stable release notes", () => {
     assert.ok(Number.isInteger(stateSchema.version) && stateSchema.version > 0);
+    // Cores before v3.6.0-beta.1 read only the legacy marker and copy their
+    // whole history when it differs from their schema, 4 (#1302).
+    assert.equal(stateSchema.legacy_marker, 4);
     assert.match(betaWorkflow, /require\('\.\/state-schema\.json'\)\.version/);
-    assert.match(betaWorkflow, /--notes "<!-- ftw-state-schema:\$\{STATE_SCHEMA\} -->"/);
+    assert.match(betaWorkflow, /require\('\.\/state-schema\.json'\)\.legacy_marker/);
+    assert.match(
+      betaWorkflow,
+      /--notes "\$\(printf '<!-- ftw-state-schema:%s -->\\n<!-- ftw-state-schema-v2:%s -->' "\$\{LEGACY_MARKER\}" "\$\{STATE_SCHEMA\}"\)"/,
+    );
     assert.match(releaseWorkflow, /require\('\.\/state-schema\.json'\)\.version/);
+    assert.match(releaseWorkflow, /require\('\.\/state-schema\.json'\)\.legacy_marker/);
     assert.match(
       releaseWorkflow,
-      /<!-- ftw-state-schema:%s -->\\n' "\$\{STATE_SCHEMA\}" >> release-notes\.md/,
+      /<!-- ftw-state-schema:%s -->\\n<!-- ftw-state-schema-v2:%s -->\\n' "\$\{LEGACY_MARKER\}" "\$\{STATE_SCHEMA\}" >> release-notes\.md/,
     );
   });
 

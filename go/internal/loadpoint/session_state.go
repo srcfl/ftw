@@ -133,6 +133,11 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 		baseline := lp.energy.counterWh - lp.energy.integralAt(lp.energy.counterAt)
 		lp.sessionPluginSoC -= baseline * DefaultChargeEfficiency / lp.VehicleCapacityWh
 	}
+	if changed {
+		lp.chargingPeriodSince = time.Time{}
+	}
+	observeChargingPeriod(lp, sample, m.now())
+	lp.powerWindow = sample.PowerWindow()
 	lp.powerAt = sample.PowerAt
 	if lp.powerAt.IsZero() {
 		lp.powerAt = m.now()
@@ -219,13 +224,13 @@ func (m *Manager) ObserveSample(id string, sample EVSample) {
 // committed snapshots. An older anchor must not confirm a newer user edit.
 func (m *Manager) refreshSessionCommitLocked(lp *loadpointRuntime) {
 	reader, ok := m.sessionStore.(interface {
-		CommittedConfig(string) (string, time.Time, bool)
+		CommittedConfig(string) (string, uint64, bool)
 	})
 	if !ok || !lp.socConfirmed || lp.sessionDeviceID == "" || lp.sessionID == "" {
 		return
 	}
-	raw, committedAt, found := reader.CommittedConfig(sessionKey(lp.sessionDeviceID))
-	if !found || committedAt.IsZero() || !committedAt.After(lp.lastSessionCommitAt) {
+	raw, committedSeq, found := reader.CommittedConfig(sessionKey(lp.sessionDeviceID))
+	if !found || committedSeq == 0 || committedSeq <= lp.lastSessionCommitSeq {
 		return
 	}
 	var saved savedSession
@@ -238,7 +243,7 @@ func (m *Manager) refreshSessionCommitLocked(lp *loadpointRuntime) {
 		wh = *saved.EstimatedWh
 	}
 	lp.lastSavedEnergyWh, lp.lastSavedEnergyAt = wh, m.now()
-	lp.lastSessionCommitAt = committedAt
+	lp.lastSessionCommitSeq = committedSeq
 	lp.socRetention = "session"
 }
 
@@ -310,6 +315,11 @@ func (m *Manager) observeConnectionProof(id string, generation uint64, unknown b
 	changed := generation != 0 && lp.connectionGeneration != 0 && generation != lp.connectionGeneration
 	if generation != 0 {
 		lp.connectionGeneration = generation
+	}
+	if unknown || changed {
+		// A fresh cached power sample cannot prove charging across a lost
+		// connection. Reset this even when no session identity is known.
+		lp.chargingPeriodSince = time.Time{}
 	}
 	if (!unknown && !changed) || (!changed && lp.sessionDeviceID == "" && lp.sessionID == "") {
 		m.mu.Unlock()

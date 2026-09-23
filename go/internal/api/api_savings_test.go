@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
+	_ "modernc.org/sqlite"
 )
 
 func TestHandleSavingsDailyCanceledRequestDoesNotCacheSuccess(t *testing.T) {
@@ -262,6 +264,68 @@ func TestHandleSavingsDailyEndToEnd(t *testing.T) {
 	}
 	if got, want := numberFromMap(body.Totals, "priced_coverage_pct"), pricedSum/expectedSum; !approxEqAPI(got, want, 1e-9) {
 		t.Errorf("weighted cost coverage = %v, want %v", got, want)
+	}
+}
+
+func TestHandleSavingsDailyUsesLedgerForBothBaselines(t *testing.T) {
+	dir := t.TempDir()
+	st, err := state.Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -1)
+	hour := start.Add(10 * time.Hour).UnixMilli()
+	if err := st.SavePrices([]state.PricePoint{{
+		Zone: "SE3", SlotTsMs: start.UnixMilli(), SlotLenMin: 24 * 60, SpotOreKwh: 80, TotalOreKwh: 100, Source: "test",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", state.HistoryDatabasePath(filepath.Join(dir, "t.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	insert := `INSERT INTO energy_ledger_entries VALUES(1,'site',?,?,3600000,?,'hardware_counter','measured','counter',1,?)`
+	for _, row := range []struct {
+		flow string
+		wh   float64
+	}{
+		{"pv_generation", 2000},
+		{"consumer_use", 1000},
+		{"grid_export", 1000},
+	} {
+		if _, err := db.Exec(insert, row.flow, hour, row.wh, hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := New(&Deps{
+		State: st,
+		Cfg:   &config.Config{Price: &config.Price{Zone: "SE3"}},
+		CfgMu: &sync.RWMutex{},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/savings/daily?days=2", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Days []map[string]any `json:"days"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	yesterday := body.Days[0]
+	if v := numberFromMap(yesterday, "saved_ore"); v < 179 || v > 181 {
+		t.Fatalf("saved vs no pv = %v, body %s", v, rr.Body.String())
+	}
+	if v := numberFromMap(yesterday, "self_consumption_saved_ore"); v < -1 || v > 1 {
+		t.Fatalf("saved vs self = %v, want about 0", v)
+	}
+	if v := numberFromMap(body.Days[1], "saved_ore"); v != 0 {
+		t.Fatalf("today saved = %v, want 0", v)
 	}
 }
 

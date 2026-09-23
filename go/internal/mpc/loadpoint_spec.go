@@ -73,6 +73,10 @@ type LoadpointSpec struct {
 	// is the same conservation rule, not this helper — dispatch.go is
 	// owned by a separate PV-export PR.
 	NoBatteryToEV bool
+
+	// Optional native-worker preference; the Go emergency fallback keeps its
+	// electrical checks and deadline behavior.
+	Charging ChargingPeriods
 }
 
 func (l *LoadpointSpec) blocksBatteryToEV() bool {

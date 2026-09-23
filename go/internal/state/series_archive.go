@@ -50,8 +50,10 @@ func (s *Store) walkMergedSeries(ctx context.Context, coldDir, driver, metric st
 }
 
 func (s *Store) walkMergedSeriesStats(ctx context.Context, coldDir, driver, metric string, since, until int64, visit func(BucketSummary) error) error {
-	// Keep the files and their raw overlap on one side of publication/pruning.
-	// Staging and compression do not need this lock; live writes never take it.
+	return s.walkMergedSeriesStatsBinned(ctx, coldDir, driver, metric, since, until, 0, visit)
+}
+
+func (s *Store) walkMergedSeriesStatsBinned(ctx context.Context, coldDir, driver, metric string, since, until, width int64, visit func(BucketSummary) error) error {
 	if err := lockContext(ctx, s.archiveViewMu.TryRLock); err != nil {
 		return err
 	}
@@ -99,28 +101,36 @@ func (s *Store) walkMergedSeriesStats(ctx context.Context, coldDir, driver, metr
 		}
 		covered[day.UnixMilli()] = true
 	}
-	// Stream current data, skipping the archive days already merged above.
 	rows, err := s.history.QueryContext(ctx, `SELECT s.ts_ms,s.value FROM ts_samples s JOIN ts_drivers d ON d.id=s.driver_id JOIN ts_metrics m ON m.id=s.metric_id WHERE d.name=? AND m.name=? AND s.ts_ms BETWEEN ? AND ? ORDER BY s.ts_ms`, driver, metric, since, until)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var ts int64
 		var v float64
 		if err := rows.Scan(&ts, &v); err != nil {
+			rows.Close()
 			return err
 		}
-		day := time.UnixMilli(ts).UTC().Truncate(24 * time.Hour).UnixMilli()
-		if covered[day] {
+		if covered[time.UnixMilli(ts).UTC().Truncate(24*time.Hour).UnixMilli()] {
 			continue
 		}
 		if err := visit(rawBucket(ts, v)); err != nil {
+			rows.Close()
 			return err
 		}
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return err
+	}
+	if width > 0 {
+		paths, err := aggregatePaths(coldDir, since, until)
+		if err != nil {
+			return err
+		}
+		if len(paths) == 0 {
+			return s.walkSQLiteSeriesBuckets(ctx, driver, metric, since, until, width, visit)
+		}
 	}
 	return s.walkAggregateSeries(ctx, coldDir, driver, metric, since, until, visit)
 }
@@ -167,7 +177,7 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	}
 	width := BucketWidthMs(since, until, maxPoints)
 	acc := make(map[int64]*seriesBucketAcc)
-	err := s.walkMergedSeriesStats(ctx, coldDir, driver, metric, since, until, func(b BucketSummary) error {
+	err := s.walkMergedSeriesStatsBinned(ctx, coldDir, driver, metric, since, until, width, func(b BucketSummary) error {
 		key := (b.LastMS - since) / width
 		a := acc[key]
 		if a == nil {
@@ -179,6 +189,11 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	})
 	if err != nil {
 		return nil, err
+	}
+	if s.seriesHoursReady() {
+		if err := s.addSummaryOnlySeriesBuckets(ctx, coldDir, driver, metric, since, until, width, acc); err != nil {
+			return nil, err
+		}
 	}
 	keys := make([]int64, 0, len(acc))
 	for k := range acc {

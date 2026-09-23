@@ -72,7 +72,15 @@ func (s *Store) rolloffSamples(ctx context.Context, coldDir string, retention ti
 			return rolledRows, files, err
 		}
 		if n == 0 {
-			return rolledRows, files, fmt.Errorf("archive made no progress; source rows retained")
+			// The previous turn may have committed the last deletion before
+			// its scratch cursor. Finishing that job safely removes no new rows.
+			var remaining int
+			if err := s.history.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ts_samples WHERE ts_ms>=? AND ts_ms<?)`, from, from+24*time.Hour.Milliseconds()).Scan(&remaining); err != nil {
+				return rolledRows, files, err
+			}
+			if remaining != 0 {
+				return rolledRows, files, fmt.Errorf("archive made no progress; source rows retained")
+			}
 		}
 	}
 }

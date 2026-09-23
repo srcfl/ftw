@@ -85,8 +85,6 @@ required_asset_names=(
   forty-two-watts-linux-amd64.tar.gz forty-two-watts-linux-amd64.tar.gz.sha256
   ftw-linux-arm64.tar.gz ftw-linux-arm64.tar.gz.sha256
   forty-two-watts-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz.sha256
-  ftw-windows-amd64.zip ftw-windows-amd64.zip.sha256
-  forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.zip.sha256
 )
 release_assets_json="$(
   printf '%s\n' "${required_asset_names[@]}" | jq -Rn --arg tag v2.2.0 '
@@ -109,7 +107,7 @@ fi
 release_test_tmp="$(mktemp -d)"
 trap 'rm -rf "${release_test_tmp}"' EXIT
 expected_notes="${release_test_tmp}/release-notes.md"
-printf 'FTW 2.2.0\n\n<!-- ftw-state-schema:7 -->\n' > "${expected_notes}"
+printf 'FTW 2.2.0\n\n<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:7 -->\n' > "${expected_notes}"
 fresh_draft="$(jq -n --arg tag v2.2.0 --rawfile body "${expected_notes}" \
   '{tagName: $tag, name: $tag, body: $body, isDraft: true, isPrerelease: false, publishedAt: null}')"
 printf '%s' "${fresh_draft}" | python3 "${release_guard}" draft v2.2.0 7 "${expected_notes}"
@@ -119,7 +117,7 @@ if printf '%s' "${stale_draft}" | python3 "${release_guard}" draft v2.2.0 7 "${e
   exit 1
 fi
 dual_marker_notes="${release_test_tmp}/dual-marker-notes.md"
-printf '<!-- ftw-state-schema:6 -->\nFTW 2.2.0\n\n<!-- ftw-state-schema:7 -->\n' > "${dual_marker_notes}"
+printf '<!-- ftw-state-schema-v2:6 -->\nFTW 2.2.0\n\n<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:7 -->\n' > "${dual_marker_notes}"
 dual_marker_draft="$(jq -n --arg tag v2.2.0 --rawfile body "${dual_marker_notes}" \
   '{tagName: $tag, name: $tag, body: $body, isDraft: true, isPrerelease: false, publishedAt: null}')"
 if printf '%s' "${dual_marker_draft}" | \
@@ -127,6 +125,30 @@ if printf '%s' "${dual_marker_draft}" | \
   echo "a stale first schema marker passed beside the expected marker" >&2
   exit 1
 fi
+# A legacy marker at the current schema would make Cores before
+# v3.6.0-beta.1 copy their whole history again before updating (#1302).
+current_floor_notes="${release_test_tmp}/current-floor-notes.md"
+printf 'FTW 2.2.0\n\n<!-- ftw-state-schema:7 -->\n<!-- ftw-state-schema-v2:7 -->\n' > "${current_floor_notes}"
+current_floor_draft="$(jq -n --arg tag v2.2.0 --rawfile body "${current_floor_notes}" \
+  '{tagName: $tag, name: $tag, body: $body, isDraft: true, isPrerelease: false, publishedAt: null}')"
+if printf '%s' "${current_floor_draft}" | \
+  python3 "${release_guard}" draft v2.2.0 7 "${current_floor_notes}" 2>/dev/null; then
+  echo "a legacy marker at the current schema passed; old Cores would copy their history again" >&2
+  exit 1
+fi
+legacy_only_notes="${release_test_tmp}/legacy-only-notes.md"
+printf 'FTW 2.2.0\n\n<!-- ftw-state-schema:4 -->\n' > "${legacy_only_notes}"
+legacy_only_draft="$(jq -n --arg tag v2.2.0 --rawfile body "${legacy_only_notes}" \
+  '{tagName: $tag, name: $tag, body: $body, isDraft: true, isPrerelease: false, publishedAt: null}')"
+if printf '%s' "${legacy_only_draft}" | \
+  python3 "${release_guard}" draft v2.2.0 7 "${legacy_only_notes}" 2>/dev/null; then
+  echo "release notes without the v2 state-schema marker passed verification" >&2
+  exit 1
+fi
+grep -Fq "require('./state-schema.json').legacy_marker" "${beta}"
+grep -Fq "<!-- ftw-state-schema:%s -->\n<!-- ftw-state-schema-v2:%s -->" "${beta}"
+grep -Fq "require('./state-schema.json').legacy_marker" "${release}"
+grep -Fq "<!-- ftw-state-schema:%s -->\n<!-- ftw-state-schema-v2:%s -->" "${release}"
 
 grep -Fq 'VERSION=${{ needs.tag.outputs.runtime_version }}' "${beta}"
 grep -Fq 'CANDIDATE_TAG=${{ needs.tag.outputs.version }}' "${beta}"
@@ -173,7 +195,7 @@ grep -Fq -- '--ref master -f tag=vX.Y.Z -f source_beta=vX.Y.Z-beta.N -f release_
 grep -Fq -- '--ref master -f tag=vX.Y.Z -f release_id=123' "${assets}"
 grep -Fq 'name: verify complete draft assets' "${assets}"
 grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
-grep -Fq 'python3 scripts/check-stable-release.py assets "${TAG}"' "${assets}"
+grep -Fq 'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' "${assets}"
 grep -Fq 'name: verify and publish complete stable release' "${assets}"
 grep -Fq 'needs: [meta, assets-ready, docker]' "${assets}"
 if [ "$(grep -Fc 'GH_TOKEN: ${{ secrets.CI_TOKEN }}' "${assets}")" -ne 6 ]; then
@@ -443,7 +465,7 @@ asset_gate_job="$(grep -n '^  assets-ready:$' "${assets}" | cut -d: -f1)"
 asset_gate_block="$(sed -n "${asset_gate_job},$((docker_start - 1))p" "${assets}")"
 for required in \
   'needs: [meta, binaries, imager-metadata]' \
-  'python3 scripts/check-stable-release.py assets "${TAG}"' \
+  'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' \
   'asset_name="${checksum_name%.sha256}"' \
   '[ "${recorded_name}" != "${asset_name}" ]' \
   'sha256sum -c "${checksum_name}"' \

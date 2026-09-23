@@ -56,6 +56,34 @@ func TestCoreDPShadowCancellation(t *testing.T) {
 	}
 }
 
+func TestNativeEVPulsePricesImportAboveSolarSurplus(t *testing.T) {
+	worker := nativeWorker(t, 500*time.Millisecond)
+	t.Cleanup(func() { _ = worker.Close() })
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, Confidence: 1, PVW: -2000, PriceOre: 100, SpotOre: 5},
+		{StartMs: 3600000, LenMin: 60, Confidence: 1, PriceOre: 50, SpotOre: 5},
+		{StartMs: 7200000, LenMin: 60, Confidence: 1, PriceOre: 200, SpotOre: 5},
+	}
+	// A fixed battery leaves the charger as the only choice. Its 11 kW
+	// pulse imports 9 kW in the solar slot even when mean EV power is 2 kW.
+	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoC: .5,
+		SoCMin: .1, SoCMax: .9, ChargeEfficiency: 1, DischargeEfficiency: 1,
+		Loadpoint: &LoadpointSpec{ID: "car", CapacityWh: 75000, Levels: 101,
+			SoCMax: 1, TargetSoC: 5500.0 / 75000, TargetSlotIdx: 2, PluggedIn: true,
+			ChargeEfficiency: 1, MaxChargeW: 11000, AllowedStepsW: []float64{0, 11000}}}
+	plan, err := worker.Optimize(context.Background(), slots, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatal(err)
+	}
+	// Later charging costs 5.5 kWh * 50, less 2 kWh * 5 of solar export.
+	if math.Abs(plan.TotalCostOre-265) > 1e-4 || math.Abs(plan.Actions[0].LoadpointW) > 1e-4 || math.Abs(plan.Actions[1].LoadpointW-5500) > 1e-4 {
+		t.Fatalf("pulse cost or slot choice: cost=%g solar=%g cheap=%g", plan.TotalCostOre, plan.Actions[0].LoadpointW, plan.Actions[1].LoadpointW)
+	}
+}
+
 func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	template := nativeWorker(t, 500*time.Millisecond)
 	defer template.Close()
@@ -67,7 +95,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = o
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.4.5" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.4.8" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
 	}
 	start := time.Now().UTC().Truncate(time.Hour)

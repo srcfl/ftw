@@ -162,6 +162,9 @@ func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing
 	}{
 		{name: "same", body: "<!-- ftw-state-schema:7 -->", targetSchema: 7, backupRequired: false},
 		{name: "different", body: "<!-- ftw-state-schema:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "v2 wins over the legacy floor", body: "<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:7 -->", targetSchema: 7, backupRequired: false},
+		{name: "v2 differs", body: "<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "invalid v2 falls back to legacy", body: "<!-- ftw-state-schema:7 -->\n<!-- ftw-state-schema-v2:no -->", targetSchema: 7, backupRequired: false},
 		{name: "missing", body: "ordinary release notes", targetSchema: 0, backupRequired: true},
 		{name: "invalid", body: "<!-- ftw-state-schema:no -->", targetSchema: 0, backupRequired: true},
 	} {
@@ -193,6 +196,26 @@ func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing
 				t.Fatalf("internal schema marker leaked into release notes: %q", info.ReleaseBody)
 			}
 		})
+	}
+}
+
+// The beta and stable workflows publish both markers. A Core before
+// v3.6.0-beta.1 reads only the legacy one and must see its own schema, 4,
+// so it skips the full history copy that cannot finish on a Raspberry Pi
+// (#1302). A newer Core reads the real schema from the v2 marker.
+func TestReleaseStateSchemaReadsV2BeforeLegacyMarker(t *testing.T) {
+	body := "FTW 3.7.0\n\n<!-- ftw-state-schema:4 -->\n<!-- ftw-state-schema-v2:7 -->\n"
+	if got := releaseStateSchema(body); got != 7 {
+		t.Fatalf("v2 marker = %d, want 7", got)
+	}
+	if got := parseStateSchemaMarker(body, stateSchemaMarkerLegacy); got != 4 {
+		t.Fatalf("legacy marker seen by an old Core = %d, want 4", got)
+	}
+	if got := releaseBodyWithoutStateSchema(body); got != "FTW 3.7.0" {
+		t.Fatalf("stripped body = %q", got)
+	}
+	if got := releaseStateSchema("<!-- ftw-state-schema:7 -->"); got != 7 {
+		t.Fatalf("legacy-only marker = %d, want 7", got)
 	}
 }
 
