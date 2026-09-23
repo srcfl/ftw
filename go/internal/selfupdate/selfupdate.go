@@ -366,7 +366,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	}
 
 	channel := cached.Channel
-	rel, deployable, err := c.resolveChannel(ctx, channel)
+	rel, deployable, err := c.resolveChannel(ctx, channel, cached.Current)
 	if err != nil {
 		return c.recordErr(err)
 	}
@@ -438,10 +438,26 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	return info, nil
 }
 
-func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghRelease, bool, error) {
+func (c *Checker) resolveChannel(ctx context.Context, channel Channel, current string) (ghRelease, bool, error) {
 	if c.cfg.NativeRoot != "" {
 		rel, err := c.fetchReleaseList(ctx, func(rel ghRelease) bool {
 			if !strings.HasPrefix(rel.TagName, "v0.") {
+				return false
+			}
+			if channel == ChannelStable {
+				return !rel.Prerelease && isStableTag(rel.TagName)
+			}
+			return !rel.Prerelease && isStableTag(rel.TagName) || rel.Prerelease && isBetaTag(rel.TagName)
+		})
+		return rel, rel.TagName != "", err
+	}
+	// The final Docker line remains on 3.x while native packages start at
+	// 0.x. Keep both channels on their install type even when GitHub's
+	// /latest endpoint or release list starts with a native release.
+	if version := parseSemanticVersion(current); version != nil && version.numbers[0] == 3 && c.cfg.ReleaseTagPrefix == "" {
+		rel, err := c.fetchReleaseList(ctx, func(rel ghRelease) bool {
+			candidate := parseSemanticVersion(rel.TagName)
+			if candidate == nil || candidate.numbers[0] != 3 {
 				return false
 			}
 			if channel == ChannelStable {

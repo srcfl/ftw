@@ -79,6 +79,33 @@ func TestNativeCheckerWaitsForChecksumAsset(t *testing.T) {
 	}
 }
 
+func TestDocker3xCheckerKeepsItsReleaseLine(t *testing.T) {
+	client := nativeReleaseClient(t, `[
+      {"tag_name":"v0.131.0","prerelease":false},
+      {"tag_name":"v0.131.0-beta.2","prerelease":true},
+      {"tag_name":"v3.8.1-beta.1","prerelease":true},
+      {"tag_name":"v3.8.0","prerelease":false},
+      {"tag_name":"v2.3.2","prerelease":false}
+    ]`)
+	c := New(Config{CurrentVersion: "v3.8.0-beta.1", HTTPClient: client,
+		ReleasesURL: "https://test.invalid/releases"}, newMemStore())
+	for _, tc := range []struct {
+		channel Channel
+		want    string
+	}{
+		{ChannelBeta, "v3.8.1-beta.1"},
+		{ChannelStable, "v3.8.0"},
+	} {
+		release, deployable, err := c.resolveChannel(context.Background(), tc.channel, "v3.8.0-beta.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !deployable || release.TagName != tc.want {
+			t.Fatalf("%s selected %q, want %q", tc.channel, release.TagName, tc.want)
+		}
+	}
+}
+
 func nativeArchive(t *testing.T, tag string) ([]byte, []byte) {
 	t.Helper()
 	var buf bytes.Buffer
