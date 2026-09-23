@@ -28,8 +28,9 @@ the same dialog: **Use custom file** opens a file picker for a manifest already
 on your computer and offers no field to paste a web address into. The FTW
 manifest is hosted, so it belongs in **Use custom URL**.
 
-`rpi-installer` is the permanent repository URL and is the recommended value
-to save in Imager. Stable application releases also mirror this small file, so
+`rpi-installer` is the permanent repository URL for the old image. It is kept
+for installed sites, not recommended for a new 0.x installation. Older stable
+application releases also mirrored this small file, so
 links such as
 `https://github.com/srcfl/ftw/releases/download/v1.3.0/os_list.json` remain
 valid when copied from a version release. Both forms point at the same current
@@ -50,8 +51,8 @@ The permanent installer release is:
 https://github.com/srcfl/ftw/releases/tag/rpi-installer
 ```
 
-Download the newest `ftw-rpi4-arm64-*.img.xz` and flash it with Raspberry Pi
-Imager (**Use custom**) or balenaEtcher. Both accept `.img.xz` directly.
+The old release contains `ftw-rpi4-arm64-*.img.xz`. Do not flash it to start a
+new native 0.x site.
 Direct images do not get Imager's FTW customisation metadata, so Wi-Fi may need
 the first-boot captive portal.
 
@@ -105,22 +106,16 @@ sudo reboot
 
 ## Update
 
-Use the update control in **Settings → System**, or:
-
-```bash
-cd /opt/ftw
-sudo docker compose pull
-sudo docker compose up -d
-```
-
-The installer image is independent of application releases. New images pull
-the current stable containers on first boot; installed systems use the normal
-beta/stable updater.
+Keep an installed old image on its current FTW version. Do not use the old
+Update control or `docker compose pull` to cross release lines. The planned
+guided installer will move existing sites directly to native 0.x after it
+has been tested. The legacy image is independent of application releases;
+flashing another copy does not install native 0.x.
 
 ### Host OS security updates
 
-The in-app updater covers FTW's own components — Core, Optimizer, drivers —
-never the host underneath them. The image keeps the host patched with
+The host operating system is separate from FTW's old in-app updater. The image
+keeps the host patched with
 `unattended-upgrades`: Debian security updates and the Raspberry Pi archive
 (kernel, firmware, bootloader) apply automatically once a day. The Pi never
 reboots on its own — a reboot stops dispatch — so an installed kernel takes

@@ -1,345 +1,91 @@
 # Updates and release channels
 
-[ADR 0007](adr/0007-self-updating-binary.md) sets the direction for native Core
-updates. The native updater and release workflow are in source, but no 0.x
-release or guided migration installer has shipped. The sections below mark
-the old Docker path separately.
+[ADR 0007](adr/0007-self-updating-binary.md) defines the move to a native
+Core. `v0.131.0-beta.1` is the first published native beta. No native stable
+release or guided migration for an existing box has shipped.
 
-The old Docker release path is frozen. Native 0.x uses
-`.github/workflows/native-release.yml`, which leaves GitHub `releases/latest`
-and the old Docker `:latest` aliases on 2.x for installed boxes. A Docker box
-on 1.x, 2.x or 3.x uses the same guided migration to reach native 0.x directly,
-without an intermediate Docker version. An urgent old-line repair remains
-possible.
+There are two channels:
 
-FTW has two channels:
-
-| Channel | Tag form | Purpose |
+| Channel | Tag | Use |
 |---|---|---|
-| `beta` | `vX.Y.Z-beta.N` | Every new candidate and real-site validation |
-| `stable` | `vX.Y.Z` | Promotion of the exact commit already tested as beta |
+| `beta` | `v0.X.Y-beta.N` | Test each candidate on real sites |
+| `stable` | `v0.X.Y` | Promote the same source commit after beta validation |
 
-Stable is the default. Persisted installations that still say `edge` are
-migrated to `beta`; no edge releases are published or accepted.
+An old saved `edge` choice becomes `beta`. Native Core selects only published
+0.x releases with a matching Linux package and checksum. Its launcher keeps
+the current and previous releases for a same-schema rollback. A full backup
+is still needed to recover older data or a failed disk.
 
-## 0.x cutover plan (not yet released)
+## Existing 1.x, 2.x and 3.x boxes
 
-The native binary line starts at `v0.131.0-beta.1`. It has its own stable and
-beta selection: it only considers published 0.x releases with the matching
-Linux archive and checksum. A 3.x Docker site never receives 0.x through the
-Update button. Existing Docker releases remain available for installed sites
-while migration is tested; no new old-line release is planned.
+Keep an existing Docker or earlier native site on its current version. Do not
+use its Update button, an old Docker migration script, a moving image alias,
+or a manual Core/updater swap to cross release lines. The old code may still
+show a previously published update; it cannot be changed on a box that has
+not installed new code. The scripts on `master` for Docker-to-Docker migration
+and 2.x-to-3.x upgrades now exit before changing a site.
 
-Installed 1.x, 2.x and 3.x boxes stay where they are until their owners use
-the guided migration installer. A 1.x or 2.x box must not use Update to enter 3.x.
-The guard in new Core code hides cross-line offers and rejects direct update
-requests, but it cannot change an older binary already installed on a box.
-In particular, an older beta box can still display a 3.x release: do not
-start that update. Keep the public `latest` release and Docker `:latest`
-aliases on the 2.x line. The native workflow creates beta and stable releases
-with `latest=false`, and the native checker selects only 0.x packages. The old
-stable workflow moves `latest` and must not publish a 0.x release.
-Older installed code cannot have its Update button removed after the fact;
-it may still show an already published release. That button is not the way
-to migrate.
+The planned guided installer will move 1.x, 2.x and 3.x sites directly to
+native 0.x. It must first make and verify a full backup held off the box,
+then stop the old Core, preserve config, history, identity and goals, install
+the native service, check data and connected devices, and retain a tested way
+back. It is not ready for users. The [fresh Linux installer](../scripts/install.sh)
+is only for an empty 64-bit host and refuses a known existing site.
 
-A native beta must run for a week on the home box and at least one other site
-with no open `release-blocker`. Only then does the owner promote the same
-tested source commit to
-`v0.131.0` stable. The beta and stable packages have different embedded
-version strings, so each published package needs its own hash and release
-receipt. A tag or green CI run alone is not a deployed release.
+GitHub `releases/latest` and the old Docker `:latest` aliases remain on the
+2.x line for installed boxes. Native beta and stable releases use exact tags
+without moving that global latest slot. An urgent safety repair may still
+need an owner-approved 2.x release; it does not restart routine Docker
+releases or provide a hop to 3.x. The old `beta.yml` and `release.yml`
+workflows are guarded to that line. A release from either line does not deploy
+itself to a box.
 
-Existing Docker users on any old version move through one installer, not a
-version check.
-The installer must make and verify a full off-device backup, stop the old
-service, keep the data directory and site identity, install the native
-service, then verify Core, history, drivers and control on that site. It must
-leave a tested path back to the site's prior image and backup. Docker and
-Home Assistant users who do not migrate stay on their current delivery path.
-The guided installer is still being built. The native workflow has not
-published a migration release; do not use a local native pilot package as one.
+## Native 0.x releases
 
-The native release workflow runs by hand from `master`. A beta tag must match
-the package version and points to the exact source commit used for both Linux
-packages. The workflow runs `make verify`, checks build revision and hashes,
-rejects a tag older than a published 0.x release, then publishes the files
-from a draft. A retry keeps any uploaded asset only
-when its bytes match. Stable requires a published beta, checks that beta's
-receipt and both packages, and builds its stable version string from the same
-source commit. A `dry_run` checks the full build without creating a tag or
-release. Stable still needs the site validation above before dispatch.
-
-On a native site, Update Center can stage a verified 0.x package and restart
-through the launcher. It retains the previous binary for a same-schema
-rollback. That button keeps current data; restoring older data is an offline
-backup operation. Core saves a local settings/config rollback point before
-each update, but the point does not contain history and is not an off-device
-backup.
-
-## Native 0.x release progression
-
-User-visible changes land with a Changeset. The Changesets workflow opens the
-Version Packages PR and updates [`package.json`](../package.json) plus
-[`CHANGELOG.md`](../CHANGELOG.md).
-
-After the Version Packages PR merges, the owner dispatches
+User-visible changes need a Changeset. The Version Packages PR updates
+[`package.json`](../package.json) and [`CHANGELOG.md`](../CHANGELOG.md).
+After it merges, the owner dispatches
 [`native-release.yml`](../.github/workflows/native-release.yml) on `master`
-for the matching `v0.X.Y-beta.N` tag. The workflow checks the source commit,
-builds complete ARM64 and AMD64 packages, runs `make verify`, checks the
-hashes and publishes a prerelease without moving GitHub `releases/latest`.
+for an exact `v0.X.Y-beta.N` tag. The workflow checks the source commit,
+runs `make verify`, builds ARM64 and AMD64 packages, verifies their hashes
+and publishes a prerelease. A `dry_run` checks the build without creating a
+tag or release. A retry may keep a published asset only if its bytes match.
 
-After a week on the home box and another real site with no open
-`release-blocker`, the owner dispatches the same workflow for `v0.X.Y` stable
-and names the tested `source_beta`. Stable uses the same source commit and
-checks the published beta receipt and packages. No merge publishes a release
-on its own. Docker aliases remain on 2.x.
+A native beta must run for a week on the home box and at least one other real
+site with no open `release-blocker`. Only then can the owner dispatch the same
+workflow for `v0.X.Y` stable, naming the tested `source_beta`. Stable checks
+the published beta receipt and package hashes and uses the same source
+commit. Beta and stable contain different embedded version strings, so each
+package has its own hash and receipt. A tag, green CI run or published package
+alone is not field validation.
 
-## Legacy Docker release progression (critical 2.x repair only)
+On a native site, Update Center can download and verify a 0.x package, create
+a mandatory local settings/config rollback point, stage the new slot and
+restart through the launcher. A trial only becomes current after readiness;
+a failed trial falls back to the previous Core. A local rollback point does
+not include history and stays on the same disk. A history-format change needs
+a full backup made before the update. See
+[full backup and restore](backup-and-restore.md).
 
-The old workflows remain for an owner-approved critical safety repair on 2.x.
-They are not a path to native 0.x. For such a repair:
+Core and the compiled Energyplan worker ship in one package. Core validates
+plans and keeps its Go fallback. Signed Lua drivers follow their own beta and
+stable channel and change one driver at a time; see
+[device repository](device-repository.md). There is no optimizer sidecar in
+the native install.
 
-1. run [`beta.yml`](../.github/workflows/beta.yml) with `vX.Y.Z-beta.N`;
-2. validate that immutable build on real sites;
-3. manually dispatch [`release.yml`](../.github/workflows/release.yml) from that
-   same commit and set `source_beta` to the exact candidate tested on sites;
-4. stable promotion verifies that the selected beta tag resolves to the exact
-   stable candidate commit;
-5. release assets publish `vX.Y.Z` and move the stable aliases.
+## Host and old release details
 
-A hand-pushed stable tag does not publish assets. Use `release.yml`; its
-explicit dispatch binds the chosen beta before `release-assets.yml` can run.
+FTW's Core update does not update the host operating system, kernel or Docker
+engine. The operator handles host updates; the old Raspberry Pi image has its
+own host update setup, described in [the image guide](rpi-image.md).
 
-Stable therefore cannot be the first public channel for new code. Beta and
-stable use different tags for the same source commit and the same Core and
-updater image digests. The beta prerelease records both index digests; stable
-fails if either beta tag moves and promotes only those recorded digests. The
-first stable promotion also records the chosen beta and both digests on the
-stable release. Asset reruns must reuse that receipt and cannot select a newer
-beta from the same commit. The candidate image already contains the stable
-product version. Compose passes
-its pinned `FTW_IMAGE_TAG` into Core so status, update
-checks and fleet reports still show the exact beta tag during site validation.
-Core accepts only that build-bound beta tag or the baked stable version; another
-environment value cannot invent a release identity. Stable promotion only adds
-stable aliases to that validated manifest.
+The old Docker workflows and their release receipts remain for an exceptional
+2.x repair. The native release workflow cannot publish Docker images or move
+old aliases. New Core code refuses cross-line update requests, but that guard
+cannot change an older installed binary. Do not use an old tag or script to
+bypass the guided migration.
 
-## Immutable update targets
-
-The checker uses GitHub Releases to select a released version and GHCR to prove
-that its exact image tag exists. The updater installs the immutable tag, never
-the moving `:latest` or `:beta` alias. This avoids the race where a release
-exists before a moving image alias has advanced.
-
-Release notes are best-effort UI data. Failure to fetch notes does not weaken
-tag resolution or image verification.
-
-## Update Center and component boundaries
-
-The Update Center reports and records Core, Optimizer and Driver operations
-separately. A component history survives Core container recreation. Core stays
-the safety authority regardless of which optional component is being updated.
-
-```text
-Core + updater    paired control plane; Core owns state, dispatch and safety
-Optimizer         independent image and version; protocol handshake; optional
-Drivers           signed Lua artifacts; one driver/version activated at a time
-```
-
-The main process checks versions and exposes update status. A separate
-`ftw-updater` container owns the Docker socket and performs immutable
-pull/recreate operations over a Unix socket. Core never mounts the Docker
-socket.
-
-Before every Core update, Core creates a mandatory, consistent local rollback
-point for `state.db` and configuration. An older client request cannot skip it.
-The point never copies `history.db`; that file stays in place through update
-and rollback, so the step is bounded by settings size, not history size.
-These bounded points remain on the same disk and are deliberately labelled
-**Local rollback points**, not full backups. Older incomplete snapshots are
-visible but cannot be restored. Going back across a history-format change
-needs a full backup made before that update.
-
-Core updates include the compiled Energyplan worker. They require no Python
-service. Core DP remains available if the worker fails or returns an invalid plan.
-
-Portable `.ftwbak` archives include the complete persistent directory, cold
-history, custom/managed drivers and component inventory. They are independently
-verified before publication and can be downloaded off-device. Safe restore
-retains the pre-restore directory and automatically reactivates it when the
-restored Core fails health. See [backup-and-restore.md](backup-and-restore.md).
-
-A Driver update downloads one signed artifact, verifies hash, metadata and host
-API compatibility, then atomically activates exactly that version. Core puts
-the affected device in its safe default mode during restart and accepts the new
-driver only after fresh telemetry reports the same stable hardware identity.
-Failure automatically reactivates the previous artifact; no other driver or
-system component changes.
-
-Status is written atomically to the shared volume and is reconciled into the
-persistent component history after Core recreation.
-
-After a verified Core update the updater removes the Core, updater and
-optimizer images that no container uses, except the images this site could
-roll back to. It never touches other repositories or user-built images, and a
-failed cleanup never turns a finished update into a failure.
-
-The updater accepts only known components and `vX.Y.Z` or
-`vX.Y.Z-beta.N` targets.
-
-Release notes carry two hidden markers. `<!-- ftw-state-schema-v2:N -->` is
-the release's on-disk state schema; Cores newer than v3.6.0-beta.1 read it to
-refuse a downgrade. `<!-- ftw-state-schema:4 -->` is read only by older Cores.
-Those Cores copied their whole history before any update whose marker differed
-from their own schema, and on a Raspberry Pi with a large history that copy
-could not finish (#1302). The legacy marker stays at 4, the last schema those
-Cores use, so they update without the copy. `state-schema.json` pins both
-values, a Go test checks them, and the stable release guard refuses notes
-that carry anything else.
-
-## Scope: the host is not updated here
-
-Self-update covers Core, the updater sidecar, the Optimizer and signed
-drivers — never the host operating system, kernel or Docker engine. The
-Raspberry Pi appliance image keeps its own host patched with
-`unattended-upgrades` ([rpi-image.md](rpi-image.md#host-os-security-updates));
-on every other deployment the host and engine belong to the operator's own
-package and service management.
-
-## Operator use
-
-The version badge selects `stable` or `beta`, checks availability and starts
-an update. Changing channel does not deploy anything. A skipped version remains
-hidden only until a newer version appears.
-
-**Restart** stops and starts the existing Core container, then checks its health.
-It keeps that container's image and environment, even if `.env` or Compose now
-names a different release. It does not apply changes to Compose; use the update
-flow for a new image. Core sends `restart_existing` so an older updater refuses
-before it can pull or replace anything. If FTW reports that safe restart needs a
-newer updater, update Core and updater together using the paired commands below.
-A normal Core update also asks the updater to replace itself with the same tag
-after Core passes its health check.
-
-The 2.x to 3.x steps below document the earlier operator-led transition.
-They are not the path for installed users in the 0.x cutover. A 1.x or 2.x
-box waits for the guided installer. Orange Update must not move it to 3.x:
-that click changes Core before its updater.
-
-For manual updates, install the updater first while the existing Core still
-runs. Set `FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the published
-immutable release tag. Keep the current `FTW_IMAGE_TAG` until the updater is
-installed. Use your installation's Compose project and override files:
-
-```bash
-cd ~/ftw
-docker compose pull ftw-updater
-docker compose up -d --no-deps ftw-updater
-docker compose images ftw-updater
-docker compose logs --tail 20 ftw-updater
-```
-
-Check that the running updater uses the intended release image and has started
-its socket listener. Then use Update Center to update Core. A manual Core
-replacement must first create and verify a full backup; pin `FTW_IMAGE_TAG` to
-the same tag, then pull and recreate only the Core service.
-
-### First DuckDB upgrade
-
-The [paired upgrade script](upgrade-paired-release.md) records the earlier
-operator path from a 2.x Compose site. The updater shipped before the fix for [#1164](https://github.com/srcfl/ftw/issues/1164)
-waits only 30 minutes and can revert the Core image without its matching data.
-It replaces itself only after Core becomes ready. **Installing a new Core does
-not fix the old updater before that first upgrade.** Install an updater release
-that contains the fix using the updater-only steps above before starting the
-DuckDB upgrade. `v3.2.0-beta.1` does not contain this fix.
-
-When `FTW_SELFUPDATE_ENABLED=1`, the new Core checks `GET /capabilities` on the
-updater Unix socket before loading config or opening state. It requires protocol
-1 and `preserve_core_on_readiness_failure: true`. It waits up to 30 seconds for
-the socket to start. An old, unknown or unavailable updater makes Core exit with
-`update ftw-updater first`, before it changes any data. The old updater can then
-revert that refused image safely. This guard cannot protect a Core already
-running `v3.2.0-beta.1`; use the stopped-updater procedure below for that case.
-Native installations with self-update disabled do not need an updater.
-
-Core first imports the catalog, site history and energy accounting, including
-the latest counters. It then starts live collection and serves its API while
-the large SQLite sample table and older Parquet files import in the background.
-The startup page and history status show progress. Historical coverage stays
-incomplete until all sources pass verification; a missing sample during this
-phase does not mean zero consumption. Unknown time bounds apply to the whole
-historical view. New writes go to DuckDB throughout the background import.
-
-An interrupted import resumes from committed progress on the next Core start.
-An import error leaves live collection running and reports incomplete history.
-Keep the original sources and the verified pre-update full backup. Core rejects
-a new full-history export until import finishes. Fix the reported source or
-storage problem before restarting Core to resume the import.
-
-Raw-history retention waits until the full import passes. Site-history rollups
-remain available after the initial seed. Import scratch directories belong to
-the importer; it removes leftovers on resume while keeping original sources.
-
-The fixed updater allows six hours for Core startup. This is a waiting budget,
-not a promise that every migration will finish within it. Core still needs a
-working `/api/status` before the updater reports success. A failed readiness
-check leaves the new container and data in place and reports failure. To return
-to an older version, stop Core and restore a verified full backup with its
-matching image; changing only the image can lose history.
-
-### An updater stopped during migration
-
-Leave the running Core alone until its import and API readiness have been
-checked. Save the updater's existing `state.json`, the pre-update full backup,
-snapshot directory and verified previous Core image identity before starting
-the updater again. Older updaters hold the current job's previous image ID only
-in memory until success; a saved `previous_image_id` may belong to an earlier
-update. Use the backup inventory and pre-update Docker evidence to resolve it.
-
-After readiness, start or replace **only** `ftw-updater` with `--no-deps` using
-the fixed release. Its startup recovery marks an interrupted update as failed;
-it does not restart Core or replay an image rollback. This records the lost
-supervision honestly even if Core has since finished. Keep that record and
-check Core's installed image and history status separately. Do not repeat the
-Core update or overwrite the job as `done` merely to clear its failed status.
-
-Manage Optimizer and Drivers independently in Update Center. A blanket
-`docker compose pull` is intentionally not the documented upgrade procedure.
-
-Use the [legacy upgrade guide](upgrade-from-legacy.md) before updating an older
-Compose layout with hard-coded or pre-FTW image names.
-
-## Enabling
-
-The shipped Linux Compose topology sets `FTW_SELFUPDATE_ENABLED=1` and mounts
-the updater socket/status volume. Native deployments normally omit the flag and
-use their package or service manager.
-
-When self-update is disabled, production UI controls and handlers are disabled.
-An unstamped `dev` build keeps the probe visible so the restart flow can be
-tested locally.
-
-## Independent release progression
-
-- Core and the updater sidecar are built from Core `vX.Y.Z[-beta.N]` releases.
-- Energyplan updates and rolls back with the Core image. There is no separate
-  optimizer channel, image update or rollback.
-- Signed Lua drivers are versioned independently in `srcfl/device-drivers`.
-  Main publishes `drivers-beta`; `drivers-stable` promotes the exact signed
-  beta commit and retains per-driver version history. See
-  [device-repository.md](device-repository.md).
-
-## Retiring the Python service
-
-After installing this Core/updater pair and checking that Energyplan is healthy,
-run the updater binary with `-retire-python` and the installation's `-compose`
-path. The command starts a short-lived helper from the exact running updater
-image, with the project mounted writable. It backs up each changed Compose file, removes only the old planner service
-and FTW socket wiring, validates the merged files, and removes the retired
-container from the same Compose project, including an orphan left by an earlier
-Compose edit. Custom services and persistent data
-stay intact. Recreate Core at its pinned image to release the old socket mount.
-An older updater can install this release while Python still runs; retire the
-service only after the new updater is installed.
+Release notes keep the old state-schema markers for the remaining Docker
+line. The native package carries its own state-schema receipt; the launcher
+checks it before staging and refuses automatic rollback across a schema
+change. Source and tests in `go/internal/nativeupdate` define that behavior.
