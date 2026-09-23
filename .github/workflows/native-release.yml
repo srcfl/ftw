@@ -58,6 +58,11 @@ jobs:
             echo "public latest must stay on a 2.x stable release (found ${latest})" >&2
             exit 1
           fi
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            > "${RUNNER_TEMP}/native-release-pages.json"
+          python3 scripts/check-native-release-order.py "${TAG}" \
+            "${RUNNER_TEMP}/native-release-pages.json"
           if [ "${CHANNEL}" = stable ]; then
             if [[ ! "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+$ ]] ||
                [[ ! "${SOURCE_BETA}" =~ ^v0\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] ||

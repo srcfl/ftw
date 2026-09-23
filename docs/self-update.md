@@ -61,7 +61,8 @@ pilot package as one.
 The native release workflow runs by hand from `master`. A beta tag must match
 the package version and points to the exact source commit used for both Linux
 packages. The workflow runs `make verify`, checks build revision and hashes,
-then publishes the files from a draft. A retry keeps any uploaded asset only
+rejects a tag older than a published 0.x release, then publishes the files
+from a draft. A retry keeps any uploaded asset only
 when its bytes match. Stable requires a published beta, checks that beta's
 receipt and both packages, and builds its stable version string from the same
 source commit. A `dry_run` checks the full build without creating a tag or
