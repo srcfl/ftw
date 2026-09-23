@@ -1,6 +1,5 @@
-// Package selfupdate resolves the selected stable or beta release
-// stream and triggers pull+restart via the ftw-updater sidecar over a Unix
-// socket.
+// Package selfupdate resolves stable and beta releases. Docker uses its
+// updater sidecar; native installs stage verified release packages in slots.
 //
 // Two signals are required, both for safety reasons:
 //
@@ -41,13 +40,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/nativeupdate"
 )
 
 // Store is the subset of state.Store methods this package needs. Declared as
@@ -127,6 +129,12 @@ type Config struct {
 	SocketPath string
 	// StatusPath is the sidecar's state.json. Empty disables Status.
 	StatusPath string
+	// NativeRoot selects verified binary release slots instead of GHCR and
+	// the Docker updater. NativeRestart must stop Core gracefully after a
+	// candidate has been staged.
+	NativeRoot       string
+	NativeRestart    func() error
+	NativeReleaseURL string // test override; empty uses the public GitHub release URL
 	// Bus receives an events.UpdateAvailable event whenever Check
 	// discovers a new, non-skipped release tag. Nil disables emission.
 	Bus *events.Bus
@@ -148,6 +156,8 @@ type Config struct {
 // Info is the cached view returned to the UI.
 type Info struct {
 	Current         string    `json:"current"`
+	Native          bool      `json:"native,omitempty"`
+	Previous        string    `json:"previous,omitempty"`
 	Channel         Channel   `json:"channel"`
 	Channels        []Channel `json:"channels"`
 	Latest          string    `json:"latest,omitempty"`
@@ -346,9 +356,7 @@ func (c *Checker) loop(ctx context.Context) {
 // finds the cache younger than half the check interval returns early
 // and never hits the network.
 func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
-	c.mu.RLock()
-	cached := c.info
-	c.mu.RUnlock()
+	cached := c.Info()
 	// A recorded GitHub 5xx must not occupy the half-interval cache.
 	// That is the "restart seemed to fix it" bug: the UI reads this
 	// cache for hours, and only a force check or a process start retries.
@@ -357,23 +365,33 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	}
 
 	channel := cached.Channel
-	rp := &registryProbe{
-		httpClient: c.cfg.HTTPClient,
-		base:       c.cfg.RegistryBaseURL,
-		repo:       c.cfg.Image,
-		service:    c.cfg.RegistryService,
-	}
-	rel, deployable, err := c.resolveChannel(ctx, channel)
+	rel, deployable, err := c.resolveChannel(ctx, channel, cached.Current)
 	if err != nil {
 		return c.recordErr(err)
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
+	if c.cfg.NativeRoot == "" && c.cfg.ReleaseTagPrefix == "" &&
+		legacyCoreReleaseLocked(cached.Current, targetTag) {
+		// An already installed 1.x/2.x Core must wait for the guided
+		// migration path, even if a newer major is published on beta.
+		rel, targetTag, deployable = ghRelease{}, "", false
+	}
 	if targetTag != "" {
-		ok, err := rp.hasTag(ctx, targetTag)
-		if err != nil {
-			return c.recordErr(fmt.Errorf("registry probe: %w", err))
+		if c.cfg.NativeRoot != "" {
+			deployable = hasNativeAssets(rel, runtime.GOARCH)
+		} else {
+			rp := &registryProbe{
+				httpClient: c.cfg.HTTPClient,
+				base:       c.cfg.RegistryBaseURL,
+				repo:       c.cfg.Image,
+				service:    c.cfg.RegistryService,
+			}
+			ok, err := rp.hasTag(ctx, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("registry probe: %w", err))
+			}
+			deployable = ok
 		}
-		deployable = ok
 	}
 
 	c.mu.Lock()
@@ -404,6 +422,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	c.info.CheckedAt = c.cfg.Now()
 	c.info.Err = ""
 	c.reloadSkipLocked()
+	c.refreshRuntimeInfoLocked()
 	// Decide whether to emit under the lock, then publish outside it.
 	var announce *events.UpdateAvailable
 	if c.cfg.Bus != nil && c.info.UpdateAvailable && !c.info.Skipped &&
@@ -425,7 +444,36 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	return info, nil
 }
 
-func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghRelease, bool, error) {
+func (c *Checker) resolveChannel(ctx context.Context, channel Channel, current string) (ghRelease, bool, error) {
+	if c.cfg.NativeRoot != "" {
+		rel, err := c.fetchReleaseList(ctx, func(rel ghRelease) bool {
+			if !strings.HasPrefix(rel.TagName, "v0.") {
+				return false
+			}
+			if channel == ChannelStable {
+				return !rel.Prerelease && isStableTag(rel.TagName)
+			}
+			return !rel.Prerelease && isStableTag(rel.TagName) || rel.Prerelease && isBetaTag(rel.TagName)
+		})
+		return rel, rel.TagName != "", err
+	}
+	// The final Docker line remains on 3.x while native packages start at
+	// 0.x. Keep both channels on their install type even when GitHub's
+	// /latest endpoint or release list starts with a native release.
+	if version := parseSemanticVersion(current); version != nil && version.numbers[0] == 3 && c.cfg.ReleaseTagPrefix == "" {
+		rel, err := c.fetchReleaseList(ctx, func(rel ghRelease) bool {
+			candidate := parseSemanticVersion(rel.TagName)
+			if candidate == nil || candidate.numbers[0] != 3 {
+				return false
+			}
+			if channel == ChannelStable {
+				return !rel.Prerelease && isStableTag(rel.TagName)
+			}
+			return !rel.Prerelease && isStableTag(rel.TagName) || rel.Prerelease && isBetaTag(rel.TagName)
+		})
+		return rel, rel.TagName != "", err
+	}
+	legacyCore := c.cfg.ReleaseTagPrefix == "" && legacyCoreMajor(current) != 0
 	switch channel {
 	case ChannelStable:
 		if c.cfg.ReleaseTagPrefix != "" {
@@ -433,8 +481,24 @@ func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghReleas
 			return rel, rel.TagName != "", err
 		}
 		rel, err := c.fetchLatestRelease(ctx)
+		if err == nil && legacyCore && rel.TagName != "" && legacyCoreReleaseLocked(current, rel.TagName) {
+			// Keep maintenance visible even if public latest moves to a
+			// newer major before this installation migrates.
+			rel, err = c.fetchReleaseList(ctx, func(candidate ghRelease) bool {
+				return !candidate.Prerelease && isStableTag(candidate.TagName) &&
+					!legacyCoreReleaseLocked(current, candidate.TagName)
+			})
+		}
 		return rel, rel.TagName != "", err
 	case ChannelBeta:
+		if legacyCore {
+			rel, err := c.fetchReleaseList(ctx, func(candidate ghRelease) bool {
+				return ((!candidate.Prerelease && isStableTag(candidate.TagName)) ||
+					(candidate.Prerelease && isBetaTag(candidate.TagName))) &&
+					!legacyCoreReleaseLocked(current, candidate.TagName)
+			})
+			return rel, rel.TagName != "", err
+		}
 		rel, err := c.fetchBetaRelease(ctx)
 		return rel, rel.TagName != "", err
 	default:
@@ -442,11 +506,26 @@ func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghReleas
 	}
 }
 
+func hasNativeAssets(rel ghRelease, arch string) bool {
+	archive := "ftw-linux-" + arch + ".tar.gz"
+	var foundArchive, foundChecksum bool
+	for _, asset := range rel.Assets {
+		if asset.Name == archive {
+			foundArchive = true
+		}
+		if asset.Name == archive+".sha256" {
+			foundChecksum = true
+		}
+	}
+	return foundArchive && foundChecksum
+}
+
 func (c *Checker) recordErr(err error) (Info, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.info.Err = err.Error()
 	c.info.CheckedAt = c.cfg.Now()
+	c.refreshRuntimeInfoLocked()
 	return c.info, err
 }
 
@@ -500,6 +579,9 @@ type ghRelease struct {
 	PublishedAt time.Time `json:"published_at"`
 	Draft       bool      `json:"draft"`
 	Prerelease  bool      `json:"prerelease"`
+	Assets      []struct {
+		Name string `json:"name"`
+	} `json:"assets"`
 }
 
 // fetchLatestRelease asks GitHub for the most-recently-published
@@ -556,28 +638,58 @@ func (c *Checker) fetchPrefixedRelease(ctx context.Context, includeBeta bool) (g
 }
 
 func (c *Checker) fetchReleaseList(ctx context.Context, accept func(ghRelease) bool) (ghRelease, error) {
-	resp, err := c.getGitHub(ctx, c.cfg.ReleasesURL)
-	if err != nil {
-		return ghRelease{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return ghRelease{}, fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var releases []ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases); err != nil {
-		return ghRelease{}, err
-	}
-	for _, rel := range releases {
-		if rel.Draft {
-			continue
+	rawURL := c.cfg.ReleasesURL
+	seen := make(map[string]bool)
+	for rawURL != "" {
+		if seen[rawURL] {
+			return ghRelease{}, errors.New("github releases list: repeated page")
 		}
-		if accept(rel) {
-			return rel, nil
+		seen[rawURL] = true
+		resp, err := c.getGitHub(ctx, rawURL)
+		if err != nil {
+			return ghRelease{}, err
+		}
+		if resp.StatusCode >= 400 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+			_ = resp.Body.Close()
+			return ghRelease{}, fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		var releases []ghRelease
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return ghRelease{}, decodeErr
+		}
+		for _, rel := range releases {
+			if !rel.Draft && accept(rel) {
+				return rel, nil
+			}
+		}
+		rawURL, err = nextReleasePage(resp.Header.Get("Link"), rawURL)
+		if err != nil {
+			return ghRelease{}, err
 		}
 	}
 	return ghRelease{}, nil
+}
+
+func nextReleasePage(linkHeader, currentURL string) (string, error) {
+	current, err := url.Parse(currentURL)
+	if err != nil {
+		return "", err
+	}
+	for _, link := range strings.Split(linkHeader, ",") {
+		parts := strings.Split(link, ";")
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) != `rel="next"` {
+			continue
+		}
+		next, err := url.Parse(strings.Trim(strings.TrimSpace(parts[0]), "<>"))
+		if err != nil || next.Scheme != current.Scheme || next.Host != current.Host {
+			return "", errors.New("github releases list: invalid next page")
+		}
+		return next.String(), nil
+	}
+	return "", nil
 }
 
 func (c *Checker) releaseTargetTag(releaseTag string) string {
@@ -602,9 +714,58 @@ func (c *Checker) Info() Info {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reloadSkipLocked()
-	info := c.info
-	info.SidecarReady = c.sidecarReadyLocked()
-	return info
+	c.refreshRuntimeInfoLocked()
+	return c.info
+}
+
+func (c *Checker) refreshRuntimeInfoLocked() {
+	c.info.Previous = ""
+	if c.cfg.NativeRoot != "" {
+		manager := nativeupdate.Manager{Root: c.cfg.NativeRoot}
+		state, err := manager.Read()
+		if err == nil {
+			_, err = manager.ReleaseDir(state.Current)
+		}
+		c.info.SidecarReady = err == nil
+		c.info.Native = true
+		if err == nil {
+			if previous, rollbackErr := manager.RollbackCandidate(); rollbackErr == nil {
+				c.info.Previous = previous
+			}
+		}
+	} else {
+		c.info.SidecarReady = c.sidecarReadyLocked()
+	}
+}
+
+func (c *Checker) Native() bool { return c.cfg.NativeRoot != "" }
+
+func (c *Checker) TriggerNativeRollback() (string, error) {
+	if c.cfg.NativeRoot == "" || c.cfg.NativeRestart == nil {
+		return "", errors.New("selfupdate: native rollback is unavailable")
+	}
+	manager := nativeupdate.Manager{Root: c.cfg.NativeRoot}
+	previous, err := manager.PrepareRollback()
+	if err != nil {
+		return "", err
+	}
+	now := c.cfg.Now()
+	status := UpdateStatus{State: "restarting", Action: "rollback", Component: "core", Target: previous,
+		StartedAt: now, PhaseStartedAt: now, UpdatedAt: now,
+		Message: "Starting the previous Core once", Step: 1, TotalSteps: 2}
+	if err := c.WriteStatus(status); err != nil {
+		_ = manager.CancelPrepared(previous)
+		return "", err
+	}
+	if err := c.cfg.NativeRestart(); err != nil {
+		_ = manager.CancelPrepared(previous)
+		status.State = "failed"
+		status.Message = err.Error()
+		status.UpdatedAt = c.cfg.Now()
+		_ = c.WriteStatus(status)
+		return "", err
+	}
+	return previous, nil
 }
 
 // SetCurrentVersion refreshes runtime-discovered component versions (notably
@@ -738,6 +899,12 @@ func (c *Checker) TriggerComponent(ctx context.Context, action, target, componen
 // TriggerComponentAt preserves the audit operation's start time across a Core
 // container recreation so the new process finishes the same history record.
 func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, component string, startedAt time.Time) error {
+	if c.cfg.NativeRoot != "" {
+		return c.triggerNative(ctx, action, target, component, startedAt)
+	}
+	if action == "update" && component == "core" && legacyCoreReleaseLocked(c.Info().Current, target) {
+		return errors.New("selfupdate: this Core release line is locked; use the guided migration installer")
+	}
 	if c.cfg.SocketPath == "" {
 		return errors.New("selfupdate: sidecar socket not configured")
 	}
@@ -762,6 +929,100 @@ func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, compon
 		return fmt.Errorf("safe restart requires a newer updater; update Core and updater together: %w", err)
 	}
 	return err
+}
+
+func (c *Checker) triggerNative(ctx context.Context, action, target, component string, startedAt time.Time) error {
+	if c.cfg.NativeRestart == nil {
+		return errors.New("selfupdate: native restart is not configured")
+	}
+	if component != "core" {
+		return errors.New("selfupdate: Energyplan ships with native Core")
+	}
+	if action == "restart" {
+		now := c.cfg.Now()
+		status := UpdateStatus{State: "restarting", Action: "restart", Component: "core", Target: c.Info().Current,
+			StartedAt: now, PhaseStartedAt: now, UpdatedAt: now,
+			Message: "Restarting the installed Core", Step: 1, TotalSteps: 2}
+		if err := c.WriteStatus(status); err != nil {
+			return err
+		}
+		if err := c.cfg.NativeRestart(); err != nil {
+			status.State = "failed"
+			status.Message = err.Error()
+			status.UpdatedAt = c.cfg.Now()
+			_ = c.WriteStatus(status)
+			return err
+		}
+		return nil
+	}
+	if action != "update" || !nativeupdate.ValidTag(target) || !strings.HasPrefix(target, "v0.") {
+		return fmt.Errorf("selfupdate: invalid native update target %q", target)
+	}
+	info := c.Info()
+	if target != info.Latest || !info.UpdateAvailable || !info.SidecarReady {
+		return errors.New("selfupdate: native target is not the available verified release")
+	}
+	if startedAt.IsZero() {
+		startedAt = c.cfg.Now()
+	}
+	manager := nativeupdate.Manager{Root: c.cfg.NativeRoot}
+	phaseStarted := c.cfg.Now()
+	status := UpdateStatus{State: "pulling", Action: "update", Component: "core", Target: target,
+		StartedAt: startedAt, PhaseStartedAt: phaseStarted, UpdatedAt: phaseStarted,
+		Message: "Downloading verified Core release", Step: 2, TotalSteps: 4, ProgressUnit: "bytes"}
+	if err := c.WriteStatus(status); err != nil {
+		return err
+	}
+	lastWrite := time.Time{}
+	// Version probes have a short HTTP deadline; an archive can take much
+	// longer on a slow site. Keep the same transport while using the update
+	// operation's own deadline for the transfer.
+	downloadClient := *c.cfg.HTTPClient
+	downloadClient.Timeout = 0
+	downloader := nativeupdate.Downloader{Manager: manager, ReleaseBaseURL: c.cfg.NativeReleaseURL,
+		HTTPClient: &downloadClient, Progress: func(copied, total int64) {
+			if time.Since(lastWrite) < time.Second && copied != total {
+				return
+			}
+			lastWrite = time.Now()
+			status.ProgressCurrent = copied
+			status.ProgressTotal = total
+			status.UpdatedAt = c.cfg.Now()
+			if err := c.WriteStatus(status); err != nil {
+				slog.Warn("selfupdate: native download progress write failed", "err", err)
+			}
+		}}
+	if err := downloader.Install(ctx, target); err != nil {
+		return err
+	}
+	status.State = "checking"
+	status.Message = "Checking release and preparing restart"
+	status.Step = 3
+	status.ProgressCurrent = 0
+	status.ProgressTotal = 0
+	status.ProgressUnit = ""
+	status.PhaseStartedAt = c.cfg.Now()
+	status.UpdatedAt = status.PhaseStartedAt
+	if err := c.WriteStatus(status); err != nil {
+		return err
+	}
+	if err := manager.Prepare(target); err != nil {
+		return err
+	}
+	status.State = "restarting"
+	status.Message = "Starting the new Core once"
+	status.Step = 4
+	status.PhaseStartedAt = c.cfg.Now()
+	status.UpdatedAt = status.PhaseStartedAt
+	if err := c.WriteStatus(status); err != nil {
+		_ = manager.CancelPrepared(target)
+		return err
+	}
+	if err := c.cfg.NativeRestart(); err != nil {
+		_ = manager.CancelPrepared(target)
+		return err
+	}
+	return nil
 }
 
 // TriggerRollback asks the sidecar to restore a snapshot over the main
@@ -949,6 +1210,23 @@ func channelUpdateAvailable(latest, current string) bool {
 		return false
 	}
 	return isNewer(latest, current)
+}
+
+func legacyCoreReleaseLocked(current, target string) bool {
+	major := legacyCoreMajor(current)
+	if major == 0 || target == "" {
+		return false
+	}
+	candidate := parseSemanticVersion(target)
+	return candidate == nil || candidate.numbers[0] != major
+}
+
+func legacyCoreMajor(current string) int {
+	running := parseSemanticVersion(current)
+	if running == nil || (running.numbers[0] != 1 && running.numbers[0] != 2) {
+		return 0
+	}
+	return running.numbers[0]
 }
 
 func isBetaTag(tag string) bool {

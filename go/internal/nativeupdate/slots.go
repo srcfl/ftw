@@ -193,6 +193,17 @@ func (m Manager) Commit(tag string) error {
 	})
 }
 
+func (m Manager) CancelPrepared(tag string) error {
+	return m.change(func(state *Slots) error {
+		if state.Next != tag || state.Trial != "" {
+			return fmt.Errorf("release %s is not waiting to start", tag)
+		}
+		state.Next = ""
+		state.LastFailed = tag
+		return nil
+	})
+}
+
 func (m Manager) FailTrial(tag string) error {
 	return m.change(func(state *Slots) error {
 		if state.Trial != tag {
@@ -211,33 +222,55 @@ func (m Manager) PrepareRollback() (string, error) {
 		if readErr != nil {
 			return readErr
 		}
-		if state.Previous == "" || state.Next != "" || state.Trial != "" {
-			return errors.New("no previous release is available for rollback")
-		}
-		previousDir, readErr := m.ReleaseDir(state.Previous)
+		previous, readErr = m.rollbackCandidateLocked(state)
 		if readErr != nil {
 			return readErr
 		}
-		currentDir, readErr := m.ReleaseDir(state.Current)
-		if readErr != nil {
-			return readErr
-		}
-		previousReceipt, readErr := readReceipt(previousDir, state.Previous, runtime.GOARCH)
-		if readErr != nil {
-			return readErr
-		}
-		currentReceipt, readErr := readReceipt(currentDir, state.Current, runtime.GOARCH)
-		if readErr != nil {
-			return readErr
-		}
-		if currentReceipt.StateSchema != previousReceipt.StateSchema {
-			return errors.New("state schema changed; use a verified full backup for rollback")
-		}
-		previous = state.Previous
 		state.Next = previous
 		return m.writeLocked(state)
 	})
 	return previous, err
+}
+
+// RollbackCandidate reports a safe binary-only rollback without changing
+// slots. The UI can then hide a previous release that needs data restore.
+func (m Manager) RollbackCandidate() (string, error) {
+	var previous string
+	err := m.locked(func() error {
+		state, readErr := m.readLocked()
+		if readErr != nil {
+			return readErr
+		}
+		previous, readErr = m.rollbackCandidateLocked(state)
+		return readErr
+	})
+	return previous, err
+}
+
+func (m Manager) rollbackCandidateLocked(state Slots) (string, error) {
+	if state.Previous == "" || state.Next != "" || state.Trial != "" {
+		return "", errors.New("no previous release is available for rollback")
+	}
+	previousDir, err := m.ReleaseDir(state.Previous)
+	if err != nil {
+		return "", err
+	}
+	currentDir, err := m.ReleaseDir(state.Current)
+	if err != nil {
+		return "", err
+	}
+	previousReceipt, err := readReceipt(previousDir, state.Previous, runtime.GOARCH)
+	if err != nil {
+		return "", err
+	}
+	currentReceipt, err := readReceipt(currentDir, state.Current, runtime.GOARCH)
+	if err != nil {
+		return "", err
+	}
+	if currentReceipt.StateSchema != previousReceipt.StateSchema {
+		return "", errors.New("state schema changed; use a verified full backup for rollback")
+	}
+	return state.Previous, nil
 }
 
 // Prune keeps the current, previous, pending and last failed releases. It

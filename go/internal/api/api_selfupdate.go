@@ -143,8 +143,16 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
+	if s.deps.SelfUpdate.Native() && s.deps.SnapshotDir == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "native update requires a writable pre-update rollback point"})
+		return
+	}
 
 	info := s.deps.SelfUpdate.Info()
+	if info.Native && !info.UpdateAvailable {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "no newer native release is available on this channel"})
+		return
+	}
 	if info.CurrentStateSchema >= 3 && info.TargetStateSchema < info.CurrentStateSchema {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "This Core uses a newer history format. Stop Core and restore a verified full backup with the matching older Core version; changing only the image would omit new history."})
 		return
@@ -160,7 +168,11 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !info.SidecarReady {
-		writeJSON(w, 502, map[string]string{"error": "selfupdate: sidecar socket not ready"})
+		message := "selfupdate: sidecar socket not ready"
+		if info.Native {
+			message = "selfupdate: native release slot not ready"
+		}
+		writeJSON(w, 502, map[string]string{"error": message})
 		return
 	}
 	if info.Latest == "" {
@@ -240,7 +252,11 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	updateTimeout := 30 * time.Second
+	if s.deps.SelfUpdate.Native() {
+		updateTimeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
 	defer cancel()
 	if err := s.deps.SelfUpdate.TriggerComponentAt(ctx, "update", latest, "core", startedAt); err != nil {
 		writeUpdateStatus("failed", err.Error())
@@ -359,6 +375,10 @@ func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
+	if s.deps.SelfUpdate.Native() {
+		writeJSON(w, 503, map[string]string{"error": "restore a native data snapshot offline with ftw-backup; use binary rollback to change only the Core version"})
+		return
+	}
 	if s.deps.SnapshotDir == "" {
 		writeJSON(w, 503, map[string]string{"error": "snapshots disabled (no SnapshotDir)"})
 		return
@@ -446,18 +466,43 @@ func containsTraversal(id string) bool {
 	return id == "." || id == ".."
 }
 
-// handleVersionRestart restarts the existing Core container. No image is
-// selected or downloaded, even when Compose now names a different release.
+// handleVersionRestart restarts the installed Core. No other version is
+// selected, even when Compose now names a different release.
 func (s *Server) handleVersionRestart(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
+	}
+	if s.deps.SelfUpdate.Native() {
+		if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) || !s.versionUpdateMu.TryLock() {
+			writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+			return
+		}
+		defer s.versionUpdateMu.Unlock()
 	}
 	if err := s.deps.SelfUpdate.TriggerRestart(r.Context()); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 202, map[string]any{"status": "started", "action": "restart"})
+}
+
+func (s *Server) handleVersionBinaryRollback(w http.ResponseWriter, r *http.Request) {
+	if s.deps.SelfUpdate == nil || !s.deps.SelfUpdate.Native() {
+		writeJSON(w, 503, map[string]string{"error": "native version rollback is unavailable"})
+		return
+	}
+	if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) || !s.versionUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+	defer s.versionUpdateMu.Unlock()
+	previous, err := s.deps.SelfUpdate.TriggerNativeRollback()
+	if err != nil {
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 202, map[string]any{"status": "started", "action": "rollback", "target": previous})
 }
 
 // handleVersionUpdateStatus passes through the sidecar's state.json. The

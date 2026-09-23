@@ -553,7 +553,9 @@
       this._updateOriginalVersion = this._info ? this._info.current : null;
       this._expectedRun = {
         action,
-        target: action === "update" && this._info ? (this._info.latest || "") : "",
+        target: this._info
+          ? (action === "update" ? this._info.latest || "" : action === "rollback" ? this._info.previous || "" : "")
+          : "",
         snapshot: "",
       };
       this._sidecarState = { state: "starting", action };
@@ -561,7 +563,8 @@
       this._startElapsedTicker();
       this._startStatusPolling();
 
-      const url = action === "restart" ? "/api/version/restart" : "/api/version/update";
+      const url = action === "restart" ? "/api/version/restart"
+        : action === "rollback" ? "/api/version/binary-rollback" : "/api/version/update";
       this._postJSON(url, null)
         .then((resp) => {
           if (!resp.ok) {
@@ -589,6 +592,9 @@
           }
         })
         .catch((e) => {
+          // A native restart may close this request after Core has accepted
+          // it. The durable status is authoritative; keep polling it.
+          if (this._info?.native && this._phase === "updating") return;
           this._sidecarState = { state: "failed", action, message: String(e) };
           this._stopUpdateTimers();
           this._render();
@@ -815,7 +821,9 @@
       // The summary covers the whole inventory, not just Core: an operator
       // with a waiting driver update should not read "up to date".
       const subtitle = pending.total === 0
-        ? "Everything is up to date."
+        ? (info.native && info.channel === "stable" && /-beta\./.test(info.current || "")
+          ? "No newer 0.x stable package is ready yet."
+          : "Everything is up to date.")
         : pending.total === 1
         ? "1 update available."
         : `${pending.total} updates available.`;
@@ -829,13 +837,18 @@
 
       // Restart is the one footer action that interrupts dispatch, so it
       // never competes with the primary button for weight.
+      const binaryRollback = info.native && info.previous
+        ? `<button class="btn btn-ghost" data-action="rollback-binary" ${this._checkingCurrentRun ? "disabled" : ""}>Return to ${escapeHTML(info.previous)}</button>`
+        : "";
       const actions = hasUpdate
         ? `
             <button class="btn btn-ghost" data-action="skip">Skip this version</button>
+            ${binaryRollback}
             <button class="btn btn-ghost" data-action="restart" ${this._checkingCurrentRun ? "disabled" : ""}>Restart</button>
             <button class="btn btn-primary" data-action="update" ${this._checkingCurrentRun ? "disabled" : ""}>Update Core to ${escapeHTML(info.latest || "")}</button>
           `
         : `
+            ${binaryRollback}
             <button class="btn btn-ghost" data-action="restart" ${this._checkingCurrentRun ? "disabled" : ""}>Restart</button>
             <button class="btn" data-action="check">Check for updates</button>
           `;
@@ -860,7 +873,7 @@
       // configured. Full, portable backups are managed separately below.
       const snapshotHint = hasUpdate
         ? `<div class="snapshot-hint">
-             <p>🛟 A local rollback point with the settings database and config is saved before each Core update. History stays in place and is not copied.</p>
+             <p>🛟 A local rollback point with the settings database and config is saved before each Core update. History stays in place and is not copied.${info.native ? " Binary rollback keeps current data; restoring data needs an offline backup restore." : ""}</p>
            </div>`
         : "";
 
@@ -986,6 +999,8 @@
         : `<button class="btn btn-ghost btn-small" data-action="delete-snapshot" data-id="${escapeHTML(s.id)}" title="Delete this backup">Delete</button>`;
       const rollbackBtn = deleting
         ? ""
+        : this._info?.native
+        ? `<span class="dim" title="Restore data offline with ftw-backup">Offline restore</span>`
         : restorable
         ? `<button class="btn btn-small" data-action="rollback-snapshot" data-id="${escapeHTML(s.id)}" data-from="${escapeHTML(s.from_version || "")}" title="Restore this complete backup (service will restart)">Roll back</button>`
         : `<span class="dim" title="Older backups omitted history and are blocked to prevent data loss">legacy backup — restore disabled</span>`;
@@ -1100,6 +1115,8 @@
       const info = this._info || {};
       const coreStatus = info.update_available
         ? `<span class="status-pending">${escapeHTML(info.latest || "update")} available</span>`
+        : info.native && info.channel === "stable" && /-beta\./.test(info.current || "")
+        ? `<span class="dim">beta installed; stable package not ready</span>`
         : `<span class="dim">up to date</span>`;
 
       // One table listing every component, whether or not it has work waiting.
@@ -1154,7 +1171,7 @@
       const st = this._sidecarState || { state: "starting" };
       const action = st.action || "update";
       const elapsed = Math.round((Date.now() - this._updateStartedAt) / 1000);
-      const label = actionLabel(st.state, action);
+      const label = this._info?.native ? nativeActionLabel(st.state, action) : actionLabel(st.state, action);
       const spinner = st.state === "failed" ? "" : `<span class="spinner"></span>`;
       const timedOut = !!st.timedOut;
       const failed = st.state === "failed";
@@ -1176,7 +1193,7 @@
         ? `<p class="err">${escapeHTML(st.message || "Update failed")}</p>
            <p>The main service may still be running — reload the page to check.</p>`
         : timedOut
-        ? `<p>Still working after ${elapsed}s. The main container may have been slow to restart.</p>
+        ? `<p>Still working after ${elapsed}s. ${this._info?.native ? "Core may have been slow to restart." : "The main container may have been slow to restart."}</p>
            <p>You can reload manually if the UI keeps the overlay stuck.</p>`
         : `${progressHTML}
            ${this._operationDetailHTML(st)}
@@ -1212,13 +1229,14 @@
     _operationDetailHTML(st) {
       const msg = st && st.message ? `<p class="dim">${escapeHTML(st.message)}</p>` : "";
       if (!st) return msg;
+      const native = this._info?.native;
       switch (st.state) {
         case "snapshotting":
-          return msg + `<p class="dim">Creating a local rollback snapshot before touching the running service. Large history databases can take several minutes.</p>`;
+          return msg + `<p class="dim">Saving settings and config before changing Core. History stays in place.</p>`;
         case "pulling":
-          return msg + `<p class="dim">Downloading the pinned release image from GHCR.</p>`;
+          return msg + `<p class="dim">${native ? "Downloading and checking the pinned release package." : "Downloading the pinned release image from GHCR."}</p>`;
         case "restarting":
-          return msg + `<p class="dim">Recreating the service. Short polling errors are expected while the container swaps.</p>`;
+          return msg + `<p class="dim">${native ? "Starting the chosen Core binary. Brief connection errors are expected." : "Recreating the service. Short polling errors are expected while the container swaps."}</p>`;
         case "checking":
           return msg + `<p class="dim">Core has started. Waiting for its API and health checks before marking the update complete.</p>`;
         case "restoring":
@@ -1248,6 +1266,12 @@
               // come back, so it asks first even though it changes no versions.
               if (window.confirm("Restart the service? Dispatch stops until Core is back and healthy.")) {
                 this._beginUpdate("restart");
+              }
+              break;
+            case "rollback-binary":
+              if (this._info?.native && this._info.previous && window.confirm(
+                `Return Core to ${this._info.previous}? Current data stays in place; Core will restart.`)) {
+                this._beginUpdate("rollback");
               }
               break;
             case "skip":
@@ -1788,6 +1812,14 @@
         if (action === "restart")  return "Restarting";
         if (action === "rollback") return "Starting rollback";
         return "Starting update";
+    }
+  }
+
+  function nativeActionLabel(state, action) {
+    switch (state) {
+      case "pulling": return "Downloading release package";
+      case "restarting": return action === "rollback" ? "Starting previous Core" : "Starting Core";
+      default: return actionLabel(state, action);
     }
   }
 

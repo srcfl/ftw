@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -338,6 +339,12 @@ func main() {
 	backfillSeed := flag.Int64("backfill-seed", 0, "DEV ONLY: backfill rng seed (0 = random)")
 	backfillForce := flag.Bool("backfill-force", false, "DEV ONLY: bypass the non-synthetic-data safety gate")
 	flag.Parse()
+	nativeRoot := os.Getenv("FTW_NATIVE_SLOT_ROOT")
+	trial, err := beginNativeTrial(nativeRoot, os.Getenv("FTW_NATIVE_TRIAL_TAG"), Version)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "native release preflight:", err)
+		os.Exit(1)
+	}
 
 	// Drivers default to a sibling of the config file (historical layout:
 	// config.yaml + drivers/ + seed/ + state.db all under one dir). Docker
@@ -367,7 +374,7 @@ func main() {
 	slog.Info("FTW starting", "version", Version, "config", *configPath)
 	// The previous updater may revert this image if startup fails. Confirm
 	// its failure behavior before config/bootstrap/state can write any data.
-	if envBool("FTW_SELFUPDATE_ENABLED") {
+	if envBool("FTW_SELFUPDATE_ENABLED") && nativeRoot == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := updateipc.RequireSafeUpdater(ctx, envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
 		cancel()
@@ -455,10 +462,18 @@ func main() {
 		fmt.Sprintf(":%d", cfg.API.Port),
 		api.WithSecurityHeaders(api.Authenticate(apiHandler, bootPolicy)),
 	)
+	listener, err := net.Listen("tcp", httpSrv.Addr)
+	if err != nil {
+		slog.Error("http listener could not bind", "addr", httpSrv.Addr, "err", err)
+		os.Exit(1)
+	}
 	go func() {
 		slog.Info("HTTP API listening (boot phase)", "addr", httpSrv.Addr)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpSrv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("http server", "err", err)
+			if trial != nil {
+				os.Exit(1)
+			}
 		}
 	}()
 
@@ -2321,7 +2336,7 @@ func main() {
 	// without setting FTW_SELFUPDATE_ENABLED=1. Production builds (real
 	// vX.Y.Z stamped via -ldflags) still require the explicit env var
 	// so the feature can't surprise an OS-image deploy.
-	if envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
+	if nativeRoot != "" || envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
 		// FTW_SELFUPDATE_CURRENT_VERSION overrides what the checker thinks
 		// it's running so dev / QA can force update_available=true without
 		// rebuilding with a fake -ldflags Version. Scoped to the checker
@@ -2334,19 +2349,30 @@ func main() {
 				"real_version", Version, "reported_version", current,
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
+		statusPath := envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json")
+		if nativeRoot != "" {
+			statusPath = filepath.Join(nativeRoot, "update-status.json")
+		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
 			CurrentVersion:     current,
 			CurrentStateSchema: state.SchemaVersion,
 			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:         envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			StatusPath:         statusPath,
+			NativeRoot:         nativeRoot,
+			NativeRestart: func() error {
+				restartOnce.Do(func() {
+					reexecAfterShutdown, exitCode = false, 1
+					close(restartCh)
+				})
+				return nil
+			},
 			// Publish events.UpdateAvailable when a new release lands so
 			// the notifications service (or any other subscriber) can act
 			// without polling the checker directly.
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
-		slog.Info("selfupdate enabled",
-			"socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+		slog.Info("selfupdate enabled", "native_root", nativeRoot,
 			"channel", selfUpdater.Info().Channel)
 	} else {
 		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
@@ -2503,7 +2529,7 @@ func main() {
 			// An old updater refuses this action before touching Docker.
 			// The Home Assistant bundle has no sidecar and must not exit:
 			// Supervisor leaves a stopped app stopped unless Watchdog is on.
-			if selfUpdater != nil && !bundle.ReexecOnRestart() {
+			if selfUpdater != nil && nativeRoot == "" && !bundle.ReexecOnRestart() {
 				if err := selfUpdater.TriggerRestart(reqCtx); err == nil {
 					slog.Info("restart: dispatched via updater sidecar")
 					return nil
@@ -2557,6 +2583,13 @@ func main() {
 	// bound at startup stays; no port gap for healthcheck probes.
 	apiHandler.Swap(handler)
 	slog.Info("HTTP API ready", "addr", httpSrv.Addr)
+	if err := trial.complete(selfUpdater); err != nil {
+		slog.Error("native trial readiness commit failed", "err", err)
+		os.Exit(1)
+	}
+	if trial == nil {
+		reconcileNativeFallback(nativeRoot, Version, selfUpdater)
+	}
 
 	// Belt-and-suspenders integrity scan, off the startup hot path: a clean
 	// restart skips the blocking boot check (so a multi-GB DB starts in seconds),
