@@ -79,6 +79,38 @@ func TestNativeCheckerWaitsForChecksumAsset(t *testing.T) {
 	}
 }
 
+func TestNativeFailedCheckRetainsRuntimeCapabilities(t *testing.T) {
+	root := t.TempDir()
+	previous, current := "v0.131.0-beta.1", "v0.131.0-beta.2"
+	nativeCurrentSlot(t, root, previous)
+	nativeCurrentSlot(t, root, current)
+	manager := nativeupdate.Manager{Root: root}
+	if err := manager.Init(previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Prepare(current); err != nil {
+		t.Fatal(err)
+	}
+	if _, selected, trial, err := manager.Select(); err != nil || selected != current || !trial {
+		t.Fatalf("trial selection: %q %t %v", selected, trial, err)
+	}
+	if err := manager.Commit(current); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: nativeRoundTrip(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found"))}, nil
+	})}
+	c := New(Config{CurrentVersion: current, NativeRoot: root, HTTPClient: client,
+		ReleasesURL: "https://test.invalid/releases"}, newMemStore())
+	info, err := c.Check(context.Background(), true)
+	if err == nil || !info.Native || !info.SidecarReady || info.Previous != previous {
+		t.Fatalf("failed check lost native capabilities: info=%+v err=%v", info, err)
+	}
+	if cached := c.info; !cached.Native || !cached.SidecarReady || cached.Previous != previous {
+		t.Fatalf("failed check did not retain capabilities in cache: %+v", cached)
+	}
+}
+
 func TestDocker3xCheckerKeepsItsReleaseLine(t *testing.T) {
 	client := nativeReleaseClient(t, `[
       {"tag_name":"v0.131.0","prerelease":false},

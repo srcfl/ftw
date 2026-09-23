@@ -356,9 +356,7 @@ func (c *Checker) loop(ctx context.Context) {
 // finds the cache younger than half the check interval returns early
 // and never hits the network.
 func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
-	c.mu.RLock()
-	cached := c.info
-	c.mu.RUnlock()
+	cached := c.Info()
 	// A recorded GitHub 5xx must not occupy the half-interval cache.
 	// That is the "restart seemed to fix it" bug: the UI reads this
 	// cache for hours, and only a force check or a process start retries.
@@ -424,6 +422,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	c.info.CheckedAt = c.cfg.Now()
 	c.info.Err = ""
 	c.reloadSkipLocked()
+	c.refreshRuntimeInfoLocked()
 	// Decide whether to emit under the lock, then publish outside it.
 	var announce *events.UpdateAvailable
 	if c.cfg.Bus != nil && c.info.UpdateAvailable && !c.info.Skipped &&
@@ -526,6 +525,7 @@ func (c *Checker) recordErr(err error) (Info, error) {
 	defer c.mu.Unlock()
 	c.info.Err = err.Error()
 	c.info.CheckedAt = c.cfg.Now()
+	c.refreshRuntimeInfoLocked()
 	return c.info, err
 }
 
@@ -714,24 +714,28 @@ func (c *Checker) Info() Info {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reloadSkipLocked()
-	info := c.info
+	c.refreshRuntimeInfoLocked()
+	return c.info
+}
+
+func (c *Checker) refreshRuntimeInfoLocked() {
+	c.info.Previous = ""
 	if c.cfg.NativeRoot != "" {
 		manager := nativeupdate.Manager{Root: c.cfg.NativeRoot}
 		state, err := manager.Read()
 		if err == nil {
 			_, err = manager.ReleaseDir(state.Current)
 		}
-		info.SidecarReady = err == nil
-		info.Native = true
+		c.info.SidecarReady = err == nil
+		c.info.Native = true
 		if err == nil {
 			if previous, rollbackErr := manager.RollbackCandidate(); rollbackErr == nil {
-				info.Previous = previous
+				c.info.Previous = previous
 			}
 		}
 	} else {
-		info.SidecarReady = c.sidecarReadyLocked()
+		c.info.SidecarReady = c.sidecarReadyLocked()
 	}
-	return info
 }
 
 func (c *Checker) Native() bool { return c.cfg.NativeRoot != "" }
