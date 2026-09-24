@@ -815,6 +815,7 @@
     _modalHTML() {
       const info = this._info || {};
       if (this._phase === "updating") return this._updatingModalHTML();
+      if (info.native) return this._nativeVersionHTML(info);
 
       const hasUpdate = !!info.update_available;
       const pending = this._pendingUpdates();
@@ -905,6 +906,40 @@
           <footer>${actions}</footer>
         </div>
       `;
+    }
+
+    // A native install updates itself. The old Updates panel belonged to the
+    // Docker updater and is not the way to move this box.
+    _nativeVersionHTML(info) {
+      const current = info.current || "unknown";
+      const channel = info.channel || "beta";
+      const checked = info.checked_at ? Date.parse(info.checked_at) : 0;
+      const checkedLine = checked > 0
+        ? `Checked ${new Date(checked).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+        : "Not checked yet.";
+      const available = info.update_available
+        ? `<p><strong>${escapeHTML(info.latest || "A newer release")}</strong> is published on ${escapeHTML(channel)}.</p>
+           <p>On the FTW machine, run:</p>
+           <p class="mono">ftw update</p>
+           <p class="dim">Core downloads that release and swaps to it. There is no separate updater.</p>`
+        : `<p class="dim">No newer release is published on ${escapeHTML(channel)}.</p>`;
+      return `
+        <div class="backdrop" data-action="close"></div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
+          <header>
+            <h3 id="ftw-upd-title">Version</h3>
+            <button class="x" data-action="close" aria-label="Close">×</button>
+          </header>
+          <div class="body">
+            <p>${escapeHTML(current)} is running.</p>
+            ${available}
+            <p class="checked-at">${escapeHTML(checkedLine)}</p>
+            ${info.err ? `<p class="err">${escapeHTML(info.err)}</p>` : ""}
+          </div>
+          <footer>
+            <button class="btn" data-action="check">Check again</button>
+          </footer>
+        </div>`;
     }
 
     // Core's channel includes the bundled Energyplan worker.

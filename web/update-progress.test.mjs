@@ -16,6 +16,9 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /written, total unknown/);
   assert.match(badge, /No new measured progress for/);
   assert.doesNotMatch(badge, /Large history databases can take several minutes/);
+  assert.match(badge, /if \(info\.native\) return this\._nativeVersionHTML\(info\)/);
+  assert.match(badge, /class="mono">ftw update<\/p>/);
+  assert.match(badge, /There is no separate updater/);
   assert.match(badge, /Total:/);
   assert.match(badge, /Saving rollback point \(settings and config; history stays in place\)/);
   assert.doesNotMatch(badge, /full history backup/);
