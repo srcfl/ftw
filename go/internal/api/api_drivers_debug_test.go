@@ -289,9 +289,9 @@ func TestIsSensitiveKey(t *testing.T) {
 }
 
 func TestRedactDumpLog(t *testing.T) {
-	in := `HTTP 400: {"refresh_token":"RT-secret-value","access_token":"AT-secret-value"} Bearer eyJabc.def password=hunter2 poll ok`
+	in := `HTTP 400: {"refresh_token":"RT-secret-value","access_token":"AT-secret-value"} Bearer eyJabc.def password=hunter2 dial 192.168.1.153:502 poll ok`
 	got := redactDumpLog(in)
-	for _, leak := range []string{"RT-secret-value", "AT-secret-value", "eyJabc.def", "hunter2"} {
+	for _, leak := range []string{"RT-secret-value", "AT-secret-value", "eyJabc.def", "hunter2", "192.168.1.153"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("redactDumpLog leaked %q in %q", leak, got)
 		}

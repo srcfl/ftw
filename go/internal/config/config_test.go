@@ -1387,44 +1387,6 @@ api: { port: 8080 }
 	}
 }
 
-func TestAssistantMaskAndPreserveKey(t *testing.T) {
-	c := Config{Assistant: &Assistant{Enabled: true, APIKey: "sk-or-v1-secret", Model: "openrouter/free"}}
-	m := c.MaskSecrets()
-	if m.Assistant.APIKey != "" {
-		t.Errorf("key not blanked: %q", m.Assistant.APIKey)
-	}
-	if !m.Assistant.HasAPIKey {
-		t.Error("HasAPIKey should be true after masking a stored key")
-	}
-	if c.Assistant.APIKey != "sk-or-v1-secret" {
-		t.Error("MaskSecrets mutated the source")
-	}
-	incoming := &Config{Assistant: &Assistant{Enabled: true, Model: "openrouter/free"}}
-	incoming.PreserveMaskedSecrets(&c)
-	if incoming.Assistant.APIKey != "sk-or-v1-secret" {
-		t.Errorf("key not restored: %q", incoming.Assistant.APIKey)
-	}
-}
-
-func TestAssistantValidateRejectsCredentialsInBaseURL(t *testing.T) {
-	a := &Assistant{BaseURL: "https://user:pass@proxy.example/v1"}
-	if err := a.Validate(); err == nil || !strings.Contains(err.Error(), "credentials") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestAssistantReady(t *testing.T) {
-	if (*Assistant)(nil).Ready() {
-		t.Fatal("nil should not be ready")
-	}
-	if (&Assistant{Enabled: true}).Ready() {
-		t.Fatal("enabled without key should not be ready")
-	}
-	if !(&Assistant{Enabled: true, APIKey: "k"}).Ready() {
-		t.Fatal("enabled with key should be ready")
-	}
-}
-
 func TestNotificationsPreserveMaskedSecrets(t *testing.T) {
 	existing := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{AccessToken: "real_tok", Password: "real_pw"}}}
 	incoming := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{}}}

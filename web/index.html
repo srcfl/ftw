@@ -32,7 +32,7 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=forecasts1">
   <!-- Dashboard layout is layered on the shared base styles. -->
-  <link rel="stylesheet" href="/app.css?v=ask3">
+  <link rel="stylesheet" href="/app.css?v=noask1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
@@ -66,7 +66,6 @@
          drawer (tabs + toggles + settings + version) via CSS class flip
          handled in the init block at the bottom of this file. -->
     <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
-    <button type="button" id="ask-why-chip" class="ask-why-chip" hidden></button>
     <div class="header-right">
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
       <!-- Advanced toggle moved below the Plan chart so it's visually
@@ -532,15 +531,6 @@
               </dd>
             </div>
           </dl>
-          <form id="plan-ask-why-form" class="plan-ask-why">
-            <label class="plan-now-label" for="plan-ask-why-input">Ask why this plan</label>
-            <div class="plan-ask-why-row">
-              <input id="plan-ask-why-input" type="text" maxlength="2000"
-                     placeholder="Why is it charging now?"
-                     aria-label="Question about this plan" autocomplete="off">
-              <button type="submit" id="plan-ask-why-plan" class="btn-send">Ask why</button>
-            </div>
-          </form>
         </section>
 
         <div id="plan-ev-plans" hidden></div>
@@ -631,15 +621,10 @@
              forecast-versus-reality and any automated findings — enough
              for someone else to answer without a screenshot round-trip. -->
         <div class="plan-help-request">
-          <div class="plan-help-actions">
-            <button type="button" id="plan-ask-why" class="btn-link">
-              Something looks wrong? Ask why
-            </button>
-            <button type="button" id="plan-help-report" class="btn-link">
-              Download a help report
-            </button>
-          </div>
-          <small>Ask why reads this site and explains. The report is the same file you can share as-is.</small>
+          <button type="button" id="plan-help-report" class="btn-link">
+            Something looks wrong? Download a help report
+          </button>
+          <small>One file describing what FTW is doing and why, with the logs behind it. Share it when asking for help.</small>
         </div>
       </section>
     </section>
@@ -980,7 +965,7 @@
   </ftw-modal>
 
   <script src="/lan-auth.js?v=lan1"></script>
-  <script src="/app.js?v=zones1"></script>
+  <script src="/app.js?v=noask1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
@@ -995,9 +980,8 @@
   <script src="/settings/tabs/fleet.js?v=fleetping2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
-  <script src="/settings/tabs/system.js?v=savings1"></script>
+  <script src="/settings/tabs/system.js?v=noask1"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
-  <script src="/assistant.js?v=ask6"></script>
   <script src="/models.js?v=diag2"></script>
   <script type="module" src="/plan.js?v=soc2"></script>
   <script src="/twins.js?v=forecasts1"></script>

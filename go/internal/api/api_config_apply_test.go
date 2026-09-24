@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -77,7 +78,9 @@ func TestPostConfigFirstSiteMeterReachesControl(t *testing.T) {
 	}
 }
 
-func TestPostConfigKeepsAskWhyOffWhenKeyPasted(t *testing.T) {
+// A Settings page loaded before Ask why was removed still posts its block.
+// The save succeeds and keeps none of it.
+func TestPostConfigDropsRetiredAskWhySettings(t *testing.T) {
 	srv, _, cfg := postConfigServer(t, nil)
 	body := `{
   "site": {"name": "Test", "smoothing_alpha": 0.3},
@@ -94,14 +97,12 @@ func TestPostConfigKeepsAskWhyOffWhenKeyPasted(t *testing.T) {
 	if code := postConfig(t, srv, body); code != 200 {
 		t.Fatalf("POST /api/config = %d, want 200", code)
 	}
-	if cfg.Assistant == nil {
-		t.Fatal("assistant missing after save")
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cfg.Assistant.Enabled {
-		t.Fatal("pasting a key must not force Ask why on when Enable is off")
-	}
-	if cfg.Assistant.APIKey != "sk-or-v1-new" {
-		t.Fatalf("api_key = %q", cfg.Assistant.APIKey)
+	if strings.Contains(string(raw), "sk-or-v1-new") {
+		t.Fatalf("saved settings still carry the Ask why key: %s", raw)
 	}
 }
 
