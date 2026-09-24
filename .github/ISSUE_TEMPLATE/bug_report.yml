@@ -44,8 +44,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `ftw --version` or release tag / commit.
-      placeholder: e.g. v0.42.0 or commit 65aaf18
+      description: The first line of `ftw status`, or the version shown in the web UI.
+      placeholder: e.g. v0.136.0-beta.1
     validations:
       required: true
   - type: dropdown
@@ -53,9 +53,10 @@ body:
     attributes:
       label: Deployment
       options:
-        - Raspberry Pi (official image)
-        - Raspberry Pi (dev binary)
-        - Docker compose
+        - Native 0.x (install.sh)
+        - Docker 0.x (deploy/docker)
+        - Docker 1.x, 2.x or 3.x
+        - Home Assistant add-on
         - Local dev (`make dev`)
         - Other
     validations:
@@ -70,7 +71,9 @@ body:
     id: logs
     attributes:
       label: Relevant logs
-      description: Paste relevant `slog` output. Redact secrets / IPs as needed.
+      description: |
+        `ftw status` and `journalctl -u ftw -n 200` (Docker: `docker compose logs --tail 200`).
+        Redact secrets and addresses. `ftw support` writes a fuller file; share it privately if you prefer.
       render: shell
   - type: textarea
     id: extra
