@@ -63,6 +63,9 @@ jobs:
             > "${RUNNER_TEMP}/native-release-pages.json"
           python3 scripts/check-native-release-order.py "${TAG}" \
             "${RUNNER_TEMP}/native-release-pages.json"
+          # Stable checks out an older beta's source below, which may lack
+          # this checker; keep the current one.
+          cp scripts/check-native-schema.py "${RUNNER_TEMP}/check-native-schema.py"
           if [ "${CHANNEL}" = stable ]; then
             if [[ ! "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+$ ]] ||
                [[ ! "${SOURCE_BETA}" =~ ^v0\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] ||
@@ -117,7 +120,7 @@ jobs:
           fi
           schema=$(node -p "require('./state-schema.json').version")
           [[ "${schema}" =~ ^[1-9][0-9]*$ ]]
-          python3 scripts/check-native-schema.py "${TAG}" "${schema}" \
+          python3 "${RUNNER_TEMP}/check-native-schema.py" "${TAG}" "${schema}" \
             "${RUNNER_TEMP}/native-release-pages.json"
           printf 'tag=%s\ncommit=%s\nschema=%s\n' "${TAG}" "${source_commit}" "${schema}" >> "${GITHUB_OUTPUT}"
         id: source
