@@ -45,6 +45,31 @@ class BackupAPI:
 
 
 class FTWCTLTests(unittest.TestCase):
+    def test_restart_reset_is_an_api_error_not_a_crash(self):
+        api = ftwctl.API("http://127.0.0.1:18080")
+        with mock.patch.object(ftwctl.request, "urlopen", side_effect=ConnectionResetError(104, "Connection reset by peer")):
+            with self.assertRaisesRegex(ftwctl.FTWError, "Connection reset"):
+                api.json("GET", "/api/health")
+
+    def test_readiness_wait_survives_the_restart_disconnect(self):
+        class RestartAPI:
+            def __init__(self):
+                self.calls = 0
+
+            def json(self, method, path, body=None, timeout=15):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionResetError(104, "Connection reset by peer")
+                if path == "/api/health":
+                    return {"status": "ok", "drivers_ok": 3,
+                            "history_storage": {"migration": {"state": "complete"}}}
+                if path == "/api/version/check":
+                    return {"current": "v0.132.0-beta.1", "native": True}
+                raise AssertionError(path)
+
+        with mock.patch.object(ftwctl.time, "sleep"), redirect_stdout(io.StringIO()):
+            self.assertTrue(ftwctl.wait_for_version(RestartAPI(), "v0.132.0-beta.1", 3, 30))
+
     def test_token_requires_private_tunnel_or_https(self):
         with self.assertRaisesRegex(ftwctl.FTWError, "SSH tunnel"):
             ftwctl.API("http://192.0.2.10:8080", "secret")
@@ -221,6 +246,96 @@ class FTWCTLTests(unittest.TestCase):
             self.assertEqual(commands.count(stop), 3)
             self.assertEqual(commands.count(start), 3)
             self.assertLess(commands.index(stop), commands.index(remove))
+
+    def test_booting_native_core_is_not_rolled_back_on_restart_disconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = "ftw-full-backup-20260923T120000Z.ftwbak"
+            backup = Path(directory) / name
+            site_sha = hashlib.sha256(b"site key").hexdigest()
+            manifest = json.dumps({"files": [{"path": "data/nova.key", "type": "file", "sha256": site_sha}]}).encode()
+            with tarfile.open(backup, "w:gz") as tar:
+                header = tarfile.TarInfo("manifest.json")
+                header.size = len(manifest)
+                tar.addfile(header, io.BytesIO(manifest))
+            digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+
+            class SwitchAPI:
+                def __init__(self):
+                    self.started = False
+                    self.resets = 0
+
+                def json(self, method, path, body=None, timeout=15):
+                    if self.started and path == "/api/health" and self.resets < 1:
+                        self.resets += 1
+                        raise ConnectionResetError(104, "Connection reset by peer")
+                    if path == "/api/health":
+                        return {"status": "ok", "drivers_ok": 3,
+                                "history_storage": {"migration": {"state": "complete"}}}
+                    if path == "/api/version/check":
+                        current = "v0.132.0-beta.1" if self.started else "v3.8.0-beta.1"
+                        return {"current": current, "native": self.started}
+                    if path == "/api/drivers":
+                        return {"easee": {}, "myuplink": {}, "sungrow": {}}
+                    if path == "/api/backups":
+                        return {"dir": "/app/data/backups", "backups": [{"id": name, "verified": True,
+                            "sha256": digest, "size_bytes": backup.stat().st_size,
+                            "created_at": datetime.now(timezone.utc).isoformat()}]}
+                    raise AssertionError((method, path))
+
+            api = SwitchAPI()
+            args = SimpleNamespace(host="homelab-rpi", tag="v0.132.0-beta.1",
+                root="/opt/ftw-native", data_dir="/srv/ftw/data", config="/app/data/config.yaml",
+                user_drivers="/app/data/drivers", unit="ftw.service", check_only=False,
+                backup=backup, max_wait=60)
+            commands = []
+
+            def fake_remote(host, *command, **kwargs):
+                commands.append(command)
+                if command[:3] == ("sudo", "-n", "systemctl") and command[3:] == ("start", "ftw.service"):
+                    api.started = True
+                if command[:2] == ("hostname", "-f"):
+                    return "rpi.example"
+                if command[:2] == ("systemctl", "is-active"):
+                    return "active"
+                if command[:1] == ("curl",):
+                    return '{"version":"v3.8.0-beta.1"}'
+                if command[:2] == ("systemctl", "show"):
+                    return "User=ftw\nGroup=ftw\nBindPaths=/srv/ftw/data:/app/data\nExecStart={ path=/opt/ftw/ftw ; }"
+                if command[:2] == ("uname", "-m"):
+                    return "aarch64"
+                if command[:2] == ("mktemp", "-d"):
+                    return "/tmp/ftw-migrate.ABC12345"
+                if command[:4] == ("sudo", "-n", "stat", "-c"):
+                    return str(backup.stat().st_size)
+                if "sha256sum" in command:
+                    if command[-1] == "/srv/ftw/data/nova.key":
+                        return site_sha + "  nova.key"
+                    return digest + "  backup"
+                if command[-1:] == ("status",):
+                    return '{"current":"v0.132.0-beta.1"}'
+                return ""
+
+            def fake_package(tag, arch, work):
+                files = tuple(work / item for item in ("ftw-linux-arm64.tar.gz", "ftw-linux-arm64.tar.gz.sha256", "ftw-launcher"))
+                for file in files:
+                    file.write_bytes(b"package")
+                return files
+
+            with mock.patch.object(ftwctl, "remote", side_effect=fake_remote), \
+                 mock.patch.object(ftwctl, "remote_copy"), \
+                 mock.patch.object(ftwctl, "published_package", side_effect=fake_package), \
+                 mock.patch.object(ftwctl.time, "sleep"), \
+                 mock.patch.object(ftwctl.socket, "getfqdn", return_value="mac.example"), \
+                 redirect_stdout(io.StringIO()):
+                ftwctl.migrate_native(api, args)
+            stop = ("sudo", "-n", "systemctl", "stop", "ftw.service")
+            start = ("sudo", "-n", "systemctl", "start", "ftw.service")
+            remove = ("sudo", "-n", "rm", "-f", "/etc/systemd/system/ftw.service.d/zz-native-migration.conf")
+            self.assertEqual(api.resets, 1)
+            self.assertEqual(commands.count(stop), 1)
+            self.assertEqual(commands.count(start), 1)
+            self.assertNotIn(remove, commands)
+            self.assertLess(commands.index(stop), commands.index(start))
 
 
 if __name__ == "__main__":

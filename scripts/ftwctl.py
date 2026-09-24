@@ -75,6 +75,10 @@ class API:
             raise FTWError(f"{method} {path}: HTTP {exc.code}: {detail}") from exc
         except error.URLError as exc:
             raise FTWError(f"{method} {path}: {exc.reason}") from exc
+        except OSError as exc:
+            # urllib raises ConnectionResetError directly when the server
+            # closes the socket. A Core restart does that on purpose.
+            raise FTWError(f"{method} {path}: {exc}") from exc
 
     def json(self, method: str, path: str, body: dict | None = None, timeout: int = 15) -> dict:
         with self.open(method, path, body, timeout) as response:
@@ -437,7 +441,9 @@ def wait_for_version(api: API, wanted: str, min_drivers: int, timeout: int) -> b
                 say(f"Ready: {current}; health ok; {drivers} drivers ok; history {history_state}; {elapsed(start)}")
                 return True
             detail = f"version={current}, health={health.get('status')}, drivers={drivers}/{min_drivers}, history={history_state}"
-        except FTWError as exc:
+        except (FTWError, ConnectionError, TimeoutError) as exc:
+            # The old process drops its socket before the new one answers.
+            # That is the restart window, not a failed installation.
             detail = f"API not ready: {exc}"
         if time.monotonic() - last >= 10:
             say(f"[{elapsed(start)}] Waiting for Core: {detail}")
