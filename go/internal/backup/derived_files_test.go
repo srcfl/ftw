@@ -7,17 +7,18 @@ import (
 	"testing"
 )
 
-// The state snapshot is rewritten through a temp file while a backup walks
-// the data dir; on the home box that failed a 15-minute backup with
-// "lstat state.db.snapshot.tmp: no such file". Neither it nor cache.db
-// belongs in the archive.
+// The state snapshot is rewritten through a temp database and its journal
+// while a backup walks the data dir; on the home box that failed 15-minute
+// backups with "lstat state.db.snapshot.tmp: no such file" and then
+// ".snapshot.tmp-journal". None of it, nor cache.db, belongs in the archive.
 func TestCollectSourcesSkipsDerivedStateFiles(t *testing.T) {
 	dataDir := t.TempDir()
 	for _, name := range []string{
 		"config.yaml", "webpush.key",
-		"state.db", "state.db-wal", "state.db-shm",
-		"state.db.snapshot", "state.db.snapshot.tmp",
-		"cache.db", "cache.db-wal", "cache.db-shm",
+		"state.db", "state.db-wal", "state.db-shm", "state.db-journal",
+		"state.db.snapshot", "state.db.snapshot.tmp", "state.db.snapshot.tmp-journal",
+		"state.db.snapshot.tmp-wal", "state.db.snapshot.tmp-shm",
+		"cache.db", "cache.db-wal", "cache.db-shm", "cache.db-journal",
 	} {
 		if err := os.WriteFile(filepath.Join(dataDir, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
