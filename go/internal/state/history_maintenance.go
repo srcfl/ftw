@@ -144,6 +144,10 @@ func (s *Store) maintainHistory(parent context.Context, coldDir string, days int
 				return s.maintainDashboard(ctx, now)
 			}},
 			{"energy_rollup", func() error { _, _, err := s.PruneEnergyLedger(ctx, now); return err }},
+			{"diagnostic_retention", func() error {
+				_, err := s.pruneDiagnosticsBefore(ctx, now.Add(-DiagnosticsRecentRetention).UnixMilli())
+				return err
+			}},
 		}
 	}
 	for _, stage := range stages {
