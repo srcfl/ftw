@@ -382,15 +382,16 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 		if importedHistory[p] {
 			return nil
 		}
-		if rel == stateRel || rel == stateRel+"-wal" || rel == stateRel+"-shm" {
+		if rel == stateRel || rel == stateRel+"-wal" || rel == stateRel+"-shm" || rel == stateRel+"-journal" {
 			return nil
 		}
 		// Derived files beside state.db. The recovery snapshot copies state.db,
-		// whose rows the export above already carries, and is rewritten through
-		// a temp file that can vanish mid-walk and fail the backup. cache.db
-		// holds only re-fetchable data. Restore moves all of them aside anyway.
-		if rel == stateRel+".snapshot" || rel == stateRel+".snapshot.tmp" ||
-			rel == cacheRel || rel == cacheRel+"-wal" || rel == cacheRel+"-shm" {
+		// whose rows the export above already carries. It is rewritten through
+		// a temp database and its journal two minutes after every start, so a
+		// backup taken right after an update walked into files that vanished.
+		// cache.db holds only re-fetchable data. Restore moves all of them
+		// aside anyway.
+		if strings.HasPrefix(rel, stateRel+".snapshot") || rel == cacheRel || strings.HasPrefix(rel, cacheRel+"-") {
 			return nil
 		}
 		info, err := d.Info()
