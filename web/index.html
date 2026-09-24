@@ -32,7 +32,7 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=forecasts1">
   <!-- Dashboard layout is layered on the shared base styles. -->
-  <link rel="stylesheet" href="/app.css?v=noask1">
+  <link rel="stylesheet" href="/app.css?v=menu1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
@@ -62,25 +62,25 @@
       <button data-view="history" class="tab-btn app-nav-btn" role="tab" aria-controls="view-history" aria-selected="false">History</button>
       <button data-view="more" class="tab-btn app-nav-btn" role="tab" aria-controls="view-more" aria-selected="false">More</button>
     </nav>
-    <!-- Hamburger — visible only on narrow viewports. Opens the header
-         drawer (tabs + toggles + settings + version) via CSS class flip
-         handled in the init block at the bottom of this file. -->
-    <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
-    <div class="header-right">
-      <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
-      <!-- Advanced toggle moved below the Plan chart so it's visually
-           colocated with the diagnostics it reveals (twins, drivers,
-           models). The button still lives in the DOM as #ui-mode-toggle,
-           just rendered there. Manual strategy fallbacks stay on the
-           Plan card itself. -->
-      <ftw-notif-history poll-ms="30000" data-menu-label="Notification history"></ftw-notif-history>
-      <!-- Always-available entry into the setup wizard. The wizard
-           currently REPLACES config on save, so the copy says "Run setup
-           wizard" rather than implying a safe additive "Add a device". -->
-      <a id="setup-wizard-btn" class="icon-btn" href="/setup" data-menu-label="Run setup wizard" title="Run setup wizard" aria-label="Run setup wizard" role="button">&#9874;</a>
-      <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
-      <ftw-update-badge></ftw-update-badge>
-      <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
+    <div class="header-end">
+      <!-- The bell stays in the header row on phones, beside the menu,
+           so its count is visible and its history opens on its own. -->
+      <ftw-notif-history poll-ms="30000"></ftw-notif-history>
+      <!-- Hamburger — visible only on narrow viewports. Opens the header
+           drawer (tabs + toggles + settings + version) via CSS class flip
+           handled in the init block at the bottom of this file. -->
+      <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
+      <div class="header-right">
+        <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
+        <!-- Advanced toggle moved below the Plan chart so it's visually
+             colocated with the diagnostics it reveals (twins, drivers,
+             models). The button still lives in the DOM as #ui-mode-toggle,
+             just rendered there. Manual strategy fallbacks stay on the
+             Plan card itself. -->
+        <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
+        <ftw-update-badge></ftw-update-badge>
+        <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
+      </div>
     </div>
   </header>
 
@@ -980,7 +980,7 @@
   <script src="/settings/tabs/fleet.js?v=fleetping2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
-  <script src="/settings/tabs/system.js?v=noask1"></script>
+  <script src="/settings/tabs/system.js?v=menu1"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
   <script src="/models.js?v=diag2"></script>
   <script type="module" src="/plan.js?v=soc2"></script>

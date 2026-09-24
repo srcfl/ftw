@@ -124,6 +124,14 @@ body.ftw-app select:focus-visible {
   outline: 2px solid var(--accent-e);
   outline-offset: 2px;
 }
+/* The bell and, on phones, the menu button end the header row; the
+   right cluster follows them on wide screens and folds into the drawer
+   on narrow ones. Not positioned, so the drawer anchors to the header. */
+body.ftw-app .header-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 body.ftw-app .header-right {
   gap: 10px;
 }
@@ -192,9 +200,6 @@ body.ftw-app .icon-btn {
   display: grid;
   place-items: center;
   cursor: pointer;
-  /* text-decoration:none keeps the <a id="setup-wizard-btn"> variant from
-     showing a default link underline; harmless for <button> icon-btns. */
-  text-decoration: none;
   transition: background .15s, color .15s, border-color .15s;
 }
 body.ftw-app .icon-btn:hover {

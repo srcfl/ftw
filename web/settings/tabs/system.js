@@ -173,6 +173,13 @@
         '<div class="sys-grid" id="sys-components">Loading component status…</div>' +
         '</fieldset>' +
         '<fieldset>' +
+        '<legend>Setup wizard</legend>' +
+        '<p class="sys-meta">Runs the guided setup again. Saving it replaces the current settings.</p>' +
+        '<div class="sys-help-actions">' +
+        '  <a class="btn-add" href="/setup">Run setup wizard</a>' +
+        '</div>' +
+        '</fieldset>' +
+        '<fieldset>' +
         '<legend>Help</legend>' +
         '<div class="sys-help-actions">' +
         '  <a class="btn-add" href="https://github.com/srcfl/ftw/issues/new?template=bug_report.yml" target="_blank" rel="noopener">Report FTW bug</a>' +
