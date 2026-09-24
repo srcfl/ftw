@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.135.2
+
+### Patch Changes
+
+- b80690b: Run FTW 0.x in Docker with `deploy/docker`, which builds a local image from the
+  checksummed release package. `ftw status` no longer suggests `journalctl`,
+  `systemctl` or the launcher where systemd does not run, such as in a container.
+- 2ed228a: The Raspberry Pi image and its Imager listing are no longer built. A Pi runs
+  Raspberry Pi OS Lite 64-bit with the installer, or FTW in Docker; cards flashed
+  from the old image keep Docker 2.x until the guided migration.
+
 ## 0.135.1
 
 ### Patch Changes
