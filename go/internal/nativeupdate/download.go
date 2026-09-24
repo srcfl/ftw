@@ -19,6 +19,9 @@ type Downloader struct {
 	ReleaseBaseURL string
 	HTTPClient     *http.Client
 	Progress       func(copied, total int64)
+	// Downloaded runs once the archive is on disk, before it is verified
+	// and unpacked.
+	Downloaded func()
 }
 
 // Install downloads one published tag's archive and checksum. The caller
@@ -55,6 +58,9 @@ func (d Downloader) Install(ctx context.Context, tag string) error {
 	}
 	if err := d.fetch(ctx, tag, name, archivePath, maxArchiveBytes, d.Progress); err != nil {
 		return err
+	}
+	if d.Downloaded != nil {
+		d.Downloaded()
 	}
 	return d.Manager.InstallArchive(ctx, tag, archivePath, checksumPath)
 }
