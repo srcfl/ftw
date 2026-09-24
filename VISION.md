@@ -235,7 +235,8 @@ The update itself stays small and must be robust enough to run unattended. On
 a native install, Core downloads the next verified release and swaps to it. A
 new release that does not stay up falls back to the previous one without
 operator action. A release that changes stored data first makes a verified
-full backup. On a container install, the owner pulls the new image. A
+full backup. On a Docker install, the owner sets the new version and rebuilds
+from the same release package. A
 privileged sidecar whose job is to update Core is not part of the product. The
 machinery around that sidecar is retired as sites leave it. The same ADR
 records the shape.

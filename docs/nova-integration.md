@@ -41,23 +41,24 @@ ID, and at least one locally registered device with telemetry.
 ```bash
 export NOVA_OPERATOR_JWT=eyJhbGciOi...
 
-./ftw nova-claim \
-  --url=https://core.sourceful.energy \
-  --org=org-... \
-  --site=sit-... \
-  --claimer=idt-...
+tag=$(sudo -u ftw /opt/ftw/ftw-launcher -root /opt/ftw status | sed 's/.*"current":"\([^"]*\)".*/\1/')
+sudo --preserve-env=NOVA_OPERATOR_JWT -u ftw sh -c "cd /var/lib/ftw && exec /opt/ftw/releases/${tag}/ftw nova-claim \
+  --url=https://core.sourceful.energy --org=org-... --site=sit-... --claimer=idt-..."
+sudo systemctl restart ftw
 ```
 
-The command creates or loads `nova.key`, proves key possession, provisions
-the observed device/DER set, caches returned DER IDs and writes the `nova:`
-configuration atomically. Restart core after the first claim.
+This runs Core's own binary as the `ftw` user in its data directory, where
+the relative paths in its settings resolve; the `ftw` command on `PATH` is
+the operator CLI and has no `nova-claim`. The
+command creates or loads `nova.key`, proves key possession, provisions the
+observed device/DER set, caches returned DER IDs and writes the `nova:`
+configuration atomically. Restart Core after the first claim.
 
 After adding hardware, let it emit telemetry and reconcile:
 
 ```bash
-./ftw nova-claim --reconcile \
-  --url=https://core.sourceful.energy \
-  --site=sit-...
+sudo --preserve-env=NOVA_OPERATOR_JWT -u ftw sh -c "cd /var/lib/ftw && exec /opt/ftw/releases/${tag}/ftw nova-claim \
+  --reconcile --url=https://core.sourceful.energy --site=sit-..."
 ```
 
 The operator JWT authorizes the operation and is not persisted.

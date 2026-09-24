@@ -188,25 +188,21 @@ func (t *ProcessTransport) writeLocked(ctx context.Context, payload []byte) erro
 	}
 }
 
-// errOptimizerWorkerMissing marks the absence of the bundled Python worker
-// interpreter in this build. The containerized core ships no Python — the
-// optimizer runs as the separate ftw-optimizer sidecar — so a missing
-// interpreter is the expected state there, not a defect. Callers can use
-// errors.Is to surface an actionable "sidecar unavailable" state instead of a
-// bare `exec: "python3": ... not found in $PATH`, which reads as a missing core
-// dependency and hides the real remedy.
+// errOptimizerWorkerMissing marks a worker binary that is not where the
+// configuration says. The release package bundles the Energyplan worker, so
+// this means an incomplete install; planning continues with the built-in Go
+// planner. Callers can use errors.Is to show that state instead of a bare
+// `exec: ... not found in $PATH`.
 var errOptimizerWorkerMissing = errors.New(
-	"optimizer worker interpreter not found on PATH; this core build has no bundled Python optimizer — run the ftw-optimizer sidecar (see docs/self-update.md)")
+	"optimizer worker not found; the Energyplan worker from the release package is missing, so the built-in Go planner is used")
 
 func (t *ProcessTransport) ensureStartedLocked() error {
 	if t.cmd != nil {
 		return nil
 	}
-	// Resolve the interpreter before fork/exec so an absent worker (the normal
-	// case on the containerized core) returns errOptimizerWorkerMissing rather
-	// than the low-level exec error. LookPath also accepts an absolute command
-	// path, so native/all-in-one deployments that set FTW_OPTIMIZER_PYTHON keep
-	// working unchanged.
+	// Resolve the worker before fork/exec so an absent one returns
+	// errOptimizerWorkerMissing rather than the low-level exec error.
+	// LookPath also accepts the absolute path the release bundle uses.
 	if _, err := exec.LookPath(t.cfg.Command[0]); err != nil {
 		return fmt.Errorf("optimizer worker %q unavailable: %w", t.cfg.Command[0], errOptimizerWorkerMissing)
 	}

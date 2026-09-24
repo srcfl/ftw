@@ -2,22 +2,36 @@
 
 Native 0.x beta and stable releases provide `ftw-linux-arm64.tar.gz` for 64-bit
 Raspberry Pi/Linux hosts and `ftw-linux-amd64.tar.gz` for x86-64 Linux hosts.
-Each archive has a matching `.sha256` file. New releases do not build Windows
-packages. Existing published assets remain available.
+Each archive has a matching `.sha256` file. Existing
+`forty-two-watts-linux-<arch>` download names remain aliases during the
+transition. New releases do not build Windows packages. Existing published
+assets remain available.
 
-This page describes package contents and manual recovery. Fresh native 0.x
-beta sites use [`scripts/install.sh`](../scripts/install.sh) with an exact
-published tag; it verifies the package, initializes release slots and starts
-the native `ftw.service`. It is not the guided migration for an existing Docker,
-Home Assistant or earlier native box. Those boxes stay on their current version
+Install a package with [`scripts/install.sh`](../scripts/install.sh) from the
+same published tag, as [native-beta.md](native-beta.md) shows. It verifies the
+package, puts releases in slots under `/opt/ftw`, installs
+`deploy/ftw-native.service` as the `ftw` service and puts the `ftw` command on
+`PATH`. After that, `ftw update` downloads the next package into a slot and
+the launcher switches to it ([ADR 0007](adr/0007-self-updating-binary.md)).
+The web UI only shows the version. `install.sh --refresh` replaces the
+launcher, the command and the unit when a release asks for it. Do not copy a
+package into `/opt/ftw` by hand: the launcher expects the slot layout.
+
+The installer is not the guided migration for an existing Docker, Home
+Assistant or earlier native box. Those boxes stay on their current version
 until the guided 0.x migration has been tested and published.
+[`deploy/docker`](../deploy/docker) builds a local image from the same
+package.
 
-The archive contains Core, `ftw-backup`, `ftw-launcher`, web files, the pinned
-recovery drivers, the compiled Energyplan bundle, license notices, an example
-config, `deploy/ftw.service` and `deploy/ftw-native.service`. Keep these files
-together when changing versions. The native slot service is the path for new
-0.x installs; existing sites still need the migration work in ADR 0007.
-Existing Linux download names remain aliases during the transition.
+## Contents
+
+Each archive holds one release: Core (`ftw`), `ftw-launcher`, `ftw-backup`,
+`ftw-cli` (installed as the `ftw` command), web files, the pinned recovery
+drivers, the compiled Energyplan bundle, license notices, an example config,
+`state-schema.json`, `release-version.json` with the version, architecture
+and state schema, `deploy/ftw-native.service` and the older direct-layout
+`deploy/ftw.service`. A release slot holds the whole extracted package; keep
+these files together.
 
 Each package includes only the Energyplan executable for its Linux
 architecture. Its manifest lists that executable and the shared schemas,
@@ -25,8 +39,8 @@ licenses and notices, with the original version, source commit and file
 checksums. Other Linux architectures and macOS executables are excluded.
 The full pinned bundle in the source checkout stays unchanged.
 
-Download the archive and its checksum from the same explicit release. For
-an arm64 host, verify and inspect the package with:
+To verify and inspect a package by hand, download the archive and its
+checksum from the same explicit release. For an arm64 host:
 
 ```sh
 sha256sum -c ftw-linux-arm64.tar.gz.sha256
@@ -37,98 +51,7 @@ cd ftw-package
 ```
 
 Use `amd64` instead on an x86-64 host. Extracting the archive does not install
-or start the systemd service. Keep configuration and data outside the
-directory replaced on update.
-
-## Manual direct installation without 0.x self-update
-
-The fresh 0.x installer above is the path for beta sites. These older manual
-steps keep the direct `/opt/ftw/ftw` layout available for recovery. They do
-not set up the 0.x release slots or in-app native update.
-
-These steps target a fresh Debian 12 or Raspberry Pi OS Bookworm host with
-systemd and a 64-bit OS. The package needs no Go toolchain or Docker engine.
-Run `uname -m`: `aarch64` needs arm64; `x86_64` needs amd64. A 32-bit OS cannot
-run these packages.
-
-Install the download tools and the OS certificate store first. Core uses that
-store for HTTPS services such as prices and driver downloads:
-
-```sh
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl
-```
-
-If FTW already runs on the host, stop here. A Compose, Home Assistant or older
-native installation needs a verified backup and a planned handover. Do not
-start a second Core against the same equipment. The older native template
-used `/etc/ftw/config.yaml`; replacing its unit alone would start setup with a
-new config. Keep its unit until the configuration, identity and other files
-beside that config have joined the full backup and passed a restore check.
-
-After verifying and extracting the package as above, run from `ftw-package`:
-
-```sh
-test ! -e /opt/ftw && test ! -e /var/lib/ftw
-```
-
-Both paths must be absent. Also check that port 8080 is free and no existing
-FTW service is installed. Then create the account and copy the whole package:
-
-```sh
-sudo useradd --system --user-group --home-dir /var/lib/ftw --no-create-home ftw
-sudo install -d -m 0755 /opt/ftw
-sudo cp -a . /opt/ftw/
-sudo chown -R root:root /opt/ftw
-sudo install -m 0644 deploy/ftw.service /etc/systemd/system/ftw.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now ftw
-```
-
-Do not copy `config.example.yaml` into the data directory. With no config,
-Core opens setup at `http://<host>:8080/setup`. Finish setup in the browser.
-Systemd creates `/var/lib/ftw` for the service account; Core keeps config,
-identity, drivers and databases there so a full backup includes them together.
-The example config remains a reference in the program directory.
-
-Check the version at the bottom of the dashboard and the running process:
-
-```sh
-systemctl is-active ftw
-curl --fail --silent --show-error http://127.0.0.1:8080/api/status
-curl --fail --silent --show-error http://127.0.0.1:8080/api/health
-sudo journalctl -u ftw -n 30 --no-pager
-```
-
-`/api/status` must report the selected release. `/api/health` becomes available
-after setup; check its body for storage and device errors. A running service
-does not prove that a meter is fresh or that a charger accepts commands.
-
-## Manual update and recovery
-
-Download, verify and extract the next explicit release into a new directory
-before stopping FTW. Read that release's data-compatibility notes. Stop Core,
-create and verify a full backup with `ftw-backup`, and copy it off the host.
-The [backup guide](backup-and-restore.md#native-helper) gives the commands.
-
-Keep the old `/opt/ftw` directory under a versioned name. Put the complete new
-package at `/opt/ftw`, owned by root, then start the existing service and check
-the version, health, saved goals and live measurements. Keep `/var/lib/ftw`
-in place; do not copy example config over it or replace only the executable.
-
-If startup fails, stop the service and inspect the logs. Before restoring the
-old program, check whether the new version changed the data format. When it
-did, restore the verified pre-update data with `ftw-backup` as well. Do not
-start an older program against an unsupported data format. This manual
-`/opt/ftw` path has no automatic rollback; retain both packages and the backup
-until the new version has passed these checks. The separate 0.x slot service
-keeps the previous same-schema binary for rollback.
-
-Native builds leave the container updater disabled. Do not set
-`FTW_SELFUPDATE_ENABLED=1`: it enables the existing container update path,
-not a native package installer. Stop Core and take a verified backup before
-replacing an existing installation; changing the program alone does not undo
-a data-format change. Follow the [backup procedure](backup-and-restore.md) for recovery.
+or start anything.
 
 ## Build the same packages locally
 
@@ -144,6 +67,8 @@ builds one target. The package builder checks the binary architecture and
 requires every pinned driver and runtime directory. It normalizes archive
 timestamps and ownership so unchanged inputs produce the same package bytes.
 
-Beta packages contain their full beta version. Stable packages currently
-build from the selected stable tag. The shared package builder does not yet
-change stable promotion into a copy of beta binary artifacts.
+Beta packages contain their full beta version. For stable,
+[`native-release.yml`](../.github/workflows/native-release.yml) checks the
+named beta's release receipt and package checksums, then rebuilds from that
+beta's commit with the stable version. Stable promotion does not copy the beta
+archives.

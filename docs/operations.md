@@ -1,85 +1,104 @@
 # Operations
 
-Existing sites may still use Docker Compose. New native 0.x installs run Core
-under systemd. The core control loop remains local; Energyplan ships with Core
-and Core falls back safely when it is unavailable.
+New sites run native 0.x under systemd, or the same release package in
+Docker. Older Docker installs (1.x–3.x) stay on their current version until
+the guided migration ships. The control loop is local; Energyplan ships with
+Core and Core falls back safely when it is unavailable.
 
 ## Install
 
-The native 0.x installer is for a fresh 64-bit Raspberry Pi OS, Debian or
-Ubuntu host and requires an exact published tag. During beta, use it only on
-an agreed test site:
+[Try the 0.x beta](native-beta.md) is the full guide and names the current
+beta. Use the installer from the same tag you install, on a fresh 64-bit
+Raspberry Pi OS, Debian or Ubuntu host. During beta, use it only on an agreed
+test site:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh -o /tmp/ftw-install.sh
-bash /tmp/ftw-install.sh --fresh-host --tag v0.131.0-beta.1
+tag=v0.X.Y-beta.N   # the exact release chosen for this site
+curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
+bash install.sh --fresh-host --tag "${tag}"
 ```
 
+Do not use GitHub `releases/latest`; it stays on 2.x for old boxes.
 `--fresh-host` confirms that no FTW site exists, including a stopped Docker
-site installed in a custom directory. Use the exact tag chosen for the site;
-do not use GitHub `releases/latest`, which remains on 2.x for old boxes. The
-installer checks the package and
-checksum, creates `/opt/ftw` with version slots, and starts `ftw.service`.
-Persistent data is under `/var/lib/ftw`. Open `http://<host>:8080/setup` on
-the LAN, then check health and live device readings. If setup stops partway,
-inspect `journalctl -u ftw`, then rerun with `--resume --tag` and the same
-tag. The installer checks its pending record and keeps any data already saved.
+site in a custom directory, and the installer refuses a site it recognises.
+It checks the package's SHA-256, creates the
+[native layout](#native-deployment) and starts `ftw.service`. Open
+`http://<host>:8080/setup` on the LAN, then check health and live device
+readings. If the install stops partway, inspect `journalctl -u ftw`, then
+rerun with `--resume --tag` and the same tag. It keeps any data already saved.
 
-Existing Docker, Home Assistant and earlier native installations must stay
-on their current version until the guided 0.x migration is tested. The fresh
-installer refuses an existing site. No native 0.x package for macOS has
-shipped; the old macOS Docker installer is retired.
+Docker runs the same release package; see [Docker](native-beta.md#docker).
 
-Common commands on an existing Docker site:
+Existing Docker, Home Assistant and earlier native installations stay on
+their current version until the guided 0.x migration is tested. No native
+0.x package for macOS has shipped; the old macOS Docker installer is retired.
+
+## Everyday commands
+
+Native (see [native-beta.md](native-beta.md#everyday-commands)):
 
 ```bash
-cd ~/ftw
-docker compose ps
-docker compose logs -f ftw
-docker compose restart ftw
+ftw status                                  # version, releases, last update, disk, health
+ftw update [--channel beta|stable] [--retry]
+ftw rollback                                # previous release, same data
+ftw backup --output-dir /media/usb/ftw      # verified full backup, copied off the disk
+ftw support [--output FILE]                 # redacted support file
+sudo systemctl restart ftw
+journalctl -u ftw -n 200 --no-pager         # logs; -f follows
 ```
 
-Older Docker boxes still have their own update controls, but they stay on
-their current version until their owner uses the guided native 0.x migration.
-Do not use Update, the retired paired-upgrade procedure or a moving Docker
-alias to cross release lines. The host operating system is maintained
-separately; see [self-update.md](self-update.md).
+Docker 0.x, in `~/ftw-local`: `docker compose ps`,
+`docker compose logs --tail 200` and `docker compose exec ftw ftw status`.
+Update or go back by changing `FTW_VERSION` in `.env` and running
+`docker compose up -d --build`.
+
+Older Docker installs (1.x–3.x), in `~/ftw` or `/opt/ftw` on the old
+Raspberry Pi image: `docker compose ps`,
+`docker compose logs -f ftw ftw-updater` and `docker compose restart ftw`.
+They keep their Update Center. Do not use it, the retired paired-upgrade
+procedure or a moving Docker alias to cross release lines.
+
+The host operating system is maintained separately; see
+[self-update.md](self-update.md).
 
 ## Persistent state
 
-For the Compose deployment, `data/` contains:
+The data directory is `/var/lib/ftw` on a native install,
+`~/ftw-local/data` in Docker 0.x and `data/` in an older Docker install. It
+holds:
 
 - `config.yaml` — operator configuration;
-- `state.db` plus SQLite WAL files — state, history and learned models;
-- `cold/` — rolled-off Parquet history;
-- custom and managed driver data.
+- `state.db` plus SQLite WAL files — settings, state and learned models;
+- `history.db` — history as SQLite buckets (10 s for 7 days, 1 min for
+  90 days, 1 h for 5 years) and the energy ledger;
+- `cache.db` — re-fetchable data;
+- key files such as `nova.key` — the box's identity; keep them with the data;
+- `drivers/` — custom and managed drivers;
+- `backups/` — full backups, unless `state.backup_dir` points elsewhere.
 
-Do not store mutable state inside the container. The data directory must be
-writable by container uid 100/gid 101.
+Core no longer writes a Parquet `cold/` directory. A box converted from an
+older version may still have one.
 
-Create verified full backups from **FTW Update Center → Full backups**, then
-download the `.ftwbak` archive to another computer or disk. The format captures
-the entire persistent directory, verifies file hashes and SQLite, and records
-the installed component versions. Use the safe restore helper, which retains
-the current data and automatically reverts it if the restored service does not
-become healthy. See [backup-and-restore.md](backup-and-restore.md).
+Do not store mutable state inside a container. In Docker the data directory
+must be writable by uid 100/gid 101. A native install runs as the `ftw` user.
 
-The updater also retains bounded local pre-update rollback points. They protect
-configuration and the settings database during a Core update; history stays in
-its own file and is left in place. They remain on the same disk and cannot
-recover a failed SD card.
+Make a verified full backup with `ftw backup --output-dir <another disk>`.
+It captures the persistent data, verifies file hashes and SQLite, and
+records the installed component versions. In Docker 0.x, back up the data
+directory while FTW is stopped. See
+[backup-and-restore.md](backup-and-restore.md).
+
+A native update takes no local rollback point: `ftw rollback` returns to the
+previous release with the current data. Older Docker installs keep bounded
+pre-update rollback points of the settings database and configuration. They
+remain on the same disk and cannot recover a failed SD card.
 
 Core exposes a read-only storage check at
 `GET /api/storage/inventory`. It reports allocated, live and free SQLite pages
 for `state.db` and `cache.db`, their WAL/SHM sizes, and free space on the volume
 that contains the data directory. It does not expose paths, scan a storage
 engine's internal files, change retention, checkpoint WAL, run `VACUUM`, or
-delete data. Use `GET /api/backups` and `GET /api/version/snapshots` for the
-existing backup and rollback-point size lists.
-
-If an older rollback leaves the service offline, follow the Swedish
-[failed-rollback recovery procedure](recover-failed-rollback.sv.md) before
-changing ownership or deleting any SQLite sidecar files.
+delete data. `GET /api/backups` lists full backups and their sizes.
 
 ## Configuration
 
@@ -107,26 +126,39 @@ Local non-browser clients such as `curl` and Home Assistant may omit browser
 fetch headers, but JSON bodies must use `Content-Type: application/json`.
 Active reads that start discovery, begin an authorization flow, or force an
 external update check pass through the same boundary. So do reads of config,
-logs, support dump and report, driver source, system info, research dump, the
-app-link device list, driver health, EV charger detail, planner diagnose,
-time series, and the fleet-ping payload. Live dashboard reads such as status,
-energy, prices, plan, loadpoints and history stay compatible.
+logs, support dump and report, driver source and identity, integration
+status, notification history and rules, system and storage info, local
+repository and snapshot paths, research dump, the app-link device list, driver
+health, EV charger detail, planner diagnose, time series, and the fleet-ping
+payload. Live dashboard reads such as status, energy, prices, plan,
+loadpoints and history stay open, even if someone publishes the port. Still do
+not publish the box directly to the internet.
 
 Mutation requests addressed through any other hostname or a public IP fail
 closed. To expose that API intentionally, generate a random token of at least
-32 characters and set `FTW_API_TOKEN`. Compose deployments should store it in
-the project `.env` file so updater-driven container recreates retain it:
+32 characters and give it to Core as the environment variable `FTW_API_TOKEN`:
 
-```dotenv
-FTW_API_TOKEN=<random-secret-at-least-32-characters>
+- Native: run `sudo systemctl edit ftw`, add
+  `Environment=FTW_API_TOKEN=<secret>` under `[Service]`, then
+  `sudo systemctl restart ftw`. The drop-in stays when `install.sh --refresh`
+  replaces the unit. Local users can read it; on a shared machine use
+  `EnvironmentFile=` with a root-only file instead.
+- Docker 0.x: add the entry below to a `compose.override.yaml` beside
+  `compose.yaml`, keep the value in `.env` with mode `0600`, and run
+  `docker compose up -d`.
+- Older Docker installs already pass it from the project `.env`; run
+  `docker compose up -d ftw` after setting it.
+
+```yaml
+services:
+  ftw:
+    environment:
+      FTW_API_TOKEN: ${FTW_API_TOKEN}
 ```
 
-Keep `.env` readable only by the operator (for example, mode `0600`).
-
-Then recreate Core and send the token as a Bearer credential:
+Send the token as a Bearer credential:
 
 ```bash
-docker compose up -d ftw
 curl -X POST -H "Authorization: Bearer <same-random-secret>" \
   https://ftw.example.net/api/restart
 ```
@@ -142,30 +174,34 @@ password guess, and a mismatch does not lock Settings.
 The built-in browser UI does not store API tokens. For a public/FQDN browser
 deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
-upstream. The token, and the same-origin / local-address checks, now also
-cover config, logs, support dump and report, driver source and identity,
-integration status, notification history and rules, system and storage info,
-local repository and snapshot paths, research dump, the app-link device list,
-driver health, EV charger detail, planner diagnose, time series, and the
-fleet-ping payload. Live dashboard reads (status, energy, prices, plan,
-loadpoints, history) stay open if someone publishes the port. Still do not
-publish the box directly to the internet.
+upstream.
 
 Recovery cannot be disabled by a bad token: connect through `localhost`, the
 host's private IP, or its `.local` name, correct/remove `FTW_API_TOKEN`, and
 restart Core. Tokens shorter than 32 characters are ignored and remote
 mutations remain locked.
 
-`FTW_API_TOKEN` is an operator-managed migration mechanism, not the identity or
-tunnel credential for future remote access. That expansion point is described in
-[architecture.md](architecture.md#future-remote-access-boundary).
+`FTW_API_TOKEN` is an operator-managed mechanism, not the credential for
+remote access; remote access is the FTW app. See
+[architecture.md](architecture.md#remote-access-boundary).
 
 `api.lan_auth` is off by default. Turn it on from loopback inside the
-process. On a Pi with host networking that is
-`http://127.0.0.1:8080` Settings → System, or `curl` to `127.0.0.1`.
-On Docker Desktop (`docker-compose.macos.yml`) a host curl to localhost
-arrives as the bridge gateway, not loopback, so Settings and host curl
-get 403. Enable from inside the container:
+process: `http://127.0.0.1:8080` Settings → System on the machine, or `curl`
+to `127.0.0.1`. When on, protected LAN routes need the house password or
+`FTW_API_TOKEN`. `curl` sends `Authorization: Bearer <house-password>` or
+`Authorization: Bearer <FTW_API_TOKEN>`. The browser login form sets a
+session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`) never
+asks. Live status stays readable without the password; a viewer caller is
+minted for those reads. The two secrets do not share a lockout: retrying the
+API token cannot lock the household out of Settings. A first enable from
+another LAN address is refused, so a visitor cannot set the password.
+`POST /api/config` cannot flip the flag.
+
+On an older Docker install under Docker Desktop (`docker-compose.macos.yml`),
+a host curl to localhost arrives as the bridge gateway, not loopback, so
+Settings and host curl get 403. Desktop SNAT uses that same peer for every
+published-port client, including LAN visitors, so it must not count as
+loopback. Enable from inside the container:
 
 ```bash
 docker compose -f docker-compose.macos.yml exec ftw \
@@ -173,18 +209,6 @@ docker compose -f docker-compose.macos.yml exec ftw \
   --post-data='{"enabled":true,"password":"ETT-LANGT-LOSEN"}' \
   http://127.0.0.1:8080/api/auth/password
 ```
-
-Do not treat that gateway as loopback: Desktop SNAT uses the same peer
-for every published-port client, including LAN visitors. A first enable
-from another LAN address is refused, so a visitor cannot set the
-password. `POST /api/config` cannot flip the flag. When on,
-protected LAN routes need the house password or `FTW_API_TOKEN`.
-`curl` sends `Authorization: Bearer <house-password>` or
-`Authorization: Bearer <FTW_API_TOKEN>`. The browser login form
-sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
-never asks. Live status stays readable without the password; a viewer
-caller is minted for those reads. The two secrets do not share a lockout:
-retrying the API token cannot lock the household out of Settings.
 
 An owner pairing QR is minted only from loopback or with the house
 password. Promoting a paired phone to owner uses the same gate. The
@@ -201,8 +225,8 @@ Recovery: `curl` to `127.0.0.1`, or set `api.lan_auth: false` in
 
 The full message is `remote access to protected API routes is disabled;
 configure FTW_API_TOKEN or use a local address`. The dashboard still loads —
-the message appears when a protected request (saving settings, starting an
-update, a scan) is refused. It means the request failed the locality rules
+the message appears when a protected request (saving settings, a scan) is
+refused. It means the request failed the locality rules
 above, and "local" is judged on the request, not on which network the
 browser sits on:
 
@@ -237,22 +261,10 @@ nothing.
 
 ## Logs and health
 
-```bash
-docker compose logs --tail=200 ftw
-docker compose logs -f ftw ftw-updater
-curl -fsS http://localhost:8080/api/health
-```
-
-For a native systemd deployment:
-
-```bash
-journalctl -u ftw -n 200 --no-pager
-journalctl -u ftw -f
-systemctl status ftw
-```
-
-Warnings about stale site-meter telemetry are safety actions, not cosmetic
-noise. Dispatch remains idle until fresh data returns.
+`curl -fsS http://localhost:8080/api/health` answers on every install; the
+commands above show logs. Warnings about stale site-meter telemetry are
+safety actions, not cosmetic noise. Dispatch remains idle until fresh data
+returns.
 
 ## Troubleshooting
 
@@ -304,16 +316,16 @@ and the socket mount are configured, `getent hosts zap.local` asks the same
 daemon, though cache timing can still differ.
 
 **`via=multicast`** — FTW queried the LAN directly. This is what happens when
-the avahi socket is not mounted, which is the default, and it needs no host
-software at all.
+the avahi socket is absent, and it needs no host software at all.
 
 Failures log `mDNS resolution failed`, and the message names both backends when
 both were tried.
 
-Either way multicast has to reach the LAN, which the Linux Compose topology
-provides through `network_mode: host`. Under `docker-compose.macos.yml` the
-container is bridged and multicast does not reach the LAN, so configure devices
-by IP there. The direct path sends on every active, non-loopback multicast
+Either way multicast has to reach the LAN. A native install is on the host
+network, and both Docker compose files for Linux use `network_mode: host`.
+Under the old `docker-compose.macos.yml` the container is bridged and
+multicast does not reach the LAN, so configure devices by IP there. The
+direct path sends on every active, non-loopback multicast
 interface. It supports IPv4 and IPv6; a link-local IPv6 answer is used only
 with its interface zone, and an unscoped link-local answer is discarded.
 
@@ -330,9 +342,9 @@ different device with no attacker involved at all. The durable check is the
 identity a device reports once connected: make and serial, or its MAC.
 
 So by default FTW does not use *its own* mDNS answer for a `.local` name: the
-name goes to the system resolver, exactly as it did before this package
-existed, and on platforms that answer `.local` themselves — Home Assistant does,
-through Supervisor's DNS service — it simply works. Opt in per driver to let FTW
+name goes to the system resolver, and on platforms that answer `.local`
+themselves — Home Assistant does, through Supervisor's DNS service — it simply
+works. Opt in per driver to let FTW
 resolve the name itself, over Avahi or the LAN:
 
 ```yaml
@@ -350,9 +362,9 @@ another driver. Literal IP addresses and ordinary DNS names are untouched.
 
 Without it, a `.local` dial is not refused; it is handed to the system resolver,
 and the log records why FTW's own answer was not used. That matters on a host
-where nothing else resolves `.local` — a plain Compose or Raspberry Pi install,
-whose `resolv.conf` points at the router — because there the name will simply
-not resolve until you opt in.
+where nothing else resolves `.local` — a native or Docker install whose
+`resolv.conf` points at the router — because there the name will simply not
+resolve until you opt in.
 
 HTTP and WebSocket requests to `.local` hosts always bypass configured proxies,
 so credentials and control payloads stay on the LAN path. Ordinary DNS names
@@ -360,8 +372,10 @@ still use the configured proxy. A TLS pin does not bypass the mDNS gate yet.
 
 #### Letting FTW use avahi
 
-Host networking shares ports, not Unix sockets, so avahi has to be bind-mounted
-in. `docker-compose.yml` carries the line commented out:
+A native install uses `/run/avahi-daemon/socket` when the host runs
+`avahi-daemon`. In Docker, host networking shares ports, not Unix sockets, so
+avahi has to be bind-mounted in. The older `docker-compose.yml` carries the
+line commented out:
 
 ```yaml
     volumes:
@@ -374,8 +388,8 @@ directory created where the socket belongs stops `avahi-daemon` from ever
 starting. Restarting avahi detaches the mount, so restart FTW after you do.
 
 This is an optimisation, not a requirement: device connectivity is unchanged
-without it. It lets `getent hosts zap.local`, `curl` and `wget` check the name
-from inside the container.
+without it. In the older image it also lets `getent hosts zap.local`, `curl`
+and `wget` check the name from inside the container.
 
 Under the Home Assistant add-on none of this applies: Supervisor mounts only a
 fixed set of named paths, so the socket cannot be provided and FTW always
@@ -398,24 +412,39 @@ Stop the conflicting service or change the configured API port, then restart.
 
 ## Native deployment
 
-`make build-arm64` and `make build-amd64` produce static Core and `ftw-backup`
-binaries.
-[`deploy/ftw.service`](../deploy/ftw.service) is the reference systemd unit. A
-conventional layout is:
+The installer creates:
 
 ```text
-/opt/ftw/                 binary, web, bundled drivers, optional optimizer
-/etc/ftw/config.yaml      operator configuration
-/var/lib/ftw/             state, history, custom/managed drivers
+/opt/ftw/ftw-launcher             starts the current release slot
+/opt/ftw/slots.json               current and previous release, trial state
+/opt/ftw/releases/<tag>/          Core, ftw-backup, web, bundled drivers, Energyplan
+/var/lib/ftw/                     config.yaml, state.db, history.db, drivers/, backups/
+/etc/systemd/system/ftw.service   deploy/ftw-native.service, alias forty-two-watts.service
+/usr/local/bin/ftw                operator command
 ```
 
-Run the binary with `-help` for its current flags. Native installs without a supported
-Energyplan worker use the Go planner fallback and normally leave container self-update
-disabled.
+[`deploy/ftw-native.service`](../deploy/ftw-native.service) runs the launcher
+as the `ftw` user. `ftw update` changes only the release slots; the launcher,
+the `ftw` command and the unit move with `install.sh --refresh`
+([native-beta.md](native-beta.md#launcher-and-command-updates)).
 
 ## Release recovery
 
-Use `stable` for normal sites and `beta` for deliberate validation. A beta
-and its promoted stable build identify the same commit. Roll back through the
-update UI when a retained snapshot is appropriate; otherwise pin the previous
-immutable image tag and restore the matching state backup.
+No 0.x stable has shipped; run a beta only on an agreed test site. A beta and
+its promoted stable build identify the same commit.
+
+- Native: `ftw rollback` returns to the previous release when it reads the
+  same data. If Core does not start and `ftw` cannot reach it, roll back
+  offline:
+
+  ```bash
+  sudo -u ftw /opt/ftw/ftw-launcher -root /opt/ftw rollback
+  sudo systemctl restart ftw
+  ```
+
+- Docker 0.x: set the previous `FTW_VERSION` in `.env` and run
+  `docker compose up -d --build`. There is no automatic fallback.
+- Across a state-schema change, restore a full backup made before the update;
+  see [backup-and-restore.md](backup-and-restore.md).
+- Older Docker installs (1.x–3.x) roll back within their own line through
+  their Update Center. Never use it to reach 0.x.

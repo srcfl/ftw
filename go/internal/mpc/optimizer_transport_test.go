@@ -520,16 +520,15 @@ func TestProcessTransportHealthReportsMissingWorker(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	// The interpreter is resolved before fork/exec, so an absent worker yields
-	// the actionable errOptimizerWorkerMissing (which names the ftw-optimizer
-	// sidecar) instead of a bare "start optimizer ... not found" that reads as a
-	// missing core dependency.
+	// The worker is resolved before fork/exec, so an absent one yields
+	// errOptimizerWorkerMissing, which says the Go planner is used, instead of
+	// a bare "start optimizer ... not found".
 	_, err = transport.Health(ctx)
 	if err == nil || !errors.Is(err, errOptimizerWorkerMissing) {
 		t.Fatalf("Health error = %v, want errOptimizerWorkerMissing", err)
 	}
-	if !strings.Contains(err.Error(), "ftw-optimizer sidecar") {
-		t.Fatalf("Health error should name the ftw-optimizer sidecar, got: %v", err)
+	if !strings.Contains(err.Error(), "Go planner") || strings.Contains(err.Error(), "sidecar") {
+		t.Fatalf("Health error should say the Go planner is used, got: %v", err)
 	}
 }
 
@@ -612,14 +611,14 @@ func TestProcessTransportReportsMissingWorkerActionably(t *testing.T) {
 	if !errors.Is(err, errOptimizerWorkerMissing) {
 		t.Fatalf("error should wrap errOptimizerWorkerMissing, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ftw-optimizer sidecar") {
-		t.Fatalf("error should point operators at the ftw-optimizer sidecar, got: %v", err)
+	if !strings.Contains(err.Error(), "Go planner") {
+		t.Fatalf("error should say the Go planner is used, got: %v", err)
 	}
 }
 
-// With the `auto` transport (sidecar primary + process fallback), a down
-// sidecar on a core build that ships no Python must still surface the
-// actionable errOptimizerWorkerMissing through the auto layer — otherwise
+// With the `auto` transport (socket primary + process fallback), a down
+// socket and a missing worker must still surface errOptimizerWorkerMissing
+// through the auto layer — otherwise
 // service.go's FallbackReason would report a bare exec error. This pins the
 // missing-worker path all the way to the operator-facing reason string.
 func TestAutoTransportSurfacesMissingWorkerFromProcessFallback(t *testing.T) {
@@ -640,8 +639,8 @@ func TestAutoTransportSurfacesMissingWorkerFromProcessFallback(t *testing.T) {
 	if !errors.Is(err, errOptimizerWorkerMissing) {
 		t.Fatalf("auto transport should surface errOptimizerWorkerMissing from the process fallback, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ftw-optimizer sidecar") {
-		t.Fatalf("fallback reason should name the ftw-optimizer sidecar, got: %v", err)
+	if !strings.Contains(err.Error(), "Go planner") {
+		t.Fatalf("fallback reason should say the Go planner is used, got: %v", err)
 	}
 }
 

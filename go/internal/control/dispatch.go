@@ -145,8 +145,7 @@ type SlotDirective struct {
 	// Discharge slots are intentionally NOT clamped on the energy-allocation
 	// path: extra export during an EXPORT-INTENT slot (PlannedGridW < 0,
 	// e.g. peak-shave discharge picked by the DP for its export price) is
-	// bonus revenue and backing off would undermine the DP choice. See
-	// docs/safety.md §8 for the full rationale.
+	// bonus revenue and backing off would undermine the DP choice.
 	//
 	// Cover-load discharge slots (PlannedGridW ≈ 0 or import) are a
 	// DIFFERENT story: the DP picked discharge to offset an expensive

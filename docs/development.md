@@ -7,18 +7,18 @@ them.
 ## Fast loop
 
 ```bash
-make dev          # simulators + core, creates config.local.yaml when missing
+make dev          # Ferroamp + Sungrow simulators and core; creates config.local.yaml when missing
 make sim-ocpp     # Evify OCPP charge points against a running FTW
-make test         # Go and Python suites
+make test         # Go suites
 make e2e          # explicit full-stack simulator test
 npm test          # web tests
-make verify       # fast pre-commit verification
-make ci           # e2e, builds and browser smoke
+make verify       # pre-commit: tests, script checks, Energyplan bundle check, vet and build
+make ci           # Go suites, e2e, builds and browser smoke
 ```
 
-`make test` runs independent Go and optimizer work concurrently and reuses the
-optimizer virtual environment. Prefer a narrow package or test while iterating,
-then run `make verify`. Use `make ci` for a complete local handoff pass.
+Prefer a narrow package or test while iterating, then run `make verify`. Use
+`make ci` for a complete local handoff pass. `make verify` and `make release`
+also need Python 3 for the release scripts and the bundle verifier.
 
 Run core alone:
 
@@ -28,6 +28,15 @@ go run ./cmd/ftw -config ../config.local.yaml -web ../web
 ```
 
 The UI listens on the configured API port, normally 8080.
+
+## Optimizer
+
+The optimizer is the compiled Energyplan worker checked in at
+`optimizer/native/bundle`; see [its README](../optimizer/native/README.md).
+There is no toolchain or virtual environment to set up. Development builds plan with Core DP unless
+`planner.engine: energyplan` is set; Core then runs the worker for this host
+from that directory. `make native-solver-test` verifies the bundle and runs
+the worker tests when the host has a bundled worker.
 
 ## Live-data UI work
 
@@ -43,23 +52,20 @@ Set `FTW_PROXY_READONLY=0` only for an intentional live write session.
 
 ## Containers
 
-`docker compose up -d` mirrors the Linux production topology: core, optimizer,
-updater and MQTT broker. Use
-[`docker-compose.macos.yml`](../docker-compose.macos.yml) on macOS. Local Compose
+[`deploy/docker`](../deploy/docker) builds a local 0.x image from a published
+release package; see [native-beta.md](native-beta.md). The root
+`docker-compose.yml` and `docker-compose.macos.yml` (Core, `ftw-updater`
+sidecar and Mosquitto) belong to the frozen 1.x–3.x Docker line. Local Compose
 overrides are machine-specific and untracked.
 
 ## Generated files
 
-`bin/`, `dist/`, `artifacts/`, local databases, caches, `node_modules/`
-and `optimizer/.venv/` are disposable and ignored. Do not treat generated
-output or agent plans as project documentation.
+`bin/`, `release/`, `artifacts/`, `dev-data/`, local databases, caches and
+`node_modules/` are disposable and ignored. Do not treat generated output or
+agent plans as project documentation.
 
 `drivers/*.lua` is ignored too: it is a snapshot of the commit pinned in
 [`drivers/BUNDLED_SOURCE.json`](../drivers/BUNDLED_SOURCE.json), fetched, never
-authored here. A fresh clone or `git worktree` therefore starts without either
-it or the virtual environment, and the first `make test` builds both. There is
-no separate setup step. Later runs cost nothing.
-
-The optimizer needs Python 3.11 or newer. `make` picks an interpreter that
-qualifies, overridable with `PYTHON=`, and falls back to `uv` — optional, used
-only when the machine has no suitable Python of its own.
+authored here. A fresh clone or `git worktree` therefore starts without it,
+and the first `make test` fetches it; this needs `curl`, `jq` and network
+access. `make drivers` fetches it again. Later runs cost nothing.

@@ -251,7 +251,7 @@ decisions about the site to you.
   `{}` updates, or with `{"retry": true}` retries a failed release;
   `GET /api/version/update/status` follows it. `POST /api/version/binary-rollback`
   rolls back, `POST /api/backups` makes a backup and
-  `POST /api/support/dump` returns the support file as a zip.
+  `GET /api/support/dump` returns the support file as a zip.
 - In Docker, run `ftw` inside the container:
   `docker compose exec ftw ftw status`. `ftw update` and `ftw rollback` do
   not apply there. Change `FTW_VERSION` in `.env` and run

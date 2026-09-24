@@ -64,7 +64,7 @@ Trage ein:
 
 - **Hostname:** `ftw`
 - **Localization:** wähle dein Land
-- **Benutzername:** z.B. `pi`
+- **Benutzername:** z.B. `pi` (nicht `ftw`: FTW legt ein eigenes Konto mit diesem Namen an)
 - **Passwort:** wähle eins, das du dir merken kannst — aber nicht "1234"
 - **WLAN:** wenn du WLAN benutzt, gib den Namen deines Heim-WLANs (SSID) und das Passwort ein. Benutzt du ein Netzwerkkabel? Überspringe diesen Schritt.
 - **Remote access:** schalte **SSH** ein. Bist du fortgeschrittener Nutzer — wähle Login mit **SSH-Schlüssel** (füge deinen öffentlichen Schlüssel ein). Sonst wähle **Passwort + Benutzername**.
@@ -143,5 +143,5 @@ Wenn diese Adresse nicht funktioniert — probiere die IP-Adresse, die du aufges
 - **Das Lämpchen leuchtet gar nicht** → prüfe, ob das Netzteil richtig eingesteckt ist.
 - **Keine IP-Adresse zu finden** → starte den Router neu, warte 5 Minuten, schau nochmal.
 - **SSH sagt "Connection refused"** → warte noch etwas. Der erste Start dauert.
-- **Die Seite lädt, aber beim Ändern von Einstellungen oder beim Update erscheint "remote access to protected API routes is disabled"** → FTW nimmt Änderungen nur von Adressen an, die es als lokal erkennt. Öffne die Oberfläche über die IP-Adresse des Pi, z. B. `http://192.168.1.123:8080`. Warum das passiert — auch zu Hause — steht in [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled) (auf Englisch).
+- **Die Seite lädt, aber beim Ändern von Einstellungen erscheint "remote access to protected API routes is disabled"** → FTW nimmt Änderungen nur von Adressen an, die es als lokal erkennt. Öffne die Oberfläche über die IP-Adresse des Pi, z. B. `http://192.168.1.123:8080`. Warum das passiert — auch zu Hause — steht in [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled) (auf Englisch).
 - **Das alles hilft nicht** → schau auf unserem Discord vorbei und frage freundlich nach Hilfe: **https://discord.gg/25xcBzQaux**

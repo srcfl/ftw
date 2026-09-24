@@ -51,7 +51,7 @@ the whole product. See [docs/architecture.md](docs/architecture.md).
 - multi-battery allocation with fuse, SoC, slew and stale-data protection;
 - price-, weather-, PV- and load-aware planning;
 - EV charging, V2X and thermal planning;
-- local web UI, SQLite history and configuration, and Parquet archives;
+- local web UI, with history and configuration in SQLite;
 - Home Assistant MQTT discovery;
 - hot-reloadable, independently released Lua drivers;
 - a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
@@ -129,9 +129,8 @@ access is a product goal, not an endpoint provided by this installation guide.
 
 The official Home Assistant app repository is
 [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons).
-Its first beta,
-[`ftw-v0.1.0-beta.1`](https://github.com/srcfl/home-assistant-addons/releases/tag/ftw-v0.1.0-beta.1),
-is published. There is no stable app yet — Home Assistant OS and Supervisor
+It publishes beta builds of the older 3.x line; the 0.x line is not in the
+app yet. There is no stable app — Home Assistant OS and Supervisor
 qualification has to finish first — so treat it as a beta rather than a
 production install.
 
@@ -216,24 +215,21 @@ See [docs/ocpp.md](docs/ocpp.md).
 
 There are two channels:
 
-- **beta** receives every merged change, usually within days;
+- **beta** receives every merged change in the next beta, aiming for one a week;
 - **stable** promotes the exact commit already published and tested as beta.
 
 There is no edge channel. Beta is the shared playground: run it on a real
 site and report what you find as an issue naming the beta version you saw it
 on. An issue marked `release-blocker` stops that line from promoting. A beta
-promotes to stable once it has run clean on the validation sites for a few
-days — there is no release calendar, but beta and stable stay weeks apart at
-most. A critical bug in stable while beta is ahead is fixed on a short-lived
-`hotfix/vX.Y` branch cut from the stable tag, never by promoting the moving
-beta line.
+promotes to stable after a week on the home box and at least one other real
+site with no open `release-blocker`.
 
-Changesets produce versions and changelog entries; GitHub Actions builds the
-binaries, containers and installer assets. The repository owner cuts every
-release. Details for operators are in
-[docs/self-update.md](docs/self-update.md); the full maintainer rules,
-including the stable-hotfix runbook, are in the Releases section of
-[AGENTS.md](AGENTS.md).
+Changesets produce versions and changelog entries; the native release
+workflow builds the checksummed Linux packages that the installer, `ftw
+update` and the Docker files use. The repository owner cuts every release.
+Details for operators are in [docs/self-update.md](docs/self-update.md); the
+full maintainer rules, including the exceptional repair path for the old
+Docker line, are in the Releases section of [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
@@ -252,7 +248,6 @@ metadata are the detailed reference.
 - [Self-update and release channels](docs/self-update.md)
 - [Status of old Docker upgrades](docs/upgrade-paired-release.md)
 - [Home Assistant](docs/ha-integration.md)
-- [Calendar removal and existing schedules](docs/caldav-integration.md)
 
 Other files under [`docs/`](docs/) are focused installation or
 external-integration guides.

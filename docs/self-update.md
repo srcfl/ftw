@@ -18,29 +18,51 @@ is still needed to recover older data or a failed disk.
 
 ## Existing 1.x, 2.x and 3.x boxes
 
-Keep an existing Docker or earlier native site on its current version. Do not
-use its Update button, an old Docker migration script, a moving image alias,
-or a manual Core/updater swap to cross release lines. The old code may still
-show a previously published update; it cannot be changed on a box that has
-not installed new code. The scripts on `master` for Docker-to-Docker migration
-and 2.x-to-3.x upgrades now exit before changing a site.
+Keep an existing Docker or earlier native site on its current version. On an
+older Docker install, the web UI's Update and Restart buttons signal the
+`ftw-updater` sidecar, which pulls a pinned image and recreates Core
+([`go/internal/selfupdate`](../go/internal/selfupdate),
+[`go/cmd/ftw-updater`](../go/cmd/ftw-updater)). That path is frozen with its
+line. Do not use its Update button, an old Docker migration script, a moving
+image alias, or a manual Core/updater swap to cross release lines. The old
+code may still show a previously published update; it cannot be changed on a
+box that has not installed new code. The scripts on `master` for
+Docker-to-Docker migration and 2.x-to-3.x upgrades now exit before changing a
+site.
 
 The planned guided installer will move 1.x, 2.x and 3.x sites directly to
 native 0.x. It must first make and verify a full backup held off the box,
 then stop the old Core, preserve config, history, identity and goals, install
 the native service, check data and connected devices, and retain a tested way
 back. It is not ready for users. The [fresh Linux installer](../scripts/install.sh)
-is only for an empty 64-bit host and refuses a known existing site.
+is only for an empty 64-bit host and refuses a known existing site. Until
+then, [Try the 0.x beta](native-beta.md#coming-from-an-older-ftw) shows how
+to test 0.x beside an old site.
 
-The [operator CLI](../scripts/ftwctl.py) now supports a **legacy native/systemd
-pilot**. Run it on another computer, through an SSH tunnel to the box's API:
+GitHub `releases/latest` and the old Docker `:latest` aliases remain on the
+2.x line for installed boxes. Native beta and stable releases use exact tags
+without moving that global latest slot. An urgent safety repair may still
+need an owner-approved 2.x release; it does not restart routine Docker
+releases or provide a hop to 3.x. The old `beta.yml` and `release.yml`
+workflows are guarded to that line. A release from either line does not deploy
+itself to a box.
+
+### Pilot: an older native systemd site
+
+This is not the user migration path. `migrate-native` in the
+[operator CLI](../scripts/ftwctl.py) moves an older **direct native systemd**
+site, one whose unit runs `/opt/ftw/ftw` as the `ftw` user, onto 0.x release
+slots. The owner's home box was moved with it. It stages the release under a
+separate root, `/opt/ftw-native` by default, and switches the unit with a
+drop-in, so such a box keeps a different layout from a fresh install. Run it
+on another computer, through an SSH tunnel to the box's API:
 
 ```bash
 ssh -N -L 18080:127.0.0.1:8080 box.example
 python3 scripts/ftwctl.py --url http://127.0.0.1:18080 status
 python3 scripts/ftwctl.py --url http://127.0.0.1:18080 backup --output-dir ~/FTW-backups
 python3 scripts/ftwctl.py --url http://127.0.0.1:18080 migrate-native \
-  --host box.example --tag v0.131.0-beta.1 \
+  --host box.example --tag v0.X.Y-beta.N \
   --data-dir /srv/ftw/data --config /app/data/config.yaml \
   --user-drivers /app/data/drivers --check-only
 ```
@@ -51,27 +73,18 @@ the last 24 hours whose size and SHA-256 match Core's verified archive. It
 checks that the same archive still exists under the service's data bind on the
 box and that its site identity matches the SSH host. This avoids copying a
 large archive back to `/tmp` or mixing up two boxes on the same version. It
-stages the exact release beside the old binary, then changes only the systemd
-start override. It compares version, health, driver names and working driver
-count. On failure it tries the old start command. If old Core cannot read the
-data after a failed trial, it restores the verified archive before retrying
-old Core. Keep the printed recovery-copy path if automatic recovery fails.
-The CLI prints the active phase, elapsed time and completed/total bytes when
+then changes only the systemd start override and compares version, health,
+driver names and working driver count. On failure it tries the old start
+command. If old Core cannot read the data after a failed trial, it restores
+the verified archive before retrying old Core. Keep the printed recovery-copy
+path if automatic recovery fails. The CLI prints the active phase, elapsed time and completed/total bytes when
 known; it says when a total is unknown. If LAN auth is on, set `FTW_API_TOKEN`
 in the CLI process environment. Never paste that token into a command line.
 
-This pilot accepts an older **direct native systemd** site only. Docker and
-Home Assistant installations remain on their current line while their own
-layout and recovery path are tested. A successful empty-data smoke test does
-not prove migration of a live household.
-
-GitHub `releases/latest` and the old Docker `:latest` aliases remain on the
-2.x line for installed boxes. Native beta and stable releases use exact tags
-without moving that global latest slot. An urgent safety repair may still
-need an owner-approved 2.x release; it does not restart routine Docker
-releases or provide a hop to 3.x. The old `beta.yml` and `release.yml`
-workflows are guarded to that line. A release from either line does not deploy
-itself to a box.
+The pilot refuses Docker and Home Assistant installations; they remain on
+their current line while their own layout and recovery path are tested. A
+successful empty-data smoke test does not prove migration of a live
+household.
 
 ## Native 0.x releases
 
@@ -93,7 +106,7 @@ package has its own hash and receipt. A tag, green CI run or published package
 alone is not field validation.
 
 On a native site the owner runs updates on the machine, by hand or from their
-own timer or agent. [Try the native beta](native-beta.md) is the tester's
+own timer or agent. [Try the 0.x beta](native-beta.md) is the tester's
 guide. The installer puts the `ftw` command on `PATH`:
 
 ```bash
@@ -128,6 +141,10 @@ The web UI on a native install shows the running version, a published
 release and the command; it has no update controls. See
 [ADR 0007](adr/0007-self-updating-binary.md) and
 [full backup and restore](backup-and-restore.md).
+
+Docker 0.x runs the same package without the launcher. Change `FTW_VERSION`
+in `.env` and run `docker compose up -d --build` to update or go back; there
+is no automatic fallback. See [Docker](native-beta.md#docker).
 
 Core and the compiled Energyplan worker ship in one package. Core validates
 plans and keeps its Go fallback. Signed Lua drivers follow their own beta and

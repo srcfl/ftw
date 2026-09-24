@@ -49,8 +49,8 @@ driver-<id>-v<major.minor.patch>-<sha256-prefix>.lua
 
 FTW first downloads the small `manifest.json`. When the operator installs or
 updates one driver, FTW downloads only that asset. Other driver files do not
-change. The manifest retains older signed entries in `history`, so the Update
-Center can select or restore an exact version without a Core release.
+change. The manifest retains older signed entries in `history`, so Settings →
+Devices can select or restore an exact version without a Core release.
 
 The publisher does not replace content-addressed driver assets. GitHub can
 therefore retain each asset's `download_count`. The public repository includes
