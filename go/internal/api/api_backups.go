@@ -71,7 +71,16 @@ func (s *Server) handleBackups(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
+// withoutWriteDeadline lifts the server's write timeout for one response. A
+// full backup takes many minutes on an SD card and answers only when it is
+// done; a large download can outlast the timeout too. Without this the
+// client sees the connection drop although the archive was made.
+func withoutWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+}
+
 func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
+	withoutWriteDeadline(w)
 	dir, ok := s.backupConfig(w)
 	if !ok {
 		return
@@ -141,6 +150,7 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBackupVerify(w http.ResponseWriter, r *http.Request) {
+	withoutWriteDeadline(w)
 	dir, ok := s.backupConfig(w)
 	if !ok {
 		return
@@ -173,6 +183,7 @@ func (s *Server) handleBackupVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBackupDownload(w http.ResponseWriter, r *http.Request) {
+	withoutWriteDeadline(w)
 	dir, ok := s.backupConfig(w)
 	if !ok {
 		return
