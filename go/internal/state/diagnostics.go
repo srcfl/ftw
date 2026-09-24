@@ -7,13 +7,12 @@ import (
 	"time"
 )
 
-// DiagnosticsRecentRetention is how long planner snapshots stay queryable
-// in SQLite before rolling off to daily Parquet files. The time-travel UI
-// falls through to Parquet transparently for anything older, so this only
-// buys query latency on recent incidents — and the rows are heavy: a real
-// site measured ~85 kB JSON per replan ≈ 485 MB in SQLite at 30 days,
-// which also ballooned every state snapshot. 7 days keeps the common
-// debugging window fast at ~115 MB.
+// DiagnosticsRecentRetention is how long planner snapshots stay in SQLite.
+// Plain history maintenance deletes older rows; the older aggregate path
+// rolled them into daily Parquet files first, which the time-travel UI still
+// reads. The rows are heavy: a real site measured ~85 kB JSON per replan ≈
+// 485 MB in SQLite at 30 days, which also ballooned every state snapshot and
+// backup. 7 days keeps the common debugging window at ~115 MB.
 const DiagnosticsRecentRetention = 7 * 24 * time.Hour
 
 // DiagnosticSummary is the light-weight row the timeline UI consumes. No
@@ -109,6 +108,34 @@ func (s *Store) LoadDiagnosticAt(tsMs int64) (*DiagnosticRow, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// pruneDiagnosticsBefore deletes snapshots older than cutoffMs in bounded
+// batches. The rows are large (85-170 kB of JSON each on real sites), so one
+// unbounded DELETE would free hundreds of MB inside a single write lock and
+// starve live writers, as in the 2026-07-16 prune incident. The IN-subquery
+// form works without the DELETE...LIMIT compile flag.
+func (s *Store) pruneDiagnosticsBefore(ctx context.Context, cutoffMs int64) (int64, error) {
+	const batch = 32
+	var deleted int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		res, err := s.db.ExecContext(ctx, `DELETE FROM planner_diagnostics WHERE ts_ms IN (
+			SELECT ts_ms FROM planner_diagnostics WHERE ts_ms < ? ORDER BY ts_ms LIMIT ?)`, cutoffMs, batch)
+		if err != nil {
+			return deleted, fmt.Errorf("delete old planner diagnostics: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+		if n < batch {
+			return deleted, nil
+		}
+		if err := pauseMaintenance(ctx); err != nil {
+			return deleted, err
+		}
+	}
 }
 
 // DeleteDiagnosticsBefore drops all snapshots with ts_ms < cutoffMs. Used
