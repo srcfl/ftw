@@ -117,6 +117,8 @@ jobs:
           fi
           schema=$(node -p "require('./state-schema.json').version")
           [[ "${schema}" =~ ^[1-9][0-9]*$ ]]
+          python3 scripts/check-native-schema.py "${TAG}" "${schema}" \
+            "${RUNNER_TEMP}/native-release-pages.json"
           printf 'tag=%s\ncommit=%s\nschema=%s\n' "${TAG}" "${source_commit}" "${schema}" >> "${GITHUB_OUTPUT}"
         id: source
       - name: Build complete ARM64 and AMD64 packages
