@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func testEnv() env {
@@ -543,6 +544,19 @@ func TestMeterDrawsABarWithRateAndTimeLeftOnATerminal(t *testing.T) {
 	}
 	if strings.Count(screen, "Downloading") != 1 {
 		t.Fatalf("the phase name is drawn once: %q", screen)
+	}
+	// On 80 columns the numbers still fit beside a shorter bar.
+	var narrow strings.Builder
+	clk80 := &clock{t: clk.t}
+	e80 := e
+	e80.now, e80.width = clk80.now, 80
+	n := newMeter(&narrow, e80)
+	n.show(sample{key: "pull", label: "1/3 Downloading", unit: "bytes", done: 246_400_000, total: 411_700_000})
+	clk80.advance(3 * time.Second)
+	n.show(sample{key: "pull", label: "1/3 Downloading", unit: "bytes", done: 300_000_000, total: 411_700_000})
+	last := narrow.String()[strings.LastIndex(narrow.String(), clearLine)+len(clearLine):]
+	if strings.Contains(last, "…") || !strings.HasSuffix(last, "  3s") || utf8.RuneCountInString(last) > 79 {
+		t.Fatalf("80 columns: %q", last)
 	}
 	out.Reset()
 	m.finish(true)

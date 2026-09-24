@@ -1038,20 +1038,24 @@ func (c *Checker) triggerNative(ctx context.Context, action, target, component s
 			if err := c.WriteStatus(status); err != nil {
 				slog.Warn("selfupdate: native download progress write failed", "err", err)
 			}
+		},
+		// Unpacking syncs every file; on an SD card that takes longer than
+		// the download, so it is its own step.
+		Downloaded: func() {
+			status.EndPhase(c.cfg.Now())
+			status.State = "checking"
+			status.Message = "Unpacking and checking the release"
+			status.Step = 2
+			status.ProgressCurrent = 0
+			status.ProgressTotal = 0
+			status.ProgressUnit = ""
+			status.PhaseStartedAt = c.cfg.Now()
+			status.UpdatedAt = status.PhaseStartedAt
+			if err := c.WriteStatus(status); err != nil {
+				slog.Warn("selfupdate: native unpack status write failed", "err", err)
+			}
 		}}
 	if err := downloader.Install(ctx, target); err != nil {
-		return err
-	}
-	status.EndPhase(c.cfg.Now())
-	status.State = "checking"
-	status.Message = "Checking release and preparing restart"
-	status.Step = 2
-	status.ProgressCurrent = 0
-	status.ProgressTotal = 0
-	status.ProgressUnit = ""
-	status.PhaseStartedAt = c.cfg.Now()
-	status.UpdatedAt = status.PhaseStartedAt
-	if err := c.WriteStatus(status); err != nil {
 		return err
 	}
 	if err := manager.Prepare(target); err != nil {

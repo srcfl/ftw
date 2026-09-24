@@ -165,8 +165,9 @@ func (m *meter) draw(now time.Time) {
 	m.spin++
 	indicator := m.spinner()
 	if m.cur.unit != "" && m.cur.total > 0 {
-		// A fixed bar width per terminal keeps the numbers from jumping.
-		indicator = m.bar(m.cur, min(max(m.e.width-58, 10), 30))
+		// A fixed bar width per terminal keeps the numbers from jumping; the
+		// widest numbers take about 60 columns.
+		indicator = m.bar(m.cur, min(max(m.e.width-70, 8), 30))
 	}
 	fmt.Fprint(m.out, clearLine+m.fit("    "+indicator+"  "+m.numbers(now), m.e.width-1))
 	m.live = true
