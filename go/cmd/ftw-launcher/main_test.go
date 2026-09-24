@@ -78,3 +78,63 @@ func containsEnv(env []string, value string) bool {
 	}
 	return false
 }
+
+func TestUnknownCommandsDoNotStartCore(t *testing.T) {
+	root := t.TempDir()
+	testRelease(t, root, "v0.131.0")
+	if err := (nativeupdate.Manager{Root: root}).Init("v0.131.0"); err != nil {
+		t.Fatal(err)
+	}
+	started := false
+	for _, args := range [][]string{{"rolback"}, {"start"}, {"--help"}} {
+		err := run(root, "/data/config.yaml", "/data/drivers", args, func(string, []string, []string) error {
+			started = true
+			return nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "unknown command") || !strings.Contains(err.Error(), "usage:") || started {
+			t.Fatalf("%v: err=%v started=%v", args, err, started)
+		}
+	}
+	if err := run(root, "/data/config.yaml", "/data/drivers", nil, func(binary string, _ []string, _ []string) error {
+		started = binary == filepath.Join(root, "releases", "v0.131.0", "ftw")
+		return nil
+	}); err != nil || !started {
+		t.Fatalf("no arguments must start Core: %v %v", err, started)
+	}
+}
+
+func TestRollbackCommandStagesThePreviousReleaseForTheNextStart(t *testing.T) {
+	root := t.TempDir()
+	manager := nativeupdate.Manager{Root: root}
+	testRelease(t, root, "v0.131.0")
+	testRelease(t, root, "v0.132.0")
+	if err := manager.Init("v0.131.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Prepare("v0.132.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := manager.Select(); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Commit("v0.132.0"); err != nil {
+		t.Fatal(err)
+	}
+	noExec := func(string, []string, []string) error { t.Fatal("rollback must not start Core"); return nil }
+	if err := run(root, "", "", []string{"rollback"}, noExec); err != nil {
+		t.Fatal(err)
+	}
+	var started string
+	if err := run(root, "/data/config.yaml", "/data/drivers", nil, func(binary string, _ []string, env []string) error {
+		started = binary
+		if !containsEnv(env, "FTW_NATIVE_TRIAL_TAG=v0.131.0") {
+			t.Fatal("the previous release must start as a trial")
+		}
+		return nil
+	}); err != nil || started != filepath.Join(root, "releases", "v0.131.0", "ftw") {
+		t.Fatalf("after rollback started %q: %v", started, err)
+	}
+	if err := run(root, "", "", []string{"rollback"}, noExec); err == nil {
+		t.Fatal("a second rollback while one is pending must fail")
+	}
+}

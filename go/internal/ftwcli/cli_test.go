@@ -208,6 +208,7 @@ func TestUpdateRefusesACoreThatIsNotNative(t *testing.T) {
 	} {
 		f, srv := newFakeCore(t)
 		f.on("GET", "/api/version/check", check)
+		f.on("GET", "/api/health", reply(200, `{"status":"ok"}`))
 		code, _, errOut := runCLI(t, testEnv(), "update", "--channel", "beta", "--url", srv.URL)
 		if code != exitFailed || !strings.Contains(errOut, "not a native install") || len(f.postedPaths()) != 0 {
 			t.Fatalf("exit %d posts %v stderr %q", code, f.postedPaths(), errOut)
@@ -509,7 +510,7 @@ func TestUpdateShowsHistoryMigrationWhileTheNewCoreStarts(t *testing.T) {
 	e.logEvery = 0 // log every reading
 	code, out, errOut := runCLI(t, e, "update", "--url", srv.URL)
 	if code != exitOK || !strings.Contains(out, "3/3 Starting the new Core once   25%  300.0 MB of 1.2 GB") ||
-		!strings.Contains(out, "new Core migrating history") {
+		!strings.Contains(out, "Core migrating history") {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 }
@@ -686,5 +687,61 @@ func TestAPhaseClosedBeforeTheRestartIsNotRepeatedFromCoresRecord(t *testing.T) 
 				{"step":2,"total_steps":3,"message":"Unpacking and checking the release","started_at":"2026-09-24T09:00:02.5Z","finished_at":"2026-09-24T09:00:04Z"},
 				{"step":3,"total_steps":3,"message":"Starting the new Core once","started_at":"2026-09-24T09:00:04Z","finished_at":"2026-09-24T09:00:11Z"}]}`,
 		))
+	}
+}
+
+func TestUpdateDoesNotReinstallAReleaseThatFailedHere(t *testing.T) {
+	f, srv := newFakeCore(t)
+	failedOffer := `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","latest":"v0.132.2-beta.1","update_available":true,"last_failed":"v0.132.2-beta.1"}`
+	f.on("GET", "/api/version/check", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("force") == "1" {
+			reply(200, failedOffer)(w, r)
+			return
+		}
+		reply(200, oldCore)(w, r)
+	})
+	f.on("GET", "/api/version/update/status", reply(200, `{"state":"idle"}`))
+	code, _, errOut := runCLI(t, testEnv(), "update", "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(errOut, "v0.132.2-beta.1 already failed on this box") || !strings.Contains(errOut, "--retry") || len(f.postedPaths()) != 0 {
+		t.Fatalf("exit %d posts %v %q", code, f.postedPaths(), errOut)
+	}
+	f.on("POST", "/api/version/update", reply(409, `{"error":"stop here"}`))
+	code, _, errOut = runCLI(t, testEnv(), "update", "--retry", "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(errOut, "stop here") || len(f.postedPaths()) != 1 {
+		t.Fatalf("--retry did not ask Core: %d %v %q", code, f.postedPaths(), errOut)
+	}
+
+	f.on("GET", "/api/health", reply(200, `{"status":"ok"}`))
+	f.on("GET", "/api/version/check", reply(200, failedOffer))
+	f.on("GET", "/api/version/snapshots", reply(200, `{"snapshots":[]}`))
+	f.on("GET", "/api/backups", reply(200, `{}`))
+	if _, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL); !strings.Contains(out, "Release:  v0.132.2-beta.1 is published but failed on this box; ftw update waits for a newer release") || strings.Contains(out, "Install it with") {
+		t.Fatalf("status %s", out)
+	}
+}
+
+func TestADownCoreNamesTheOfflineWayBack(t *testing.T) {
+	_, srv := newFakeCore(t)
+	srv.Close()
+	if code, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL); code != exitFailed || !strings.Contains(out, "Back:     if a new release does not start, run: sudo -u ftw /opt/ftw/ftw-launcher -root /opt/ftw rollback") {
+		t.Fatalf("status %d %s", code, out)
+	}
+	if code, _, errOut := runCLI(t, testEnv(), "rollback", "--url", srv.URL); code != exitFailed || !strings.Contains(errOut, "ftw-launcher -root /opt/ftw rollback") {
+		t.Fatalf("rollback %d %q", code, errOut)
+	}
+}
+
+func TestACoreWaitingForSetupIsNamed(t *testing.T) {
+	f, srv := newFakeCore(t)
+	f.on("GET", "/api/health", reply(404, "404 page not found"))
+	f.on("GET", "/setup", reply(200, "<html>setup</html>"))
+	f.on("GET", "/api/version/check", reply(503, `{"error":"self-update disabled"}`))
+	code, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(out, "Core:     waiting for setup; open "+srv.URL+"/setup") {
+		t.Fatalf("status %d\n%s", code, out)
+	}
+	code, _, errOut := runCLI(t, testEnv(), "update", "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(errOut, "waiting for setup; finish it at "+srv.URL+"/setup first") {
+		t.Fatalf("update %d %q", code, errOut)
 	}
 }

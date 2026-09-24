@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSpaceNeededIsThreeTimesTheCurrentRelease(t *testing.T) {
@@ -50,5 +51,31 @@ func TestCheckSpaceRefusesWhenTheNextReleaseWouldNotFit(t *testing.T) {
 	err = Manager{Root: root}.CheckSpace("v0.131.0")
 	if err == nil || !strings.Contains(err.Error(), "not enough disk space in "+root) {
 		t.Fatalf("an oversized release: %v", err)
+	}
+}
+
+func TestLeftoversFromAnInterruptedUpdateAreRemoved(t *testing.T) {
+	root := t.TempDir()
+	downloads := filepath.Join(root, ".downloads")
+	for _, dir := range []string{downloads, filepath.Join(root, "releases", ".stage-old"), filepath.Join(root, "releases", ".stage-new"), filepath.Join(root, "releases", "v0.131.0")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(downloads, ".archive-123"), make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "releases", ".stage-old"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	Manager{Root: root}.removeLeftovers(downloads)
+	if entries, _ := os.ReadDir(downloads); len(entries) != 0 {
+		t.Fatalf("download leftovers kept: %v", entries)
+	}
+	for name, want := range map[string]bool{".stage-old": false, ".stage-new": true, "v0.131.0": true} {
+		if _, err := os.Stat(filepath.Join(root, "releases", name)); (err == nil) != want {
+			t.Fatalf("%s kept=%v, want %v", name, err == nil, want)
+		}
 	}
 }
