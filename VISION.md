@@ -219,12 +219,26 @@ already works. They should be able to follow a guide, take a backup and apply
 an update. systemd and a container are both valid ways to run it. The project
 documents those ways.
 
-The update itself stays small. On a native install, Core downloads the next
-verified release and swaps to it. On a container install, the owner pulls the
-new image. Either way the owner can see the step and can wrap it. A privileged
-sidecar whose job is to update Core is not part of the product. The machinery
-around that sidecar is retired as sites leave it. The same ADR records the
-shape.
+FTW's own work is the EMS and the Energy Planner. The owner operates the
+machine it runs on: the service manager, when to update, backups kept off the
+box and logs. They can do that by hand or through their own automation or
+agent. The project gives them a few documented steps and does not take over
+running their host.
+
+Those steps are short commands on the machine, and the same operations are
+available over the API. Each one runs without questions, shows its progress
+and ends with a clear result, so it can be wrapped. The web UI shows the
+running version, whether a newer release exists and the command that installs
+it. On a native install it does not update, roll back or restore.
+
+The update itself stays small and must be robust enough to run unattended. On
+a native install, Core downloads the next verified release and swaps to it. A
+new release that does not stay up falls back to the previous one without
+operator action. A release that changes stored data first makes a verified
+full backup. On a container install, the owner pulls the new image. A
+privileged sidecar whose job is to update Core is not part of the product. The
+machinery around that sidecar is retired as sites leave it. The same ADR
+records the shape.
 
 A hosted service, in the spirit of the Sourceful Blixt gateway, is the later
 path for a household that wants FTW to just work and does not want to operate
