@@ -110,6 +110,27 @@ func BackupArchiveScratch(sourceBytes, extraBytes int64) int64 {
 	return 4*sourceBytes + 2*extraBytes + backupScratchHeadroom
 }
 
+// backupScratchFile keeps the raw SQLite export off the data disk when a
+// tmpfs can hold it. Scratch commits then do not queue behind a durable goal
+// fsync on the same SD card. mq-deadline ignores IO priority, and shrinking
+// the on-disk batch from 256 KiB to 16 KiB still left a goal save over the
+// 2 s limit on homelab-rpi. The compressed archive stays on the destination
+// filesystem and is what gets synced.
+func backupScratchFile(dstPath string, sourceBytes int64) (path string, cleanup func()) {
+	need := sourceBytes + backupScratchHeadroom
+	if avail, err := diskAvail("/dev/shm"); err == nil && avail >= need {
+		f, err := os.CreateTemp("/dev/shm", "ftw-backup-*.raw")
+		if err == nil {
+			name := f.Name()
+			_ = f.Close()
+			_ = os.Remove(name)
+			return name, func() { _ = os.Remove(name) }
+		}
+	}
+	path = dstPath + ".raw.tmp"
+	return path, func() { _ = os.Remove(path) }
+}
+
 // EnsureDiskSpace refuses to start a backup when dir cannot hold needed bytes.
 // A probe error (including Windows) does not block; the copy still fails if
 // the filesystem fills.
