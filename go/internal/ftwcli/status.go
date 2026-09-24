@@ -144,17 +144,19 @@ func runStatus(args []string, out io.Writer, e env) error {
 	if err := c.get(ctx, "/api/health", &h); err != nil {
 		if c.waitingForSetup(ctx) {
 			fmt.Fprintf(out, "Core:     waiting for setup; open %s/setup\n", base)
-			printNextSteps(out)
+			printNextSteps(out, e)
 			return errors.New("Core is waiting for setup")
 		}
 		fmt.Fprintf(out, "Core:     not answering at %s (%s)\n", base, err)
-		printNextSteps(out)
-		fmt.Fprintf(out, "Back:     %s\n", offlineRollback)
+		printNextSteps(out, e)
+		if e.systemd {
+			fmt.Fprintf(out, "Back:     %s\n", offlineRollback)
+		}
 		return errors.New("Core is not answering")
 	}
 	if h.Status == "starting" {
 		fmt.Fprintf(out, "Core:     starting: %s\n", h.Phase)
-		printNextSteps(out)
+		printNextSteps(out, e)
 		return errors.New("Core is still starting")
 	}
 
@@ -201,7 +203,7 @@ func runStatus(args []string, out io.Writer, e env) error {
 	if h.History != nil {
 		fmt.Fprintf(out, "History:  %s; %d write failures\n", orUnknown(h.History.Migration.State), h.History.Writer.CommitFailures)
 	}
-	printNextSteps(out)
+	printNextSteps(out, e)
 	if h.Status != "ok" {
 		problems = append([]string{"health is " + h.Status}, problems...)
 	}
@@ -255,7 +257,10 @@ func (c *client) printUnusedRollbackPoints(ctx context.Context, out io.Writer) {
 // made by install.sh.
 const offlineRollback = "if a new release does not start, run: sudo -u ftw /opt/ftw/ftw-launcher -root /opt/ftw rollback && sudo systemctl restart ftw"
 
-func printNextSteps(out io.Writer) {
+func printNextSteps(out io.Writer, e env) {
+	if !e.systemd {
+		return
+	}
 	fmt.Fprintln(out, "Logs:     journalctl -u ftw -n 100")
 	fmt.Fprintln(out, "Restart:  sudo systemctl restart ftw")
 }

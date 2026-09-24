@@ -1,0 +1,34 @@
+# FTW 0.x in Docker. Put this file, the Dockerfile beside it and a .env
+# with FTW_VERSION in one directory, then see docs/native-beta.md:
+#
+#   mkdir -p data && sudo chown 100:101 data
+#   echo FTW_VERSION=v0.135.1-beta.1 > .env
+#   docker compose up -d --build
+#
+# Update: change FTW_VERSION in .env and run `docker compose up -d --build`.
+# Going back is the same with the previous version.
+name: ftw
+
+services:
+  ftw:
+    build:
+      context: .
+      args:
+        FTW_VERSION: ${FTW_VERSION:?Set FTW_VERSION in .env, for example FTW_VERSION=v0.135.1-beta.1}
+    image: ftw-local:${FTW_VERSION}
+    restart: unless-stopped
+    # Core saves its state on a clean stop.
+    stop_grace_period: 60s
+    # Modbus, MQTT and mDNS devices on the LAN need the host's network.
+    # Linux only; Docker Desktop keeps this network inside its VM.
+    network_mode: host
+    # :z lets SELinux hosts such as Fedora share the directory; elsewhere it
+    # does nothing.
+    volumes:
+      - ./data:/app/data:z
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6

@@ -136,11 +136,14 @@ to it. No native update needs a Docker socket or Docker engine.**
    installs Docker 2.x with the sidecar; it moves to native early, so new
    Pi users stop arriving on the old line.
 
-7. **New Docker packaging becomes a plain image.** The Compose file has one
-   Core service and Mosquitto, no sidecar and no `update-ipc` volume. The
-   version notice stays, and `docker compose pull` is the documented path.
-   Existing 1.x, 2.x and 3.x Docker installs remain in place until their owners
-   use the guided migration. The Home Assistant add-on stays on Supervisor.
+7. **New Docker packaging builds from the release package.**
+   [`deploy/docker`](../../deploy/docker) holds a Compose file with one Core
+   service and a Dockerfile that installs the same checksummed package as
+   the native installer. There is no sidecar, `update-ipc` volume, broker or
+   published image. The owner updates by setting `FTW_VERSION` and running
+   `docker compose up -d --build`. Existing 1.x, 2.x and 3.x Docker installs
+   remain in place until their owners use the guided migration. The Home
+   Assistant add-on stays on Supervisor.
 
 8. **Betas aim for a weekly cadence.** The owner dispatches
    `native-release.yml` after a Version Packages merge. Once the first
