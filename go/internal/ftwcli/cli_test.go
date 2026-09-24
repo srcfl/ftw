@@ -21,7 +21,7 @@ import (
 func testEnv() env {
 	return env{now: time.Now, sleep: time.Sleep, requestTimeout: time.Second,
 		pollInterval: time.Millisecond, followLimit: 5 * time.Second, logEvery: time.Hour,
-		healthSettle: 20 * time.Millisecond}
+		healthSettle: 20 * time.Millisecond, systemd: true}
 }
 
 func runCLI(t *testing.T, e env, args ...string) (int, string, string) {
@@ -369,10 +369,18 @@ func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 	if code, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL); code != exitOK || !strings.Contains(out, "v2.3.2, updates are managed outside FTW") {
 		t.Fatalf("self-update off: %d %s", code, out)
 	}
+	container := testEnv()
+	container.systemd = false
+	if code, out, _ := runCLI(t, container, "status", "--url", srv.URL); code != exitOK || strings.Contains(out, "journalctl") || strings.Contains(out, "systemctl") {
+		t.Fatalf("container: %d %s", code, out)
+	}
 
 	srv.Close()
 	if code, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL); code != exitFailed || !strings.Contains(out, "not answering") || !strings.Contains(out, "journalctl -u ftw") {
 		t.Fatalf("down: %d %s", code, out)
+	}
+	if code, out, _ := runCLI(t, container, "status", "--url", srv.URL); code != exitFailed || !strings.Contains(out, "not answering") || strings.Contains(out, "ftw-launcher") {
+		t.Fatalf("container down: %d %s", code, out)
 	}
 }
 

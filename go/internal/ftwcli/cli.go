@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -69,6 +70,9 @@ type env struct {
 	tty   bool
 	width int
 	ascii bool
+	// systemd is false in a container, where the journalctl, systemctl and
+	// launcher hints do not apply.
+	systemd bool
 }
 
 func defaultEnv() env {
@@ -85,6 +89,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	e := defaultEnv()
 	e.tty, e.width = terminal(stdout)
 	e.ascii = !utf8Locale()
+	_, err := os.Stat("/run/systemd/system")
+	e.systemd = err == nil
 	return run(args, stdout, stderr, e)
 }
 
