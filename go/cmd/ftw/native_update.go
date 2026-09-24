@@ -67,6 +67,7 @@ func (trial *nativeTrial) complete(checker *selfupdate.Checker) error {
 	trial.timer.Stop()
 	if checker != nil {
 		status := checker.Status()
+		status.EndPhase(time.Now())
 		status.State = "done"
 		status.Message = "Core is ready on " + trial.tag
 		status.UpdatedAt = time.Now()
@@ -88,6 +89,7 @@ func reconcileNativeFallback(root, version string, checker *selfupdate.Checker) 
 	}
 	status := checker.Status()
 	if status.Action == "restart" && status.State == "restarting" && status.Target == version {
+		status.EndPhase(time.Now())
 		status.State = "done"
 		status.Message = "Core restarted on " + version
 		status.UpdatedAt = time.Now()

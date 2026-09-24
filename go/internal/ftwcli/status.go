@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -22,6 +23,9 @@ type versionInfo struct {
 	TargetStateSchema  int       `json:"target_state_schema"`
 	CheckedAt          time.Time `json:"checked_at"`
 	Err                string    `json:"err"`
+	InstallRoot        string    `json:"install_root"`
+	InstallFreeBytes   int64     `json:"install_free_bytes"`
+	InstallNeedBytes   int64     `json:"install_need_bytes"`
 }
 
 type updateStatus struct {
@@ -35,6 +39,36 @@ type updateStatus struct {
 	ProgressTotal   int64     `json:"progress_total"`
 	ProgressUnit    string    `json:"progress_unit"`
 	UpdatedAt       time.Time `json:"updated_at"`
+	// Phases are the run's finished phases with Core's own timing.
+	Phases []phaseRecord `json:"phases"`
+}
+
+type phaseRecord struct {
+	Step       int       `json:"step"`
+	TotalSteps int       `json:"total_steps"`
+	Message    string    `json:"message"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Bytes      int64     `json:"bytes"`
+}
+
+func (r phaseRecord) label() string {
+	if r.Step > 0 && r.TotalSteps > 0 {
+		return fmt.Sprintf("%d/%d %s", r.Step, r.TotalSteps, r.Message)
+	}
+	return r.Message
+}
+
+func (r phaseRecord) summary() string {
+	took := r.FinishedAt.Sub(r.StartedAt)
+	if r.Bytes <= 0 {
+		return "in " + formatTook(took)
+	}
+	line := formatBytes(r.Bytes) + " in " + formatTook(took)
+	if took >= 100*time.Millisecond {
+		line += " (" + formatBytes(int64(float64(r.Bytes)/took.Seconds())) + "/s)"
+	}
+	return line
 }
 
 func (st updateStatus) inFlight() bool {
@@ -60,6 +94,14 @@ type health struct {
 			CommitFailures uint64 `json:"commit_failures"`
 		} `json:"writer"`
 	} `json:"history_storage"`
+	// Migration is the history migration a starting Core reports.
+	Migration *struct {
+		State            string `json:"state"`
+		RowsDone         int64  `json:"rows_done"`
+		RowsTotal        int64  `json:"rows_total"`
+		SourceBytesDone  *int64 `json:"source_bytes_done"`
+		SourceBytesTotal *int64 `json:"source_bytes_total"`
+	} `json:"migration"`
 }
 
 func (h health) drivers() string {
@@ -93,6 +135,7 @@ func runStatus(args []string, out io.Writer, e env) error {
 		return errors.New("Core is still starting")
 	}
 
+	var problems []string
 	var info versionInfo
 	infoErr := c.get(ctx, "/api/version/check", &info)
 	switch {
@@ -108,6 +151,13 @@ func runStatus(args []string, out io.Writer, e env) error {
 		if info.Previous != "" {
 			fmt.Fprintf(out, "Previous: %s (ftw rollback returns to it)\n", info.Previous)
 		}
+		if info.InstallRoot != "" {
+			fmt.Fprintf(out, "Releases: %s\n", spaceLine(filepath.Join(info.InstallRoot, "releases"), info.InstallFreeBytes, info.InstallNeedBytes))
+			if info.InstallNeedBytes > 0 && info.InstallFreeBytes > 0 && info.InstallFreeBytes < info.InstallNeedBytes {
+				problems = append(problems, "not enough disk space for the next release")
+			}
+		}
+		c.printUnusedRollbackPoints(ctx, out)
 	case infoErr == nil:
 		fmt.Fprintf(out, "Core:     %s, not a native install; ftw does not update it\n", info.Current)
 	case selfUpdateOff(infoErr):
@@ -120,15 +170,59 @@ func runStatus(args []string, out io.Writer, e env) error {
 		fmt.Fprintf(out, "Core:     version not readable (%s)\n", infoErr)
 	}
 
+	c.printBackups(ctx, out)
 	fmt.Fprintf(out, "Health:   %s; %s\n", h.Status, h.drivers())
 	if h.History != nil {
 		fmt.Fprintf(out, "History:  %s; %d write failures\n", orUnknown(h.History.Migration.State), h.History.Writer.CommitFailures)
 	}
 	printNextSteps(out)
 	if h.Status != "ok" {
-		return fmt.Errorf("health is %s", h.Status)
+		problems = append([]string{"health is " + h.Status}, problems...)
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// printBackups names where full backups go and the space left there.
+func (c *client) printBackups(ctx context.Context, out io.Writer) {
+	var list struct {
+		Dir       string `json:"dir"`
+		FreeBytes int64  `json:"free_bytes"`
+		Backups   []struct {
+			SizeBytes int64 `json:"size_bytes"`
+		} `json:"backups"`
+	}
+	if c.get(ctx, "/api/backups", &list) != nil || list.Dir == "" {
+		return
+	}
+	line := fmt.Sprintf("%s, %d archives", list.Dir, len(list.Backups))
+	if list.FreeBytes > 0 {
+		line += ", " + formatBytes(list.FreeBytes) + " free"
+	}
+	fmt.Fprintf(out, "Backups:  %s\n", line)
+}
+
+// printUnusedRollbackPoints reports rollback points an older Core left.
+// Native Core neither takes nor restores them; deleting them is the
+// owner's choice.
+func (c *client) printUnusedRollbackPoints(ctx context.Context, out io.Writer) {
+	var list struct {
+		Dir       string `json:"dir"`
+		Snapshots []struct {
+			SizeBytes int64 `json:"size_bytes"`
+		} `json:"snapshots"`
+	}
+	if c.get(ctx, "/api/version/snapshots", &list) != nil || len(list.Snapshots) == 0 || list.Dir == "" {
+		return
+	}
+	var size int64
+	for _, snapshot := range list.Snapshots {
+		size += snapshot.SizeBytes
+	}
+	fmt.Fprintf(out, "Unused:   %d rollback points from older updates, %s, in %s; native Core does not use them\n",
+		len(list.Snapshots), formatBytes(size), list.Dir)
 }
 
 func printNextSteps(out io.Writer) {
@@ -203,6 +297,15 @@ func formatBytes(n int64) string {
 		return fmt.Sprintf("%.1f kB", float64(n)/1e3)
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// formatTook gives a finished phase's duration, with tenths below ten
+// seconds so a fast step does not read as zero.
+func formatTook(d time.Duration) string {
+	if d >= 0 && d < 10*time.Second {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return formatElapsed(d)
 }
 
 func formatElapsed(d time.Duration) string {

@@ -31,20 +31,40 @@ type backupProgress struct {
 	RowsDone       int64  `json:"rows_done"`
 }
 
-func (p backupProgress) line() string {
-	parts := []string{strings.ReplaceAll(p.Phase, "_", " ")}
-	if p.Table != "" {
-		parts = append(parts, p.Table)
+type backupList struct {
+	Dir       string         `json:"dir"`
+	FreeBytes int64          `json:"free_bytes"`
+	Progress  backupProgress `json:"progress"`
+	Backups   []backupEntry  `json:"backups"`
+}
+
+// backupPhases names Core's backup phases for a person.
+var backupPhases = map[string]string{
+	"waiting_for_maintenance": "Pausing history maintenance",
+	"checking_sources":        "Checking the files to back up",
+	"copying_database":        "Copying the database",
+	"compressing_database":    "Compressing the database",
+	"packing_archive":         "Packing the archive",
+	"verifying_archive":       "Verifying the archive",
+	"syncing_backup":          "Writing the archive to disk",
+}
+
+func (p backupProgress) sample() (sample, bool) {
+	if p.Phase == "" || p.Phase == "complete" || p.Phase == "failed" {
+		return sample{}, false
 	}
-	if p.RowsDone > 0 {
-		parts = append(parts, fmt.Sprintf("%d rows", p.RowsDone))
+	label, ok := backupPhases[p.Phase]
+	if !ok {
+		label = strings.ReplaceAll(p.Phase, "_", " ")
 	}
-	if p.TotalBytes > 0 {
-		parts = append(parts, formatBytes(p.CompletedBytes)+" of "+formatBytes(p.TotalBytes))
-	} else if p.CompletedBytes > 0 {
-		parts = append(parts, formatBytes(p.CompletedBytes)+", total unknown")
+	s := sample{key: p.Phase, label: label, detail: p.Table}
+	switch {
+	case p.TotalBytes > 0 || p.CompletedBytes > 0:
+		s.unit, s.done, s.total = "bytes", p.CompletedBytes, p.TotalBytes
+	case p.RowsDone > 0:
+		s.unit, s.done = "rows", p.RowsDone
 	}
-	return strings.Join(parts, " ")
+	return s, true
 }
 
 func runBackup(args []string, out io.Writer, e env) error {
@@ -57,8 +77,20 @@ func runBackup(args []string, out io.Writer, e env) error {
 	}
 	c := newClient(base, e)
 	ctx := context.Background()
+	var before backupList
+	if c.get(ctx, "/api/backups", &before) == nil && before.Dir != "" {
+		line := before.Dir
+		if before.FreeBytes > 0 {
+			line += " (" + formatBytes(before.FreeBytes) + " free)"
+		}
+		fmt.Fprintf(out, "Backups:  %s\n", line)
+		if len(before.Backups) > 0 && before.FreeBytes > 0 && before.FreeBytes < before.Backups[0].SizeBytes {
+			fmt.Fprintf(out, "Warning:  less space is free than the last backup took (%s)\n", formatBytes(before.Backups[0].SizeBytes))
+		}
+	}
 	fmt.Fprintln(out, "Making a full backup. Core keeps running; Ctrl-C stops the backup.")
 	start := e.now()
+	m := newMeter(out, e)
 
 	type result struct {
 		body struct {
@@ -74,11 +106,11 @@ func runBackup(args []string, out io.Writer, e env) error {
 		r.err = c.call(ctx, http.MethodPost, "/api/backups", map[string]any{}, &r.body, 0)
 		done <- r
 	}()
-	var dir, last string
-	lastPrinted := start
+	dir := before.Dir
 	for {
 		select {
 		case r := <-done:
+			m.finish(r.err == nil)
 			if r.err != nil {
 				return fmt.Errorf("backup failed: %w", r.err)
 			}
@@ -88,13 +120,6 @@ func runBackup(args []string, out io.Writer, e env) error {
 			b := r.body.Backup
 			if !b.Verified || !validBackupID(b.ID) || !validDigest(b.SHA256) {
 				return errors.New("Core did not return a verified backup")
-			}
-			if dir == "" {
-				var list struct {
-					Dir string `json:"dir"`
-				}
-				_ = c.get(ctx, "/api/backups", &list)
-				dir = list.Dir
 			}
 			where := b.ID
 			if dir != "" {
@@ -108,20 +133,29 @@ func runBackup(args []string, out io.Writer, e env) error {
 			return c.copyBackup(ctx, out, outputDir, b)
 		case <-time.After(e.pollInterval):
 		}
-		var list struct {
-			Dir      string         `json:"dir"`
-			Progress backupProgress `json:"progress"`
-		}
-		if c.get(ctx, "/api/backups", &list) != nil || list.Progress.Phase == "" {
+		var list backupList
+		if c.get(ctx, "/api/backups", &list) != nil {
 			continue
 		}
-		dir = list.Dir
-		now := e.now()
-		if line := list.Progress.line(); line != last || now.Sub(lastPrinted) >= e.heartbeat {
-			fmt.Fprintf(out, "[%s] %s\n", formatElapsed(now.Sub(start)), line)
-			last, lastPrinted = line, now
+		if list.Dir != "" {
+			dir = list.Dir
+		}
+		if s, ok := list.Progress.sample(); ok {
+			m.show(s)
 		}
 	}
+}
+
+// byteCounter reports how much of a copy has been written.
+type byteCounter struct {
+	n    int64
+	tick func(int64)
+}
+
+func (b *byteCounter) Write(p []byte) (int, error) {
+	b.n += int64(len(p))
+	b.tick(b.n)
+	return len(p), nil
 }
 
 // copyBackup copies a verified archive to dir and checks size and SHA-256
@@ -154,8 +188,12 @@ func (c *client) copyBackup(ctx context.Context, out io.Writer, dir string, b ba
 	if err != nil {
 		return err
 	}
+	m := newMeter(out, c.env)
+	counter := &byteCounter{tick: func(n int64) {
+		m.show(sample{key: "copy", label: "Copying to " + dir, unit: "bytes", done: n, total: b.SizeBytes})
+	}}
 	sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, sum), resp.Body)
+	n, err := io.Copy(io.MultiWriter(f, sum, counter), resp.Body)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -168,6 +206,7 @@ func (c *client) copyBackup(ctx context.Context, out io.Writer, dir string, b ba
 	if err == nil {
 		err = os.Rename(pending, target)
 	}
+	m.finish(err == nil)
 	if err != nil {
 		_ = os.Remove(pending)
 		return err

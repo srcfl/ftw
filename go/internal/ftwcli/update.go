@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"time"
 )
 
@@ -61,6 +62,13 @@ func (c *client) update(ctx context.Context, out io.Writer) error {
 			info.Latest, info.CurrentStateSchema, info.TargetStateSchema, info.Current)
 	}
 	fmt.Fprintf(out, "Updating %s -> %s on %s\n", info.Current, info.Latest, info.Channel)
+	if info.InstallRoot != "" {
+		fmt.Fprintf(out, "Releases: %s\n", spaceLine(filepath.Join(info.InstallRoot, "releases"), info.InstallFreeBytes, info.InstallNeedBytes))
+		if info.InstallNeedBytes > 0 && info.InstallFreeBytes > 0 && info.InstallFreeBytes < info.InstallNeedBytes {
+			return fmt.Errorf("not enough disk space for %s: %s free, %s needed; free some space, then run ftw update again",
+				info.Latest, formatBytes(info.InstallFreeBytes), formatBytes(info.InstallNeedBytes))
+		}
+	}
 	var started struct {
 		Target string `json:"target"`
 	}
@@ -128,7 +136,8 @@ func (c *client) status(ctx context.Context) (updateStatus, error) {
 // finish waits for an update or rollback to end and checks what runs.
 func (c *client) finish(ctx context.Context, out io.Writer, action, target, from string) error {
 	start := c.env.now()
-	st, err := c.follow(ctx, out, action, target, start)
+	m := newMeter(out, c.env)
+	st, err := c.follow(ctx, m, action, target, start)
 	if err != nil {
 		return err
 	}
@@ -148,6 +157,13 @@ func (c *client) finish(ctx context.Context, out io.Writer, action, target, from
 		return fmt.Errorf("%s finished, but Core reports %s instead of %s; see ftw status", action, info.Current, target)
 	}
 	fmt.Fprintf(out, "Now running %s (was %s) after %s.\n", info.Current, orUnknown(from), formatElapsed(c.env.now().Sub(start)))
+	if info.Previous != "" {
+		where := info.Previous
+		if info.InstallRoot != "" {
+			where = filepath.Join(info.InstallRoot, "releases", info.Previous)
+		}
+		fmt.Fprintf(out, "Previous: %s (ftw rollback returns to it)\n", where)
+	}
 	c.reportHealth(ctx, out)
 	return nil
 }
@@ -177,33 +193,100 @@ func (c *client) reportHealth(ctx context.Context, out io.Writer) {
 }
 
 // follow polls Core until the run ends. While the next Core starts, Core
-// does not answer or answers only /api/health; that is part of the run.
-func (c *client) follow(ctx context.Context, out io.Writer, action, target string, start time.Time) (updateStatus, error) {
-	last, lastPrinted := "", time.Time{}
+// does not answer or answers only /api/health; that time is its own phase,
+// unless Core already said it was restarting.
+func (c *client) follow(ctx context.Context, m *meter, action, target string, start time.Time) (updateStatus, error) {
+	var phase sample
+	restarting := false
+	printed := 0 // Core's finished phases already shown
 	for {
 		now := c.env.now()
 		if now.Sub(start) > c.env.followLimit {
+			m.finish(false)
 			return updateStatus{}, fmt.Errorf("no result after %s; Core may still be working. Check it with ftw status", formatElapsed(now.Sub(start)))
 		}
 		st, err := c.status(ctx)
-		var line string
-		switch {
-		case err == nil && st.Target == target && st.Action == action && (st.State == "done" || st.State == "failed"):
-			return st, nil
-		case err == nil:
-			line = progressLine(st)
-		default:
-			var h health
-			if c.get(ctx, "/api/health", &h) == nil && h.Status == "starting" {
-				line = "the new Core is starting: " + orUnknown(h.Phase)
-			} else {
-				line = "Core is restarting and not answering yet"
+		if err == nil && st.Target == target && st.Action == action {
+			for ; printed < len(st.Phases); printed++ {
+				m.recorded(st.Phases[printed].label(), st.Phases[printed].summary())
 			}
 		}
-		if line != last || now.Sub(lastPrinted) >= c.env.heartbeat {
-			fmt.Fprintf(out, "[%s] %s\n", formatElapsed(now.Sub(start)), line)
-			last, lastPrinted = line, now
+		switch {
+		case err == nil && st.Target == target && st.Action == action && (st.State == "done" || st.State == "failed"):
+			switch {
+			case st.State == "failed":
+				m.finish(false)
+			case phase.key == "restart" && finalRecorded(st):
+				m.discard() // Core's record already has the restart
+			default:
+				m.finish(true)
+			}
+			return st, nil
+		case err == nil:
+			phase, restarting = statusSample(st), st.State == "restarting"
+			m.show(phase)
+		default:
+			if !restarting {
+				phase, restarting = sample{key: "restart", label: "Restarting into " + target}, true
+			}
+			between := phase
+			between.done, between.total, between.unit = 0, 0, ""
+			between.detail = "Core is restarting"
+			var h health
+			if c.get(ctx, "/api/health", &h) == nil && h.Status == "starting" {
+				between.detail = "new Core starting: " + orUnknown(h.Phase)
+				if mig := h.Migration; mig != nil && mig.State != "" && mig.State != "complete" {
+					between.detail = "new Core migrating history"
+					switch {
+					case mig.SourceBytesTotal != nil && *mig.SourceBytesTotal > 0 && mig.SourceBytesDone != nil:
+						between.unit, between.done, between.total = "bytes", *mig.SourceBytesDone, *mig.SourceBytesTotal
+					case mig.RowsTotal > 0:
+						between.unit, between.done, between.total = "rows", mig.RowsDone, mig.RowsTotal
+					}
+				}
+			}
+			m.show(between)
 		}
 		c.env.sleep(c.env.pollInterval)
 	}
+}
+
+// finalRecorded reports whether Core's record of a run includes its last
+// step. A Core older than the record, or one that does not note the start
+// of the next Core, leaves it out.
+func finalRecorded(st updateStatus) bool {
+	if len(st.Phases) == 0 {
+		return false
+	}
+	last := st.Phases[len(st.Phases)-1]
+	return last.Step > 0 && last.Step == last.TotalSteps
+}
+
+// statusSample turns Core's update status into a phase of the meter.
+func statusSample(st updateStatus) sample {
+	label := st.Message
+	if label == "" {
+		label = st.State
+	}
+	if st.Step > 0 && st.TotalSteps > 0 {
+		label = fmt.Sprintf("%d/%d %s", st.Step, st.TotalSteps, label)
+	}
+	s := sample{key: fmt.Sprintf("%s|%d|%s", st.State, st.Step, st.Message), label: label, quiet: st.Step == 0}
+	if st.ProgressUnit == "bytes" && (st.ProgressCurrent > 0 || st.ProgressTotal > 0) {
+		s.unit, s.done, s.total = "bytes", st.ProgressCurrent, st.ProgressTotal
+	}
+	return s
+}
+
+// spaceLine names a directory with its free space and what a step needs.
+func spaceLine(dir string, free, need int64) string {
+	line := dir
+	if free > 0 {
+		line += " (" + formatBytes(free) + " free"
+		if need > 0 {
+			line += ", the next release needs " + formatBytes(need)
+		}
+		line += ")"
+	}
+	return line
 }

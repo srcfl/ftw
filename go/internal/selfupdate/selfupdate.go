@@ -189,6 +189,11 @@ type Info struct {
 	// honestly, but the UI uses this flag to decide whether to offer an
 	// actionable Update button vs just a notify-only indicator.
 	SidecarReady bool `json:"sidecar_ready"`
+	// InstallRoot holds the native release slots. InstallFreeBytes is the
+	// space left there and InstallNeedBytes what the next download needs.
+	InstallRoot      string `json:"install_root,omitempty"`
+	InstallFreeBytes int64  `json:"install_free_bytes,omitempty"`
+	InstallNeedBytes int64  `json:"install_need_bytes,omitempty"`
 }
 
 // MaxReleaseBodyBytes caps the persisted release body. 16 KiB covers a
@@ -217,6 +222,29 @@ type UpdateStatus struct {
 	ProgressUnit    string            `json:"progress_unit,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
+	// Phases lists the finished phases of this run with Core's own timing,
+	// so a client that polls slowly still sees every phase.
+	Phases []PhaseRecord `json:"phases,omitempty"`
+}
+
+// PhaseRecord is one finished phase of an update or rollback.
+type PhaseRecord struct {
+	Step       int       `json:"step,omitempty"`
+	TotalSteps int       `json:"total_steps,omitempty"`
+	Message    string    `json:"message"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Bytes      int64     `json:"bytes,omitempty"`
+}
+
+// EndPhase records the current phase as finished at now.
+func (st *UpdateStatus) EndPhase(now time.Time) {
+	record := PhaseRecord{Step: st.Step, TotalSteps: st.TotalSteps, Message: st.Message,
+		StartedAt: st.PhaseStartedAt, FinishedAt: now}
+	if st.ProgressUnit == "bytes" {
+		record.Bytes = st.ProgressCurrent
+	}
+	st.Phases = append(st.Phases, record)
 }
 
 // Checker is the background version-check service.
@@ -732,10 +760,14 @@ func (c *Checker) refreshRuntimeInfoLocked() {
 		}
 		c.info.SidecarReady = err == nil
 		c.info.Native = true
+		c.info.InstallRoot = c.cfg.NativeRoot
+		c.info.InstallFreeBytes, _ = manager.FreeBytes()
+		c.info.InstallNeedBytes = 0
 		if err == nil {
 			if previous, rollbackErr := manager.RollbackCandidate(); rollbackErr == nil {
 				c.info.Previous = previous
 			}
+			c.info.InstallNeedBytes, _ = manager.SpaceNeeded(state.Current)
 		}
 	} else {
 		c.info.SidecarReady = c.sidecarReadyLocked()
@@ -935,6 +967,10 @@ func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, compon
 	return err
 }
 
+// NativeUpdateSteps counts a native update's phases: download, check and
+// start. A native update takes no rollback point (ADR 0007, decision 3).
+const NativeUpdateSteps = 3
+
 func (c *Checker) triggerNative(ctx context.Context, action, target, component string, startedAt time.Time) error {
 	if c.cfg.NativeRestart == nil {
 		return errors.New("selfupdate: native restart is not configured")
@@ -970,10 +1006,17 @@ func (c *Checker) triggerNative(ctx context.Context, action, target, component s
 		startedAt = c.cfg.Now()
 	}
 	manager := nativeupdate.Manager{Root: c.cfg.NativeRoot}
+	slots, err := manager.Read()
+	if err != nil {
+		return err
+	}
+	if err := manager.CheckSpace(slots.Current); err != nil {
+		return err
+	}
 	phaseStarted := c.cfg.Now()
 	status := UpdateStatus{State: "pulling", Action: "update", Component: "core", Target: target,
 		StartedAt: startedAt, PhaseStartedAt: phaseStarted, UpdatedAt: phaseStarted,
-		Message: "Downloading verified Core release", Step: 2, TotalSteps: 4, ProgressUnit: "bytes"}
+		Message: "Downloading verified Core release", Step: 1, TotalSteps: NativeUpdateSteps, ProgressUnit: "bytes"}
 	if err := c.WriteStatus(status); err != nil {
 		return err
 	}
@@ -999,9 +1042,10 @@ func (c *Checker) triggerNative(ctx context.Context, action, target, component s
 	if err := downloader.Install(ctx, target); err != nil {
 		return err
 	}
+	status.EndPhase(c.cfg.Now())
 	status.State = "checking"
 	status.Message = "Checking release and preparing restart"
-	status.Step = 3
+	status.Step = 2
 	status.ProgressCurrent = 0
 	status.ProgressTotal = 0
 	status.ProgressUnit = ""
@@ -1013,9 +1057,10 @@ func (c *Checker) triggerNative(ctx context.Context, action, target, component s
 	if err := manager.Prepare(target); err != nil {
 		return err
 	}
+	status.EndPhase(c.cfg.Now())
 	status.State = "restarting"
 	status.Message = "Starting the new Core once"
-	status.Step = 4
+	status.Step = 3
 	status.PhaseStartedAt = c.cfg.Now()
 	status.UpdatedAt = status.PhaseStartedAt
 	if err := c.WriteStatus(status); err != nil {

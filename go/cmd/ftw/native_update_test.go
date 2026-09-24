@@ -60,8 +60,11 @@ func TestNativeTrialCommitsOnlyAfterReadiness(t *testing.T) {
 	}
 	checker := selfupdate.New(selfupdate.Config{CurrentVersion: next, NativeRoot: root,
 		StatusPath: filepath.Join(root, "update-status.json")}, nil)
+	started := time.Now().Add(-time.Minute)
 	if err := checker.WriteStatus(selfupdate.UpdateStatus{State: "restarting", Target: next,
-		Action: "update", StartedAt: time.Now(), TotalSteps: 4}); err != nil {
+		Action: "update", StartedAt: started, PhaseStartedAt: started.Add(50 * time.Second),
+		Step: 3, TotalSteps: 3, Message: "Starting the new Core once",
+		Phases: []selfupdate.PhaseRecord{{Step: 1, TotalSteps: 3, Message: "Downloading verified Core release", Bytes: 24_000_000}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := trial.complete(checker); err != nil {
@@ -70,6 +73,11 @@ func TestNativeTrialCommitsOnlyAfterReadiness(t *testing.T) {
 	state, err = m.Read()
 	if err != nil || state.Current != next || state.Previous != current || checker.Status().State != "done" {
 		t.Fatalf("trial did not commit: %+v %v status=%+v", state, err, checker.Status())
+	}
+	phases := checker.Status().Phases
+	if len(phases) != 2 || phases[1].Message != "Starting the new Core once" || phases[1].Step != 3 ||
+		phases[1].FinishedAt.Sub(phases[1].StartedAt) < 9*time.Second {
+		t.Fatalf("the start of the new Core is not recorded as a phase: %+v", phases)
 	}
 }
 

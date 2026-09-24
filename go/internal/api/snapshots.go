@@ -309,6 +309,10 @@ func (s *Server) handleVersionSnapshotCreate(w http.ResponseWriter, _ *http.Requ
 		writeJSON(w, 503, map[string]string{"error": "snapshots disabled (no SnapshotDir)"})
 		return
 	}
+	if s.deps.SelfUpdate.Native() {
+		writeJSON(w, 409, map[string]string{"error": "native Core keeps no rollback points; make a full backup with ftw backup"})
+		return
+	}
 	if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) {
 		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
 		return

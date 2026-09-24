@@ -56,11 +56,19 @@ func (s *Server) handleBackups(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	sort.Slice(backups, func(i, j int) bool { return backups[i].CreatedAt.After(backups[j].CreatedAt) })
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"enabled": true, "backups": backups, "dir": dir,
 		"on_device": s.deps.DataDir != "" && pathWithin(s.deps.DataDir, dir),
 		"progress":  s.deps.State.BackupProgress(),
-	})
+	}
+	// The space left beside the archives, so an owner sees a full disk
+	// before a backup or an update runs into it.
+	if free, err := state.DiskAvail(dir); err == nil {
+		resp["free_bytes"] = free
+	} else if free, err := state.DiskAvail(filepath.Dir(dir)); err == nil {
+		resp["free_bytes"] = free
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
