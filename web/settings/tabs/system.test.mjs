@@ -64,6 +64,15 @@ describe("optimizerStatus", () => {
   });
 });
 
+describe("Setup wizard", () => {
+  it("offers the wizard and says that saving it replaces the settings", () => {
+    const html = globalThis.window.FTWSettings.tabs.system.render();
+    assert.match(html, /<legend>Setup wizard<\/legend>/);
+    assert.match(html, /href="\/setup"/);
+    assert.match(html, /replaces the current settings/);
+  });
+});
+
 describe("Ask why is gone", () => {
   it("renders no assistant settings, even for a config that still has them", () => {
     const html = globalThis.window.FTWSettings.tabs.system.render({
