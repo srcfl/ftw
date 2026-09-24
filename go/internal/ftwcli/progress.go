@@ -41,6 +41,7 @@ type meter struct {
 	drawnAt    time.Time
 	loggedAt   time.Time
 	spin       int
+	closed     map[string]bool // phases that already have their line
 }
 
 // ANSI control: move to the start of the line and clear it; move up one.
@@ -50,7 +51,7 @@ const (
 )
 
 func newMeter(out io.Writer, e env) *meter {
-	return &meter{out: out, e: e, start: e.now()}
+	return &meter{out: out, e: e, start: e.now(), closed: map[string]bool{}}
 }
 
 func (m *meter) show(s sample) {
@@ -101,15 +102,23 @@ func (m *meter) finish(ok bool) {
 		}
 	}
 	fmt.Fprintf(m.out, "%s %s  %s\n", m.symbol(ok), s.label, summary)
+	m.closed[s.label] = true
 }
 
 // recorded prints a phase Core reports as finished, with Core's timing. It
 // replaces the live phase when that is the same one and otherwise goes
 // above it.
+//
+// A phase this client already closed, because Core stopped answering right
+// after it, keeps that one line.
 func (m *meter) recorded(label, summary string) {
 	same := m.cur.key != "" && m.cur.label == label
+	if m.closed[label] && !same {
+		return
+	}
 	m.erase()
 	fmt.Fprintf(m.out, "%s %s  %s\n", m.symbol(true), label, summary)
+	m.closed[label] = true
 	if same {
 		m.cur = sample{}
 		return

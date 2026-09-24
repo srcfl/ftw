@@ -615,3 +615,62 @@ func TestUpdateShowsEveryPhaseCoreRecordedEvenWhenPollingMissedThem(t *testing.T
 		t.Fatalf("exit %d; the client's own restart phase must give way to Core's record\n%s", code, out)
 	}
 }
+
+func TestAPhaseClosedBeforeTheRestartIsNotRepeatedFromCoresRecord(t *testing.T) {
+	f, srv := newFakeCore(t)
+	var mu sync.Mutex
+	finished := false
+	f.on("GET", "/api/version/check", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case finished:
+			reply(200, newCore)(w, r)
+		case r.URL.Query().Get("force") == "1":
+			reply(200, offer)(w, r)
+		default:
+			reply(200, oldCore)(w, r)
+		}
+	})
+	// Seen on the home box: the download is read live, then Core is already
+	// gone; its record arrives with the new Core.
+	f.on("GET", "/api/version/update/status", sequence(
+		`{"state":"idle"}`,
+		`{"state":"pulling","action":"update","target":"v0.132.2-beta.1","step":1,"total_steps":3,"message":"Downloading verified Core release","progress_current":24000000,"progress_total":24000000,"progress_unit":"bytes"}`,
+		`503 {"error":"starting"}`,
+		`{"state":"done","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Core is ready on v0.132.2-beta.1","phases":[
+			{"step":1,"total_steps":3,"message":"Downloading verified Core release","started_at":"2026-09-24T09:00:00Z","finished_at":"2026-09-24T09:00:02.5Z","bytes":24000000},
+			{"step":2,"total_steps":3,"message":"Unpacking and checking the release","started_at":"2026-09-24T09:00:02.5Z","finished_at":"2026-09-24T09:00:04Z"},
+			{"step":3,"total_steps":3,"message":"Starting the new Core once","started_at":"2026-09-24T09:00:04Z","finished_at":"2026-09-24T09:00:11Z"}]}`,
+	))
+	f.on("POST", "/api/version/update", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		finished = true
+		mu.Unlock()
+		reply(202, `{"target":"v0.132.2-beta.1"}`)(w, r)
+	})
+	f.on("GET", "/api/health", reply(200, `{"status":"ok","drivers_ok":1}`))
+	for _, tty := range []bool{false, true} {
+		e := testEnv()
+		e.tty, e.width = tty, 100
+		code, out, errOut := runCLI(t, e, "update", "--url", srv.URL)
+		if code != exitOK || strings.Count(out, "✓ 1/3 Downloading verified Core release") != 1 ||
+			!strings.Contains(out, "✓ 2/3 Unpacking and checking the release  in 1.5s") ||
+			!strings.Contains(out, "✓ 3/3 Starting the new Core once  in 7.0s") {
+			t.Fatalf("tty=%v exit %d\n%s%s", tty, code, out, errOut)
+		}
+		// Reset the status sequence for the next pass.
+		mu.Lock()
+		finished = false
+		mu.Unlock()
+		f.on("GET", "/api/version/update/status", sequence(
+			`{"state":"idle"}`,
+			`{"state":"pulling","action":"update","target":"v0.132.2-beta.1","step":1,"total_steps":3,"message":"Downloading verified Core release","progress_current":24000000,"progress_total":24000000,"progress_unit":"bytes"}`,
+			`503 {"error":"starting"}`,
+			`{"state":"done","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Core is ready on v0.132.2-beta.1","phases":[
+				{"step":1,"total_steps":3,"message":"Downloading verified Core release","started_at":"2026-09-24T09:00:00Z","finished_at":"2026-09-24T09:00:02.5Z","bytes":24000000},
+				{"step":2,"total_steps":3,"message":"Unpacking and checking the release","started_at":"2026-09-24T09:00:02.5Z","finished_at":"2026-09-24T09:00:04Z"},
+				{"step":3,"total_steps":3,"message":"Starting the new Core once","started_at":"2026-09-24T09:00:04Z","finished_at":"2026-09-24T09:00:11Z"}]}`,
+		))
+	}
+}
