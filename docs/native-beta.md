@@ -16,7 +16,8 @@ package. Report what you find in an issue that names the beta, for example
 - Port 8080 free, `curl`, and `sudo`.
 - FTW needs no MQTT broker of its own. Ferroamp and CTEK equipment runs
   one itself, and FTW connects to it. Pixii and Heishamon publish to a
-  broker you choose: use the one in Home Assistant, or install Mosquitto.
+  broker you choose: use the one in Home Assistant, or
+  [install Mosquitto](#an-mqtt-broker).
 - FTW controls the battery and charger you configure. Keep the equipment's
   own app at hand to take control back.
 
@@ -85,6 +86,21 @@ ftw status
 `restore` keeps the replaced data, including earlier backups made on the
 box, in `/var/lib/ftw/.ftw-pre-restore-<time>` and prints its path. To undo it, stop the service and run
 `ftw-backup revert -data /var/lib/ftw -safety <that path> -yes` the same way.
+
+## An MQTT broker
+
+Only Pixii and Heishamon need one. Mosquitto is about 1 MB and ships with
+Debian and Raspberry Pi OS. It accepts only local connections until it is
+told to listen on the network:
+
+```bash
+sudo apt install mosquitto
+printf 'listener 1883\nallow_anonymous true\n' | sudo tee /etc/mosquitto/conf.d/lan.conf
+sudo systemctl restart mosquitto
+```
+
+Point the device and the FTW driver at `<host>:1883`. Anonymous access
+suits a trusted home network; otherwise add a `password_file`.
 
 ## Launcher and command updates
 
