@@ -14,6 +14,8 @@ test('every pause reason has its own sentence', () => {
   assert.match(source, /Paused for safety: site-meter data is stale/);
   assert.match(source, /commanded_reason === "pv_surplus_pause"/);
   assert.match(source, /Paused: waiting for PV surplus/);
+  assert.match(source, /commanded_reason === "no_plan_budget" && !hasSchedule/);
+  assert.match(source, /No schedule set\. Create a schedule or charge manually\./);
   assert.match(source, /commanded_reason === "no_plan_budget"/);
   assert.match(source, /The ready time has passed, so FTW is not charging/);
   assert.match(source, /Battery level is assumed, not read from the car/);
