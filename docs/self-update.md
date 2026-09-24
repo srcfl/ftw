@@ -93,7 +93,8 @@ package has its own hash and receipt. A tag, green CI run or published package
 alone is not field validation.
 
 On a native site the owner runs updates on the machine, by hand or from their
-own timer or agent. The installer puts the `ftw` command on `PATH`:
+own timer or agent. [Try the native beta](native-beta.md) is the tester's
+guide. The installer puts the `ftw` command on `PATH`:
 
 ```bash
 ftw status                   # version, published release, last update, health
