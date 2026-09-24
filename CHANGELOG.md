@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.136.2
+
+### Patch Changes
+
+- b6004ce: Backups leave out `state.db.snapshot`, its temp file and `cache.db`. The snapshot
+  is a local copy of state.db whose rows the backup already holds, and a snapshot
+  being rewritten during a backup made it fail with "no such file or directory".
+  Archives also get smaller.
+- ad0bdd0: When the optimizer worker is missing, FTW now says the release package's
+  Energyplan worker is missing and that the built-in Go planner is used. It no
+  longer tells operators to run an ftw-optimizer sidecar that is gone.
+- 3679e3b: Planner diagnostics are kept for seven days again. Since history moved to plain
+  buckets nothing pruned them, so state.db grew by about 30 MB a day and every
+  backup copied the growth. Maintenance now deletes older snapshots in small
+  batches.
+
 ## 0.136.1
 
 ### Patch Changes
