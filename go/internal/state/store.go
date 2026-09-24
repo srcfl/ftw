@@ -985,9 +985,9 @@ func (s *Store) migrate() error {
 		// horizon_slots so the timeline UI can render summary rows without
 		// unmarshalling every JSON blob.
 		//
-		// Retention: DiagnosticsRecentRetention (30 d) in SQLite; older
-		// rows roll off to <coldDir>/diagnostics/YYYY/MM/DD.parquet via
-		// RolloffDiagnosticsToParquet.
+		// Retention: DiagnosticsRecentRetention (7 d) in SQLite. Plain history
+		// maintenance deletes older rows; the older aggregate path rolled them
+		// to <coldDir>/diagnostics/YYYY/MM/DD.parquet first.
 		`CREATE TABLE IF NOT EXISTS planner_diagnostics (
 			ts_ms          INTEGER PRIMARY KEY NOT NULL,
 			reason         TEXT    NOT NULL,
