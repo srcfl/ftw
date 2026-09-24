@@ -2,7 +2,7 @@
 
 Ce guide est fait pour vous qui n'avez jamais configuré un Raspberry Pi. Pas de panique — c'est plus simple qu'il n'y paraît. Il suffit de suivre les étapes, une par une.
 
-> **Bêta native 0.x :** l'ancienne image FTW et l'installateur Docker ne servent plus aux nouveaux appareils. Ce guide couvre la préparation du Pi. Les testeurs ayant un nouvel hôte 64 bits suivent [l'installation Linux native](../operations.md#install). Les appareils existants attendent la migration guidée.
+> **Bêta native 0.x :** l'ancienne image FTW et l'installateur Docker ne servent plus aux nouveaux appareils. Ce guide couvre la préparation du Pi. Les testeurs ayant un nouvel hôte 64 bits suivent [l'installation Linux native](../native-beta.md#install). FTW tourne déjà ? Voir [Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
 
 > **Pas de Raspberry Pi ?** Un nouvel hôte 64 bits sous Debian ou Ubuntu peut utiliser le même installateur natif bêta. Ignorez les étapes propres au Pi et lisez l'**Étape 11 — Installer FTW**.
 
@@ -121,8 +121,9 @@ Bravo — vous êtes maintenant "à l'intérieur" du Raspberry Pi.
 L'ancien installateur Docker en une ligne n'est plus utilisé. Native 0.x est
 encore en test ; ce guide ne propose pas encore d'installation générale. Si
 vous participez à la bêta avec un nouveau Pi 64 bits, suivez les étapes avec
-un tag précis dans le [guide d'installation](../operations.md#install). Si FTW
-tourne déjà sur votre Pi, gardez sa version jusqu'à la migration guidée.
+un tag précis dans le [guide d'installation](../native-beta.md#install). Si FTW
+tourne déjà sur votre Pi, gardez cette carte telle quelle et lisez
+[Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
 
 ## Après l'installation
 

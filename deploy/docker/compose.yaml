@@ -7,7 +7,10 @@
 #
 # Update: change FTW_VERSION in .env and run `docker compose up -d --build`.
 # Going back is the same with the previous version.
-name: ftw
+#
+# The project has its own name so it never mixes with an older FTW stack,
+# whose project is called ftw.
+name: ftw-local
 
 services:
   ftw:

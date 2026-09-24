@@ -82,7 +82,7 @@ else
 fi
 for path in "${existing_paths[@]}"; do
   if [[ -e "$path" || -L "$path" ]]; then
-    echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
+    echo "Existing FTW installation found at $path. Keep it; \"Coming from an older FTW\" in docs/native-beta.md shows how to try 0.x beside it." >&2
     exit 2
   fi
 done
@@ -91,9 +91,13 @@ if [[ "$mode" != --refresh ]] && {
    systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
    { [[ "$mode" == --fresh-host ]] &&
      { systemctl cat ftw.service >/dev/null 2>&1 ||
-       systemctl cat forty-two-watts.service >/dev/null 2>&1 ||
-       id ftw >/dev/null 2>&1; }; }; }; then
-  echo "An FTW service or account already exists; refusing a fresh install." >&2
+       systemctl cat forty-two-watts.service >/dev/null 2>&1; }; }; }; then
+  echo "An FTW service already exists; refusing a fresh install." >&2
+  exit 2
+fi
+# Cards made from the old FTW image logged in as ftw, so people pick it again.
+if [[ "$mode" == --fresh-host ]] && id ftw >/dev/null 2>&1; then
+  echo "A user named ftw already exists. FTW runs as its own ftw account, so install from a login with another name; on a Raspberry Pi, write the card again and choose a different username." >&2
   exit 2
 fi
 if [[ "$mode" != --refresh ]] && command -v ss >/dev/null 2>&1 &&
@@ -184,7 +188,7 @@ if [[ "$mode" == --refresh ]]; then
 fi
 for path in "${existing_paths[@]}"; do
   if as_root test -e "$path" || as_root test -L "$path"; then
-    echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
+    echo "Existing FTW installation found at $path. Keep it; \"Coming from an older FTW\" in docs/native-beta.md shows how to try 0.x beside it." >&2
     exit 2
   fi
 done

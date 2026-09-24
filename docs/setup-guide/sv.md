@@ -2,7 +2,7 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
-> **Native 0.x-beta:** den gamla FTW-imagen och Docker-installationen används inte för nya boxar. Den här guiden visar Pi-stegen. Betatestare med en ny 64-bitars värd följer [installationen för Linux](../operations.md#install). Befintliga boxar väntar på den styrda flytten.
+> **Native 0.x-beta:** den gamla FTW-imagen och Docker-installationen används inte för nya boxar. Den här guiden visar Pi-stegen. Betatestare med en ny 64-bitars värd följer [installationen för Linux](../native-beta.md#install). Kör du redan FTW: läs [Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
 
 > **Ingen Raspberry Pi?** En ny 64-bitars värd med Debian eller Ubuntu kan använda samma native beta. Hoppa över Pi-stegen och läs **Steg 11 — Installera FTW**.
 
@@ -121,8 +121,9 @@ Grattis — du är nu "inne" i Raspberry Pin.
 Den gamla Docker-installationen med ett kommando är avslutad. Native 0.x
 testas ännu och den här guiden ger därför ingen allmän installation just nu.
 Om du deltar i betan och har en ny 64-bitars Pi, följ stegen med exakt tagg i
-[installationsguiden](../operations.md#install). Kör FTW redan på din Pi, låt
-den vara kvar på sin version tills den styrda flytten är klar.
+[installationsguiden](../native-beta.md#install). Kör FTW redan på din Pi,
+behåll det kortet som det är och läs
+[Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
 
 ## Efter installationen
 
