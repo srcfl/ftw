@@ -178,17 +178,28 @@ func (c *client) finish(ctx context.Context, out io.Writer, action, target, from
 	return nil
 }
 
-// reportHealth gives a fresh Core a short while to read its devices again;
-// readings from before the restart count as stale for a few seconds.
-// Health is information here: the run itself has already succeeded.
+// reportHealth gives a fresh Core a short while to read its devices again.
+// A driver starts as ok, turns offline when the reading from before the
+// restart counts as stale, and recovers with the first new reading, so ok
+// has to hold for healthSteady before it is reported. Health is information
+// here: the run itself has already succeeded.
 func (c *client) reportHealth(ctx context.Context, out io.Writer) {
 	start := c.env.now()
+	var okSince time.Time
 	for {
 		var h health
 		err := c.get(ctx, "/api/health", &h)
+		now := c.env.now()
 		if err == nil && h.Status == "ok" {
-			fmt.Fprintf(out, "Health: ok; %s.\n", h.drivers())
-			return
+			if okSince.IsZero() {
+				okSince = now
+			}
+			if now.Sub(okSince) >= c.env.healthSteady {
+				fmt.Fprintf(out, "Health: ok; %s.\n", h.drivers())
+				return
+			}
+		} else {
+			okSince = time.Time{}
 		}
 		if c.env.now().Sub(start) >= c.env.healthSettle {
 			if err != nil {
