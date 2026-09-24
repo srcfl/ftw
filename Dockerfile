@@ -35,8 +35,7 @@ COPY --from=builder /out/ /
 # Debian trixie-slim — current Debian stable (13), and the same suite as
 # Dockerfile.updater. Both images share the rootfs blob, so the extra bytes
 # over alpine are paid a single time per host rather than per image, and there
-# is one libc and one security stream to track. It also matches the Raspberry Pi
-# OS release the SD image is built from (deploy/pi-gen/config: RELEASE=trixie).
+# is one libc and one security stream to track.
 #
 # Pinned to the codename, not `stable-slim`: a suite alias would silently jump
 # major versions on some future rebuild. The `debian base currency` workflow

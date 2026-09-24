@@ -43,8 +43,7 @@ Older Docker boxes still have their own update controls, but they stay on
 their current version until their owner uses the guided native 0.x migration.
 Do not use Update, the retired paired-upgrade procedure or a moving Docker
 alias to cross release lines. The host operating system is maintained
-separately; see [self-update.md](self-update.md) and the old
-[Raspberry Pi image](rpi-image.md#host-os-security-updates).
+separately; see [self-update.md](self-update.md).
 
 ## Persistent state
 

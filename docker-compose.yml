@@ -81,7 +81,7 @@ services:
       # libnss-mdns). Without it FTW queries the LAN itself, which needs no
       # host software and is why this stays commented out by default.
       #
-      # Uncomment only if the host runs avahi-daemon — the Raspberry Pi image
+      # Uncomment only if the host runs avahi-daemon, as Raspberry Pi OS
       # does. Mount the DIRECTORY, not the socket inside it: if the path is
       # missing Docker creates it, and an empty directory there is harmless,
       # whereas a directory created where the *socket* belongs stops

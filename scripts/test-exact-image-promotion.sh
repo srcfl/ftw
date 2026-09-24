@@ -80,7 +80,7 @@ if printf '{}' | python3 "${release_guard}" order v2.2.0 2>/dev/null; then
 fi
 
 required_asset_names=(
-  ftw-promotion-receipt.json os_list.json
+  ftw-promotion-receipt.json
   ftw-linux-amd64.tar.gz ftw-linux-amd64.tar.gz.sha256
   forty-two-watts-linux-amd64.tar.gz forty-two-watts-linux-amd64.tar.gz.sha256
   ftw-linux-arm64.tar.gz ftw-linux-arm64.tar.gz.sha256
@@ -198,7 +198,7 @@ grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
 grep -Fq 'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' "${assets}"
 grep -Fq 'name: verify and publish complete stable release' "${assets}"
 grep -Fq 'needs: [meta, assets-ready, docker]' "${assets}"
-if [ "$(grep -Fc 'GH_TOKEN: ${{ secrets.CI_TOKEN }}' "${assets}")" -ne 6 ]; then
+if [ "$(grep -Fc 'GH_TOKEN: ${{ secrets.CI_TOKEN }}' "${assets}")" -ne 5 ]; then
   echo "every draft release read/write must use the repo-scoped release token" >&2
   exit 1
 fi
@@ -224,7 +224,6 @@ grep -Fq 'current_digest="$(scripts/inspect-image-digest.sh "${source}")"' "${as
 grep -Fq 'test "$(scripts/inspect-image-digest.sh "${canonical}:${tag}")" = "${expected}"' "${assets}"
 grep -Fq '"${source}@${source_digest}"' "${assets}"
 grep -Fq 'sha256sum -c "${checksum_name}"' "${assets}"
-grep -Fq 'and ((.imager.devices // []) | length) > 0' "${assets}"
 grep -Fq '[ "${STABLE_COMMIT}" != "${GITHUB_SHA}" ]' "${assets}"
 grep -Fq '[ "${GITHUB_REF}" != "refs/heads/master" ]' "${assets}"
 grep -Fq 'RELEASE_JSON="$(scripts/github-release-by-id.sh show "${RELEASE_ID}")"' "${assets}"
@@ -464,12 +463,11 @@ fi
 asset_gate_job="$(grep -n '^  assets-ready:$' "${assets}" | cut -d: -f1)"
 asset_gate_block="$(sed -n "${asset_gate_job},$((docker_start - 1))p" "${assets}")"
 for required in \
-  'needs: [meta, binaries, imager-metadata]' \
+  'needs: [meta, binaries]' \
   'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' \
   'asset_name="${checksum_name%.sha256}"' \
   '[ "${recorded_name}" != "${asset_name}" ]' \
-  'sha256sum -c "${checksum_name}"' \
-  'and ((.imager.devices // []) | length) > 0'; do
+  'sha256sum -c "${checksum_name}"'; do
   if ! grep -Fq -- "${required}" <<<"${asset_gate_block}"; then
     echo "pre-Docker stable asset gate is missing ${required}" >&2
     exit 1

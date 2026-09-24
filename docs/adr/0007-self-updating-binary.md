@@ -125,16 +125,16 @@ to it. No native update needs a Docker socket or Docker engine.**
    or file is consulted.
 
 5. **No privilege for updates.** The install root belongs to the `ftw` user.
-   Downloading, unpacking, renaming and exiting need nothing else. The host
-   keeps patching itself with `unattended-upgrades` on the Pi image.
+   Downloading, unpacking, renaming and exiting need nothing else. Host
+   updates stay with the owner.
 
-6. **The Pi image runs the native install.** It uses the same installer,
-   launcher and unit as any other host,
-   [`deploy/ftw-native.service`](../../deploy/ftw-native.service). The image
-   drops the Docker engine and Compose. Mosquitto comes from `apt`, on the
-   same host port as today. The monthly image built from `master` still
-   installs Docker 2.x with the sidecar; it moves to native early, so new
-   Pi users stop arriving on the old line.
+6. **There is no FTW image for the Raspberry Pi.** Owners install FTW
+   themselves and choose how it runs. A Pi runs Raspberry Pi OS Lite 64-bit
+   with the same installer, launcher and unit as any other host,
+   [`deploy/ftw-native.service`](../../deploy/ftw-native.service), or runs
+   FTW in Docker. The monthly image, its Imager listing and the
+   `rpi-installer` release are removed. Cards flashed from the image keep
+   Docker 2.x until the guided migration.
 
 7. **New Docker packaging builds from the release package.**
    [`deploy/docker`](../../deploy/docker) holds a Compose file with one Core
@@ -209,8 +209,8 @@ to it. No native update needs a Docker socket or Docker engine.**
     `releases/<tag>`. These files must be complete before the first native
     user. A release that needs a newer launcher says so and refuses to
     prepare, rather than failing its trial. The installer can refresh the
-    files on an existing native box. Installation, migration and the Pi
-    image produce one layout: `/opt/ftw` with `ftw-native.service`.
+    files on an existing native box. Installation and migration produce
+    one layout: `/opt/ftw` with `ftw-native.service`.
 
 ## Versions
 
@@ -350,8 +350,6 @@ anything may change, and that is the true state of FTW.
   code as a person at the terminal.
 - Disk use after ten updates stays at the retained slots.
 - The Docker-to-binary installer path on a box with data in `~/ftw/data`.
-- A freshly flashed Pi image comes up as the same native layout and passes
-  these checks.
 - A verified full backup copied off the box before cutover, plus a tested
   restore or return to the old installation after a failed cutover.
 - Checks that history, site identity, device goals and live device state

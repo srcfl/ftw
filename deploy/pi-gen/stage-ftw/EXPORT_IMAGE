@@ -1,4 +1,0 @@
-# Sentinel: the presence of this file tells pi-gen to export a .img
-# at the end of this stage. Contents are unused by pi-gen but the
-# convention is to put the image name here as a hint for humans.
-IMG_SUFFIX=""

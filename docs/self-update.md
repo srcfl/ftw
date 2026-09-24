@@ -138,8 +138,7 @@ the native install.
 ## Host and old release details
 
 FTW's Core update does not update the host operating system, kernel or Docker
-engine. The operator handles host updates; the old Raspberry Pi image has its
-own host update setup, described in [the image guide](rpi-image.md).
+engine. The operator handles host updates.
 
 The old Docker workflows and their release receipts remain for an exceptional
 2.x repair. The native release workflow cannot publish Docker images or move

@@ -90,15 +90,19 @@ driver actually changed.
 
 ## Install on Linux
 
-Native 0.x is in beta. On a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu
-host that is part of the beta test, install one exact published tag:
+You install FTW yourself and choose how it runs: natively with systemd, or in
+Docker. Both use the same checksummed release package. 0.x is in beta;
+[docs/native-beta.md](docs/native-beta.md) has both paths, the everyday
+commands and recovery. On a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu
+host, the native install is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh -o /tmp/ftw-install.sh
-bash /tmp/ftw-install.sh --fresh-host --tag v0.131.0-beta.1
+tag=v0.135.1-beta.1   # the newest beta on the Releases page
+curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
+bash install.sh --fresh-host --tag "${tag}"
 ```
 
-Use the tag chosen for that test site. `--fresh-host` confirms there is no
+`--fresh-host` confirms there is no
 existing FTW site, even a stopped Docker site in a custom directory. The
 installer checks the package and checksum, creates native release slots under
 `/opt/ftw`, and starts the local
@@ -114,9 +118,7 @@ the connection if DHCP later hands the host a different address.
 
 Existing 1.x, 2.x, 3.x and earlier native sites stay on their current version
 until the guided 0.x migration is ready. The fresh installer refuses them; do
-not use Update or old Docker migration scripts to cross release lines. The
-published [Raspberry Pi image](docs/rpi-image.md) still uses the older Docker
-path and is not a way to start a new native 0.x site.
+not use Update or old Docker migration scripts to cross release lines.
 
 The on-box dashboard remains local. The optional
 [FTW webapp](https://github.com/srcfl/ftw-webapp) connects through an encrypted
