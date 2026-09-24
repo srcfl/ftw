@@ -194,6 +194,9 @@ type Info struct {
 	InstallRoot      string `json:"install_root,omitempty"`
 	InstallFreeBytes int64  `json:"install_free_bytes,omitempty"`
 	InstallNeedBytes int64  `json:"install_need_bytes,omitempty"`
+	// LastFailed is a release that failed on this box: its trial did not
+	// become ready, or it kept stopping during probation.
+	LastFailed string `json:"last_failed,omitempty"`
 }
 
 // MaxReleaseBodyBytes caps the persisted release body. 16 KiB covers a
@@ -763,6 +766,7 @@ func (c *Checker) refreshRuntimeInfoLocked() {
 		c.info.InstallRoot = c.cfg.NativeRoot
 		c.info.InstallFreeBytes, _ = manager.FreeBytes()
 		c.info.InstallNeedBytes = 0
+		c.info.LastFailed = state.LastFailed
 		if err == nil {
 			if previous, rollbackErr := manager.RollbackCandidate(); rollbackErr == nil {
 				c.info.Previous = previous

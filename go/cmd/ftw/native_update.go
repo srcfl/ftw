@@ -101,17 +101,34 @@ func reconcileNativeFallback(root, version string, checker *selfupdate.Checker) 
 		return
 	}
 	state, err := (nativeupdate.Manager{Root: root}).Read()
-	if err != nil || state.Current != version || state.LastFailed == "" {
+	if err != nil || state.Current != version || state.LastFailed == "" || status.Target != state.LastFailed {
 		return
 	}
-	if status.Target != state.LastFailed || (status.State != "restarting" && status.State != "failed") {
+	switch status.State {
+	case "restarting", "failed":
+		status.Message = "New Core did not reach readiness; previous Core is running"
+	case "done":
+		// It committed, then kept stopping without a clean shutdown, and the
+		// launcher went back during its probation.
+		status.Message = status.Target + " kept stopping after it started; " + version + " runs again"
+	default:
 		return
 	}
 	status.State = "failed"
-	status.Message = "New Core did not reach readiness; previous Core is running"
 	status.UpdatedAt = time.Now()
 	status.PhaseStartedAt = status.UpdatedAt
 	if err := checker.WriteStatus(status); err != nil {
 		slog.Warn("native fallback status could not be saved", "err", err)
+	}
+}
+
+// markNativeCleanExit tells the launcher that this stop is on purpose, so
+// the next start does not count as a crash during an update's probation.
+func markNativeCleanExit(root string) {
+	if root == "" {
+		return
+	}
+	if err := (nativeupdate.Manager{Root: root}).MarkCleanExit(Version); err != nil {
+		slog.Warn("native clean-exit mark could not be saved", "err", err)
 	}
 }

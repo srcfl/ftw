@@ -48,4 +48,16 @@ if [[ "$(uname -s)" == Linux ]]; then
   fi
 fi
 
+if [[ "$(uname -s)" == Linux && ! -e /opt/ftw/slots.json ]]; then
+  if bash "$installer" --refresh --tag v0.131.0-beta.1 > "$work/out" 2>&1; then
+    echo "installer refreshed a host without a native install" >&2
+    exit 1
+  fi
+  grep -q 'No native install made by this script was found' "$work/out"
+  if grep -Eq 'sudo|download|checksum' "$work/out"; then
+    echo "refresh did not stop before privilege or download" >&2
+    exit 1
+  fi
+fi
+
 echo 'native fresh-installer guards passed'

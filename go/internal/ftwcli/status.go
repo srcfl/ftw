@@ -26,6 +26,7 @@ type versionInfo struct {
 	InstallRoot        string    `json:"install_root"`
 	InstallFreeBytes   int64     `json:"install_free_bytes"`
 	InstallNeedBytes   int64     `json:"install_need_bytes"`
+	LastFailed         string    `json:"last_failed"`
 }
 
 type updateStatus struct {
@@ -109,6 +110,22 @@ func (h health) drivers() string {
 		h.DriversOK, h.DriversDegraded, h.DriversOffline, h.DriversFaulted)
 }
 
+// waitingForSetup reports a Core that has no site configuration yet and
+// serves only the setup wizard.
+func (c *client) waitingForSetup(ctx context.Context) bool {
+	var health struct{}
+	var api *apiError
+	if err := c.get(ctx, "/api/health", &health); !errors.As(err, &api) || api.status != http.StatusNotFound {
+		return false
+	}
+	resp, err := c.open(ctx, "/setup")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
 // selfUpdateOff reports Core's answer when it does not manage its own
 // updates: a container, the Home Assistant add-on or a plain binary.
 func selfUpdateOff(err error) bool {
@@ -125,8 +142,14 @@ func runStatus(args []string, out io.Writer, e env) error {
 	ctx := context.Background()
 	var h health
 	if err := c.get(ctx, "/api/health", &h); err != nil {
+		if c.waitingForSetup(ctx) {
+			fmt.Fprintf(out, "Core:     waiting for setup; open %s/setup\n", base)
+			printNextSteps(out)
+			return errors.New("Core is waiting for setup")
+		}
 		fmt.Fprintf(out, "Core:     not answering at %s (%s)\n", base, err)
 		printNextSteps(out)
+		fmt.Fprintf(out, "Back:     %s\n", offlineRollback)
 		return errors.New("Core is not answering")
 	}
 	if h.Status == "starting" {
@@ -150,6 +173,9 @@ func runStatus(args []string, out io.Writer, e env) error {
 		}
 		if info.Previous != "" {
 			fmt.Fprintf(out, "Previous: %s (ftw rollback returns to it)\n", info.Previous)
+		}
+		if info.LastFailed != "" && info.LastFailed != info.Latest {
+			fmt.Fprintf(out, "Failed:   %s failed on this box\n", info.LastFailed)
 		}
 		if info.InstallRoot != "" {
 			fmt.Fprintf(out, "Releases: %s\n", spaceLine(filepath.Join(info.InstallRoot, "releases"), info.InstallFreeBytes, info.InstallNeedBytes))
@@ -225,6 +251,10 @@ func (c *client) printUnusedRollbackPoints(ctx context.Context, out io.Writer) {
 		len(list.Snapshots), formatBytes(size), list.Dir)
 }
 
+// offlineRollback is the way back when Core does not start, for an install
+// made by install.sh.
+const offlineRollback = "if a new release does not start, run: sudo -u ftw /opt/ftw/ftw-launcher -root /opt/ftw rollback && sudo systemctl restart ftw"
+
 func printNextSteps(out io.Writer) {
 	fmt.Fprintln(out, "Logs:     journalctl -u ftw -n 100")
 	fmt.Fprintln(out, "Restart:  sudo systemctl restart ftw")
@@ -238,6 +268,8 @@ func releaseLine(info versionInfo) string {
 	switch {
 	case info.Err != "":
 		return "check failed: " + info.Err + checked
+	case info.UpdateAvailable && info.Latest == info.LastFailed:
+		return info.Latest + " is published but failed on this box; ftw update waits for a newer release (ftw update --retry tries it again)" + checked
 	case info.UpdateAvailable:
 		return info.Latest + " is published. Install it with: ftw update" + checked
 	default:

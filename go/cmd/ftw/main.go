@@ -340,6 +340,21 @@ func main() {
 	backfillForce := flag.Bool("backfill-force", false, "DEV ONLY: bypass the non-synthetic-data safety gate")
 	flag.Parse()
 	nativeRoot := os.Getenv("FTW_NATIVE_SLOT_ROOT")
+	// A stop that arrives while Core is still starting is deliberate too, so
+	// it must not count as a crash during an update's probation. The control
+	// loop takes this channel over once it runs.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	bootDone := make(chan struct{})
+	go func() {
+		select {
+		case <-sigc:
+			slog.Info("stopped while starting")
+			markNativeCleanExit(nativeRoot)
+			os.Exit(0)
+		case <-bootDone:
+		}
+	}()
 	trial, err := beginNativeTrial(nativeRoot, os.Getenv("FTW_NATIVE_TRIAL_TAG"), Version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "native release preflight:", err)
@@ -2353,6 +2368,14 @@ func main() {
 		if nativeRoot != "" {
 			statusPath = filepath.Join(nativeRoot, "update-status.json")
 		}
+		// FTW_RELEASE_MIRROR serves the release list at /releases and the
+		// packages at /download/<tag>/, as GitHub does. It exists to test the
+		// native chain with releases that are not published; leave it unset.
+		var releasesURL, nativeReleaseURL string
+		if mirror := strings.TrimRight(os.Getenv("FTW_RELEASE_MIRROR"), "/"); mirror != "" && nativeRoot != "" {
+			releasesURL, nativeReleaseURL = mirror+"/releases", mirror+"/download"
+			slog.Warn("selfupdate: native releases come from a mirror", "url", mirror)
+		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
 			CurrentVersion:     current,
 			CurrentStateSchema: state.SchemaVersion,
@@ -2360,6 +2383,8 @@ func main() {
 			StatusPath:         statusPath,
 			NativeRoot:         nativeRoot,
 			NativeTrialTimeout: nativeTrialTimeout,
+			ReleasesURL:        releasesURL,
+			NativeReleaseURL:   nativeReleaseURL,
 			NativeRestart: func() error {
 				restartOnce.Do(func() {
 					reexecAfterShutdown, exitCode = false, 1
@@ -2774,9 +2799,8 @@ func main() {
 		lpController.SetCommandTimeout(driverCmdTimeout)
 	}
 
-	// Graceful shutdown
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	// Graceful shutdown: the loop below now handles the stop signals.
+	close(bootDone)
 
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
@@ -2813,6 +2837,7 @@ func main() {
 		select {
 		case <-sigc:
 			slog.Info("shutting down")
+			markNativeCleanExit(nativeRoot)
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
@@ -2824,6 +2849,7 @@ func main() {
 			} else {
 				slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
 			}
+			markNativeCleanExit(nativeRoot)
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)

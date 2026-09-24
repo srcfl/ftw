@@ -152,6 +152,20 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "no newer native release is available on this channel"})
 		return
 	}
+	// A release that failed on this box is not installed again by an
+	// unattended caller, whatever client it uses; {"retry": true} asks.
+	if info.Native && info.LastFailed != "" && info.LastFailed == info.Latest {
+		var request struct {
+			Retry bool `json:"retry"`
+		}
+		_ = readJSON(r, &request) // an empty body asks for no retry
+		if !request.Retry {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": info.Latest + ` failed on this box; send {"retry": true} to try it again`,
+			})
+			return
+		}
+	}
 	if info.CurrentStateSchema >= 3 && info.TargetStateSchema < info.CurrentStateSchema {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "This Core uses a newer history format. Stop Core and restore a verified full backup with the matching older Core version; changing only the image would omit new history."})
 		return
