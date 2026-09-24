@@ -2,7 +2,7 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
-> **Native 0.x beta:** the old FTW image and Docker installer are retired for new sites. This guide covers Pi setup; beta testers with a fresh 64-bit host use the [native Linux installer](../operations.md#install). Existing sites wait for the guided migration.
+> **Native 0.x beta:** the old FTW image and Docker installer are retired for new sites. This guide covers Pi setup; beta testers with a fresh 64-bit host use the [native Linux installer](../native-beta.md#install). Sites that already run FTW: see [Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
 
 > **Don't have a Raspberry Pi?** A fresh 64-bit Debian or Ubuntu host can use the same native beta installer. Skip the Pi hardware steps and read **Step 11 — Install FTW**.
 
@@ -121,8 +121,9 @@ Well done — you're now "inside" the Raspberry Pi.
 The old one-line Docker installer has been retired. Native 0.x is being tested;
 this beginner guide does not yet offer a general install. If you are part of
 the beta and this is a fresh 64-bit Pi, follow the exact-tag steps in the
-[Linux install guide](../operations.md#install). If FTW already runs on this
-Pi, leave it on its current version until the guided migration is ready.
+[Linux install guide](../native-beta.md#install). If FTW already runs on this
+Pi, keep that card as it is and see
+[Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
 
 ## After installation
 

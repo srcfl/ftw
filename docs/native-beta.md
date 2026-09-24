@@ -9,10 +9,10 @@ package. Report what you find in an issue that names the beta, for example
 
 ## Before you start
 
-- A spare 64-bit Linux host: a Raspberry Pi 4 or 5 with Raspberry Pi OS
-  Bookworm 64-bit, Debian 12, or an x86_64 machine.
-- No FTW on it already. An existing Docker 1.x, 2.x or 3.x site waits for
-  the guided migration; do not install over it.
+- A 64-bit Linux host: a Raspberry Pi 4 or 5 with Raspberry Pi OS Lite
+  64-bit (Bookworm or Trixie), Debian 12 or 13, or an x86_64 machine.
+- Running FTW 1.x, 2.x or 3.x already, perhaps from the Raspberry Pi image?
+  Read [Coming from an older FTW](#coming-from-an-older-ftw) first.
 - Port 8080 free, `curl`, and `sudo`.
 - FTW needs no MQTT broker of its own. Ferroamp and CTEK equipment runs
   one itself, and FTW connects to it. Pixii and Heishamon publish to a
@@ -37,6 +37,49 @@ and starts the `ftw` service. Open `http://<host>:8080/setup` to set up the
 site.
 
 To run it in Docker instead, see [Docker](#docker).
+
+## Coming from an older FTW
+
+Most sites run FTW 1.x, 2.x or 3.x in Docker, many from the Raspberry Pi
+image. The beta does not move their settings or history yet; that comes with
+the guided migration. Try it beside the old installation instead. The old one
+and its data stay as they are, and switching back takes a minute.
+
+Never run both at once: they would control the same equipment. Stop the old
+one first.
+
+**On a Raspberry Pi, use a second SD card.** This is the safest way.
+
+1. Write Raspberry Pi OS Lite (64-bit) to a new card with Raspberry Pi
+   Imager, as in the [setup guide](setup-guide/README.md). Choose a username
+   other than `ftw`: the installer creates its own `ftw` account, and cards
+   made from the FTW image used that name for the login.
+2. Shut the Pi down, swap the cards, start it and follow [Install](#install).
+   Set the site up again at `http://<host>:8080/setup`.
+3. To go back, shut down and put the old card back.
+
+**On the same machine, run the beta in Docker.** Stop the old stack, then
+follow [Docker](#docker); the beta lives in its own folder, `~/ftw-local`.
+
+```bash
+cd /opt/ftw && sudo docker compose down      # the Raspberry Pi image
+cd ~/ftw && docker compose down              # the Docker installer (1.x: ~/forty-two-watts)
+```
+
+To go back, stop the beta and start the old stack again. Its data was never
+touched; what the beta recorded stays in `~/ftw-local/data` for next time.
+
+```bash
+cd ~/ftw-local && docker compose down
+cd /opt/ftw && sudo docker compose up -d     # or ~/ftw, ~/forty-two-watts
+```
+
+- The old stack's Mosquitto stops with it. Pixii and Heishamon then need
+  [a broker](#an-mqtt-broker).
+- The native installer refuses a machine that still has an older FTW: it
+  finds `/opt/ftw`, `~/ftw` or an `ftw` account. Installing natively over an
+  old site is the guided migration.
+- On Home Assistant, keep the add-on and try the beta on another machine.
 
 ## Everyday commands
 
@@ -122,7 +165,7 @@ You need Docker Engine with Compose on Linux. Docker Desktop on macOS or
 Windows keeps the network inside its VM and cannot reach the equipment.
 
 ```bash
-mkdir -p ~/ftw && cd ~/ftw
+mkdir -p ~/ftw-local && cd ~/ftw-local
 base=https://raw.githubusercontent.com/srcfl/ftw/master/deploy/docker
 curl -fsSLO "${base}/compose.yaml" -O "${base}/Dockerfile"
 mkdir -p data && sudo chown 100:101 data
@@ -131,12 +174,13 @@ docker compose up -d --build
 ```
 
 The two files stay the same between releases; `FTW_VERSION` chooses one. Open
-`http://<host>:8080/setup`. Data lives in `~/ftw/data`.
+`http://<host>:8080/setup`. Data lives in `~/ftw-local/data`. If Docker
+answers "permission denied", put `sudo` in front of `docker`.
 
 ```bash
 docker compose ps                            # running and healthy
 docker compose exec ftw ftw status           # the same status as a native install
-docker compose exec ftw ftw support --output /app/data/support.zip   # lands in ~/ftw/data
+docker compose exec ftw ftw support --output /app/data/support.zip   # lands in ~/ftw-local/data
 docker compose logs --tail 100               # logs
 docker compose restart                       # restart
 ```
@@ -171,7 +215,7 @@ docker compose start
 ```
 
 To remove it, run `docker compose down`, remove the `ftw-local` images and
-delete `~/ftw`.
+delete `~/ftw-local`.
 
 ## For an agent that runs the host
 
