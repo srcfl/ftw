@@ -64,7 +64,7 @@ Remplissez :
 
 - **Hostname :** `ftw`
 - **Localization :** choisissez votre pays
-- **Nom d'utilisateur :** p. ex. `pi`
+- **Nom d'utilisateur :** p. ex. `pi` (pas `ftw` : FTW crée son propre compte sous ce nom)
 - **Mot de passe :** choisissez-en un que vous retiendrez — mais pas "1234"
 - **Wi-Fi :** si vous utilisez le sans fil, tapez le nom de votre Wi-Fi domestique (SSID) et le mot de passe. Vous utilisez un câble réseau ? Sautez cette étape.
 - **Remote access :** activez **SSH**. Si vous êtes un utilisateur avancé — choisissez la connexion par **clé SSH** (collez votre clé publique). Sinon, choisissez **mot de passe + nom d'utilisateur**.
@@ -142,5 +142,5 @@ Si cette adresse ne fonctionne pas — essayez l'adresse IP que vous avez notée
 - **La lumière ne s'allume pas du tout** → vérifiez que l'adaptateur secteur est bien branché.
 - **Pas d'adresse IP trouvée** → redémarrez la box, attendez 5 minutes, regardez à nouveau.
 - **SSH dit "Connection refused"** → attendez encore un peu. Le premier démarrage prend du temps.
-- **La page s'ouvre, mais modifier un réglage ou lancer une mise à jour affiche "remote access to protected API routes is disabled"** → FTW n'accepte les modifications que depuis des adresses qu'il reconnaît comme locales. Ouvrez l'interface via l'adresse IP du Pi, p. ex. `http://192.168.1.123:8080`. Le pourquoi — même à la maison — est expliqué dans [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled) (en anglais).
+- **La page s'ouvre, mais modifier un réglage affiche "remote access to protected API routes is disabled"** → FTW n'accepte les modifications que depuis des adresses qu'il reconnaît comme locales. Ouvrez l'interface via l'adresse IP du Pi, p. ex. `http://192.168.1.123:8080`. Le pourquoi — même à la maison — est expliqué dans [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled) (en anglais).
 - **Rien de tout cela ne marche** → passez sur notre Discord et demandez gentiment de l'aide : **https://discord.gg/25xcBzQaux**

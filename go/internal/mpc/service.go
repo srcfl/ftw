@@ -563,7 +563,7 @@ type SlotDirective struct {
 	// pulled back when live gridW imports more than plan. Discharge
 	// slots are intentionally not clamped (extra export = bonus revenue
 	// at the slot's chosen price). See control.SlotDirective.PlannedGridW
-	// and docs/safety.md §8 for the asymmetry rationale.
+	// and the energy-allocation comment in control/dispatch.go.
 	GridW float64
 
 	// LivePVSurplusSoCCap enables economically justified live surplus

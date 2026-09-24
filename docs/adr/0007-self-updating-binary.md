@@ -8,10 +8,9 @@
 - Also decides the version scheme, tracked in
   [#1314](https://github.com/srcfl/ftw/issues/1314). The stable-channel defect
   is tracked separately in [#1313](https://github.com/srcfl/ftw/issues/1313).
-- Replaces, when shipped: the `ftw-updater` sidecar, the update IPC volume
-  and the Compose and `.env` pinning described in
-  [self-update.md](../self-update.md). That document stays the description of
-  what ships until this one is implemented.
+- Replaces on native 0.x: the `ftw-updater` sidecar, the update IPC volume
+  and the Compose and `.env` pinning of the older Docker lines.
+  [self-update.md](../self-update.md) describes what ships.
 
 ## Context
 
@@ -173,8 +172,9 @@ to it. No native update needs a Docker socket or Docker engine.**
 
     - `ftw status`: version, channel, published release, the last update's
       result and health, plus where to look next, such as `journalctl -u ftw`
-    - `ftw update [--channel beta|stable] [--backup-dir DIR]`: install the
-      next release on the saved channel; already current exits 0
+    - `ftw update [--channel beta|stable] [--retry]`: install the next
+      release on the saved channel, or try a release that failed on this box
+      again; already current exits 0
     - `ftw rollback`: return to `previous` under decision 3
     - `ftw backup [--output-dir DIR]`: make, verify and optionally copy a
       full backup

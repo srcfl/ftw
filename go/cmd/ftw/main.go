@@ -4221,8 +4221,8 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 }
 
 // envOr returns the env var's value if it is set (even if empty, so an
-// operator can explicitly blank a path to disable a feature — see
-// docs/self-update.md on FTW_UPDATER_SOCKET=""). Returns def only when
+// operator can explicitly blank a path to disable a feature, such as
+// FTW_UPDATER_SOCKET="" on the older Docker line). Returns def only when
 // the variable is unset.
 // haCallbacks builds the bridge's command-callback set. Extracted so
 // the boot-time ha.Start path and the configreload "disabled → enabled"

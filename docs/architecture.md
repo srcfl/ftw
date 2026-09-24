@@ -122,14 +122,13 @@ device
 Lua driver                 optional optimizer
   ↕ site-convention data       ↓ proposed trajectory
 telemetry → control/planner → core validation and safety → driver command
-     ↘ SQLite + Parquet       ↘ API/UI and integrations
+     ↘ SQLite                 ↘ API/UI and integrations
 ```
 
 The in-memory telemetry store owns latest readings and driver health.
-SQLite history.db owns samples, hourly summaries, dashboard history and the
-energy ledger. A separate state.db owns goals, device identity and learned
-state. Rebuildable prices and forecasts live in cache.db. Older samples use
-daily Parquet files.
+SQLite history.db owns bucketed history, dashboard summaries and the energy
+ledger. A separate state.db owns goals, device identity, learned state and
+planner diagnostics. Rebuildable prices and forecasts live in cache.db.
 Database access stays in
 [`go/internal/state`](../go/internal/state).
 
@@ -138,21 +137,24 @@ applies safety constraints, then sends commands through the driver registry.
 Planner output is an input to that loop, never a direct device command.
 
 A bounded queue copies each telemetry tick before the SQLite writer commits
-its history, samples, energy ledger and retry receipt in one transaction.
+its history buckets, energy ledger and retry receipt in one transaction.
 Admission to memory is separate from commit. A full queue returns a collection
 error; health reports pending, committed and rejected ticks. Reads use WAL
 snapshots. Goals and session state use a separate database and sync their WAL
 before returning success, so history maintenance does not hold their writer.
 
-Core writes scalar history as 10-second summaries in SQLite for the last
-24 hours. It also maintains minute summaries for verified publication to
-Parquet. Minute files cover days 1–30; five-minute files cover days 30–730.
-Hourly gauge summaries and the energy ledger remain after detailed history
-expires. The old `state.cold_retention_days` setting no longer controls this
-policy; startup reports a stored nonzero value.
+Scalar history is stored as buckets in history.db, not as raw polls:
+10-second buckets for seven days, one-minute buckets for 90 days and hourly
+buckets for five years. Hourly maintenance rolls complete minute hours into
+hourly buckets and deletes expired rows in short transactions that yield to
+live collection. It reads and writes no Parquet. A tick older than an
+interval that maintenance has closed returns an explicit collection error.
+Planner diagnostics stay in state.db for seven days. The old
+`state.cold_retention_days` setting no longer controls this policy; startup
+reports a stored nonzero value.
 
-Dashboard charts use the same 10-second, one-minute and five-minute ages in
-SQLite. These small site summaries stay separate from scalar Parquet archives.
+Dashboard site summaries keep 10-second rows for 24 hours, one-minute rows
+for 30 days and five-minute rows for two years.
 Energy and cost consume original observed intervals recorded before chart
 averaging. Minute energy totals remain for two years, then quarter-hour totals
 preserve local day boundaries and normal tariff periods. A range edge or price
@@ -170,34 +172,22 @@ power integration in the energy ledger, which consumes original observations.
 Five-minute energy detail becomes hourly after 30 days and daily after two
 years; totals remain. Reads have time and output limits.
 
-Archiving streams through a bounded SQLite staging file, reads the new Parquet
-back and checks its ordered contents before publishing by a synced rename.
-Pruning removes matching complete source minutes in short transactions. Live
-SQLite wins while both copies exist. A failed write, verification or prune
-keeps the source; a retry cannot count both copies. Admission and the archive
-boundary share a short memory lock so pending ticks finish before their
-interval closes. Later attempts to backdate into a closed interval return an
-explicit collection error without blocking the write queue.
-
-Old raw Parquet files convert in the background. Each staging transaction
-saves its input cursor with its summaries, so a restart resumes the file.
-Independent counts, sums, extrema and observation bounds must match before
-raw data is removed. The original file wins while both forms exist. Compacted
-history cannot accept individual raw corrections. Restore original history
-before importing corrections. Backup archives omit resumable scratch files.
-
-Fresh installations create SQLite directly. Earlier SQLite installations copy
-frozen history in bounded, restartable transactions and keep their Parquet
-files. Only DuckDB beta installations need the separate offline
+Fresh installations create these buckets directly. Older layouts convert at
+startup: frozen legacy history imports in bounded transactions, a history.db
+that still holds raw polls is replaced by a copy with only buckets and the
+ledger, and old Parquet bucket files are folded into hourly rows before they
+are removed. Old planner-diagnostics Parquet files stay on the box and remain
+readable. Only DuckDB beta installations need the separate offline
 [history converter](history-conversion.md). Core and normal release builds
 have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
 
-State schema 5 adds aggregate history and binds state.db to a specific history.db generation. Portable
-backups export a SQLite read snapshot with row counts and hashes checked, plus
-retained Parquet. The old beta files stay on the box for recovery. A config-only
-snapshot cannot recover missing history. To return to an older Core, stop Core
-and restore a verified full backup with its matching version; image-only
-rollback across the format boundary is refused.
+State schema 5 added aggregate history and binds state.db to a specific
+history.db generation. Portable backups export a SQLite read snapshot with row
+counts and hashes checked, plus any Parquet files still on the box. A
+config-only snapshot cannot recover missing history. To return to an older
+Core across a state-schema change, stop Core and restore a verified full backup
+with its matching version; rolling back the program alone across that boundary
+is refused.
 
 ## Drivers
 
@@ -241,7 +231,8 @@ Stable and development builds default to Core. Older `engine: python` values
 migrate to Energyplan; retired optimizer settings are ignored and omitted
 when the configuration is saved.
 Energyplan ships as compiled binaries with its own license; source and builds
-stay in the private Energyplan repository. It updates with the Core image.
+stay in the private Energyplan repository. It ships in the Core release
+package and updates with Core.
 The optimizer never reads hardware or issues commands, so its deployment and
 dependency churn do not enlarge the safety-critical runtime.
 
@@ -285,9 +276,9 @@ Grow the contract by adding **features** to the handshake, not by bumping the
 version. A feature an old peer does not advertise costs nothing — core simply
 does not ask it for what it cannot do — while a version bump makes every peer
 outside the new window incompatible at once. That is the mistake the `champion`
-requirement made: it landed in core before any optimizer image advertised it,
-and every site that had not updated the optimizer silently fell back to the Go
-planner.
+requirement made while the optimizer still shipped separately: it landed in
+core before any optimizer image advertised it, and every site that had not
+updated the optimizer silently fell back to the Go planner.
 
 When the framing or the request shape genuinely changes, bump the version and
 **widen** the window rather than moving it, so sites that have not updated the
@@ -321,7 +312,7 @@ the document and credential rows together with SQLite `synchronous=FULL`
 before applying them through [`go/internal/configreload`](../go/internal/configreload).
 The file watcher has been removed; editing the seed does not change live settings.
 The first import keeps older YAML fields so a failed update can return to its
-previous Core image. If that older Core later saves settings, it removes the
+previous Core. If that older Core later saves settings, it removes the
 unknown database locator. The next upgrade detects that changed source and
 imports the newer save. An interrupted import with unchanged source bytes
 reuses the committed document.
@@ -335,9 +326,9 @@ API listener and selected integration changes still need a restart.
 
 State schema 2 marks this settings migration, so an update from older Core
 versions takes a full backup first. To return to a Core that reads YAML, stop
-Core and restore a full backup with its matching Core version. An image-only
-downgrade to state schema 1 is refused; the import seed can be older than the
-settings saved in SQLite.
+Core and restore a full backup with its matching Core version. A downgrade of
+the program alone to state schema 1 is refused; the import seed can be older
+than the settings saved in SQLite.
 
 
 Document revisions only prevent stale Settings forms from overwriting a newer
@@ -526,9 +517,7 @@ method is never consulted:
   the box. Refused with `E_LOCAL_ONLY`, and neither a role nor a ceremony
   changes that.
 
-The method used to decide this, and it was wrong twice. `GET
-/api/caldav/credentials` was priced as a read and handed a shared viewer a
-password that is a write channel back into dispatch. `POST
+The method used to decide this, and it was wrong. `POST
 /api/self_tune/start` was priced as ordinary configuration while it pauses
 control and drives every battery through ±3000 W for minutes. A verb cannot
 know what a handler does, so it is no longer asked.
@@ -648,10 +637,19 @@ There are two channels:
 - `beta`: every new release candidate, used for real-site validation;
 - `stable`: promotion of the exact commit already published and tested as beta.
 
-Core includes Energyplan. Core and signed Drivers use the same
-beta-to-stable progression. Core and its privileged updater remain a
-paired control plane; optional components negotiate compatibility with Core.
-There is no edge channel. See [self-update.md](self-update.md).
+Core ships as one release package, `ftw-linux-<arch>.tar.gz`, with the
+launcher, the `ftw` command, web files, recovery drivers and Energyplan. On
+a native install, systemd starts `ftw-launcher`, which runs Core from release
+slots under `/opt/ftw`. `ftw update` downloads the next package into a slot;
+the launcher runs it as a trial and commits it only once it becomes ready,
+otherwise it goes back to the release that ran before
+([ADR 0007](adr/0007-self-updating-binary.md)). No privileged updater runs
+on native. The frozen 1.x–3.x Docker line paired Core with a privileged
+`ftw-updater` sidecar.
+
+Core and signed Drivers use the same beta-to-stable progression. Optional
+components negotiate compatibility with Core. There is no edge channel. See
+[self-update.md](self-update.md) and [linux-packages.md](linux-packages.md).
 
 ## Start reading
 

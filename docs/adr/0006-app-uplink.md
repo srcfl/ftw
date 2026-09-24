@@ -2,7 +2,7 @@
 
 - Status: accepted and implemented
 - Date: 2026-08-05
-- Supersedes: [ADR 0005](0005-outbound-site-link.md) in full. Home Link's
+- Supersedes: ADR 0005 (the outbound site link, removed with it) in full. Home Link's
   packages, HTTP endpoints, config block, relay binary, web pages and deploy
   script are deleted, not deprecated
 - Preserves: ADR 0003's retirement of the earlier remote-access implementation.

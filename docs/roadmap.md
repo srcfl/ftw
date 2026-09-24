@@ -9,109 +9,17 @@ and site evidence before claiming a gap or completion. Preserve established
 behaviour while simplifying the product. Bug fixes, security, recovery and
 necessary maintenance continue alongside product work.
 
-## Implementation review, 12 September 2026
+## Remaining work after the 12 September 2026 review
 
-### Selected scope after the PR review
-
-The owner selected the delivery order below. Start with the confirmed Core
-control and Lua-host gaps, then finish the daily charging flow. Keep necessary
-maintenance in small changes alongside that work.
-
-The STRÅNG, roof-geometry, panel-drawing and related settings stack
-([#734](https://github.com/srcfl/ftw/pull/734),
-[#735](https://github.com/srcfl/ftw/pull/735),
-[#826](https://github.com/srcfl/ftw/pull/826),
-[#1052](https://github.com/srcfl/ftw/pull/1052)) leaves the Core queue.
-Preserve the work as reference for a possible optional extension. Its form
-is undecided; do not add a module framework now. Default setup must work
-without irradiance-source selection, azimuth or panel geometry.
-
-Close the retired Python-optimizer work in
-[#963](https://github.com/srcfl/ftw/pull/963) and
-[#1036](https://github.com/srcfl/ftw/pull/1036). Core removed that runtime in
-[#1083](https://github.com/srcfl/ftw/pull/1083); new solver work belongs in
-Energyplan. Retain the useful requirements: report unmet household goals,
-compare plans with one physical and economic model, and evaluate whether
-cost-neutral peak reduction improves the current planner. These requirements
-do not authorize restoring the Python runtime or copying private solver source
-into Core.
-
-[#971](https://github.com/srcfl/ftw/pull/971) already reached Core through the
-Energyplan integration; its exact head is in master's history. Close the
-remaining PR against its old feature base. Preserve independent benchmarks
-and Python development tools where they verify today's product; they are not
-the retired optimizer runtime.
-
-### First delivery after the review
-
-Core [#1170](https://github.com/srcfl/ftw/pull/1170) and
-[#1199](https://github.com/srcfl/ftw/pull/1199) merged on 12 September.
-Missing-SoC protection now holds through final dispatch. Load calculations
-exclude offline devices; the curtailment helper requires a fresh site meter. The Lua host rejects absent command hooks and
-read-only commands, denies writes during fingerprint probes, and requires a
-safe default for PV control too. The recovery pin carries 40 drivers, each
-covered by the startup-contract test.
-
-Webapp [#57](https://github.com/srcfl/ftw-webapp/pull/57) also merged. A manual
-mode keeps a clear **Use the plan** action. Sending and confirmed state remain
-distinct, and mode changes cannot overlap with the same control revision.
-
-The Core changes passed `make verify` and CI. The webapp passed its verification
-suite, shared-contract checks and a browser run against the protocol simulator.
-These results close the confirmed code defects; they do not complete physical
-safe-default qualification, the full daily charging outcome or a release.
-The implementation review below remains the original baseline for comparison.
-
-The next product change remains the direct post-plug-in SoC flow, accepted-plan
-feedback and actionable missed-departure risk. Verify recurring goals, Charge
-now and restart recovery together on a named charger with an offline car.
-Keep target-box response and safe-default evidence alongside that work.
-
-### Reviewed baseline
-
-This baseline checks Core `f1a3b765`, webapp `ff7af033`, native app
-`79fdd0e8`, drivers `7e594655`, and website `d26e14f7`, after the shared
-vision changes merged. It combines source review, repository tests and a local
-webapp simulator rendered in a browser. It is not an audit of every installed
-box, hardware combination or measured saving.
-
-Much of the required foundation exists. The next work should close gaps in
-that foundation and complete daily flows, rather than replace the planner or
-add another control service.
-
-### Close confirmed control gaps first
-
-Core already has a [site freshness gate](../go/cmd/ftw/site_dispatch_safety.go),
-[device-fault exclusion and retries](../go/cmd/ftw/driver_failure_default.go),
-and [planner filtering of available batteries](../go/internal/mpc/service.go).
-These need to work through every path. Current legacy paths still differ:
-
-- [LuaDriver.Command](../go/internal/drivers/lua.go) returns success when
-  `driver_command` is absent.
-- [siteLoadW](../go/internal/control/dispatch.go) sums cached battery and PV
-  watts without excluding offline drivers. In the existing regression cases,
-  a 500 W house becomes 4,500 W or 5,500 W.
-- The same dispatch file substitutes 10% for missing battery SoC. One
-  regression case produces a -1,200 W battery target without a SoC reading.
-- `liveCurtailLimitW` accepts an old or offline meter in isolated tests.
-  The outer site gate already blocks stale-site dispatch; the inner helper
-  still needs its own correct freshness contract.
-
-Nine existing regression cases from
+The owner reviewed Core, the webapp, the native app, drivers and the website
+on 12 September 2026 and chose the delivery order below. The first delivery,
 [#1170](https://github.com/srcfl/ftw/pull/1170) and
-[#1199](https://github.com/srcfl/ftw/pull/1199) were run against this baseline
-through a temporary Go test overlay: seven failed and two passed. No runtime
-source was changed. These are gaps in the existing test coverage and code,
-not regressions from the documentation merge.
+[#1199](https://github.com/srcfl/ftw/pull/1199), closed the confirmed control
+and Lua-host gaps and is merged. The settings stack for roof geometry and
+panels (#734, #735, #826, #1052) and the retired Python optimizer work stay out
+of Core; new solver work belongs in Energyplan.
 
-Continue those PRs before adding wider actuation. Recheck their current diffs
-and reviews: missing-SoC protection must survive slew and final clamps;
-read-only metadata must agree with actual command enforcement; PV curtailment
-needs the default-mode gate too. Verify the bundled driver pin through startup
-with any stricter host rule. An earlier approval or a merged driver-source
-change does not prove the currently pinned recovery bundle passes.
-
-### Existing behaviour and remaining product work
+### What exists and what remains
 
 | Area | What the baseline contains | What remains |
 |---|---|---|
@@ -133,7 +41,7 @@ clear result that the owner can review.
 
 | Order | Delivery | Done when |
 |---|---|---|
-| 1 | Close the confirmed legacy control and host gaps in #1170 and #1199. | The failing baseline cases pass through the final command path; remaining review findings are resolved; the pinned driver set starts and reaches its safe defaults. |
+| 1 | Close the confirmed legacy control and host gaps in #1170 and #1199. | Done: both merged on 12 September. Physical safe-default qualification continues on target boxes. |
 | 2 | Complete everyday charging. | Plug in → open app → correct SoC → see accepted plan takes no extra navigation or Save. Recurring weekday goals, Charge now, restart recovery and goal-risk notifications work together on a named charger and offline-car setup. |
 | 3 | Complete first-day commissioning and simple defaults. | A new mixed site reaches safe automatic operation with confirmed fuse/meter, minimal required input and a receipt for observed control. Wrong starting ratings and failed integrations have clear handling; learned power does not replace hard equipment limits. |
 | 4 | Share live evidence with people and agents. | One structured path explains intent, command result, freshness and measured outcome. Both normal Flow and an authorized analysis agent can use it. Target-box latency and differing sampling rates are measured; forecast evaluation covers cold start and learned periods. |

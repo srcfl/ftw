@@ -91,5 +91,6 @@ failure and recovery.
 
 Home Assistant, notifications, cloud drivers, price/weather services
 and Nova fail soft. Their network I/O is outside the control tick, and their
-failure cannot disable local measurement or safety. Self-update snapshots state
-before replacement and uses immutable version targets.
+failure cannot disable local measurement or safety. Updates install immutable,
+checksummed release packages, and a release that does not become ready falls
+back to the previous one.
