@@ -4,13 +4,14 @@ import "encoding/json"
 
 // Read-only tools the model may call. Anything else is refused as unknown.
 const (
-	ToolSupportReport = "get_support_report"
-	ToolDriverHealth  = "get_driver_health"
-	ToolRecentLogs    = "get_recent_logs"
-	ToolPlanNow       = "get_plan_now"
-	ToolVersion       = "get_version"
-	maxRounds         = 6
-	maxToolResult     = 20_000
+	ToolSupportReport    = "get_support_report"
+	ToolDriverHealth     = "get_driver_health"
+	ToolRecentLogs       = "get_recent_logs"
+	ToolPlanNow          = "get_plan_now"
+	ToolChargingEvidence = "get_charging_evidence"
+	ToolVersion          = "get_version"
+	maxRounds            = 6
+	maxToolResult        = 20_000
 )
 
 // Runner executes one allowed tool. The HTTP layer implements it against
@@ -45,6 +46,9 @@ func ToolDefs() []ToolDef {
 		fn(ToolPlanNow,
 			"What the box is doing this minute: mode, live power, the plan slot covering now, and the last commands sent.",
 			`{"type":"object","properties":{}}`),
+		fn(ToolChargingEvidence,
+			"Structured charging evidence for one loadpoint: saved goal, plan windows, Core's last commanded watts and reason, charger feedback, and separately timestamped observed power. Call without id to list loadpoint IDs. Null observed values are unknown; cached loadpoint fields are not live proof. Commanded watts are not a device acknowledgement, and measured power does not prove which command caused it. Read-only.",
+			`{"type":"object","properties":{"id":{"type":"string","description":"Loadpoint ID. Omit to list IDs."}},"additionalProperties":false}`),
 		fn(ToolVersion,
 			"FTW version running on this box.",
 			`{"type":"object","properties":{}}`),
@@ -65,7 +69,7 @@ func fn(name, desc, params string) ToolDef {
 // AllowedTool is true only for the read-only tools advertised above.
 func AllowedTool(name string) bool {
 	switch name {
-	case ToolSupportReport, ToolDriverHealth, ToolRecentLogs, ToolPlanNow, ToolVersion:
+	case ToolSupportReport, ToolDriverHealth, ToolRecentLogs, ToolPlanNow, ToolChargingEvidence, ToolVersion:
 		return true
 	default:
 		return false

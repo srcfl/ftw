@@ -515,6 +515,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/ev/chargers", Configure, s.handleEVChargers)
 	s.handle("GET  /api/ev/providers", Read, s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", Read, s.handleLoadpoints)
+	s.handle("GET  /api/loadpoints/{id}/evidence", Read, s.handleLoadpointEvidence)
 	// Via names the one field of this body the session can set. The target
 	// level and its deadline still have no command; the passthrough refuses
 	// the whole route either way.
@@ -3581,13 +3582,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}, "vehicle_limit_goal_supported": true})
 		return
 	}
-	states := s.deps.Loadpoints.States()
-	if s.deps.Tel != nil {
-		decorateLoadpointsWithVehicle(states, s.deps.Tel)
-	}
-	s.decorateLoadpointsWithManual(states)
-	s.decorateLoadpointsWithBatteryBoost(states)
-	s.decorateLoadpointsWithPlan(states)
+	states, _ := s.loadpointStates()
 	writeJSON(w, 200, map[string]any{
 		"enabled":                      true,
 		"vehicle_limit_goal_supported": true,

@@ -24,7 +24,7 @@ import (
 // and is called from handleLoadpoints in api.go.
 
 // decorateLoadpointsWithPlan mutates states in place.
-func (s *Server) decorateLoadpointsWithPlan(states []loadpoint.State) {
+func (s *Server) decorateLoadpointsWithPlan(states []loadpoint.State) mpc.PlanSnapshot {
 	now := time.Now()
 	var snapshot mpc.PlanSnapshot
 	if s.deps.MPC != nil {
@@ -59,6 +59,7 @@ func (s *Server) decorateLoadpointsWithPlan(states []loadpoint.State) {
 			})
 		}
 	}
+	return snapshot
 }
 
 // maxPlanWindows bounds the list a client gets. A 48 h horizon in 15 min

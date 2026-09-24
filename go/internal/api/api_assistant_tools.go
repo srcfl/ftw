@@ -27,6 +27,8 @@ func (s *Server) runAssistantTool(name string, args json.RawMessage) (string, er
 		return s.toolRecentLogs(args), nil
 	case assistant.ToolPlanNow:
 		return s.toolPlanNow(), nil
+	case assistant.ToolChargingEvidence:
+		return s.toolChargingEvidence(args)
 	case assistant.ToolVersion:
 		v := strings.TrimSpace(s.deps.Version)
 		if v == "" {
