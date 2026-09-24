@@ -79,7 +79,7 @@ func (c *client) update(ctx context.Context, out io.Writer, retry bool) error {
 	var started struct {
 		Target string `json:"target"`
 	}
-	if err := c.post(ctx, "/api/version/update", &started); err != nil {
+	if err := c.call(ctx, http.MethodPost, "/api/version/update", map[string]bool{"retry": retry}, &started, c.env.requestTimeout); err != nil {
 		return err
 	}
 	if started.Target != info.Latest {

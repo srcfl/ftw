@@ -340,6 +340,21 @@ func main() {
 	backfillForce := flag.Bool("backfill-force", false, "DEV ONLY: bypass the non-synthetic-data safety gate")
 	flag.Parse()
 	nativeRoot := os.Getenv("FTW_NATIVE_SLOT_ROOT")
+	// A stop that arrives while Core is still starting is deliberate too, so
+	// it must not count as a crash during an update's probation. The control
+	// loop takes this channel over once it runs.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	bootDone := make(chan struct{})
+	go func() {
+		select {
+		case <-sigc:
+			slog.Info("stopped while starting")
+			markNativeCleanExit(nativeRoot)
+			os.Exit(0)
+		case <-bootDone:
+		}
+	}()
 	trial, err := beginNativeTrial(nativeRoot, os.Getenv("FTW_NATIVE_TRIAL_TAG"), Version)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "native release preflight:", err)
@@ -2784,9 +2799,8 @@ func main() {
 		lpController.SetCommandTimeout(driverCmdTimeout)
 	}
 
-	// Graceful shutdown
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	// Graceful shutdown: the loop below now handles the stop signals.
+	close(bootDone)
 
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
