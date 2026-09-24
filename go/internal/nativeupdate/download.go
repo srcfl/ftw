@@ -39,6 +39,7 @@ func (d Downloader) Install(ctx context.Context, tag string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	d.Manager.removeLeftovers(dir)
 	archive, err := os.CreateTemp(dir, ".archive-*")
 	if err != nil {
 		return err

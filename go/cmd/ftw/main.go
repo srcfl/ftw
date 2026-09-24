@@ -2353,6 +2353,14 @@ func main() {
 		if nativeRoot != "" {
 			statusPath = filepath.Join(nativeRoot, "update-status.json")
 		}
+		// FTW_RELEASE_MIRROR serves the release list at /releases and the
+		// packages at /download/<tag>/, as GitHub does. It exists to test the
+		// native chain with releases that are not published; leave it unset.
+		var releasesURL, nativeReleaseURL string
+		if mirror := strings.TrimRight(os.Getenv("FTW_RELEASE_MIRROR"), "/"); mirror != "" && nativeRoot != "" {
+			releasesURL, nativeReleaseURL = mirror+"/releases", mirror+"/download"
+			slog.Warn("selfupdate: native releases come from a mirror", "url", mirror)
+		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
 			CurrentVersion:     current,
 			CurrentStateSchema: state.SchemaVersion,
@@ -2360,6 +2368,8 @@ func main() {
 			StatusPath:         statusPath,
 			NativeRoot:         nativeRoot,
 			NativeTrialTimeout: nativeTrialTimeout,
+			ReleasesURL:        releasesURL,
+			NativeReleaseURL:   nativeReleaseURL,
 			NativeRestart: func() error {
 				restartOnce.Do(func() {
 					reexecAfterShutdown, exitCode = false, 1
@@ -2813,6 +2823,7 @@ func main() {
 		select {
 		case <-sigc:
 			slog.Info("shutting down")
+			markNativeCleanExit(nativeRoot)
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
@@ -2824,6 +2835,7 @@ func main() {
 			} else {
 				slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
 			}
+			markNativeCleanExit(nativeRoot)
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)

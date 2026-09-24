@@ -15,8 +15,10 @@ const notNative = "this Core is not a native install; ftw only updates native FT
 
 func runUpdate(args []string, out io.Writer, e env) error {
 	var channel string
-	base, err := parse(args, out, "ftw update [--channel beta|stable] [--url URL]", func(fs *flag.FlagSet) {
+	var retry bool
+	base, err := parse(args, out, "ftw update [--channel beta|stable] [--retry] [--url URL]", func(fs *flag.FlagSet) {
 		fs.StringVar(&channel, "channel", "", "")
+		fs.BoolVar(&retry, "retry", false, "")
 	})
 	if err != nil {
 		return err
@@ -42,10 +44,10 @@ func runUpdate(args []string, out io.Writer, e env) error {
 		}
 		fmt.Fprintf(out, "Channel: %s -> %s\n", info.Channel, channel)
 	}
-	return c.update(ctx, out)
+	return c.update(ctx, out, retry)
 }
 
-func (c *client) update(ctx context.Context, out io.Writer) error {
+func (c *client) update(ctx context.Context, out io.Writer, retry bool) error {
 	var info versionInfo
 	if err := c.get(ctx, "/api/version/check?force=1", &info); err != nil {
 		return fmt.Errorf("release check failed: %w", err)
@@ -56,6 +58,11 @@ func (c *client) update(ctx context.Context, out io.Writer) error {
 	if !info.UpdateAvailable {
 		fmt.Fprintf(out, "Already current on %s: %s\n", info.Channel, info.Current)
 		return nil
+	}
+	if info.LastFailed != "" && info.LastFailed == info.Latest && !retry {
+		// An unattended run would otherwise install a failing release again
+		// and again.
+		return fmt.Errorf("%s already failed on this box, so ftw update waits for a newer release; run ftw update --retry to try it again", info.Latest)
 	}
 	if info.FullBackupRequired {
 		return fmt.Errorf("%s changes stored data (state schema %d -> %d), which a native update cannot take yet; %s stays installed",
@@ -116,10 +123,13 @@ func runRollback(args []string, out io.Writer, e env) error {
 func (c *client) nativeInfo(ctx context.Context) (versionInfo, error) {
 	var info versionInfo
 	if err := c.get(ctx, "/api/version/check", &info); err != nil {
+		if c.waitingForSetup(ctx) {
+			return info, fmt.Errorf("Core is waiting for setup; finish it at %s/setup first", c.base)
+		}
 		if selfUpdateOff(err) {
 			return info, errors.New(notNative)
 		}
-		return info, fmt.Errorf("Core is not answering at %s: %w", c.base, err)
+		return info, fmt.Errorf("Core is not answering at %s: %w; %s", c.base, err, offlineRollback)
 	}
 	if !info.Native {
 		return info, errors.New(notNative)
@@ -234,9 +244,9 @@ func (c *client) follow(ctx context.Context, m *meter, action, target string, st
 			between.detail = "Core is restarting"
 			var h health
 			if c.get(ctx, "/api/health", &h) == nil && h.Status == "starting" {
-				between.detail = "new Core starting: " + orUnknown(h.Phase)
+				between.detail = "Core starting: " + orUnknown(h.Phase)
 				if mig := h.Migration; mig != nil && mig.State != "" && mig.State != "complete" {
-					between.detail = "new Core migrating history"
+					between.detail = "Core migrating history"
 					switch {
 					case mig.SourceBytesTotal != nil && *mig.SourceBytesTotal > 0 && mig.SourceBytesDone != nil:
 						between.unit, between.done, between.total = "bytes", *mig.SourceBytesDone, *mig.SourceBytesTotal

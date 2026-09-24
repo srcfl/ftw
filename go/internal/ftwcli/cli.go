@@ -21,6 +21,7 @@ It uses Core's local API and never starts Core itself.
 Usage:
   ftw status                          version, releases, last update and health
   ftw update [--channel beta|stable]  install the next release; already current exits 0
+             [--retry]                  also a release that failed here before
   ftw rollback                        return to the previous release
   ftw backup [--output-dir DIR]       make a verified full backup; DIR gets a checked copy
   ftw support [--output FILE]         write the redacted support file
