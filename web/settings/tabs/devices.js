@@ -1005,7 +1005,7 @@
         var entryForDriver = catalogEntryForLua(d.lua);
         var supportsBattery = catalogHasCapability(d.lua, "battery") &&
           !(entryForDriver && entryForDriver.read_only);
-        html += '<div class="device-item">' +
+        html += '<div class="device-item" data-device-idx="' + idx + '">' +
           '<div class="device-item-header">' +
           '<strong>' + escHtml(d.name) + '</strong>' +
           '<span class="device-meta">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
@@ -1644,6 +1644,12 @@
               return k !== 'client_secret' && k !== 'refresh_token';
             });
           }
+          // Cloud credentials already render config.password. A second
+          // Secrets field bound to the same path (Easee, Zaptec) saves
+          // whichever input is read last and shows the wrong hint.
+          if (bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.password"]')) {
+            secrets = secrets.filter(function (k) { return k !== 'password'; });
+          }
           if (secrets.length === 0) return;
           var fs = '<fieldset><legend>Secrets</legend>';
           secrets.forEach(function (key) {
@@ -1863,11 +1869,7 @@
           config.drivers.push(driver);
           if (S.chargerSetup) S.chargerSetupPending = driver.name;
           ctx.renderTab("devices");
-          if (S.chargerSetup) {
-            var connection = bodyEl.querySelector('[data-path="drivers.' + (config.drivers.length - 1) + '.config.email"]') ||
-              bodyEl.querySelector('[data-path="drivers.' + (config.drivers.length - 1) + '.config.host"]');
-            if (connection) { connection.scrollIntoView({ block: 'center' }); connection.focus(); }
-          }
+          revealAddedDevice(config.drivers.length - 1);
         };
         if (chosen.dataset.channel !== "beta") {
           finishAdd();
@@ -2182,6 +2184,22 @@
       // Add/remove-device buttons.
       var addMqtt = document.getElementById("add-mqtt");
       var addModbus = document.getElementById("add-modbus");
+      function revealAddedDevice(idx) {
+        var card = bodyEl.querySelector('.device-item[data-device-idx="' + idx + '"]');
+        if (!card) return;
+        card.style.outline = "2px solid var(--accent, #888)";
+        card.style.scrollMargin = "1rem";
+        if (card.scrollIntoView) card.scrollIntoView({ block: "center" });
+        var field = card.querySelector(
+          '[data-path="drivers.' + idx + '.config.email"],' +
+          '[data-path="drivers.' + idx + '.config.host"],' +
+          '[data-path="drivers.' + idx + '.config.ip"],' +
+          '[data-path="drivers.' + idx + '.capabilities.mqtt.host"],' +
+          '[data-path="drivers.' + idx + '.capabilities.modbus.host"]'
+        );
+        if (field && field.focus) field.focus();
+        window.setTimeout(function () { card.style.outline = ""; }, 4000);
+      }
       if (addMqtt) addMqtt.addEventListener("click", function () {
         ctx.captureCurrentTab();
         config.drivers.push({
@@ -2192,6 +2210,7 @@
           mqtt: { host: "", port: 1883, username: "", password: "" },
         });
         ctx.renderTab("devices");
+        revealAddedDevice(config.drivers.length - 1);
       });
       if (addModbus) addModbus.addEventListener("click", function () {
         ctx.captureCurrentTab();
@@ -2203,6 +2222,7 @@
           modbus: { host: "", port: 502, unit_id: 1 },
         });
         ctx.renderTab("devices");
+        revealAddedDevice(config.drivers.length - 1);
       });
       bodyEl.querySelectorAll("[data-remove-idx]").forEach(function (rmBtn) {
         rmBtn.addEventListener("click", function () {

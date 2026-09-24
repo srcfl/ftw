@@ -13,6 +13,9 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /progress_total/);
   assert.match(badge, /case "checking":\s+return "Checking service health"/);
   assert.match(badge, /This step:/);
+  assert.match(badge, /written, total unknown/);
+  assert.match(badge, /No new measured progress for/);
+  assert.doesNotMatch(badge, /Large history databases can take several minutes/);
   assert.match(badge, /Total:/);
   assert.match(badge, /Saving rollback point \(settings and config; history stays in place\)/);
   assert.doesNotMatch(badge, /full history backup/);

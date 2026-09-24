@@ -1178,8 +1178,20 @@
       const progress = operationProgress(st, action);
       const phaseStarted = st.phase_started_at ? Date.parse(st.phase_started_at) : 0;
       const phaseElapsed = Math.max(0, Math.round((Date.now() - (phaseStarted > 0 ? phaseStarted : this._updateStartedAt)) / 1000));
-      const byteProgress = st.progress_unit === "bytes" && st.progress_total > 0
-        ? `<p class="dim">${escapeHTML(formatBytes(st.progress_current || 0))} / ${escapeHTML(formatBytes(st.progress_total))}</p>`
+      const bytesNow = Number(st.progress_current) || 0;
+      const bytesTotal = Number(st.progress_total) || 0;
+      if (st.progress_unit === "bytes" && bytesNow !== this._measuredBytes) {
+        this._measuredBytes = bytesNow;
+        this._measuredAt = Date.now();
+      }
+      const byteProgress = st.progress_unit === "bytes" && (bytesNow > 0 || bytesTotal > 0)
+        ? (bytesTotal > 0
+          ? `<p class="dim">${escapeHTML(formatBytes(bytesNow))} / ${escapeHTML(formatBytes(bytesTotal))}</p>`
+          : `<p class="dim">${escapeHTML(formatBytes(bytesNow))} written, total unknown</p>`)
+        : "";
+      const quietFor = this._measuredAt ? Date.now() - this._measuredAt : 0;
+      const stalled = st.progress_unit === "bytes" && bytesNow > 0 && quietFor > 20000
+        ? `<p class="dim">No new measured progress for ${escapeHTML(formatElapsed(Math.round(quietFor / 1000)))}. The clock above is only how long this step has been open.</p>`
         : "";
       const progressHTML = failed ? "" : `
         <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.step}">
@@ -1187,7 +1199,8 @@
         </div>
         <p class="update-step">Step ${progress.step} of ${progress.total} · ${escapeHTML(label)}</p>
         <p class="dim">This step: ${escapeHTML(formatElapsed(phaseElapsed))}</p>
-        ${byteProgress}`;
+        ${byteProgress}
+        ${stalled}`;
 
       const body = failed
         ? `<p class="err">${escapeHTML(st.message || "Update failed")}</p>

@@ -321,6 +321,14 @@ import {
       : 'Mathematical optimizer unavailable. This plan uses the built-in Go fallback.' + reason;
   }
 
+  function configuredDeviceCount(status) {
+    const drivers = status && status.drivers;
+    if (!drivers) return 0;
+    if (Array.isArray(drivers)) return drivers.length;
+    if (typeof drivers === 'object') return Object.keys(drivers).length;
+    return 0;
+  }
+
   function render() {
     const canvas = document.getElementById('plan-chart');
     if (!canvas) return;
@@ -345,6 +353,14 @@ import {
     const { tMin, tMax } = horizonBounds(state.horizon);
     const xScale = t => pad.l + (t - tMin) / (tMax - tMin) * plotW;
     const plan = state.plan;
+    if (configuredDeviceCount(state.status) === 0) {
+      ctx.fillStyle = C.dim;
+      ctx.font = '14px sans-serif';
+      ctx.fillText('No devices yet. Add one in Settings.', pad.l, pad.t + 28);
+      const summary = document.getElementById('plan-summary');
+      if (summary) summary.textContent = 'No devices yet — add a device in Settings, and the plan starts once FTW can see your site.';
+      return;
+    }
 
     // Layout: price bars (top) | mode band (thin strip) | power bars (middle) | SoC (bottom)
     const modeBandH = 10;

@@ -2883,6 +2883,9 @@
       text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "pv_surplus_pause") {
       text = "Paused: waiting for PV surplus — solar is below the charger's minimum step right now." + kwPlanned;
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "no_plan_budget" && !hasSchedule) {
+      text = "No schedule set. Create a schedule or charge manually.";
+      tone = "var(--text)";
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "no_plan_budget") {
       var deadlineMs = lp.target_time ? Date.parse(lp.target_time) : NaN;
       if (isFinite(deadlineMs) && deadlineMs <= Date.now()) {
