@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.136.1
+
+### Patch Changes
+
+- 3dcf95e: `ftw backup` no longer reports "EOF" when a backup takes more than two minutes.
+  Backup creation, verification and download now outlast the server's write
+  timeout; before, the archive was made but the reply was cut off.
+- 78f51fe: The installer now says why it refuses: an older FTW points to "Coming from an
+  older FTW" in the beta guide, and a login named `ftw` (common on cards from the
+  old image) asks for another username. The Docker files use their own project and
+  folder name, `ftw-local`, so they never mix with an older FTW stack.
+- 7c4d286: On phones the notification bell sits beside the menu button with its count and
+  opens its history on its own. "Run setup wizard" leaves the header and moves to
+  Settings → System, which says that saving it replaces the current settings; More
+  still links it.
+
 ## 0.136.0
 
 ### Minor Changes
