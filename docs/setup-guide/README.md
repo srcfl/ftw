@@ -1,12 +1,9 @@
 # Setup Guide — FTW
 
-Alternativ manuell installation av Raspberry Pi OS + Docker för FTW, i flera
-språk. Den rekommenderade vägen är den färdiga FTW-imagen i
-[`docs/rpi-image.md`](../rpi-image.md).
+Så förbereder du en Raspberry Pi med Raspberry Pi OS för FTW, på flera språk.
 
-Alternative manual Raspberry Pi OS + Docker setup for FTW, in several
-languages. The recommended path is the ready-made FTW image in
-[`docs/rpi-image.md`](../rpi-image.md).
+How to prepare a Raspberry Pi with Raspberry Pi OS for FTW, in several
+languages.
 
 - Svenska — [sv.md](sv.md)
 - English — [en.md](en.md)

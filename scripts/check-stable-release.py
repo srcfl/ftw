@@ -11,7 +11,6 @@ STABLE_TAG = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
 REQUIRED_ASSETS = sorted(
     [
         "ftw-promotion-receipt.json",
-        "os_list.json",
         "ftw-linux-amd64.tar.gz",
         "ftw-linux-amd64.tar.gz.sha256",
         "forty-two-watts-linux-amd64.tar.gz",

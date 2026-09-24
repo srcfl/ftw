@@ -42,13 +42,6 @@ dev-data/
 # Per-user Codex CLI tooling — machine-local, not part of the project.
 .codex/
 
-# pi-gen image builder — cloned by deploy/pi-gen/build.sh into the
-# deploy/pi-gen/ subtree, plus the per-build copies of files that
-# the stage pulls from the repo root at build time.
-/deploy/pi-gen/pi-gen/
-/deploy/pi-gen/stage-ftw/01-ftw-setup/files/docker-compose.yml
-/deploy/pi-gen/stage-ftw/01-ftw-setup/files/mosquitto.conf
-
 # State DB
 *.db
 *.db.clean
