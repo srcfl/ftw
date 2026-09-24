@@ -16,6 +16,8 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /written, total unknown/);
   assert.match(badge, /No new measured progress for/);
   assert.doesNotMatch(badge, /Large history databases can take several minutes/);
+  assert.match(badge, /if \(!this\._info\) return this\._versionLoadingHTML\(\)/);
+  assert.match(badge, /if \(info\.native\) return this\._nativeVersionHTML\(info\)/);
   assert.match(badge, /Total:/);
   assert.match(badge, /Saving rollback point \(settings and config; history stays in place\)/);
   assert.doesNotMatch(badge, /full history backup/);
@@ -32,6 +34,11 @@ test("setup keeps polling when a safe update takes longer", () => {
   assert.doesNotMatch(setup, /this\._stopPolling\(\);\s+this\._phase = "timedOut"/);
   assert.match(setup, /case "snapshotting": return "Saving rollback point"/);
   assert.match(setup, /case "checking":\s+return "Checking service health"/);
+});
+
+test("setup on a native install names ftw update and offers no update button", () => {
+  assert.match(setup, /info\.native === true \|\| info\.sidecar_ready === true/);
+  assert.match(setup, /const actions = info\.native\s+\? `<div class="banner-hint">After setup, install it on the machine that runs FTW with <code>ftw update<\/code>\.<\/div>\s+<div class="banner-actions">\s+<button class="btn-skip" data-action="dismiss">Continue<\/button>/);
 });
 
 test("Core image sets ownership during copy without a duplicate app layer", () => {

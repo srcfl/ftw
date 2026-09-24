@@ -92,25 +92,31 @@ commit. Beta and stable contain different embedded version strings, so each
 package has its own hash and receipt. A tag, green CI run or published package
 alone is not field validation.
 
-On a native site, Update Center can download and verify a 0.x package, create
-a mandatory local settings/config rollback point, stage the new slot and
-restart through the launcher. A trial only becomes current after readiness;
-a failed trial falls back to the previous Core. A local rollback point does
-not include history and stays on the same disk. A history-format change needs
-a full backup made before the update. See
-[full backup and restore](backup-and-restore.md).
-
-The same operator CLI can show the native path from a terminal:
+On a native site the owner runs updates on the machine, by hand or from their
+own timer or agent. The installer puts the `ftw` command on `PATH`:
 
 ```bash
-python3 scripts/ftwctl.py --url http://127.0.0.1:18080 update --channel beta
+ftw status                   # version, published release, last update, health
+ftw update                   # install the next release on the saved channel
+ftw update --channel stable  # change the channel first
+ftw rollback                 # return to the previous release
 ```
 
-It asks Core to update through its normal API and follows the local rollback
-point, download, restart and health result. If Core says a full backup is
-required, pass `--backup-dir ~/FTW-backups` so the CLI first creates, verifies
-and downloads one to this computer. The `update` command refuses old 1.x,
-2.x and 3.x installs before changing their channel.
+`ftw update` asks Core to save a local settings/config rollback point,
+download and verify the 0.x package, stage the new slot and restart through
+the launcher. It prints each phase, waits through the restart and reports the
+version and health that result. A trial only becomes current after readiness;
+a failed trial falls back to the previous Core, and `ftw update` names the
+Core that runs. Already current exits 0, so a script can run the step
+unattended; a failed step exits 1. The same steps are Core API calls. A
+release that changes stored data (the state schema) cannot be installed
+natively yet; `ftw update` stops before it changes anything.
+
+`ftw rollback` returns to the previous release when it reads the same data.
+The web UI on a native install shows the running version, a published
+release and the command; it has no update controls. See
+[ADR 0007](adr/0007-self-updating-binary.md) and
+[full backup and restore](backup-and-restore.md).
 
 Core and the compiled Energyplan worker ship in one package. Core validates
 plans and keeps its Go fallback. Signed Lua drivers follow their own beta and

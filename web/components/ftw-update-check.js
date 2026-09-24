@@ -13,6 +13,8 @@
 //      update_available && !skipped && sidecar_ready. sidecar_ready
 //      is true when Docker's updater socket is reachable or a native
 //      release slot is ready. Dev runs keep the banner hidden.
+//      On a native install the banner only names `ftw update`; the owner
+//      runs it on the machine (ADR 0007, decision 12).
 //   4. Update-now posts /api/version/update, opens an <ftw-modal>-based
 //      progress overlay, polls /api/version/update/status, and
 //      cache-busts reloads on `done`. Long phases keep polling while the
@@ -70,6 +72,8 @@ class FtwUpdateCheck extends FtwElement {
       font-family: var(--mono, ui-monospace, monospace);
       color: var(--fg);
     }
+    .banner-hint { font-size: 0.8rem; color: var(--fg-dim); }
+    .banner-hint code { font-family: var(--mono, ui-monospace, monospace); color: var(--fg); }
     .banner-notes {
       font-size: 0.78rem;
       color: var(--accent-e);
@@ -376,11 +380,12 @@ class FtwUpdateCheck extends FtwElement {
     // Banner is only useful when the full pull+restart flow is actionable.
     // sidecar_ready also means a native release slot is ready. Both paths
     // must be actionable before we offer the update button.
+    // A native banner only informs: the owner runs ftw update on the box.
     const showBanner =
       !!info &&
       info.update_available &&
       !info.skipped &&
-      info.sidecar_ready === true &&
+      (info.native === true || info.sidecar_ready === true) &&
       this._phase === "idle";
 
     // Toggle :host visibility so the element collapses when it has
@@ -437,15 +442,21 @@ class FtwUpdateCheck extends FtwElement {
       ? `<a class="banner-notes" href="${escapeHTML(href)}" target="_blank" rel="noopener">Release notes ↗</a>`
       : "";
 
-    return `
-      <div class="banner" part="banner">
-        <div class="banner-title">Update available</div>
-        <div class="banner-detail">${escapeHTML(info.current || "?")}  →  ${escapeHTML(info.latest || "?")}</div>
-        ${notes}
+    const actions = info.native
+      ? `<div class="banner-hint">After setup, install it on the machine that runs FTW with <code>ftw update</code>.</div>
         <div class="banner-actions">
+          <button class="btn-skip" data-action="dismiss">Continue</button>
+        </div>`
+      : `<div class="banner-actions">
           <button class="btn-primary" data-action="update">Update now</button>
           <button class="btn-skip" data-action="dismiss">Continue anyway</button>
-        </div>
+        </div>`;
+    return `
+      <div class="banner" part="banner">
+        <div class="banner-title">${info.native ? "A newer release is published" : "Update available"}</div>
+        <div class="banner-detail">${escapeHTML(info.current || "?")}  →  ${escapeHTML(info.latest || "?")}</div>
+        ${notes}
+        ${actions}
       </div>
     `;
   }

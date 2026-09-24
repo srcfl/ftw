@@ -73,7 +73,7 @@ jobs:
       - name: Verify pure Go build and absence of DuckDB
         run: |
           set -euo pipefail
-          for binary in bin/linux/ftw bin/linux/ftw-backup bin/linux/ftw-launcher; do
+          for binary in bin/linux/ftw bin/linux/ftw-backup bin/linux/ftw-cli bin/linux/ftw-launcher; do
             go version -m "$binary" | tee "$binary.buildinfo"
             if grep -F 'github.com/duckdb/' "$binary.buildinfo"; then exit 1; fi
             grep -F 'CGO_ENABLED=0' "$binary.buildinfo"
@@ -90,6 +90,7 @@ jobs:
             sh -ec '
               /binaries/ftw -h
               /binaries/ftw-launcher -h
+              /binaries/ftw-cli help | grep -F "ftw update"
               set +e
               output=$(/binaries/ftw-backup 2>&1)
               status=$?

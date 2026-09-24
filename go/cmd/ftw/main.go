@@ -464,7 +464,7 @@ func main() {
 	)
 	listener, err := net.Listen("tcp", httpSrv.Addr)
 	if err != nil {
-		slog.Error("http listener could not bind", "addr", httpSrv.Addr, "err", err)
+		slog.Error("http listener could not bind", "addr", httpSrv.Addr, "err", explainBindError(httpSrv.Addr, err))
 		os.Exit(1)
 	}
 	go func() {
@@ -2359,6 +2359,7 @@ func main() {
 			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			StatusPath:         statusPath,
 			NativeRoot:         nativeRoot,
+			NativeTrialTimeout: nativeTrialTimeout,
 			NativeRestart: func() error {
 				restartOnce.Do(func() {
 					reexecAfterShutdown, exitCode = false, 1

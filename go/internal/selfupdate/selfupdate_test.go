@@ -766,6 +766,30 @@ func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 	}
 }
 
+func TestStatus_NativeRestartLastsUntilTheTrialDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now()
+	c := New(Config{StatusPath: path, NativeRoot: t.TempDir(), NativeTrialTimeout: 6 * time.Hour,
+		Now: func() time.Time { return now }}, nil)
+	restarting := UpdateStatus{State: "restarting", Action: "update", Target: "v0.133.0",
+		PhaseStartedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-20 * time.Minute)}
+
+	writeJSON(t, path, restarting)
+	if got := c.Status(); got.State != "restarting" {
+		t.Fatalf("20-minute native start = %q, want restarting", got.State)
+	}
+	restarting.UpdatedAt = now.Add(-6*time.Hour - time.Second)
+	writeJSON(t, path, restarting)
+	if got := c.Status(); got.State != "failed" {
+		t.Fatalf("native start past the trial deadline = %q, want failed", got.State)
+	}
+	restarting.State, restarting.UpdatedAt = "pulling", now.Add(-20*time.Minute)
+	writeJSON(t, path, restarting)
+	if got := c.Status(); got.State != "failed" {
+		t.Fatalf("silent native download = %q, want failed", got.State)
+	}
+}
+
 func TestStatus_AllowsSilentLegacyPullUntilItsDockerTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	now := time.Now()

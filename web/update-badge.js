@@ -47,6 +47,7 @@
       this._dialogRoot = null;
       this._storageOpen = false;
       this._info = null;              // last /api/version/check payload
+      this._lastRun = null;           // last finished update or rollback
       this._phase = "idle";           // idle | dialog | updating
       this._sidecarState = null;      // last /api/version/update/status
       this._updateStartedAt = 0;
@@ -97,6 +98,7 @@
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
           if (!this.isConnected || generation !== this._resumeGeneration) return;
+          if (st && (st.state === "done" || st.state === "failed")) this._lastRun = st;
           if (!st || !isUpdateInFlight(st.state) || this._phase === "updating") return;
           const started = st.started_at ? Date.parse(st.started_at) : 0;
           this._phase = "updating";
@@ -187,9 +189,11 @@
         this._render();
       });
       this._refresh(false); // surface the freshest info when opened
+      this._refreshComponents(false);
+      // A native box shows only its version; the rest feeds the old dialog.
+      if (this._info && this._info.native) return;
       this._refreshSnapshots(); // pull the list for the Snapshots accordion
       this._refreshBackups();
-      this._refreshComponents(false);
       this._refreshComponentHistory();
       this._refreshDriverCatalog();
     }
@@ -711,7 +715,8 @@
     _pendingUpdates() {
       const info = this._info || {};
       const core = !!(info.update_available && !info.skipped);
-      const drivers = this._driverEntries().filter((entry) => entry.pending_update).length;
+      // Native driver updates live in Settings › Devices, not in this panel.
+      const drivers = info.native ? 0 : this._driverEntries().filter((entry) => entry.pending_update).length;
       return { core, drivers, total: (core ? 1 : 0) + drivers };
     }
 
@@ -815,6 +820,8 @@
     _modalHTML() {
       const info = this._info || {};
       if (this._phase === "updating") return this._updatingModalHTML();
+      if (!this._info) return this._versionLoadingHTML();
+      if (info.native) return this._nativeVersionHTML(info);
 
       const hasUpdate = !!info.update_available;
       const pending = this._pendingUpdates();
@@ -905,6 +912,75 @@
           <footer>${actions}</footer>
         </div>
       `;
+    }
+
+    // On a native install the owner runs updates on the machine, by hand or
+    // from their own automation (ADR 0007, decision 12). This panel reports;
+    // it has no update, rollback, channel or backup controls.
+    _nativeVersionHTML(info) {
+      const channel = info.channel ? ` on the ${escapeHTML(info.channel)} channel` : "";
+      const checked = info.checked_at ? Date.parse(info.checked_at) : 0;
+      const checkedLine = checked > 0
+        ? `Checked ${new Date(checked).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+        : "Not checked yet.";
+      const notesHref = safeHref(info.release_notes_url);
+      const notes = notesHref
+        ? ` <a class="notes-link" href="${escapeHTML(notesHref)}" target="_blank" rel="noopener">What's new ↗</a>`
+        : "";
+      let release;
+      if (info.update_available && info.full_backup_required) {
+        release = `<p><strong>${escapeHTML(info.latest || "A newer release")}</strong> is published.${notes}</p>
+          <p class="err">It changes stored data, which a native update cannot take yet. ${escapeHTML(info.current || "This release")} stays installed.</p>`;
+      } else if (info.update_available) {
+        release = `<p><strong>${escapeHTML(info.latest || "A newer release")}</strong> is published.${notes}</p>
+          <p>On the machine that runs FTW, install it with:</p>
+          <pre class="cmd">ftw update</pre>`;
+      } else {
+        release = `<p class="dim">Nothing newer is published${channel}.</p>`;
+      }
+      const run = this._lastRun || {};
+      const action = run.action === "rollback" ? "rollback" : "update";
+      let lastRun = "";
+      if (run.state === "done") {
+        lastRun = `<p class="dim">Last ${action}: ${escapeHTML(run.message || "done")}</p>`;
+      } else if (run.state === "failed") {
+        lastRun = `<p class="err">Last ${action} failed: ${escapeHTML(run.message || "no reason given")}</p>`;
+      }
+      return `
+        <div class="backdrop" data-action="close"></div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
+          <header>
+            <h3 id="ftw-upd-title">Version</h3>
+            <button class="x" data-action="close" aria-label="Close">×</button>
+          </header>
+          <div class="body">
+            <p><strong>${escapeHTML(info.current || "unknown")}</strong> is running${channel}.</p>
+            ${release}
+            ${lastRun}
+            <p class="dim">On that machine, <code>ftw status</code> shows health and the last update, and <code>ftw help</code> lists the other steps.</p>
+            <p class="checked-at">${escapeHTML(checkedLine)}</p>
+            ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
+          </div>
+          <footer>
+            <button class="btn" data-action="check">Check again</button>
+          </footer>
+        </div>`;
+    }
+
+    // Shown until the first version check answers, so a native box never
+    // flashes the old Updates dialog.
+    _versionLoadingHTML() {
+      return `
+        <div class="backdrop" data-action="close"></div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
+          <header>
+            <h3 id="ftw-upd-title">Version</h3>
+            <button class="x" data-action="close" aria-label="Close">×</button>
+          </header>
+          <div class="body">
+            <p class="dim" role="status">Reading the running version…</p>
+          </div>
+        </div>`;
     }
 
     // Core's channel includes the bundled Energyplan worker.
@@ -1711,6 +1787,15 @@
           color: var(--red-e, #f87171); font-size: 0.85rem;
         }
         .dim { color: var(--fg-dim, #a0a0a0); font-size: 0.8rem; }
+        .cmd, code { font-family: var(--mono, ui-monospace, monospace); }
+        .cmd {
+          margin: 0.25rem 0 0.75rem;
+          padding: 0.5rem 0.7rem;
+          border: 1px solid var(--line, #2a2a2a);
+          border-radius: var(--radius-xs, 4px);
+          color: var(--fg, #e5e5e5);
+          user-select: all;
+        }
         .modal footer {
           display: flex; gap: 0.5rem; justify-content: flex-end;
           padding: 0.75rem 1rem;

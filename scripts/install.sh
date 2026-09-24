@@ -58,7 +58,7 @@ legacy_paths=(
   "$HOME/forty-two-watts/docker-compose.yml"
 )
 if [[ "$mode" == --fresh-host ]]; then
-  existing_paths=(/opt/ftw /var/lib/ftw /etc/systemd/system/ftw.service
+  existing_paths=(/opt/ftw /var/lib/ftw /etc/systemd/system/ftw.service /usr/local/bin/ftw
     /etc/systemd/system/forty-two-watts.service "$pending" "${legacy_paths[@]}")
 else
   existing_paths=("${legacy_paths[@]}")
@@ -199,6 +199,13 @@ as_root install -m 0755 "${work}/ftw-launcher" /opt/ftw/ftw-launcher
 as_root chown -R ftw:ftw /opt/ftw
 as_root /opt/ftw/ftw-launcher -root /opt/ftw init "$tag"
 as_root /opt/ftw/ftw-launcher -root /opt/ftw status >/dev/null
+# The operator command. Root owns this copy, so the service account cannot
+# replace a program that people may run with sudo.
+operator_command=no
+if as_root test -f "/opt/ftw/releases/${tag}/ftw-cli"; then
+  as_root install -m 0755 -o root -g root "/opt/ftw/releases/${tag}/ftw-cli" /usr/local/bin/ftw
+  operator_command=yes
+fi
 as_root install -m 0644 \
   "${stage}/releases/${tag}/deploy/ftw-native.service" \
   /etc/systemd/system/ftw.service
@@ -220,3 +227,7 @@ as_root rm "$pending"
 
 echo "Native FTW $tag is running. Open http://<host>:8080/setup to finish setup."
 echo "Check the reported version, storage health and live device readings before use."
+if [[ "$operator_command" == yes ]]; then
+  echo "On this machine, ftw status shows its state, ftw update installs a newer release"
+  echo "and ftw backup makes a verified backup. Run ftw help for the rest."
+fi
