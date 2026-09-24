@@ -5,7 +5,7 @@ run the host; FTW gives you a few commands for it
 ([ADR 0007](adr/0007-self-updating-binary.md), decisions 10–14). Install it
 natively with systemd, or run it in Docker. Both run the same release
 package. Report what you find in an issue that names the beta, for example
-`v0.136.2-beta.1`.
+`v0.136.3-beta.1`.
 
 ## Before you start
 
@@ -26,7 +26,7 @@ package. Report what you find in an issue that names the beta, for example
 Use the installer from the same tag you install:
 
 ```bash
-tag=v0.136.2-beta.1
+tag=v0.136.3-beta.1
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --fresh-host --tag "${tag}"
 ```
@@ -154,7 +154,7 @@ service definition. When a release notes changes to them, refresh them with
 the installer from that release:
 
 ```bash
-tag=v0.136.3-beta.1
+tag=v0.136.4-beta.1
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --refresh --tag "${tag}"
 ```
@@ -171,7 +171,7 @@ mkdir -p ~/ftw-local && cd ~/ftw-local
 base=https://raw.githubusercontent.com/srcfl/ftw/master/deploy/docker
 curl -fsSLO "${base}/compose.yaml" -O "${base}/Dockerfile"
 mkdir -p data && sudo chown 100:101 data
-echo "FTW_VERSION=v0.136.2-beta.1" > .env
+echo "FTW_VERSION=v0.136.3-beta.1" > .env
 docker compose up -d --build
 ```
 
@@ -192,7 +192,7 @@ version; its image is still on the host, so nothing is fetched. Going back
 works while both releases read the same data, as on a native install.
 
 ```bash
-sed -i 's/^FTW_VERSION=.*/FTW_VERSION=v0.136.3-beta.1/' .env
+sed -i 's/^FTW_VERSION=.*/FTW_VERSION=v0.136.4-beta.1/' .env
 docker compose up -d --build
 ```
 
