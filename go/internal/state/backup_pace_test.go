@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,6 +132,26 @@ func TestEnsureDiskSpaceSkipsUnknownProbe(t *testing.T) {
 	backupDiskAvail = func(string) (int64, error) { return 0, errors.New("unsupported") }
 	if err := EnsureDiskSpace(t.TempDir(), 1<<40); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBackupScratchUsesTmpfsWhenItFits(t *testing.T) {
+	if _, err := os.Stat("/dev/shm"); err != nil {
+		t.Skip("no tmpfs")
+	}
+	path, cleanup := backupScratchFile(filepath.Join(t.TempDir(), "full.gz"), 1<<20)
+	defer cleanup()
+	if !strings.HasPrefix(path, "/dev/shm/") {
+		t.Fatalf("scratch stayed on the data disk: %s", path)
+	}
+}
+
+func TestBackupScratchStaysOnDiskWhenTmpfsIsTooSmall(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "full.gz")
+	path, cleanup := backupScratchFile(dst, 1<<40)
+	defer cleanup()
+	if path != dst+".raw.tmp" {
+		t.Fatalf("oversized scratch = %s", path)
 	}
 }
 
