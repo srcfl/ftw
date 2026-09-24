@@ -192,10 +192,14 @@ to it. No native update needs a Docker socket or Docker engine.**
 13. **A release that changes the state schema is still one `ftw update`.**
     Core first makes and verifies a full backup of the current data, then
     installs the release; `--backup-dir` also copies that backup off the
-    box. The way back across that step is an offline restore of the backup
-    with the previous release. Until that path exists and is tested, the
-    native release workflow must refuse a release whose state schema
-    differs from the one before it.
+    box. The previous Core cannot safely reopen migrated data, so the
+    automatic fallback of decision 2 must not start it on that data: when
+    such a trial fails, the launcher restores the verified backup before it
+    starts `previous`, without operator action, and `ftw status` reports
+    both steps. After the release has committed, going back is an offline
+    restore of that backup with the previous release. Until this path
+    exists and is tested, the native release workflow must refuse a
+    release whose state schema differs from the one before it.
 
 14. **Install-time files are part of the release contract.** The installer
     writes the launcher, the unit and `ftw`; self-update replaces only
@@ -336,8 +340,9 @@ anything may change, and that is the true state of FTW.
 - `ftw update` on a box whose new Core takes longer than five minutes to
   become ready keeps reporting progress and does not report a failure while
   the trial is inside its deadline.
-- A release that changes the state schema installs with one `ftw update`,
-  and the way back from it is tested.
+- A release that changes the state schema installs with one `ftw update`.
+  A trial of it that fails after migrating restores the backup and starts
+  the previous Core on its own data, and the offline way back is tested.
 - A script that runs `ftw update` unattended gets the same result and exit
   code as a person at the terminal.
 - Disk use after ten updates stays at the retained slots.
