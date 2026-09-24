@@ -61,8 +61,9 @@ type env struct {
 	// so a log shows the command is alive without a line per poll.
 	logEvery time.Duration
 	// healthSettle is how long a new Core gets to read its devices before
-	// its health is reported.
+	// its health is reported; healthSteady is how long ok must hold.
 	healthSettle time.Duration
+	healthSteady time.Duration
 	// tty redraws one progress line in place; width is the terminal's.
 	// ascii replaces block characters where the locale is not UTF-8.
 	tty   bool
@@ -75,7 +76,7 @@ func defaultEnv() env {
 		now: time.Now, sleep: time.Sleep,
 		requestTimeout: 15 * time.Second, pollInterval: 500 * time.Millisecond,
 		followLimit: 6*time.Hour + 15*time.Minute, logEvery: 10 * time.Second,
-		healthSettle: 30 * time.Second,
+		healthSettle: 30 * time.Second, healthSteady: 5 * time.Second,
 	}
 }
 

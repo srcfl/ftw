@@ -745,3 +745,27 @@ func TestACoreWaitingForSetupIsNamed(t *testing.T) {
 		t.Fatalf("update %d %q", code, errOut)
 	}
 }
+
+func TestUpdateReportsHealthOnlyOnceItHolds(t *testing.T) {
+	var out strings.Builder
+	f, srv := newFakeCore(t)
+	// As seen after a restart: ok at first, offline for a moment, ok again.
+	f.on("GET", "/api/health", sequence(
+		`{"status":"ok","drivers_ok":1}`,
+		`{"status":"degraded","drivers_offline":1}`,
+		`{"status":"ok","drivers_ok":1}`,
+	))
+	clk := &clock{t: time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)}
+	e := testEnv()
+	e.now, e.sleep = clk.now, func(d time.Duration) { clk.advance(time.Second) }
+	e.healthSettle, e.healthSteady = 30*time.Second, 3*time.Second
+	c := newClient(srv.URL, e)
+	c.reportHealth(t.Context(), &out)
+	if got := out.String(); got != "Health: ok; drivers 1 ok, 0 degraded, 0 offline, 0 faulted.\n" {
+		t.Fatalf("health %q", got)
+	}
+	// It needed the ok after the dip to hold for three seconds.
+	if elapsed := clk.t.Sub(time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)); elapsed < 5*time.Second {
+		t.Fatalf("reported after %s, before ok held", elapsed)
+	}
+}
