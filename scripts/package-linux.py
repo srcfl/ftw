@@ -20,6 +20,7 @@ RESOURCES = (
     "LICENSE", "NOTICE", "LICENSING.md",
     "THIRD-PARTY-NOTICES.txt",
 )
+BINARIES = ("ftw", "ftw-backup", "ftw-cli", "ftw-launcher")
 MACHINES = {"amd64": 62, "arm64": 183}
 ENERGYPLAN_DIR = "optimizer/native/bundle"
 # Use the reviewed verifier beside this helper, including when --root selects
@@ -32,7 +33,7 @@ spec.loader.exec_module(energyplan_verify)
 
 def package(root, binaries, output, arch):
     # Catch an accidentally reused host build before it reaches the release.
-    for name in ("ftw", "ftw-backup", "ftw-launcher"):
+    for name in BINARIES:
         with (binaries / name).open("rb") as source:
             header = source.read(20)
         if (len(header) != 20 or header[:6] != b"\x7fELF\x02\x01"
@@ -73,7 +74,7 @@ def package(root, binaries, output, arch):
             pending = Path(raw.name)
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
                 with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as tar:
-                    for name in ("ftw", "ftw-backup", "ftw-launcher"):
+                    for name in BINARIES:
                         info = normalized(tar.gettarinfo(str(binaries / name), name))
                         info.mode = 0o755
                         with (binaries / name).open("rb") as binary:

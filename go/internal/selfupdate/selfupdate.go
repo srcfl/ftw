@@ -135,6 +135,10 @@ type Config struct {
 	NativeRoot       string
 	NativeRestart    func() error
 	NativeReleaseURL string // test override; empty uses the public GitHub release URL
+	// NativeTrialTimeout is how long a new native Core may take to become
+	// ready. The next Core writes no status before it is ready, so a native
+	// "restarting" status is not stale until this much time has passed.
+	NativeTrialTimeout time.Duration
 	// Bus receives an events.UpdateAvailable event whenever Check
 	// discovers a new, non-skipped release tag. Nil disables emission.
 	Bus *events.Bus
@@ -1105,6 +1109,9 @@ func (c *Checker) Status() UpdateStatus {
 	}
 	if isInFlightState(st.State) && !st.UpdatedAt.IsZero() {
 		threshold := updateStatusStaleThreshold(st)
+		if st.State == "restarting" && c.cfg.NativeRoot != "" && c.cfg.NativeTrialTimeout > threshold {
+			threshold = c.cfg.NativeTrialTimeout
+		}
 		if c.cfg.Now().Sub(st.UpdatedAt) > threshold {
 			st.State = "failed"
 			if st.Message == "" {

@@ -321,9 +321,6 @@ func main() {
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
 			return
-		case "update":
-			runUpdate(os.Args[1:])
-			return
 		}
 	}
 
@@ -341,7 +338,6 @@ func main() {
 	backfillStep := flag.Duration("backfill-step", 5*time.Second, "DEV ONLY: backfill sample interval")
 	backfillSeed := flag.Int64("backfill-seed", 0, "DEV ONLY: backfill rng seed (0 = random)")
 	backfillForce := flag.Bool("backfill-force", false, "DEV ONLY: bypass the non-synthetic-data safety gate")
-	apiPort := flag.Int("port", 0, "HTTP port. 0 uses api.port from config, which defaults to 8080")
 	flag.Parse()
 	nativeRoot := os.Getenv("FTW_NATIVE_SLOT_ROOT")
 	trial, err := beginNativeTrial(nativeRoot, os.Getenv("FTW_NATIVE_TRIAL_TAG"), Version)
@@ -407,13 +403,6 @@ func main() {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
 	}
-	if *apiPort != 0 {
-		if *apiPort < 1 || *apiPort > 65535 {
-			slog.Error("port is outside 1-65535", "port", *apiPort)
-			os.Exit(1)
-		}
-		cfg.API.Port = *apiPort
-	}
 	slog.Info("config loaded", "site", cfg.Site.Name, "drivers", len(cfg.Drivers))
 	// Repaired-but-wrong config: ERROR so it reaches the log ring and the
 	// support report, without stopping a boot the repair made safe.
@@ -475,9 +464,7 @@ func main() {
 	)
 	listener, err := net.Listen("tcp", httpSrv.Addr)
 	if err != nil {
-		bindErr := explainBindError(httpSrv.Addr, err)
-		fmt.Fprintln(os.Stderr, bindErr)
-		slog.Error("http listener could not bind", "addr", httpSrv.Addr, "err", bindErr)
+		slog.Error("http listener could not bind", "addr", httpSrv.Addr, "err", explainBindError(httpSrv.Addr, err))
 		os.Exit(1)
 	}
 	go func() {
@@ -2372,6 +2359,7 @@ func main() {
 			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			StatusPath:         statusPath,
 			NativeRoot:         nativeRoot,
+			NativeTrialTimeout: nativeTrialTimeout,
 			NativeRestart: func() error {
 				restartOnce.Do(func() {
 					reexecAfterShutdown, exitCode = false, 1

@@ -38,7 +38,7 @@ function fixture({ get } = {}) {
     document: { body, createElement: () => new Element() },
     customElements: { define: (_, cls) => { Badge = cls; } },
     CustomEvent: class {},
-    window: { alert: message => alerts.push(message), confirm: () => true },
+    window: { alert: message => alerts.push(message), confirm: () => true, location: { href: "http://127.0.0.1:8080/" } },
     fetch: (url, options) => {
       requests.push({ url, options });
       if (options?.method === "POST") return new Promise(resolve => { finish = resolve; });
@@ -51,6 +51,7 @@ function fixture({ get } = {}) {
   vm.runInNewContext(source, sandbox);
   const badge = new Badge();
   badge._phase = "dialog";
+  badge._info = {}; // a Core that is not native keeps the old dialog
   badge._backups = { enabled: true, backups: [], on_device: true };
   badge._snapshots = { enabled: true, snapshots: [] };
   badge._render();
@@ -75,26 +76,61 @@ test("the dialog and update progress render outside the header badge", () => {
   assert.equal(rig.body.children.length, 0, "closing removes the overlay");
 });
 
-test("native beta shows the stable gap and offers binary rollback without online data restore", () => {
+test("a native install reports its version and names ftw update, with no controls", () => {
   const rig = fixture();
   rig.badge._info = {
-    native: true, current: "v0.131.0-beta.1", previous: "v0.130.4",
-    channel: "stable", update_available: false,
+    native: true, current: "v0.131.0-beta.1", previous: "v0.130.4", channel: "beta",
+    update_available: true, latest: "v0.131.0-beta.2",
+    release_notes_url: "https://github.com/srcfl/ftw/releases/tag/v0.131.0-beta.2",
   };
-  rig.badge._components = { core: { version: "v0.131.0-beta.1" } };
-  rig.badge._snapshots.snapshots = [{ id: "pre-update", restorable: true }];
+  rig.badge._lastRun = { state: "failed", action: "update", message: "New Core did not reach readiness; previous Core is running" };
   rig.badge._render();
-  assert.match(rig.root().innerHTML, /No newer 0\.x stable package is ready yet/);
-  assert.match(rig.root().innerHTML, /beta installed; stable package not ready/);
-  assert.match(rig.root().innerHTML, /Return to v0\.130\.4/);
-  assert.match(rig.root().innerHTML, /Offline restore/);
-  assert.doesNotMatch(rig.root().innerHTML, /data-action="rollback-snapshot"/);
+  const html = rig.root().innerHTML.split("</style>").pop();
+  assert.match(html, /<strong>v0\.131\.0-beta\.1<\/strong> is running on the beta channel/);
+  assert.match(html, /<strong>v0\.131\.0-beta\.2<\/strong> is published/);
+  assert.match(html, /<pre class="cmd">ftw update<\/pre>/);
+  assert.match(html, /Last update failed: New Core did not reach readiness/);
+  assert.match(html, /What's new/);
+  assert.deepEqual([...new Set(rig.root().actions.map(action => action.dataset.action))].sort(), ["check", "close"]);
+  assert.doesNotMatch(html, /Return to v0\.130\.4|Offline restore|Snapshots|Full backup|Channel/);
+});
 
-  const rollback = rig.root().actions.find(action => action.dataset.action === "rollback-binary");
-  rollback.click({ currentTarget: rollback });
-  assert.equal(rig.requests.find(request => request.options?.method === "POST")?.url,
-    "/api/version/binary-rollback");
-  assert.equal(rig.badge._expectedRun.target, "v0.130.4");
+test("a native release that changes stored data is named without a command", () => {
+  const rig = fixture();
+  rig.badge._info = {
+    native: true, current: "v0.132.2", channel: "stable", update_available: true,
+    latest: "v0.133.0", full_backup_required: true,
+  };
+  rig.badge._render();
+  assert.match(rig.root().innerHTML, /changes stored data, which a native update cannot take yet/);
+  assert.doesNotMatch(rig.root().innerHTML, /class="cmd"/);
+});
+
+test("the dialog waits for the version check instead of showing the old dialog", () => {
+  const rig = fixture();
+  rig.badge._info = null;
+  rig.badge._render();
+  assert.match(rig.root().innerHTML, /Reading the running version/);
+  assert.doesNotMatch(rig.root().innerHTML, /Updates<\/h3>|data-action="restart"/);
+});
+
+test("opening on a native install reads only the version, the last run and the components", async () => {
+  const rig = fixture({ get: () => ({ ok: true, json: async () => ({ state: "idle" }) }) });
+  rig.badge._info = { native: true, current: "v0.131.0-beta.1", channel: "beta" };
+  rig.requests.length = 0;
+  rig.badge.open();
+  await settled();
+  assert.deepEqual(rig.requests.map(request => request.url).sort(),
+    ["/api/components", "/api/version/check", "/api/version/update/status"]);
+});
+
+test("a native header mark counts only Core; drivers update in Settings", () => {
+  const rig = fixture();
+  rig.badge._driverCatalog = { entries: [{ pending_update: true }] };
+  rig.badge._info = { native: true, update_available: false };
+  assert.equal(rig.badge._pendingUpdates().total, 0);
+  rig.badge._info = { update_available: false };
+  assert.equal(rig.badge._pendingUpdates().total, 1);
 });
 
 test("full backup displays phase and row progress while the request is pending", () => {

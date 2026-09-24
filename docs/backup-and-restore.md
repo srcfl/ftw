@@ -40,6 +40,18 @@ Choose **Download**, save the `.ftwbak` file on another computer or USB disk,
 and keep at least one older known-good copy. **Verify** rechecks the server copy;
 it does not prove that a download exists elsewhere.
 
+A native install has no backup controls in the web UI. On the machine, run:
+
+```bash
+ftw backup --output-dir /media/usb/ftw-backups
+```
+
+It waits for Core's verified archive, copies it to the directory and compares
+size and SHA-256 before the copy gets its final name. Without `--output-dir`
+the archive stays only in Core's backup directory on the same disk. Keeping a
+copy somewhere else is the owner's step: point `--output-dir` at another
+disk, or copy the file off the machine.
+
 From another computer, [`scripts/ftwctl.py`](../scripts/ftwctl.py) can do all
 three steps in one command: create the archive, wait for Core's verification,
 then download it and compare SHA-256 before naming the local file. Use an SSH
