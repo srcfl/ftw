@@ -1,6 +1,8 @@
 # ADR 0007: Core updates itself as a static binary
 
-- Status: accepted as direction on 2026-09-23; rollout pending
+- Status: accepted as direction on 2026-09-23; amended on 2026-09-24 so the
+  owner runs updates from the command line or API and native installs have
+  no update UI (decisions 2–4, 6, 9 and 10–14); rollout pending
 - Date: 2026-09-18
 - Issue: [#1308](https://github.com/srcfl/ftw/issues/1308)
 - Also decides the version scheme, tracked in
@@ -101,29 +103,38 @@ to it. No native update needs a Docker socket or Docker engine.**
    `current`; else if `next` exists, it renames `next` to `trial` and starts
    `trial`; else it starts `current`. A Core started from `trial` must reach
    readiness (API up, state open, drivers loaded) within a bounded time and
-   then commits by renaming `trial` to `current` and the old `current` to
-   `previous`. If it crashes or times out, it exits and systemd restarts the
-   launcher, which falls back. Each rename is atomic on one file system, but
+   stay ready for a short settling period. It then commits by renaming
+   `trial` to `current` and the old `current` to `previous`. If it crashes
+   or times out before that, it exits and systemd restarts the launcher,
+   which falls back. Each rename is atomic on one file system, but
    the series is not one atomic operation. The launcher needs durable intent
    and recovery for a crash between renames.
 
-3. **Rollback is the same swap in reverse.** The UI offers `previous` only
-   when that binary can read the current state schema. Core renames it to
-   `next` and exits; the launcher runs it as a trial. The rollback point stays
-   what #1302 made it: `state.db` and config, taken before every Core update,
-   never a copy of history. A full data restore is an offline operation.
+3. **Rollback is the same swap in reverse.** `ftw rollback` and its API call
+   offer `previous` only when that binary can read the current state schema.
+   Core renames it to `next` and exits; the launcher runs it as a trial. When
+   `current` cannot start at all, the launcher selects `previous` offline
+   under the same schema rule. A native update keeps current data in place and
+   takes no separate rollback point; binary rollback keeps that data, and a
+   release that changes the state schema is covered by decision 13. A full
+   data restore is an offline operation.
 
-4. **Restart is an exit.** The unit has `Restart=always`. "Restart" in the UI
-   makes Core shut down cleanly and exit; systemd starts the launcher, which
-   starts `current`. No image, tag or file is consulted.
+4. **Restart is an exit.** The unit has `Restart=always`. When Core needs a
+   restart, for example after a settings change, it shuts down cleanly and
+   exits; systemd starts the launcher, which starts `current`. No image, tag
+   or file is consulted.
 
 5. **No privilege for updates.** The install root belongs to the `ftw` user.
    Downloading, unpacking, renaming and exiting need nothing else. The host
    keeps patching itself with `unattended-upgrades` on the Pi image.
 
-6. **The Pi image runs the binary.** [`deploy/ftw.service`](../../deploy/ftw.service)
-   becomes the shipped unit. The image drops the Docker engine and Compose.
-   Mosquitto comes from `apt`, on the same host port as today.
+6. **The Pi image runs the native install.** It uses the same installer,
+   launcher and unit as any other host,
+   [`deploy/ftw-native.service`](../../deploy/ftw-native.service). The image
+   drops the Docker engine and Compose. Mosquitto comes from `apt`, on the
+   same host port as today. The monthly image built from `master` still
+   installs Docker 2.x with the sidecar; it moves to native early, so new
+   Pi users stop arriving on the old line.
 
 7. **New Docker packaging becomes a plain image.** The Compose file has one
    Core service and Mosquitto, no sidecar and no `update-ipc` volume. The
@@ -141,7 +152,62 @@ to it. No native update needs a Docker socket or Docker engine.**
    or left support.** A 3.5 version check is not enough: 1.x and 2.x boxes
    stay on their line until the new installer is proven. Remove each old path
    after checking the box inventory and its recovery need. Keep the legacy
-   state-schema marker while any supported reader still needs it.
+   state-schema marker while any supported reader still needs it. Code on
+   `master` that only an installed 1.x, 2.x or 3.x box would run is not part
+   of their migration: those boxes run their installed binaries, and a 2.x
+   repair builds from its own branch. `master` keeps what the migration and
+   its way back need.
+
+10. **The owner operates the host.** FTW's own work is the EMS and the
+    Energy Planner. The service manager, when to update, copies of backups
+    off the box and logs belong to the owner, by hand or through their own
+    automation or agent. The project documents the steps; it does not run
+    the owner's host.
+
+11. **`ftw` is the operator command.** The installer puts `ftw` on `PATH`.
+    It talks only to the local Core's HTTP API, needs no root, asks no
+    questions and never starts Core:
+
+    - `ftw status`: version, channel, published release, the last update's
+      result and health, plus where to look next, such as `journalctl -u ftw`
+    - `ftw update [--channel beta|stable] [--backup-dir DIR]`: install the
+      next release on the saved channel; already current exits 0
+    - `ftw rollback`: return to `previous` under decision 3
+    - `ftw backup [--output-dir DIR]`: make, verify and optionally copy a
+      full backup
+    - `ftw support`: write the redacted support file
+    - `ftw help`
+
+    Each command prints its phases and elapsed time, bounds every request and
+    exits non-zero only when its step failed. Every step is also an API call,
+    so a script or agent can wrap either. Starting, stopping and logs stay
+    with systemd.
+
+12. **Native installs have no update UI.** The web UI shows the running
+    version and channel, whether a newer release is published, the command
+    that installs it and the last update's result. It has no update,
+    rollback, restore, channel, snapshot or backup controls, and the setup
+    wizard offers no update. Full backups come from `ftw backup` or the API.
+
+13. **A release that changes the state schema is still one `ftw update`.**
+    Core first makes and verifies a full backup of the current data, then
+    installs the release; `--backup-dir` also copies that backup off the
+    box. The previous Core cannot safely reopen migrated data, so the
+    automatic fallback of decision 2 must not start it on that data: when
+    such a trial fails, the launcher restores the verified backup before it
+    starts `previous`, without operator action, and `ftw status` reports
+    both steps. After the release has committed, going back is an offline
+    restore of that backup with the previous release. Until this path
+    exists and is tested, the native release workflow must refuse a
+    release whose state schema differs from the one before it.
+
+14. **Install-time files are part of the release contract.** The installer
+    writes the launcher, the unit and `ftw`; self-update replaces only
+    `releases/<tag>`. These files must be complete before the first native
+    user. A release that needs a newer launcher says so and refuses to
+    prepare, rather than failing its trial. The installer can refresh the
+    files on an existing native box. Installation, migration and the Pi
+    image produce one layout: `/opt/ftw` with `ftw-native.service`.
 
 ## Versions
 
@@ -190,11 +256,14 @@ anything may change, and that is the true state of FTW.
 - **The capability handshake and the six-hour readiness budget.** Both existed
   to protect Core from an older sidecar. There is no sidecar.
 - **The Compose and `.env` pin.** The launcher reads a directory, not a file.
+- **Update, rollback, snapshot and backup controls in the web UI on native.**
+  The owner, or their agent, runs `ftw` or the API. The UI keeps the version
+  and the notice that a release exists.
+- **The pre-update rollback point on native.** Nothing on native could restore
+  it, and a schema step now takes a full backup instead (decision 13).
 
 ## What is kept, and why
 
-- **The rollback point.** `state.db` and config before every Core update, in
-  the #1302 form. It is what makes a schema step reversible.
 - **The readiness gate.** A trial that does not become ready does not become
   `current`. The existing `/api/status` check is the signal.
 - **Immutable tags and the release checker.** `selfupdate` keeps resolving
@@ -214,7 +283,10 @@ anything may change, and that is the true state of FTW.
   the table above.
 - **Added:** download and verify, the slot swap and commit, a launcher script
   and its tests, and installer support for the binary layout. Rough size:
-  a few hundred lines of Go and under a hundred of shell.
+  a few hundred lines of Go and under a hundred of shell. The `ftw` command
+  is a thin HTTP client beside them.
+- **Removed from the native UI:** the Updates dialog, its component, channel,
+  snapshot and backup sections, and the setup wizard's update offer.
 - **Existing Docker boxes.** The same guided installer accepts 1.x, 2.x and
   3.x without an intermediate update. It first creates and verifies a full
   backup kept off the box. It preserves config, history, site identity and
@@ -247,8 +319,8 @@ anything may change, and that is the true state of FTW.
   today, but it keeps Compose, `.env`, the project-path coupling and the Docker
   engine on the Pi. Rejected.
 - **Debian package and `apt`, the evcc model.** Good for servers and easy to
-  add later by packaging the same tarball. It gives no UI rollback and no
-  health-gated commit, so it does not replace the slot model. Deferred.
+  add later by packaging the same tarball. It gives no health-gated commit
+  and no automatic fallback, so it does not replace the slot model. Deferred.
 - **Calendar versions (`2026.9.x`).** They sort after 3.x with the existing
   comparator and claim nothing about maturity, so they could land on the
   Docker line today. They drop the signal a minor carries in 0.x: that a
@@ -263,10 +335,20 @@ anything may change, and that is the true state of FTW.
 
 - Update and rollback on the home box (Raspberry Pi 4, 7.5 GB history) with
   timings for download, swap and readiness.
-- An induced crash during a trial falls back to `current` with no operator
-  action, and the UI reports it.
+- An induced crash during a trial, and one just after readiness, falls back
+  to `current` with no operator action, and `ftw status` reports it.
+- `ftw update` on a box whose new Core takes longer than five minutes to
+  become ready keeps reporting progress and does not report a failure while
+  the trial is inside its deadline.
+- A release that changes the state schema installs with one `ftw update`.
+  A trial of it that fails after migrating restores the backup and starts
+  the previous Core on its own data, and the offline way back is tested.
+- A script that runs `ftw update` unattended gets the same result and exit
+  code as a person at the terminal.
 - Disk use after ten updates stays at the retained slots.
 - The Docker-to-binary installer path on a box with data in `~/ftw/data`.
+- A freshly flashed Pi image comes up as the same native layout and passes
+  these checks.
 - A verified full backup copied off the box before cutover, plus a tested
   restore or return to the old installation after a failed cutover.
 - Checks that history, site identity, device goals and live device state
