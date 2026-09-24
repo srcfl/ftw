@@ -133,3 +133,51 @@ func TestNativeRestartReportsCompletionAfterBoot(t *testing.T) {
 		t.Fatalf("restart did not complete: %+v", status)
 	}
 }
+
+func TestNativeProbationFallbackIsReportedAsAFailedUpdate(t *testing.T) {
+	root := t.TempDir()
+	current, next := "v0.131.0-beta.1", "v0.131.0-beta.2"
+	nativeFixtureRelease(t, root, current)
+	nativeFixtureRelease(t, root, next)
+	m := nativeupdate.Manager{Root: root}
+	if err := m.Init(current); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Prepare(next); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := m.Select(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Commit(next); err != nil {
+		t.Fatal(err)
+	}
+	// The new Core kept stopping without a clean shutdown.
+	for i := 0; i < 3; i++ {
+		if _, _, _, err := m.Select(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checker := selfupdate.New(selfupdate.Config{CurrentVersion: current, NativeRoot: root,
+		StatusPath: filepath.Join(root, "update-status.json")}, nil)
+	if err := checker.WriteStatus(selfupdate.UpdateStatus{State: "done", Target: next,
+		Action: "update", StartedAt: time.Now(), Message: "Core is ready on " + next}); err != nil {
+		t.Fatal(err)
+	}
+	reconcileNativeFallback(root, current, checker)
+	if status := checker.Status(); status.State != "failed" || status.Message != next+" kept stopping after it started; "+current+" runs again" {
+		t.Fatalf("probation fallback status: %+v", status)
+	}
+	if info := checker.Info(); info.LastFailed != next {
+		t.Fatalf("last failed not reported: %+v", info)
+	}
+}
+
+func TestNativeCleanExitMarksTheRoot(t *testing.T) {
+	root := t.TempDir()
+	markNativeCleanExit(root)
+	if data, err := os.ReadFile(filepath.Join(root, ".clean-exit")); err != nil || strings.TrimSpace(string(data)) != Version {
+		t.Fatalf("clean exit mark %q %v", data, err)
+	}
+	markNativeCleanExit("") // not native: nothing to mark
+}

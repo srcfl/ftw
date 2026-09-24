@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"syscall"
+	"time"
 )
 
 const stateFile = "slots.json"
@@ -23,10 +24,14 @@ type Slots struct {
 	Next       string `json:"next,omitempty"`
 	Trial      string `json:"trial,omitempty"`
 	LastFailed string `json:"last_failed,omitempty"`
+	// Probation watches the current release for a while after it
+	// committed; see probation.go.
+	Probation *Probation `json:"probation,omitempty"`
 }
 
 type Manager struct {
 	Root string
+	Now  func() time.Time // nil uses time.Now
 }
 
 func ValidTag(tag string) bool { return releaseTag.MatchString(tag) }
@@ -137,13 +142,16 @@ func (m Manager) Prepare(tag string) error {
 }
 
 // Select runs at every service start. An uncommitted trial means the trial
-// process exited or the host rebooted; it always falls back to current.
+// process exited or the host rebooted; it always falls back to current. A
+// release on probation that keeps stopping without a clean shutdown falls
+// back to the previous release.
 func (m Manager) Select() (path, tag string, trial bool, err error) {
 	err = m.locked(func() error {
 		state, readErr := m.readLocked()
 		if readErr != nil {
 			return readErr
 		}
+		cleanTag := m.takeCleanExit()
 		if state.Trial != "" {
 			state.LastFailed = state.Trial
 			state.Trial = ""
@@ -165,6 +173,10 @@ func (m Manager) Select() (path, tag string, trial bool, err error) {
 					return writeErr
 				}
 				trial = true
+			}
+		} else if m.watchProbation(&state, cleanTag) {
+			if writeErr := m.writeLocked(state); writeErr != nil {
+				return writeErr
 			}
 		}
 		tag = state.Current
@@ -188,7 +200,12 @@ func (m Manager) Commit(tag string) error {
 		state.Previous = state.Current
 		state.Current = tag
 		state.Trial = ""
-		state.LastFailed = ""
+		// A rollback that commits does not clear a failed release: an
+		// unattended update would otherwise install it again.
+		if state.LastFailed == tag {
+			state.LastFailed = ""
+		}
+		state.Probation = &Probation{Tag: tag, Until: m.now().Add(ProbationWindow)}
 		return nil
 	})
 }

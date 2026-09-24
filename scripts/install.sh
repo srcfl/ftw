@@ -7,11 +7,15 @@ usage() {
   cat <<'EOF'
 Usage: install.sh --fresh-host --tag v0.X.Y[-beta.N]
        install.sh --resume --tag v0.X.Y[-beta.N]
+       install.sh --refresh --tag v0.X.Y[-beta.N]
 
 Install one exact published native 0.x release on a fresh 64-bit Linux host.
 --fresh-host confirms that no FTW site exists on this host, including a
 stopped Docker site installed in a custom directory. --resume only continues
 an interrupted native install with the same tag and package checksum.
+--refresh replaces the launcher, the ftw command and the service definition
+of an install this script made with those from the given release. Updates
+never replace these files; Core itself moves with ftw update.
 There is no default tag: GitHub releases/latest still serves old Docker boxes.
 An existing FTW installation must wait for the guided 0.x migration. This
 script will not replace it or update a Docker container.
@@ -22,7 +26,7 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   usage
   exit 0
 fi
-if [[ "$#" != 3 || ( "${1:-}" != --fresh-host && "${1:-}" != --resume ) || "${2:-}" != --tag ]]; then
+if [[ "$#" != 3 || ( "${1:-}" != --fresh-host && "${1:-}" != --resume && "${1:-}" != --refresh ) || "${2:-}" != --tag ]]; then
   usage >&2
   exit 2
 fi
@@ -57,7 +61,16 @@ legacy_paths=(
   "$HOME/ftw/docker-compose.yml"
   "$HOME/forty-two-watts/docker-compose.yml"
 )
-if [[ "$mode" == --fresh-host ]]; then
+installed_paths=(/opt/ftw/slots.json /opt/ftw/ftw-launcher /etc/systemd/system/ftw.service)
+if [[ "$mode" == --refresh ]]; then
+  existing_paths=()
+  for path in "${installed_paths[@]}"; do
+    if [[ ! -e "$path" ]]; then
+      echo "No native install made by this script was found ($path is missing); --refresh changes nothing." >&2
+      exit 2
+    fi
+  done
+elif [[ "$mode" == --fresh-host ]]; then
   existing_paths=(/opt/ftw /var/lib/ftw /etc/systemd/system/ftw.service /usr/local/bin/ftw
     /etc/systemd/system/forty-two-watts.service "$pending" "${legacy_paths[@]}")
 else
@@ -73,16 +86,17 @@ for path in "${existing_paths[@]}"; do
     exit 2
   fi
 done
-if systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
+if [[ "$mode" != --refresh ]] && {
+   systemctl is-active --quiet ftw.service >/dev/null 2>&1 ||
    systemctl is-active --quiet forty-two-watts.service >/dev/null 2>&1 ||
    { [[ "$mode" == --fresh-host ]] &&
      { systemctl cat ftw.service >/dev/null 2>&1 ||
        systemctl cat forty-two-watts.service >/dev/null 2>&1 ||
-       id ftw >/dev/null 2>&1; }; }; then
+       id ftw >/dev/null 2>&1; }; }; }; then
   echo "An FTW service or account already exists; refusing a fresh install." >&2
   exit 2
 fi
-if command -v ss >/dev/null 2>&1 &&
+if [[ "$mode" != --refresh ]] && command -v ss >/dev/null 2>&1 &&
    ss -ltnH | awk '$4 ~ /:8080$/ { found = 1 } END { exit !found }'; then
   echo "Port 8080 is already in use; refusing a fresh install." >&2
   exit 2
@@ -102,10 +116,18 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 archive="ftw-linux-${arch}.tar.gz"
 url="https://github.com/srcfl/ftw/releases/download/${tag}"
-curl --fail --silent --show-error --location --retry 3 --proto '=https' \
-  --proto-redir '=https' "${url}/${archive}" -o "${work}/${archive}"
-curl --fail --silent --show-error --location --retry 3 --proto '=https' \
-  --proto-redir '=https' "${url}/${archive}.sha256" -o "${work}/${archive}.sha256"
+protocols=(--proto '=https' --proto-redir '=https')
+# FTW_RELEASE_MIRROR serves /download/<tag>/ as GitHub does. It exists to
+# test unpublished releases; leave it unset.
+if [[ -n "${FTW_RELEASE_MIRROR:-}" ]]; then
+  url="${FTW_RELEASE_MIRROR%/}/download/${tag}"
+  protocols=()
+  echo "Using the release mirror at ${FTW_RELEASE_MIRROR} (for testing)." >&2
+fi
+curl --fail --silent --show-error --location --retry 3 "${protocols[@]}" \
+  "${url}/${archive}" -o "${work}/${archive}"
+curl --fail --silent --show-error --location --retry 3 "${protocols[@]}" \
+  "${url}/${archive}.sha256" -o "${work}/${archive}.sha256"
 
 checksum="$(cat "${work}/${archive}.sha256")"
 expected="${checksum:0:64}"
@@ -133,6 +155,33 @@ mkdir -p "$stage"
 
 # No host write occurs until the whole package has passed verification.
 if (( EUID != 0 )) && ! sudo -n true 2>/dev/null; then sudo -v; fi
+if [[ "$mode" == --refresh ]]; then
+  for path in "${installed_paths[@]}"; do
+    if ! as_root test -f "$path" || as_root test -L "$path"; then
+      echo "The native install at $path is missing or a symlink; --refresh changes nothing." >&2
+      exit 2
+    fi
+  done
+  release="${stage}/releases/${tag}"
+  # The launcher is not running: it replaced itself with Core when it
+  # started it, so its file can be swapped in place.
+  as_root install -m 0755 -o ftw -g ftw "${work}/ftw-launcher" /opt/ftw/ftw-launcher
+  if [[ -f "${release}/ftw-cli" ]]; then
+    as_root install -m 0755 -o root -g root "${release}/ftw-cli" /usr/local/bin/ftw
+  fi
+  if as_root cmp -s "${release}/deploy/ftw-native.service" /etc/systemd/system/ftw.service; then
+    unit=unchanged
+  else
+    as_root install -m 0644 "${release}/deploy/ftw-native.service" /etc/systemd/system/ftw.service
+    as_root systemctl daemon-reload
+    unit=changed
+  fi
+  echo "The launcher and the ftw command now come from $tag. Core itself is unchanged; ftw update moves it."
+  if [[ "$unit" == changed ]]; then
+    echo "The service definition changed. It applies at the next restart: sudo systemctl restart ftw"
+  fi
+  exit 0
+fi
 for path in "${existing_paths[@]}"; do
   if as_root test -e "$path" || as_root test -L "$path"; then
     echo "Existing FTW installation found at $path; leave it running and use the guided 0.x migration when available." >&2
@@ -197,7 +246,6 @@ as_root install -d -m 0755 /opt/ftw
 as_root cp -a "${stage}/." /opt/ftw/
 as_root install -m 0755 "${work}/ftw-launcher" /opt/ftw/ftw-launcher
 as_root chown -R ftw:ftw /opt/ftw
-as_root /opt/ftw/ftw-launcher -root /opt/ftw init "$tag"
 as_root /opt/ftw/ftw-launcher -root /opt/ftw status >/dev/null
 # The operator command. Root owns this copy, so the service account cannot
 # replace a program that people may run with sudo.

@@ -106,6 +106,17 @@ test("a native release that changes stored data is named without a command", () 
   assert.doesNotMatch(rig.root().innerHTML, /class="cmd"/);
 });
 
+test("a native release that failed on this machine is not offered again", () => {
+  const rig = fixture();
+  rig.badge._info = {
+    native: true, current: "v0.135.0-beta.1", channel: "beta", update_available: true,
+    latest: "v0.135.0-beta.2", last_failed: "v0.135.0-beta.2",
+  };
+  rig.badge._render();
+  assert.match(rig.root().innerHTML, /It failed on this machine, so FTW waits for a newer release/);
+  assert.doesNotMatch(rig.root().innerHTML, /class="cmd"/);
+});
+
 test("the dialog waits for the version check instead of showing the old dialog", () => {
   const rig = fixture();
   rig.badge._info = null;

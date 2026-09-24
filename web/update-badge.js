@@ -928,7 +928,10 @@
         ? ` <a class="notes-link" href="${escapeHTML(notesHref)}" target="_blank" rel="noopener">What's new ↗</a>`
         : "";
       let release;
-      if (info.update_available && info.full_backup_required) {
+      if (info.update_available && info.last_failed && info.last_failed === info.latest) {
+        release = `<p><strong>${escapeHTML(info.latest)}</strong> is published.${notes}</p>
+          <p class="err">It failed on this machine, so FTW waits for a newer release. <code>ftw update --retry</code> tries it again.</p>`;
+      } else if (info.update_available && info.full_backup_required) {
         release = `<p><strong>${escapeHTML(info.latest || "A newer release")}</strong> is published.${notes}</p>
           <p class="err">It changes stored data, which a native update cannot take yet. ${escapeHTML(info.current || "This release")} stays installed.</p>`;
       } else if (info.update_available) {
