@@ -174,15 +174,6 @@ func TestRestartRequiredFor_PriceZoneSwapNeedsRestart(t *testing.T) {
 	}
 }
 
-func TestRestartRequiredFor_AssistantIsHot(t *testing.T) {
-	old := baseCfg()
-	n := baseCfg()
-	n.Assistant = &Assistant{Enabled: true, APIKey: "sk-or-v1-test", Model: "openrouter/free"}
-	if r := RestartRequiredFor(old, n); len(r) != 0 {
-		t.Fatalf("assistant is read per request, got restart reasons %v", r)
-	}
-}
-
 func TestRestartRequiredFor_NilInputs(t *testing.T) {
 	if r := RestartRequiredFor(nil, baseCfg()); r != nil {
 		t.Fatalf("expected nil reasons for nil old, got %v", r)

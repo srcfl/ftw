@@ -526,6 +526,11 @@ func main() {
 		slog.Error("initialize config database", "err", err)
 		os.Exit(1)
 	}
+	if dropped, err := config.DropRetiredSettings(st, *configPath, cfg); err != nil {
+		slog.Warn("could not remove retired Ask why settings", "err", err)
+	} else if dropped {
+		slog.Info("Ask why has been removed; its settings and API key were deleted")
+	}
 
 	if cfg.State != nil && cfg.State.ColdRetentionDays != 0 {
 		slog.Warn("state.cold_retention_days is retired; fixed EMS history retention applies", "previous_days", cfg.State.ColdRetentionDays)

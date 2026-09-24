@@ -241,7 +241,6 @@ func protectedReadPath(path string) bool {
 	case "/api/config",
 		"/api/support/dump",
 		"/api/support/report",
-		"/api/assistant/status",
 		"/api/logs",
 		"/api/system/info",
 		"/api/storage/inventory",
@@ -271,11 +270,6 @@ func protectedReadPath(path string) bool {
 		return true
 	}
 	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {
-		return true
-	}
-	// Ask why history holds the model's answers about this house, so the
-	// list and every single conversation stay off a public host.
-	if path == "/api/assistant/threads" || strings.HasPrefix(path, "/api/assistant/threads/") {
 		return true
 	}
 	if path == "/api/series" || strings.HasPrefix(path, "/api/series/") {

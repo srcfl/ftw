@@ -2244,8 +2244,6 @@
         // Isolate render errors from connection state / timestamp
         try { render(data); }
         catch (e) { console.error("render error:", e); }
-        try { window.dispatchEvent(new CustomEvent("ftw-status", { detail: data })); }
-        catch (e3) { /* assistant chip is optional */ }
         // Show a subtle prompt when no drivers are configured
         try { updateNoDevicesPrompt(data.drivers); }
         catch (e2) { /* silent */ }

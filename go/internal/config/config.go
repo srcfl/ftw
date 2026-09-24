@@ -44,7 +44,6 @@ type Config struct {
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
-	Assistant        *Assistant         `yaml:"assistant,omitempty" json:"assistant,omitempty"`
 
 	// LoadWarnings collects recoverable problems Parse repaired instead of
 	// refusing the file: an on-disk config an older version accepted must
@@ -344,78 +343,6 @@ const (
 	legacyDriverRepositoryName        = "FTW official drivers"
 	legacyDriverRepositoryManifestURL = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
 )
-
-// Assistant is the optional Ask why helper: a user-supplied OpenRouter
-// (or OpenAI-compatible) key used to explain the local help report.
-// Nil or disabled is the unavailable state. The helper never issues
-// driver commands or writes config.
-type Assistant struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"`
-	APIKey  string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
-	// Model is an OpenRouter model id. Empty means openrouter/free.
-	Model string `yaml:"model,omitempty" json:"model,omitempty"`
-	// BaseURL is the OpenAI-compatible root (no /chat/completions suffix).
-	// Empty means https://openrouter.ai/api/v1. A later Sourceful proxy
-	// can set this without a code change.
-	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
-
-	// HasAPIKey is JSON-only: true when a key exists on disk. Set by
-	// MaskSecrets before APIKey is blanked so Settings can render
-	// "configured — hidden". Never written to YAML.
-	HasAPIKey bool `yaml:"-" json:"has_api_key,omitempty"`
-}
-
-const (
-	DefaultAssistantModel   = "openrouter/free"
-	DefaultAssistantBaseURL = "https://openrouter.ai/api/v1"
-)
-
-// Ready is true when Ask why can make an outbound call.
-func (a *Assistant) Ready() bool {
-	return a != nil && a.Enabled && strings.TrimSpace(a.APIKey) != ""
-}
-
-// ResolvedModel returns the configured model or the free-router default.
-func (a *Assistant) ResolvedModel() string {
-	if a == nil || strings.TrimSpace(a.Model) == "" {
-		return DefaultAssistantModel
-	}
-	return strings.TrimSpace(a.Model)
-}
-
-// ResolvedBaseURL returns the OpenAI-compatible root without a trailing slash.
-func (a *Assistant) ResolvedBaseURL() string {
-	if a == nil || strings.TrimSpace(a.BaseURL) == "" {
-		return DefaultAssistantBaseURL
-	}
-	return strings.TrimRight(strings.TrimSpace(a.BaseURL), "/")
-}
-
-// Validate checks optional assistant settings. A missing key is allowed:
-// the Ask why endpoint reports that as unavailable rather than refusing
-// the whole config.
-func (a *Assistant) Validate() error {
-	if a == nil {
-		return nil
-	}
-	if strings.TrimSpace(a.Model) != "" && len(a.Model) > 120 {
-		return errors.New("assistant.model is too long")
-	}
-	if strings.TrimSpace(a.BaseURL) == "" {
-		return nil
-	}
-	u, err := url.Parse(strings.TrimSpace(a.BaseURL))
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return errors.New("assistant.base_url must be an http(s) URL")
-	}
-	if u.User != nil {
-		return errors.New("assistant.base_url must carry no credentials")
-	}
-	if u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("assistant.base_url must carry no query or fragment")
-	}
-	return nil
-}
 
 // Notifications configures outbound push notifications. Exactly one
 // transport provider is active at a time, selected by Provider. Today
@@ -1385,12 +1312,6 @@ func (c Config) MaskSecrets() Config {
 		cp.APIKey = ""
 		out.Weather = &cp
 	}
-	if out.Assistant != nil {
-		cp := *out.Assistant
-		cp.HasAPIKey = strings.TrimSpace(cp.APIKey) != ""
-		cp.APIKey = ""
-		out.Assistant = &cp
-	}
 	if out.Notifications != nil {
 		cp := *out.Notifications
 		if cp.Ntfy != nil {
@@ -1482,9 +1403,6 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.Weather != nil && existing.Weather != nil && incoming.Weather.APIKey == "" {
 		incoming.Weather.APIKey = existing.Weather.APIKey
-	}
-	if incoming.Assistant != nil && existing.Assistant != nil && incoming.Assistant.APIKey == "" {
-		incoming.Assistant.APIKey = existing.Assistant.APIKey
 	}
 	if incoming.Notifications != nil && existing.Notifications != nil &&
 		incoming.Notifications.Ntfy != nil && existing.Notifications.Ntfy != nil {
@@ -2014,9 +1932,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.OCPP.Validate(); err != nil {
-		return err
-	}
-	if err := c.Assistant.Validate(); err != nil {
 		return err
 	}
 	if err := c.validateVehicles(); err != nil {

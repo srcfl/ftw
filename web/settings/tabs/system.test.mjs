@@ -64,25 +64,12 @@ describe("optimizerStatus", () => {
   });
 });
 
-describe("Ask why settings", () => {
-  it("renders the key field and default model", () => {
+describe("Ask why is gone", () => {
+  it("renders no assistant settings, even for a config that still has them", () => {
     const html = globalThis.window.FTWSettings.tabs.system.render({
       config: { assistant: { enabled: true, has_api_key: true, model: "openrouter/free" } },
-      escHtml: (s) => String(s ?? ""),
     });
-    assert.match(html, /Ask why/);
-    assert.match(html, /data-checkbox-path="assistant.enabled"/);
-    assert.match(html, /data-path="assistant.api_key"/);
-    assert.match(html, /configured — hidden/);
-    assert.match(html, /openrouter\/free/);
-    assert.match(html, /never issues driver commands/);
-  });
-
-  it("checks Enable when a key is typed", () => {
-    const src = readFileSync(new URL("./system.js", import.meta.url), "utf8");
-    assert.match(src, /sys-assistant-key/);
-    assert.match(src, /enable\.checked = true/);
-    assert.match(src, /uncheck Enable later without deleting the key/);
+    assert.doesNotMatch(html, /Ask why|OpenRouter|assistant\./);
   });
 });
 

@@ -229,17 +229,6 @@ fleet_ping:
   enabled: true
   # endpoint: https://relay.ftw.energy/fleet
 
-# Ask why — optional. Paste an OpenRouter key (free account, no card) and
-# the Plan card can explain the live help report and draft a GitHub issue.
-# Off until enabled. The key is stored on this box and sent only as a
-# bearer token to the API you set. Default model openrouter/free stays on
-# free models. The helper never issues driver commands.
-# assistant:
-#   enabled: true
-#   api_key: sk-or-v1-...
-#   model: openrouter/free
-#   # base_url: https://openrouter.ai/api/v1
-
 # Independently distributed Lua drivers. The signed stable catalog is refreshed
 # by default, but refresh never downloads, activates, or restarts a driver.
 # Add `device_repository: { enabled: false }` to opt out. The expanded form is:

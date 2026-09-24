@@ -421,3 +421,66 @@ func TestRecoveryCannotSubstituteAnotherConfigAtTheSameRevision(t *testing.T) {
 		t.Fatal("different config with the same revision replaced the loaded settings")
 	}
 }
+
+func TestDropRetiredSettingsDeletesTheAskWhyKey(t *testing.T) {
+	dir := t.TempDir()
+	path, database := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.db")
+	if err := os.WriteFile(path, []byte(minimalYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := InitializeStorage(path, database, cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	// Settings saved by a Core that still had Ask why.
+	current, _, err := st.Configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(current.Document, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["config"].(map[string]any)["assistant"] = map[string]any{"enabled": true, "api_key": "sk-or-v1-secret"}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveConfiguration(raw, current.Revision, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadStored(database, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dropped, err := DropRetiredSettings(st, path, loaded)
+	if err != nil || !dropped {
+		t.Fatalf("DropRetiredSettings = %v, %v; want true", dropped, err)
+	}
+	after, _, err := st.Configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(after.Document), "sk-or-v1-secret") || strings.Contains(string(after.Document), `"assistant"`) {
+		t.Fatalf("stored settings still carry Ask why: %s", after.Document)
+	}
+	reloaded, err := loadStored(database, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Site.Name != loaded.Site.Name {
+		t.Fatalf("site name %q, want %q", reloaded.Site.Name, loaded.Site.Name)
+	}
+	if dropped, err := DropRetiredSettings(st, path, reloaded); err != nil || dropped {
+		t.Fatalf("second DropRetiredSettings = %v, %v; want false", dropped, err)
+	}
+}

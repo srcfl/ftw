@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/srcfl/ftw/go/internal/assistant"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -537,8 +536,8 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/support/dump — zip archive with everything a developer needs
 // to triage a support incident: redacted config, full driver health JSON,
-// recent global + per-driver logs (secrets stripped at least as strictly
-// as Ask why), last 1 h of TS samples per (driver, metric), and a
+// recent global + per-driver logs (secrets and IPv4 addresses stripped),
+// last 1 h of TS samples per (driver, metric), and a
 // manifest. SQLite is NOT included; the dump is intended to be small
 // enough to attach to a chat message — measured at ~6 kB on a two-driver
 // install.
@@ -774,19 +773,22 @@ func hasAuthSegment(k string) bool {
 }
 
 var (
+	dumpIPv4Re       = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
+	dumpBearerRe     = regexp.MustCompile(`(?i)bearer\s+\S+`)
 	dumpJSONSecretRe = regexp.MustCompile(`(?i)("([^"\\]+)"\s*:\s*)("(?:\\.|[^"\\])*")`)
 	dumpFormSecretRe = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9_-]*)=([^\s&"]+)`)
 	dumpBasicAuthRe  = regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=_-]+`)
 )
 
-// redactDumpLog applies Ask-why redaction, then also blanks JSON/form
-// fields whose keys isSensitiveKey would catch. Stricter on OAuth bodies
-// that Lua logs as `HTTP %d: %s`.
+// redactDumpLog removes IPv4 addresses and credentials, including JSON and
+// form fields whose keys isSensitiveKey would catch. Stricter on OAuth
+// bodies that Lua logs as `HTTP %d: %s`.
 func redactDumpLog(s string) string {
 	if s == "" {
 		return s
 	}
-	s = assistant.Redact(s)
+	s = dumpIPv4Re.ReplaceAllString(s, "[ip omitted]")
+	s = dumpBearerRe.ReplaceAllString(s, "Bearer [omitted]")
 	s = dumpBasicAuthRe.ReplaceAllString(s, "Basic [omitted]")
 	s = dumpJSONSecretRe.ReplaceAllStringFunc(s, func(m string) string {
 		parts := dumpJSONSecretRe.FindStringSubmatch(m)

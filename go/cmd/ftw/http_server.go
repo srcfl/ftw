@@ -8,8 +8,7 @@ import (
 const (
 	httpReadHeaderTimeout = 10 * time.Second
 	httpReadTimeout       = 15 * time.Second
-	// WriteTimeout must outlast assistant.Timeout (90s): Ask why streams SSE
-	// on this listener, and a shorter write ceiling would cut the reply off.
+	// WriteTimeout bounds how long one response may take to a slow client.
 	httpWriteTimeout = 2 * time.Minute
 	httpIdleTimeout  = 60 * time.Second
 )
