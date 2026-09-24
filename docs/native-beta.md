@@ -45,8 +45,10 @@ image. The beta does not move their settings or history yet; that comes with
 the guided migration. Try it beside the old installation instead. The old one
 and its data stay as they are, and switching back takes a minute.
 
-Never run both at once: they would control the same equipment. Stop the old
-one first.
+Never run both at once: they would control the same equipment. The beta will
+not start while the old one holds port 8080, but an old 1.x-3.x Core started
+while the beta runs keeps controlling in the background, without its web
+page. So stop the old one before the beta, and the beta before the old one.
 
 **On a Raspberry Pi, use a second SD card.** This is the safest way.
 
@@ -66,7 +68,7 @@ cd /opt/ftw && sudo docker compose down      # the Raspberry Pi image
 cd ~/ftw && docker compose down              # the Docker installer (1.x: ~/forty-two-watts)
 ```
 
-To go back, stop the beta and start the old stack again. Its data was never
+To go back, stop the beta first, then start the old stack. Its data was never
 touched; what the beta recorded stays in `~/ftw-local/data` for next time.
 
 ```bash
@@ -209,7 +211,7 @@ docker compose start
 
 # restore
 docker compose stop
-sudo mv data data.before-restore
+sudo mv data data.before-restore-$(date +%F-%H%M)
 sudo tar -xzf /media/usb/ftw/ftw-data-<date>.tar.gz
 docker compose start
 ```
