@@ -138,16 +138,15 @@ func (s *Server) handleVersionUnskip(w http.ResponseWriter, r *http.Request) {
 // state schema. Going back across a history-format change still needs a
 // full backup made before the update; handleVersionRollback refuses such a
 // point and says so.
+//
+// A native update takes no rollback point (ADR 0007, decision 3). Its
+// binary rollback keeps the data in place, and a native state-schema change
+// is refused until it has its own backup path.
 func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
-	if s.deps.SelfUpdate.Native() && s.deps.SnapshotDir == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "native update requires a writable pre-update rollback point"})
-		return
-	}
-
 	info := s.deps.SelfUpdate.Info()
 	if info.Native && !info.UpdateAvailable {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "no newer native release is available on this channel"})
@@ -186,6 +185,10 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 
 	startedAt := time.Now()
 	startMessage := "starting update"
+	startStep, totalSteps := 1, 4
+	if info.Native {
+		startStep, totalSteps = 0, selfupdate.NativeUpdateSteps
+	}
 	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
 		State:          "starting",
 		Action:         "update",
@@ -195,19 +198,19 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 		PhaseStartedAt: startedAt,
 		UpdatedAt:      time.Now(),
 		Message:        startMessage,
-		Step:           1,
-		TotalSteps:     4,
+		Step:           startStep,
+		TotalSteps:     totalSteps,
 	})
 	s.recordComponentStatus(selfupdate.UpdateStatus{
 		State: "starting", Action: "update", Component: "core", Target: info.Latest,
 		StartedAt: startedAt, PhaseStartedAt: startedAt, UpdatedAt: startedAt,
-		Message: startMessage, Step: 1, TotalSteps: 4,
+		Message: startMessage, Step: startStep, TotalSteps: totalSteps,
 	}, info.Current)
 
 	go s.runVersionUpdate(startedAt, info.Current, info.Latest)
 
 	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if s.deps.SnapshotDir == "" {
+	if !info.Native && s.deps.SnapshotDir == "" {
 		resp["snapshot_skipped"] = true
 		resp["snapshot_skip_reason"] = "snapshots disabled"
 	}
@@ -217,6 +220,11 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 	defer s.versionUpdateMu.Unlock()
 
+	native := s.deps.SelfUpdate.Native()
+	totalSteps := 4
+	if native {
+		totalSteps = selfupdate.NativeUpdateSteps
+	}
 	writeUpdateStatus := func(updateState, message string) {
 		now := time.Now()
 		s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
@@ -228,11 +236,11 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 			PhaseStartedAt: now,
 			UpdatedAt:      now,
 			Message:        message,
-			TotalSteps:     4,
+			TotalSteps:     totalSteps,
 		})
 	}
 
-	if s.deps.SnapshotDir != "" {
+	if !native && s.deps.SnapshotDir != "" {
 		phaseStarted := time.Now()
 		status := selfupdate.UpdateStatus{
 			State: "snapshotting", Action: "update", Component: "core", Target: latest,
@@ -253,7 +261,7 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 	}
 
 	updateTimeout := 30 * time.Second
-	if s.deps.SelfUpdate.Native() {
+	if native {
 		updateTimeout = 30 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
@@ -376,7 +384,7 @@ func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.deps.SelfUpdate.Native() {
-		writeJSON(w, 503, map[string]string{"error": "restore a native data snapshot offline with ftw-backup; use binary rollback to change only the Core version"})
+		writeJSON(w, 503, map[string]string{"error": "native Core keeps no rollback points; ftw rollback returns to the previous release with the current data, and a full backup restores data offline"})
 		return
 	}
 	if s.deps.SnapshotDir == "" {

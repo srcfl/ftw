@@ -13,6 +13,12 @@ There is no skip control in the UI, and old clients cannot disable the server's
 rollback point with `skip_snapshot`. Local points remain on the same disk, so
 they are not a substitute for an exported full backup.
 
+A native install takes no local rollback point: `ftw rollback` returns to the
+previous release with the current data, and a release that changes the state
+schema is refused until its backup path exists. `ftw status` lists points an
+older Core left, with their size and directory; nothing on a native install
+uses them.
+
 The point copies the settings database and configuration only. `history.db`
 stays where it is: the update does not replace it and a rollback leaves it in
 place. The step is therefore bounded by the size of the settings, not by years

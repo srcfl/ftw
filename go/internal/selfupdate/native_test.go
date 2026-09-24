@@ -274,6 +274,16 @@ func TestNativeTriggerStagesThenRequestsRestart(t *testing.T) {
 	if err != nil || state.Current != current || state.Next != next || restarts != 1 || c.Status().State != "restarting" {
 		t.Fatalf("native update state=%+v err=%v restarts=%d status=%+v", state, err, restarts, c.Status())
 	}
+	if st := c.Status(); st.Step != NativeUpdateSteps || st.TotalSteps != NativeUpdateSteps {
+		t.Fatalf("native update reports step %d/%d; it has no rollback point step", st.Step, st.TotalSteps)
+	}
+	if phases := c.Status().Phases; len(phases) != 2 || phases[0].Step != 1 || phases[0].Bytes != int64(len(archive)) ||
+		phases[1].Step != 2 || phases[1].FinishedAt.Before(phases[1].StartedAt) {
+		t.Fatalf("finished phases %+v", phases)
+	}
+	if info := c.Info(); info.InstallRoot != root || info.InstallFreeBytes <= 0 || info.InstallNeedBytes <= 0 {
+		t.Fatalf("install space not reported: %+v", info)
+	}
 	c.cfg.NativeRestart = func() error { return errors.New("restart refused") }
 	if err := manager.CancelPrepared(next); err != nil {
 		t.Fatal(err)

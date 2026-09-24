@@ -102,10 +102,17 @@ ftw update --channel stable  # change the channel first
 ftw rollback                 # return to the previous release
 ```
 
-`ftw update` asks Core to save a local settings/config rollback point,
-download and verify the 0.x package, stage the new slot and restart through
-the launcher. It prints each phase, waits through the restart and reports the
-version and health that result. A trial only becomes current after readiness;
+`ftw update` first checks that the disk has room: three times the current
+release, for the archive, the unpacked release and some margin for the data
+on the same disk. Core then downloads and verifies the 0.x package, stages
+the new slot and restarts through the launcher. A native update keeps the
+data in place and takes no local rollback point. On a terminal each step
+shows a bar with size, rate and time left and ends as one line with its
+duration; in a log or script it is one line per step. Core records every
+finished step with its own timing, so a step that ends between two reads is
+still shown. `ftw update` waits through the restart, including a history
+migration, and reports the version and health that result. A trial only
+becomes current after readiness;
 a failed trial falls back to the previous Core, and `ftw update` names the
 Core that runs. Already current exits 0, so a script can run the step
 unattended; a failed step exits 1. The same steps are Core API calls. A
@@ -113,6 +120,9 @@ release that changes stored data (the state schema) cannot be installed
 natively yet; `ftw update` stops before it changes anything.
 
 `ftw rollback` returns to the previous release when it reads the same data.
+`ftw status` also shows free space for releases and backups, and any local
+rollback points an older Core left; native Core does not use them, so they
+can be deleted.
 The web UI on a native install shows the running version, a published
 release and the command; it has no update controls. See
 [ADR 0007](adr/0007-self-updating-binary.md) and

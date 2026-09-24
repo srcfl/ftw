@@ -50,31 +50,40 @@ type env struct {
 	sleep func(time.Duration)
 	// requestTimeout bounds each API call except making and copying a backup.
 	requestTimeout time.Duration
-	// pollInterval is the gap between progress reads.
+	// pollInterval is the gap between progress reads. A native download
+	// and restart can both finish within a couple of seconds.
 	pollInterval time.Duration
 	// followLimit bounds waiting for an update or rollback. A native trial
 	// may take six hours to become ready.
 	followLimit time.Duration
-	// heartbeat repeats an unchanged progress line so a person or a log
-	// can see the command is still alive.
-	heartbeat time.Duration
+	// logEvery repeats a progress line when the output is not a terminal,
+	// so a log shows the command is alive without a line per poll.
+	logEvery time.Duration
 	// healthSettle is how long a new Core gets to read its devices before
 	// its health is reported.
 	healthSettle time.Duration
+	// tty redraws one progress line in place; width is the terminal's.
+	// ascii replaces block characters where the locale is not UTF-8.
+	tty   bool
+	width int
+	ascii bool
 }
 
 func defaultEnv() env {
 	return env{
 		now: time.Now, sleep: time.Sleep,
-		requestTimeout: 15 * time.Second, pollInterval: 2 * time.Second,
-		followLimit: 6*time.Hour + 15*time.Minute, heartbeat: 30 * time.Second,
+		requestTimeout: 15 * time.Second, pollInterval: 500 * time.Millisecond,
+		followLimit: 6*time.Hour + 15*time.Minute, logEvery: 10 * time.Second,
 		healthSettle: 30 * time.Second,
 	}
 }
 
 // Run executes one ftw command and returns its exit status.
 func Run(args []string, stdout, stderr io.Writer) int {
-	return run(args, stdout, stderr, defaultEnv())
+	e := defaultEnv()
+	e.tty, e.width = terminal(stdout)
+	e.ascii = !utf8Locale()
+	return run(args, stdout, stderr, e)
 }
 
 func run(args []string, stdout, stderr io.Writer, e env) int {

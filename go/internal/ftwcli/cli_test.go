@@ -19,7 +19,7 @@ import (
 
 func testEnv() env {
 	return env{now: time.Now, sleep: time.Sleep, requestTimeout: time.Second,
-		pollInterval: time.Millisecond, followLimit: 5 * time.Second, heartbeat: time.Hour,
+		pollInterval: time.Millisecond, followLimit: 5 * time.Second, logEvery: time.Hour,
 		healthSettle: 20 * time.Millisecond}
 }
 
@@ -100,8 +100,8 @@ func sequence(bodies ...string) http.HandlerFunc {
 
 const (
 	oldCore = `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","previous":"v0.132.0-beta.1"}`
-	offer   = `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","latest":"v0.132.2-beta.1","update_available":true}`
-	newCore = `{"current":"v0.132.2-beta.1","native":true,"channel":"beta","previous":"v0.132.1-beta.1"}`
+	offer   = `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","latest":"v0.132.2-beta.1","update_available":true,"install_root":"/opt/ftw","install_free_bytes":61000000000,"install_need_bytes":210000000}`
+	newCore = `{"current":"v0.132.2-beta.1","native":true,"channel":"beta","previous":"v0.132.1-beta.1","install_root":"/opt/ftw"}`
 )
 
 func TestHelpAndCommandLineErrors(t *testing.T) {
@@ -142,11 +142,12 @@ func TestUpdateRollsThroughTheRestart(t *testing.T) {
 	})
 	f.on("GET", "/api/version/update/status", sequence(
 		`{"state":"done","action":"update","target":"v0.132.1-beta.1"}`,
-		`{"state":"starting","action":"update","target":"v0.132.2-beta.1","step":1,"total_steps":4,"message":"starting update"}`,
-		`{"state":"pulling","action":"update","target":"v0.132.2-beta.1","step":2,"total_steps":4,"message":"Downloading verified Core release","progress_current":10000000,"progress_total":21600000,"progress_unit":"bytes"}`,
+		`{"state":"starting","action":"update","target":"v0.132.2-beta.1","total_steps":3,"message":"starting update"}`,
+		`{"state":"pulling","action":"update","target":"v0.132.2-beta.1","step":1,"total_steps":3,"message":"Downloading verified Core release","progress_current":10000000,"progress_total":21600000,"progress_unit":"bytes"}`,
+		`{"state":"restarting","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Starting the new Core once"}`,
 		`503 {"error":"starting"}`,
 		`503 {"error":"starting"}`,
-		`{"state":"done","action":"update","target":"v0.132.2-beta.1","step":4,"total_steps":4,"message":"Core is ready on v0.132.2-beta.1"}`,
+		`{"state":"done","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Core is ready on v0.132.2-beta.1"}`,
 	))
 	f.on("POST", "/api/version/update", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -162,9 +163,13 @@ func TestUpdateRollsThroughTheRestart(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Updating v0.132.1-beta.1 -> v0.132.2-beta.1 on beta",
-		"2/4 Downloading verified Core release 10.0 MB of 21.6 MB",
-		"Core is restarting and not answering yet",
+		"Releases: /opt/ftw/releases (61.0 GB free, the next release needs 210.0 MB)",
+		"1/3 Downloading verified Core release   46%  10.0 MB of 21.6 MB",
+		"✓ 1/3 Downloading verified Core release  10.0 MB in ",
+		"3/3 Starting the new Core once",
+		"✓ 3/3 Starting the new Core once  in ",
 		"Now running v0.132.2-beta.1 (was v0.132.1-beta.1)",
+		"Previous: /opt/ftw/releases/v0.132.1-beta.1 (ftw rollback returns to it)",
 		"Health: ok; drivers 3 ok, 0 degraded, 0 offline, 0 faulted.",
 	} {
 		if !strings.Contains(out, want) {
@@ -316,14 +321,20 @@ func TestRollbackReturnsToThePreviousRelease(t *testing.T) {
 func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 	f, srv := newFakeCore(t)
 	f.on("GET", "/api/health", reply(200, `{"status":"ok","drivers_ok":1,"history_storage":{"migration":{"state":"complete"},"writer":{"commit_failures":0}}}`))
-	f.on("GET", "/api/version/check", reply(200, `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","latest":"v0.132.2-beta.1","update_available":true,"previous":"v0.132.0-beta.1"}`))
+	f.on("GET", "/api/version/check", reply(200, `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","latest":"v0.132.2-beta.1","update_available":true,"previous":"v0.132.0-beta.1",
+		"install_root":"/opt/ftw","install_free_bytes":61000000000,"install_need_bytes":210000000}`))
 	f.on("GET", "/api/version/update/status", reply(200, `{"state":"failed","action":"update","target":"v0.132.1-beta.1","message":"New Core did not reach readiness; previous Core is running"}`))
+	f.on("GET", "/api/version/snapshots", reply(200, `{"dir":"/var/lib/ftw/snapshots","snapshots":[{"size_bytes":453000000},{"size_bytes":453000000}]}`))
+	f.on("GET", "/api/backups", reply(200, `{"dir":"/var/lib/ftw/backups","free_bytes":61000000000,"backups":[{"size_bytes":95000}]}`))
 	code, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL)
 	for _, want := range []string{
 		"Core:     v0.132.1-beta.1, native, beta channel",
 		"Release:  v0.132.2-beta.1 is published. Install it with: ftw update",
 		"Update:   last update FAILED: New Core did not reach readiness",
 		"Previous: v0.132.0-beta.1 (ftw rollback returns to it)",
+		"Releases: /opt/ftw/releases (61.0 GB free, the next release needs 210.0 MB)",
+		"Unused:   2 rollback points from older updates, 906.0 MB, in /var/lib/ftw/snapshots; native Core does not use them",
+		"Backups:  /var/lib/ftw/backups, 1 archives, 61.0 GB free",
 		"Health:   ok; drivers 1 ok",
 		"History:  complete; 0 write failures",
 		"journalctl -u ftw",
@@ -339,6 +350,12 @@ func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 	f.on("GET", "/api/health", reply(200, `{"status":"degraded","drivers_offline":1}`))
 	if code, _, errOut := runCLI(t, testEnv(), "status", "--url", srv.URL); code != exitFailed || !strings.Contains(errOut, "health is degraded") {
 		t.Fatalf("degraded: %d %q", code, errOut)
+	}
+	f.on("GET", "/api/health", reply(200, `{"status":"ok"}`))
+	f.on("GET", "/api/version/check", reply(200, `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","install_root":"/opt/ftw","install_free_bytes":90000000,"install_need_bytes":210000000}`))
+	if code, out, errOut := runCLI(t, testEnv(), "status", "--url", srv.URL); code != exitFailed ||
+		!strings.Contains(errOut, "not enough disk space for the next release") || !strings.Contains(out, "90.0 MB free") {
+		t.Fatalf("low disk: %d %q\n%s", code, errOut, out)
 	}
 	f.on("GET", "/api/health", reply(200, `{"status":"starting","phase":"initializing state"}`))
 	if code, out, _ := runCLI(t, testEnv(), "status", "--url", srv.URL); code != exitFailed || !strings.Contains(out, "starting: initializing state") {
@@ -432,5 +449,169 @@ func TestSupportWritesAPrivateReadableZip(t *testing.T) {
 	}
 	if _, err := os.Stat("cut.zip"); !os.IsNotExist(err) {
 		t.Fatalf("cut zip kept: %v", err)
+	}
+}
+
+func TestUpdateStopsWhenTheDiskCannotHoldTheNextRelease(t *testing.T) {
+	f, srv := newFakeCore(t)
+	f.on("GET", "/api/version/check", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("force") == "1" {
+			reply(200, `{"current":"v0.132.1-beta.1","native":true,"channel":"beta","latest":"v0.132.2-beta.1","update_available":true,
+				"install_root":"/opt/ftw","install_free_bytes":90000000,"install_need_bytes":210000000}`)(w, r)
+			return
+		}
+		reply(200, oldCore)(w, r)
+	})
+	f.on("GET", "/api/version/update/status", reply(200, `{"state":"idle"}`))
+	code, out, errOut := runCLI(t, testEnv(), "update", "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(errOut, "not enough disk space for v0.132.2-beta.1: 90.0 MB free, 210.0 MB needed") ||
+		!strings.Contains(out, "Releases: /opt/ftw/releases (90.0 MB free") || len(f.postedPaths()) != 0 {
+		t.Fatalf("exit %d posts %v\n%s%s", code, f.postedPaths(), out, errOut)
+	}
+}
+
+func TestUpdateShowsHistoryMigrationWhileTheNewCoreStarts(t *testing.T) {
+	f, srv := newFakeCore(t)
+	var mu sync.Mutex
+	finished := false
+	f.on("GET", "/api/version/check", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case finished:
+			reply(200, newCore)(w, r)
+		case r.URL.Query().Get("force") == "1":
+			reply(200, offer)(w, r)
+		default:
+			reply(200, oldCore)(w, r)
+		}
+	})
+	f.on("GET", "/api/version/update/status", sequence(
+		`{"state":"idle"}`,
+		`{"state":"restarting","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Starting the new Core once"}`,
+		`503 {"error":"starting"}`,
+		`503 {"error":"starting"}`,
+		`{"state":"done","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Core is ready on v0.132.2-beta.1"}`,
+	))
+	f.on("POST", "/api/version/update", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		finished = true
+		mu.Unlock()
+		reply(202, `{"target":"v0.132.2-beta.1"}`)(w, r)
+	})
+	f.on("GET", "/api/health", sequence(
+		`{"status":"starting","phase":"initializing state","migration":{"state":"running","source_bytes_done":300000000,"source_bytes_total":1200000000}}`,
+		`{"status":"starting","phase":"initializing state","migration":{"state":"running","source_bytes_done":600000000,"source_bytes_total":1200000000}}`,
+		`{"status":"ok","drivers_ok":1}`,
+	))
+	e := testEnv()
+	e.logEvery = 0 // log every reading
+	code, out, errOut := runCLI(t, e, "update", "--url", srv.URL)
+	if code != exitOK || !strings.Contains(out, "3/3 Starting the new Core once   25%  300.0 MB of 1.2 GB") ||
+		!strings.Contains(out, "new Core migrating history") {
+		t.Fatalf("exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+// clock advances only when a test says so.
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time          { return c.t }
+func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func TestMeterDrawsABarWithRateAndTimeLeftOnATerminal(t *testing.T) {
+	var out strings.Builder
+	clk := &clock{t: time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)}
+	e := testEnv()
+	e.now, e.tty, e.width = clk.now, true, 100
+	m := newMeter(&out, e)
+	step := sample{key: "pull", label: "1/3 Downloading verified Core release", unit: "bytes", total: 100_000_000}
+	for i := int64(0); i <= 4; i++ {
+		step.done = i * 10_000_000
+		m.show(step)
+		clk.advance(time.Second)
+	}
+	screen := out.String()
+	bar := "[" + strings.Repeat("█", 12) + strings.Repeat("░", 18) + "]"
+	for _, want := range []string{
+		"  1/3 Downloading verified Core release\n",
+		clearLine + "    " + bar + "   40%  40.0 MB of 100.0 MB  10.0 MB/s  ETA 6s  4s",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("missing %q in %q", want, screen)
+		}
+	}
+	if strings.Count(screen, "Downloading") != 1 {
+		t.Fatalf("the phase name is drawn once: %q", screen)
+	}
+	out.Reset()
+	m.finish(true)
+	if got := out.String(); got != clearLine+lineUp+clearLine+"✓ 1/3 Downloading verified Core release  40.0 MB in 5.0s (8.0 MB/s)\n" {
+		t.Fatalf("finish %q", got)
+	}
+
+	out.Reset()
+	e.ascii = true
+	m = newMeter(&out, e)
+	m.show(sample{key: "start", label: "3/3 Starting the new Core once", detail: "new Core starting: initializing state"})
+	m.finish(false)
+	if got := out.String(); !strings.Contains(got, "    /  new Core starting: initializing state  0s") ||
+		!strings.HasSuffix(got, "FAILED 3/3 Starting the new Core once  after 0.0s\n") {
+		t.Fatalf("ascii %q", got)
+	}
+	out.Reset()
+	m.show(sample{key: "setup", label: "starting update", quiet: true})
+	m.finish(true)
+	if got := out.String(); strings.Contains(got, "done") || !strings.HasSuffix(got, lineUp+clearLine) {
+		t.Fatalf("a quiet phase leaves nothing: %q", got)
+	}
+}
+
+func TestUpdateShowsEveryPhaseCoreRecordedEvenWhenPollingMissedThem(t *testing.T) {
+	f, srv := newFakeCore(t)
+	var mu sync.Mutex
+	finished := false
+	f.on("GET", "/api/version/check", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case finished:
+			reply(200, newCore)(w, r)
+		case r.URL.Query().Get("force") == "1":
+			reply(200, offer)(w, r)
+		default:
+			reply(200, oldCore)(w, r)
+		}
+	})
+	// The download and check finish between two reads; only Core's record
+	// knows them.
+	f.on("GET", "/api/version/update/status", sequence(
+		`{"state":"idle"}`,
+		`{"state":"starting","action":"update","target":"v0.132.2-beta.1","total_steps":3,"message":"starting update"}`,
+		`503 {"error":"starting"}`,
+		`{"state":"done","action":"update","target":"v0.132.2-beta.1","step":3,"total_steps":3,"message":"Core is ready on v0.132.2-beta.1","phases":[
+			{"step":1,"total_steps":3,"message":"Downloading verified Core release","started_at":"2026-09-24T09:00:00Z","finished_at":"2026-09-24T09:00:00.4Z","bytes":24000000},
+			{"step":2,"total_steps":3,"message":"Checking release and preparing restart","started_at":"2026-09-24T09:00:00.4Z","finished_at":"2026-09-24T09:00:00.5Z"},
+			{"step":3,"total_steps":3,"message":"Starting the new Core once","started_at":"2026-09-24T09:00:00.5Z","finished_at":"2026-09-24T09:00:02.5Z"}]}`,
+	))
+	f.on("POST", "/api/version/update", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		finished = true
+		mu.Unlock()
+		reply(202, `{"target":"v0.132.2-beta.1"}`)(w, r)
+	})
+	f.on("GET", "/api/health", reply(200, `{"status":"ok","drivers_ok":1}`))
+	code, out, errOut := runCLI(t, testEnv(), "update", "--url", srv.URL)
+	for _, want := range []string{
+		"✓ 1/3 Downloading verified Core release  24.0 MB in 0.4s (60.0 MB/s)\n",
+		"✓ 2/3 Checking release and preparing restart  in 0.1s\n",
+		"✓ 3/3 Starting the new Core once  in 2.0s\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q\n%s%s", want, out, errOut)
+		}
+	}
+	if code != exitOK || strings.Contains(out, "✓ Restarting into") {
+		t.Fatalf("exit %d; the client's own restart phase must give way to Core's record\n%s", code, out)
 	}
 }

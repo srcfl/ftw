@@ -68,6 +68,12 @@ func TestFullBackupLifecycle(t *testing.T) {
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"verified":true`) {
 		t.Fatalf("list backups = %d %s", list.Code, list.Body.String())
 	}
+	var listed struct {
+		FreeBytes int64 `json:"free_bytes"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil || listed.FreeBytes <= 0 {
+		t.Fatalf("backup list reports no free space: %v %s", err, list.Body.String())
+	}
 
 	download := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(download, httptest.NewRequest(http.MethodGet, "/api/backups/"+created.Backup.ID, nil))
