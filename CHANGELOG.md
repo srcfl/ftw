@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.134.2
+
+### Patch Changes
+
+- 00f33fd: `ftw update` no longer prints the download step twice when Core restarts right after it.
+
 ## 0.134.1
 
 ### Patch Changes
