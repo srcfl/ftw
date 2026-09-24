@@ -278,7 +278,8 @@ func TestNativeTriggerStagesThenRequestsRestart(t *testing.T) {
 		t.Fatalf("native update reports step %d/%d; it has no rollback point step", st.Step, st.TotalSteps)
 	}
 	if phases := c.Status().Phases; len(phases) != 2 || phases[0].Step != 1 || phases[0].Bytes != int64(len(archive)) ||
-		phases[1].Step != 2 || phases[1].FinishedAt.Before(phases[1].StartedAt) {
+		phases[1].Step != 2 || phases[1].Message != "Unpacking and checking the release" ||
+		phases[1].FinishedAt.Before(phases[1].StartedAt) || phases[1].StartedAt.Before(phases[0].FinishedAt) {
 		t.Fatalf("finished phases %+v", phases)
 	}
 	if info := c.Info(); info.InstallRoot != root || info.InstallFreeBytes <= 0 || info.InstallNeedBytes <= 0 {
