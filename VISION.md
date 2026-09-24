@@ -5,6 +5,11 @@ ahead, controls against current measurements and shows what actually happened.
 Its default experience must be simple enough for a first-time user and good
 enough to earn the trust of someone who builds their own energy system.
 
+The product is a lean core: FTW Core and the Energy Planner. They are the
+primitives an agent or another automation needs in order to work with the
+home's energy system. Home Assistant, MQTT and a database the owner runs for
+their own analysis sit on top. Core does not absorb those tools.
+
 This is the product direction set by Fredrik. It guides design and review;
 it does not claim that every outcome below has shipped. The
 [roadmap](docs/roadmap.md) names the work and evidence needed to reach it.
@@ -197,6 +202,37 @@ Scope exclusions will be decided as needs arise. There is no standing list
 of banned protocols or features. A roadmap entry, green CI or available agent
 capacity does not by itself establish priority. Fredrik sets the work; finish
 coherent user outcomes and keep necessary maintenance moving.
+
+## Versions tell the truth
+
+The version stays in 0.x until FTW is actually a 1.0. Real sites already run
+it, and it is still an early project. The 1.x, 2.x and 3.x numbers came from
+removals, not from a decision that the product was finished. The native line
+continues the earlier 0.x counter at 0.131 so tags that were already published
+stay unique. [ADR 0007](docs/adr/0007-self-updating-binary.md) records that
+choice.
+
+## Running it, updating it, and a later hosted service
+
+A person who runs FTW on their own machine is using an early project that
+already works. They should be able to follow a guide, take a backup and apply
+an update. systemd and a container are both valid ways to run it. The project
+documents those ways.
+
+The update itself stays small. On a native install, Core downloads the next
+verified release and swaps to it. On a container install, the owner pulls the
+new image. Either way the owner can see the step and can wrap it. A privileged
+sidecar whose job is to update Core is not part of the product. The machinery
+around that sidecar is retired as sites leave it. The same ADR records the
+shape.
+
+A hosted service, in the spirit of the Sourceful Blixt gateway, is the later
+path for a household that wants FTW to just work and does not want to operate
+the box. It has not shipped. Until it exists, the project does not promise
+individual support for every self-hosted site that can report only a version
+number while releases still move quickly. Support that an agent can carry
+out needs the user's authorization and access to that gateway. The box keeps
+planning and controlling when the agent and the network are gone.
 
 ## Ownership and contributions
 
