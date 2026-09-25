@@ -92,6 +92,10 @@ type CatalogEntry struct {
 	// write path, rather than FTW matching on a filename or vendor name.
 	// Read-only remains the default for every driver in the catalog.
 	WriteCapabilities []string `json:"write_capabilities,omitempty"`
+	// Replaces names catalog driver ids this driver takes over, such as
+	// esphome-dsmr folded into esphome_dsmr. A device running one of them is
+	// moved to this driver when the release ships it.
+	Replaces []string `json:"replaces,omitempty"`
 }
 
 // LoadCatalog scans dir (and any direct sub-directories) for .lua driver
@@ -221,6 +225,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
 	e.WriteCapabilities = pickList(block, "write_capabilities")
+	e.Replaces = pickList(block, "replaces")
 	e.AuthPostPath = pickString(block, "auth_post_path")
 	e.Controls = pickControls(block)
 	return e, nil
