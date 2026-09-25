@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.137.1
+
+### Patch Changes
+
+- 2184858: A device that runs the retired ESPHome DSMR driver entry `esphome-dsmr` moves to
+  the release's `esphome_dsmr` at start, and its settings are saved; the two were
+  the same driver under two names. An operator's own driver file of the old name is
+  left alone. The bundled drivers come from srcfl/device-drivers 92adaf0.
+- 2328385: FTW no longer reads Device Support driver packages. Drivers come from the
+  release and from FTW's own signed driver channel, as before. A site that still
+  lists a Device Support package source keeps starting: the source is removed
+  from its settings with one warning, and a package that was active is switched
+  off at startup so the release's own driver runs. A driver `control` opt-in has
+  no effect any more; it is removed with a warning instead of stopping that
+  driver from starting. The driver diagnostics report now names a driver
+  installed from the channel as `managed`.
+- dbdf5d6: `ftw status` no longer says a driver from the channel runs "until a release has
+  it" when the release already has the same version; it says the version is the
+  same as the release's.
+- 9044826: When a release's newer driver runs instead of a kept older selection, a failed
+  trial of another version now returns the device to the release's driver. Before,
+  the recovery restarted a file that no longer ran and left the device stopped, or
+  made the kept older version run. The kept version now offers "Use this" under
+  Settings › Devices, so the owner can go back to it.
+
 ## 0.137.0
 
 ### Minor Changes
