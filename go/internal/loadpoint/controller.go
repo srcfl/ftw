@@ -1513,8 +1513,14 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 			continue
 		}
 		observations = append(observations, observation{cfg, sample})
-		if sample.Connected && !sample.ConnectionUnknown && (!dispatchAllowed || sample.PowerUnavailable) && c.driverCanDispatch(cfg.DriverName) {
-			c.standDownBeforeStorage(ctx, now, cfg, sample, dispatchAllowed)
+		// Only a stale site meter stands chargers down. An old charger power
+		// reading from a live driver is not a hardware risk: the fuse clamps
+		// work from the site meter, and energy accounting already treats the
+		// gap as unmeasured. Easee reports power only when it changes, so
+		// steady charging looked stale after three minutes and Core stopped
+		// the car every few minutes.
+		if sample.Connected && !sample.ConnectionUnknown && !dispatchAllowed && c.driverCanDispatch(cfg.DriverName) {
+			c.standDownBeforeStorage(ctx, now, cfg, sample)
 		}
 	}
 	if c.plan == nil && dispatchAllowed {
@@ -1525,16 +1531,12 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 	}
 }
 
-func (c *Controller) standDownBeforeStorage(ctx context.Context, now time.Time, cfg Config, sample EVSample, dispatchAllowed bool) {
+func (c *Controller) standDownBeforeStorage(ctx context.Context, now time.Time, cfg Config, sample EVSample) {
 	var manualUpdatedAt time.Time
 	if hold, held := c.GetManualHold(cfg.ID, now); held {
 		manualUpdatedAt = hold.UpdatedAt
 	}
-	reason := "site_meter_stale"
-	if dispatchAllowed && sample.PowerUnavailable {
-		reason = "charger_power_stale"
-	}
-	c.manager.setCommandedForManual(cfg.ID, 0, reason, manualUpdatedAt)
+	c.manager.setCommandedForManual(cfg.ID, 0, "site_meter_stale", manualUpdatedAt)
 	if c.send == nil {
 		return
 	}
@@ -1618,7 +1620,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		// outcome here; driverActuationTracker.update owns the timed retry.
 		return
 	}
-	if !dispatchAllowed || sample.PowerUnavailable {
+	if !dispatchAllowed {
 		// Standdown already ran before storage. Keep observations and goals,
 		// but do not advance completion timers or perform wake side effects.
 		return

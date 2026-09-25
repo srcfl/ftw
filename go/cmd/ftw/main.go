@@ -2834,8 +2834,6 @@ func main() {
 	evDrawPrev := map[string]float64{}
 	var lastEVStopReplan time.Time
 	const evStopReplanCooldown = 60 * time.Second
-	const evStopHigh = 100.0 // W — "was actually drawing"
-	const evStopLow = 50.0   // W — "now essentially zero"
 	var staleDefaults staleSiteDefaultTracker
 	solarFeed := newSolarFeedSender()
 	for {
@@ -3254,7 +3252,7 @@ func main() {
 				for _, lp := range lpMgr.States() {
 					prev := evDrawPrev[lp.ID]
 					curr := lp.CurrentPowerW
-					if lp.PluggedIn && prev >= evStopHigh && curr < evStopLow &&
+					if evStopNeedsReplan(lp, prev) &&
 						time.Since(lastEVStopReplan) > evStopReplanCooldown && !fired {
 						lastEVStopReplan = time.Now()
 						fired = true

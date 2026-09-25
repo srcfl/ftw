@@ -25,7 +25,7 @@ func (s *blockedSessionStore) SaveConfig(key, value string) error {
 }
 
 func TestSafetyStopsAllChargersBeforeBlockedSessionSave(t *testing.T) {
-	for _, stale := range []string{"site_meter", "charger_power"} {
+	for _, stale := range []string{"site_meter"} {
 		t.Run(stale, func(t *testing.T) {
 			now := time.Now()
 			cfgs := []Config{
@@ -45,11 +45,6 @@ func TestSafetyStopsAllChargersBeforeBlockedSessionSave(t *testing.T) {
 				// A previous failed checkpoint must retry, but it must not
 				// delay the site's safety standdown for either charger.
 				c.manager.byID[cfg.ID].socRetention = "error"
-				if stale == "charger_power" {
-					sample := samples[cfg.ID]
-					sample.PowerUnavailable = true
-					samples[cfg.ID] = sample
-				}
 			}
 			commands := make(chan sentCommand, 8)
 			c.send = func(_ context.Context, driver string, body []byte) error {
@@ -67,7 +62,7 @@ func TestSafetyStopsAllChargersBeforeBlockedSessionSave(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				c.TickWithDispatch(context.Background(), now, stale != "site_meter")
+				c.TickWithDispatch(context.Background(), now, false)
 			}()
 			defer func() {
 				close(store.release)
