@@ -303,19 +303,27 @@ func (s *Server) handleDeviceRepositoryVersions(w http.ResponseWriter, r *http.R
 			logicalPath = candidate.Driver.Path
 		}
 	}
-	release, chosen := "", ""
+	// A selection the release's newer copy has overtaken is kept but does
+	// not run, so the picker offers it like any version on disk.
+	release, chosen, superseded := "", "", ""
 	if logicalPath != "" {
 		release = s.deps.DriverRepository.ReleaseVersion(logicalPath)
 		for _, installed := range versions {
-			if installed.Active && s.deps.DriverRepository.Chosen(logicalPath, installed.Version) {
+			if !installed.Active {
+				continue
+			}
+			if s.deps.DriverRepository.Chosen(logicalPath, installed.Version) {
 				chosen = installed.Version
+			}
+			if !s.deps.DriverRepository.Runs(installed) {
+				superseded = installed.Version
 			}
 		}
 	}
 	writeJSON(w, 200, map[string]any{
 		"driver_id": r.PathValue("id"), "installed": versions, "available": available,
 		"logical_path": logicalPath, "release_version": release, "chosen_version": chosen,
-		"release_source": s.bundledSource(),
+		"superseded_version": superseded, "release_source": s.bundledSource(),
 	})
 }
 
@@ -362,8 +370,11 @@ func (s *Server) handleDeviceRepositoryActivate(w http.ResponseWriter, r *http.R
 	if restartErr != nil {
 		recoveryErr := error(nil)
 		if original != nil {
+			// A rollback restores the selection and the choice that went
+			// with it. Activating the original again would pin a kept
+			// version the release had overtaken, and run it instead.
 			var recovered state.DriverRepoInstall
-			recovered, recoveryErr = s.deps.DriverRepository.ActivateInstalled(driverID, original.Version, original.SHA256)
+			recovered, recoveryErr = s.deps.DriverRepository.Rollback(activated.LogicalPath)
 			if recoveryErr == nil {
 				_, recoveryErr = s.restartManagedDriversExpected(context.Background(), recovered, restartState.ExpectedIdentities)
 			}
@@ -524,7 +535,10 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 	rel := filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/"))
 	activePath := filepath.Join(s.managedDriverDir(), rel)
 	targetPath := activePath
-	if artifact.InstalledPath == "" {
+	// No managed file runs at this path either when nothing is selected
+	// (UseBundled) or when the release's newer copy overtakes the selection;
+	// the release's own file runs then.
+	if _, err := os.Stat(activePath); artifact.InstalledPath == "" || err != nil {
 		var err error
 		targetPath, err = s.bundledDriverFor(artifact.DriverID, artifact.LogicalPath)
 		if err != nil {

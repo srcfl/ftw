@@ -213,6 +213,12 @@
     var available = (body && body.available) || [];
     var release = (body && body.release_version) || "";
     var chosen = (body && body.chosen_version) || "";
+    // A selection the release's newer copy has overtaken is kept but does not
+    // run. It is offered like any version on disk, so the owner can go back.
+    var superseded = (body && body.superseded_version) || "";
+    function selected(item, version) {
+      return !!(item && item.active && version !== superseded);
+    }
     var rows = [];
     var seen = {};
 
@@ -242,8 +248,8 @@
         channel: candidate.channel === "beta" ? "beta" : "stable",
         changes: changesURL(candidate.repository, driver.source_commit, driver.filename),
         downloaded: !!onDisk,
-        active: !!(onDisk && onDisk.active),
-        chosen: !!(onDisk && onDisk.active && chosen && driver.version === chosen),
+        active: selected(onDisk, driver.version),
+        chosen: !!(selected(onDisk, driver.version) && chosen && driver.version === chosen),
         verification: verificationLabel((driver.metadata || {}).verification_status)
       });
     });
@@ -260,8 +266,8 @@
         channel: "",
         changes: "",
         downloaded: true,
-        active: !!item.active,
-        chosen: !!(item.active && chosen && item.version === chosen),
+        active: selected(item, item.version),
+        chosen: !!(selected(item, item.version) && chosen && item.version === chosen),
         verification: ""
       });
     });
