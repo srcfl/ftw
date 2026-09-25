@@ -124,6 +124,11 @@ type DriverHealth struct {
 	LastError         string
 	TickCount         uint64
 
+	// StartedAt is when this record was created, which is when the driver
+	// was added. Until its first success the watchdog measures from here,
+	// so a driver that has not had time to emit is not already stale.
+	StartedAt time.Time
+
 	// WatchdogTimeoutOverride, when > 0, replaces the site-wide
 	// timeout in WatchdogScan for this driver only. Drivers with
 	// intrinsically slow polling cadences (Tesla BLE proxy, cloud
@@ -674,7 +679,7 @@ func (s *Store) DriverHealthMut(name string) *DriverHealth {
 func (s *Store) driverHealthLocked(name string) *DriverHealth {
 	h, ok := s.health[name]
 	if !ok {
-		h = &DriverHealth{Name: name}
+		h = &DriverHealth{Name: name, StartedAt: time.Now()}
 		s.health[name] = h
 	}
 	return h
@@ -731,8 +736,9 @@ func (s *Store) AllHealth() map[string]DriverHealth {
 	return out
 }
 
-// WatchdogScan checks each known driver's LastSuccess timestamp against
-// timeout and toggles Status accordingly. Returns the list of drivers whose
+// WatchdogScan checks each known driver's LastSuccess timestamp, or its
+// StartedAt before the first success, against timeout and toggles Status
+// accordingly. Returns the list of drivers whose
 // status just changed (name → new online state). Call this once per control
 // cycle so the control loop can react (e.g. exclude offline drivers from
 // dispatch and ask them to revert to autonomous mode).
@@ -746,7 +752,11 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 		if h.WatchdogTimeoutOverride > 0 {
 			eff = h.WatchdogTimeoutOverride
 		}
-		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > eff
+		since := h.StartedAt
+		if h.LastSuccess != nil {
+			since = *h.LastSuccess
+		}
+		stale := since.IsZero() || now.Sub(since) > eff
 		wasOnline := h.Status != StatusOffline
 		if stale && wasOnline {
 			h.SetOffline()
@@ -769,7 +779,7 @@ func (s *Store) SetDriverWatchdogTimeout(name string, d time.Duration) {
 	defer s.mu.Unlock()
 	h, ok := s.health[name]
 	if !ok {
-		h = &DriverHealth{Name: name}
+		h = &DriverHealth{Name: name, StartedAt: time.Now()}
 		s.health[name] = h
 	}
 	h.WatchdogTimeoutOverride = d
@@ -781,7 +791,7 @@ func (s *Store) SetDriverDeviceFault(name string, faulted bool, reason string) {
 	s.mu.Lock()
 	h, ok := s.health[name]
 	if !ok {
-		h = &DriverHealth{Name: name}
+		h = &DriverHealth{Name: name, StartedAt: time.Now()}
 		s.health[name] = h
 	}
 	before := h.DeviceFault
