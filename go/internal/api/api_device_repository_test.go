@@ -492,9 +492,8 @@ func TestDriverCatalogNamesTheDriversThatRunEachFile(t *testing.T) {
 	}
 }
 
-// publishAs publishes the fixture driver under the channel's own spelling,
-// as device-drivers does: the bundled source declares id "esphome-dsmr",
-// the signed channel calls the same file "esphome_dsmr".
+// publishAs publishes the fixture driver on the channel under id, at
+// drivers/<filename>.
 func (f *driverUpdateFixture) publishAs(id, filename, version string) {
 	f.t.Helper()
 	source := []byte(strings.Replace(string(updateDriverLua(version, "P1-123", `host.emit("meter", {w=103})`)),
@@ -528,13 +527,17 @@ func (f *driverUpdateFixture) requestFor(id, action, body string, want int) map[
 	return response
 }
 
-// On the home box "Use bundled" answered "no bundled file declares driver
-// easee_cloud": the release's easee_cloud.lua declares "easee-cloud". The
-// same spelling kept an install from reaching the running instance until
-// Core restarted. The signed manifest names the file, and the publisher's
-// identity rule ties the two spellings together.
-func TestChannelAndBundledSpellingsOfOneDriverMeet(t *testing.T) {
+// A driver has one id: the release's copy and the signed channel's file at
+// the same path declare it alike. An install reaches the running instance,
+// and "Use bundled" finds the release's copy again. On the home box the old
+// spellings (easee-cloud, easee_cloud) broke both.
+func TestReleaseCopyAndChannelMeetByTheirOneID(t *testing.T) {
 	f := newDriverUpdateFixture(t, "running")
+	release := strings.Replace(string(updateDriverLua("1.0.2", "P1-123", `host.emit("meter", {w=102})`)),
+		`id = "esphome-dsmr"`, `id = "esphome_dsmr"`, 1)
+	if err := os.WriteFile(f.bundled, []byte(release), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	f.publishAs("esphome_dsmr", "esphome_dsmr.lua", "1.0.3")
 
 	response := f.requestFor("esphome_dsmr", "install", `{"repository_id":"test"}`, 200)

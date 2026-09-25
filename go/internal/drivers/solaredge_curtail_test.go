@@ -193,8 +193,8 @@ func TestSolarEdgeCatalogAdvertisesCurtail(t *testing.T) {
 	}
 	wantIDs := map[string]bool{
 		"solaredge":        false,
-		"solaredge-pv":     false,
-		"solaredge-legacy": false,
+		"solaredge_pv":     false,
+		"solaredge_legacy": false,
 	}
 	for _, e := range entries {
 		if _, ok := wantIDs[e.ID]; !ok {

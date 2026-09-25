@@ -272,7 +272,7 @@
     btn.disabled = false;
 
     var lines = [];
-    if (selectedCatalog.filename === 'zap.lua' || selectedCatalog.id === 'sourceful-zap') {
+    if (selectedCatalog.filename === 'zap.lua' || selectedCatalog.id === 'zap') {
       lines.push('This driver is the P1/HAN site meter by default. Add inverters, batteries and chargers as their own devices in FTW when you can. If Zap is the only reader, turn on PV or battery ingest later under Settings → Devices.');
     }
     if (selectedCatalog.description) lines.push(selectedCatalog.description);

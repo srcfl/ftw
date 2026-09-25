@@ -108,7 +108,7 @@ func TestSolisStringCatalogEntry(t *testing.T) {
 	}
 	var found *CatalogEntry
 	for i, e := range entries {
-		if e.ID == "solis-string" {
+		if e.ID == "solis_string" {
 			found = &entries[i]
 			break
 		}
