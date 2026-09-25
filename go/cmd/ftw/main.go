@@ -550,6 +550,13 @@ func main() {
 	driverRepository.SetBundledDir(resolveDriverDir())
 	driverRepository.ApplyBundled()
 	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
+	// A catalog driver the release's own driver replaces (DRIVER.replaces)
+	// moves its devices over, and the saved settings follow.
+	if moved := driverRepository.MigrateReplaced(cfg, *userDriversDirFlag); len(moved) > 0 {
+		if err := config.SaveStored(st, *configPath, cfg); err != nil {
+			slog.Warn("could not save devices moved to a replacing driver", "err", err)
+		}
+	}
 	config.ManagedDriversDirOverride = driverRepository.EffectiveDir()
 	cfg.ResolveDriverPaths(filepath.Dir(*configPath))
 
