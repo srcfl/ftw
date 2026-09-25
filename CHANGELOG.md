@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.136.4
+
+### Patch Changes
+
+- f447c9d: The bundled Easee driver (1.3.3) no longer reports an old change time for a
+  steady charging power, so FTW sees the reading as current. The bundled drivers
+  move to srcfl/device-drivers 489c937, which also brings nibe_local 1.2.0 with
+  its optional, off-by-default solar surplus feed.
+- a4a1bde: A car charging at a steady current is no longer stopped every three minutes.
+  Easee reports power only when it changes, and Core took the unchanged reading as
+  a stale charger and set it to 0 A, then started it again, all night. An old
+  charger power reading now only affects energy accounting; a stale site meter
+  still stops every charger. A stop that Core ordered itself no longer triggers
+  a replan, which had fed the start-stop loop.
+
 ## 0.136.3
 
 ### Patch Changes
