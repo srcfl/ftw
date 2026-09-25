@@ -175,8 +175,7 @@ and `ftw update` and `ftw rollback` move them with Core. A driver fix is a pin
 bump in the next beta. The signed driver channel serves installs that cannot
 take a new Core and lets an owner pick another signed version of one driver.
 Early access ends when a release catches up; an older version chosen on
-purpose stays until the owner changes it. Proposed: `drivers-stable` carries the drivers of the
-latest stable Core and is promoted with it.
+purpose stays until the owner changes it.
 
 Native 0.x path:
 
@@ -188,6 +187,9 @@ Native 0.x path:
 4. Dispatch the same workflow for `v0.X.Y` stable, naming the tested beta.
    The workflow checks the source commit and release assets, and keeps GitHub
    `releases/latest` on the old 2.x line.
+5. Promote the signed driver channel for installs that read `drivers-stable`:
+   `gh workflow run ftw-drivers-release.yml -R srcfl/device-drivers --ref main -f channel=stable`.
+   It promotes the driver commit already published as `drivers-beta`.
 
 Do not publish routine Docker releases. Existing 1.x, 2.x and 3.x installs
 remain on their current version until their owner uses the guided installer
