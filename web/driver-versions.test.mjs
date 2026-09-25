@@ -642,3 +642,27 @@ test("each version links to what changed, and only to its GitHub source", () => 
   assert.equal(linkOf(rowOf(panel, "v2.1.1")).textContent, "What changed");
   assert.equal(linkOf(rowOf(panel, "v2.0.0")), undefined, "a source that is not GitHub gets no link");
 });
+
+test("after a switch, checking for new versions redraws what runs now", async () => {
+  // install, refresh and versions all answer with this body in the stub.
+  const body = { ...PAYLOAD, release_version: "1.0.0", runtime_verified: true, restarted_drivers: ["p1"] };
+  const { api } = load(body);
+  catalogEntry = { path: "drivers/ferroamp.lua", source: "managed", installed_version: "1.1.1" };
+  const panel = element("div");
+  api.render(panel, "ferroamp", body, {
+    runningVersion: "1.0.0", runningSource: "bundled", logicalPath: "drivers/ferroamp.lua",
+    headlineEl: element("span"), detailEl: element("span"),
+  });
+  assert.equal(buttonsOf(rowOf(panel, "release")).length, 0, "the release's copy runs at first");
+
+  buttonsOf(rowOf(panel, "v1.1.1"))[0].click();
+  await settle();
+  buttonsOf(panel).find((b) => b.textContent === "Check for new versions").click();
+  await settle();
+  await settle();
+
+  const release = rowOf(panel, "release");
+  assert.doesNotMatch(textOf(release), /running now/, "1.1.1 runs now, not the release's copy");
+  assert.equal(buttonsOf(release).map((b) => b.textContent).join(" "), "Use this",
+    "the way back to the release's copy must stay after a redraw");
+});

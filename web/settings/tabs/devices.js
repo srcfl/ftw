@@ -630,10 +630,15 @@
         entries.forEach(function (e) { if (e && e.path === opts.logicalPath) entry = e; });
         if (!entry) return;
         var summary = runningSummary(entry);
+        // The picker is redrawn from these options (Check for new versions),
+        // so they follow what runs now, not what ran when it was opened.
+        opts.runningSource = entry.source || "bundled";
+        opts.runningVersion = entry.installed_version || entry.version || "";
+        opts.overridden = opts.runningSource === "local";
         if (opts.versionsEl) {
           opts.versionsEl.dataset.logicalPath = entry.path;
-          opts.versionsEl.dataset.source = entry.source || "bundled";
-          opts.versionsEl.dataset.runningVersion = entry.installed_version || entry.version || "";
+          opts.versionsEl.dataset.source = opts.runningSource;
+          opts.versionsEl.dataset.runningVersion = opts.runningVersion;
         }
         badge.textContent = summary.headline;
         if (opts.detailEl) opts.detailEl.textContent = summary.detail;
