@@ -104,3 +104,18 @@ describe("data-source coverage under the map", () => {
     assert.match(source, /coverage is advisory; never break the tab/);
   });
 });
+
+// The form shows what Core runs. Without a provider Core fetches no forecast,
+// and without a rated power it has none; a form that showed met_no and
+// 10000 W instead never saved them when the owner accepted them (#1436).
+describe("weather defaults are what Core uses", () => {
+  it("shows no provider and no rated power when none is set", () => {
+    const defaults = {};
+    const ctx = stubCtx({ provider: "", latitude: 55.9, longitude: 13.4 });
+    ctx.field = (label, path, type, dflt) => { defaults[path] = dflt; return ""; };
+    ctx.selectField = (label, path, options, dflt) => { defaults[path] = dflt; return ""; };
+    tab.render(ctx);
+    assert.equal(defaults["weather.provider"], "none");
+    assert.equal(defaults["weather.pv_rated_w"], "");
+  });
+});
