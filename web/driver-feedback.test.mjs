@@ -27,7 +27,8 @@ describe("driver feedback", () => {
     assert.match(diagnostics, /local \/ unsigned/);
     assert.match(diagnostics, /Last error:.*omitted here for privacy/);
     assert.match(diagnostics, /raw errors, logs, IP addresses, serial numbers, credentials, site IDs and config out/);
-    assert.match(diagnostics, /entry\.source === "managed" && entry\.package_id && entry\.artifact_sha256/);
+    assert.match(diagnostics, /entry\.source === "managed"\) return "managed"/);
+    assert.doesNotMatch(diagnostics, /package_id/);
   });
 });
 

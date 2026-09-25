@@ -1265,25 +1265,23 @@ func TestSerialAndStandaloneDriverCapabilities(t *testing.T) {
 	}
 }
 
-func TestDeviceRepositorySourcefulFormatMustBeSignedAndKnown(t *testing.T) {
+func TestDeviceRepositoryRejectsUnknownFormats(t *testing.T) {
 	base := Config{Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16}}
 	base.DeviceRepository = &DeviceRepository{Enabled: true, Repositories: []DriverRepositorySource{{
-		ID: "sourceful", Format: DriverRepositoryFormatSourcefulIndexV1,
-		ManifestURL: "file:///tmp/sourceful-driver-index.json", Enabled: true,
-		AllowInsecure: true, AllowUnsigned: true,
+		ID: "custom", Format: DriverRepositoryFormatFTWManifestV1,
+		ManifestURL: "https://drivers.example/manifest.json", Enabled: true,
+		TrustedKeys: map[string]string{"test": strings.Repeat("A", 44)},
 	}}}
 	applyDefaults(&base)
-	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "must be signed") {
-		t.Fatalf("unsigned Sourceful index error = %v", err)
-	}
-	base.DeviceRepository.Repositories[0].AllowUnsigned = false
-	base.DeviceRepository.Repositories[0].TrustedKeys = map[string]string{"test": strings.Repeat("A", 44)}
 	if err := base.Validate(); err != nil {
-		t.Fatalf("signed Sourceful source rejected: %v", err)
+		t.Fatalf("FTW manifest source rejected: %v", err)
 	}
-	base.DeviceRepository.Repositories[0].Format = "sourceful.driver-index/v9"
-	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported format") {
-		t.Fatalf("unknown repository format error = %v", err)
+	// Loading drops a retired Device Support source; saving one is refused.
+	for _, format := range []string{retiredDriverRepositoryFormat, "sourceful.driver-index/v9"} {
+		base.DeviceRepository.Repositories[0].Format = format
+		if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported format") {
+			t.Fatalf("%s repository format error = %v", format, err)
+		}
 	}
 }
 

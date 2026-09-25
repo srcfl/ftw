@@ -34,6 +34,11 @@ func decodeStored(c state.Configuration, database, baseDir string) (*Config, err
 	cfg.ConfigDatabase = database
 	cfg.Revision = c.Revision
 	cfg.LANPasswordHash = doc.LANPasswordHash
+	var legacy struct {
+		Config retiredDriverSettings `json:"config"`
+	}
+	_ = json.Unmarshal(c.Document, &legacy)
+	cfg.dropRetired(legacy.Config)
 	// This is the same typed config that was validated on save. Do not apply new
 	// defaults during a storage-only reload: nil, false and zero stay distinct.
 	if err := cfg.Validate(); err != nil {
@@ -205,25 +210,28 @@ func SaveStored(st *state.Store, path string, cfg *Config) error {
 	return saveStored(st, path, cfg, "")
 }
 
-// DropRetiredSettings rewrites stored settings that still carry the block of
-// a removed feature. Ask why kept an OpenRouter key there; nothing reads it,
-// so it must not stay in state.db and every backup. Saving the typed Config
-// writes the document without it. It reports whether it rewrote anything.
-func DropRetiredSettings(st *state.Store, path string, cfg *Config) (bool, error) {
+// DropRetiredSettings rewrites stored settings that still carry settings of a
+// removed feature. Ask why kept an OpenRouter key there; nothing reads it, so
+// it must not stay in state.db and every backup. Device Support repositories
+// and driver control opt-ins no longer do anything. Saving the typed Config,
+// which loading already cleaned, writes the document without them. It names
+// what it removed.
+func DropRetiredSettings(st *state.Store, path string, cfg *Config) ([]string, error) {
 	current, found, err := st.Configuration()
 	if err != nil || !found {
-		return false, err
+		return nil, err
 	}
 	var saved struct {
 		Config map[string]json.RawMessage `json:"config"`
 	}
 	if err := json.Unmarshal(current.Document, &saved); err != nil {
-		return false, err
+		return nil, err
 	}
-	if _, ok := saved.Config["assistant"]; !ok {
-		return false, nil
+	removed := storedRetiredSettings(saved.Config)
+	if len(removed) == 0 {
+		return nil, nil
 	}
-	return true, SaveStored(st, path, cfg)
+	return removed, SaveStored(st, path, cfg)
 }
 
 func saveStored(st *state.Store, path string, cfg *Config, sourceHash string) error {

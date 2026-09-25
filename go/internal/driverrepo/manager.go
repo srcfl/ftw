@@ -55,34 +55,20 @@ type Manifest struct {
 }
 
 type ManifestDriver struct {
-	ID                    string                     `json:"id"`
-	Path                  string                     `json:"path"`
-	Filename              string                     `json:"filename"`
-	Version               string                     `json:"version"`
-	SHA256                string                     `json:"sha256"`
-	SizeBytes             int64                      `json:"size_bytes,omitempty"`
-	URL                   string                     `json:"url"`
-	HostAPI               components.CompatibleRange `json:"host_api"`
-	Metadata              drivers.CatalogEntry       `json:"metadata"`
-	PackageID             string                     `json:"package_id,omitempty"`
-	Target                string                     `json:"target,omitempty"`
-	ArtifactID            string                     `json:"artifact_id,omitempty"`
-	RuntimeName           string                     `json:"runtime_name,omitempty"`
-	RuntimeSemantics      string                     `json:"runtime_semantics,omitempty"`
-	RuntimeVersion        string                     `json:"runtime_version,omitempty"`
-	RuntimeABI            string                     `json:"runtime_abi,omitempty"`
-	HostAPIProfile        string                     `json:"host_api_profile,omitempty"`
-	PackageKeyID          string                     `json:"package_key_id,omitempty"`
-	PackageEnvelopeURL    string                     `json:"package_envelope_url,omitempty"`
-	PackageEnvelopeSHA256 string                     `json:"package_envelope_sha256,omitempty"`
-	SourceCommit          string                     `json:"source_commit,omitempty"`
-	Channel               string                     `json:"channel,omitempty"`
-	ControlEnabled        bool                       `json:"control_enabled,omitempty"`
-	ReadOnly              bool                       `json:"read_only,omitempty"`
-	Permissions           []string                   `json:"permissions,omitempty"`
-	Commands              []sourcefulCommand         `json:"commands,omitempty"`
-	DefaultMode           sourcefulDefaultMode       `json:"default_mode,omitempty"`
-	LeasePolicy           sourcefulLeasePolicy       `json:"lease_policy,omitempty"`
+	ID             string                     `json:"id"`
+	Path           string                     `json:"path"`
+	Filename       string                     `json:"filename"`
+	Version        string                     `json:"version"`
+	SHA256         string                     `json:"sha256"`
+	SizeBytes      int64                      `json:"size_bytes,omitempty"`
+	URL            string                     `json:"url"`
+	HostAPI        components.CompatibleRange `json:"host_api"`
+	Metadata       drivers.CatalogEntry       `json:"metadata"`
+	SourceCommit   string                     `json:"source_commit,omitempty"`
+	Channel        string                     `json:"channel,omitempty"`
+	ControlEnabled bool                       `json:"control_enabled,omitempty"`
+	ReadOnly       bool                       `json:"read_only,omitempty"`
+	Permissions    []string                   `json:"permissions,omitempty"`
 }
 
 type RepositoryStatus struct {
@@ -148,8 +134,7 @@ func New(cfg *config.DeviceRepository, persistentDir string, store *state.Store)
 	return NewWithHostVersion(cfg, persistentDir, store, "dev")
 }
 
-// NewWithHostVersion binds Sourceful package compatibility to the running FTW
-// release. Local "dev" builds remain fail-closed for canonical packages.
+// NewWithHostVersion names the running FTW release in the manager's logs.
 func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, store *state.Store, hostVersion string) *Manager {
 	effective := config.DeviceRepository{}
 	if cfg != nil {
@@ -168,6 +153,7 @@ func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, stor
 		manifests: make(map[string]Manifest), statuses: make(map[string]RepositoryStatus),
 	}
 	manager.reconcileActive()
+	manager.retirePackages()
 	manager.rebuildEffective()
 	return manager
 }
@@ -229,7 +215,7 @@ func (m *Manager) ActiveDir() string { return filepath.Join(m.root, "active") }
 // reconcileActive closes the tiny crash window between the SQLite activation
 // commit and the atomic symlink swap. The path actually used by the driver
 // resolver is authoritative; an unknown, missing, or modified artifact is
-// deactivated so startup falls back to the bundled recovery copy.
+// deactivated so startup falls back to the release's own driver.
 func (m *Manager) reconcileActive() {
 	if m.store == nil {
 		return
@@ -336,9 +322,6 @@ func (m *Manager) RefreshAll(ctx context.Context) (warnings []string, err error)
 }
 
 func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySource) error {
-	if repositoryFormat(repo) == config.DriverRepositoryFormatSourcefulIndexV1 {
-		return m.refreshSourceful(ctx, repo)
-	}
 	raw, err := m.fetch(ctx, repo.ManifestURL, maxManifestBytes, repo.AllowInsecure)
 	if err != nil {
 		m.recordError(repo, err)
@@ -485,11 +468,8 @@ func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.Catalo
 					!strings.EqualFold(driver.SHA256, in.SHA256) {
 					continue
 				}
-				entries[i].PackageID = driver.PackageID
 				entries[i].PackageChannel = driver.Channel
 				entries[i].ArtifactSHA256 = strings.ToLower(driver.SHA256)
-				entries[i].RuntimeABI = driver.RuntimeABI
-				entries[i].HostAPIProfile = driver.HostAPIProfile
 				break
 			}
 		}
@@ -533,14 +513,6 @@ func (m *Manager) manifestFor(repo config.DriverRepositorySource) (Manifest, err
 	if err != nil {
 		return Manifest{}, err
 	}
-	if repositoryFormat(repo) == config.DriverRepositoryFormatSourcefulIndexV1 {
-		manifest, keyID, err := m.cachedSourcefulManifest(repo, raw)
-		if err != nil {
-			return Manifest{}, err
-		}
-		m.cacheManifest(repo, manifest, keyID)
-		return manifest, nil
-	}
 	manifest, keyID, err := verifyManifest(raw, repo)
 	if err != nil {
 		return Manifest{}, err
@@ -555,15 +527,6 @@ func (m *Manager) manifestFor(repo config.DriverRepositorySource) (Manifest, err
 	m.statuses[repo.ID] = st
 	m.mu.Unlock()
 	return manifest, nil
-}
-
-func (m *Manager) cacheManifest(repo config.DriverRepositorySource, manifest Manifest, keyID string) {
-	m.mu.Lock()
-	m.manifests[repo.ID] = manifest
-	st := m.statuses[repo.ID]
-	st.Cached, st.KeyID, st.DriverCount = true, keyID, len(manifest.Drivers)
-	m.statuses[repo.ID] = st
-	m.mu.Unlock()
 }
 
 // Install downloads and validates an artifact, stores it content-addressed,
@@ -623,20 +586,14 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return state.DriverRepoInstall{}, err
 	}
-	if err == nil && retained.RepositoryFormat != "" && retained.RepositoryFormat != repositoryFormat(repo) {
-		return state.DriverRepoInstall{}, errors.New("retained driver metadata format cannot change")
-	}
-	if repositoryFormat(repo) == config.DriverRepositoryFormatFTWManifestV1 {
-		// Older activation rows do not record a format. A retained envelope
-		// still rules out direct-manifest operation, even if it is damaged.
-		_, packageErr := os.Lstat(filepath.Join(filepath.Dir(installPath), sourcefulInstalledPackageEnvelope))
-		if packageErr == nil {
-			return state.DriverRepoInstall{}, errors.New("retained signed package cannot be reinstalled as a direct-manifest driver")
+	if err == nil {
+		if retiredPackage(retained) {
+			return state.DriverRepoInstall{}, errors.New("a retired Device Support package is retained at this path; install from a repository with another id")
 		}
-		if !errors.Is(packageErr, os.ErrNotExist) {
-			return state.DriverRepoInstall{}, fmt.Errorf("inspect retained signed package envelope: %w", packageErr)
+		if retained.RepositoryFormat != "" && retained.RepositoryFormat != repositoryFormat(repo) {
+			return state.DriverRepoInstall{}, errors.New("retained driver metadata format cannot change")
 		}
-		if err == nil && retained.RepositoryFormat == "" {
+		if retained.RepositoryFormat == "" {
 			// Missing metadata does not prove v1. Recover the old format only
 			// from signed metadata bound to that install's source and artifact.
 			if err := m.recordDirectManifestFormat(repo, retained); err != nil {
@@ -649,19 +606,6 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 	}
 	if err := validateLuaArtifact(installPath, entry); err != nil {
 		return state.DriverRepoInstall{}, err
-	}
-	if entry.PackageID != "" {
-		packageRaw, err := readLimitedFile(m.sourcefulPackageCachePath(repo, entry.PackageEnvelopeSHA256), maxManifestBytes)
-		if err != nil {
-			return state.DriverRepoInstall{}, fmt.Errorf("read verified package envelope for install: %w", err)
-		}
-		sum := sha256.Sum256(packageRaw)
-		if hex.EncodeToString(sum[:]) != entry.PackageEnvelopeSHA256 {
-			return state.DriverRepoInstall{}, errors.New("cached package envelope hash changed before install")
-		}
-		if err := atomicWrite(filepath.Join(filepath.Dir(installPath), sourcefulInstalledPackageEnvelope), packageRaw, 0o600); err != nil {
-			return state.DriverRepoInstall{}, fmt.Errorf("persist package envelope with artifact: %w", err)
-		}
 	}
 	logical := filepath.ToSlash(entry.Path)
 	installed := state.DriverRepoInstall{
@@ -717,6 +661,9 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 	if err != nil {
 		return state.DriverRepoInstall{}, err
 	}
+	if retiredPackage(previous) {
+		return state.DriverRepoInstall{}, errors.New("the previous artifact is a retired Device Support package")
+	}
 	if err := validateInstalledFile(previous); err != nil {
 		return state.DriverRepoInstall{}, err
 	}
@@ -748,7 +695,19 @@ func (m *Manager) InstalledVersions(driverID string) ([]state.DriverRepoInstall,
 	if safeSegment(driverID) != driverID || driverID == "" {
 		return nil, fmt.Errorf("unsafe driver id %q", driverID)
 	}
-	return m.store.DriverRepoInstallsByDriver(driverID)
+	retained, err := m.store.DriverRepoInstallsByDriver(driverID)
+	if err != nil {
+		return nil, err
+	}
+	// A retired Device Support package stays on disk but is never offered or
+	// activated again.
+	out := retained[:0]
+	for _, installed := range retained {
+		if !retiredPackage(installed) {
+			out = append(out, installed)
+		}
+	}
+	return out, nil
 }
 
 // AvailableVersions merges the signed remote history with locally retained
@@ -943,7 +902,7 @@ func (m *Manager) UseBundled(logicalPath, bundledPath string) (state.DriverRepoI
 
 // Deactivate removes the managed resolver entry. It is used when the first
 // ever managed activation fails and there is no earlier managed artifact;
-// core can then restart the bundled recovery snapshot.
+// core can then restart the release's own driver.
 func (m *Manager) Deactivate(logicalPath string) error {
 	logicalPath, err := safeLogicalPath(logicalPath)
 	if err != nil {
@@ -1347,9 +1306,6 @@ func validateLuaArtifact(path string, manifest ManifestDriver) error {
 	}
 	if metadata.ID != manifest.ID || metadata.Version != manifest.Version {
 		return fmt.Errorf("driver metadata id/version %s@%s, want %s@%s", metadata.ID, metadata.Version, manifest.ID, manifest.Version)
-	}
-	if manifest.PackageID != "" && metadata.ReadOnly != manifest.Metadata.ReadOnly {
-		return fmt.Errorf("driver metadata read_only %t, want %t", metadata.ReadOnly, manifest.Metadata.ReadOnly)
 	}
 	source := string(raw)
 	if !regexp.MustCompile(`(?m)^\s*host_api_min\s*=\s*[0-9]+`).MatchString(source) ||

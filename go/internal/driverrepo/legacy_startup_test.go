@@ -22,7 +22,7 @@ import (
 )
 
 func TestManagedDriverStartupAfterRepositoryRemoval(t *testing.T) {
-	for _, scenario := range []string{"legacy_v1", "control_v2_opt_in", "official_invalid_signature"} {
+	for _, scenario := range []string{"legacy_v1", "official_invalid_signature"} {
 		t.Run(scenario, func(t *testing.T) {
 			public, private, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
@@ -111,9 +111,6 @@ end
 			registry.RuntimePolicyResolver = reloaded.RuntimePolicy
 			defer registry.ShutdownAll()
 			cfg := config.Driver{Name: "demo", Lua: filepath.Join(reloaded.ActiveDir(), "demo.lua")}
-			if scenario == "control_v2_opt_in" {
-				cfg.Control = &config.DriverControlOptIn{Enabled: true, PackageID: "com.sourceful.driver.demo", Version: installed.Version, ArtifactSHA256: installed.SHA256}
-			}
 			err = registry.Add(context.Background(), cfg)
 			if scenario == "legacy_v1" {
 				if err != nil {

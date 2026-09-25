@@ -68,10 +68,10 @@ fetched from that repository at the commit pinned in
 make drivers
 ```
 
-The files still ship. FTW's offline recovery set exists because startup is
-deliberately local — a gateway boots and runs without the network, so a remote
-refresh must never block it — so the image, the release tarballs and the tests
-all read `drivers/`. They are simply fetched rather than committed, which is
+The files still ship: they are the release's own drivers and what normally
+runs. Startup is deliberately local — a gateway boots and runs without the
+network, so a remote refresh must never block it — and the image, the release
+tarballs and the tests all read `drivers/`. They are simply fetched rather than committed, which is
 why a driver cannot be edited here at all. There is no file to open a pull
 request against; fix it upstream and move the pin. CI fails if one is
 committed.

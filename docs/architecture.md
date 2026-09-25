@@ -16,7 +16,7 @@ by themselves add runtime behaviour or new protocol capabilities.
 | Module | Source | Runtime | Responsibility |
 |---|---|---|---|
 | Core | [`go/cmd/ftw`](../go/cmd/ftw), [`go/internal`](../go/internal), [`web`](../web) | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
-| Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); bundled recovery in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
+| Drivers | Editable source in [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers); the release's own copies in `drivers/*.lua`; host in [`go/internal/drivers`](../go/internal/drivers) | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
 | Optimizer | [`optimizer`](../optimizer), contracts in [`go/internal/mpc`](../go/internal/mpc) and [`go/internal/energyforecast`](../go/internal/energyforecast) | Compiled Energyplan worker | Solve the long-horizon plan and supply primary PV and household-load forecasts |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
@@ -194,9 +194,7 @@ is refused.
 The public `srcfl/device-drivers` repo owns editable driver source, versions,
 contracts, tests and FTW's signed release channel. FTW downloads only an
 explicitly selected, content-addressed Lua asset after it verifies the signed
-manifest. It never runs raw code from the repository branch. Device Support
-may later consume an exact public commit for other products or a higher support
-level.
+manifest. It never runs raw code from the repository branch.
 
 Each Lua artifact still contains its own `DRIVER` metadata and implements the
 FTW lifecycle. [`go/internal/drivers/lua.go`](../go/internal/drivers/lua.go) is
@@ -212,9 +210,11 @@ Drivers are the only hardware-specific layer. They must:
 - avoid policy decisions that belong in core;
 - remain independently testable and hot-editable.
 
-Bundled drivers provide the offline recovery set. A signed distribution index
-is discovery only; FTW independently verifies the selected package and
-artifact, while activation remains explicit and atomic. See
+Bundled drivers are the release's own drivers and normally run. An owner's
+selected signed version runs instead while it is at least as new as the
+release's copy, or when it was chosen over a newer one. The signed manifest is
+discovery only; FTW verifies the selected artifact against it, and activation
+remains explicit and atomic. See
 [writing-a-driver.md](writing-a-driver.md) and
 [device-repository.md](device-repository.md).
 
@@ -639,7 +639,7 @@ There are two channels:
 - `stable`: promotion of the exact commit already published and tested as beta.
 
 Core ships as one release package, `ftw-linux-<arch>.tar.gz`, with the
-launcher, the `ftw` command, web files, recovery drivers and Energyplan. On
+launcher, the `ftw` command, web files, the release's drivers and Energyplan. On
 a native install, systemd starts `ftw-launcher`, which runs Core from release
 slots under `/opt/ftw`. `ftw update` downloads the next package into a slot;
 the launcher runs it as a trial and commits it only once it becomes ready,

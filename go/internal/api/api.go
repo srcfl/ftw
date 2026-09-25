@@ -1864,7 +1864,7 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	if s.deps.DriverRepository != nil {
 		managedDir = s.deps.DriverRepository.EffectiveDir()
 	}
-	// Local override > activated managed artifact > bundled recovery snapshot.
+	// Local override > owner's selected signed driver > the release's own driver.
 	entries, err := drivers.LoadCatalogSources(
 		drivers.CatalogSource{Dir: s.deps.UserDriverDir, Source: "local"},
 		drivers.CatalogSource{Dir: managedDir, Source: "managed"},

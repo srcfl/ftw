@@ -15,7 +15,9 @@ import (
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 	_ "modernc.org/sqlite"
 )
 
@@ -254,33 +256,6 @@ func TestLegacyDirectManifestFormatDoesNotInferUnknownRows(t *testing.T) {
 			},
 		},
 		{
-			name:   "sourceful_package_entry",
-			want:   "not a legacy direct-manifest artifact",
-			record: func(t *testing.T, f legacyDirectFixture) { f.clearFormat(t, nil) },
-			cache: func(t *testing.T, f legacyDirectFixture, manager *Manager) {
-				f.signed.mu.Lock()
-				f.signed.manifest.Drivers[0].PackageID = "com.sourceful.driver.demo"
-				f.signed.mu.Unlock()
-				if err := os.WriteFile(filepath.Join(manager.root, "cache", f.repo.ID+".json"), f.signed.envelope(t), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
-			name:   "v2_abi_entry",
-			want:   "not a legacy direct-manifest artifact",
-			record: func(t *testing.T, f legacyDirectFixture) { f.clearFormat(t, nil) },
-			cache: func(t *testing.T, f legacyDirectFixture, manager *Manager) {
-				f.signed.mu.Lock()
-				f.signed.manifest.Drivers[0].RuntimeABI = sourcefulFTWABIV2
-				f.signed.manifest.Drivers[0].HostAPIProfile = sourcefulFTWHostAPIProfileV2
-				f.signed.mu.Unlock()
-				if err := os.WriteFile(filepath.Join(manager.root, "cache", f.repo.ID+".json"), f.signed.envelope(t), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-		{
 			name:   "memory_cache_cannot_override_bad_disk_cache",
 			want:   "verify older installed driver format",
 			record: func(t *testing.T, f legacyDirectFixture) { f.clearFormat(t, nil) },
@@ -306,5 +281,34 @@ func TestLegacyDirectManifestFormatDoesNotInferUnknownRows(t *testing.T) {
 			}
 			assertUnrecordedFormat(t, store, f.installed.InstalledPath)
 		})
+	}
+}
+
+func TestHistoricalDirectManifestAllowsVerifiedReinstallAndDefault(t *testing.T) {
+	f := installLegacyDirectFixture(t)
+	f.clearFormat(t, nil)
+	store, manager := f.reopen(t)
+
+	installed, err := manager.Install(context.Background(), f.repo.ID, f.installed.DriverID, f.installed.Version)
+	if err != nil {
+		t.Fatalf("verified direct-manifest reinstall: %v", err)
+	}
+	if installed.RepositoryFormat != config.DriverRepositoryFormatFTWManifestV1 || !installed.Active {
+		t.Fatalf("verified direct-manifest row = %+v", installed)
+	}
+	stored, err := store.ActiveDriverRepoInstall(installed.LogicalPath)
+	if err != nil || stored.RepositoryFormat != config.DriverRepositoryFormatFTWManifestV1 {
+		t.Fatalf("stored direct-manifest row = %+v, %v", stored, err)
+	}
+
+	registry := drivers.NewRegistry(telemetry.NewStore())
+	registry.RuntimePolicyResolver = manager.RuntimePolicy
+	defer registry.ShutdownAll()
+	driver := f.legacyDriver()
+	if err := registry.Add(context.Background(), driver); err != nil {
+		t.Fatalf("start verified direct-manifest driver: %v", err)
+	}
+	if err := registry.SendDefault(context.Background(), driver.Name); err != nil {
+		t.Fatalf("run verified direct-manifest default: %v", err)
 	}
 }

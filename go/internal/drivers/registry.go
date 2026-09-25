@@ -1688,8 +1688,7 @@ func sameDriverConfig(a, b config.Driver) bool {
 		a.BatteryTelemetryOnly != b.BatteryTelemetryOnly ||
 		a.ObserveOnly != b.ObserveOnly ||
 		a.Disabled != b.Disabled ||
-		a.Capabilities.AllowUnverifiedLocal != b.Capabilities.AllowUnverifiedLocal ||
-		!reflect.DeepEqual(a.Control, b.Control) {
+		a.Capabilities.AllowUnverifiedLocal != b.Capabilities.AllowUnverifiedLocal {
 		return false
 	}
 	aMq, bMq := a.EffectiveMQTT(), b.EffectiveMQTT()
