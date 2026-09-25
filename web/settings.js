@@ -372,6 +372,9 @@
 
   function selectField(label, path, options, dflt, helpText) {
     var val = getByPath(currentConfig, path, dflt);
+    // A stored value that is none of the options would show the first one,
+    // and an unchanged save would never store it. Show the default instead.
+    if (options.indexOf(val) < 0) val = dflt;
     var opts = options.map(function (o) {
       return '<option value="' + o + '"' + (o === val ? ' selected' : '') + '>' + o + '</option>';
     }).join("");

@@ -360,6 +360,15 @@ describe("unchanged settings fields", () => {
     assert.equal(rig.saved().planner.soc_max, 0.95);
   });
 
+  // A select shows the first option when the stored value is none of them,
+  // and an unchanged save then never stores what the form showed (#1436).
+  it("shows a select's default when the stored value is not an option", async () => {
+    const rig = await formShell({ site: { name: "Home" }, weather: { provider: "", latitude: 55.9, longitude: 13.4 } });
+    const html = rig.context.selectField("Provider", "weather.provider", ["met_no", "open_meteo", "none"], "none");
+    assert.match(html, /<option value="none" selected>/);
+    assert.doesNotMatch(html, /<option value="met_no" selected>/);
+  });
+
   it("preserves a late secret input until its value changes", async () => {
     const rig = await formShell();
     const secret = Object.assign(stubElement(), { dataset: { path: "device.secret" }, type: "password", defaultValue: "", value: "" });

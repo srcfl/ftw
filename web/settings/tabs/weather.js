@@ -301,7 +301,9 @@
       if (!Array.isArray(config.weather.pv_arrays)) config.weather.pv_arrays = [];
       var n = config.weather.pv_arrays.length;
       return '<fieldset><legend>Weather forecast &amp; PV</legend>' +
-        selectField("Provider", "weather.provider", ["met_no", "openweather", "open_meteo", "forecast_solar", "none"], "met_no",
+        // Defaults are what Core uses: no provider means no forecast, and no
+        // rated power means none to scale it by.
+        selectField("Provider", "weather.provider", ["met_no", "openweather", "open_meteo", "forecast_solar", "none"], "none",
           "met_no + openweather: cloud-cover only. open_meteo: direct shortwave radiation (better day-one forecast). forecast_solar: site-calibrated watts. The production pattern is learned from measured solar.") +
         '<div class="field-row"><div>' +
         field("Latitude", "weather.latitude", "number", 59.3293) +
@@ -311,7 +313,8 @@
         '<div id="weather-map" style="height:260px;border-radius:6px;margin:6px 0;background:var(--ink-sunken)"></div>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:-2px 0 8px">Click or drag the marker to set your location.</p>' +
         '<div id="data-coverage" style="margin:0 0 10px"></div>' +
-        field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
+        field("PV rated (W)", "weather.pv_rated_w", "number", "",
+          "The solar panels' total rated power. The solar forecast needs it, or the PV arrays below.") +
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +
         '</fieldset>' +
         '<p id="pv-arrays-summary" style="color:var(--text-dim);font-size:0.8rem;margin:8px 0">' +
