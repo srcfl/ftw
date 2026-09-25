@@ -293,34 +293,21 @@
           var driversHTML =
             '<div class="sys-row"><span class="sys-label">Drivers</span><span>host API ' +
               escHtml(drivers.driver_host_api || drivers.host_api || 1) + ' · ' + active +
-              ' managed</span><button class="btn-add" id="sys-refresh-drivers" type="button">Refresh</button></div>';
-          var actionHTML = '<div class="sys-meta" id="sys-component-action" style="grid-column:1/-1"></div>';
+              ' managed</span><span class="sys-value">versions under Devices</span></div>';
           if (bundled) {
             el.innerHTML =
               '<div class="sys-row"><span class="sys-label">FTW</span><span>' + escHtml(bundled.ftwVersion) +
                 '</span><span class="sys-value">bundled</span></div>' +
               warningHTML +
               driversHTML +
-              '<div class="sys-meta" style="grid-column:1/-1">' + escHtml(bundled.note) + '</div>' +
-              actionHTML;
+              '<div class="sys-meta" style="grid-column:1/-1">' + escHtml(bundled.note) + '</div>';
           } else {
             el.innerHTML =
               '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
                 ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
               warningHTML +
-              driversHTML +
-              actionHTML;
+              driversHTML;
           }
-          var status = document.getElementById("sys-component-action");
-          var driverBtn = document.getElementById("sys-refresh-drivers");
-          if (driverBtn) driverBtn.onclick = function () {
-            driverBtn.disabled = true;
-            if (status) status.textContent = "Refreshing signed driver manifests…";
-            apiFetch("/api/device_repository/refresh", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
-              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "refresh failed"); return body; }); })
-              .then(function () { if (status) status.textContent = "Driver catalog refreshed; no driver was activated."; driverBtn.disabled = false; })
-              .catch(function (err) { if (status) status.textContent = err.message; driverBtn.disabled = false; });
-          };
         }).catch(function () {
           setText("sys-components", "Component status unavailable");
         });

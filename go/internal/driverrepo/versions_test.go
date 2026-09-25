@@ -1,0 +1,159 @@
+package driverrepo
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
+)
+
+func mustRefreshAll(t *testing.T, manager *Manager) {
+	t.Helper()
+	warnings, err := manager.RefreshAll(context.Background())
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("RefreshAll: %v %v", warnings, err)
+	}
+}
+
+func signedServer(t *testing.T, version string) (*signedFixture, string, string) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &signedFixture{private: private}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(fixture.envelope(t))
+		case "/demo.lua":
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			_, _ = w.Write(fixture.driver)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	fixture.setVersion(server.URL, version)
+	return fixture, server.URL, base64.StdEncoding.EncodeToString(public)
+}
+
+// The version picker is the one place an owner sees and changes a driver
+// version, so it lists the beta channel beside stable, labelled, and one
+// refresh checks both.
+func TestVersionListShowsStableAndBetaFromOneRefresh(t *testing.T) {
+	_, stableURL, stableKey := signedServer(t, "1.0.0")
+	beta, betaURL, betaKey := signedServer(t, "1.1.0-beta.1")
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := New(&config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
+		ID: "stable", ManifestURL: stableURL + "/manifest.json", Enabled: true, AllowInsecure: true,
+		TrustedKeys: map[string]string{"test": stableKey},
+	}}}, dir, store)
+	manager.betaRepo = config.DriverRepositorySource{
+		ID: config.DefaultDriverRepositoryBetaID, ManifestURL: betaURL + "/manifest.json", Enabled: true,
+		AllowInsecure: true, TrustedKeys: map[string]string{"test": betaKey},
+	}
+	mustRefreshAll(t, manager)
+	versions, err := manager.AvailableVersions("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 || versions[0].Driver.Version != "1.1.0-beta.1" || versions[0].Channel != "beta" ||
+		versions[1].Driver.Version != "1.0.0" || versions[1].Channel != "stable" {
+		t.Fatalf("versions = %+v; want beta 1.1.0-beta.1 then stable 1.0.0", versions)
+	}
+
+	// Promotion publishes the same file on both channels; it is one version.
+	beta.setVersion(betaURL, "1.0.0")
+	mustRefreshAll(t, manager)
+	if versions, _ = manager.AvailableVersions("demo"); len(versions) != 1 || versions[0].Channel != "stable" {
+		t.Fatalf("versions = %+v; want the promoted file listed once, as stable", versions)
+	}
+
+	// A beta version that stable has already passed is not offered.
+	beta.setVersion(betaURL, "0.9.0")
+	mustRefreshAll(t, manager)
+	if versions, _ = manager.AvailableVersions("demo"); len(versions) != 1 || versions[0].Driver.Version != "1.0.0" {
+		t.Fatalf("versions = %+v; want only stable 1.0.0", versions)
+	}
+}
+
+// A beta file stable later publishes byte for byte is still the file that
+// runs; the owner's choice must not vanish from the list.
+func TestRunningBetaFileStaysRunningWhenStablePublishesIt(t *testing.T) {
+	stable, stableURL, stableKey := signedServer(t, "1.0.0")
+	_, betaURL, betaKey := signedServer(t, "1.1.0")
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := New(&config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
+		ID: "stable", ManifestURL: stableURL + "/manifest.json", Enabled: true, AllowInsecure: true,
+		TrustedKeys: map[string]string{"test": stableKey},
+	}}}, dir, store)
+	manager.betaRepo = config.DriverRepositorySource{
+		ID: config.DefaultDriverRepositoryBetaID, ManifestURL: betaURL + "/manifest.json", Enabled: true,
+		AllowInsecure: true, TrustedKeys: map[string]string{"test": betaKey},
+	}
+	mustRefreshAll(t, manager)
+	if _, err := manager.InstallChannel(context.Background(), "beta", "demo", "1.1.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	stable.setVersion(stableURL, "1.1.0") // promotion: the same bytes on stable
+	mustRefreshAll(t, manager)
+	versions, err := manager.AvailableVersions("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range versions {
+		if v.Driver.Version == "1.1.0" {
+			if v.Installed == nil || !v.Installed.Active {
+				t.Fatalf("1.1.0 row = %+v; the beta install that runs must mark it", v)
+			}
+			return
+		}
+	}
+	t.Fatalf("no 1.1.0 row in %+v", versions)
+}
+
+// "Check for new versions" still redraws when beta cannot be reached.
+func TestUnreachableBetaIsAWarningNotAFailure(t *testing.T) {
+	_, stableURL, stableKey := signedServer(t, "1.0.0")
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := New(&config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
+		ID: "stable", ManifestURL: stableURL + "/manifest.json", Enabled: true, AllowInsecure: true,
+		TrustedKeys: map[string]string{"test": stableKey},
+	}}}, dir, store)
+	manager.betaRepo = config.DriverRepositorySource{
+		ID: config.DefaultDriverRepositoryBetaID, ManifestURL: "http://127.0.0.1:1/manifest.json", Enabled: true, AllowInsecure: true,
+	}
+	warnings, err := manager.RefreshAll(context.Background())
+	if err != nil || len(warnings) != 1 {
+		t.Fatalf("RefreshAll = %v, %v; want stable refreshed and one beta warning", warnings, err)
+	}
+	if versions, _ := manager.AvailableVersions("demo"); len(versions) != 1 || versions[0].Driver.Version != "1.0.0" {
+		t.Fatalf("versions = %+v; stable must still be listed", versions)
+	}
+}

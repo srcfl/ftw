@@ -15,40 +15,6 @@
     return fetch(path, opts);
   }
 
-  function driverFileKey(path) {
-    return String(path || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
-  }
-
-  // A signed driver version is SemVer. A beta older than what runs is not an
-  // update: the badge counted one as waiting whenever the numbers differed.
-  function isNewerVersion(candidate, current) {
-    function parse(value) {
-      const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(value || ""));
-      return match ? { core: [+match[1], +match[2], +match[3]], pre: match[4] || "" } : null;
-    }
-    function comparePre(a, b) {
-      const left = a.split("."), right = b.split(".");
-      for (let i = 0; i < Math.min(left.length, right.length); i++) {
-        if (left[i] === right[i]) continue;
-        const ln = /^\d+$/.test(left[i]), rn = /^\d+$/.test(right[i]);
-        if (ln && rn) return +left[i] - +right[i];
-        if (ln !== rn) return ln ? -1 : 1;
-        return left[i] < right[i] ? -1 : 1;
-      }
-      return left.length - right.length;
-    }
-    const a = parse(candidate), b = parse(current);
-    if (!a) return false;
-    if (!b) return true;
-    for (let i = 0; i < 3; i++) {
-      if (a.core[i] !== b.core[i]) return a.core[i] > b.core[i];
-    }
-    if (a.pre === b.pre) return false;
-    if (!a.pre) return true;
-    if (!b.pre) return false;
-    return comparePre(a.pre, b.pre) > 0;
-  }
-
   // Header status marks. Inline SVG rather than font glyphs: at 16px the
   // three announcements have to be separable by silhouette alone, because
   // colour is not reliable for every operator and the marks sit in the
@@ -98,8 +64,6 @@
       this._verifyingBackup = "";
       this._components = null;
       this._componentHistory = null;
-      this._driverCatalog = null;
-      this._driverVersions = {};
       this._componentAction = "";
       this._connected = true;         // header liveness light; see setConnected()
       this._bootHealth = null;
@@ -114,11 +78,9 @@
       this._resumeUpdateStatus();
       this._refresh(false);
       this._refreshComponents(false);
-      this._refreshDriverCatalog();
       this._checkTimer = setInterval(() => {
         this._refresh(false);
         this._refreshComponents(false);
-        this._refreshDriverCatalog();
       }, CHECK_INTERVAL_MS);
     }
 
@@ -225,7 +187,6 @@
       this._refreshSnapshots(); // pull the list for the Snapshots accordion
       this._refreshBackups();
       this._refreshComponentHistory();
-      this._refreshDriverCatalog();
     }
 
     // Fetch the snapshot list so the operator sees the retained set and
@@ -363,82 +324,6 @@
           this._render();
         })
         .catch(() => { /* old backends do not expose history */ });
-    }
-
-    _refreshDriverCatalog() {
-      Promise.all([
-        apiFetch("/api/drivers/catalog").then((r) => (r.ok ? r.json() : null)),
-        apiFetch("/api/config").then((r) => (r.ok ? r.json() : null)),
-        apiFetch("/api/device_repository/catalog?channel=beta").then((r) => (r.ok ? r.json() : { entries: [] })),
-      ])
-        .then(([catalog, config, betaCatalog]) => {
-          if (!catalog || !config) return;
-          const configured = new Set((Array.isArray(config.drivers) ? config.drivers : [])
-            .map((driver) => driverFileKey(driver && driver.lua))
-            .filter(Boolean));
-          const betaByID = new Map((betaCatalog && Array.isArray(betaCatalog.entries) ? betaCatalog.entries : [])
-            .map((candidate) => [candidate && candidate.driver && candidate.driver.id, candidate]));
-          // Every configured driver is part of the inventory, whether or not
-          // it has an update waiting — the dialog answers "what am I running?"
-          // before it answers "what can I change?". Locally edited drivers are
-          // listed too, but carry no actions: nothing signed to move them to.
-          const entries = (Array.isArray(catalog.entries) ? catalog.entries : [])
-            .filter((entry) => configured.has(driverFileKey(entry && (entry.path || entry.filename))))
-            .map((entry) => {
-              const beta = betaByID.get(entry.id) || null;
-              const current = entry.installed_version || entry.version || "";
-              const betaDriver = beta && beta.driver;
-              const managed = entry.source !== "local";
-              const stableAvailable = !!(managed && entry.update_available && entry.repository_id && entry.upstream_version);
-              const betaAvailable = !!(managed && betaDriver && betaDriver.version && isNewerVersion(betaDriver.version, current));
-              return {
-                ...entry,
-                beta_candidate: beta,
-                managed,
-                stable_available: stableAvailable,
-                beta_available: betaAvailable,
-                pending_update: stableAvailable || betaAvailable,
-              };
-            });
-          this._driverCatalog = { entries };
-          this._render();
-        })
-        .catch(() => { /* config or repository discovery may be unavailable */ });
-    }
-
-    _loadDriverVersions(id) {
-      if (!id) return;
-      apiFetch("/api/device_repository/drivers/" + encodeURIComponent(id) + "/versions")
-        .then(async (resp) => {
-          const body = await resp.json().catch(() => ({}));
-          if (!resp.ok) throw new Error(body.error || "failed to load driver history");
-          this._driverVersions[id] = body;
-          this._render();
-        })
-        .catch((err) => window.alert("Driver history failed: " + err.message));
-    }
-
-    _changeDriverVersion(id, repositoryID, version, sha256, installed, channel) {
-      if (!id || !version || this._componentAction) return;
-      this._componentAction = "driver:" + id;
-      this._render();
-      const url = "/api/device_repository/drivers/" + encodeURIComponent(id) + (installed ? "/activate" : "/install");
-      const body = installed
-        ? { version, sha256 }
-        : { repository_id: repositoryID, version, ...(channel ? { channel } : {}) };
-      this._postJSON(url, body)
-        .then((resp) => {
-          if (!resp.ok) throw new Error((resp.body && resp.body.error) || "driver update failed");
-          delete this._driverVersions[id];
-          this._refreshDriverCatalog();
-          this._refreshComponents(false);
-          this._refreshComponentHistory();
-        })
-        .catch((err) => window.alert("Driver update failed: " + err.message))
-        .finally(() => {
-          this._componentAction = "";
-          this._render();
-        });
     }
 
     // _beginRollback kicks off a rollback-to-snapshot. Reuses the same
@@ -733,26 +618,17 @@
 
     // ---- render ----
 
-    // _driverEntries is the full configured inventory; _pendingUpdates counts
-    // only what an operator could act on right now. The badge, the summary
-    // line and the footer all read the same count so they can't disagree.
-    _driverEntries() {
-      return this._driverCatalog && Array.isArray(this._driverCatalog.entries)
-        ? this._driverCatalog.entries
-        : [];
-    }
-
+    // Driver versions are chosen per device under Settings › Devices, the
+    // one place they are shown and changed, so only Core counts here.
     _pendingUpdates() {
       const info = this._info || {};
       const core = !!(info.update_available && !info.skipped);
-      // Native driver updates live in Settings › Devices, not in this panel.
-      const drivers = info.native ? 0 : this._driverEntries().filter((entry) => entry.pending_update).length;
-      return { core, drivers, total: (core ? 1 : 0) + drivers };
+      return { core, total: core ? 1 : 0 };
     }
 
     _render() {
       // A 503 from /api/version/check permanently disables this component.
-      // Component and driver requests start alongside that check, so their
+      // Component requests start alongside that check, so their
       // responses can arrive later. Never let one of those responses rebuild
       // controls that open() will refuse to use.
       if (this._disabled) {
@@ -855,8 +731,6 @@
 
       const hasUpdate = !!info.update_available;
       const pending = this._pendingUpdates();
-      // The summary covers the whole inventory, not just Core: an operator
-      // with a waiting driver update should not read "up to date".
       const subtitle = pending.total === 0
         ? (info.native && info.channel === "stable" && /-beta\./.test(info.current || "")
           ? "No newer 0.x stable package is ready yet."
@@ -1041,7 +915,7 @@
             <div class="channel-options" role="group" aria-label="Update channel">${channelButtons}</div>
           </div>
           <p class="channel-note">${escapeHTML(channelNote)}</p>
-          <p class="channel-note">Drivers follow no channel. Each one is pinned to a version you pick per driver above, from either stream.</p>
+          <p class="channel-note">Drivers follow no channel. Each device runs the version chosen under Settings › Devices.</p>
         </div>
       </details>`;
     }
@@ -1179,37 +1053,6 @@
         ? `<p class="component-warning" role="alert"><strong>${optimizerFallbackActive ? "Planner fallback active." : "Optimizer unavailable."}</strong>${optimizerFallbackActive ? " Core is using the built-in Go planner." : " The current plan stays active until the next replan."}${optimizerReason ? " " + escapeHTML(optimizerReason) : ""}</p>`
         : "";
 
-      const entries = this._driverEntries();
-      const driverRows = entries.map((entry) => {
-        const current = entry.installed_version || entry.version || "unknown";
-        const busy = this._componentAction === "driver:" + entry.id;
-        const action = entry.stable_available
-          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(entry.repository_id)}" data-version="${escapeHTML(entry.upstream_version)}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Stable " + escapeHTML(entry.upstream_version)}</button>`
-          : "";
-        const beta = entry.beta_candidate || {};
-        const betaDriver = beta.driver || {};
-        const betaAction = entry.beta_available
-          ? `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(beta.repository_id || "")}" data-version="${escapeHTML(betaDriver.version)}" data-channel="beta" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Beta " + escapeHTML(betaDriver.version)}</button>`
-          : "";
-        const history = entry.repository_id
-          ? `<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(entry.id || "")}">History</button>`
-          : "";
-        // A locally edited driver has no signed counterpart to move to, so it
-        // reports what it is instead of offering an action it cannot perform.
-        const target = entry.stable_available ? entry.upstream_version : (betaDriver.version || "");
-        const status = !entry.managed
-          ? `<span class="dim" title="Edited on this device; no signed version to switch to">local copy</span>`
-          : entry.pending_update
-          ? `<span class="status-pending">${escapeHTML(target)} available</span>`
-          : `<span class="dim">up to date</span>`;
-        return `<tr>
-          <th scope="row">${escapeHTML(entry.name || entry.id || "driver")}</th>
-          <td class="dim mono">${escapeHTML(current)}</td>
-          <td class="component-status">${status}</td>
-          <td class="component-actions">${action}${betaAction}${history}</td>
-        </tr>${this._driverVersionsHTML(entry.id)}`;
-      }).join("");
-
       const history = this._componentHistory && Array.isArray(this._componentHistory.events)
         ? this._componentHistory.events.slice(0, 8) : [];
       const historyRows = history.map((event) => {
@@ -1245,27 +1088,14 @@
               <td class="component-status">${coreStatus}</td>
               <td class="component-actions"></td>
             </tr>
-            ${driverRows}
+            <tr>
+              <th scope="row">Drivers</th>
+              <td class="dim" colspan="3">Versions are chosen per device under Settings › Devices.</td>
+            </tr>
           </tbody>
         </table>
         ${historyRows ? `<details class="component-history"><summary>Update history</summary><table class="snapshots-table"><thead><tr><th>When</th><th>Component</th><th>Version</th><th>Result</th></tr></thead><tbody>${historyRows}</tbody></table></details>` : ""}
       </div>`;
-    }
-
-    _driverVersionsHTML(id) {
-      const payload = id && this._driverVersions[id];
-      if (!payload) return "";
-      const versions = Array.isArray(payload.available) ? payload.available : [];
-      if (!versions.length) return `<tr class="driver-history-row"><td colspan="4" class="dim">No signed or retained versions found.</td></tr>`;
-      const rows = versions.map((candidate) => {
-        const driver = candidate.driver || {};
-        const installed = candidate.installed || null;
-        const active = installed && installed.active;
-        const label = active ? "active" : (installed ? "Activate" : "Install");
-        const button = active ? `<span class="dim">active</span>` : `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(id)}" data-repository="${escapeHTML(candidate.repository_id || "")}" data-version="${escapeHTML(driver.version || "")}" data-sha="${escapeHTML(driver.sha256 || "")}" data-installed="${installed ? "true" : "false"}" ${this._componentAction ? "disabled" : ""}>${label}</button>`;
-        return `<span class="driver-version"><span class="mono">${escapeHTML(driver.version || "?")}</span>${button}</span>`;
-      }).join("");
-      return `<tr class="driver-history-row"><td colspan="4"><div class="driver-history">${rows}</div></td></tr>`;
     }
 
     _updatingModalHTML() {
@@ -1405,19 +1235,6 @@
             case "set-channel":
               this._setChannel(e.currentTarget.dataset.channel);
               break;
-            case "driver-versions":
-              this._loadDriverVersions(e.currentTarget.dataset.id);
-              break;
-            case "driver-change": {
-              const dataset = e.currentTarget.dataset;
-              const installed = dataset.installed === "true";
-              const verb = installed ? "activate" : "install";
-              const channel = dataset.channel || "stable";
-              if (window.confirm(`${verb} ${channel} driver ${dataset.id} ${dataset.version}? Only affected driver instances restart and must return fresh telemetry.`)) {
-                this._changeDriverVersion(dataset.id, dataset.repository, dataset.version, dataset.sha || "", installed, dataset.channel || "");
-              }
-              break;
-            }
             case "reload":
               this._attemptReload();
               break;
@@ -1781,9 +1598,6 @@
         .component-actions { width: 1%; white-space: nowrap; text-align: right; }
         .component-actions > * { margin-left: 0.3rem; }
         .component-actions .btn { white-space: nowrap; }
-        .driver-history-row > td { padding-top: 0; }
-        .driver-history { display: flex; gap: 0.35rem; flex-wrap: wrap; }
-        .driver-version { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.2rem 0.3rem; border: 1px solid var(--line, #2a2a2a); border-radius: 4px; }
         .component-history { margin: 0.5rem 0 0; }
         .component-history > summary { cursor: pointer; color: var(--fg-dim, #a0a0a0); font-size: 0.75rem; }
         .snapshots-table {

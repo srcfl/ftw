@@ -93,13 +93,12 @@ describe("header status marks", () => {
       ok: true,
       json: async () => ({ optimizer: { configured: true, healthy: false } }),
     });
-    delayed.get("/api/drivers/catalog")({ ok: true, json: async () => ({ entries: [] }) });
-    delayed.get("/api/config")({ ok: true, json: async () => ({ drivers: [] }) });
-    delayed.get("/api/device_repository/catalog?channel=beta")({ ok: true, json: async () => ({ entries: [] }) });
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.ok(badge._components, "the delayed component response should reach its success handler");
-    assert.ok(badge._driverCatalog, "the delayed catalog response should reach its success handler");
+    // Driver versions are chosen under Settings › Devices; the badge asks
+    // nothing about drivers.
+    assert.deepEqual([...delayed.keys()].sort(), ["/api/components"]);
     assert.equal(badge._shadow.innerHTML, "");
     assert.equal(badge.hidden, true);
   });

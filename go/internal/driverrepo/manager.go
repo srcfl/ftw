@@ -107,12 +107,21 @@ type CatalogCandidate struct {
 }
 
 type VersionCandidate struct {
-	RepositoryID string                   `json:"repository_id"`
-	Driver       ManifestDriver           `json:"driver"`
-	Installed    *state.DriverRepoInstall `json:"installed,omitempty"`
+	RepositoryID string `json:"repository_id"`
+	// Channel is "beta" for the built-in beta channel and "stable" for a
+	// configured repository.
+	Channel string `json:"channel"`
+	// Repository is the signed manifest's source repository URL; with the
+	// entry's source commit it names the history behind this version.
+	Repository string                   `json:"repository,omitempty"`
+	Driver     ManifestDriver           `json:"driver"`
+	Installed  *state.DriverRepoInstall `json:"installed,omitempty"`
 }
 
 type Status struct {
+	// Warnings are problems a refresh met that did not stop it, such as an
+	// unreachable beta channel.
+	Warnings     []string                  `json:"warnings,omitempty"`
 	Enabled      bool                      `json:"enabled"`
 	HostAPI      int                       `json:"driver_host_api"`
 	RootDir      string                    `json:"root_dir"`
@@ -310,6 +319,20 @@ func (m *Manager) Refresh(ctx context.Context, repositoryID string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// RefreshAll is an owner's "check for new versions": every configured
+// source and the beta channel. A beta that cannot be reached is a warning,
+// not a failure, so the versions list still redraws from what did refresh.
+// The periodic refresh stays on Refresh, which reads only configured sources.
+func (m *Manager) RefreshAll(ctx context.Context) (warnings []string, err error) {
+	if err := m.Refresh(ctx, ""); err != nil {
+		return nil, err
+	}
+	if betaErr := m.refreshOne(ctx, m.betaRepo); betaErr != nil {
+		warnings = append(warnings, "beta channel: "+betaErr.Error())
+	}
+	return warnings, nil
 }
 
 func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySource) error {
@@ -735,33 +758,63 @@ func (m *Manager) AvailableVersions(driverID string) ([]VersionCandidate, error)
 	if err != nil {
 		return nil, err
 	}
-	installedByKey := make(map[string]state.DriverRepoInstall, len(installed))
+	// An install is matched by content, not by the channel it came from: a
+	// beta file that stable later publishes byte for byte is the file that
+	// runs, whichever row lists it.
+	installedByContent := make(map[string]state.DriverRepoInstall, len(installed))
 	for _, artifact := range installed {
-		installedByKey[artifact.RepoID+"\x00"+artifact.Version+"\x00"+strings.ToLower(artifact.SHA256)] = artifact
+		key := artifact.Version + "\x00" + strings.ToLower(artifact.SHA256)
+		if prior, ok := installedByContent[key]; !ok || (artifact.Active && !prior.Active) {
+			installedByContent[key] = artifact
+		}
 	}
+	listed := make(map[int64]bool)
 	var out []VersionCandidate
 	seen := make(map[string]bool)
+	offered := make(map[string]bool) // by content, so a promoted beta file is listed once
+	sources := make([]config.DriverRepositorySource, 0, len(m.cfg.Repositories)+1)
 	for _, repo := range m.cfg.Repositories {
-		if !repo.Enabled {
-			continue
+		if repo.Enabled {
+			sources = append(sources, repo)
 		}
+	}
+	if m.cfg.Enabled {
+		// Cached only: listing versions never reaches the network.
+		sources = append(sources, m.betaRepo)
+	}
+	newestStable := ""
+	for _, repo := range sources {
 		manifest, err := m.manifestFor(repo)
 		if err != nil {
 			continue
+		}
+		channel := "stable"
+		if repo.ID == m.betaRepo.ID {
+			channel = "beta"
 		}
 		for _, driver := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
 			if driver.ID != driverID {
 				continue
 			}
+			if channel == "stable" && (newestStable == "" || compareSemver(driver.Version, newestStable) > 0) {
+				newestStable = driver.Version
+			}
+			// Beta is where the next version waits. Its history repeats
+			// versions stable has passed, which would only be noise here.
+			if channel == "beta" && newestStable != "" && compareSemver(driver.Version, newestStable) <= 0 {
+				continue
+			}
 			key := repo.ID + "\x00" + driver.Version + "\x00" + strings.ToLower(driver.SHA256)
-			if seen[key] {
+			if seen[key] || (channel == "beta" && offered[strings.ToLower(driver.SHA256)]) {
 				continue
 			}
 			seen[key] = true
-			candidate := VersionCandidate{RepositoryID: repo.ID, Driver: driver}
-			if artifact, ok := installedByKey[key]; ok {
+			offered[strings.ToLower(driver.SHA256)] = true
+			candidate := VersionCandidate{RepositoryID: repo.ID, Channel: channel, Repository: manifest.Repository, Driver: driver}
+			if artifact, ok := installedByContent[driver.Version+"\x00"+strings.ToLower(driver.SHA256)]; ok {
 				copy := artifact
 				candidate.Installed = &copy
+				listed[artifact.ID] = true
 			}
 			out = append(out, candidate)
 		}
@@ -772,13 +825,18 @@ func (m *Manager) AvailableVersions(driverID string) ([]VersionCandidate, error)
 	// return to a known local version.
 	for _, artifact := range installed {
 		key := artifact.RepoID + "\x00" + artifact.Version + "\x00" + strings.ToLower(artifact.SHA256)
-		if seen[key] {
+		if seen[key] || listed[artifact.ID] {
 			continue
 		}
 		seen[key] = true
 		copy := artifact
+		channel := "stable"
+		if artifact.RepoID == m.betaRepo.ID {
+			channel = "beta"
+		}
 		out = append(out, VersionCandidate{
 			RepositoryID: artifact.RepoID,
+			Channel:      channel,
 			Driver: ManifestDriver{
 				ID: artifact.DriverID, Path: artifact.LogicalPath,
 				Filename: filepath.Base(artifact.InstalledPath), Version: artifact.Version,
@@ -926,6 +984,21 @@ func (m *Manager) bundledVersion(logicalPath string) string {
 		return ""
 	}
 	return entry.Version
+}
+
+// ReleaseVersion is the version this Core release bundles at logicalPath, or
+// "" when it bundles none there.
+func (m *Manager) ReleaseVersion(logicalPath string) string { return m.bundledVersion(logicalPath) }
+
+// Chosen reports whether the managed selection at logicalPath runs version
+// because the owner went back to it from a newer one; such a choice stays
+// across Core updates.
+func (m *Manager) Chosen(logicalPath, version string) bool {
+	if m.store == nil || version == "" {
+		return false
+	}
+	pinned, _ := m.store.LoadConfig(pinKey(logicalPath))
+	return pinned == version
 }
 
 // pinKey holds the version of a managed selection the owner chose over a
