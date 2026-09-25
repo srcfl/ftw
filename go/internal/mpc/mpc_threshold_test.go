@@ -11,8 +11,8 @@ import (
 // initial SoC. This is the fixture for the threshold tests below.
 func arbitrageCycleSlots() []Slot {
 	return []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50, Confidence: 1},
-		{StartMs: 3600000, LenMin: 60, PriceOre: 70, SpotOre: 70, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50},
+		{StartMs: 3600000, LenMin: 60, PriceOre: 70, SpotOre: 70},
 	}
 }
 
@@ -51,8 +51,8 @@ func TestArbitrageThresholdSuppressesMarginalCycle(t *testing.T) {
 // cycles.
 func TestArbitrageThresholdDoesNotBlockWideSpread(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50, Confidence: 1},
-		{StartMs: 3600000, LenMin: 60, PriceOre: 200, SpotOre: 200, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50},
+		{StartMs: 3600000, LenMin: 60, PriceOre: 200, SpotOre: 200},
 	}
 	p := arbitrageCycleParams()
 	p.MinArbitrageSpreadOreKwh = 25 // spread ~144 öre/kWh >> 25
@@ -67,7 +67,7 @@ func TestArbitrageThresholdDoesNotBlockWideSpread(t *testing.T) {
 // suppressed by an öre-level threshold, even in an arbitrage mode.
 func TestThresholdDoesNotSuppressCoverLoadDischarge(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 250, SpotOre: 200, LoadW: 2000, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 250, SpotOre: 200, LoadW: 2000},
 	}
 	p := baseParams(ModePassiveArbitrage)
 	p.InitialSoC = 0.8
@@ -84,8 +84,8 @@ func TestThresholdDoesNotSuppressCoverLoadDischarge(t *testing.T) {
 // identical — the threshold biases the DP decision, never the accounting.
 func TestThresholdDoesNotAffectReportedCost(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50, Confidence: 1},
-		{StartMs: 3600000, LenMin: 60, PriceOre: 200, SpotOre: 200, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50},
+		{StartMs: 3600000, LenMin: 60, PriceOre: 200, SpotOre: 200},
 	}
 	base := arbitrageCycleParams()
 	plan0 := Optimize(slots, base)
@@ -108,7 +108,7 @@ func TestThresholdDoesNotAffectReportedCost(t *testing.T) {
 // self_consumption cover-load discharge is identical with and without it.
 func TestThresholdGatedOutOfSelfConsumption(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 250, SpotOre: 200, LoadW: 2000, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 250, SpotOre: 200, LoadW: 2000},
 	}
 	base := baseParams(ModeSelfConsumption)
 	base.InitialSoC = 0.8

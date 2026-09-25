@@ -45,7 +45,6 @@ func TestNativeProcessCoreContract(t *testing.T) {
 	floor := -5.0
 	p.ExportBonusOreKwh, p.ExportFeeOreKwh, p.ExportFloorOreKwh = 12, 3, &floor
 	p.PVChargeBonusOreKwh, p.MinArbitrageSpreadOreKwh = 30, 20
-	slots[0].Confidence, slots[1].Confidence = .4, .9
 	slots[0].PVW = -4500
 	for _, mode := range []Mode{ModeArbitrage, ModeSelfConsumption, ModePassiveArbitrage, ModeCheapCharge} {
 		p.Mode = mode

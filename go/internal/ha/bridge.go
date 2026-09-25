@@ -72,7 +72,6 @@ type PlanAction struct {
 	PriceOre    float64 // total consumer price (öre/kWh)
 	SpotOre     float64 // raw wholesale spot price (öre/kWh)
 	CostOre     float64 // expected cost this slot (öre, negative = revenue)
-	Confidence  float64 // forecast confidence 0–1
 	Reason      string  // human-readable DP reason
 	EMSMode     string  // effective EMS mode the planner chose
 	PVW         float64 // planned PV output (site-sign, ≤ 0)
@@ -623,7 +622,7 @@ func (b *Bridge) publishDiscovery() {
 		total++
 
 		// Current electricity price sensor: state = total consumer price (öre/kWh),
-		// attrs = spot_ore, cost_ore, confidence, reason, ems_mode.
+		// attrs = spot_ore, cost_ore, reason, ems_mode.
 		priceMsg := b.withAvail(map[string]any{
 			"name":                  "Electricity Price",
 			"unique_id":             b.deviceID + "_price_ore",
@@ -1151,7 +1150,7 @@ func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
 //     Assistant's recorder keeps it (#1296)
 //   - plan_schedule_json: the full schedule with every field, own topic
 //   - price_ore: current consumer electricity price (öre/kWh)
-//   - price_json: price attributes (spot_ore, cost_ore, confidence, reason, ems_mode)
+//   - price_json: price attributes (spot_ore, cost_ore, reason, ems_mode)
 func (b *Bridge) publishPlan() {
 	actions := b.plan.LatestActions()
 	now := time.Now()
@@ -1160,7 +1159,7 @@ func (b *Bridge) publishPlan() {
 	currentAction := snapshot.Action
 	cur := snapshot.Current
 	curPVW, curLoadW := cur.PVW, cur.LoadW
-	curPriceOre, curSpotOre, curCostOre, curConfidence := cur.PriceOre, cur.SpotOre, cur.CostOre, cur.Confidence
+	curPriceOre, curSpotOre, curCostOre := cur.PriceOre, cur.SpotOre, cur.CostOre
 	curReason, curEMSMode := cur.Reason, cur.EMSMode
 
 	b.publishString("plan_action", currentAction)
@@ -1172,12 +1171,11 @@ func (b *Bridge) publishPlan() {
 	// Price sensor: standalone value + rich attributes for HA energy dashboard.
 	b.publishValue("price_ore", curPriceOre)
 	priceAttrs := map[string]any{
-		"price_ore":  curPriceOre,
-		"spot_ore":   curSpotOre,
-		"cost_ore":   curCostOre,
-		"confidence": curConfidence,
-		"reason":     curReason,
-		"ems_mode":   curEMSMode,
+		"price_ore": curPriceOre,
+		"spot_ore":  curSpotOre,
+		"cost_ore":  curCostOre,
+		"reason":    curReason,
+		"ems_mode":  curEMSMode,
 	}
 	if d, err := json.Marshal(priceAttrs); err == nil {
 		b.publish(b.stateTopic("price_json"), d, false)

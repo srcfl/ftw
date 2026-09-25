@@ -71,7 +71,7 @@ func TestNativeChargingPeriodsContinueMeasuredRun(t *testing.T) {
 	start := time.Now().Add(time.Minute).Truncate(time.Minute)
 	slots := make([]Slot, 12)
 	for i := range slots {
-		slots[i] = Slot{StartMs: start.Add(time.Duration(i) * time.Minute).UnixMilli(), LenMin: 1, Confidence: 1, PriceOre: 100, Limits: PowerLimits{MaxImportW: 1000}}
+		slots[i] = Slot{StartMs: start.Add(time.Duration(i) * time.Minute).UnixMilli(), LenMin: 1, PriceOre: 100, Limits: PowerLimits{MaxImportW: 1000}}
 	}
 	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, SoCMin: .1, SoCMax: .9, InitialSoC: .5, ChargeEfficiency: 1, DischargeEfficiency: 1,
 		Loadpoint: &LoadpointSpec{ID: "car", CapacityWh: 1000, Levels: 11, SoCMax: .1, TargetSoC: .1, TargetSlotIdx: 11, PluggedIn: true,

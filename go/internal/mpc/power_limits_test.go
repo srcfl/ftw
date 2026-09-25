@@ -73,14 +73,13 @@ func TestOptimizeRespectsImportCap(t *testing.T) {
 	// slot 1 should force the DP to stay under 2000 W net import.
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 10, SpotOre: 10,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 		{StartMs: 3600_000, LenMin: 60, PriceOre: 10, SpotOre: 10,
-			LoadW: 500, Confidence: 1.0,
-			Limits: PowerLimits{MaxImportW: 2000}},
+			LoadW: 500, Limits: PowerLimits{MaxImportW: 2000}},
 		{StartMs: 7200_000, LenMin: 60, PriceOre: 10, SpotOre: 10,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 		{StartMs: 10800_000, LenMin: 60, PriceOre: 10, SpotOre: 10,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 	}
 	p := Params{
 		Mode:                ModeCheapCharge,
@@ -129,8 +128,7 @@ func TestOptimizeInfeasibleStatePicksNearIdle(t *testing.T) {
 	// action grid).
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 20,
-			LoadW: 500, Confidence: 1.0,
-			Limits: PowerLimits{MaxImportW: 1, MaxExportW: 1}},
+			LoadW: 500, Limits: PowerLimits{MaxImportW: 1, MaxExportW: 1}},
 	}
 	p := Params{
 		Mode:                ModeSelfConsumption,
@@ -160,8 +158,7 @@ func TestOptimizeInfeasibleStatePicksNearIdle(t *testing.T) {
 func TestOptimizeInfeasibleStatePicksIdleWithAsymmetricLimits(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 20,
-			LoadW: 500, Confidence: 1.0,
-			Limits: PowerLimits{MaxImportW: 1, MaxExportW: 1}},
+			LoadW: 500, Limits: PowerLimits{MaxImportW: 1, MaxExportW: 1}},
 	}
 	p := Params{
 		Mode:                ModeSelfConsumption,
@@ -193,12 +190,11 @@ func TestOptimizeRespectsExportCap(t *testing.T) {
 	// decision in that slot must not exceed the cap.
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 80,
-			PVW: -4000, LoadW: 500, Confidence: 1.0},
+			PVW: -4000, LoadW: 500},
 		{StartMs: 3600_000, LenMin: 60, PriceOre: 100, SpotOre: 80,
-			PVW: -4000, LoadW: 500, Confidence: 1.0,
-			Limits: PowerLimits{MaxExportW: 500}},
+			PVW: -4000, LoadW: 500, Limits: PowerLimits{MaxExportW: 500}},
 		{StartMs: 7200_000, LenMin: 60, PriceOre: 100, SpotOre: 80,
-			PVW: -4000, LoadW: 500, Confidence: 1.0},
+			PVW: -4000, LoadW: 500},
 	}
 	p := Params{
 		Mode:                ModeArbitrage,
@@ -233,8 +229,7 @@ func TestOptimizeRespectsFuseExportCap(t *testing.T) {
 	// discharge that brings grid down to ≈ -11 kW, not -14 kW.
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 345, SpotOre: 156,
-			PVW: -6000, LoadW: 700, Confidence: 1.0,
-			Limits: PowerLimits{MaxImportW: 11000, MaxExportW: 11000}},
+			PVW: -6000, LoadW: 700, Limits: PowerLimits{MaxImportW: 11000, MaxExportW: 11000}},
 	}
 	p := Params{
 		Mode:                ModeArbitrage,
@@ -267,9 +262,8 @@ func TestOptimizeRespectsFuseExportCap(t *testing.T) {
 // side was silently uncapped.
 func TestFuseMaxWPopulatesBothDirections(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1.0},
-		{StartMs: 3600_000, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1.0,
-			Limits: PowerLimits{MaxImportW: 5000, MaxExportW: 7000}},
+		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 50},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 100, SpotOre: 50, Limits: PowerLimits{MaxImportW: 5000, MaxExportW: 7000}},
 	}
 	const fuseW = 11000
 	// Inline the plumbing under test (mirrors service.go:560-573).

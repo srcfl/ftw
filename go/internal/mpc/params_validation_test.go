@@ -354,7 +354,7 @@ func TestValidatePlanningParamsRejectsInvalidLoadpointPhysics(t *testing.T) {
 }
 
 func TestValidatePlanningSlotsAndFleet(t *testing.T) {
-	validSlot := Slot{StartMs: 1, LenMin: 15, PriceOre: -100, SpotOre: -200, PVW: -500, LoadW: 1000, Confidence: 1}
+	validSlot := Slot{StartMs: 1, LenMin: 15, PriceOre: -100, SpotOre: -200, PVW: -500, LoadW: 1000}
 	if err := validatePlanningSlots([]Slot{validSlot}); err != nil {
 		t.Fatalf("valid slot rejected: %v", err)
 	}
@@ -373,8 +373,6 @@ func TestValidatePlanningSlotsAndFleet(t *testing.T) {
 		{"infinite spot", "spot_ore", func(s *Slot) { s.SpotOre = math.Inf(1) }},
 		{"positive pv", "pv_w", func(s *Slot) { s.PVW = 1 }},
 		{"negative load", "load_w", func(s *Slot) { s.LoadW = -1 }},
-		{"zero confidence", "confidence", func(s *Slot) { s.Confidence = 0 }},
-		{"high confidence", "confidence", func(s *Slot) { s.Confidence = 1.1 }},
 		{"negative import limit", "grid limits", func(s *Slot) { s.Limits.MaxImportW = -1 }},
 		{"nan export limit", "max_export_w", func(s *Slot) { s.Limits.MaxExportW = math.NaN() }},
 	}
@@ -443,7 +441,7 @@ func (o *physicsGateRecoveryOptimizer) Optimize(_ context.Context, slots []Slot,
 		plan.Actions[i] = Action{
 			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin, ExecutionStartMs: slot.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
-			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
+			PVW: slot.PVW, LoadW: slot.LoadW,
 			GridW: gridW, SoC: p.InitialSoC, CostOre: cost,
 		}
 		if len(p.Storages) > 0 {

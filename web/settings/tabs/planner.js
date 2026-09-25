@@ -130,7 +130,7 @@
         '</fieldset>' +
         '</details>' +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
-        'The planner requires working price + weather forecasts. When disabled the system runs in the manual mode set on the Control page.' +
+        'The planner plans as far ahead as electricity prices are published and uses the weather forecast for solar. When disabled the system runs in the manual mode set on the Control page.' +
         '</p>';
     },
     after: function (ctx) {

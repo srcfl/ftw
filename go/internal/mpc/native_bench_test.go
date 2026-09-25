@@ -26,7 +26,7 @@ func nativeBenchmarkFixture(ev bool) ([]Slot, Params) {
 			spot = 35 + 20*math.Sin(math.Pi*(h-5)/14) + 75*math.Exp(-(h-18)*(h-18)/3)
 		}
 		load := 450 + 900*math.Exp(-(h-7)*(h-7)/1.5) + 1400*math.Exp(-(h-19)*(h-19)/2)
-		slots[i] = Slot{StartMs: int64(i) * 900000, LenMin: 15, Confidence: 1, PVW: pv, LoadW: load, PriceOre: spot*1.25 + 95, SpotOre: spot, Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 11040}}
+		slots[i] = Slot{StartMs: int64(i) * 900000, LenMin: 15, PVW: pv, LoadW: load, PriceOre: spot*1.25 + 95, SpotOre: spot, Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 11040}}
 	}
 	if ev {
 		p.Loadpoint = &LoadpointSpec{ID: "garage", CapacityWh: 60000, Levels: 11, InitialSoC: .35, SoCMax: 1, PluggedIn: true, TargetSoC: .8, TargetSlotIdx: 64, MaxChargeW: 11000, ChargeEfficiency: .9, AllowedStepsW: []float64{0, 4140, 6900, 11000}, NoBatteryToEV: true}

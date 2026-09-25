@@ -96,7 +96,7 @@ func TestReasonForLabelsBranchOnGridW(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := Slot{LoadW: tc.loadW, PVW: tc.pvW, PriceOre: tc.priceOre, Confidence: 1.0}
+			s := Slot{LoadW: tc.loadW, PVW: tc.pvW, PriceOre: tc.priceOre}
 			got := reasonFor(s, tc.batteryW, tc.gridW, tc.meanPrice)
 			if !strings.Contains(got, tc.wantContain) {
 				t.Errorf("reason = %q, want substring %q", got, tc.wantContain)

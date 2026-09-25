@@ -1116,6 +1116,11 @@ func (s *Store) migrate() error {
 		// The assistant_threads table went the same way when Ask why was
 		// removed. Its rows are old conversations that nothing reads. Do not
 		// reuse the name.
+		//
+		// The price forecast kept its model in the config key pricefc/state
+		// until the planner moved to published prices only. Nothing reads it
+		// now, and an older release restores its model from it after a
+		// rollback. Do not reuse the key.
 
 	}
 	for _, stmt := range stmts {

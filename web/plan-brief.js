@@ -6,6 +6,14 @@ function formatClock(tsMs) {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+// A plan that ends at midnight ends with that day: "Sat 24:00", not "Sun 00:00".
+function formatPlanEnd(tsMs) {
+  const date = new Date(tsMs);
+  const weekday = (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: "short" });
+  if (date.getHours() === 0 && date.getMinutes() === 0) return `${weekday(tsMs - 1)} 24:00`;
+  return `${weekday(tsMs)} ${formatClock(tsMs)}`;
+}
+
 function readableReason(reason) {
   if (!reason) return "Balancing expected energy use and supply";
   const known = {
@@ -244,25 +252,14 @@ export function derivePlanBrief({
     constraint = "The schedule is old, so FTW is using safe live balancing";
   }
 
-  const uncertain = actions.filter((action) => (
-    action.confidence != null && action.confidence < 0.999
-  ));
-  const forecast = uncertain.length
-    ? {
-        label: (
-          uncertain.reduce((sum, action) => sum + action.confidence, 0) /
-          uncertain.length
-        ) >= 0.75
-          ? "Some modeled inputs"
-          : "Higher uncertainty later",
-        detail: `Observed market data to ${formatClock(uncertain[0].slot_start_ms)}; forecast after that`,
-      }
-    : {
-        label: "Current published inputs",
-        detail: "No modeled price period in this plan",
-      };
-
   const finalAction = actions[actions.length - 1];
+  // The plan reaches as far as the published prices, and says how far.
+  const forecast = {
+    label: "Published prices",
+    detail: finalAction
+      ? `Plan until ${formatPlanEnd(finalAction.slot_start_ms + (finalAction.slot_len_min || 15) * 60_000)}`
+      : "The plan reaches as far as the published prices",
+  };
   const nextSocPct = next ? socPercent(next.soc) : null;
   const finalSocPct = finalAction ? socPercent(finalAction.soc) : null;
   const soc = hasBattery

@@ -20,33 +20,31 @@ const planAttributesBudget = 14 * 1024
 // dashboard or automation needs per slot, rounded to one decimal. The full
 // slot detail goes to plan_schedule_json.
 type planSlot struct {
-	Start      string  `json:"start"`
-	Action     string  `json:"action"`
-	BatteryW   float64 `json:"battery_w"`
-	GridW      float64 `json:"grid_w"`
-	SoCPct     float64 `json:"soc_pct"`
-	PriceOre   float64 `json:"price_ore"`
-	Confidence float64 `json:"confidence"`
+	Start    string  `json:"start"`
+	Action   string  `json:"action"`
+	BatteryW float64 `json:"battery_w"`
+	GridW    float64 `json:"grid_w"`
+	SoCPct   float64 `json:"soc_pct"`
+	PriceOre float64 `json:"price_ore"`
 }
 
 // planScheduleSlot is one entry of plan_schedule_json, the full schedule for
 // MQTT consumers. It is not attached to a Home Assistant entity because it
 // can exceed the recorder limit.
 type planScheduleSlot struct {
-	Start      string  `json:"start"`
-	End        string  `json:"end"`
-	Action     string  `json:"action"`
-	BatteryW   float64 `json:"battery_w"`
-	GridW      float64 `json:"grid_w"`
-	SoCPct     float64 `json:"soc_pct"`
-	PVW        float64 `json:"pv_w,omitempty"`
-	LoadW      float64 `json:"load_w,omitempty"`
-	PriceOre   float64 `json:"price_ore,omitempty"`
-	SpotOre    float64 `json:"spot_ore,omitempty"`
-	CostOre    float64 `json:"cost_ore,omitempty"`
-	Confidence float64 `json:"confidence,omitempty"`
-	Reason     string  `json:"reason,omitempty"`
-	EMSMode    string  `json:"ems_mode,omitempty"`
+	Start    string  `json:"start"`
+	End      string  `json:"end"`
+	Action   string  `json:"action"`
+	BatteryW float64 `json:"battery_w"`
+	GridW    float64 `json:"grid_w"`
+	SoCPct   float64 `json:"soc_pct"`
+	PVW      float64 `json:"pv_w,omitempty"`
+	LoadW    float64 `json:"load_w,omitempty"`
+	PriceOre float64 `json:"price_ore,omitempty"`
+	SpotOre  float64 `json:"spot_ore,omitempty"`
+	CostOre  float64 `json:"cost_ore,omitempty"`
+	Reason   string  `json:"reason,omitempty"`
+	EMSMode  string  `json:"ems_mode,omitempty"`
 }
 
 // planSnapshot is everything publishPlan publishes about the plan.
@@ -86,12 +84,12 @@ func buildPlanSnapshot(actions []PlanAction, now time.Time) planSnapshot {
 		compact = append(compact, planSlot{
 			Start: start, Action: label,
 			BatteryW: round1(a.BatteryW), GridW: round1(a.GridW), SoCPct: round1(a.SoCPct),
-			PriceOre: round1(a.PriceOre), Confidence: round2(a.Confidence),
+			PriceOre: round1(a.PriceOre),
 		})
 		full = append(full, planScheduleSlot{
 			Start: start, End: end, Action: label,
 			BatteryW: a.BatteryW, GridW: a.GridW, SoCPct: a.SoCPct, PVW: a.PVW, LoadW: a.LoadW,
-			PriceOre: a.PriceOre, SpotOre: a.SpotOre, CostOre: a.CostOre, Confidence: a.Confidence,
+			PriceOre: a.PriceOre, SpotOre: a.SpotOre, CostOre: a.CostOre,
 			Reason: a.Reason, EMSMode: a.EMSMode,
 		})
 	}
@@ -107,7 +105,6 @@ func buildPlanSnapshot(actions []PlanAction, now time.Time) planSnapshot {
 		"price_ore":  cur.PriceOre,
 		"spot_ore":   cur.SpotOre,
 		"cost_ore":   cur.CostOre,
-		"confidence": cur.Confidence,
 		"reason":     cur.Reason,
 		"ems_mode":   cur.EMSMode,
 	}
@@ -143,4 +140,3 @@ func marshalPlanAttributes(attrs map[string]any, slots []planSlot, budget int) (
 }
 
 func round1(v float64) float64 { return math.Round(v*10) / 10 }
-func round2(v float64) float64 { return math.Round(v*100) / 100 }

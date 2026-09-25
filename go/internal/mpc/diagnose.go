@@ -19,11 +19,10 @@ type DiagnosticSlot struct {
 	LenMin           int   `json:"len_min"`
 
 	// Inputs
-	PriceOre   float64 `json:"price_ore"`  // consumer total (spot + tariff + VAT)
-	SpotOre    float64 `json:"spot_ore"`   // raw spot — used for export revenue
-	Confidence float64 `json:"confidence"` // 1.0 = day-ahead, 0.6 = forecast
-	PVW        float64 `json:"pv_w"`       // site-signed (≤ 0 when producing)
-	LoadW      float64 `json:"load_w"`
+	PriceOre float64 `json:"price_ore"` // consumer total (spot + tariff + VAT)
+	SpotOre  float64 `json:"spot_ore"`  // raw spot — used for export revenue
+	PVW      float64 `json:"pv_w"`      // site-signed (≤ 0 when producing)
+	LoadW    float64 `json:"load_w"`
 
 	// Source and local availability time for the rows consulted to build this
 	// slot. Synthetic price rows use their creation time. WeatherRow is not full
@@ -130,9 +129,7 @@ type Diagnostic struct {
 // The shape matches what the UI renders in the planner inspector so
 // operators can audit each slot: "what did the DP see, what did it
 // decide, and why". The per-slot `Reason` string already explains the
-// decision class; the adjacent inputs show whether the decision was
-// grounded in a real day-ahead price (`confidence == 1.0`) or a
-// forecasted one (`confidence == 0.6`).
+// decision class; the adjacent inputs show what it was based on.
 func (s *Service) Diagnose() *Diagnostic {
 	if s == nil {
 		return nil
@@ -178,7 +175,6 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			ExecutionStartMs:        slot.ExecutionStartMs,
 			PriceOre:                slot.PriceOre,
 			SpotOre:                 slot.SpotOre,
-			Confidence:              slot.Confidence,
 			PVW:                     slot.PVW,
 			LoadW:                   slot.LoadW,
 			PriceInputSource:        slot.PriceInputSource,
@@ -391,7 +387,6 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			SpotOre:                 ds.SpotOre,
 			PVW:                     ds.PVW,
 			LoadW:                   ds.LoadW,
-			Confidence:              ds.Confidence,
 			InputProvenanceSchema:   d.InputProvenanceSchema,
 			PriceInputSource:        ds.PriceInputSource,
 			PriceInputAvailableAtMs: ds.PriceInputAvailableAtMs,
@@ -410,7 +405,6 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			GridW:            ds.GridW,
 			SoC:              ds.SoC,
 			CostOre:          ds.CostOre,
-			Confidence:       ds.Confidence,
 			Reason:           ds.Reason,
 			EMSMode:          ds.EMSMode,
 			PVLimitW:         ds.PVLimitW,

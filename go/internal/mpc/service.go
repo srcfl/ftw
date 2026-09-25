@@ -39,12 +39,6 @@ type PVResidualCorrector func(now, tTarget time.Time, basePrediction float64) fl
 // *loadmodel.Service.Predict. Leave nil to fall back to Service.BaseLoad.
 type LoadPredictor func(t time.Time) float64
 
-// PricePredictor fills in spot price for future slots that the day-ahead
-// source hasn't published yet. Implemented by
-// *priceforecast.Service.Predict. Returns ÖRE/kWh spot (no tariff/VAT).
-// Leave nil to cap the plan horizon at what's been published.
-type PricePredictor func(zone string, t time.Time) float64
-
 // plannerWeatherLookback keeps the hourly weather row that can overlap the
 // first price slot in a plan or twin-drift comparison. Production forecast
 // writers store 60-minute rows.
@@ -118,7 +112,6 @@ type Service struct {
 	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
 	// unset config to 1.0.
 	PVForecastSafetyK float64
-	Price             PricePredictor // optional — fills in future slots when day-ahead isn't published yet
 	Loadpoint         LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
 	Loadpoints        LoadpointsProbe
 
@@ -224,11 +217,8 @@ type Service struct {
 	// no clamp, real spot pass-through (default).
 	ExportFloorOreKwh *float64
 
-	// GridTariffOreKwh and VATPercent let the MPC turn forecast spot
-	// prices into consumer-total prices when back-filling future slots
-	// using s.Price. Mirrors prices.Applier semantics.
-	GridTariffOreKwh float64
-	VATPercent       float64
+	// VATPercent applies to the demand charge, like the slot prices.
+	VATPercent float64
 	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
 	// minor units as slot prices, excluding VAT. Zero disables it.
 	DemandPricePerKW float64
@@ -335,7 +325,7 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		Tele:             tl,
 		Zone:             zone,
 		Defaults:         p,
-		Horizon:          48 * time.Hour, // always plan 48h — forecaster fills beyond day-ahead
+		Horizon:          48 * time.Hour, // an upper bound: the plan covers the published prices
 		Interval:         15 * time.Minute,
 		ReactiveInterval: 10 * time.Second,
 		// Tightened 2026-05: lower thresholds + shorter half-life + shorter
@@ -1466,15 +1456,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if request.wasCanceledByService() {
 		return s.canceledReplan(request, "load-prices")
 	}
-	// Extend prices into the horizon using the learned forecast when
-	// the day-ahead source hasn't published that far yet. Otherwise
-	// the plan silently truncates the moment we pass the published
-	// cutoff — operators lose overnight planning exactly when they'd
-	// most want it.
-	if s.Price != nil {
-		prices = extendPricesWithForecast(prices, s.Zone, s.Price,
-			now.UnixMilli(), untilMs, s.GridTariffOreKwh, s.VATPercent)
-	}
+	// The plan covers the published prices and nothing beyond them.
 	if len(prices) == 0 {
 		slog.Info("mpc: no prices available yet")
 		return nil
@@ -1953,23 +1935,18 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 	// Horizon statistics — surfaced in logs so operators can
 	// reconstruct "what did the DP know?" without pulling the full
-	// Diagnostic JSON. Captures the three factors most likely to
-	// explain a surprising decision: mean price level, mean data
-	// confidence (how much of the horizon is forecast vs day-ahead),
-	// and the capacity envelope.
-	var sumPrice, sumConf float64
+	// Diagnostic JSON: the mean price level, how far the published
+	// prices reach, and the capacity envelope.
+	var sumPrice float64
 	for i := range slots {
 		sumPrice += slots[i].PriceOre
-		c := slots[i].Confidence
-		if c <= 0 {
-			c = 1.0
-		}
-		sumConf += c
 	}
-	var meanPrice, meanConf float64
+	var meanPrice float64
+	var pricesUntil time.Time
 	if n := len(slots); n > 0 {
 		meanPrice = sumPrice / float64(n)
-		meanConf = sumConf / float64(n)
+		last := slots[n-1]
+		pricesUntil = time.UnixMilli(last.StartMs + int64(last.LenMin)*60*1000)
 	}
 	slog.Info("mpc: replanned",
 		"decision_id", plan.DecisionID,
@@ -1978,7 +1955,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		"cost_ore", plan.TotalCostOre,
 		"reason", reason,
 		"mean_price_ore", meanPrice,
-		"mean_confidence", meanConf,
+		"prices_until", pricesUntil,
 		"terminal_soc_price_ore", p.TerminalSoCPrice,
 		"capacity_wh", p.CapacityWh,
 		"max_charge_w", p.MaxChargeW,
@@ -2085,77 +2062,6 @@ func (s *Service) LastReplanInfo() (time.Time, string) {
 	return s.lastReplanAt, s.lastReason
 }
 
-// extendPricesWithForecast appends synthesized price rows for slots between
-// the last published price and `untilMs`.
-//
-// The hour-of-week climatology is a typical day, not tomorrow. Jumping
-// straight to it at the day-ahead cut-off produces a fake overnight
-// crash (200+ öre at 23:00 → 60–80 öre after midnight) that tells
-// active arbitrage to wait and skip charging. Blend from the last
-// published spot toward climatology with a 6 h e-folding so the first
-// unpublished hours follow the curve the operator just saw. Synthesized
-// rows are tagged `source="forecast"` so the UI can distinguish them.
-const forecastPersistTauH = 6.0
-
-func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer PricePredictor, nowMs, untilMs int64, gridTariff, vatPct float64) []state.PricePoint {
-	// Find the latest published slot end and its spot.
-	var latestEndMs int64
-	var lastSpot float64
-	haveLast := false
-	slotLen := 60
-	for _, p := range prices {
-		sl := p.SlotLenMin
-		if sl <= 0 {
-			sl = 60
-		}
-		end := p.SlotTsMs + int64(sl)*60*1000
-		if end > latestEndMs {
-			latestEndMs = end
-			lastSpot = p.SpotOreKwh
-			haveLast = true
-		}
-		if sl > 0 {
-			slotLen = sl
-		}
-	}
-	// If published already covers the horizon, nothing to do.
-	if latestEndMs >= untilMs {
-		return prices
-	}
-	// Start synthesizing from the later of (latestEndMs, nowMs).
-	start := latestEndMs
-	if start < nowMs {
-		start = nowMs
-	}
-	// Round down to the slotLen grid.
-	mod := start % (int64(slotLen) * 60 * 1000)
-	start -= mod
-	for ts := start; ts < untilMs; ts += int64(slotLen) * 60 * 1000 {
-		t := time.UnixMilli(ts).UTC()
-		climatology := pricer(zone, t)
-		spot := climatology
-		if haveLast {
-			hoursAhead := float64(ts-latestEndMs) / float64(time.Hour.Milliseconds())
-			if hoursAhead < 0 {
-				hoursAhead = 0
-			}
-			w := math.Exp(-hoursAhead / forecastPersistTauH)
-			spot = w*lastSpot + (1-w)*climatology
-		}
-		total := (spot + gridTariff) * (1 + vatPct/100.0)
-		prices = append(prices, state.PricePoint{
-			Zone:        zone,
-			SlotTsMs:    ts,
-			SlotLenMin:  slotLen,
-			SpotOreKwh:  spot,
-			TotalOreKwh: total,
-			Source:      "forecast",
-			FetchedAtMs: nowMs,
-		})
-	}
-	return prices
-}
-
 // buildSlots joins price rows with forecast rows by start time. Prices drive
 // slot count + duration; forecast PV is interpolated forward (last valid
 // value carries) because forecast is usually hourly while prices are 15-min.
@@ -2222,13 +2128,6 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if load != nil {
 			loadW = load(slotT)
 		}
-		// Confidence from the price source: real day-ahead → 1.0,
-		// ML-forecasted → 0.6 (user-tunable hook for later). Anything
-		// else (seed data, Sourceful, ENTSOE, elprisetjustnu) → 1.0 too.
-		conf := 1.0
-		if pr.Source == "forecast" {
-			conf = 0.6
-		}
 		slot := Slot{
 			StartMs:                 pr.SlotTsMs,
 			LenMin:                  slotLen,
@@ -2236,7 +2135,6 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 			SpotOre:                 pr.SpotOreKwh,
 			PVW:                     -math.Abs(pvW),
 			LoadW:                   loadW,
-			Confidence:              conf,
 			InputProvenanceSchema:   inputProvenanceSchemaVersion,
 			PriceInputSource:        pr.Source,
 			PriceInputAvailableAtMs: pr.FetchedAtMs,

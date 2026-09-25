@@ -33,11 +33,11 @@ func TestBindDemandChargesExpandsWeekdayHoursAndElapsed(t *testing.T) {
 	now := time.Date(2026, 9, 9, 10, 7, 0, 0, loc) // Wednesday
 	start := time.Date(2026, 9, 9, 10, 0, 0, 0, loc)
 	slots := []Slot{
-		{StartMs: start.UnixMilli(), ExecutionStartMs: now.UnixMilli(), LenMin: 15, PriceOre: 100, Confidence: 1},
-		{StartMs: start.Add(15 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, Confidence: 1},
-		{StartMs: start.Add(30 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, Confidence: 1},
-		{StartMs: start.Add(45 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, Confidence: 1},
-		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 80, Confidence: 1},
+		{StartMs: start.UnixMilli(), ExecutionStartMs: now.UnixMilli(), LenMin: 15, PriceOre: 100},
+		{StartMs: start.Add(15 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100},
+		{StartMs: start.Add(30 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100},
+		{StartMs: start.Add(45 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100},
+		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 80},
 	}
 	importWh := func(intervals [][2]int64) ([]float64, []int64) {
 		wh := make([]float64, len(intervals))
@@ -91,9 +91,9 @@ func TestBindDemandChargesGroupsHoursByLocalDay(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 9, 6, 0, 0, 0, loc)
 	slots := []Slot{
-		{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
-		{StartMs: now.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
-		{StartMs: time.Date(2026, 9, 10, 6, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
+		{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100},
+		{StartMs: now.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 100},
+		{StartMs: time.Date(2026, 9, 10, 6, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 100},
 	}
 	got := bindDemandCharges(slots, 7000, 3, 0, 0, loc, now, nil)
 	if len(got) != 1 || len(got[0].Hours) < 3 {
@@ -118,9 +118,9 @@ func TestEllevioNightWeightIncludesWeekendsAndHalvesNightHours(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 5, 10, 0, 0, 0, loc) // Saturday
 	slots := []Slot{
-		{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100, Confidence: 1},
-		{StartMs: time.Date(2026, 9, 5, 22, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 80, Confidence: 1},
-		{StartMs: time.Date(2026, 9, 5, 23, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 80, Confidence: 1},
+		{StartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100},
+		{StartMs: time.Date(2026, 9, 5, 22, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 80},
+		{StartMs: time.Date(2026, 9, 5, 23, 0, 0, 0, loc).UnixMilli(), LenMin: 60, PriceOre: 80},
 	}
 	without := bindDemandCharges(slots, 7000, 3, 0, 0, loc, now, nil)
 	if len(without) != 0 {
@@ -161,9 +161,9 @@ func TestBindDemandChargesSkipsUnalignedCurrentHour(t *testing.T) {
 	now := time.Date(2026, 9, 9, 10, 17, 0, 0, loc)
 	start := time.Date(2026, 9, 9, 10, 15, 0, 0, loc)
 	slots := []Slot{
-		{StartMs: start.UnixMilli(), ExecutionStartMs: now.UnixMilli(), LenMin: 15, Confidence: 1},
-		{StartMs: start.Add(15 * time.Minute).UnixMilli(), LenMin: 45, Confidence: 1},
-		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, Confidence: 1},
+		{StartMs: start.UnixMilli(), ExecutionStartMs: now.UnixMilli(), LenMin: 15},
+		{StartMs: start.Add(15 * time.Minute).UnixMilli(), LenMin: 45},
+		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60},
 	}
 	got := bindDemandCharges(slots, 7000, 1, 0, 0, loc, now, nil)
 	if len(got) != 1 || len(got[0].Hours) == 0 {
@@ -203,9 +203,9 @@ func TestNativeDemandChargesOnWeekdayHour(t *testing.T) {
 	defer o.Close()
 	start := time.Date(2026, 9, 9, 10, 0, 0, 0, time.UTC)
 	slots := []Slot{
-		{StartMs: start.UnixMilli(), LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 500,
+		{StartMs: start.UnixMilli(), LenMin: 60, PriceOre: 100, SpotOre: 50, LoadW: 500,
 			Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000}},
-		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 300, SpotOre: 240, Confidence: 1, LoadW: 500,
+		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 300, SpotOre: 240, LoadW: 500,
 			Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000}},
 	}
 	p := Params{

@@ -22,7 +22,7 @@ func TestPartialSlotCoreAndWorkerReplay(t *testing.T) {
 			for _, elapsed := range []time.Duration{0, 450 * time.Second, 750 * time.Second, 748939 * time.Millisecond, 899 * time.Second} {
 				for _, ev := range []bool{false, true} {
 					start := time.Date(2026, 9, 8, 4, 45, 0, 0, time.UTC)
-					slots := []Slot{{StartMs: start.UnixMilli(), LenMin: 15, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 794.2886383422652}}
+					slots := []Slot{{StartMs: start.UnixMilli(), LenMin: 15, PriceOre: 100, SpotOre: 50, LoadW: 794.2886383422652}}
 					if !trimFirstExecutionSlot(slots, start.Add(elapsed)) {
 						t.Fatal("trim failed")
 					}
@@ -177,7 +177,7 @@ func (*partialClockOptimizer) Close() error { return nil }
 
 func Test0457PlanRejectsFullQuarterEnergy(t *testing.T) {
 	start := time.Date(2026, 9, 8, 4, 45, 0, 0, time.UTC)
-	slots := []Slot{{StartMs: start.UnixMilli(), LenMin: 15, ExecutionStartMs: start.Add(748939 * time.Millisecond).UnixMilli(), PriceOre: 162.6900225, SpotOre: 60.152018, LoadW: 794.2886383422652, Confidence: 1}}
+	slots := []Slot{{StartMs: start.UnixMilli(), LenMin: 15, ExecutionStartMs: start.Add(748939 * time.Millisecond).UnixMilli(), PriceOre: 162.6900225, SpotOre: 60.152018, LoadW: 794.2886383422652}}
 	p := baseParams(ModeArbitrage)
 	p.InitialSoC = .875
 	p.CapacityWh = 9600

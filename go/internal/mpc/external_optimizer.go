@@ -248,7 +248,7 @@ type externalSlot struct {
 	LenMin           int     `json:"len_min"`
 	PriceOre         float64 `json:"price_per_kwh"`
 	SpotOre          float64 `json:"spot_per_kwh"`
-	Confidence       float64 `json:"confidence"`
+	Confidence       float64 `json:"confidence"` // required by Energyplan; always 1, every price is published
 	PVW              float64 `json:"pv_w"`
 	LoadW            float64 `json:"load_w"`
 	MaxImportW       float64 `json:"max_import_w"`
@@ -466,7 +466,7 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		req.Slots[i] = externalSlot{
 			StartMs: slot.StartMs, LenMin: slot.LenMin, ExecutionStartMs: slot.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
-			Confidence: slot.Confidence, PVW: slot.PVW, LoadW: slot.LoadW,
+			Confidence: 1, PVW: slot.PVW, LoadW: slot.LoadW,
 			MaxImportW: slot.Limits.MaxImportW, MaxExportW: slot.Limits.MaxExportW,
 		}
 	}
@@ -592,7 +592,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 		action := Action{
 			SlotStartMs: candidate.SlotStartMs, SlotLenMin: candidate.SlotLenMin, ExecutionStartMs: candidate.ExecutionStartMs,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
-			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
+			PVW: slot.PVW, LoadW: slot.LoadW,
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
 			SoC: candidate.SoCPct / 100, CostOre: candidate.CostOre,
 			PVLimitW:           candidate.PVLimitW,

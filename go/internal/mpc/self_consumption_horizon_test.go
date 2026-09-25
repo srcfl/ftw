@@ -51,7 +51,6 @@ func TestSelfConsumptionAbsorbsCheapPVOver48hHorizon(t *testing.T) {
 			SpotOre:    spot,
 			PVW:        pv,
 			LoadW:      load,
-			Confidence: 1.0,
 		}
 	}
 

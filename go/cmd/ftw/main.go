@@ -60,7 +60,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/nova"
 	"github.com/srcfl/ftw/go/internal/ocpp"
-	"github.com/srcfl/ftw/go/internal/priceforecast"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/proxy"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
@@ -930,7 +929,7 @@ func main() {
 
 	// Forward-declared so the hot-reload closure below can push
 	// capacity changes into the running planner. Assigned at line
-	// ~450 after all its dependencies (pvSvc, loadSvc, priceFc) are
+	// ~450 after all its dependencies (pvSvc, loadSvc) are
 	// wired up. nil until that point — the reload closure guards.
 	var mpcSvc *mpc.Service
 
@@ -1131,7 +1130,6 @@ func main() {
 				mpcSvc.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
 				mpcSvc.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
 				mpcSvc.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
-				mpcSvc.GridTariffOreKwh = newCfg.Price.GridTariffOreKwh
 				mpcSvc.VATPercent = newCfg.Price.VATPercent
 				mpcSvc.DemandPricePerKW = newCfg.Price.DemandPricePerKW
 				mpcSvc.DemandTopN = newCfg.Price.DemandTopN
@@ -1268,25 +1266,6 @@ func main() {
 
 	priceSvc = prices.FromConfig(cfg.Price, st, fxSvc)
 
-	// ---- Price forecaster (fills in beyond day-ahead publication) ----
-	zones := []string{"SE3"}
-	if cfg.Price != nil && cfg.Price.Zone != "" {
-		zones = []string{cfg.Price.Zone}
-	}
-	priceFc := priceforecast.NewService(st, zones)
-	// Optional: seed from bundled CSV on first boot. Idempotent so safe
-	// to call every boot — no-op once data is already in the store.
-	seedPath := filepath.Join(filepath.Dir(*configPath), "seed", "prices.csv")
-	if _, err := os.Stat(seedPath); err == nil {
-		n, err := priceFc.SeedFromCSV(seedPath)
-		if err != nil {
-			slog.Warn("priceforecast seed failed", "path", seedPath, "err", err)
-		} else if n > 0 {
-			slog.Info("priceforecast seeded", "rows", n, "path", seedPath)
-		}
-	}
-	priceFc.Start(ctx)
-	defer priceFc.Stop()
 	if priceSvc != nil {
 		priceSvc.Start(ctx)
 		defer priceSvc.Stop()
@@ -1650,7 +1629,6 @@ func main() {
 			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
 		}
 		mpcSvc.Load = loadSvc.Predict
-		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
 		// The mathematical planner co-optimizes every scheduled loadpoint.
 		// The service retains the first entry for its Go-DP emergency fallback.
@@ -1837,7 +1815,6 @@ func main() {
 			mpcSvc.ExportBonusOreKwh = cfg.Price.ExportBonusOreKwh
 			mpcSvc.ExportFeeOreKwh = cfg.Price.ExportFeeOreKwh
 			mpcSvc.ExportFloorOreKwh = cfg.Price.ExportFloorOreKwh
-			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
 			mpcSvc.VATPercent = cfg.Price.VATPercent
 			mpcSvc.DemandPricePerKW = cfg.Price.DemandPricePerKW
 			mpcSvc.DemandTopN = cfg.Price.DemandTopN
@@ -4312,7 +4289,6 @@ func (b mpcPlanBridge) LatestActions() []ha.PlanAction {
 			PriceOre:    a.PriceOre,
 			SpotOre:     a.SpotOre,
 			CostOre:     a.CostOre,
-			Confidence:  a.Confidence,
 			Reason:      a.Reason,
 			EMSMode:     a.EMSMode,
 			PVW:         a.PVW,

@@ -16,7 +16,7 @@ import (
 )
 
 func TestValidatePlanRejectsEVOverCapacity(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, Confidence: 1}}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100}}
 	p := baseParams(ModeArbitrage)
 	p.MaxChargeW, p.MaxDischargeW = 0, 0
 	p.Loadpoint = &LoadpointSpec{ID: "ev", Levels: 11, CapacityWh: 10000, InitialSoC: .95, SoCMax: 1,
@@ -29,7 +29,7 @@ func TestValidatePlanRejectsEVOverCapacity(t *testing.T) {
 }
 
 func TestCoreDPNearCeilingReplaysPower(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 15, Confidence: 1}}
+	slots := []Slot{{StartMs: 1, LenMin: 15}}
 	p := Params{Mode: ModeArbitrage, InitialSoC: .947, CapacityWh: 20000, SoCMin: .1, SoCMax: .95,
 		ChargeEfficiency: .95, DischargeEfficiency: .95, MaxChargeW: 9000, MaxDischargeW: 9000,
 		TerminalSoCPrice: 160, SoCLevels: 201, ActionLevels: 401}
@@ -60,9 +60,9 @@ func TestNativeEVPulsePricesImportAboveSolarSurplus(t *testing.T) {
 	worker := nativeWorker(t, 500*time.Millisecond)
 	t.Cleanup(func() { _ = worker.Close() })
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, Confidence: 1, PVW: -2000, PriceOre: 100, SpotOre: 5},
-		{StartMs: 3600000, LenMin: 60, Confidence: 1, PriceOre: 50, SpotOre: 5},
-		{StartMs: 7200000, LenMin: 60, Confidence: 1, PriceOre: 200, SpotOre: 5},
+		{StartMs: 0, LenMin: 60, PVW: -2000, PriceOre: 100, SpotOre: 5},
+		{StartMs: 3600000, LenMin: 60, PriceOre: 50, SpotOre: 5},
+		{StartMs: 7200000, LenMin: 60, PriceOre: 200, SpotOre: 5},
 	}
 	// A fixed battery leaves the charger as the only choice. Its 11 kW
 	// pulse imports 9 kW in the solar slot even when mean EV power is 2 kW.
