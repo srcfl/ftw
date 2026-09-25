@@ -640,3 +640,31 @@ func TestValidateReadingSiteConventionAndFractions(t *testing.T) {
 		t.Fatal("+Inf power must be rejected")
 	}
 }
+
+// A driver that has just been added, at Core start, after an update or after a
+// driver install, has not had time to emit. It was marked stale on the next
+// tick and sent its default a second time; on the home box Easee lost its
+// charging current 2-4 s after every restart (#1421).
+func TestWatchdogGivesANewDriverItsTimeoutBeforeTheFirstReading(t *testing.T) {
+	s := NewStore()
+	s.EnsureDriverHealth("easee")
+	if tr := s.WatchdogScan(60 * time.Second); len(tr) != 0 {
+		t.Fatalf("a driver added just now went stale: %+v", tr)
+	}
+	if !s.DriverHealth("easee").IsOnline() {
+		t.Fatal("a driver added just now is offline")
+	}
+
+	// A driver that never emits still goes stale once the timeout passes.
+	s.health["easee"].StartedAt = time.Now().Add(-61 * time.Second)
+	if tr := s.WatchdogScan(60 * time.Second); len(tr) != 1 || tr[0].Online {
+		t.Fatalf("a silent driver past its timeout: %+v", tr)
+	}
+
+	// A restart removes the record; the replacement starts its own window.
+	s.Remove("easee")
+	s.EnsureDriverHealth("easee")
+	if tr := s.WatchdogScan(60 * time.Second); len(tr) != 0 {
+		t.Fatalf("a restarted driver went stale at once: %+v", tr)
+	}
+}
