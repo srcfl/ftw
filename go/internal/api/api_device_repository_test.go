@@ -497,7 +497,12 @@ func TestDriverCatalogNamesTheDriversThatRunEachFile(t *testing.T) {
 // drivers/<filename>.
 func (f *driverUpdateFixture) publishAs(id, filename, version string) {
 	f.t.Helper()
-	source := []byte(strings.Replace(string(updateDriverLua(version, "P1-123", `host.emit("meter", {w=103})`)),
+	f.publishSourceAs(id, filename, version, "P1-123", `host.emit("meter", {w=103})`)
+}
+
+func (f *driverUpdateFixture) publishSourceAs(id, filename, version, serial, poll string) {
+	f.t.Helper()
+	source := []byte(strings.Replace(string(updateDriverLua(version, serial, poll)),
 		`id = "esphome-dsmr"`, `id = "`+id+`"`, 1))
 	f.mu.Lock()
 	f.lua = source
@@ -631,5 +636,78 @@ func TestVersionsShowTheReleaseAndTheOwnersChoice(t *testing.T) {
 		if e.Filename == "esphome_dsmr.lua" && (!e.Chosen || e.ReleaseVersion != "1.0.2") {
 			t.Fatalf("catalog entry = %+v; want chosen over release 1.0.2", e)
 		}
+	}
+}
+
+// A selection a newer release has overtaken is kept but does not run. A
+// failed trial of another version must come back to what ran -- the
+// release's copy -- and must not make the kept selection run instead.
+func TestFailedTrialOverASupersededSelectionReturnsToTheRelease(t *testing.T) {
+	f := newDriverUpdateFixture(t, "running")
+	release := func(version string, watts int) {
+		t.Helper()
+		source := strings.Replace(string(updateDriverLua(version, "P1-123", fmt.Sprintf(`host.emit("meter", {w=%d})`, watts))),
+			`id = "esphome-dsmr"`, `id = "esphome_dsmr"`, 1)
+		if err := os.WriteFile(f.bundled, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release("1.0.2", 102)
+	f.publishAs("esphome_dsmr", "esphome_dsmr.lua", "1.0.3")
+	f.requestFor("esphome_dsmr", "install", `{"repository_id":"test"}`, 200)
+	f.reading(103)
+
+	// A Core update brings 1.0.4: the 1.0.3 selection stays but no longer runs.
+	release("1.0.4", 104)
+	f.s.deps.DriverRepository.ApplyBundled()
+	f.s.deps.Cfg.Drivers[0].Lua = f.bundled
+	if err := f.s.deps.Registry.Restart(context.Background(), f.s.deps.Cfg.Drivers[0]); err != nil {
+		t.Fatal(err)
+	}
+	f.reading(104)
+	w := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/device_repository/drivers/esphome_dsmr/versions", nil))
+	var versions struct {
+		Superseded string `json:"superseded_version"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &versions) != nil || versions.Superseded != "1.0.3" {
+		t.Fatalf("versions: HTTP %d %s; want the kept 1.0.3 named as overtaken", w.Code, w.Body.String())
+	}
+
+	stillTheRelease := func(action string) {
+		t.Helper()
+		f.reading(104)
+		if got := f.s.activeManagedDriverVersion("esphome_dsmr"); got != "1.0.3" {
+			t.Fatalf("after the failed %s the kept selection is %q, want 1.0.3", action, got)
+		}
+		if f.s.deps.DriverRepository.Chosen("drivers/esphome_dsmr.lua", "1.0.3") {
+			t.Fatalf("the failed %s turned the kept 1.0.3 into a choice that runs over the release", action)
+		}
+		if _, err := os.Stat(filepath.Join(f.s.managedDriverDir(), "esphome_dsmr.lua")); !os.IsNotExist(err) {
+			t.Fatalf("after the failed %s a managed file runs instead of the release's (stat err %v)", action, err)
+		}
+	}
+
+	// A version for another meter fails its identity check.
+	f.publishSourceAs("esphome_dsmr", "esphome_dsmr.lua", "1.0.5", "OTHER-METER", `host.emit("meter", {w=105})`)
+	response := f.requestFor("esphome_dsmr", "install", `{"repository_id":"test"}`, 502)
+	if msg, _ := response["error"].(string); strings.Contains(msg, "rollback failed") {
+		t.Fatalf("install recovery failed: %s", msg)
+	}
+	stillTheRelease("install")
+
+	// The failed version is on disk now; switching to it fails the same way.
+	response = f.requestFor("esphome_dsmr", "activate", `{"version":"1.0.5"}`, 502)
+	if msg, _ := response["error"].(string); strings.Contains(msg, "recovery failed") {
+		t.Fatalf("activate recovery failed: %s", msg)
+	}
+	stillTheRelease("activate")
+
+	// The owner can still go back to the kept version on purpose, and it
+	// then stays as a choice over the release's newer copy.
+	f.requestFor("esphome_dsmr", "activate", `{"version":"1.0.3"}`, 200)
+	f.reading(103)
+	if !f.s.deps.DriverRepository.Chosen("drivers/esphome_dsmr.lua", "1.0.3") {
+		t.Fatal("going back to the kept 1.0.3 was not recorded as the owner's choice")
 	}
 }

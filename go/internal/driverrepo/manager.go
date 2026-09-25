@@ -960,6 +960,16 @@ func (m *Manager) Chosen(logicalPath, version string) bool {
 	return pinned == version
 }
 
+// Runs reports whether a managed selection runs, rather than the release's
+// newer copy at its path. A selection that does not run is kept all the same.
+func (m *Manager) Runs(installed state.DriverRepoInstall) bool {
+	if m.store == nil {
+		return true
+	}
+	ok, _ := m.runs(installed)
+	return ok
+}
+
 // pinKey holds the version of a managed selection the owner chose over a
 // newer one that was running. previousPinKey keeps the value it replaced, so
 // undoing an activation also undoes its effect on the choice.

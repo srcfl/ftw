@@ -678,3 +678,20 @@ test("a beta outage is shown but the list still redraws", async () => {
   assert.match(textOf(panel), /Checked, but beta channel: connection refused/);
   assert.ok(rowOf(panel, "v1.1.1"), "the stable rows are drawn again");
 });
+
+test("a kept selection the release has overtaken can be chosen again", async () => {
+  const { api, calls } = load();
+  const panel = element("div");
+  api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.0.2", superseded_version: "1.0.0" }, {
+    runningVersion: "1.0.2", runningSource: "bundled", logicalPath: "drivers/ferroamp.lua",
+  });
+
+  assert.match(textOf(rowOf(panel, "release")), /running now · this release/);
+  const kept = rowOf(panel, "v1.0.0");
+  assert.doesNotMatch(textOf(kept), /selected/, "the release's copy runs, not the kept 1.0.0");
+  assert.match(textOf(kept), /on disk/);
+  buttonsOf(kept)[0].click();
+  await settle();
+  assert.equal(calls[0].path, "/api/device_repository/drivers/ferroamp/activate");
+  assert.deepEqual(calls[0].body, { version: "1.0.0", sha256: "aa11…" });
+});
