@@ -973,6 +973,7 @@ func (m *Manager) RetireSupersededByBundled() []Superseded {
 		return nil
 	}
 	var retired []Superseded
+	failed := false
 	for _, installed := range active {
 		bundled := m.bundledVersion(installed.LogicalPath)
 		if bundled == "" || !semverRE.MatchString(installed.Version) || compareSemver(bundled, installed.Version) < 0 {
@@ -983,6 +984,7 @@ func (m *Manager) RetireSupersededByBundled() []Superseded {
 		}
 		if err := m.Deactivate(installed.LogicalPath); err != nil {
 			slog.Warn("driver repository: retire superseded install", "path", installed.LogicalPath, "err", err)
+			failed = true
 			continue
 		}
 		slog.Info("driver repository: bundled driver supersedes managed install",
@@ -992,6 +994,11 @@ func (m *Manager) RetireSupersededByBundled() []Superseded {
 			DriverID: installed.DriverID, LogicalPath: installed.LogicalPath,
 			Version: installed.Version, BundledVersion: bundled,
 		})
+	}
+	// A retirement that failed is tried again at the next start of this
+	// release, rather than left shadowing the bundled driver until the next.
+	if failed {
+		return retired
 	}
 	if err := m.store.SaveConfig(releaseMarkerKey, m.hostVersion); err != nil {
 		slog.Warn("driver repository: record reconciled release", "err", err)

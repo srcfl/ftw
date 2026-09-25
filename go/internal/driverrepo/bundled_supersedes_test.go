@@ -209,3 +209,27 @@ func TestBetaChannelRespectsTheOffSwitch(t *testing.T) {
 		t.Fatalf("InstallChannel with the repository off: %v", err)
 	}
 }
+
+// A retirement that fails is tried again at the next start of the same
+// release instead of shadowing the bundled driver until the next release.
+func TestFailedRetirementIsRetriedOnTheNextStart(t *testing.T) {
+	site := newSupersedeSite(t, "1.3.3", "1.3.3")
+	manager, _ := site.boot("v0.136.3-beta.1")
+	site.install(t, manager)
+
+	active := manager.ActiveDir()
+	if err := os.Chmod(active, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	manager, retired := site.boot("v0.136.4-beta.1")
+	if err := os.Chmod(active, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if len(retired) != 0 || !managedActive(t, manager) {
+		t.Skip("the active directory stayed writable; cannot simulate a failed retirement here")
+	}
+	manager, retired = site.boot("v0.136.4-beta.1")
+	if len(retired) != 1 || managedActive(t, manager) {
+		t.Fatalf("retired = %+v; the failed retirement must be tried again on the same release", retired)
+	}
+}
