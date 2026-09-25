@@ -453,3 +453,41 @@ func TestManagedDriverUpdateBundledIdentityFailureRecovers(t *testing.T) {
 	f.reading(103)
 	f.assertReload(filepath.Join(f.s.managedDriverDir(), "esphome-dsmr.lua"), 103)
 }
+
+// `ftw status` reads which file each configured driver runs, its version and
+// its source, so an override of the release's copy is visible.
+func TestDriverCatalogNamesTheDriversThatRunEachFile(t *testing.T) {
+	catalog := func(f *driverUpdateFixture) map[string]drivers.CatalogEntry {
+		t.Helper()
+		w := httptest.NewRecorder()
+		f.s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/drivers/catalog", nil))
+		var body struct {
+			Entries []drivers.CatalogEntry `json:"entries"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil {
+			t.Fatalf("catalog: HTTP %d %s", w.Code, w.Body.String())
+		}
+		out := make(map[string]drivers.CatalogEntry)
+		for _, e := range body.Entries {
+			out[e.Filename] = e
+		}
+		return out
+	}
+	f := newDriverUpdateFixture(t, "running")
+	if got := catalog(f)["esphome_dsmr.lua"]; got.Source != "bundled" || strings.Join(got.UsedBy, ",") != "p1" {
+		t.Fatalf("before install: %+v", got)
+	}
+	f.request(context.Background(), "install", `{"repository_id":"test"}`, 200)
+	after := catalog(f)
+	if got := after["esphome-dsmr.lua"]; got.Source != "managed" || got.Version != "1.0.3" || strings.Join(got.UsedBy, ",") != "p1" {
+		t.Fatalf("after install: %+v", got)
+	}
+	if got := after["esphome_dsmr.lua"]; len(got.UsedBy) != 0 {
+		t.Fatalf("the bundled file no longer runs, used_by = %v", got.UsedBy)
+	}
+
+	disabled := newDriverUpdateFixture(t, "disabled")
+	if got := catalog(disabled)["esphome_dsmr.lua"]; len(got.UsedBy) != 0 {
+		t.Fatalf("a disabled driver runs nothing, used_by = %v", got.UsedBy)
+	}
+}

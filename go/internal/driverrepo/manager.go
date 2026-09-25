@@ -879,6 +879,63 @@ func (m *Manager) Deactivate(logicalPath string) error {
 	return m.store.DeactivateDriverRepoInstall(logicalPath)
 }
 
+// releaseMarkerKey holds the Core release that last reconciled managed
+// installs against its bundled drivers.
+const releaseMarkerKey = "driver_repository/bundled_release"
+
+// Superseded is a managed install that a newer Core release caught up with.
+type Superseded struct {
+	DriverID       string `json:"driver_id"`
+	LogicalPath    string `json:"logical_path"`
+	Version        string `json:"version"`
+	BundledVersion string `json:"bundled_version"`
+}
+
+// RetireSupersededByBundled ends managed installs that the running release
+// has caught up with. Drivers ship with Core, so a managed install is a
+// temporary override of the release's own copy: once Core moves to another
+// release whose bundled copy at the same path is at least as new, the managed
+// entry is deactivated and the bundled driver runs. Within one release an
+// override stays, including a deliberate downgrade. Only a readable SemVer on
+// both sides retires anything.
+func (m *Manager) RetireSupersededByBundled(bundledDir string) []Superseded {
+	if m.store == nil || bundledDir == "" || m.hostVersion == "" {
+		return nil
+	}
+	if last, ok := m.store.LoadConfig(releaseMarkerKey); ok && last == m.hostVersion {
+		return nil
+	}
+	active, err := m.store.ActiveDriverRepoInstalls()
+	if err != nil {
+		slog.Warn("driver repository: read active state", "err", err)
+		return nil
+	}
+	var retired []Superseded
+	for _, installed := range active {
+		rel := strings.TrimPrefix(installed.LogicalPath, "drivers/")
+		entry, err := drivers.ParseCatalogFile(filepath.Join(bundledDir, filepath.FromSlash(rel)))
+		if err != nil || !semverRE.MatchString(entry.Version) || !semverRE.MatchString(installed.Version) ||
+			compareSemver(entry.Version, installed.Version) < 0 {
+			continue
+		}
+		if err := m.Deactivate(installed.LogicalPath); err != nil {
+			slog.Warn("driver repository: retire superseded install", "path", installed.LogicalPath, "err", err)
+			continue
+		}
+		slog.Info("driver repository: bundled driver supersedes managed install",
+			"driver", installed.DriverID, "path", installed.LogicalPath,
+			"managed_version", installed.Version, "bundled_version", entry.Version, "release", m.hostVersion)
+		retired = append(retired, Superseded{
+			DriverID: installed.DriverID, LogicalPath: installed.LogicalPath,
+			Version: installed.Version, BundledVersion: entry.Version,
+		})
+	}
+	if err := m.store.SaveConfig(releaseMarkerKey, m.hostVersion); err != nil {
+		slog.Warn("driver repository: record reconciled release", "err", err)
+	}
+	return retired
+}
+
 func (m *Manager) find(repositoryID, driverID, version string) (config.DriverRepositorySource, Manifest, ManifestDriver, error) {
 	for _, repo := range m.cfg.Repositories {
 		if repo.ID != repositoryID || !repo.Enabled {
