@@ -126,7 +126,10 @@ func TestDutyDispatchStopsForUnavailablePowerAndKeepsSpentBudget(t *testing.T) {
 	}
 }
 
-func TestUnavailablePowerPausesAndRetainsManualCharge(t *testing.T) {
+// An old power reading from a live driver no longer pauses charging while the
+// site meter is fresh; the fuse clamps work from the site meter. The manual
+// request stays in force throughout.
+func TestUnavailablePowerKeepsManualCharge(t *testing.T) {
 	start := time.Now().Truncate(time.Minute)
 	cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11000}
 	samples := map[string]EVSample{"easee": {Connected: true, RequestActive: true, DeviceID: "easee:A", SessionID: "session-1", SessionWh: 1000}}
@@ -138,8 +141,8 @@ func TestUnavailablePowerPausesAndRetainsManualCharge(t *testing.T) {
 	s.PowerUnavailable = true
 	samples["easee"] = s
 	c.Tick(context.Background(), start.Add(5*time.Minute))
-	if cmd, _ := lastSetCurrent(sender.calls); cmd.power != 0 {
-		t.Fatalf("unavailable power did not pause manual charge: %+v", cmd)
+	if cmd, _ := lastSetCurrent(sender.calls); cmd.power <= 0 {
+		t.Fatalf("an old power reading paused the manual charge: %+v", cmd)
 	}
 	if _, held := c.GetManualHold(cfg.ID, start.Add(5*time.Minute)); !held {
 		t.Fatal("stale measurements erased the manual request")
