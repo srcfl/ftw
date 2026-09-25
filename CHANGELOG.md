@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.137.0
+
+### Minor Changes
+
+- 6c75162: Driver versions have one place: each device's Versions list under Settings →
+  Devices. It shows the release's own copy, the signed stable versions and any beta
+  newer than stable, each with a "What changed" link to the driver's history, and a
+  button to check the signed channels for new versions. The device line says where
+  the running driver comes from and whether a chosen version is kept across
+  updates; `ftw status` says the same. Update Center and System no longer list or
+  refresh drivers, and no new version lights up the header. Adding a device can
+  fetch driver types the release does not carry, from the driver channel or, marked,
+  from beta, in the same list.
+
+### Patch Changes
+
+- a04a4d7: An older driver version chosen on purpose now stays after a Core update. Only
+  a newer version installed early is replaced once a release catches up. "Use
+  bundled" works again for drivers whose bundled file spells the id differently
+  from the channel (easee-cloud, easee_cloud), and installing such a driver
+  reaches the running device without a restart. `ftw status` names the release's
+  own version beside an override. The beta driver channel honours
+  `device_repository.enabled: false`, and Update Center no longer offers an older
+  beta driver as an update.
+- 2487c90: A driver version picked under Settings → Devices is no longer lost when a Core
+  update brings a newer copy of that driver. The release's newer driver runs, and
+  if the update falls back or you run `ftw rollback`, the older release runs your
+  picked version again. Going back from a newer driver version to an older one
+  now counts as a choice and stays across updates. `ftw status` no longer credits
+  a driver version to a device that runs your own file of the same name from
+  another directory.
+- 70f2563: A driver installed from the driver channel no longer keeps running after an
+  update brings a copy of the same or a newer version. At the first start of a new
+  release, Core retires such an install and runs the release's driver. An older
+  version chosen on purpose stays until the next release. `ftw status` now lists
+  the version each configured driver runs and names any driver that is not the
+  release's own copy.
+- fe0a02d: Every bundled driver now declares the same id and version as the signed driver
+  channel, for example `sungrow` instead of `sungrow-shx` and `easee_cloud` instead
+  of `easee-cloud`. Choosing a version under Settings → Devices now works for these
+  drivers, "Use bundled" finds the release's copy, and installing a channel version
+  reaches the running device without a restart. The driver inventory sent to
+  Sourceful reports these ids. The bundled ESPHome DSMR driver is its real source
+  again; its published file used to report a wrong id.
+- f60d99d: A driver that has just started is no longer marked offline before its first
+  reading. After every Core start, update or driver install, the watchdog sent the
+  driver its autonomous default a second time, 2–4 s after the start; an Easee
+  charger lost its charging current each time. A new driver now gets the watchdog
+  timeout from its start, and one that never reports still goes offline after it.
+
 ## 0.136.4
 
 ### Patch Changes
