@@ -54,7 +54,7 @@ func TestFerroampModbusCatalogEntry(t *testing.T) {
 	}
 	var found *CatalogEntry
 	for i, e := range entries {
-		if e.ID == "ferroamp-modbus" {
+		if e.ID == "ferroamp_modbus" {
 			found = &entries[i]
 			break
 		}

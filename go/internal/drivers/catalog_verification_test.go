@@ -25,13 +25,13 @@ func TestCatalogVerificationStatus(t *testing.T) {
 		status string
 	}{
 		{"ferroamp", "production"},
-		{"sungrow-shx", "production"},
-		{"easee-cloud", "production"},
-		{"ferroamp-modbus", "experimental"},
-		{"sourceful-zap", "production"},
+		{"sungrow", "production"},
+		{"easee_cloud", "production"},
+		{"ferroamp_modbus", "experimental"},
+		{"zap", "production"},
 		{"deye", "experimental"},
 		{"solis", "experimental"},
-		{"solis-string", "experimental"},
+		{"solis_string", "experimental"},
 		{"tibber", "experimental"},
 	}
 	for _, tc := range cases {
@@ -53,7 +53,7 @@ func TestCatalogSourcefulZapIsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.ID == "sourceful-zap" {
+		if e.ID == "zap" {
 			if !e.ReadOnly {
 				t.Fatal("Sourceful Zap must remain explicitly read-only until the local API has a semantic control endpoint")
 			}
@@ -68,7 +68,7 @@ func TestCatalogSourcefulZapIsReadOnly(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("sourceful-zap missing from catalog")
+	t.Fatal("zap missing from catalog")
 }
 
 // Drivers at production status must also have a non-empty VerifiedBy

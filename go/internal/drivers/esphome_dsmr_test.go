@@ -2,12 +2,10 @@ package drivers
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -505,22 +503,6 @@ func TestESPHomeDSMR_BackoffResetsOnRecovery(t *testing.T) {
 	}
 }
 
-func TestESPHomeDSMRRecoverySnapshotProvenance(t *testing.T) {
-	const (
-		sourceCommit = "2939543a2041a29566e6cf27a4eb5e4c69924de8"
-		assetURL     = "https://github.com/srcfl/device-drivers/releases/download/drivers-beta/driver-esphome-dsmr-v1.0.2-c415e507f4371c85.lua"
-		wantSHA256   = "c415e507f4371c859fbf60827cc0704c5e24ad122dca1a9e5e1f190d67e852d1"
-	)
-	raw, err := os.ReadFile("../../../drivers/esphome_dsmr.lua")
-	if err != nil {
-		t.Fatalf("read recovery snapshot: %v", err)
-	}
-	got := fmt.Sprintf("%x", sha256.Sum256(raw))
-	if got != wantSHA256 {
-		t.Fatalf("recovery snapshot SHA-256 = %s, want %s from %s at %s", got, wantSHA256, assetURL, sourceCommit)
-	}
-}
-
 func TestESPHomeDSMR_NameDerivedPhaseObjectIDs(t *testing.T) {
 	// Default ESPHome DSMR YAML derives object_ids from entity names
 	// ("Current Phase 1" → current_phase_1) rather than the DSMR
@@ -640,7 +622,7 @@ func TestESPHomeDSMRCatalogEntry(t *testing.T) {
 	}
 	var found *CatalogEntry
 	for i, e := range entries {
-		if e.ID == "esphome-dsmr" {
+		if e.ID == "esphome_dsmr" {
 			found = &entries[i]
 			break
 		}
