@@ -35,6 +35,11 @@ or an update trial that falls back, therefore runs the selection again.
 `ftw status` lists the version each configured driver runs and, for an
 override, the release's own version.
 
+Settings → Devices is the one place a driver version is seen and changed.
+Each device's Versions list shows the release's copy, the signed stable
+versions and any beta newer than stable, with a link to what changed. Nothing
+there announces a new version; the owner checks and picks.
+
 Refreshing the signed manifest only updates discovery data. It never installs,
 activates or restarts a driver. FTW verifies the Ed25519 signature, driver ID,
 SemVer, host API range, URL, file size and SHA-256. Installation then compiles

@@ -1,45 +1,48 @@
+// One place for driver versions: the device's Versions panel under Settings ›
+// Devices. Update Center and System only point there, and adding a device
+// chooses a driver type, not a version.
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const badge = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8");
 const devices = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
+const system = readFileSync(new URL("./settings/tabs/system.js", import.meta.url), "utf8");
 
-test("the dialog lists every configured driver, not just the updatable ones", () => {
-  assert.match(badge, /apiFetch\("\/api\/drivers\/catalog"\)/);
-  assert.match(badge, /apiFetch\("\/api\/config"\)/);
-  assert.match(badge, /device_repository\/catalog\?channel=beta/);
-  assert.match(badge, /configured\.has\(driverFileKey/);
-  assert.match(badge, /pending_update: stableAvailable \|\| betaAvailable/);
-  // A driver with nothing waiting still gets a row, so the inventory does
-  // not change shape depending on what happens to be releasable today.
-  assert.doesNotMatch(badge, /return stableAvailable \|\| betaAvailable;/);
-  assert.doesNotMatch(badge, /if \(entry\.source === "local"\) return false;/);
-  assert.doesNotMatch(badge, /No configured drivers found/);
-  assert.doesNotMatch(badge, /apiFetch\("\/api\/device_repository\/catalog"\)/);
-  assert.doesNotMatch(badge, /No managed driver candidates cached yet/);
+test("Update Center lists no driver versions and offers no driver actions", () => {
+  assert.doesNotMatch(badge, /device_repository/);
+  assert.doesNotMatch(badge, /driver-change|driver-versions|_driverCatalog|_refreshDriverCatalog/);
+  assert.match(badge, /Versions are chosen per device under Settings › Devices\./);
 });
 
-test("a locally edited driver is listed but offered no signed action", () => {
-  assert.match(badge, /const managed = entry\.source !== "local"/);
-  assert.match(badge, /title="Edited on this device; no signed version to switch to">local copy</);
-  assert.match(badge, /managed && entry\.update_available/);
-  assert.match(badge, /managed && betaDriver && betaDriver\.version/);
+test("the badge counts only Core, so a new driver does not light it up", () => {
+  assert.match(badge, /return \{ core, total: core \? 1 : 0 \};/);
+  assert.match(badge, /showDot = pending\.total > 0/);
 });
 
-test("Update Center can install one signed beta driver without a Core update", () => {
-  assert.match(badge, /"Beta " \+ escapeHTML\(betaDriver\.version\)/);
-  assert.match(badge, /data-channel="beta"/);
-  assert.match(badge, /channel \? \{ channel \} : \{\}/);
-  assert.match(badge, /Only affected driver instances restart/);
+test("System points to Devices instead of refreshing driver catalogs itself", () => {
+  assert.doesNotMatch(system, /sys-refresh-drivers|device_repository\/refresh/);
+  assert.match(system, /versions under Devices/);
 });
 
-test("Devices can add one driver straight from the signed beta channel", () => {
-  assert.match(devices, /id="driver-catalog-channel"/);
-  assert.match(devices, /Beta · test one driver/);
-  assert.match(devices, /device_repository\/catalog\?channel=beta/);
-  assert.match(devices, /JSON\.stringify\(\{channel: "beta", version: chosen\.dataset\.version\}\)/);
-  assert.match(devices, /Beta installs only the selected signed driver/);
+test("a device card announces no update; Versions is the way in", () => {
+  assert.doesNotMatch(devices, /drv-module-update|Update to v/);
+  assert.match(devices, /class="btn-add drv-module-versions"/);
+});
+
+test("adding a device lists channel driver types in the same list, marked by origin", () => {
+  assert.doesNotMatch(devices, /driver-catalog-channel/);
+  assert.match(devices, /id="driver-catalog-more"/);
+  // Both signed channels: stable has drivers the release does not carry.
+  assert.match(devices, /fetchCatalog\("\/api\/device_repository\/catalog"\)/);
+  assert.match(devices, /fetchCatalog\("\/api\/device_repository\/catalog\?channel=beta"\)/);
+  assert.match(devices, /e\.channel === "beta" \? "beta" : "from the driver channel"/);
+  // The release's own drivers are added as they are; a channel driver is
+  // fetched from its channel when the device is added.
+  assert.match(devices, /populateCatalogPicker\(entries, "release"\)/);
+  assert.match(devices, /\? \{channel: "beta", version: chosen\.dataset\.version\}/);
+  assert.match(devices, /: \{repository_id: chosen\.dataset\.repositoryId, version: chosen\.dataset\.version\}/);
 });
 
 test("Devices configure the GoodWe register profile without editing YAML", () => {
@@ -53,42 +56,10 @@ test("Devices configure the GoodWe register profile without editing YAML", () =>
   assert.match(devices, /unit_id = selectedProfile\.unitId/);
 });
 
-test("Update Center only offers stable or beta when that signed version differs", () => {
-  assert.match(badge, /entry\.update_available && entry\.repository_id && entry\.upstream_version/);
-  assert.match(badge, /"Stable " \+ escapeHTML\(entry\.upstream_version\)/);
-  assert.match(badge, /isNewerVersion\(betaDriver\.version, current\)/);
-  assert.doesNotMatch(badge, />current<\/span>/);
-  assert.doesNotMatch(badge, /entry\.update_available \|\| !entry\.installed/);
-  assert.doesNotMatch(badge, /\? "Update" : "Install"/);
-});
-
-test("the badge counts only drivers with work waiting, not the whole inventory", () => {
-  assert.match(badge, /_pendingUpdates\(\)/);
-  assert.match(badge, /filter\(\(entry\) => entry\.pending_update\)\.length/);
-  assert.match(badge, /showDot = pending\.total > 0/);
-  // The old signal lit the dot for any listed driver, which now means all
-  // of them.
-  assert.doesNotMatch(badge, /this\._driverCatalog\.entries\.length > 0/);
-});
-
 test("Devices links to repository support data without traffic-light claims", () => {
   assert.match(devices, /device-drivers\/blob\/main\/SUPPORT_STATUS\.md/);
   assert.doesNotMatch(devices, /production — verified on real hardware/);
   assert.doesNotMatch(devices, /awaiting a second/);
   assert.doesNotMatch(devices, /ported from reference/);
   assert.doesNotMatch(devices, /[🟢🟡🔴]/u);
-});
-
-test("a beta driver counts as an update only when it is newer than what runs", () => {
-  const source = badge.match(/  function isNewerVersion\([\s\S]*?\n  }\n/)[0];
-  const isNewerVersion = new Function(source + "\nreturn isNewerVersion;")();
-  assert.equal(isNewerVersion("1.3.3", "1.3.2"), true);
-  assert.equal(isNewerVersion("1.3.2", "1.3.3"), false);
-  assert.equal(isNewerVersion("1.3.3", "1.3.3"), false);
-  assert.equal(isNewerVersion("1.4.0-beta.1", "1.3.3"), true);
-  assert.equal(isNewerVersion("1.4.0", "1.4.0-beta.1"), true);
-  assert.equal(isNewerVersion("1.4.0-beta.1", "1.4.0"), false);
-  assert.equal(isNewerVersion("1.4.0-beta.2", "1.4.0-beta.10"), false);
-  assert.equal(isNewerVersion("1.0.0", ""), true);
-  assert.equal(isNewerVersion("", "1.0.0"), false);
 });

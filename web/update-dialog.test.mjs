@@ -135,12 +135,11 @@ test("opening on a native install reads only the version, the last run and the c
     ["/api/components", "/api/version/check", "/api/version/update/status"]);
 });
 
-test("a native header mark counts only Core; drivers update in Settings", () => {
+test("the header mark counts only Core; driver versions live in Settings › Devices", () => {
   const rig = fixture();
-  rig.badge._driverCatalog = { entries: [{ pending_update: true }] };
   rig.badge._info = { native: true, update_available: false };
   assert.equal(rig.badge._pendingUpdates().total, 0);
-  rig.badge._info = { update_available: false };
+  rig.badge._info = { update_available: true };
   assert.equal(rig.badge._pendingUpdates().total, 1);
 });
 

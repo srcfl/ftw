@@ -19,11 +19,10 @@ test("Energyplan follows Core's update channel", () => {
 
 test("the channel control does not claim to govern drivers", () => {
   // selfupdate.Channel drives the Core image only; driverrepo never reads it.
-  // A driver is pinned to an exact version and takes its channel per install
-  // (?channel=beta on the catalog, {version, channel} on the install call),
-  // so a host is never "on" a driver channel.
+  // A driver runs the version chosen for its device under Settings ›
+  // Devices, so a host is never "on" a driver channel.
   assert.match(badge, /Drivers follow no channel\./);
-  assert.match(badge, /pinned to a version you pick per driver/);
+  assert.match(badge, /Each device runs the version chosen under Settings › Devices\./);
   assert.doesNotMatch(badge, /Core &amp; drivers/);
   assert.doesNotMatch(badge, /Core and drivers track/);
 });
@@ -53,7 +52,7 @@ test("the inventory is one table so its columns line up across rows", () => {
   // different place from a driver's.
   assert.doesNotMatch(badge, /class="component-row"/);
   assert.match(badge, /\.inventory-table \{[\s\S]*?border-collapse: collapse;/);
-  assert.match(badge, /driver-history-row"><td colspan="4"/);
+  assert.match(badge, /<td class="dim" colspan="3">Versions are chosen per device/);
   // Stacked mobile rows must not inherit the nowrap that sizes the desktop
   // action column, or the dialog scrolls sideways on a phone.
   assert.match(badge, /@media \(max-width: 560px\)[\s\S]*?white-space: normal;/);
@@ -101,14 +100,12 @@ test("a failed GitHub check retries a few times instead of waiting three hours",
   assert.match(badge, /github releases \(429\|5\\d\\d\)\|temporar\|timeout/);
 });
 
-test("Update dialog keeps component history and independent driver actions", () => {
+test("Update dialog keeps component history and leaves driver versions to Devices", () => {
   assert.match(badge, /<h3 id="ftw-upd-title">Updates<\/h3>/);
   assert.match(badge, /\/api\/components\/history\?limit=20/);
   assert.doesNotMatch(badge, /\/api\/components\/optimizer\/channel/);
   assert.doesNotMatch(badge, /\/api\/components\/optimizer\/update/);
-  assert.match(badge, /\/api\/device_repository\/drivers\//);
-  assert.match(badge, /\/versions/);
-  assert.match(badge, /\/activate/);
+  assert.doesNotMatch(badge, /\/api\/device_repository\/drivers\//);
 });
 
 test("optimizer fallback is visible in the global header and Update Center", () => {

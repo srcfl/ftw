@@ -98,7 +98,7 @@ test("the issue carries what someone needs to act without asking", () => {
   // hash it was based on — a maintainer can find the exact bytes from that.
   assert.match(body, /sungrow/);
   assert.match(body, /v1\.5\.0/);
-  assert.match(body, /official/);
+  assert.match(body, /Came from: from the driver channel/);
   assert.match(body, /abc123def456/);
 });
 
@@ -167,7 +167,7 @@ test("opening the editor hands it the driver and the actions it needs", () => {
   assert.equal(driver.lua, SOURCE_BODY.lua);
   // Provenance is resolved here, so the editor does not need to know the
   // three overlays exist.
-  assert.match(driver.sourceLabel, /official/);
+  assert.equal(driver.sourceLabel, "from the driver channel");
   for (const name of ["runDraft", "keepDraft", "revertDraft", "draftStatus", "lint", "suggest"]) {
     assert.equal(typeof actions[name], "function", `actions.${name} is missing`);
   }

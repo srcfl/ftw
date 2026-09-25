@@ -2053,6 +2053,12 @@ body.ftw-app .drv-version-detail {
   color: var(--fg-muted);
   font-size: 0.75rem;
 }
+/* What changed in a version: a quiet link beside the prose, not a button. */
+body.ftw-app .drv-version-changes {
+  color: var(--accent-e, var(--fg-muted));
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
 /* The driver's Lua. Scrolls in its own box rather than stretching the modal,
    and keeps the operator's own indentation. */
 body.ftw-app .drv-source-code {

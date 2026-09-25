@@ -226,6 +226,7 @@ func (c *client) printDrivers(ctx context.Context, out io.Writer) {
 			Source         string   `json:"source"`
 			UsedBy         []string `json:"used_by"`
 			ReleaseVersion string   `json:"release_version"`
+			Chosen         bool     `json:"chosen"`
 		} `json:"entries"`
 	}
 	if err := c.get(ctx, "/api/drivers/catalog", &catalog); err != nil {
@@ -239,10 +240,14 @@ func (c *client) printDrivers(ctx context.Context, out io.Writer) {
 			if e.ReleaseVersion != "" {
 				release = "the release has " + e.ReleaseVersion
 			}
-			switch e.Source {
-			case "managed":
+			switch {
+			case e.Source == "managed" && e.Chosen:
+				overrides = append(overrides, fmt.Sprintf("%s %s, chosen and kept across updates; %s", name, orUnknown(e.Version), release))
+			case e.Source == "managed" && e.ReleaseVersion != "":
+				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel until a release has it; %s", name, orUnknown(e.Version), release))
+			case e.Source == "managed":
 				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel; %s", name, orUnknown(e.Version), release))
-			case "local":
+			case e.Source == "local":
 				overrides = append(overrides, fmt.Sprintf("%s runs a local file; %s", name, release))
 			}
 		}

@@ -44,6 +44,9 @@ type CatalogEntry struct {
 	// ReleaseVersion is the version this Core release bundles at the same
 	// path, set on an entry that overrides it.
 	ReleaseVersion string `json:"release_version,omitempty"`
+	// Chosen marks a managed entry the owner picked over a newer release
+	// copy; it stays across Core updates until the owner changes it.
+	Chosen bool `json:"chosen,omitempty"`
 	// AuthPostPath is the URL path a read-only driver signs in at. A driver
 	// that reads a vendor cloud has to POST for a token before it can read,
 	// and that POST is not actuation. Only meaningful with ReadOnly.

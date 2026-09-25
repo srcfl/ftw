@@ -101,6 +101,7 @@ func newDriverUpdateFixture(t *testing.T, mode string) *driverUpdateFixture {
 	t.Cleanup(func() { _ = st.Close() })
 	rc := &config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{ID: "test", ManifestURL: f.repo.URL + "/manifest.json", Enabled: true, AllowInsecure: true, TrustedKeys: map[string]string{"test": base64.StdEncoding.EncodeToString(public)}}}}
 	m := driverrepo.New(rc, dir, st)
+	m.SetBundledDir(bundledDir)
 	tel := telemetry.NewStore()
 	registry := drivers.NewRegistry(tel)
 	registry.RuntimePolicyResolver = m.RuntimePolicy
@@ -594,6 +595,41 @@ func TestDriverCatalogCreditsOnlyTheFileThatRuns(t *testing.T) {
 	for _, e := range body.Entries {
 		if e.Filename == "esphome-dsmr.lua" && len(e.UsedBy) != 0 {
 			t.Fatalf("the managed %s is credited to %v, but p1 runs its own file at %s", e.Path, e.UsedBy, f.s.deps.Cfg.Drivers[0].Lua)
+		}
+	}
+}
+
+// The picker shows the release's own version and marks the owner's choice,
+// and the device card reads the same mark from the catalog.
+func TestVersionsShowTheReleaseAndTheOwnersChoice(t *testing.T) {
+	f := newDriverUpdateFixture(t, "running")
+	f.publishAs("esphome_dsmr", "esphome_dsmr.lua", "1.0.1")
+	f.requestFor("esphome_dsmr", "install", `{"repository_id":"test"}`, 200)
+
+	w := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/device_repository/drivers/esphome_dsmr/versions", nil))
+	var versions struct {
+		Release string `json:"release_version"`
+		Chosen  string `json:"chosen_version"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &versions) != nil {
+		t.Fatalf("versions: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if versions.Release != "1.0.2" || versions.Chosen != "1.0.1" {
+		t.Fatalf("versions = %+v; want release 1.0.2 and the chosen 1.0.1", versions)
+	}
+
+	w = httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/drivers/catalog", nil))
+	var catalog struct {
+		Entries []drivers.CatalogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range catalog.Entries {
+		if e.Filename == "esphome_dsmr.lua" && (!e.Chosen || e.ReleaseVersion != "1.0.2") {
+			t.Fatalf("catalog entry = %+v; want chosen over release 1.0.2", e)
 		}
 	}
 }

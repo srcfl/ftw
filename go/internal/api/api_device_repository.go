@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -278,7 +279,33 @@ func (s *Server) handleDeviceRepositoryVersions(w http.ResponseWriter, r *http.R
 		writeJSON(w, 500, map[string]string{"error": availableErr.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"driver_id": r.PathValue("id"), "installed": versions, "available": available})
+	// The release's own copy and the owner's choice belong in the same list:
+	// the picker is the one place a driver version is seen and changed.
+	logicalPath := ""
+	for _, installed := range versions {
+		if installed.Active {
+			logicalPath = installed.LogicalPath
+		}
+	}
+	for _, candidate := range available {
+		if logicalPath == "" {
+			logicalPath = candidate.Driver.Path
+		}
+	}
+	release, chosen := "", ""
+	if logicalPath != "" {
+		release = s.deps.DriverRepository.ReleaseVersion(logicalPath)
+		for _, installed := range versions {
+			if installed.Active && s.deps.DriverRepository.Chosen(logicalPath, installed.Version) {
+				chosen = installed.Version
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"driver_id": r.PathValue("id"), "installed": versions, "available": available,
+		"logical_path": logicalPath, "release_version": release, "chosen_version": chosen,
+		"release_source": s.bundledSource(),
+	})
 }
 
 func (s *Server) handleDeviceRepositoryActivate(w http.ResponseWriter, r *http.Request) {
@@ -406,6 +433,23 @@ func (r managedDriverRestartState) response(status string, artifact any) map[str
 	names := append([]string{}, r.Restarted...)
 	return map[string]any{"status": status, "artifact": artifact,
 		"runtime_verified": len(names) > 0, "restarted_drivers": names, "logical_path": r.LogicalPath, "config_changed": r.ConfigChanged}
+}
+
+// bundledSource names where this release's drivers were taken from: the
+// repository and commit pinned in drivers/BUNDLED_SOURCE.json.
+func (s *Server) bundledSource() map[string]string {
+	raw, err := os.ReadFile(filepath.Join(s.deps.DriverDir, "BUNDLED_SOURCE.json"))
+	if err != nil {
+		return nil
+	}
+	var pin struct {
+		Repository string `json:"repository"`
+		Commit     string `json:"commit"`
+	}
+	if json.Unmarshal(raw, &pin) != nil || pin.Repository == "" || pin.Commit == "" {
+		return nil
+	}
+	return map[string]string{"repository": "https://github.com/" + pin.Repository, "commit": pin.Commit}
 }
 
 // sameDriverFile reports whether a driver file, declaring id, holds the

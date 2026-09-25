@@ -67,6 +67,16 @@ function buttonsOf(el) {
   return el.children.flatMap((c) => (c.tag === "button" ? [c] : buttonsOf(c)));
 }
 
+// The panel's rows are told apart by what they are, not by their position:
+// the release's own copy comes first and "Check for new versions" last.
+function rowOf(panel, key) {
+  return panel.children.find((c) => c.dataset && c.dataset.row === key);
+}
+
+function switchButtons(panel) {
+  return buttonsOf(panel).filter((b) => b.textContent !== "Check for new versions");
+}
+
 // What /api/drivers/catalog will say after the switch under test.
 let catalogEntry = {};
 
@@ -244,7 +254,7 @@ test("undo goes to the bundled copy when that is what was running", async () => 
   await settle();
   const undo = buttonsOf(panel).find((b) => b.textContent.startsWith("Undo"));
   assert.ok(undo, "installing over the bundled driver is the first thing anyone does");
-  assert.match(undo.textContent, /bundled driver/);
+  assert.match(undo.textContent, /this release's driver/);
 
   undo.click();
   await settle();
@@ -296,7 +306,7 @@ test("switching rewrites the summary line from the catalog, not from the old tex
   await settle();
 
   assert.equal(headlineEl.textContent, "v1.1.1");
-  assert.equal(detailEl.textContent, "official · untested");
+  assert.equal(detailEl.textContent, "from the driver channel · untested");
   assert.equal(readOnlyEl.style.display, "", "1.1.1 may only read");
 });
 
@@ -327,31 +337,8 @@ test("undo rewrites the line back to what is running again", async () => {
   await settle();
 
   assert.equal(headlineEl.textContent, "v1.0.0");
-  assert.match(detailEl.textContent, /shipped with this build/);
+  assert.match(detailEl.textContent, /this release/);
   assert.equal(readOnlyEl.style.display, "none", "the bundled driver may control again");
-});
-
-test("the Update shortcut hides once its version is the one running", async () => {
-  const { api } = load();
-  const panel = element("div");
-  const headlineEl = element("span");
-  const updateEl = element("button");
-  updateEl.dataset.version = "1.1.1";
-
-  // No update left to offer once 1.1.1 is what runs.
-  catalogEntry = {
-    path: "drivers/ferroamp.lua", source: "managed", installed_version: "1.1.1",
-    update_available: false,
-  };
-  api.render(panel, "ferroamp", PAYLOAD, {
-    runningVersion: "1.0.0", runningSource: "bundled",
-    logicalPath: "drivers/ferroamp.lua", headlineEl, updateEl,
-  });
-
-  buttonsOf(panel)[0].click();
-  await settle();
-  assert.equal(updateEl.style.display, "none",
-    "otherwise it offers to install what is already installed");
 });
 
 test("the version that is running is not offered as a switch target", () => {
@@ -359,14 +346,14 @@ test("the version that is running is not offered as a switch target", () => {
   const panel = element("div");
   api.render(panel, "ferroamp", PAYLOAD, { runningVersion: "1.0.0", runningSource: "bundled" });
 
-  const labels = buttonsOf(panel).map((b) => b.textContent);
+  const labels = switchButtons(panel).map((b) => b.textContent);
   assert.equal(labels.join(" "), "Use this", "only 1.1.1 is a switch; 1.0.0 already runs");
 });
 
-test("a managed driver can always get back to the bundled copy", () => {
+test("a managed driver can always get back to the release's copy", () => {
   const { api } = load();
   const panel = element("div");
-  api.render(panel, "ferroamp", PAYLOAD, {
+  api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.0.2" }, {
     runningVersion: "1.1.1", runningSource: "managed", logicalPath: "drivers/ferroamp.lua",
   });
 
@@ -374,26 +361,38 @@ test("a managed driver can always get back to the bundled copy", () => {
   // install and appears in neither. Without a row for it, an operator who
   // installed one channel version over a bundled driver and then closed this
   // panel has no way back at all.
-  assert.match(textOf(panel), /the copy shipped with this build/);
+  const release = rowOf(panel, "release");
+  assert.ok(release, "the release's copy has its own row");
+  assert.equal(panel.children[0], release, "and it comes first");
+  assert.match(textOf(release), /v1\.0\.2 this release/);
+  assert.equal(buttonsOf(release).map((b) => b.textContent).join(" "), "Use this");
 });
 
-test("the bundled row is not offered when the bundled copy is already running", () => {
+test("the release's row runs without a switch when its copy is running", () => {
   const { api } = load();
   const panel = element("div");
-  api.render(panel, "ferroamp", PAYLOAD, { runningVersion: "1.0.0", runningSource: "bundled" });
+  api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.0.2" }, { runningVersion: "1.0.2", runningSource: "bundled" });
 
-  assert.ok(!/shipped with this build/.test(textOf(panel)),
-    "switching to what is already running is not a choice");
+  const release = rowOf(panel, "release");
+  assert.match(textOf(release), /running now · this release/);
+  assert.equal(buttonsOf(release).length, 0, "switching to what is already running is not a choice");
+});
+
+test("a driver the release does not carry gets no release row", () => {
+  const { api } = load();
+  const panel = element("div");
+  api.render(panel, "ferroamp", PAYLOAD, { runningVersion: "1.1.1", runningSource: "managed" });
+  assert.equal(rowOf(panel, "release"), undefined, "use_bundled would refuse; do not offer it");
 });
 
 test("switching to the bundled copy uses its own endpoint, which refuses when there is none", async () => {
   const { api, calls } = load();
   const panel = element("div");
-  api.render(panel, "ferroamp", PAYLOAD, {
+  api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.0.2" }, {
     runningVersion: "1.1.1", runningSource: "managed", logicalPath: "drivers/ferroamp.lua",
   });
 
-  const bundled = buttonsOf(panel).at(-1);
+  const bundled = buttonsOf(rowOf(panel, "release"))[0];
   bundled.click();
   await settle();
 
@@ -432,18 +431,18 @@ test("switching to the bundled copy corrects the line above the panel", async ()
     path: "drivers/ferroamp.lua", source: "bundled", version: "1.0.0",
     verification_status: "production",
   };
-  api.render(panel, "ferroamp", PAYLOAD, {
+  api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.0.0" }, {
     runningVersion: "1.1.1", runningSource: "managed",
     logicalPath: "drivers/ferroamp.lua", headlineEl, detailEl,
   });
 
-  buttonsOf(panel).at(-1).click();
+  buttonsOf(rowOf(panel, "release"))[0].click();
   await settle();
 
   // This is not an undo -- it can be the first thing done after opening the
   // panel, so there is no earlier line to restore.
   assert.equal(headlineEl.textContent, "v1.0.0");
-  assert.match(detailEl.textContent, /shipped with this build/);
+  assert.match(detailEl.textContent, /this release/);
 });
 
 test("an override downloads without claiming it will take over", async () => {
@@ -454,7 +453,7 @@ test("an override downloads without claiming it will take over", async () => {
   assert.match(textOf(panel), /Your own file runs while it is there/,
     "say why nothing here changes what runs");
 
-  const buttons = buttonsOf(panel);
+  const buttons = switchButtons(panel);
   assert.equal(buttons.map((b) => b.textContent).join(" "), "Download Downloaded",
     "an override shadows the channel, so 'Use this' would be a lie");
   assert.equal(buttons[1].disabled, true, "already on disk, nothing to fetch");
@@ -480,13 +479,19 @@ test("what is running reads as words, not as an enum", () => {
     source: "managed", installed_version: "1.1.1", verification_status: "production",
   });
   assert.equal(managed.headline, "v1.1.1");
-  assert.equal(managed.detail, "official · verified on hardware");
+  assert.equal(managed.detail, "from the driver channel · verified on hardware");
 
   const bundled = api.runningSummary({
     source: "bundled", version: "1.0.0", verification_status: "experimental",
   });
   assert.equal(bundled.headline, "v1.0.0");
-  assert.equal(bundled.detail, "official, shipped with this build · untested");
+  assert.equal(bundled.detail, "this release · untested");
+
+  // Whether an override stays across a Core update is part of what it is.
+  const chosen = api.runningSummary({ source: "managed", version: "1.3.2", chosen: true, release_version: "1.3.3" });
+  assert.equal(chosen.detail, "chosen, kept across updates · release has v1.3.3");
+  const early = api.runningSummary({ source: "managed", version: "1.3.4", release_version: "1.3.3" });
+  assert.equal(early.detail, "until a release has it · release has v1.3.3");
 
   // An operator's own file has no version the channel would recognise, so
   // naming one would read as provenance it does not have. Point at the file
@@ -496,24 +501,6 @@ test("what is running reads as words, not as an enum", () => {
   });
   assert.equal(own.headline, "your own file");
   assert.equal(own.detail, "drivers/ferroamp.lua");
-});
-
-test("an override is not offered an Update button", () => {
-  const { api } = load();
-
-  const managed = api.runningSummary({
-    source: "managed", version: "1.0.0", update_available: true,
-    repository_id: "ftw-official", upstream_version: "1.1.1",
-  });
-  assert.equal(managed.updatable, true);
-
-  // Installing a channel version while a local file is present changes
-  // nothing: the local file still wins.
-  const overridden = api.runningSummary({
-    source: "local", version: "local", update_available: true,
-    repository_id: "ftw-official", upstream_version: "1.1.1",
-  });
-  assert.equal(overridden.updatable, false);
 });
 
 test("manifest data and driver source become text, never markup", () => {
@@ -576,4 +563,82 @@ test("a saved filename change tells the open Settings dialog to reload before Sa
   buttonsOf(panel)[0].click();
   await settle();
   assert.match(textOf(panel), /fresh telemetry verified. Settings changed. Close and reopen Settings before saving/);
+});
+
+test("a channel file of the release's version is listed only while it runs", () => {
+  const { api } = load();
+  const payload = { ...PAYLOAD, release_version: "1.1.1" };
+  const rows = api.versionRows(payload);
+  assert.deepEqual([...rows].map((r) => r.version), ["1.0.0"], "the release's row stands for 1.1.1");
+
+  const running = api.versionRows({
+    release_version: "1.0.0", installed: null, available: PAYLOAD.available,
+  });
+  assert.deepEqual([...running].map((r) => r.version), ["1.1.1", "1.0.0"],
+    "a managed 1.0.0 that runs stays visible, or the panel hides what is running");
+});
+
+test("a beta version is marked and installs through the beta channel", async () => {
+  const { api, calls } = load();
+  const panel = element("div");
+  api.render(panel, "ferroamp", {
+    installed: null,
+    available: [{ repository_id: "ftw-official-beta", channel: "beta", driver: { version: "1.2.0-beta.1", sha256: "bb22…" } }],
+  }, { runningVersion: "1.0.0", runningSource: "managed", logicalPath: "drivers/ferroamp.lua" });
+
+  const row = rowOf(panel, "v1.2.0-beta.1");
+  assert.match(textOf(row), /beta/);
+  buttonsOf(row)[0].click();
+  await settle();
+  assert.equal(calls[0].path, "/api/device_repository/drivers/ferroamp/install");
+  assert.deepEqual(calls[0].body, { version: "1.2.0-beta.1", channel: "beta" });
+});
+
+test("the owner's choice is marked where the versions are", () => {
+  const { api } = load();
+  const panel = element("div");
+  api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.1.1", chosen_version: "1.0.0" }, {
+    runningVersion: "1.0.0", runningSource: "managed", logicalPath: "drivers/ferroamp.lua",
+  });
+  assert.match(textOf(rowOf(panel, "v1.0.0")), /chosen, kept across updates/);
+});
+
+test("checking for new versions refreshes both channels and redraws the list", async () => {
+  const refreshed = { ...PAYLOAD, available: [...PAYLOAD.available,
+    { repository_id: "ftw-official-beta", channel: "beta", driver: { version: "1.2.0-beta.1", sha256: "bb22…" } }] };
+  const { api, calls } = load(refreshed);
+  const panel = element("div");
+  api.render(panel, "ferroamp", PAYLOAD, { runningVersion: "1.0.0", runningSource: "managed", logicalPath: "drivers/ferroamp.lua" });
+
+  buttonsOf(panel).find((b) => b.textContent === "Check for new versions").click();
+  await settle();
+  await settle();
+  assert.equal(calls[0].path, "/api/device_repository/refresh");
+  assert.equal(calls[1].path, "/api/device_repository/drivers/ferroamp/versions");
+  assert.ok(rowOf(panel, "v1.2.0-beta.1"), "the new beta row is drawn");
+});
+
+test("each version links to what changed, and only to its GitHub source", () => {
+  const { api } = load();
+  const panel = element("div");
+  api.render(panel, "goodwe", {
+    logical_path: "drivers/goodwe.lua",
+    release_version: "2.1.2",
+    release_source: { repository: "https://github.com/srcfl/device-drivers", commit: "489c9373be1fb391d885b948bf736399b3e40f2e" },
+    installed: null,
+    available: [
+      { repository_id: "ftw-official", channel: "stable", repository: "https://github.com/srcfl/device-drivers",
+        driver: { version: "2.1.1", sha256: "0dc9…", filename: "goodwe.lua", source_commit: "f18ceef" } },
+      { repository_id: "mine", channel: "stable", repository: "javascript:alert(1)",
+        driver: { version: "2.0.0", sha256: "ee00…", filename: "goodwe.lua", source_commit: "f18ceef" } },
+    ],
+  }, { runningVersion: "2.1.2", runningSource: "bundled", logicalPath: "drivers/goodwe.lua" });
+
+  const linkOf = (row) => row.children.find((c) => c.tag === "a");
+  assert.equal(linkOf(rowOf(panel, "release")).href,
+    "https://github.com/srcfl/device-drivers/commits/489c9373be1fb391d885b948bf736399b3e40f2e/drivers/lua/goodwe.lua");
+  assert.equal(linkOf(rowOf(panel, "v2.1.1")).href,
+    "https://github.com/srcfl/device-drivers/commits/f18ceef/drivers/lua/goodwe.lua");
+  assert.equal(linkOf(rowOf(panel, "v2.1.1")).textContent, "What changed");
+  assert.equal(linkOf(rowOf(panel, "v2.0.0")), undefined, "a source that is not GitHub gets no link");
 });
