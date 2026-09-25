@@ -541,12 +541,13 @@ func main() {
 	driverRepository := driverrepo.NewWithHostVersion(
 		cfg.DeviceRepository, filepath.Dir(statePath), st, Version,
 	)
-	// Drivers ship with the release. A managed install that this release's
-	// bundled copy has caught up with ends here, before any path resolves.
+	// Drivers ship with the release. Paths resolve through the managed
+	// selections that run with this release's drivers; a selection this
+	// release has overtaken is kept, and an older release runs it again.
 	driverRepository.SetBundledDir(resolveDriverDir())
-	driverRepository.RetireSupersededByBundled()
+	driverRepository.ApplyBundled()
 	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
-	config.ManagedDriversDirOverride = driverRepository.ActiveDir()
+	config.ManagedDriversDirOverride = driverRepository.EffectiveDir()
 	cfg.ResolveDriverPaths(filepath.Dir(*configPath))
 
 	// ---- Dev backfill (flag-gated, one-shot) ----
@@ -2766,7 +2767,7 @@ func main() {
 					RunningNames:      reg.Names(),
 					Health:            tel.AllHealth(),
 					UserDriverDir:     *userDriversDirFlag,
-					ManagedDriverDir:  driverRepository.ActiveDir(),
+					ManagedDriverDir:  driverRepository.EffectiveDir(),
 					BundledDriverDir:  resolveDriverDir(),
 					RepositoryDrivers: inventoryRepositoryArtifacts(driverRepository),
 				})

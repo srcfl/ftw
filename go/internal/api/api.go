@@ -1862,7 +1862,7 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	managedDir := ""
 	if s.deps.DriverRepository != nil {
-		managedDir = s.deps.DriverRepository.ActiveDir()
+		managedDir = s.deps.DriverRepository.EffectiveDir()
 	}
 	// Local override > activated managed artifact > bundled recovery snapshot.
 	entries, err := drivers.LoadCatalogSources(

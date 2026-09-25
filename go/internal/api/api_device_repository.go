@@ -19,7 +19,7 @@ func (s *Server) managedDriverDir() string {
 	if s.deps.DriverRepository == nil {
 		return ""
 	}
-	return s.deps.DriverRepository.ActiveDir()
+	return s.deps.DriverRepository.EffectiveDir()
 }
 
 func (s *Server) handleDeviceRepositoryStatus(w http.ResponseWriter, _ *http.Request) {

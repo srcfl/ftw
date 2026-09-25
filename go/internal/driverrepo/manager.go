@@ -159,6 +159,7 @@ func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, stor
 		manifests: make(map[string]Manifest), statuses: make(map[string]RepositoryStatus),
 	}
 	manager.reconcileActive()
+	manager.rebuildEffective()
 	return manager
 }
 
@@ -653,6 +654,10 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 	}
 	defer cleanupSymlink()
 	previous, previousErr := m.store.ActiveDriverRepoInstall(logical)
+	var replaced *state.DriverRepoInstall
+	if previousErr == nil {
+		replaced = &previous
+	}
 	activated, err := m.store.ActivateDriverRepoInstall(installed)
 	if err != nil {
 		return state.DriverRepoInstall{}, err
@@ -665,7 +670,7 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 		}
 		return state.DriverRepoInstall{}, err
 	}
-	m.recordChoice(activated)
+	m.recordChoice(activated, replaced)
 	return activated, nil
 }
 
@@ -706,7 +711,7 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 		_, _ = m.store.ActivateDriverRepoInstall(current)
 		return state.DriverRepoInstall{}, err
 	}
-	m.recordChoice(activated)
+	m.restoreChoice(logicalPath)
 	return activated, nil
 }
 
@@ -839,7 +844,11 @@ func (m *Manager) ActivateInstalled(driverID, version, sha256 string) (state.Dri
 		}
 		return state.DriverRepoInstall{}, err
 	}
-	m.recordChoice(activated)
+	var replaced *state.DriverRepoInstall
+	if currentErr == nil {
+		replaced = &current
+	}
+	m.recordChoice(activated, replaced)
 	return activated, nil
 }
 
@@ -894,11 +903,7 @@ func (m *Manager) Deactivate(logicalPath string) error {
 	return nil
 }
 
-// releaseMarkerKey holds the Core release that last reconciled managed
-// installs against its bundled drivers.
-const releaseMarkerKey = "driver_repository/bundled_release"
-
-// Superseded is a managed install that a newer Core release caught up with.
+// Superseded is a managed selection this release's own copy has overtaken.
 type Superseded struct {
 	DriverID       string `json:"driver_id"`
 	LogicalPath    string `json:"logical_path"`
@@ -923,48 +928,99 @@ func (m *Manager) bundledVersion(logicalPath string) string {
 	return entry.Version
 }
 
-// pinKey holds the version of a managed install the owner chose although
-// the release bundles a newer copy at the same path.
+// pinKey holds the version of a managed selection the owner chose over a
+// newer one that was running. previousPinKey keeps the value it replaced, so
+// undoing an activation also undoes its effect on the choice.
 func pinKey(logicalPath string) string { return "driver_repository/pinned/" + logicalPath }
 
-// recordChoice remembers whether an activation went back behind the
-// release. Choosing the release's version or a newer one is early access and
-// clears the mark.
-func (m *Manager) recordChoice(installed state.DriverRepoInstall) {
+func previousPinKey(logicalPath string) string { return pinKey(logicalPath) + "/previous" }
+
+// runs reports whether a managed selection runs rather than the release's
+// own copy: when the release has none, when it is at least as new, or when
+// the owner chose it over something newer.
+func (m *Manager) runs(installed state.DriverRepoInstall) (bool, string) {
+	bundled := m.bundledVersion(installed.LogicalPath)
+	if bundled == "" || !semverRE.MatchString(installed.Version) || compareSemver(installed.Version, bundled) >= 0 {
+		return true, bundled
+	}
+	pinned, _ := m.store.LoadConfig(pinKey(installed.LogicalPath))
+	return pinned == installed.Version, bundled
+}
+
+// recordChoice remembers whether an activation went back to a version older
+// than the one that was running, which is a choice that stays across Core
+// updates. Moving to the same or a newer version is early access and clears
+// the mark. previous is the selection this activation replaced, if any.
+func (m *Manager) recordChoice(installed state.DriverRepoInstall, previous *state.DriverRepoInstall) {
 	if m.store == nil {
 		return
 	}
+	running := m.bundledVersion(installed.LogicalPath)
+	if previous != nil {
+		if ok, _ := m.runs(*previous); ok && (running == "" || compareSemver(previous.Version, running) > 0) {
+			running = previous.Version
+		}
+	}
 	pinned := ""
-	if bundled := m.bundledVersion(installed.LogicalPath); bundled != "" &&
-		semverRE.MatchString(installed.Version) && compareSemver(installed.Version, bundled) < 0 {
+	if running != "" && semverRE.MatchString(installed.Version) && compareSemver(installed.Version, running) < 0 {
 		pinned = installed.Version
 	}
-	if err := m.store.SaveConfig(pinKey(installed.LogicalPath), pinned); err != nil {
-		slog.Warn("driver repository: record chosen version", "path", installed.LogicalPath, "err", err)
+	m.savePin(installed.LogicalPath, pinned)
+	m.rebuildEffective()
+}
+
+// restoreChoice undoes the last recordChoice at logicalPath: a rollback puts
+// back the selection that ran before, and with it the choice that went with
+// it.
+func (m *Manager) restoreChoice(logicalPath string) {
+	if m.store == nil {
+		return
 	}
+	previous, _ := m.store.LoadConfig(previousPinKey(logicalPath))
+	m.savePin(logicalPath, previous)
+	m.rebuildEffective()
 }
 
 func (m *Manager) forgetChoice(logicalPath string) {
 	if m.store == nil {
 		return
 	}
-	if err := m.store.SaveConfig(pinKey(logicalPath), ""); err != nil {
-		slog.Warn("driver repository: forget chosen version", "path", logicalPath, "err", err)
+	m.savePin(logicalPath, "")
+	m.rebuildEffective()
+}
+
+func (m *Manager) savePin(logicalPath, pinned string) {
+	current, _ := m.store.LoadConfig(pinKey(logicalPath))
+	if err := m.store.SaveConfig(previousPinKey(logicalPath), current); err != nil {
+		slog.Warn("driver repository: record chosen version", "path", logicalPath, "err", err)
+	}
+	if err := m.store.SaveConfig(pinKey(logicalPath), pinned); err != nil {
+		slog.Warn("driver repository: record chosen version", "path", logicalPath, "err", err)
 	}
 }
 
-// RetireSupersededByBundled ends managed installs that the running release
-// has caught up with. Drivers ship with Core, so installing a newer driver
-// from the channel is early access: once Core moves to another release whose
-// bundled copy at the same path is at least as new, the managed entry is
-// deactivated and the bundled driver runs. A version the owner chose although
-// the release had a newer one stays until the owner changes it. Only a
-// readable SemVer on both sides retires anything.
-func (m *Manager) RetireSupersededByBundled() []Superseded {
-	if m.store == nil || m.bundledDir == "" || m.hostVersion == "" {
-		return nil
+// EffectiveDir holds the managed drivers that run, and is what paths resolve
+// through. ActiveDir records what the owner selected and is never changed by
+// a Core start; this directory is derived from it and the release's own
+// copies whenever either changes. An update, a failed trial or a rollback to
+// an older Core therefore never loses a selection: an older release simply
+// derives it again.
+func (m *Manager) EffectiveDir() string { return filepath.Join(m.root, "effective") }
+
+// ApplyBundled derives EffectiveDir for this release's drivers and returns
+// the selections the release has overtaken. Call it after SetBundledDir.
+func (m *Manager) ApplyBundled() []Superseded {
+	superseded := m.rebuildEffective()
+	for _, s := range superseded {
+		slog.Info("driver repository: this release's driver runs instead of an older selection",
+			"driver", s.DriverID, "path", s.LogicalPath, "selected_version", s.Version,
+			"release_version", s.BundledVersion, "release", m.hostVersion)
 	}
-	if last, ok := m.store.LoadConfig(releaseMarkerKey); ok && last == m.hostVersion {
+	return superseded
+}
+
+func (m *Manager) rebuildEffective() []Superseded {
+	if m.store == nil {
 		return nil
 	}
 	active, err := m.store.ActiveDriverRepoInstalls()
@@ -972,38 +1028,54 @@ func (m *Manager) RetireSupersededByBundled() []Superseded {
 		slog.Warn("driver repository: read active state", "err", err)
 		return nil
 	}
-	var retired []Superseded
-	failed := false
+	want := make(map[string]string, len(active))
+	var superseded []Superseded
 	for _, installed := range active {
-		bundled := m.bundledVersion(installed.LogicalPath)
-		if bundled == "" || !semverRE.MatchString(installed.Version) || compareSemver(bundled, installed.Version) < 0 {
+		rel := filepath.FromSlash(strings.TrimPrefix(installed.LogicalPath, "drivers/"))
+		if ok, bundled := m.runs(installed); !ok {
+			superseded = append(superseded, Superseded{
+				DriverID: installed.DriverID, LogicalPath: installed.LogicalPath,
+				Version: installed.Version, BundledVersion: bundled,
+			})
 			continue
 		}
-		if pinned, _ := m.store.LoadConfig(pinKey(installed.LogicalPath)); pinned == installed.Version {
+		want[rel] = installed.InstalledPath
+	}
+	dir := m.EffectiveDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		slog.Warn("driver repository: effective drivers", "err", err)
+		return superseded
+	}
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, path)
+		if _, keep := want[rel]; !keep {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
+	for rel, target := range want {
+		link := filepath.Join(dir, rel)
+		if current, err := os.Readlink(link); err == nil && current == target {
 			continue
 		}
-		if err := m.Deactivate(installed.LogicalPath); err != nil {
-			slog.Warn("driver repository: retire superseded install", "path", installed.LogicalPath, "err", err)
-			failed = true
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			slog.Warn("driver repository: effective drivers", "path", link, "err", err)
 			continue
 		}
-		slog.Info("driver repository: bundled driver supersedes managed install",
-			"driver", installed.DriverID, "path", installed.LogicalPath,
-			"managed_version", installed.Version, "bundled_version", bundled, "release", m.hostVersion)
-		retired = append(retired, Superseded{
-			DriverID: installed.DriverID, LogicalPath: installed.LogicalPath,
-			Version: installed.Version, BundledVersion: bundled,
-		})
+		tmp := link + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		if err := os.Symlink(target, tmp); err != nil {
+			slog.Warn("driver repository: effective drivers", "path", link, "err", err)
+			continue
+		}
+		if err := os.Rename(tmp, link); err != nil {
+			_ = os.Remove(tmp)
+			slog.Warn("driver repository: effective drivers", "path", link, "err", err)
+		}
 	}
-	// A retirement that failed is tried again at the next start of this
-	// release, rather than left shadowing the bundled driver until the next.
-	if failed {
-		return retired
-	}
-	if err := m.store.SaveConfig(releaseMarkerKey, m.hostVersion); err != nil {
-		slog.Warn("driver repository: record reconciled release", "err", err)
-	}
-	return retired
+	return superseded
 }
 
 func (m *Manager) find(repositoryID, driverID, version string) (config.DriverRepositorySource, Manifest, ManifestDriver, error) {
