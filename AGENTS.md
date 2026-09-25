@@ -189,7 +189,9 @@ Native 0.x path:
    `releases/latest` on the old 2.x line.
 5. Promote the signed driver channel for installs that read `drivers-stable`:
    `gh workflow run ftw-drivers-release.yml -R srcfl/device-drivers --ref main -f channel=stable`.
-   It promotes the driver commit already published as `drivers-beta`.
+   It promotes the driver commit already published as `drivers-beta`. If it
+   refuses because `main` has moved past `drivers-beta`, publish beta first
+   (`-f channel=beta`), then promote.
 
 Do not publish routine Docker releases. Existing 1.x, 2.x and 3.x installs
 remain on their current version until their owner uses the guided installer
