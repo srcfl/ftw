@@ -97,7 +97,7 @@ commands and recovery. On a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu
 host, the native install is:
 
 ```bash
-tag=v0.136.4-beta.1   # the newest beta on the Releases page
+tag=v0.137.1-beta.1   # the newest beta on the Releases page
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --fresh-host --tag "${tag}"
 ```
