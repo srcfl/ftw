@@ -462,9 +462,9 @@ func TestDropRetiredSettingsDeletesTheAskWhyKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dropped, err := DropRetiredSettings(st, path, loaded)
-	if err != nil || !dropped {
-		t.Fatalf("DropRetiredSettings = %v, %v; want true", dropped, err)
+	removed, err := DropRetiredSettings(st, path, loaded)
+	if err != nil || len(removed) != 1 || removed[0] != "Ask why settings and API key" {
+		t.Fatalf("DropRetiredSettings = %v, %v; want the Ask why settings", removed, err)
 	}
 	after, _, err := st.Configuration()
 	if err != nil {
@@ -480,7 +480,7 @@ func TestDropRetiredSettingsDeletesTheAskWhyKey(t *testing.T) {
 	if reloaded.Site.Name != loaded.Site.Name {
 		t.Fatalf("site name %q, want %q", reloaded.Site.Name, loaded.Site.Name)
 	}
-	if dropped, err := DropRetiredSettings(st, path, reloaded); err != nil || dropped {
-		t.Fatalf("second DropRetiredSettings = %v, %v; want false", dropped, err)
+	if removed, err := DropRetiredSettings(st, path, reloaded); err != nil || len(removed) != 0 {
+		t.Fatalf("second DropRetiredSettings = %v, %v; want nothing", removed, err)
 	}
 }

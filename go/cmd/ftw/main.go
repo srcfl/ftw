@@ -424,6 +424,9 @@ func main() {
 	for _, w := range cfg.LoadWarnings {
 		slog.Error(w)
 	}
+	for _, notice := range cfg.Retired {
+		slog.Warn(notice)
+	}
 
 	// ---- Open persistent state (SQLite) ----
 	statePath := "state.db"
@@ -526,10 +529,10 @@ func main() {
 		slog.Error("initialize config database", "err", err)
 		os.Exit(1)
 	}
-	if dropped, err := config.DropRetiredSettings(st, *configPath, cfg); err != nil {
-		slog.Warn("could not remove retired Ask why settings", "err", err)
-	} else if dropped {
-		slog.Info("Ask why has been removed; its settings and API key were deleted")
+	if removed, err := config.DropRetiredSettings(st, *configPath, cfg); err != nil {
+		slog.Warn("could not remove retired settings", "err", err)
+	} else if len(removed) > 0 {
+		slog.Info("deleted the stored settings of removed features", "removed", strings.Join(removed, "; "))
 	}
 
 	if cfg.State != nil && cfg.State.ColdRetentionDays != 0 {
@@ -3325,34 +3328,14 @@ func inventoryRepositoryArtifacts(manager *driverrepo.Manager) []driverinventory
 	active := manager.Status().Active
 	out := make([]driverinventory.RepositoryArtifact, 0, len(active))
 	for _, installed := range active {
-		item := driverinventory.RepositoryArtifact{
+		out = append(out, driverinventory.RepositoryArtifact{
 			LogicalPath:   installed.LogicalPath,
 			InstalledPath: installed.InstalledPath,
 			DriverID:      installed.DriverID,
 			Version:       installed.Version,
 			SHA256:        installed.SHA256,
 			RepositoryID:  installed.RepoID,
-		}
-		versions, err := manager.AvailableVersions(installed.DriverID)
-		if err == nil {
-			for _, candidate := range versions {
-				driver := candidate.Driver
-				if candidate.RepositoryID != installed.RepoID || driver.Version != installed.Version || !strings.EqualFold(driver.SHA256, installed.SHA256) {
-					continue
-				}
-				item.PackageID = driver.PackageID
-				item.PackageChannel = driver.Channel
-				if driver.PackageID != "" {
-					if driver.Metadata.ReadOnly {
-						item.ControlClass = "read_only"
-					} else {
-						item.ControlClass = "control"
-					}
-				}
-				break
-			}
-		}
-		out = append(out, item)
+		})
 	}
 	return out
 }

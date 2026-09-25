@@ -192,9 +192,7 @@
   }
 
   function diagnosticSource(entry) {
-    if (entry && entry.source === "managed" && entry.package_id && entry.artifact_sha256) {
-      return "managed / signed";
-    }
+    if (entry && entry.source === "managed") return "managed";
     if (entry && entry.source === "local") return "local / unsigned";
     if (entry && entry.source === "bundled") return "bundled";
     return "unknown";
@@ -229,8 +227,7 @@
       "- Driver version: `" + version + "`",
       "- Source: `" + source + "`",
     ];
-    if (source === "managed / signed") {
-      lines.push("- Package: `" + safeDiagnosticValue(entry.package_id) + "`");
+    if (source === "managed") {
       lines.push("- Channel: `" + (safeDiagnosticValue(entry.package_channel) || "unknown") + "`");
       if (/^[0-9a-f]{64}$/.test(entry.artifact_sha256 || "")) {
         lines.push("- Artifact SHA-256: `" + entry.artifact_sha256 + "`");
@@ -238,7 +235,7 @@
     }
     lines.push("- FTW version: `" + ftwVersion + "`");
     lines.push("- Host API: `" + hostAPI + "`");
-    lines.push("- Runtime ABI: `" + (safeDiagnosticValue(entry && entry.runtime_abi) || "gopher-lua-source-v1") + "`");
+    lines.push("- Runtime ABI: `gopher-lua-source-v1`");
     if (make) lines.push("- Device make: `" + make + "`");
     if (model) lines.push("- Device model: `" + model + "`");
     if (firmware) lines.push("- Firmware: `" + firmware + "`");

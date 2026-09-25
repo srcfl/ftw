@@ -136,8 +136,10 @@ A device that answers Modbus before its registers mean anything can call
 
 ## Where FTW loads a driver from
 
-FTW resolves a driver file as local, then managed signed, then bundled.
-Settings and fleet inventory mark the first case `local / unsigned`.
+A local file wins. Otherwise the owner's selected signed version runs while it
+is at least as new as the release's copy, or when it was chosen over a newer
+one. Otherwise the release's own driver runs. Settings and fleet inventory mark
+the first case `local / unsigned`.
 
 Operator-only drivers belong in the persistent user-driver directory, not
 inside a container layer:
@@ -146,12 +148,12 @@ inside a container layer:
 - systemd: `/var/lib/ftw/drivers`;
 - another native run: pass `-user-drivers <dir>`.
 
-Local code works offline and never needs GitHub or Device Support. It gets no
-auto-update or promotion and cannot claim signed package control. The normal
-host capabilities and lifecycle still apply.
+Local code works offline and never needs GitHub. It gets no auto-update or
+promotion and never claims signed status. The normal host capabilities and
+lifecycle still apply.
 
-The bundled set under `drivers/` is FTW's offline recovery snapshot, generated
-from the commit pinned in
+The bundled set under `drivers/` is the release's own drivers, generated from
+the commit pinned in
 [`drivers/BUNDLED_SOURCE.json`](../drivers/BUNDLED_SOURCE.json) and fetched by
 `make drivers`. It is not editable here: the files are gitignored and CI fails
 if one is committed. Fix a driver upstream and move the pin. Managed drivers

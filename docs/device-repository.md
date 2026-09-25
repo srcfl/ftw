@@ -12,17 +12,13 @@ an expert try one driver ahead of a release. Its release workflow builds an FTW
 artifact for each catalog driver from a reviewed `main` commit, signs one
 manifest and publishes the files through GitHub Releases.
 
-Device Support may later consume an exact public commit for another product or
-a higher support level. That path does not own a second editable driver copy
-and does not replace FTW's default channel.
-
 ## Resolution and recovery
 
 A configured driver resolves in this order:
 
 1. operator-owned local override;
 2. explicitly activated managed artifact;
-3. bundled recovery driver.
+3. the release's own driver.
 
 Drivers ship with the release. A managed artifact the owner selected runs
 while it is at least as new as the release's own copy at the same path, or
@@ -129,8 +125,5 @@ makes that Lua artifact write-inert. These checks do not claim hardware test
 coverage; the public catalog and support status hold that evidence.
 
 Remote Lua never runs from a URL. Local unsigned drivers need an explicit
-operator file and never claim signed or managed status. Bundled drivers remain
-the offline recovery set.
-
-FTW still understands `sourceful.driver-index/v1` for later signed Device
-Support packages. That format is optional and is not the default source.
+operator file and never claim signed or managed status. Bundled drivers are the
+release's own drivers and work offline.
