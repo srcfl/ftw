@@ -491,3 +491,86 @@ func TestDriverCatalogNamesTheDriversThatRunEachFile(t *testing.T) {
 		t.Fatalf("a disabled driver runs nothing, used_by = %v", got.UsedBy)
 	}
 }
+
+// publishAs publishes the fixture driver under the channel's own spelling,
+// as device-drivers does: the bundled source declares id "esphome-dsmr",
+// the signed channel calls the same file "esphome_dsmr".
+func (f *driverUpdateFixture) publishAs(id, filename, version string) {
+	f.t.Helper()
+	source := []byte(strings.Replace(string(updateDriverLua(version, "P1-123", `host.emit("meter", {w=103})`)),
+		`id = "esphome-dsmr"`, `id = "`+id+`"`, 1))
+	f.mu.Lock()
+	f.lua = source
+	hash := sha256.Sum256(source)
+	f.manifest = driverrepo.Manifest{SchemaVersion: 1, Repository: f.repo.URL, Drivers: []driverrepo.ManifestDriver{{
+		ID: id, Path: "drivers/" + filename, Filename: filename, Version: version,
+		SHA256: hex.EncodeToString(hash[:]), URL: f.repo.URL + "/driver.lua", HostAPI: components.CompatibleRange{Min: 1, Max: 1},
+	}}}
+	f.mu.Unlock()
+	if err := f.s.deps.DriverRepository.Refresh(context.Background(), "test"); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *driverUpdateFixture) requestFor(id, action, body string, want int) map[string]any {
+	f.t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/api/device_repository/drivers/"+id+"/"+action, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, r)
+	if w.Code != want {
+		f.t.Fatalf("%s: HTTP %d want %d: %s", action, w.Code, want, w.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		f.t.Fatal(err)
+	}
+	return response
+}
+
+// On the home box "Use bundled" answered "no bundled file declares driver
+// easee_cloud": the release's easee_cloud.lua declares "easee-cloud". The
+// same spelling kept an install from reaching the running instance until
+// Core restarted. The signed manifest names the file, and the publisher's
+// identity rule ties the two spellings together.
+func TestChannelAndBundledSpellingsOfOneDriverMeet(t *testing.T) {
+	f := newDriverUpdateFixture(t, "running")
+	f.publishAs("esphome_dsmr", "esphome_dsmr.lua", "1.0.3")
+
+	response := f.requestFor("esphome_dsmr", "install", `{"repository_id":"test"}`, 200)
+	if response["runtime_verified"] != true {
+		t.Fatalf("install did not reach the running instance: %v", response)
+	}
+	f.reading(103)
+	managed := filepath.Join(f.s.managedDriverDir(), "esphome_dsmr.lua")
+	if f.saved.Drivers[0].Lua != managed {
+		t.Fatalf("config points at %s, want %s", f.saved.Drivers[0].Lua, managed)
+	}
+
+	w := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/drivers/catalog", nil))
+	var catalog struct {
+		Entries []drivers.CatalogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range catalog.Entries {
+		if e.Filename == "esphome_dsmr.lua" {
+			found = true
+			if e.Source != "managed" || e.Version != "1.0.3" || e.ReleaseVersion != "1.0.2" {
+				t.Fatalf("catalog entry = %+v; want managed 1.0.3 over the release's 1.0.2", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("catalog has no esphome_dsmr.lua")
+	}
+
+	f.requestFor("esphome_dsmr", "use_bundled", `{}`, 200)
+	f.reading(102)
+	if f.saved.Drivers[0].Lua != f.bundled {
+		t.Fatalf("config points at %s, want the release's %s", f.saved.Drivers[0].Lua, f.bundled)
+	}
+}

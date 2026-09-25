@@ -209,7 +209,7 @@ func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
 	defer store.Close()
 	// The box config lists only stable; InstallChannel owns its separate,
 	// already trusted beta source.
-	configured := &config.DeviceRepository{Repositories: []config.DriverRepositorySource{{
+	configured := &config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
 		ID: config.DefaultDriverRepositoryID, ManifestURL: config.DefaultDriverRepositoryManifestURL,
 	}}}
 	manager := New(configured, dir, store)

@@ -56,7 +56,7 @@ test("Devices configure the GoodWe register profile without editing YAML", () =>
 test("Update Center only offers stable or beta when that signed version differs", () => {
   assert.match(badge, /entry\.update_available && entry\.repository_id && entry\.upstream_version/);
   assert.match(badge, /"Stable " \+ escapeHTML\(entry\.upstream_version\)/);
-  assert.match(badge, /betaDriver\.version !== current/);
+  assert.match(badge, /isNewerVersion\(betaDriver\.version, current\)/);
   assert.doesNotMatch(badge, />current<\/span>/);
   assert.doesNotMatch(badge, /entry\.update_available \|\| !entry\.installed/);
   assert.doesNotMatch(badge, /\? "Update" : "Install"/);
@@ -77,4 +77,18 @@ test("Devices links to repository support data without traffic-light claims", ()
   assert.doesNotMatch(devices, /awaiting a second/);
   assert.doesNotMatch(devices, /ported from reference/);
   assert.doesNotMatch(devices, /[🟢🟡🔴]/u);
+});
+
+test("a beta driver counts as an update only when it is newer than what runs", () => {
+  const source = badge.match(/  function isNewerVersion\([\s\S]*?\n  }\n/)[0];
+  const isNewerVersion = new Function(source + "\nreturn isNewerVersion;")();
+  assert.equal(isNewerVersion("1.3.3", "1.3.2"), true);
+  assert.equal(isNewerVersion("1.3.2", "1.3.3"), false);
+  assert.equal(isNewerVersion("1.3.3", "1.3.3"), false);
+  assert.equal(isNewerVersion("1.4.0-beta.1", "1.3.3"), true);
+  assert.equal(isNewerVersion("1.4.0", "1.4.0-beta.1"), true);
+  assert.equal(isNewerVersion("1.4.0-beta.1", "1.4.0"), false);
+  assert.equal(isNewerVersion("1.4.0-beta.2", "1.4.0-beta.10"), false);
+  assert.equal(isNewerVersion("1.0.0", ""), true);
+  assert.equal(isNewerVersion("", "1.0.0"), false);
 });

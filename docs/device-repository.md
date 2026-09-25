@@ -24,13 +24,13 @@ A configured driver resolves in this order:
 2. explicitly activated managed artifact;
 3. bundled recovery driver.
 
-Drivers ship with the release, so a managed artifact overrides the release's
-own copy only until Core moves to another release. At the first start of a
-new release, Core deactivates each managed artifact whose bundled copy at the
-same path is at least as new, and the bundled driver runs. Within one release
-an override stays, including an older version chosen on purpose.
-`ftw status` lists the version each configured driver runs and names every
-override.
+Drivers ship with the release, so installing a newer driver from the channel
+is early access to the release's own copy. At the first start of a new
+release, Core deactivates each managed artifact whose bundled copy at the same
+path is at least as new, and the bundled driver runs. A version chosen
+although the release had a newer one stays until the owner changes it.
+`ftw status` lists the version each configured driver runs and, for an
+override, the release's own version.
 
 Refreshing the signed manifest only updates discovery data. It never installs,
 activates or restarts a driver. FTW verifies the Ed25519 signature, driver ID,

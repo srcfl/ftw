@@ -275,7 +275,7 @@ anything may change, and that is the true state of FTW.
 - **The signed driver channel and `.ftwbak` full backups.** Backups do not
   change. Since 2026-09-25 the drivers ship in the release package, so an
   update or rollback moves them with Core; the signed channel serves older
-  installs and expert overrides that end when a release catches up. See
+  installs and lets an owner pick another signed version of one driver. See
   [device repository](../device-repository.md).
 - **`history-migrate`.** It links DuckDB with CGO. It ships in the tarball as
   a second, dynamically linked binary, or moves into Core behind a build tag.

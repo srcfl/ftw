@@ -41,6 +41,9 @@ type CatalogEntry struct {
 	// UsedBy names the enabled configured drivers that run this file, so a
 	// reader sees the live version and its source without the config.
 	UsedBy []string `json:"used_by,omitempty"`
+	// ReleaseVersion is the version this Core release bundles at the same
+	// path, set on an entry that overrides it.
+	ReleaseVersion string `json:"release_version,omitempty"`
 	// AuthPostPath is the URL path a read-only driver signs in at. A driver
 	// that reads a vendor cloud has to POST for a token before it can read,
 	// and that POST is not actuation. Only meaningful with ReadOnly.

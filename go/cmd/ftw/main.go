@@ -543,7 +543,8 @@ func main() {
 	)
 	// Drivers ship with the release. A managed install that this release's
 	// bundled copy has caught up with ends here, before any path resolves.
-	driverRepository.RetireSupersededByBundled(resolveDriverDir())
+	driverRepository.SetBundledDir(resolveDriverDir())
+	driverRepository.RetireSupersededByBundled()
 	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
 	config.ManagedDriversDirOverride = driverRepository.ActiveDir()
 	cfg.ResolveDriverPaths(filepath.Dir(*configPath))

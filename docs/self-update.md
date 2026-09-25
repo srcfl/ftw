@@ -149,8 +149,8 @@ is no automatic fallback. See [Docker](native-beta.md#docker).
 Core, the compiled Energyplan worker and the Lua drivers pinned in
 `drivers/BUNDLED_SOURCE.json` ship in one package, so `ftw update` and
 `ftw rollback` move the drivers with Core. Core validates plans and keeps its
-Go fallback. A driver installed from the signed channel overrides the
-release's copy until a release catches up; see
+Go fallback. A newer driver installed from the signed channel runs until a
+release catches up, and an older one chosen on purpose stays; see
 [device repository](device-repository.md). There is no optimizer sidecar in
 the native install.
 

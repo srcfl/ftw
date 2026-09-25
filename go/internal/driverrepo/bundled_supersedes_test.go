@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/config"
@@ -21,6 +22,8 @@ type supersedeSite struct {
 	dir, bundled string
 	store        *state.Store
 	cfg          *config.DeviceRepository
+	channel      *signedFixture
+	channelURL   string
 }
 
 func newSupersedeSite(t *testing.T, channelVersion, bundledVersion string) *supersedeSite {
@@ -45,7 +48,7 @@ func newSupersedeSite(t *testing.T, channelVersion, bundledVersion string) *supe
 	t.Cleanup(server.Close)
 	fixture.setVersion(server.URL, channelVersion)
 
-	site := &supersedeSite{dir: t.TempDir()}
+	site := &supersedeSite{dir: t.TempDir(), channel: fixture, channelURL: server.URL}
 	site.bundled = filepath.Join(site.dir, "bundled")
 	if err := os.MkdirAll(site.bundled, 0o755); err != nil {
 		t.Fatal(err)
@@ -70,11 +73,22 @@ func newSupersedeSite(t *testing.T, channelVersion, bundledVersion string) *supe
 // boot starts Core at release and runs the startup reconciliation.
 func (s *supersedeSite) boot(release string) (*Manager, []Superseded) {
 	manager := NewWithHostVersion(s.cfg, s.dir, s.store, release)
-	return manager, manager.RetireSupersededByBundled(s.bundled)
+	manager.SetBundledDir(s.bundled)
+	return manager, manager.RetireSupersededByBundled()
 }
 
 func (s *supersedeSite) install(t *testing.T, manager *Manager) {
 	t.Helper()
+	s.installVersion(t, manager, "")
+}
+
+// installVersion publishes version on the channel ("" keeps the current one)
+// and installs it, as an owner picking it under Settings does.
+func (s *supersedeSite) installVersion(t *testing.T, manager *Manager, version string) {
+	t.Helper()
+	if version != "" {
+		s.channel.setVersion(s.channelURL, version)
+	}
 	if err := manager.Refresh(context.Background(), "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -125,20 +139,38 @@ func TestFirstBootWithoutRecordedReleaseReconciles(t *testing.T) {
 	}
 }
 
-// Within one release an expert's choice stands, even an older version picked
-// to avoid a bad bundled driver. The next release ends it.
-func TestOverrideStaysWithinTheReleaseItWasMadeOn(t *testing.T) {
+// An owner who goes back behind the release, say to avoid a bad bundled
+// driver, keeps that choice across releases until they change it.
+func TestChosenOlderVersionStaysUntilTheOwnerChangesIt(t *testing.T) {
 	site := newSupersedeSite(t, "1.0.0", "1.1.0")
 	manager, _ := site.boot("v0.136.4-beta.1")
 	site.install(t, manager)
 
-	manager, retired := site.boot("v0.136.4-beta.1")
-	if len(retired) != 0 || !managedActive(t, manager) {
-		t.Fatalf("restart on the same release retired %+v; the downgrade must stay", retired)
+	for _, release := range []string{"v0.136.4-beta.1", "v0.136.5-beta.1", "v0.137.0-beta.1"} {
+		manager, retired := site.boot(release)
+		if len(retired) != 0 || !managedActive(t, manager) {
+			t.Fatalf("%s retired %+v; the owner's older choice must stay", release, retired)
+		}
 	}
-	manager, retired = site.boot("v0.136.5-beta.1")
+
+	// Choosing the release's own version again is early access, not a pin.
+	site.installVersion(t, manager, "1.1.0")
+	manager, retired := site.boot("v0.137.1-beta.1")
 	if len(retired) != 1 || managedActive(t, manager) {
-		t.Fatalf("next release retired %+v; want the override ended", retired)
+		t.Fatalf("retired = %+v; the release caught up with the owner's choice", retired)
+	}
+}
+
+// Going back to the release's copy forgets the choice.
+func TestUsingTheBundledCopyForgetsTheChoice(t *testing.T) {
+	site := newSupersedeSite(t, "1.0.0", "1.1.0")
+	manager, _ := site.boot("v0.136.4-beta.1")
+	site.install(t, manager)
+	if err := manager.Deactivate("drivers/demo.lua"); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, _ := site.store.LoadConfig(pinKey("drivers/demo.lua")); pinned != "" {
+		t.Fatalf("pin %q survived going back to the bundled copy", pinned)
 	}
 }
 
@@ -157,5 +189,23 @@ func TestNewerManagedInstallAndUnbundledDriverStay(t *testing.T) {
 				t.Fatalf("retired = %+v; the managed install must keep running", retired)
 			}
 		})
+	}
+}
+
+// device_repository.enabled: false turns off every remote fetch, the built-in
+// beta channel included.
+func TestBetaChannelRespectsTheOffSwitch(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := New(&config.DeviceRepository{Enabled: false}, dir, store)
+	if _, err := manager.ChannelCatalog(context.Background(), "beta"); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("ChannelCatalog with the repository off: %v", err)
+	}
+	if _, err := manager.InstallChannel(context.Background(), "beta", "easee_cloud", "1.3.3"); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("InstallChannel with the repository off: %v", err)
 	}
 }

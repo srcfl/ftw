@@ -173,8 +173,9 @@ There is no edge channel. Drivers ship with Core: a release carries the
 drivers pinned in [`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json),
 and `ftw update` and `ftw rollback` move them with Core. A driver fix is a pin
 bump in the next beta. The signed driver channel serves installs that cannot
-take a new Core and lets an expert try one driver early; such an override ends
-when a release catches up. Proposed: `drivers-stable` carries the drivers of the
+take a new Core and lets an owner pick another signed version of one driver.
+Early access ends when a release catches up; an older version chosen on
+purpose stays until the owner changes it. Proposed: `drivers-stable` carries the drivers of the
 latest stable Core and is promoted with it.
 
 Native 0.x path:
