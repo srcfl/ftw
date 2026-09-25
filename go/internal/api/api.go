@@ -1862,7 +1862,7 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	managedDir := ""
 	if s.deps.DriverRepository != nil {
-		managedDir = s.deps.DriverRepository.ActiveDir()
+		managedDir = s.deps.DriverRepository.EffectiveDir()
 	}
 	// Local override > activated managed artifact > bundled recovery snapshot.
 	entries, err := drivers.LoadCatalogSources(
@@ -1877,19 +1877,26 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	if s.deps.DriverRepository != nil {
 		entries = s.deps.DriverRepository.EnrichCatalog(entries)
 	}
-	// The catalog keeps one entry per filename, the first source that has
-	// it, which is the file a configured driver of that name runs.
+	// A configured driver runs the file its resolved path names. Matching
+	// by file name would credit a catalog entry with an operator's file of
+	// the same name kept elsewhere.
 	if s.deps.Cfg != nil && s.deps.CfgMu != nil {
+		sourceDirs := map[string]string{"local": s.deps.UserDriverDir, "managed": managedDir, "bundled": dir}
 		usedBy := make(map[string][]string)
 		s.deps.CfgMu.RLock()
 		for _, d := range s.deps.Cfg.Drivers {
 			if !d.Disabled && d.Lua != "" {
-				usedBy[filepath.Base(d.Lua)] = append(usedBy[filepath.Base(d.Lua)], d.Name)
+				usedBy[filepath.Clean(d.Lua)] = append(usedBy[filepath.Clean(d.Lua)], d.Name)
 			}
 		}
 		s.deps.CfgMu.RUnlock()
 		for i := range entries {
-			entries[i].UsedBy = usedBy[entries[i].Filename]
+			root := sourceDirs[entries[i].Source]
+			if root == "" {
+				continue
+			}
+			rel := filepath.FromSlash(strings.TrimPrefix(entries[i].Path, "drivers/"))
+			entries[i].UsedBy = usedBy[filepath.Clean(filepath.Join(root, rel))]
 		}
 	}
 	for i := range entries {

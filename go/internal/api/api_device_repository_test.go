@@ -577,3 +577,23 @@ func TestReleaseCopyAndChannelMeetByTheirOneID(t *testing.T) {
 		t.Fatalf("config points at %s, want the release's %s", f.saved.Drivers[0].Lua, f.bundled)
 	}
 }
+
+// An operator's own file elsewhere that shares a catalog file's name is not
+// that catalog entry: `ftw status` must not credit it with the version.
+func TestDriverCatalogCreditsOnlyTheFileThatRuns(t *testing.T) {
+	f := newDriverUpdateFixture(t, "override")
+	f.request(context.Background(), "install", `{"repository_id":"test"}`, 200)
+	w := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/drivers/catalog", nil))
+	var body struct {
+		Entries []drivers.CatalogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range body.Entries {
+		if e.Filename == "esphome-dsmr.lua" && len(e.UsedBy) != 0 {
+			t.Fatalf("the managed %s is credited to %v, but p1 runs its own file at %s", e.Path, e.UsedBy, f.s.deps.Cfg.Drivers[0].Lua)
+		}
+	}
+}

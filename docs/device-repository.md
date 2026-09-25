@@ -24,11 +24,14 @@ A configured driver resolves in this order:
 2. explicitly activated managed artifact;
 3. bundled recovery driver.
 
-Drivers ship with the release, so installing a newer driver from the channel
-is early access to the release's own copy. At the first start of a new
-release, Core deactivates each managed artifact whose bundled copy at the same
-path is at least as new, and the bundled driver runs. A version chosen
-although the release had a newer one stays until the owner changes it.
+Drivers ship with the release. A managed artifact the owner selected runs
+while it is at least as new as the release's own copy at the same path, or
+when the owner went back to it from a newer version that was running. When a
+release brings a newer copy, that copy runs instead, but the selection is
+kept: `driver-repository/active` records what the owner selected, and
+`driver-repository/effective`, which paths resolve through, is derived from it
+and the release's drivers at every start and after every change. A rollback,
+or an update trial that falls back, therefore runs the selection again.
 `ftw status` lists the version each configured driver runs and, for an
 override, the release's own version.
 

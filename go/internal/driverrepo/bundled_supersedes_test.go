@@ -70,11 +70,19 @@ func newSupersedeSite(t *testing.T, channelVersion, bundledVersion string) *supe
 	return site
 }
 
-// boot starts Core at release and runs the startup reconciliation.
+// boot starts Core at release with the site's bundled drivers.
 func (s *supersedeSite) boot(release string) (*Manager, []Superseded) {
 	manager := NewWithHostVersion(s.cfg, s.dir, s.store, release)
 	manager.SetBundledDir(s.bundled)
-	return manager, manager.RetireSupersededByBundled()
+	return manager, manager.ApplyBundled()
+}
+
+// bundle replaces the release's own copy, as a Core update or rollback does.
+func (s *supersedeSite) bundle(t *testing.T, version string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.bundled, "demo.lua"), testDriver(version), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (s *supersedeSite) install(t *testing.T, manager *Manager) {
@@ -97,9 +105,21 @@ func (s *supersedeSite) installVersion(t *testing.T, manager *Manager, version s
 	}
 }
 
-func managedActive(t *testing.T, manager *Manager) bool {
+// runsManaged reports whether paths resolve to the managed selection.
+func runsManaged(t *testing.T, manager *Manager) bool {
 	t.Helper()
-	if _, err := os.Lstat(filepath.Join(manager.ActiveDir(), "demo.lua")); err == nil {
+	return exists(t, filepath.Join(manager.EffectiveDir(), "demo.lua"))
+}
+
+// selected reports whether the owner's selection is still recorded.
+func selected(t *testing.T, manager *Manager) bool {
+	t.Helper()
+	return exists(t, filepath.Join(manager.ActiveDir(), "demo.lua"))
+}
+
+func exists(t *testing.T, path string) bool {
+	t.Helper()
+	if _, err := os.Lstat(path); err == nil {
 		return true
 	} else if !os.IsNotExist(err) {
 		t.Fatal(err)
@@ -107,35 +127,44 @@ func managedActive(t *testing.T, manager *Manager) bool {
 	return false
 }
 
-// The owner's box on 2026-09-25: easee_cloud 1.3.2 from the beta channel kept
-// running over the bundled 1.3.3 in v0.136.4-beta.1 until someone clicked.
-// A release that bundles the same or a newer driver ends the override.
-func TestNewReleaseRetiresManagedInstallItCaughtUpWith(t *testing.T) {
-	site := newSupersedeSite(t, "1.3.3", "1.3.3")
+// On the home box easee_cloud 1.3.2 from the beta channel kept running over
+// the bundled 1.3.3 in v0.136.4-beta.1. A release with a newer driver runs
+// it, and the owner's selection is kept: a rollback, or a trial that falls
+// back, runs it again under the older release.
+func TestNewerReleaseDriverRunsWithoutLosingTheSelection(t *testing.T) {
+	site := newSupersedeSite(t, "1.3.2", "1.3.1")
 	manager, _ := site.boot("v0.136.3-beta.1")
 	site.install(t, manager)
+	if !runsManaged(t, manager) {
+		t.Fatal("the early 1.3.2 must run over the release's 1.3.1")
+	}
 
-	manager, retired := site.boot("v0.136.4-beta.1")
-	if len(retired) != 1 || retired[0].Version != "1.3.3" || retired[0].BundledVersion != "1.3.3" {
-		t.Fatalf("retired = %+v, want demo 1.3.3 superseded by bundled 1.3.3", retired)
+	site.bundle(t, "1.3.3")
+	manager, superseded := site.boot("v0.136.4-beta.1")
+	if len(superseded) != 1 || superseded[0].BundledVersion != "1.3.3" || runsManaged(t, manager) {
+		t.Fatalf("superseded = %+v; the release's 1.3.3 must run", superseded)
 	}
-	if managedActive(t, manager) {
-		t.Fatal("managed symlink still shadows the bundled driver")
+	if !selected(t, manager) {
+		t.Fatal("the owner's selection was lost")
 	}
-	if active, err := site.store.ActiveDriverRepoInstalls(); err != nil || len(active) != 0 {
-		t.Fatalf("active installs = %+v, %v; want none", active, err)
+
+	site.bundle(t, "1.3.1") // ftw rollback, or a failed trial
+	manager, superseded = site.boot("v0.136.3-beta.1")
+	if len(superseded) != 0 || !runsManaged(t, manager) {
+		t.Fatalf("superseded = %+v; the older release must run the selection again", superseded)
 	}
 }
 
-// A box that already carries a managed install when this reconciliation
-// first ships has no recorded release; its first boot counts as a change.
-func TestFirstBootWithoutRecordedReleaseReconciles(t *testing.T) {
-	site := newSupersedeSite(t, "1.3.2", "1.3.3")
-	site.install(t, New(site.cfg, site.dir, site.store))
-
-	manager, retired := site.boot("v0.136.5-beta.1")
-	if len(retired) != 1 || managedActive(t, manager) {
-		t.Fatalf("retired = %+v, active = %v; want the older managed install retired", retired, managedActive(t, manager))
+// A release that bundles the same version leaves the selection running: the
+// same version is the same driver.
+func TestSameVersionKeepsTheSelectionRunning(t *testing.T) {
+	site := newSupersedeSite(t, "1.3.3", "1.3.1")
+	manager, _ := site.boot("v0.136.3-beta.1")
+	site.install(t, manager)
+	site.bundle(t, "1.3.3")
+	manager, superseded := site.boot("v0.136.4-beta.1")
+	if len(superseded) != 0 || !runsManaged(t, manager) {
+		t.Fatalf("superseded = %+v", superseded)
 	}
 }
 
@@ -147,17 +176,53 @@ func TestChosenOlderVersionStaysUntilTheOwnerChangesIt(t *testing.T) {
 	site.install(t, manager)
 
 	for _, release := range []string{"v0.136.4-beta.1", "v0.136.5-beta.1", "v0.137.0-beta.1"} {
-		manager, retired := site.boot(release)
-		if len(retired) != 0 || !managedActive(t, manager) {
-			t.Fatalf("%s retired %+v; the owner's older choice must stay", release, retired)
+		site.bundle(t, "1.1.0")
+		manager, superseded := site.boot(release)
+		if len(superseded) != 0 || !runsManaged(t, manager) {
+			t.Fatalf("%s superseded %+v; the owner's older choice must stay", release, superseded)
 		}
 	}
 
-	// Choosing the release's own version again is early access, not a pin.
+	// Choosing the release's version again is not a choice to keep.
 	site.installVersion(t, manager, "1.1.0")
-	manager, retired := site.boot("v0.137.1-beta.1")
-	if len(retired) != 1 || managedActive(t, manager) {
-		t.Fatalf("retired = %+v; the release caught up with the owner's choice", retired)
+	site.installVersion(t, manager, "1.0.9")
+	manager, _ = site.boot("v0.137.1-beta.1")
+	if !runsManaged(t, manager) {
+		t.Fatal("1.0.9 went below the running 1.1.0; that is a choice")
+	}
+}
+
+// Going back below the version that was running is a choice even when it is
+// still newer than the release's copy: the owner rejected what ran.
+func TestGoingBackBelowTheRunningVersionIsAChoice(t *testing.T) {
+	site := newSupersedeSite(t, "1.3.3", "1.3.0")
+	manager, _ := site.boot("v0.136.4-beta.1")
+	site.install(t, manager)                 // early 1.3.3
+	site.installVersion(t, manager, "1.3.2") // it misbehaved; back to 1.3.2
+
+	site.bundle(t, "1.3.3") // the next release ships the rejected version
+	manager, superseded := site.boot("v0.136.5-beta.1")
+	if len(superseded) != 0 || !runsManaged(t, manager) {
+		t.Fatalf("superseded = %+v; the owner's 1.3.2 must keep running", superseded)
+	}
+}
+
+// A rollback undoes an activation and the choice that went with it, so the
+// recovery of a failed install does not leave a mark of its own.
+func TestRollbackRestoresTheChoiceItUndid(t *testing.T) {
+	site := newSupersedeSite(t, "1.3.2", "1.3.3")
+	manager, _ := site.boot("v0.136.4-beta.1")
+	site.install(t, manager)                 // chosen 1.3.2 under the release's 1.3.3
+	site.installVersion(t, manager, "1.3.4") // early 1.3.4 clears the choice
+	if _, err := manager.Rollback("drivers/demo.lua"); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, _ := site.store.LoadConfig(pinKey("drivers/demo.lua")); pinned != "1.3.2" {
+		t.Fatalf("pin after rollback = %q; want the undone choice 1.3.2 back", pinned)
+	}
+	manager, superseded := site.boot("v0.136.5-beta.1")
+	if len(superseded) != 0 || !runsManaged(t, manager) {
+		t.Fatalf("superseded = %+v", superseded)
 	}
 }
 
@@ -172,6 +237,9 @@ func TestUsingTheBundledCopyForgetsTheChoice(t *testing.T) {
 	if pinned, _ := site.store.LoadConfig(pinKey("drivers/demo.lua")); pinned != "" {
 		t.Fatalf("pin %q survived going back to the bundled copy", pinned)
 	}
+	if runsManaged(t, manager) || selected(t, manager) {
+		t.Fatal("the managed driver still runs after going back to the release's copy")
+	}
 }
 
 func TestNewerManagedInstallAndUnbundledDriverStay(t *testing.T) {
@@ -184,9 +252,9 @@ func TestNewerManagedInstallAndUnbundledDriverStay(t *testing.T) {
 			manager, _ := site.boot("v0.136.4-beta.1")
 			site.install(t, manager)
 
-			manager, retired := site.boot("v0.136.5-beta.1")
-			if len(retired) != 0 || !managedActive(t, manager) {
-				t.Fatalf("retired = %+v; the managed install must keep running", retired)
+			manager, superseded := site.boot("v0.136.5-beta.1")
+			if len(superseded) != 0 || !runsManaged(t, manager) {
+				t.Fatalf("superseded = %+v; the managed install must keep running", superseded)
 			}
 		})
 	}
