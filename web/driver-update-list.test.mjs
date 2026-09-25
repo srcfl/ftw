@@ -37,6 +37,8 @@ test("adding a device lists channel driver types in the same list, marked by ori
   // Both signed channels: stable has drivers the release does not carry.
   assert.match(devices, /fetchCatalog\("\/api\/device_repository\/catalog"\)/);
   assert.match(devices, /fetchCatalog\("\/api\/device_repository\/catalog\?channel=beta"\)/);
+  // One channel being unreachable does not hide what the other lists.
+  assert.match(devices, /Promise\.allSettled\(\[/);
   assert.match(devices, /e\.channel === "beta" \? "beta" : "from the driver channel"/);
   // The release's own drivers are added as they are; a channel driver is
   // fetched from its channel when the device is added.

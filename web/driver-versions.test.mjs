@@ -666,3 +666,15 @@ test("after a switch, checking for new versions redraws what runs now", async ()
   assert.equal(buttonsOf(release).map((b) => b.textContent).join(" "), "Use this",
     "the way back to the release's copy must stay after a redraw");
 });
+
+test("a beta outage is shown but the list still redraws", async () => {
+  const body = { ...PAYLOAD, warnings: ["beta channel: connection refused"] };
+  const { api } = load(body);
+  const panel = element("div");
+  api.render(panel, "ferroamp", PAYLOAD, { runningVersion: "1.0.0", runningSource: "managed", logicalPath: "drivers/ferroamp.lua" });
+  buttonsOf(panel).find((b) => b.textContent === "Check for new versions").click();
+  await settle();
+  await settle();
+  assert.match(textOf(panel), /Checked, but beta channel: connection refused/);
+  assert.ok(rowOf(panel, "v1.1.1"), "the stable rows are drawn again");
+});

@@ -65,11 +65,22 @@ func (s *Server) handleDeviceRepositoryRefresh(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
-	if err := s.deps.DriverRepository.Refresh(r.Context(), body.RepositoryID); err != nil {
+	// Without a repository this is the owner's "check for new versions",
+	// which also reads the beta channel; a beta outage is only a warning.
+	var warnings []string
+	var err error
+	if body.RepositoryID == "" {
+		warnings, err = s.deps.DriverRepository.RefreshAll(r.Context())
+	} else {
+		err = s.deps.DriverRepository.Refresh(r.Context(), body.RepositoryID)
+	}
+	if err != nil {
 		writeJSON(w, 502, map[string]any{"error": err.Error(), "status": s.deps.DriverRepository.Status()})
 		return
 	}
-	writeJSON(w, 200, s.deps.DriverRepository.Status())
+	status := s.deps.DriverRepository.Status()
+	status.Warnings = warnings
+	writeJSON(w, 200, status)
 }
 
 func (s *Server) handleDeviceRepositoryInstall(w http.ResponseWriter, r *http.Request) {

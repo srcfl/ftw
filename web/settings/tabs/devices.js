@@ -160,6 +160,9 @@
     if (source === "local") return "your own file";
     if (source === "bundled") return "this release";
     if (entry.chosen) return ["chosen, kept across updates", release].filter(Boolean).join(" · ");
+    if (entry.release_version && entry.release_version === (entry.installed_version || entry.version)) {
+      return "from the driver channel · same as this release";
+    }
     if (release) return "until a release has it · " + release;
     return "from the driver channel";
   }
@@ -391,6 +394,7 @@
     check.textContent = "Check for new versions";
     var status = document.createElement("span");
     status.className = "drv-version-status";
+    var warnings = [];
     check.addEventListener("click", function () {
       check.disabled = true;
       status.textContent = "Checking the signed channels…";
@@ -403,7 +407,8 @@
           if (!r.ok) throw new Error(b.error || "could not check for versions");
           return b;
         });
-      }).then(function () {
+      }).then(function (refreshed) {
+        warnings = (refreshed && refreshed.warnings) || [];
         return apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + "/versions");
       }).then(function (r) {
         return r.json().then(function (b) {
@@ -412,6 +417,12 @@
         });
       }).then(function (body) {
         renderVersionPicker(panel, driverID, body, opts);
+        if (warnings.length) {
+          var note = document.createElement("div");
+          note.className = "drv-version-detail";
+          note.textContent = "Checked, but " + warnings.join("; ");
+          panel.appendChild(note);
+        }
       }).catch(function (err) {
         status.textContent = err.message;
         check.disabled = false;
@@ -1843,10 +1854,15 @@
         var status = document.getElementById("driver-catalog-more-status");
         moreDrivers.disabled = true;
         if (status) status.textContent = "Checking the signed channels…";
-        Promise.all([
+        // Either channel can be unreachable; what the other one lists still
+        // counts.
+        Promise.allSettled([
           fetchCatalog("/api/device_repository/catalog"),
           fetchCatalog("/api/device_repository/catalog?channel=beta")
-        ]).then(function (results) {
+        ]).then(function (settled) {
+          var failed = settled.filter(function (r) { return r.status !== "fulfilled"; });
+          if (failed.length === settled.length) throw failed[0].reason;
+          var results = settled.map(function (r) { return r.status === "fulfilled" ? r.value : null; });
           var listed = S.catalogEntries || [];
           var known = {};
           listed.forEach(function (e) { known[e.id] = true; known[e.filename] = true; });
@@ -1862,9 +1878,11 @@
           var parts = [];
           if (added.length > beta) parts.push((added.length - beta) + " from the driver channel");
           if (beta) parts.push(beta + " in testing, marked beta");
-          if (status) status.textContent = added.length === 0
+          var note = failed.length ? " " + (results[1] ? "The driver channel" : "The beta channel") +
+            " could not be reached." : "";
+          if (status) status.textContent = (added.length === 0
             ? "The release already has every signed driver."
-            : "Added " + parts.join(" and ") + ".";
+            : "Added " + parts.join(" and ") + ".") + note;
         }).catch(function (err) {
           if (status) status.textContent = err.message;
           moreDrivers.disabled = false;

@@ -119,6 +119,9 @@ type VersionCandidate struct {
 }
 
 type Status struct {
+	// Warnings are problems a refresh met that did not stop it, such as an
+	// unreachable beta channel.
+	Warnings     []string                  `json:"warnings,omitempty"`
 	Enabled      bool                      `json:"enabled"`
 	HostAPI      int                       `json:"driver_host_api"`
 	RootDir      string                    `json:"root_dir"`
@@ -306,12 +309,6 @@ func (m *Manager) Refresh(ctx context.Context, repositoryID string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", repo.ID, err))
 		}
 	}
-	// One refresh checks every version an owner can pick, beta included.
-	if repositoryID == "" {
-		if err := m.refreshOne(ctx, m.betaRepo); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", m.betaRepo.ID, err))
-		}
-	}
 	if repositoryID != "" && len(errs) == 0 {
 		found := false
 		for _, repo := range m.cfg.Repositories {
@@ -322,6 +319,20 @@ func (m *Manager) Refresh(ctx context.Context, repositoryID string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// RefreshAll is an owner's "check for new versions": every configured
+// source and the beta channel. A beta that cannot be reached is a warning,
+// not a failure, so the versions list still redraws from what did refresh.
+// The periodic refresh stays on Refresh, which reads only configured sources.
+func (m *Manager) RefreshAll(ctx context.Context) (warnings []string, err error) {
+	if err := m.Refresh(ctx, ""); err != nil {
+		return nil, err
+	}
+	if betaErr := m.refreshOne(ctx, m.betaRepo); betaErr != nil {
+		warnings = append(warnings, "beta channel: "+betaErr.Error())
+	}
+	return warnings, nil
 }
 
 func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySource) error {
@@ -747,10 +758,17 @@ func (m *Manager) AvailableVersions(driverID string) ([]VersionCandidate, error)
 	if err != nil {
 		return nil, err
 	}
-	installedByKey := make(map[string]state.DriverRepoInstall, len(installed))
+	// An install is matched by content, not by the channel it came from: a
+	// beta file that stable later publishes byte for byte is the file that
+	// runs, whichever row lists it.
+	installedByContent := make(map[string]state.DriverRepoInstall, len(installed))
 	for _, artifact := range installed {
-		installedByKey[artifact.RepoID+"\x00"+artifact.Version+"\x00"+strings.ToLower(artifact.SHA256)] = artifact
+		key := artifact.Version + "\x00" + strings.ToLower(artifact.SHA256)
+		if prior, ok := installedByContent[key]; !ok || (artifact.Active && !prior.Active) {
+			installedByContent[key] = artifact
+		}
 	}
+	listed := make(map[int64]bool)
 	var out []VersionCandidate
 	seen := make(map[string]bool)
 	offered := make(map[string]bool) // by content, so a promoted beta file is listed once
@@ -793,9 +811,10 @@ func (m *Manager) AvailableVersions(driverID string) ([]VersionCandidate, error)
 			seen[key] = true
 			offered[strings.ToLower(driver.SHA256)] = true
 			candidate := VersionCandidate{RepositoryID: repo.ID, Channel: channel, Repository: manifest.Repository, Driver: driver}
-			if artifact, ok := installedByKey[key]; ok {
+			if artifact, ok := installedByContent[driver.Version+"\x00"+strings.ToLower(driver.SHA256)]; ok {
 				copy := artifact
 				candidate.Installed = &copy
+				listed[artifact.ID] = true
 			}
 			out = append(out, candidate)
 		}
@@ -806,7 +825,7 @@ func (m *Manager) AvailableVersions(driverID string) ([]VersionCandidate, error)
 	// return to a known local version.
 	for _, artifact := range installed {
 		key := artifact.RepoID + "\x00" + artifact.Version + "\x00" + strings.ToLower(artifact.SHA256)
-		if seen[key] {
+		if seen[key] || listed[artifact.ID] {
 			continue
 		}
 		seen[key] = true
