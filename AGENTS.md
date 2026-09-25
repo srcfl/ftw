@@ -169,8 +169,13 @@ Only two release channels exist:
 - **beta** receives every new candidate;
 - **stable** promotes the exact commit already published and validated as beta.
 
-There is no edge channel. Core and signed driver artifacts can release
-independently but follow the same beta-to-stable progression.
+There is no edge channel. Drivers ship with Core: a release carries the
+drivers pinned in [`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json),
+and `ftw update` and `ftw rollback` move them with Core. A driver fix is a pin
+bump in the next beta. The signed driver channel serves installs that cannot
+take a new Core and lets an expert try one driver early; such an override ends
+when a release catches up. Proposed: `drivers-stable` carries the drivers of the
+latest stable Core and is promoted with it.
 
 Native 0.x path:
 

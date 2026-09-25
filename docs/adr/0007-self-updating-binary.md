@@ -2,7 +2,8 @@
 
 - Status: accepted as direction on 2026-09-23; amended on 2026-09-24 so the
   owner runs updates from the command line or API and native installs have
-  no update UI (decisions 2–4, 6, 9 and 10–14); rollout pending
+  no update UI (decisions 2–4, 6, 9 and 10–14); amended on 2026-09-25 so
+  the Lua drivers ship with the Core release; rollout pending
 - Date: 2026-09-18
 - Issue: [#1308](https://github.com/srcfl/ftw/issues/1308)
 - Also decides the version scheme, tracked in
@@ -271,8 +272,11 @@ anything may change, and that is the true state of FTW.
   `current`. The existing `/api/status` check is the signal.
 - **Immutable tags and the release checker.** `selfupdate` keeps resolving
   GitHub Releases and refusing moving aliases. Only the trigger changes.
-- **The signed driver channel and `.ftwbak` full backups.** They are
-  independent of how Core is delivered and do not change.
+- **The signed driver channel and `.ftwbak` full backups.** Backups do not
+  change. Since 2026-09-25 the drivers ship in the release package, so an
+  update or rollback moves them with Core; the signed channel serves older
+  installs and expert overrides that end when a release catches up. See
+  [device repository](../device-repository.md).
 - **`history-migrate`.** It links DuckDB with CGO. It ships in the tarball as
   a second, dynamically linked binary, or moves into Core behind a build tag.
   That choice is made in its own PR.

@@ -38,6 +38,9 @@ type CatalogEntry struct {
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
+	// UsedBy names the enabled configured drivers that run this file, so a
+	// reader sees the live version and its source without the config.
+	UsedBy []string `json:"used_by,omitempty"`
 	// AuthPostPath is the URL path a read-only driver signs in at. A driver
 	// that reads a vendor cloud has to POST for a token before it can read,
 	// and that POST is not actuation. Only meaningful with ReadOnly.

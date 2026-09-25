@@ -2,9 +2,15 @@
 
 [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) is FTW's main
 driver source and default signed channel. FTW does not run raw code from the
-repository branch. The release workflow builds a read-only FTW artifact for
-each catalog driver from a reviewed `main` commit, signs one manifest and
-publishes the files through GitHub Releases.
+repository branch.
+
+Drivers reach a site with the Core release. Each release bundles the commit
+pinned in [`drivers/BUNDLED_SOURCE.json`](../drivers/BUNDLED_SOURCE.json), and
+`ftw update` and `ftw rollback` move those drivers with Core. The signed
+channel serves installs that cannot take a new Core, such as 1.x–3.x, and lets
+an expert try one driver ahead of a release. Its release workflow builds an FTW
+artifact for each catalog driver from a reviewed `main` commit, signs one
+manifest and publishes the files through GitHub Releases.
 
 Device Support may later consume an exact public commit for another product or
 a higher support level. That path does not own a second editable driver copy
@@ -17,6 +23,14 @@ A configured driver resolves in this order:
 1. operator-owned local override;
 2. explicitly activated managed artifact;
 3. bundled recovery driver.
+
+Drivers ship with the release, so a managed artifact overrides the release's
+own copy only until Core moves to another release. At the first start of a
+new release, Core deactivates each managed artifact whose bundled copy at the
+same path is at least as new, and the bundled driver runs. Within one release
+an override stays, including an older version chosen on purpose.
+`ftw status` lists the version each configured driver runs and names every
+override.
 
 Refreshing the signed manifest only updates discovery data. It never installs,
 activates or restarts a driver. FTW verifies the Ed25519 signature, driver ID,
@@ -75,17 +89,13 @@ device_repository:
         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 ```
 
-Set `device_repository: { enabled: false }` to opt out. Test beta on one chosen
-site by changing the ID, name and URL to:
+Set `device_repository: { enabled: false }` to opt out. The beta channel is
+built in and never replaces the stable source. Install one driver from it on
+one chosen site:
 
-```yaml
-    - id: ftw-device-drivers-beta
-      name: FTW device drivers beta
-      format: ftw.manifest/v1
-      manifest_url: https://github.com/srcfl/device-drivers/releases/download/drivers-beta/manifest.json
-      enabled: true
-      trusted_keys:
-        ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+```bash
+curl -X POST http://127.0.0.1:8080/api/device_repository/drivers/easee_cloud/install \
+  -H 'Content-Type: application/json' -d '{"channel":"beta","version":"1.3.3"}'
 ```
 
 Beta receives reviewed `main` commits. Stable promotion accepts only the exact
@@ -95,8 +105,10 @@ There is no edge channel.
 
 ## Runtime trust
 
-The signed public channel is read-only. Each manifest entry binds the driver
-artifact, source commit and only the read permissions it needs:
+Each manifest entry binds the driver artifact, its source commit and its
+permissions. A driver the catalog marks `control: true` keeps its control path
+and runs under the same terms as the copy bundled with Core, which is the same
+source. Every other entry gets only the read permissions it needs:
 
 - `http.get`;
 - `modbus.read`;
@@ -104,8 +116,8 @@ artifact, source commit and only the read permissions it needs:
 - `serial.read`.
 
 FTW binds those permissions to the active managed file. It denies write calls
-during init, poll, command, default mode and cleanup. The release build also
-makes the Lua artifact write-inert. These checks do not claim hardware test
+during init, poll, command, default mode and cleanup, and the release build
+makes that Lua artifact write-inert. These checks do not claim hardware test
 coverage; the public catalog and support status hold that evidence.
 
 Remote Lua never runs from a URL. Local unsigned drivers need an explicit

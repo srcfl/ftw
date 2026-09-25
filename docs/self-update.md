@@ -146,9 +146,11 @@ Docker 0.x runs the same package without the launcher. Change `FTW_VERSION`
 in `.env` and run `docker compose up -d --build` to update or go back; there
 is no automatic fallback. See [Docker](native-beta.md#docker).
 
-Core and the compiled Energyplan worker ship in one package. Core validates
-plans and keeps its Go fallback. Signed Lua drivers follow their own beta and
-stable channel and change one driver at a time; see
+Core, the compiled Energyplan worker and the Lua drivers pinned in
+`drivers/BUNDLED_SOURCE.json` ship in one package, so `ftw update` and
+`ftw rollback` move the drivers with Core. Core validates plans and keeps its
+Go fallback. A driver installed from the signed channel overrides the
+release's copy until a release catches up; see
 [device repository](device-repository.md). There is no optimizer sidecar in
 the native install.
 

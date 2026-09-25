@@ -59,6 +59,8 @@ func newFakeCore(t *testing.T) (*fakeCore, *httptest.Server) {
 		handler(w, r)
 	}))
 	t.Cleanup(srv.Close)
+	// A Core older than the driver lines answers the catalog without them.
+	f.on("GET", "/api/drivers/catalog", reply(404, "404 page not found"))
 	return f, srv
 }
 
@@ -347,6 +349,28 @@ func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 	}
 	if code != exitOK {
 		t.Fatalf("exit %d", code)
+	}
+
+	if strings.Contains(out, "Drivers:") {
+		t.Fatalf("a Core without used_by must leave the drivers line out:\n%s", out)
+	}
+	f.on("GET", "/api/drivers/catalog", reply(200, `{"entries":[
+		{"version":"1.5.8","source":"bundled","used_by":["sungrow"]},
+		{"version":"1.3.2","source":"managed","used_by":["easee"]},
+		{"version":"0.1.0","source":"local","used_by":["meter"]},
+		{"version":"2.1.2","source":"bundled"}]}`))
+	_, out, _ = runCLI(t, testEnv(), "status", "--url", srv.URL)
+	for _, want := range []string{
+		"Drivers:  easee 1.3.2, meter 0.1.0, sungrow 1.5.8\n",
+		"Override: easee 1.3.2 is installed from the driver channel; the next release with the same or a newer version replaces it",
+		"Override: meter runs a local file from the user drivers directory",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "sungrow runs") || strings.Contains(out, "2.1.2") {
+		t.Fatalf("a release driver or an unused file got its own line:\n%s", out)
 	}
 
 	f.on("GET", "/api/health", reply(200, `{"status":"degraded","drivers_offline":1}`))

@@ -262,8 +262,9 @@ same issue. It does not treat missing or censored truth as evidence.
 
 ## Versioning a module contract
 
-Drivers release independently. Energyplan ships with Core, but Core still
-checks the worker contract before accepting plans.
+Drivers and Energyplan ship with Core. A driver from the signed channel can
+still run on another Core, and Core still checks the worker contract before
+accepting plans.
 
 Each side declares the **window** of contract versions it speaks — core in
 [`go/internal/components`](../go/internal/components) and

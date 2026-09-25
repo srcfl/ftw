@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -200,6 +201,7 @@ func runStatus(args []string, out io.Writer, e env) error {
 
 	c.printBackups(ctx, out)
 	fmt.Fprintf(out, "Health:   %s; %s\n", h.Status, h.drivers())
+	c.printDrivers(ctx, out)
 	if h.History != nil {
 		fmt.Fprintf(out, "History:  %s; %d write failures\n", orUnknown(h.History.Migration.State), h.History.Writer.CommitFailures)
 	}
@@ -214,6 +216,43 @@ func runStatus(args []string, out io.Writer, e env) error {
 }
 
 // printBackups names where full backups go and the space left there.
+// printDrivers names the version each configured driver runs. Drivers ship
+// with the release, so only a file from elsewhere gets its own line. A Core
+// that does not say which file a driver runs leaves the section out.
+func (c *client) printDrivers(ctx context.Context, out io.Writer) {
+	var catalog struct {
+		Entries []struct {
+			Version string   `json:"version"`
+			Source  string   `json:"source"`
+			UsedBy  []string `json:"used_by"`
+		} `json:"entries"`
+	}
+	if err := c.get(ctx, "/api/drivers/catalog", &catalog); err != nil {
+		return
+	}
+	var running, overrides []string
+	for _, e := range catalog.Entries {
+		for _, name := range e.UsedBy {
+			running = append(running, name+" "+orUnknown(e.Version))
+			switch e.Source {
+			case "managed":
+				overrides = append(overrides, fmt.Sprintf("%s %s is installed from the driver channel; the next release with the same or a newer version replaces it", name, orUnknown(e.Version)))
+			case "local":
+				overrides = append(overrides, fmt.Sprintf("%s runs a local file from the user drivers directory", name))
+			}
+		}
+	}
+	if len(running) == 0 {
+		return
+	}
+	sort.Strings(running)
+	sort.Strings(overrides)
+	fmt.Fprintf(out, "Drivers:  %s\n", strings.Join(running, ", "))
+	for _, line := range overrides {
+		fmt.Fprintf(out, "Override: %s\n", line)
+	}
+}
+
 func (c *client) printBackups(ctx context.Context, out io.Writer) {
 	var list struct {
 		Dir       string `json:"dir"`
