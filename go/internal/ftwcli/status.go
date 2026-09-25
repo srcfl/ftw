@@ -243,8 +243,10 @@ func (c *client) printDrivers(ctx context.Context, out io.Writer) {
 			switch {
 			case e.Source == "managed" && e.Chosen:
 				overrides = append(overrides, fmt.Sprintf("%s %s, chosen and kept across updates; %s", name, orUnknown(e.Version), release))
+			case e.Source == "managed" && e.ReleaseVersion != "" && e.ReleaseVersion == e.Version:
+				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel, the same version as the release's", name, orUnknown(e.Version)))
 			case e.Source == "managed" && e.ReleaseVersion != "":
-				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel until a release has it; %s", name, orUnknown(e.Version), release))
+				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel until a release has a newer one; %s", name, orUnknown(e.Version), release))
 			case e.Source == "managed":
 				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel; %s", name, orUnknown(e.Version), release))
 			case e.Source == "local":

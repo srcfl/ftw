@@ -358,13 +358,15 @@ func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 		{"version":"1.5.8","source":"bundled","used_by":["sungrow"]},
 		{"version":"1.3.2","source":"managed","used_by":["easee"],"release_version":"1.3.3","chosen":true},
 		{"version":"2.2.0","source":"managed","used_by":["battery"],"release_version":"2.1.9"},
+		{"version":"1.2.2","source":"managed","used_by":["heatpump"],"release_version":"1.2.2"},
 		{"version":"0.1.0","source":"local","used_by":["meter"]},
 		{"version":"2.1.2","source":"bundled"}]}`))
 	_, out, _ = runCLI(t, testEnv(), "status", "--url", srv.URL)
 	for _, want := range []string{
-		"Drivers:  battery 2.2.0, easee 1.3.2, meter 0.1.0, sungrow 1.5.8\n",
+		"Drivers:  battery 2.2.0, easee 1.3.2, heatpump 1.2.2, meter 0.1.0, sungrow 1.5.8\n",
 		"Override: easee 1.3.2, chosen and kept across updates; the release has 1.3.3",
-		"Override: battery 2.2.0 from the driver channel until a release has it; the release has 2.1.9",
+		"Override: battery 2.2.0 from the driver channel until a release has a newer one; the release has 2.1.9",
+		"Override: heatpump 1.2.2 from the driver channel, the same version as the release's",
 		"Override: meter runs a local file; the release has no copy",
 	} {
 		if !strings.Contains(out, want) {
