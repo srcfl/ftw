@@ -19,6 +19,36 @@
     return String(path || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
   }
 
+  // A signed driver version is SemVer. A beta older than what runs is not an
+  // update: the badge counted one as waiting whenever the numbers differed.
+  function isNewerVersion(candidate, current) {
+    function parse(value) {
+      const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(value || ""));
+      return match ? { core: [+match[1], +match[2], +match[3]], pre: match[4] || "" } : null;
+    }
+    function comparePre(a, b) {
+      const left = a.split("."), right = b.split(".");
+      for (let i = 0; i < Math.min(left.length, right.length); i++) {
+        if (left[i] === right[i]) continue;
+        const ln = /^\d+$/.test(left[i]), rn = /^\d+$/.test(right[i]);
+        if (ln && rn) return +left[i] - +right[i];
+        if (ln !== rn) return ln ? -1 : 1;
+        return left[i] < right[i] ? -1 : 1;
+      }
+      return left.length - right.length;
+    }
+    const a = parse(candidate), b = parse(current);
+    if (!a) return false;
+    if (!b) return true;
+    for (let i = 0; i < 3; i++) {
+      if (a.core[i] !== b.core[i]) return a.core[i] > b.core[i];
+    }
+    if (a.pre === b.pre) return false;
+    if (!a.pre) return true;
+    if (!b.pre) return false;
+    return comparePre(a.pre, b.pre) > 0;
+  }
+
   // Header status marks. Inline SVG rather than font glyphs: at 16px the
   // three announcements have to be separable by silhouette alone, because
   // colour is not reliable for every operator and the marks sit in the
@@ -360,7 +390,7 @@
               const betaDriver = beta && beta.driver;
               const managed = entry.source !== "local";
               const stableAvailable = !!(managed && entry.update_available && entry.repository_id && entry.upstream_version);
-              const betaAvailable = !!(managed && betaDriver && betaDriver.version && betaDriver.version !== current);
+              const betaAvailable = !!(managed && betaDriver && betaDriver.version && isNewerVersion(betaDriver.version, current));
               return {
                 ...entry,
                 beta_candidate: beta,

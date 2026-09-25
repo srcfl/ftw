@@ -1892,6 +1892,15 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 			entries[i].UsedBy = usedBy[entries[i].Filename]
 		}
 	}
+	for i := range entries {
+		if entries[i].Source != "managed" && entries[i].Source != "local" {
+			continue
+		}
+		rel := strings.TrimPrefix(entries[i].Path, "drivers/")
+		if release, err := drivers.ParseCatalogFile(filepath.Join(dir, filepath.FromSlash(rel))); err == nil {
+			entries[i].ReleaseVersion = release.Version
+		}
+	}
 	writeJSON(w, 200, map[string]any{"path": dir, "entries": entries})
 }
 

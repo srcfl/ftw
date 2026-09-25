@@ -222,9 +222,10 @@ func runStatus(args []string, out io.Writer, e env) error {
 func (c *client) printDrivers(ctx context.Context, out io.Writer) {
 	var catalog struct {
 		Entries []struct {
-			Version string   `json:"version"`
-			Source  string   `json:"source"`
-			UsedBy  []string `json:"used_by"`
+			Version        string   `json:"version"`
+			Source         string   `json:"source"`
+			UsedBy         []string `json:"used_by"`
+			ReleaseVersion string   `json:"release_version"`
 		} `json:"entries"`
 	}
 	if err := c.get(ctx, "/api/drivers/catalog", &catalog); err != nil {
@@ -234,11 +235,15 @@ func (c *client) printDrivers(ctx context.Context, out io.Writer) {
 	for _, e := range catalog.Entries {
 		for _, name := range e.UsedBy {
 			running = append(running, name+" "+orUnknown(e.Version))
+			release := "the release has no copy"
+			if e.ReleaseVersion != "" {
+				release = "the release has " + e.ReleaseVersion
+			}
 			switch e.Source {
 			case "managed":
-				overrides = append(overrides, fmt.Sprintf("%s %s is installed from the driver channel; the next release with the same or a newer version replaces it", name, orUnknown(e.Version)))
+				overrides = append(overrides, fmt.Sprintf("%s %s from the driver channel; %s", name, orUnknown(e.Version), release))
 			case "local":
-				overrides = append(overrides, fmt.Sprintf("%s runs a local file from the user drivers directory", name))
+				overrides = append(overrides, fmt.Sprintf("%s runs a local file; %s", name, release))
 			}
 		}
 	}

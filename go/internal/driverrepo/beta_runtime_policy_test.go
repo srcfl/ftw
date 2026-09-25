@@ -55,7 +55,7 @@ func installBetaPolicyFixture(t *testing.T, repositoryIDs []string) betaPolicyFi
 	}
 	t.Cleanup(func() { st.Close() })
 	newManager := func(ids []string) *Manager {
-		cfg := &config.DeviceRepository{}
+		cfg := &config.DeviceRepository{Enabled: true}
 		for _, id := range ids {
 			cfg.Repositories = append(cfg.Repositories, config.DriverRepositorySource{
 				ID: id, ManifestURL: "https://unrelated.invalid/manifest.json", AllowUnsigned: true,

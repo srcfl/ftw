@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/state"
 )
@@ -229,7 +230,7 @@ func (s *Server) handleDeviceRepositoryUseBundled(w http.ResponseWriter, r *http
 		return
 	}
 	body.LogicalPath = logicalPath
-	bundledPath, err := s.bundledDriverPath(r.PathValue("id"))
+	bundledPath, err := s.bundledDriverFor(r.PathValue("id"), body.LogicalPath)
 	if err != nil {
 		writeJSON(w, 422, map[string]string{"error": err.Error()})
 		return
@@ -376,7 +377,7 @@ func (s *Server) activeDriverLogicalPath(id, requested string) (string, error) {
 		if requested == "" || requested == version.LogicalPath {
 			return version.LogicalPath, nil
 		}
-		if bundled, err := s.bundledDriverPath(id); err == nil {
+		if bundled, err := s.bundledDriverFor(id, version.LogicalPath); err == nil {
 			rel, _ := filepath.Rel(s.deps.DriverDir, bundled)
 			if requested == "drivers/"+filepath.ToSlash(rel) {
 				return version.LogicalPath, nil
@@ -406,6 +407,38 @@ func (r managedDriverRestartState) response(status string, artifact any) map[str
 	names := append([]string{}, r.Restarted...)
 	return map[string]any{"status": status, "artifact": artifact,
 		"runtime_verified": len(names) > 0, "restarted_drivers": names, "logical_path": r.LogicalPath, "config_changed": r.ConfigChanged}
+}
+
+// sameDriverFile reports whether a driver file, declaring id, holds the
+// driver of a signed artifact. An equal id is enough. The bundled sources
+// spell ids their own way (easee-cloud for the channel's easee_cloud), so a
+// file at the path the signed manifest names also counts when its id passes
+// the publisher's identity rule. The rule alone is too loose: ctek-chargestorm-
+// hybrid contains "ctek".
+func sameDriverFile(path, id string, artifact state.DriverRepoInstall) bool {
+	if artifact.DriverID == "" || id == "" {
+		return false
+	}
+	if id == artifact.DriverID {
+		return true
+	}
+	return filepath.Base(path) == filepath.Base(artifact.LogicalPath) &&
+		driverrepo.IdentifiesSameDriver(id, artifact.DriverID)
+}
+
+// bundledDriverFor finds this release's copy of a managed driver: first the
+// file at the logical path the signed manifest names, then any bundled file
+// declaring exactly the same id.
+func (s *Server) bundledDriverFor(id, logicalPath string) (string, error) {
+	rel := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(logicalPath)), "drivers/")
+	if logicalPath != "" && rel != "" && !strings.Contains(rel, "..") && !filepath.IsAbs(rel) {
+		candidate := filepath.Join(s.deps.DriverDir, filepath.FromSlash(rel))
+		if entry, err := drivers.ParseCatalogFile(candidate); err == nil &&
+			sameDriverFile(candidate, entry.ID, state.DriverRepoInstall{DriverID: id, LogicalPath: logicalPath}) {
+			return candidate, nil
+		}
+	}
+	return s.bundledDriverPath(id)
 }
 
 // The repository verifies DRIVER.id against its signed manifest. Bundled
@@ -449,7 +482,7 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 	targetPath := activePath
 	if artifact.InstalledPath == "" {
 		var err error
-		targetPath, err = s.bundledDriverPath(artifact.DriverID)
+		targetPath, err = s.bundledDriverFor(artifact.DriverID, artifact.LogicalPath)
 		if err != nil {
 			return restartState, err
 		}
@@ -474,7 +507,7 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 		// record still binds the path to the ID; all other files need metadata.
 		if filepath.Clean(current.Lua) != filepath.Clean(activePath) {
 			entry, err := drivers.ParseCatalogFile(current.Lua)
-			if err != nil || artifact.DriverID == "" || entry.ID != artifact.DriverID {
+			if err != nil || !sameDriverFile(current.Lua, entry.ID, artifact) {
 				continue
 			}
 		}

@@ -356,14 +356,14 @@ func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 	}
 	f.on("GET", "/api/drivers/catalog", reply(200, `{"entries":[
 		{"version":"1.5.8","source":"bundled","used_by":["sungrow"]},
-		{"version":"1.3.2","source":"managed","used_by":["easee"]},
+		{"version":"1.3.2","source":"managed","used_by":["easee"],"release_version":"1.3.3"},
 		{"version":"0.1.0","source":"local","used_by":["meter"]},
 		{"version":"2.1.2","source":"bundled"}]}`))
 	_, out, _ = runCLI(t, testEnv(), "status", "--url", srv.URL)
 	for _, want := range []string{
 		"Drivers:  easee 1.3.2, meter 0.1.0, sungrow 1.5.8\n",
-		"Override: easee 1.3.2 is installed from the driver channel; the next release with the same or a newer version replaces it",
-		"Override: meter runs a local file from the user drivers directory",
+		"Override: easee 1.3.2 from the driver channel; the release has 1.3.3",
+		"Override: meter runs a local file; the release has no copy",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in\n%s", want, out)
