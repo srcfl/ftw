@@ -119,6 +119,11 @@ func (s *Store) RetireRawHistory(ctx context.Context) error {
 	}
 	failed = false
 
+	// Fold the old WAL into history.db before the swap moves it aside, so a
+	// crash in that window boots the old file with nothing left in its WAL.
+	if _, err := s.history.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return err
+	}
 	if err := s.history.Close(); err != nil {
 		return err
 	}
