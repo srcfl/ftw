@@ -65,6 +65,7 @@ func (r *evCommandOwnerRuntime) DefaultMode(context.Context) error {
 	return nil
 }
 func (r *evCommandOwnerRuntime) Cleanup(context.Context) error { return nil }
+func (r *evCommandOwnerRuntime) Discard()                      {}
 func (r *evCommandOwnerRuntime) Env() *HostEnv                 { return r.env }
 
 func (r *evCommandOwnerRuntime) sent(action string) bool {
