@@ -624,7 +624,7 @@ func main() {
 		}
 	}
 	if v, ok := st.LoadConfig("grid_target_w"); ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
+		if f, ok := restoredGridTargetW(v); ok {
 			ctrl.SetGridTarget(f)
 		}
 	}

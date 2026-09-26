@@ -1217,6 +1217,11 @@ func (s *State) SetGridTarget(w float64) {
 // and perPhaseOverageW: an incomplete fuse description yields no clamp
 // rather than an invented one.
 func (s *State) SetPeakLimit(w float64) error {
+	// NaN fails every comparison, so it would pass both checks below and
+	// leave `gridW > PeakLimitW` never true: shaving silently off.
+	if math.IsNaN(w) || math.IsInf(w, 0) {
+		return fmt.Errorf("peak_limit_w must be a finite number, got %v", w)
+	}
 	if w < 0 {
 		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
 	}

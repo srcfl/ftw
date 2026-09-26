@@ -353,7 +353,14 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 		// While the lock is off every LAN peer is an owner. First enable
 		// from the LAN is how a visitor sets their own password and
 		// locks Settings. The box itself (loopback) is the only door
-		// that may turn the lock on.
+		// that may turn the lock on. An app session request is built to
+		// look like loopback; it is not the box (appLinkOwnerMintAllowed).
+		if !currentlyOn && appLinkOverSession(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "turn the house password on at the box, not through the app",
+			})
+			return
+		}
 		if !currentlyOn && !isLoopbackClient(r.RemoteAddr) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": "enable the house password from loopback inside the process. A published Docker port is not loopback — on Docker Desktop use docker compose -f docker-compose.macos.yml exec ftw, then curl http://127.0.0.1:8080",
