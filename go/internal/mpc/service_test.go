@@ -83,7 +83,7 @@ func TestBuildSlotsCarriesInputProvenance(t *testing.T) {
 		},
 		{
 			SlotTsMs: start + time.Hour.Milliseconds(), SlotLenMin: 15,
-			SpotOreKwh: 70, TotalOreKwh: 130, Source: "forecast", FetchedAtMs: 222,
+			SpotOreKwh: 70, TotalOreKwh: 130, Source: "elprisetjustnu", FetchedAtMs: 222,
 		},
 	}
 	forecasts := []state.ForecastPoint{
@@ -103,14 +103,12 @@ func TestBuildSlotsCarriesInputProvenance(t *testing.T) {
 	}
 	if got := slots[0]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
 		got.PriceInputSource != "entsoe" || got.PriceInputAvailableAtMs != 111 ||
-		got.WeatherRowSource != "met.no" || got.WeatherRowAvailableAtMs != 333 ||
-		got.Confidence != 1 {
+		got.WeatherRowSource != "met.no" || got.WeatherRowAvailableAtMs != 333 {
 		t.Fatalf("first slot provenance = %+v", got)
 	}
 	if got := slots[1]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
-		got.PriceInputSource != "forecast" || got.PriceInputAvailableAtMs != 222 ||
-		got.WeatherRowSource != "open-meteo" || got.WeatherRowAvailableAtMs != 444 ||
-		got.Confidence != 0.6 {
+		got.PriceInputSource != "elprisetjustnu" || got.PriceInputAvailableAtMs != 222 ||
+		got.WeatherRowSource != "open-meteo" || got.WeatherRowAvailableAtMs != 444 {
 		t.Fatalf("second slot provenance = %+v", got)
 	}
 
@@ -122,92 +120,6 @@ func TestBuildSlotsCarriesInputProvenance(t *testing.T) {
 		got.PriceInputSource != "entsoe" || got.PriceInputAvailableAtMs != 111 ||
 		got.WeatherRowSource != "" || got.WeatherRowAvailableAtMs != 0 {
 		t.Fatalf("slot without weather provenance = %+v", got)
-	}
-}
-
-func TestSynthesizedPriceCarriesCreationProvenance(t *testing.T) {
-	now := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
-	prices := extendPricesWithForecast(nil, "SE3",
-		func(string, time.Time) float64 { return 42 },
-		now.UnixMilli(), now.Add(time.Hour).UnixMilli(), 0, 0)
-	if len(prices) != 1 {
-		t.Fatalf("extendPricesWithForecast returned %d rows, want 1", len(prices))
-	}
-	slots := buildSlots(prices, nil, 500, now.UnixMilli(), nil, nil, nil)
-	if len(slots) != 1 {
-		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
-	}
-	if got := slots[0]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
-		got.PriceInputSource != "forecast" ||
-		got.PriceInputAvailableAtMs != now.UnixMilli() || got.Confidence != 0.6 {
-		t.Fatalf("synthesized price provenance = %+v", got)
-	}
-}
-
-func TestForecastPricePersistsLastKnownInsteadOfClimatologyCliff(t *testing.T) {
-	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
-	last := state.PricePoint{
-		Zone: "SE3", SlotTsMs: now.UnixMilli(), SlotLenMin: 60,
-		SpotOreKwh: 200, TotalOreKwh: 280, Source: "entsoe",
-	}
-	prices := extendPricesWithForecast(
-		[]state.PricePoint{last},
-		"SE3",
-		func(string, time.Time) float64 { return 70 },
-		now.UnixMilli(),
-		now.Add(2*time.Hour).UnixMilli(),
-		0, 0,
-	)
-	if len(prices) < 2 {
-		t.Fatalf("got %d prices, want published + forecast", len(prices))
-	}
-	var forecast []state.PricePoint
-	for _, p := range prices {
-		if p.Source == "forecast" {
-			forecast = append(forecast, p)
-		}
-	}
-	if len(forecast) == 0 {
-		t.Fatal("no forecast rows")
-	}
-	first := forecast[0]
-	if first.SpotOreKwh < 150 {
-		t.Errorf("first unpublished hour jumped to climatology: got %.1f, want near last-known 200 (not 70)", first.SpotOreKwh)
-	}
-	if first.SpotOreKwh > 201 {
-		t.Errorf("first unpublished hour overshot last-known: got %.1f", first.SpotOreKwh)
-	}
-}
-
-func TestForecastPriceFadesTowardClimatologyOverHours(t *testing.T) {
-	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
-	last := state.PricePoint{
-		Zone: "SE3", SlotTsMs: now.UnixMilli(), SlotLenMin: 60,
-		SpotOreKwh: 200, TotalOreKwh: 280, Source: "entsoe",
-	}
-	prices := extendPricesWithForecast(
-		[]state.PricePoint{last},
-		"SE3",
-		func(string, time.Time) float64 { return 70 },
-		now.UnixMilli(),
-		now.Add(13*time.Hour).UnixMilli(),
-		0, 0,
-	)
-	var forecast []state.PricePoint
-	for _, p := range prices {
-		if p.Source == "forecast" {
-			forecast = append(forecast, p)
-		}
-	}
-	if len(forecast) < 12 {
-		t.Fatalf("got %d forecast rows, want >= 12", len(forecast))
-	}
-	late := forecast[len(forecast)-1]
-	if late.SpotOreKwh > 120 {
-		t.Errorf("12 h out should have faded toward climatology 70, got %.1f", late.SpotOreKwh)
-	}
-	if late.SpotOreKwh >= forecast[0].SpotOreKwh {
-		t.Errorf("later forecast %.1f should be below first-hour persist %.1f", late.SpotOreKwh, forecast[0].SpotOreKwh)
 	}
 }
 
@@ -734,10 +646,10 @@ func TestSelfConsumptionTerminalPriceEmpty(t *testing.T) {
 func TestOptimizeSelfConsumptionDischargesWithSpreadTerminalPrice(t *testing.T) {
 	// 4-slot horizon, PV < load in every slot so battery has work to do.
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
-		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
-		{StartMs: 7200 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
-		{StartMs: 10800 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500},
+		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500},
+		{StartMs: 7200 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500},
+		{StartMs: 10800 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500},
 	}
 
 	// Build PricePoints identical to the slots and compute the
@@ -997,8 +909,8 @@ func TestSelectPlannerPVWForecastCapInactiveWhenTwinNearZero(t *testing.T) {
 // the mode name implies.
 func TestOptimizeSelfConsumptionDischargesDespiteHighTerminal(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
-		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500},
+		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500},
 	}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = 0.8

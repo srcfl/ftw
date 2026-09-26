@@ -128,13 +128,6 @@ type Slot struct {
 	WeatherRowSource        string
 	WeatherRowAvailableAtMs int64
 
-	// Confidence in [0, 1]. 1.0 = real day-ahead price; < 1.0 = ML-
-	// forecasted price where we're less sure of both level and shape.
-	// The DP blends low-confidence prices toward the horizon mean so
-	// the planner doesn't over-commit to uncertain spikes. Defaults to
-	// 1.0 when callers leave it zero.
-	Confidence float64
-
 	// Limits caps grid flow for this slot. Zero value = unlimited.
 	// See power_limits.go for use cases (peak-tariff capacity, DSO
 	// curtailment, service-entrance current limit).
@@ -304,13 +297,12 @@ type Action struct {
 	ForecastPVW   *float64 `json:"forecast_pv_w,omitempty"`
 	ForecastLoadW *float64 `json:"forecast_load_w,omitempty"`
 	LoadW         float64  `json:"load_w"`
-	BatteryW      float64  `json:"battery_w"`  // decision (site sign, AC terminals)
-	GridW         float64  `json:"grid_w"`     // resulting grid power
-	SoC           float64  `json:"soc"`        // 0–1 at END of slot
-	CostOre       float64  `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
-	Confidence    float64  `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
-	Reason        string   `json:"reason"`     // short human-readable explanation
-	EMSMode       string   `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
+	BatteryW      float64  `json:"battery_w"` // decision (site sign, AC terminals)
+	GridW         float64  `json:"grid_w"`    // resulting grid power
+	SoC           float64  `json:"soc"`       // 0–1 at END of slot
+	CostOre       float64  `json:"cost_ore"`  // this slot's cost (öre). Negative = revenue.
+	Reason        string   `json:"reason"`    // short human-readable explanation
+	EMSMode       string   `json:"ems_mode"`  // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
 	// When PVCurtailActive is false, 0 means no cap (a dispatch hint may
@@ -501,8 +493,7 @@ type SolverInfo struct {
 // p.ExportFloorOreKwh explicitly floors it.
 //
 // Shared by plan reporting, baselines, diagnostics reconstruction, and
-// curtailment. The DP decision path applies confidence blending on top of
-// this same raw export-price model.
+// curtailment. The DP decides with this same export-price model.
 func SlotGridCostOre(slot Slot, gridKWh float64, p Params) float64 {
 	return gridcost.GridCostOre(slot.PriceOre, slot.SpotOre, gridKWh, exportPricingFromParams(p))
 }
@@ -590,11 +581,6 @@ func sanitizeOptimizeSlots(slots []Slot) []Slot {
 		if !finite(s.LoadW) || s.LoadW < 0 {
 			s.LoadW = 0
 		}
-		if !finite(s.Confidence) || s.Confidence <= 0 {
-			s.Confidence = 1.0
-		} else if s.Confidence > 1 {
-			s.Confidence = 1.0
-		}
 		if !finite(s.Limits.MaxImportW) {
 			s.Limits.MaxImportW = 0
 		}
@@ -654,28 +640,8 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 	socStep := (p.SoCMax - p.SoCMin) / float64(S-1)
 	socAt := func(i int) float64 { return p.SoCMin + float64(i)*socStep }
 
-	// Default any missing confidence to 1.0 (treat caller-unaware slots
-	// as "real") before anything reads it.
-	for i := range slots {
-		if slots[i].Confidence <= 0 {
-			slots[i].Confidence = 1.0
-		}
-	}
-	// Confidence handling: blend low-confidence prices toward the
-	// horizon mean (real + forecast).
-	meanPrice, meanExport := horizonMeans(slots, p)
-	// effPrice(slot) = c × raw + (1 − c) × mean. c=1 → raw; c<1 pulls
-	// toward horizon mean, dampening arbitrage the DP sees on shaky
-	// forecasted slots without hiding them entirely.
-	effPrice := func(s Slot) float64 {
-		return s.Confidence*s.PriceOre + (1-s.Confidence)*meanPrice
-	}
-	// Export decision lens mirrors import price confidence handling, but
-	// starts from the same raw per-slot export model used everywhere else.
-	effExportOre := func(s Slot) float64 {
-		raw := SlotExportPriceOre(s, p)
-		return s.Confidence*raw + (1-s.Confidence)*meanExport
-	}
+	// The mean price scales the EV deadline penalty and labels reasons.
+	meanPrice := horizonMeanPrice(slots)
 
 	// Action grid spans −MaxDischargeW … +MaxChargeW and always contains
 	// 0 W. With asymmetric charge/discharge limits, an odd number of evenly
@@ -897,9 +863,9 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 						gridKWh := gridW * dtH / 1000.0
 						var cost float64
 						if gridKWh > 0 {
-							cost = effPrice(slot) * gridKWh
+							cost = slot.PriceOre * gridKWh
 						} else {
-							cost = -effExportOre(slot) * (-gridKWh)
+							cost = -SlotExportPriceOre(slot, p) * (-gridKWh)
 						}
 
 						// Strict self-consumption bias. When the mode
@@ -939,7 +905,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 							houseGridW := slot.LoadW + slot.PVW + battW
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
-								cost += strictSCBiasOre(effPrice(slot), houseKWh)
+								cost += strictSCBiasOre(slot.PriceOre, houseKWh)
 							}
 						}
 
@@ -1137,7 +1103,6 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 			ExecutionStartMs: slot.ExecutionStartMs,
 			PriceOre:         slot.PriceOre,
 			SpotOre:          slot.SpotOre,
-			Confidence:       slot.Confidence,
 			PVW:              slot.PVW,
 			LoadW:            slot.LoadW,
 			BatteryW:         actW,
@@ -1163,33 +1128,29 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 	return plan, ctx.Err()
 }
 
-// horizonMeans returns the horizon's mean import price and mean export
-// price, both LENGTH-WEIGHTED by Slot.LenMin: with mixed 15/60-minute
-// slots an unweighted mean over-counts the short slots, skewing the
-// confidence blend and the EV deadline penalty (parity fix, #1020 —
-// Baselines already weighted by LenMin; the DP did not). Falls back to
-// the unweighted mean when no slot carries a length. Never mutates
-// slots.
-func horizonMeans(slots []Slot, p Params) (meanPriceOre, meanExportOre float64) {
+// horizonMeanPrice returns the horizon's mean import price, LENGTH-WEIGHTED
+// by Slot.LenMin: with mixed 15/60-minute slots an unweighted mean
+// over-counts the short slots, skewing the EV deadline penalty (parity fix,
+// #1020 — Baselines already weighted by LenMin; the DP did not). Falls back
+// to the unweighted mean when no slot carries a length. Never mutates slots.
+func horizonMeanPrice(slots []Slot) float64 {
 	if len(slots) == 0 {
-		return 0, 0
+		return 0
 	}
-	var sumPrice, sumExport, sumLenMin float64
+	var sumPrice, sumLenMin float64
 	for _, s := range slots {
 		w := s.DurationHours() * 60
 		sumPrice += s.PriceOre * w
-		sumExport += SlotExportPriceOre(s, p) * w
 		sumLenMin += w
 	}
 	if sumLenMin <= 0 {
-		sumPrice, sumExport = 0, 0
+		sumPrice = 0
 		for _, s := range slots {
 			sumPrice += s.PriceOre
-			sumExport += SlotExportPriceOre(s, p)
 		}
 		sumLenMin = float64(len(slots))
 	}
-	return sumPrice / sumLenMin, sumExport / sumLenMin
+	return sumPrice / sumLenMin
 }
 
 // strictSCBiasOre is the strict self-consumption decision bias: house
@@ -1228,13 +1189,12 @@ func annotateCurtailment(plan *Plan, p Params) {
 			continue // importing, not exporting
 		}
 		slot := Slot{
-			StartMs:    a.SlotStartMs,
-			LenMin:     a.SlotLenMin,
-			PriceOre:   a.PriceOre,
-			SpotOre:    a.SpotOre,
-			PVW:        a.PVW,
-			LoadW:      a.LoadW,
-			Confidence: a.Confidence,
+			StartMs:  a.SlotStartMs,
+			LenMin:   a.SlotLenMin,
+			PriceOre: a.PriceOre,
+			SpotOre:  a.SpotOre,
+			PVW:      a.PVW,
+			LoadW:    a.LoadW,
 		}
 		if SlotExportPriceOre(slot, p) > 0 {
 			continue // profitable export; curtailing would discard revenue
@@ -1337,10 +1297,6 @@ func reasonFor(s Slot, batteryW, gridW, meanPrice float64) string {
 	baseline := s.LoadW + s.PVW // what grid would see with no battery
 	const chargeThresh = IdleGateThresholdW
 	const gridThresh = 100.0
-	priceTag := ""
-	if s.Confidence < 1.0 {
-		priceTag = " (predicted)"
-	}
 	// Classify the resulting grid direction — this is what the
 	// operator sees on the meter, and what matters for the label.
 	gridExports := gridW < -gridThresh
@@ -1358,36 +1314,36 @@ func reasonFor(s Slot, batteryW, gridW, meanPrice float64) string {
 		// battery act as a sink for solar energy. Only flip to the
 		// "charge — import" branches when the battery's appetite
 		// exceeds PV output and drags grid into actual import.
-		return "absorb PV surplus" + priceTag
+		return "absorb PV surplus"
 	case batteryW > chargeThresh && gridImports && priceBelow:
-		return "charge from cheap grid" + priceTag
+		return "charge from cheap grid"
 	case batteryW > chargeThresh && gridImports:
-		return "charge — import" + priceTag
+		return "charge — import"
 	case batteryW > chargeThresh:
-		return "charge" + priceTag
+		return "charge"
 
 	// --- discharging branches ---
 	case batteryW < -chargeThresh && gridExports && priceAbove:
-		return "discharge — export at peak" + priceTag
+		return "discharge — export at peak"
 	case batteryW < -chargeThresh && gridExports:
-		return "discharge — export" + priceTag
+		return "discharge — export"
 	case batteryW < -chargeThresh && priceAbove:
 		// Reducing import during a high-price slot — even if it
 		// doesn't push grid negative, the motive is peak-shaving.
-		return "discharge — price above horizon mean" + priceTag
+		return "discharge — price above horizon mean"
 	case batteryW < -chargeThresh && baseline > chargeThresh:
-		return "discharge — cover local load" + priceTag
+		return "discharge — cover local load"
 	case batteryW < -chargeThresh:
-		return "discharge" + priceTag
+		return "discharge"
 
 	// --- idle branches ---
 	default:
 		if gridImports {
-			return "idle — import to cover load" + priceTag
+			return "idle — import to cover load"
 		}
 		if gridExports {
-			return "idle — export PV surplus" + priceTag
+			return "idle — export PV surplus"
 		}
-		return "idle" + priceTag
+		return "idle"
 	}
 }

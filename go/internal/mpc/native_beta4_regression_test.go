@@ -70,7 +70,7 @@ func TestNativeCapturedSiteReplay(t *testing.T) {
 	}
 	var slots []Slot
 	for _, s := range q.Slots {
-		slots = append(slots, Slot{StartMs: s.StartMs, ExecutionStartMs: s.ExecutionStartMs, LenMin: s.LenMin, PriceOre: s.PriceOre, SpotOre: s.SpotOre, Confidence: s.Confidence, LoadW: s.LoadW, PVW: s.PVW, Limits: PowerLimits{MaxImportW: s.MaxImportW, MaxExportW: s.MaxExportW}})
+		slots = append(slots, Slot{StartMs: s.StartMs, ExecutionStartMs: s.ExecutionStartMs, LenMin: s.LenMin, PriceOre: s.PriceOre, SpotOre: s.SpotOre, LoadW: s.LoadW, PVW: s.PVW, Limits: PowerLimits{MaxImportW: s.MaxImportW, MaxExportW: s.MaxExportW}})
 	}
 	var response []byte
 	if path := os.Getenv("FTW_NATIVE_CAPTURE_RESPONSE"); path != "" {

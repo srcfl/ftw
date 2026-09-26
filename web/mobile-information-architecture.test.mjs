@@ -84,7 +84,7 @@ describe("plain-language plan briefing", () => {
     assert.match(plan, /derivePlanBrief/);
     assert.match(planBrief, /Fallback active/);
     assert.match(planBrief, /No active safety adjustment/);
-    assert.match(planBrief, /forecast after that/);
+    assert.match(planBrief, /Plan until /);
     assert.match(planBrief, /at the end of the plan/);
   });
 });

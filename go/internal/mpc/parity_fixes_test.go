@@ -25,47 +25,33 @@ func TestStrictSCBiasClampsNegativePrices(t *testing.T) {
 	}
 }
 
-// TestHorizonMeansAreLengthWeighted: with mixed 15/60-minute slots the
-// unweighted mean over-counts the short ones. The mean feeds the
-// confidence blend and the EV deadline penalty, so the error moves real
-// decisions.
-func TestHorizonMeansAreLengthWeighted(t *testing.T) {
-	p := Params{ExportBonusOreKwh: 10}
+// TestHorizonMeanPriceIsLengthWeighted: with mixed 15/60-minute slots the
+// unweighted mean over-counts the short ones. The mean feeds the EV
+// deadline penalty, so the error moves real decisions.
+func TestHorizonMeanPriceIsLengthWeighted(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 15, PriceOre: 100, SpotOre: 20},
 		{StartMs: 15 * 60 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 60},
 	}
-	meanPrice, meanExport := horizonMeans(slots, p)
+	meanPrice := horizonMeanPrice(slots)
 
 	const wantPrice = (100*15 + 300*60) / 75.0 // 260, not the unweighted 200
 	if math.Abs(meanPrice-wantPrice) > 1e-9 {
 		t.Errorf("meanPrice = %v, want %v (unweighted would be 200)", meanPrice, wantPrice)
 	}
-	wantExport := (SlotExportPriceOre(slots[0], p)*15 + SlotExportPriceOre(slots[1], p)*60) / 75.0
-	if math.Abs(meanExport-wantExport) > 1e-9 {
-		t.Errorf("meanExport = %v, want %v", meanExport, wantExport)
-	}
-	unweightedExport := (SlotExportPriceOre(slots[0], p) + SlotExportPriceOre(slots[1], p)) / 2.0
-	if math.Abs(wantExport-unweightedExport) < 1e-9 {
-		t.Fatal("fixture is degenerate: weighted and unweighted export means coincide")
-	}
 
 	// Pure: the caller's slots come back untouched.
-	if slots[0].Confidence != 0 || slots[0].PriceOre != 100 || slots[1].LenMin != 60 {
-		t.Errorf("horizonMeans mutated its input: %+v", slots)
+	if slots[0].PriceOre != 100 || slots[1].LenMin != 60 {
+		t.Errorf("horizonMeanPrice mutated its input: %+v", slots)
 	}
 }
 
-// TestHorizonMeansFallBackToUnweighted covers the degenerate horizon
-// where nothing carries a length — the means must still be finite.
-func TestHorizonMeansFallBackToUnweighted(t *testing.T) {
+// TestHorizonMeanPriceFallsBackToUnweighted covers the degenerate horizon
+// where nothing carries a length — the mean must still be finite.
+func TestHorizonMeanPriceFallsBackToUnweighted(t *testing.T) {
 	slots := []Slot{{PriceOre: 100, SpotOre: 10}, {PriceOre: 300, SpotOre: 30}}
-	meanPrice, meanExport := horizonMeans(slots, Params{})
-	if meanPrice != 200 {
+	if meanPrice := horizonMeanPrice(slots); meanPrice != 200 {
 		t.Errorf("meanPrice = %v, want 200", meanPrice)
-	}
-	if meanExport != 20 {
-		t.Errorf("meanExport = %v, want 20", meanExport)
 	}
 }
 
@@ -92,7 +78,7 @@ func TestForwardSimStartsAtRealInitialSoC(t *testing.T) {
 		TerminalSoCPrice:    100, // == slot price → idle is optimal
 	}
 	slots := []Slot{{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 0,
-		LoadW: 0, PVW: 0, Confidence: 1}}
+		LoadW: 0, PVW: 0}}
 
 	plan := Optimize(slots, p)
 	if len(plan.Actions) != 1 {
@@ -117,7 +103,7 @@ func TestPVBonusAppliesInEveryMode(t *testing.T) {
 	// earns the 100 öre/kWh terminal credit on 0.95 of what goes in.
 	// Exporting therefore wins on price alone — until the bonus.
 	slots := []Slot{{StartMs: 0, LenMin: 60, PriceOre: 150, SpotOre: 110,
-		LoadW: 500, PVW: -3000, Confidence: 1}}
+		LoadW: 500, PVW: -3000}}
 	base := Params{
 		Mode:                ModeSelfConsumption,
 		SoCMin:              0.1,
@@ -167,9 +153,9 @@ func TestDiagnosticPersistsReplayEconomics(t *testing.T) {
 	start := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC).UnixMilli()
 	slots := []Slot{
 		{StartMs: start, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			PVW: -200, LoadW: 400, Confidence: 1.0},
+			PVW: -200, LoadW: 400},
 		{StartMs: start + 15*60*1000, LenMin: 15, PriceOre: 150, SpotOre: 80,
-			PVW: -100, LoadW: 500, Confidence: 1.0},
+			PVW: -100, LoadW: 500},
 	}
 	p := Params{
 		Mode:                     ModeArbitrage,

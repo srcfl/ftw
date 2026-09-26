@@ -19,7 +19,7 @@ func TestDiagnoseNilBeforeReplan(t *testing.T) {
 
 // TestDiagnoseJoinsSlotsAndActions is the core contract: the per-slot
 // output row must carry BOTH the input context the DP saw (price, PV,
-// load, confidence) and the decision it made (battery, grid, SoC,
+// load, provenance) and the decision it made (battery, grid, SoC,
 // reason). Without the join, operators can't audit decisions.
 func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	start := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC).UnixMilli()
@@ -28,14 +28,13 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	// we're testing the join shape.
 	slots := []Slot{
 		{StartMs: start, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			PVW: -200, LoadW: 400, Confidence: 1.0,
-			InputProvenanceSchema: inputProvenanceSchemaVersion,
+			PVW: -200, LoadW: 400, InputProvenanceSchema: inputProvenanceSchemaVersion,
 			PriceInputSource:      "entsoe", PriceInputAvailableAtMs: 111,
 			WeatherRowSource: "met.no", WeatherRowAvailableAtMs: 222},
 		{StartMs: start + 15*60*1000, LenMin: 15, PriceOre: 150,
-			SpotOre: 80, PVW: -100, LoadW: 500, Confidence: 0.6,
+			SpotOre: 80, PVW: -100, LoadW: 500,
 			InputProvenanceSchema: inputProvenanceSchemaVersion,
-			PriceInputSource:      "forecast", PriceInputAvailableAtMs: 333,
+			PriceInputSource:      "elprisetjustnu", PriceInputAvailableAtMs: 333,
 			WeatherRowSource: "open-meteo", WeatherRowAvailableAtMs: 444},
 	}
 	p := Params{
@@ -93,9 +92,6 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	if row.SpotOre != 50 {
 		t.Errorf("row0 SpotOre: got %.1f want 50", row.SpotOre)
 	}
-	if row.Confidence != 1.0 {
-		t.Errorf("row0 Confidence: got %.2f want 1.0", row.Confidence)
-	}
 	if row.PVW != -200 {
 		t.Errorf("row0 PVW: got %.1f want -200", row.PVW)
 	}
@@ -112,11 +108,7 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	if row.Reason == "" {
 		t.Error("row0 Reason should be populated by the DP")
 	}
-	// Row 1 should carry the forecast confidence.
-	if d.Slots[1].Confidence != 0.6 {
-		t.Errorf("row1 Confidence: got %.2f want 0.6", d.Slots[1].Confidence)
-	}
-	if row := d.Slots[1]; row.PriceInputSource != "forecast" || row.PriceInputAvailableAtMs != 333 ||
+	if row := d.Slots[1]; row.PriceInputSource != "elprisetjustnu" || row.PriceInputAvailableAtMs != 333 ||
 		row.WeatherRowSource != "open-meteo" || row.WeatherRowAvailableAtMs != 444 {
 		t.Errorf("row1 input provenance: %+v", row)
 	}
@@ -166,8 +158,8 @@ func TestDiagnosticProvenanceSchemaMarksCurrentMissingRows(t *testing.T) {
 // into lastSlots in service code paths that could diverge).
 func TestDiagnoseHandlesLengthMismatch(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 1000, LenMin: 15, PriceOre: 100, Confidence: 1.0},
-		{StartMs: 2000, LenMin: 15, PriceOre: 110, Confidence: 1.0},
+		{StartMs: 1000, LenMin: 15, PriceOre: 100},
+		{StartMs: 2000, LenMin: 15, PriceOre: 110},
 	}
 	plan := Plan{
 		GeneratedAtMs: 123,
@@ -221,7 +213,6 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 				LenMin:           15,
 				PriceOre:         120,
 				SpotOre:          80,
-				Confidence:       1,
 				PVW:              -4500,
 				LoadW:            900,
 				BatteryW:         0,
@@ -241,7 +232,6 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 				LenMin:      15,
 				PriceOre:    -10,
 				SpotOre:     -20,
-				Confidence:  1,
 				PVW:         -5000,
 				LoadW:       900,
 				BatteryW:    1200,
@@ -465,7 +455,7 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 		Slots: []DiagnosticSlot{{
 			Idx: 0, SlotStartMs: start.UnixMilli(),
 			SlotEndMs: start.Add(15 * time.Minute).UnixMilli(),
-			LenMin:    15, PriceOre: 100, Confidence: 1, PVW: -3000, LoadW: 500,
+			LenMin:    15, PriceOre: 100, PVW: -3000, LoadW: 500,
 			BatteryW: 0, GridW: -2500, SoC: 0.08,
 			EMSMode: "self_consumption",
 		}},
@@ -555,7 +545,7 @@ func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 		Slots: []DiagnosticSlot{{
 			Idx: 0, SlotStartMs: start.UnixMilli(),
 			SlotEndMs: start.Add(15 * time.Minute).UnixMilli(),
-			LenMin:    15, PriceOre: 100, Confidence: 1, PVW: -3000, LoadW: 500,
+			LenMin:    15, PriceOre: 100, PVW: -3000, LoadW: 500,
 			BatteryW: 0, GridW: -2500, SoC: 0.3,
 			EMSMode: "self_consumption",
 		}},
@@ -592,13 +582,13 @@ func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
 	start := time.Date(2026, 4, 22, 0, 0, 0, 0, time.UTC).UnixMilli()
 	slots := []Slot{
 		{StartMs: start, LenMin: 60, PriceOre: 30, SpotOre: 15,
-			LoadW: 400, Confidence: 1.0},
+			LoadW: 400},
 		{StartMs: start + 3600_000, LenMin: 60, PriceOre: 20, SpotOre: 10,
-			LoadW: 400, Confidence: 1.0},
+			LoadW: 400},
 		{StartMs: start + 7200_000, LenMin: 60, PriceOre: 25, SpotOre: 12,
-			LoadW: 400, Confidence: 1.0},
+			LoadW: 400},
 		{StartMs: start + 10800_000, LenMin: 60, PriceOre: 40, SpotOre: 20,
-			LoadW: 400, Confidence: 1.0},
+			LoadW: 400},
 	}
 	p := Params{
 		Mode:                ModeCheapCharge,

@@ -14,9 +14,9 @@ import (
 func TestStrictSelfConsumptionDischargesWhenSoCHealthy(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 166, SpotOre: 63,
-			LoadW: 3480, PVW: -1390, Confidence: 1.0},
+			LoadW: 3480, PVW: -1390},
 		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 165, SpotOre: 63,
-			LoadW: 3480, PVW: -1985, Confidence: 1.0},
+			LoadW: 3480, PVW: -1985},
 	}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = 0.5
@@ -60,11 +60,11 @@ func TestStrictSelfConsumptionDischargesWhenSoCHealthy(t *testing.T) {
 func TestStrictSelfConsumptionDoesNotStarveEVDeadline(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 400, SpotOre: 200,
-			LoadW: 500, PVW: -200, Confidence: 1.0},
+			LoadW: 500, PVW: -200},
 		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 100, SpotOre: 40,
-			LoadW: 500, PVW: -200, Confidence: 1.0},
+			LoadW: 500, PVW: -200},
 		{StartMs: 2 * 3600 * 1000, LenMin: 60, PriceOre: 100, SpotOre: 40,
-			LoadW: 500, PVW: -200, Confidence: 1.0},
+			LoadW: 500, PVW: -200},
 	}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = 0.8 // well above floor+20
@@ -152,7 +152,7 @@ func TestUpdatePlannerScalarsPropagatesToDefaults(t *testing.T) {
 // but makes the test assert nothing useful about the bias.
 func TestStrictSelfConsumptionRespectsFloor(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 166, LoadW: 3480, PVW: -1390, Confidence: 1.0},
+		{StartMs: 0, LenMin: 60, PriceOre: 166, LoadW: 3480, PVW: -1390},
 	}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = 0.22 // comfortably above min (10) but well below the old min+20 buffer
@@ -182,7 +182,7 @@ func TestStrictSelfConsumptionRespectsFloor(t *testing.T) {
 func TestStrictSelfConsumptionDischargesBelowOldBufferAtHighPrice(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 206, SpotOre: 80,
-			LoadW: 5300, PVW: 0, Confidence: 1.0},
+			LoadW: 5300, PVW: 0},
 	}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = 0.28      // just below the old floor+20 threshold (10+20)

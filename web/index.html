@@ -596,8 +596,8 @@
           <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
         <p class="plan-help">
-          Forecast-driven schedule for the home battery and cars over the next 48&nbsp;h, updated every few minutes.
-          Each bar is a 15-minute slot. Prices after the day-ahead publication window are filled in by the ML price twin.
+          Schedule for the home battery and cars, as far ahead as electricity prices are published, updated every few minutes.
+          Tomorrow&rsquo;s prices usually arrive around 13:00. Each bar is a 15-minute slot.
           Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
         </p>
         <div class="chart-container">
@@ -608,7 +608,6 @@
           <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.72)"></span> Spot (expensive)</span>
           <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:rgba(100,116,139,0.45)"></span> Grid tariff</span>
           <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:rgba(100,116,139,0.25)"></span> VAT</span>
-          <span class="legend-item" title="Beyond day-ahead publication — price filled in by the ML price twin"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
           <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
           <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
           <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:#22d3ee"></span> Car charging</span>

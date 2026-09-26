@@ -95,7 +95,7 @@ func coreReservePlan(ctx context.Context, slots []Slot, p Params) Plan {
 		average := min(peak, need/(eff*hours))
 		evEnergy += average * eff * hours
 		energy += loadpoint.BatteryEnergyDeltaWh(battery, hours, chargeEff, dischargeEff)
-		a := Action{ExecutionStartMs: slot.ExecutionStartMs, SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin, PriceOre: slot.PriceOre, SpotOre: slot.SpotOre, PVW: slot.PVW, LoadW: slot.LoadW, BatteryW: battery, GridW: house + battery + average, SoC: energy / p.CapacityWh, Confidence: slot.Confidence,
+		a := Action{ExecutionStartMs: slot.ExecutionStartMs, SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin, PriceOre: slot.PriceOre, SpotOre: slot.SpotOre, PVW: slot.PVW, LoadW: slot.LoadW, BatteryW: battery, GridW: house + battery + average, SoC: energy / p.CapacityWh,
 			LoadpointW: average, LoadpointSoC: evEnergy / lp.CapacityWh, LoadpointPowerW: map[string]float64{lp.ID: average}, LoadpointSoCByID: map[string]float64{lp.ID: evEnergy / lp.CapacityWh}, LoadpointMaxPowerW: map[string]float64{lp.ID: peak}, Reason: "EV deadline reserve"}
 		a.CostOre = reserveSlotCost(slot, p, a)
 		plan.TotalCostOre += a.CostOre

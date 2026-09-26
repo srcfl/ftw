@@ -104,7 +104,6 @@ func TestPassiveArbitragePVChargeBonusPrefersPVOverExport(t *testing.T) {
 		SpotOre:    20,
 		LoadW:      500,
 		PVW:        -5000,
-		Confidence: 1,
 	}}
 	pNoBonus := baseParams(ModePassiveArbitrage)
 	pNoBonus.InitialSoC = 0.6
@@ -154,7 +153,6 @@ func TestPassiveArbitragePVChargeBonusDoesNotMotivateGridCharge(t *testing.T) {
 			SpotOre:    5,
 			LoadW:      500,
 			PVW:        0, // no PV
-			Confidence: 1,
 		}
 	}
 	p := baseParams(ModePassiveArbitrage)
@@ -203,7 +201,6 @@ func TestPassiveArbitrageChargesFromPVWhenSurplusAvailable(t *testing.T) {
 			SpotOre:    10,
 			LoadW:      500,
 			PVW:        -3000, // PV >> load
-			Confidence: 1,
 		}
 	}
 	p := baseParams(ModePassiveArbitrage)
@@ -241,13 +238,11 @@ func TestPassiveArbitrageGridChargesAtCheapHours(t *testing.T) {
 		if i < 4 {
 			slots[i] = Slot{
 				StartMs: int64(i) * 60 * 60 * 1000, LenMin: 60,
-				PriceOre: 30, SpotOre: 5, LoadW: 500, PVW: 0, Confidence: 1,
-			}
+				PriceOre: 30, SpotOre: 5, LoadW: 500, PVW: 0, }
 		} else {
 			slots[i] = Slot{
 				StartMs: int64(i) * 60 * 60 * 1000, LenMin: 60,
-				PriceOre: 250, SpotOre: 200, LoadW: 500, PVW: 0, Confidence: 1,
-			}
+				PriceOre: 250, SpotOre: 200, LoadW: 500, PVW: 0, }
 		}
 	}
 	p := baseParams(ModePassiveArbitrage)
@@ -284,7 +279,7 @@ func TestPassiveArbitrageNeverExportsFromBattery(t *testing.T) {
 	// would tempt DP to discharge into grid for arbitrage. Mode must
 	// refuse.
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 300, LoadW: 100, PVW: 0, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 300, LoadW: 100, PVW: 0},
 	}
 	p := baseParams(ModePassiveArbitrage)
 	p.InitialSoC = 0.8 // plenty of stored energy
@@ -326,7 +321,6 @@ func TestDownsidePVKeepsReserveAgainstUncertainLatePV(t *testing.T) {
 				SpotOre:    spot,
 				LoadW:      0,
 				PVW:        -pv,
-				Confidence: 1,
 			}
 		}
 		return s
@@ -382,8 +376,7 @@ func TestDownsidePVReserveIncreasesWithK(t *testing.T) {
 			}
 			s[i] = Slot{
 				StartMs: int64(i) * 15 * 60 * 1000, LenMin: 15,
-				PriceOre: price, SpotOre: spot, LoadW: 0, PVW: -pv, Confidence: 1,
-			}
+				PriceOre: price, SpotOre: spot, LoadW: 0, PVW: -pv, }
 		}
 		return s
 	}
@@ -417,8 +410,7 @@ func TestDownsidePVWinterNoReserveForced(t *testing.T) {
 			}
 			s[i] = Slot{
 				StartMs: int64(i) * 15 * 60 * 1000, LenMin: 15,
-				PriceOre: price, SpotOre: price * 0.5, LoadW: 1000, PVW: 0, Confidence: 1,
-			}
+				PriceOre: price, SpotOre: price * 0.5, LoadW: 1000, PVW: 0, }
 		}
 		return s
 	}
@@ -440,11 +432,11 @@ func TestSelfConsumptionDefersPVStorageWhenCheaperSurplusAhead(t *testing.T) {
 	// battery headroom and export the early PV instead of filling the battery
 	// before the negative-price window.
 	slots := []Slot{
-		{StartMs: 0, LenMin: 15, PriceOre: 129, SpotOre: 33, LoadW: 1000, PVW: -4000, Confidence: 1},
-		{StartMs: 15 * 60 * 1000, LenMin: 15, PriceOre: 75, SpotOre: -15, LoadW: 1000, PVW: -7000, Confidence: 1},
-		{StartMs: 30 * 60 * 1000, LenMin: 15, PriceOre: 75, SpotOre: -15, LoadW: 1000, PVW: -7000, Confidence: 1},
-		{StartMs: 45 * 60 * 1000, LenMin: 15, PriceOre: 220, SpotOre: 100, LoadW: 2500, PVW: 0, Confidence: 1},
-		{StartMs: 60 * 60 * 1000, LenMin: 15, PriceOre: 220, SpotOre: 100, LoadW: 2500, PVW: 0, Confidence: 1},
+		{StartMs: 0, LenMin: 15, PriceOre: 129, SpotOre: 33, LoadW: 1000, PVW: -4000},
+		{StartMs: 15 * 60 * 1000, LenMin: 15, PriceOre: 75, SpotOre: -15, LoadW: 1000, PVW: -7000},
+		{StartMs: 30 * 60 * 1000, LenMin: 15, PriceOre: 75, SpotOre: -15, LoadW: 1000, PVW: -7000},
+		{StartMs: 45 * 60 * 1000, LenMin: 15, PriceOre: 220, SpotOre: 100, LoadW: 2500, PVW: 0},
+		{StartMs: 60 * 60 * 1000, LenMin: 15, PriceOre: 220, SpotOre: 100, LoadW: 2500, PVW: 0},
 	}
 	p := Params{
 		Mode:                ModeSelfConsumption,
@@ -490,7 +482,6 @@ func TestSmartSelfConsumptionExportsMorningPVAndChargesNegativeMidday(t *testing
 			SpotOre:    100,
 			LoadW:      1000,
 			PVW:        -4000,
-			Confidence: 1,
 		})
 	}
 	for h := 10; h < 14; h++ {
@@ -501,7 +492,6 @@ func TestSmartSelfConsumptionExportsMorningPVAndChargesNegativeMidday(t *testing
 			SpotOre:    -20,
 			LoadW:      1000,
 			PVW:        -6000,
-			Confidence: 1,
 		})
 	}
 	for h := 18; h < 22; h++ {
@@ -512,7 +502,6 @@ func TestSmartSelfConsumptionExportsMorningPVAndChargesNegativeMidday(t *testing
 			SpotOre:    100,
 			LoadW:      2000,
 			PVW:        0,
-			Confidence: 1,
 		})
 	}
 
@@ -636,8 +625,8 @@ func TestArbitrageNoEVChargeWhileBatteryExporting(t *testing.T) {
 	// EV could too), slot 1 expensive (battery should discharge to
 	// export). With the constraint, slot 1 must NOT also charge the EV.
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50, LoadW: 500, PVW: -3000, Confidence: 1},
-		{StartMs: 3600_000, LenMin: 60, PriceOre: 800, SpotOre: 800, LoadW: 500, PVW: 0, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 50, LoadW: 500, PVW: -3000},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 800, SpotOre: 800, LoadW: 500, PVW: 0},
 	}
 	p := baseParams(ModeArbitrage)
 	p.InitialSoC = 0.8 // headroom for big discharge
@@ -688,7 +677,6 @@ func TestArbitrageDoesNotDischargeAtNegativeSpot(t *testing.T) {
 			SpotOre:    -5.0, // wholesale spot pays you to consume
 			LoadW:      500,
 			PVW:        -2000, // 2 kW solar
-			Confidence: 1.0,
 		}
 	}
 	p := baseParams(ModeArbitrage)
@@ -717,7 +705,7 @@ func TestSlotGridCostOreCostsNegativeExport(t *testing.T) {
 
 func TestOptimizeReportedCostUsesNegativeExportPrice(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 80, SpotOre: -5, LoadW: 0, PVW: -1000, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 80, SpotOre: -5, LoadW: 0, PVW: -1000},
 	}
 	p := baseParams(ModeArbitrage)
 	p.MaxChargeW = 0
@@ -746,14 +734,14 @@ func TestArbitrageNegativeSpotWithExportFloorClampsAtZero(t *testing.T) {
 	zero := 0.0
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 80, SpotOre: -5.0,
-			LoadW: 500, PVW: -2000, Confidence: 1.0},
+			LoadW: 500, PVW: -2000},
 		// Second slot identical so the planner has multiple
 		// indistinguishable options to pick from. With the floor at 0
 		// the cost of discharging vs idling is exactly equal — but
 		// neither should exhibit a *positive* cost (i.e. v < 0 must
 		// have been clamped out).
 		{StartMs: 60 * 60 * 1000, LenMin: 60, PriceOre: 80, SpotOre: -5.0,
-			LoadW: 500, PVW: -2000, Confidence: 1.0},
+			LoadW: 500, PVW: -2000},
 	}
 	p := baseParams(ModeArbitrage)
 	p.InitialSoC = 0.6
@@ -952,7 +940,6 @@ func TestExportWhenMorningIsHighStoreWhenMiddayIsLow(t *testing.T) {
 			SpotOre:    price * 0.7, // rough: strip tariff + VAT for export
 			PVW:        -pvW,
 			LoadW:      500,
-			Confidence: 1.0,
 		}
 	}
 
@@ -1058,7 +1045,7 @@ func TestCurtailmentSkipsWhenExportProfitable(t *testing.T) {
 
 func TestCurtailmentSkipsPositiveSpotExport(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 80, LoadW: 500, PVW: -8000, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 80, LoadW: 500, PVW: -8000},
 	}
 	p := baseParams(ModeArbitrage)
 	p.InitialSoC = 0.95

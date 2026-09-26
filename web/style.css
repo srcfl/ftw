@@ -490,7 +490,6 @@ header h1 {
 }
 .diag-table tbody tr.diag-row-hidden { display: none; }
 .diag-reason-cell { color: var(--text-dim); white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-.conf-low { color: #fde68a; }
 
 @media (max-width: 900px) {
   .diagnose-body { grid-template-columns: 1fr; }
@@ -1637,15 +1636,6 @@ footer {
   display: inline-block;
   vertical-align: middle;
 }
-.legend-ghost {
-  background: rgba(148,163,184,0.10) !important;
-  border: 1px dashed rgba(148,163,184,0.75);
-  width: 14px;
-  height: 10px;
-  display: inline-block;
-  vertical-align: middle;
-  box-sizing: border-box;
-}
 .control-strategy { min-width: 320px; }
 
 /* Strategy block when embedded inside the Plan card. Sits between the
@@ -1961,7 +1951,6 @@ footer {
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
 .plan-tip .tip-head { font-weight: 600; margin-bottom: 4px; color: #fff; }
-.plan-tip .tip-pred { font-size: 0.7rem; color: #fbbf24; font-weight: normal; }
 .plan-tip .tip-row { display: flex; justify-content: space-between; padding: 1px 0; }
 .plan-tip .tip-row span { color: var(--text-dim, #a0a0a0); }
 .plan-tip .tip-breakdown {

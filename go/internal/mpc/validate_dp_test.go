@@ -23,7 +23,7 @@ func TestOptimizePlansPassValidatePlan(t *testing.T) {
 		{
 			name: "self_consumption pv surplus",
 			slots: []Slot{
-				{StartMs: 0, LenMin: 60, PriceOre: 100, Confidence: 1, LoadW: 2000, PVW: -3500},
+				{StartMs: 0, LenMin: 60, PriceOre: 100, LoadW: 2000, PVW: -3500},
 			},
 			p: baseParams(ModeSelfConsumption),
 		},
@@ -53,8 +53,7 @@ func TestOptimizePlansPassValidatePlan(t *testing.T) {
 
 func TestValidatePlanAcceptsGoDPCurtailHint(t *testing.T) {
 	slots := []Slot{{
-		StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: -50, Confidence: 1,
-		LoadW: 500, PVW: -5000,
+		StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: -50, LoadW: 500, PVW: -5000,
 	}}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = 0.90
@@ -76,8 +75,7 @@ func TestValidatePlanAcceptsGoDPCurtailHint(t *testing.T) {
 
 func TestValidatePlanRejectsFuseViolatingIdle(t *testing.T) {
 	slots := []Slot{{
-		StartMs: 1, LenMin: 60, PriceOre: 100, Confidence: 1,
-		LoadW: 0, PVW: -8000,
+		StartMs: 1, LenMin: 60, PriceOre: 100, LoadW: 0, PVW: -8000,
 		Limits: PowerLimits{MaxExportW: 100},
 	}}
 	p := baseParams(ModeSelfConsumption)
@@ -96,8 +94,7 @@ func TestValidatePlanRejectsFuseViolatingIdle(t *testing.T) {
 
 func TestValidatePlanRejectsUndispatchableZeroPVCap(t *testing.T) {
 	slots := []Slot{{
-		StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: -100, Confidence: 1,
-		LoadW: 0, PVW: -5000,
+		StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: -100, LoadW: 0, PVW: -5000,
 	}}
 	p := baseParams(ModeArbitrage)
 	p.InitialSoC = 0.95
@@ -158,7 +155,7 @@ func TestOptimizeReplaysFromActualSoCBelowMinimum(t *testing.T) {
 
 func TestOptimizeDoesNotWorsenOperatingBoundNearFloor(t *testing.T) {
 	slots := []Slot{{
-		StartMs: 0, LenMin: 60, PriceOre: 300, Confidence: 1, LoadW: 2000, PVW: 0,
+		StartMs: 0, LenMin: 60, PriceOre: 300, LoadW: 2000, PVW: 0,
 	}}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoC = p.SoCMin + 0.001

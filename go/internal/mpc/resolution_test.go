@@ -64,12 +64,11 @@ func TestFineGridStillAbsorbsBorderlinePV(t *testing.T) {
 			pv = 0
 		}
 		slots[i] = Slot{
-			LenMin:     15,
-			PriceOre:   price,
-			SpotOre:    spot,
-			PVW:        pv,
-			LoadW:      load,
-			Confidence: 1.0,
+			LenMin:   15,
+			PriceOre: price,
+			SpotOre:  spot,
+			PVW:      pv,
+			LoadW:    load,
 		}
 	}
 	// Slot 0 nets 2300 − 693 = 1607 W of PV surplus; the regression is
@@ -130,13 +129,12 @@ func resolutionBenchSlots() []Slot {
 		load := 450 + 900*math.Exp(-(h-7)*(h-7)/1.5) + 1400*math.Exp(-(h-19)*(h-19)/2)
 
 		slots[i] = Slot{
-			StartMs:    int64(i) * 15 * 60 * 1000,
-			LenMin:     15,
-			PriceOre:   spot*1.25 + 95, // spot + grid fee + VAT
-			SpotOre:    spot,
-			PVW:        pv,
-			LoadW:      load,
-			Confidence: 1.0,
+			StartMs:  int64(i) * 15 * 60 * 1000,
+			LenMin:   15,
+			PriceOre: spot*1.25 + 95, // spot + grid fee + VAT
+			SpotOre:  spot,
+			PVW:      pv,
+			LoadW:    load,
 		}
 	}
 	return slots

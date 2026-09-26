@@ -63,12 +63,10 @@ func TestEVSiteOptimizeThenDispatchChargesEVFromPVBesideBatteryImport(t *testing
 	slots := []mpc.Slot{
 		{
 			StartMs: slot.UnixMilli(), LenMin: 60,
-			PriceOre: 20, SpotOre: 10, LoadW: evComboLoadW, PVW: evComboPVW, Confidence: 1,
-		},
+			PriceOre: 20, SpotOre: 10, LoadW: evComboLoadW, PVW: evComboPVW},
 		{
 			StartMs: slot.Add(time.Hour).UnixMilli(), LenMin: 60,
-			PriceOre: 300, SpotOre: 240, LoadW: 2500, PVW: 0, Confidence: 1,
-		},
+			PriceOre: 300, SpotOre: 240, LoadW: 2500, PVW: 0},
 	}
 	params := mpc.Params{
 		Mode:                mpc.ModeArbitrage,

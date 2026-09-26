@@ -73,13 +73,13 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 	// inactive-ish (small capacity).
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 150, SpotOre: 100,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 		{StartMs: 3600_000, LenMin: 60, PriceOre: 20, SpotOre: 10,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 		{StartMs: 7200_000, LenMin: 60, PriceOre: 180, SpotOre: 140,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 		{StartMs: 10800_000, LenMin: 60, PriceOre: 30, SpotOre: 20,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 	}
 	p := Params{
 		Mode:                ModeCheapCharge,
@@ -139,9 +139,9 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 func TestOptimizeNilLoadpointUnchanged(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 150, SpotOre: 100,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 		{StartMs: 3600_000, LenMin: 60, PriceOre: 20, SpotOre: 10,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 	}
 	p := Params{
 		Mode:                ModeCheapCharge,

@@ -28,8 +28,8 @@ func (t *externalOptimizerTransportStub) Close() error { return nil }
 
 func externalTestFixture() ([]Slot, Params) {
 	slots := []Slot{
-		{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000}},
-		{StartMs: 3600001, LenMin: 60, PriceOre: 300, SpotOre: 240, Confidence: 1, LoadW: 2500, Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000}},
+		{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, LoadW: 500, Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000}},
+		{StartMs: 3600001, LenMin: 60, PriceOre: 300, SpotOre: 240, LoadW: 2500, Limits: PowerLimits{MaxImportW: 8000, MaxExportW: 8000}},
 	}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
@@ -133,7 +133,7 @@ func TestValidatePlanRejectsBrokenGridBalance(t *testing.T) {
 }
 
 func TestValidatePlanAcceptsSubWattSolverResidueInPassiveMode(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
+	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, LoadW: 0}}
 	p := Params{
 		Mode: ModePassiveArbitrage, CapacityWh: 10000,
 		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
@@ -170,8 +170,7 @@ func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			slot := Slot{
-				StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 50, Confidence: 1,
-				Limits: PowerLimits{MaxImportW: limitW, MaxExportW: limitW},
+				StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 50, Limits: PowerLimits{MaxImportW: limitW, MaxExportW: limitW},
 			}
 			if tc.gridW > 0 {
 				slot.LoadW = tc.gridW
@@ -192,7 +191,7 @@ func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
 }
 
 func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
+	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, LoadW: 0}}
 	p := Params{
 		Mode: ModePassiveArbitrage, CapacityWh: 10000,
 		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
@@ -216,8 +215,7 @@ func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
 // all reconcile, so only the grid-limit check can reject it.
 func gridLimitFixture(gridW float64) ([]Slot, Params, Plan) {
 	slot := Slot{
-		StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 80, Confidence: 1,
-		Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 8000},
+		StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 80, Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 8000},
 	}
 	if gridW >= 0 {
 		slot.LoadW = gridW
@@ -316,7 +314,7 @@ func TestExternalOptimizerStopsWorkerAfterIdleTimeout(t *testing.T) {
 }
 
 func TestValidatePlanAllowsButDoesNotWorsenInitialSoCBelowMinimum(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 500}}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 50, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
 		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.05,
@@ -340,7 +338,7 @@ func TestValidatePlanAllowsButDoesNotWorsenInitialSoCBelowMinimum(t *testing.T) 
 }
 
 func TestValidatePlanRejectsBatteryFedSurplusLoadpoint(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 70, Confidence: 1, LoadW: 500}}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 70, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
 		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
@@ -366,7 +364,7 @@ func TestValidatePlanRejectsBatteryFedSurplusLoadpoint(t *testing.T) {
 }
 
 func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 30, SpotOre: 10, Confidence: 1, LoadW: 500}}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
 		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.2,
@@ -392,7 +390,7 @@ func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
 }
 
 func TestValidatePlanAllowsEVPVWithBatteryGridCharge(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, LoadW: 500, PVW: -6500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
 		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
@@ -420,7 +418,7 @@ func TestValidatePlanAllowsEVPVWithBatteryGridCharge(t *testing.T) {
 }
 
 func TestValidatePlanRejectsSurplusOnlyEVAboveLeftoverPV(t *testing.T) {
-	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, LoadW: 500, PVW: -6500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
 		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
@@ -457,8 +455,7 @@ func TestBuildRequestScenarioSpreadIsPerSlotWhenRelativeIsLearned(t *testing.T) 
 	for i, g := range gen {
 		slots[i] = Slot{
 			StartMs: start + int64(i)*15*60*1000, LenMin: 15,
-			PriceOre: 100, SpotOre: 50, LoadW: 400, PVW: -g, Confidence: 1,
-		}
+			PriceOre: 100, SpotOre: 50, LoadW: 400, PVW: -g}
 	}
 	p := Params{
 		Mode: ModeArbitrage, SoCMin: 0.1, SoCMax: 0.95, SoCLevels: 11,
@@ -500,9 +497,9 @@ func TestBuildRequestScenarioSpreadStaysFlatWhenRelativeIsUnlearned(t *testing.T
 	start := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC).UnixMilli()
 	slots := []Slot{
 		{StartMs: start, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			LoadW: 400, PVW: -6000, Confidence: 1},
+			LoadW: 400, PVW: -6000},
 		{StartMs: start + 15*60*1000, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			LoadW: 400, PVW: -500, Confidence: 1},
+			LoadW: 400, PVW: -500},
 	}
 	p := Params{
 		Mode: ModeArbitrage, SoCMin: 0.1, SoCMax: 0.95, SoCLevels: 11,

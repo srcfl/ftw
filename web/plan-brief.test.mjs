@@ -11,7 +11,6 @@ const slot = (offsetMinutes, overrides = {}) => ({
   loadpoint_w: 0,
   pv_limit_w: 0,
   reason: "scheduled",
-  confidence: 1,
   ...overrides,
 });
 
@@ -157,13 +156,13 @@ describe("plan brief normalization", () => {
     assert.equal(brief.planner.detail, "Worker unavailable");
   });
 
-  it("surfaces active safety clamps and modeled forecast periods", () => {
+  it("surfaces active safety clamps and how far the published prices reach", () => {
     const brief = derivePlanBrief({
       enabled: true,
       plan: {
         actions: [
-          slot(8, { confidence: 0.8 }),
-          slot(23, { confidence: 0.7 }),
+          slot(8),
+          slot(23),
         ],
         solver: {},
       },
@@ -175,8 +174,20 @@ describe("plan brief normalization", () => {
     });
 
     assert.match(brief.constraint, /Safety adjusted battery to 1.8 kW/);
-    assert.equal(brief.forecast.label, "Some modeled inputs");
-    assert.match(brief.forecast.detail, /forecast after that/);
+    assert.equal(brief.forecast.label, "Published prices");
+    assert.match(brief.forecast.detail, /^Plan until \S+ 10:45$/);
+  });
+
+  it("names a plan that ends at midnight by the day it ends", () => {
+    // The last slot starts at 23:45, so the published prices run to midnight.
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: { actions: [slot(8), slot(818)], solver: {} },
+      status: { mode: "planner_arbitrage" },
+      now,
+    });
+    const today = new Date(now).toLocaleDateString(undefined, { weekday: "short" });
+    assert.equal(brief.forecast.detail, `Plan until ${today} 24:00`);
   });
 
   it("does not tell a user who already picked a planner mode to pick a strategy", () => {

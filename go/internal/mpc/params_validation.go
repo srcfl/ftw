@@ -19,7 +19,6 @@ func validatePlanningSlots(slots []Slot) error {
 			{"spot_ore", slot.SpotOre},
 			{"pv_w", slot.PVW},
 			{"load_w", slot.LoadW},
-			{"confidence", slot.Confidence},
 			{"max_import_w", slot.Limits.MaxImportW},
 			{"max_export_w", slot.Limits.MaxExportW},
 		} {
@@ -32,9 +31,6 @@ func validatePlanningSlots(slots []Slot) error {
 		}
 		if slot.LoadW < 0 {
 			return fmt.Errorf("%s.load_w must be non-negative in the site sign convention", field)
-		}
-		if slot.Confidence <= 0 || slot.Confidence > 1 {
-			return fmt.Errorf("%s.confidence must be within (0, 1]", field)
 		}
 		if slot.Limits.MaxImportW < 0 || slot.Limits.MaxExportW < 0 {
 			return fmt.Errorf("%s grid limits must be non-negative", field)

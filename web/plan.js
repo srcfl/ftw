@@ -113,8 +113,22 @@ import {
     if (horizon === "tomorrow") {
       return { tMin: localMidnight(1), tMax: localMidnight(2) };
     }
-    // "all" — current default: now-30 min through next 48 h.
-    return { tMin: now - 30 * 60 * 1000, tMax: now + 48 * 60 * 60 * 1000 };
+    // "all" — current default: now-30 min through the end of the published
+    // prices the plan runs on, at most 48 h ahead.
+    return { tMin: now - 30 * 60 * 1000, tMax: Math.min(pricesEndMs(now), now + 48 * 60 * 60 * 1000) };
+  }
+  // Where the published prices end: the plan's last slot, or the last price
+  // before a plan exists. 48 h ahead when neither has arrived yet.
+  function pricesEndMs(now) {
+    const slots = (state.plan && state.plan.actions && state.plan.actions.length)
+      ? state.plan.actions
+      : (state.prices || []);
+    let end = 0;
+    for (const s of slots) {
+      const start = s.slot_start_ms ?? s.slot_ts_ms;
+      end = Math.max(end, start + (s.slot_len_min || 15) * 60 * 1000);
+    }
+    return end > now ? end : now + 48 * 60 * 60 * 1000;
   }
   function chartTickStepMs(tMin, tMax) {
     const span = Math.max(1, tMax - tMin);
@@ -367,14 +381,9 @@ import {
 
     // Price range.
     //
-    // The bars come from the plan's actions whenever a plan exists, because
-    // those cover the whole horizon — including slots whose day-ahead price
-    // hasn't published yet and is filled in by the ML price twin. The scale
-    // and the tercile thresholds must be derived from the SAME set. Deriving
-    // them from state.prices (published slots only) put every predicted slot
-    // above the known maximum: its bar was drawn past the top of the price
-    // band and over the mode strip, and it always landed above p75 so the
-    // entire forecast period read as "expensive".
+    // The bars come from the plan's actions whenever a plan exists, and the
+    // scale and the tercile thresholds are derived from the SAME set, so no
+    // bar is drawn past the top of the price band.
     const prices = (state.prices || []).filter(p => p.slot_ts_ms >= tMin && p.slot_ts_ms <= tMax);
     const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
     const priceBars = barSource.filter(b => {
@@ -410,8 +419,8 @@ import {
 
     // Power band in middle — covers battery + grid.
     // `plan` is aliased at the top of render() because the price scale
-    // needs it too; several later sections ("Plan battery bars", "Load
-    // forecast", predicted-zone shade) reference it directly.
+    // needs it too; later sections ("Plan battery bars", "Load forecast")
+    // reference it directly.
     renderPlanBrief(plan);
     renderCarPlans();
     renderOptimizerFallbackAlert(plan);
@@ -461,39 +470,6 @@ import {
       ctx.setLineDash([]);
     }
 
-    // ---- Predicted-zone shade + boundary ----
-    // Find the first ML-forecasted action. Everything at or past that
-    // point gets a translucent band and a "predicted" label, so the
-    // uncertain portion reads as visually different — not just dimmer
-    // bars but a whole different region.
-    if (plan && plan.actions && plan.actions.length) {
-      const firstPred = plan.actions.find(a => a.confidence != null && a.confidence < 1.0);
-      if (firstPred) {
-        const xPred = Math.max(xScale(firstPred.slot_start_ms), pad.l);
-        const xEnd = pad.l + plotW;
-        if (xPred < xEnd) {
-          // Shaded band behind everything in the plot area — strong
-          // enough to read as "this zone is different".
-          ctx.fillStyle = 'rgba(251,191,36,0.10)';
-          ctx.fillRect(xPred, pad.t, xEnd - xPred, plotH);
-          // Boundary line
-          ctx.strokeStyle = 'rgba(251,191,36,0.65)';
-          ctx.lineWidth = 1.2;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(xPred, pad.t);
-          ctx.lineTo(xPred, pad.t + plotH);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          // Label "predicted →"
-          ctx.fillStyle = 'rgba(251,191,36,0.9)';
-          ctx.font = '10px system-ui, sans-serif';
-          ctx.textAlign = 'left';
-          ctx.fillText('predicted →', xPred + 4, pad.t + 10);
-        }
-      }
-    }
-
     // ---- Price bars ----
     // Stacked: spot (bottom, tercile-colored) + grid tariff (middle,
     // neutral slate) + VAT (top, lighter slate). Reads grid tariff +
@@ -519,8 +495,6 @@ import {
       const priceVal = bar.total_ore_kwh ?? bar.price_ore;
       const x0 = xScale(ts);
       const x1 = xScale(ts + len * 60 * 1000);
-      const zero = priceY(Math.max(0, priceMin));
-      const isPredicted = bar.confidence != null && bar.confidence < 1.0;
       // Component breakdown. When we have spot_ore AND at least one
       // of the fixed portions is non-zero, stack three segments so
       // the bar reads as a breakdown. Otherwise render a single flat
@@ -553,34 +527,15 @@ import {
       // we re-project each segment's top edge through priceY so the
       // stacked bar lines up pixel-perfect with the axis grid.
       let runningOre = 0;
-      const topY = priceY(priceVal);
       for (const part of parts) {
         if (part.ore <= 0) continue;
         const segBottomY = priceY(runningOre);
         const segTopY    = priceY(runningOre + part.ore);
         const segY = Math.min(segBottomY, segTopY);
         const segH = Math.abs(segBottomY - segTopY);
-        const alpha = isPredicted ? part.alpha * 0.45 : part.alpha;
-        ctx.fillStyle = `rgba(${part.rgb},${alpha})`;
+        ctx.fillStyle = `rgba(${part.rgb},${part.alpha})`;
         ctx.fillRect(rectX, segY, rectW, segH);
         runningOre += part.ore;
-      }
-      if (isPredicted) {
-        // Predicted slots are marked by a cap on top of the bar, not by an
-        // outline around it. The outline was written for hourly slots; at
-        // the 15-minute resolution NordPool publishes, ~96 dashed frames a
-        // day merge into a solid hatched wall that hides the prices behind
-        // it. The cap survives any bar width, and the shaded band plus the
-        // "predicted →" label already mark the zone.
-        ctx.fillStyle = `rgba(${parts[0].rgb},0.9)`;
-        ctx.fillRect(rectX, Math.min(topY, zero), rectW, 1.5);
-        if (rectW >= 6) {
-          ctx.strokeStyle = `rgba(${parts[0].rgb},0.55)`;
-          ctx.lineWidth = 1;
-          ctx.setLineDash([3, 3]);
-          ctx.strokeRect(rectX + 0.5, Math.min(topY, zero) + 0.5, rectW - 1, Math.abs(topY - zero) - 1);
-          ctx.setLineDash([]);
-        }
       }
       // Track for hover hit-test.
       state.priceBarBounds.push({
@@ -984,7 +939,6 @@ import {
       const d = new Date(found.ts);
       const hh = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
       const dayStr = d.toLocaleDateString(undefined, { weekday: 'short' });
-      const predicted = a.confidence != null && a.confidence < 1.0;
       const price = a.total_ore_kwh ?? a.price_ore;
       // PV is site-signed internally (generation = negative). Flip it for
       // display so the tooltip reads as a positive production number —
@@ -992,7 +946,7 @@ import {
       const u = unitFor(state.currency);
       const inUnit = (v, d) => toDisplay(v, state.currency).toFixed(d == null ? u.decimals : d);
       const lines = [
-        `<div class="tip-head">${dayStr} ${hh}${predicted ? ' <span class="tip-pred">predicted</span>' : ''}</div>`,
+        `<div class="tip-head">${dayStr} ${hh}</div>`,
         `<div class="tip-row"><span title="Consumer total: spot + grid tariff + VAT — the actual ${u.perKwh} you pay during this 15-minute slot">Price</span><b>${inUnit(price)} ${u.perKwh}</b></div>`,
       ];
       // Price breakdown: show where the consumer total comes from.
@@ -1052,7 +1006,7 @@ import {
         else if (a.battery_w < -100) { action = 'Discharging'; actionHint = 'battery covers load (and may export)'; }
         else { action = 'Idle'; actionHint = 'battery neither charges nor discharges'; }
         lines.push(`<div class="tip-row"><span title="Battery action this slot">Plan</span><b>${action}</b></div>`);
-        lines.push(`<div class="tip-reason">${a.reason ? escapeHTML(a.reason) : `${action.toLowerCase()} — ${actionHint}${predicted ? ' (predicted)' : ''}`}</div>`);
+        lines.push(`<div class="tip-reason">${a.reason ? escapeHTML(a.reason) : `${action.toLowerCase()} — ${actionHint}`}</div>`);
       } else if (a.reason) {
         lines.push(`<div class="tip-reason">${escapeHTML(a.reason)}</div>`);
       }

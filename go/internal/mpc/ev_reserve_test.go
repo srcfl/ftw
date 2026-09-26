@@ -13,7 +13,7 @@ func nearTargetReserveFixture() ([]Slot, Params) {
 	slots := make([]Slot, 193)
 	start := time.Now().UTC().Truncate(15 * time.Minute)
 	for i := range slots {
-		slots[i] = Slot{StartMs: start.Add(time.Duration(i) * 15 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, SpotOre: 10, LoadW: 500, Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 11040}, Confidence: 1}
+		slots[i] = Slot{StartMs: start.Add(time.Duration(i) * 15 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, SpotOre: 10, LoadW: 500, Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 11040}}
 	}
 	return slots, p
 }

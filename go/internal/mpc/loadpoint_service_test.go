@@ -21,12 +21,11 @@ func TestSlotDirectiveCarriesLoadpointEnergyWh(t *testing.T) {
 	slots := make([]Slot, 4)
 	for i := range slots {
 		slots[i] = Slot{
-			StartMs:    start.Add(time.Duration(i) * time.Hour).UnixMilli(),
-			LenMin:     60,
-			PriceOre:   40,
-			SpotOre:    20,
-			LoadW:      400,
-			Confidence: 1.0,
+			StartMs:  start.Add(time.Duration(i) * time.Hour).UnixMilli(),
+			LenMin:   60,
+			PriceOre: 40,
+			SpotOre:  20,
+			LoadW:    400,
 		}
 	}
 	p := Params{
@@ -102,7 +101,7 @@ func TestSlotDirectiveEmptyWhenNoLoadpoint(t *testing.T) {
 	start := now.Truncate(15 * time.Minute)
 	slots := []Slot{
 		{StartMs: start.UnixMilli(), LenMin: 15, PriceOre: 50,
-			LoadW: 500, Confidence: 1.0},
+			LoadW: 500},
 	}
 	plan := Optimize(slots, Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
@@ -136,22 +135,20 @@ func TestNoBatteryToEVForbidsBatteryFeedingEV(t *testing.T) {
 	// it, battery must stay ≤ house_residual = max(0, 1000 - 1000) = 0.
 	slots := []Slot{
 		{
-			StartMs:    start.UnixMilli(),
-			LenMin:     60,
-			PriceOre:   500,
-			SpotOre:    500,
-			LoadW:      1000,
-			PVW:        -1000,
-			Confidence: 1.0,
+			StartMs:  start.UnixMilli(),
+			LenMin:   60,
+			PriceOre: 500,
+			SpotOre:  500,
+			LoadW:    1000,
+			PVW:      -1000,
 		},
 		{
-			StartMs:    start.Add(time.Hour).UnixMilli(),
-			LenMin:     60,
-			PriceOre:   500,
-			SpotOre:    500,
-			LoadW:      1000,
-			PVW:        -1000,
-			Confidence: 1.0,
+			StartMs:  start.Add(time.Hour).UnixMilli(),
+			LenMin:   60,
+			PriceOre: 500,
+			SpotOre:  500,
+			LoadW:    1000,
+			PVW:      -1000,
 		},
 	}
 	mkParams := func(noBatToEV bool) Params {
@@ -216,22 +213,20 @@ func TestSurplusOnlyForbidsBatteryFeedingEVEvenWhenCoverEVEnabled(t *testing.T) 
 
 	slots := []Slot{
 		{
-			StartMs:    start.UnixMilli(),
-			LenMin:     60,
-			PriceOre:   500,
-			SpotOre:    500,
-			LoadW:      1000,
-			PVW:        -1000,
-			Confidence: 1.0,
+			StartMs:  start.UnixMilli(),
+			LenMin:   60,
+			PriceOre: 500,
+			SpotOre:  500,
+			LoadW:    1000,
+			PVW:      -1000,
 		},
 		{
-			StartMs:    start.Add(time.Hour).UnixMilli(),
-			LenMin:     60,
-			PriceOre:   500,
-			SpotOre:    500,
-			LoadW:      1000,
-			PVW:        -1000,
-			Confidence: 1.0,
+			StartMs:  start.Add(time.Hour).UnixMilli(),
+			LenMin:   60,
+			PriceOre: 500,
+			SpotOre:  500,
+			LoadW:    1000,
+			PVW:      -1000,
 		},
 	}
 
@@ -297,8 +292,8 @@ func TestSurplusOnlyForbidsBatteryFeedingEVEvenWhenCoverEVEnabled(t *testing.T) 
 // was plugged in, which silenced grid-charge for the whole connection.
 func TestArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500, PVW: 0, Confidence: 1},
-		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 250, LoadW: 500, PVW: 0, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500, PVW: 0},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 250, LoadW: 500, PVW: 0},
 	}
 	plan := Optimize(slots, Params{
 		Mode:                ModeArbitrage,
@@ -346,8 +341,8 @@ func TestArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
 
 func TestPassiveArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500, Confidence: 1},
-		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 250, LoadW: 5000, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 250, LoadW: 5000},
 	}
 	plan := Optimize(slots, Params{
 		Mode:                ModePassiveArbitrage,
@@ -392,7 +387,7 @@ func TestPassiveArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) 
 
 func TestSurplusOnlyEVCannotImportEvenWithDeadline(t *testing.T) {
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 40, SpotOre: 10, LoadW: 500, PVW: 0, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 40, SpotOre: 10, LoadW: 500, PVW: 0},
 	}
 	plan := Optimize(slots, Params{
 		Mode:                ModeArbitrage,
@@ -437,8 +432,8 @@ func TestArbitrageChargesSurplusOnlyEVFromPVWhileBatteryGridCharges(t *testing.T
 	// the grid in the same slot. The old feasibility rule rejected any
 	// (evW>0 AND gridW>50) pair and forced "car sits / Pixii never buys".
 	slots := []Slot{
-		{StartMs: 0, LenMin: 60, PriceOre: 20, SpotOre: 10, LoadW: 500, PVW: -6500, Confidence: 1},
-		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 240, LoadW: 2500, PVW: 0, Confidence: 1},
+		{StartMs: 0, LenMin: 60, PriceOre: 20, SpotOre: 10, LoadW: 500, PVW: -6500},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 240, LoadW: 2500, PVW: 0},
 	}
 	plan := Optimize(slots, Params{
 		Mode:                ModeArbitrage,

@@ -189,7 +189,6 @@ func benchFixtureDiagnostic() *Diagnostic {
 			LenMin:      15,
 			PriceOre:    price,
 			SpotOre:     price / 2,
-			Confidence:  1,
 			LoadW:       1000,
 			BatteryW:    0,
 			GridW:       1000,

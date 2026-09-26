@@ -19,7 +19,6 @@ func planFixture(now time.Time, slotMin, slots int) []PlanAction {
 			PriceOre:    123.456789 + float64(i),
 			SpotOre:     80.12345,
 			CostOre:     -12.3456,
-			Confidence:  0.87654321,
 			Reason:      "cheap hour: charge before the evening peak while PV output is still available",
 			EMSMode:     "planner_arbitrage",
 			PVW:         -2000.5,
@@ -57,7 +56,7 @@ func TestPlanAttributesStayUnderHomeAssistantLimit(t *testing.T) {
 		t.Fatalf("schedule entries = %d", len(schedule))
 	}
 	first, _ := schedule[0].(map[string]any)
-	for _, key := range []string{"start", "action", "battery_w", "grid_w", "soc_pct", "price_ore", "confidence"} {
+	for _, key := range []string{"start", "action", "battery_w", "grid_w", "soc_pct", "price_ore"} {
 		if _, ok := first[key]; !ok {
 			t.Fatalf("compact slot missing %s: %v", key, first)
 		}

@@ -342,7 +342,7 @@
           <thead>
             <tr>
               <th>#</th><th>Time</th>
-              <th>Price</th><th>Spot</th><th>Conf</th>
+              <th>Price</th><th>Spot</th>
               <th>PV</th><th>Load</th>
               <th>Battery</th><th>Grid</th><th>SoC end</th>
               ${lpActive ? '<th>EV W</th><th>EV SoC</th>' : ''}
@@ -443,8 +443,6 @@
   }
 
   function slotRow(sl, i, lpActive) {
-    const conf = sl.confidence != null ? sl.confidence.toFixed(2) : '—';
-    const confCls = sl.confidence < 0.9 ? 'conf-low' : '';
     const gridCls = sl.grid_w > 0 ? 'val-import' : (sl.grid_w < 0 ? 'val-export' : 'val-neutral');
     const batCls = sl.battery_w > 0 ? 'val-charging' : (sl.battery_w < 0 ? 'val-discharging' : 'val-neutral');
     const socPct = socPercent(socValue(sl));
@@ -454,7 +452,6 @@
       <td>${fmtHHMM(sl.slot_start_ms)}</td>
       <td>${fmt1(sl.price_ore)}</td>
       <td>${fmt1(sl.spot_ore)}</td>
-      <td class="${confCls}">${conf}</td>
       <td class="val-generation">${fmtW(sl.pv_w)}</td>
       <td>${fmtW(sl.load_w)}</td>
       <td class="${batCls}">${fmtW(sl.battery_w)}</td>
@@ -525,11 +522,10 @@
       const x = pad.l + i * barW;
       const h = (s.price_ore / maxPrice) * priceH;
       const y = priceY0 + priceH - h;
-      // Cheap slots (below mean) in green, expensive in red, low-confidence dimmed
-      const alpha = s.confidence < 0.9 ? 0.35 : 0.75;
+      // Cheap slots (below mean) in green, expensive in red
       ctx.fillStyle = s.price_ore < priceMean
-        ? `rgba(34,197,94,${alpha})`
-        : `rgba(239,68,68,${alpha})`;
+        ? 'rgba(34,197,94,0.75)'
+        : 'rgba(239,68,68,0.75)';
       ctx.fillRect(x, y, barW, h);
     });
 
