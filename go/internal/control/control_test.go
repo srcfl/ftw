@@ -1,6 +1,8 @@
 package control
 
 import (
+	"context"
+	"log/slog"
 	"math"
 	"testing"
 	"time"
@@ -6503,3 +6505,70 @@ func TestSelfConsumptionEVReserveReleasesToBatteryWhenEVCannotStart(t *testing.T
 		t.Errorf("TargetW=%.0f — battery must absorb the sub-reserve surplus the EV can't use; want a positive charge (~1100), got idle", targets[0].TargetW)
 	}
 }
+
+// Holding the grid at its target is normal operation. The clamp is reported
+// when it engages, once, and each further tick stays at debug level; it
+// engages again only after a tick without it.
+func TestMeterClampLogsWhenItEngages(t *testing.T) {
+	var levels []slog.Level
+	previous := slog.Default()
+	slog.SetDefault(slog.New(levelRecorder{levels: &levels}))
+	defer slog.SetDefault(previous)
+
+	clampTick := func(st *State) {
+		store := seedStore(2000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"ferroamp", 0, 0.6}})
+		for i := 0; i < 200; i++ {
+			st.PI.Update(2000)
+		}
+		st.LastDispatch = nil // each call is a fresh control tick, past the holdoff
+		ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	}
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
+	st.SlewRateW = 100000
+
+	clampTick(st)
+	clampTick(st)
+	clampTick(st)
+	want := []slog.Level{slog.LevelInfo, slog.LevelDebug, slog.LevelDebug}
+	if len(levels) != len(want) {
+		t.Fatalf("clamp logged %d times at %v, want %v", len(levels), levels, want)
+	}
+	for i := range want {
+		if levels[i] != want[i] {
+			t.Fatalf("clamp log levels = %v, want %v", levels, want)
+		}
+	}
+
+	// A tick with the grid on target needs no clamp and ends the episode.
+	quiet := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{{"ferroamp", 0, 0.6}})
+	st.PI.Reset()
+	st.LastDispatch = nil
+	ComputeDispatch(quiet, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.meterClampLogged {
+		t.Fatal("a tick without the clamp left it marked as reported")
+	}
+	clampTick(st)
+	if last := levels[len(levels)-1]; last != slog.LevelInfo {
+		t.Fatalf("a clamp that engages again logged at %v, want INFO", last)
+	}
+}
+
+type levelRecorder struct{ levels *[]slog.Level }
+
+func (levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r levelRecorder) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message == "dispatch: meter clamp reduced battery target" {
+		*r.levels = append(*r.levels, rec.Level)
+	}
+	return nil
+}
+func (r levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r levelRecorder) WithGroup(string) slog.Handler      { return r }
