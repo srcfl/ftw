@@ -50,6 +50,7 @@ func newTieredSession(t *testing.T, role string) *tieredRig {
 		Ctrl: ctrl, CtrlMu: &sync.Mutex{},
 		Tel: tel, LogRing: telemetry.NewLogRing(), Version: "test",
 		CfgMu: &sync.RWMutex{}, Cfg: cfg,
+		CapMu: &sync.RWMutex{}, Capacities: map[string]float64{"pixii-1": 16000},
 		SelfTune: coordinator,
 		Models:   map[string]*battery.Model{"pixii-1": battery.New("pixii-1")},
 		ModelsMu: &sync.Mutex{},
