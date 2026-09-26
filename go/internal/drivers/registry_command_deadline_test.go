@@ -40,6 +40,7 @@ func (r *wedgedCommandRuntime) Command(ctx context.Context, cmdJSON []byte) erro
 }
 func (r *wedgedCommandRuntime) DefaultMode(ctx context.Context) error { return nil }
 func (r *wedgedCommandRuntime) Cleanup(ctx context.Context) error     { return nil }
+func (r *wedgedCommandRuntime) Discard()                              {}
 func (r *wedgedCommandRuntime) Env() *HostEnv                         { return r.env }
 
 // Twin of TestSendDefaultPassesCallerContextToRuntime for the dispatch
