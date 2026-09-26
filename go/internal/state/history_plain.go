@@ -28,18 +28,23 @@ const (
 	plainHourKeep                 = 5 * 365 * 24 * time.Hour
 )
 
-// Tables copied into a history file that no longer carries raw polls.
+// Tables copied into a history file that no longer carries raw polls. Import
+// cursors and Parquet summary receipts travel with the hours they produced:
+// without them a restart repeats an import and adds its samples twice.
 var plainHistoryTables = []string{
 	"ts_drivers", "ts_metrics", "ts_latest",
 	"energy_daily", "energy_ledger_meta", "energy_assets", "energy_ledger_entries", "energy_ledger_cursors",
-	"ts_buckets", "ts_aggregate_hours", "ts_series_hour",
+	"ts_buckets", "ts_aggregate_hours", "ts_series_hour", "ts_archive_days",
 	"history_dashboard", "history_site_energy", "history_site_cursor",
-	"history_migrations",
+	"history_migrations", "history_sqlite_progress",
 }
 
+// replaceHistoryFile publishes the rebuilt history file. Tests replace it.
+var replaceHistoryFile = os.Rename
+
 // RetireRawHistory replaces history.db with a copy that omits raw polls and
-// the old hot/warm/cold point log. The previous file is renamed beside it
-// and is not opened again. Ledger rows are counted before the swap.
+// the old hot/warm/cold point log. The previous file stays beside it and is
+// not opened again. Ledger rows are counted before the swap.
 func (s *Store) RetireRawHistory(ctx context.Context) error {
 	if s == nil || s.history == nil {
 		return nil
@@ -122,17 +127,47 @@ func (s *Store) RetireRawHistory(ctx context.Context) error {
 	if _, err := os.Stat(retired); err == nil {
 		retired = fmt.Sprintf("%s.raw-retired-%d", s.historyPath, time.Now().Unix())
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.Rename(s.historyPath+suffix, retired+suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// Boot refuses to start without history.db, so it must exist after every
+	// step. A hard link keeps the old file under both names until one rename
+	// replaces it. A filesystem without hard links moves it aside as before.
+	linked := os.Link(s.historyPath, retired) == nil
+	if !linked {
+		if err := os.Rename(s.historyPath, retired); err != nil {
 			return err
 		}
 	}
-	if err := os.Rename(freshPath, s.historyPath); err != nil {
-		_ = os.Rename(retired, s.historyPath)
+	var moved []string
+	restore := func() {
+		for _, suffix := range moved {
+			_ = os.Rename(retired+suffix, s.historyPath+suffix)
+		}
+		if linked {
+			_ = os.Remove(retired)
+		} else {
+			_ = os.Rename(retired, s.historyPath)
+		}
+	}
+	// The old WAL must never be applied to the new file.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		err := os.Rename(s.historyPath+suffix, retired+suffix)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			restore()
+			return err
+		}
+		moved = append(moved, suffix)
+	}
+	if err := replaceHistoryFile(freshPath, s.historyPath); err != nil {
+		restore()
 		return err
 	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		_ = os.Rename(freshPath+suffix, s.historyPath+suffix)
+	}
+	if err := syncDir(filepath.Dir(s.historyPath)); err != nil {
+		return err
 	}
 	reopened, err := openDurableHistory(s.historyPath)
 	if err != nil {
@@ -150,8 +185,10 @@ func (s *Store) RetireRawHistory(ctx context.Context) error {
 
 // AbsorbColdHistory folds sealed bucket files into hourly rows in history.db.
 // Import every age: a longer minute policy does not recreate archived rows.
-// The files are removed only after every day has been stored. Sample files and archive scratch go with
-// them. Diagnostics files are left in place.
+// The files are removed only after every day has been stored. Archive scratch
+// goes with them, and so does a sample day whose hourly summary receipt
+// matches the file. Other sample days stay readable until the background
+// rollup summarizes them. Diagnostics files are left in place.
 func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	if s == nil || s.history == nil || strings.TrimSpace(cold) == "" {
 		return nil
@@ -199,15 +236,54 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 		}
 		imported++
 	}
-	if err := removeColdHistory(cold); err != nil {
+	keep, err := s.unsummarizedSampleDays(ctx, cold)
+	if err != nil {
+		return err
+	}
+	if err := removeColdHistory(cold, keep); err != nil {
 		return err
 	}
 	removed, err := removeRetiredHistory(s.historyPath)
 	if err != nil {
 		return err
 	}
+	if len(keep) > 0 {
+		slog.Warn("history sample days kept until they have hourly summaries", "days", len(keep))
+	}
 	slog.Info("history cold files absorbed", "days", imported, "retired_files", removed)
 	return nil
+}
+
+// A sample day counts as absorbed only through the summary receipt for this
+// exact file. 2.x wrote these days and never summarized them.
+func (s *Store) unsummarizedSampleDays(ctx context.Context, cold string) (map[string]bool, error) {
+	paths, err := parquetPaths(cold, math.MinInt64, math.MaxInt64)
+	if err != nil {
+		return nil, err
+	}
+	keep := map[string]bool{}
+	for _, path := range paths {
+		var receipt string
+		err := s.history.QueryRowContext(ctx, `SELECT sha256 FROM ts_archive_days WHERE path=?`, parquetSummaryKey(path)).Scan(&receipt)
+		if errors.Is(err, sql.ErrNoRows) {
+			keep[path] = true
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		digest, err := historyFileHashContext(ctx, path)
+		if err != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			slog.Warn("history sample day unreadable; kept", "path", path, "err", err)
+		}
+		if err != nil || digest != receipt {
+			keep[path] = true
+		}
+	}
+	return keep, nil
 }
 
 type namedHour struct {
@@ -346,13 +422,40 @@ func sameColdSummary(a, b BucketSummary) bool {
 		math.Abs(a.Sum-b.Sum) <= 1e-12*max(1, math.Abs(a.Sum), math.Abs(b.Sum))
 }
 
-func removeColdHistory(cold string) error {
+func removeColdHistory(cold string, keep map[string]bool) error {
 	years, err := filepath.Glob(filepath.Join(cold, "[0-9][0-9][0-9][0-9]"))
 	if err != nil {
 		return err
 	}
 	for _, year := range years {
-		if err := os.RemoveAll(year); err != nil {
+		if err := removeColdExcept(year, keep); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeColdExcept(path string, keep map[string]bool) error {
+	held := false
+	for kept := range keep {
+		if strings.HasPrefix(kept, path+string(filepath.Separator)) {
+			held = true
+			break
+		}
+	}
+	if !held {
+		return os.RemoveAll(path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		child := filepath.Join(path, entry.Name())
+		if keep[child] {
+			continue
+		}
+		if err := removeColdExcept(child, keep); err != nil {
 			return err
 		}
 	}
