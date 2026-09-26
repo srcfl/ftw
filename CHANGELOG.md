@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.137.2
+
+### Patch Changes
+
+- 30017ac: An `observe_only` driver is no longer handed back to its default mode when FTW stops, restarts, updates or reloads it, so a battery that a retailer's VPP controls keeps the VPP's settings. When FTW stops a driver it controls, the driver's own cleanup runs again after its default mode, so a PV curtailment on a Sungrow inverter, which only that cleanup releases, no longer stays latched. A driver that fails to start now closes the MQTT, Modbus and other connections it opened, so its retries do not fight each other for the same MQTT client ID. A driver restart or settings save that the browser abandons partway still starts the driver again instead of leaving it stopped until the next reload. Changing a driver's HTTP or WebSocket grant (revoking `allow_write` or setting a new TLS pin, for example) or its `supports_pv_curtail` flag now restarts that driver so the change takes effect.
+- fdfa700: The log no longer fills with warnings about normal operation. The meter clamp, which holds the grid at its target and stops the battery from exporting while covering the house, is logged once when it engages instead of as a warning every control tick. On the home box that was about 3,000 warnings a night. A failed fetch of tomorrow's prices before they are published, around 13:00, is logged at debug level; a failure for today, or for tomorrow after publication, is still a warning. Real warnings, such as a cloud charger going offline, stand out again in `journalctl` and in the support report.
+- 399fdf7: The EV charger picker reuses your saved Easee or Zaptec password only for the provider's own server or the address you saved; any other address must be given the password again. The house password can no longer be turned on for the first time through the app; that is still done on the box. With the house password on, the OCPP charger list, which shows charger serials and RFID card tags, needs the password like the other Settings reads. Home Assistant number commands that are not a finite number are ignored and logged instead of being saved. A Home Assistant bridge that fails to connect at start now stops retrying instead of connecting later in a half-working state.
+- 8a29ee2: Self-tune now sends its step commands only to the batteries FTW controls. Chargers, meters, PV inverters and telemetry-only batteries no longer receive battery commands during a run, so an EV no longer stops charging and those drivers are no longer marked faulty for five minutes after the tune. Each step still passes the fuse guard, the fuse-saver and the battery's power and SoC limits, so a self-tune can no longer push the site past its main fuse. Starting a self-tune now refuses any name that is not a controllable battery, and any battery named more than once.
+- e343d44: A box moving from 2.x keeps its older chart history: Core no longer deletes Parquet sample days that have no hourly summary yet, and removes each one only after the background rollup has summarized it. A restart during the first history import resumes where it stopped instead of counting the imported samples twice, and a power cut while Core replaces its history file no longer leaves a box that refuses to start. Full backups now carry a copy of the price cache, so savings and cost history for past days come back after a restore. `ftw update` and the native installer flush the release and its receipt to disk before FTW starts, so a power cut right after an update cannot leave the launcher unable to start or roll back.
+- 8d6da58: Settings › Weather saves the forecast provider and PV rated power you choose.
+  The form showed `met_no` and 10000 W when neither was set, so accepting them
+  changed nothing and Save kept no provider and no rated power: the site got no
+  solar forecast. The form now shows what Core uses, no provider and an empty
+  rated power, and a select whose stored value is not one of its options shows
+  its default instead of the first option.
+
 ## 0.137.1
 
 ### Patch Changes
