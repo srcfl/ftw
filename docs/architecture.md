@@ -128,7 +128,8 @@ telemetry → control/planner → core validation and safety → driver command
 The in-memory telemetry store owns latest readings and driver health.
 SQLite history.db owns bucketed history, dashboard summaries and the energy
 ledger. A separate state.db owns goals, device identity, learned state and
-planner diagnostics. Rebuildable prices and forecasts live in cache.db.
+planner diagnostics. Prices and forecasts live in cache.db; full backups
+keep its past prices, which savings history needs.
 Database access stays in
 [`go/internal/state`](../go/internal/state).
 
@@ -176,8 +177,9 @@ Fresh installations create these buckets directly. Older layouts convert at
 startup: frozen legacy history imports in bounded transactions, a history.db
 that still holds raw polls is replaced by a copy with only buckets and the
 ledger, and old Parquet bucket files are folded into hourly rows before they
-are removed. Old planner-diagnostics Parquet files stay on the box and remain
-readable. Only DuckDB beta installations need the separate offline
+are removed. An old Parquet sample day is removed only once its hourly summary
+matches the file; until then it stays readable. Old planner-diagnostics
+Parquet files stay on the box and remain readable. Only DuckDB beta installations need the separate offline
 [history converter](history-conversion.md). Core and normal release builds
 have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
 
