@@ -693,16 +693,28 @@ func (s *Service) loop(ctx context.Context) {
 // day-ahead is normally on the dataportal. Hourly ticks alone can miss
 // that window for up to an hour.
 func nextDayAheadCatch(now time.Time) time.Time {
+	target := dayAheadPublished(now)
+	if !now.Before(target) {
+		target = target.Add(24 * time.Hour)
+	}
+	return target
+}
+
+// notPublishedYet reports whether a failed fetch for today+offset is the
+// normal answer before tomorrow's day-ahead prices are published.
+func notPublishedYet(offset int, now time.Time) bool {
+	return offset == 1 && now.Before(dayAheadPublished(now))
+}
+
+// dayAheadPublished is 13:05 Europe/Stockholm on now's date, by when
+// tomorrow's day-ahead prices are normally published.
+func dayAheadPublished(now time.Time) time.Time {
 	loc, err := time.LoadLocation("Europe/Stockholm")
 	if err != nil {
 		loc = time.FixedZone("CET", 3600)
 	}
 	now = now.In(loc)
-	target := time.Date(now.Year(), now.Month(), now.Day(), 13, 5, 0, 0, loc)
-	if !now.Before(target) {
-		target = target.Add(24 * time.Hour)
-	}
-	return target
+	return time.Date(now.Year(), now.Month(), now.Day(), 13, 5, 0, 0, loc)
 }
 
 func (s *Service) fetchAndStore(ctx context.Context) {
@@ -711,7 +723,13 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		day := now.AddDate(0, 0, offset)
 		rows, err := s.Provider.Fetch(ctx, s.Zone, day)
 		if err != nil {
-			slog.Warn("price fetch failed", "zone", s.Zone, "day", day.Format("2006-01-02"), "err", err)
+			// Tomorrow's day-ahead is not published before about 13:00, so
+			// asking earlier is expected to find nothing.
+			if notPublishedYet(offset, now) {
+				slog.Debug("tomorrow's prices are not published yet", "zone", s.Zone, "day", day.Format("2006-01-02"), "err", err)
+			} else {
+				slog.Warn("price fetch failed", "zone", s.Zone, "day", day.Format("2006-01-02"), "err", err)
+			}
 			continue
 		}
 		if len(rows) == 0 {
