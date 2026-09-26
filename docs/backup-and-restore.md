@@ -46,10 +46,12 @@ disk. Keeping a copy somewhere else is the owner's step: point `--output-dir`
 at another disk, or copy the file off the machine. Keep at least one older
 known-good copy.
 
-The archive leaves out other backups, old rollback points and `cache.db`,
-which holds only re-fetchable data. Managed-driver links that point inside the
-persistent directory become relative links in the archive, so restore can
-move the data to another directory or machine. Backup never follows these
+The archive leaves out other backups and old rollback points. It carries a
+consistent copy of `cache.db`: savings history is costed from its past
+prices, and a price provider sends only today and tomorrow. Managed-driver
+links that point inside the persistent directory become relative links in the
+archive, so restore can move the data to another directory or machine.
+Backup never follows these
 links to copy a host file; verification rejects link chains that escape the
 data directory or form a cycle.
 

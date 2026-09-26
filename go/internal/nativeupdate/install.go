@@ -138,7 +138,9 @@ func (m Manager) InstallArchive(ctx context.Context, tag, archivePath, checksumP
 		return fmt.Errorf("release identity mismatch: package %s/%s, requested %s/%s", version.Version, version.Arch, tag, arch)
 	}
 	receipt, _ := json.Marshal(releaseReceipt{Tag: tag, Arch: arch, ArchiveSHA256: digest, StateSchema: version.StateSchema})
-	if err := os.WriteFile(filepath.Join(stage, receiptFile), append(receipt, '\n'), 0o600); err != nil {
+	// The launcher and rollback refuse a release without a readable receipt.
+	// Flush it like the extracted files before the release becomes visible.
+	if err := writeFileSync(filepath.Join(stage, receiptFile), append(receipt, '\n'), 0o600); err != nil {
 		return err
 	}
 	if err := validateReleasePath(stage, tag, arch); err != nil {
@@ -237,6 +239,21 @@ func extractArchive(ctx context.Context, source io.Reader, target string) error 
 			return closeErr
 		}
 	}
+}
+
+// syncFile flushes one written file to disk. Tests replace it.
+var syncFile = (*os.File).Sync
+
+func writeFileSync(path string, data []byte, mode fs.FileMode) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	if err == nil {
+		err = syncFile(file)
+	}
+	return errors.Join(err, file.Close())
 }
 
 func syncDir(path string) error {

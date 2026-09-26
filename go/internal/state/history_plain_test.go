@@ -2,8 +2,11 @@ package state
 
 import (
 	"context"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +76,99 @@ func TestRetireRawHistoryKeepsTheLedger(t *testing.T) {
 	info, err := os.Stat(retired)
 	if err != nil || info.Size() == 0 {
 		t.Fatal(err, info)
+	}
+}
+
+func TestRetireRawHistoryNeverLeavesHistoryMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSamples([]Sample{{Driver: "meter", Metric: "grid_w", TsMs: 1_000, Value: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	RetireRawOnOpen = true
+	t.Cleanup(func() { RetireRawOnOpen = false; replaceHistoryFile = os.Rename })
+	historyPath := pathDirHistory(path)
+	present := false
+	// Power is lost as the rebuilt copy is published.
+	replaceHistoryFile = func(string, string) error {
+		_, err := os.Stat(historyPath)
+		present = err == nil
+		return errors.New("power lost")
+	}
+	if s, err := Open(path); err == nil {
+		s.Close()
+		t.Fatal("interrupted retire opened")
+	}
+	if !present {
+		t.Fatal("history.db was missing while its replacement was published")
+	}
+	replaceHistoryFile = os.Rename
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("original history not back in service: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	var raw int
+	if err := s.history.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&raw); err != nil || raw != 0 {
+		t.Fatalf("retry did not retire raw polls: raw=%d err=%v", raw, err)
+	}
+	if info, err := os.Stat(historyPath + ".raw-retired"); err != nil || info.Size() == 0 {
+		t.Fatal("retired history missing", err)
+	}
+}
+
+// A restart during the legacy import retires raw rows before it resumes.
+// The cursor must survive, or every imported sample is summed twice.
+func TestRetireDuringImportKeepsItsCursor(t *testing.T) {
+	const rows = 3000
+	path, cold := legacyMigrationFixture(t, rows)
+	RetireRawOnOpen = true
+	t.Cleanup(func() { RetireRawOnOpen = false })
+	reached, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s, err := OpenWithBackgroundHistory(path, cold, func(st HistoryMigrationStatus) {
+		if st.Phase == "sqlite" && st.RowsDone == historyImportRows {
+			once.Do(func() { close(reached); <-release })
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("import never reached a committed chunk")
+	}
+	s.historyMigration.cancel()
+	close(release)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenWithBackgroundHistory(path, cold, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	waitHistoryMigration(t, s)
+	if !s.HistoryMigrationStatus().HistoryComplete {
+		t.Fatal(s.HistoryMigrationStatus())
+	}
+	var n int64
+	var sum, want float64
+	if err := s.history.QueryRow(`SELECT n,sum_value FROM ts_series_hour WHERE driver_id=7 AND metric_id=9 AND hour_ms=0`).Scan(&n, &sum); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= rows; i++ {
+		want += float64(i) / 7
+	}
+	if n != rows || math.Abs(sum-want) > 1e-6*want {
+		t.Fatalf("hour counts %d samples summing %v, want %d summing %v", n, sum, rows, want)
 	}
 }
 

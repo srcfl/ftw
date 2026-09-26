@@ -541,6 +541,29 @@ func (h *HostEnv) WithTCPAllowedHosts(hosts []string) *HostEnv {
 	return h
 }
 
+// closeCapabilities tears down the connections the registry opened for this
+// driver, so a later Add with the same name does not race an old MQTT
+// session (the broker resolves the client-ID conflict by kicking one of
+// them, and subscribe ACKs get lost). Modbus TCP connections similarly need
+// an explicit close so the server side frees the slot.
+func (h *HostEnv) closeCapabilities() {
+	if h.MQTT != nil {
+		_ = h.MQTT.Close()
+	}
+	if h.Modbus != nil {
+		_ = h.Modbus.Close()
+	}
+	if h.Serial != nil {
+		_ = h.Serial.Close()
+	}
+	if h.WS != nil {
+		_ = h.WS.Close()
+	}
+	if h.TCP != nil {
+		_ = h.TCP.Close()
+	}
+}
+
 // millis returns monotonic milliseconds since host startup.
 func (h *HostEnv) millis() int64 {
 	return time.Since(h.Start).Milliseconds()
