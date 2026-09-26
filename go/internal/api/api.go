@@ -345,9 +345,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // draw until somebody names the path, not a control a stranger can reach.
 //
 // The caller is the passthrough, which needs the answer before it runs
-// anything. Nothing on the LAN path consults it: the LAN is served with no
-// authentication at all, and pretending otherwise here would be a claim the
-// deployment does not support.
+// anything. The LAN and public-host path does not consult it: Authenticate
+// guards reads by protectedReadPath, and a test keeps every Local and
+// Configure GET on that list.
 func (s *Server) Route(r *http.Request) apiauth.RouteFacts {
 	facts := apiauth.RouteFacts{Tier: apiauth.TierLocal}
 
@@ -3576,7 +3576,8 @@ func (s *Server) handleEVProviders(w http.ResponseWriter, r *http.Request) {
 // transport block + optional auth). For providers that need auth and
 // the body omits Password, we fall back to the persisted
 // ev_charger_password so the operator doesn't have to re-type it when
-// they're just refreshing the picker.
+// they're just refreshing the picker — but only toward the provider's
+// default endpoint or the base_url already saved (storedEVPasswordAllowed).
 func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 	var cfg config.EVCharger
 	if err := readJSON(r, &cfg); err != nil {
@@ -3598,7 +3599,7 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	desc := p.Describe()
-	if desc.NeedsAuth && cfg.Password == "" {
+	if desc.NeedsAuth && cfg.Password == "" && s.storedEVPasswordAllowed(&cfg) {
 		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
 			cfg.Password = pw
 		}
@@ -3617,6 +3618,24 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, chargers)
+}
+
+// storedEVPasswordAllowed reports whether the saved EV cloud password may
+// travel with this probe. The provider logs in at http.base_url, which the
+// caller chooses, so the saved secret goes only to the provider's default
+// endpoint or to the base_url the operator already saved. Any other host
+// must be sent the password in the request body.
+func (s *Server) storedEVPasswordAllowed(cfg *config.EVCharger) bool {
+	if cfg.HTTP == nil || cfg.HTTP.BaseURL == "" {
+		return true
+	}
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return false
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	saved := s.deps.Cfg.EVCharger
+	return saved != nil && saved.HTTP != nil && saved.HTTP.BaseURL == cfg.HTTP.BaseURL
 }
 
 // GET /api/loadpoints returns the configured EV loadpoints with their

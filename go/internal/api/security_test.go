@@ -262,6 +262,7 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 		"/api/device_repository/catalog",
 		"/api/device_repository/drivers/sonnen/versions",
 		"/api/app-link/status",
+		"/api/ocpp/chargers",
 	} {
 		t.Run(path, func(t *testing.T) {
 			request := func(auth string) *httptest.ResponseRecorder {
@@ -286,6 +287,40 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 				t.Fatalf("valid token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
 			}
 		})
+	}
+}
+
+// The route table and protectedReadPath are kept side by side by hand. A GET
+// the passthrough refuses (Local) or keeps for owners (Configure) must not be
+// handed to an unauthenticated LAN viewer or a public-host stranger either.
+func TestLocalAndConfigureReadsAreProtectedReads(t *testing.T) {
+	srv := New(&Deps{Version: "test", WebDir: t.TempDir()})
+	// Guarded in requiresMutationProtection instead: the OAuth callback is a
+	// cross-site redirect with its own single-use state, and the update check
+	// is protected only when it forces a fetch.
+	exempt := map[string]bool{
+		"GET /api/oauth/myuplink/callback": true,
+		"GET /api/version/check":           true,
+	}
+	checked := 0
+	for pattern, mark := range srv.marks {
+		method, path, _ := strings.Cut(pattern, " ")
+		if method != http.MethodGet && method != http.MethodHead {
+			continue
+		}
+		if mark.tier != Local && mark.tier != Configure {
+			continue
+		}
+		checked++
+		if exempt[pattern] {
+			continue
+		}
+		if !protectedReadPath(concrete(path)) {
+			t.Errorf("%s is %s but protectedReadPath does not guard it", pattern, mark.tier)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no Local or Configure GET routes found; the sweep checked nothing")
 	}
 }
 

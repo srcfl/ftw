@@ -1,8 +1,12 @@
 package ha
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/srcfl/ftw/go/internal/config"
 )
@@ -229,6 +233,94 @@ func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
 		// Stop returned — rollback closed b.done, teardown didn't block.
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop blocked after a failed Connect — teardown is stuck on <-doneCh; the connectAndStart rollback regressed")
+	}
+}
+
+// A Start that times out against a broker that is not up yet (FTW booting
+// before the HA box after a power cut) is dropped by main.go. Its paho client
+// must stop dialling: left alive, it connected later, took HA commands with
+// no publish loop, and fought the next Start's client over the same ClientID.
+func TestFailedConnectStopsTheRetryingClient(t *testing.T) {
+	b := &Bridge{
+		topicPrefix:    "ftw",
+		discoPrefix:    "homeassistant",
+		deviceID:       "ftw",
+		connectTimeout: 100 * time.Millisecond,
+	}
+	cfg := &config.HomeAssistant{Broker: "127.0.0.1", Port: 1}
+	if err := b.connectAndStart(cfg, nil); err == nil {
+		t.Fatal("connectAndStart against a refused broker must return an error")
+	}
+	b.mu.Lock()
+	cli := b.client
+	b.mu.Unlock()
+
+	// With ConnectRetry, IsConnected reports true for as long as the client
+	// keeps retrying.
+	deadline := time.Now().Add(2 * time.Second)
+	for cli.IsConnected() {
+		if time.Now().After(deadline) {
+			t.Fatal("the failed client is still retrying after connectAndStart returned an error")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// commandClient records the handlers subscribeCommands installs so a test can
+// deliver a payload the way the broker would.
+type commandClient struct {
+	paho.Client
+	handlers map[string]paho.MessageHandler
+}
+
+func (c *commandClient) Subscribe(topic string, _ byte, cb paho.MessageHandler) paho.Token {
+	c.handlers[topic] = cb
+	return nil
+}
+
+type commandMessage struct {
+	paho.Message
+	payload []byte
+}
+
+func (m commandMessage) Payload() []byte { return m.payload }
+
+// ParseFloat accepts "nan" and "inf". A non-finite target reached the PI
+// setpoint, was persisted, and blanked /api/status on every boot after.
+func TestNumberCommandsDropNonFiniteValues(t *testing.T) {
+	var got []string
+	record := func(name string) func(float64) error {
+		return func(w float64) error {
+			got = append(got, fmt.Sprintf("%s=%v", name, w))
+			return nil
+		}
+	}
+	cli := &commandClient{handlers: map[string]paho.MessageHandler{}}
+	b := &Bridge{
+		topicPrefix: "ftw",
+		client:      cli,
+		cb: CommandCallbacks{
+			SetGridTarget: record("grid_target_w"),
+			SetPeakLimit:  record("peak_limit_w"),
+			SetEVCharging: func(w float64, _ bool) error { return record("ev_charging_w")(w) },
+		},
+	}
+	b.subscribeCommands()
+
+	for _, name := range []string{"grid_target_w", "peak_limit_w", "ev_charging_w"} {
+		handler := cli.handlers[b.cmdTopic(name)]
+		if handler == nil {
+			t.Fatalf("no handler subscribed for %s", name)
+		}
+		for _, payload := range []string{"nan", "NaN", "inf", "+Inf", "-infinity"} {
+			handler(cli, commandMessage{payload: []byte(payload)})
+		}
+		handler(cli, commandMessage{payload: []byte("1500")})
+	}
+
+	want := []string{"grid_target_w=1500", "peak_limit_w=1500", "ev_charging_w=1500"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("callbacks saw %v, want only the finite values %v", got, want)
 	}
 }
 

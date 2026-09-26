@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -293,6 +294,10 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 	started := false
 	defer func() {
 		if !started {
+			// ConnectRetry keeps a failed client dialling. Left running, it
+			// would connect later and take HA commands with no publish loop
+			// and no owner to stop it, beside the next Start's client.
+			cli.Disconnect(0)
 			b.mu.Lock()
 			close(b.done)
 			b.mu.Unlock()
@@ -813,8 +818,8 @@ func (b *Bridge) subscribeCommands() {
 		}
 	})
 	b.client.Subscribe(b.cmdTopic("grid_target_w"), 0, func(_ paho.Client, m paho.Message) {
-		f, err := strconv.ParseFloat(string(m.Payload()), 64)
-		if err != nil {
+		f, ok := commandWatts("grid_target_w", m.Payload())
+		if !ok {
 			return
 		}
 		if b.cb.SetGridTarget != nil {
@@ -822,8 +827,8 @@ func (b *Bridge) subscribeCommands() {
 		}
 	})
 	b.client.Subscribe(b.cmdTopic("peak_limit_w"), 0, func(_ paho.Client, m paho.Message) {
-		f, err := strconv.ParseFloat(string(m.Payload()), 64)
-		if err != nil {
+		f, ok := commandWatts("peak_limit_w", m.Payload())
+		if !ok {
 			return
 		}
 		if b.cb.SetPeakLimit != nil {
@@ -838,8 +843,8 @@ func (b *Bridge) subscribeCommands() {
 		}
 	})
 	b.client.Subscribe(b.cmdTopic("ev_charging_w"), 0, func(_ paho.Client, m paho.Message) {
-		f, err := strconv.ParseFloat(string(m.Payload()), 64)
-		if err != nil {
+		f, ok := commandWatts("ev_charging_w", m.Payload())
+		if !ok {
 			return
 		}
 		if b.cb.SetEVCharging != nil {
@@ -852,6 +857,21 @@ func (b *Bridge) subscribeCommands() {
 			_ = b.cb.SetBatteryCoversEV(on)
 		}
 	})
+}
+
+// commandWatts parses a number command. ParseFloat accepts "nan" and "inf";
+// either would poison the PI setpoint, be persisted, and blank every JSON
+// read of the control state, so a non-finite value is dropped and logged.
+func commandWatts(topic string, payload []byte) (float64, bool) {
+	f, err := strconv.ParseFloat(string(payload), 64)
+	if err != nil {
+		return 0, false
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		slog.Warn("HA command ignored: not a finite number", "topic", topic, "payload", string(payload))
+		return 0, false
+	}
+	return f, true
 }
 
 // ---- State publish loop ----
