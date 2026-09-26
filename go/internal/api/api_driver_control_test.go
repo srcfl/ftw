@@ -904,6 +904,12 @@ func TestDriverControlRejectsObserveOnlyWithoutSending(t *testing.T) {
 	if err := srv.deps.Registry.Send(context.Background(), "heat", []byte(`{"action":"set_offset","value":2}`)); err != drivers.ErrObserveOnly {
 		t.Fatalf("direct observe_only Send = %v, want %v", err, drivers.ErrObserveOnly)
 	}
+
+	release := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(release, httptest.NewRequest(http.MethodDelete, "/api/drivers/heat/control", nil))
+	if release.Code != http.StatusForbidden {
+		t.Fatalf("observe_only release = %d, body %s", release.Code, release.Body.String())
+	}
 }
 
 func TestDriverControlBlocksUntilDefaultRecovery(t *testing.T) {

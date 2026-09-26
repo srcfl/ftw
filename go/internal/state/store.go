@@ -48,7 +48,7 @@ const (
 //   - history: samples, hourly summaries, energy ledger and dashboard history
 //   - hot: alias for history, used by recent-history readers
 //   - db: state.db configuration, devices and learned state
-//   - cache: cache.db prices and forecasts, which can be rebuilt
+//   - cache: cache.db prices and forecasts; savings history needs past prices
 //
 // See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
@@ -1148,9 +1148,10 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
-	// separate file so its corruption (or a deliberate flush) never risks the
-	// precious state.db — and recovery is just "rebuild empty + re-fetch".
+	// Cache tier (cache.db): market + weather data. Kept in a separate file so
+	// its corruption (or a deliberate flush) never risks the precious state.db;
+	// recovery rebuilds it empty and re-fetches. Providers resend only today
+	// and tomorrow, so past prices come back only from a full backup.
 	cacheStmts := []string{
 		// Spot prices — one row per time slot per zone. Slot duration is
 		// provider-dependent (NordPool 15-min PTU since late 2025; ENTSOE

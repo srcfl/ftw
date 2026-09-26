@@ -2177,6 +2177,33 @@ func (s *Server) handleSelfTuneStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Each run steps one battery for about 166 s while normal control is
+	// paused, so only the controllable pool may be named, once each.
+	if s.deps.CapMu == nil || s.deps.Capacities == nil {
+		writeJSON(w, 503, map[string]string{"error": "battery control inventory not available"})
+		return
+	}
+	s.deps.CapMu.RLock()
+	controllable := make(map[string]bool, len(s.deps.Capacities))
+	for name := range s.deps.Capacities {
+		controllable[name] = true
+	}
+	s.deps.CapMu.RUnlock()
+	seen := make(map[string]bool, len(req.Batteries))
+	for _, name := range req.Batteries {
+		msg := ""
+		switch {
+		case !controllable[name]:
+			msg = "battery " + name + " is not a controllable battery and cannot be self-tuned"
+		case seen[name]:
+			msg = "battery " + name + " is listed more than once"
+		}
+		if msg != "" {
+			writeJSON(w, 400, map[string]string{"error": msg})
+			return
+		}
+		seen[name] = true
+	}
 	s.deps.ModelsMu.Lock()
 	err := s.deps.SelfTune.Start(req.Batteries, s.deps.Models, s.deps.DtS)
 	s.deps.ModelsMu.Unlock()

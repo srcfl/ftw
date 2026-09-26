@@ -3130,18 +3130,15 @@ func main() {
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
 			ctrlMu.Unlock()
 
-			// ---- Self-tune override: force commanded battery, hold others at 0 ----
+			// ---- Self-tune override: step one battery, hold its siblings at 0 ----
+			// Only the controllable battery pool is commanded, and the step
+			// still passes the fuse guard, fuse-saver and power/SoC clamps.
 			finalTargets := targets
 			selfTuneName, selfTuneCmd, selfTuneActive := selfTune.CurrentCommand()
 			if selfTuneActive {
-				finalTargets = make([]control.DispatchTarget, 0, len(reg.Names()))
-				for _, n := range reg.Names() {
-					if n == selfTuneName {
-						finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: selfTuneCmd})
-					} else {
-						finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: 0})
-					}
-				}
+				ctrlMu.Lock()
+				finalTargets = control.SelfTuneDispatch(tel, ctrl, capsSnap, fuseMaxW, selfTuneName, selfTuneCmd)
+				ctrlMu.Unlock()
 			}
 			if troubleshootingMode {
 				gridW, haveGrid := troubleshootingGridW(tel, siteMeterDriver)
