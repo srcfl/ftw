@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -242,6 +243,19 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		}
 		sources = append(filtered, sourceEntry{archivePath: archivePath, sourcePath: exported})
 	}
+	// Savings history is costed from past prices, which providers do not send
+	// again. Archive a consistent copy of cache.db, never the live file. A
+	// damaged cache must not cost the owner the rest of the backup.
+	stagedCache := filepath.Join(stageDir, "cache.db")
+	if found, err := opts.State.BackupCache(ctx, stagedCache); err != nil {
+		if ctx.Err() != nil {
+			return Info{}, ctx.Err()
+		}
+		_ = os.Remove(stagedCache)
+		slog.Warn("full backup continues without cache.db; past prices are not in it", "err", err)
+	} else if found {
+		sources = append(sources, sourceEntry{archivePath: "data/" + path.Join(path.Dir(databaseFile), "cache.db"), sourcePath: stagedCache})
+	}
 	sources = append(sources, sourceEntry{
 		archivePath: databaseEntry,
 		sourcePath:  databaseGzip,
@@ -389,8 +403,8 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 		// whose rows the export above already carries. It is rewritten through
 		// a temp database and its journal two minutes after every start, so a
 		// backup taken right after an update walked into files that vanished.
-		// cache.db holds only re-fetchable data. Restore moves all of them
-		// aside anyway.
+		// The live cache.db is never copied; Create archives a consistent
+		// copy instead. Restore moves all of them aside anyway.
 		if strings.HasPrefix(rel, stateRel+".snapshot") || rel == cacheRel || strings.HasPrefix(rel, cacheRel+"-") {
 			return nil
 		}
