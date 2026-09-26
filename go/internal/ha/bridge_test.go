@@ -242,9 +242,9 @@ func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
 // no publish loop, and fought the next Start's client over the same ClientID.
 func TestFailedConnectStopsTheRetryingClient(t *testing.T) {
 	b := &Bridge{
-		topicPrefix:    "forty-two-watts",
+		topicPrefix:    "ftw",
 		discoPrefix:    "homeassistant",
-		deviceID:       "forty_two_watts",
+		deviceID:       "ftw",
 		connectTimeout: 100 * time.Millisecond,
 	}
 	cfg := &config.HomeAssistant{Broker: "127.0.0.1", Port: 1}
@@ -297,7 +297,7 @@ func TestNumberCommandsDropNonFiniteValues(t *testing.T) {
 	}
 	cli := &commandClient{handlers: map[string]paho.MessageHandler{}}
 	b := &Bridge{
-		topicPrefix: "forty-two-watts",
+		topicPrefix: "ftw",
 		client:      cli,
 		cb: CommandCallbacks{
 			SetGridTarget: record("grid_target_w"),
