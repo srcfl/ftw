@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -167,4 +169,19 @@ func TestManagedDriverSoCBoundsDuringRecovery(t *testing.T) {
 			assertDriverSoC(t, f, since, recovered, 0.23, 0.81, raw)
 		})
 	}
+}
+
+// The dashboard's per-driver Restart button re-runs driver_init. It must hand
+// the driver the same battery window as startup, or the driver's built-in
+// ceiling (0.95 on a Ferroamp) returns until the next reload.
+func TestDriverRestartButtonKeepsBatterySoCBounds(t *testing.T) {
+	f := newDriverSoCFixture(t, nil)
+	since := time.Now()
+	r := httptest.NewRequest(http.MethodPost, "/api/drivers/p1/restart", nil)
+	w := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("restart: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	assertDriverSoC(t, f, since, 102, 0.23, 0.81, nil)
 }

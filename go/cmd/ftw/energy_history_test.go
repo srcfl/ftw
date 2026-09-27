@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func TestBuildEnergyObservationsUsesStableAssetsAndDirectionalCounters(t *testin
 		json.RawMessage(`{"import_wh":1200,"export_wh":340}`))
 	tel.Update("mutable-ev-name", telemetry.DerEV, 3200, nil,
 		json.RawMessage(`{"session_wh":800}`))
-	ctrl := &control.State{SiteMeterDriver: "mutable-meter-name"}
+	ctrl := tickPersistControl{SiteMeterDriver: "mutable-meter-name"}
 	observations := buildEnergyObservations(st, tel, ctrl, state.HistoryPoint{LoadW: 450}, testEnergyIdentity(st))
 
 	wantAssetID := state.HardwareEnergyAssetID(deviceID, state.AssetGridMeter)
@@ -79,7 +80,7 @@ func TestBuildHistoryPointExcludesUnavailableTelemetry(t *testing.T) {
 	tel.Get("stale-pv", telemetry.DerPV).UpdatedAt = now.Add(-2 * time.Minute)
 	tel.DriverHealthMut("stale-battery").SetOffline()
 
-	point, available := buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
+	point, available := buildHistoryPoint(tel, tickPersistControl{SiteMeterDriver: "site-meter"},
 		now.UnixMilli(), time.Minute)
 	if available {
 		t.Fatalf("offline site meter produced history: %+v", point)
@@ -87,7 +88,7 @@ func TestBuildHistoryPointExcludesUnavailableTelemetry(t *testing.T) {
 
 	tel.Update("site-meter", telemetry.DerMeter, 800, nil, nil)
 	tel.RecordDriverSuccess("site-meter")
-	point, available = buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
+	point, available = buildHistoryPoint(tel, tickPersistControl{SiteMeterDriver: "site-meter"},
 		now.UnixMilli(), time.Minute)
 	if available {
 		t.Fatalf("missing PV/battery treated as zero in household history: %+v", point)
@@ -97,7 +98,7 @@ func TestBuildHistoryPointExcludesUnavailableTelemetry(t *testing.T) {
 	tel.RecordDriverSuccess("stale-pv")
 	tel.Update("stale-battery", telemetry.DerBattery, 250, nil, nil)
 	tel.RecordDriverSuccess("stale-battery")
-	point, available = buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
+	point, available = buildHistoryPoint(tel, tickPersistControl{SiteMeterDriver: "site-meter"},
 		time.Now().Add(time.Millisecond).UnixMilli(), time.Minute)
 	if !available || point.LoadW != 1600 || point.PVW != -1100 || point.BatW != 300 {
 		t.Fatalf("recovered complete raw balance = %+v, available=%v", point, available)
@@ -108,7 +109,7 @@ func TestBuildHistoryPointExcludesUnavailableTelemetry(t *testing.T) {
 	zeroTel.Update("zero-meter", telemetry.DerMeter, 0, nil, nil)
 	zeroTel.RecordDriverSuccess("zero-meter")
 	zero, zeroAvailable := buildHistoryPoint(zeroTel,
-		&control.State{SiteMeterDriver: "zero-meter"}, time.Now().Add(time.Millisecond).UnixMilli(), time.Minute)
+		tickPersistControl{SiteMeterDriver: "zero-meter"}, time.Now().Add(time.Millisecond).UnixMilli(), time.Minute)
 	if !zeroAvailable || zero.GridW != 0 {
 		t.Fatalf("fresh 0 W site meter unavailable: point=%+v available=%v", zero, zeroAvailable)
 	}
@@ -137,7 +138,7 @@ func TestBuildHistoryPointRequiresFreshEVAndV2X(t *testing.T) {
 		tel.RecordDriverSuccess(name)
 	}
 
-	point, available := buildHistoryPoint(tel, &control.State{SiteMeterDriver: "site-meter"},
+	point, available := buildHistoryPoint(tel, tickPersistControl{SiteMeterDriver: "site-meter"},
 		now.UnixMilli(), time.Minute)
 	if available {
 		t.Fatalf("aged EV/V2X became zero household demand: %+v", point)
@@ -168,7 +169,7 @@ func TestPersistTelemetryTickUsesPersistenceFreshness(t *testing.T) {
 			tel.RecordDriverSuccess("meter")
 			sampleAt := time.Now().Add(tc.sampleAge)
 			tel.Get("meter", telemetry.DerMeter).UpdatedAt = sampleAt
-			ctrl := &control.State{SiteMeterDriver: "meter"}
+			ctrl := tickPersistControl{SiteMeterDriver: "meter"}
 			if _, err := persistTelemetryTick(st, tel, ctrl, tickMS, time.Minute, testEnergyIdentity(st)); err != nil {
 				t.Fatal(err)
 			}
@@ -202,6 +203,45 @@ func TestPersistTelemetryTickUsesPersistenceFreshness(t *testing.T) {
 	}
 }
 
+// A config reload rewrites ctrl.SiteMeterDriver under ctrlMu from an HTTP
+// goroutine while the tick persists. Persistence works from a copy taken
+// under the same lock, so `go test -race` stays clean, and the copy does not
+// share the targets slice that the next dispatch rewrites.
+func TestTickPersistenceSnapshotsControlUnderLock(t *testing.T) {
+	ctrl := &control.State{
+		SiteMeterDriver: "meter",
+		LastTargets:     []control.DispatchTarget{{Driver: "battery", TargetW: 321}},
+	}
+	ctrlMu := &sync.Mutex{}
+	tel := telemetry.NewStore()
+	tel.EnsureDriverHealth("meter")
+	tel.Update("meter", telemetry.DerMeter, 1200, nil, nil)
+	tel.RecordDriverSuccess("meter")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			ctrlMu.Lock()
+			ctrl.SiteMeterDriver = []string{"meter", "replacement-meter"}[i%2]
+			ctrl.LastTargets = []control.DispatchTarget{{Driver: "battery", TargetW: float64(i)}}
+			ctrlMu.Unlock()
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		buildHistoryPoint(tel, snapshotTickPersistControl(ctrl, ctrlMu), time.Now().UnixMilli(), time.Minute)
+	}
+	<-done
+
+	snap := snapshotTickPersistControl(ctrl, ctrlMu)
+	ctrlMu.Lock()
+	ctrl.LastTargets[0].TargetW = -1
+	ctrlMu.Unlock()
+	if snap.LastTargets[0].TargetW == -1 {
+		t.Fatal("persistence snapshot shares the dispatch targets slice")
+	}
+}
+
 func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -227,7 +267,7 @@ func TestStaleMeterTickKeepsSamplesAndIndependentLedgerWithoutDispatch(t *testin
 	tel.Get("solar", telemetry.DerPV).UpdatedAt = now.Add(-30 * time.Second)
 	tel.RecordDriverSuccess("solar")
 
-	ctrl := &control.State{
+	ctrl := tickPersistControl{
 		SiteMeterDriver: "meter",
 		LastTargets:     []control.DispatchTarget{{Driver: "battery", TargetW: 321}},
 	}

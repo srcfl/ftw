@@ -326,6 +326,65 @@ func TestStorePreservesSoCWhenMissing(t *testing.T) {
 	}
 }
 
+func TestStoreDropsBatterySoCPastMaxAge(t *testing.T) {
+	// A battery driver that keeps emitting power but stops reporting SoC must
+	// not keep its last SoC forever. Dispatch, the planner and a battery-boost
+	// lease would act on a number that may be far from the real pack.
+	s := NewStore()
+	setSoCAge := func(at time.Time) {
+		s.mu.Lock()
+		s.readings[key("bat", DerBattery)].SoCUpdatedAt = at
+		s.mu.Unlock()
+	}
+	soc := 0.40
+	s.Update("bat", DerBattery, 2000, &soc, nil)
+
+	within := time.Now().Add(-BatterySoCMaxAge + time.Minute)
+	setSoCAge(within)
+	s.Update("bat", DerBattery, 2000, nil, nil)
+	if r := s.Get("bat", DerBattery); r == nil || r.SoC == nil || *r.SoC != 0.40 || !r.SoCUpdatedAt.Equal(within) {
+		t.Fatalf("SoC within max age must carry forward, got %+v", r)
+	}
+
+	setSoCAge(time.Now().Add(-BatterySoCMaxAge - time.Second))
+	s.Update("bat", DerBattery, 2000, nil, nil)
+	if r := s.Get("bat", DerBattery); r == nil || r.SoC != nil || !r.SoCUpdatedAt.IsZero() {
+		t.Fatalf("SoC past max age must be unknown, got %+v", r)
+	}
+	s.Update("bat", DerBattery, 2000, nil, nil)
+	if r := s.Get("bat", DerBattery); r == nil || r.SoC != nil {
+		t.Fatalf("unknown SoC must stay unknown until a fresh one, got %+v", r)
+	}
+	fresh := 0.38
+	s.Update("bat", DerBattery, 2000, &fresh, nil)
+	if r := s.Get("bat", DerBattery); r == nil || r.SoC == nil || *r.SoC != 0.38 {
+		t.Fatalf("fresh SoC must restore the reading, got %+v", r)
+	}
+}
+
+func TestStoreRemoveDropsLatestMetrics(t *testing.T) {
+	// A site meter replaced under the same name by a driver that emits no
+	// phase currents must not inherit the old meter_lN_a snapshots: they age
+	// into "phase currents stale" and block dispatch until Core restarts.
+	s := NewStore()
+	for _, phase := range []string{"meter_l1_a", "meter_l2_a", "meter_l3_a"} {
+		s.EmitMetric("meter", phase, 8, "A", "", "")
+	}
+	s.EmitMetric("meter2", "meter_l1_a", 5, "A", "", "")
+
+	s.Remove("meter")
+
+	if got := s.LatestMetricsByDriver("meter"); len(got) != 0 {
+		t.Fatalf("removed driver kept metric snapshots: %+v", got)
+	}
+	if _, _, ok := s.LatestMetric("meter", "meter_l1_a"); ok {
+		t.Fatal("removed driver still answers LatestMetric")
+	}
+	if v, _, ok := s.LatestMetric("meter2", "meter_l1_a"); !ok || v != 5 {
+		t.Fatalf("another driver's metric was dropped: %v %v", v, ok)
+	}
+}
+
 func TestStorePreservesVehicleSoCWhenDriverReplaysCache(t *testing.T) {
 	s := NewStore()
 	freshSoC := 0.61

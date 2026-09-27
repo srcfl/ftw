@@ -2541,6 +2541,9 @@ func main() {
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,
 		EVSend:           evSend,
+		SiteDispatchBlocked: func() string {
+			return siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, time.Now()).Reason
+		},
 		HA:               haBridge,
 		Registry:         reg,
 		DriverRepository: driverRepository,
@@ -3024,7 +3027,7 @@ func main() {
 				// ctrl, so the stored tick has to show the hold already
 				// released rather than one the blocked tick never executed.
 				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
-				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+				sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
@@ -3105,6 +3108,7 @@ func main() {
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
+			mode := ctrl.Mode
 			ctrlMu.Unlock()
 
 			// ---- Self-tune override: step one battery, hold its siblings at 0 ----
@@ -3124,7 +3128,7 @@ func main() {
 				evW := tel.SumOnlineEVW()
 				v2xW := tel.SumOnlineV2XW()
 				attrs := []any{
-					"mode", ctrl.Mode,
+					"mode", mode,
 					"plan_stale", planMissingNow,
 					"site_meter", siteMeterDriver,
 					"grid_known", haveGrid,
@@ -3276,7 +3280,7 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+			sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 			if err != nil {
 				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
@@ -4023,7 +4027,24 @@ func isConfigMissing(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
+// tickPersistControl is what tick persistence reads from control.State,
+// copied under ctrlMu. A config reload rewrites SiteMeterDriver from an HTTP
+// goroutine, so persistence must never read ctrl directly.
+type tickPersistControl struct {
+	SiteMeterDriver string
+	LastTargets     []control.DispatchTarget
+}
+
+func snapshotTickPersistControl(ctrl *control.State, ctrlMu *sync.Mutex) tickPersistControl {
+	ctrlMu.Lock()
+	defer ctrlMu.Unlock()
+	return tickPersistControl{
+		SiteMeterDriver: ctrl.SiteMeterDriver,
+		LastTargets:     append([]control.DispatchTarget(nil), ctrl.LastTargets...),
+	}
+}
+
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl tickPersistControl, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
 	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge, options...)
 	samples := tel.FlushSamples()
 	stSamples := make([]state.Sample, len(samples))
@@ -4062,9 +4083,9 @@ func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.S
 	return len(samples), st.EnqueueTelemetryTick(historyPoint, stSamples, energyObservations)
 }
 
-func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
+func buildHistoryPoint(tel *telemetry.Store, ctrl tickPersistControl, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
 	unavailable := state.HistoryPoint{TsMs: nowMs}
-	if tel == nil || ctrl == nil || ctrl.SiteMeterDriver == "" {
+	if tel == nil || ctrl.SiteMeterDriver == "" {
 		return unavailable, false
 	}
 	opts := telemetry.ForecastOptions{MaxAge: historyMaxAge}
