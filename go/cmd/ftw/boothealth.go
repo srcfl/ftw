@@ -15,7 +15,7 @@ import (
 // integrity check, one-time VACUUM) and atomically hand the same listener
 // over to the real mux once wiring completes. See main.go for why: an
 // unbound port during a 25-minute compaction makes the Docker healthcheck
-// fail and the self-update sidecar roll the deploy back mid-VACUUM.
+// fail and a health-gated update roll the deploy back mid-VACUUM.
 type swappableHandler struct {
 	// atomic.Pointer, not atomic.Value: the boot handler and the wired mux
 	// are different concrete types, and Value panics on that.
@@ -58,7 +58,7 @@ func (b *bootHandler) setMigration(progress state.HistoryMigrationStatus) {
 
 // Health proves process liveness. Every other API stays unavailable until
 // the fully wired handler replaces this one. Browser reloads get a progress
-// page instead of a JSON error, without changing the updater's readiness test.
+// page instead of a JSON error, without changing what a health check sees.
 func (b *bootHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if b.webDir != "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {

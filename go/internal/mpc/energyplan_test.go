@@ -151,8 +151,8 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 			t.Fatalf("wrong downside PV: %f", slot.PVW)
 		}
 	}
-	if len(input.Scenarios) != 0 || input.Settings.CVaRWeight != 0 {
-		t.Fatal("Energyplan received scenarios")
+	if input.Settings.CVaRWeight != 0 || input.Settings.ScenarioPolicy != "shared" {
+		t.Fatal("Energyplan received a risk model")
 	}
 	if input.Settings.TimeLimitS != .5 {
 		t.Fatalf("deterministic downside request budget=%g, want 0.5", input.Settings.TimeLimitS)
@@ -360,9 +360,6 @@ func (c *countingTransport) RoundTrip(ctx context.Context, payload []byte) ([]by
 		c.deadlineWait = time.Until(d)
 	}
 	return nil, errors.New("stop")
-}
-func (c *countingTransport) Health(context.Context) (OptimizerRuntimeInfo, error) {
-	return OptimizerRuntimeInfo{}, nil
 }
 func (c *countingTransport) Close() error { return nil }
 

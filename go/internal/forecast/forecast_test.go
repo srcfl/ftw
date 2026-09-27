@@ -572,7 +572,7 @@ func TestFetchAndStoreCapsPastedWattsGHI(t *testing.T) {
 		t.Fatalf("expected one stored row, got %+v", rows)
 	}
 	got := *rows[0].PVWEstimated
-	if got > 10000*nameplateHeadroom+1 {
+	if got > 10000+1 {
 		t.Fatalf("pasted 10000 kWp at 354 W/m² must not store megawatts, got %.1f W", got)
 	}
 	if got <= 0 {
@@ -608,53 +608,13 @@ func TestBjorn18960WTooltipIsPastedKWpNotDisplayScale(t *testing.T) {
 		t.Fatalf("nameplate = %.0f, want 18960 W", NameplateW(ratedW, []Array{{RatedW: ratedW}}))
 	}
 
-	capped, ok := clampPVToNameplate(storedW, ratedW)
-	if !ok || capped > ratedW*nameplateHeadroom+1 {
-		t.Fatalf("stored %.0f W must clamp to 1.25×18960, got %.1f ok=%v", storedW, capped, ok)
-	}
-
 	tt := time.Date(2026, 8, 18, 17, 45, 0, 0, time.UTC) // 19:45 Swedish summer
 	house := poaPVWattsFromGHI(59.3293, 18.0686, tt, impliedPOA, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 18960}})
 	pastedW := poaPVWattsFromGHI(59.3293, 18.0686, tt, impliedPOA, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 18960}})
-	if house <= 0 || house > ratedW*nameplateHeadroom {
+	if house <= 0 || house > ratedW {
 		t.Fatalf("18.96 kWp at ~108 W/m² must stay on a house scale, got %.1f W", house)
 	}
 	if math.Abs(pastedW-house) > 1 {
 		t.Fatalf("kWp=18960 (rated W pasted) must match 18.96 kWp, house=%.1f pasted=%.1f", house, pastedW)
-	}
-}
-
-func TestLoadUsesVerifiedACLimit(t *testing.T) {
-	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	wild := 3544200.0
-	ts := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC).UnixMilli()
-	if err := st.SaveForecasts([]state.ForecastPoint{{
-		SlotTsMs: ts, SlotLenMin: 60, PVWEstimated: &wild, Source: "open_meteo",
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	s := &Service{
-		Store:    st,
-		RatedPVW: 10000,
-		ACLimitW: 10000,
-		Arrays:   []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}},
-	}
-	rows, err := s.Load(ts, ts+3600*1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || rows[0].PVWEstimated == nil {
-		t.Fatalf("expected one clamped row, got %+v", rows)
-	}
-	got := *rows[0].PVWEstimated
-	if got > 10000*nameplateHeadroom+1 {
-		t.Fatalf("stored 3544 kW forecast must clamp to nameplate, got %.1f W", got)
-	}
-	if got < 10000 {
-		t.Fatalf("clamp should sit on the nameplate ceiling, got %.1f W", got)
 	}
 }

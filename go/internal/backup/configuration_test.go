@@ -42,7 +42,7 @@ func TestFullBackupRestoresCurrentSQLiteConfigAtANewPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(root, "restored")
-	if _, err := Restore(info.Path, destination, time.Now()); err != nil {
+	if _, err := restoreFresh(info.Path, destination, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := config.Load(filepath.Join(destination, "config.yaml"))

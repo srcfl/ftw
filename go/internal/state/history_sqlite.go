@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
 	"hash"
 	"io"
 	"math"
@@ -15,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const HistoryFilename = "history.db"
@@ -319,13 +320,6 @@ func historyFileHashContext(ctx context.Context, path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-// ImportedHistoryFiles lists only verified legacy sources. Full backups omit
-// them because their rows are already in the portable SQLite export; this
-// also prevents an older Core from reading each sample twice after restore.
-func (s *Store) ImportedHistoryFiles(ctx context.Context) (map[string]bool, error) {
-	return map[string]bool{}, nil
-}
-
 // Signed zero carries no energy. SQLite normalizes it too; every other finite
 // float keeps its bits. Non-finite values fail the persistence contract.
 func historyFloatBits(value float64) uint64 {
@@ -356,8 +350,6 @@ func (s *Store) CheckpointHistory(ctx context.Context) error {
 	_, err := s.history.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
 	return err
 }
-
-func (s *Store) RotateHistory(ctx context.Context) error { return s.CheckpointHistory(ctx) }
 
 func historyOrder(table string) string {
 	switch table {

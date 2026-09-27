@@ -253,9 +253,9 @@ func TestLookupPVBeforeFirstForecastReturnsZero(t *testing.T) {
 		{SlotTsMs: firstTs + int64(time.Hour/time.Millisecond), SlotLenMin: 60, PVWEstimated: &lastPV},
 	}
 
-	got := lookupPV(forecasts, firstTs-int64(15*time.Minute/time.Millisecond))
-	if got != 0 {
-		t.Fatalf("lookupPV before first row = %.1f, want 0", got)
+	got, row := lookupPVInput(forecasts, firstTs-int64(15*time.Minute/time.Millisecond))
+	if got != 0 || row != nil {
+		t.Fatalf("lookupPVInput before first row = %.1f %+v, want 0 and no row", got, row)
 	}
 }
 
@@ -307,40 +307,6 @@ func TestApplyPVDownsideScalesWithK(t *testing.T) {
 	applyPVDownside(slots, 2.0, 500) // k=2, σ=500 → haircut 1000 W
 	if slots[0].PVW != -2000 {
 		t.Errorf("PVW = %v, want -2000 (3000 − 2·500)", slots[0].PVW)
-	}
-}
-
-// The Service seam reads σ from the PVUncertaintyW hook and the configured k.
-func TestServiceApplyPVDownsideToSlotsUsesHookAndK(t *testing.T) {
-	s := &Service{
-		PVForecastSafetyK: 1.0,
-		PVUncertaintyW:    func() float64 { return 800 }, // live σ = 800 W
-	}
-	slots := []Slot{{PVW: -3000}, {PVW: 0}}
-	s.applyPVDownsideToSlots(slots)
-	if slots[0].PVW != -2200 {
-		t.Errorf("PVW[0] = %v, want -2200 (3000 − 1·800 from the hook)", slots[0].PVW)
-	}
-	if slots[1].PVW != 0 {
-		t.Errorf("night slot must stay 0, got %v", slots[1].PVW)
-	}
-}
-
-func TestServiceApplyPVDownsideToSlotsNoOpWithoutHook(t *testing.T) {
-	s := &Service{PVForecastSafetyK: 1.0} // PVUncertaintyW unwired
-	slots := []Slot{{PVW: -3000}}
-	s.applyPVDownsideToSlots(slots)
-	if slots[0].PVW != -3000 {
-		t.Errorf("no σ hook → raw forecast, got %v", slots[0].PVW)
-	}
-}
-
-func TestServiceApplyPVDownsideToSlotsNilServiceNoPanic(t *testing.T) {
-	var s *Service
-	slots := []Slot{{PVW: -3000}}
-	s.applyPVDownsideToSlots(slots) // must not panic
-	if slots[0].PVW != -3000 {
-		t.Errorf("nil Service must be a no-op, got %v", slots[0].PVW)
 	}
 }
 
@@ -415,31 +381,9 @@ func TestApplyPVDownsidePerSlotNoOpWhenDisabled(t *testing.T) {
 	}
 }
 
-// The Service seam prefers the relative hook and keeps the absolute one as the
-// fallback, so one replan cannot mix the two forms.
-func TestServiceApplyPVDownsideToSlotsPrefersRelative(t *testing.T) {
-	s := &Service{
-		PVForecastSafetyK:     1.0,
-		PVUncertaintyW:        func() float64 { return 1891 },
-		PVRelativeUncertainty: func() float64 { return 0.25 },
-	}
-	slots := []Slot{{PVW: -6000}, {PVW: -400}, {PVW: 0}}
-	s.applyPVDownsideToSlots(slots)
-	if slots[0].PVW != -4500 {
-		t.Errorf("PVW[0] = %v, want -4500 (6000 − 25 %%)", slots[0].PVW)
-	}
-	if slots[1].PVW != -300 {
-		t.Errorf("PVW[1] = %v, want -300 — a flat 1891 W cut would have zeroed this shoulder",
-			slots[1].PVW)
-	}
-	if slots[2].PVW != 0 {
-		t.Errorf("night slot must stay 0, got %v", slots[2].PVW)
-	}
-}
-
 // TestBuildSlots_AppliesPVResidualCorrection: a non-nil
 // PVResidualCorrector adds an additive bias to the twin's per-slot
-// prediction BEFORE selectPlannerPVW blends with the forecast. We mock
+// prediction BEFORE selectPlannerPVWithWeight blends with the forecast. We mock
 // the corrector to apply -200 W to the first slot only and verify the
 // final slot 0 PVW reflects the correction while slot 1 does not.
 func TestBuildSlots_AppliesPVResidualCorrection(t *testing.T) {
@@ -693,12 +637,12 @@ func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
 	tel.Update("offline", telemetry.DerBattery, 0, &socOffline, nil)
 	tel.DriverHealthMut("offline").SetOffline()
 
-	s := &Service{Tele: tel, FuseMaxW: 6000}
+	s := &Service{Tele: tel}
 	p, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
 		{Driver: "b", CapacityWh: 30000, MaxChargeW: 5000, MaxDischargeW: 5000},
 		{Driver: "offline", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
-	})
+	}, 6000)
 	if !ok {
 		t.Fatal("onlineFleetParams returned ok=false")
 	}
@@ -747,11 +691,11 @@ func TestOnlineFleetParamsDropsCommandFaultedBattery(t *testing.T) {
 	tel.DriverHealthMut("refusing").RecordSuccess()
 	tel.SetDriverCommandFault("refusing", true, "modbus write refused")
 
-	s := &Service{Tele: tel, FuseMaxW: 20000}
+	s := &Service{Tele: tel}
 	p, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
 		{Driver: "refusing", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
-	})
+	}, 20000)
 	if !ok {
 		t.Fatal("onlineFleetParams returned ok=false")
 	}
@@ -775,7 +719,7 @@ func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {
 	_, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "no-soc", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
 		{Driver: "missing", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
-	})
+	}, 0)
 	if ok {
 		t.Fatal("onlineFleetParams ok=true without any online battery SoC")
 	}
@@ -812,7 +756,7 @@ func TestBuildSlotsEmptyForecast(t *testing.T) {
 }
 
 func TestSelectPlannerPVWBothNaN(t *testing.T) {
-	got := selectPlannerPVW(math.NaN(), math.NaN(), false)
+	got := selectPlannerPVWithWeight(math.NaN(), math.NaN(), false, PlannerRadiationWeight)
 	if got != 0 {
 		t.Errorf("both NaN should return 0, got %f", got)
 	}
@@ -822,7 +766,7 @@ func TestSelectPlannerPVWBothNaN(t *testing.T) {
 // under-trained RLS can't dominate. 4000W forecast + 2000W twin with
 // PlannerRadiationWeight=0.3 → 0.7*4000 + 0.3*2000 = 3400.
 func TestSelectPlannerPVWRadiationBlend(t *testing.T) {
-	got := selectPlannerPVW(4000, 2000, true)
+	got := selectPlannerPVWithWeight(4000, 2000, true, PlannerRadiationWeight)
 	want := 0.7*4000 + 0.3*2000
 	if math.Abs(got-want) > 0.01 {
 		t.Errorf("radiation blend: got %f, want %f", got, want)
@@ -833,28 +777,28 @@ func TestSelectPlannerPVWRadiationBlend(t *testing.T) {
 // forecast + 10000W twin → 0.7*4000 + 0.3*10000 = 5800. Still sane,
 // not the full 10000 the cloud-only path would have let through.
 func TestSelectPlannerPVWRadiationBlendClampsWildTwin(t *testing.T) {
-	got := selectPlannerPVW(4000, 10000, true)
+	got := selectPlannerPVWithWeight(4000, 10000, true, PlannerRadiationWeight)
 	want := 0.7*4000 + 0.3*10000
 	if math.Abs(got-want) > 0.01 {
 		t.Errorf("radiation blend clamping: got %f, want %f", got, want)
 	}
 	// Without radiation backing, the same inputs would let the twin
 	// take over completely (cloud-only path, not collapsed).
-	if got := selectPlannerPVW(4000, 10000, false); got != 10000 {
+	if got := selectPlannerPVWithWeight(4000, 10000, false, PlannerRadiationWeight); got != 10000 {
 		t.Errorf("cloud-only path should pass through twin prediction, got %f", got)
 	}
 }
 
 // A provider's explicit zero is a valid signal, including night.
 func TestSelectPlannerPVWRadiationZeroDoesNotInventPV(t *testing.T) {
-	if got := selectPlannerPVW(0, 300, true); got != 0 {
+	if got := selectPlannerPVWithWeight(0, 300, true, PlannerRadiationWeight); got != 0 {
 		t.Fatalf("provider zero became %v W", got)
 	}
 }
 
 func TestSelectPlannerPVWContinuousAtLegacyThreshold(t *testing.T) {
-	before := selectPlannerPVW(6000, 50, true)
-	after := selectPlannerPVW(6000, 51, true)
+	before := selectPlannerPVWithWeight(6000, 50, true, PlannerRadiationWeight)
+	after := selectPlannerPVWithWeight(6000, 51, true, PlannerRadiationWeight)
 	if math.Abs((after-before)-PlannerRadiationWeight) > 1e-9 {
 		t.Fatalf("one watt changed blend %v -> %v", before, after)
 	}
@@ -875,7 +819,7 @@ func TestSelectPlannerPVWForecastCapInactiveWhenRatioOK(t *testing.T) {
 	forecast := 4000.0
 	twin := 2000.0 // 2× — well below cap threshold of 3×
 
-	got := selectPlannerPVW(forecast, twin, true)
+	got := selectPlannerPVWithWeight(forecast, twin, true, PlannerRadiationWeight)
 	want := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
 	if math.Abs(got-want) > 0.01 {
 		t.Errorf("cap should be inactive when forecast/twin=2x: got %.2f, want %.2f", got, want)
@@ -891,7 +835,7 @@ func TestSelectPlannerPVWForecastCapInactiveWhenTwinNearZero(t *testing.T) {
 	forecast := 300.0
 	twin := 30.0 // below the 50 W threshold
 
-	got := selectPlannerPVW(forecast, twin, true)
+	got := selectPlannerPVWithWeight(forecast, twin, true, PlannerRadiationWeight)
 	want := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin // no cap
 	if math.Abs(got-want) > 0.01 {
 		t.Errorf("cap should be inactive when twin < 50 W: got %.2f, want %.2f", got, want)
@@ -1110,59 +1054,5 @@ func TestSlotDirectiveAtNilService(t *testing.T) {
 	var s *Service
 	if _, ok := s.SlotDirectiveAt(time.Now()); ok {
 		t.Error("nil Service returned ok=true")
-	}
-}
-
-func TestClampForecastPVHouseNameplate(t *testing.T) {
-	t.Parallel()
-	wild := 3544200.0
-	ok := 3200.0
-	bjorn := 2046200.0 // tooltip 2046.2 kW with rated 18960 W
-	rows := clampForecastPV([]state.ForecastPoint{
-		{PVWEstimated: &wild},
-		{PVWEstimated: &ok},
-		{PVWEstimated: &bjorn},
-	}, 18960)
-	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated != 18960 {
-		t.Fatalf("3544 kW row must cut to 18960 W, got %+v", rows[0].PVWEstimated)
-	}
-	if rows[1].PVWEstimated == nil || *rows[1].PVWEstimated != 3200 {
-		t.Fatalf("in-range estimate must stay, got %+v", rows[1].PVWEstimated)
-	}
-	if rows[2].PVWEstimated == nil || *rows[2].PVWEstimated != 18960 {
-		t.Fatalf("2046.2 kW row must cut to 18960 W, got %+v", rows[2].PVWEstimated)
-	}
-}
-
-func TestCapSlotsPVToNameplate(t *testing.T) {
-	t.Parallel()
-	slots := capSlotsPVToNameplate([]Slot{
-		{PVW: -2046200},
-		{PVW: -3200},
-		{PVW: 0},
-	}, 18960)
-	if slots[0].PVW != -18960 {
-		t.Fatalf("2 MW slot must cut to −18960 W, got %v", slots[0].PVW)
-	}
-	if slots[1].PVW != -3200 {
-		t.Fatalf("in-range generation must stay, got %v", slots[1].PVW)
-	}
-	if slots[2].PVW != 0 {
-		t.Fatalf("night slot must stay 0, got %v", slots[2].PVW)
-	}
-}
-
-func TestCapPlanPVToNameplate(t *testing.T) {
-	t.Parallel()
-	plan := &Plan{Actions: []Action{{PVW: -2046200}, {PVW: -4000}}}
-	capPlanPVToNameplate(plan, 18960)
-	if plan.PVNameplateW != 18960 {
-		t.Fatalf("plan must carry nameplate, got %v", plan.PVNameplateW)
-	}
-	if plan.Actions[0].PVW != -18960 {
-		t.Fatalf("published action must cut to −18960 W, got %v", plan.Actions[0].PVW)
-	}
-	if plan.Actions[1].PVW != -4000 {
-		t.Fatalf("in-range action must stay, got %v", plan.Actions[1].PVW)
 	}
 }

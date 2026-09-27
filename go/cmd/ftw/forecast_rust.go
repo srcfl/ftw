@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -46,7 +45,7 @@ type rustForecast struct {
 }
 
 func newRustForecast(st *state.Store, binary string) (*rustForecast, error) {
-	transport, err := mpc.NewProcessTransport(mpc.ProcessTransportConfig{Command: []string{binary}, ModuleDir: filepath.Dir(binary), IdleTimeout: 2 * time.Minute})
+	transport, err := mpc.NewProcessTransport(mpc.ProcessTransportConfig{Command: []string{binary}, IdleTimeout: 2 * time.Minute})
 	if err != nil {
 		return nil, err
 	}

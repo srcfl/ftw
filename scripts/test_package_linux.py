@@ -71,19 +71,20 @@ class LinuxPackageTest(unittest.TestCase):
         with tarfile.open(archive) as tar:
             for name in ("ftw", "ftw-backup", "ftw-cli", "ftw-launcher", "release-version.json",
                          "web/index.html", "drivers/fixture.lua",
-                         "optimizer/native/bundle/manifest.json", "deploy/ftw.service", "LICENSE"):
+                         "optimizer/native/bundle/manifest.json", "deploy/ftw-native.service", "LICENSE"):
                 self.assertTrue(tar.getmember(name).isfile(), name)
             self.assertEqual(tar.getmember("ftw").mode, 0o755)
             self.assertEqual(json.load(tar.extractfile("release-version.json")),
                              {"version": os.environ.get("VERSION", "dev"),
                               "arch": "amd64", "state_schema": 7})
-            self.assertEqual(tar.getmember("forty-two-watts").linkname, "ftw")
+            # The launcher needs no alias, and the direct-layout unit bypassed it.
+            self.assertFalse(any(member.issym() or member.islnk() for member in tar.getmembers()))
+            self.assertNotIn("deploy/ftw.service", tar.getnames())
             self.assertFalse(any(name.startswith(("data/", "bin/")) for name in tar.getnames()))
-        legacy = archive.with_name("forty-two-watts-linux-amd64.tar.gz")
-        self.assertEqual(archive.read_bytes(), legacy.read_bytes())
-        for path in (archive, legacy):
-            checksum = path.with_name(path.name + ".sha256").read_text()
-            self.assertEqual(checksum, f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
+        checksum = archive.with_name(archive.name + ".sha256").read_text()
+        self.assertEqual(checksum, f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
+        self.assertEqual(sorted(path.name for path in archive.parent.iterdir()),
+                         ["ftw-linux-amd64.tar.gz", "ftw-linux-amd64.tar.gz.sha256"])
 
     def test_checkout_times_do_not_change_the_archive(self):
         first = self.build().read_bytes()

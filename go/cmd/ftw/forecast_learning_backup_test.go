@@ -120,7 +120,10 @@ planner:
 				t.Fatal(err)
 			}
 			restoredDir := filepath.Join(root, "restored")
-			if _, err := backup.Restore(info.Path, restoredDir, cutoff.Add(2*time.Hour)); err != nil {
+			if err := os.MkdirAll(restoredDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := backup.RestoreContents(info.Path, restoredDir, cutoff.Add(2*time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 

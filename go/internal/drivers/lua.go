@@ -93,9 +93,9 @@ func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
 	return NewLuaDriverWithPolicy(path, env, nil)
 }
 
-// NewLuaDriverWithPolicy binds verified managed package permissions to the
+// NewLuaDriverWithPolicy binds verified managed read-only permissions to the
 // host. Every driver VM uses the restricted library surface (no io/load, no
-// os.execute). Control v2 also gets a bounded load timeout.
+// os.execute).
 func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*LuaDriver, error) {
 	if policy != nil {
 		if err := policy.validate(); err != nil {
@@ -111,18 +111,7 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 	openRestrictedLibraries(L)
 	d := &LuaDriver{Env: env, Path: path, L: L, loadedSourceSHA256: fmt.Sprintf("%x", sha256.Sum256(src))}
 	registerHost(L, env)
-	var loadCancel context.CancelFunc
-	if policy != nil && policy.IsControlV2() {
-		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		loadCancel = cancel
-		L.SetContext(loadCtx)
-	}
-	err = L.DoString(string(src))
-	if loadCancel != nil {
-		L.RemoveContext()
-		loadCancel()
-	}
-	if err != nil {
+	if err := L.DoString(string(src)); err != nil {
 		L.Close()
 		return nil, fmt.Errorf("execute %s: %w", path, err)
 	}
@@ -219,7 +208,7 @@ func (d *LuaDriver) callInitLocked(ctx context.Context) error {
 	if d.initConfig != nil {
 		arg = goToLua(d.L, d.initConfig)
 	}
-	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
+	cleanup := d.setLifecycleContext(ctx)
 	defer cleanup()
 	return d.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}, arg)
 }
@@ -265,7 +254,7 @@ func (d *LuaDriver) pollLocked(ctx context.Context) (time.Duration, error) {
 	if fn == lua.LNil {
 		return 0, nil
 	}
-	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
+	cleanup := d.setLifecycleContext(ctx)
 	defer cleanup()
 	d.Env.beginPollEvidence()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
@@ -325,18 +314,7 @@ func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
 	L := lua.NewState(lua.Options{SkipOpenLibs: true})
 	openRestrictedLibraries(L)
 	registerHost(L, d.Env)
-	var loadCancel context.CancelFunc
-	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
-		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		loadCancel = cancel
-		L.SetContext(loadCtx)
-	}
-	err = L.DoString(string(src))
-	if loadCancel != nil {
-		L.RemoveContext()
-		loadCancel()
-	}
-	if err != nil {
+	if err := L.DoString(string(src)); err != nil {
 		L.Close()
 		return fmt.Errorf("execute %s: %w", d.Path, err)
 	}
@@ -400,9 +378,6 @@ func driverRequiresFreshModbusRead(L *lua.LState, hasModbusCapability bool) bool
 // where full_cmd is the original decoded table (for drivers that want
 // extra fields).
 func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
-	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
-		return errors.New("managed control v2 driver requires a sourceful.driver-command/v1 call")
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if driverDeclaresReadOnly(d.L) {
@@ -439,200 +414,6 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	return luaReturnError("driver_command", ret)
 }
 
-// CommandV2 validates a host-owned command, grants a short write scope, calls
-// the v2 entrypoint and completes the signed-package-bound result. Validation
-// happens before Lua runs.
-func (d *LuaDriver) CommandV2(ctx context.Context, cmd DriverCommandV1, now time.Time) (DriverCommandResultV1, error) {
-	policy := d.Env.RuntimePolicy
-	result := d.commandResult(cmd, now)
-	decl, err := policy.validateCommand(cmd, now)
-	if err != nil {
-		result.Status = "rejected"
-		result.Code = "host_validation_failed"
-		if strings.Contains(err.Error(), "expired") {
-			result.Status = "expired"
-			result.Code = "command_expired"
-		}
-		result.Message = err.Error()
-		return result, err
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	fn := d.L.GetGlobal("driver_command_v2")
-	if fn == lua.LNil {
-		err = errors.New("driver_command_v2 is required by the control v2 ABI")
-		result.Status, result.Code, result.Message = "failed", "entrypoint_missing", err.Error()
-		return result, err
-	}
-
-	deadline := cmd.ExpiresAt
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	if err := d.Env.beginWriteScope("command", deadline); err != nil {
-		result.Status, result.Code, result.Message = "failed", "write_scope_denied", err.Error()
-		return result, err
-	}
-	writes := 0
-	var hostEvidence []string
-	ended := false
-	endScope := func() {
-		if !ended {
-			writes, hostEvidence = d.Env.endWriteScope()
-			ended = true
-		}
-	}
-	defer endScope()
-
-	callCtx, cancel := boundedLuaContext(ctx, deadline)
-	defer cancel()
-	d.L.SetContext(callCtx)
-	defer d.L.RemoveContext()
-	payload := map[string]interface{}{}
-	raw, _ := json.Marshal(cmd)
-	_ = json.Unmarshal(raw, &payload)
-	// runtime_action is signed package adapter data. The canonical command ID
-	// stays unchanged; the adapter may use this field while old action names are
-	// phased out.
-	payload["runtime_action"] = decl.RuntimeAction
-	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, goToLua(d.L, payload)); err != nil {
-		endScope()
-		result.Status, result.Code, result.Message, result.Writes = "failed", "lua_call_failed", err.Error(), writes
-		return result, err
-	}
-	ret := d.L.Get(-1)
-	d.L.Pop(1)
-	endScope()
-	parsed, err := parseLuaCommandResult(luaToGo(ret))
-	if err != nil {
-		result.Status, result.Code, result.Message, result.Writes = "failed", "invalid_driver_result", err.Error(), writes
-		return result, err
-	}
-	result.Status, result.Code, result.Message = parsed.Status, parsed.Code, parsed.Message
-	result.DeviceState, result.Writes = parsed.DeviceState, writes
-	result.Evidence, result.Applied = parsed.Evidence, parsed.Applied
-	if !evidenceContained(parsed.Evidence, hostEvidence) {
-		err = errors.New("driver result claims evidence not observed by the host")
-		result.Status, result.Code, result.Message = "failed", "evidence_unproven", err.Error()
-		return result, err
-	}
-	if result.Status == "applied" &&
-		((result.DeviceState != "controlled" && result.DeviceState != "default") || result.Writes == 0 ||
-			!containsEvidence(result.Evidence, policy.requiredEvidence())) {
-		err = errors.New("applied result requires a known state, at least one write, and evidence")
-		result.Status, result.Code, result.Message = "failed", "application_unproven", err.Error()
-		return result, err
-	}
-	return result, nil
-}
-
-// DefaultModeV2 runs only the signed default-mode entrypoint with its own
-// bounded write scope. It never calls the legacy default function.
-func (d *LuaDriver) DefaultModeV2(ctx context.Context, id, reason string, now time.Time) (DriverCommandResultV1, error) {
-	policy := d.Env.RuntimePolicy
-	cmd := DriverCommandV1{ID: id, Command: "driver.default_mode", Lease: DriverCommandLeaseV1{ID: id}}
-	result := d.commandResult(cmd, now)
-	result.LeaseID = ""
-	if policy == nil || !policy.IsControlV2() || policy.DefaultMode != "driver_default_mode_v2" {
-		err := errors.New("driver_default_mode_v2 is not declared by the signed package")
-		result.Status, result.Code, result.Message = "failed", "default_mode_not_declared", err.Error()
-		return result, err
-	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	fn := d.L.GetGlobal("driver_default_mode_v2")
-	if fn == lua.LNil {
-		err := errors.New("driver_default_mode_v2 is required by the control v2 ABI")
-		result.Status, result.Code, result.Message = "failed", "entrypoint_missing", err.Error()
-		return result, err
-	}
-	deadline := now.Add(5 * time.Second)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	if err := d.Env.beginWriteScope("default", deadline); err != nil {
-		result.Status, result.Code, result.Message = "failed", "write_scope_denied", err.Error()
-		return result, err
-	}
-	writes := 0
-	var hostEvidence []string
-	ended := false
-	endScope := func() {
-		if !ended {
-			writes, hostEvidence = d.Env.endWriteScope()
-			ended = true
-		}
-	}
-	defer endScope()
-	callCtx, cancel := boundedLuaContext(ctx, deadline)
-	defer cancel()
-	d.L.SetContext(callCtx)
-	defer d.L.RemoveContext()
-	callArg := goToLua(d.L, map[string]interface{}{
-		"reason": reason,
-		"at":     now.UTC().Format(time.RFC3339Nano),
-	})
-	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}, callArg); err != nil {
-		endScope()
-		result.Status, result.Code, result.Message, result.Writes = "failed", "lua_call_failed", err.Error(), writes
-		return result, err
-	}
-	ret := d.L.Get(-1)
-	d.L.Pop(1)
-	endScope()
-	parsed, err := parseLuaCommandResult(luaToGo(ret))
-	if err != nil {
-		result.Status, result.Code, result.Message, result.Writes = "failed", "invalid_driver_result", err.Error(), writes
-		return result, err
-	}
-	result.Status, result.Code, result.Message = parsed.Status, parsed.Code, parsed.Message
-	result.DeviceState, result.Writes = parsed.DeviceState, writes
-	result.Evidence, result.Applied = parsed.Evidence, parsed.Applied
-	if !evidenceContained(parsed.Evidence, hostEvidence) {
-		err = errors.New("driver default result claims evidence not observed by the host")
-		result.Status, result.Code, result.Message = "failed", "evidence_unproven", err.Error()
-		return result, err
-	}
-	if result.Status != "defaulted" || result.DeviceState != "default" || result.Writes == 0 ||
-		!containsEvidence(result.Evidence, policy.requiredEvidence()) {
-		err = errors.New("default result requires defaulted status, default state, a write, and host-observed evidence")
-		result.Status, result.Code, result.Message = "failed", "default_unproven", err.Error()
-		return result, err
-	}
-	return result, nil
-}
-
-func boundedLuaContext(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	return context.WithDeadline(parent, deadline)
-}
-
-func evidenceContained(claimed, observed []string) bool {
-	seen := make(map[string]bool, len(observed))
-	for _, item := range observed {
-		seen[item] = true
-	}
-	for _, item := range claimed {
-		if !seen[item] {
-			return false
-		}
-	}
-	return true
-}
-
-func containsEvidence(evidence []string, want string) bool {
-	for _, item := range evidence {
-		if item == want {
-			return true
-		}
-	}
-	return false
-}
-
 func (d *LuaDriver) setLuaCallContext(parent context.Context, timeout time.Duration) func() {
 	if parent == nil {
 		parent = context.Background()
@@ -645,37 +426,14 @@ func (d *LuaDriver) setLuaCallContext(parent context.Context, timeout time.Durat
 	}
 }
 
-func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Duration) func() {
+func (d *LuaDriver) setLifecycleContext(parent context.Context) func() {
 	if parent == nil {
 		parent = context.Background()
-	}
-	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
-		ctx, cancel := context.WithTimeout(parent, timeout)
-		d.L.SetContext(ctx)
-		return func() {
-			d.L.RemoveContext()
-			cancel()
-		}
 	}
 	d.L.SetContext(parent)
 	return func() {
 		d.L.RemoveContext()
 	}
-}
-
-func (d *LuaDriver) commandResult(cmd DriverCommandV1, now time.Time) DriverCommandResultV1 {
-	policy := d.Env.RuntimePolicy
-	result := DriverCommandResultV1{
-		SchemaVersion: DriverCommandResultSchema,
-		ID:            cmd.ID, Command: cmd.Command, LeaseID: cmd.Lease.ID,
-		Status: "failed", Code: "host_error", CompletedAt: now.UTC(), DeviceState: "unknown",
-	}
-	if policy != nil {
-		result.Driver = DriverResultIdentityV1{
-			PackageID: policy.PackageID, Version: policy.Version, ArtifactSHA256: policy.ArtifactSHA256,
-		}
-	}
-	return result
 }
 
 // Cleanup calls driver_cleanup() and closes the VM.
@@ -890,10 +648,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// safe because each driver has its own goroutine and VM lock.
 	host.RawSetString("sleep", L.NewFunction(func(L *lua.LState) int {
 		ms := L.CheckInt(1)
-		if env.RuntimePolicy != nil && ms > 100 {
-			L.Push(lua.LString("sleep exceeds control v2 limit of 100 ms"))
-			return 1
-		}
 		if ms > 0 {
 			timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
 			defer timer.Stop()
@@ -1054,7 +808,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
-		env.recordWriteEvidence("write_ack")
 		return 0
 	})
 	host.RawSetString("mqtt_publish", mqttPublish)
@@ -1172,7 +925,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(err.Error()))
 			return 2
 		}
-		env.recordWriteEvidence("readback")
 		t := L.NewTable()
 		for i, r := range regs {
 			t.RawSetInt(i+1, lua.LNumber(r))
@@ -1196,7 +948,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
-		env.recordWriteEvidence("write_ack")
 		return 0
 	}))
 
@@ -1221,7 +972,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
-		env.recordWriteEvidence("write_ack")
 		return 0
 	}))
 
@@ -1541,8 +1291,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		// A read-only driver signing in at the path its signed manifest
-		// declares is reading, not writing, so it skips the write phase and
-		// budget. Every other POST goes through allowWrite unchanged.
+		// declares is reading, not writing, so allowWrite does not see it.
+		// Every other POST goes through allowWrite unchanged.
 		if !env.allowAuthPost(L.CheckString(1)) {
 			if err := env.allowWrite("http.post"); err != nil {
 				L.Push(lua.LNil)
@@ -1587,7 +1337,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
 			return 2
 		}
-		env.recordWriteEvidence("write_ack")
 		L.Push(lua.LString(string(body)))
 		return 1
 	}))
@@ -1650,7 +1399,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
 			return 2
 		}
-		env.recordWriteEvidence("write_ack")
 		L.Push(lua.LString(string(body)))
 		return 1
 	}))
@@ -1801,17 +1549,14 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}))
 
 	if env.RuntimePolicy != nil {
-		// The canonical package contract has no WebSocket or raw TCP grant.
-		// Do not leave these functions reachable in a v2 VM even when local
-		// YAML happens to configure those legacy capabilities.
+		// A signed read-only policy has no WebSocket or raw TCP grant. Do not
+		// leave these functions reachable in its VM even when local YAML
+		// happens to configure those capabilities.
 		for _, name := range []string{
 			"ws_open", "ws_send", "ws_messages", "ws_is_open", "ws_close",
 			"tcp_open", "tcp_recv", "tcp_is_open", "tcp_close",
 		} {
 			host.RawSetString(name, lua.LNil)
-		}
-		if !env.RuntimePolicy.IsReadOnly() {
-			host.RawSetString("persist_secret", lua.LNil)
 		}
 	}
 	L.SetGlobal("host", host)

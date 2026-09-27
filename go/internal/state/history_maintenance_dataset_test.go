@@ -3,10 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"os"
-	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -55,62 +52,5 @@ func TestHistoryMaintenanceReadOnlyDataset(t *testing.T) {
 		}
 		t.Logf("query=%s elapsed=%s rows=%v err=%v", query.sql, time.Since(started), values, err)
 		cancel()
-	}
-}
-
-// Only use a disposable restored copy, never the running box's directory.
-func TestHistoryMaintenanceDataset(t *testing.T) {
-	dir := os.Getenv("FTW_MAINTENANCE_TEST_DATA")
-	if dir == "" {
-		t.Skip("set FTW_MAINTENANCE_TEST_DATA to a disposable copy")
-	}
-	db, err := openDurableHistory(filepath.Join(dir, "history.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	s := &Store{history: db, coldDir: filepath.Join(dir, "cold"), historyWriter: &historyWriter{}}
-	s.aggregateHistory.Store(true)
-	parent, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	ctx := context.WithValue(parent, archiveTurnKey{}, time.Now().Add(30*time.Second))
-	defer cancel()
-	stage := os.Getenv("FTW_MAINTENANCE_TEST_STAGE")
-	started := time.Now()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				t.Logf("progress=%+v", s.HistoryMaintenanceStatus())
-			}
-		}
-	}()
-	defer wg.Wait()
-	defer cancel()
-	switch stage {
-	case "dashboard":
-		err = s.maintainDashboard(ctx, time.Now())
-	case "aggregate":
-		err = s.MaintainAggregateHistory(ctx, s.coldDir, time.Now())
-	case "samples":
-		_, _, err = s.rolloffSamples(ctx, s.coldDir, AggregateRecentRetention)
-	default:
-		t.Fatal("choose dashboard, aggregate or samples")
-	}
-	t.Logf("stage=%s elapsed=%s err=%v", stage, time.Since(started), err)
-	if errors.Is(err, errArchiveTurnComplete) {
-		if s.HistoryMaintenanceStatus().RowsDone <= 0 {
-			t.Fatal("yield without saved progress")
-		}
-		return
-	}
-	if err != nil {
-		t.Fatal(err)
 	}
 }

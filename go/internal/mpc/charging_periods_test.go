@@ -3,7 +3,6 @@ package mpc
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -18,19 +17,13 @@ func (c *chargingTransport) RoundTrip(context.Context, []byte) ([]byte, error) {
 	}
 	return json.Marshal(map[string]any{"name": "ftw-solver", "version": "test", "protocol_version": 1, "features": features})
 }
-func (*chargingTransport) Health(context.Context) (OptimizerRuntimeInfo, error) {
-	return OptimizerRuntimeInfo{}, fmt.Errorf("native handshake required")
-}
 func (*chargingTransport) Close() error { return nil }
 
 func TestChargingPeriodsNegotiatesEachWorkerAndKeepsLegacyWire(t *testing.T) {
 	slots, p := externalTestFixture()
 	p.Loadpoint = &LoadpointSpec{ID: "car", PluggedIn: true, CapacityWh: 60000, Levels: 11, SoCMax: 1, MaxChargeW: 11000, Charging: DefaultChargingPeriods(true, 120)}
 	transport := &chargingTransport{feature: true}
-	external, err := NewExternalOptimizer(ExternalOptimizerConfig{Transport: transport})
-	if err != nil {
-		t.Fatal(err)
-	}
+	external := &ExternalOptimizer{cfg: ExternalOptimizerConfig{Timeout: time.Second}, transport: transport}
 	o := &EnergyplanOptimizer{ExternalOptimizer: external}
 	for _, supported := range []bool{true, false, true} {
 		transport.feature = supported

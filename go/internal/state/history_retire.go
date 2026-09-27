@@ -112,7 +112,7 @@ func ensureSqliteLegacyHistory(exec func(string) error) error {
 	}
 	return nil
 }
-func (s *Store) legacyHistoryIdle(coldDir string) (bool, error) {
+func (s *Store) legacyHistoryIdle() (bool, error) {
 	var n int
 	err := s.history.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-v1'`).Scan(&n)
 	return n > 0, err

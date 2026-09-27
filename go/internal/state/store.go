@@ -34,19 +34,10 @@ const (
 	// (#1302). Keep this at 4 so they skip the copy and update. Newer Cores
 	// read `<!-- ftw-state-schema-v2:N -->`, which carries SchemaVersion.
 	LegacyReleaseMarker = 4
-	// HotRetention = 30 days at 5s resolution
-	HotRetention = 30 * 24 * time.Hour
-	// WarmRetention = 12 months at 15-min buckets
-	WarmRetention = 365 * 24 * time.Hour
-	// WarmBucketMS = 15-minute bucket size for warm tier
-	WarmBucketMS = 15 * 60 * 1000
-	// ColdBucketMS = daily bucket size for cold tier
-	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
 // Store owns three SQLite databases:
 //   - history: samples, hourly summaries, energy ledger and dashboard history
-//   - hot: alias for history, used by recent-history readers
 //   - db: state.db configuration, devices and learned state
 //   - cache: cache.db prices and forecasts; savings history needs past prices
 //
@@ -62,10 +53,6 @@ type Store struct {
 	maintenanceRunMu  sync.Mutex
 	maintenanceCancel context.CancelFunc // guarded by maintenanceStatusMu
 	maintenancePaused int                // guarded by maintenanceStatusMu
-
-	hot        *sql.DB
-	hotPath    string
-	hotWriteMu sync.Mutex
 
 	archiveMu     sync.Mutex   // Serializes archive construction and retention.
 	archiveViewMu sync.RWMutex // Protects file publication/pruning against readers.
@@ -146,7 +133,7 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 		m.cancel()
 		return nil, err
 	}
-	idle, err := s.legacyHistoryIdle(coldDir)
+	idle, err := s.legacyHistoryIdle()
 	if err != nil {
 		s.historyMigration = nil
 		m.cancel()
@@ -238,28 +225,9 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 		cache.Close()
 		return nil, err
 	}
-	if err := s.openHotHistory(); err != nil {
-		if s.history != nil {
-			s.history.Close()
-		}
-		db.Close()
-		cache.Close()
-		return nil, err
-	}
 	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
 	return s, nil
-}
-
-func (s *Store) closeOpenedHistory() {
-	if s.hot != nil && s.hot != s.history {
-		s.hot.Close()
-		s.hot = nil
-	}
-	if s.history != nil {
-		s.history.Close()
-		s.history = nil
-	}
 }
 
 // OpenBackupSource opens an existing state.db without integrity healing,
@@ -332,9 +300,6 @@ func (s *Store) Close() error {
 		return nil
 	}
 	err := s.StopHistory()
-	if s.hot != nil && s.hot != s.history {
-		err = errors.Join(err, s.hot.Close())
-	}
 	if s.history != nil {
 		err = errors.Join(err, s.history.Close())
 	}
@@ -508,9 +473,8 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	// Refuse to overwrite an existing destination. The old VACUUM INTO
 	// path errored implicitly; the ATTACH path would happily append
 	// into a pre-existing schema, which would silently corrupt a stale
-	// snapshot. Caller (createPreUpdateSnapshot) builds a unique
-	// timestamped dir per snapshot, so collision is a bug worth
-	// surfacing.
+	// snapshot. The caller builds a unique path per snapshot, so a
+	// collision is a bug worth surfacing.
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf("snapshot: destination already exists: %s", dstPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -616,9 +580,8 @@ const (
 // BackupToCompressed writes a complete, point-in-time copy of state.db as a
 // gzip stream. Unlike SnapshotTo, this is a user-data backup: it includes the
 // history and sample tables as well as configuration, models, and identities.
-// The self-update rollback flow must use this method; restoring the compact
-// recovery snapshot produced by SnapshotTo would intentionally erase recent
-// time-series data.
+// Restoring the compact recovery snapshot produced by SnapshotTo instead
+// would intentionally erase recent time-series data.
 //
 // Verified row copies build a temporary SQLite file next to dstPath. It is
 // compressed, synced and removed. dstPath must not exist.
@@ -630,36 +593,16 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
-	return s.backupToCompressed(dstPath, report, nil, true)
+	return s.backupToCompressed(dstPath, report, nil)
 }
 
 // BackupWithConfiguration returns settings from the same SQLite snapshot as
 // the archive, so its YAML export remains correct even for an older Core.
 func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
-	return s.backupWithConfiguration(dstPath, report, true)
+	return s.BackupWithConfigurationContext(context.Background(), dstPath, report)
 }
 
 func (s *Store) BackupWithConfigurationContext(ctx context.Context, dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
-	return s.backupWithConfigurationContext(ctx, dstPath, report, true)
-}
-
-// BackupStateWithConfiguration is the Core update rollback point: the
-// settings database and its configuration export, without the history
-// database. History lives in its own file, which an update does not replace
-// and a rollback leaves in place, so copying it here only bounded the update
-// by months of telemetry. A schema-change update on a Raspberry Pi could not
-// finish that copy inside the live export deadline (#1302). A store that
-// still keeps legacy history inside state.db is copied whole, so the point
-// stays complete for that layout.
-func (s *Store) BackupStateWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
-	return s.backupWithConfiguration(dstPath, report, false)
-}
-
-func (s *Store) backupWithConfiguration(dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
-	return s.backupWithConfigurationContext(context.Background(), dstPath, report, includeHistory)
-}
-
-func (s *Store) backupWithConfigurationContext(ctx context.Context, dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
 	var configuration Configuration
 	var found bool
 	err := s.backupToCompressedContext(ctx, dstPath, report, func(rawPath string) error {
@@ -670,15 +613,15 @@ func (s *Store) backupWithConfigurationContext(ctx context.Context, dstPath stri
 		}
 		found = err == nil
 		return err
-	}, includeHistory)
+	})
 	return configuration, found, err
 }
 
-func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
-	return s.backupToCompressedContext(context.Background(), dstPath, report, capture, includeHistory)
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
+	return s.backupToCompressedContext(context.Background(), dstPath, report, capture)
 }
 
-func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
+func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -692,9 +635,6 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 	defer cancel()
 	ctx = context.WithValue(ctx, backupReportKey{}, report)
 	sourceBytes := s.BackupSourceBytes()
-	if !includeHistory {
-		sourceBytes = s.stateSourceBytes()
-	}
 	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(sourceBytes)); err != nil {
 		return err
 	}
@@ -706,10 +646,8 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 		return fmt.Errorf("backup state: %w", err)
 	}
 
-	if includeHistory {
-		if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
-			return fmt.Errorf("backup history: %w", err)
-		}
+	if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
+		return fmt.Errorf("backup history: %w", err)
 	}
 
 	if capture != nil {
@@ -1065,21 +1003,10 @@ func (s *Store) migrate() error {
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_active_path
 			ON driver_repo_installs(logical_path) WHERE active = 1`,
-		`CREATE TABLE IF NOT EXISTS driver_command_results (
-			id TEXT PRIMARY KEY NOT NULL,
-			driver_name TEXT NOT NULL,
-			command TEXT NOT NULL,
-			status TEXT NOT NULL,
-			code TEXT NOT NULL,
-			completed_at_ms INTEGER NOT NULL,
-			result_json TEXT NOT NULL
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_driver_command_results_completed
-			ON driver_command_results(completed_at_ms DESC)`,
 
-		// Cross-component update audit. The operation key survives a core
-		// container recreation, allowing the new process to finish the event
-		// that the old process recorded before handing off to the updater.
+		// Cross-component update audit. The operation key survives a Core
+		// restart, allowing the new process to finish the event that the old
+		// process recorded before it stopped.
 		`CREATE TABLE IF NOT EXISTS component_updates (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			operation_key TEXT NOT NULL UNIQUE,
@@ -1121,6 +1048,13 @@ func (s *Store) migrate() error {
 		// until the planner moved to published prices only. Nothing reads it
 		// now, and an older release restores its model from it after a
 		// rollback. Do not reuse the key.
+		//
+		// The driver_command_results table and its
+		// idx_driver_command_results_completed index held results from the
+		// signed control v2 driver runtime, which was removed. Nothing wrote
+		// to them after Device Support packages were retired, and nothing
+		// ever read them. Existing boxes keep them untouched. Do not reuse
+		// the names.
 
 	}
 	for _, stmt := range stmts {
@@ -1461,12 +1395,12 @@ func (s *Store) RecordHistory(p HistoryPoint) error {
 	if normalizeErr != nil {
 		return normalizeErr
 	}
-	if s.hot == nil {
+	if s.history == nil {
 		return errors.New("live history is unavailable")
 	}
-	s.hotWriteMu.Lock()
-	defer s.hotWriteMu.Unlock()
-	_, err := s.hot.Exec(
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	_, err := s.history.Exec(
 		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
@@ -1851,124 +1785,6 @@ func (s *Store) HistoryCounts() (hot, warm, cold int, err error) {
 	return
 }
 
-// pruneChunkSpanMS bounds how much history one prune transaction may age.
-// The write lock is held per chunk, not for the whole backlog: a DB that
-// missed months of pruning is worked off in ~24 h bites of ~40 k rows
-// (sub-second each) instead of one transaction that starves every writer.
-// 2026-07-16 incident: the first prune of a 93-day backlog held the write
-// lock for 4+ hours and every control-loop tick failed with SQLITE_BUSY.
-// Var, not const, so tests can force multiple chunks with small data.
-var pruneChunkSpanMS = int64(24 * 60 * 60 * 1000)
-
-// Prune ages old hot rows into warm buckets, old warm into cold daily buckets.
-// Chunked and linear: each chunk is one short transaction whose boundaries are
-// aligned DOWN to whole buckets, so a bucket is always aggregated from its
-// complete row set (a cutoff mid-bucket would otherwise INSERT OR REPLACE the
-// bucket twice, each time from a partial slice, keeping only the second).
-// Idempotent; safe to call often.
-func (s *Store) Prune(ctx context.Context) error {
-	if s.aggregateHistory.Load() {
-		if err := s.maintainDashboard(ctx, time.Now()); err != nil {
-			return err
-		}
-	}
-	nowMs := time.Now().UnixMilli()
-	t0 := time.Now()
-
-	// hot → warm (15-min buckets). The bare json column rides along with
-	// MAX(ts_ms): SQLite's bare-column rule picks it from the newest row of
-	// each bucket in the same linear pass. The previous correlated subquery
-	// re-scanned history_hot once per bucket — O(buckets × rows).
-	hotAged, hotChunks, err := s.pruneTier(ctx, "history_hot", "history_warm",
-		nowMs-HotRetention.Milliseconds(), WarmBucketMS)
-	if err != nil {
-		return fmt.Errorf("hot→warm: %w", err)
-	}
-
-	// warm → cold (1-day buckets)
-	warmAged, warmChunks, err := s.pruneTier(ctx, "history_warm", "history_cold",
-		nowMs-WarmRetention.Milliseconds(), ColdBucketMS)
-	if err != nil {
-		return fmt.Errorf("warm→cold: %w", err)
-	}
-
-	// Maintenance must never be silent — the 4-hour lock above was invisible
-	// precisely because a running/finished prune logged nothing.
-	if hotAged > 0 || warmAged > 0 {
-		slog.Info("state: history prune complete",
-			"hot_rows_aged", hotAged, "warm_rows_aged", warmAged,
-			"chunks", hotChunks+warmChunks,
-			"elapsed", time.Since(t0).Round(time.Millisecond))
-	}
-	return nil
-}
-
-// pruneTier ages rows older than cutoffMs from src into bucketMs-wide averaged
-// buckets in dst, in bounded per-chunk transactions. Returns rows aged and
-// chunks used. Table names are compile-time constants at every call site.
-func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucketMs int64) (aged int64, chunks int, err error) {
-	// Only age complete buckets: align the cutoff down to a bucket boundary.
-	cutoffMs = (cutoffMs / bucketMs) * bucketMs
-	spanMS := pruneChunkSpanMS
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return aged, chunks, err
-		}
-		var minTs sql.NullInt64
-		if err := s.history.QueryRowContext(ctx,
-			`SELECT MIN(ts_ms) FROM `+src).Scan(&minTs); err != nil {
-			return aged, chunks, err
-		}
-		if !minTs.Valid || minTs.Int64 >= cutoffMs {
-			return aged, chunks, nil
-		}
-		// Chunk upper bound: at most pruneChunkSpanMS of rows, never past the
-		// cutoff, always on a bucket boundary.
-		chunkEnd := minTs.Int64 + spanMS
-		if chunkEnd > cutoffMs {
-			chunkEnd = cutoffMs
-		}
-		chunkEnd = (chunkEnd / bucketMs) * bucketMs
-		if chunkEnd <= minTs.Int64 {
-			chunkEnd = (minTs.Int64/bucketMs + 1) * bucketMs
-			if chunkEnd > cutoffMs {
-				chunkEnd = cutoffMs
-			}
-		}
-
-		n, err := s.pruneChunk(ctx, src, dst, minTs.Int64, chunkEnd, bucketMs)
-		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-				spanMS = max(bucketMs, (chunkEnd-minTs.Int64)/2/bucketMs*bucketMs)
-				if err := pauseMaintenance(ctx); err != nil {
-					return aged, chunks, err
-				}
-				continue
-			}
-			return aged, chunks, err
-		}
-		aged += n
-		chunks++
-
-		// Yield between chunks. Short transactions alone are not enough:
-		// SQLite's busy handler retries with backoff and no fairness, so a
-		// back-to-back chunk loop re-acquires the lock before any waiting
-		// writer wins its retry — observed in production as tick-persistence
-		// SQLITE_BUSY all through a 93-day backlog migration even with ~1 s
-		// chunks. A real pause guarantees every waiter a window.
-		select {
-		case <-ctx.Done():
-			return aged, chunks, ctx.Err()
-		case <-time.After(pruneChunkPause):
-		}
-	}
-}
-
-// pruneChunkPause is the writer-fairness gap between prune chunks. Var so
-// tests can shrink it.
-var pruneChunkPause = 250 * time.Millisecond
-
 // ---- Prices ----
 
 // PricePoint is one time-slot's spot price row. Slot length varies by source:
@@ -1985,7 +1801,10 @@ type PricePoint struct {
 	FetchedAtMs int64   `json:"fetched_at_ms"`
 }
 
-// SavePrices upserts a batch of price rows (slot duration per-row).
+// SavePrices upserts a batch of price rows (slot duration per-row). Each row
+// first removes the cached rows of its zone that it overlaps, so a day
+// fetched again at another resolution replaces the old rows instead of
+// leaving an overlapping timeline that the planner rejects.
 func (s *Store) SavePrices(pts []PricePoint) error {
 	if len(pts) == 0 {
 		return nil
@@ -1995,6 +1814,15 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 		return err
 	}
 	defer tx.Rollback()
+	// A cached row that starts before a new one can still reach into it.
+	// maxSlotPadMs bounds how far back, as it does for cost reads.
+	overlapping, err := tx.Prepare(`DELETE FROM prices
+		WHERE zone = ? AND slot_ts_ms > ? AND slot_ts_ms < ?
+			AND slot_ts_ms + slot_len_min * 60000 > ?`)
+	if err != nil {
+		return err
+	}
+	defer overlapping.Close()
 	stmt, err := tx.Prepare(`INSERT INTO prices
 		(zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -2012,6 +1840,10 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 		slot := p.SlotLenMin
 		if slot <= 0 {
 			slot = 60
+		}
+		endMs := p.SlotTsMs + int64(slot)*60_000
+		if _, err := overlapping.Exec(p.Zone, p.SlotTsMs-maxSlotPadMs, endMs, p.SlotTsMs); err != nil {
+			return err
 		}
 		if _, err := stmt.Exec(p.Zone, p.SlotTsMs, slot, p.SpotOreKwh, p.TotalOreKwh, p.Source, p.FetchedAtMs); err != nil {
 			return err

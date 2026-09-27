@@ -3203,7 +3203,6 @@
     vehicle_unplugged: "car unplugged",
     ev_target_reached: "car target reached",
     departure_reached: "departure time reached",
-    operator_hold: "a manual charge took priority",
     surplus_only: "PV only took priority",
     site_safety_block: "site-meter safety stopped it",
     loadpoint_driver_unavailable: "charger driver unavailable",
@@ -3406,7 +3405,6 @@
       } else {
         var why = "";
         if (!lpNow.plugged_in) why = "Plug in the car first.";
-        else if (lpNow.manual_active) why = "Stop the manual charge first — it already takes what it needs.";
         else if (lpNow.surplus_only) why = "Turn off PV only first.";
         startBtn.disabled = !!why;
         startBtn.style.opacity = why ? "0.5" : "1";

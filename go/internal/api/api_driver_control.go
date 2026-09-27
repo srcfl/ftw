@@ -1,15 +1,12 @@
 // Operator-facing driver controls: send one declared command, hold it for a
 // bounded time, and hand the device back to itself when the hold ends.
 //
-// Deliberately outside control v2. A signed package binds a RuntimePolicy and
-// goes through CommandV2 with its write scope, lease and evidence. A bundled
-// or local driver has no policy, and giving it a synthesised one would be
-// worse than doing nothing: HostEnv.permissionAllowed grants everything only
-// while the policy is nil, so a policy without permissions silently blocks
-// the driver's own MQTT, and LuaDriver.Command refuses a control v2 driver on
-// the legacy path — v2 needs driver_command_v2 entrypoints that no community
-// driver has. So this path leaves the policy layer untouched and validates
-// against the driver's catalog declaration instead.
+// Deliberately outside the signed runtime policy. A commandable driver has no
+// policy, and giving it a synthesised one would be worse than doing nothing:
+// HostEnv.permissionAllowed grants everything only while the policy is nil,
+// so a policy without permissions silently blocks the driver's own MQTT, and
+// any policy denies every write. So this path leaves the policy layer
+// untouched and validates against the driver's catalog declaration instead.
 //
 // What that costs is honest and worth stating: no host-enforced write scope
 // and no host-verified evidence. What it keeps is the part that protects
@@ -55,7 +52,8 @@ type controlHold struct {
 	ExpiresAt  int64  `json:"expires_at_ms"`
 	Generation uint64 `json:"-"`
 
-	timer *time.Timer
+	armedAt time.Time
+	timer   *time.Timer
 }
 
 type controlRequest struct {
@@ -152,7 +150,11 @@ func (s *Server) handleDriverControl(w http.ResponseWriter, r *http.Request) {
 	// order, so it cannot remove the map entry between these operations.
 	state := s.lockControlState(name, s.beforeDriverControlStateLock)
 	defer state.mu.Unlock()
-	generation, err := s.deps.Registry.SendWithGeneration(r.Context(), name, body)
+	// The lock is held across the device call, so the call gets a deadline:
+	// a request context has none, and hold expiry waits on this lock.
+	sendCtx, cancel := context.WithTimeout(r.Context(), controlDefaultTimeout)
+	defer cancel()
+	generation, err := s.deps.Registry.SendWithGeneration(sendCtx, name, body)
 	if err != nil {
 		s.clearControlHoldLocked(state)
 		if errors.Is(err, drivers.ErrObserveOnly) {
@@ -292,28 +294,29 @@ func (s *Server) lockControlState(name string, beforeStateLock func()) *controlD
 	return state
 }
 
-// lockExistingControlState serializes access to a state that already exists
-// without creating one for a driver that may have been removed concurrently.
+// tryLockExistingControlState locks a state that already exists without
+// creating one for a driver that may have been removed concurrently, and
+// without waiting: locked is false when another request holds the state.
 // Lifecycle invalidation uses the same controlStateMu -> state.mu order.
-func (s *Server) lockExistingControlState(name string) (*controlDriverState, bool) {
+func (s *Server) tryLockExistingControlState(name string) (state *controlDriverState, locked bool) {
 	s.controlStateMu.Lock()
-	state := s.controlStates[name]
+	defer s.controlStateMu.Unlock()
+	state = s.controlStates[name]
 	if state == nil {
-		s.controlStateMu.Unlock()
 		return nil, false
 	}
-	state.mu.Lock()
-	s.controlStateMu.Unlock()
-	return state, true
+	return state, state.mu.TryLock()
 }
 
 func (s *Server) armControlHoldLocked(name string, state *controlDriverState, control string, value any, generation uint64, d time.Duration) *controlHold {
 	s.clearControlHoldLocked(state)
+	now := time.Now()
 	hold := &controlHold{
 		Control:    control,
 		Value:      value,
-		ExpiresAt:  time.Now().Add(d).UnixMilli(),
+		ExpiresAt:  now.Add(d).UnixMilli(),
 		Generation: generation,
+		armedAt:    now,
 	}
 	hold.timer = time.AfterFunc(d, func() {
 		if err := s.expireControlHold(name, state, hold); err != nil {
@@ -361,6 +364,13 @@ func (s *Server) expireControlHold(name string, state *controlDriverState, fired
 // It clears the operator hold while holding the same per-driver lock used by
 // command dispatch, then sends the driver's own default with a bounded
 // context. A caller without a deadline gets the 10-second safety deadline.
+//
+// The control tick calls this, so it never waits for an operator command in
+// flight. When one holds the lock, the default goes first: SendDefault cancels
+// that command and refuses new ones until the default is confirmed. The hold
+// is cleared once the lock is free, but only a hold armed before the default
+// returned. A later one belongs to a command sent after the default and keeps
+// its own expiry.
 func (s *Server) SendDriverDefault(ctx context.Context, name string) error {
 	if s.deps == nil || s.deps.Registry == nil {
 		return errors.New("driver registry not available")
@@ -371,11 +381,24 @@ func (s *Server) SendDriverDefault(ctx context.Context, name string) error {
 	if s.beforeDriverDefaultStateLock != nil {
 		s.beforeDriverDefaultStateLock()
 	}
-	if state, ok := s.lockExistingControlState(name); ok {
+	state, locked := s.tryLockExistingControlState(name)
+	if locked {
 		defer state.mu.Unlock()
 		s.clearControlHoldLocked(state)
+		return s.sendDefaultLocked(ctx, name)
 	}
-	return s.sendDefaultLocked(ctx, name)
+	err := s.sendDefaultLocked(ctx, name)
+	if state != nil {
+		defaulted := time.Now()
+		go func() {
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if state.hold != nil && !state.hold.armedAt.After(defaulted) {
+				s.clearControlHoldLocked(state)
+			}
+		}()
+	}
+	return err
 }
 
 func (s *Server) sendDefaultLocked(ctx context.Context, name string) error {

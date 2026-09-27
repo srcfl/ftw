@@ -195,24 +195,6 @@ func TestV2XEnvelopeSoCJSONIsFraction(t *testing.T) {
 	}
 }
 
-func TestShadowEvaluationJSONIsFraction(t *testing.T) {
-	s := mpc.ShadowEvaluation{ChampionVirtualSoC: 0.55, ChallengerVirtualSoC: 0.45}
-	raw, err := json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := m["champion_virtual_soc_pct"]; ok {
-		t.Fatalf("shadow JSON still emits champion_virtual_soc_pct: %s", raw)
-	}
-	if m["champion_virtual_soc"] != 0.55 {
-		t.Fatalf("champion_virtual_soc = %v, want 0.55", m["champion_virtual_soc"])
-	}
-}
-
 func TestCoreBannedSoCPercentFieldNames(t *testing.T) {
 	types := []reflect.Type{
 		reflect.TypeOf(loadpoint.State{}),

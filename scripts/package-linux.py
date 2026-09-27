@@ -9,22 +9,21 @@ import io
 import json
 import os
 from pathlib import Path
-import shutil
 import tarfile
 import tempfile
 
 
 RESOURCES = (
     "drivers", "web", "config.example.yaml", "state-schema.json",
-    "deploy/ftw.service", "deploy/ftw-native.service",
+    "deploy/ftw-native.service",
     "LICENSE", "NOTICE", "LICENSING.md",
     "THIRD-PARTY-NOTICES.txt",
 )
 BINARIES = ("ftw", "ftw-backup", "ftw-cli", "ftw-launcher")
 MACHINES = {"amd64": 62, "arm64": 183}
 ENERGYPLAN_DIR = "optimizer/native/bundle"
-# Use the reviewed verifier beside this helper, including when --root selects
-# an older release checkout. Keep the pinned source bundle unchanged.
+# Use the reviewed verifier beside this helper. Keep the pinned source bundle
+# unchanged.
 spec = importlib.util.spec_from_file_location(
     "energyplan_verify", Path(__file__).resolve().parents[1] / "optimizer/native/verify.py")
 energyplan_verify = importlib.util.module_from_spec(spec)
@@ -79,11 +78,6 @@ def package(root, binaries, output, arch):
                         info.mode = 0o755
                         with (binaries / name).open("rb") as binary:
                             tar.addfile(info, binary)
-                    alias = tarfile.TarInfo("forty-two-watts")
-                    alias.type = tarfile.SYMTYPE
-                    alias.linkname = "ftw"
-                    alias.mode = 0o777
-                    tar.addfile(alias)
                     for name in RESOURCES:
                         tar.add(root / name, arcname=name, filter=normalized)
                     for name in sorted(manifest["files"]):
@@ -110,12 +104,8 @@ def package(root, binaries, output, arch):
         if pending is not None:
             pending.unlink(missing_ok=True)
 
-    # Keep existing download names until installed users have moved over.
-    legacy = output / f"forty-two-watts-linux-{arch}.tar.gz"
-    shutil.copyfile(archive, legacy)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    for asset in (archive, legacy):
-        asset.with_name(asset.name + ".sha256").write_text(f"{digest}  {asset.name}\n")
+    archive.with_name(archive.name + ".sha256").write_text(f"{digest}  {archive.name}\n")
     return archive
 
 

@@ -104,23 +104,21 @@ type DiagnosticParams struct {
 // Diagnostic is the full post-mortem of the most recent Optimize call.
 // Returned by Service.Diagnose for the /api/mpc/diagnose endpoint.
 type Diagnostic struct {
-	DecisionID            string            `json:"decision_id,omitempty"`
-	ComputedAtMs          int64             `json:"computed_at_ms"`
-	InputProvenanceSchema int               `json:"input_provenance_schema,omitempty"`
-	Zone                  string            `json:"zone"`
-	Horizon               int               `json:"horizon_slots"`
-	TotalCostOre          float64           `json:"total_cost_ore"`
-	Solver                *SolverInfo       `json:"solver,omitempty"`
-	DPShadow              *ShadowPlan       `json:"dp_shadow,omitempty"`
-	DPEvaluationShadow    *ShadowPlan       `json:"dp_evaluation_shadow,omitempty"`
-	RecourseShadow        *ShadowPlan       `json:"recourse_shadow,omitempty"`
-	ShadowEvaluation      *ShadowEvaluation `json:"shadow_evaluation,omitempty"`
-	OptimizerInput        json.RawMessage   `json:"optimizer_input,omitempty"`
-	Params                DiagnosticParams  `json:"params"`
-	Slots                 []DiagnosticSlot  `json:"slots"`
-	LoadpointID           string            `json:"loadpoint_id,omitempty"`
-	LastReplanAtMs        int64             `json:"last_replan_at_ms"`
-	LastReason            string            `json:"last_reason"`
+	DecisionID            string           `json:"decision_id,omitempty"`
+	ComputedAtMs          int64            `json:"computed_at_ms"`
+	InputProvenanceSchema int              `json:"input_provenance_schema,omitempty"`
+	Zone                  string           `json:"zone"`
+	Horizon               int              `json:"horizon_slots"`
+	TotalCostOre          float64          `json:"total_cost_ore"`
+	Solver                *SolverInfo      `json:"solver,omitempty"`
+	DPShadow              *ShadowPlan      `json:"dp_shadow,omitempty"`
+	DPEvaluationShadow    *ShadowPlan      `json:"dp_evaluation_shadow,omitempty"`
+	OptimizerInput        json.RawMessage  `json:"optimizer_input,omitempty"`
+	Params                DiagnosticParams `json:"params"`
+	Slots                 []DiagnosticSlot `json:"slots"`
+	LoadpointID           string           `json:"loadpoint_id,omitempty"`
+	LastReplanAtMs        int64            `json:"last_replan_at_ms"`
+	LastReason            string           `json:"last_reason"`
 }
 
 // Diagnose returns the inputs + outputs of the most recent Optimize
@@ -211,8 +209,6 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		Solver:                plan.Solver,
 		DPShadow:              plan.DPShadow,
 		DPEvaluationShadow:    plan.DPEvaluationShadow,
-		RecourseShadow:        plan.RecourseShadow,
-		ShadowEvaluation:      plan.ShadowEvaluation,
 		OptimizerInput:        append(json.RawMessage(nil), plan.OptimizerInput...),
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
@@ -448,8 +444,6 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		Solver:             d.Solver,
 		DPShadow:           d.DPShadow,
 		DPEvaluationShadow: d.DPEvaluationShadow,
-		RecourseShadow:     d.RecourseShadow,
-		ShadowEvaluation:   d.ShadowEvaluation,
 		OptimizerInput:     append(json.RawMessage(nil), d.OptimizerInput...),
 	}
 	return plan, slots, params, time.UnixMilli(replanAtMs), true

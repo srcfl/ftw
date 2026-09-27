@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,59 +24,24 @@ type PlanOptimizer interface {
 	Close() error
 }
 
-// RecourseOptimizer is implemented by optimizers that can solve the same
-// immutable planning snapshot with scenario-dependent future decisions. The
-// returned plan is diagnostic only; Service never promotes it to dispatch.
-type RecourseOptimizer interface {
-	OptimizeRecourse(context.Context, []Slot, Params, int) (Plan, error)
-}
-
-// MultistageOptimizer exposes the calibrated scenario-tree challenger. Like
-// recourse, its result is diagnostic-only and cannot reach dispatch.
-type MultistageOptimizer interface {
-	OptimizeMultistage(context.Context, []Slot, Params, int) (Plan, error)
-}
-
-type MultistageOptimizerConfig struct {
-	ScenarioLimit          int
-	BranchIntervalSlots    int
-	BranchHorizonSlots     int
-	MaxBranching           int
-	NearHorizonSlots       int
-	MidHorizonSlots        int
-	MidBlockSlots          int
-	FarBlockSlots          int
-	ServiceCVaRWeight      *float64
-	ServiceCVaRAlpha       float64
-	EconomicCVaRWeight     float64
-	EconomicCVaRAlpha      float64
-	DecompositionThreshold int
-	DecompositionMethod    string
-	PHMaxIterations        int
-	PHRho                  float64
-	PHToleranceW           float64
-}
-
 // ExternalOptimizerConfig controls a compiled worker. The command is an
 // argv array rather than a shell string, so configuration cannot accidentally
 // acquire shell expansion semantics.
 type ExternalOptimizerConfig struct {
-	Command   []string
-	ModuleDir string
-	// Transport may be supplied by tests or alternate runtimes. When nil,
-	// TransportMode selects process, unix, or auto (unix with process fallback).
-	Transport     OptimizerTransport
-	TransportMode string
-	SocketPath    string
-	Timeout       time.Duration
-	Solver        string
-	Formulation   string
-	MIPRelGap     float64
-	CVaRWeight    float64
-	CVaRAlpha     float64
-	IdleTimeout   time.Duration
-	Multistage    MultistageOptimizerConfig
+	Command     []string
+	Timeout     time.Duration
+	IdleTimeout time.Duration
 }
+
+// The worker solves one deterministic request. Core has already applied the PV
+// risk margin to the slots, so it sends no scenarios and no risk weight.
+const (
+	optimizerSolver         = "HIGHS"
+	optimizerFormulation    = "auto"
+	optimizerMIPRelGap      = 0.005
+	optimizerCVaRAlpha      = 0.9
+	optimizerScenarioPolicy = "shared"
+)
 
 // ExternalOptimizer owns one warm JSON-lines worker process. Calls are
 // serialized to keep request and response ownership unambiguous. An optional idle timeout releases the worker's solver memory
@@ -93,102 +57,11 @@ func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, erro
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = optimizercontract.DefaultTimeout
 	}
-	if cfg.Solver == "" {
-		cfg.Solver = "HIGHS"
-	}
-	if cfg.Formulation == "" {
-		cfg.Formulation = "auto"
-	}
-	if cfg.MIPRelGap <= 0 {
-		cfg.MIPRelGap = 0.005
-	}
-	if cfg.CVaRAlpha <= 0 || cfg.CVaRAlpha >= 1 {
-		cfg.CVaRAlpha = 0.9
-	}
-	ms := &cfg.Multistage
-	if ms.ScenarioLimit <= 0 {
-		ms.ScenarioLimit = 12
-	}
-	if ms.BranchIntervalSlots <= 0 {
-		ms.BranchIntervalSlots = 4
-	}
-	if ms.BranchHorizonSlots <= 0 {
-		ms.BranchHorizonSlots = 48
-	}
-	if ms.MaxBranching <= 0 {
-		ms.MaxBranching = 2
-	}
-	if ms.NearHorizonSlots <= 0 {
-		ms.NearHorizonSlots = 16
-	}
-	if ms.MidHorizonSlots <= 0 {
-		ms.MidHorizonSlots = 96
-	}
-	if ms.MidBlockSlots <= 0 {
-		ms.MidBlockSlots = 2
-	}
-	if ms.FarBlockSlots <= 0 {
-		ms.FarBlockSlots = 4
-	}
-	if ms.ServiceCVaRWeight == nil {
-		defaultWeight := 1.0
-		ms.ServiceCVaRWeight = &defaultWeight
-	}
-	if ms.ServiceCVaRAlpha <= 0 || ms.ServiceCVaRAlpha >= 1 {
-		ms.ServiceCVaRAlpha = 0.95
-	}
-	if ms.EconomicCVaRAlpha <= 0 || ms.EconomicCVaRAlpha >= 1 {
-		ms.EconomicCVaRAlpha = 0.9
-	}
-	if ms.DecompositionThreshold <= 0 {
-		ms.DecompositionThreshold = 20
-	}
-	if ms.DecompositionMethod == "" {
-		ms.DecompositionMethod = "auto"
-	}
-	if ms.PHMaxIterations <= 0 {
-		ms.PHMaxIterations = 8
-	}
-	if ms.PHRho <= 0 {
-		ms.PHRho = 50
-	}
-	if ms.PHToleranceW <= 0 {
-		ms.PHToleranceW = 5
-	}
-	transport := cfg.Transport
-	if transport == nil {
-		mode := strings.ToLower(strings.TrimSpace(cfg.TransportMode))
-		if mode == "" {
-			mode = "process"
-		}
-		processCfg := ProcessTransportConfig{
-			Command: cfg.Command, ModuleDir: cfg.ModuleDir,
-			IdleTimeout: cfg.IdleTimeout,
-		}
-		switch mode {
-		case "process":
-			var err error
-			transport, err = NewProcessTransport(processCfg)
-			if err != nil {
-				return nil, err
-			}
-		case "unix":
-			if strings.TrimSpace(cfg.SocketPath) == "" {
-				return nil, errors.New("optimizer socket path is empty")
-			}
-			transport = NewUnixTransport(cfg.SocketPath)
-		case "auto":
-			if strings.TrimSpace(cfg.SocketPath) == "" {
-				return nil, errors.New("optimizer socket path is empty")
-			}
-			fallback, err := NewProcessTransport(processCfg)
-			if err != nil {
-				return nil, fmt.Errorf("optimizer process fallback: %w", err)
-			}
-			transport = NewAutoTransport(NewUnixTransport(cfg.SocketPath), fallback)
-		default:
-			return nil, fmt.Errorf("optimizer transport must be auto, unix, or process, got %q", mode)
-		}
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: cfg.Command, IdleTimeout: cfg.IdleTimeout,
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &ExternalOptimizer{cfg: cfg, transport: transport}, nil
 }
@@ -201,7 +74,6 @@ type externalRequest struct {
 	Storages      []externalStorage      `json:"storages"`
 	FlexLoads     []externalFlexLoad     `json:"flex_loads"`
 	ThermalLoads  []map[string]any       `json:"thermal_loads"`
-	Scenarios     []map[string]any       `json:"scenarios,omitempty"`
 	DemandCharges []externalDemandCharge `json:"demand_charges,omitempty"`
 }
 
@@ -219,27 +91,9 @@ type externalSettings struct {
 	ExportFloorOreKwh        *float64 `json:"export_floor_per_kwh,omitempty"`
 	MinArbitrageSpreadOreKwh float64  `json:"min_arbitrage_spread_per_kwh"`
 	PVChargeBonusOreKwh      float64  `json:"pv_charge_bonus_per_kwh"`
-	CVaRWeight               float64  `json:"cvar_weight"`
+	CVaRWeight               float64  `json:"cvar_weight"` // always 0, see optimizerCVaRAlpha
 	CVaRAlpha                float64  `json:"cvar_alpha"`
 	ScenarioPolicy           string   `json:"scenario_policy,omitempty"`
-	NonAnticipativeSlots     int      `json:"non_anticipative_slots,omitempty"`
-	ScenarioLimit            int      `json:"scenario_limit,omitempty"`
-	BranchIntervalSlots      int      `json:"branch_interval_slots,omitempty"`
-	BranchHorizonSlots       int      `json:"branch_horizon_slots,omitempty"`
-	MaxBranching             int      `json:"max_branching,omitempty"`
-	NearHorizonSlots         int      `json:"near_horizon_slots,omitempty"`
-	MidHorizonSlots          int      `json:"mid_horizon_slots,omitempty"`
-	MidBlockSlots            int      `json:"mid_block_slots,omitempty"`
-	FarBlockSlots            int      `json:"far_block_slots,omitempty"`
-	ServiceCVaRWeight        float64  `json:"service_cvar_weight,omitempty"`
-	ServiceCVaRAlpha         float64  `json:"service_cvar_alpha,omitempty"`
-	EconomicCVaRWeight       float64  `json:"economic_cvar_weight,omitempty"`
-	EconomicCVaRAlpha        float64  `json:"economic_cvar_alpha,omitempty"`
-	DecompositionThreshold   int      `json:"decomposition_threshold,omitempty"`
-	DecompositionMethod      string   `json:"decomposition_method,omitempty"`
-	PHMaxIterations          int      `json:"ph_max_iterations,omitempty"`
-	PHRho                    float64  `json:"ph_rho,omitempty"`
-	PHToleranceW             float64  `json:"ph_tolerance_w,omitempty"`
 }
 
 type externalSlot struct {
@@ -344,53 +198,10 @@ type externalAction struct {
 }
 
 func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
-	return o.optimize(ctx, slots, p, "shared", 0)
-}
-
-// OptimizeRecourse runs the storage recourse challenger in the same warm
-// worker as the champion. Calls remain serialized, avoiding a second resident
-// CVXPY/HiGHS process on memory-constrained edge hosts.
-func (o *ExternalOptimizer) OptimizeRecourse(ctx context.Context, slots []Slot, p Params, nonAnticipativeSlots int) (Plan, error) {
-	if nonAnticipativeSlots < 1 {
-		nonAnticipativeSlots = 1
-	}
-	return o.optimize(ctx, slots, p, "recourse", nonAnticipativeSlots)
-}
-
-func (o *ExternalOptimizer) OptimizeMultistage(ctx context.Context, slots []Slot, p Params, nonAnticipativeSlots int) (Plan, error) {
-	if nonAnticipativeSlots < 1 {
-		nonAnticipativeSlots = 1
-	}
-	return o.optimize(ctx, slots, p, "multistage", nonAnticipativeSlots)
-}
-
-func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params, scenarioPolicy string, nonAnticipativeSlots int) (Plan, error) {
 	if err := validatePartialSlots(slots); err != nil {
 		return Plan{}, err
 	}
 	request := o.buildRequest(slots, p)
-	request.Settings.ScenarioPolicy = scenarioPolicy
-	request.Settings.NonAnticipativeSlots = nonAnticipativeSlots
-	if scenarioPolicy == "multistage" {
-		ms := o.cfg.Multistage
-		request.Settings.ScenarioLimit = ms.ScenarioLimit
-		request.Settings.BranchIntervalSlots = ms.BranchIntervalSlots
-		request.Settings.BranchHorizonSlots = ms.BranchHorizonSlots
-		request.Settings.MaxBranching = ms.MaxBranching
-		request.Settings.NearHorizonSlots = ms.NearHorizonSlots
-		request.Settings.MidHorizonSlots = ms.MidHorizonSlots
-		request.Settings.MidBlockSlots = ms.MidBlockSlots
-		request.Settings.FarBlockSlots = ms.FarBlockSlots
-		request.Settings.ServiceCVaRWeight = *ms.ServiceCVaRWeight
-		request.Settings.ServiceCVaRAlpha = ms.ServiceCVaRAlpha
-		request.Settings.EconomicCVaRWeight = ms.EconomicCVaRWeight
-		request.Settings.EconomicCVaRAlpha = ms.EconomicCVaRAlpha
-		request.Settings.DecompositionThreshold = ms.DecompositionThreshold
-		request.Settings.DecompositionMethod = ms.DecompositionMethod
-		request.Settings.PHMaxIterations = ms.PHMaxIterations
-		request.Settings.PHRho = ms.PHRho
-		request.Settings.PHToleranceW = ms.PHToleranceW
-	}
 	if o.prepareRequest != nil {
 		if err := o.prepareRequest(ctx, &request, p); err != nil {
 			return Plan{}, fmt.Errorf("prepare optimizer request: %w", err)
@@ -441,18 +252,18 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		RequestID:     uuid.NewString(),
 		Settings: externalSettings{
 			Mode:                     p.Mode,
-			Solver:                   strings.ToUpper(o.cfg.Solver),
-			Formulation:              o.cfg.Formulation,
+			Solver:                   optimizerSolver,
+			Formulation:              optimizerFormulation,
 			TimeLimitS:               o.cfg.Timeout.Seconds() * 0.8,
-			MIPRelGap:                o.cfg.MIPRelGap,
+			MIPRelGap:                optimizerMIPRelGap,
 			ExportOrePerKWh:          p.ExportOrePerKWh,
 			ExportBonusOreKwh:        p.ExportBonusOreKwh,
 			ExportFeeOreKwh:          p.ExportFeeOreKwh,
 			ExportFloorOreKwh:        p.ExportFloorOreKwh,
 			MinArbitrageSpreadOreKwh: p.MinArbitrageSpreadOreKwh,
 			PVChargeBonusOreKwh:      p.PVChargeBonusOreKwh,
-			CVaRWeight:               o.cfg.CVaRWeight,
-			CVaRAlpha:                o.cfg.CVaRAlpha,
+			CVaRAlpha:                optimizerCVaRAlpha,
+			ScenarioPolicy:           optimizerScenarioPolicy,
 		},
 		Slots:        make([]externalSlot, len(slots)),
 		Storages:     []externalStorage{},
@@ -534,40 +345,6 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		}
 		req.DemandCharges = append(req.DemandCharges, wire)
 	}
-	if (p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0) && p.PVForecastSafetyK > 0 {
-		downsidePV := make([]float64, len(slots))
-		upsidePV := make([]float64, len(slots))
-		loads := make([]float64, len(slots))
-		basePV := make([]float64, len(slots))
-		hasDaylight := false
-		// The champion's scenarios and the Go fallback's downside slots must
-		// describe the same physics, so this mirrors applyPVDownsidePerSlot:
-		// a share of each slot's own generation once the twin has learned its
-		// relative error, the flat watt spread until then.
-		flatSpread := p.PVUncertaintyW * p.PVForecastSafetyK
-		relSpread := p.PVRelativeUncertainty * p.PVForecastSafetyK
-		for i, slot := range slots {
-			loads[i] = slot.LoadW
-			basePV[i] = slot.PVW
-			if slot.PVW < 0 {
-				hasDaylight = true
-				generation := -slot.PVW
-				spread := flatSpread
-				if p.PVRelativeUncertainty > 0 {
-					spread = relSpread * generation
-				}
-				downsidePV[i] = -math.Max(0, generation-spread)
-				upsidePV[i] = -(generation + spread)
-			}
-		}
-		if hasDaylight {
-			req.Scenarios = []map[string]any{
-				{"id": "base", "probability": 0.60, "load_w": loads, "pv_w": basePV},
-				{"id": "pv-downside", "probability": 0.25, "load_w": loads, "pv_w": downsidePV},
-				{"id": "pv-upside", "probability": 0.15, "load_w": loads, "pv_w": upsidePV},
-			}
-		}
-	}
 	return req
 }
 
@@ -624,13 +401,6 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 
 func (o *ExternalOptimizer) Close() error {
 	return o.transport.Close()
-}
-
-// Health negotiates the independent optimizer module contract. It is
-// intentionally separate from plan validation: a healthy worker can still
-// return an unsafe candidate, and ValidatePlan will reject it.
-func (o *ExternalOptimizer) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
-	return o.transport.Health(ctx)
 }
 
 // solverGridLimitToleranceW admits only sub-watt feasibility residue from the

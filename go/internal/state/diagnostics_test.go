@@ -2,9 +2,13 @@ package state
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/parquet-go/parquet-go"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -153,59 +157,46 @@ func TestDiagnosticsBeforeBatches(t *testing.T) {
 	}
 }
 
-func TestRolloffDiagnosticsToParquet(t *testing.T) {
+// Installs from before 0.x may still hold diagnostics day files in cold
+// storage. The API reads them back as summaries and as full snapshots.
+func TestDiagnosticsParquetReaders(t *testing.T) {
 	st := openTestStore(t)
 	coldDir := t.TempDir()
-	// Insert 5 rows well before the retention cutoff so they're all
-	// eligible to roll off. DiagnosticsRecentRetention is 30 d; put
-	// them 60 d back.
-	base := time.Now().Add(-60 * 24 * time.Hour).UTC().Truncate(24 * time.Hour)
-	for i := 0; i < 5; i++ {
-		ts := base.Add(time.Duration(i) * 2 * time.Hour).UnixMilli()
-		_ = st.SaveDiagnostic(ts, "scheduled", "SE3", float64(i), 96,
-			`{"idx":`+itoa(i)+`}`)
+	day := time.Now().Add(-60 * 24 * time.Hour).UTC().Truncate(24 * time.Hour)
+	rows := make([]parquetDiagRow, 5)
+	for i := range rows {
+		rows[i] = parquetDiagRow{
+			TsMs: day.Add(time.Duration(i) * 2 * time.Hour).UnixMilli(), Reason: "scheduled", Zone: "SE3",
+			TotalCostOre: float64(i), HorizonSlots: 96, JSON: `{"idx":` + itoa(i) + `}`,
+		}
 	}
-	// Plus one fresh row that must stay.
-	freshTs := time.Now().UnixMilli()
-	_ = st.SaveDiagnostic(freshTs, "scheduled", "SE3", 999, 96, "fresh")
+	path := filepath.Join(coldDir, "diagnostics", day.Format("2006/01/02.parquet"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := parquet.NewGenericWriter[parquetDiagRow](f)
+	if _, err := w.Write(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(w.Close(), f.Close()); err != nil {
+		t.Fatal(err)
+	}
 
-	n, files, err := st.RolloffDiagnosticsToParquet(context.Background(), coldDir)
-	if err != nil {
-		t.Fatalf("Rolloff: %v", err)
+	summaries, err := st.LoadDiagnosticsFromParquet(coldDir, day.UnixMilli(), day.Add(24*time.Hour).UnixMilli())
+	if err != nil || len(summaries) != 5 {
+		t.Fatalf("cold summaries = %+v, %v; want 5", summaries, err)
 	}
-	if n != 5 {
-		t.Errorf("rolled %d rows, want 5", n)
+	if summaries[0].TsMs != rows[0].TsMs || summaries[4].TotalCostOre != 4 || summaries[4].HorizonSlots != 96 {
+		t.Fatalf("cold summaries = %+v", summaries)
 	}
-	if len(files) == 0 {
-		t.Error("no parquet files produced")
-	}
-	// Fresh row still queryable.
-	got, _ := st.LoadDiagnosticAt(freshTs)
-	if got == nil {
-		t.Error("fresh row got deleted — rolloff cut too aggressively")
-	}
-	// Old rows are GONE from SQLite.
-	rows, _ := st.LoadDiagnosticsInRange(base.UnixMilli(), base.Add(time.Hour*24).UnixMilli(), 0)
-	if len(rows) != 0 {
-		t.Errorf("old rows still in SQLite: %v", rows)
-	}
-	// Round-trip via cold storage.
-	coldSummaries, err := st.LoadDiagnosticsFromParquet(coldDir,
-		base.UnixMilli(), base.Add(24*time.Hour).UnixMilli())
-	if err != nil {
-		t.Fatalf("LoadDiagnosticsFromParquet: %v", err)
-	}
-	if len(coldSummaries) != 5 {
-		t.Errorf("cold storage returned %d, want 5", len(coldSummaries))
-	}
-	// Full-blob readback.
-	full, err := st.LoadDiagnosticFullFromParquet(coldDir,
-		base.Add(4*time.Hour).UnixMilli())
-	if err != nil {
-		t.Fatalf("LoadDiagnosticFullFromParquet: %v", err)
-	}
-	if full == nil || full.JSON == "" {
-		t.Errorf("cold full-row not returned: %+v", full)
+	// The closest snapshot at or before the requested time is returned.
+	full, err := st.LoadDiagnosticFullFromParquet(coldDir, day.Add(5*time.Hour).UnixMilli())
+	if err != nil || full == nil || full.TsMs != rows[2].TsMs || full.JSON != rows[2].JSON {
+		t.Fatalf("cold full row = %+v, %v; want %+v", full, err, rows[2])
 	}
 }
 

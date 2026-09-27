@@ -1,62 +1,9 @@
 package state
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
-
-func touchDayFile(t *testing.T, root string, day time.Time) string {
-	t.Helper()
-	dir := filepath.Join(root, day.Format("2006/01"))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, day.Format("02")+".parquet")
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestPruneColdParquet(t *testing.T) {
-	coldDir := t.TempDir()
-	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
-
-	oldSamples := touchDayFile(t, coldDir, now.AddDate(0, 0, -400))
-	freshSamples := touchDayFile(t, coldDir, now.AddDate(0, 0, -10))
-	oldDiag := touchDayFile(t, filepath.Join(coldDir, "diagnostics"), now.AddDate(0, 0, -400))
-	freshDiag := touchDayFile(t, filepath.Join(coldDir, "diagnostics"), now.AddDate(0, 0, -10))
-
-	removed, err := PruneColdParquet(coldDir, 365, now)
-	if err != nil {
-		t.Fatalf("PruneColdParquet: %v", err)
-	}
-	if len(removed) != 2 {
-		t.Fatalf("removed %d files, want 2: %v", len(removed), removed)
-	}
-	for _, gone := range []string{oldSamples, oldDiag} {
-		if _, err := os.Stat(gone); !os.IsNotExist(err) {
-			t.Errorf("expired file still present: %s", gone)
-		}
-	}
-	for _, kept := range []string{freshSamples, freshDiag} {
-		if _, err := os.Stat(kept); err != nil {
-			t.Errorf("fresh file removed: %s", kept)
-		}
-	}
-	// Emptied month dir of the expired file must be gone too.
-	if _, err := os.Stat(filepath.Dir(oldSamples)); !os.IsNotExist(err) {
-		t.Errorf("empty month dir not cleaned: %s", filepath.Dir(oldSamples))
-	}
-
-	// Retention 0 = keep everything.
-	removed, err = PruneColdParquet(coldDir, 0, now)
-	if err != nil || removed != nil {
-		t.Fatalf("retention 0 must be a no-op, got removed=%v err=%v", removed, err)
-	}
-}
 
 func TestRecordTickWritesHistoryAndSamplesAtomically(t *testing.T) {
 	s := freshStore(t)

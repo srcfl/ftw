@@ -48,7 +48,7 @@ func TestFullBackupRestoresPastPrices(t *testing.T) {
 				t.Fatal(err)
 			}
 			restoredDir := filepath.Join(root, "restored")
-			if _, err := Restore(info.Path, restoredDir, time.Time{}); err != nil {
+			if _, err := restoreFresh(info.Path, restoredDir, time.Time{}); err != nil {
 				t.Fatal(err)
 			}
 			restored, err := state.Open(filepath.Join(restoredDir, "state.db"))

@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"sync"
@@ -96,49 +95,5 @@ func TestForecastPruneReadDoesNotBlockDurableGoals(t *testing.T) {
 	}
 	if value, ok := s.LoadConfig("test-goal"); !ok || value != "80" {
 		t.Fatal("durable goal changed")
-	}
-}
-
-func TestArchiveSingleRowDeadlineRetainsCurrentBatch(t *testing.T) {
-	s := freshStore(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.RecordSamples([]Sample{{Driver: "test", Metric: "power", TsMs: 1, Value: 42}}); err != nil {
-		t.Fatal(err)
-	}
-	d, err := s.driverID("test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := s.metricID("power", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// One long reader outlasts the archive's write budget. The verified row
-	// must stay in this job and retry after the reader releases the view.
-	s.archiveViewMu.RLock()
-	locked := true
-	defer func() {
-		if locked {
-			s.archiveViewMu.RUnlock()
-		}
-	}()
-	done := make(chan error, 1)
-	go func() {
-		n, err := s.pruneArchivedSamples(ctx, []resolvedSample{{dID: d, mID: m, ts: 1, v: 42}})
-		if err == nil && n != 1 {
-			err = sql.ErrNoRows
-		}
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		t.Fatalf("archive abandoned its verified row after one write deadline: %v", err)
-	case <-time.After(archiveWriteTimeout + 150*time.Millisecond):
-	}
-	s.archiveViewMu.RUnlock()
-	locked = false
-	if err := <-done; err != nil {
-		t.Fatal(err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // A real registry, so a draft is only green if the edited file actually loads
@@ -195,6 +196,47 @@ func TestAnExpiryRacingKeepDoesNotDeleteTheKeptFile(t *testing.T) {
 	}
 }
 
+// A timer that already fired cannot be disarmed. Keep pressed while that expiry
+// holds the update lock must wait for it and must not report a draft as kept
+// after the expiry has put the old driver back.
+func TestKeepWaitsForAnExpiryAlreadyInFlight(t *testing.T) {
+	srv, _, user, _ := draftServer(t)
+	if code, _ := postDraft(t, srv, "demo", `{"lua":`+quote(draftLua)+`,"minutes":1}`); code != 200 {
+		t.Fatal("draft did not start")
+	}
+
+	// expireDraft has taken the lock and is part way through its revert.
+	srv.driverUpdateMu.Lock()
+	type result struct {
+		code int
+		body map[string]any
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, body := postDraftAction(t, srv, "demo", "keep")
+		done <- result{code, body}
+	}()
+	select {
+	case got := <-done:
+		srv.driverUpdateMu.Unlock()
+		t.Fatalf("keep answered %d %v while an expiry held the update lock", got.code, got.body)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !srv.revertDraft("demo.lua") {
+		srv.driverUpdateMu.Unlock()
+		t.Fatal("keep removed the record before the in-flight expiry finished")
+	}
+	srv.driverUpdateMu.Unlock()
+
+	got := <-done
+	if got.code != 409 {
+		t.Fatalf("keep after the expiry = %d %v, want 409", got.code, got.body)
+	}
+	if _, err := os.Stat(filepath.Join(user, "demo.lua")); !os.IsNotExist(err) {
+		t.Fatalf("overlay after the expiry: %v, want the draft gone", err)
+	}
+}
+
 // The timer dies with the process, so the record on disk is what makes the
 // window mean anything across a restart.
 func TestARestartUndoesADraftLeftRunning(t *testing.T) {
@@ -299,4 +341,41 @@ func quote(s string) string {
 func itoa(n int) string {
 	out, _ := json.Marshal(n)
 	return string(out)
+}
+
+// Applying a draft restarts the driver. That restart must carry the battery's
+// soc_min/soc_max into driver_init like startup does, not the driver defaults.
+func TestDraftRestartKeepsBatterySoCBounds(t *testing.T) {
+	bundled := t.TempDir()
+	writeSourceDriver(t, bundled, "demo.lua", "demo", "1.0.0",
+		"function driver_init(cfg) end\nfunction driver_poll() return 1000 end\n")
+	tel := telemetry.NewStore()
+	reg := drivers.NewRegistry(tel)
+	t.Cleanup(reg.ShutdownAll)
+	min, max := 0.23, 0.81
+	cfg := &config.Config{
+		Drivers:   []config.Driver{{Name: "demo-1", Lua: filepath.Join(bundled, "demo.lua")}},
+		Batteries: map[string]config.Battery{"demo-1": {SoCMin: &min, SoCMax: &max}},
+	}
+	srv := New(&Deps{
+		DriverDir: bundled, UserDriverDir: t.TempDir(),
+		Registry: reg, Cfg: cfg, CfgMu: &sync.RWMutex{}, Tel: tel,
+	})
+	lua := "DRIVER = {\n  id = \"demo\",\n  version = \"1.0.0\",\n  protocols = { \"modbus\" },\n}\n" +
+		"function driver_init(cfg)\n" +
+		"  cfg = cfg or {}\n" +
+		"  host.emit_metric(\"init_charge_ceil_soc\", cfg.charge_ceil_soc or 0.95)\n" +
+		"  host.emit_metric(\"init_discharge_floor_soc\", cfg.discharge_floor_soc or 0.05)\n" +
+		"end\nfunction driver_poll() return 1000 end\n"
+	if code, body := postDraft(t, srv, "demo", `{"lua":`+quote(lua)+`,"minutes":5}`); code != 200 {
+		t.Fatalf("draft = %d %v", code, body)
+	}
+	for name, want := range map[string]float64{"init_charge_ceil_soc": max, "init_discharge_floor_soc": min} {
+		if got, _, ok := tel.LatestMetric("demo-1", name); !ok || got != want {
+			t.Fatalf("draft driver_init %s = %g (ok=%v), want %g", name, got, ok, want)
+		}
+	}
+	if cfg.Drivers[0].Config != nil {
+		t.Fatalf("derived bounds leaked into live config: %v", cfg.Drivers[0].Config)
+	}
 }

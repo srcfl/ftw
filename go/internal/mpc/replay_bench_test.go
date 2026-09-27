@@ -8,10 +8,9 @@ package mpc
 // cost: raw grid cost minus the terminal-SoC credit both solvers
 // optimize with but neither reports. Without that correction a solver
 // that parks the horizon with a fuller battery looks expensive when it
-// is merely storing value (up to ~21 SEK swing on a 9.6 kWh pack) —
-// the stateful shadow evaluator already nets this out; the DP shadow
-// comparisons do not, which is how a measurement artifact once read as
-// a 39 SEK/day solver gap.
+// is merely storing value (up to ~21 SEK swing on a 9.6 kWh pack),
+// which is how a raw-cost comparison once read a measurement artifact
+// as a 39 SEK/day solver gap.
 //
 // The snapshot directory stays outside the repository on purpose: real
 // blobs carry a household's load traces. CI runs only the synthetic
@@ -92,8 +91,8 @@ func TestReplayBenchSnapshots(t *testing.T) {
 	var ext *ExternalOptimizer
 	if binary := os.Getenv("FTW_TEST_ENERGYPLAN_BIN"); binary != "" {
 		ext, err = NewExternalOptimizer(ExternalOptimizerConfig{
-			Command:   []string{binary, "--time-limit=500ms"},
-			ModuleDir: filepath.Dir(binary), Timeout: 2 * time.Second,
+			Command: []string{binary, "--time-limit=500ms"},
+			Timeout: 2 * time.Second,
 		})
 		if err != nil {
 			t.Fatalf("external optimizer: %v", err)

@@ -142,7 +142,7 @@ func TestHistoryReceiptRetirementPreservesUncertainCommit(t *testing.T) {
 func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 	s := freshStore(t)
 	s.historyWriter.commitInterval = 0
-	if _, err := s.hot.Exec(`ALTER TABLE history_hot RENAME TO history_unavailable`); err != nil {
+	if _, err := s.history.Exec(`ALTER TABLE history_hot RENAME TO history_unavailable`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.EnqueueTelemetryTick(&HistoryPoint{TsMs: 1, GridW: 42}, nil, nil); err != nil {
@@ -156,7 +156,7 @@ func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 	if status.LastError == "" || status.Pending != 1 || status.Committed != 0 {
 		t.Fatalf("failed write was not retained: %+v", status)
 	}
-	if _, err := s.hot.Exec(`ALTER TABLE history_unavailable RENAME TO history_hot`); err != nil {
+	if _, err := s.history.Exec(`ALTER TABLE history_unavailable RENAME TO history_hot`); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -303,7 +303,7 @@ func TestHistoryRejectsNonFiniteAndCanonicalizesZero(t *testing.T) {
 	}
 }
 
-func TestHistoryQueryCancellationAndRetention(t *testing.T) {
+func TestHistoryQueryCancellation(t *testing.T) {
 	s := freshStore(t)
 	s.coldDir = t.TempDir()
 	now := time.Now().UTC()
@@ -317,20 +317,6 @@ func TestHistoryQueryCancellationAndRetention(t *testing.T) {
 	}
 	if _, err := s.LoadSeriesBucketsOrRawContext(ctx, "d", "m", 0, now.UnixMilli(), 100); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
-	}
-	if err := s.PruneHistorySamples(context.Background(), 0, now); err != nil {
-		t.Fatal(err)
-	}
-	all, err := s.LoadSeries("d", "m", 0, now.UnixMilli(), 0)
-	if err != nil || len(all) != 2 {
-		t.Fatal("unlimited retention lost history")
-	}
-	if err := s.PruneHistorySamples(context.Background(), 30, now); err != nil {
-		t.Fatal(err)
-	}
-	all, err = s.LoadSeries("d", "m", 0, now.UnixMilli(), 0)
-	if err != nil || len(all) != 1 || all[0].Value != 2 {
-		t.Fatalf("retention: %+v %v", all, err)
 	}
 }
 

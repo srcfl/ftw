@@ -24,7 +24,6 @@ const (
 	BatteryBoostStoppedVehicleUnplugged   BatteryBoostStopReason = "vehicle_unplugged"
 	BatteryBoostStoppedEVTargetReached    BatteryBoostStopReason = "ev_target_reached"
 	BatteryBoostStoppedDepartureReached   BatteryBoostStopReason = "departure_reached"
-	BatteryBoostStoppedOperatorHold       BatteryBoostStopReason = "operator_hold"
 	BatteryBoostStoppedSurplusOnly        BatteryBoostStopReason = "surplus_only"
 	BatteryBoostStoppedSiteSafety         BatteryBoostStopReason = "site_safety_block"
 	BatteryBoostStoppedLoadpointDriver    BatteryBoostStopReason = "loadpoint_driver_unavailable"
@@ -216,9 +215,9 @@ func (c *Controller) batteryBoostLivePreflight(id string, lease BatteryBoostLeas
 	if st.SurplusOnly {
 		return BatteryBoostStoppedSurplusOnly, errors.New("surplus_only is an operator clamp")
 	}
-	if _, held := c.GetManualHold(id, now); held {
-		return BatteryBoostStoppedOperatorHold, errors.New("loadpoint operator hold is active")
-	}
+	// A manual hold sets how much the car draws; a boost only lets the home
+	// battery cover that draw. They answer different questions, so Charge
+	// now and a boost run together.
 
 	c.batteryBoostMu.Lock()
 	safety := c.batteryBoostSafety
@@ -346,10 +345,6 @@ func (c *Controller) evaluateBatteryBoost(id string, now time.Time, connected, d
 	}
 	if !dispatchAllowed {
 		c.stopBatteryBoost(id, BatteryBoostStoppedSiteSafety, now)
-		return
-	}
-	if _, held := c.GetManualHold(id, now); held {
-		c.stopBatteryBoost(id, BatteryBoostStoppedOperatorHold, now)
 		return
 	}
 	if st, ok := c.manager.State(id); ok {

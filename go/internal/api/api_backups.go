@@ -114,7 +114,7 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.backupMu.Unlock()
 	// A Core restart/update can terminate this process mid-archive. Share the
-	// component-operation mutex and inspect the sidecar state so a full backup
+	// component-operation mutex and inspect the update status so a full backup
 	// is either completely published or never started.
 	if !s.versionUpdateMu.TryLock() {
 		writeJSON(w, 409, map[string]string{"error": "component update or rollback already in progress"})

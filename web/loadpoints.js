@@ -101,7 +101,6 @@
     vehicle_unplugged: 'Vehicle unplugged',
     ev_target_reached: 'EV target reached',
     departure_reached: 'Departure time reached',
-    operator_hold: 'Charger hold took priority',
     surplus_only: 'Surplus-only policy took priority',
     site_safety_block: 'Site meter safety stopped boost',
     loadpoint_driver_unavailable: 'Charger driver unavailable',

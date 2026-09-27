@@ -1,8 +1,6 @@
 package mpc
 
 import (
-	"context"
-	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -10,21 +8,6 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
-
-type externalOptimizerTransportStub struct {
-	healthErr    error
-	roundTripErr error
-}
-
-func (t *externalOptimizerTransportStub) RoundTrip(context.Context, []byte) ([]byte, error) {
-	return nil, t.roundTripErr
-}
-
-func (t *externalOptimizerTransportStub) Health(context.Context) (OptimizerRuntimeInfo, error) {
-	return OptimizerRuntimeInfo{Features: []string{"champion"}}, t.healthErr
-}
-
-func (t *externalOptimizerTransportStub) Close() error { return nil }
 
 func externalTestFixture() ([]Slot, Params) {
 	slots := []Slot{
@@ -41,22 +24,6 @@ func externalTestFixture() ([]Slot, Params) {
 	return slots, p
 }
 
-func TestExternalOptimizerPreservesExplicitZeroServiceCVaRWeight(t *testing.T) {
-	zero := 0.0
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command: []string{"python3"},
-		Multistage: MultistageOptimizerConfig{
-			ServiceCVaRWeight: &zero,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := *optimizer.cfg.Multistage.ServiceCVaRWeight; got != 0 {
-		t.Fatalf("explicit zero weight replaced by default: %g", got)
-	}
-}
-
 func TestExternalOptimizerUsesSharedDefaultTimeout(t *testing.T) {
 	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
 		Command: []string{"python3"},
@@ -66,37 +33,6 @@ func TestExternalOptimizerUsesSharedDefaultTimeout(t *testing.T) {
 	}
 	if optimizer.cfg.Timeout != optimizercontract.DefaultTimeout {
 		t.Fatalf("timeout = %s, want %s", optimizer.cfg.Timeout, optimizercontract.DefaultTimeout)
-	}
-}
-
-func TestExternalOptimizerTimeoutPreservesAutoTransportCauses(t *testing.T) {
-	sidecarErr := errors.New("connection closed")
-	transport := NewAutoTransport(
-		&externalOptimizerTransportStub{healthErr: sidecarErr},
-		&externalOptimizerTransportStub{roundTripErr: context.DeadlineExceeded},
-	)
-	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Transport: transport,
-		Timeout:   time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	slots, params := externalTestFixture()
-	_, err = optimizer.Optimize(context.Background(), slots, params)
-	if err == nil {
-		t.Fatal("Optimize succeeded, want timeout")
-	}
-	if !errors.Is(err, sidecarErr) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Optimize error does not unwrap sidecar and timeout failures: %v", err)
-	}
-	message := err.Error()
-	sidecarAt := strings.Index(message, sidecarErr.Error())
-	fallbackAt := strings.Index(message, context.DeadlineExceeded.Error())
-	if !strings.HasPrefix(message, "optimizer timeout after 1s: ") ||
-		sidecarAt < 0 || fallbackAt < 0 || sidecarAt >= fallbackAt {
-		t.Fatalf("Optimize error = %q, want timeout class with sidecar cause first", message)
 	}
 }
 
@@ -441,83 +377,5 @@ func TestValidatePlanRejectsSurplusOnlyEVAboveLeftoverPV(t *testing.T) {
 		}}}
 	if err := ValidatePlan(slots, p, &plan); err == nil {
 		t.Fatal("ValidatePlan accepted surplus-only EV above leftover PV")
-	}
-}
-
-// The champion's scenarios and the Go fallback's downside slots have to
-// describe the same physics. Once the twin has learned a relative error, the
-// scenario spread is a share of each slot's own generation, not one watt
-// figure repeated across the horizon.
-func TestBuildRequestScenarioSpreadIsPerSlotWhenRelativeIsLearned(t *testing.T) {
-	start := time.Date(2026, 8, 30, 4, 0, 0, 0, time.UTC).UnixMilli()
-	gen := []float64{0, 500, 6000}
-	slots := make([]Slot, len(gen))
-	for i, g := range gen {
-		slots[i] = Slot{
-			StartMs: start + int64(i)*15*60*1000, LenMin: 15,
-			PriceOre: 100, SpotOre: 50, LoadW: 400, PVW: -g}
-	}
-	p := Params{
-		Mode: ModeArbitrage, SoCMin: 0.1, SoCMax: 0.95, SoCLevels: 11,
-		InitialSoC: 0.5, ActionLevels: 7, CapacityWh: 10000,
-		MaxChargeW: 5000, MaxDischargeW: 5000,
-		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
-		PVUncertaintyW: 1891, PVRelativeUncertainty: 0.25, PVForecastSafetyK: 1,
-	}
-
-	req := (&ExternalOptimizer{}).buildRequest(slots, p)
-	if len(req.Scenarios) != 3 {
-		t.Fatalf("got %d scenarios, want 3", len(req.Scenarios))
-	}
-	down, ok := req.Scenarios[1]["pv_w"].([]float64)
-	if !ok {
-		t.Fatalf("downside pv_w has type %T", req.Scenarios[1]["pv_w"])
-	}
-	up, ok := req.Scenarios[2]["pv_w"].([]float64)
-	if !ok {
-		t.Fatalf("upside pv_w has type %T", req.Scenarios[2]["pv_w"])
-	}
-	for i, g := range gen {
-		wantDown, wantUp := -(g * 0.75), -(g * 1.25)
-		if g == 0 {
-			wantDown, wantUp = 0, 0 // night slots carry no spread either way
-		}
-		if down[i] != wantDown {
-			t.Errorf("downside[%d] = %v, want %v", i, down[i], wantDown)
-		}
-		if up[i] != wantUp {
-			t.Errorf("upside[%d] = %v, want %v", i, up[i], wantUp)
-		}
-	}
-}
-
-// With no learned relative error the scenarios keep the flat watt spread, so
-// a fresh site's champion sees exactly what it saw before.
-func TestBuildRequestScenarioSpreadStaysFlatWhenRelativeIsUnlearned(t *testing.T) {
-	start := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC).UnixMilli()
-	slots := []Slot{
-		{StartMs: start, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			LoadW: 400, PVW: -6000},
-		{StartMs: start + 15*60*1000, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			LoadW: 400, PVW: -500},
-	}
-	p := Params{
-		Mode: ModeArbitrage, SoCMin: 0.1, SoCMax: 0.95, SoCLevels: 11,
-		InitialSoC: 0.5, ActionLevels: 7, CapacityWh: 10000,
-		MaxChargeW: 5000, MaxDischargeW: 5000,
-		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
-		PVUncertaintyW: 2000, PVForecastSafetyK: 1,
-	}
-
-	req := (&ExternalOptimizer{}).buildRequest(slots, p)
-	if len(req.Scenarios) != 3 {
-		t.Fatalf("got %d scenarios, want 3", len(req.Scenarios))
-	}
-	down := req.Scenarios[1]["pv_w"].([]float64)
-	if down[0] != -4000 {
-		t.Errorf("downside[0] = %v, want -4000 (6000 − 2000)", down[0])
-	}
-	if down[1] != 0 {
-		t.Errorf("downside[1] = %v, want 0 (500 W shoulder minus a 2000 W flat cut)", down[1])
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 )
 
@@ -45,50 +44,6 @@ func (s *Store) rollupTransaction(ctx context.Context, prepare, write func(conte
 			return err
 		}
 	}
-}
-
-// Read the full source buckets before acquiring the live writer mutex. The
-// same SQLite snapshot binds the averages and newest JSON to the deleted rows.
-func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMS, toMS, bucketMS int64) (int64, error) {
-	var points []HistoryPoint
-	var deleted int64
-	err := s.rollupTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		points = nil
-		q := fmt.Sprintf(`SELECT (ts_ms / %d) * %d + %d,
- AVG(grid_w),AVG(pv_w),AVG(bat_w),AVG(load_w),AVG(bat_soc),json,MAX(ts_ms)
- FROM %s WHERE ts_ms>=? AND ts_ms<? GROUP BY ts_ms/%d`, bucketMS, bucketMS, bucketMS/2, src, bucketMS)
-		rows, err := tx.QueryContext(ctx, q, fromMS, toMS)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var p HistoryPoint
-			var newest int64
-			if err := rows.Scan(&p.TsMs, &p.GridW, &p.PVW, &p.BatW, &p.LoadW, &p.BatSoC, &p.JSON, &newest); err != nil {
-				return err
-			}
-			points = append(points, p)
-		}
-		return rows.Err()
-	}, func(ctx context.Context, tx *sql.Tx) error {
-		for _, p := range points {
-			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO `+dst+` (ts_ms,grid_w,pv_w,bat_w,load_w,bat_soc,json) VALUES(?,?,?,?,?,?,?)`,
-				p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON); err != nil {
-				return err
-			}
-		}
-		res, err := tx.ExecContext(ctx, `DELETE FROM `+src+` WHERE ts_ms>=? AND ts_ms<?`, fromMS, toMS)
-		if err != nil {
-			return err
-		}
-		deleted, err = res.RowsAffected()
-		return err
-	})
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
 }
 
 func (s *Store) rollupEnergyLedgerWidth(ctx context.Context, fromMS, toMS, width int64) (int64, error) {

@@ -67,7 +67,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
-	"github.com/srcfl/ftw/go/internal/updateipc"
 )
 
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
@@ -386,17 +385,6 @@ func main() {
 		slog.Warn("ignoring FTW_IMAGE_TAG that does not match a built release identity", "built_version", builtVersion, "built_candidate", CandidateTag, "image_tag", imageTag)
 	}
 	slog.Info("FTW starting", "version", Version, "config", *configPath)
-	// The previous updater may revert this image if startup fails. Confirm
-	// its failure behavior before config/bootstrap/state can write any data.
-	if envBool("FTW_SELFUPDATE_ENABLED") && nativeRoot == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := updateipc.RequireSafeUpdater(ctx, envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
-		cancel()
-		if err != nil {
-			slog.Error("updater preflight", "err", err)
-			os.Exit(1)
-		}
-	}
 
 	// Route "drivers/<name>.lua" path resolution through the drivers dir
 	// (from -drivers). Picked up by both the initial Load below and every
@@ -463,8 +451,8 @@ func main() {
 	// Bind the API port BEFORE the potentially slow state open. A boot that
 	// runs a one-time VACUUM or a full integrity check on a multi-GB DB can
 	// take 25+ minutes, and an unbound port for that long makes the Docker
-	// healthcheck fail and the self-update sidecar judge the deploy failed —
-	// observed 2026-07-16 as an auto-rollback in the middle of a VACUUM.
+	// healthcheck fail and a health-gated update roll back — observed
+	// 2026-07-16 in the middle of a VACUUM.
 	// Until the real mux is wired, /api/health answers 200 "starting" and
 	// everything else 503.
 	// Closures start unbound (lan_auth off) so the boot-phase health
@@ -695,14 +683,6 @@ func main() {
 	reg := newDriverRegistry(tel, st)
 	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
 	reg.RuntimePolicyResolver = driverRepository.RuntimePolicy
-	reg.CommandResultSink = func(driverName string, result drivers.DriverCommandResultV1) {
-		if err := st.RecordDriverCommandResult(
-			result.ID, driverName, result.Command, result.Status, result.Code,
-			result.CompletedAt.UnixMilli(), result.JSON(),
-		); err != nil {
-			slog.Error("persist driver command result", "driver", driverName, "command_id", result.ID, "err", err)
-		}
-	}
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.DialWithOptions(c.Host, c.Port, c.Username, c.Password, "ftw-"+name, c.AllowUnverifiedLocal)
 	}
@@ -1122,22 +1102,24 @@ func main() {
 			mpcSvc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 			slog.Info("mpc: capacity updated via hot-reload",
 				"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
-			if newCfg.Price != nil {
-				mpcSvc.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
-				mpcSvc.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
-				mpcSvc.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
-				mpcSvc.VATPercent = newCfg.Price.VATPercent
-				mpcSvc.DemandPricePerKW = newCfg.Price.DemandPricePerKW
-				mpcSvc.DemandTopN = newCfg.Price.DemandTopN
-				mpcSvc.DemandNightWeight = newCfg.Price.DemandNightWeight
-			} else {
-				mpcSvc.DemandPricePerKW = 0
-				mpcSvc.DemandTopN = 0
-				mpcSvc.DemandNightWeight = 0
+			// One locked swap: a replan already running keeps the values
+			// it started with instead of mixing old and new ones. With no
+			// price section every tariff input is zero, as at startup.
+			economics := mpc.SiteEconomics{
+				FuseMaxW:   newCfg.Fuse.MaxPowerW(),
+				MaxExportW: newCfg.Site.MaxExportW,
+				Timezone:   forecastTimezone(),
 			}
-			mpcSvc.Timezone = forecastTimezone()
-			mpcSvc.FuseMaxW = newCfg.Fuse.MaxPowerW()
-			mpcSvc.MaxExportW = newCfg.Site.MaxExportW
+			if newCfg.Price != nil {
+				economics.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
+				economics.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
+				economics.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
+				economics.VATPercent = newCfg.Price.VATPercent
+				economics.DemandPricePerKW = newCfg.Price.DemandPricePerKW
+				economics.DemandTopN = newCfg.Price.DemandTopN
+				economics.DemandNightWeight = newCfg.Price.DemandNightWeight
+			}
+			mpcSvc.UpdateSiteEconomics(economics)
 			if newCfg.Planner != nil {
 				applyPlannerScalars(mpcSvc, newCfg.Planner)
 			}
@@ -1230,7 +1212,7 @@ func main() {
 			deps.HA = nil
 			slog.Info("HA bridge stopped (disabled in config)")
 		case haBridge == nil && haEnabled:
-			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
+			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
 				slog.Warn("HA bridge start failed", "err", err)
 			} else {
 				haBridge = bridge
@@ -1593,14 +1575,10 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
-		// Grid limits remain on grid flow. Neither a DC nameplate nor an
-		// inferred PV scale proves an inverter's hard AC limit.
-		mpcSvc.LoadMaxW = 0
-		mpcSvc.PVNameplateW = 0
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).
-		// Startup-only, matching FuseMaxW above.
+		// A config reload refreshes it together with FuseMaxW.
 		mpcSvc.MaxExportW = cfg.Site.MaxExportW
 		if pvSvc != nil {
 			// Use the unanchored structural predictor here: the MPC also
@@ -1832,6 +1810,17 @@ func main() {
 			mpcSvc.ForecastSnapshot = forecastTrackerSvc.Snapshot
 			forecastTrackerSvc.setReplan(mpcSvc.RequestReplan)
 		}
+		// If the restored control mode is a planner variant, push the
+		// corresponding mpc.Mode before the first solve so the plan is built
+		// with the strategy the user actually picked — not whatever
+		// cfg.planner.mode says. control.PlannerMPCMode is the shared mapping
+		// (same one the API and HA setters use), so the three paths can't
+		// drift. The persisted plan is restored before Start as well, so the
+		// first solve replaces it instead of racing it.
+		if mm, ok := control.PlannerMPCMode(ctrl.Mode); ok {
+			mpcSvc.Defaults.Mode = mm
+		}
+		restoreLatestMPCDiagnostic(st, mpcSvc, time.Now())
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
 		// Inject plan → control.State. Both callbacks are wired:
@@ -1859,17 +1848,6 @@ func main() {
 		// has already turned the removed `use_energy_dispatch` key into
 		// legacy_dispatch.
 		ctrl.UseEnergyDispatch = energyDispatchEnabled(cfg)
-		// If the restored control mode is a planner variant, push the
-		// corresponding mpc.Mode so the plan is built with the strategy
-		// the user actually picked — not whatever cfg.planner.mode says.
-		// control.PlannerMPCMode is the shared mapping (same one the API
-		// and HA setters use), so the three paths can't drift.
-		if mm, ok := control.PlannerMPCMode(ctrl.Mode); ok {
-			mpcSvc.SetMode(ctx, mm)
-		}
-		if mpcSvc.Latest() == nil {
-			restoreLatestMPCDiagnostic(st, mpcSvc, time.Now())
-		}
 		slog.Info("mpc planner started",
 			"mode", mpcSvc.Defaults.Mode,
 			"capacity_wh", mpcSvc.Defaults.CapacityWh,
@@ -2318,20 +2296,15 @@ func main() {
 	}
 
 	// ---- Self-update checker ----
-	// Probes the GitHub Releases API in the background; the UI reads the
-	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
-	// because the ftw-updater sidecar only exists in the docker-compose deploy.
-	// Native / OS-image builds will ship their own update mechanism and set
-	// their own gate (or leave this one off). Deps.SelfUpdate stays nil when
-	// disabled, which makes every /api/version/* handler return 503 and the
-	// UI hide the badge.
+	// Probes the GitHub Releases API in the background; the ftw command and
+	// the UI read the cached result via /api/version/check. Only a native
+	// install, started by the launcher from its release slots, updates
+	// itself (ADR 0007). Docker changes FTW_VERSION and rebuilds, and the
+	// Home Assistant app follows Supervisor. Deps.SelfUpdate stays nil there,
+	// which makes every /api/version/* handler return 503 and the UI hide
+	// the badge.
 	var selfUpdater *selfupdate.Checker
-	// Implicitly enable for dev binaries (Version=="dev") so `make dev`
-	// users can click the version label and exercise the probe + modal
-	// without setting FTW_SELFUPDATE_ENABLED=1. Production builds (real
-	// vX.Y.Z stamped via -ldflags) still require the explicit env var
-	// so the feature can't surprise an OS-image deploy.
-	if nativeRoot != "" || envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
+	if nativeRoot != "" {
 		// FTW_SELFUPDATE_CURRENT_VERSION overrides what the checker thinks
 		// it's running so dev / QA can force update_available=true without
 		// rebuilding with a fake -ldflags Version. Scoped to the checker
@@ -2344,23 +2317,18 @@ func main() {
 				"real_version", Version, "reported_version", current,
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
-		statusPath := envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json")
-		if nativeRoot != "" {
-			statusPath = filepath.Join(nativeRoot, "update-status.json")
-		}
 		// FTW_RELEASE_MIRROR serves the release list at /releases and the
 		// packages at /download/<tag>/, as GitHub does. It exists to test the
 		// native chain with releases that are not published; leave it unset.
 		var releasesURL, nativeReleaseURL string
-		if mirror := strings.TrimRight(os.Getenv("FTW_RELEASE_MIRROR"), "/"); mirror != "" && nativeRoot != "" {
+		if mirror := strings.TrimRight(os.Getenv("FTW_RELEASE_MIRROR"), "/"); mirror != "" {
 			releasesURL, nativeReleaseURL = mirror+"/releases", mirror+"/download"
 			slog.Warn("selfupdate: native releases come from a mirror", "url", mirror)
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
 			CurrentVersion:     current,
 			CurrentStateSchema: state.SchemaVersion,
-			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:         statusPath,
+			StatusPath:         filepath.Join(nativeRoot, "update-status.json"),
 			NativeRoot:         nativeRoot,
 			NativeTrialTimeout: nativeTrialTimeout,
 			ReleasesURL:        releasesURL,
@@ -2380,8 +2348,6 @@ func main() {
 		selfUpdater.Start(ctx)
 		slog.Info("selfupdate enabled", "native_root", nativeRoot,
 			"channel", selfUpdater.Info().Channel)
-	} else {
-		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
 	}
 
 	// ---- Start HTTP API ----
@@ -2507,11 +2473,8 @@ func main() {
 		StatePath:         statePath,
 		BackupDir:         backupDir,
 		DataMaintenanceMu: dataMaintenanceMu,
-		// Snapshots live next to the rest of the persistent data so
-		// docker-compose deploys only need one bind (./data). Derived
-		// from the state.db path rather than the config path because
-		// `state.db` is always in the main data volume; the config
-		// can live elsewhere after its one-time migration.
+		// Rollback points an older Docker Core left beside state.db. They
+		// are listed and deleted, never taken or restored.
 		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
@@ -2524,25 +2487,16 @@ func main() {
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,
 		EVSend:           evSend,
+		SiteDispatchBlocked: func() string {
+			return siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, time.Now()).Reason
+		},
 		HA:               haBridge,
 		Registry:         reg,
 		DriverRepository: driverRepository,
 		Events:           bus,
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
-		Restart: func(reqCtx context.Context) error {
-			// Compose: restart the existing container through the updater.
-			// An old updater refuses this action before touching Docker.
-			// The Home Assistant bundle has no sidecar and must not exit:
-			// Supervisor leaves a stopped app stopped unless Watchdog is on.
-			if selfUpdater != nil && nativeRoot == "" && !bundle.ReexecOnRestart() {
-				if err := selfUpdater.TriggerRestart(reqCtx); err == nil {
-					slog.Info("restart: dispatched via updater sidecar")
-					return nil
-				} else {
-					slog.Info("restart: sidecar unavailable, falling back to in-process exit", "err", err)
-				}
-			}
+		Restart: func(context.Context) error {
 			// Drop the main control loop out of its select so every defer
 			// (HA Stop, st.Close, http.Shutdown, …) runs cleanly. The
 			// first defer then re-execs or os.Exit(1) per restartPlan.
@@ -2698,7 +2652,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -2753,15 +2707,8 @@ func main() {
 		}
 	}
 
-	// ---- Background: Parquet rolloff (>14d → cold dir) ----
-	go rolloffLoop(ctx, st, coldDir, func() int {
-		cfgMu.RLock()
-		defer cfgMu.RUnlock()
-		if cfg.State == nil {
-			return 0
-		}
-		return cfg.State.ColdRetentionDays
-	}, dataMaintenanceMu)
+	// ---- Background: SQLite history retention (hourly) ----
+	go rolloffLoop(ctx, st, coldDir, dataMaintenanceMu)
 
 	// ---- Background: daily state.db recovery snapshot ----
 	go snapshotLoop(ctx, st)
@@ -3007,7 +2954,7 @@ func main() {
 				// ctrl, so the stored tick has to show the hold already
 				// released rather than one the blocked tick never executed.
 				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
-				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+				sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
@@ -3088,6 +3035,7 @@ func main() {
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
+			mode := ctrl.Mode
 			ctrlMu.Unlock()
 
 			// ---- Self-tune override: step one battery, hold its siblings at 0 ----
@@ -3107,7 +3055,7 @@ func main() {
 				evW := tel.SumOnlineEVW()
 				v2xW := tel.SumOnlineV2XW()
 				attrs := []any{
-					"mode", ctrl.Mode,
+					"mode", mode,
 					"plan_stale", planMissingNow,
 					"site_meter", siteMeterDriver,
 					"grid_known", haveGrid,
@@ -3259,7 +3207,7 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+			sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 			if err != nil {
 				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
@@ -3335,8 +3283,9 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 	}
 }
 
-// rolloffLoop maintains diagnostic archives and history retention hourly.
-func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retentionDays func() int, dataMaintenanceMu *sync.Mutex) {
+// rolloffLoop applies history and diagnostic retention inside SQLite hourly
+// and warns when the data disk runs low.
+func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, dataMaintenanceMu *sync.Mutex) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
 	var lastDiskWarn time.Time
@@ -3965,14 +3914,14 @@ func applyPlannerScalars(svc *mpc.Service, pl *config.Planner) {
 		interval = time.Duration(pl.IntervalMin) * time.Minute
 	}
 	svc.UpdatePlannerScalars(mpc.Params{
-		SoCMin:              socMin,
-		SoCMax:              socMax,
-		ChargeEfficiency:    chgEff,
-		DischargeEfficiency: disEff,
-		PVChargeBonusOreKwh: pvBonus,
-		ExportOrePerKWh:     pl.ExportOrePerKWh,
+		SoCMin:                   socMin,
+		SoCMax:                   socMax,
+		ChargeEfficiency:         chgEff,
+		DischargeEfficiency:      disEff,
+		PVChargeBonusOreKwh:      pvBonus,
+		ExportOrePerKWh:          pl.ExportOrePerKWh,
+		MinArbitrageSpreadOreKwh: pl.MinArbitrageSpreadOreKwh,
 	}, pl.BaseLoadW, horizon, interval)
-	svc.MinArbitrageSpreadOreKwh = pl.MinArbitrageSpreadOreKwh
 }
 
 func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Manager, intervalHours int) {
@@ -4006,7 +3955,24 @@ func isConfigMissing(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
+// tickPersistControl is what tick persistence reads from control.State,
+// copied under ctrlMu. A config reload rewrites SiteMeterDriver from an HTTP
+// goroutine, so persistence must never read ctrl directly.
+type tickPersistControl struct {
+	SiteMeterDriver string
+	LastTargets     []control.DispatchTarget
+}
+
+func snapshotTickPersistControl(ctrl *control.State, ctrlMu *sync.Mutex) tickPersistControl {
+	ctrlMu.Lock()
+	defer ctrlMu.Unlock()
+	return tickPersistControl{
+		SiteMeterDriver: ctrl.SiteMeterDriver,
+		LastTargets:     append([]control.DispatchTarget(nil), ctrl.LastTargets...),
+	}
+}
+
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl tickPersistControl, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
 	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge, options...)
 	samples := tel.FlushSamples()
 	stSamples := make([]state.Sample, len(samples))
@@ -4045,9 +4011,9 @@ func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.S
 	return len(samples), st.EnqueueTelemetryTick(historyPoint, stSamples, energyObservations)
 }
 
-func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
+func buildHistoryPoint(tel *telemetry.Store, ctrl tickPersistControl, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
 	unavailable := state.HistoryPoint{TsMs: nowMs}
-	if tel == nil || ctrl == nil || ctrl.SiteMeterDriver == "" {
+	if tel == nil || ctrl.SiteMeterDriver == "" {
 		return unavailable, false
 	}
 	opts := telemetry.ForecastOptions{MaxAge: historyMaxAge}
@@ -4170,16 +4136,12 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 	}
 }
 
-// envOr returns the env var's value if it is set (even if empty, so an
-// operator can explicitly blank a path to disable a feature, such as
-// FTW_UPDATER_SOCKET="" on the older Docker line). Returns def only when
-// the variable is unset.
 // haCallbacks builds the bridge's command-callback set. Extracted so
 // the boot-time ha.Start path and the configreload "disabled → enabled"
 // path can share the exact same wiring — drift between them would mean
 // HA commands behave one way after boot and a different way after a
 // hot-reload, which is the kind of silent skew that's hardest to debug.
-func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service, prefs *config.PlannerPrefs) ha.CommandCallbacks {
+func haCallbacks(ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service, prefs *config.PlannerPrefs) ha.CommandCallbacks {
 	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: mpcSvc, prefs: prefs}
 	return ha.CommandCallbacks{
 		// Home Assistant changes the mode through the app's door:
@@ -4187,7 +4149,8 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 		// `select` advertises, then the saved mode, the export preference
 		// and a replan that does not hold up the MQTT handler.
 		SetMode: func(m string) error {
-			return modes.SetMode(ctx, control.Mode(m))
+			// The mode is applied at once; the replan runs in the background.
+			return modes.SetMode(context.Background(), control.Mode(m))
 		},
 		SetGridTarget: func(w float64) error {
 			ctrlMu.Lock()
@@ -4291,13 +4254,6 @@ func haEnergySource(st *state.Store) ha.EnergySource {
 	return stateEnergyBridge{st: st}
 }
 
-func envOr(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok {
-		return v
-	}
-	return def
-}
-
 func troubleshootingGridW(tel *telemetry.Store, siteMeterDriver string) (float64, bool) {
 	if siteMeterDriver == "" {
 		return 0, false
@@ -4319,14 +4275,4 @@ func troubleshootingSumOnlineW(tel *telemetry.Store, typ telemetry.DerType) floa
 		sum += r.SmoothedW
 	}
 	return sum
-}
-
-// envBool returns true iff the env var is set to a positive value
-// (1/true/yes/on, case-insensitive). Unset or any other value = false.
-func envBool(key string) bool {
-	switch strings.ToLower(os.Getenv(key)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
 }

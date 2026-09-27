@@ -496,6 +496,81 @@ end
 	}
 }
 
+// A manual V2X setpoint reaches hardware outside the control tick, so it must
+// pass the tick's site-dispatch gate: stale site-meter data stops dispatch.
+// A stop stays allowed, because it is the standdown.
+func TestHandleV2XCommandRefusesSetpointWhileSiteDispatchIsInhibited(t *testing.T) {
+	tel := telemetry.NewStore()
+	reg := drivers.NewRegistry(tel)
+	const src = `
+function driver_init(config) end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd)
+  host.emit_metric("last_command_power_w", w)
+end
+`
+	luaPath := filepath.Join(t.TempDir(), "fake_v2x.lua")
+	if err := os.WriteFile(luaPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("write driver: %v", err)
+	}
+	cfg := config.Driver{Name: "dc2", Lua: luaPath}
+	if err := reg.Add(context.Background(), cfg); err != nil {
+		t.Fatalf("registry add: %v", err)
+	}
+	defer reg.ShutdownAll()
+	tel.Update("dc2", telemetry.DerV2X, 0, nil, nil)
+	tel.RecordDriverSuccess("dc2")
+
+	blocked := "site_meter_stale"
+	srv := New(&Deps{
+		Tel:                 tel,
+		Registry:            reg,
+		Cfg:                 &config.Config{Drivers: []config.Driver{cfg}},
+		CfgMu:               &sync.RWMutex{},
+		SiteDispatchBlocked: func() string { return blocked },
+	})
+	send := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v2x/command", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	lastCommand := func() (float64, bool) {
+		v, _, ok := tel.LatestMetric("dc2", "last_command_power_w")
+		return v, ok
+	}
+
+	rr := send(`{"action":"v2x_set_power","driver":"dc2","power_w":-5000}`)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "site_meter_stale") {
+		t.Fatalf("setpoint while stale = %d %s, want 409 naming the reason", rr.Code, rr.Body.String())
+	}
+	if v, ok := lastCommand(); ok {
+		t.Fatalf("driver was commanded %v W while site dispatch was inhibited", v)
+	}
+
+	if rr := send(`{"action":"v2x_stop","driver":"dc2"}`); rr.Code != http.StatusOK {
+		t.Fatalf("stop while stale = %d %s, want 200", rr.Code, rr.Body.String())
+	}
+	if v, ok := lastCommand(); !ok || v != 0 {
+		t.Fatalf("stop reached driver as %v (ok=%v), want 0", v, ok)
+	}
+
+	blocked = ""
+	if rr := send(`{"action":"v2x_set_power","driver":"dc2","power_w":-5000}`); rr.Code != http.StatusOK {
+		t.Fatalf("setpoint while fresh = %d %s, want 200", rr.Code, rr.Body.String())
+	}
+	if v, ok := lastCommand(); !ok || v != -5000 {
+		t.Fatalf("setpoint reached driver as %v (ok=%v), want -5000", v, ok)
+	}
+
+	srv.deps.SiteDispatchBlocked = nil
+	if rr := send(`{"action":"v2x_set_power","driver":"dc2","power_w":3000}`); rr.Code != http.StatusConflict {
+		t.Fatalf("setpoint without a dispatch gate = %d %s, want 409", rr.Code, rr.Body.String())
+	}
+}
+
 func TestLoadResearchDumpExportsHouseLoadWithEVSplit(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

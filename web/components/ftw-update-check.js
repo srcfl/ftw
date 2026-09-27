@@ -1,4 +1,4 @@
-// <ftw-update-check> — pre-setup update banner.
+// <ftw-update-check> — pre-setup notice that a newer release is published.
 //
 // Usage:
 //
@@ -6,38 +6,22 @@
 //
 // Behavior:
 //   1. On connect, silently calls GET /api/version/check.
-//   2. If the backend returns 503 (self-update gated off) or a network
-//      error fires, the component stays invisible — setup is never
+//   2. If the backend returns 503 (no self-update on this install) or a
+//      network error fires, the component stays invisible — setup is never
 //      blocked by the check.
 //   3. The banner only renders when the response has
-//      update_available && !skipped && sidecar_ready. sidecar_ready
-//      is true when Docker's updater socket is reachable or a native
-//      release slot is ready. Dev runs keep the banner hidden.
-//      On a native install the banner only names `ftw update`; the owner
-//      runs it on the machine (ADR 0007, decision 12).
-//   4. Update-now posts /api/version/update, opens an <ftw-modal>-based
-//      progress overlay, polls /api/version/update/status, and
-//      cache-busts reloads on `done`. Long phases keep polling while the
-//      UI offers a Reload / Continue-setup escape hatch.
-//   5. Continue-anyway hides the card for this page load only. We do
-//      NOT POST /api/version/skip — that would silence the dashboard's
+//      update_available && !skipped && native. It names `ftw update`; the
+//      owner runs it on the machine after setup (ADR 0007, decision 12).
+//   4. Continue hides the card for this page load only. We do NOT POST
+//      /api/version/skip — that would silence the dashboard's
 //      <ftw-update-badge> too, which is a separate decision the operator
 //      should make from the dashboard itself.
 //
-// Reuse:
-//   - <ftw-modal> supplies the overlay
-//     chrome, ESC/backdrop-close handling, and theming tokens.
-//   - Shared tokens declared on :root in /components/theme.css keep the
-//     component consistent in setup and the dashboard.
+// Shared tokens declared on :root in /components/theme.css keep the
+// component consistent in setup and the dashboard.
 
 import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
-import { migrationHTML } from "../history-migration.js";
-import "./ftw-modal.js";
-
-const STATUS_POLL_MS = 2000;
-const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;
-const SNAPSHOT_SOFT_TIMEOUT_MS = 15 * 60 * 1000;
 
 class FtwUpdateCheck extends FtwElement {
   static styles = `
@@ -92,27 +76,6 @@ class FtwUpdateCheck extends FtwElement {
       font-family: var(--sans, system-ui, sans-serif);
       cursor: pointer;
     }
-    .btn-primary {
-      padding: 11px 18px;
-      border: none;
-      border-radius: 8px;
-      background: var(--accent-e);
-      color: #0a0a0a;
-      font-size: 14px;
-      font-weight: 500;
-      transition: transform 0.12s;
-    }
-    .btn-primary:hover { transform: translateY(-1px); }
-    .btn-secondary {
-      padding: 10px 18px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: transparent;
-      color: var(--fg);
-      font-size: 14px;
-      transition: border-color 0.15s;
-    }
-    .btn-secondary:hover { border-color: var(--fg-dim); }
     .btn-skip {
       background: none;
       border: none;
@@ -124,91 +87,17 @@ class FtwUpdateCheck extends FtwElement {
       transition: color 0.15s;
     }
     .btn-skip:hover { color: var(--fg); }
-
-    /* Progress overlay content — lives inside <ftw-modal>. The modal
-       owns the backdrop, positioning, and ESC/click-close. We drive
-       the content and, while actively updating, block close by
-       cancelling the ftw-modal-close event in afterRender(). */
-    .progress { text-align: center; padding: 0.5rem 0; }
-    .progress .spinner {
-      display: inline-block;
-      width: 28px;
-      height: 28px;
-      border: 3px solid var(--line);
-      border-top-color: var(--accent-e);
-      border-radius: 50%;
-      animation: spin 0.9s linear infinite;
-      margin-bottom: 0.75rem;
-    }
-    .progress h3 {
-      margin: 0 0 0.4rem;
-      font-size: 1rem;
-      color: var(--fg);
-    }
-    .progress .msg {
-      font-size: 0.88rem;
-      color: var(--fg);
-      margin: 0 0 0.3rem;
-    }
-    .progress .hint {
-      font-size: 0.78rem;
-      color: var(--fg-dim);
-      margin: 0;
-    }
-    .update-progress {
-      width: min(340px, 78vw);
-      height: 8px;
-      margin: 0.2rem auto 0.7rem;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--fg) 5%, transparent);
-    }
-    .update-progress > span {
-      display: block;
-      height: 100%;
-      min-width: 4px;
-      border-radius: inherit;
-      background: var(--accent-e);
-      transition: width 0.25s ease;
-    }
-    .update-step { margin: 0.25rem 0; font-weight: 600; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    /* Hide the modal's X during an active update. The operator should
-       wait for the reload (or the timeout escape hatch) rather than
-       silently dismissing a container mid-recreate. */
-    ftw-modal.busy::part(close) { display: none; }
-
-    .overlay-actions {
-      display: flex;
-      gap: 10px;
-      justify-content: flex-end;
-      flex-wrap: wrap;
-    }
   `;
 
   constructor() {
     super();
     this._info = null;       // last /api/version/check payload
-    this._phase = "idle";    // idle | updating | timedOut | failed
-    this._status = null;     // last /api/version/update/status payload
-    this._statusTimer = null;
-    this._pollAbort = null;  // AbortController for in-flight status fetches
-    this._updateStartedAt = 0;
-    this._bootHealth = null;
-    this._bootConnected = true;
-    this._healthInFlight = false;
     this.classList.add("hidden");
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._check();
-  }
-
-  disconnectedCallback() {
-    this._stopPolling();
   }
 
   update() {
@@ -224,7 +113,7 @@ class FtwUpdateCheck extends FtwElement {
   _check() {
     apiFetch("/api/version/check")
       .then((r) => {
-        // 503 = self-update disabled by deploy. Stay invisible — this
+        // 503 = no self-update on this install. Stay invisible — this
         // is config, not an error.
         if (r.status === 503) return null;
         return r.json().catch(() => null);
@@ -238,41 +127,6 @@ class FtwUpdateCheck extends FtwElement {
   }
 
   // ---- actions ----
-  _beginUpdate() {
-    this._phase = "updating";
-    this._status = { state: "starting" };
-    this._updateStartedAt = Date.now();
-    this.update();
-
-    apiFetch("/api/version/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    })
-      .then((r) => r.json().then((b) => ({ ok: r.ok, body: b })))
-      .then((res) => {
-        if (!res.ok) {
-          if (res.body?.error === "starting") {
-            this._bootHealth = { status:"starting", migration:res.body.migration };
-            this._startPolling();
-            this.update();
-            return;
-          }
-          this._fail((res.body && res.body.error) || "failed to start");
-          return;
-        }
-        this._startPolling();
-      })
-      .catch((e) => {
-        // Native Core may exit for the accepted update before the reply
-        // reaches this browser. Its saved status tells us what happened.
-        if (this._info?.native) {
-          this._startPolling();
-          return;
-        }
-        this._fail(String(e));
-      });
-  }
-
   _dismiss() {
     // Session-only: wipe the local flag so the banner hides but don't
     // persist via /api/version/skip — the dashboard badge should still
@@ -281,159 +135,25 @@ class FtwUpdateCheck extends FtwElement {
     this.update();
   }
 
-  _startPolling() {
-    this._stopPolling();
-    this._pollAbort = new AbortController();
-    this._statusTimer = setInterval(() => this._tick(), STATUS_POLL_MS);
-    this._tick();
-  }
-
-  // Stops the poll interval AND aborts any in-flight status fetch. Called
-  // from every transition out of "updating" (fail, timeout, cancel, modal
-  // close, disconnect) so a late `state === "done"` response can't hijack
-  // the setup flow with a surprise _reload() after the operator bailed.
-  _stopPolling() {
-    clearInterval(this._statusTimer);
-    this._statusTimer = null;
-    if (this._pollAbort) {
-      this._pollAbort.abort();
-      this._pollAbort = null;
-    }
-  }
-
-  _tick() {
-    const signal = this._pollAbort ? this._pollAbort.signal : undefined;
-    if (!this._healthInFlight) {
-      this._healthInFlight = true;
-      apiFetch("/api/health", { cache:"no-store", signal:AbortSignal.timeout(8000) })
-        .then(r => r.ok ? r.json() : null)
-        .then(health => {
-          if (signal?.aborted || this._phase !== "updating") return;
-          this._bootConnected = !!health;
-          if (health) this._bootHealth = health.status === "starting" ? health : null;
-          this.update();
-        })
-        .catch(() => {
-          if (signal?.aborted || this._phase !== "updating") return;
-          this._bootConnected = false;
-          this.update();
-        })
-        .finally(() => { this._healthInFlight = false; });
-    }
-    apiFetch("/api/version/update/status", { signal })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((st) => {
-        // Belt-and-braces: if the phase was reset while the fetch was in
-        // flight (cancel button / modal close / timeout), AbortController
-        // should have rejected the promise above — but guard anyway so a
-        // late resolution can never trigger _reload() after bailout.
-        if (!st || this._phase !== "updating") return;
-        const keepTimeout = this._status && this._status.timed_out &&
-          this._status.state === st.state &&
-          (this._status.phase_started_at || "") === (st.phase_started_at || "");
-        this._status = keepTimeout ? Object.assign({}, st, { timed_out: true }) : st;
-        if (st.state === "failed") {
-          this._fail(st.message || "Update failed");
-          return;
-        }
-        if (st.state === "done") {
-          this._stopPolling();
-          // Give the new container a moment to open its listener,
-          // then cache-bust reload so stale JS is replaced.
-          setTimeout(() => {
-            if (this._phase === "updating") this._reload();
-          }, 800);
-        }
-        this.update();
-      })
-      .catch(() => { /* aborted, or main container mid-restart — both fine */ });
-
-    const phaseStarted = this._status && this._status.phase_started_at
-      ? Date.parse(this._status.phase_started_at)
-      : 0;
-    const timeoutStartedAt = phaseStarted > 0 ? phaseStarted : this._updateStartedAt;
-    const timeout = this._status && this._status.state === "snapshotting"
-      ? SNAPSHOT_SOFT_TIMEOUT_MS
-      : UPDATE_SOFT_TIMEOUT_MS;
-    if (!this._bootHealth && Date.now() - timeoutStartedAt > timeout && this._phase === "updating") {
-      this._status = Object.assign({}, this._status, { timed_out: true });
-      this.update();
-    }
-  }
-
-  _fail(msg) {
-    this._stopPolling();
-    this._phase = "failed";
-    this._status = { state: "failed", message: msg };
-    this.update();
-  }
-
-  _reload() {
-    const u = new URL(window.location.href);
-    u.searchParams.set("_u", String(Date.now()));
-    window.location.replace(u.toString());
-  }
-
   // ---- render ----
   render() {
     const info = this._info;
-    // Banner is only useful when the full pull+restart flow is actionable.
-    // sidecar_ready also means a native release slot is ready. Both paths
-    // must be actionable before we offer the update button.
-    // A native banner only informs: the owner runs ftw update on the box.
+    // The banner only informs: the owner runs ftw update on the box.
     const showBanner =
       !!info &&
       info.update_available &&
       !info.skipped &&
-      (info.native === true || info.sidecar_ready === true) &&
-      this._phase === "idle";
+      info.native === true;
 
     // Toggle :host visibility so the element collapses when it has
     // nothing to say — the wizard layout shouldn't reserve space.
-    if (showBanner || this._phase !== "idle") {
-      this.classList.remove("hidden");
-    } else {
-      this.classList.add("hidden");
-    }
-
-    return `
-      ${showBanner ? this._bannerHTML(info) : ""}
-      ${this._phase !== "idle" ? this._overlayHTML() : ""}
-    `;
+    this.classList.toggle("hidden", !showBanner);
+    return showBanner ? this._bannerHTML(info) : "";
   }
 
   afterRender() {
-    const upd = this.shadowRoot.querySelector('[data-action="update"]');
-    if (upd) upd.addEventListener("click", () => this._beginUpdate());
     const dis = this.shadowRoot.querySelector('[data-action="dismiss"]');
     if (dis) dis.addEventListener("click", () => this._dismiss());
-    const rel = this.shadowRoot.querySelector('[data-action="reload"]');
-    if (rel) rel.addEventListener("click", () => this._reload());
-    const cancel = this.shadowRoot.querySelector('[data-action="cancel"]');
-    if (cancel) {
-      cancel.addEventListener("click", () => {
-        this._stopPolling();
-        this._phase = "idle";
-        this.update();
-      });
-    }
-
-    // Block ftw-modal's self-close while we're mid-update. The operator
-    // uses our explicit Reload / Continue-setup buttons on fail/timeout;
-    // they shouldn't silently dismiss a container being recreated.
-    const modal = this.shadowRoot.querySelector("ftw-modal");
-    if (modal) {
-      modal.addEventListener("ftw-modal-close", (e) => {
-        if (this._phase === "updating") {
-          e.preventDefault();
-          return;
-        }
-        // In failed / timedOut, treat close as "Continue setup".
-        this._stopPolling();
-        this._phase = "idle";
-        this.update();
-      });
-    }
   }
 
   _bannerHTML(info) {
@@ -441,86 +161,16 @@ class FtwUpdateCheck extends FtwElement {
     const notes = href
       ? `<a class="banner-notes" href="${escapeHTML(href)}" target="_blank" rel="noopener">Release notes ↗</a>`
       : "";
-
-    const actions = info.native
-      ? `<div class="banner-hint">After setup, install it on the machine that runs FTW with <code>ftw update</code>.</div>
-        <div class="banner-actions">
-          <button class="btn-skip" data-action="dismiss">Continue</button>
-        </div>`
-      : `<div class="banner-actions">
-          <button class="btn-primary" data-action="update">Update now</button>
-          <button class="btn-skip" data-action="dismiss">Continue anyway</button>
-        </div>`;
     return `
       <div class="banner" part="banner">
-        <div class="banner-title">${info.native ? "A newer release is published" : "Update available"}</div>
+        <div class="banner-title">A newer release is published</div>
         <div class="banner-detail">${escapeHTML(info.current || "?")}  →  ${escapeHTML(info.latest || "?")}</div>
         ${notes}
-        ${actions}
+        <div class="banner-hint">After setup, install it on the machine that runs FTW with <code>ftw update</code>.</div>
+        <div class="banner-actions">
+          <button class="btn-skip" data-action="dismiss">Continue</button>
+        </div>
       </div>
-    `;
-  }
-
-  _overlayHTML() {
-    if (this._bootHealth) {
-      return `<ftw-modal open class="busy"><span slot="title">Starting FTW</span><div class="progress">
-        ${migrationHTML(this._bootHealth.migration, {boot:true, connected:this._bootConnected}) || '<p>Core is preparing to start. Control has not started yet. Keep the box powered.</p>'}
-        <p class="hint">${this._bootConnected ? "The box is responding." : "Cannot reach the box. The last report may be out of date."}</p></div>
-        <div class="overlay-actions" slot="footer"><button class="btn-primary" data-action="reload">Reload status</button>
-        <span>Reloading this page does not restart the box.</span></div></ftw-modal>`;
-    }
-    const st = this._status || { state: "starting" };
-    const busy = this._phase === "updating";
-    const failed = this._phase === "failed";
-    const timedOut = !!st.timed_out || this._phase === "timedOut";
-    const progress = operationProgress(st);
-    const elapsed = Math.max(0, Math.round((Date.now() - this._updateStartedAt) / 1000));
-    const phaseStarted = st.phase_started_at ? Date.parse(st.phase_started_at) : 0;
-    const phaseElapsed = Math.max(0, Math.round((Date.now() - (phaseStarted > 0 ? phaseStarted : this._updateStartedAt)) / 1000));
-    const progressHTML = `
-      <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.step}">
-        <span style="width:${progress.percent}%"></span>
-      </div>
-      <p class="update-step">Step ${progress.step} of ${progress.total} · ${escapeHTML(stateLabel(st.state))}</p>
-      <p class="hint">${escapeHTML(st.message || "")}</p>
-      <p class="hint">This step: ${escapeHTML(formatElapsed(phaseElapsed))} · Total: ${escapeHTML(formatElapsed(elapsed))}</p>`;
-
-    let title = "Updating";
-    let msg = stateLabel(st.state) + "…";
-    let hint = "The page will reload automatically.";
-    let actions = "";
-    if (failed) {
-      title = "Update failed";
-      msg = st.message || "Update failed";
-      hint = "";
-      actions = `
-        <div class="overlay-actions" slot="footer">
-          <button class="btn-secondary" data-action="cancel">Continue setup</button>
-          <button class="btn-primary" data-action="reload">Reload page</button>
-        </div>
-      `;
-    } else if (timedOut) {
-      title = "Taking longer than expected";
-      msg = `Still working after ${elapsed}s. You can reload to check, or continue setup and let the update finish in the background.`;
-      hint = "";
-      actions = `
-        <div class="overlay-actions" slot="footer">
-          <button class="btn-secondary" data-action="cancel">Continue setup</button>
-          <button class="btn-primary" data-action="reload">Reload page</button>
-        </div>
-      `;
-    }
-
-    return `
-      <ftw-modal open class="${busy ? "busy" : ""}">
-        <span slot="title">${escapeHTML(title)}</span>
-        <div class="progress">
-          ${busy ? `<span class="spinner" aria-hidden="true"></span>` : ""}
-          ${busy && !failed ? progressHTML : `<p class="msg">${escapeHTML(msg)}</p>`}
-          ${hint ? `<p class="hint">${escapeHTML(hint)}</p>` : ""}
-        </div>
-        ${actions}
-      </ftw-modal>
     `;
   }
 }
@@ -544,41 +194,6 @@ function escapeHTML(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-function stateLabel(state) {
-  switch (state) {
-    case "snapshotting": return "Saving rollback point";
-    case "pulling":    return "Pulling new image";
-    case "restarting": return "Applying update";
-    case "checking":   return "Checking service health";
-    case "done":       return "Reloading";
-    case "failed":     return "Failed";
-    default:           return "Starting update";
-  }
-}
-
-function operationProgress(st) {
-  let total = Number(st && st.total_steps) || 4;
-  let step = Number(st && st.step) || 0;
-  if (!step) {
-    switch (st && st.state) {
-      case "snapshotting": step = 1; break;
-      case "pulling": step = 2; break;
-      case "restarting": step = 3; break;
-      case "checking":
-      case "done": step = 4; break;
-      default: step = 1;
-    }
-  }
-  step = Math.max(0, Math.min(step, total));
-  return { step, total, percent: Math.round((step / total) * 100) };
-}
-
-function formatElapsed(seconds) {
-  const value = Math.max(0, Number(seconds) || 0);
-  if (value < 60) return `${value}s`;
-  return `${Math.floor(value / 60)}m ${value % 60}s`;
 }
 
 customElements.define("ftw-update-check", FtwUpdateCheck);

@@ -4,10 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net"
 	"os"
 	"strings"
 	"testing"
@@ -140,461 +137,9 @@ func TestProcessTransportWriteCancellationRestartsWorker(t *testing.T) {
 	}
 }
 
-func TestUnixTransportHandshakeAndRoundTrip(t *testing.T) {
-	path := fmt.Sprintf("/tmp/ftw-opt-%d.sock", time.Now().UnixNano())
-	t.Cleanup(func() { _ = os.Remove(path) })
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	go func() {
-		for i := 0; i < 2; i++ {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			scanner := bufio.NewScanner(conn)
-			if scanner.Scan() {
-				var request map[string]any
-				_ = json.Unmarshal(scanner.Bytes(), &request)
-				if request["type"] == "handshake" {
-					_, _ = conn.Write([]byte(`{"name":"ftw-optimizer","version":"1.2.3","protocol_version":1,"features":["champion"]}` + "\n"))
-				} else {
-					_, _ = conn.Write([]byte(`{"ok":true}` + "\n"))
-				}
-			}
-			_ = conn.Close()
-		}
-	}()
-
-	transport := NewUnixTransport(path)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	info, err := transport.Health(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Version != "1.2.3" || info.ProtocolVersion != 1 || info.Transport != "unix" {
-		t.Fatalf("unexpected handshake: %+v", info)
-	}
-	response, err := transport.RoundTrip(ctx, []byte(`{"schema_version":1}`))
-	if err != nil || string(response) != `{"ok":true}` {
-		t.Fatalf("round trip = %s, %v", response, err)
-	}
-}
-
-func TestUnixTransportCancelsSentRequestOnCallerCancellation(t *testing.T) {
-	path := fmt.Sprintf("/tmp/ftw-opt-cancel-%d.sock", time.Now().UnixNano())
-	t.Cleanup(func() { _ = os.Remove(path) })
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	requestRead := make(chan []byte, 1)
-	cancelRead := make(chan []byte, 1)
-	serverDone := make(chan error, 1)
-	go func() {
-		requestConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer requestConn.Close()
-		requestScanner := bufio.NewScanner(requestConn)
-		if !requestScanner.Scan() {
-			serverDone <- requestScanner.Err()
-			return
-		}
-		requestRead <- append([]byte(nil), requestScanner.Bytes()...)
-
-		cancelConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer cancelConn.Close()
-		cancelScanner := bufio.NewScanner(cancelConn)
-		if !cancelScanner.Scan() {
-			serverDone <- cancelScanner.Err()
-			return
-		}
-		cancelRead <- append([]byte(nil), cancelScanner.Bytes()...)
-		serverDone <- nil
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	payload := []byte(`{"schema_version":1,"request_id":"plan-42"}`)
-	go func() {
-		_, err := NewUnixTransport(path).RoundTrip(ctx, payload)
-		result <- err
-	}()
-
-	select {
-	case got := <-requestRead:
-		if string(got) != string(payload) {
-			t.Fatalf("request = %s, want %s", got, payload)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("sidecar did not receive the optimizer request")
-	}
-	cancel()
-
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("RoundTrip did not return after cancellation")
-	}
-
-	var frame map[string]any
-	select {
-	case raw := <-cancelRead:
-		if err := json.Unmarshal(raw, &frame); err != nil {
-			t.Fatalf("decode cancel frame %q: %v", raw, err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("sidecar did not receive a cancel request")
-	}
-	if len(frame) != 3 || frame["type"] != "cancel_request" || frame["request_id"] != "plan-42" || frame["protocol_version"] != float64(OptimizerProtocolVersion) {
-		t.Fatalf("cancel frame = %#v", frame)
-	}
-	if err := <-serverDone; err != nil {
-		t.Fatalf("sidecar server: %v", err)
-	}
-}
-
-func TestUnixTransportCancelsSentRequestOnCallerDeadline(t *testing.T) {
-	path := fmt.Sprintf("/tmp/ftw-opt-deadline-%d.sock", time.Now().UnixNano())
-	t.Cleanup(func() { _ = os.Remove(path) })
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	requestRead := make(chan struct{})
-	cancelRead := make(chan []byte, 1)
-	serverDone := make(chan error, 1)
-	go func() {
-		requestConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer requestConn.Close()
-		requestScanner := bufio.NewScanner(requestConn)
-		if !requestScanner.Scan() {
-			serverDone <- requestScanner.Err()
-			return
-		}
-		close(requestRead)
-
-		cancelConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer cancelConn.Close()
-		cancelScanner := bufio.NewScanner(cancelConn)
-		if !cancelScanner.Scan() {
-			serverDone <- cancelScanner.Err()
-			return
-		}
-		cancelRead <- append([]byte(nil), cancelScanner.Bytes()...)
-		serverDone <- nil
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-	result := make(chan error, 1)
-	go func() {
-		_, err := NewUnixTransport(path).RoundTrip(ctx, []byte(`{"request_id":"deadline-plan"}`))
-		result <- err
-	}()
-	select {
-	case <-requestRead:
-	case <-time.After(time.Second):
-		t.Fatal("sidecar did not receive the optimizer request")
-	}
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("RoundTrip error = %v, want context.DeadlineExceeded", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("RoundTrip did not return after its deadline")
-	}
-
-	select {
-	case raw := <-cancelRead:
-		var frame unixCancelRequest
-		if err := json.Unmarshal(raw, &frame); err != nil {
-			t.Fatalf("decode cancel frame %q: %v", raw, err)
-		}
-		if frame.Type != "cancel_request" || frame.RequestID != "deadline-plan" || frame.ProtocolVersion != OptimizerProtocolVersion {
-			t.Fatalf("cancel frame = %+v", frame)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("sidecar did not receive a cancel request")
-	}
-	if err := <-serverDone; err != nil {
-		t.Fatalf("sidecar server: %v", err)
-	}
-}
-
-func TestUnixTransportDoesNotCancelRequestWithoutID(t *testing.T) {
-	path := fmt.Sprintf("/tmp/ftw-opt-no-id-%d.sock", time.Now().UnixNano())
-	t.Cleanup(func() { _ = os.Remove(path) })
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	requestRead := make(chan struct{})
-	checkSecond := make(chan struct{})
-	serverDone := make(chan error, 1)
-	go func() {
-		requestConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		defer requestConn.Close()
-		requestScanner := bufio.NewScanner(requestConn)
-		if !requestScanner.Scan() {
-			serverDone <- requestScanner.Err()
-			return
-		}
-		close(requestRead)
-		<-checkSecond
-		if err := listener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			serverDone <- err
-			return
-		}
-		second, err := listener.Accept()
-		if err == nil {
-			_ = second.Close()
-			serverDone <- errors.New("received unexpected cancel connection")
-			return
-		}
-		if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
-			serverDone <- err
-			return
-		}
-		serverDone <- nil
-	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		_, err := NewUnixTransport(path).RoundTrip(ctx, []byte(`{"schema_version":1}`))
-		result <- err
-	}()
-	select {
-	case <-requestRead:
-	case <-time.After(time.Second):
-		t.Fatal("sidecar did not receive the optimizer request")
-	}
-	cancel()
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("RoundTrip did not return after cancellation")
-	}
-	close(checkSecond)
-	if err := <-serverDone; err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestUnixTransportDoesNotCancelAfterOrdinaryReadFailure(t *testing.T) {
-	path := fmt.Sprintf("/tmp/ftw-opt-read-failure-%d.sock", time.Now().UnixNano())
-	t.Cleanup(func() { _ = os.Remove(path) })
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	requestRead := make(chan struct{})
-	checkSecond := make(chan struct{})
-	serverDone := make(chan error, 1)
-	go func() {
-		requestConn, err := listener.Accept()
-		if err != nil {
-			serverDone <- err
-			return
-		}
-		requestScanner := bufio.NewScanner(requestConn)
-		if !requestScanner.Scan() {
-			_ = requestConn.Close()
-			serverDone <- requestScanner.Err()
-			return
-		}
-		close(requestRead)
-		_ = requestConn.Close()
-		<-checkSecond
-		if err := listener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			serverDone <- err
-			return
-		}
-		second, err := listener.Accept()
-		if err == nil {
-			_ = second.Close()
-			serverDone <- errors.New("received unexpected cancel connection")
-			return
-		}
-		if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
-			serverDone <- err
-			return
-		}
-		serverDone <- nil
-	}()
-
-	result := make(chan error, 1)
-	go func() {
-		_, err := NewUnixTransport(path).RoundTrip(context.Background(), []byte(`{"request_id":"plan-42"}`))
-		result <- err
-	}()
-	select {
-	case <-requestRead:
-	case <-time.After(time.Second):
-		t.Fatal("sidecar did not receive the optimizer request")
-	}
-	select {
-	case err := <-result:
-		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("RoundTrip error = %v, want ordinary read failure", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("RoundTrip did not return after the sidecar closed")
-	}
-	close(checkSecond)
-	if err := <-serverDone; err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestProcessTransportHealthPerformsCompatibleHandshake(t *testing.T) {
-	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "process-health-helper" {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			_, _ = os.Stdout.WriteString(`{"name":"ftw-optimizer","version":"test","protocol_version":1,"features":["champion"]}` + "\n")
-		}
-		return
-	}
-	transport, err := NewProcessTransport(ProcessTransportConfig{
-		Command: []string{os.Args[0], "-test.run=TestProcessTransportHealthPerformsCompatibleHandshake", "--", "process-health-helper"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = transport.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	info, err := transport.Health(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Name != "ftw-optimizer" || info.Version != "test" || info.Transport != "process" {
-		t.Fatalf("unexpected process handshake: %+v", info)
-	}
-}
-
-func TestProcessTransportHealthReportsMissingWorker(t *testing.T) {
-	transport, err := NewProcessTransport(ProcessTransportConfig{
-		Command: []string{"/definitely/missing/ftw-optimizer-python"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	// The worker is resolved before fork/exec, so an absent one yields
-	// errOptimizerWorkerMissing, which says the Go planner is used, instead of
-	// a bare "start optimizer ... not found".
-	_, err = transport.Health(ctx)
-	if err == nil || !errors.Is(err, errOptimizerWorkerMissing) {
-		t.Fatalf("Health error = %v, want errOptimizerWorkerMissing", err)
-	}
-	if !strings.Contains(err.Error(), "Go planner") || strings.Contains(err.Error(), "sidecar") {
-		t.Fatalf("Health error should say the Go planner is used, got: %v", err)
-	}
-}
-
-func TestProcessTransportHealthRejectsIncompatibleHandshake(t *testing.T) {
-	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "process-incompatible-helper" {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			_, _ = os.Stdout.WriteString(`{"name":"ftw-optimizer","version":"test","protocol_version":2,"features":["champion"]}` + "\n")
-		}
-		return
-	}
-	transport, err := NewProcessTransport(ProcessTransportConfig{
-		Command: []string{os.Args[0], "-test.run=TestProcessTransportHealthRejectsIncompatibleHandshake", "--", "process-incompatible-helper"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = transport.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err = transport.Health(ctx)
-	if err == nil || !strings.Contains(err.Error(), "protocol 2") {
-		t.Fatalf("Health error = %v, want protocol mismatch", err)
-	}
-	// An operator reads this string in a badge tooltip, so it has to name the
-	// fix. Core updates never move Optimizer, and Optimizer's own healthcheck
-	// calls itself healthy — nothing else tells them what to do.
-	if !strings.Contains(err.Error(), "update Optimizer in Update Center") {
-		t.Errorf("handshake rejection must name the remedy, got %q", err)
-	}
-}
-
-type fakeTransport struct {
-	healthErr    error
-	roundTripErr error
-	reply        []byte
-	calls        int
-}
-
-func (f *fakeTransport) RoundTrip(context.Context, []byte) ([]byte, error) {
-	f.calls++
-	return f.reply, f.roundTripErr
-}
-func (f *fakeTransport) Health(context.Context) (OptimizerRuntimeInfo, error) {
-	return OptimizerRuntimeInfo{ProtocolVersion: 1, Features: []string{"champion"}}, f.healthErr
-}
-
-func TestAutoTransportFallsBackWhenFeatureIsMissing(t *testing.T) {
-	primary := &fakeTransport{reply: []byte(`{"primary":true}`)}
-	fallback := &fakeTransport{reply: []byte(`{"fallback":true}`)}
-	transport := NewAutoTransport(primary, fallback)
-	payload := []byte(`{"settings":{"scenario_policy":"multistage"}}`)
-	response, err := transport.RoundTrip(context.Background(), payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(response) != `{"fallback":true}` || primary.calls != 0 || fallback.calls != 1 {
-		t.Fatalf("response=%s primary=%d fallback=%d", response, primary.calls, fallback.calls)
-	}
-}
-func (f *fakeTransport) Close() error { return nil }
-
-// A containerized core has no bundled Python interpreter, so the process
-// worker can never start. The error must name the remedy (run the sidecar),
-// not surface a bare "python3: not found in $PATH" that reads as a missing
-// core dependency. Regression guard for the masked-fallback bug.
+// An install missing the bundled worker must say that the Go planner is used,
+// not surface a bare "not found in $PATH" that reads as a missing Core
+// dependency. Regression guard for the masked-fallback bug.
 func TestProcessTransportReportsMissingWorkerActionably(t *testing.T) {
 	transport, err := NewProcessTransport(ProcessTransportConfig{
 		Command: []string{"ftw-nonexistent-optimizer-worker-xyz"},
@@ -606,7 +151,7 @@ func TestProcessTransportReportsMissingWorkerActionably(t *testing.T) {
 
 	_, err = transport.RoundTrip(context.Background(), []byte(`{}`))
 	if err == nil {
-		t.Fatal("expected an error when the optimizer worker interpreter is absent")
+		t.Fatal("expected an error when the optimizer worker is absent")
 	}
 	if !errors.Is(err, errOptimizerWorkerMissing) {
 		t.Fatalf("error should wrap errOptimizerWorkerMissing, got: %v", err)
@@ -616,104 +161,10 @@ func TestProcessTransportReportsMissingWorkerActionably(t *testing.T) {
 	}
 }
 
-// With the `auto` transport (socket primary + process fallback), a down
-// socket and a missing worker must still surface errOptimizerWorkerMissing
-// through the auto layer — otherwise
-// service.go's FallbackReason would report a bare exec error. This pins the
-// missing-worker path all the way to the operator-facing reason string.
-func TestAutoTransportSurfacesMissingWorkerFromProcessFallback(t *testing.T) {
-	sidecar := &fakeTransport{healthErr: errors.New("dial optimizer socket: no such file")}
-	worker, err := NewProcessTransport(ProcessTransportConfig{
-		Command: []string{"ftw-nonexistent-optimizer-worker-xyz"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = worker.Close() })
-
-	transport := NewAutoTransport(sidecar, worker)
-	_, err = transport.RoundTrip(context.Background(), []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected an error when the sidecar is down and no worker interpreter exists")
-	}
-	if !errors.Is(err, errOptimizerWorkerMissing) {
-		t.Fatalf("auto transport should surface errOptimizerWorkerMissing from the process fallback, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "Go planner") {
-		t.Fatalf("fallback reason should say the Go planner is used, got: %v", err)
-	}
-}
-
-func TestAutoTransportFallsBackWhenSidecarUnhealthy(t *testing.T) {
-	primary := &fakeTransport{healthErr: errors.New("socket down")}
-	fallback := &fakeTransport{reply: []byte(`{"fallback":true}`)}
-	transport := NewAutoTransport(primary, fallback)
-	response, err := transport.RoundTrip(context.Background(), []byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(response) != `{"fallback":true}` || primary.calls != 0 || fallback.calls != 1 {
-		t.Fatalf("response=%s primary=%d fallback=%d", response, primary.calls, fallback.calls)
-	}
-}
-
-func TestAutoTransportReportsSidecarFailureBeforeProcessFailure(t *testing.T) {
-	sidecarErr := errors.New("connection closed")
-	processErr := errors.New(`start optimizer "python3": executable file not found`)
-	primary := &fakeTransport{healthErr: sidecarErr}
-	fallback := &fakeTransport{roundTripErr: processErr}
-	transport := NewAutoTransport(primary, fallback)
-
-	_, err := transport.RoundTrip(context.Background(), []byte(`{}`))
-	if err == nil {
-		t.Fatal("RoundTrip succeeded, want both transport failures")
-	}
-	if !errors.Is(err, sidecarErr) || !errors.Is(err, processErr) {
-		t.Fatalf("RoundTrip error does not unwrap both failures: %v", err)
-	}
-	message := err.Error()
-	sidecarAt := strings.Index(message, sidecarErr.Error())
-	processAt := strings.Index(message, processErr.Error())
-	if sidecarAt < 0 || processAt < 0 || sidecarAt >= processAt {
-		t.Fatalf("RoundTrip error = %q, want sidecar cause before process failure", message)
-	}
-}
-
-func TestAutoTransportReportsRequestFailureBeforeProcessFailure(t *testing.T) {
-	sidecarErr := errors.New("connection closed")
-	processErr := errors.New("process unavailable")
-	primary := &fakeTransport{roundTripErr: sidecarErr}
-	fallback := &fakeTransport{roundTripErr: processErr}
-	transport := NewAutoTransport(primary, fallback)
-
-	_, err := transport.RoundTrip(context.Background(), []byte(`{}`))
-	if err == nil || !strings.Contains(err.Error(), "optimizer sidecar failed: connection closed") {
-		t.Fatalf("RoundTrip error = %v, want failed sidecar request as primary cause", err)
-	}
-}
-
-func TestAutoTransportHealthReportsBothFailures(t *testing.T) {
-	sidecarErr := errors.New("socket unavailable")
-	processErr := errors.New("python unavailable")
-	transport := NewAutoTransport(
-		&fakeTransport{healthErr: sidecarErr},
-		&fakeTransport{healthErr: processErr},
-	)
-
-	_, err := transport.Health(context.Background())
-	if err == nil || !errors.Is(err, sidecarErr) || !errors.Is(err, processErr) {
-		t.Fatalf("Health error = %v, want both failures", err)
-	}
-	if strings.Index(err.Error(), sidecarErr.Error()) >= strings.Index(err.Error(), processErr.Error()) {
-		t.Fatalf("Health error = %q, want sidecar cause first", err)
-	}
-}
-
-// The field failure mode: an Optimizer image older than #563 has no champion
-// solver. Its own healthcheck predates the requirement, so Docker and the
-// updater both call it healthy while Core quietly refuses to use it and plans
-// on the Go fallback instead. The rejection string is the only thing an
-// operator ever sees, so it has to name the fix.
+// A worker that does not match Core is refused, and Core quietly plans on the
+// Go fallback instead. The rejection string is the only thing an operator ever
+// sees, so it has to name the fix. The worker ships with Core, so the fix is a
+// Core update or reinstall; there is no separate optimizer update.
 func TestHandshakeRejectionNamesTheRemedy(t *testing.T) {
 	for _, tc := range []struct {
 		name, line string
@@ -721,27 +172,27 @@ func TestHandshakeRejectionNamesTheRemedy(t *testing.T) {
 	}{
 		{
 			name: "old optimizer without champion",
-			line: `{"name":"ftw-optimizer","version":"1.2.0","protocol_version":1,"features":["recourse"]}`,
-			want: []string{"1.2.0", "too old", "update Optimizer in Update Center"},
+			line: `{"name":"ftw-solver","version":"1.2.0","protocol_version":1,"features":["ev_duty"]}`,
+			want: []string{"1.2.0", "too old", "ftw update"},
 		},
 		{
 			name: "champion missing and version unreported",
-			line: `{"name":"ftw-optimizer","protocol_version":1,"features":[]}`,
-			want: []string{"optimizer is too old", "update Optimizer in Update Center"},
+			line: `{"name":"ftw-solver","protocol_version":1,"features":[]}`,
+			want: []string{"optimizer is too old", "ftw update"},
 		},
 		{
 			name: "protocol ahead of Core",
-			line: `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":99,"features":["champion"]}`,
-			want: []string{"protocol 99", "accepts 1", "update Optimizer in Update Center"},
+			line: `{"name":"ftw-solver","version":"9.0.0","protocol_version":99,"features":["champion"]}`,
+			want: []string{"protocol 99", "accepts 1", "ftw update"},
 		},
 		{
 			name: "declared window sits entirely above Core",
-			line: `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":5,"protocol_min":4,"protocol_max":6,"features":["champion"]}`,
-			want: []string{"protocol 4-6", "accepts 1", "update Optimizer in Update Center"},
+			line: `{"name":"ftw-solver","version":"9.0.0","protocol_version":5,"protocol_min":4,"protocol_max":6,"features":["champion"]}`,
+			want: []string{"protocol 4-6", "accepts 1", "ftw update"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeOptimizerHandshake([]byte(tc.line), "unix")
+			_, err := decodeOptimizerHandshakeFor([]byte(tc.line), "process", "ftw-solver")
 			if err == nil {
 				t.Fatal("incompatible handshake must be rejected")
 			}
@@ -750,16 +201,19 @@ func TestHandshakeRejectionNamesTheRemedy(t *testing.T) {
 					t.Errorf("error %q missing %q", err, want)
 				}
 			}
+			if strings.Contains(err.Error(), "Update Center") {
+				t.Errorf("error %q names the retired Update Center", err)
+			}
 		})
 	}
 }
 
 func TestHandshakeAcceptsCurrentOptimizer(t *testing.T) {
-	info, err := decodeOptimizerHandshake([]byte(`{"name":"ftw-optimizer","version":"1.3.2","protocol_version":1,"features":["champion","recourse"]}`), "unix")
+	info, err := decodeOptimizerHandshakeFor([]byte(`{"name":"ftw-solver","version":"1.3.2","protocol_version":1,"features":["champion","ev_duty"]}`), "process", "ftw-solver")
 	if err != nil {
 		t.Fatalf("current optimizer must be accepted: %v", err)
 	}
-	if info.Version != "1.3.2" || info.Transport != "unix" {
+	if info.Version != "1.3.2" || info.Transport != "process" {
 		t.Fatalf("info = %+v", info)
 	}
 }
@@ -774,27 +228,27 @@ func TestHandshakeAcceptsAnyOverlappingProtocolWindow(t *testing.T) {
 	}{
 		{
 			name:   "single version matching Core",
-			line:   `{"name":"ftw-optimizer","version":"1.3.2","protocol_version":1,"features":["champion"]}`,
+			line:   `{"name":"ftw-solver","version":"1.3.2","protocol_version":1,"features":["champion"]}`,
 			wantOK: true,
 		},
 		{
 			name:   "newer optimizer that still speaks Core's version",
-			line:   `{"name":"ftw-optimizer","version":"2.0.0","protocol_version":2,"protocol_min":1,"protocol_max":2,"features":["champion"]}`,
+			line:   `{"name":"ftw-solver","version":"2.0.0","protocol_version":2,"protocol_min":1,"protocol_max":2,"features":["champion"]}`,
 			wantOK: true,
 		},
 		{
 			name:   "window touching Core only at its lower bound",
-			line:   `{"name":"ftw-optimizer","version":"3.0.0","protocol_version":3,"protocol_min":1,"protocol_max":3,"features":["champion"]}`,
+			line:   `{"name":"ftw-solver","version":"3.0.0","protocol_version":3,"protocol_min":1,"protocol_max":3,"features":["champion"]}`,
 			wantOK: true,
 		},
 		{
 			name:   "window entirely above Core",
-			line:   `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":7,"protocol_min":7,"protocol_max":9,"features":["champion"]}`,
+			line:   `{"name":"ftw-solver","version":"9.0.0","protocol_version":7,"protocol_min":7,"protocol_max":9,"features":["champion"]}`,
 			wantOK: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeOptimizerHandshake([]byte(tc.line), "unix")
+			_, err := decodeOptimizerHandshakeFor([]byte(tc.line), "process", "ftw-solver")
 			if tc.wantOK && err != nil {
 				t.Fatalf("overlapping window must be accepted: %v", err)
 			}

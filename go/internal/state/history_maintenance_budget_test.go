@@ -22,45 +22,21 @@ func TestHistoryMaintenanceBudgetStaysPending(t *testing.T) {
 		var seen []string
 		historyStageForTest = func(name string, ctx context.Context) (bool, error) {
 			seen = append(seen, name)
-			if name != "dashboard_rollup" {
+			if name != "plain_buckets" {
 				return false, nil
 			}
 			<-ctx.Done()
 			return true, ctx.Err()
 		}
 		started := time.Now()
-		if err := s.MaintainHistory(context.Background(), t.TempDir(), 0, time.Now()); err != nil {
+		if err := s.MaintainPlainHistory(context.Background(), time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if time.Since(started) > 2*time.Second {
 			t.Fatal("a spent stage budget blocked the maintenance turn")
 		}
-		if len(seen) != 1 || seen[0] != "dashboard_rollup" {
+		if len(seen) != 1 || seen[0] != "plain_buckets" {
 			t.Fatalf("stages after the budget: %v", seen)
-		}
-		assertPending(t, s)
-	})
-
-	t.Run("archive write deadline", func(t *testing.T) {
-		s := openBudgetStore(t)
-		var seen []string
-		historyStageForTest = func(name string, ctx context.Context) (bool, error) {
-			seen = append(seen, name)
-			if name != "aggregate_archive" {
-				return false, nil
-			}
-			if ctx.Err() != nil {
-				t.Errorf("archive stage context already done: %v", ctx.Err())
-			}
-			return true, context.DeadlineExceeded
-		}
-		if err := s.MaintainHistory(context.Background(), t.TempDir(), 0, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range seen {
-			if name == "sample_archive" || name == "legacy_compaction" {
-				t.Fatalf("kept going after the archive budget: %v", seen)
-			}
 		}
 		assertPending(t, s)
 	})
@@ -76,7 +52,7 @@ func TestHistoryMaintenanceBudgetStaysPending(t *testing.T) {
 			}
 			return true, fmt.Errorf("dashboard bucket 1 cannot commit within its write budget: %w", context.DeadlineExceeded)
 		}
-		err := s.MaintainHistory(context.Background(), t.TempDir(), 0, time.Now())
+		err := s.MaintainPlainHistory(context.Background(), time.Now())
 		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatal(err)
 		}
@@ -97,7 +73,7 @@ func TestHistoryMaintenanceBudgetStaysPending(t *testing.T) {
 			<-ctx.Done()
 			return true, ctx.Err()
 		}
-		err := s.MaintainHistory(parent, t.TempDir(), 0, time.Now())
+		err := s.MaintainPlainHistory(parent, time.Now())
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
@@ -107,11 +83,11 @@ func TestHistoryMaintenanceBudgetStaysPending(t *testing.T) {
 	})
 }
 
-func TestArchiveBudgetCancelsAndLiveHistoryCommits(t *testing.T) {
-	previous := historyArchiveTurn
-	historyArchiveTurn = 80 * time.Millisecond
+func TestMaintenanceBudgetCancelsAndLiveHistoryCommits(t *testing.T) {
+	previous := historyStageBudget
+	historyStageBudget = 80 * time.Millisecond
 	t.Cleanup(func() {
-		historyArchiveTurn = previous
+		historyStageBudget = previous
 		historyStageForTest = nil
 	})
 	s := freshStore(t)
@@ -120,7 +96,7 @@ func TestArchiveBudgetCancelsAndLiveHistoryCommits(t *testing.T) {
 	}
 	started := make(chan struct{})
 	historyStageForTest = func(name string, ctx context.Context) (bool, error) {
-		if name != "sample_archive" {
+		if name != "plain_buckets" {
 			return false, nil
 		}
 		close(started)
@@ -142,11 +118,11 @@ func TestArchiveBudgetCancelsAndLiveHistoryCommits(t *testing.T) {
 		errc <- s.FlushHistory(flush)
 	}()
 	maintainStarted := time.Now()
-	if err := s.MaintainHistory(context.Background(), t.TempDir(), 0, time.Now()); err != nil {
+	if err := s.MaintainPlainHistory(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if time.Since(maintainStarted) > 2*time.Second {
-		t.Fatal("sample archive had no cancellable budget")
+		t.Fatal("maintenance stage had no cancellable budget")
 	}
 	if err := <-errc; err != nil {
 		t.Fatal(err)

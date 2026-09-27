@@ -26,6 +26,33 @@ func writeTestParquet(t *testing.T, path string) {
 	}
 }
 
+// restoreFresh restores into a new data directory, the way ftw-backup restores
+// onto a fresh install.
+func restoreFresh(archive, dataDir string, now time.Time) (RestoreResult, error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return RestoreResult{}, err
+	}
+	return RestoreContents(archive, dataDir, now)
+}
+
+// writeColdSampleDay writes a sample day in the cold layout a 2.x install
+// left behind.
+func writeColdSampleDay(t *testing.T, path string, tsMs int64, driver, metric string, value float64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	type sample struct {
+		TsMs   int64   `parquet:"ts_ms"`
+		Driver string  `parquet:"driver,dict,zstd"`
+		Metric string  `parquet:"metric,dict,zstd"`
+		Value  float64 `parquet:"value,zstd"`
+	}
+	if err := parquet.WriteFile(path, []sample{{TsMs: tsMs, Driver: driver, Metric: metric, Value: value}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackupRejectsUnreadableParquetWithMatchingHash(t *testing.T) {
 	for _, corruption := range []string{"truncated", "pages"} {
 		t.Run(corruption, func(t *testing.T) {
@@ -131,7 +158,7 @@ func TestOfflineBackupCreateVerifyRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	restoredDir := filepath.Join(root, "restored")
-	if _, err := Restore(info.Path, restoredDir, time.Time{}); err != nil {
+	if _, err := restoreFresh(info.Path, restoredDir, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := state.Open(filepath.Join(restoredDir, "state.db"))
@@ -225,7 +252,7 @@ func TestCreateVerifyAndRestoreCompleteBackup(t *testing.T) {
 	}
 
 	writeTestFile(t, filepath.Join(dataDir, "config.yaml"), "site:\n  name: changed-after-backup\n")
-	result, err := Restore(info.Path, dataDir, time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC))
+	result, err := RestoreContents(info.Path, dataDir, time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,15 +293,9 @@ func TestSQLiteBackupKeepsParquetAndOmitsLiveDatabaseFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	oldTS := time.Now().Add(-40 * 24 * time.Hour).UnixMilli()
-	if err := st.RecordSamples([]state.Sample{{Driver: "meter", Metric: "power", TsMs: oldTS, Value: 123, Unit: "W"}}); err != nil {
-		t.Fatal(err)
-	}
+	old := time.Now().Add(-40 * 24 * time.Hour).UTC()
 	coldDir := filepath.Join(dataDir, "cold")
-	_, files, err := st.RolloffToParquet(context.Background(), coldDir)
-	if err != nil || len(files) != 1 {
-		t.Fatalf("legacy source: %v %v", files, err)
-	}
+	writeColdSampleDay(t, filepath.Join(coldDir, old.Format("2006/01/02.parquet")), old.UnixMilli(), "meter", "power", 123)
 	liveTmp := state.HistoryDatabasePath(statePath) + ".tmp"
 	if err := os.MkdirAll(liveTmp, 0700); err != nil {
 		t.Fatal(err)
@@ -297,11 +318,10 @@ func TestSQLiteBackupKeepsParquetAndOmitsLiveDatabaseFiles(t *testing.T) {
 	}
 	st.Close()
 	restoredDir := filepath.Join(root, "restored")
-	if _, err := Restore(info.Path, restoredDir, time.Now()); err != nil {
+	if _, err := restoreFresh(info.Path, restoredDir, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	// A SQLite-only Core reads the portable database, with no overlapping
-	// daily sample files that could make its old merge count samples twice.
+	// The kept cold day is read back once.
 	restored, err := state.OpenWithLegacyHistory(filepath.Join(restoredDir, "custom.db"), filepath.Join(restoredDir, "cold"))
 	if err != nil {
 		t.Fatal(err)
@@ -482,7 +502,7 @@ func TestAbsoluteManagedDriverBackupRestoresAtAnotherPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(restoredDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Restore(archive.Path, restoredDir, time.Now()); err != nil {
+	if _, err := restoreFresh(archive.Path, restoredDir, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	restoredLink := filepath.Join(restoredDir, "driver-repository", "active", "goodwe.lua")

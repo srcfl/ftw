@@ -91,7 +91,6 @@ type historyWriter struct {
 	commitFn              func(context.Context, []historyBatch, int64) (historyBatchCommit, error)
 	flushCh               chan struct{}
 	flushTarget           atomic.Uint64
-	forceRotate           atomic.Bool
 }
 
 func newHistoryWriter(s *Store) *historyWriter {
@@ -251,7 +250,6 @@ func (w *historyWriter) run() {
 	defer close(w.done)
 	var acknowledgedSequence int64
 	var held []historyBatch
-	var heldBytes int
 	var firstHeld time.Time
 	commitHeld := func() bool {
 		maxAttempt := w.maxTicks()
@@ -307,7 +305,6 @@ func (w *historyWriter) run() {
 				}
 				w.scheduleMaintenance(out.rows)
 				held = held[n:]
-				heldBytes -= attemptBytes
 				if len(held) == 0 {
 					firstHeld = time.Time{}
 				}
@@ -345,7 +342,6 @@ func (w *historyWriter) run() {
 					return
 				}
 				held = append(held, b)
-				heldBytes += b.bytes
 			default:
 				return
 			}
@@ -377,7 +373,6 @@ func (w *historyWriter) run() {
 					return
 				}
 				held = append(held, b)
-				heldBytes += b.bytes
 				firstHeld = time.Now()
 			case <-w.ctx.Done():
 				return
@@ -404,7 +399,6 @@ func (w *historyWriter) run() {
 				return
 			}
 			held = append(held, b)
-			heldBytes += b.bytes
 		case <-w.flushCh:
 			timer.Stop()
 			drainQueue()
@@ -426,7 +420,7 @@ func (w *historyWriter) run() {
 // Maintenance follows a durable commit or an OOM rollback. It never holds a catalog/write/status
 // lock, and admission can continue into the bounded queue. A long read only
 // postpones maintenance; its transaction and the new committed data stay intact.
-// Hourly rotation runs in the background so a multi-GB reopen cannot stall
+// The hourly checkpoint runs in the background so a slow card cannot stall
 // live commits past the site watchdog.
 func (w *historyWriter) scheduleMaintenance(rows int) {
 	if w.maintenanceCtx.Err() != nil {
@@ -448,25 +442,13 @@ func (w *historyWriter) scheduleMaintenance(rows int) {
 	}()
 }
 
-func (w *historyWriter) maintainHistory(rows int) {
-	w.maintenanceRows += rows
-	now := time.Now()
-	if now.Before(w.maintenanceRetry) || (w.maintenanceRows < w.maintenanceRowsLimit && now.Before(w.maintenanceDue)) {
-		return
-	}
-	w.runMaintenance()
-}
-
 func (w *historyWriter) runMaintenance() {
 	w.maintenanceMu.Lock()
 	defer w.maintenanceMu.Unlock()
 	ctx, cancel := context.WithTimeout(w.maintenanceCtx, historyMaintenanceTimeout)
-	err := w.store.checkpointLiveHistory(ctx)
+	err := w.store.CheckpointHistory(ctx)
 	cancel()
-	if w.forceRotate.Load() {
-		w.forceRotate.Store(false)
-	}
-	// A successful rotation may still leave the same tick too large. Back off
+	// A successful checkpoint may still leave the same tick too large. Back off
 	// every actual attempt; skipped calls above must not extend this deadline.
 	w.maintenanceRetry = time.Now().Add(w.maintenanceRetryDelay)
 	if err == nil {

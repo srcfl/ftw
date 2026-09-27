@@ -253,7 +253,7 @@ func TestHomeAssistantSetModeFinishesWhenTheModeCannotBeSaved(t *testing.T) {
 	}
 	prefs := config.NewPlannerPrefs(config.ForecastTrustBalanced, config.BatteryExportNotAllowed, config.SafetyKDefault)
 
-	callbacks := haCallbacks(t.Context(), ctrl, &sync.Mutex{}, st, nil, prefs)
+	callbacks := haCallbacks(ctrl, &sync.Mutex{}, st, nil, prefs)
 	if err := callbacks.SetMode(string(control.ModePlannerArbitrage)); err != nil {
 		t.Fatalf("SetMode: %v", err)
 	}

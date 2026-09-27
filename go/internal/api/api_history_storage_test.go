@@ -42,7 +42,7 @@ func TestHealthShowsFailedArchiveAndRecovery(t *testing.T) {
 	srv.deps.Tel = telemetry.NewStore()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := st.MaintainHistory(ctx, t.TempDir(), 0, time.Now()); err == nil {
+	if err := st.MaintainPlainHistory(ctx, time.Now()); err == nil {
 		t.Fatal("cancelled maintenance succeeded")
 	}
 	check := func(want string) {
@@ -63,7 +63,7 @@ func TestHealthShowsFailedArchiveAndRecovery(t *testing.T) {
 		}
 	}
 	check("degraded")
-	if err := st.MaintainHistory(context.Background(), t.TempDir(), 0, time.Now()); err != nil {
+	if err := st.MaintainPlainHistory(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	check("ok")

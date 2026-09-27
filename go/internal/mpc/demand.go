@@ -132,11 +132,12 @@ func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent, n
 	}
 
 	type monthAcc struct {
-		id       string
-		already  []float64
-		hours    []DemandHour
-		elapsed  [][2]int64
-		elapsedI []int
+		id         string
+		already    []float64
+		alreadyDay map[string]int // local day → index in already
+		hours      []DemandHour
+		elapsed    [][2]int64
+		elapsedI   []int
 	}
 	months := make(map[string]*monthAcc)
 	var order []string
@@ -199,21 +200,38 @@ func bindDemandCharges(slots []Slot, pricePerKW float64, topN int, vatPercent, n
 			for i, kind := range lookKind {
 				key := lookMonth[i]
 				if kind == "already" {
+					if i >= len(lookHour) {
+						continue
+					}
+					hour := lookHour[i]
 					m := months[key]
 					if m == nil {
-						if i >= len(lookHour) {
-							continue
-						}
-						m = acc(lookHour[i])
+						m = acc(hour)
 					}
 					duration := look[i][1] - look[i][0]
 					if duration <= 0 || float64(covered[i]) < demandCoverageFloor*float64(duration) {
 						continue
 					}
+					// History follows the rule the planned hours carry: a
+					// night hour counts at its weight, and each local day
+					// contributes one peak.
+					kw := wh[i] * 3600 / float64(duration)
+					if hour.weight > 0 {
+						kw *= hour.weight
+					}
+					day := hour.start.Format("2006-01-02")
+					if j, ok := m.alreadyDay[day]; ok {
+						m.already[j] = max(m.already[j], kw)
+						continue
+					}
 					if len(m.already) >= maxDemandAlreadyKW {
 						continue
 					}
-					m.already = append(m.already, wh[i]*3600/float64(duration))
+					if m.alreadyDay == nil {
+						m.alreadyDay = make(map[string]int)
+					}
+					m.alreadyDay[day] = len(m.already)
+					m.already = append(m.already, kw)
 					continue
 				}
 				m := months[key]
@@ -257,12 +275,12 @@ func slotEndMs(slot Slot) (int64, bool) {
 	return end, true
 }
 
-func (s *Service) demandChargesFor(slots []Slot, now time.Time) []DemandCharge {
-	if s == nil || s.DemandPricePerKW <= 0 {
+func (s *Service) demandChargesFor(site SiteEconomics, slots []Slot, now time.Time) []DemandCharge {
+	if s == nil || site.DemandPricePerKW <= 0 {
 		return nil
 	}
-	loc := siteLocation(s.Timezone)
-	return bindDemandCharges(slots, s.DemandPricePerKW, s.DemandTopN, s.VATPercent, s.DemandNightWeight, loc, now, s.importEnergy)
+	loc := siteLocation(site.Timezone)
+	return bindDemandCharges(slots, site.DemandPricePerKW, site.DemandTopN, site.VATPercent, site.DemandNightWeight, loc, now, s.importEnergy)
 }
 
 func (s *Service) importEnergy(intervals [][2]int64) ([]float64, []int64) {
