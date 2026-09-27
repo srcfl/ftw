@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -157,7 +156,7 @@ func runPostDriver(t *testing.T, env *HostEnv, targetURL string) (ok bool, errTe
 	return false, "other"
 }
 
-func TestLuaHTTPPost302DoesNotWriteAck(t *testing.T) {
+func TestLuaHTTPPost302IsNotFollowed(t *testing.T) {
 	var followUps atomic.Int64
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		followUps.Add(1)
@@ -173,12 +172,6 @@ func TestLuaHTTPPost302DoesNotWriteAck(t *testing.T) {
 	defer redirector.Close()
 
 	env := NewHostEnv("post-302", telemetry.NewStore()).WithHTTP()
-	env.RuntimePolicy = &RuntimePolicy{
-		PackageID:   "com.sourceful.driver.test",
-		Permissions: map[string]bool{"http.post": true},
-	}
-	env.writePhase = "command"
-	env.writeDeadline = time.Now().Add(time.Minute)
 
 	ok, deniedBy := runPostDriver(t, env, redirector.URL)
 	if ok {
@@ -189,9 +182,6 @@ func TestLuaHTTPPost302DoesNotWriteAck(t *testing.T) {
 	}
 	if followUps.Load() != 0 {
 		t.Fatalf("redirect target was reached %d times — the write was converted to a GET", followUps.Load())
-	}
-	if env.writeEvidence["write_ack"] {
-		t.Fatal("302 GET must not record write_ack")
 	}
 }
 

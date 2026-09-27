@@ -215,18 +215,11 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 		a.prefs.ApplyExportFromMode(string(m), save)
 	}
 	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
-		// Forced replan, off this goroutine. mpc.SetMode replans before it
-		// returns, and planning can take longer than the app
-		// waits for a command result — so a mode change that had already
-		// been applied and read back was reported "unconfirmed" purely
-		// because the planner was slow. The mode itself is already set and
-		// persisted above; the plan push that follows the replan reaches
-		// the app on its own.
-		//
-		// WithoutCancel: the replan belongs to the mode change, not to the
-		// session that asked for it. A phone that drops its socket right
-		// after tapping must not abort the planner mid-run.
-		go a.mpc.SetMode(context.WithoutCancel(ctx), mm)
+		// mpc.SetMode replans in the background and returns at once, so a
+		// slow planner cannot make an applied mode change look
+		// "unconfirmed", and a phone that drops its socket cannot abort
+		// the replan. The plan push that follows reaches the app on its own.
+		a.mpc.SetMode(mm)
 	}
 	return nil
 }

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -111,35 +110,24 @@ end`), 0600); err != nil {
 			if deviceRequests.Load() != 0 {
 				t.Fatal("OAuth exception reached a device write path")
 			}
-			// A write scope must not turn a read-only OAuth grant into a device
-			// write grant, even when local HTTP write capability is configured.
+			// Local HTTP write capability must not turn a read-only OAuth grant
+			// into a device write grant.
 			env.WithHTTPAllowWrite()
-			env.writePhase = "command"
-			env.writeDeadline = time.Now().Add(time.Minute)
 			if err := env.allowWrite("http.post"); err == nil {
-				t.Fatal("read-only POST escaped through command write scope")
-			}
-			if env.writeAttempts != 0 {
-				t.Fatal("auth or rejected device POST spent the write budget")
+				t.Fatal("read-only POST escaped through local allow_write")
 			}
 		})
 	}
 }
 
-func TestReadOnlyDriverMaySignInOutsideAWriteScope(t *testing.T) {
+func TestReadOnlyDriverMaySignInAlthoughItCannotWrite(t *testing.T) {
 	env := &HostEnv{RuntimePolicy: readOnlyAuthPostPolicy("/oauth/token")}
 
-	// No write scope is open -- this is what init and poll look like.
 	if err := env.allowWrite("http.post"); err == nil {
-		t.Fatal("allowWrite should still refuse a POST outside a write scope")
+		t.Fatal("allowWrite should still refuse a read-only driver's POST")
 	}
 	if !env.allowAuthPost("https://api.myuplink.com/oauth/token") {
 		t.Fatal("the declared sign-in must be allowed from init or poll")
-	}
-	// A token refresh is driven by expiry, not by a caller, so it must not
-	// spend the write budget that a real command depends on.
-	if env.writeAttempts != 0 {
-		t.Fatalf("sign-in consumed the write budget: %d", env.writeAttempts)
 	}
 }
 
@@ -172,7 +160,7 @@ func TestSignInExemptionRequiresBeingDeclared(t *testing.T) {
 	}
 
 	// Declared but not read-only: a controlling driver has no exemption to
-	// take, and must not gain a POST path that skips the write scope.
+	// take, and must not gain a POST path that skips allowWrite.
 	control := readOnlyAuthPostPolicy("/oauth/token")
 	control.ReadOnly = false
 	env = &HostEnv{RuntimePolicy: control}

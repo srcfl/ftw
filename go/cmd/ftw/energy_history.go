@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"math"
 
-	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -49,8 +48,8 @@ func confirmedEnergyDeviceID(current state.Device, known []state.Device) string 
 // buildEnergyObservations translates current telemetry into independent,
 // unsigned ledger directions. It does not attribute PV to individual loads:
 // the observed household consumer remains a site-balance observation only.
-func buildEnergyObservations(st *state.Store, tel *telemetry.Store, ctrl *control.State, hp state.HistoryPoint, identity energyIdentityLookup) []state.EnergyObservation {
-	if st == nil || tel == nil || ctrl == nil {
+func buildEnergyObservations(st *state.Store, tel *telemetry.Store, ctrl tickPersistControl, hp state.HistoryPoint, identity energyIdentityLookup) []state.EnergyObservation {
+	if st == nil || tel == nil {
 		return nil
 	}
 	out := make([]state.EnergyObservation, 0, 16)

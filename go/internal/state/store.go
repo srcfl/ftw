@@ -1038,17 +1038,6 @@ func (s *Store) migrate() error {
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_active_path
 			ON driver_repo_installs(logical_path) WHERE active = 1`,
-		`CREATE TABLE IF NOT EXISTS driver_command_results (
-			id TEXT PRIMARY KEY NOT NULL,
-			driver_name TEXT NOT NULL,
-			command TEXT NOT NULL,
-			status TEXT NOT NULL,
-			code TEXT NOT NULL,
-			completed_at_ms INTEGER NOT NULL,
-			result_json TEXT NOT NULL
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_driver_command_results_completed
-			ON driver_command_results(completed_at_ms DESC)`,
 
 		// Cross-component update audit. The operation key survives a Core
 		// restart, allowing the new process to finish the event that the old
@@ -1094,6 +1083,13 @@ func (s *Store) migrate() error {
 		// until the planner moved to published prices only. Nothing reads it
 		// now, and an older release restores its model from it after a
 		// rollback. Do not reuse the key.
+		//
+		// The driver_command_results table and its
+		// idx_driver_command_results_completed index held results from the
+		// signed control v2 driver runtime, which was removed. Nothing wrote
+		// to them after Device Support packages were retired, and nothing
+		// ever read them. Existing boxes keep them untouched. Do not reuse
+		// the names.
 
 	}
 	for _, stmt := range stmts {
@@ -1958,7 +1954,10 @@ type PricePoint struct {
 	FetchedAtMs int64   `json:"fetched_at_ms"`
 }
 
-// SavePrices upserts a batch of price rows (slot duration per-row).
+// SavePrices upserts a batch of price rows (slot duration per-row). Each row
+// first removes the cached rows of its zone that it overlaps, so a day
+// fetched again at another resolution replaces the old rows instead of
+// leaving an overlapping timeline that the planner rejects.
 func (s *Store) SavePrices(pts []PricePoint) error {
 	if len(pts) == 0 {
 		return nil
@@ -1968,6 +1967,15 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 		return err
 	}
 	defer tx.Rollback()
+	// A cached row that starts before a new one can still reach into it.
+	// maxSlotPadMs bounds how far back, as it does for cost reads.
+	overlapping, err := tx.Prepare(`DELETE FROM prices
+		WHERE zone = ? AND slot_ts_ms > ? AND slot_ts_ms < ?
+			AND slot_ts_ms + slot_len_min * 60000 > ?`)
+	if err != nil {
+		return err
+	}
+	defer overlapping.Close()
 	stmt, err := tx.Prepare(`INSERT INTO prices
 		(zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1985,6 +1993,10 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 		slot := p.SlotLenMin
 		if slot <= 0 {
 			slot = 60
+		}
+		endMs := p.SlotTsMs + int64(slot)*60_000
+		if _, err := overlapping.Exec(p.Zone, p.SlotTsMs-maxSlotPadMs, endMs, p.SlotTsMs); err != nil {
+			return err
 		}
 		if _, err := stmt.Exec(p.Zone, p.SlotTsMs, slot, p.SpotOreKwh, p.TotalOreKwh, p.Source, p.FetchedAtMs); err != nil {
 			return err

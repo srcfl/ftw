@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -247,7 +248,8 @@ func TestReplanWithoutSaveDiagAssignsDistinctDecisionIDs(t *testing.T) {
 }
 
 func TestReplanRejectsTimelineItCannotRestore(t *testing.T) {
-	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	dir := t.TempDir()
+	st, err := state.Open(filepath.Join(dir, "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,11 +297,17 @@ func TestReplanRejectsTimelineItCannotRestore(t *testing.T) {
 		t.Fatalf("initial valid plan = %+v", accepted)
 	}
 
-	// The state store permits different starts whose durations overlap. Make
-	// the first row cover the second, then prove the service retains the last
-	// restorable plan without assigning or persisting a new decision ID.
-	prices[0].SlotLenMin = 60
-	if err := st.SavePrices(prices[:1]); err != nil {
+	// SavePrices no longer stores overlapping rows, but a cache written by an
+	// earlier version can still hold them. Make the first row cover the
+	// second, then prove the service retains the last restorable plan
+	// without assigning or persisting a new decision ID.
+	cache, err := sql.Open("sqlite", filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	if _, err := cache.Exec(`UPDATE prices SET slot_len_min = 60 WHERE zone = 'SE3' AND slot_ts_ms = ?`,
+		prices[0].SlotTsMs); err != nil {
 		t.Fatal(err)
 	}
 	got := svc.Replan(context.Background())

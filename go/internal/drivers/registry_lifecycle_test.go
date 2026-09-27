@@ -9,8 +9,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// lifecycleHookDriver records which hand-back hooks ran. Metrics outlive
-// Registry.Remove, so the test can read them after the driver is gone.
+// lifecycleHookDriver records which hand-back hooks ran, as metrics.
 const lifecycleHookDriver = `
 function driver_init(config)
     host.set_poll_interval(1000)
@@ -24,6 +23,18 @@ function driver_cleanup()
     host.emit_metric("cleanup_called", 1)
 end
 `
+
+// emittedHooks drains every metric sample the drivers emitted, keyed
+// "driver:metric". Registry.Remove drops a driver's latest metric snapshots
+// with the rest of its live state, but samples still waiting for the history
+// writer survive it, so a hook that ran during teardown stays visible.
+func emittedHooks(tel *telemetry.Store) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range tel.FlushSamples() {
+		out[s.Driver+":"+s.Metric] = true
+	}
+	return out
+}
 
 func TestObserveOnlyStopNeverWritesDefaultOrCleanup(t *testing.T) {
 	path := writeTestDriver(t, lifecycleHookDriver)
@@ -54,8 +65,9 @@ func TestObserveOnlyStopNeverWritesDefaultOrCleanup(t *testing.T) {
 			if err := tc.stop(r, cfg); err != nil {
 				t.Fatal(err)
 			}
+			emitted := emittedHooks(tel)
 			for _, metric := range []string{"default_called", "cleanup_called"} {
-				if _, _, ok := tel.LatestMetric("vpp", metric); ok {
+				if emitted["vpp:"+metric] {
 					t.Fatalf("stopping an observe_only driver ran %s", metric)
 				}
 			}
@@ -86,7 +98,7 @@ func TestRemoveRunsDriverCleanupAfterShutdownDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Remove("d1")
-	if _, _, ok := tel.LatestMetric("d1", "cleanup_called"); !ok {
+	if !emittedHooks(tel)["d1:cleanup_called"] {
 		t.Fatal("driver_cleanup did not run on Remove; its hand-back (e.g. releasing a PV curtailment) was lost")
 	}
 }
@@ -109,8 +121,9 @@ end
 	if err := r.AddProbe(context.Background(), config.Driver{Name: "failed-probe", Lua: failingInit}); err == nil {
 		t.Fatal("probe with failing driver_init was accepted")
 	}
+	emitted := emittedHooks(tel)
 	for _, name := range []string{"probe", "failed-probe"} {
-		if _, _, ok := tel.LatestMetric(name, "cleanup_called"); ok {
+		if emitted[name+":cleanup_called"] {
 			t.Fatalf("%s teardown ran driver_cleanup, which may write the device", name)
 		}
 	}

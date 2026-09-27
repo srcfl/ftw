@@ -156,6 +156,56 @@ func TestEllevioNightWeightIncludesWeekendsAndHalvesNightHours(t *testing.T) {
 	}
 }
 
+// Past hours this month follow the same tariff rule as planned hours. An EV
+// that drew 8 kW at 02:00 set a 4 kW Ellevio peak, not 8 kW, and several hot
+// hours on one day count as that day's one peak.
+func TestEllevioAlreadyKWWeighsNightsAndKeepsOnePeakPerDay(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 9, 10, 7, 0, 0, loc)
+	start := time.Date(2026, 9, 9, 10, 0, 0, 0, loc)
+	slots := []Slot{
+		{StartMs: start.UnixMilli(), ExecutionStartMs: now.UnixMilli(), LenMin: 60, PriceOre: 100},
+		{StartMs: start.Add(time.Hour).UnixMilli(), LenMin: 60, PriceOre: 100},
+	}
+	evNight := time.Date(2026, 9, 8, 2, 0, 0, 0, loc).UnixMilli()
+	importWh := func(intervals [][2]int64) ([]float64, []int64) {
+		wh := make([]float64, len(intervals))
+		cov := make([]int64, len(intervals))
+		for i, window := range intervals {
+			cov[i] = window[1] - window[0]
+			switch {
+			case window[0] == evNight:
+				wh[i] = 8000
+			case window[0] == evNight+time.Hour.Milliseconds():
+				wh[i] = 7000
+			default:
+				wh[i] = 1000
+			}
+		}
+		return wh, cov
+	}
+	got := bindDemandCharges(slots, 7000, 3, 0, 0.5, loc, now, importWh)
+	if len(got) != 1 {
+		t.Fatalf("charges=%+v", got)
+	}
+	already := got[0].AlreadyKW
+	if len(already) != 9 {
+		t.Fatalf("already_kw=%v, want one peak for each of 1–9 September", already)
+	}
+	for i, kw := range already {
+		want := 1.0
+		if i == 7 { // 8 September
+			want = 4
+		}
+		if kw != want {
+			t.Fatalf("already_kw=%v, want 4 kW on 8 September and 1 kW on other days", already)
+		}
+	}
+}
+
 func TestBindDemandChargesSkipsUnalignedCurrentHour(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 9, 9, 10, 17, 0, 0, loc)

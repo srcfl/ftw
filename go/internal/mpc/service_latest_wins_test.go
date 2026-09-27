@@ -253,10 +253,14 @@ func TestReplanNewestRequestWinsWhenOlderSolveFinishesLast(t *testing.T) {
 
 	// The second solve starts after the mode change and finishes while the
 	// first solve remains blocked.
-	svc.SetMode(context.Background(), ModeArbitrage)
+	svc.SetMode(ModeArbitrage)
 	if mode := <-optimizer.secondMode; mode != ModeArbitrage {
 		t.Fatalf("second solve mode = %q, want %q", mode, ModeArbitrage)
 	}
+	// SetMode solves in the background; the diagnostic is saved after the
+	// plan is published.
+	gotSaved := <-saved
+	waitForRequestedReplans(t, svc)
 
 	published := svc.Latest()
 	if published == nil || published.Solver == nil || published.Solver.Status != "new-arbitrage" {
@@ -265,8 +269,8 @@ func TestReplanNewestRequestWinsWhenOlderSolveFinishesLast(t *testing.T) {
 	if published.DecisionID != testDecisionID1 {
 		t.Fatalf("published decision ID = %q, want %q", published.DecisionID, testDecisionID1)
 	}
-	if got := <-saved; got.mode != ModeArbitrage || got.reason != "mode_changed" || got.decisionID != published.DecisionID {
-		t.Fatalf("saved diagnostic = %+v, want arbitrage/mode_changed", got)
+	if gotSaved.mode != ModeArbitrage || gotSaved.reason != "mode_changed" || gotSaved.decisionID != published.DecisionID {
+		t.Fatalf("saved diagnostic = %+v, want arbitrage/mode_changed", gotSaved)
 	}
 
 	close(optimizer.releaseFirst)
@@ -327,11 +331,7 @@ func TestNewerReplanCancelsOlderSolveBeforePublishing(t *testing.T) {
 		t.Fatal("first solve did not start")
 	}
 
-	newDone := make(chan struct{})
-	go func() {
-		svc.SetMode(context.Background(), ModeArbitrage)
-		close(newDone)
-	}()
+	svc.SetMode(ModeArbitrage)
 	select {
 	case <-optimizer.firstCanceled:
 	case <-time.After(time.Second):
@@ -360,11 +360,7 @@ func TestNewerReplanCancelsOlderSolveBeforePublishing(t *testing.T) {
 	}
 
 	close(optimizer.releaseSecond)
-	select {
-	case <-newDone:
-	case <-time.After(time.Second):
-		t.Fatal("newer solve did not finish")
-	}
+	waitForRequestedReplans(t, svc)
 	published := svc.Latest()
 	if published == nil || published.Solver == nil || published.Solver.Status != "new-arbitrage" {
 		t.Fatalf("newer plan was not published: %+v", published)

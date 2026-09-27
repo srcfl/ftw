@@ -616,7 +616,10 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 }
 
 // Match startup and normal reload without persisting derived battery limits.
-// Recovery uses this path too; Originals must remain the raw config.
+// Every API restart of a configured driver goes through here (repository
+// install and recovery, the Restart button, drafts, OAuth token refresh), so
+// driver_init never falls back to the driver's own SoC window. Originals must
+// remain the raw config.
 func (s *Server) restartDriverWithBatterySoCBounds(ctx context.Context, driver config.Driver) error {
 	s.deps.CfgMu.RLock()
 	runtimeDriver := config.WithBatterySoCBounds([]config.Driver{driver}, s.deps.Cfg.Batteries)[0]

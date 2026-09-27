@@ -1,7 +1,6 @@
 package drivers
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,9 +118,8 @@ type HostEnv struct {
 	// callers / tests can inspect what was granted.
 	TCPAllowedHosts []string
 	Start           time.Time // monotonic start; host.millis() computed from here
-	// RuntimePolicy is nil for bundled, local and legacy repository drivers. A
-	// signed read-only policy denies writes in every phase. A signed v2 control
-	// policy also limits writes to a bounded command/default-mode call.
+	// RuntimePolicy is nil for bundled, local and control-capable signed
+	// drivers. A signed read-only policy denies writes in every phase.
 	RuntimePolicy *RuntimePolicy
 	// ProbeReadOnly denies every mutating host verb. Fingerprint probes set
 	// this so a buggy driver_fingerprint cannot reconfigure hardware: bundled
@@ -180,11 +178,6 @@ type HostEnv struct {
 	// closure (see registry.go SecretPersister). The host limits each value
 	// to 1 MiB and checks signed secret-key grants for managed drivers.
 	PersistSecret func(key, value string) error
-	writePhase    string
-	writeDeadline time.Time
-	writeAttempts int
-	writeCount    int
-	writeEvidence map[string]bool
 
 	// Poll-scoped Modbus evidence prevents a Modbus driver from turning failed
 	// reads into fresh zero-valued telemetry. The Lua runtime holds emissions
@@ -234,62 +227,15 @@ func (h *HostEnv) permissionAllowed(permission string) bool {
 	return h.RuntimePolicy == nil || h.RuntimePolicy.allows(permission)
 }
 
-func (h *HostEnv) beginWriteScope(phase string, deadline time.Time) error {
-	if h.RuntimePolicy == nil {
-		return nil
-	}
-	if !h.RuntimePolicy.IsControlV2() {
-		return errors.New("managed driver has an unsupported control runtime")
-	}
-	if phase != "command" && phase != "default" {
-		return fmt.Errorf("invalid driver write phase %q", phase)
-	}
-	if deadline.IsZero() || !time.Now().Before(deadline) {
-		return errors.New("driver write scope has expired")
-	}
-	h.mu.Lock()
-	h.writePhase = phase
-	h.writeDeadline = deadline
-	h.writeAttempts = 0
-	h.writeCount = 0
-	h.writeEvidence = make(map[string]bool)
-	h.mu.Unlock()
-	return nil
-}
-
-func (h *HostEnv) endWriteScope() (int, []string) {
-	if h.RuntimePolicy == nil {
-		return 0, nil
-	}
-	h.mu.Lock()
-	writes := h.writeCount
-	evidence := make([]string, 0, len(h.writeEvidence))
-	for _, name := range []string{"write_ack", "vendor_ack", "readback"} {
-		if h.writeEvidence[name] {
-			evidence = append(evidence, name)
-		}
-	}
-	h.writePhase = ""
-	h.writeDeadline = time.Time{}
-	h.writeAttempts = 0
-	h.writeCount = 0
-	h.writeEvidence = nil
-	h.mu.Unlock()
-	return writes, evidence
-}
-
-// allowAuthPost reports whether this POST is the sign-in the signed package
-// declared, and so may proceed outside the write phases.
+// allowAuthPost reports whether this POST is the sign-in the signed manifest
+// declared, and so may proceed although allowWrite refuses the driver.
 //
 // A read-only driver that reads a vendor cloud cannot read anything until it
-// has exchanged a token, and it exchanges one from init or poll -- the phases
-// allowWrite refuses, for good reason, since nothing there can carry a command
-// lease. Authenticating is a precondition for reading rather than a write to
-// the device, so it is admitted here instead, confined to the single path the
-// signed manifest names and only for a driver published read-only. It does not
-// consume the write budget: a token refresh is driven by expiry, not by a
-// caller, and spending the budget on it would leave the driver unable to read
-// once its token aged out.
+// has exchanged a token, and it exchanges one from init or poll. allowWrite
+// refuses every write from a read-only driver, for good reason.
+// Authenticating is a precondition for reading rather than a write to the
+// device, so it is admitted here instead, confined to the single path the
+// signed manifest names and only for a driver published read-only.
 func (h *HostEnv) allowAuthPost(rawURL string) bool {
 	if h.RuntimePolicy == nil || !h.RuntimePolicy.ReadOnly {
 		return false
@@ -309,52 +255,12 @@ func (h *HostEnv) allowWrite(permission string) error {
 	if h.ProbeReadOnly {
 		return fmt.Errorf("%s: fingerprint probe cannot write", permission)
 	}
-	if h.RuntimePolicy == nil {
-		return nil
-	}
-	if h.RuntimePolicy.IsReadOnly() {
+	// Every policy validate accepts is read-only. Refuse any other policy
+	// too, so a managed driver never writes in any phase.
+	if h.RuntimePolicy != nil {
 		return fmt.Errorf("%s: read-only driver cannot write", permission)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.RuntimePolicy.allows(permission) {
-		return fmt.Errorf("%s: permission not granted by signed package", permission)
-	}
-	if h.writePhase != "command" && h.writePhase != "default" {
-		return fmt.Errorf("%s: write is not allowed during init, poll, or cleanup", permission)
-	}
-	if h.writeDeadline.IsZero() || !time.Now().Before(h.writeDeadline) {
-		h.writePhase = ""
-		return fmt.Errorf("%s: write scope expired", permission)
-	}
-	if h.writeAttempts >= h.RuntimePolicy.maxWrites() {
-		return fmt.Errorf("%s: write budget exhausted", permission)
-	}
-	h.writeAttempts++
 	return nil
-}
-
-func (h *HostEnv) recordWriteEvidence(name string) {
-	if h.RuntimePolicy == nil {
-		return
-	}
-	h.mu.Lock()
-	if h.writePhase == "command" || h.writePhase == "default" {
-		if name == "write_ack" {
-			h.writeCount++
-		}
-		// Readback proves an applied write only when the read happened after
-		// at least one successful host write in this scope.
-		if name == "readback" && h.writeCount == 0 {
-			h.mu.Unlock()
-			return
-		}
-		if h.writeEvidence == nil {
-			h.writeEvidence = make(map[string]bool)
-		}
-		h.writeEvidence[name] = true
-	}
-	h.mu.Unlock()
 }
 
 func (h *HostEnv) beginPollEvidence() {
@@ -918,29 +824,6 @@ func (h *HostEnv) SetMAC(mac string) {
 	h.mu.Unlock()
 }
 
-// ---- MQTT proxy ----
-
-func (h *HostEnv) mqttSubscribe(ctx context.Context, topic string) error {
-	if h.MQTT == nil {
-		return ErrNoCapability
-	}
-	return h.MQTT.Subscribe(topic)
-}
-
-func (h *HostEnv) mqttPublish(ctx context.Context, topic string, payload []byte) error {
-	if h.MQTT == nil {
-		return ErrNoCapability
-	}
-	return h.MQTT.Publish(topic, payload)
-}
-
-func (h *HostEnv) mqttPollMessages() ([]MQTTMessage, error) {
-	if h.MQTT == nil {
-		return nil, ErrNoCapability
-	}
-	return h.MQTT.PopMessages(), nil
-}
-
 // ---- Modbus proxy ----
 
 func (h *HostEnv) modbusRead(addr, count uint16, kind int32) ([]uint16, error) {
@@ -951,20 +834,6 @@ func (h *HostEnv) modbusRead(addr, count uint16, kind int32) ([]uint16, error) {
 	regs, err := h.Modbus.Read(addr, count, kind)
 	h.recordPollModbusRead(err)
 	return regs, err
-}
-
-func (h *HostEnv) modbusWriteSingle(addr, value uint16) error {
-	if h.Modbus == nil {
-		return ErrNoCapability
-	}
-	return h.Modbus.WriteSingle(addr, value)
-}
-
-func (h *HostEnv) modbusWriteMulti(addr uint16, values []uint16) error {
-	if h.Modbus == nil {
-		return ErrNoCapability
-	}
-	return h.Modbus.WriteMulti(addr, values)
 }
 
 // describe explains a poll in the terms that decide whether its readings
