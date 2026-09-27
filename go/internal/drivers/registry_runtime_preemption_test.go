@@ -40,6 +40,7 @@ func (r *blockedRuntime) DefaultMode(context.Context) error {
 	return nil
 }
 func (r *blockedRuntime) Cleanup(context.Context) error { return nil }
+func (r *blockedRuntime) Discard()                      {}
 func (r *blockedRuntime) Env() *HostEnv                 { return r.env }
 
 func TestSendDefaultSurvivesFullStaleCommandQueue(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/apiauth"
+	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
@@ -596,6 +597,36 @@ func TestGetConfigDoesNotContainLANPasswordHash(t *testing.T) {
 	if strings.Contains(string(onDisk), "$argon2id$") || strings.Contains(string(onDisk), testHousePassword) {
 		t.Fatalf("config.yaml leaked the house secret: %s", onDisk)
 	}
+}
+
+// The app passthrough builds its requests with a loopback RemoteAddr. An
+// owner's session, even with a step-up, is not the box, so it cannot be the
+// one that first turns the house password on.
+func TestAuthPasswordFirstEnableRefusedOverAppSession(t *testing.T) {
+	resetLANGuesses(t)
+	lan := newLANAuthServer(t)
+	rig := newAppSession(t, apiauth.RoleOwner, func(d *Deps) {
+		d.State = lan.deps.State
+		d.Cfg = lan.deps.Cfg
+		d.CfgMu = lan.deps.CfgMu
+		d.ConfigPath = lan.deps.ConfigPath
+		d.SaveConfig = lan.deps.SaveConfig
+		d.MutationPolicy = lan.deps.MutationPolicy
+	})
+
+	body := []byte(`{"password":"` + testHousePassword + `","enabled":true}`)
+	status, code, raw := rig.call(t, 1, appproto.APIReq{
+		Method: appproto.APIPost, Path: "/api/auth/password", Body: body, StepUp: true,
+	})
+	if status != http.StatusForbidden {
+		t.Fatalf("session first enable = %d %q (body=%s), want 403", status, code, raw)
+	}
+	if lan.deps.Cfg.API.LANAuth || lanPasswordConfigured(lan.deps.State) {
+		t.Fatal("an app session turned the house password on")
+	}
+
+	// The box itself still can.
+	enableStoredLANAuth(t, lan)
 }
 
 func TestAuthPasswordDisableClearsHash(t *testing.T) {

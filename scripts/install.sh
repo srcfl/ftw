@@ -180,6 +180,7 @@ if [[ "$mode" == --refresh ]]; then
     as_root systemctl daemon-reload
     unit=changed
   fi
+  as_root sync
   echo "The launcher and the ftw command now come from $tag. Core itself is unchanged; ftw update moves it."
   if [[ "$unit" == changed ]]; then
     echo "The service definition changed. It applies at the next restart: sudo systemctl restart ftw"
@@ -242,6 +243,8 @@ if [[ "$mode" == --resume ]]; then
 else
   printf '%s %s\n' "$tag" "$expected" > "${work}/pending"
   as_root install -m 0600 "${work}/pending" "$pending"
+  # --resume needs this record after a power cut during the copy below.
+  as_root sync
 fi
 if ! id ftw >/dev/null 2>&1; then
   as_root useradd --system --user-group --home-dir /var/lib/ftw --no-create-home ftw
@@ -261,6 +264,9 @@ fi
 as_root install -m 0644 \
   "${stage}/releases/${tag}/deploy/ftw-native.service" \
   /etc/systemd/system/ftw.service
+# Flush the release, its receipt, the command and the unit before the service
+# starts. The launcher cannot start or roll back from a file lost to a power cut.
+as_root sync
 as_root systemctl daemon-reload
 if ! as_root systemctl enable --now ftw.service; then
   as_root systemctl disable --now ftw.service || true

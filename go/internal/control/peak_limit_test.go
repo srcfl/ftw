@@ -1,6 +1,7 @@
 package control
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -101,6 +102,22 @@ func TestSetPeakLimitRejectsNegative(t *testing.T) {
 	}
 	if st.PeakLimitW != 5000 {
 		t.Errorf("a rejected value must not land: PeakLimitW = %.0f, want 5000", st.PeakLimitW)
+	}
+}
+
+// NaN fails every comparison, so it slipped past both checks and turned
+// peak shaving off without a word. Infinity passes when no fuse is set.
+func TestSetPeakLimitRejectsNonFinite(t *testing.T) {
+	for _, st := range []*State{fusedState(), NewState(0, 50, "ferroamp")} {
+		st.PeakLimitW = 5000
+		for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			if err := st.SetPeakLimit(w); err == nil {
+				t.Fatalf("SetPeakLimit(%v) must be rejected (fuse %.0f A)", w, st.SiteFuseAmps)
+			}
+			if st.PeakLimitW != 5000 {
+				t.Fatalf("a rejected %v landed: PeakLimitW = %v, want 5000", w, st.PeakLimitW)
+			}
+		}
 	}
 }
 

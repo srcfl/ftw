@@ -356,18 +356,11 @@ func setupStack(t *testing.T) *stack {
 				// Dispatch
 				s.ctrlMu.Lock()
 				targets := control.ComputeDispatch(s.tel, s.ctrl, s.caps, fuseMaxW)
-				s.ctrlMu.Unlock()
 				finalTargets := targets
 				if name, cmd, active := s.selfTune.CurrentCommand(); active {
-					finalTargets = make([]control.DispatchTarget, 0, len(s.reg.Names()))
-					for _, n := range s.reg.Names() {
-						if n == name {
-							finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: cmd})
-						} else {
-							finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: 0})
-						}
-					}
+					finalTargets = control.SelfTuneDispatch(s.tel, s.ctrl, s.caps, fuseMaxW, name, cmd)
 				}
+				s.ctrlMu.Unlock()
 				for _, t := range finalTargets {
 					payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
 					_ = s.reg.Send(ctx, t.Driver, payload)

@@ -122,6 +122,32 @@ func TestNextDayAheadCatch(t *testing.T) {
 	}
 }
 
+// Asking for tomorrow before about 13:00 finds nothing on a normal day; only
+// a failure after publication, or for today, is worth a warning.
+func TestNotPublishedYet(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		offset int
+		now    time.Time
+		want   bool
+	}{
+		{"tomorrow in the morning", 1, time.Date(2026, 9, 26, 7, 40, 0, 0, loc), true},
+		{"tomorrow just after midnight", 1, time.Date(2026, 9, 26, 0, 40, 0, 0, loc), true},
+		{"tomorrow after publication", 1, time.Date(2026, 9, 26, 13, 30, 0, 0, loc), false},
+		{"tomorrow in winter, UTC clock", 1, time.Date(2026, 12, 1, 11, 30, 0, 0, time.UTC), true},
+		{"tomorrow in winter after publication, UTC clock", 1, time.Date(2026, 12, 1, 12, 30, 0, 0, time.UTC), false},
+		{"today", 0, time.Date(2026, 9, 26, 7, 40, 0, 0, loc), false},
+	} {
+		if got := notPublishedYet(tc.offset, tc.now); got != tc.want {
+			t.Errorf("%s: notPublishedYet = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestNordPoolRejectsCurrencyMismatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

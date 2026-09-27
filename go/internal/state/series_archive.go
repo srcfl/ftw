@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -306,7 +307,14 @@ func (s *Store) ensureParquetHours(ctx context.Context) error {
 		err := s.summarizeParquetDay(ctx, path)
 		s.archiveMu.Unlock()
 		if err != nil {
-			return err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			// One unreadable day must not hold back every later one. The
+			// file stays on disk, since cold history is only removed once
+			// absorbed; retrying it every few seconds would change nothing.
+			slog.Warn("history: a cold sample day could not be summarized and is kept as it is", "path", path, "err", err)
+			continue
 		}
 		if err := pauseMaintenance(ctx); err != nil {
 			return err

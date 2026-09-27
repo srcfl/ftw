@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -473,6 +474,9 @@ type State struct {
 
 	// PI controller (outer, site-level)
 	PI *PIController
+	// meterClampLogged records that the live-meter clamp was already
+	// reported, so it is logged when it engages rather than every tick.
+	meterClampLogged bool
 
 	// Slew + holdoff
 	SlewRateW float64
@@ -1213,6 +1217,11 @@ func (s *State) SetGridTarget(w float64) {
 // and perPhaseOverageW: an incomplete fuse description yields no clamp
 // rather than an invented one.
 func (s *State) SetPeakLimit(w float64) error {
+	// NaN fails every comparison, so it would pass both checks below and
+	// leave `gridW > PeakLimitW` never true: shaving silently off.
+	if math.IsNaN(w) || math.IsInf(w, 0) {
+		return fmt.Errorf("peak_limit_w must be a finite number, got %v", w)
+	}
 	if w < 0 {
 		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
 	}
@@ -1638,6 +1647,12 @@ func ComputeDispatch(
 		}
 	}
 
+	// Every tick past the holdoff decides afresh whether the live-meter
+	// clamp is engaged, so one that ends without it ends the episode and
+	// the next engagement is reported again.
+	var meterClampActive bool
+	defer func() { state.meterClampLogged = meterClampActive }()
+
 	// ---- Read site meter ----
 	rawGridW := 0.0
 	if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
@@ -1782,7 +1797,6 @@ func ComputeDispatch(
 	// removed that motion. A non-following battery would otherwise recreate
 	// the unsafe command on every tick (#816).
 	var meterClampMoveW float64
-	var meterClampActive bool
 	switch {
 	case manualHoldActive:
 		// Drive the aggregate battery toward the operator's setpoint.
@@ -2260,7 +2274,14 @@ func ComputeDispatch(
 		if allowed != targetTotal {
 			meterClampActive = true
 			meterClampMoveW = allowed - currentTotal
-			slog.Warn("dispatch: meter clamp reduced battery target",
+			// Holding the grid at its target is normal operation, not a
+			// fault: report when the clamp engages and keep the per-tick
+			// detail at debug level.
+			level := slog.LevelDebug
+			if !state.meterClampLogged {
+				level = slog.LevelInfo
+			}
+			slog.Log(context.Background(), level, "dispatch: meter clamp reduced battery target",
 				"requested_total_w", targetTotal,
 				"clamped_total_w", allowed,
 				"ideal_target_w", idealTarget,

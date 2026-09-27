@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,8 @@ var (
 	// available. The registry restores the driver's default independently.
 	ErrCommandMayHaveRun = errors.New("driver command may have run")
 	// ErrObserveOnly is returned when a configured telemetry-only driver is
-	// reached through a generic command path instead of the API guard.
+	// reached through a generic command or default path instead of the API
+	// guard.
 	ErrObserveOnly = errors.New("driver is observe_only and cannot be controlled")
 	// ErrReadOnlyDriver rejects dispatch before the declared read-only Lua
 	// command hook can run, even when that hook exists and would accept it.
@@ -184,6 +186,9 @@ type driverRuntime interface {
 	Command(ctx context.Context, cmdJSON []byte) error
 	DefaultMode(ctx context.Context) error
 	Cleanup(ctx context.Context) error
+	// Discard closes the runtime without driver_cleanup, which may write
+	// hardware. Probes and observe_only drivers leave the device alone.
+	Discard()
 	Env() *HostEnv
 }
 
@@ -514,6 +519,15 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	}
 
 	env := NewHostEnv(cfg.Name, r.tel)
+	// runLoop owns the capabilities once the driver is registered. Until then
+	// every failed return closes what it opened: a leaked MQTT client keeps
+	// reconnecting under the same client ID and fights the next Add.
+	registered := false
+	defer func() {
+		if !registered {
+			env.closeCapabilities()
+		}
+	}()
 	env.BatteryCapacityWh = cfg.BatteryCapacityWh
 	env.BatteryTelemetryOnly = cfg.BatteryTelemetryOnly
 	// Wire secret write-back (rotated OAuth tokens). The host must install
@@ -660,7 +674,11 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	// host-level keys injected only at runtime.
 	initCfg := driverInitConfigJSON(initDriverCfg, troubleshootingMode)
 	if err := drv.Init(ctx, initCfg); err != nil {
-		drv.Cleanup(ctx)
+		if cfg.ObserveOnly {
+			drv.Discard()
+		} else {
+			drv.Cleanup(ctx)
+		}
 		return fmt.Errorf("driver_init: %w", err)
 	}
 	if startupDefault && !cfg.ObserveOnly && policy != nil && policy.IsControlV2() {
@@ -737,6 +755,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	if r.tel != nil {
 		r.tel.EnsureDriverHealth(cfg.Name)
 	}
+	registered = true
 	go r.runLoop(rd)
 	slog.Info("driver added", "name", cfg.Name, "path", cfg.Lua)
 	return nil
@@ -897,7 +916,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		}
 		select {
 		case skipDefault := <-rd.stop:
-			if !skipDefault {
+			if skipDefault {
+				rd.driver.Discard()
+			} else {
 				invalidateCommandSequence()
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
 				defaultErr := r.defaultDriver(shutdownCtx, rd, "host_shutdown")
@@ -906,29 +927,14 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					slog.Error("driver failed to enter default mode during shutdown", "name", rd.cfg.Name, "err", defaultErr)
 				}
 				cancel()
+				// The lifecycle context is already canceled. driver_cleanup
+				// gets its own bound so the hand-back it performs (releasing
+				// a PV curtailment, for one) still runs.
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
+				_ = rd.driver.Cleanup(cleanupCtx)
+				cancelCleanup()
 			}
-			_ = rd.driver.Cleanup(ctx)
-			// Tear down capability connections so a subsequent Add
-			// with the same driver name doesn't race an old MQTT
-			// session (broker resolves the conflict by kicking the
-			// newer one on the next connect, and subscribe ACKs get
-			// lost). Modbus TCP connections similarly need an explicit
-			// close so the server side frees the slot.
-			if rd.env.MQTT != nil {
-				_ = rd.env.MQTT.Close()
-			}
-			if rd.env.Modbus != nil {
-				_ = rd.env.Modbus.Close()
-			}
-			if rd.env.Serial != nil {
-				_ = rd.env.Serial.Close()
-			}
-			if rd.env.WS != nil {
-				_ = rd.env.WS.Close()
-			}
-			if rd.env.TCP != nil {
-				_ = rd.env.TCP.Close()
-			}
+			rd.env.closeCapabilities()
 			return
 		case cmd := <-rd.defaultCh:
 			handleDefault(cmd)
@@ -1236,6 +1242,9 @@ func (r *Registry) removeLocked(name string, skipDefault bool) {
 		r.mu.Unlock()
 		return
 	}
+	// Another party owns an observe_only device's actuation (a retailer VPP,
+	// say). Stopping it must not write driver_default_mode or cleanup.
+	skipDefault = skipDefault || rd.cfg.ObserveOnly
 	if !skipDefault {
 		if r.recoveryRequired == nil {
 			r.recoveryRequired = make(map[string]bool)
@@ -1364,7 +1373,8 @@ func (r *Registry) sendWithGeneration(ctx context.Context, name string, payload 
 // SendDefault sends the default/watchdog command to a driver. Defaults use a
 // dedicated one-slot queue so stale normal commands cannot prevent the
 // autonomous path from being accepted. Once accepted, the generation stays
-// blocked until the default succeeds or the recovery timer retries it.
+// blocked until the default succeeds or the recovery timer retries it. An
+// observe_only driver is refused with ErrObserveOnly, as main's watchdog does.
 func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1374,6 +1384,9 @@ func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	r.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("driver %q not found", name)
+	}
+	if rd.cfg.ObserveOnly {
+		return ErrObserveOnly
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1457,6 +1470,7 @@ func (r *Registry) ShutdownAll() {
 // map are restarted. Drivers marked Disabled are treated as "not in the
 // new list" — running ones get stopped, missing ones are not added.
 func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troubleshootingMode bool) {
+	ctx = replacementContext(ctx)
 	// Filter out disabled drivers — they behave like removed from the
 	// registry's perspective but remain in config.yaml for re-enable.
 	active := make([]config.Driver, 0, len(newDrivers))
@@ -1533,7 +1547,7 @@ func (r *Registry) Restart(ctx context.Context, cfg config.Driver) error {
 	if cfg.Disabled {
 		return nil
 	}
-	return r.add(ctx, cfg, true)
+	return r.add(replacementContext(ctx), cfg, true)
 }
 
 // Restart a driver by name using whatever cfg it was last started with.
@@ -1553,7 +1567,18 @@ func (r *Registry) RestartByName(ctx context.Context, name string) error {
 	if cfg.Disabled {
 		return nil
 	}
-	return r.add(ctx, cfg, true)
+	return r.add(replacementContext(ctx), cfg, true)
+}
+
+// replacementContext keeps the caller's values but not its cancellation. A
+// replacement Add runs after the old generation has already stopped, so an
+// HTTP client that disconnects mid-restart must not cancel driver_init and
+// leave the driver (perhaps the site meter) stopped until the next reload.
+func replacementContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
 }
 
 // PollInterval returns the currently requested cadence for a running driver.
@@ -1687,6 +1712,7 @@ func sameDriverConfig(a, b config.Driver) bool {
 		a.BatteryCapacityWh != b.BatteryCapacityWh ||
 		a.BatteryTelemetryOnly != b.BatteryTelemetryOnly ||
 		a.ObserveOnly != b.ObserveOnly ||
+		a.SupportsPVCurtail != b.SupportsPVCurtail ||
 		a.Disabled != b.Disabled ||
 		a.Capabilities.AllowUnverifiedLocal != b.Capabilities.AllowUnverifiedLocal {
 		return false
@@ -1715,6 +1741,25 @@ func sameDriverConfig(a, b config.Driver) bool {
 		return false
 	}
 	if aTCP != nil && !reflect.DeepEqual(aTCP.AllowedHosts, bTCP.AllowedHosts) {
+		return false
+	}
+	// add builds the HTTP and WebSocket grants into the host, so a revoked
+	// allow_write or a rotated TLS pin needs a restart to reach the driver.
+	// slices.Equal treats a nil and an empty allowlist alike, as add does,
+	// so a settings save and its file-watcher reload agree.
+	aHTTP, bHTTP := a.Capabilities.HTTP, b.Capabilities.HTTP
+	if (aHTTP == nil) != (bHTTP == nil) {
+		return false
+	}
+	if aHTTP != nil && (!slices.Equal(aHTTP.AllowedHosts, bHTTP.AllowedHosts) ||
+		aHTTP.TLSPinSHA256 != bHTTP.TLSPinSHA256 || aHTTP.AllowWrite != bHTTP.AllowWrite) {
+		return false
+	}
+	aWS, bWS := a.Capabilities.WebSocket, b.Capabilities.WebSocket
+	if (aWS == nil) != (bWS == nil) {
+		return false
+	}
+	if aWS != nil && !slices.Equal(aWS.AllowedHosts, bWS.AllowedHosts) {
 		return false
 	}
 	// Compare the free-form Config map. Previously omitted, so a changed

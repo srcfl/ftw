@@ -205,6 +205,12 @@ func (s *Server) handleDriverControlRelease(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := s.SendDriverDefault(context.Background(), name); err != nil {
+		// An observe_only driver is never commanded, not even back to its
+		// default; that is a refusal, not a server error.
+		if errors.Is(err, drivers.ErrObserveOnly) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "observe_only": true})
+			return
+		}
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}

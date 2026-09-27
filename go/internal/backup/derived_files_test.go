@@ -10,7 +10,8 @@ import (
 // The state snapshot is rewritten through a temp database and its journal
 // while a backup walks the data dir; on the home box that failed 15-minute
 // backups with "lstat state.db.snapshot.tmp: no such file" and then
-// ".snapshot.tmp-journal". None of it, nor cache.db, belongs in the archive.
+// ".snapshot.tmp-journal". None of it belongs in the archive. The live
+// cache.db files are skipped too; Create archives a consistent copy instead.
 func TestCollectSourcesSkipsDerivedStateFiles(t *testing.T) {
 	dataDir := t.TempDir()
 	for _, name := range []string{

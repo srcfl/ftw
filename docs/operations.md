@@ -71,7 +71,8 @@ holds:
 - `state.db` plus SQLite WAL files — settings, state and learned models;
 - `history.db` — history as SQLite buckets (10 s for 7 days, 1 min for
   90 days, 1 h for 5 years) and the energy ledger;
-- `cache.db` — re-fetchable data;
+- `cache.db` — prices and forecasts; past prices cost the savings history
+  and come back only from a full backup;
 - key files such as `nova.key` — the box's identity; keep them with the data;
 - `drivers/` — custom and managed drivers;
 - `backups/` — full backups, unless `state.backup_dir` points elsewhere.

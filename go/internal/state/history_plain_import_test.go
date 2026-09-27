@@ -111,6 +111,80 @@ func TestAbsorbColdHistoryRetainsAmbiguousCompactedOverlap(t *testing.T) {
 	assertColdImportIntact(t, s, path)
 }
 
+// 2.x wrote raw sample days with no hourly summary. Absorbing cold history
+// must keep such a day until a summary receipt matches the file.
+func TestAbsorbColdHistoryKeepsUnsummarizedSampleDays(t *testing.T) {
+	s := freshStore(t)
+	if err := s.EnableHistoryAggregation(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	day := time.Now().UTC().Add(-40 * 24 * time.Hour).Truncate(24 * time.Hour)
+	hour := day.Add(3 * time.Hour).UnixMilli()
+	cold := t.TempDir()
+	s.coldDir = cold
+	path := filepath.Join(cold, day.Format("2006/01/02.parquet"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rows := []parquetSampleRow{
+		{TsMs: hour + 1000, Driver: "meter", Metric: "grid_w", Value: 10},
+		{TsMs: hour + 2000, Driver: "meter", Metric: "grid_w", Value: 30},
+	}
+	if err := writeParquetDay(path, rows); err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(filepath.Dir(path), ".ftw-buckets-"+day.Format("02")+".pending.db")
+	if err := os.WriteFile(scratch, []byte("scratch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AbsorbColdHistory(ctx, cold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unsummarized sample day removed: %v", err)
+	}
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("archive scratch kept: %v", err)
+	}
+	got, err := s.LoadSeries("meter", "grid_w", hour, hour+HistoryHourResolutionMS-1, 0)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("kept day unreadable: %v %v", got, err)
+	}
+	if err := s.summarizeParquetDay(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	// A day that changed after its summary is not absorbed by that receipt.
+	rows = append(rows, parquetSampleRow{TsMs: hour + 3000, Driver: "meter", Metric: "grid_w", Value: 20})
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeParquetDay(path, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AbsorbColdHistory(ctx, cold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("changed sample day removed: %v", err)
+	}
+	if err := s.summarizeParquetDay(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AbsorbColdHistory(ctx, cold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("summarized sample day kept: %v", err)
+	}
+	var n int64
+	var sum float64
+	if err := s.history.QueryRow(`SELECT h.n,h.sum_value FROM ts_series_hour h JOIN ts_drivers d ON d.id=h.driver_id JOIN ts_metrics m ON m.id=h.metric_id
+ WHERE d.name='meter' AND m.name='grid_w' AND h.hour_ms=?`, hour).Scan(&n, &sum); err != nil || n != 3 || sum != 60 {
+		t.Fatalf("hourly summary n=%d sum=%v err=%v", n, sum, err)
+	}
+}
+
 func coldImportFixture(t *testing.T, width int64) (*Store, string, string, int64) {
 	t.Helper()
 	s := freshStore(t)

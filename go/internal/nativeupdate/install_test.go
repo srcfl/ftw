@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,6 +87,37 @@ func TestInstallArchiveAndSelect(t *testing.T) {
 	}
 	if err := m.InstallArchive(context.Background(), tag, archive, checksum); err != nil {
 		t.Fatalf("same archive must be idempotent: %v", err)
+	}
+}
+
+// A receipt lost to a power cut after commit leaves the launcher unable to
+// start or roll back. Publishing must wait until the receipt is on disk.
+func TestInstallArchiveFlushesReceiptBeforePublishing(t *testing.T) {
+	root := t.TempDir()
+	tag := "v0.131.0-beta.1"
+	archive, checksum := writeArchive(t, root, tag)
+	synced := map[string]bool{}
+	syncFile = func(f *os.File) error {
+		synced[filepath.Base(f.Name())] = true
+		return errors.New("flush failed")
+	}
+	t.Cleanup(func() { syncFile = (*os.File).Sync })
+	m := Manager{Root: root}
+	if err := m.InstallArchive(context.Background(), tag, archive, checksum); err == nil {
+		t.Fatal("published a release whose receipt was not flushed")
+	}
+	if !synced[receiptFile] {
+		t.Fatalf("receipt never flushed: %v", synced)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "releases", tag)); !os.IsNotExist(err) {
+		t.Fatalf("release was published: %v", err)
+	}
+	syncFile = (*os.File).Sync
+	if err := m.InstallArchive(context.Background(), tag, archive, checksum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ReleaseDir(tag); err != nil {
+		t.Fatal(err)
 	}
 }
 

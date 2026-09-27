@@ -1,6 +1,9 @@
 package main
 
 import (
+	"math"
+	"strconv"
+
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 )
@@ -44,4 +47,16 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// protecting inverters that trip below the breaker rating.
 	ctrl.MaxExportW = cfg.Site.MaxExportW
 	return ctrl
+}
+
+// restoredGridTargetW parses the grid target saved in state.db. The Home
+// Assistant bridge once stored "NaN" from an MQTT command; restoring that
+// would poison the PI setpoint on every boot, so a non-finite value is
+// ignored and the configured target stays.
+func restoredGridTargetW(v string) (float64, bool) {
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return f, true
 }

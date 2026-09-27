@@ -164,3 +164,16 @@ func TestBatteryLimitConfigBothZeroUsesHalfC(t *testing.T) {
 		t.Fatalf("both-zero config error produced %+v, want 0.5C 5000 W", targets)
 	}
 }
+
+// A "NaN" saved from an MQTT command must not come back as the PI setpoint
+// on every boot.
+func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
+	for _, stored := range []string{"NaN", "nan", "+Inf", "-Inf", "not-a-number"} {
+		if f, ok := restoredGridTargetW(stored); ok {
+			t.Errorf("restoredGridTargetW(%q) = %v, true; want ignored", stored, f)
+		}
+	}
+	if f, ok := restoredGridTargetW("-1500.0"); !ok || f != -1500 {
+		t.Fatalf("restoredGridTargetW(-1500.0) = %v, %v; want -1500, true", f, ok)
+	}
+}

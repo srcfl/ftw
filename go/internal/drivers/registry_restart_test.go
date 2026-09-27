@@ -92,6 +92,7 @@ func (r *ctxAwareRuntime) DefaultMode(ctx context.Context) error {
 	return ctx.Err()
 }
 func (r *ctxAwareRuntime) Cleanup(ctx context.Context) error { return nil }
+func (r *ctxAwareRuntime) Discard()                          {}
 func (r *ctxAwareRuntime) Env() *HostEnv                     { return r.env }
 
 type cancelAfterStartRuntime struct {
@@ -120,6 +121,7 @@ func (r *cancelAfterStartRuntime) DefaultMode(ctx context.Context) error {
 	return nil
 }
 func (r *cancelAfterStartRuntime) Cleanup(ctx context.Context) error { return nil }
+func (r *cancelAfterStartRuntime) Discard()                          {}
 func (r *cancelAfterStartRuntime) Env() *HostEnv                     { return r.env }
 
 func TestSendDefaultPassesCallerContextToRuntime(t *testing.T) {

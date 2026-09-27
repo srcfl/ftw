@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -57,6 +58,35 @@ func (s *Store) backupCopyYield(ctx context.Context) func() error {
 		}
 		return nil
 	}
+}
+
+// BackupCache writes a consistent copy of cache.db to dstPath. Savings history
+// is costed from the past prices there, and providers send only today and
+// tomorrow, so a restore needs them. It reports false when there is no cache.
+func (s *Store) BackupCache(ctx context.Context, dstPath string) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	db := s.cache
+	if db == nil {
+		// The offline helper opens no cache; read the one Core left behind.
+		path := filepath.Join(filepath.Dir(s.mainDBPath), "cache.db")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		ro, err := sql.Open("sqlite", ReadOnlyDatabaseURI(path))
+		if err != nil {
+			return false, err
+		}
+		defer ro.Close()
+		db = ro
+	}
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dstPath); err != nil {
+		return false, fmt.Errorf("backup cache: %w", err)
+	}
+	return true, nil
 }
 
 // BackupSourceBytes is the on-disk size of state and history files, including

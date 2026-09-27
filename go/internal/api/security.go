@@ -235,7 +235,8 @@ func requiresMutationProtection(r *http.Request) bool {
 }
 
 // protectedReadPath names GET/HEAD routes that must not leak off a public
-// host. Live dashboard reads are not listed here.
+// host. Live dashboard reads are not listed here. Every GET registered at the
+// Local or Configure tier belongs here too; a test sweeps the route table.
 func protectedReadPath(path string) bool {
 	switch path {
 	case "/api/config",
@@ -266,7 +267,8 @@ func protectedReadPath(path string) bool {
 		"/api/notifications/defaults",
 		"/api/notifications/vapid",
 		"/api/device_repository/catalog",
-		"/api/app-link/status":
+		"/api/app-link/status",
+		"/api/ocpp/chargers":
 		return true
 	}
 	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {

@@ -10,6 +10,20 @@ bash -n "$installer"
 bash "$installer" --help > "$work/help"
 grep -q 'exact published native 0.x release' "$work/help"
 
+# A power cut must not lose the pending record or the copied release: each is
+# flushed before the step that depends on it.
+line_of() { grep -nF -- "$1" "$installer" | head -1 | cut -d: -f1; }
+synced_between() {
+  awk -v a="$1" -v b="$2" 'NR > a && NR < b && $1 == "as_root" && $2 == "sync" { found = 1 } END { exit !found }' "$installer"
+}
+pending_line="$(line_of 'install -m 0600 "${work}/pending" "$pending"')"
+copy_line="$(line_of 'as_root cp -a "${stage}/." /opt/ftw/')"
+enable_line="$(line_of 'systemctl enable --now ftw.service')"
+if ! synced_between "$pending_line" "$copy_line" || ! synced_between "$copy_line" "$enable_line"; then
+  echo "installer starts FTW before its pending record and release are on disk" >&2
+  exit 1
+fi
+
 if bash "$installer" > "$work/out" 2>&1; then
   echo "installer accepted a missing tag" >&2
   exit 1
