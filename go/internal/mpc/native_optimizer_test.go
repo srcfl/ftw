@@ -67,9 +67,12 @@ func TestNativeProcessCoreContract(t *testing.T) {
 			}
 		}
 	}
+	// Core applies the PV risk margin to the slots itself (see
+	// EnergyplanOptimizer.Optimize), so a request never carries a scenario
+	// model, even when the margin is set.
 	p.PVForecastSafetyK, p.PVUncertaintyW = 1, 300
-	if plan, err := o.Optimize(context.Background(), slots, p); err != nil || plan.Solver.ScenarioCount != 3 {
-		t.Fatalf("scenario model failed: plan=%+v err=%v", plan.Solver, err)
+	if plan, err := o.Optimize(context.Background(), slots, p); err != nil || plan.Solver.ScenarioCount > 1 {
+		t.Fatalf("a risk margin built a scenario model: plan=%+v err=%v", plan.Solver, err)
 	}
 	p.PVForecastSafetyK = 0
 	if _, err := o.Optimize(context.Background(), slots, p); err != nil {
