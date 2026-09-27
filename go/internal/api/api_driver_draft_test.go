@@ -195,6 +195,47 @@ func TestAnExpiryRacingKeepDoesNotDeleteTheKeptFile(t *testing.T) {
 	}
 }
 
+// A timer that already fired cannot be disarmed. Keep pressed while that expiry
+// holds the update lock must wait for it and must not report a draft as kept
+// after the expiry has put the old driver back.
+func TestKeepWaitsForAnExpiryAlreadyInFlight(t *testing.T) {
+	srv, _, user, _ := draftServer(t)
+	if code, _ := postDraft(t, srv, "demo", `{"lua":`+quote(draftLua)+`,"minutes":1}`); code != 200 {
+		t.Fatal("draft did not start")
+	}
+
+	// expireDraft has taken the lock and is part way through its revert.
+	srv.driverUpdateMu.Lock()
+	type result struct {
+		code int
+		body map[string]any
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, body := postDraftAction(t, srv, "demo", "keep")
+		done <- result{code, body}
+	}()
+	select {
+	case got := <-done:
+		srv.driverUpdateMu.Unlock()
+		t.Fatalf("keep answered %d %v while an expiry held the update lock", got.code, got.body)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !srv.revertDraft("demo.lua") {
+		srv.driverUpdateMu.Unlock()
+		t.Fatal("keep removed the record before the in-flight expiry finished")
+	}
+	srv.driverUpdateMu.Unlock()
+
+	got := <-done
+	if got.code != 409 {
+		t.Fatalf("keep after the expiry = %d %v, want 409", got.code, got.body)
+	}
+	if _, err := os.Stat(filepath.Join(user, "demo.lua")); !os.IsNotExist(err) {
+		t.Fatalf("overlay after the expiry: %v, want the draft gone", err)
+	}
+}
+
 // The timer dies with the process, so the record on disk is what makes the
 // window mean anything across a restart.
 func TestARestartUndoesADraftLeftRunning(t *testing.T) {

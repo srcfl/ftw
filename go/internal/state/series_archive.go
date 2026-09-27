@@ -209,44 +209,6 @@ func (s *Store) mergedSeries(ctx context.Context, coldDir, driver, metric string
 	return out, nil
 }
 
-// Rolloff is mandatory before raw retention. A failed archive never falls
-// through to a DELETE. Retention removes only verified files with summaries.
-func (s *Store) retainSampleHistory(ctx context.Context, days int, now time.Time) error {
-	if s.coldDir == "" {
-		return nil
-	}
-	if _, _, err := s.RolloffToParquet(ctx, s.coldDir); err != nil {
-		return err
-	}
-	if days <= 0 {
-		return nil
-	}
-	if err := s.ensureSeriesHours(ctx); err != nil {
-		return err
-	}
-	paths, err := parquetPaths(s.coldDir, 0, now.UTC().AddDate(0, 0, -days).Truncate(24*time.Hour).UnixMilli()-1)
-	if err != nil {
-		return err
-	}
-	if err := s.lockArchive(ctx); err != nil {
-		return err
-	}
-	defer s.archiveMu.Unlock()
-	for _, path := range paths {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		// Build/verify the aggregate before applying the configured raw retention.
-		if err := s.summarizeParquetDay(ctx, path); err != nil {
-			return err
-		}
-		if err := s.removeArchive(ctx, path); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // A marker binds summaries to the exact file content. Changed or late files
 // rebuild before they are allowed to expire. Only file hashes are persisted.
 func (s *Store) summarizeParquetDay(ctx context.Context, path string) error {
@@ -339,14 +301,6 @@ func (s *Store) onlySeriesSummary(ctx context.Context, driver, metric string, si
 func parquetSummaryKey(path string) string {
 	return filepath.ToSlash(filepath.Join(filepath.Base(filepath.Dir(filepath.Dir(path))), filepath.Base(filepath.Dir(path)), filepath.Base(path)))
 }
-func (s *Store) markParquetSummary(ctx context.Context, path string) error {
-	digest, err := historyFileHashContext(ctx, path)
-	if err != nil {
-		return err
-	}
-	_, err = s.history.ExecContext(ctx, `INSERT INTO ts_archive_days(path,sha256) VALUES(?,?) ON CONFLICT(path) DO UPDATE SET sha256=excluded.sha256`, parquetSummaryKey(path), digest)
-	return err
-}
 
 func (s *Store) lockArchive(ctx context.Context) error {
 	return lockContext(ctx, s.archiveMu.TryLock)
@@ -368,26 +322,4 @@ func lockContext(ctx context.Context, tryLock func() bool) error {
 		case <-timer.C:
 		}
 	}
-}
-
-func (s *Store) removeArchive(ctx context.Context, path string) error {
-	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
-		return err
-	}
-	defer s.archiveViewMu.Unlock()
-	if err := os.Remove(path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-func (s *Store) replaceArchive(ctx context.Context, tmp, path string) error {
-	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
-		return err
-	}
-	defer s.archiveViewMu.Unlock()
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
 }

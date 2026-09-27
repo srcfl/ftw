@@ -96,28 +96,6 @@ func TestStrictSelfConsumptionDoesNotStarveEVDeadline(t *testing.T) {
 	}
 }
 
-// TestUpdateCapacityPropagatesToDefaults covers Codex P1 on PR #121
-// — the hot-reload path now pushes new totals into the running
-// service so the next replan uses them instead of the startup
-// snapshot. The field is mutex-protected because a reactive replan
-// could race the reload.
-func TestUpdateCapacityPropagatesToDefaults(t *testing.T) {
-	s := &Service{Defaults: Params{CapacityWh: 99800, MaxChargeW: 11040, MaxDischargeW: 11040}}
-	s.UpdateCapacity(24800, 8000, 8000)
-	if s.Defaults.CapacityWh != 24800 {
-		t.Errorf("CapacityWh = %f, want 24800", s.Defaults.CapacityWh)
-	}
-	if s.Defaults.MaxChargeW != 8000 {
-		t.Errorf("MaxChargeW = %f, want 8000", s.Defaults.MaxChargeW)
-	}
-	if s.Defaults.MaxDischargeW != 8000 {
-		t.Errorf("MaxDischargeW = %f, want 8000", s.Defaults.MaxDischargeW)
-	}
-	// Nil receiver must no-op, not panic.
-	var nilSvc *Service
-	nilSvc.UpdateCapacity(1, 2, 3)
-}
-
 func TestUpdatePlannerScalarsPropagatesToDefaults(t *testing.T) {
 	s := &Service{Defaults: Params{SoCMin: 0.10, SoCMax: 0.95, ChargeEfficiency: 0.95, DischargeEfficiency: 0.95}, Horizon: 48 * time.Hour, Interval: 15 * time.Minute}
 	s.UpdatePlannerScalars(Params{SoCMin: 0.15, SoCMax: 0.90, ChargeEfficiency: 0.92, DischargeEfficiency: 0.93, ExportOrePerKWh: 40}, 400, 24*time.Hour, 10*time.Minute)

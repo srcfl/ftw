@@ -168,11 +168,7 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		}
 		defer opts.Maintenance.Unlock()
 	}
-	importedHistory, err := opts.State.ImportedHistoryFiles(ctx)
-	if err != nil {
-		return Info{}, err
-	}
-	sources, err := collectSources(dataDir, statePath, outputDir, importedHistory)
+	sources, err := collectSources(dataDir, statePath, outputDir)
 	if err != nil {
 		return Info{}, err
 	}
@@ -342,7 +338,7 @@ func backupExtraBytes(sources []sourceEntry) (int64, error) {
 	return total, nil
 }
 
-func collectSources(dataDir, statePath, outputDir string, importedHistory map[string]bool) ([]sourceEntry, error) {
+func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error) {
 	stateRel, _ := filepath.Rel(dataDir, statePath)
 	cacheRel, _ := filepath.Rel(dataDir, filepath.Join(filepath.Dir(statePath), "cache.db"))
 	outputRel, outputInside := filepath.Rel(dataDir, outputDir)
@@ -393,9 +389,6 @@ func collectSources(dataDir, statePath, outputDir string, importedHistory map[st
 			return nil
 		}
 
-		if importedHistory[p] {
-			return nil
-		}
 		if rel == stateRel || rel == stateRel+"-wal" || rel == stateRel+"-shm" || rel == stateRel+"-journal" {
 			return nil
 		}
@@ -846,71 +839,8 @@ func validateArchiveLink(name, target string, links map[string]string) error {
 	return nil
 }
 
-// Restore verifies and extracts the archive into a new directory, then swaps
-// it into place while retaining the previous data directory beside it.
-// Callers must stop FTW before invoking this function.
-func Restore(archivePath, dataDir string, now time.Time) (RestoreResult, error) {
-	var err error
-	dataDir, err = filepath.Abs(dataDir)
-	if err != nil {
-		return RestoreResult{}, err
-	}
-	parent := filepath.Dir(dataDir)
-	if _, err := verifyInWorkspace(archivePath, parent); err != nil {
-		return RestoreResult{}, err
-	}
-	staging, err := os.MkdirTemp(parent, ".ftw-restore-stage-")
-	if err != nil {
-		return RestoreResult{}, err
-	}
-	keepStaging := false
-	defer func() {
-		if !keepStaging {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	if err := extractArchive(archivePath, staging); err != nil {
-		return RestoreResult{}, err
-	}
-	stamp := now.UTC()
-	if stamp.IsZero() {
-		stamp = time.Now().UTC()
-	}
-	safetyDir := dataDir + ".pre-restore-" + stamp.Format("20060102T150405Z")
-	if _, err := os.Stat(safetyDir); err == nil {
-		return RestoreResult{}, fmt.Errorf("backup: safety directory already exists: %s", safetyDir)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return RestoreResult{}, err
-	}
-	if _, err := os.Stat(dataDir); err == nil {
-		if err := os.Rename(dataDir, safetyDir); err != nil {
-			return RestoreResult{}, fmt.Errorf("backup: preserve current data: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return RestoreResult{}, err
-	} else {
-		safetyDir = ""
-	}
-	if err := os.Rename(staging, dataDir); err != nil {
-		if safetyDir != "" {
-			_ = os.Rename(safetyDir, dataDir)
-		}
-		return RestoreResult{}, fmt.Errorf("backup: activate restored data: %w", err)
-	}
-	if err := syncDir(parent); err != nil {
-		rollbackErr := os.Rename(dataDir, staging)
-		if rollbackErr == nil && safetyDir != "" {
-			rollbackErr = os.Rename(safetyDir, dataDir)
-		}
-		rollbackErr = errors.Join(rollbackErr, syncDir(parent))
-		return RestoreResult{}, errors.Join(fmt.Errorf("backup: sync activated restore: %w", err), rollbackErr)
-	}
-	keepStaging = true
-	return RestoreResult{DataDir: dataDir, SafetyDir: safetyDir}, nil
-}
-
-// RestoreContents restores into an existing persistent mount. Unlike Restore,
-// it does not rename dataDir itself (mount roots cannot be renamed). It first
+// RestoreContents restores into an existing data directory. It never renames
+// dataDir itself, because a mount root cannot be renamed. It first
 // extracts and verifies the complete archive, then moves the current top-level
 // entries into a retained safety directory before activating the restored
 // entries. If activation fails, the moves are reversed before returning.

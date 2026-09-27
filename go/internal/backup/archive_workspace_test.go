@@ -57,29 +57,21 @@ func TestReadOnlyArchiveCanBeVerifiedAndRestored(t *testing.T) {
 	// Restore must use its target filesystem even when the normal temp
 	// directory is unavailable. Neither operation may write at the source.
 	t.Setenv("TMPDIR", filepath.Join(root, "missing-temp"))
-	for _, inPlace := range []bool{false, true} {
-		target := filepath.Join(root, "restored")
-		if inPlace {
-			target = filepath.Join(root, "mounted-target")
-			if err := os.Mkdir(target, 0700); err != nil {
-				t.Fatal(err)
-			}
-			_, err = RestoreContents(info.Path, target, time.Time{})
-		} else {
-			_, err = Restore(info.Path, target, time.Time{})
-		}
-		if err != nil {
-			t.Fatalf("restore inPlace=%v: %v", inPlace, err)
-		}
-		restored, err := state.Open(filepath.Join(target, "state.db"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		goal, ok := restored.LoadConfig("ev_goal")
-		_ = restored.Close()
-		if !ok || goal != "80% by 07:00" {
-			t.Fatalf("restore changed stored goal: %q %v", goal, ok)
-		}
+	target := filepath.Join(root, "mounted-target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RestoreContents(info.Path, target, time.Time{}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := state.Open(filepath.Join(target, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal, ok := restored.LoadConfig("ev_goal")
+	_ = restored.Close()
+	if !ok || goal != "80% by 07:00" {
+		t.Fatalf("restore changed stored goal: %q %v", goal, ok)
 	}
 }
 

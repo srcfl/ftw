@@ -53,30 +53,6 @@ func (o *countingPrimaryOptimizer) Optimize(ctx context.Context, slots []Slot, p
 
 func (o *countingPrimaryOptimizer) Close() error { return nil }
 
-func (testPrimaryOptimizer) OptimizeRecourse(_ context.Context, slots []Slot, p Params, prefix int) (Plan, error) {
-	plan := Optimize(slots, p)
-	plan.Solver = &SolverInfo{
-		Engine: "cvxpy", Backend: "highs", Status: "optimal",
-		Formulation: "stochastic-recourse", ScenarioPolicy: "recourse",
-		PolicyVersion:        "storage-recourse-v1",
-		NonAnticipativeSlots: prefix,
-	}
-	return plan, nil
-}
-
-func (testPrimaryOptimizer) OptimizeMultistage(_ context.Context, slots []Slot, p Params, prefix int) (Plan, error) {
-	plan := Optimize(slots, p)
-	plan.Solver = &SolverInfo{
-		Engine: "cvxpy", Backend: "highs", Status: "optimal",
-		Formulation: "multistage-milp", ScenarioPolicy: "multistage",
-		PolicyVersion:        "storage-multistage-v1",
-		NonAnticipativeSlots: prefix,
-		ServiceCVaRWeight:    1,
-		ServiceCVaRAlpha:     0.95,
-	}
-	return plan, nil
-}
-
 // TestReplanCallsSaveDiag — after a successful replan, the SaveDiag
 // hook fires once with (non-nil Diagnostic, reason). Verifies the hook
 // wiring end-to-end without having to spin up the full stack.

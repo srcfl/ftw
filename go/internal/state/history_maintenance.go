@@ -63,26 +63,19 @@ func (s *Store) HistoryMaintenanceStatus() HistoryMaintenanceStatus {
 	return status
 }
 
-// historyStageBudget bounds one non-archive maintenance stage. Archive stages
-// carry historyArchiveTurn and yield at a committed cursor. A test shrinks
-// the budget so a blocked stage can yield without waiting half a minute.
+// historyStageBudget bounds one maintenance stage. A test shrinks the budget
+// so a blocked stage can yield without waiting half a minute.
 var historyStageBudget = 30 * time.Second
-
-var historyArchiveTurn = 30 * time.Second
 
 // historyStageForTest, when set, may replace one stage body. Production
 // leaves it nil. Tests restore the previous value before returning.
 var historyStageForTest func(name string, ctx context.Context) (replaced bool, err error)
 
-// MaintainHistory runs the existing retention work and records its result.
-// The caller serializes it with backup/restore. Archives yield at committed
-// cursors; other stages have a deadline. A spent budget stays pending so the
-// caller can resume; real failures remain visible.
-func (s *Store) MaintainHistory(parent context.Context, coldDir string, days int, now time.Time) error {
-	return s.maintainHistory(parent, coldDir, days, now, false)
-}
-
-func (s *Store) maintainHistory(parent context.Context, coldDir string, days int, now time.Time, plain bool) error {
+// maintainHistory runs the SQLite retention stages and records the result.
+// The caller serializes it with backup/restore. Each stage has a deadline; a
+// spent budget stays pending so the caller can resume, and real failures
+// remain visible.
+func (s *Store) maintainHistory(parent context.Context, now time.Time) error {
 	if !s.maintenanceRunMu.TryLock() {
 		if err := lockContext(parent, s.maintenanceRunMu.TryLock); err != nil {
 			return err
@@ -108,47 +101,18 @@ func (s *Store) maintainHistory(parent context.Context, coldDir string, days int
 		run  func() error
 	}
 	stages := []maintenanceStage{
-		{"dashboard_rollup", func() error { return s.Prune(ctx) }},
+		{"plain_buckets", func() error { return s.maintainPlainBuckets(ctx, now) }},
+		{"dashboard_rollup", func() error {
+			if !s.aggregateHistory.Load() {
+				return nil
+			}
+			return s.maintainDashboard(ctx, now)
+		}},
 		{"energy_rollup", func() error { _, _, err := s.PruneEnergyLedger(ctx, now); return err }},
-		{"diagnostic_archive", func() error { _, _, err := s.RolloffDiagnosticsToParquet(ctx, coldDir); return err }},
-		{"aggregate_archive", func() error { return s.MaintainAggregateHistory(ctx, coldDir, now) }},
-		{"sample_archive", func() error {
-			if s.aggregateHistory.Load() {
-				_, _, err := s.rolloffSamples(ctx, coldDir, AggregateRecentRetention)
-				return err
-			}
-			return s.PruneHistorySamples(ctx, days, now)
-		}},
-		{"legacy_compaction", func() error {
-			if s.aggregateHistory.Load() {
-				return s.CompactLegacyHistory(ctx, coldDir, now)
-			}
-			return nil
-		}},
 		{"diagnostic_retention", func() error {
-			retention := days
-			if s.aggregateHistory.Load() {
-				retention = 30
-			}
-			_, err := PruneDiagnosticsParquet(coldDir, retention, now)
+			_, err := s.pruneDiagnosticsBefore(ctx, now.Add(-DiagnosticsRecentRetention).UnixMilli())
 			return err
 		}},
-	}
-	if plain {
-		stages = []maintenanceStage{
-			{"plain_buckets", func() error { return s.maintainPlainBuckets(ctx, now) }},
-			{"dashboard_rollup", func() error {
-				if !s.aggregateHistory.Load() {
-					return nil
-				}
-				return s.maintainDashboard(ctx, now)
-			}},
-			{"energy_rollup", func() error { _, _, err := s.PruneEnergyLedger(ctx, now); return err }},
-			{"diagnostic_retention", func() error {
-				_, err := s.pruneDiagnosticsBefore(ctx, now.Add(-DiagnosticsRecentRetention).UnixMilli())
-				return err
-			}},
-		}
 	}
 	for _, stage := range stages {
 		s.maintenanceStatusMu.Lock()
@@ -164,18 +128,10 @@ func (s *Store) maintainHistory(parent context.Context, coldDir string, days int
 			failures = append(failures, err)
 			break
 		}
+		// The stage closures read ctx, so the budget replaces it in place.
 		parentCtx := ctx
-		stop := func() {}
-		switch stage.name {
-		case "aggregate_archive", "sample_archive", "legacy_compaction":
-			// The turn key yields between committed batches. The timeout
-			// cancels a query that is still running when that budget ends,
-			// so one slow read cannot sit on the card until it finishes.
-			ctx, stop = context.WithTimeout(parentCtx, historyArchiveTurn)
-			ctx = context.WithValue(ctx, archiveTurnKey{}, time.Now().Add(historyArchiveTurn))
-		default:
-			ctx, stop = context.WithTimeout(parentCtx, historyStageBudget)
-		}
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(parentCtx, historyStageBudget)
 		var err error
 		if historyStageForTest != nil {
 			var replaced bool
@@ -191,18 +147,14 @@ func (s *Store) maintainHistory(parent context.Context, coldDir string, days int
 		stageErr := ctx.Err()
 		stop()
 		ctx = parentCtx
-		if errors.Is(err, errArchiveTurnComplete) {
-			pending = true
-			continue
-		}
-		if err != nil && parent.Err() == nil && maintenanceBudgetSpent(stage.name, stageErr, err) {
+		if err != nil && parent.Err() == nil && stageErr != nil {
 			pending = true
 			break
 		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", stage.name, err))
-			// A later archive stage may run for a long time. Report this
-			// failure now, rather than hiding it until the full cycle ends.
+			// Report this failure now, rather than hiding it until the full
+			// cycle ends.
 			s.maintenanceStatusMu.Lock()
 			s.maintenanceStatus.LastError = errors.Join(failures...).Error()
 			s.maintenanceStatus.LastFailureMS = time.Now().UnixMilli()
@@ -226,20 +178,4 @@ func (s *Store) maintainHistory(parent context.Context, coldDir string, days int
 		s.maintenanceStatus.LastFailureMS, s.maintenanceStatus.LastFailureError = time.Now().UnixMilli(), err.Error()
 	}
 	return err
-}
-
-// maintenanceBudgetSpent reports that this stage stopped because its time ran
-// out while the caller is still running. A dashboard bucket that cannot commit
-// inside its own write budget keeps a live stage context and a wrapped
-// deadline, and stays a real failure.
-func maintenanceBudgetSpent(stage string, stageErr, err error) bool {
-	if stageErr != nil {
-		return true
-	}
-	switch stage {
-	case "aggregate_archive", "sample_archive", "legacy_compaction":
-		return errors.Is(err, context.DeadlineExceeded)
-	default:
-		return false
-	}
 }

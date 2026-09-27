@@ -3,14 +3,17 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -124,17 +127,33 @@ func TestHandleSeriesAbsoluteWindowAndCSV(t *testing.T) {
 	}
 }
 
+// coldSample is the sample-day row a 2.x install archived to cold storage.
+type coldSample struct {
+	TsMs   int64   `parquet:"ts_ms"`
+	Driver string  `parquet:"driver,dict,zstd"`
+	Metric string  `parquet:"metric,dict,zstd"`
+	Value  float64 `parquet:"value,zstd"`
+}
+
 func TestHandleSeriesReadsParquetAndSQLite(t *testing.T) {
 	srv, st, coldDir := newSeriesTestServer(t)
 
-	// Old samples: destined for cold storage.
-	oldTs := time.Now().Add(-state.RecentRetention - 48*time.Hour).UnixMilli()
-	if err := st.RecordSamples([]state.Sample{
-		{Driver: "meter", Metric: "grid_w", TsMs: oldTs, Value: 111},
-	}); err != nil {
+	// An older install left this day in cold storage.
+	old := time.Now().Add(-16 * 24 * time.Hour).UTC()
+	oldTs := old.UnixMilli()
+	path := filepath.Join(coldDir, old.Format("2006/01/02.parquet"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.RolloffToParquet(context.Background(), coldDir); err != nil {
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := parquet.NewGenericWriter[coldSample](f)
+	if _, err := w.Write([]coldSample{{TsMs: oldTs, Driver: "meter", Metric: "grid_w", Value: 111}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(w.Close(), f.Close()); err != nil {
 		t.Fatal(err)
 	}
 	// The day file stays in place; fresh samples go to SQLite.
@@ -162,7 +181,7 @@ func TestHandleSeriesReadsParquetAndSQLite(t *testing.T) {
 }
 
 func TestHandleSeriesCSVExposesStoredEvidence(t *testing.T) {
-	srv, st, cold := newSeriesTestServer(t)
+	srv, st, _ := newSeriesTestServer(t)
 	if err := st.EnableHistoryAggregation(); err != nil {
 		t.Fatal(err)
 	}
@@ -178,9 +197,9 @@ func TestHandleSeriesCSVExposesStoredEvidence(t *testing.T) {
 	for _, check := range []struct {
 		days       int
 		resolution int64
-	}{{0, 10000}, {3, 60000}, {40, 300000}} {
+	}{{0, 10000}, {8, 60000}, {91, 3600000}} {
 		if check.days > 0 {
-			if err := st.MaintainAggregateHistory(context.Background(), cold, time.UnixMilli(base).Add(time.Duration(check.days)*24*time.Hour)); err != nil {
+			if err := st.MaintainPlainHistory(context.Background(), time.UnixMilli(base).Add(time.Duration(check.days)*24*time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 		}

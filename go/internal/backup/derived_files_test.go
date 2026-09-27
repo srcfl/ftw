@@ -25,7 +25,7 @@ func TestCollectSourcesSkipsDerivedStateFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sources, err := collectSources(dataDir, filepath.Join(dataDir, "state.db"), filepath.Join(dataDir, "backups"), nil)
+	sources, err := collectSources(dataDir, filepath.Join(dataDir, "state.db"), filepath.Join(dataDir, "backups"))
 	if err != nil {
 		t.Fatal(err)
 	}

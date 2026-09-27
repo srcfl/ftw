@@ -51,8 +51,8 @@ func TestNativeCapturedSiteReplay(t *testing.T) {
 	if err := json.Unmarshal(data, &q); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.Storages) != 1 || len(q.Scenarios) != 0 || len(q.DemandCharges) != 0 || q.Settings.PVCurtailmentMinW != nil || len(q.ThermalLoads) != 0 {
-		t.Fatal("capture replay supports one battery without scenarios, demand charges, thermal loads or PV controls")
+	if len(q.Storages) != 1 || len(q.DemandCharges) != 0 || q.Settings.PVCurtailmentMinW != nil || len(q.ThermalLoads) != 0 {
+		t.Fatal("capture replay supports one battery without demand charges, thermal loads or PV controls")
 	}
 	b := q.Storages[0]
 	p := Params{Mode: q.Settings.Mode, CapacityWh: b.CapacityWh, InitialSoC: b.InitialEnergyWh / b.CapacityWh, SoCMin: b.MinEnergyWh / b.CapacityWh, SoCMax: b.MaxEnergyWh / b.CapacityWh,

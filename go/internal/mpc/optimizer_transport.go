@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -31,9 +30,9 @@ func formatProtocolRange(min, max int) string {
 	return strconv.Itoa(min) + "-" + strconv.Itoa(max)
 }
 
-// OptimizerRuntimeInfo is returned by the sidecar handshake and exposed to
+// OptimizerRuntimeInfo is returned by the worker handshake and exposed to
 // component diagnostics. Protocol compatibility, not matching app versions,
-// decides whether core may use a separately released optimizer.
+// decides whether Core may use the worker.
 type OptimizerRuntimeInfo struct {
 	Name            string `json:"name"`
 	Version         string `json:"version"`
@@ -69,19 +68,17 @@ func (i OptimizerRuntimeInfo) protocolWindow() (int, int) {
 // ExternalOptimizer.
 type OptimizerTransport interface {
 	RoundTrip(context.Context, []byte) ([]byte, error)
-	Health(context.Context) (OptimizerRuntimeInfo, error)
 	Close() error
 }
 
 type ProcessTransportConfig struct {
 	Command     []string
-	ModuleDir   string
 	IdleTimeout time.Duration
 }
 
-// ProcessTransport preserves the all-in-one/native fallback. One warm worker
-// is shared and calls are serialized because CVXPY warm-start state is local
-// to the process.
+// ProcessTransport runs the bundled worker as a child process. One warm worker
+// is shared, and calls are serialized because every request and response
+// shares its stdin and stdout.
 type ProcessTransport struct {
 	cfg ProcessTransportConfig
 
@@ -124,41 +121,6 @@ func (t *ProcessTransport) RoundTrip(ctx context.Context, payload []byte) ([]byt
 	}
 	t.scheduleIdleStopLocked()
 	return line, nil
-}
-
-func (t *ProcessTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
-	if err := t.mu.acquire(ctx); err != nil {
-		return OptimizerRuntimeInfo{}, err
-	}
-	defer t.mu.release()
-	t.cancelIdleStopLocked()
-	if err := t.ensureStartedLocked(); err != nil {
-		return OptimizerRuntimeInfo{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		t.scheduleIdleStopLocked()
-		return OptimizerRuntimeInfo{}, err
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"type":             "handshake",
-		"protocol_version": OptimizerProtocolVersion,
-	})
-	if err := t.writeLocked(ctx, payload); err != nil {
-		t.stopLocked()
-		return OptimizerRuntimeInfo{}, fmt.Errorf("write optimizer handshake: %w", err)
-	}
-	line, err := scanLine(ctx, t.scanner)
-	if err != nil {
-		t.stopLocked()
-		return OptimizerRuntimeInfo{}, fmt.Errorf("read optimizer handshake: %w", err)
-	}
-	info, err := decodeOptimizerHandshake(line, "process")
-	if err != nil {
-		t.stopLocked()
-		return OptimizerRuntimeInfo{}, err
-	}
-	t.scheduleIdleStopLocked()
-	return info, nil
 }
 
 // writeLocked keeps a worker that stops reading stdin inside the caller's
@@ -209,9 +171,6 @@ func (t *ProcessTransport) ensureStartedLocked() error {
 	cmd := exec.Command(t.cfg.Command[0], t.cfg.Command[1:]...)
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	if t.cfg.ModuleDir != "" {
-		cmd.Env = append(cmd.Env, "PYTHONPATH="+t.cfg.ModuleDir)
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("optimizer stdin: %w", err)
@@ -328,111 +287,10 @@ func (g *contextGate) Unlock() {
 	g.release()
 }
 
-type UnixTransport struct{ socketPath string }
-
-const unixCancelTimeout = 250 * time.Millisecond
-
-type unixCancelRequest struct {
-	Type            string `json:"type"`
-	RequestID       string `json:"request_id"`
-	ProtocolVersion int    `json:"protocol_version"`
-}
-
-func NewUnixTransport(socketPath string) *UnixTransport {
-	return &UnixTransport{socketPath: socketPath}
-}
-
-func (t *UnixTransport) exchange(ctx context.Context, payload []byte) ([]byte, bool, error) {
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", t.socketPath)
-	if err != nil {
-		return nil, false, fmt.Errorf("dial %s: %w", t.socketPath, err)
-	}
-	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		// scanLine owns read cancellation. A read deadline could race ctx.Done
-		// and turn the caller's deadline into an unrelated I/O timeout.
-		_ = conn.SetWriteDeadline(deadline)
-	}
-	if _, err := conn.Write(append(append([]byte(nil), payload...), '\n')); err != nil {
-		return nil, false, fmt.Errorf("write unix optimizer: %w", err)
-	}
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	line, err := scanLine(ctx, scanner)
-	return line, true, err
-}
-
-func (t *UnixTransport) RoundTrip(ctx context.Context, payload []byte) ([]byte, error) {
-	line, sent, err := t.exchange(ctx, payload)
-	if err == nil {
-		return line, nil
-	}
-	ctxErr := ctx.Err()
-	if !sent || ctxErr == nil {
-		return nil, err
-	}
-	requestID := optimizerRequestID(payload)
-	if requestID == "" {
-		return nil, err
-	}
-
-	// The request may still be running in the shared sidecar after its caller
-	// has gone away. A fresh connection lets a current worker interrupt it;
-	// older workers reject the unknown frame without changing this error path.
-	_ = t.cancelRequest(requestID)
-	return nil, ctxErr
-}
-
-func (t *UnixTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
-	payload, _ := json.Marshal(map[string]any{"type": "handshake", "protocol_version": OptimizerProtocolVersion})
-	line, _, err := t.exchange(ctx, payload)
-	if err != nil {
-		return OptimizerRuntimeInfo{}, err
-	}
-	return decodeOptimizerHandshake(line, "unix")
-}
-
-func optimizerRequestID(payload []byte) string {
-	var request struct {
-		RequestID string `json:"request_id"`
-	}
-	if json.Unmarshal(payload, &request) != nil {
-		return ""
-	}
-	return request.RequestID
-}
-
-func (t *UnixTransport) cancelRequest(requestID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), unixCancelTimeout)
-	defer cancel()
-
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "unix", t.socketPath)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetWriteDeadline(deadline)
-	}
-	payload, err := json.Marshal(unixCancelRequest{
-		Type:            "cancel_request",
-		RequestID:       requestID,
-		ProtocolVersion: OptimizerProtocolVersion,
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := conn.Write(append(payload, '\n')); err != nil {
-		return fmt.Errorf("write unix optimizer cancellation: %w", err)
-	}
-	return nil
-}
-
-func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeInfo, error) {
-	return decodeOptimizerHandshakeFor(line, transport, "ftw-optimizer")
-}
+// optimizerMismatchRemedy is what an operator can do about a worker that does
+// not match Core. The Energyplan worker ships inside the Core release, so it
+// has no update of its own.
+const optimizerMismatchRemedy = "the bundled Energyplan worker does not match this Core; run `ftw update` or reinstall this release"
 
 func decodeOptimizerHandshakeFor(line []byte, transport, name string) (OptimizerRuntimeInfo, error) {
 	var info OptimizerRuntimeInfo
@@ -442,15 +300,12 @@ func decodeOptimizerHandshakeFor(line []byte, transport, name string) (Optimizer
 	if info.Name != name {
 		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer handshake name %q, want %q", info.Name, name)
 	}
-	// Both mismatches below mean the same thing in the field: the Optimizer
-	// image is older than this Core. Core updates do not touch Optimizer — it
-	// has its own release series and its own button — and the container's own
-	// healthcheck validates its own handshake against its own constants, so an
-	// old Optimizer reports itself healthy while Core refuses to use it. The
-	// only signal an operator gets is a plan silently served by the Go
-	// fallback, so these strings have to say what to do, not just what failed.
+	// Both mismatches below mean the worker on disk is not the one this Core
+	// release bundles: an incomplete install or a hand-copied binary. The only
+	// signal an operator gets is a plan served by the Go fallback, so these
+	// strings have to say what to do, not just what failed.
 	if min, max := info.protocolWindow(); !optimizercontract.Compatible(min, max) {
-		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer speaks protocol %s but this Core accepts %s — update Optimizer in Update Center",
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer speaks protocol %s but this Core accepts %s — "+optimizerMismatchRemedy,
 			formatProtocolRange(min, max),
 			formatProtocolRange(OptimizerProtocolMinVersion, OptimizerProtocolVersion))
 	}
@@ -459,75 +314,10 @@ func decodeOptimizerHandshakeFor(line []byte, transport, name string) (Optimizer
 		if v := strings.TrimSpace(info.Version); v != "" {
 			which = "optimizer " + v
 		}
-		return OptimizerRuntimeInfo{}, fmt.Errorf("%s is too old for this Core (no champion solver) — update Optimizer in Update Center", which)
+		return OptimizerRuntimeInfo{}, fmt.Errorf("%s is too old for this Core (no champion solver) — "+optimizerMismatchRemedy, which)
 	}
 	info.Transport = transport
 	return info, nil
-}
-
-func (t *UnixTransport) Close() error { return nil }
-
-// AutoTransport is an explicit native/development mode. It prefers an
-// independently updated sidecar, then tries a local process. Official
-// containers select unix transport so Core falls straight back to Go DP.
-type AutoTransport struct {
-	primary  OptimizerTransport
-	fallback OptimizerTransport
-}
-
-type autoTransportError struct {
-	primary  error
-	fallback error
-}
-
-func (e *autoTransportError) Error() string {
-	return fmt.Sprintf("optimizer sidecar failed: %v; process fallback failed: %v", e.primary, e.fallback)
-}
-
-func (e *autoTransportError) Unwrap() []error {
-	return []error{e.primary, e.fallback}
-}
-
-func NewAutoTransport(primary, fallback OptimizerTransport) *AutoTransport {
-	return &AutoTransport{primary: primary, fallback: fallback}
-}
-
-func (t *AutoTransport) RoundTrip(ctx context.Context, payload []byte) ([]byte, error) {
-	requiredFeature := requiredOptimizerFeature(payload)
-	info, primaryErr := t.primary.Health(ctx)
-	if primaryErr == nil {
-		if !optimizerHasFeature(info, requiredFeature) {
-			primaryErr = fmt.Errorf("optimizer handshake is missing required %s feature", requiredFeature)
-		} else if response, err := t.primary.RoundTrip(ctx, payload); err == nil {
-			return response, nil
-		} else {
-			primaryErr = err
-		}
-	}
-	response, fallbackErr := t.fallback.RoundTrip(ctx, payload)
-	if fallbackErr != nil {
-		return nil, &autoTransportError{primary: primaryErr, fallback: fallbackErr}
-	}
-	return response, nil
-}
-
-func requiredOptimizerFeature(payload []byte) string {
-	var request struct {
-		Settings struct {
-			ScenarioPolicy string `json:"scenario_policy"`
-		} `json:"settings"`
-		DemandCharges []json.RawMessage `json:"demand_charges"`
-	}
-	if json.Unmarshal(payload, &request) == nil {
-		switch request.Settings.ScenarioPolicy {
-		case "recourse", "multistage":
-			return request.Settings.ScenarioPolicy
-		}
-		if len(request.DemandCharges) > 0 {
-			return "demand_charges"
-		}
-	}
-	return "champion"
 }
 
 func optimizerHasFeature(info OptimizerRuntimeInfo, feature string) bool {
@@ -537,27 +327,6 @@ func optimizerHasFeature(info OptimizerRuntimeInfo, feature string) bool {
 		}
 	}
 	return false
-}
-
-func (t *AutoTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
-	info, primaryErr := t.primary.Health(ctx)
-	if primaryErr == nil {
-		return info, nil
-	}
-	info, fallbackErr := t.fallback.Health(ctx)
-	if fallbackErr != nil {
-		return OptimizerRuntimeInfo{}, &autoTransportError{primary: primaryErr, fallback: fallbackErr}
-	}
-	return info, nil
-}
-
-func (t *AutoTransport) Close() error {
-	errPrimary := t.primary.Close()
-	errFallback := t.fallback.Close()
-	if errPrimary != nil {
-		return errPrimary
-	}
-	return errFallback
 }
 
 func scanLine(ctx context.Context, scanner *bufio.Scanner) ([]byte, error) {

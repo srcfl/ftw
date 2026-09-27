@@ -2,10 +2,11 @@ package backup
 
 import (
 	"context"
-	"github.com/srcfl/ftw/go/internal/state"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 func TestBackupRestoresDashboardEnergyAndCursor(t *testing.T) {
@@ -35,7 +36,7 @@ func TestBackupRestoresDashboardEnergyAndCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(t.TempDir(), "restored")
-	if _, err := Restore(info.Path, dst, time.Now()); err != nil {
+	if _, err := restoreFresh(info.Path, dst, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := state.OpenWithLegacyHistory(filepath.Join(dst, "state.db"), filepath.Join(dst, "cold"))

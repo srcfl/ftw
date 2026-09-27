@@ -632,7 +632,6 @@ func TestReplanSanitizesBadLoadInput(t *testing.T) {
 				MaxChargeW: 3000, MaxDischargeW: 3000,
 				ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 			})
-			svc.LoadMaxW = 11000
 			svc.Load = func(time.Time) float64 { return tc.load }
 			plan := svc.Replan(context.Background())
 			if plan == nil || len(plan.Actions) == 0 {

@@ -135,7 +135,7 @@ func clampParamsIntoOperatingBand(p *Params) (clamped, ok bool) {
 	unclamped := p.InitialSoC
 	// Clamp each battery first and re-derive the aggregate from the clamped
 	// fleet: validateStorageSpecs requires Σ initial_energy_wh to equal
-	// capacity × initial_soc, and the Python shadow receives both.
+	// capacity × initial_soc.
 	if len(p.Storages) > 0 {
 		totalWh := 0.0
 		for i := range p.Storages {

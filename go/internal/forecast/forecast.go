@@ -264,7 +264,6 @@ type Service struct {
 	mu         sync.RWMutex
 	generation uint64
 	refresh    chan struct{}
-	ACLimitW   float64 // verified inverter AC limit; zero means unknown
 	Provider   Provider
 	Store      *state.Store
 	Lat, Lon   float64
@@ -396,7 +395,7 @@ func (s *Service) loop(ctx context.Context) {
 
 func (s *Service) fetchAndStore(ctx context.Context) bool {
 	s.mu.RLock()
-	provider, lat, lon, rated, acLimit, generation := s.Provider, s.Lat, s.Lon, s.RatedPVW, s.ACLimitW, s.generation
+	provider, lat, lon, rated, generation := s.Provider, s.Lat, s.Lon, s.RatedPVW, s.generation
 	arrays := append([]Array(nil), s.Arrays...)
 	s.mu.RUnlock()
 	if provider == nil {
@@ -453,14 +452,6 @@ func (s *Service) fetchAndStore(ctx context.Context) bool {
 		if pvW < 0 {
 			pvW = 0
 		}
-		if capW := acLimit; capW > 0 {
-			if capped, ok := clampPVToNameplate(pvW, capW); ok {
-				slog.Warn("forecast PV capped to verified AC limit",
-					"provider", provider.Name(), "slot", r.HourStart,
-					"raw_w", pvW, "capped_w", capped, "nameplate_w", capW)
-				pvW = capped
-			}
-		}
 		pvPtr := &pvW
 		// Missing capacity or weather is unknown, even when EstimatePVW's
 		// numeric fallback is zero. Direct production forecasts stand alone.
@@ -499,10 +490,6 @@ func arrayFromConfig(a config.PVArray) (Array, bool) {
 	return Array{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, RatedW: ratedW}, true
 }
 
-func (s *Service) nameplateW() float64 {
-	return NameplateW(s.RatedPVW, s.Arrays)
-}
-
 // NameplateW is the configured DC scale, not a verified AC limit. The
 // sum of those is the nameplate. pv_rated_w is the fallback when no
 // complete array geometry exists.
@@ -521,19 +508,6 @@ func NameplateW(ratedPVW float64, arrays []Array) float64 {
 	default:
 		return 0
 	}
-}
-
-// nameplateHeadroom is 1: a forecast must not exceed the site
-// nameplate. This is a physics gate, not a unit conversion. Core
-// stores rated watts so the gate should rarely fire. 0 nameplate
-// disables the cut.
-const nameplateHeadroom = 1.0
-
-func clampPVToNameplate(pvW, nameplateW float64) (float64, bool) {
-	if nameplateW <= 0 || pvW <= nameplateW*nameplateHeadroom {
-		return pvW, false
-	}
-	return nameplateW * nameplateHeadroom, true
 }
 
 func normalizeIrradiance(ghiWm2 float64) (float64, bool) {
@@ -582,35 +556,10 @@ func poaPVWattsFromGHI(lat, lon float64, t time.Time, ghiWm2 float64, arrays []A
 	return total
 }
 
-// Load returns forecasts in [sinceMs, untilMs], bounded by a verified AC
-// limit when one is known. A configured DC rating is only a prior.
+// Load returns the stored forecasts in [sinceMs, untilMs]. A configured DC
+// rating is only a prior, so it never caps them.
 func (s *Service) Load(sinceMs, untilMs int64) ([]state.ForecastPoint, error) {
-	rows, err := s.Store.LoadForecasts(sinceMs, untilMs)
-	if err != nil {
-		return rows, err
-	}
-	s.mu.RLock()
-	limit := s.ACLimitW
-	s.mu.RUnlock()
-	return ClampForecasts(rows, limit), nil
-}
-
-// ClampForecasts copies any estimate above nameplate down onto that
-// ceiling. Physics gate only: stored units are already watts.
-func ClampForecasts(rows []state.ForecastPoint, nameplateW float64) []state.ForecastPoint {
-	if nameplateW <= 0 {
-		return rows
-	}
-	for i := range rows {
-		if rows[i].PVWEstimated == nil {
-			continue
-		}
-		if capped, ok := clampPVToNameplate(*rows[i].PVWEstimated, nameplateW); ok {
-			v := capped
-			rows[i].PVWEstimated = &v
-		}
-	}
-	return rows
+	return s.Store.LoadForecasts(sinceMs, untilMs)
 }
 
 func validWeatherNumber(v *float64, low, high float64) *float64 {

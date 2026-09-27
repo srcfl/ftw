@@ -2,17 +2,14 @@ package state
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
-	"github.com/parquet-go/parquet-go/compress/zstd"
 )
 
 const archiveBatchRows = 1024
@@ -95,148 +92,6 @@ func walkParquetRows(ctx context.Context, path string, visit func([]parquetSampl
 			return err
 		}
 	}
-}
-
-func (s *Store) publishStagedSamples(ctx context.Context, path string, stage *sql.DB) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".ftw-parquet-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	defer f.Close()
-	w := parquet.NewGenericWriter[parquetSampleRow](NewMaintenanceWriter(ctx, f), parquet.Compression(&zstd.Codec{Level: zstd.DefaultLevel}), parquet.MaxRowsPerRowGroup(8192), parquet.PageBufferSize(64<<10))
-	rows, err := stage.QueryContext(ctx, `SELECT ts_ms,driver,metric,value FROM samples ORDER BY ts_ms,driver,metric`)
-	if err != nil {
-		return err
-	}
-	expected := sha256.New()
-	var count int64
-	buf := make([]parquetSampleRow, 0, archiveBatchRows)
-	flush := func() error {
-		if len(buf) == 0 {
-			return nil
-		}
-		_, err := w.Write(buf)
-		buf = buf[:0]
-		return err
-	}
-	for rows.Next() {
-		var r parquetSampleRow
-		if err := rows.Scan(&r.TsMs, &r.Driver, &r.Metric, &r.Value); err != nil {
-			rows.Close()
-			w.Close()
-			return err
-		}
-		if err := hashHistoryRow(expected, []any{r.TsMs, r.Driver, r.Metric, r.Value}); err != nil {
-			rows.Close()
-			w.Close()
-			return err
-		}
-		count++
-		buf = append(buf, r)
-		if len(buf) == cap(buf) {
-			if err := flush(); err != nil {
-				rows.Close()
-				w.Close()
-				return err
-			}
-		}
-	}
-	err = errors.Join(rows.Err(), rows.Close())
-	if err != nil {
-		w.Close()
-		return err
-	}
-	if err := flush(); err != nil {
-		w.Close()
-		return err
-	}
-	if err := w.Close(); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	verify := func(file string) error {
-		actual := sha256.New()
-		var n int64
-		err := walkParquetRows(ctx, file, func(batch []parquetSampleRow) error {
-			for _, r := range batch {
-				if err := hashHistoryRow(actual, []any{r.TsMs, r.Driver, r.Metric, r.Value}); err != nil {
-					return err
-				}
-				n++
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		if n != count || fmt.Sprintf("%x", actual.Sum(nil)) != fmt.Sprintf("%x", expected.Sum(nil)) {
-			return errors.New("Parquet readback differs from source")
-		}
-		return nil
-	}
-	if err := verify(tmp); err != nil {
-		return err
-	}
-	if err := s.replaceArchive(ctx, tmp, path); err != nil {
-		return err
-	}
-	return verify(path)
-}
-
-func (s *Store) pruneArchivedSamples(ctx context.Context, batch []resolvedSample) (int64, error) {
-	var deleted int64
-	limit := 1024
-	for len(batch) > 0 {
-		n := min(len(batch), limit)
-		var removed int64
-		err := s.writeArchiveBatch(ctx, func(ctx context.Context, tx *sql.Tx) error {
-			removed = 0 // A busy attempt rolls back and retries this same prefix.
-			stmt, err := tx.PrepareContext(ctx, `DELETE FROM ts_samples WHERE driver_id=? AND metric_id=? AND ts_ms=? AND value=?`)
-			if err != nil {
-				return err
-			}
-			defer stmt.Close()
-			for _, r := range batch[:n] {
-				res, err := stmt.ExecContext(ctx, r.dID, r.mID, r.ts, r.v)
-				if err != nil {
-					return err
-				}
-				count, err := res.RowsAffected()
-				if err != nil {
-					return err
-				}
-				removed += count
-			}
-			return nil
-		})
-		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-				// Even one row can meet a busy reader or a slow sync. Retain
-				// this verified prefix instead of staging the whole day again.
-				limit = max(1, n/2)
-				if err := pauseMaintenance(ctx); err != nil {
-					return deleted, err
-				}
-				continue
-			}
-			return deleted, err
-		}
-		deleted += removed
-		batch = batch[n:]
-		if len(batch) > 0 && s.HistoryWriterStatus().Pending >= historyCommitMaxTicks/2 {
-			if err := pauseMaintenance(ctx); err != nil {
-				return deleted, err
-			}
-		}
-	}
-	return deleted, nil
 }
 
 func (s *Store) archiveDayHours(ctx context.Context, stage *sql.DB) error {
@@ -397,33 +252,4 @@ func insertArchiveRows(ctx context.Context, stage *sql.DB, rows []parquetSampleR
 		}
 	}
 	return tx.Commit()
-}
-
-// Temporary merge files are disposable. Keep a full day of grace so a slow
-// active operation cannot be mistaken for an interrupted earlier run.
-func cleanupArchiveTemps(ctx context.Context, coldDir string, now time.Time) error {
-	for _, pattern := range []string{".ftw-samples-*.db*", ".ftw-summary-*.db*", ".ftw-parquet-*.tmp"} {
-		paths, err := filepath.Glob(filepath.Join(coldDir, "[0-9][0-9][0-9][0-9]", "[0-9][0-9]", pattern))
-		if err != nil {
-			return err
-		}
-		for _, path := range paths {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			info, err := os.Lstat(path)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if info.Mode().IsRegular() && info.ModTime().Before(now.Add(-24*time.Hour)) {
-				if err := os.Remove(path); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }

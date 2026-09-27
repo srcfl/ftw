@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,7 +17,7 @@ func TestNativeForecastStateReplay(t *testing.T) {
 		t.Skip("set FTW_FORECAST_WORKER to an Energyplan worker with forecast protocol v1")
 	}
 	newClient := func() (*energyforecast.Client, *mpc.ProcessTransport) {
-		transport, err := mpc.NewProcessTransport(mpc.ProcessTransportConfig{Command: []string{binary}, ModuleDir: filepath.Dir(binary)})
+		transport, err := mpc.NewProcessTransport(mpc.ProcessTransportConfig{Command: []string{binary}})
 		if err != nil {
 			t.Fatal(err)
 		}

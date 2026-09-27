@@ -1600,14 +1600,10 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
-		// Grid limits remain on grid flow. Neither a DC nameplate nor an
-		// inferred PV scale proves an inverter's hard AC limit.
-		mpcSvc.LoadMaxW = 0
-		mpcSvc.PVNameplateW = 0
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).
-		// Startup-only, matching FuseMaxW above.
+		// A config reload refreshes it together with FuseMaxW.
 		mpcSvc.MaxExportW = cfg.Site.MaxExportW
 		if pvSvc != nil {
 			// Use the unanchored structural predictor here: the MPC also
@@ -2770,15 +2766,8 @@ func main() {
 		}
 	}
 
-	// ---- Background: Parquet rolloff (>14d → cold dir) ----
-	go rolloffLoop(ctx, st, coldDir, func() int {
-		cfgMu.RLock()
-		defer cfgMu.RUnlock()
-		if cfg.State == nil {
-			return 0
-		}
-		return cfg.State.ColdRetentionDays
-	}, dataMaintenanceMu)
+	// ---- Background: SQLite history retention (hourly) ----
+	go rolloffLoop(ctx, st, coldDir, dataMaintenanceMu)
 
 	// ---- Background: daily state.db recovery snapshot ----
 	go snapshotLoop(ctx, st)
@@ -3352,8 +3341,9 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 	}
 }
 
-// rolloffLoop maintains diagnostic archives and history retention hourly.
-func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, retentionDays func() int, dataMaintenanceMu *sync.Mutex) {
+// rolloffLoop applies history and diagnostic retention inside SQLite hourly
+// and warns when the data disk runs low.
+func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, dataMaintenanceMu *sync.Mutex) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
 	var lastDiskWarn time.Time

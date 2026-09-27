@@ -185,12 +185,18 @@ func (s *Server) handleDriverDraft(w http.ResponseWriter, r *http.Request) {
 // handleDriverDraftKeep stops the clock. The draft stays as an ordinary local
 // override, which already shadows the channel and already reports when a newer
 // version exists.
+//
+// It waits for an expiry already in flight, so "kept" is only reported for a
+// draft that is still there. The record goes first: once it is gone no revert
+// touches the live file, even one that has not taken the lock yet.
 func (s *Server) handleDriverDraftKeep(w http.ResponseWriter, r *http.Request) {
 	entry, err := s.catalogEntryByID(r.PathValue("id"))
 	if err != nil {
 		writeJSON(w, 404, map[string]string{"error": err.Error()})
 		return
 	}
+	s.driverUpdateMu.Lock()
+	defer s.driverUpdateMu.Unlock()
 	filename := driverFilename(entry)
 	_, original, record := s.draftPaths(filename)
 	if _, err := os.Stat(record); err != nil {
@@ -198,8 +204,8 @@ func (s *Server) handleDriverDraftKeep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.drafts.disarm(filename)
-	_ = os.Remove(original)
 	_ = os.Remove(record)
+	_ = os.Remove(original)
 	writeJSON(w, 200, map[string]any{"status": "kept", "driver_id": entry.ID})
 }
 

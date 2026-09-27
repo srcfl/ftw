@@ -2,10 +2,7 @@ package state
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -29,61 +26,4 @@ func (s *Store) CheckpointWAL() {
 // containing dir. Errors on platforms without statfs support (Windows).
 func DiskAvail(dir string) (int64, error) {
 	return diskAvail(dir)
-}
-
-// PruneColdParquet deletes cold-tier day files older than retentionDays
-// (both ts_samples days at <coldDir>/YYYY/MM/DD.parquet and diagnostics days
-// under <coldDir>/diagnostics/). retentionDays <= 0 keeps everything.
-// Empty month/year directories left behind are removed opportunistically.
-func PruneColdParquet(coldDir string, retentionDays int, now time.Time) (removed []string, err error) {
-	return pruneParquetRoots(retentionDays, now, coldDir, filepath.Join(coldDir, "diagnostics"))
-}
-
-// PruneDiagnosticsParquet retains legacy sample files as migration evidence.
-func PruneDiagnosticsParquet(coldDir string, retentionDays int, now time.Time) ([]string, error) {
-	if coldDir == "" {
-		return nil, nil
-	}
-	return pruneParquetRoots(retentionDays, now, filepath.Join(coldDir, "diagnostics"))
-}
-
-func pruneParquetRoots(retentionDays int, now time.Time, roots ...string) (removed []string, err error) {
-	if retentionDays <= 0 {
-		return nil, nil
-	}
-	cutoff := now.UTC().AddDate(0, 0, -retentionDays)
-
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		matches, err := filepath.Glob(filepath.Join(root,
-			"[0-9][0-9][0-9][0-9]", "[0-9][0-9]", "[0-9][0-9].parquet"))
-		if err != nil {
-			return removed, err
-		}
-		for _, path := range matches {
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				continue
-			}
-			day, err := time.Parse("2006/01/02.parquet", filepath.ToSlash(rel))
-			if err != nil {
-				continue
-			}
-			if !day.Before(cutoff) {
-				continue
-			}
-			if err := os.Remove(path); err != nil {
-				return removed, fmt.Errorf("remove %s: %w", path, err)
-			}
-			removed = append(removed, path)
-			// Opportunistic cleanup — Remove fails on non-empty dirs, which
-			// is exactly the behavior we want, so errors are ignored.
-			monthDir := filepath.Dir(path)
-			_ = os.Remove(monthDir)
-			_ = os.Remove(filepath.Dir(monthDir))
-		}
-	}
-	return removed, nil
 }

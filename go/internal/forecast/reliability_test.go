@@ -53,10 +53,4 @@ func TestUnknownPVScaleAndDCNameplateAreNotACLimits(t *testing.T) {
 	if rows[0].PVWEstimated == nil || math.Abs(*rows[0].PVWEstimated-12000) > 1e-6 {
 		t.Fatal("DC prior imposed an AC cap")
 	}
-	s.ACLimitW = 9000
-	s.fetchAndStore(context.Background())
-	rows, _ = s.Load(at.UnixMilli(), at.Add(time.Hour).UnixMilli())
-	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated != 9000 {
-		t.Fatal("verified AC cap was ignored")
-	}
 }

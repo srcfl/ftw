@@ -34,19 +34,10 @@ const (
 	// (#1302). Keep this at 4 so they skip the copy and update. Newer Cores
 	// read `<!-- ftw-state-schema-v2:N -->`, which carries SchemaVersion.
 	LegacyReleaseMarker = 4
-	// HotRetention = 30 days at 5s resolution
-	HotRetention = 30 * 24 * time.Hour
-	// WarmRetention = 12 months at 15-min buckets
-	WarmRetention = 365 * 24 * time.Hour
-	// WarmBucketMS = 15-minute bucket size for warm tier
-	WarmBucketMS = 15 * 60 * 1000
-	// ColdBucketMS = daily bucket size for cold tier
-	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
 // Store owns three SQLite databases:
 //   - history: samples, hourly summaries, energy ledger and dashboard history
-//   - hot: alias for history, used by recent-history readers
 //   - db: state.db configuration, devices and learned state
 //   - cache: cache.db prices and forecasts; savings history needs past prices
 //
@@ -62,10 +53,6 @@ type Store struct {
 	maintenanceRunMu  sync.Mutex
 	maintenanceCancel context.CancelFunc // guarded by maintenanceStatusMu
 	maintenancePaused int                // guarded by maintenanceStatusMu
-
-	hot        *sql.DB
-	hotPath    string
-	hotWriteMu sync.Mutex
 
 	archiveMu     sync.Mutex   // Serializes archive construction and retention.
 	archiveViewMu sync.RWMutex // Protects file publication/pruning against readers.
@@ -146,7 +133,7 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 		m.cancel()
 		return nil, err
 	}
-	idle, err := s.legacyHistoryIdle(coldDir)
+	idle, err := s.legacyHistoryIdle()
 	if err != nil {
 		s.historyMigration = nil
 		m.cancel()
@@ -238,28 +225,9 @@ func openStore(path, coldDir string, importLegacy bool, migration *historyMigrat
 		cache.Close()
 		return nil, err
 	}
-	if err := s.openHotHistory(); err != nil {
-		if s.history != nil {
-			s.history.Close()
-		}
-		db.Close()
-		cache.Close()
-		return nil, err
-	}
 	s.historyWriter = newHistoryWriter(s)
 	writeCleanMarker(path)
 	return s, nil
-}
-
-func (s *Store) closeOpenedHistory() {
-	if s.hot != nil && s.hot != s.history {
-		s.hot.Close()
-		s.hot = nil
-	}
-	if s.history != nil {
-		s.history.Close()
-		s.history = nil
-	}
 }
 
 // OpenBackupSource opens an existing state.db without integrity healing,
@@ -332,9 +300,6 @@ func (s *Store) Close() error {
 		return nil
 	}
 	err := s.StopHistory()
-	if s.hot != nil && s.hot != s.history {
-		err = errors.Join(err, s.hot.Close())
-	}
 	if s.history != nil {
 		err = errors.Join(err, s.history.Close())
 	}
@@ -1461,12 +1426,12 @@ func (s *Store) RecordHistory(p HistoryPoint) error {
 	if normalizeErr != nil {
 		return normalizeErr
 	}
-	if s.hot == nil {
+	if s.history == nil {
 		return errors.New("live history is unavailable")
 	}
-	s.hotWriteMu.Lock()
-	defer s.hotWriteMu.Unlock()
-	_, err := s.hot.Exec(
+	s.historyWriteMu.Lock()
+	defer s.historyWriteMu.Unlock()
+	_, err := s.history.Exec(
 		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
@@ -1850,124 +1815,6 @@ func (s *Store) HistoryCounts() (hot, warm, cold int, err error) {
 	err = row.Scan(&hot, &warm, &cold)
 	return
 }
-
-// pruneChunkSpanMS bounds how much history one prune transaction may age.
-// The write lock is held per chunk, not for the whole backlog: a DB that
-// missed months of pruning is worked off in ~24 h bites of ~40 k rows
-// (sub-second each) instead of one transaction that starves every writer.
-// 2026-07-16 incident: the first prune of a 93-day backlog held the write
-// lock for 4+ hours and every control-loop tick failed with SQLITE_BUSY.
-// Var, not const, so tests can force multiple chunks with small data.
-var pruneChunkSpanMS = int64(24 * 60 * 60 * 1000)
-
-// Prune ages old hot rows into warm buckets, old warm into cold daily buckets.
-// Chunked and linear: each chunk is one short transaction whose boundaries are
-// aligned DOWN to whole buckets, so a bucket is always aggregated from its
-// complete row set (a cutoff mid-bucket would otherwise INSERT OR REPLACE the
-// bucket twice, each time from a partial slice, keeping only the second).
-// Idempotent; safe to call often.
-func (s *Store) Prune(ctx context.Context) error {
-	if s.aggregateHistory.Load() {
-		if err := s.maintainDashboard(ctx, time.Now()); err != nil {
-			return err
-		}
-	}
-	nowMs := time.Now().UnixMilli()
-	t0 := time.Now()
-
-	// hot → warm (15-min buckets). The bare json column rides along with
-	// MAX(ts_ms): SQLite's bare-column rule picks it from the newest row of
-	// each bucket in the same linear pass. The previous correlated subquery
-	// re-scanned history_hot once per bucket — O(buckets × rows).
-	hotAged, hotChunks, err := s.pruneTier(ctx, "history_hot", "history_warm",
-		nowMs-HotRetention.Milliseconds(), WarmBucketMS)
-	if err != nil {
-		return fmt.Errorf("hot→warm: %w", err)
-	}
-
-	// warm → cold (1-day buckets)
-	warmAged, warmChunks, err := s.pruneTier(ctx, "history_warm", "history_cold",
-		nowMs-WarmRetention.Milliseconds(), ColdBucketMS)
-	if err != nil {
-		return fmt.Errorf("warm→cold: %w", err)
-	}
-
-	// Maintenance must never be silent — the 4-hour lock above was invisible
-	// precisely because a running/finished prune logged nothing.
-	if hotAged > 0 || warmAged > 0 {
-		slog.Info("state: history prune complete",
-			"hot_rows_aged", hotAged, "warm_rows_aged", warmAged,
-			"chunks", hotChunks+warmChunks,
-			"elapsed", time.Since(t0).Round(time.Millisecond))
-	}
-	return nil
-}
-
-// pruneTier ages rows older than cutoffMs from src into bucketMs-wide averaged
-// buckets in dst, in bounded per-chunk transactions. Returns rows aged and
-// chunks used. Table names are compile-time constants at every call site.
-func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucketMs int64) (aged int64, chunks int, err error) {
-	// Only age complete buckets: align the cutoff down to a bucket boundary.
-	cutoffMs = (cutoffMs / bucketMs) * bucketMs
-	spanMS := pruneChunkSpanMS
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return aged, chunks, err
-		}
-		var minTs sql.NullInt64
-		if err := s.history.QueryRowContext(ctx,
-			`SELECT MIN(ts_ms) FROM `+src).Scan(&minTs); err != nil {
-			return aged, chunks, err
-		}
-		if !minTs.Valid || minTs.Int64 >= cutoffMs {
-			return aged, chunks, nil
-		}
-		// Chunk upper bound: at most pruneChunkSpanMS of rows, never past the
-		// cutoff, always on a bucket boundary.
-		chunkEnd := minTs.Int64 + spanMS
-		if chunkEnd > cutoffMs {
-			chunkEnd = cutoffMs
-		}
-		chunkEnd = (chunkEnd / bucketMs) * bucketMs
-		if chunkEnd <= minTs.Int64 {
-			chunkEnd = (minTs.Int64/bucketMs + 1) * bucketMs
-			if chunkEnd > cutoffMs {
-				chunkEnd = cutoffMs
-			}
-		}
-
-		n, err := s.pruneChunk(ctx, src, dst, minTs.Int64, chunkEnd, bucketMs)
-		if err != nil {
-			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-				spanMS = max(bucketMs, (chunkEnd-minTs.Int64)/2/bucketMs*bucketMs)
-				if err := pauseMaintenance(ctx); err != nil {
-					return aged, chunks, err
-				}
-				continue
-			}
-			return aged, chunks, err
-		}
-		aged += n
-		chunks++
-
-		// Yield between chunks. Short transactions alone are not enough:
-		// SQLite's busy handler retries with backoff and no fairness, so a
-		// back-to-back chunk loop re-acquires the lock before any waiting
-		// writer wins its retry — observed in production as tick-persistence
-		// SQLITE_BUSY all through a 93-day backlog migration even with ~1 s
-		// chunks. A real pause guarantees every waiter a window.
-		select {
-		case <-ctx.Done():
-			return aged, chunks, ctx.Err()
-		case <-time.After(pruneChunkPause):
-		}
-	}
-}
-
-// pruneChunkPause is the writer-fairness gap between prune chunks. Var so
-// tests can shrink it.
-var pruneChunkPause = 250 * time.Millisecond
 
 // ---- Prices ----
 

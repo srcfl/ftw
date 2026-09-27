@@ -3,7 +3,6 @@ package mpc
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 )
 
@@ -15,9 +14,8 @@ type EnergyplanOptimizer struct {
 
 func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 	external, err := NewExternalOptimizer(ExternalOptimizerConfig{
-		Command:   []string{binary, "--time-limit=5s"},
-		ModuleDir: filepath.Dir(binary), Timeout: 7 * time.Second,
-		IdleTimeout: 2 * time.Minute,
+		Command: []string{binary, "--time-limit=5s"},
+		Timeout: 7 * time.Second, IdleTimeout: 2 * time.Minute,
 	})
 	if err != nil {
 		return nil, err
@@ -60,10 +58,9 @@ func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
 	return budget
 }
 
+// Optimize solves the slots Service has already moved to the PV downside, so
+// the worker never adds a second risk margin.
 func (o *EnergyplanOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
-	// Service has already applied the risk margin to these slots. Do not
-	// construct a second scenario model for this deterministic solver.
-	p.PVUncertaintyW, p.PVRelativeUncertainty, p.PVForecastSafetyK = 0, 0, 0
 	budget := energyplanTimeBudget(slots, p)
 	if budget <= 0 {
 		return Plan{}, fmt.Errorf("remaining first-slot time %s is below the Energyplan budget", remainingFirstSlot(slots))
@@ -86,8 +83,8 @@ func (o *EnergyplanOptimizer) Health(ctx context.Context) (OptimizerRuntimeInfo,
 	return decodeOptimizerHandshakeFor(line, "process", "ftw-solver")
 }
 
-// BundledWithCore prevents sidecar update controls from reporting or replacing
-// the independently versioned worker bundled in the Core image.
+// BundledWithCore tells component diagnostics that this worker ships inside
+// the Core release and moves with its updates and rollbacks.
 func (o *EnergyplanOptimizer) BundledWithCore() bool { return true }
 
 func usesDownsidePV(optimizer PlanOptimizer) bool {

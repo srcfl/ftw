@@ -36,9 +36,6 @@ func TestBackupRestoresAggregateEvidenceAndDuplicateIdentity(t *testing.T) {
 	if err := st.FlushHistory(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MaintainAggregateHistory(context.Background(), cold, time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	writeTestFile(t, filepath.Join(cold, "2026", "09", ".ftw-buckets-01.pending.db"), "resumable scratch, not a backup source")
 	info, err := Create(context.Background(), CreateOptions{State: st, StatePath: path, DataDir: dir, OutputDir: filepath.Join(root, "backups")})
 	if err != nil {
@@ -48,18 +45,13 @@ func TestBackupRestoresAggregateEvidenceAndDuplicateIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	archiveFound := false
 	for _, f := range manifest.Files {
 		if strings.Contains(f.Path, ".ftw-buckets-") {
 			t.Fatal("included mutable scratch", f.Path)
 		}
-		archiveFound = archiveFound || strings.HasSuffix(f.Path, ".buckets.parquet")
-	}
-	if !archiveFound {
-		t.Fatal("missing aggregate Parquet")
 	}
 	target := filepath.Join(root, "restore")
-	if _, err := Restore(info.Path, target, time.Now()); err != nil {
+	if _, err := restoreFresh(info.Path, target, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := state.OpenWithLegacyHistory(filepath.Join(target, "state.db"), filepath.Join(target, "cold"))

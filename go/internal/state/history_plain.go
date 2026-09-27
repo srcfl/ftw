@@ -493,7 +493,7 @@ func (s *Store) MaintainPlainHistory(ctx context.Context, now time.Time) error {
 	if s == nil || s.history == nil {
 		return nil
 	}
-	return s.maintainHistory(ctx, "", 0, now, true)
+	return s.maintainHistory(ctx, now)
 }
 
 func (s *Store) maintainPlainBuckets(ctx context.Context, now time.Time) error {

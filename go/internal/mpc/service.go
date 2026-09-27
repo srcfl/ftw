@@ -85,14 +85,7 @@ type Service struct {
 	PVCurtailmentProbe   func() PVCurtailment
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
-	// PVNameplateW accepts a verified AC generation ceiling. A configured
-	// DC rating or learned scale is not a hard limit. Zero disables the cut.
-	PVNameplateW float64
-	Load         LoadPredictor // optional — overrides flat BaseLoad
-	// LoadMaxW is an independently verified gross-load limit, not the
-	// grid fuse: local generation may supply load above grid import.
-	// Zero disables the upper cut.
-	LoadMaxW float64
+	Load               LoadPredictor // optional — overrides flat BaseLoad
 	// Optimizer is the external mathematical planning engine. Nil — the
 	// default since #1020 — makes the in-process Go DP the champion. When
 	// non-nil, any engine/process/validation failure falls back to the DP for
@@ -355,32 +348,6 @@ func (s *Service) SetSiteMeter(name string) {
 	}
 	s.mu.Lock()
 	s.SiteMeter = name
-	s.mu.Unlock()
-}
-
-// UpdateCapacity swaps the aggregate battery capacity + charge/discharge
-// bounds on the active planner. Called from the config-reload path when
-// the operator adds or removes a driver (or promotes/demotes an EV
-// loadpoint) and the MPC battery pool changes. Without this, the
-// planner would keep optimising against its startup-time capacity
-// snapshot while the dispatch layer already saw the new numbers — the
-// plan's SoC% and terminal credit would drift from reality until the
-// next process restart. Codex P1 on PR #121.
-//
-// Caller is expected to pass the same totals buildMPC would have
-// computed from the new config: totalCap across battery drivers,
-// aggregate max charge/discharge clamped to fuse capacity.
-func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.Defaults.CapacityWh = totalCapWh
-	s.Defaults.MaxChargeW = maxChargeW
-	s.Defaults.MaxDischargeW = maxDischargeW
-	if totalCapWh == 0 {
-		s.Defaults.InitialSoC = 0
-	}
 	s.mu.Unlock()
 }
 
@@ -1185,7 +1152,7 @@ func (s *Service) checkTwinDrift(ctx context.Context) {
 		untilMs := pp.slotStart[len(pp.slotStart)-1].UnixMilli() + 24*3600*1000
 		sinceMs := pp.slotStart[0].Add(-plannerWeatherLookback).UnixMilli()
 		if fs, err := s.Store.LoadForecasts(sinceMs, untilMs); err == nil {
-			forecasts = clampForecastPV(fs, s.PVNameplateW)
+			forecasts = fs
 		}
 	}
 
@@ -1473,7 +1440,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		// continue without PV forecast
 	}
 	forecasts = usableForecasts(forecasts, now.UnixMilli())
-	forecasts = clampForecastPV(forecasts, s.PVNameplateW)
 
 	pv, correct, load := s.PV, s.PVResidualCorrect, s.Load
 	var captured ForecastInputs
@@ -1485,10 +1451,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		}
 	}
 	slots := buildSlots(prices, forecasts, baseLoad, now.UnixMilli(), pv, correct, load, captured.PVWeight)
-	// Resolve receives the complete legacy forecast, including verified limits,
-	// so its frozen shadow matches what the previous pipeline would have used.
-	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
-	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	// Resolve receives the complete legacy forecast, so its frozen shadow
+	// matches what the previous pipeline would have used.
+	sanitizeSlotLoads(slots)
 	if captured.Resolve != nil && len(slots) > 0 {
 		if request.wasCanceledByService() {
 			return s.canceledReplan(request, "forecast-start")
@@ -1512,8 +1477,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			slots[i].PVW, slots[i].LoadW = resolved[i].PVW, resolved[i].LoadW
 		}
 	}
-	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
-	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	sanitizeSlotLoads(slots)
 	{
 		loadW, ok := s.liveHouseLoadW()
 		overlayLiveHouseLoad(slots, loadW, ok)
@@ -1527,16 +1491,16 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		slog.Error("mpc: invalid slot chronology; keeping previous plan", "err", err)
 		return s.Latest()
 	}
-	// The mathematical optimizer receives raw PV plus explicit scenarios. Keep
-	// a separate downside copy for the emergency Go-DP path, preserving the
-	// previous safety behavior if the worker is unavailable.
+	// Keep the point forecast and a downside-PV copy. The Core DP and the
+	// Energyplan worker both plan against the downside copy; the point
+	// forecast stays for diagnostics and forecast calibration.
 	fallbackSlots := append([]Slot(nil), slots...)
 	var pvUncertaintyW, pvRelativeUncertainty float64
 	pvUncertainty := s.PVUncertaintyW
 	pvRelative := s.PVRelativeUncertainty
 	if pvUncertainty != nil {
 		// One replan must use one uncertainty snapshot. Reading the live model
-		// twice could give the external scenarios and Go fallback different
+		// twice could give the plan and its recorded diagnostic different
 		// physics for the same request.
 		pvUncertaintyW = pvUncertainty()
 	}
@@ -1914,8 +1878,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.expiredReplan(request)
 	}
 
-	capPlanPVToNameplate(&plan, s.PVNameplateW)
-	capPlanLoad(&plan, 0, s.LoadMaxW)
+	sanitizePlanLoads(&plan)
 	plan.DecisionID = s.nextDecisionIDLocked()
 	s.last = &plan
 	s.executionPlan = s.last
@@ -2148,25 +2111,6 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 	return out
 }
 
-// applyPVDownsideToSlots is the Service-level seam over the haircut: it reads
-// the live uncertainties from the PVUncertaintyW / PVRelativeUncertainty hooks
-// and the configured k, and applies the downside to the plan's slots. No-op
-// when both hooks are unwired or on a nil Service — the planner then runs
-// against the raw forecast.
-func (s *Service) applyPVDownsideToSlots(slots []Slot) {
-	if s == nil || (s.PVUncertaintyW == nil && s.PVRelativeUncertainty == nil) {
-		return
-	}
-	var sigmaAbsW, sigmaRel float64
-	if s.PVUncertaintyW != nil {
-		sigmaAbsW = s.PVUncertaintyW()
-	}
-	if s.PVRelativeUncertainty != nil {
-		sigmaRel = s.PVRelativeUncertainty()
-	}
-	applyPVDownsidePerSlot(slots, s.PVForecastSafetyK, sigmaRel, sigmaAbsW)
-}
-
 // applyPVDownsidePerSlot is the proportional form: each slot loses k·σ_rel of
 // its OWN expected generation rather than one flat watt figure repeated across
 // the horizon. The flat form erased the morning and evening shoulders outright
@@ -2313,10 +2257,6 @@ func upperHalfMeanPrice(prices []state.PricePoint) float64 {
 // non-representative training data).
 const PlannerRadiationWeight = 0.3
 
-func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
-	return selectPlannerPVWithWeight(forecastPVW, predictedPVW, radiationBacked, PlannerRadiationWeight)
-}
-
 func selectPlannerPVWithWeight(forecastPVW, predictedPVW float64, radiationBacked bool, weight float64) float64 {
 	if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) || forecastPVW < 0 {
 		forecastPVW = 0
@@ -2347,7 +2287,7 @@ func selectPlannerPVWithWeight(forecastPVW, predictedPVW float64, radiationBacke
 // a measured-radiation or direct-PV signal from the provider (as
 // opposed to a cloud-derated naive estimate). Used by the planner to
 // decide how much to trust the forecast vs the RLS twin. Anchors on
-// the same slot-boundary rules as lookupPV.
+// the same slot-boundary rules as lookupPVInput.
 func lookupHasRadiation(forecasts []state.ForecastPoint, ts int64) bool {
 	for _, f := range forecasts {
 		slotLen := f.SlotLenMin
@@ -2397,19 +2337,12 @@ func lookupCloudInput(forecasts []state.ForecastPoint, ts int64) (float64, *stat
 	return 50, nil
 }
 
-// lookupPV finds the forecast row whose slot covers ts and returns its PV
-// estimate (W, non-negative). Returns 0 if no forecast or no estimate.
-// Strictly respects slot boundaries: does NOT carry forward beyond the last
-// forecast slot, because doing so would project stale PV into nighttime or
-// far-future slots where the forecast didn't cover.
-func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
-	pvW, _ := lookupPVInput(forecasts, ts)
-	return pvW
-}
-
-// lookupPVInput returns the cached row used for the direct PV estimate. It
-// returns no row outside forecast coverage because lookupPV intentionally does
-// not carry PV backward before the first row or forward after the last row.
+// lookupPVInput finds the forecast row whose slot covers ts and returns its PV
+// estimate (W, non-negative) and that row. It returns 0 and no row when no
+// forecast or estimate covers ts. It strictly respects slot boundaries and does
+// not carry PV backward before the first row or forward after the last row,
+// because doing so would project stale PV into nighttime or far-future slots
+// the forecast did not cover.
 func lookupPVInput(forecasts []state.ForecastPoint, ts int64) (float64, *state.ForecastPoint) {
 	if len(forecasts) == 0 {
 		return 0, nil
@@ -2525,49 +2458,4 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Param
 	}
 	p.Storages = storages
 	return p, true
-}
-
-// clampForecastPV copies estimates above nameplate down onto that
-// ceiling. Same hard cut as forecast.ClampForecasts and
-// capSlotsPVToNameplate: the plan must not see more PV than the roof
-// can make.
-func clampForecastPV(rows []state.ForecastPoint, nameplateW float64) []state.ForecastPoint {
-	if nameplateW <= 0 {
-		return rows
-	}
-	for i := range rows {
-		if rows[i].PVWEstimated == nil || *rows[i].PVWEstimated <= nameplateW {
-			continue
-		}
-		v := nameplateW
-		rows[i].PVWEstimated = &v
-	}
-	return rows
-}
-
-// capSlotsPVToNameplate is the last cut before the optimizer: slot PV
-// (site-signed, generation negative) cannot exceed the nameplate,
-// even if the twin or a 3× forecast blend still overshoots.
-func capSlotsPVToNameplate(slots []Slot, nameplateW float64) []Slot {
-	if nameplateW <= 0 {
-		return slots
-	}
-	for i := range slots {
-		if math.Abs(slots[i].PVW) > nameplateW {
-			slots[i].PVW = -nameplateW
-		}
-	}
-	return slots
-}
-
-func capPlanPVToNameplate(plan *Plan, nameplateW float64) {
-	if plan == nil || nameplateW <= 0 {
-		return
-	}
-	plan.PVNameplateW = nameplateW
-	for i := range plan.Actions {
-		if math.Abs(plan.Actions[i].PVW) > nameplateW {
-			plan.Actions[i].PVW = -nameplateW
-		}
-	}
 }

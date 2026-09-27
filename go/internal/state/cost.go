@@ -285,31 +285,6 @@ func (s *Store) loadCostHistoryRows(ctx context.Context, sinceMs, untilMs int64)
 			return nil, err
 		}
 	}
-	if s.hot != nil && s.hot != s.history && untilMs >= sinceMs {
-		rows, err := s.hot.QueryContext(ctx, `
-			SELECT ts_ms, COALESCE(grid_w, 0), COALESCE(load_w, 0), COALESCE(bat_w, 0), COALESCE(pv_w, 0)
-			FROM history_hot WHERE ts_ms BETWEEN ? AND ?`, sinceMs, untilMs)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var r costHistoryRow
-			if err := rows.Scan(&r.ts, &r.gridW, &r.loadW, &r.batW, &r.pvW); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if len(byTS) >= maxRawSeriesPoints {
-				rows.Close()
-				return nil, ErrHistoryQueryLimit
-			}
-			byTS[r.ts] = r
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return nil, err
-		}
-	}
 	out := make([]costHistoryRow, 0, len(byTS))
 	for _, r := range byTS {
 		out = append(out, r)

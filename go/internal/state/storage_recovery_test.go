@@ -3,6 +3,7 @@ package state
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -13,10 +14,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/parquet-go/parquet-go"
+	"github.com/parquet-go/parquet-go/compress/zstd"
 )
 
 func TestFreshSQLiteStoreDoesNotCreateBetaFiles(t *testing.T) {
@@ -163,80 +168,6 @@ func TestSQLiteLegacyResumeRetainsParquetIdentityAndLiveTicks(t *testing.T) {
 	}
 	if n := sqliteLegacyHistoryTableCount(s); n != len(historyTables) {
 		t.Fatal("legacy SQLite source deleted", n)
-	}
-}
-
-func TestArchiveRetryKeepsAllRowsPeaksAndOlderSummaries(t *testing.T) {
-	s := freshStore(t)
-	s.coldDir = t.TempDir()
-	ctx := context.Background()
-	day := time.Now().AddDate(0, 0, -40).UTC().Truncate(24 * time.Hour)
-	put := func(ts int64, v float64) {
-		t.Helper()
-		if err := s.RecordSamples([]Sample{{Driver: "ev", Metric: "power", TsMs: ts, Value: v}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	put(day.UnixMilli(), 0)
-	put(day.Add(time.Minute).UnixMilli(), 11000)
-	if _, err := s.history.Exec(`CREATE TRIGGER fail_archive_prune BEFORE DELETE ON ts_samples BEGIN SELECT RAISE(ABORT,'injected prune failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.RolloffToParquet(ctx, s.coldDir); err == nil {
-		t.Fatal("prune fault ignored")
-	}
-	put(day.Add(2*time.Minute).UnixMilli(), 1000)
-	if _, err := s.history.Exec(`DROP TRIGGER fail_archive_prune`); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.RolloffToParquet(ctx, s.coldDir); err != nil {
-		t.Fatal(err)
-	}
-	pts, err := s.LoadSeries("ev", "power", day.UnixMilli(), day.Add(time.Hour).UnixMilli(), 0)
-	if err != nil || len(pts) != 3 {
-		t.Fatalf("retry rows=%v %v", pts, err)
-	}
-	if err := s.PruneHistorySamples(ctx, 30, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	paths, err := parquetPaths(s.coldDir, day.UnixMilli(), day.Add(time.Hour).UnixMilli())
-	if err != nil || len(paths) != 0 {
-		t.Fatal(paths, err)
-	}
-	buckets, err := s.LoadSeriesBuckets("ev", "power", day.UnixMilli(), day.Add(24*time.Hour).UnixMilli()-1, 24)
-	if err != nil || len(buckets) != 1 || buckets[0].N != 3 || buckets[0].Min != 0 || buckets[0].Max != 11000 || buckets[0].V != 4000 {
-		t.Fatalf("lost old envelope: %+v %v", buckets, err)
-	}
-	// A late, unique point after raw expiry must add to the durable total.
-	put(day.Add(3*time.Minute).UnixMilli(), 1000)
-	if err := s.PruneHistorySamples(ctx, 30, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	buckets, err = s.LoadSeriesBuckets("ev", "power", day.UnixMilli(), day.Add(24*time.Hour).UnixMilli()-1, 24)
-	if err != nil || len(buckets) != 1 || buckets[0].N != 4 || buckets[0].V != 3250 || buckets[0].Max != 11000 {
-		t.Fatalf("late point erased old total: %+v %v", buckets, err)
-	}
-
-}
-
-func TestArchiveRejectsCorruptionBeforeDeletingSQLite(t *testing.T) {
-	s := freshStore(t)
-	s.coldDir = t.TempDir()
-	day := time.Now().AddDate(0, 0, -40).UTC().Truncate(24 * time.Hour)
-	if err := s.RecordSamples([]Sample{{Driver: "ev", Metric: "power", TsMs: day.UnixMilli(), Value: 7000}}); err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(s.coldDir, day.Format("2006/01"))
-	os.MkdirAll(dir, 0700)
-	if err := os.WriteFile(filepath.Join(dir, day.Format("02.parquet")), []byte("truncated archive"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.RolloffToParquet(context.Background(), s.coldDir); err == nil {
-		t.Fatal("accepted corrupt archive")
-	}
-	var n int
-	if err := s.history.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&n); err != nil || n != 1 {
-		t.Fatal("deleted unarchived rows", n, err)
 	}
 }
 
@@ -633,18 +564,22 @@ func TestHistoryCommitSyncsWAL(t *testing.T) {
 	}
 }
 
+// writeParquetDay writes a cold sample day in the layout a 2.x install left
+// behind: rows ordered by time, driver and metric.
 func writeParquetDay(path string, rows []parquetSampleRow) error {
-	stagePath := path + ".fixture.db"
-	stage, err := openArchiveStage(stagePath)
+	rows = slices.Clone(rows)
+	slices.SortFunc(rows, func(a, b parquetSampleRow) int {
+		return cmp.Or(cmp.Compare(a.TsMs, b.TsMs), strings.Compare(a.Driver, b.Driver), strings.Compare(a.Metric, b.Metric))
+	})
+	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(stagePath)
-	defer stage.Close()
-	if err := insertArchiveRows(context.Background(), stage, rows); err != nil {
-		return err
+	w := parquet.NewGenericWriter[parquetSampleRow](f, parquet.Compression(&zstd.Codec{Level: zstd.DefaultLevel}))
+	if _, err := w.Write(rows); err != nil {
+		return errors.Join(err, w.Close(), f.Close())
 	}
-	return new(Store).publishStagedSamples(context.Background(), path, stage)
+	return errors.Join(w.Close(), f.Close())
 }
 
 // Opt-in admission fixture: records kernel peak RSS on the target. Also use
@@ -999,38 +934,6 @@ func TestCloseCancelsBlockedSeriesBackfill(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("shutdown waited for archive backfill")
-	}
-}
-
-func TestInterruptedArchiveCleanupKeepsSourcesAndActiveTemps(t *testing.T) {
-	dir := t.TempDir()
-	month := filepath.Join(dir, "2026", "01")
-	if err := os.MkdirAll(month, 0700); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	old := now.Add(-48 * time.Hour)
-	for _, name := range []string{".ftw-samples-old.db", ".ftw-samples-active.db", "01.parquet"} {
-		path := filepath.Join(month, name)
-		if err := os.WriteFile(path, []byte("source"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if name != ".ftw-samples-active.db" {
-			if err := os.Chtimes(path, old, old); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if err := cleanupArchiveTemps(context.Background(), dir, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(month, ".ftw-samples-old.db")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("orphan remains", err)
-	}
-	for _, name := range []string{".ftw-samples-active.db", "01.parquet"} {
-		if _, err := os.Stat(filepath.Join(month, name)); err != nil {
-			t.Fatal("removed retained file", name, err)
-		}
 	}
 }
 

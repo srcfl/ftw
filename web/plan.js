@@ -54,20 +54,12 @@ import {
     return frac * 100;
   }
 
-  // Hard cut: the roof cannot make more than its nameplate. A stale
-  // megawatt pv_w (kWp pasted as watts) must not paint the chart.
-  function sitePVWCapped(pvW, nameplateW) {
-    if (pvW == null || !(nameplateW > 0)) return pvW;
-    var gen = Math.max(0, -Number(pvW));
-    if (gen > nameplateW) return -nameplateW;
-    return pvW;
-  }
-
-  function siteLoadWCapped(loadW, maxW) {
+  // House load is consumption: a missing value stays missing, and a
+  // negative or non-numeric one draws as 0 W.
+  function siteLoadW(loadW) {
     if (loadW == null) return loadW;
     var w = Number(loadW);
     if (!(w >= 0) || isNaN(w)) return 0;
-    if (maxW > 0 && w > maxW) return maxW;
     return w;
   }
 
@@ -571,7 +563,7 @@ import {
         if (a.slot_start_ms > tMax) break;
         if (a.pv_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(sitePVWCapped(a.forecast_pv_w ?? a.pv_w, plan.pv_nameplate_w)); // site-signed, cut at nameplate
+        const y = powerY(a.forecast_pv_w ?? a.pv_w); // site-signed
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -579,7 +571,7 @@ import {
       for (const f of state.forecast || []) {
         if (f.slot_ts_ms > tMax || !f.pv_w_estimated) continue;
         const x = xScale(f.slot_ts_ms);
-        const y = powerY(sitePVWCapped(-f.pv_w_estimated, plan && plan.pv_nameplate_w)); // flip + nameplate cut
+        const y = powerY(-f.pv_w_estimated); // flip to site sign
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -599,7 +591,7 @@ import {
         if (a.slot_start_ms > tMax) break;
         if (a.load_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(siteLoadWCapped(a.forecast_load_w ?? a.load_w, plan.load_max_w));
+        const y = powerY(siteLoadW(a.forecast_load_w ?? a.load_w));
         if (f2) { ctx.moveTo(x, y); f2 = false; }
         else ctx.lineTo(x, y);
       }
@@ -617,7 +609,7 @@ import {
         let first = true;
         for (const a of plan.actions) {
           if (a.slot_start_ms > tMax) break;
-          const value = field === "pv_w" ? sitePVWCapped(a[field], plan.pv_nameplate_w) : siteLoadWCapped(a[field], plan.load_max_w);
+          const value = field === "pv_w" ? a[field] : siteLoadW(a[field]);
           const x = xScale(a.slot_start_ms), y = powerY(value);
           if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
         }
@@ -978,12 +970,11 @@ import {
         lines.push(`<div class="tip-row"><span>Load forecast</span><b>${(a.forecast_load_w / 1000).toFixed(1)} kW</b></div>`);
       }
       if (a.pv_w != null) {
-        const pvW = sitePVWCapped(a.pv_w, state.plan && state.plan.pv_nameplate_w);
-        const pvGen = Math.max(0, -pvW) / 1000;
+        const pvGen = Math.max(0, -a.pv_w) / 1000;
         lines.push(`<div class="tip-row"><span title="Solar generation used for planning after the forecast margin">PV used by plan</span><b>${pvGen.toFixed(1)} kW</b></div>`);
       }
       if (a.load_w != null) {
-        const loadW = siteLoadWCapped(a.load_w, state.plan && state.plan.load_max_w);
+        const loadW = siteLoadW(a.load_w);
         lines.push(`<div class="tip-row"><span title="Household load used for planning after the forecast margin">Load used by plan</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
       }
       const evWatts = plannedEVWatts(a);

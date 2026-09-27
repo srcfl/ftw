@@ -46,7 +46,10 @@ func TestAbsorbColdHistoryReconcilesPublishedSource(t *testing.T) {
 			}
 			publish()
 			if partialPrune {
-				if err := s.pruneBucketMinutes(context.Background(), archive[:1]); err != nil {
+				// An older Core deleted the first archived minute from SQLite
+				// after it published the file.
+				if _, err := s.history.Exec(`DELETE FROM ts_buckets WHERE resolution_ms IN (?,?) AND start_ms>=? AND start_ms<?`,
+					HistoryResolutionMS, ArchiveResolutionMS, archive[0].StartMS, archive[0].StartMS+archive[0].ResolutionMS); err != nil {
 					t.Fatal(err)
 				}
 			}

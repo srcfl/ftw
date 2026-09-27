@@ -236,8 +236,8 @@ type Params struct {
 	// power bounds. The Go DP fallback continues to use the aggregate fields.
 	Storages []StorageAssetSpec
 
-	// PV scenario inputs are consumed by the mathematical optimizer. The Go DP
-	// fallback still receives downside-adjusted slots directly from Service.
+	// PV uncertainty is the one snapshot Service used to move the planning
+	// slots to the PV downside, kept here for diagnostics and replay.
 	// PVRelativeUncertainty (0..1) sizes the spread per slot against that
 	// slot's own generation; 0 keeps the flat PVUncertaintyW watt figure.
 	PVUncertaintyW        float64
@@ -365,27 +365,18 @@ type Plan struct {
 	// active do not get an execution-facing identity. Together with an
 	// Action's SlotStartMs it forms the stable key for one planned decision.
 	// Direct Optimize callers leave it empty; the service fills it on publish.
-	DecisionID    string   `json:"decision_id,omitempty"`
-	GeneratedAtMs int64    `json:"generated_at_ms"`
-	Mode          Mode     `json:"mode"`
-	HorizonSlots  int      `json:"horizon_slots"`
-	CapacityWh    float64  `json:"capacity_wh"`
-	InitialSoC    float64  `json:"initial_soc"`
-	TotalCostOre  float64  `json:"total_cost_ore"`
-	Actions       []Action `json:"actions"`
-	// PVNameplateW is the hard generation ceiling (W) applied to
-	// every slot. The UI uses it so a stale megawatt pv_w cannot
-	// paint the chart; 0 means no cut was configured.
-	PVNameplateW float64 `json:"pv_nameplate_w,omitempty"`
-	// LoadMaxW is the hard house-load ceiling (W), normally the fuse.
-	// The UI uses it so a stale wild load_w cannot paint the chart.
-	LoadMaxW           float64           `json:"load_max_w,omitempty"`
-	Baselines          *Baselines        `json:"baselines,omitempty"`
-	Solver             *SolverInfo       `json:"solver,omitempty"`
-	DPShadow           *ShadowPlan       `json:"dp_shadow,omitempty"`
-	DPEvaluationShadow *ShadowPlan       `json:"dp_evaluation_shadow,omitempty"`
-	RecourseShadow     *ShadowPlan       `json:"recourse_shadow,omitempty"`
-	ShadowEvaluation   *ShadowEvaluation `json:"shadow_evaluation,omitempty"`
+	DecisionID         string      `json:"decision_id,omitempty"`
+	GeneratedAtMs      int64       `json:"generated_at_ms"`
+	Mode               Mode        `json:"mode"`
+	HorizonSlots       int         `json:"horizon_slots"`
+	CapacityWh         float64     `json:"capacity_wh"`
+	InitialSoC         float64     `json:"initial_soc"`
+	TotalCostOre       float64     `json:"total_cost_ore"`
+	Actions            []Action    `json:"actions"`
+	Baselines          *Baselines  `json:"baselines,omitempty"`
+	Solver             *SolverInfo `json:"solver,omitempty"`
+	DPShadow           *ShadowPlan `json:"dp_shadow,omitempty"`
+	DPEvaluationShadow *ShadowPlan `json:"dp_evaluation_shadow,omitempty"`
 	// OptimizerInput is the exact versioned request used by an external
 	// optimizer. It is omitted from the live plan API and copied into the
 	// persisted Diagnostic for deterministic replay.
@@ -411,8 +402,8 @@ type ShadowPlan struct {
 	// optimize with but neither reports. Two plans that park the horizon at
 	// different SoC are not comparable on raw cost: the fuller one is storing
 	// value, not overspending, and on a 9.6 kWh pack that artifact is worth up
-	// to ~21 SEK. Filled by the Python field shadow; zero on blocks written
-	// before it existed.
+	// to ~21 SEK. Filled by the Core DP shadow; zero on blocks written before
+	// it existed.
 	ActiveTerminalCorrectedOre            float64 `json:"active_terminal_corrected_ore,omitempty"`
 	TerminalCorrectedOre                  float64 `json:"terminal_corrected_ore,omitempty"`
 	ActiveMinusShadowTerminalCorrectedOre float64 `json:"active_minus_shadow_terminal_corrected_ore,omitempty"`
@@ -420,7 +411,7 @@ type ShadowPlan struct {
 
 // terminalCorrectedOre nets the terminal-SoC credit out of a raw grid cost so
 // two plans ending at different SoC compare honestly. Same formula as the DP's
-// terminal value (Optimize) and the stateful shadow's valued cost.
+// terminal value (Optimize).
 func terminalCorrectedOre(rawCostOre, endSoC float64, p Params) float64 {
 	return rawCostOre - p.TerminalSoCPrice*(endSoC*p.CapacityWh)/1000.0
 }

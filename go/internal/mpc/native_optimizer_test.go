@@ -24,7 +24,7 @@ func nativeWorker(t testing.TB, budget time.Duration) *ExternalOptimizer {
 	if !filepath.IsAbs(binary) {
 		t.Fatal("FTW_NATIVE_SOLVER must be an absolute executable path")
 	}
-	o, err := NewExternalOptimizer(ExternalOptimizerConfig{Command: []string{binary, "--time-limit=" + budget.String()}, ModuleDir: filepath.Dir(binary), Timeout: 3 * time.Second})
+	o, err := NewExternalOptimizer(ExternalOptimizerConfig{Command: []string{binary, "--time-limit=" + budget.String()}, Timeout: 3 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

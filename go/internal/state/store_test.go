@@ -453,47 +453,6 @@ func TestLoadSeriesBucketsEnvelope(t *testing.T) {
 	}
 }
 
-func TestRolloffToParquetPreservesExistingDayRows(t *testing.T) {
-	s := freshStore(t)
-	coldDir := t.TempDir()
-	day := time.Now().Add(-RecentRetention - 48*time.Hour).UTC().Truncate(24 * time.Hour)
-	first := day.Add(10 * time.Hour).UnixMilli()
-	second := day.Add(11 * time.Hour).UnixMilli()
-
-	if err := s.RecordSamples([]Sample{
-		{Driver: "meter", Metric: "grid_w", TsMs: first, Value: 100},
-	}); err != nil {
-		t.Fatalf("record first sample: %v", err)
-	}
-	if rows, _, err := s.RolloffToParquet(context.Background(), coldDir); err != nil {
-		t.Fatalf("first rolloff: %v", err)
-	} else if rows != 1 {
-		t.Fatalf("first rolloff rows = %d, want 1", rows)
-	}
-
-	if err := s.RecordSamples([]Sample{
-		{Driver: "meter", Metric: "grid_w", TsMs: second, Value: 200},
-	}); err != nil {
-		t.Fatalf("record second sample: %v", err)
-	}
-	if rows, _, err := s.RolloffToParquet(context.Background(), coldDir); err != nil {
-		t.Fatalf("second rolloff: %v", err)
-	} else if rows != 1 {
-		t.Fatalf("second rolloff rows = %d, want 1", rows)
-	}
-
-	got, err := s.LoadSeriesFromParquet(coldDir, "meter", "grid_w", first, second)
-	if err != nil {
-		t.Fatalf("LoadSeriesFromParquet: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("cold series len = %d, want 2: %+v", len(got), got)
-	}
-	if got[0].TsMs != first || got[0].Value != 100 || got[1].TsMs != second || got[1].Value != 200 {
-		t.Fatalf("cold series = %+v, want first+second preserved", got)
-	}
-}
-
 func TestBatteryModelStore(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveBatteryModel("ferroamp", `{"a":0.7,"b":0.3}`); err != nil {
@@ -622,34 +581,6 @@ func TestCountHistoryWithoutMarker(t *testing.T) {
 	if got != 1 {
 		t.Fatalf("count without marker = %d, want 1", got)
 	}
-}
-
-func TestHistoryPruneAggregates(t *testing.T) {
-	s := freshStore(t)
-	// Insert 20 rows, all older than HotRetention
-	oldMs := time.Now().UnixMilli() - int64(HotRetention.Milliseconds()) - 24*3600*1000
-	old := make([]HistoryPoint, 20)
-	for i := range old {
-		old[i] = HistoryPoint{
-			TsMs:  oldMs + int64(i)*1000,
-			GridW: float64(100 + i),
-			JSON:  "{}",
-		}
-	}
-	if err := s.BulkRecordHistory(old); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Prune(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	hot, warm, _, _ := s.HistoryCounts()
-	if hot != 0 {
-		t.Errorf("prune: expected hot=0 after pruning old rows, got %d", hot)
-	}
-	if warm == 0 {
-		t.Errorf("prune: expected warm>0 (hot→warm aggregation), got 0")
-	}
-	t.Logf("after prune: hot=%d warm=%d", hot, warm)
 }
 
 func TestTelemetrySaveLoad(t *testing.T) {

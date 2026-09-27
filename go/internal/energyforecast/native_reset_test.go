@@ -3,7 +3,6 @@ package energyforecast_test
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,7 +16,7 @@ func TestNativeForecastResetIsSignalScopedAndDurable(t *testing.T) {
 		t.Skip("set FTW_FORECAST_WORKER to an Energyplan worker with forecast reset support")
 	}
 	newClient := func() (*energyforecast.Client, *mpc.ProcessTransport) {
-		transport, err := mpc.NewProcessTransport(mpc.ProcessTransportConfig{Command: []string{binary}, ModuleDir: filepath.Dir(binary)})
+		transport, err := mpc.NewProcessTransport(mpc.ProcessTransportConfig{Command: []string{binary}})
 		if err != nil {
 			t.Fatal(err)
 		}

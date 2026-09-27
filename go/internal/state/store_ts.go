@@ -15,9 +15,6 @@ import (
 // memory so writes don't need a roundtrip per sample. The intern caches
 // hydrate from disk on first use.
 
-// RecentRetention is the SQLite/Parquet boundary for raw samples.
-const RecentRetention = 14 * 24 * time.Hour
-
 // Sample is one (driver, metric, ts, value) tuple — the canonical TS row.
 // Unit is optional display metadata persisted on the metric (not per row).
 type Sample struct {
@@ -801,15 +798,6 @@ func (s *Store) DriverNames() ([]string, error) {
 		out = append(out, n)
 	}
 	return out, nil
-}
-
-// PruneHistorySamples archives before applying raw retention. Hourly summaries
-// remain; a nonpositive retention keeps all Parquet samples.
-func (s *Store) PruneHistorySamples(ctx context.Context, retentionDays int, now time.Time) error {
-	if !s.HistoryMigrationStatus().HistoryComplete {
-		return nil
-	}
-	return s.retainSampleHistory(ctx, retentionDays, now)
 }
 
 // SamplesBefore streams every sample with ts_ms < cutoff in batches sorted
