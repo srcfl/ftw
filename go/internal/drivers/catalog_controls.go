@@ -16,9 +16,8 @@ import (
 // for the commands that have no other way to reach a person — a heat curve
 // offset, a mode selection — which today reach nobody at all.
 //
-// The signed package manifest carries the same shape in RuntimeCommand, but
-// only for drivers that ship through the signed channel. A bundled or local
-// driver has no policy, so this is where its declaration lives.
+// The declaration lives in the driver's own DRIVER block, whichever source
+// the driver came from.
 type CatalogControl struct {
 	ID       string              `json:"id"`
 	Label    string              `json:"label,omitempty"`
@@ -38,6 +37,12 @@ type CatalogControlInput struct {
 }
 
 var controlEvidence = map[string]bool{"readback": true, "write_ack": true}
+
+var controlTokenRE = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
+
+func validControlToken(value string) bool {
+	return len(value) <= 128 && controlTokenRE.MatchString(value)
+}
 
 // ControlsForDriver returns the controls declared by the catalog entry for
 // luaPath, matching the way IsEVOrVehicleDriver and IsReadOnlyDriver already

@@ -1,15 +1,12 @@
 // Operator-facing driver controls: send one declared command, hold it for a
 // bounded time, and hand the device back to itself when the hold ends.
 //
-// Deliberately outside control v2. A signed package binds a RuntimePolicy and
-// goes through CommandV2 with its write scope, lease and evidence. A bundled
-// or local driver has no policy, and giving it a synthesised one would be
-// worse than doing nothing: HostEnv.permissionAllowed grants everything only
-// while the policy is nil, so a policy without permissions silently blocks
-// the driver's own MQTT, and LuaDriver.Command refuses a control v2 driver on
-// the legacy path — v2 needs driver_command_v2 entrypoints that no community
-// driver has. So this path leaves the policy layer untouched and validates
-// against the driver's catalog declaration instead.
+// Deliberately outside the signed runtime policy. A commandable driver has no
+// policy, and giving it a synthesised one would be worse than doing nothing:
+// HostEnv.permissionAllowed grants everything only while the policy is nil,
+// so a policy without permissions silently blocks the driver's own MQTT, and
+// any policy denies every write. So this path leaves the policy layer
+// untouched and validates against the driver's catalog declaration instead.
 //
 // What that costs is honest and worth stating: no host-enforced write scope
 // and no host-verified evidence. What it keeps is the part that protects

@@ -3,8 +3,6 @@ package drivers
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,12 +101,10 @@ type Registry struct {
 	// config.yaml value at driver_init so a rotated token survives a
 	// restart. Returns ("", false) when no override exists.
 	SecretOverride func(driverName, key string) (string, bool)
-	// RuntimePolicyResolver returns verified signed policy for a managed
-	// artifact. Nil means legacy/bundled/local v1 behavior.
+	// RuntimePolicyResolver returns the verified signed policy of a managed
+	// read-only artifact. Nil means bundled, local and control-capable
+	// signed drivers, which run without one.
 	RuntimePolicyResolver func(config.Driver) (*RuntimePolicy, error)
-	// CommandResultSink records completed v2 command and default-mode results.
-	// A nil sink keeps tests and legacy setups simple.
-	CommandResultSink func(driverName string, result DriverCommandResultV1)
 
 	mu               sync.Mutex
 	rec              map[string]*runningDriver
@@ -192,11 +188,6 @@ type driverRuntime interface {
 	Env() *HostEnv
 }
 
-type controlV2Runtime interface {
-	CommandV2(context.Context, DriverCommandV1, time.Time) (DriverCommandResultV1, error)
-	DefaultModeV2(context.Context, string, string, time.Time) (DriverCommandResultV1, error)
-}
-
 // luaRuntime adapts *LuaDriver to driverRuntime. LuaDriver's internal
 // signatures take a map (not raw JSON) for ergonomics, so we decode
 // once at the boundary.
@@ -217,12 +208,6 @@ func (l *luaRuntime) Cleanup(ctx context.Context) error {
 	return nil
 }
 func (l *luaRuntime) Env() *HostEnv { return l.LuaDriver.Env }
-func (l *luaRuntime) CommandV2(ctx context.Context, cmd DriverCommandV1, now time.Time) (DriverCommandResultV1, error) {
-	return l.LuaDriver.CommandV2(ctx, cmd, now)
-}
-func (l *luaRuntime) DefaultModeV2(ctx context.Context, id, reason string, now time.Time) (DriverCommandResultV1, error) {
-	return l.LuaDriver.DefaultModeV2(ctx, id, reason, now)
-}
 
 func driverInitConfigJSON(cfg config.Driver, troubleshootingMode bool) []byte {
 	if len(cfg.Config) == 0 && !troubleshootingMode && !cfg.SupportsPVCurtail {
@@ -249,9 +234,7 @@ type runningDriver struct {
 	driver             driverRuntime
 	env                *HostEnv
 	cfg                config.Driver
-	policy             *RuntimePolicy
 	readOnly           bool
-	leaseExpiresAt     time.Time
 	generation         uint64
 	statusMu           sync.RWMutex
 	controlBlocked     bool
@@ -634,7 +617,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	if err != nil {
 		return fmt.Errorf("load lua: %w", err)
 	}
-	if !cfg.ObserveOnly && (policy == nil || !policy.IsControlV2()) {
+	if !cfg.ObserveOnly {
 		requiresDefault, catalogErr := legacyDriverRequiresDefaultMode(cfg.Lua, luaDrv.hasEntrypoint("driver_command"))
 		if catalogErr != nil {
 			luaDrv.CleanupContext(ctx)
@@ -681,17 +664,8 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		}
 		return fmt.Errorf("driver_init: %w", err)
 	}
-	if startupDefault && !cfg.ObserveOnly && policy != nil && policy.IsControlV2() {
-		v2 := drv.(controlV2Runtime)
-		result, defaultErr := v2.DefaultModeV2(ctx, newControlID("default"), "host_start", time.Now())
-		r.recordCommandResult(cfg.Name, result)
-		if defaultErr != nil {
-			drv.Cleanup(ctx)
-			return fmt.Errorf("driver_default_mode_v2 on startup: %w", defaultErr)
-		}
-	}
 	var startupDefaultErr error
-	if startupDefault && !cfg.ObserveOnly && (policy == nil || !policy.IsControlV2()) {
+	if startupDefault && !cfg.ObserveOnly {
 		defaultCtx, cancel := context.WithTimeout(ctx, defaultRecoveryTimeout)
 		startupDefaultErr = drv.DefaultMode(defaultCtx)
 		cancel()
@@ -705,7 +679,6 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		driver:          drv,
 		env:             env,
 		cfg:             cfg,
-		policy:          policy,
 		readOnly:        driverDeclaresReadOnly(luaDrv.L),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
@@ -718,14 +691,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	r.nextGeneration++
 	rd.generation = r.nextGeneration
 	inheritsRecovery := r.recoveryRequired[cfg.Name]
-	if startupDefault && !cfg.ObserveOnly && policy != nil && policy.IsControlV2() {
-		rd.defaultConfirmed = true
-		// The v2 startup default above is a confirmed recovery for a
-		// replacement generation. It does not need the legacy retry path.
-		if inheritsRecovery {
-			delete(r.recoveryRequired, cfg.Name)
-		}
-	} else if startupDefault && !cfg.ObserveOnly && (policy == nil || !policy.IsControlV2()) {
+	if startupDefault && !cfg.ObserveOnly {
 		if startupDefaultErr == nil {
 			rd.defaultConfirmed = true
 			if inheritsRecovery {
@@ -774,39 +740,13 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	interval := rd.env.FirstPollDelay()
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
-	leaseTimer := time.NewTimer(time.Hour)
-	if !leaseTimer.Stop() {
-		<-leaseTimer.C
-	}
-	defer leaseTimer.Stop()
 	invalidateCommandSequence := func() {
 		rd.commandRevision++
 		rd.evPausePending = false
 	}
-	var leaseC <-chan time.Time
 	var recoveryTimer *time.Timer
 	var recoveryC <-chan time.Time
 	retryDelay := defaultRetryInitial
-	clearLease := func() {
-		rd.leaseExpiresAt = time.Time{}
-		if !leaseTimer.Stop() {
-			select {
-			case <-leaseTimer.C:
-			default:
-			}
-		}
-		leaseC = nil
-	}
-	armLease := func(expiresAt time.Time) {
-		clearLease()
-		rd.leaseExpiresAt = expiresAt
-		d := time.Until(expiresAt)
-		if d < time.Millisecond {
-			d = time.Millisecond
-		}
-		leaseTimer.Reset(d)
-		leaseC = leaseTimer.C
-	}
 	clearRecoveryTimer := func() {
 		if recoveryTimer != nil {
 			if !recoveryTimer.Stop() {
@@ -848,27 +788,25 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	if rd.controlIsBlocked() {
 		scheduleRecovery()
 	}
-	attemptDefault := func(reason string) error {
+	attemptDefault := func() error {
 		// The actor owns this transition. Invalidate any pause→resume
 		// continuation before the default call starts, regardless of whether
 		// the device later confirms it.
 		invalidateCommandSequence()
 		defaultCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
-		defaultErr := r.defaultDriver(defaultCtx, rd, reason)
+		defaultErr := rd.driver.DefaultMode(defaultCtx)
 		cancel()
 		if defaultErr != nil {
 			scheduleRecovery()
 			return defaultErr
 		}
 		rd.markDefaultConfirmed()
-		clearLease()
 		clearRecoveryTimer()
 		r.clearRecoveryRequired(rd.cfg.Name, rd)
 		return nil
 	}
 	restoreAfterCommand := func(commandErr error) error {
-		clearLease()
-		defaultErr := attemptDefault("command_failed")
+		defaultErr := attemptDefault()
 		commandOutcome := &commandMayHaveRunError{cause: commandErr}
 		if defaultErr != nil {
 			return errors.Join(commandOutcome, fmt.Errorf("%w: restore default after ambiguous command: %v", ErrControlBlocked, defaultErr))
@@ -888,12 +826,11 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		if cmdCtx.Err() != nil {
 			cmdCtx, cancel = context.WithTimeout(context.Background(), defaultRecoveryTimeout)
 		}
-		err := r.defaultDriver(cmdCtx, rd, "host_request")
+		err := rd.driver.DefaultMode(cmdCtx)
 		if cancel != nil {
 			cancel()
 		}
 		if err == nil {
-			clearLease()
 			rd.markDefaultConfirmed()
 			clearRecoveryTimer()
 			r.clearRecoveryRequired(rd.cfg.Name, rd)
@@ -921,7 +858,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			} else {
 				invalidateCommandSequence()
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
-				defaultErr := r.defaultDriver(shutdownCtx, rd, "host_shutdown")
+				defaultErr := rd.driver.DefaultMode(shutdownCtx)
 				rd.setShutdownDefaultError(defaultErr)
 				if defaultErr != nil {
 					slog.Error("driver failed to enter default mode during shutdown", "name", rd.cfg.Name, "err", defaultErr)
@@ -1016,35 +953,14 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					err = ErrControlBlocked
 					break
 				}
-				if rd.policy != nil && rd.policy.IsControlV2() {
-					var result DriverCommandResultV1
-					var leaseExpiresAt time.Time
-					result, leaseExpiresAt, err = r.dispatchV2Command(commandCtx, rd, cmd.payload)
-					r.recordCommandResult(rd.cfg.Name, result)
-					if err == nil {
-						err = commandContextError(cmdCtx, commandCtx)
-					}
-					if err == nil && result.Status == "applied" && result.DeviceState == "controlled" {
-						armLease(leaseExpiresAt)
-						rd.markCommandApplied()
-					} else if err == nil && result.Status == "applied" && result.DeviceState == "default" {
-						invalidateCommandSequence()
-						clearLease()
-						rd.markDefaultConfirmed()
-						clearRecoveryTimer()
-					} else if err != nil {
-						err = restoreAfterCommand(err)
-					}
+				err = rd.driver.Command(commandCtx, cmd.payload)
+				if err == nil {
+					err = commandContextError(cmdCtx, commandCtx)
+				}
+				if err != nil {
+					err = restoreAfterCommand(err)
 				} else {
-					err = rd.driver.Command(commandCtx, cmd.payload)
-					if err == nil {
-						err = commandContextError(cmdCtx, commandCtx)
-					}
-					if err != nil {
-						err = restoreAfterCommand(err)
-					} else {
-						rd.markCommandApplied()
-					}
+					rd.markCommandApplied()
 				}
 				finishCommand()
 				if err == nil && cyclePause {
@@ -1063,14 +979,12 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				cmd.result <- err
 			}
 		case <-timer.C:
-			pollFailed := false
 			// Register the poll as the active Lua call so SendDefault can
 			// cancel it the same way it cancels an in-flight command.
 			pollCtx, finishPoll := rd.beginCommand(ctx)
 			_, err := rd.driver.Poll(pollCtx)
 			finishPoll()
 			if err != nil {
-				pollFailed = true
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
 				if r.tel != nil {
 					r.tel.RecordDriverError(rd.cfg.Name, err.Error())
@@ -1086,116 +1000,15 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				// re-stamps LastSuccess every tick from cached values.
 				r.tel.RecordDriverTick(rd.cfg.Name)
 			}
-			if rd.policy != nil && rd.policy.IsControlV2() && !rd.leaseExpiresAt.IsZero() {
-				var health *telemetry.DriverHealth
-				if r.tel != nil {
-					health = r.tel.DriverHealth(rd.cfg.Name)
-				}
-				if pollFailed || health == nil || !health.IsOnline() {
-					clearLease()
-					if err := attemptDefault("driver_stale"); err != nil {
-						slog.Error("driver stale default mode failed; control blocked", "name", rd.cfg.Name, "err", err)
-					}
-				}
-			}
 			// Re-arm timer at driver's requested interval
 			interval = rd.env.PollInterval()
 			timer.Reset(interval)
-		case <-leaseC:
-			clearLease()
-			if err := attemptDefault("lease_expired"); err != nil {
-				slog.Error("driver lease expiry default mode failed; control blocked", "name", rd.cfg.Name, "err", err)
-			}
 		case <-recoveryC:
-			if err := attemptDefault("control_recovery"); err != nil {
+			if err := attemptDefault(); err != nil {
 				slog.Error("driver default recovery failed; control remains blocked", "name", rd.cfg.Name, "err", err)
 			}
 		}
 	}
-}
-
-func (r *Registry) dispatchV2Command(ctx context.Context, rd *runningDriver, payload []byte) (DriverCommandResultV1, time.Time, error) {
-	var legacy map[string]interface{}
-	if err := json.Unmarshal(payload, &legacy); err != nil {
-		return DriverCommandResultV1{}, time.Time{}, err
-	}
-	action, _ := legacy["action"].(string)
-	var declared *RuntimeCommand
-	for _, candidate := range rd.policy.Commands {
-		if candidate.RuntimeAction == action {
-			if declared != nil {
-				return DriverCommandResultV1{}, time.Time{}, fmt.Errorf("signed package maps more than one command to runtime action %q", action)
-			}
-			copy := candidate
-			declared = &copy
-		}
-	}
-	if declared == nil {
-		return DriverCommandResultV1{}, time.Time{}, fmt.Errorf("runtime action %q is not declared by the signed package", action)
-	}
-	inputs := make(map[string]interface{}, len(declared.Inputs))
-	for name := range declared.Inputs {
-		if value, ok := legacy[name]; ok {
-			inputs[name] = value
-			continue
-		}
-		if name == "power_w" {
-			if value, ok := legacy["w"]; ok {
-				inputs[name] = value
-			}
-		}
-	}
-	now := time.Now()
-	heartbeat := rd.policy.Lease.HeartbeatInterval
-	if heartbeat < time.Second {
-		heartbeat = time.Second
-	}
-	leaseDuration := 2 * heartbeat
-	if leaseDuration > rd.policy.Lease.MaxDuration {
-		leaseDuration = rd.policy.Lease.MaxDuration
-	}
-	commandDeadline := now.Add(5 * time.Second)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(commandDeadline) {
-		commandDeadline = ctxDeadline
-	}
-	cmd := DriverCommandV1{
-		SchemaVersion: DriverCommandSchemaV1,
-		ID:            newControlID("command"), Command: declared.ID, Source: "ftw.control",
-		IssuedAt: now.UTC(), ExpiresAt: commandDeadline.UTC(), Attempt: 1, Inputs: inputs,
-		Lease: DriverCommandLeaseV1{
-			ID: newControlID("lease"), ExpiresAt: now.Add(leaseDuration).UTC(),
-			HeartbeatIntervalMS: heartbeat.Milliseconds(),
-		},
-	}
-	result, err := rd.driver.(controlV2Runtime).CommandV2(ctx, cmd, now)
-	if err == nil && result.Status != "applied" {
-		err = fmt.Errorf("driver command returned %s, not applied", result.Status)
-	}
-	return result, cmd.Lease.ExpiresAt, err
-}
-
-func (r *Registry) defaultDriver(ctx context.Context, rd *runningDriver, reason string) error {
-	if rd.policy == nil || !rd.policy.IsControlV2() {
-		return rd.driver.DefaultMode(ctx)
-	}
-	result, err := rd.driver.(controlV2Runtime).DefaultModeV2(ctx, newControlID("default"), reason, time.Now())
-	r.recordCommandResult(rd.cfg.Name, result)
-	return err
-}
-
-func (r *Registry) recordCommandResult(driverName string, result DriverCommandResultV1) {
-	if r.CommandResultSink != nil && result.SchemaVersion != "" {
-		result.CompletedAt = time.Now().UTC()
-		r.CommandResultSink(driverName, result)
-	}
-}
-
-func newControlID(kind string) string {
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return fmt.Sprintf("ftw.%s:%d", kind, time.Now().UnixNano())
-	}
-	return "ftw." + kind + ":" + hex.EncodeToString(raw)
 }
 
 // Remove stops and cleans up a driver. Idempotent. Also wipes the
