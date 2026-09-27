@@ -19,7 +19,7 @@ var sensitiveMutations = []sensitiveMutation{
 	{name: "battery", path: "/api/battery/manual_hold", body: `{"direction":"idle","hold_s":60}`},
 	{name: "EV", path: "/api/ev/command", body: `{"action":"ev_stop"}`},
 	{name: "update", path: "/api/version/update"},
-	{name: "restore", path: "/api/version/rollback", body: `{"snapshot_id":"snapshot-1"}`},
+	{name: "rollback", path: "/api/version/binary-rollback"},
 	{name: "restart", path: "/api/restart"},
 }
 

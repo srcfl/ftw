@@ -11,10 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 type fixtureFile struct {
@@ -185,6 +188,57 @@ func TestDownloaderFetchesExactTagAndPublishesOnlyAfterChecksum(t *testing.T) {
 	}
 	if _, err := d.Manager.ReleaseDir(tag); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A connection that stays open but sends nothing must end the download well
+// before the update status turns stale, so a run reported failed has really
+// stopped and cannot restart Core minutes later.
+func TestDownloaderFailsASilentTransfer(t *testing.T) {
+	old := fetchIdleTimeout
+	fetchIdleTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { fetchIdleTimeout = old })
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sha256") {
+			// Silent before the response headers.
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		// Silent after the first bytes of the body.
+		w.Header().Set("Content-Length", "4096")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 512))
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	root := t.TempDir()
+	d := Downloader{Manager: Manager{Root: root}, ReleaseBaseURL: srv.URL, HTTPClient: srv.Client()}
+	target := filepath.Join(root, "asset")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range []string{"ftw-linux-arm64.tar.gz.sha256", "ftw-linux-arm64.tar.gz"} {
+		t.Run(asset, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			started := time.Now()
+			err := d.fetch(ctx, "v0.131.0-beta.1", asset, target, 1<<20, nil)
+			if !errors.Is(err, errFetchIdle) {
+				t.Fatalf("silent transfer error = %v, want %v", err, errFetchIdle)
+			}
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Fatalf("silent transfer took %s to fail", elapsed)
+			}
+		})
 	}
 }
 

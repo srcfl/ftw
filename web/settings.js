@@ -277,7 +277,7 @@
 
   function pollHealth(progressTextEl) {
     var startedAt = Date.now();
-    var TIMEOUT_MS = 90 * 1000; // ~90 s; sidecar pull+up can be slow on Pi.
+    var TIMEOUT_MS = 90 * 1000; // ~90 s; a restart can be slow on a Pi.
     function tick() {
       // Cache-bust so an intermediate proxy can't lie about reachability.
       apiFetch("/api/health?_=" + Date.now(), { cache: "no-store" })
@@ -285,7 +285,7 @@
           if (r.ok) {
             progressTextEl.textContent = "Reloading…";
             // Hard reload so any new static assets (post-update) are
-            // picked up — same dance ftw-update-check.js does.
+            // picked up.
             setTimeout(function () { window.location.reload(); }, 400);
             return;
           }

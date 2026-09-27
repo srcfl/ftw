@@ -17,28 +17,15 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /No new measured progress for/);
   assert.doesNotMatch(badge, /Large history databases can take several minutes/);
   assert.match(badge, /if \(!this\._info\) return this\._versionLoadingHTML\(\)/);
-  assert.match(badge, /if \(info\.native\) return this\._nativeVersionHTML\(info\)/);
+  assert.match(badge, /return this\._versionHTML\(info\)/);
   assert.match(badge, /Total:/);
-  assert.match(badge, /Saving rollback point \(settings and config; history stays in place\)/);
-  assert.doesNotMatch(badge, /full history backup/);
+  assert.doesNotMatch(badge, /rollback point|full history backup/);
 });
 
-test("update history shows failure message not only outcome", () => {
-  assert.match(badge, /event\.message/);
-  assert.match(badge, /outcome \|\| "\?"\} — \$\{event\.message\}/);
-});
-
-test("setup keeps polling when a safe update takes longer", () => {
-  assert.match(setup, /SNAPSHOT_SOFT_TIMEOUT_MS = 15 \* 60 \* 1000/);
-  assert.match(setup, /timed_out: true/);
-  assert.doesNotMatch(setup, /this\._stopPolling\(\);\s+this\._phase = "timedOut"/);
-  assert.match(setup, /case "snapshotting": return "Saving rollback point"/);
-  assert.match(setup, /case "checking":\s+return "Checking service health"/);
-});
-
-test("setup on a native install names ftw update and offers no update button", () => {
-  assert.match(setup, /info\.native === true \|\| info\.sidecar_ready === true/);
-  assert.match(setup, /const actions = info\.native\s+\? `<div class="banner-hint">After setup, install it on the machine that runs FTW with <code>ftw update<\/code>\.<\/div>\s+<div class="banner-actions">\s+<button class="btn-skip" data-action="dismiss">Continue<\/button>/);
+test("setup names ftw update and offers no update button", () => {
+  assert.match(setup, /info\.native === true/);
+  assert.match(setup, /<div class="banner-hint">After setup, install it on the machine that runs FTW with <code>ftw update<\/code>\.<\/div>\s+<div class="banner-actions">\s+<button class="btn-skip" data-action="dismiss">Continue<\/button>/);
+  assert.doesNotMatch(setup, /\/api\/version\/update|data-action="update"|sidecar_ready/);
 });
 
 test("Core image sets ownership during copy without a duplicate app layer", () => {
@@ -46,4 +33,18 @@ test("Core image sets ownership during copy without a duplicate app layer", () =
   assert.match(dockerfile, /COPY --chown=100:101 drivers\/\s+\/app\/drivers\//);
   assert.match(dockerfile, /COPY --chown=100:101 web\/\s+\/app\/web\//);
   assert.doesNotMatch(dockerfile, /chown -R 100:101 \/app/);
+});
+
+test("a failed GitHub check retries a few times instead of waiting three hours", () => {
+  assert.match(badge, /ERROR_RETRY_DELAYS_MS = \[30 \* 1000, 90 \* 1000, 180 \* 1000\]/);
+  assert.match(badge, /_scheduleErrorRetry\(\)/);
+  assert.match(badge, /this\._refresh\(true\)/);
+});
+
+test("optimizer fallback is visible in the global header", () => {
+  assert.match(badge, /Planner fallback active/);
+  // The header mark labels itself from the same warning title it shows on
+  // hover; header-status-marks.test.mjs drives the rendered states.
+  assert.match(badge, /class="mark warning"[^`]*aria-label="\$\{escapeHTML\(warningTitle\)\}"/);
+  assert.match(badge, /optimizer\.fallback_reason \|\| optimizer\.health_error/);
 });

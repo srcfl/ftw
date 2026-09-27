@@ -67,7 +67,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
-	"github.com/srcfl/ftw/go/internal/updateipc"
 )
 
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
@@ -386,17 +385,6 @@ func main() {
 		slog.Warn("ignoring FTW_IMAGE_TAG that does not match a built release identity", "built_version", builtVersion, "built_candidate", CandidateTag, "image_tag", imageTag)
 	}
 	slog.Info("FTW starting", "version", Version, "config", *configPath)
-	// The previous updater may revert this image if startup fails. Confirm
-	// its failure behavior before config/bootstrap/state can write any data.
-	if envBool("FTW_SELFUPDATE_ENABLED") && nativeRoot == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := updateipc.RequireSafeUpdater(ctx, envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
-		cancel()
-		if err != nil {
-			slog.Error("updater preflight", "err", err)
-			os.Exit(1)
-		}
-	}
 
 	// Route "drivers/<name>.lua" path resolution through the drivers dir
 	// (from -drivers). Picked up by both the initial Load below and every
@@ -463,8 +451,8 @@ func main() {
 	// Bind the API port BEFORE the potentially slow state open. A boot that
 	// runs a one-time VACUUM or a full integrity check on a multi-GB DB can
 	// take 25+ minutes, and an unbound port for that long makes the Docker
-	// healthcheck fail and the self-update sidecar judge the deploy failed —
-	// observed 2026-07-16 as an auto-rollback in the middle of a VACUUM.
+	// healthcheck fail and a health-gated update roll back — observed
+	// 2026-07-16 in the middle of a VACUUM.
 	// Until the real mux is wired, /api/health answers 200 "starting" and
 	// everything else 503.
 	// Closures start unbound (lan_auth off) so the boot-phase health
@@ -2335,20 +2323,15 @@ func main() {
 	}
 
 	// ---- Self-update checker ----
-	// Probes the GitHub Releases API in the background; the UI reads the
-	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
-	// because the ftw-updater sidecar only exists in the docker-compose deploy.
-	// Native / OS-image builds will ship their own update mechanism and set
-	// their own gate (or leave this one off). Deps.SelfUpdate stays nil when
-	// disabled, which makes every /api/version/* handler return 503 and the
-	// UI hide the badge.
+	// Probes the GitHub Releases API in the background; the ftw command and
+	// the UI read the cached result via /api/version/check. Only a native
+	// install, started by the launcher from its release slots, updates
+	// itself (ADR 0007). Docker changes FTW_VERSION and rebuilds, and the
+	// Home Assistant app follows Supervisor. Deps.SelfUpdate stays nil there,
+	// which makes every /api/version/* handler return 503 and the UI hide
+	// the badge.
 	var selfUpdater *selfupdate.Checker
-	// Implicitly enable for dev binaries (Version=="dev") so `make dev`
-	// users can click the version label and exercise the probe + modal
-	// without setting FTW_SELFUPDATE_ENABLED=1. Production builds (real
-	// vX.Y.Z stamped via -ldflags) still require the explicit env var
-	// so the feature can't surprise an OS-image deploy.
-	if nativeRoot != "" || envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
+	if nativeRoot != "" {
 		// FTW_SELFUPDATE_CURRENT_VERSION overrides what the checker thinks
 		// it's running so dev / QA can force update_available=true without
 		// rebuilding with a fake -ldflags Version. Scoped to the checker
@@ -2361,23 +2344,18 @@ func main() {
 				"real_version", Version, "reported_version", current,
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
-		statusPath := envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json")
-		if nativeRoot != "" {
-			statusPath = filepath.Join(nativeRoot, "update-status.json")
-		}
 		// FTW_RELEASE_MIRROR serves the release list at /releases and the
 		// packages at /download/<tag>/, as GitHub does. It exists to test the
 		// native chain with releases that are not published; leave it unset.
 		var releasesURL, nativeReleaseURL string
-		if mirror := strings.TrimRight(os.Getenv("FTW_RELEASE_MIRROR"), "/"); mirror != "" && nativeRoot != "" {
+		if mirror := strings.TrimRight(os.Getenv("FTW_RELEASE_MIRROR"), "/"); mirror != "" {
 			releasesURL, nativeReleaseURL = mirror+"/releases", mirror+"/download"
 			slog.Warn("selfupdate: native releases come from a mirror", "url", mirror)
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
 			CurrentVersion:     current,
 			CurrentStateSchema: state.SchemaVersion,
-			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:         statusPath,
+			StatusPath:         filepath.Join(nativeRoot, "update-status.json"),
 			NativeRoot:         nativeRoot,
 			NativeTrialTimeout: nativeTrialTimeout,
 			ReleasesURL:        releasesURL,
@@ -2397,8 +2375,6 @@ func main() {
 		selfUpdater.Start(ctx)
 		slog.Info("selfupdate enabled", "native_root", nativeRoot,
 			"channel", selfUpdater.Info().Channel)
-	} else {
-		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
 	}
 
 	// ---- Start HTTP API ----
@@ -2524,11 +2500,8 @@ func main() {
 		StatePath:         statePath,
 		BackupDir:         backupDir,
 		DataMaintenanceMu: dataMaintenanceMu,
-		// Snapshots live next to the rest of the persistent data so
-		// docker-compose deploys only need one bind (./data). Derived
-		// from the state.db path rather than the config path because
-		// `state.db` is always in the main data volume; the config
-		// can live elsewhere after its one-time migration.
+		// Rollback points an older Docker Core left beside state.db. They
+		// are listed and deleted, never taken or restored.
 		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
@@ -2547,19 +2520,7 @@ func main() {
 		Events:           bus,
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
-		Restart: func(reqCtx context.Context) error {
-			// Compose: restart the existing container through the updater.
-			// An old updater refuses this action before touching Docker.
-			// The Home Assistant bundle has no sidecar and must not exit:
-			// Supervisor leaves a stopped app stopped unless Watchdog is on.
-			if selfUpdater != nil && nativeRoot == "" && !bundle.ReexecOnRestart() {
-				if err := selfUpdater.TriggerRestart(reqCtx); err == nil {
-					slog.Info("restart: dispatched via updater sidecar")
-					return nil
-				} else {
-					slog.Info("restart: sidecar unavailable, falling back to in-process exit", "err", err)
-				}
-			}
+		Restart: func(context.Context) error {
 			// Drop the main control loop out of its select so every defer
 			// (HA Stop, st.Close, http.Shutdown, …) runs cleanly. The
 			// first defer then re-execs or os.Exit(1) per restartPlan.
@@ -4187,10 +4148,6 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 	}
 }
 
-// envOr returns the env var's value if it is set (even if empty, so an
-// operator can explicitly blank a path to disable a feature, such as
-// FTW_UPDATER_SOCKET="" on the older Docker line). Returns def only when
-// the variable is unset.
 // haCallbacks builds the bridge's command-callback set. Extracted so
 // the boot-time ha.Start path and the configreload "disabled → enabled"
 // path can share the exact same wiring — drift between them would mean
@@ -4329,13 +4286,6 @@ func haEnergySource(st *state.Store) ha.EnergySource {
 	return stateEnergyBridge{st: st}
 }
 
-func envOr(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok {
-		return v
-	}
-	return def
-}
-
 func troubleshootingGridW(tel *telemetry.Store, siteMeterDriver string) (float64, bool) {
 	if siteMeterDriver == "" {
 		return 0, false
@@ -4357,14 +4307,4 @@ func troubleshootingSumOnlineW(tel *telemetry.Store, typ telemetry.DerType) floa
 		sum += r.SmoothedW
 	}
 	return sum
-}
-
-// envBool returns true iff the env var is set to a positive value
-// (1/true/yes/on, case-insensitive). Unset or any other value = false.
-func envBool(key string) bool {
-	switch strings.ToLower(os.Getenv(key)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
 }

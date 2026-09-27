@@ -10,10 +10,9 @@ const badge = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8"
 const devices = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
 const system = readFileSync(new URL("./settings/tabs/system.js", import.meta.url), "utf8");
 
-test("Update Center lists no driver versions and offers no driver actions", () => {
+test("the version dialog lists no driver versions and offers no driver actions", () => {
   assert.doesNotMatch(badge, /device_repository/);
   assert.doesNotMatch(badge, /driver-change|driver-versions|_driverCatalog|_refreshDriverCatalog/);
-  assert.match(badge, /Versions are chosen per device under Settings › Devices\./);
 });
 
 test("the badge counts only Core, so a new driver does not light it up", () => {

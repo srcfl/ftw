@@ -11,15 +11,13 @@ function fixture({ get } = {}) {
     set innerHTML(html) {
       this.html = html;
       this.modal = /<div class="modal"/.test(html) ? { scrollTop: 0 } : null;
-      const storage = html.match(/<details class="snapshots storage"([^>]*)>/);
-      this.storage = storage ? { open: /\bopen\b/.test(storage[1]) } : null;
       this.actions = [...html.matchAll(/data-action="([^"]*)"/g)].map(([, action]) => ({
         dataset: { action }, addEventListener(type, handler) { this[type] = handler; },
       }));
     }
     get innerHTML() { return this.html || ""; }
     querySelector(selector) {
-      return selector === ".modal" ? this.modal : selector === "details.storage" ? this.storage : null;
+      return selector === ".modal" ? this.modal : null;
     }
     querySelectorAll(selector) { return selector === "[data-action]" ? this.actions || [] : []; }
   }
@@ -31,19 +29,18 @@ function fixture({ get } = {}) {
     dispatchEvent() {}
   }
   const body = new Element();
-  const requests = [], alerts = [];
-  let Badge, finish;
+  const requests = [];
+  let Badge;
   const sandbox = {
     HTMLElement: Element,
     document: { body, createElement: () => new Element() },
     customElements: { define: (_, cls) => { Badge = cls; } },
     CustomEvent: class {},
-    window: { alert: message => alerts.push(message), confirm: () => true, location: { href: "http://127.0.0.1:8080/" } },
+    window: { location: { href: "http://127.0.0.1:8080/" } },
     fetch: (url, options) => {
       requests.push({ url, options });
-      if (options?.method === "POST") return new Promise(resolve => { finish = resolve; });
       if (get) return Promise.resolve(get(url));
-      return Promise.resolve({ ok: true, json: async () => ({ enabled: true, backups: [], snapshots: [] }) });
+      return Promise.resolve({ ok: true, json: async () => ({}) });
     },
     setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {},
     URL, console,
@@ -51,14 +48,11 @@ function fixture({ get } = {}) {
   vm.runInNewContext(source, sandbox);
   const badge = new Badge();
   badge._phase = "dialog";
-  badge._info = {}; // a Core that is not native keeps the old dialog
-  badge._backups = { enabled: true, backups: [], on_device: true };
-  badge._snapshots = { enabled: true, snapshots: [] };
+  badge._info = { native: true, current: "v0.131.0-beta.1", channel: "beta" };
   badge._render();
   return {
-    badge, body, requests, alerts,
+    badge, body, requests,
     root: () => body.children[0]?.shadowRoot || badge._shadow,
-    finish: ok => finish({ ok, json: async () => ok ? {} : { error: "fixture failed" } }),
   };
 }
 
@@ -117,17 +111,28 @@ test("a native release that failed on this machine is not offered again", () => 
   assert.doesNotMatch(rig.root().innerHTML, /class="cmd"/);
 });
 
-test("the dialog waits for the version check instead of showing the old dialog", () => {
+test("the dialog waits for the version check before reporting a version", () => {
   const rig = fixture();
   rig.badge._info = null;
   rig.badge._render();
   assert.match(rig.root().innerHTML, /Reading the running version/);
-  assert.doesNotMatch(rig.root().innerHTML, /Updates<\/h3>|data-action="restart"/);
+  assert.doesNotMatch(rig.root().innerHTML, /is running/);
 });
 
-test("opening on a native install reads only the version, the last run and the components", async () => {
+test("the dialog offers no update, restart, rollback, channel or backup control", () => {
+  const rig = fixture();
+  rig.badge._info = { native: true, current: "v0.131.0-beta.1", update_available: true, latest: "v0.131.0-beta.2" };
+  rig.badge._render();
+  assert.deepEqual([...new Set(rig.root().actions.map(action => action.dataset.action))].sort(), ["check", "close"]);
+  for (const route of ["/api/version/update", "/api/version/restart", "/api/version/binary-rollback",
+    "/api/version/rollback", "/api/version/channel", "/api/version/skip", "/api/version/snapshots", "/api/backups"]) {
+    // The status route is read, never a mutation.
+    assert.doesNotMatch(source, new RegExp('"' + route + "(?!/status)"), route);
+  }
+});
+
+test("opening reads only the version, the last run and the components", async () => {
   const rig = fixture({ get: () => ({ ok: true, json: async () => ({ state: "idle" }) }) });
-  rig.badge._info = { native: true, current: "v0.131.0-beta.1", channel: "beta" };
   rig.requests.length = 0;
   rig.badge.open();
   await settled();
@@ -143,41 +148,6 @@ test("the header mark counts only Core; driver versions live in Settings › Dev
   assert.equal(rig.badge._pendingUpdates().total, 1);
 });
 
-test("full backup displays phase and row progress while the request is pending", () => {
-  const rig = fixture();
-  rig.badge._creatingBackup = true;
-  rig.badge._backups.progress = { phase: "copying_database", rows_done: 8192 };
-  rig.badge._render();
-  assert.match(rig.root().innerHTML, /Copying saved data/);
-  assert.match(rig.root().innerHTML, /8,192 records processed/);
-  rig.badge._backups.progress = { phase: "verifying_archive" };
-  rig.badge._render();
-  assert.match(rig.root().innerHTML, /Verifying the full backup/);
-});
-
-for (const [method, path] of [["_createBackup", "/api/backups"], ["_createSnapshot", "/api/version/snapshots"]]) {
-  for (const ok of [true, false]) {
-    test(method + " keeps the open section and scroll through progress and " + (ok ? "success" : "failure"), async () => {
-      const rig = fixture();
-      rig.root().storage.open = true;
-      rig.root().modal.scrollTop = 270;
-      rig.badge[method]();
-      assert.equal(rig.requests[0].url, path);
-      assert.equal(rig.root().storage.open, true, "progress must stay visible");
-      assert.equal(rig.root().modal.scrollTop, 270);
-      assert.match(rig.root().innerHTML, /Creating/);
-      rig.badge.setConnected(false);
-      assert.equal(rig.root().storage.open, true, "a concurrent status render must preserve the section");
-      assert.equal(rig.root().modal.scrollTop, 270);
-      rig.finish(ok);
-      await settled();
-      assert.equal(rig.root().storage.open, true, "completion must remain in view");
-      assert.equal(rig.root().modal.scrollTop, 270);
-      assert.equal(rig.alerts.length, ok ? 0 : 1);
-    });
-  }
-}
-
 test("disabling or removing the badge leaves no detached dialog", () => {
   for (const action of ["_disable", "disconnectedCallback"]) {
     const rig = fixture();
@@ -189,17 +159,19 @@ test("disabling or removing the badge leaves no detached dialog", () => {
   }
 });
 
-test("opening Updates adopts work started by another client and blocks a duplicate start", async () => {
-  const running = { state: "snapshotting", action: "update", target: "v3.2.1-beta.1", started_at: new Date().toISOString() };
+test("opening the dialog follows an update started with ftw update", async () => {
+  const running = { state: "pulling", action: "update", target: "v0.131.0-beta.2", started_at: new Date().toISOString(),
+    step: 1, total_steps: 3, progress_unit: "bytes", progress_current: 1048576, progress_total: 4194304 };
   const rig = fixture({ get: url => ({ ok: true, json: async () => url.endsWith("/update/status") ? running : {} }) });
   rig.badge.open();
-  assert.equal(rig.badge._checkingCurrentRun, true);
-  rig.badge._beginUpdate("update");
-  assert.equal(rig.requests.filter(r => r.options?.method === "POST").length, 0);
   await settled();
   assert.equal(rig.badge._phase, "updating");
-  assert.equal(rig.badge._sidecarState.state, "snapshotting");
+  assert.equal(rig.badge._runStatus.state, "pulling");
   assert.equal(rig.badge._expectedRun.target, running.target);
+  const html = rig.root().innerHTML;
+  assert.match(html, /Step 1 of 3 · Downloading release package/);
+  assert.match(html, /1\.0 MB \/ 4\.0 MB/);
+  assert.equal(rig.requests.filter(r => r.options?.method === "POST").length, 0);
 });
 
 test("a startup 503 keeps update progress available; only explicit disable hides it", async () => {

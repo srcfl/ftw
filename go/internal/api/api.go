@@ -127,12 +127,9 @@ type Deps struct {
 	StatePath         string      // absolute primary SQLite path used by portable backups
 	BackupDir         string      // full .ftwbak output; may be an externally mounted path
 	DataMaintenanceMu *sync.Mutex // excludes Parquet rolloff/pruning while a full backup is captured
-	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
-	// are written by the self-update flow. Defaults to
-	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
-	// an absolute, writable path. Empty disables the snapshot step —
-	// updates proceed as before, the UI surfaces that no rollback point
-	// was captured so the operator can decide whether to continue.
+	// SnapshotDir holds the rollback points the older Docker line saved
+	// before each update. Native Core only lists and deletes them. main.go
+	// passes an absolute path; empty disables both.
 	SnapshotDir string
 
 	// Optional: spot prices + weather forecast services. Nil if disabled.
@@ -189,8 +186,8 @@ type Deps struct {
 	DriverModbusFactory func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error)
 	DriverARPLookup     func(host string) (mac string, ok bool)
 
-	// Optional: background version-check + updater-sidecar dispatch.
-	// Nil disables every /api/version/* endpoint (returns 503).
+	// Optional: background version check and native update. Nil disables
+	// every /api/version/* endpoint (returns 503).
 	SelfUpdate *selfupdate.Checker
 
 	// Events is the shared pub/sub bus. Nil is a safe no-op for
@@ -212,9 +209,6 @@ type Deps struct {
 
 	// Restart triggers a graceful process restart from POST /api/restart.
 	// Implementations:
-	//   - production (docker compose): dispatch to the ftw-updater sidecar
-	//     so the running container is force-recreated against the same
-	//     image — exact same code path as the post-update restart.
 	//   - Home Assistant add-on: signal main() to shut down cleanly, then
 	//     re-exec the binary in-process. Supervisor does not restart a
 	//     stopped app unless Watchdog is on, so exiting would leave the
@@ -539,14 +533,12 @@ func (s *Server) routes() {
 	s.handle("POST /api/version/restart", Configure, s.handleVersionRestart)
 	s.handle("GET  /api/version/update/status", Read, s.handleVersionUpdateStatus)
 	s.handle("GET  /api/version/snapshots", Read, s.handleVersionSnapshots)
-	s.handle("POST /api/version/snapshots", Configure, s.handleVersionSnapshotCreate)
 	s.handle("DELETE /api/version/snapshots/{id}", Configure, s.handleVersionSnapshotDelete)
 	s.handle("GET  /api/backups", Read, s.handleBackups)
 	s.handle("POST /api/backups", Configure, s.handleBackupCreate)
 	s.handle("GET  /api/backups/{id}", Local, s.handleBackupDownload)
 	s.handle("DELETE /api/backups/{id}", Configure, s.handleBackupDelete)
 	s.handle("POST /api/backups/{id}/verify", Configure, s.handleBackupVerify)
-	s.handle("POST /api/version/rollback", Configure, s.handleVersionRollback)
 	s.handle("POST /api/version/binary-rollback", Configure, s.handleVersionBinaryRollback)
 	s.handle("POST /api/restart", Configure, s.handleRestart)
 

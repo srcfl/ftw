@@ -261,12 +261,11 @@
       max-width: 420px;
     }
 
-    /* When <ftw-update-check> has something to show (banner or update
-       overlay), force the operator to acknowledge it before starting
-       setup. The component toggles its own `.hidden` class when idle;
-       the absence of it here means the update card is on screen, so we
-       collapse the "Welcome / Get started" block until the user picks
-       Update now or Continue anyway. */
+    /* When <ftw-update-check> shows its notice, the operator
+       acknowledges it before starting setup. The component toggles its
+       own `.hidden` class when idle; the absence of it here means the
+       notice is on screen, so we collapse the "Welcome / Get started"
+       block until the user picks Continue. */
     .welcome-center:has(ftw-update-check:not(.hidden)) > h2,
     .welcome-center:has(ftw-update-check:not(.hidden)) > p,
     .welcome-center:has(ftw-update-check:not(.hidden)) > button.btn-primary {
@@ -846,12 +845,12 @@
 
 </div>
 
-<!-- Components: load only <ftw-update-check> (pre-setup update banner)
-     and its transitive deps (ftw-element + ftw-modal). Pulling the full
+<!-- Components: load only <ftw-update-check> (pre-setup release notice)
+     and its transitive deps (ftw-element, api-fetch). Pulling the full
      /components/index.js registry here would eagerly import the whole
      dashboard component catalogue (ftw-energy-flow etc.) — dead weight on
      the first setup paint. -->
-<script type="module" src="/components/ftw-update-check.js"></script>
+<script type="module" src="/components/ftw-update-check.js?v=native1"></script>
 <script src="/lan-auth.js?v=lan1"></script>
 <script src="/setup.js?v=zones1"></script>
 </body>

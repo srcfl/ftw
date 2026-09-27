@@ -9,7 +9,6 @@ User=ftw
 Group=ftw
 WorkingDirectory=/var/lib/ftw
 ExecStart=/opt/ftw/ftw-launcher -root /opt/ftw -config /var/lib/ftw/config.yaml -user-drivers /var/lib/ftw/drivers
-Environment=FTW_SELFUPDATE_ENABLED=0
 Restart=always
 RestartSec=5
 StateDirectory=ftw

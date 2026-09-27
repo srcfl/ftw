@@ -22,7 +22,7 @@ while IFS= read -r file; do
       ;;
     # contract/ is here because the Go suite checks the generated constants
     # against the registry.
-    go/*|contract/*|drivers/*|config*.yaml|Dockerfile|Dockerfile.updater|.dockerignore)
+    go/*|contract/*|drivers/*|config*.yaml|Dockerfile|.dockerignore)
       core=true
       ;;
     optimizer/*|Dockerfile.optimizer|go/internal/mpc/*|go/cmd/ftw/main.go)

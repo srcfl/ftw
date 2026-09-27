@@ -32,10 +32,8 @@ FROM scratch AS binaries
 COPY --from=builder /out/ /
 
 # --- Runtime ---------------------------------------------------------------
-# Debian trixie-slim — current Debian stable (13), and the same suite as
-# Dockerfile.updater. Both images share the rootfs blob, so the extra bytes
-# over alpine are paid a single time per host rather than per image, and there
-# is one libc and one security stream to track.
+# Debian trixie-slim — current Debian stable (13), with one libc and one
+# security stream to track.
 #
 # Pinned to the codename, not `stable-slim`: a suite alias would silently jump
 # major versions on some future rebuild. The `debian base currency` workflow

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -122,7 +121,7 @@ func TestNativeRestartReportsCompletionAfterBoot(t *testing.T) {
 	checker := selfupdate.New(selfupdate.Config{CurrentVersion: current, NativeRoot: root,
 		StatusPath:    filepath.Join(root, "update-status.json"),
 		NativeRestart: func() error { restarts++; return nil }}, nil)
-	if err := checker.TriggerRestart(context.Background()); err != nil {
+	if err := checker.TriggerRestart(); err != nil {
 		t.Fatal(err)
 	}
 	if status := checker.Status(); status.State != "restarting" || status.Action != "restart" || restarts != 1 {

@@ -508,9 +508,8 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	// Refuse to overwrite an existing destination. The old VACUUM INTO
 	// path errored implicitly; the ATTACH path would happily append
 	// into a pre-existing schema, which would silently corrupt a stale
-	// snapshot. Caller (createPreUpdateSnapshot) builds a unique
-	// timestamped dir per snapshot, so collision is a bug worth
-	// surfacing.
+	// snapshot. The caller builds a unique path per snapshot, so a
+	// collision is a bug worth surfacing.
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf("snapshot: destination already exists: %s", dstPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -616,9 +615,8 @@ const (
 // BackupToCompressed writes a complete, point-in-time copy of state.db as a
 // gzip stream. Unlike SnapshotTo, this is a user-data backup: it includes the
 // history and sample tables as well as configuration, models, and identities.
-// The self-update rollback flow must use this method; restoring the compact
-// recovery snapshot produced by SnapshotTo would intentionally erase recent
-// time-series data.
+// Restoring the compact recovery snapshot produced by SnapshotTo instead
+// would intentionally erase recent time-series data.
 //
 // Verified row copies build a temporary SQLite file next to dstPath. It is
 // compressed, synced and removed. dstPath must not exist.
@@ -630,36 +628,16 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 // progress. The callback may take long enough to write a small status file,
 // but it must not call back into Store.
 func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
-	return s.backupToCompressed(dstPath, report, nil, true)
+	return s.backupToCompressed(dstPath, report, nil)
 }
 
 // BackupWithConfiguration returns settings from the same SQLite snapshot as
 // the archive, so its YAML export remains correct even for an older Core.
 func (s *Store) BackupWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
-	return s.backupWithConfiguration(dstPath, report, true)
+	return s.BackupWithConfigurationContext(context.Background(), dstPath, report)
 }
 
 func (s *Store) BackupWithConfigurationContext(ctx context.Context, dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
-	return s.backupWithConfigurationContext(ctx, dstPath, report, true)
-}
-
-// BackupStateWithConfiguration is the Core update rollback point: the
-// settings database and its configuration export, without the history
-// database. History lives in its own file, which an update does not replace
-// and a rollback leaves in place, so copying it here only bounded the update
-// by months of telemetry. A schema-change update on a Raspberry Pi could not
-// finish that copy inside the live export deadline (#1302). A store that
-// still keeps legacy history inside state.db is copied whole, so the point
-// stays complete for that layout.
-func (s *Store) BackupStateWithConfiguration(dstPath string, report func(BackupProgress)) (Configuration, bool, error) {
-	return s.backupWithConfiguration(dstPath, report, false)
-}
-
-func (s *Store) backupWithConfiguration(dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
-	return s.backupWithConfigurationContext(context.Background(), dstPath, report, includeHistory)
-}
-
-func (s *Store) backupWithConfigurationContext(ctx context.Context, dstPath string, report func(BackupProgress), includeHistory bool) (Configuration, bool, error) {
 	var configuration Configuration
 	var found bool
 	err := s.backupToCompressedContext(ctx, dstPath, report, func(rawPath string) error {
@@ -670,15 +648,15 @@ func (s *Store) backupWithConfigurationContext(ctx context.Context, dstPath stri
 		}
 		found = err == nil
 		return err
-	}, includeHistory)
+	})
 	return configuration, found, err
 }
 
-func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
-	return s.backupToCompressedContext(context.Background(), dstPath, report, capture, includeHistory)
+func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), capture func(string) error) error {
+	return s.backupToCompressedContext(context.Background(), dstPath, report, capture)
 }
 
-func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error, includeHistory bool) error {
+func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -692,9 +670,6 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 	defer cancel()
 	ctx = context.WithValue(ctx, backupReportKey{}, report)
 	sourceBytes := s.BackupSourceBytes()
-	if !includeHistory {
-		sourceBytes = s.stateSourceBytes()
-	}
 	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(sourceBytes)); err != nil {
 		return err
 	}
@@ -706,10 +681,8 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 		return fmt.Errorf("backup state: %w", err)
 	}
 
-	if includeHistory {
-		if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
-			return fmt.Errorf("backup history: %w", err)
-		}
+	if err := s.exportHistoryToSQLite(ctx, rawPath); err != nil {
+		return fmt.Errorf("backup history: %w", err)
 	}
 
 	if capture != nil {
@@ -1077,9 +1050,9 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_driver_command_results_completed
 			ON driver_command_results(completed_at_ms DESC)`,
 
-		// Cross-component update audit. The operation key survives a core
-		// container recreation, allowing the new process to finish the event
-		// that the old process recorded before handing off to the updater.
+		// Cross-component update audit. The operation key survives a Core
+		// restart, allowing the new process to finish the event that the old
+		// process recorded before it stopped.
 		`CREATE TABLE IF NOT EXISTS component_updates (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			operation_key TEXT NOT NULL UNIQUE,
