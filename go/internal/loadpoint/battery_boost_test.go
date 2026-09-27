@@ -76,23 +76,49 @@ func TestBatteryBoostValidationAndOperatorClamps(t *testing.T) {
 		name        string
 		lease       BatteryBoostLease
 		surplusOnly bool
-		hold        bool
 	}{
-		{"short duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(30 * time.Second), MinBatterySoC: 0.3}, false, false},
-		{"long duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(MaxBatteryBoostDuration + time.Second), MinBatterySoC: 0.3}, false, false},
-		{"low reserve", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), MinBatterySoC: 0.04}, false, false},
-		{"departure after expiry", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), DepartureAt: now.Add(2 * time.Hour), MinBatterySoC: 0.3}, false, false},
-		{"surplus only", validBatteryBoost(now), true, false},
-		{"manual hold", validBatteryBoost(now), false, true},
+		{"short duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(30 * time.Second), MinBatterySoC: 0.3}, false},
+		{"long duration", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(MaxBatteryBoostDuration + time.Second), MinBatterySoC: 0.3}, false},
+		{"low reserve", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), MinBatterySoC: 0.04}, false},
+		{"departure after expiry", BatteryBoostLease{StartedAt: now, ExpiresAt: now.Add(time.Hour), DepartureAt: now.Add(2 * time.Hour), MinBatterySoC: 0.3}, false},
+		{"surplus only", validBatteryBoost(now), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl, _, _ := newBatteryBoostController(t, tc.surplusOnly)
-			if tc.hold {
-				ctrl.SetManualHold("garage", ManualHold{Persistent: true, PowerW: 1380})
-			}
 			if _, err := ctrl.EnableBatteryBoost("garage", tc.lease, now); err == nil {
 				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+// Charge now sets how much the car draws; a boost lets the home battery cover
+// that draw. Starting either one keeps the other, and the boost counts what the
+// held charge actually draws.
+func TestBatteryBoostRunsWithChargeNow(t *testing.T) {
+	now := time.Now()
+	for _, order := range []string{"hold first", "boost first"} {
+		t.Run(order, func(t *testing.T) {
+			ctrl, mgr, _ := newBatteryBoostController(t, false)
+			hold := func() { ctrl.SetManualHold("garage", ManualHold{Persistent: true, PowerW: 11000}) }
+			if order == "hold first" {
+				hold()
+			}
+			if _, err := ctrl.EnableBatteryBoost("garage", validBatteryBoost(now), now); err != nil {
+				t.Fatalf("boost refused beside Charge now: %v", err)
+			}
+			if order == "boost first" {
+				hold()
+			}
+			ctrl.TickWithDispatch(context.Background(), now.Add(time.Minute), true)
+			if _, status := ctrl.BatteryBoost("garage", now.Add(time.Minute)); !status.Active {
+				t.Fatalf("Charge now ended the boost: %+v", status)
+			}
+			mgr.Observe("garage", true, 11000, 0, true)
+			st, _ := mgr.State("garage")
+			if w, reserve := ctrl.ActiveBatteryBoostTotals([]State{st}, now.Add(time.Minute)); w != 11000 || reserve != 0.3 {
+				t.Fatalf("boost covers %.0f W above %.2f, want the held 11000 W above 0.30", w, reserve)
 			}
 		})
 	}
@@ -110,9 +136,6 @@ func TestBatteryBoostAutoStopsAndClearsPersistedLease(t *testing.T) {
 		{"expiry", nil, now.Add(time.Hour), true, BatteryBoostStoppedExpired},
 		{"unplug", func(_ *Controller, s *EVSample) { s.Connected = false }, now.Add(time.Minute), true, BatteryBoostStoppedVehicleUnplugged},
 		{"site safety", nil, now.Add(time.Minute), false, BatteryBoostStoppedSiteSafety},
-		{"operator hold", func(c *Controller, _ *EVSample) {
-			c.SetManualHold("garage", ManualHold{Persistent: true, PowerW: 1380})
-		}, now.Add(time.Minute), true, BatteryBoostStoppedOperatorHold},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
