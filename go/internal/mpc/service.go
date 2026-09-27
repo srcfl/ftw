@@ -67,6 +67,49 @@ type BatteryFleetMember struct {
 	MaxDischargeW float64
 }
 
+// SiteEconomics is the site's grid limits and tariff inputs. Config reload
+// can change them while a replan runs, so each replan copies them once.
+type SiteEconomics struct {
+	// FuseMaxW is the site's grid fuse ceiling (W). When > 0, every slot
+	// passed to Optimize gets `Limits.MaxImportW = FuseMaxW`, so the DP
+	// joint-plans battery + EV in a way that respects the fuse from the
+	// start — battery charge + EV charge + house net can't exceed this.
+	// Without this, the DP can prescribe (battery_charge + EV_charge)
+	// totals that bust the fuse, and dispatch has to scale them at
+	// execution time. Wired from main.go (cfg.Fuse → fuseMaxW).
+	FuseMaxW float64
+
+	// MaxExportW caps total site export (W, magnitude) below the fuse.
+	// When > 0, every slot's export limit becomes min(FuseMaxW, MaxExportW)
+	// so the DP never schedules a battery discharge that would over-export
+	// and trip an inverter that faults below the breaker rating (recurring
+	// Ferroamp 0x8030 fault). 0 = disabled (export bounded by the fuse).
+	// Wired from main.go (cfg.Site.MaxExportW).
+	MaxExportW float64
+
+	// ExportBonusOreKwh and ExportFeeOreKwh flow in from config.Price.
+	// Used to compute default ExportOrePerKWh when Params doesn't set it.
+	ExportBonusOreKwh float64
+	ExportFeeOreKwh   float64
+
+	// ExportFloorOreKwh, when non-nil, clamps the per-slot export ore
+	// at the floor. Wired from config.Price.ExportFloorOreKwh; nil =
+	// no clamp, real spot pass-through (default).
+	ExportFloorOreKwh *float64
+
+	// VATPercent applies to the demand charge, like the slot prices.
+	VATPercent float64
+	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
+	// minor units as slot prices, excluding VAT. Zero disables it.
+	DemandPricePerKW float64
+	DemandTopN       int
+	// DemandNightWeight, when > 0, includes every local hour (all days).
+	// Hours 22:00–06:00 are scaled by this factor (Ellevio uses 0.5).
+	DemandNightWeight float64
+	// Timezone is the household IANA zone used to expand weekday 06–20.
+	Timezone string
+}
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
@@ -168,22 +211,9 @@ type Service struct {
 	// derive actual load = grid − pv − bat. Empty = skip load check.
 	SiteMeter string
 
-	// FuseMaxW is the site's grid fuse ceiling (W). When > 0, every slot
-	// passed to Optimize gets `Limits.MaxImportW = FuseMaxW`, so the DP
-	// joint-plans battery + EV in a way that respects the fuse from the
-	// start — battery charge + EV charge + house net can't exceed this.
-	// Without this, the DP can prescribe (battery_charge + EV_charge)
-	// totals that bust the fuse, and dispatch has to scale them at
-	// execution time. Wired from main.go (cfg.Fuse → fuseMaxW).
-	FuseMaxW float64
-
-	// MaxExportW caps total site export (W, magnitude) below the fuse.
-	// When > 0, every slot's export limit becomes min(FuseMaxW, MaxExportW)
-	// so the DP never schedules a battery discharge that would over-export
-	// and trip an inverter that faults below the breaker rating (recurring
-	// Ferroamp 0x8030 fault). 0 = disabled (export bounded by the fuse).
-	// Wired from main.go (cfg.Site.MaxExportW).
-	MaxExportW float64
+	// SiteEconomics holds the grid limits and tariff inputs. Set its fields
+	// before Start; config reload replaces them with UpdateSiteEconomics.
+	SiteEconomics
 
 	lastReplanAt time.Time
 	lastReason   string // reason paired with the currently published plan
@@ -202,32 +232,10 @@ type Service struct {
 	// accepted plan. It is read only while mu is held at the publish gate.
 	decisionIDFactory func() string
 
-	// ExportBonusOreKwh and ExportFeeOreKwh flow in from config.Price.
-	// Used to compute default ExportOrePerKWh when Params doesn't set it.
-	ExportBonusOreKwh float64
-	ExportFeeOreKwh   float64
-
 	// MinArbitrageSpreadOreKwh flows in from config.Planner. Copied into
 	// Params so the DP applies the arbitrage cycle deadband. See
 	// mpc.Params.MinArbitrageSpreadOreKwh.
 	MinArbitrageSpreadOreKwh float64
-
-	// ExportFloorOreKwh, when non-nil, clamps the per-slot export ore
-	// at the floor. Wired from config.Price.ExportFloorOreKwh; nil =
-	// no clamp, real spot pass-through (default).
-	ExportFloorOreKwh *float64
-
-	// VATPercent applies to the demand charge, like the slot prices.
-	VATPercent float64
-	// DemandPricePerKW is the weekday 06–20 peak-power tariff in the same
-	// minor units as slot prices, excluding VAT. Zero disables it.
-	DemandPricePerKW float64
-	DemandTopN       int
-	// DemandNightWeight, when > 0, includes every local hour (all days).
-	// Hours 22:00–06:00 are scaled by this factor (Ellevio uses 0.5).
-	DemandNightWeight float64
-	// Timezone is the household IANA zone used to expand weekday 06–20.
-	Timezone string
 
 	Defaults     Params
 	BatteryFleet []BatteryFleetMember
@@ -270,9 +278,14 @@ type replanRequest struct {
 	generation uint64
 	params     Params
 	fleet      []BatteryFleetMember
-	reason     string
-	ctx        context.Context
-	cancel     context.CancelFunc
+	// site, safetyK and minSpread are copied with params, so one plan never
+	// mixes limits or prices from before and after a config reload.
+	site      SiteEconomics
+	safetyK   float64
+	minSpread float64
+	reason    string
+	ctx       context.Context
+	cancel    context.CancelFunc
 	// canceledByService distinguishes supersession/Stop from the caller's
 	// context. Caller cancellation keeps the prior Go-fallback behavior.
 	canceledByService *atomic.Bool
@@ -358,6 +371,18 @@ func (s *Service) SetSiteMeter(name string) {
 	s.mu.Unlock()
 }
 
+// UpdateSiteEconomics replaces the grid limits and tariff inputs. Config hot
+// reload calls this while a replan may be running; that replan keeps the
+// values it started with and the next one uses these.
+func (s *Service) UpdateSiteEconomics(e SiteEconomics) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.SiteEconomics = e
+	s.mu.Unlock()
+}
+
 // UpdateCapacity swaps the aggregate battery capacity + charge/discharge
 // bounds on the active planner. Called from the config-reload path when
 // the operator adds or removes a driver (or promotes/demotes an EV
@@ -410,9 +435,10 @@ func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, max
 }
 
 // UpdatePlannerScalars pushes operator planner knobs that do not rebuild
-// the optimizer process: SoC window, efficiency, export value, base load,
-// horizon and replan interval. The next replan (and the next ticker fire
-// for Interval) uses them. Engine / optimizer path still need a restart.
+// the optimizer process: SoC window, efficiency, export value, arbitrage
+// spread, base load, horizon and replan interval. The next replan (and the
+// next ticker fire for Interval) uses them. Engine / optimizer path still
+// need a restart.
 func (s *Service) UpdatePlannerScalars(p Params, baseLoad float64, horizon, interval time.Duration) {
 	if s == nil {
 		return
@@ -432,6 +458,7 @@ func (s *Service) UpdatePlannerScalars(p Params, baseLoad float64, horizon, inte
 	}
 	s.Defaults.PVChargeBonusOreKwh = p.PVChargeBonusOreKwh
 	s.Defaults.ExportOrePerKWh = p.ExportOrePerKWh
+	s.MinArbitrageSpreadOreKwh = p.MinArbitrageSpreadOreKwh
 	s.BaseLoad = baseLoad
 	if horizon > 0 {
 		s.Horizon = horizon
@@ -861,29 +888,17 @@ func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
 	}
 }
 
-// SetMode changes the planner's operating mode and forces an immediate
-// replan so the new mode takes effect within one control cycle.
-func (s *Service) SetMode(ctx context.Context, mode Mode) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.Defaults.Mode = mode
-	request := s.beginReplanLocked(ctx, "mode_changed")
-	s.mu.Unlock()
-	s.runReplan(request)
+// SetMode changes the planner's operating mode and requests a replan in the
+// background, like RequestReplan. The solve does not belong to the caller:
+// an HTTP client that disconnects must not cancel it into a fallback plan.
+func (s *Service) SetMode(mode Mode) {
+	s.requestReplan("mode_changed", func() { s.Defaults.Mode = mode })
 }
 
-// SetSafetyK updates the downside-PV haircut scale and replans.
-func (s *Service) SetSafetyK(ctx context.Context, k float64) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.PVForecastSafetyK = k
-	request := s.beginReplanLocked(ctx, "safety_k_changed")
-	s.mu.Unlock()
-	s.runReplan(request)
+// SetSafetyK updates the downside-PV haircut scale and requests a replan in
+// the background.
+func (s *Service) SetSafetyK(k float64) {
+	s.requestReplan("safety_k_changed", func() { s.PVForecastSafetyK = k })
 }
 
 // Start runs the planner in a goroutine. Does an initial plan immediately.
@@ -1259,10 +1274,19 @@ func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
 // a Go solve already in progress, so starting a worker per edit would pile up
 // obsolete solves. Stop waits for accepted work, including the queued request.
 func (s *Service) RequestReplan(reason string) {
+	s.requestReplan(reason, nil)
+}
+
+// requestReplan applies change and registers the new generation under one
+// lock, so no older solve can publish a plan after the change is visible.
+func (s *Service) requestReplan(reason string, change func()) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
+	if change != nil {
+		change()
+	}
 	request := s.beginReplanLocked(context.Background(), reason)
 	if !request.accepted {
 		s.mu.Unlock()
@@ -1357,6 +1381,9 @@ func (s *Service) beginReplanLocked(ctx context.Context, reason string) replanRe
 		generation:        s.latestReplanGeneration,
 		params:            s.Defaults,
 		fleet:             append([]BatteryFleetMember(nil), s.BatteryFleet...),
+		site:              s.SiteEconomics,
+		safetyK:           s.PVForecastSafetyK,
+		minSpread:         s.MinArbitrageSpreadOreKwh,
 		reason:            reason,
 		ctx:               requestCtx,
 		cancel:            cancel,
@@ -1428,7 +1455,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if request.wasCanceledByService() {
 		return s.canceledReplan(request, "start")
 	}
-	fuseMaxW, maxExportW := s.FuseMaxW, s.MaxExportW
+	site := request.site
+	fuseMaxW, maxExportW := site.FuseMaxW, site.MaxExportW
 	if err := validateServiceGridLimits(fuseMaxW, maxExportW); err != nil {
 		slog.Error("mpc: invalid grid limits; keeping previous plan",
 			"generation", request.generation,
@@ -1574,7 +1602,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			return s.Latest()
 		}
 		var ok bool
-		p, ok = s.onlineFleetParams(p, fleet)
+		p, ok = s.onlineFleetParams(p, fleet, fuseMaxW)
 		if !ok {
 			slog.Warn("mpc: no online battery capacity with SoC — keeping previous plan")
 			return s.Latest()
@@ -1597,12 +1625,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// the DP can compute `slot.SpotOre + bonus − fee` per slot. Leave
 	// p.ExportOrePerKWh at 0 (operators can still set it via Params
 	// to force a flat feed-in tariff).
-	p.ExportBonusOreKwh = s.ExportBonusOreKwh
-	p.ExportFeeOreKwh = s.ExportFeeOreKwh
-	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
-	p.ExportFloorOreKwh = s.ExportFloorOreKwh
-	p.PVForecastSafetyK = s.PVForecastSafetyK
-	p.DemandCharges = s.demandChargesFor(slots, executionNow)
+	p.ExportBonusOreKwh = site.ExportBonusOreKwh
+	p.ExportFeeOreKwh = site.ExportFeeOreKwh
+	p.MinArbitrageSpreadOreKwh = request.minSpread
+	p.ExportFloorOreKwh = site.ExportFloorOreKwh
+	p.PVForecastSafetyK = request.safetyK
+	p.DemandCharges = s.demandChargesFor(site, slots, executionNow)
 	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}
@@ -1631,7 +1659,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		switch p.Mode {
 		case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage:
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
-				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
+				site.ExportBonusOreKwh, site.ExportFeeOreKwh)
 		default:
 			// Arbitrage: stored SoC at horizon end will be discharged at
 			// the more expensive hours, not at a typical hour. Mean of
@@ -2459,7 +2487,9 @@ func currentSoC(t *telemetry.Store, fallback float64) float64 {
 	return sum / float64(n)
 }
 
-func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Params, bool) {
+// onlineFleetParams takes fuseMaxW from the replan's copy, so the battery
+// clamp and the slot grid limits of one plan use the same fuse.
+func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember, fuseMaxW float64) (Params, bool) {
 	if s == nil || s.Tele == nil {
 		return p, false
 	}
@@ -2501,12 +2531,12 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Param
 	p.InitialSoC = sumSoCWh / totalCap
 	p.MaxChargeW = maxCharge
 	p.MaxDischargeW = maxDischarge
-	if s.FuseMaxW > 0 {
-		if p.MaxChargeW > s.FuseMaxW {
-			p.MaxChargeW = s.FuseMaxW
+	if fuseMaxW > 0 {
+		if p.MaxChargeW > fuseMaxW {
+			p.MaxChargeW = fuseMaxW
 		}
-		if p.MaxDischargeW > s.FuseMaxW {
-			p.MaxDischargeW = s.FuseMaxW
+		if p.MaxDischargeW > fuseMaxW {
+			p.MaxDischargeW = fuseMaxW
 		}
 	}
 	// Preserve the existing aggregate fleet clamp inside the per-asset model.

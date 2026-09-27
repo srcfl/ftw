@@ -428,7 +428,29 @@ func (e *ENTSOEProvider) parseXML(body []byte) ([]RawPrice, error) {
 			out = append(out, rows...)
 		}
 	}
-	return out, nil
+	return keepFinestRows(out), nil
+}
+
+// keepFinestRows drops each row that overlaps a finer one. One A44 document
+// can publish a delivery day at both PT15M and PT60M; storing both would give
+// the planner overlapping slots.
+func keepFinestRows(rows []RawPrice) []RawPrice {
+	out := make([]RawPrice, 0, len(rows))
+	for _, r := range rows {
+		end := r.SlotStart.Add(time.Duration(r.SlotLenMin) * time.Minute)
+		finer := false
+		for _, o := range rows {
+			if o.SlotLenMin < r.SlotLenMin && o.SlotStart.Before(end) &&
+				r.SlotStart.Before(o.SlotStart.Add(time.Duration(o.SlotLenMin)*time.Minute)) {
+				finer = true
+				break
+			}
+		}
+		if !finer {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // expandPeriod turns one Period into per-slot prices. ENTSOE uses a sparse
