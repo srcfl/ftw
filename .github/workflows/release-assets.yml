@@ -284,7 +284,8 @@ jobs:
       - name: Package
         env:
           ARCH: ${{ matrix.arch }}
-        run: python3 .release-workflow/scripts/package-linux.py "${ARCH}" --root .
+          VERSION: ${{ needs.meta.outputs.tag }}
+        run: python3 .release-workflow/scripts/package-legacy-linux.py "${ARCH}" --root .
 
       - name: Upload to release
         env:

@@ -15,6 +15,9 @@
 ^scripts/upgrade-paired-release\.sh:.*forty-two-watts.*$
 # The native updater still accepts older archives that carry the executable alias.
 ^go/internal/nativeupdate/install\.go:[[:space:]]*if header\.Typeflag == tar\.TypeSymlink && name == "forty-two-watts" && header\.Linkname == "ftw" \{$
+# Old 2.x repair archives must retain the executable alias.
+^scripts/package-legacy-linux\.py:[[:space:]]*alias = tarfile\.TarInfo\("forty-two-watts"\)$
+^scripts/test_package_legacy_linux\.py:[[:space:]]*self\.assertEqual\(tar\.getmember\("forty-two-watts"\)\.linkname, "ftw"\)$
 ^scripts/restore-full-backup\.sh:for candidate in ftw forty-two-watts; do$
 ^README\.md:Existing Forty Two Watts or older FTW deployments must use the$
 # Rust's upstream runtime notices describe third-party licenses, not FTW's license.
