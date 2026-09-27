@@ -35,7 +35,12 @@ func TestQueuedCommandMustNotRunAfterSafetyDefault(t *testing.T) {
 	defer cancel()
 	// An operator command is already queued while the actor is busy.
 	commandDone := make(chan error, 1)
-	go func() { commandDone <- r.Send(ctx, rd.cfg.Name, []byte(`{"action":"set_offset","value":2}`)) }()
+	outcomeDone := make(chan error, 1)
+	go func() {
+		commandDone <- r.SendWithOutcome(ctx, rd.cfg.Name, []byte(`{"action":"set_offset","value":2}`), func(err error) {
+			outcomeDone <- err
+		})
+	}()
 	for len(rd.cmdCh) == 0 {
 		select {
 		case <-ctx.Done():
@@ -60,8 +65,11 @@ func TestQueuedCommandMustNotRunAfterSafetyDefault(t *testing.T) {
 		t.Fatalf("default failed: %v", err)
 	}
 	err := <-commandDone
-	if calls := runtime.commandCalls.Load(); calls != 0 || !errors.Is(err, ErrControlBlocked) {
-		t.Fatalf("queued command survived safety default: command calls=%d, command error=%v, want zero calls and rejection", calls, err)
+	if calls := runtime.commandCalls.Load(); calls != 0 || !errors.Is(err, ErrCommandSuperseded) {
+		t.Fatalf("queued command after safety default: command calls=%d, command error=%v, want zero calls and superseded intent", calls, err)
+	}
+	if outcome := <-outcomeDone; !errors.Is(outcome, ErrCommandSuperseded) || errors.Is(outcome, ErrControlBlocked) {
+		t.Fatalf("a confirmed default must not report a current control fault: %v", outcome)
 	}
 	if err := r.Send(ctx, rd.cfg.Name, []byte(`{"action":"set_offset","value":1}`)); err != nil {
 		t.Fatalf("new command after default: %v", err)

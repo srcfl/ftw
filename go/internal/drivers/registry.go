@@ -33,8 +33,9 @@ var (
 	// ErrReadOnlyDriver rejects dispatch before the declared read-only Lua
 	// command hook can run, even when that hook exists and would accept it.
 	ErrReadOnlyDriver = errors.New("driver is read_only and cannot be controlled")
-	// ErrCommandSuperseded is returned when an EV command no longer belongs
-	// to the current per-driver control sequence. In particular, ev_resume is
+	// ErrCommandSuperseded is returned when a command no longer belongs
+	// to the current per-driver control sequence. A confirmed default invalidates
+	// older queued commands without reporting a device fault. In particular, ev_resume is
 	// valid only immediately after the ev_pause that opened its cycle; any
 	// intervening command, default, exclusion, or lifecycle stop cancels it.
 	ErrCommandSuperseded = errors.New("driver command was superseded by a newer control boundary")
@@ -287,10 +288,16 @@ func (rd *runningDriver) commandEpoch() uint64 {
 	return rd.controlEpoch
 }
 
-func (rd *runningDriver) commandIsBlocked(epoch uint64) bool {
+func (rd *runningDriver) commandRejection(epoch uint64) error {
 	rd.statusMu.RLock()
 	defer rd.statusMu.RUnlock()
-	return rd.controlBlocked || epoch != rd.controlEpoch
+	if rd.controlBlocked {
+		return ErrControlBlocked
+	}
+	if epoch != rd.controlEpoch {
+		return ErrCommandSuperseded
+	}
+	return nil
 }
 
 func (rd *runningDriver) markCommandApplied() {
@@ -919,8 +926,8 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				action := metadata.Action
 				cyclePause := action == "ev_pause" && cmd.cycleID != 0
 				cycleResume := action == "ev_resume" && cmd.cycleID != 0
-				if rd.commandIsBlocked(cmd.controlEpoch) {
-					err = ErrControlBlocked
+				if rejection := rd.commandRejection(cmd.controlEpoch); rejection != nil {
+					err = rejection
 					break
 				}
 				if cancelErr := cmdCtx.Err(); cancelErr != nil {
@@ -965,9 +972,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				// check but before this actor installs activeCancel. Recheck once the
 				// cancel hook exists; after this point a racing default cancels the
 				// context passed to the runtime.
-				if rd.commandIsBlocked(cmd.controlEpoch) {
+				if rejection := rd.commandRejection(cmd.controlEpoch); rejection != nil {
 					finishCommand()
-					err = ErrControlBlocked
+					err = rejection
 					break
 				}
 				err = rd.driver.Command(commandCtx, cmd.payload)
