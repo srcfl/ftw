@@ -23,7 +23,8 @@ test('the EV modal owns the battery boost lease', () => {
   assert.doesNotMatch(boostView, /departure/);
   // Start is refused for the same reasons the controller refuses it.
   assert.match(boostView, /Plug in the car first/);
-  assert.match(boostView, /Stop the manual charge first/);
+  // Charge now sets the car's draw; a boost only lets the battery cover it.
+  assert.doesNotMatch(boostView, /Stop the manual charge first/);
   assert.match(boostView, /Turn off PV only first/);
   // Active state and stop.
   assert.match(boostView, /method: "DELETE"/);
@@ -33,7 +34,7 @@ test('the EV modal owns the battery boost lease', () => {
 test('every controller stop reason has words', () => {
   for (const reason of [
     'cancelled', 'expired', 'vehicle_unplugged', 'ev_target_reached', 'departure_reached',
-    'operator_hold', 'surplus_only', 'site_safety_block', 'loadpoint_driver_unavailable',
+    'surplus_only', 'site_safety_block', 'loadpoint_driver_unavailable',
     'battery_unavailable', 'battery_reserve_reached', 'battery_hold', 'core_mode',
     'fuse_safety_block', 'restart_lease_invalid',
   ]) {
