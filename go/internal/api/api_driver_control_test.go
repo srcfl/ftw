@@ -744,6 +744,144 @@ func TestDriverControlDefaultPathClearsHold(t *testing.T) {
 	waitMetric(t, tel, "heat", "defaulted", 1)
 }
 
+// An operator command that waits on its device holds the per-driver lock.
+// The control tick's safety default must not queue behind it: the default
+// cancels the command, reaches the driver within the tick's own deadline,
+// and leaves no hold behind.
+const controlSlowProbeLua = `DRIVER = {
+  id      = "probe_slow",
+  name    = "Probe slow",
+  version = "1.0.0",
+  controls = {
+    { id = "set_offset", input = { type = "number", min = -3, max = 3 } },
+  },
+}
+
+local applied   = nil
+local defaulted = 0
+local startup_default = true
+
+function driver_init(config)
+    host.set_poll_interval(100)
+end
+
+function driver_poll()
+    if applied ~= nil then host.emit_metric("applied", applied, "n") end
+    host.emit_metric("defaulted", defaulted, "n")
+    return 100
+end
+
+function driver_command(action, power_w, cmd)
+    host.emit_metric("command_started", 1, "n")
+    host.sleep(5000)
+    applied = tonumber(cmd.value)
+    return true
+end
+
+function driver_default_mode()
+    if startup_default then
+        startup_default = false
+        applied = 0
+        return true
+    end
+    defaulted = defaulted + 1
+    applied = 0
+end
+`
+
+func TestSendDriverDefaultDoesNotWaitForAnOperatorCommand(t *testing.T) {
+	srv, tel := controlServerWithLua(t, controlSlowProbeLua)
+
+	posted := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		posted <- post(t, srv, "/api/drivers/heat/control",
+			`{"control":"set_offset","value":2,"duration_s":600}`)
+	}()
+	waitMetric(t, tel, "heat", "command_started", 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := srv.SendDriverDefault(ctx, "heat"); err != nil {
+		t.Fatalf("SendDriverDefault behind an operator command = %v", err)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("safety default waited %v for the operator command", waited)
+	}
+	waitMetric(t, tel, "heat", "applied", 0)
+
+	select {
+	case rec := <-posted:
+		if rec.Code == http.StatusOK {
+			t.Fatalf("operator command overtaken by the default reported success: %s", rec.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("operator command did not return after the default cancelled it")
+	}
+	if hold := srv.activeControlHold("heat"); hold != nil {
+		t.Fatalf("hold survived the safety default: %+v", hold)
+	}
+}
+
+// When the default cannot take the lock, it clears the hold afterwards, but
+// only one armed before the default. A hold armed after it belongs to the
+// operator's next command and must keep its own expiry.
+func TestSendDriverDefaultClearsOnlyHoldsArmedBeforeIt(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		armBefore   bool
+		wantCleared bool
+	}{
+		{"hold armed before the default", true, true},
+		{"hold armed after the default", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := controlServer(t)
+			status, ok := srv.deps.Registry.ControlStatus("heat")
+			if !ok {
+				t.Fatal("driver not running")
+			}
+			state := srv.controlState("heat")
+			state.mu.Lock() // an operator request in flight
+			if tc.armBefore {
+				srv.armControlHoldLocked("heat", state, "set_offset", 1.0, status.Generation, time.Hour)
+			}
+			done := make(chan error, 1)
+			go func() { done <- srv.SendDriverDefault(context.Background(), "heat") }()
+			select {
+			case err := <-done:
+				if err != nil {
+					state.mu.Unlock()
+					t.Fatalf("SendDriverDefault = %v", err)
+				}
+			case <-time.After(time.Second):
+				state.mu.Unlock()
+				t.Fatal("SendDriverDefault waited for the operator request")
+			}
+			if !tc.armBefore {
+				srv.armControlHoldLocked("heat", state, "set_offset", 2.0, status.Generation, time.Hour)
+			}
+			state.mu.Unlock()
+
+			if tc.wantCleared {
+				deadline := time.Now().Add(time.Second)
+				for srv.activeControlHold("heat") != nil {
+					if time.Now().After(deadline) {
+						t.Fatal("hold armed before the default survived it")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				return
+			}
+			// Give the deferred clear time to take the lock and decide.
+			time.Sleep(200 * time.Millisecond)
+			if srv.activeControlHold("heat") == nil {
+				t.Fatal("default cleared a hold armed after it; that command would never expire")
+			}
+		})
+	}
+}
+
 func TestSendDriverDefaultDoesNotRecreateStateAfterRemove(t *testing.T) {
 	srv, _ := controlServer(t)
 	srv.controlState("heat")

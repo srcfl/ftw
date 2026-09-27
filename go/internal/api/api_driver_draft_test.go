@@ -13,6 +13,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // A real registry, so a draft is only green if the edited file actually loads
@@ -299,4 +300,41 @@ func quote(s string) string {
 func itoa(n int) string {
 	out, _ := json.Marshal(n)
 	return string(out)
+}
+
+// Applying a draft restarts the driver. That restart must carry the battery's
+// soc_min/soc_max into driver_init like startup does, not the driver defaults.
+func TestDraftRestartKeepsBatterySoCBounds(t *testing.T) {
+	bundled := t.TempDir()
+	writeSourceDriver(t, bundled, "demo.lua", "demo", "1.0.0",
+		"function driver_init(cfg) end\nfunction driver_poll() return 1000 end\n")
+	tel := telemetry.NewStore()
+	reg := drivers.NewRegistry(tel)
+	t.Cleanup(reg.ShutdownAll)
+	min, max := 0.23, 0.81
+	cfg := &config.Config{
+		Drivers:   []config.Driver{{Name: "demo-1", Lua: filepath.Join(bundled, "demo.lua")}},
+		Batteries: map[string]config.Battery{"demo-1": {SoCMin: &min, SoCMax: &max}},
+	}
+	srv := New(&Deps{
+		DriverDir: bundled, UserDriverDir: t.TempDir(),
+		Registry: reg, Cfg: cfg, CfgMu: &sync.RWMutex{}, Tel: tel,
+	})
+	lua := "DRIVER = {\n  id = \"demo\",\n  version = \"1.0.0\",\n  protocols = { \"modbus\" },\n}\n" +
+		"function driver_init(cfg)\n" +
+		"  cfg = cfg or {}\n" +
+		"  host.emit_metric(\"init_charge_ceil_soc\", cfg.charge_ceil_soc or 0.95)\n" +
+		"  host.emit_metric(\"init_discharge_floor_soc\", cfg.discharge_floor_soc or 0.05)\n" +
+		"end\nfunction driver_poll() return 1000 end\n"
+	if code, body := postDraft(t, srv, "demo", `{"lua":`+quote(lua)+`,"minutes":5}`); code != 200 {
+		t.Fatalf("draft = %d %v", code, body)
+	}
+	for name, want := range map[string]float64{"init_charge_ceil_soc": max, "init_discharge_floor_soc": min} {
+		if got, _, ok := tel.LatestMetric("demo-1", name); !ok || got != want {
+			t.Fatalf("draft driver_init %s = %g (ok=%v), want %g", name, got, ok, want)
+		}
+	}
+	if cfg.Drivers[0].Config != nil {
+		t.Fatalf("derived bounds leaked into live config: %v", cfg.Drivers[0].Config)
+	}
 }

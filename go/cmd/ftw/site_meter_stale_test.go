@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -59,6 +60,24 @@ func TestEvaluateSiteDispatchFreshnessPhaseRecovery(t *testing.T) {
 	recovered := evaluateSiteDispatchFreshnessAt(tel, "meter", 16, 3, time.Minute, time.Now())
 	if !recovered.Allowed() {
 		t.Fatalf("complete fresh phase telemetry remained blocked: %q", recovered.Reason)
+	}
+}
+
+// The on-demand gate the manual V2X command uses reads the live site meter
+// and the configured watchdog timeout, like the tick.
+func TestSiteDispatchNowUsesConfiguredMeterAndTimeout(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("meter", telemetry.DerMeter, 1200, nil, nil)
+	at := tel.Get("meter", telemetry.DerMeter).UpdatedAt
+	cfg := &config.Config{Site: config.Site{WatchdogTimeoutS: 10}}
+	ctrl := &control.State{SiteMeterDriver: "meter"}
+	cfgMu, ctrlMu := &sync.RWMutex{}, &sync.Mutex{}
+
+	if got := siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, at.Add(5*time.Second)); !got.Allowed() {
+		t.Fatalf("fresh meter blocked: %q", got.Reason)
+	}
+	if got := siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, at.Add(11*time.Second)); got.Reason != siteDispatchMeterStale {
+		t.Fatalf("meter past the configured timeout = %q, want %q", got.Reason, siteDispatchMeterStale)
 	}
 }
 

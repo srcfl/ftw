@@ -236,8 +236,6 @@ func TestDailyCostBreakdown_FlatAverageIsHalfOpenAndTimeWeighted(t *testing.T) {
 		{Zone: "SE3", SlotTsMs: -1_800_000, SlotLenMin: 60, SpotOreKwh: 80, TotalOreKwh: 100, Source: "test", FetchedAtMs: 0},
 		// Overlaps the second 30 min of the query range.
 		{Zone: "SE3", SlotTsMs: 1_800_000, SlotLenMin: 60, SpotOreKwh: 160, TotalOreKwh: 300, Source: "test", FetchedAtMs: 0},
-		// Starts exactly at untilMs; must not leak into the half-open range.
-		{Zone: "SE3", SlotTsMs: 3_600_000, SlotLenMin: 60, SpotOreKwh: 9000, TotalOreKwh: 9000, Source: "test", FetchedAtMs: 0},
 	}); err != nil {
 		t.Fatalf("save prices: %v", err)
 	}
@@ -261,6 +259,18 @@ func TestDailyCostBreakdown_FlatAverageIsHalfOpenAndTimeWeighted(t *testing.T) {
 	}
 	if b.PriceSlotCount != 2 {
 		t.Errorf("PriceSlotCount = %d, want 2", b.PriceSlotCount)
+	}
+
+	// The second slot starts exactly at this untilMs; it must not leak into
+	// the half-open range. The cache holds no overlapping rows, so this uses
+	// a shorter range rather than a third row inside the second slot.
+	b, err = s.DailyCostBreakdown(0, 1_800_000, "SE3", ExportPricing{})
+	if err != nil {
+		t.Fatalf("breakdown: %v", err)
+	}
+	if !approxEq(b.AvgImportOreKwh, 100, 0.01) || !approxEq(b.AvgExportOreKwh, 80, 0.01) || b.PriceSlotCount != 1 {
+		t.Errorf("half-open range: import %.4f export %.4f slots %d, want 100, 80 and 1",
+			b.AvgImportOreKwh, b.AvgExportOreKwh, b.PriceSlotCount)
 	}
 }
 

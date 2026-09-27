@@ -411,7 +411,7 @@ func (s *Server) persistMyUplinkRefreshToken(r *http.Request, driver, refreshTok
 		s.deps.ConfigApplier(&next, &old)
 	}
 	if s.deps.Registry != nil {
-		if err := s.deps.Registry.Restart(r.Context(), *restartCfg); err != nil {
+		if err := s.restartDriverWithBatterySoCBounds(r.Context(), *restartCfg); err != nil {
 			return fmt.Errorf("driver restart: %w", err)
 		}
 	}

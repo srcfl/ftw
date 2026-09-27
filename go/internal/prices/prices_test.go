@@ -510,6 +510,64 @@ func TestENTSOEFifteenMinCarriesForwardGaps(t *testing.T) {
 	}
 }
 
+// One document can publish the same hour at PT60M and PT15M. Keeping both
+// would give the planner overlapping slots, so the finer series wins where
+// they overlap and the coarse one fills only what the fine one lacks.
+const entsoeMixedResolutionXML = `<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:0">
+  <TimeSeries>
+    <currency_Unit.name>EUR</currency_Unit.name>
+    <Period>
+      <timeInterval>
+        <start>2026-06-02T22:00Z</start>
+        <end>2026-06-03T00:00Z</end>
+      </timeInterval>
+      <resolution>PT60M</resolution>
+      <Point><position>1</position><price.amount>90.0</price.amount></Point>
+      <Point><position>2</position><price.amount>70.0</price.amount></Point>
+    </Period>
+  </TimeSeries>
+  <TimeSeries>
+    <currency_Unit.name>EUR</currency_Unit.name>
+    <Period>
+      <timeInterval>
+        <start>2026-06-02T22:00Z</start>
+        <end>2026-06-02T23:00Z</end>
+      </timeInterval>
+      <resolution>PT15M</resolution>
+      <Point><position>1</position><price.amount>100.0</price.amount></Point>
+    </Period>
+  </TimeSeries>
+</Publication_MarketDocument>`
+
+func TestENTSOEMixedResolutionKeepsFinestRows(t *testing.T) {
+	p, closeFn := entsoeServer(t, entsoeMixedResolutionXML)
+	defer closeFn()
+
+	day, _ := time.Parse("2006-01-02", "2026-06-02")
+	rows, err := p.Fetch(context.Background(), "SE3", day)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("got %d rows, want 22:00 as four quarters plus the 23:00 hour: %+v", len(rows), rows)
+	}
+	hourStart, _ := time.Parse(time.RFC3339, "2026-06-02T23:00:00Z")
+	quarters := 0
+	for _, r := range rows {
+		switch {
+		case r.SlotLenMin == 15 && r.SlotStart.Before(hourStart) && math.Abs(r.SEKPerKWh-0.100) < 1e-9:
+			quarters++
+		case r.SlotLenMin == 60 && r.SlotStart.Equal(hourStart) && math.Abs(r.SEKPerKWh-0.070) < 1e-9:
+		default:
+			t.Fatalf("unexpected row %+v in %+v", r, rows)
+		}
+	}
+	if quarters != 4 {
+		t.Fatalf("quarters=%d, want 4: %+v", quarters, rows)
+	}
+}
+
 // A EUR document with no way to reach SEK must fail the fetch. Storing the
 // EUR figure as if it were SEK would understate every price elevenfold and
 // steer the planner; no prices at all is the safe answer.

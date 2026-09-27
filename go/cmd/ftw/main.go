@@ -1118,22 +1118,24 @@ func main() {
 			mpcSvc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 			slog.Info("mpc: capacity updated via hot-reload",
 				"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
-			if newCfg.Price != nil {
-				mpcSvc.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
-				mpcSvc.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
-				mpcSvc.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
-				mpcSvc.VATPercent = newCfg.Price.VATPercent
-				mpcSvc.DemandPricePerKW = newCfg.Price.DemandPricePerKW
-				mpcSvc.DemandTopN = newCfg.Price.DemandTopN
-				mpcSvc.DemandNightWeight = newCfg.Price.DemandNightWeight
-			} else {
-				mpcSvc.DemandPricePerKW = 0
-				mpcSvc.DemandTopN = 0
-				mpcSvc.DemandNightWeight = 0
+			// One locked swap: a replan already running keeps the values
+			// it started with instead of mixing old and new ones. With no
+			// price section every tariff input is zero, as at startup.
+			economics := mpc.SiteEconomics{
+				FuseMaxW:   newCfg.Fuse.MaxPowerW(),
+				MaxExportW: newCfg.Site.MaxExportW,
+				Timezone:   forecastTimezone(),
 			}
-			mpcSvc.Timezone = forecastTimezone()
-			mpcSvc.FuseMaxW = newCfg.Fuse.MaxPowerW()
-			mpcSvc.MaxExportW = newCfg.Site.MaxExportW
+			if newCfg.Price != nil {
+				economics.ExportBonusOreKwh = newCfg.Price.ExportBonusOreKwh
+				economics.ExportFeeOreKwh = newCfg.Price.ExportFeeOreKwh
+				economics.ExportFloorOreKwh = newCfg.Price.ExportFloorOreKwh
+				economics.VATPercent = newCfg.Price.VATPercent
+				economics.DemandPricePerKW = newCfg.Price.DemandPricePerKW
+				economics.DemandTopN = newCfg.Price.DemandTopN
+				economics.DemandNightWeight = newCfg.Price.DemandNightWeight
+			}
+			mpcSvc.UpdateSiteEconomics(economics)
 			if newCfg.Planner != nil {
 				applyPlannerScalars(mpcSvc, newCfg.Planner)
 				ctrlMu.Lock()
@@ -1229,7 +1231,7 @@ func main() {
 			deps.HA = nil
 			slog.Info("HA bridge stopped (disabled in config)")
 		case haBridge == nil && haEnabled:
-			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
+			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
 				slog.Warn("HA bridge start failed", "err", err)
 			} else {
 				haBridge = bridge
@@ -1831,6 +1833,17 @@ func main() {
 			mpcSvc.ForecastSnapshot = forecastTrackerSvc.Snapshot
 			forecastTrackerSvc.setReplan(mpcSvc.RequestReplan)
 		}
+		// If the restored control mode is a planner variant, push the
+		// corresponding mpc.Mode before the first solve so the plan is built
+		// with the strategy the user actually picked — not whatever
+		// cfg.planner.mode says. control.PlannerMPCMode is the shared mapping
+		// (same one the API and HA setters use), so the three paths can't
+		// drift. The persisted plan is restored before Start as well, so the
+		// first solve replaces it instead of racing it.
+		if mm, ok := control.PlannerMPCMode(ctrl.Mode); ok {
+			mpcSvc.Defaults.Mode = mm
+		}
+		restoreLatestMPCDiagnostic(st, mpcSvc, time.Now())
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
 		// Inject plan → control.State. Both callbacks are wired:
@@ -1867,17 +1880,6 @@ func main() {
 				"true to opt out of the energy path instead. Honored for this run.",
 				"value", v)
 			ctrl.UseEnergyDispatch = v
-		}
-		// If the restored control mode is a planner variant, push the
-		// corresponding mpc.Mode so the plan is built with the strategy
-		// the user actually picked — not whatever cfg.planner.mode says.
-		// control.PlannerMPCMode is the shared mapping (same one the API
-		// and HA setters use), so the three paths can't drift.
-		if mm, ok := control.PlannerMPCMode(ctrl.Mode); ok {
-			mpcSvc.SetMode(ctx, mm)
-		}
-		if mpcSvc.Latest() == nil {
-			restoreLatestMPCDiagnostic(st, mpcSvc, time.Now())
 		}
 		slog.Info("mpc planner started",
 			"mode", mpcSvc.Defaults.Mode,
@@ -2533,6 +2535,9 @@ func main() {
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,
 		EVSend:           evSend,
+		SiteDispatchBlocked: func() string {
+			return siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, time.Now()).Reason
+		},
 		HA:               haBridge,
 		Registry:         reg,
 		DriverRepository: driverRepository,
@@ -2707,7 +2712,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -3016,7 +3021,7 @@ func main() {
 				// ctrl, so the stored tick has to show the hold already
 				// released rather than one the blocked tick never executed.
 				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
-				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+				sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
@@ -3097,6 +3102,7 @@ func main() {
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
+			mode := ctrl.Mode
 			ctrlMu.Unlock()
 
 			// ---- Self-tune override: step one battery, hold its siblings at 0 ----
@@ -3116,7 +3122,7 @@ func main() {
 				evW := tel.SumOnlineEVW()
 				v2xW := tel.SumOnlineV2XW()
 				attrs := []any{
-					"mode", ctrl.Mode,
+					"mode", mode,
 					"plan_stale", planMissingNow,
 					"site_meter", siteMeterDriver,
 					"grid_known", haveGrid,
@@ -3268,7 +3274,7 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+			sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
 			if err != nil {
 				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
@@ -3974,14 +3980,14 @@ func applyPlannerScalars(svc *mpc.Service, pl *config.Planner) {
 		interval = time.Duration(pl.IntervalMin) * time.Minute
 	}
 	svc.UpdatePlannerScalars(mpc.Params{
-		SoCMin:              socMin,
-		SoCMax:              socMax,
-		ChargeEfficiency:    chgEff,
-		DischargeEfficiency: disEff,
-		PVChargeBonusOreKwh: pvBonus,
-		ExportOrePerKWh:     pl.ExportOrePerKWh,
+		SoCMin:                   socMin,
+		SoCMax:                   socMax,
+		ChargeEfficiency:         chgEff,
+		DischargeEfficiency:      disEff,
+		PVChargeBonusOreKwh:      pvBonus,
+		ExportOrePerKWh:          pl.ExportOrePerKWh,
+		MinArbitrageSpreadOreKwh: pl.MinArbitrageSpreadOreKwh,
 	}, pl.BaseLoadW, horizon, interval)
-	svc.MinArbitrageSpreadOreKwh = pl.MinArbitrageSpreadOreKwh
 }
 
 func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Manager, intervalHours int) {
@@ -4015,7 +4021,24 @@ func isConfigMissing(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
+// tickPersistControl is what tick persistence reads from control.State,
+// copied under ctrlMu. A config reload rewrites SiteMeterDriver from an HTTP
+// goroutine, so persistence must never read ctrl directly.
+type tickPersistControl struct {
+	SiteMeterDriver string
+	LastTargets     []control.DispatchTarget
+}
+
+func snapshotTickPersistControl(ctrl *control.State, ctrlMu *sync.Mutex) tickPersistControl {
+	ctrlMu.Lock()
+	defer ctrlMu.Unlock()
+	return tickPersistControl{
+		SiteMeterDriver: ctrl.SiteMeterDriver,
+		LastTargets:     append([]control.DispatchTarget(nil), ctrl.LastTargets...),
+	}
+}
+
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl tickPersistControl, nowMs int64, historyMaxAge time.Duration, identity energyIdentityLookup, options ...telemetry.ForecastOptions) (int, error) {
 	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge, options...)
 	samples := tel.FlushSamples()
 	stSamples := make([]state.Sample, len(samples))
@@ -4054,9 +4077,9 @@ func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.S
 	return len(samples), st.EnqueueTelemetryTick(historyPoint, stSamples, energyObservations)
 }
 
-func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
+func buildHistoryPoint(tel *telemetry.Store, ctrl tickPersistControl, nowMs int64, historyMaxAge time.Duration, options ...telemetry.ForecastOptions) (state.HistoryPoint, bool) {
 	unavailable := state.HistoryPoint{TsMs: nowMs}
-	if tel == nil || ctrl == nil || ctrl.SiteMeterDriver == "" {
+	if tel == nil || ctrl.SiteMeterDriver == "" {
 		return unavailable, false
 	}
 	opts := telemetry.ForecastOptions{MaxAge: historyMaxAge}
@@ -4188,7 +4211,7 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 // path can share the exact same wiring — drift between them would mean
 // HA commands behave one way after boot and a different way after a
 // hot-reload, which is the kind of silent skew that's hardest to debug.
-func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service, prefs *config.PlannerPrefs) ha.CommandCallbacks {
+func haCallbacks(ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service, prefs *config.PlannerPrefs) ha.CommandCallbacks {
 	return ha.CommandCallbacks{
 		SetMode: func(m string) error {
 			mode := control.Mode(m)
@@ -4215,7 +4238,7 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 				prefs.ApplyExportFromMode(m, st.SaveConfig)
 			}
 			if mm, ok := control.PlannerMPCMode(mode); ok && mpcSvc != nil {
-				mpcSvc.SetMode(ctx, mm)
+				mpcSvc.SetMode(mm)
 			}
 			return nil
 		},

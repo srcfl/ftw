@@ -693,12 +693,12 @@ func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
 	tel.Update("offline", telemetry.DerBattery, 0, &socOffline, nil)
 	tel.DriverHealthMut("offline").SetOffline()
 
-	s := &Service{Tele: tel, FuseMaxW: 6000}
+	s := &Service{Tele: tel}
 	p, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
 		{Driver: "b", CapacityWh: 30000, MaxChargeW: 5000, MaxDischargeW: 5000},
 		{Driver: "offline", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
-	})
+	}, 6000)
 	if !ok {
 		t.Fatal("onlineFleetParams returned ok=false")
 	}
@@ -747,11 +747,11 @@ func TestOnlineFleetParamsDropsCommandFaultedBattery(t *testing.T) {
 	tel.DriverHealthMut("refusing").RecordSuccess()
 	tel.SetDriverCommandFault("refusing", true, "modbus write refused")
 
-	s := &Service{Tele: tel, FuseMaxW: 20000}
+	s := &Service{Tele: tel}
 	p, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
 		{Driver: "refusing", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
-	})
+	}, 20000)
 	if !ok {
 		t.Fatal("onlineFleetParams returned ok=false")
 	}
@@ -775,7 +775,7 @@ func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {
 	_, ok := s.onlineFleetParams(Params{InitialSoC: 0.5}, []BatteryFleetMember{
 		{Driver: "no-soc", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
 		{Driver: "missing", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
-	})
+	}, 0)
 	if ok {
 		t.Fatal("onlineFleetParams ok=true without any online battery SoC")
 	}

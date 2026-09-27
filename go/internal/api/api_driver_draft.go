@@ -433,7 +433,7 @@ func (s *Server) restartDriversUsing(ctx context.Context, filename string) error
 	}
 	s.deps.CfgMu.Unlock()
 	for _, d := range affected {
-		if err := s.deps.Registry.Restart(ctx, d); err != nil {
+		if err := s.restartDriverWithBatterySoCBounds(ctx, d); err != nil {
 			return fmt.Errorf("restart driver %s: %w", d.Name, err)
 		}
 	}

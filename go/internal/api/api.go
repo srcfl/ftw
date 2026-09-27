@@ -174,6 +174,12 @@ type Deps struct {
 	// Pause / Resume / Force start would find no such driver and fail.
 	EVSend func(ctx context.Context, name string, payload []byte) error
 
+	// SiteDispatchBlocked evaluates the control tick's pre-dispatch
+	// freshness gate now and returns why physical dispatch is inhibited, or
+	// "" when it is allowed. Operator setpoints that bypass the tick (the
+	// manual V2X command) check it. Nil refuses those setpoints.
+	SiteDispatchBlocked func() string
+
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
 
@@ -1714,14 +1720,14 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	if s.deps.PlannerPrefs != nil && s.deps.State != nil {
 		s.deps.PlannerPrefs.ApplyExportFromMode(req.Mode, s.deps.State.SaveConfig)
 	}
-	// Propagate to MPC if switching to a planner mode and force an
-	// immediate replan. control.PlannerMPCMode is the single source of the
+	// Propagate to MPC if switching to a planner mode and request a
+	// background replan. control.PlannerMPCMode is the single source of the
 	// ModePlanner* → mpc.Mode mapping; ok is false for non-planner modes (and
 	// for any planner mode that hasn't been wired into the mapping), so an
 	// unmapped mode skips the MPC push instead of silently coercing it to the
 	// zero-value mpc.Mode("").
 	if mm, ok := control.PlannerMPCMode(m); ok && s.deps.MPC != nil {
-		s.deps.MPC.SetMode(r.Context(), mm)
+		s.deps.MPC.SetMode(mm)
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
 }
@@ -1950,7 +1956,7 @@ func (s *Server) handleDriverRestart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "restarted", "source": "registry"})
 		return
 	}
-	if err := s.deps.Registry.Restart(r.Context(), *cfg); err != nil {
+	if err := s.restartDriverWithBatterySoCBounds(r.Context(), *cfg); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
@@ -3515,6 +3521,20 @@ func (s *Server) handleV2XCommand(w http.ResponseWriter, r *http.Request) {
 	if action == "v2x_set_power" && powerW != 0 && !live[driverName] {
 		writeJSON(w, 409, map[string]string{"error": "v2x driver is not reporting live telemetry"})
 		return
+	}
+	// Stale site-meter data stops dispatch. This setpoint bypasses the tick,
+	// which defaults every driver once on entering the stale state, so a
+	// setpoint accepted afterwards would hold while Core cannot see the site.
+	// A stop (0 W) is a standdown and stays allowed.
+	if action == "v2x_set_power" && powerW != 0 {
+		reason := "site dispatch gate unavailable"
+		if s.deps.SiteDispatchBlocked != nil {
+			reason = s.deps.SiteDispatchBlocked()
+		}
+		if reason != "" {
+			writeJSON(w, 409, map[string]string{"error": "site dispatch is inhibited: " + reason, "reason": reason})
+			return
+		}
 	}
 	payload, _ := json.Marshal(map[string]any{"action": action, "power_w": powerW})
 	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {

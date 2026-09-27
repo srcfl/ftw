@@ -261,6 +261,55 @@ func TestStopWaitsForRequestedReplanAndDiscardsQueuedEdits(t *testing.T) {
 	}
 }
 
+// Saving planner preferences sets the mode and k back to back. Both must
+// return while the solve runs, so an HTTP client that goes away cannot cancel
+// it into a fallback plan, and the two edits share one current solve.
+func TestSetModeAndSafetyKReplanInBackground(t *testing.T) {
+	optimizer := &blockingFirstOptimizer{
+		firstMode: make(chan Mode, 1), secondMode: make(chan Mode, 1), releaseFirst: make(chan struct{}),
+	}
+	svc := newCancellationTestService(t, optimizer)
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(optimizer.releaseFirst) }) }
+	t.Cleanup(func() { unblock(); waitForRequestedReplans(t, svc) })
+
+	returned := make(chan struct{})
+	go func() {
+		svc.SetMode(ModeArbitrage)
+		svc.SetSafetyK(0.5)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("SetMode/SetSafetyK waited for the solve")
+	}
+	select {
+	case mode := <-optimizer.firstMode:
+		if mode != ModeArbitrage {
+			t.Fatalf("solve mode=%q, want %q", mode, ModeArbitrage)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("mode change did not reach the optimizer")
+	}
+	unblock()
+	waitForRequestedReplans(t, svc)
+
+	snapshot := svc.PlanSnapshot()
+	if snapshot.Plan == nil || snapshot.Pending || snapshot.Outdated || snapshot.Reason != "safety_k_changed" {
+		t.Fatalf("latest edit not published: %+v", snapshot)
+	}
+	if solver := snapshot.Plan.Solver; solver == nil || solver.Fallback || solver.Backend != "blocking" {
+		t.Fatalf("published solver=%+v, want the optimizer plan", solver)
+	}
+	svc.mu.RLock()
+	p := svc.lastParams
+	svc.mu.RUnlock()
+	if p.Mode != ModeArbitrage || p.PVForecastSafetyK != 0.5 {
+		t.Fatalf("published params mode=%q k=%v", p.Mode, p.PVForecastSafetyK)
+	}
+}
+
 func waitForRequestedReplans(t *testing.T, svc *Service) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

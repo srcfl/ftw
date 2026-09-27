@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -79,7 +78,7 @@ func TestStartupAliasCannotReplayCountersWhileRawHistoryKeepsWriting(t *testing.
 	tel.EnsureDriverHealth("meter")
 	tel.Update("meter", telemetry.DerMeter, 500, nil, json.RawMessage(`{"import_wh":7300}`))
 	tel.RecordDriverSuccess("meter")
-	ctrl := &control.State{SiteMeterDriver: "meter"}
+	ctrl := tickPersistControl{SiteMeterDriver: "meter"}
 	live := mac
 	lookup := func(string) state.Device { return live }
 	if _, err := persistTelemetryTick(st, tel, ctrl, now.UnixMilli(), time.Minute, lookup); err != nil {
