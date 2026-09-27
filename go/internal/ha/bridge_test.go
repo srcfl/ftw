@@ -80,8 +80,6 @@ func TestModeOptionsIncludePublishedPlannerModes(t *testing.T) {
 		"self_consumption",
 		"peak_shaving",
 		"charge",
-		"priority",
-		"weighted",
 		"planner_self",
 		"planner_cheap",
 		"planner_passive_arbitrage",

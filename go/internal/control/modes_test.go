@@ -41,7 +41,7 @@ func TestPlannerMPCModeMapping(t *testing.T) {
 		}
 	}
 	// Non-planner modes must report ok=false (zero-value mpc.Mode skipped).
-	for _, m := range []Mode{ModeIdle, ModeSelfConsumption, ModePeakShaving, ModeCharge, ModePriority, ModeWeighted, "garbage"} {
+	for _, m := range []Mode{ModeIdle, ModeSelfConsumption, ModePeakShaving, ModeCharge, "garbage"} {
 		if mm, ok := PlannerMPCMode(m); ok {
 			t.Errorf("PlannerMPCMode(%q) = (%q, true), want ok=false", m, mm)
 		}
@@ -56,7 +56,7 @@ func TestPlannerMPCModeMapping(t *testing.T) {
 func TestAllModesCoversPlannerModes(t *testing.T) {
 	want := []Mode{
 		ModeIdle, ModeSelfConsumption, ModePeakShaving,
-		ModeCharge, ModePriority, ModeWeighted,
+		ModeCharge,
 		ModePlannerSelf, ModePlannerCheap,
 		ModePlannerPassiveArbitrage, ModePlannerArbitrage,
 	}
@@ -79,7 +79,9 @@ func TestIsValidModeAgreesWithAllModes(t *testing.T) {
 			t.Errorf("IsValidMode(%q) = false, want true (mode is in AllModes)", m)
 		}
 	}
-	for _, bad := range []Mode{"", "planner", "self", "arbitrage", "PLANNER_ARBITRAGE"} {
+	// priority and weighted were removed: priority never regulated, because
+	// nothing set its battery order. No door may accept either again.
+	for _, bad := range []Mode{"", "planner", "self", "arbitrage", "PLANNER_ARBITRAGE", "priority", "weighted"} {
 		if IsValidMode(bad) {
 			t.Errorf("IsValidMode(%q) = true, want false", bad)
 		}

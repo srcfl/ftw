@@ -96,32 +96,30 @@ type goldenLegacyPlan struct {
 }
 
 type goldenStateInputs struct {
-	Mode                      string             `json:"mode"`
-	GridTargetW               float64            `json:"grid_target_w"`
-	GridToleranceW            float64            `json:"grid_tolerance_w"`
-	SlewRateW                 float64            `json:"slew_rate_w"`
-	SlewEnabled               bool               `json:"slew_enabled"`
-	MinDispatchIntervalS      int                `json:"min_dispatch_interval_s"`
-	HoldoffActive             bool               `json:"holdoff_active"`
-	UseEnergyDispatch         bool               `json:"use_energy_dispatch"`
-	EVChargingW               float64            `json:"ev_charging_w"`
-	BatteryCoversEV           bool               `json:"battery_covers_ev"`
-	BatteryBoostEVChargingW   float64            `json:"battery_boost_ev_charging_w"`
-	BatteryBoostReserveSoC    float64            `json:"battery_boost_reserve_soc"`
-	EVSurplusOnlyReserveW     float64            `json:"ev_surplus_only_reserve_w"`
-	EVSurplusOnlyChargingW    float64            `json:"ev_surplus_only_charging_w,omitempty"`
-	PeakLimitW                float64            `json:"peak_limit_w"`
-	PeakImportCeilingW        float64            `json:"peak_import_ceiling_w"`
-	MaxExportW                float64            `json:"max_export_w"`
-	SiteFuseAmps              float64            `json:"site_fuse_amps"`
-	SiteFuseVoltage           float64            `json:"site_fuse_voltage"`
-	SiteFusePhases            int                `json:"site_fuse_phases"`
-	SiteFuseSafetyA           float64            `json:"site_fuse_safety_a"`
-	PVSurplusAbsorbSoCCap     float64            `json:"pv_surplus_absorb_soc_cap"`
-	PVSurplusAbsorbThresholdW float64            `json:"pv_surplus_absorb_threshold_w"`
-	InverterGroups            map[string]string  `json:"inverter_groups,omitempty"`
-	PriorityOrder             []string           `json:"priority_order,omitempty"`
-	Weights                   map[string]float64 `json:"weights,omitempty"`
+	Mode                      string            `json:"mode"`
+	GridTargetW               float64           `json:"grid_target_w"`
+	GridToleranceW            float64           `json:"grid_tolerance_w"`
+	SlewRateW                 float64           `json:"slew_rate_w"`
+	SlewEnabled               bool              `json:"slew_enabled"`
+	MinDispatchIntervalS      int               `json:"min_dispatch_interval_s"`
+	HoldoffActive             bool              `json:"holdoff_active"`
+	UseEnergyDispatch         bool              `json:"use_energy_dispatch"`
+	EVChargingW               float64           `json:"ev_charging_w"`
+	BatteryCoversEV           bool              `json:"battery_covers_ev"`
+	BatteryBoostEVChargingW   float64           `json:"battery_boost_ev_charging_w"`
+	BatteryBoostReserveSoC    float64           `json:"battery_boost_reserve_soc"`
+	EVSurplusOnlyReserveW     float64           `json:"ev_surplus_only_reserve_w"`
+	EVSurplusOnlyChargingW    float64           `json:"ev_surplus_only_charging_w,omitempty"`
+	PeakLimitW                float64           `json:"peak_limit_w"`
+	PeakImportCeilingW        float64           `json:"peak_import_ceiling_w"`
+	MaxExportW                float64           `json:"max_export_w"`
+	SiteFuseAmps              float64           `json:"site_fuse_amps"`
+	SiteFuseVoltage           float64           `json:"site_fuse_voltage"`
+	SiteFusePhases            int               `json:"site_fuse_phases"`
+	SiteFuseSafetyA           float64           `json:"site_fuse_safety_a"`
+	PVSurplusAbsorbSoCCap     float64           `json:"pv_surplus_absorb_soc_cap"`
+	PVSurplusAbsorbThresholdW float64           `json:"pv_surplus_absorb_threshold_w"`
+	InverterGroups            map[string]string `json:"inverter_groups,omitempty"`
 }
 
 type goldenInputs struct {
@@ -299,12 +297,6 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	}
 	if len(groups) > 0 {
 		st.InverterGroups = groups
-	}
-	if len(si.PriorityOrder) > 0 {
-		st.PriorityOrder = si.PriorityOrder
-	}
-	if len(si.Weights) > 0 {
-		st.Weights = si.Weights
 	}
 	if si.HoldoffActive {
 		now := scenarioNow
@@ -1508,26 +1500,6 @@ func slewScenarios() []goldenScenario {
 		Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.60), offB},
 		State:     react(ModeSelfConsumption, 500),
 	}))
-	pr := react(ModePriority, 500)
-	pr.PriorityOrder = []string{"sungrow", "ferroamp"}
-	out = append(out, mk("priority_split_with_slew", goldenInputs{
-		FuseMaxW: 11040, GridW: 4000,
-		Batteries: []goldenBattery{
-			gb("ferroamp", 15200, 2000, 0.60),
-			gb("sungrow", 9600, -1000, 0.60),
-		},
-		State: pr,
-	}))
-	wt := react(ModeWeighted, 500)
-	wt.Weights = map[string]float64{"ferroamp": 2, "sungrow": 1}
-	out = append(out, mk("weighted_split_with_slew", goldenInputs{
-		FuseMaxW: 11040, GridW: 4000,
-		Batteries: []goldenBattery{
-			gb("ferroamp", 15200, 2000, 0.60),
-			gb("sungrow", 9600, -1000, 0.60),
-		},
-		State: wt,
-	}))
 	ps := react(ModePeakShaving, 500)
 	ps.PeakLimitW = 3000
 	out = append(out, mk("peak_shaving_with_slew", goldenInputs{
@@ -1551,8 +1523,11 @@ func slewScenarios() []goldenScenario {
 // the combinations nobody did. Seeds are fixed, so the set is reproducible.
 func slewSeeded() []goldenScenario {
 	rates := []float64{250, 500, 750, 1000, 1500, 2000, 3000}
+	// The empty slots held the removed priority and weighted modes. Their
+	// records were dropped and the rotation kept, so every other record
+	// keeps the seed and mode it was recorded with.
 	modes := []Mode{
-		ModeSelfConsumption, ModePeakShaving, ModePriority, ModeWeighted,
+		ModeSelfConsumption, ModePeakShaving, "", "",
 		ModePlannerSelf, ModePlannerCheap, ModePlannerPassiveArbitrage, ModePlannerArbitrage,
 	}
 	strategies := map[Mode]string{
@@ -1566,6 +1541,9 @@ func slewSeeded() []goldenScenario {
 		seed := int64(6000 + i)
 		rng := rand.New(rand.NewSource(seed))
 		mode := modes[i%len(modes)]
+		if mode == "" {
+			continue
+		}
 		n := 1 + rng.Intn(3)
 		bats := seededBatteries(rng, n, 0.10, 0.90)
 		// Put at least one battery well away from any plausible target, so
@@ -1594,19 +1572,6 @@ func slewSeeded() []goldenScenario {
 		switch mode {
 		case ModePeakShaving:
 			st.PeakLimitW = roundW(3000 + rng.Float64()*3000)
-		case ModePriority:
-			order := make([]string, len(bats))
-			for j, b := range bats {
-				order[j] = b.Driver
-			}
-			rng.Shuffle(len(order), func(a, b int) { order[a], order[b] = order[b], order[a] })
-			st.PriorityOrder = order
-		case ModeWeighted:
-			w := map[string]float64{}
-			for _, b := range bats {
-				w[b.Driver] = round1(0.5 + rng.Float64()*2.5)
-			}
-			st.Weights = w
 		}
 
 		// Fuse pressure on a quarter of the set: relief has to out-rank
@@ -1691,12 +1656,18 @@ func seededBatteries(rng *rand.Rand, n int, socMin, socMax float64) []goldenBatt
 }
 
 func seededReactive() []goldenScenario {
-	modes := []Mode{ModeSelfConsumption, ModePeakShaving, ModeCharge, ModeIdle, ModePriority, ModeWeighted}
+	// The empty slots held the removed priority and weighted modes. Their
+	// records were dropped and the rotation kept, so every other record
+	// keeps the seed and mode it was recorded with.
+	modes := []Mode{ModeSelfConsumption, ModePeakShaving, ModeCharge, ModeIdle, "", ""}
 	out := make([]goldenScenario, 0, 100)
 	for i := 0; i < 100; i++ {
 		seed := int64(1000 + i)
 		rng := rand.New(rand.NewSource(seed))
 		mode := modes[i%len(modes)]
+		if mode == "" {
+			continue
+		}
 		n := 1 + rng.Intn(3)
 		bats := seededBatteries(rng, n, 0.05, 0.95)
 		if n > 1 && rng.Float64() < 0.20 {
@@ -1721,21 +1692,6 @@ func seededReactive() []goldenScenario {
 		}
 		if mode == ModePeakShaving {
 			st.PeakLimitW = roundW(3000 + rng.Float64()*4000)
-		}
-		if mode == ModePriority {
-			order := make([]string, len(bats))
-			for j, b := range bats {
-				order[j] = b.Driver
-			}
-			rng.Shuffle(len(order), func(a, b int) { order[a], order[b] = order[b], order[a] })
-			st.PriorityOrder = order
-		}
-		if mode == ModeWeighted {
-			w := map[string]float64{}
-			for _, b := range bats {
-				w[b.Driver] = round1(0.5 + rng.Float64()*2.5)
-			}
-			st.Weights = w
 		}
 		in := goldenInputs{
 			FuseMaxW:  11040,

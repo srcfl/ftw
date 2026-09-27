@@ -147,8 +147,6 @@ modes:
   - { key: charge, tier: advanced }
   - { key: planner_self, tier: hidden }
   - { key: planner_cheap, tier: hidden }
-  - { key: priority, tier: hidden }
-  - { key: weighted, tier: hidden }
 
 # ---------------------------------------------------------------------------
 # Error codes the box sends. The box sends the code and args; this app owns all

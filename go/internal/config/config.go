@@ -756,14 +756,6 @@ type Planner struct {
 	// respects the principle "plan allocates energy, EMS reacts to
 	// live data".
 	LegacyDispatch bool `yaml:"legacy_dispatch,omitempty" json:"legacy_dispatch,omitempty"`
-
-	// UseEnergyDispatch is the deprecated inverse of LegacyDispatch.
-	// Pointer so we can distinguish "unset" (nil) from "explicitly
-	// false" (*false) — the latter matters because an operator who
-	// previously picked legacy dispatch must not be silently flipped
-	// to the energy path on upgrade. Honored with a startup WARN
-	// and will be removed after one release.
-	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
 // Planner engines accepted by configuration.
@@ -1253,7 +1245,6 @@ type Battery struct {
 	SoCMax        *float64 `yaml:"soc_max,omitempty" json:"soc_max,omitempty"`
 	MaxChargeW    *float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
 	MaxDischargeW *float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`
-	Weight        *float64 `yaml:"weight,omitempty" json:"weight,omitempty"`
 }
 
 // MaskSecrets returns a copy of the config with sensitive fields (passwords,
@@ -1483,6 +1474,9 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	var retiredDrivers retiredDriverSettings
 	_ = doc.Decode(&retiredDrivers)
 	c.dropRetired(retiredDrivers)
+	var retiredControl retiredControlSettings
+	_ = doc.Decode(&retiredControl)
+	c.applyRetiredControl(retiredControl)
 	// An omitted app_link section follows the new default. An explicit YAML
 	// null was a valid opt-out before that default changed, so retain it as an
 	// explicit disabled section instead of letting applyDefaults turn it on.

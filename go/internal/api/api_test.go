@@ -859,6 +859,45 @@ func TestHandleSetModeAcceptsPassiveArbitrage(t *testing.T) {
 	}
 }
 
+// Priority mode held every battery at its measured power, because nothing set
+// its battery order: a battery discharging when the load dropped kept
+// discharging into export. Weighted was an equal split under another name.
+// Both were removed, so the API must refuse them rather than run them.
+func TestHandleSetModeRefusesRemovedModes(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	for _, mode := range []string{"priority", "weighted"} {
+		t.Run(mode, func(t *testing.T) {
+			ctrl := control.NewState(0, 50, "meter")
+			srv := New(&Deps{
+				Ctrl:   ctrl,
+				CtrlMu: &sync.Mutex{},
+				State:  st,
+				CfgMu:  &sync.RWMutex{},
+				Cfg:    &config.Config{},
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/api/mode",
+				strings.NewReader(`{"mode":"`+mode+`"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
+			}
+			if ctrl.Mode != control.ModeSelfConsumption {
+				t.Errorf("ctrl.Mode = %q after a refused mode, want self_consumption", ctrl.Mode)
+			}
+			if stored, ok := st.LoadConfig("mode"); ok {
+				t.Errorf("a refused mode was persisted as %q", stored)
+			}
+		})
+	}
+}
+
 // 2026-05-24 evening regression: PI integrator state carried across an
 // operator mode switch, so the new mode inherited a saturated integral
 // from the previous mode's stuck-import accumulation and commanded

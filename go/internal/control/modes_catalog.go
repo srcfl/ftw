@@ -58,7 +58,5 @@ func ModeCatalog() []ModeInfo {
 		// Hidden — valid (API + HA + planner) but not surfaced as buttons.
 		{ModePlannerSelf, "Planner (self)", "Forecast-driven self-consumption — never grid-charges, never exports.", TierHidden},
 		{ModePlannerCheap, "Planner (cheap)", "Forecast-driven — grid-charges during cheap hours, never exports.", TierHidden},
-		{ModePriority, "Priority", "Fill the highest-priority battery first.", TierHidden},
-		{ModeWeighted, "Weighted", "Distribute dispatch across batteries by configured weights.", TierHidden},
 	}
 }

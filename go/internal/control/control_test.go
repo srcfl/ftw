@@ -576,121 +576,6 @@ func TestProportionalUsesTotalDesired(t *testing.T) {
 	}
 }
 
-func TestPriorityDrainsPrimaryFirst(t *testing.T) {
-	bats := []batteryInfo{
-		{driver: "primary", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
-		{driver: "secondary", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
-	}
-	// Small correction - primary should take it all
-	targets := distributePriority(bats, -1000, []string{"primary", "secondary"})
-	var p, s float64
-	for _, tg := range targets {
-		if tg.Driver == "primary" {
-			p = tg.TargetW
-		}
-		if tg.Driver == "secondary" {
-			s = tg.TargetW
-		}
-	}
-	if math.Abs(p+1000) > 1 {
-		t.Errorf("primary: got %f, want -1000", p)
-	}
-	if s != 0 {
-		t.Errorf("secondary: got %f, want 0", s)
-	}
-}
-
-func TestPriorityOverflowsToSecondary(t *testing.T) {
-	bats := []batteryInfo{
-		{driver: "primary", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
-		{driver: "secondary", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
-	}
-	// Big correction - primary saturates at -5000 (per-command cap), rest spills
-	targets := distributePriority(bats, -7000, []string{"primary", "secondary"})
-	var p, s float64
-	for _, tg := range targets {
-		if tg.Driver == "primary" {
-			p = tg.TargetW
-		}
-		if tg.Driver == "secondary" {
-			s = tg.TargetW
-		}
-	}
-	if p != -5000 {
-		t.Errorf("primary: got %f, want -5000", p)
-	}
-	if math.Abs(s+2000) > 1 {
-		t.Errorf("secondary: got %f, want -2000", s)
-	}
-}
-
-func TestWeightedDistribution(t *testing.T) {
-	bats := []batteryInfo{
-		{driver: "a", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
-		{driver: "b", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
-	}
-	weights := map[string]float64{"a": 0.8, "b": 0.2}
-	targets := distributeWeighted(bats, 1000, weights)
-	var a, b float64
-	for _, tg := range targets {
-		if tg.Driver == "a" {
-			a = tg.TargetW
-		}
-		if tg.Driver == "b" {
-			b = tg.TargetW
-		}
-	}
-	if math.Abs(a-800) > 1 {
-		t.Errorf("a: got %f, want 800", a)
-	}
-	if math.Abs(b-200) > 1 {
-		t.Errorf("b: got %f, want 200", b)
-	}
-}
-
-func TestWeightedDistributionReallocatesBlockedDirection(t *testing.T) {
-	tests := []struct {
-		name       string
-		correction float64
-		bats       []batteryInfo
-		wantB      float64
-	}{
-		{
-			name:       "charge",
-			correction: 1000,
-			bats: []batteryInfo{
-				{driver: "blocked", capacityWh: 10000, soc: 0.5, online: true, chargeBlocked: true},
-				{driver: "capable", capacityWh: 10000, soc: 0.5, online: true},
-			},
-			wantB: 1000,
-		},
-		{
-			name:       "discharge",
-			correction: -1000,
-			bats: []batteryInfo{
-				{driver: "blocked", capacityWh: 10000, soc: 0.5, online: true, dischargeBlocked: true},
-				{driver: "capable", capacityWh: 10000, soc: 0.5, online: true},
-			},
-			wantB: -1000,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			targets := distributeWeighted(tt.bats, tt.correction, map[string]float64{
-				"blocked": 1,
-				"capable": 1,
-			})
-			got := targetsByDriver(targets)
-			if got["blocked"].TargetW != 0 || !got["blocked"].Clamped {
-				t.Errorf("blocked target = %+v, want 0 W clamped", got["blocked"])
-			}
-			if got["capable"].TargetW != tt.wantB {
-				t.Errorf("capable TargetW = %.1f W, want %.1f W", got["capable"].TargetW, tt.wantB)
-			}
-		})
-	}
-}
-
 // ---- Clamps ----
 
 func TestClampWithSoCBlocksDischargeWhenEmpty(t *testing.T) {
@@ -5301,7 +5186,7 @@ func TestMeterClampRespectsNonZeroGridTarget(t *testing.T) {
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(-3000, 50, "ferroamp")
-	st.Mode = ModeWeighted
+	st.Mode = ModeSelfConsumption
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	var sum float64

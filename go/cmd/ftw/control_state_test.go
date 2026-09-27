@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -175,5 +177,79 @@ func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
 	}
 	if f, ok := restoredGridTargetW("-1500.0"); !ok || f != -1500 {
 		t.Fatalf("restoredGridTargetW(-1500.0) = %v, %v; want -1500, true", f, ok)
+	}
+}
+
+// Priority and weighted were removed. A site that stored one must boot into
+// self-consumption and store it, not keep a mode no door accepts any more.
+func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
+	for stored, want := range map[string]control.Mode{
+		"priority":          control.ModeSelfConsumption,
+		"weighted":          control.ModeSelfConsumption,
+		"planner_arbitrage": control.ModePlannerArbitrage,
+		"peak_shaving":      control.ModePeakShaving,
+	} {
+		t.Run(stored, func(t *testing.T) {
+			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			if err := st.SaveConfig("mode", stored); err != nil {
+				t.Fatal(err)
+			}
+			ctrl := control.NewState(0, 50, "meter")
+			ctrl.Mode = control.ModeIdle
+
+			restoreStoredMode(ctrl, st)
+
+			if ctrl.Mode != want {
+				t.Fatalf("mode = %q, want %q", ctrl.Mode, want)
+			}
+			if saved, _ := st.LoadConfig("mode"); saved != string(want) {
+				t.Fatalf("stored mode = %q, want %q", saved, want)
+			}
+		})
+	}
+}
+
+// A value FTW never had keeps the default and is left for an operator to see.
+func TestRestoreStoredModeLeavesAnUnknownValueAlone(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveConfig("mode", "turbo"); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := control.NewState(0, 50, "meter")
+
+	restoreStoredMode(ctrl, st)
+
+	if ctrl.Mode != control.ModeSelfConsumption {
+		t.Fatalf("mode = %q, want the default", ctrl.Mode)
+	}
+	if saved, _ := st.LoadConfig("mode"); saved != "turbo" {
+		t.Fatalf("stored mode = %q, want it untouched", saved)
+	}
+}
+
+// Boot and hot reload read the dispatch path from one place. A reload that
+// removed the planner section used to keep the legacy path a fresh boot
+// would not pick.
+func TestEnergyDispatchEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		planner *config.Planner
+		want    bool
+	}{
+		{"no planner section", nil, true},
+		{"planner without legacy_dispatch", &config.Planner{Enabled: true}, true},
+		{"legacy_dispatch", &config.Planner{Enabled: true, LegacyDispatch: true}, false},
+	} {
+		if got := energyDispatchEnabled(&config.Config{Planner: tc.planner}); got != tc.want {
+			t.Errorf("%s: energyDispatchEnabled = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

@@ -2,7 +2,7 @@ package control
 
 // Golden replay of ComputeDispatch.
 //
-// testdata/golden/ holds 611 recorded dispatch ticks: nine families covering
+// testdata/golden/ holds 551 recorded dispatch ticks: nine families covering
 // the reactive modes, all four planner modes, fuse pressure in both
 // directions, degraded siblings, EV and battery-boost reserves, the slew
 // limiter at rates a site actually runs, the three early exits meeting a
@@ -64,7 +64,7 @@ const (
 
 	// goldenExpectedRecords guards against a half-written re-recording
 	// silently shrinking the net.
-	goldenExpectedRecords = 611
+	goldenExpectedRecords = 551
 
 	// goldenSlewBindingMarginW is how far a record's targets have to move
 	// when the slew limiter is switched off before that record counts as

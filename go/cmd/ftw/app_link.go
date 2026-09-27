@@ -181,7 +181,8 @@ func (a appBoxInfo) Identity() appproto.Identity {
 // otherwise would be a spinner that never resolves.
 func (a appBoxInfo) Boot() *appproto.BootProgress { return nil }
 
-// appModes applies a mode and reads it back.
+// appModes applies a mode and reads it back. Home Assistant's mode command
+// uses the same SetMode, so the two doors cannot drift apart.
 //
 // SetMode and ObservedMode are deliberately different questions: the first is
 // what was asked for, the second is what the box is running. cmd.result
@@ -204,7 +205,7 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 
 	if a.state != nil {
 		if err := a.state.SaveConfig("mode", string(m)); err != nil {
-			slog.Warn("app uplink could not persist the mode", "err", err)
+			slog.Warn("could not persist the mode", "mode", m, "err", err)
 		}
 	}
 	if a.prefs != nil {

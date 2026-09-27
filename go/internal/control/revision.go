@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"math"
-	"sort"
 	"sync"
 )
 
@@ -86,23 +85,6 @@ func fingerprint(s *State) [sha256.Size]byte {
 	writeFloat(h, s.MaxExportW)
 	writeFloat(h, s.ManualEVChargingW)
 	writeBool(h, s.BatteryCoversEV)
-
-	for _, name := range s.PriorityOrder {
-		writeString(h, name)
-	}
-
-	// Sorted, because the same weights in a different map iteration order are
-	// the same weights, and a revision that moved on iteration order would
-	// make every command a conflict at random.
-	names := make([]string, 0, len(s.Weights))
-	for name := range s.Weights {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		writeString(h, name)
-		writeFloat(h, s.Weights[name])
-	}
 
 	var sum [sha256.Size]byte
 	copy(sum[:], h.Sum(nil))

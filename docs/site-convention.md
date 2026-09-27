@@ -53,9 +53,8 @@ In self-consumption mode, the controller drives the site meter toward the
 grid target (normally 0 W): it charges from live surplus and may discharge
 to cover local load. It must not intentionally export via the battery; export
 should come from PV unless an explicit export-capable strategy is selected.
-Other modes such as peak-shaving, weighted target-following, and arbitrage
-may still issue negative battery targets when their contract calls for
-discharge.
+Other modes such as peak-shaving and arbitrage may still issue negative
+battery targets when their contract calls for discharge.
 
 ## SI units everywhere
 

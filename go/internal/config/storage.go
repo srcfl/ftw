@@ -39,6 +39,11 @@ func decodeStored(c state.Configuration, database, baseDir string) (*Config, err
 	}
 	_ = json.Unmarshal(c.Document, &legacy)
 	cfg.dropRetired(legacy.Config)
+	var legacyControl struct {
+		Config retiredControlSettings `json:"config"`
+	}
+	_ = json.Unmarshal(c.Document, &legacyControl)
+	cfg.applyRetiredControl(legacyControl.Config)
 	// This is the same typed config that was validated on save. Do not apply new
 	// defaults during a storage-only reload: nil, false and zero stay distinct.
 	if err := cfg.Validate(); err != nil {
@@ -212,10 +217,11 @@ func SaveStored(st *state.Store, path string, cfg *Config) error {
 
 // DropRetiredSettings rewrites stored settings that still carry settings of a
 // removed feature. Ask why kept an OpenRouter key there; nothing reads it, so
-// it must not stay in state.db and every backup. Device Support repositories
-// and driver control opt-ins no longer do anything. Saving the typed Config,
-// which loading already cleaned, writes the document without them. It names
-// what it removed.
+// it must not stay in state.db and every backup. Device Support repositories,
+// driver control opt-ins and battery weights no longer do anything, and
+// planner.use_energy_dispatch is now planner.legacy_dispatch. Saving the typed
+// Config, which loading already cleaned, writes the document without them. It
+// names what it removed.
 func DropRetiredSettings(st *state.Store, path string, cfg *Config) ([]string, error) {
 	current, found, err := st.Configuration()
 	if err != nil || !found {
@@ -227,7 +233,7 @@ func DropRetiredSettings(st *state.Store, path string, cfg *Config) ([]string, e
 	if err := json.Unmarshal(current.Document, &saved); err != nil {
 		return nil, err
 	}
-	removed := storedRetiredSettings(saved.Config)
+	removed := append(storedRetiredSettings(saved.Config), storedRetiredControl(saved.Config)...)
 	if len(removed) == 0 {
 		return nil, nil
 	}

@@ -218,47 +218,6 @@ func TestSiteTroubleshootingModeParses(t *testing.T) {
 	}
 }
 
-// TestDeprecatedUseEnergyDispatchParsesAsPointer covers the
-// Codex P1 on PR #124: an operator who explicitly set
-// `use_energy_dispatch: false` to pick legacy dispatch pre-v0.27
-// must not be silently flipped to the energy path on upgrade. The
-// field lives on as a deprecated *bool so main.go can distinguish
-// "unset" (nil) from "explicitly false" and honor prior intent.
-func TestDeprecatedUseEnergyDispatchParsesAsPointer(t *testing.T) {
-	yaml := minimalYAML + `
-planner:
-  enabled: true
-  use_energy_dispatch: false
-`
-	c, err := Parse([]byte(yaml), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Planner == nil {
-		t.Fatal("planner not parsed")
-	}
-	if c.Planner.UseEnergyDispatch == nil {
-		t.Fatal("UseEnergyDispatch should be non-nil when key is present")
-	}
-	if *c.Planner.UseEnergyDispatch != false {
-		t.Errorf("UseEnergyDispatch = %v, want false", *c.Planner.UseEnergyDispatch)
-	}
-}
-
-func TestUseEnergyDispatchNilWhenUnset(t *testing.T) {
-	yaml := minimalYAML + `
-planner:
-  enabled: true
-`
-	c, err := Parse([]byte(yaml), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Planner.UseEnergyDispatch != nil {
-		t.Errorf("UseEnergyDispatch should be nil when YAML omits the key, got %v", *c.Planner.UseEnergyDispatch)
-	}
-}
-
 func TestV2XPolicyParses(t *testing.T) {
 	yaml := minimalYAML + `
 v2x:
@@ -608,7 +567,6 @@ weather:
 batteries:
   f:
     soc_min: 0.1
-    weight: 2.0
 `
 	c, err := Parse([]byte(yaml), ".")
 	if err != nil {

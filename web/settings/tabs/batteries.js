@@ -26,8 +26,6 @@
             field("Max discharge (W)", "batteries." + d.name + ".max_discharge_w", "number", "",
               "Peak discharge rate the driver will command. Defaults to 0.5C.") +
             '</div></div>' +
-            field("Weight (for weighted mode)", "batteries." + d.name + ".weight", "number", 1,
-              "Share of correction this battery takes when control mode is 'weighted'. 1.0 = equal with other batteries.") +
             '</fieldset>';
         }
       });

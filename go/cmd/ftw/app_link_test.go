@@ -2,12 +2,15 @@ package main
 
 import (
 	"math"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -228,6 +231,47 @@ func TestAppSetModeGoesThroughApplyMode(t *testing.T) {
 	}
 	if _, active := ctrl.GetBatteryManualHold(time.Now()); active {
 		t.Fatal("the manual hold survived a mode change")
+	}
+}
+
+// Home Assistant's mode command is the app's door. It used to be a third copy
+// that returned when the mode could not be saved, before the export preference
+// and the planner were told, so control ran one strategy while the planner
+// planned another.
+func TestHomeAssistantSetModeFinishesWhenTheModeCannotBeSaved(t *testing.T) {
+	_, ctrl := seedSite(t)
+	ctrl.PI = &control.PIController{}
+	ctrl.SetBatteryManualHold(control.BatteryManualHold{
+		Driver: "battery", PowerW: -2000, ExpiresAt: time.Now().Add(time.Hour),
+	})
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	prefs := config.NewPlannerPrefs(config.ForecastTrustBalanced, config.BatteryExportNotAllowed, config.SafetyKDefault)
+
+	callbacks := haCallbacks(t.Context(), ctrl, &sync.Mutex{}, st, nil, prefs)
+	if err := callbacks.SetMode(string(control.ModePlannerArbitrage)); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+
+	if ctrl.Mode != control.ModePlannerArbitrage {
+		t.Fatalf("mode = %q", ctrl.Mode)
+	}
+	if _, active := ctrl.GetBatteryManualHold(time.Now()); active {
+		t.Fatal("the manual hold survived a mode change")
+	}
+	if _, export, _ := prefs.Get(); export != config.BatteryExportAllowed {
+		t.Fatalf("battery export = %q; the mode change stopped before the planner preference", export)
+	}
+	if err := callbacks.SetMode("priority"); err == nil {
+		t.Fatal("Home Assistant set a removed mode")
+	}
+	if ctrl.Mode != control.ModePlannerArbitrage {
+		t.Fatalf("a refused mode changed the state to %q", ctrl.Mode)
 	}
 }
 

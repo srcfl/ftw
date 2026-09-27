@@ -589,11 +589,7 @@ func main() {
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
 	// dropped on restart and the dashboard appears to forget the selection.
-	if v, ok := st.LoadConfig("mode"); ok {
-		if m := control.Mode(v); control.IsValidMode(m) {
-			ctrl.Mode = m
-		}
-	}
+	restoreStoredMode(ctrl, st)
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
 	storedSafetyK, _ := st.LoadConfig(config.StateKeySafetyK)
@@ -1144,13 +1140,10 @@ func main() {
 			mpcSvc.MaxExportW = newCfg.Site.MaxExportW
 			if newCfg.Planner != nil {
 				applyPlannerScalars(mpcSvc, newCfg.Planner)
-				ctrlMu.Lock()
-				ctrl.UseEnergyDispatch = !newCfg.Planner.LegacyDispatch
-				if newCfg.Planner.UseEnergyDispatch != nil {
-					ctrl.UseEnergyDispatch = *newCfg.Planner.UseEnergyDispatch
-				}
-				ctrlMu.Unlock()
 			}
+			ctrlMu.Lock()
+			ctrl.UseEnergyDispatch = energyDispatchEnabled(newCfg)
+			ctrlMu.Unlock()
 		}
 		if priceSvc != nil && newCfg.Price != nil {
 			vat := newCfg.Price.VATPercent
@@ -1862,20 +1855,10 @@ func main() {
 		// the regulator (decides HOW batteries react — from live
 		// telemetry, not plan forecasts).
 		// `planner.legacy_dispatch: true` opts back to the old
-		// PI-on-grid-target path for emergency rollback.
-		//
-		// Back-compat: honor the deprecated `use_energy_dispatch`
-		// key when explicitly set. An operator who had
-		// `use_energy_dispatch: false` in their config before v0.27.0
-		// chose legacy on purpose — don't silently flip them.
-		ctrl.UseEnergyDispatch = cfg.Planner == nil || !cfg.Planner.LegacyDispatch
-		if cfg.Planner != nil && cfg.Planner.UseEnergyDispatch != nil {
-			v := *cfg.Planner.UseEnergyDispatch
-			slog.Warn("planner.use_energy_dispatch is deprecated — use planner.legacy_dispatch: "+
-				"true to opt out of the energy path instead. Honored for this run.",
-				"value", v)
-			ctrl.UseEnergyDispatch = v
-		}
+		// PI-on-grid-target path for emergency rollback. Config loading
+		// has already turned the removed `use_energy_dispatch` key into
+		// legacy_dispatch.
+		ctrl.UseEnergyDispatch = energyDispatchEnabled(cfg)
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.
@@ -4197,35 +4180,14 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 // HA commands behave one way after boot and a different way after a
 // hot-reload, which is the kind of silent skew that's hardest to debug.
 func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service, prefs *config.PlannerPrefs) ha.CommandCallbacks {
+	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: mpcSvc, prefs: prefs}
 	return ha.CommandCallbacks{
+		// Home Assistant changes the mode through the app's door:
+		// control.ApplyMode, which accepts exactly the set the HA discovery
+		// `select` advertises, then the saved mode, the export preference
+		// and a replan that does not hold up the MQTT handler.
 		SetMode: func(m string) error {
-			mode := control.Mode(m)
-			// Accept exactly the set the HA discovery `select` advertises —
-			// control.AllModes via IsValidMode — so a planner_* option an
-			// operator picks in Home Assistant isn't silently rejected here.
-			// Mirror the full /api/mode side-effects (manual-hold + PI reset
-			// + MPC propagation); the two setters must behave identically or
-			// HA mode changes diverge from web-UI ones (#mode-drift).
-			if !control.IsValidMode(mode) {
-				return fmt.Errorf("unknown mode: %s", m)
-			}
-			ctrlMu.Lock()
-			ctrl.Mode = mode
-			ctrl.ClearBatteryManualHold()
-			if ctrl.PI != nil {
-				ctrl.PI.Reset()
-			}
-			ctrlMu.Unlock()
-			if err := st.SaveConfig("mode", m); err != nil {
-				return err
-			}
-			if prefs != nil {
-				prefs.ApplyExportFromMode(m, st.SaveConfig)
-			}
-			if mm, ok := control.PlannerMPCMode(mode); ok && mpcSvc != nil {
-				mpcSvc.SetMode(ctx, mm)
-			}
-			return nil
+			return modes.SetMode(ctx, control.Mode(m))
 		},
 		SetGridTarget: func(w float64) error {
 			ctrlMu.Lock()

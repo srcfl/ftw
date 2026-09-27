@@ -720,11 +720,11 @@ func TestE2E_FullStack(t *testing.T) {
 		t.Errorf("expected 2 drivers, got %+v", status["drivers"])
 	}
 
-	// 3. In a manual target-following mode, set a positive grid target
-	// (import more) — batteries should CHARGE (site convention:
-	// + = charge = load that adds to grid import).
-	if code := s.postJSON("/api/mode", map[string]any{"mode": "weighted"}, nil); code != 200 {
-		t.Errorf("mode weighted POST: %d", code)
+	// 3. In manual self-consumption, which follows the grid target, set a
+	// positive grid target (import more) — batteries should CHARGE (site
+	// convention: + = charge = load that adds to grid import).
+	if code := s.postJSON("/api/mode", map[string]any{"mode": "self_consumption"}, nil); code != 200 {
+		t.Errorf("mode self_consumption POST: %d", code)
 	}
 	if code := s.postJSON("/api/target", map[string]any{"grid_target_w": 3000}, nil); code != 200 {
 		t.Errorf("target POST: %d", code)

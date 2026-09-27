@@ -22,8 +22,6 @@ const (
 	ModeSelfConsumption Mode = "self_consumption"
 	ModePeakShaving     Mode = "peak_shaving"
 	ModeCharge          Mode = "charge"
-	ModePriority        Mode = "priority"
-	ModeWeighted        Mode = "weighted"
 
 	// Planner modes: control loop pulls GridTargetW from the MPC plan
 	// for the current 15-min slot. If the plan is stale (>30 min) or
@@ -54,7 +52,7 @@ const (
 func AllModes() []Mode {
 	return []Mode{
 		ModeIdle, ModeSelfConsumption, ModePeakShaving,
-		ModeCharge, ModePriority, ModeWeighted,
+		ModeCharge,
 		ModePlannerSelf, ModePlannerCheap,
 		ModePlannerPassiveArbitrage, ModePlannerArbitrage,
 	}
@@ -381,11 +379,6 @@ type State struct {
 	// Zero disables the margin (back-compat).
 	SiteFuseSafetyA float64
 
-	// For Priority mode
-	PriorityOrder []string
-	// For Weighted mode
-	Weights map[string]float64
-
 	// Peak limit — enforced only in PeakShaving mode
 	PeakLimitW float64
 
@@ -494,9 +487,6 @@ type State struct {
 	clock func() time.Time
 
 	LastTargets []DispatchTarget
-
-	// Cascade toggle — set by main.go based on whether models exist
-	UseCascade bool
 
 	// PlanTarget is consulted at the top of each control cycle when
 	// Mode is a planner mode. Nil outside planner modes. Injected from
@@ -1139,8 +1129,6 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 		GridTargetW:          gridTargetW,
 		GridToleranceW:       gridToleranceW,
 		SiteMeterDriver:      siteMeter,
-		PriorityOrder:        nil,
-		Weights:              map[string]float64{},
 		PeakLimitW:           5000,
 		EVChargingW:          0,
 		PI:                   pi,
@@ -1148,7 +1136,6 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 		SlewEnabled:          true,
 		MinDispatchIntervalS: 5,
 		PrevTargets:          map[string]float64{},
-		UseCascade:           true,
 	}
 }
 
@@ -1541,8 +1528,7 @@ func ComputeDispatch(
 				// Distribution mode is decoupled from planner strategy in
 				// the energy path — the operator-selected strategy drives
 				// the plan's DP, distribution is always proportional across
-				// online batteries. If the operator wants priority or
-				// weighted, they use the manual modes, not a planner mode.
+				// online batteries.
 				effectiveMode = ModeSelfConsumption
 				state.PlanStale = false
 				// Carve-out slots must chase grid=0, not the legacy
@@ -2063,7 +2049,7 @@ func ComputeDispatch(
 		totalCorrection = targetTotalW - currentTotal
 	default:
 		// Legacy PI-on-grid-target path. Used by:
-		//   - manual modes (self_consumption, peak_shaving, priority, weighted)
+		//   - manual modes (self_consumption, peak_shaving)
 		//   - planner_self (the "participate reactively" branch — idle-gate
 		//     already handled above)
 		//   - planner_cheap / planner_arbitrage when UseEnergyDispatch=false
@@ -2076,8 +2062,7 @@ func ComputeDispatch(
 		// (which polls a separate surplus number) sees nothing left to
 		// claim — flap mode. The bias is only applied to the self-
 		// consumption flavour: PeakShaving has its own peak-relative
-		// error, and other modes (Charge, Priority, Weighted) are out
-		// of scope for surplus-only semantics.
+		// error, and Charge is out of scope for surplus-only semantics.
 		//
 		// Three regions:
 		//   gridW < -reserveRemaining: exporting MORE than the reserve.
@@ -2457,10 +2442,6 @@ func ComputeDispatch(
 		switch effectiveMode {
 		case ModeSelfConsumption, ModePeakShaving:
 			raw = distributeProportional(onlineBats, totalCorrection, groupPV)
-		case ModePriority:
-			raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
-		case ModeWeighted:
-			raw = distributeWeighted(onlineBats, totalCorrection, state.Weights)
 		}
 	}
 
@@ -3904,88 +3885,6 @@ func planHasNonDischargeIntent(state *State) bool {
 		}
 	}
 	return false
-}
-
-// distributePriority assigns correction to the primary battery first, falling
-// back to secondaries only when saturated.
-func distributePriority(bats []batteryInfo, totalCorrection float64, order []string) []DispatchTarget {
-	remaining := totalCorrection
-	out := make([]DispatchTarget, 0, len(bats))
-	// Named order first
-	for _, name := range order {
-		for _, b := range bats {
-			if b.driver != name {
-				continue
-			}
-			t := b.currentW + remaining
-			clamped, was := clampWithSoC(t, b)
-			remaining -= clamped - b.currentW
-			out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
-		}
-	}
-	// Unmentioned batteries stay at their current power
-	for _, b := range bats {
-		seen := false
-		for _, o := range out {
-			if o.Driver == b.driver {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			out = append(out, DispatchTarget{Driver: b.driver, TargetW: b.currentW})
-		}
-	}
-	return out
-}
-
-// distributeWeighted splits by custom weights. Missing batteries default to weight=1.
-func distributeWeighted(bats []batteryInfo, totalCorrection float64, weights map[string]float64) []DispatchTarget {
-	var currentTotal float64
-	for _, b := range bats {
-		currentTotal += b.currentW
-	}
-	desiredTotal := currentTotal + totalCorrection
-	blockedForDirection := func(b batteryInfo) bool {
-		if desiredTotal > 0 {
-			return b.chargeBlocked
-		}
-		if desiredTotal < 0 {
-			return b.dischargeBlocked
-		}
-		return false
-	}
-
-	var totalW float64
-	for _, b := range bats {
-		if blockedForDirection(b) {
-			continue
-		}
-		w, ok := weights[b.driver]
-		if !ok {
-			w = 1.0
-		}
-		totalW += w
-	}
-
-	out := make([]DispatchTarget, 0, len(bats))
-	for _, b := range bats {
-		if blockedForDirection(b) {
-			out = append(out, DispatchTarget{Driver: b.driver, TargetW: 0, Clamped: true})
-			continue
-		}
-		if totalW <= 0 {
-			continue
-		}
-		w, ok := weights[b.driver]
-		if !ok {
-			w = 1.0
-		}
-		t := desiredTotal * (w / totalW)
-		clamped, was := clampWithSoC(t, b)
-		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
-	}
-	return out
 }
 
 // chargeAll forces every online battery to its per-driver MaxChargeW

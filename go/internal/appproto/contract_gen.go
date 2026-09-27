@@ -250,6 +250,4 @@ var RegistryModeTiers = map[string]string{
 	"charge":                    "advanced",
 	"planner_self":              "hidden",
 	"planner_cheap":             "hidden",
-	"priority":                  "hidden",
-	"weighted":                  "hidden",
 }

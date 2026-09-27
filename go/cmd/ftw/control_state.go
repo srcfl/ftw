@@ -1,11 +1,13 @@
 package main
 
 import (
+	"log/slog"
 	"math"
 	"strconv"
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 func newControlStateFromConfig(cfg *config.Config) *control.State {
@@ -59,4 +61,42 @@ func restoredGridTargetW(v string) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+// energyDispatchEnabled reports whether planner modes run the
+// energy-allocation dispatch. planner.legacy_dispatch: true is the only way
+// back to the PI-on-grid-target path, and a config without a planner section
+// takes the default. Boot and hot reload both read it here so a reload cannot
+// leave a site on a path a fresh boot would not choose.
+func energyDispatchEnabled(cfg *config.Config) bool {
+	return cfg.Planner == nil || !cfg.Planner.LegacyDispatch
+}
+
+// removedModes are control modes FTW no longer runs. Priority held every
+// battery at its measured power, because nothing ever set its battery order,
+// and weighted split equally because nothing set its weights.
+var removedModes = map[string]bool{"priority": true, "weighted": true}
+
+// restoreStoredMode applies the mode saved in state.db. A removed mode becomes
+// manual self-consumption and is saved back, so the stored mode matches what
+// the site runs. Any other unknown value keeps the default mode, as before.
+func restoreStoredMode(ctrl *control.State, st *state.Store) {
+	v, ok := st.LoadConfig("mode")
+	if !ok {
+		return
+	}
+	if m := control.Mode(v); control.IsValidMode(m) {
+		ctrl.Mode = m
+		return
+	}
+	if !removedModes[v] {
+		return
+	}
+	ctrl.Mode = control.ModeSelfConsumption
+	if err := st.SaveConfig("mode", string(ctrl.Mode)); err != nil {
+		slog.Warn("the stored control mode was removed; running self_consumption, but it could not be saved",
+			"stored", v, "err", err)
+		return
+	}
+	slog.Warn("the stored control mode was removed; running and saving self_consumption instead", "stored", v)
 }
