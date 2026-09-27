@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -431,25 +432,40 @@ func (e *ENTSOEProvider) parseXML(body []byte) ([]RawPrice, error) {
 	return keepFinestRows(out), nil
 }
 
-// keepFinestRows drops each row that overlaps a finer one. One A44 document
-// can publish a delivery day at both PT15M and PT60M; storing both would give
-// the planner overlapping slots.
+// keepFinestRows gives finer rows precedence only over the time they cover.
+// A partial PT15M series must not erase the rest of a PT60M delivery hour.
 func keepFinestRows(rows []RawPrice) []RawPrice {
 	out := make([]RawPrice, 0, len(rows))
 	for _, r := range rows {
-		end := r.SlotStart.Add(time.Duration(r.SlotLenMin) * time.Minute)
-		finer := false
+		parts := []RawPrice{r}
 		for _, o := range rows {
-			if o.SlotLenMin < r.SlotLenMin && o.SlotStart.Before(end) &&
-				r.SlotStart.Before(o.SlotStart.Add(time.Duration(o.SlotLenMin)*time.Minute)) {
-				finer = true
-				break
+			if o.SlotLenMin >= r.SlotLenMin {
+				continue
 			}
+			fineEnd := o.SlotStart.Add(time.Duration(o.SlotLenMin) * time.Minute)
+			var remaining []RawPrice
+			for _, part := range parts {
+				end := part.SlotStart.Add(time.Duration(part.SlotLenMin) * time.Minute)
+				if !o.SlotStart.Before(end) || !part.SlotStart.Before(fineEnd) {
+					remaining = append(remaining, part)
+					continue
+				}
+				if part.SlotStart.Before(o.SlotStart) {
+					left := part
+					left.SlotLenMin = int(o.SlotStart.Sub(part.SlotStart) / time.Minute)
+					remaining = append(remaining, left)
+				}
+				if fineEnd.Before(end) {
+					part.SlotStart = fineEnd
+					part.SlotLenMin = int(end.Sub(fineEnd) / time.Minute)
+					remaining = append(remaining, part)
+				}
+			}
+			parts = remaining
 		}
-		if !finer {
-			out = append(out, r)
-		}
+		out = append(out, parts...)
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].SlotStart.Before(out[j].SlotStart) })
 	return out
 }
 
