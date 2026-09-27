@@ -238,6 +238,7 @@ type runningDriver struct {
 	generation         uint64
 	statusMu           sync.RWMutex
 	controlBlocked     bool
+	controlEpoch       uint64
 	defaultConfirmed   bool
 	recoveryPending    bool
 	activeMu           sync.Mutex
@@ -280,6 +281,18 @@ func (rd *runningDriver) controlIsBlocked() bool {
 	return blocked
 }
 
+func (rd *runningDriver) commandEpoch() uint64 {
+	rd.statusMu.RLock()
+	defer rd.statusMu.RUnlock()
+	return rd.controlEpoch
+}
+
+func (rd *runningDriver) commandIsBlocked(epoch uint64) bool {
+	rd.statusMu.RLock()
+	defer rd.statusMu.RUnlock()
+	return rd.controlBlocked || epoch != rd.controlEpoch
+}
+
 func (rd *runningDriver) markCommandApplied() {
 	rd.statusMu.Lock()
 	rd.defaultConfirmed = false
@@ -288,6 +301,9 @@ func (rd *runningDriver) markCommandApplied() {
 
 func (rd *runningDriver) markDefaultConfirmed() {
 	rd.statusMu.Lock()
+	// A confirmed default ends all earlier control intent, including commands
+	// still in the queue or waiting for room in it. New requests use this epoch.
+	rd.controlEpoch++
 	rd.controlBlocked = false
 	rd.defaultConfirmed = true
 	rd.recoveryPending = false
@@ -400,6 +416,7 @@ type driverCmd struct {
 	result        chan error
 	state         *commandState
 	cycleID       uint64
+	controlEpoch  uint64
 	checkEVHealth bool
 	// outcome runs on the per-driver actor after command/default recovery and
 	// before the next queue item. It must stay bounded and perform no I/O.
@@ -902,7 +919,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				action := metadata.Action
 				cyclePause := action == "ev_pause" && cmd.cycleID != 0
 				cycleResume := action == "ev_resume" && cmd.cycleID != 0
-				if rd.controlIsBlocked() {
+				if rd.commandIsBlocked(cmd.controlEpoch) {
 					err = ErrControlBlocked
 					break
 				}
@@ -948,7 +965,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				// check but before this actor installs activeCancel. Recheck once the
 				// cancel hook exists; after this point a racing default cancels the
 				// context passed to the runtime.
-				if rd.controlIsBlocked() {
+				if rd.commandIsBlocked(cmd.controlEpoch) {
 					finishCommand()
 					err = ErrControlBlocked
 					break
@@ -1163,8 +1180,9 @@ func (r *Registry) sendWithGeneration(ctx context.Context, name string, payload 
 	}
 	resCh := make(chan error, 1)
 	state := &commandState{}
+	epoch := rd.commandEpoch()
 	select {
-	case rd.cmdCh <- driverCmd{kind: "command", ctx: ctx, payload: payload, result: resCh, state: state, cycleID: cycleID, checkEVHealth: checkEVHealth, outcome: outcome}:
+	case rd.cmdCh <- driverCmd{kind: "command", ctx: ctx, payload: payload, result: resCh, state: state, cycleID: cycleID, controlEpoch: epoch, checkEVHealth: checkEVHealth, outcome: outcome}:
 	case <-ctx.Done():
 		return generation, ctx.Err()
 	}
