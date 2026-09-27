@@ -68,9 +68,8 @@ updates:
           - "patch"
 
   # ---- Docker base images -----------------------------------------------
-  # Covers all three root Dockerfiles: the updater matches file names against
-  # an unanchored /dockerfile|containerfile/i, so Dockerfile.optimizer and
-  # Dockerfile.updater are picked up alongside Dockerfile.
+  # Covers the root Dockerfile: the updater matches file names against an
+  # unanchored /dockerfile|containerfile/i.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:

@@ -2,10 +2,9 @@
 
 Native 0.x beta and stable releases provide `ftw-linux-arm64.tar.gz` for 64-bit
 Raspberry Pi/Linux hosts and `ftw-linux-amd64.tar.gz` for x86-64 Linux hosts.
-Each archive has a matching `.sha256` file. Existing
-`forty-two-watts-linux-<arch>` download names remain aliases during the
-transition. New releases do not build Windows packages. Existing published
-assets remain available.
+Each archive has a matching `.sha256` file. Native releases publish no
+`forty-two-watts-linux-<arch>` downloads and no Windows packages. Assets
+already published for older releases remain available.
 
 Install a package with [`scripts/install.sh`](../scripts/install.sh) from the
 same published tag, as [native-beta.md](native-beta.md) shows. It verifies the
@@ -29,9 +28,8 @@ Each archive holds one release: Core (`ftw`), `ftw-launcher`, `ftw-backup`,
 `ftw-cli` (installed as the `ftw` command), web files, the pinned recovery
 drivers, the compiled Energyplan bundle, license notices, an example config,
 `state-schema.json`, `release-version.json` with the version, architecture
-and state schema, `deploy/ftw-native.service` and the older direct-layout
-`deploy/ftw.service`. A release slot holds the whole extracted package; keep
-these files together.
+and state schema, and `deploy/ftw-native.service`. A release slot holds the
+whole extracted package; keep these files together.
 
 Each package includes only the Energyplan executable for its Linux
 architecture. Its manifest lists that executable and the shared schemas,

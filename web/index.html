@@ -989,13 +989,13 @@
   <script src="/energy-history.js?v=story1"></script>
   <script src="/diagnose.js?v=zones1"></script>
   <script type="module" src="/mobile-navigation.js?v=scroll1"></script>
-  <script src="/update-badge.js?v=modal2" defer></script>
+  <script src="/update-badge.js?v=native1" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
     // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
     // The dashboard controller stays untouched by the self-update feature. When the backend
-    // reports the feature disabled (503 on /api/version/check — e.g. native
-    // build with FTW_SELFUPDATE_ENABLED unset), the badge fires
+    // reports the feature disabled (503 on /api/version/check — e.g. Docker
+    // or the Home Assistant app, which update outside Core), the badge fires
     // `ftw-selfupdate-disabled` and we strip the pointer affordance here.
     document.addEventListener("DOMContentLoaded", function () {
       var v = document.getElementById("version");

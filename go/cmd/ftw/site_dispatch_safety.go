@@ -1,8 +1,11 @@
 package main
 
 import (
+	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -48,6 +51,31 @@ func evaluateSiteDispatchFreshnessAt(
 		return siteDispatchDecision{Reason: siteDispatchPhaseCurrentsStale}
 	}
 	return siteDispatchDecision{}
+}
+
+// siteDispatchNow evaluates the tick's pre-dispatch gate on demand, with the
+// tick's inputs and watchdog timeout, for operator setpoints that reach
+// hardware outside the tick.
+func siteDispatchNow(
+	tel *telemetry.Store,
+	cfg *config.Config,
+	cfgMu *sync.RWMutex,
+	ctrl *control.State,
+	ctrlMu *sync.Mutex,
+	now time.Time,
+) siteDispatchDecision {
+	cfgMu.RLock()
+	timeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+	cfgMu.RUnlock()
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctrlMu.Lock()
+	siteMeter := ctrl.SiteMeterDriver
+	fuseAmps := ctrl.SiteFuseAmps
+	phases := ctrl.SiteFusePhases
+	ctrlMu.Unlock()
+	return evaluateSiteDispatchFreshnessAt(tel, siteMeter, fuseAmps, phases, timeout, now)
 }
 
 // sitePhaseCurrentsAt returns the configured phases in L1/L2/L3 order.

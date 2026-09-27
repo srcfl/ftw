@@ -10,9 +10,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const defaultReleaseBaseURL = "https://github.com/srcfl/ftw/releases/download"
+
+// fetchIdleTimeout ends a transfer that has received nothing for this long,
+// whether it waits for the response or for more of the body. The update's
+// status turns stale after five minutes of silence; a silent connection
+// must fail before that, so the run that is reported failed has really
+// stopped and cannot restart Core later. Tests shorten it.
+var fetchIdleTimeout = time.Minute
+
+var errFetchIdle = errors.New("no data received")
 
 type Downloader struct {
 	Manager        Manager
@@ -72,6 +82,10 @@ func (d Downloader) fetch(ctx context.Context, tag, asset, target string, limit 
 		base = defaultReleaseBaseURL
 	}
 	url := strings.TrimRight(base, "/") + "/" + tag + "/" + asset
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	idle := time.AfterFunc(fetchIdleTimeout, func() { cancel(errFetchIdle) })
+	defer idle.Stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -82,7 +96,7 @@ func (d Downloader) fetch(ctx context.Context, tag, asset, target string, limit 
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return idleError(ctx, asset, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -99,8 +113,11 @@ func (d Downloader) fetch(ctx context.Context, tag, asset, target string, limit 
 	if progress != nil {
 		writer = &progressWriter{writer: f, total: resp.ContentLength, publish: progress}
 	}
-	n, copyErr := io.Copy(writer, io.LimitReader(resp.Body, limit+1))
-	if copyErr == nil && n > limit {
+	body := &idleReader{reader: resp.Body, timer: idle}
+	n, copyErr := io.Copy(writer, io.LimitReader(body, limit+1))
+	if copyErr != nil {
+		copyErr = idleError(ctx, asset, copyErr)
+	} else if n > limit {
 		copyErr = errors.New("release asset exceeds size limit")
 	}
 	if copyErr == nil {
@@ -111,6 +128,28 @@ func (d Downloader) fetch(ctx context.Context, tag, asset, target string, limit 
 		return copyErr
 	}
 	return closeErr
+}
+
+// idleReader restarts the idle timer whenever data arrives.
+type idleReader struct {
+	reader io.Reader
+	timer  *time.Timer
+}
+
+func (r *idleReader) Read(data []byte) (int, error) {
+	n, err := r.reader.Read(data)
+	if n > 0 {
+		r.timer.Reset(fetchIdleTimeout)
+	}
+	return n, err
+}
+
+// idleError names the silence when the idle timer ended the transfer.
+func idleError(ctx context.Context, asset string, err error) error {
+	if errors.Is(context.Cause(ctx), errFetchIdle) {
+		return fmt.Errorf("release asset %s: %w for %s", asset, errFetchIdle, fetchIdleTimeout)
+	}
+	return err
 }
 
 type progressWriter struct {

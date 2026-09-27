@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,11 +119,62 @@ func TestNativeUpdateTakesNoRollbackPoint(t *testing.T) {
 	if st := checker.Status(); st.State != "restarting" || st.Step != 3 || st.TotalSteps != 3 {
 		t.Fatalf("native update status %+v", st)
 	}
+}
 
-	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/snapshots", nil))
-	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "ftw backup") {
-		t.Fatalf("native manual rollback point: %d %s", rr.Code, rr.Body.String())
+// The slot swap refuses a state-schema change only after the package is on
+// disk, and nothing records that refusal. The API must refuse first, or a
+// caller on a schedule downloads the same package on every call.
+func TestNativeUpdateRefusesASchemaChangeBeforeDownloading(t *testing.T) {
+	root := t.TempDir()
+	current, next := "v0.131.0-beta.1", "v0.131.0-beta.2"
+	installNativeSlots(t, root, current)
+	if err := (nativeupdate.Manager{Root: root}).Init(current); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var downloads []string
+	client := &http.Client{Transport: nativeReleaseTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/releases" {
+			body := releaseListJSON(next, "<!-- ftw-state-schema-v2:8 -->")
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		mu.Lock()
+		downloads = append(downloads, r.URL.Path)
+		mu.Unlock()
+		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	checker := selfupdate.New(selfupdate.Config{
+		CurrentVersion: current, CurrentStateSchema: 7, NativeRoot: root,
+		StatusPath: filepath.Join(root, "update-status.json"), HTTPClient: client,
+		NativeReleaseURL: "https://test.invalid", ReleasesURL: "https://test.invalid/releases",
+		NativeRestart: func() error { return nil },
+	}, newMemStore())
+	if info, err := checker.Check(context.Background(), true); err != nil || !info.UpdateAvailable || !info.FullBackupRequired {
+		t.Fatalf("schema-changing release not offered as such: %+v %v", info, err)
+	}
+	srv := New(&Deps{SelfUpdate: checker})
+	for i := 0; i < 2; i++ {
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/update", nil))
+		var body map[string]string
+		_ = json.Unmarshal(rr.Body.Bytes(), &body)
+		if rr.Code != http.StatusConflict || !strings.Contains(body["error"], "changes stored data (state schema 7 -> 8)") {
+			t.Fatalf("schema-changing update %d: %d %s", i, rr.Code, rr.Body.String())
+		}
+	}
+	// Give an accepted run the chance to start before looking.
+	time.Sleep(50 * time.Millisecond)
+	if !srv.versionUpdateMu.TryLock() {
+		t.Fatal("a refused update holds the update lock")
+	}
+	srv.versionUpdateMu.Unlock()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(downloads) != 0 {
+		t.Fatalf("refused update downloaded %v", downloads)
+	}
+	if st := checker.Status(); st.State != "idle" {
+		t.Fatalf("refused update wrote status %+v", st)
 	}
 }
 

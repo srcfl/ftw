@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -15,30 +14,11 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/scanner"
-	"github.com/srcfl/ftw/go/internal/selfupdate"
 )
 
 // runBootstrap serves the setup wizard when config.yaml does not exist yet.
 func runBootstrap(configPath, webDir, driverDir string) {
 	slog.Info("no config found — starting setup wizard", "url", "http://localhost:8080/setup")
-
-	var selfUpdater *selfupdate.Checker
-	if envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
-		current := Version
-		if v, ok := os.LookupEnv("FTW_SELFUPDATE_CURRENT_VERSION"); ok && v != "" {
-			current = v
-			slog.Warn("selfupdate: CurrentVersion overridden for testing",
-				"real_version", Version, "reported_version", current,
-				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
-		}
-		selfUpdater = selfupdate.New(selfupdate.Config{
-			CurrentVersion: current,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
-		}, nil)
-		selfUpdater.Start(context.Background())
-		slog.Info("selfupdate enabled in bootstrap", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
-	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -70,40 +50,6 @@ func runBootstrap(configPath, webDir, driverDir string) {
 			return
 		}
 		writeBootstrapJSON(w, http.StatusOK, devices)
-	})
-	mux.HandleFunc("GET /api/version/check", func(w http.ResponseWriter, r *http.Request) {
-		if selfUpdater == nil {
-			writeBootstrapJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "self-update disabled"})
-			return
-		}
-		if r.URL.Query().Get("force") == "1" {
-			info, err := selfUpdater.Check(r.Context(), true)
-			if err != nil {
-				info.Err = err.Error()
-				writeBootstrapJSON(w, http.StatusBadGateway, info)
-				return
-			}
-		}
-		writeBootstrapJSON(w, http.StatusOK, selfUpdater.Info())
-	})
-	mux.HandleFunc("POST /api/version/update", func(w http.ResponseWriter, r *http.Request) {
-		if selfUpdater == nil {
-			writeBootstrapJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "self-update disabled"})
-			return
-		}
-		info := selfUpdater.Info()
-		if err := selfUpdater.Trigger(r.Context(), "update", info.Latest); err != nil {
-			writeBootstrapJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		writeBootstrapJSON(w, http.StatusAccepted, map[string]any{"status": "started", "action": "update", "target": info.Latest})
-	})
-	mux.HandleFunc("GET /api/version/update/status", func(w http.ResponseWriter, _ *http.Request) {
-		if selfUpdater == nil {
-			writeBootstrapJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "self-update disabled"})
-			return
-		}
-		writeBootstrapJSON(w, http.StatusOK, selfUpdater.Status())
 	})
 	mux.HandleFunc("GET /api/ev/providers", func(w http.ResponseWriter, _ *http.Request) {
 		writeBootstrapJSON(w, http.StatusOK, evcloud.Describe())

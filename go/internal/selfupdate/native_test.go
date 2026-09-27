@@ -103,83 +103,11 @@ func TestNativeFailedCheckRetainsRuntimeCapabilities(t *testing.T) {
 	c := New(Config{CurrentVersion: current, NativeRoot: root, HTTPClient: client,
 		ReleasesURL: "https://test.invalid/releases"}, newMemStore())
 	info, err := c.Check(context.Background(), true)
-	if err == nil || !info.Native || !info.SidecarReady || info.Previous != previous {
+	if err == nil || !info.Native || !info.InstallReady || info.Previous != previous {
 		t.Fatalf("failed check lost native capabilities: info=%+v err=%v", info, err)
 	}
-	if cached := c.info; !cached.Native || !cached.SidecarReady || cached.Previous != previous {
+	if cached := c.info; !cached.Native || !cached.InstallReady || cached.Previous != previous {
 		t.Fatalf("failed check did not retain capabilities in cache: %+v", cached)
-	}
-}
-
-func TestDocker3xCheckerKeepsItsReleaseLine(t *testing.T) {
-	client := nativeReleaseClient(t, `[
-      {"tag_name":"v0.131.0","prerelease":false},
-      {"tag_name":"v0.131.0-beta.2","prerelease":true},
-      {"tag_name":"v3.8.1-beta.1","prerelease":true},
-      {"tag_name":"v3.8.0","prerelease":false},
-      {"tag_name":"v2.3.2","prerelease":false}
-    ]`)
-	c := New(Config{CurrentVersion: "v3.8.0-beta.1", HTTPClient: client,
-		ReleasesURL: "https://test.invalid/releases"}, newMemStore())
-	for _, tc := range []struct {
-		channel Channel
-		want    string
-	}{
-		{ChannelBeta, "v3.8.1-beta.1"},
-		{ChannelStable, "v3.8.0"},
-	} {
-		release, deployable, err := c.resolveChannel(context.Background(), tc.channel, "v3.8.0-beta.1")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !deployable || release.TagName != tc.want {
-			t.Fatalf("%s selected %q, want %q", tc.channel, release.TagName, tc.want)
-		}
-	}
-}
-
-func TestLegacyDockerDoesNotOffer3xOnEitherChannel(t *testing.T) {
-	client := &http.Client{Transport: nativeRoundTrip(func(req *http.Request) (*http.Response, error) {
-		var body string
-		switch req.URL.Path {
-		case "/latest":
-			body = `{"tag_name":"v3.8.0","prerelease":false}`
-		case "/releases":
-			body = `[{"tag_name":"v3.8.0-beta.1","prerelease":true}]`
-		default:
-			t.Fatalf("unexpected request: %s", req.URL)
-		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
-	})}
-	for _, current := range []string{"v1.9.1-beta.1", "v2.3.2-beta.1", "v2.3.2"} {
-		c := New(Config{CurrentVersion: current, HTTPClient: client,
-			LatestReleaseURL: "https://test.invalid/latest", ReleasesURL: "https://test.invalid/releases"}, newMemStore())
-		for _, channel := range []Channel{ChannelBeta, ChannelStable} {
-			if err := c.SetChannel(channel); err != nil {
-				t.Fatal(err)
-			}
-			info, err := c.Check(context.Background(), true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if info.UpdateAvailable || info.Latest != "" {
-				t.Fatalf("%s %s offered a cross-line release: %+v", current, channel, info)
-			}
-		}
-	}
-}
-
-func TestLegacyDockerRejectsDirect3xUpdate(t *testing.T) {
-	c := New(Config{CurrentVersion: "v2.3.2", SocketPath: "/missing-updater"}, newMemStore())
-	err := c.TriggerComponentAt(context.Background(), "update", "v3.8.0-beta.1", "core", time.Time{})
-	if err == nil || !strings.Contains(err.Error(), "guided migration installer") {
-		t.Fatalf("cross-line update was not blocked: %v", err)
-	}
-	if legacyCoreReleaseLocked("v2.3.2", "v2.3.3") {
-		t.Fatal("same-line maintenance release was blocked")
-	}
-	if legacyCoreReleaseLocked("v0.131.0", "v0.131.1") {
-		t.Fatal("native release was blocked as legacy Docker")
 	}
 }
 
@@ -267,7 +195,7 @@ func TestNativeTriggerStagesThenRequestsRestart(t *testing.T) {
 	if _, err := c.Check(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.TriggerComponentAt(context.Background(), "update", next, "core", time.Now()); err != nil {
+	if err := c.TriggerUpdate(context.Background(), next, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	state, err := manager.Read()
@@ -289,11 +217,46 @@ func TestNativeTriggerStagesThenRequestsRestart(t *testing.T) {
 	if err := manager.CancelPrepared(next); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.TriggerComponentAt(context.Background(), "update", next, "core", time.Now()); err == nil {
+	if err := c.TriggerUpdate(context.Background(), next, time.Now()); err == nil {
 		t.Fatal("failed restart reported success")
 	}
 	state, err = manager.Read()
 	if err != nil || state.Next != "" || state.LastFailed != next {
 		t.Fatalf("failed restart left a pending trial: %+v %v", state, err)
+	}
+}
+
+// Prepare refuses a state-schema change only after the package is on disk;
+// the trigger refuses first, so nothing is downloaded for it.
+func TestNativeTriggerRefusesASchemaChangeBeforeDownloading(t *testing.T) {
+	root := t.TempDir()
+	current, next := "v0.131.0-beta.1", "v0.131.0-beta.2"
+	nativeCurrentSlot(t, root, current)
+	if err := (nativeupdate.Manager{Root: root}).Init(current); err != nil {
+		t.Fatal(err)
+	}
+	asset := "ftw-linux-" + runtime.GOARCH + ".tar.gz"
+	var downloads []string
+	client := &http.Client{Transport: nativeRoundTrip(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/releases" {
+			downloads = append(downloads, req.URL.Path)
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		body := fmt.Sprintf(`[{"tag_name":%q,"prerelease":true,"body":"<!-- ftw-state-schema-v2:8 -->","assets":[{"name":%q},{"name":%q}]}]`, next, asset, asset+".sha256")
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	c := New(Config{CurrentVersion: current, CurrentStateSchema: 7, NativeRoot: root,
+		NativeRestart: func() error { return nil }, NativeReleaseURL: "https://test.invalid",
+		StatusPath: filepath.Join(root, "update-status.json"), HTTPClient: client,
+		ReleasesURL: "https://test.invalid/releases"}, newMemStore())
+	if _, err := c.Check(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	err := c.TriggerUpdate(context.Background(), next, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "changes stored data") {
+		t.Fatalf("schema-changing update = %v", err)
+	}
+	if len(downloads) != 0 || c.Status().State != "idle" {
+		t.Fatalf("refused update downloaded %v, status %+v", downloads, c.Status())
 	}
 }

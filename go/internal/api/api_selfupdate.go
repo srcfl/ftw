@@ -2,15 +2,12 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
-	"path/filepath"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/selfupdate"
-	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // handleVersionCheck returns self-update state. A normal GET still asks the
@@ -40,8 +37,8 @@ func (s *Server) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleVersionChannel persists the selected release stream. Changing the
-// channel only clears the cached target; image pulls still require the normal
-// update endpoint and its pre-update snapshot.
+// channel only clears the cached target; installing a release still needs
+// the update endpoint.
 func (s *Server) handleVersionChannel(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
@@ -77,7 +74,7 @@ func (s *Server) handleVersionChannel(w http.ResponseWriter, r *http.Request) {
 
 func versionUpdateInFlight(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "checking", "restoring":
+	case "starting", "pulling", "checking", "restarting":
 		return true
 	default:
 		return false
@@ -121,40 +118,25 @@ func (s *Server) handleVersionUnskip(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "skipped": false})
 }
 
-// handleVersionUpdate signals the sidecar to pull the latest image + compose
-// up the main service. Returns as soon as the sidecar acknowledges; the UI
-// polls /api/version/update/status for progress.
-//
-// Before handing off to the sidecar we capture a rollback-point snapshot
-// (settings database + config.yaml) into SnapshotDir. A failed snapshot
-// aborts the update — the whole point of offering "Update" is that the user
-// knows they can back out, and shipping without the safety net breaks
-// that promise. SnapshotDir being disabled at deployment time is the only
-// exception. The legacy skip_snapshot request field is deliberately ignored:
-// an old client cannot silently remove the safety net from a new server.
-//
-// The point never copies history.db. It is bounded by the settings
-// database, so it is taken for every update, including ones that keep the
-// state schema. Going back across a history-format change still needs a
-// full backup made before the update; handleVersionRollback refuses such a
-// point and says so.
-//
-// A native update takes no rollback point (ADR 0007, decision 3). Its
-// binary rollback keeps the data in place, and a native state-schema change
-// is refused until it has its own backup path.
+// handleVersionUpdate starts a native update to the latest release on the
+// saved channel. It returns once the run is accepted; the caller follows
+// /api/version/update/status. A native update takes no rollback point
+// (ADR 0007, decision 3): binary rollback keeps the data in place, and a
+// release that changes the state schema is refused until it has its own
+// backup path.
 func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
 	info := s.deps.SelfUpdate.Info()
-	if info.Native && !info.UpdateAvailable {
+	if !info.UpdateAvailable {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "no newer native release is available on this channel"})
 		return
 	}
 	// A release that failed on this box is not installed again by an
 	// unattended caller, whatever client it uses; {"retry": true} asks.
-	if info.Native && info.LastFailed != "" && info.LastFailed == info.Latest {
+	if info.LastFailed != "" && info.LastFailed == info.Latest {
 		var request struct {
 			Retry bool `json:"retry"`
 		}
@@ -166,30 +148,17 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if info.CurrentStateSchema >= 3 && info.TargetStateSchema < info.CurrentStateSchema {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "This Core uses a newer history format. Stop Core and restore a verified full backup with the matching older Core version; changing only the image would omit new history."})
+	// Refuse before the download: the slot swap refuses a state-schema
+	// change only after the package is on disk, and nothing records that
+	// refusal, so a scheduled caller would download it again every time.
+	if info.FullBackupRequired {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf(
+			"%s changes stored data (state schema %d -> %d), which a native update cannot take yet; %s stays installed",
+			info.Latest, info.CurrentStateSchema, info.TargetStateSchema, info.Current)})
 		return
 	}
-	if info.TargetStateSchema > 0 && info.TargetStateSchema < 2 && s.deps.Cfg != nil && s.deps.CfgMu != nil {
-		s.deps.CfgMu.RLock()
-		storedSettings := s.deps.Cfg.ConfigDatabase != ""
-		s.deps.CfgMu.RUnlock()
-		if storedSettings {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "This older Core reads settings from a file. Stop Core and restore a full backup with the matching Core version instead of changing only the image."})
-			return
-		}
-	}
-
-	if !info.SidecarReady {
-		message := "selfupdate: sidecar socket not ready"
-		if info.Native {
-			message = "selfupdate: native release slot not ready"
-		}
-		writeJSON(w, 502, map[string]string{"error": message})
-		return
-	}
-	if info.Latest == "" {
-		writeJSON(w, 409, map[string]string{"error": "no update target available"})
+	if !info.InstallReady {
+		writeJSON(w, 502, map[string]string{"error": "selfupdate: native release slot not ready"})
 		return
 	}
 	if !s.versionUpdateMu.TryLock() {
@@ -198,169 +167,42 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now()
-	startMessage := "starting update"
-	startStep, totalSteps := 1, 4
-	if info.Native {
-		startStep, totalSteps = 0, selfupdate.NativeUpdateSteps
-	}
-	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
+	start := selfupdate.UpdateStatus{
 		State:          "starting",
 		Action:         "update",
 		Component:      "core",
 		Target:         info.Latest,
 		StartedAt:      startedAt,
 		PhaseStartedAt: startedAt,
-		UpdatedAt:      time.Now(),
-		Message:        startMessage,
-		Step:           startStep,
-		TotalSteps:     totalSteps,
-	})
-	s.recordComponentStatus(selfupdate.UpdateStatus{
-		State: "starting", Action: "update", Component: "core", Target: info.Latest,
-		StartedAt: startedAt, PhaseStartedAt: startedAt, UpdatedAt: startedAt,
-		Message: startMessage, Step: startStep, TotalSteps: totalSteps,
-	}, info.Current)
-
-	go s.runVersionUpdate(startedAt, info.Current, info.Latest)
-
-	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if !info.Native && s.deps.SnapshotDir == "" {
-		resp["snapshot_skipped"] = true
-		resp["snapshot_skip_reason"] = "snapshots disabled"
+		UpdatedAt:      startedAt,
+		Message:        "starting update",
+		TotalSteps:     selfupdate.NativeUpdateSteps,
 	}
-	writeJSON(w, 202, resp)
+	s.writeVersionUpdateStatus(start)
+	s.recordComponentStatus(start, info.Current)
+
+	go s.runVersionUpdate(startedAt, info.Latest)
+
+	writeJSON(w, 202, map[string]any{"status": "started", "action": "update", "target": info.Latest})
 }
 
-func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
+func (s *Server) runVersionUpdate(startedAt time.Time, latest string) {
 	defer s.versionUpdateMu.Unlock()
-
-	native := s.deps.SelfUpdate.Native()
-	totalSteps := 4
-	if native {
-		totalSteps = selfupdate.NativeUpdateSteps
-	}
-	writeUpdateStatus := func(updateState, message string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	if err := s.deps.SelfUpdate.TriggerUpdate(ctx, latest, startedAt); err != nil {
 		now := time.Now()
 		s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
-			State:          updateState,
+			State:          "failed",
 			Action:         "update",
 			Component:      "core",
 			Target:         latest,
 			StartedAt:      startedAt,
 			PhaseStartedAt: now,
 			UpdatedAt:      now,
-			Message:        message,
-			TotalSteps:     totalSteps,
+			Message:        err.Error(),
+			TotalSteps:     selfupdate.NativeUpdateSteps,
 		})
-	}
-
-	if !native && s.deps.SnapshotDir != "" {
-		phaseStarted := time.Now()
-		status := selfupdate.UpdateStatus{
-			State: "snapshotting", Action: "update", Component: "core", Target: latest,
-			StartedAt: startedAt, PhaseStartedAt: phaseStarted, UpdatedAt: phaseStarted,
-			Message: snapshotCopyMessage, Step: 1, TotalSteps: 4,
-		}
-		s.writeVersionUpdateStatus(status)
-		heartbeat := newUpdateStatusHeartbeat(s.deps.SelfUpdate, status)
-		heartbeat.Start()
-		_, err := s.createPreUpdateSnapshotWithProgress("update", current, latest, func(progress state.BackupProgress) {
-			heartbeat.SetBackupProgress(progress)
-		})
-		heartbeat.Stop()
-		if err != nil {
-			writeUpdateStatus("failed", "snapshot failed: "+err.Error())
-			return
-		}
-	}
-
-	updateTimeout := 30 * time.Second
-	if native {
-		updateTimeout = 30 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
-	defer cancel()
-	if err := s.deps.SelfUpdate.TriggerComponentAt(ctx, "update", latest, "core", startedAt); err != nil {
-		writeUpdateStatus("failed", err.Error())
-		return
-	}
-}
-
-type updateStatusHeartbeat struct {
-	checker *selfupdate.Checker
-
-	mu     sync.Mutex
-	status selfupdate.UpdateStatus
-	phase  string
-	stop   chan struct{}
-	done   chan struct{}
-}
-
-func newUpdateStatusHeartbeat(checker *selfupdate.Checker, status selfupdate.UpdateStatus) *updateStatusHeartbeat {
-	return &updateStatusHeartbeat{
-		checker: checker,
-		status:  status,
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-	}
-}
-
-func (h *updateStatusHeartbeat) Start() {
-	go func() {
-		defer close(h.done)
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				h.publish(nil)
-			case <-h.stop:
-				return
-			}
-		}
-	}()
-}
-
-func (h *updateStatusHeartbeat) Stop() {
-	close(h.stop)
-	<-h.done
-}
-
-// snapshotCopyMessage names what the rollback point copies. History is not
-// part of it; saying so stops an operator from waiting for a history copy.
-const snapshotCopyMessage = "Saving rollback point: settings database and config (history stays in place)"
-
-func (h *updateStatusHeartbeat) SetBackupProgress(progress state.BackupProgress) {
-	h.publish(func(status *selfupdate.UpdateStatus) {
-		if progress.Phase != h.phase {
-			h.phase = progress.Phase
-			status.PhaseStartedAt = time.Now()
-		}
-		status.ProgressCurrent = progress.CompletedBytes
-		status.ProgressTotal = progress.TotalBytes
-		status.ProgressUnit = ""
-		switch progress.Phase {
-		case state.BackupPhaseCopying:
-			status.Message = snapshotCopyMessage
-		case state.BackupPhaseCompressing:
-			status.Message = "Compressing rollback backup"
-			status.ProgressUnit = "bytes"
-		case state.BackupPhaseSyncing:
-			status.Message = "Syncing rollback backup to disk"
-			status.ProgressUnit = "bytes"
-		}
-	})
-}
-
-func (h *updateStatusHeartbeat) publish(update func(*selfupdate.UpdateStatus)) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if update != nil {
-		update(&h.status)
-	}
-	h.status.UpdatedAt = time.Now()
-	if err := h.checker.WriteStatus(h.status); err != nil {
-		slog.Warn("selfupdate: backup progress write failed", "err", err)
 	}
 }
 
@@ -374,143 +216,27 @@ func (s *Server) writeVersionUpdateStatus(st selfupdate.UpdateStatus) {
 	s.recordComponentStatus(st, "")
 }
 
-// handleVersionRollback restores a specific snapshot over the main
-// container's data volume ("soft" rollback — state.db + config.yaml only,
-// image unchanged). Before triggering the sidecar we capture a
-// *pre-rollback* safety snapshot so the operator can roll forward again
-// if the restored state misbehaves. That extra snapshot is tagged as
-// action="pre-rollback" so the UI can distinguish it from the routine
-// pre-update set.
-//
-// Request body: {"snapshot_id": "<id>"}. The id must match a directory
-// inside SnapshotDir; the validation rules mirror handleVersionSnapshotDelete.
-//
-// Scope of this endpoint (#152):
-//   - Soft rollback only. Image version stays on the currently-running
-//     tag. If the snapshot predates a state-schema change, a forward
-//     rollback to the same version or an explicit image pin may be needed.
-//   - Pre-rollback safety snapshot is always created; no opt-out (unlike
-//     the routine #149 opt-out). If disk is tight, delete older
-//     snapshots via DELETE /api/version/snapshots/{id} first.
-func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
-	if s.deps.SelfUpdate == nil {
-		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
-		return
-	}
-	if s.deps.SelfUpdate.Native() {
-		writeJSON(w, 503, map[string]string{"error": "native Core keeps no rollback points; ftw rollback returns to the previous release with the current data, and a full backup restores data offline"})
-		return
-	}
-	if s.deps.SnapshotDir == "" {
-		writeJSON(w, 503, map[string]string{"error": "snapshots disabled (no SnapshotDir)"})
-		return
-	}
-	var body struct {
-		SnapshotID string `json:"snapshot_id"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	if body.SnapshotID == "" {
-		writeJSON(w, 400, map[string]string{"error": "snapshot_id required"})
-		return
-	}
-	// Same id-shape validation as DELETE — cheap defence in depth.
-	if containsTraversal(body.SnapshotID) {
-		writeJSON(w, 400, map[string]string{"error": "invalid snapshot id"})
-		return
-	}
-	// Validate the snapshot exists and looks plausible (has meta.json +
-	// at least one file we can restore).
-	snapDir := filepath.Join(s.deps.SnapshotDir, body.SnapshotID)
-	meta, err := readSnapshotMeta(snapDir)
-	if err != nil {
-		writeJSON(w, 404, map[string]string{"error": "snapshot not found or unreadable: " + err.Error()})
-		return
-	}
-	if len(meta.Files) == 0 {
-		writeJSON(w, 400, map[string]string{"error": "snapshot has no files recorded; cannot restore safely"})
-		return
-	}
-	if s.deps.SelfUpdate.Info().CurrentStateSchema >= 3 && meta.DatabaseSchema < s.deps.SelfUpdate.Info().CurrentStateSchema {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "This snapshot predates the current history format. Restore its verified full backup offline with the matching Core version."})
-		return
-	}
-	if !snapshotMetaRestorable(meta) {
-		writeJSON(w, 409, map[string]string{
-			"error": "this legacy snapshot is incomplete and cannot be restored without losing history; create a new backup first",
-		})
-		return
-	}
-
-	// Safety-net snapshot before we swap files. If the rolled-back
-	// state turns out to be wrong, this is the forward-rollback point.
-	info := s.deps.SelfUpdate.Info()
-	safetyID := ""
-	var safetyFiles []string
-	if safety, serr := s.createPreUpdateSnapshot("pre-rollback", info.Current, body.SnapshotID); serr != nil {
-		writeJSON(w, 500, map[string]string{
-			"error": "failed to capture pre-rollback safety snapshot: " + serr.Error(),
-			"hint":  "Rollback aborted. Check SnapshotDir free space and retry, or delete stale snapshots first.",
-		})
-		return
-	} else {
-		safetyID = safety.ID
-		safetyMeta, metaErr := readSnapshotMeta(safety.Path)
-		if metaErr != nil {
-			writeJSON(w, 500, map[string]string{"error": "failed to read pre-rollback safety snapshot: " + metaErr.Error()})
-			return
-		}
-		safetyFiles = safetyMeta.Files
-	}
-
-	if err := s.deps.SelfUpdate.TriggerRollback(r.Context(), body.SnapshotID, meta.Files, safetyID, safetyFiles); err != nil {
-		writeJSON(w, 502, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, 202, map[string]any{
-		"status":             "started",
-		"action":             "rollback",
-		"snapshot":           body.SnapshotID,
-		"files":              meta.Files,
-		"safety_snapshot_id": safetyID,
-	})
-}
-
-// containsTraversal rejects ids that could escape SnapshotDir.
-// Extracted so the rollback + delete handlers share the exact same
-// rule — diverging them silently would open a path-traversal CVE.
-func containsTraversal(id string) bool {
-	if strings.ContainsAny(id, "/\\") {
-		return true
-	}
-	return id == "." || id == ".."
-}
-
 // handleVersionRestart restarts the installed Core. No other version is
-// selected, even when Compose now names a different release.
-func (s *Server) handleVersionRestart(w http.ResponseWriter, r *http.Request) {
+// selected.
+func (s *Server) handleVersionRestart(w http.ResponseWriter, _ *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
-	if s.deps.SelfUpdate.Native() {
-		if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) || !s.versionUpdateMu.TryLock() {
-			writeJSON(w, 409, map[string]string{"error": "update already in progress"})
-			return
-		}
-		defer s.versionUpdateMu.Unlock()
+	if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) || !s.versionUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
 	}
-	if err := s.deps.SelfUpdate.TriggerRestart(r.Context()); err != nil {
+	defer s.versionUpdateMu.Unlock()
+	if err := s.deps.SelfUpdate.TriggerRestart(); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 202, map[string]any{"status": "started", "action": "restart"})
 }
 
-func (s *Server) handleVersionBinaryRollback(w http.ResponseWriter, r *http.Request) {
-	if s.deps.SelfUpdate == nil || !s.deps.SelfUpdate.Native() {
+func (s *Server) handleVersionBinaryRollback(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "native version rollback is unavailable"})
 		return
 	}
@@ -527,11 +253,10 @@ func (s *Server) handleVersionBinaryRollback(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 202, map[string]any{"status": "started", "action": "rollback", "target": previous})
 }
 
-// handleVersionUpdateStatus passes through the sidecar's state.json. The
-// shared Docker volume makes this survive the main container being recreated:
-// the new container reads the same file written by the (still-running)
-// sidecar and serves the last transition (pulling → restarting → done) to
-// the UI which is still polling from the browser.
+// handleVersionUpdateStatus passes through the saved update status. The
+// file sits beside the release slots, so the Core that starts next serves
+// the last transition (pulling → restarting → done) to a client that is
+// still polling.
 func (s *Server) handleVersionUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})

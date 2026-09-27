@@ -1,6 +1,6 @@
 name: debian base currency
 
-# The container images pin a Debian codename (debian:trixie-slim) rather than a
+# The Core container image pins a Debian codename (debian:trixie-slim) rather than a
 # suite alias, so that a major-version jump can never arrive silently on some
 # future rebuild. The cost of pinning is that nothing notices when a new stable
 # ships, and a base left behind quietly stops receiving security updates once
@@ -54,7 +54,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           # A network or parse failure must not read as "the base is current",
           # and must not open an issue claiming a new release we never saw.
-          # 1 means a newer stable (or a split pin), 0 means current.
+          # 1 means a newer stable, 0 means current.
           if [ "$status" != "0" ] && [ "$status" != "1" ]; then
             echo "::error::the Debian currency check could not run (exit ${status})"
             exit "$status"
@@ -69,9 +69,9 @@ jobs:
         run: |
           title="Container base is behind Debian stable"
           body="$(printf '%s\n\n```\n%s\n```\n\n%s\n\nFrom %s\n\nThis issue is rewritten by each run of the `debian base currency` workflow. Closing it without moving the pin means it comes back next Monday.\n' \
-            "The Debian suite pinned by the container images is no longer the current Debian stable, or the two images have drifted apart. Core and updater are pinned to one suite on purpose: they share a single base layer, so a host pulls that rootfs once instead of twice." \
+            "The Debian suite pinned by the Core container image is no longer the current Debian stable." \
             "${REPORT}" \
-            "Moving the pin means updating the FROM lines in \`Dockerfile\`, \`Dockerfile.updater\` together, then rebuilding both and checking Core and updater health. Do not move core alone — that splits the shared layer. If the readiness lines above say a tag is not published yet, wait for it rather than splitting the pin." \
+            "Moving the pin means updating the FROM lines in \`Dockerfile\`, then rebuilding and checking Core health. If the readiness line above says a tag is not published yet, wait for it." \
             "${RUN_URL}")"
 
           existing="$(gh issue list --state open --search "in:title \"${title}\"" \

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -394,6 +395,15 @@ func freshSoCObservation(t DerType, soc *float64, data json.RawMessage) bool {
 	return fresh
 }
 
+// BatterySoCMaxAge bounds how long a battery reading carries its last SoC
+// forward while the driver keeps emitting power without a new SoC. Past it the
+// SoC is nil, so the existing unknown-SoC paths engage: dispatch stops
+// discharging the pack, and the planner, battery-boost lease and hold
+// validation treat it as unavailable. At 0.5C a pack moves about 4% in this
+// window. Battery drivers read SoC on every poll (seconds apart), so it still
+// rides out many missed reads. Vehicles keep their own VehicleMaxAge check.
+const BatterySoCMaxAge = 5 * time.Minute
+
 // Update feeds a new reading. Applies Kalman smoothing and stores both raw
 // and smoothed values.
 func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage) {
@@ -421,12 +431,17 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 	// the power-flow telemetry; a missing field this tick doesn't mean
 	// the battery has no SoC. Keep its original observation time so callers and
 	// persisted metrics can still distinguish it from a fresh number.
+	// A battery SoC older than BatterySoCMaxAge is not carried: it is unknown.
 	if !socFresh {
-		if prev, ok := s.readings[k]; ok && prev.SoC != nil {
+		prev, ok := s.readings[k]
+		switch {
+		case !ok || prev.SoC == nil:
+			soc = nil
+		case t == DerBattery && now.Sub(prev.SoCUpdatedAt) > BatterySoCMaxAge:
+			soc = nil
+		default:
 			soc = prev.SoC
 			socUpdatedAt = prev.SoCUpdatedAt
-		} else {
-			soc = nil
 		}
 	}
 	s.readings[k] = &DerReading{
@@ -710,19 +725,31 @@ func (s *Store) RecordDriverError(name, err string) {
 }
 
 // Remove drops all in-memory state for a driver: readings, Kalman
-// filters, and the health entry. Called from the driver Registry when
-// a driver is removed from config (or restarted — the next Update will
-// repopulate) so the API status + UI stop rendering the stale card.
+// filters, the health entry and the latest emit_metric snapshots. Called
+// from the driver Registry when a driver is removed from config (or
+// restarted — the next Update will repopulate) so the API status + UI stop
+// rendering the stale card. A replacement under the same name that no
+// longer emits a metric (e.g. site-meter phase currents) must not inherit
+// the old, ageing snapshot, which would read as stale and block dispatch.
 // Historical TS-DB samples are NOT touched; they stay queryable.
 func (s *Store) Remove(driver string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, t := range allDerTypes {
 		k := key(driver, t)
 		delete(s.readings, k)
 		delete(s.filters, k)
 	}
 	delete(s.health, driver)
+	s.mu.Unlock()
+
+	prefix := driver + ":"
+	s.latestMu.Lock()
+	for k := range s.latestMetric {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.latestMetric, k)
+		}
+	}
+	s.latestMu.Unlock()
 }
 
 // AllHealth returns a snapshot of all driver health entries.

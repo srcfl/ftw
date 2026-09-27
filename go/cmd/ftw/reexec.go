@@ -36,9 +36,9 @@ func execCurrentProcess(execFn execFunc) error {
 	return errors.New("re-exec returned without replacing the process")
 }
 
-// restartPlan is the in-process fallback when the updater sidecar is absent.
-// Home Assistant re-execs after shutdown; native installs exit 1 so docker
-// (unless-stopped) and systemd (on-failure) bring the binary back.
+// restartPlan decides how a requested restart ends this process. Home
+// Assistant re-execs after shutdown; other installs exit 1 so docker
+// (unless-stopped) and systemd bring the binary back.
 func restartPlan(bundle *components.Bundle) (reexec bool, exitCode int) {
 	if bundle.ReexecOnRestart() {
 		return true, 0

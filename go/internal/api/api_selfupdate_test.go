@@ -1,24 +1,20 @@
 package api
 
 import (
-	"compress/gzip"
-	"context"
-	"database/sql"
 	"encoding/json"
-	"io"
-	"net"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/nativeupdate"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
-	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // memStore satisfies selfupdate.Store for the wiring tests.
@@ -41,105 +37,71 @@ func (s *memStore) LoadConfig(k string) (string, bool) {
 	return v, ok
 }
 
-// newCheckerAgainst returns a Checker primed with one Check against a
-// fake GH /releases/latest pointing at tag and a fake GHCR /tags/list
-// that has the same tag pushed. After the priming Check the Info cache
-// matches what handler tests expect to see.
+// installNativeSlots writes the unpacked release directories a launcher
+// leaves under root, each with its receipt at state schema 7.
+func installNativeSlots(t *testing.T, root string, tags ...string) {
+	t.Helper()
+	for _, tag := range tags {
+		dir := filepath.Join(root, "releases", tag)
+		for _, name := range []string{"ftw", "web/index.html", "drivers/BUNDLED_SOURCE.json", "optimizer/native/bundle/manifest.json"} {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("test"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		receipt := fmt.Sprintf(`{"tag":%q,"arch":%q,"archive_sha256":%q,"state_schema":7}`, tag, runtime.GOARCH, strings.Repeat("a", 64))
+		if err := os.WriteFile(filepath.Join(dir, ".ftw-release.json"), []byte(receipt), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// releaseListJSON is a GitHub release list with one prerelease that carries
+// this host's package and checksum.
+func releaseListJSON(tag, body string) string {
+	asset := "ftw-linux-" + runtime.GOARCH + ".tar.gz"
+	entry, _ := json.Marshal(map[string]any{
+		"tag_name": tag, "prerelease": strings.Contains(tag, "-beta."), "body": body,
+		"html_url": "https://example/releases/" + tag,
+		"assets":   []map[string]string{{"name": asset}, {"name": asset + ".sha256"}},
+	})
+	return "[" + string(entry) + "]"
+}
+
+// newCheckerAgainst returns a native Checker on a ready install of current,
+// primed with one Check against a release list that publishes tag at the
+// same state schema. The status file lives beside the slots.
 func newCheckerAgainst(t *testing.T, tag, current string) *selfupdate.Checker {
 	t.Helper()
-	return newCheckerAgainstWithStatus(t, tag, current, "")
+	root := t.TempDir()
+	installNativeSlots(t, root, current)
+	if err := (nativeupdate.Manager{Root: root}).Init(current); err != nil {
+		t.Fatal(err)
+	}
+	return newCheckerOnRoot(t, root, tag, current, "<!-- ftw-state-schema-v2:7 -->", func() error { return nil })
 }
 
-func newCheckerAgainstWithStatus(t *testing.T, tag, current, statusPath string) *selfupdate.Checker {
+func newCheckerOnRoot(t *testing.T, root, tag, current, body string, restart func() error) *selfupdate.Checker {
 	t.Helper()
-	return newCheckerAgainstWithStatusAndSocket(t, tag, current, statusPath, "")
-}
-
-func newCheckerAgainstWithStatusAndSocket(t *testing.T, tag, current, statusPath, socketPath string) *selfupdate.Checker {
-	return newCheckerAgainstOptions(t, tag, current, statusPath, socketPath, "", 0)
-}
-
-func newCheckerAgainstOptions(
-	t *testing.T,
-	tag, current, statusPath, socketPath, releaseBody string,
-	currentStateSchema int,
-) *selfupdate.Checker {
-	t.Helper()
-	const repo = "srcfl/ftw"
-
-	regMux := http.NewServeMux()
-	regMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": "stub"})
-	})
-	regMux.HandleFunc("/v2/"+repo+"/tags/list", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name": repo,
-			"tags": []string{tag},
-		})
-	})
-	regSrv := httptest.NewServer(regMux)
-	t.Cleanup(regSrv.Close)
-
-	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     tag,
-			"html_url":     "https://example/releases/" + tag,
-			"body":         releaseBody,
-			"published_at": time.Now().Format(time.RFC3339),
-		})
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(releaseListJSON(tag, body)))
 	}))
-	t.Cleanup(relSrv.Close)
-
+	t.Cleanup(releases.Close)
 	c := selfupdate.New(selfupdate.Config{
-		Repo:               repo,
 		CurrentVersion:     current,
-		CurrentStateSchema: currentStateSchema,
-		RegistryBaseURL:    regSrv.URL,
-		LatestReleaseURL:   relSrv.URL,
+		CurrentStateSchema: 7,
 		CheckInterval:      time.Hour,
-		SocketPath:         socketPath,
-		StatusPath:         statusPath,
+		NativeRoot:         root,
+		StatusPath:         filepath.Join(root, "update-status.json"),
+		ReleasesURL:        releases.URL,
+		NativeRestart:      restart,
 	}, newMemStore())
 	if _, err := c.Check(t.Context(), true); err != nil {
 		t.Fatalf("priming check: %v", err)
 	}
 	return c
-}
-
-func startFakeSidecar(t *testing.T, statusCode int) string {
-	t.Helper()
-	socketPath := filepath.Join("/tmp", "ftw-"+strconv.FormatInt(time.Now().UnixNano(), 36)+".sock")
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen fake sidecar: %v", err)
-	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(statusCode)
-		_, _ = w.Write([]byte(`{"status":"stub"}`))
-	})}
-	go func() {
-		_ = srv.Serve(ln)
-	}()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		_ = ln.Close()
-		_ = os.Remove(socketPath)
-	})
-	return socketPath
-}
-
-func waitUntil(t *testing.T, fn func() bool) {
-	t.Helper()
-	// These checks wait for update/backup state transitions, not a latency
-	// promise. Filesystem work can exceed two seconds on a busy CI runner.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("condition not reached before timeout")
 }
 
 func TestVersionCheck_Disabled(t *testing.T) {
@@ -153,7 +115,10 @@ func TestVersionCheck_Disabled(t *testing.T) {
 }
 
 func TestVersionCheck_ReturnsInfo(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	c := newCheckerAgainst(t, "v0.133.0-beta.1", "v0.132.0")
+	if err := c.SetChannel(selfupdate.ChannelBeta); err != nil {
+		t.Fatal(err)
+	}
 	srv := New(&Deps{SelfUpdate: c})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/version/check", nil)
@@ -166,13 +131,13 @@ func TestVersionCheck_ReturnsInfo(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.Latest != "v1.5.0" || !info.UpdateAvailable {
+	if info.Latest != "v0.133.0-beta.1" || !info.UpdateAvailable || !info.Native || !info.InstallReady {
 		t.Errorf("unexpected info: %+v", info)
 	}
 }
 
 func TestVersionChannel_RoundTrip(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
 	srv := New(&Deps{SelfUpdate: c})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"beta"}`))
@@ -192,7 +157,7 @@ func TestVersionChannel_RoundTrip(t *testing.T) {
 }
 
 func TestVersionChannel_RejectsUnknownChannel(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
 	srv := New(&Deps{SelfUpdate: c})
 	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"nightly"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -203,10 +168,9 @@ func TestVersionChannel_RejectsUnknownChannel(t *testing.T) {
 	}
 }
 
-func TestVersionChannel_BlockedWhileSidecarUpdateIsInFlight(t *testing.T) {
-	statusPath := filepath.Join(t.TempDir(), "state.json")
-	c := newCheckerAgainstWithStatus(t, "v1.5.0", "v1.4.0", statusPath)
-	if err := c.WriteStatus(selfupdate.UpdateStatus{State: "pulling", Action: "update", Target: "v1.5.0"}); err != nil {
+func TestVersionChannel_BlockedWhileUpdateIsInFlight(t *testing.T) {
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
+	if err := c.WriteStatus(selfupdate.UpdateStatus{State: "pulling", Action: "update", Target: "v0.133.0"}); err != nil {
 		t.Fatal(err)
 	}
 	srv := New(&Deps{SelfUpdate: c})
@@ -223,11 +187,11 @@ func TestVersionChannel_BlockedWhileSidecarUpdateIsInFlight(t *testing.T) {
 }
 
 func TestVersionSkip_RoundTrip(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
 	srv := New(&Deps{SelfUpdate: c})
 
-	// Skip v1.5.0 — should now report Skipped=true.
-	body := strings.NewReader(`{"version":"v1.5.0"}`)
+	// Skip v0.133.0 — should now report Skipped=true.
+	body := strings.NewReader(`{"version":"v0.133.0"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/version/skip", body)
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -252,7 +216,7 @@ func TestVersionSkip_RoundTrip(t *testing.T) {
 }
 
 func TestVersionSkip_EmptyVersionRejected(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
 	srv := New(&Deps{SelfUpdate: c})
 	req := httptest.NewRequest(http.MethodPost, "/api/version/skip", strings.NewReader(`{"version":""}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -263,452 +227,99 @@ func TestVersionSkip_EmptyVersionRejected(t *testing.T) {
 	}
 }
 
-func TestVersionUpdate_NoSidecar502(t *testing.T) {
-	// Checker has no socket configured — Trigger returns an error and the
-	// handler surfaces it as 502 so the UI can show the sidecar is missing.
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+// Without readable release slots nothing can be staged, and without a way to
+// stop Core nothing can restart; both surface as 502.
+func TestVersionUpdateAndRestartNeedAReadyInstall(t *testing.T) {
+	c := newCheckerOnRoot(t, t.TempDir(), "v0.133.0", "v0.132.0", "<!-- ftw-state-schema-v2:7 -->", nil)
 	srv := New(&Deps{SelfUpdate: c})
 
-	for _, path := range []string{"/api/version/update", "/api/version/restart"} {
+	for path, want := range map[string]string{
+		"/api/version/update":  "native release slot not ready",
+		"/api/version/restart": "native restart is not configured",
+	} {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, req)
-		if rr.Code != http.StatusBadGateway {
-			t.Errorf("%s without sidecar = %d, want 502", path, rr.Code)
+		if rr.Code != http.StatusBadGateway || !strings.Contains(rr.Body.String(), want) {
+			t.Errorf("%s = %d %s, want 502 %q", path, rr.Code, rr.Body.String(), want)
 		}
 	}
 }
 
-// Snapshot is captured BEFORE the handler hands off to the sidecar, so
-// an operator who hits Update always has a rollback point — even if the
-// sidecar is missing and the trigger fails. Issue #140.
-func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "update-state.json")
-	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
-	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
-	st, err := state.Open(filepath.Join(dir, "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	_ = st.SaveConfig("mode", "planner_self")
-
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir, ConfigPath: ""})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
+func TestVersionRestartKeepsTheInstalledRelease(t *testing.T) {
+	root := t.TempDir()
+	restarts := 0
+	c := newCheckerOnRoot(t, root, "v0.133.0", "v0.132.0", "", func() error { restarts++; return nil })
+	srv := New(&Deps{SelfUpdate: c})
 	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-
-	// The handler returns immediately; snapshot + sidecar trigger finish in
-	// the background and publish failure via /status if the sidecar rejects.
-	if rr.Code != http.StatusAccepted {
-		t.Errorf("expected 202, got %d", rr.Code)
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/restart", nil))
+	if rr.Code != http.StatusAccepted || restarts != 1 {
+		t.Fatalf("restart = %d %s, restarts=%d", rr.Code, rr.Body.String(), restarts)
 	}
-	waitUntil(t, func() bool { return c.Status().State == "failed" })
-	entries, err := os.ReadDir(snapDir)
-	if err != nil {
-		t.Fatalf("snapshot dir not created: %v", err)
+	if st := c.Status(); st.Action != "restart" || st.State != "restarting" || st.Target != "v0.132.0" {
+		t.Fatalf("restart status = %+v", st)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("want 1 snapshot dir, got %d", len(entries))
-	}
-	// Snapshot dir should contain a complete compressed state.db + meta.json (no config.yaml
-	// because ConfigPath was empty).
-	snapPath := filepath.Join(snapDir, entries[0].Name())
-	for _, f := range []string{"state.db.gz", "meta.json"} {
-		if _, err := os.Stat(filepath.Join(snapPath, f)); err != nil {
-			t.Errorf("snapshot missing %s: %v", f, err)
-		}
-	}
-	// The compressed settings database must carry the seeded config. It is
-	// read as a plain SQLite file here: a Core open expects the live
-	// history.db beside it, which a real rollback leaves in place (see
-	// TestRollbackPointRestoresBesideHistoryInPlace).
-	restoredPath := filepath.Join(t.TempDir(), "state.db")
-	gunzipTestFile(t, filepath.Join(snapPath, "state.db.gz"), restoredPath)
-	if v := readSnapshotConfigValue(t, restoredPath, "mode"); v != "planner_self" {
-		t.Errorf("snapshot missing seeded mode config: %q", v)
-	}
-
-	gotStatus := c.Status()
-	if gotStatus.State != "failed" || gotStatus.Action != "update" || gotStatus.Target != "v1.5.0" {
-		t.Errorf("trigger failure should be published to status file, got %+v", gotStatus)
+	// A second request while the first is in flight is refused.
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/restart", nil))
+	if rr.Code != http.StatusConflict || restarts != 1 {
+		t.Fatalf("second restart = %d %s, restarts=%d", rr.Code, rr.Body.String(), restarts)
 	}
 }
 
-// The rollback point is bounded by the settings database, so every update
-// takes one, including an update that keeps the state schema (#1302).
-func TestVersionUpdateSavesRollbackPointWhenSchemaIsUnchanged(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "update-state.json")
-	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
-	c := newCheckerAgainstOptions(
-		t, "v1.5.0", "v1.4.0", statusPath, socketPath,
-		"<!-- ftw-state-schema:1 -->", 1,
-	)
-	st, err := state.Open(filepath.Join(dir, "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
-	}
-	var response map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	if _, skipped := response["snapshot_skipped"]; skipped {
-		t.Fatalf("schema-compatible update skipped its rollback point: %+v", response)
-	}
-	waitUntil(t, func() bool { return c.Status().State == "failed" })
-	entries, err := os.ReadDir(snapDir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("rollback point dir = %v %v, want one entry", entries, err)
-	}
-	if _, err := os.Stat(filepath.Join(snapDir, entries[0].Name(), "state.db.gz")); err != nil {
-		t.Fatalf("rollback point missing its settings database: %v", err)
-	}
-}
-
-// A rollback replaces state.db and leaves history.db where it is. The point
-// therefore holds no history rows, and every row written before or after it
-// survives the rollback (#1302).
-func TestRollbackPointRestoresBesideHistoryInPlace(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.db")
-	st, err := state.Open(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	closed := false
-	t.Cleanup(func() {
-		if !closed {
-			st.Close()
-		}
-	})
-	if err := st.SaveConfig("mode", "planner_self"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.BulkRecordHistory(recentHistoryPoints(500, 0)); err != nil {
-		t.Fatal(err)
-	}
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: filepath.Join(dir, "snapshots")})
-	snap, err := srv.createPreUpdateSnapshot("update", "v1.4.0", "v1.5.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := readSnapshotMeta(snap.Path)
-	if err != nil || !meta.HistoryInPlace || !snapshotMetaRestorable(meta) {
-		t.Fatalf("rollback point meta = %+v %v", meta, err)
-	}
-	raw := filepath.Join(t.TempDir(), "point.db")
-	gunzipTestFile(t, filepath.Join(snap.Path, "state.db.gz"), raw)
-	if n := countSnapshotRows(t, raw, `SELECT COUNT(*) FROM sqlite_master WHERE name='history_hot'`); n != 0 {
-		t.Fatalf("rollback point copied the history table")
-	}
-
-	// History written after the point must survive the rollback too.
-	if err := st.BulkRecordHistory(recentHistoryPoints(500, 500)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.FlushHistory(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	closed = true
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Restore the way ftw-updater does: replace state.db, drop its WAL and
-	// SHM, and leave history.db untouched.
-	gunzipTestFile(t, filepath.Join(snap.Path, "state.db.gz"), statePath)
-	_ = os.Remove(statePath + "-wal")
-	_ = os.Remove(statePath + "-shm")
-	restored, err := state.Open(statePath)
-	if err != nil {
-		t.Fatalf("rollback with history in place failed to open: %v", err)
-	}
-	defer restored.Close()
-	if v, ok := restored.LoadConfig("mode"); !ok || v != "planner_self" {
-		t.Fatalf("restored settings = %q ok=%v", v, ok)
-	}
-	if n := countSnapshotRows(t, filepath.Join(dir, "history.db"), `SELECT COUNT(*) FROM history_hot`); n != 1000 {
-		t.Fatalf("history rows after rollback = %d, want 1000", n)
-	}
-}
-
-func recentHistoryPoints(n, offset int) []state.HistoryPoint {
-	base := time.Now().Add(-time.Hour).UnixMilli()
-	points := make([]state.HistoryPoint, n)
-	for i := range points {
-		points[i] = state.HistoryPoint{TsMs: base + int64(offset+i)*1000, GridW: float64(i)}
-	}
-	return points
-}
-
-func readSnapshotConfigValue(t *testing.T, path, key string) string {
+// seedSnapshot writes a rollback point as the older Docker Core left it.
+func seedSnapshot(t *testing.T, snapshotDir, id string, created time.Time) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
+	dir := filepath.Join(snapshotDir, id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	var value string
-	if err := db.QueryRow(`SELECT value FROM config WHERE key=?`, key).Scan(&value); err != nil {
-		t.Fatalf("read %s from %s: %v", key, path, err)
+	meta := fmt.Sprintf(`{"schema_version":2,"created_at":%q,"from_version":"v3.8.0","to_version":"v3.8.1","action":"update","complete_database":true,"files":["state.db.gz","config.yaml"]}`,
+		created.UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	return value
+	if err := os.WriteFile(filepath.Join(dir, "state.db.gz"), []byte("settings"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
-func countSnapshotRows(t *testing.T, path, query string) int {
-	t.Helper()
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var n int
-	if err := db.QueryRow(query).Scan(&n); err != nil {
-		t.Fatalf("%s on %s: %v", query, path, err)
-	}
-	return n
-}
-
-func TestUpdateStatusHeartbeatPublishesBackupProgress(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	checker := selfupdate.New(selfupdate.Config{StatusPath: path}, nil)
-	started := time.Now().Add(-time.Minute)
-	heartbeat := newUpdateStatusHeartbeat(checker, selfupdate.UpdateStatus{
-		State: "snapshotting", Action: "update", Component: "core", Target: "v1.5.0",
-		StartedAt: started, PhaseStartedAt: started, Step: 1, TotalSteps: 4,
-	})
-	heartbeat.Start()
-	heartbeat.SetBackupProgress(state.BackupProgress{
-		Phase: state.BackupPhaseCompressing, CompletedBytes: 25, TotalBytes: 100,
-	})
-	heartbeat.Stop()
-
-	got := checker.Status()
-	if got.State != "snapshotting" || got.Step != 1 || got.TotalSteps != 4 {
-		t.Fatalf("status = %+v", got)
-	}
-	if got.Message != "Compressing rollback backup" ||
-		got.ProgressCurrent != 25 || got.ProgressTotal != 100 || got.ProgressUnit != "bytes" {
-		t.Fatalf("backup progress = %+v", got)
-	}
-	if got.PhaseStartedAt.IsZero() || got.UpdatedAt.IsZero() {
-		t.Fatalf("progress timestamps = %+v", got)
-	}
-}
-
-func gunzipTestFile(t *testing.T, src, dst string) {
-	t.Helper()
-	in, err := os.Open(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer in.Close()
-	zr, err := gzip.NewReader(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer zr.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.Copy(out, zr); err != nil {
-		t.Fatal(err)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// Legacy clients may still send skip_snapshot, but the server must ignore it:
-// every update gets a rollback point when snapshots are configured.
-func TestVersionUpdate_LegacySkipSnapshotCannotDisableRollbackPoint(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "update-state.json")
-	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
-	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-
-	body := strings.NewReader(`{"skip_snapshot":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/version/update", body)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-
-	// Sidecar trigger still fails, but the rollback point is created first.
-	if rr.Code != http.StatusAccepted {
-		t.Errorf("want 202, got %d body=%s", rr.Code, rr.Body.String())
-	}
-	waitUntil(t, func() bool { return c.Status().State == "failed" })
-	if entries, _ := os.ReadDir(snapDir); len(entries) != 1 {
-		t.Errorf("legacy skip_snapshot must be ignored, found %d rollback points", len(entries))
-	}
-}
-
-// With ConfigPath set the snapshot must also copy config.yaml so a
-// rollback can restore the exact YAML the operator was running.
-func TestVersionUpdate_SnapshotIncludesConfigWhenPathSet(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "update-state.json")
-	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
-	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("site:\n  name: test\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir, ConfigPath: cfgPath})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("want 202, got %d body=%s", rr.Code, rr.Body.String())
-	}
-	waitUntil(t, func() bool { return c.Status().State == "failed" })
-	entries, _ := os.ReadDir(snapDir)
-	if len(entries) == 0 {
-		t.Fatal("no snapshot created")
-	}
-	copied := filepath.Join(snapDir, entries[0].Name(), "config.yaml")
-	got, err := os.ReadFile(copied)
-	if err != nil {
-		t.Fatalf("config.yaml not copied: %v", err)
-	}
-	if !strings.Contains(string(got), "name: test") {
-		t.Errorf("config.yaml contents wrong: %s", got)
-	}
-}
-
-// Snapshot failure must abort the update with 500 — we never want to
-// pull a new image without a rollback point when the operator opted in.
-func TestVersionUpdate_SnapshotFailureAborts(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "update-state.json")
-	socketPath := startFakeSidecar(t, http.StatusAccepted)
-	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-
-	// Point SnapshotDir at a PATH THAT IS A FILE, not a directory.
-	// Mkdir on that path will fail and the whole update should abort.
-	badPath := filepath.Join(dir, "not-a-dir")
-	if err := os.WriteFile(badPath, []byte("block"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: badPath})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("want 202 when async snapshot job starts, got %d (body=%s)", rr.Code, rr.Body.String())
-	}
-	waitUntil(t, func() bool {
-		st := c.Status()
-		return st.State == "failed" && strings.Contains(st.Message, "snapshot failed")
-	})
-}
-
-// Retention keeps the N newest snapshots — older ones pruned after each
-// new snapshot. Exercised via direct calls to avoid running the whole
-// update pipeline five times.
-func TestSnapshotsPruneToKeepNewest(t *testing.T) {
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-
-	srv := New(&Deps{State: st, SnapshotDir: snapDir})
-	// Create snapshotKeepCount+3 snapshots. The createPreUpdateSnapshot
-	// helper calls pruneSnapshots at the end of each, so after the
-	// loop we should have exactly snapshotKeepCount dirs.
-	for i := 0; i < snapshotKeepCount+3; i++ {
-		if _, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1"); err != nil {
-			t.Fatalf("snapshot %d: %v", i, err)
-		}
-		// sleep a tick so the timestamp in the dir name changes —
-		// otherwise mkdir fails because the sibling dir already exists.
-		time.Sleep(1100 * time.Millisecond)
-	}
-
-	entries, _ := os.ReadDir(snapDir)
-	if len(entries) != snapshotKeepCount {
-		t.Errorf("retained %d snapshots, want %d", len(entries), snapshotKeepCount)
-	}
-}
-
-// Delete by id removes the directory + returns 200. Guards #150's
-// operator-self-service promise: "I see these snapshots in the UI and
-// can reclaim disk from them without SSH."
+// Delete by id removes the directory + returns 200, so an owner can reclaim
+// the space an older Core's rollback points still take.
 func TestVersionSnapshots_DeleteByID(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-	snap, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+	path := seedSnapshot(t, snapDir, "2026-09-01T10-00-00Z_3.8.0_to_3.8.1", time.Now())
+	srv := New(&Deps{SelfUpdate: c, SnapshotDir: snapDir})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+snap.ID, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+filepath.Base(path), nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatalf("DELETE = %d body=%s", rr.Code, rr.Body.String())
 	}
-	if _, err := os.Stat(snap.Path); !os.IsNotExist(err) {
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("snapshot dir should be gone after DELETE, stat err = %v", err)
 	}
 }
 
 func TestVersionSnapshots_DeleteRejectedDuringUpdate(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "update-status.json")
-	c := newCheckerAgainstWithStatus(t, "v1.5.0", "v1.4.0", statusPath)
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-	snap, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.WriteStatus(selfupdate.UpdateStatus{State: "pulling", Action: "update", Target: "v1.5.0"}); err != nil {
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+	path := seedSnapshot(t, snapDir, "2026-09-01T10-00-00Z_3.8.0_to_3.8.1", time.Now())
+	srv := New(&Deps{SelfUpdate: c, SnapshotDir: snapDir})
+	if err := c.WriteStatus(selfupdate.UpdateStatus{State: "pulling", Action: "update", Target: "v0.133.0"}); err != nil {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+snap.ID, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+filepath.Base(path), nil)
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("DELETE during update = %d body=%s, want 409", rr.Code, rr.Body.String())
 	}
-	if _, err := os.Stat(snap.Path); err != nil {
+	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("snapshot should remain after rejected DELETE: %v", err)
 	}
 }
@@ -716,12 +327,9 @@ func TestVersionSnapshots_DeleteRejectedDuringUpdate(t *testing.T) {
 // Traversal + missing-id guards. A rogue client can't escape SnapshotDir
 // or delete arbitrary files via the endpoint.
 func TestVersionSnapshots_DeleteRejectsInvalidID(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+	srv := New(&Deps{SelfUpdate: c, SnapshotDir: snapDir})
 
 	// Non-existent id: handler hits the stat check, returns 404.
 	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/no-such-snapshot", nil)
@@ -746,19 +354,13 @@ func TestVersionSnapshots_DeleteRejectsInvalidID(t *testing.T) {
 }
 
 func TestVersionSnapshots_ListsNewestFirst(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-
-	for i := 0; i < 3; i++ {
-		if _, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1"); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(1100 * time.Millisecond)
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+	now := time.Now()
+	for i, id := range []string{"b", "c", "a"} {
+		seedSnapshot(t, snapDir, id, now.Add(time.Duration(i)*time.Minute))
 	}
+	srv := New(&Deps{SelfUpdate: c, SnapshotDir: snapDir})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/version/snapshots", nil)
 	rr := httptest.NewRecorder()
@@ -774,212 +376,21 @@ func TestVersionSnapshots_ListsNewestFirst(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if !out.Enabled || len(out.Snapshots) != 3 {
-		t.Fatalf("got %d snapshots, enabled=%v", len(out.Snapshots), out.Enabled)
+	if !out.Enabled || out.Dir != snapDir || len(out.Snapshots) != 3 {
+		t.Fatalf("got %d snapshots, enabled=%v dir=%q", len(out.Snapshots), out.Enabled, out.Dir)
 	}
 	for i := 1; i < len(out.Snapshots); i++ {
 		if !out.Snapshots[i-1].CreatedAt.After(out.Snapshots[i].CreatedAt) {
 			t.Errorf("snapshots not ordered newest-first at idx %d", i)
 		}
 	}
-}
-
-func TestVersionSnapshots_CreateManualRollbackPoint(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, err := state.Open(filepath.Join(dir, "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	if err := st.SaveConfig("manual-checkpoint", "present"); err != nil {
-		t.Fatal(err)
-	}
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/version/snapshots", nil)
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusCreated {
-		t.Fatalf("manual snapshot = %d %s, want 201", rr.Code, rr.Body.String())
-	}
-	var out struct {
-		Status   string       `json:"status"`
-		Snapshot SnapshotInfo `json:"snapshot"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
-		t.Fatal(err)
-	}
-	if out.Status != "created" || !out.Snapshot.Restorable || out.Snapshot.Action != "manual" {
-		t.Fatalf("manual snapshot response = %+v", out)
-	}
-	meta, err := readSnapshotMeta(out.Snapshot.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if meta.Action != "manual" || !snapshotMetaRestorable(meta) {
-		t.Fatalf("manual snapshot meta = %+v", meta)
-	}
-	if _, err := os.Stat(filepath.Join(out.Snapshot.Path, "state.db.gz")); err != nil {
-		t.Fatalf("manual snapshot database missing: %v", err)
-	}
-}
-
-// Rollback creates a pre-rollback safety snapshot, then asks the sidecar
-// to restore (#152). The sidecar is absent in this test, so Trigger
-// fails with 502 — but the safety snapshot must land first, proving
-// the "we always capture current state before touching it" promise.
-func TestVersionRollback_CreatesSafetySnapshotBeforeTrigger(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-
-	// Seed one snapshot so the rollback target exists.
-	seed, err := srv.createPreUpdateSnapshot("update", "v1.3.0", "v1.4.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	body := strings.NewReader(`{"snapshot_id":"` + seed.ID + `"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", body)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-
-	// Sidecar trigger fails → 502. The safety snapshot should have
-	// been captured before the trigger attempt regardless.
-	if rr.Code != http.StatusBadGateway {
-		t.Errorf("want 502 from missing sidecar, got %d body=%s", rr.Code, rr.Body.String())
-	}
-	entries, _ := os.ReadDir(snapDir)
-	// Seed + safety = 2 entries (retention is 5, way under).
-	if len(entries) < 2 {
-		t.Fatalf("want ≥ 2 snapshots on disk (seed + safety), got %d", len(entries))
-	}
-	// At least one snapshot must be tagged "pre-rollback" in meta.
-	foundSafety := false
-	for _, e := range entries {
-		meta, err := readSnapshotMeta(filepath.Join(snapDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		if meta.Action == "pre-rollback" {
-			foundSafety = true
-			break
-		}
-	}
-	if !foundSafety {
-		t.Error("expected a snapshot with meta.action = pre-rollback after rollback request")
-	}
-}
-
-func TestVersionRollbackRejectsIncompleteLegacySnapshot(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	legacyID := "2026-07-01T00-00-00Z_legacy"
-	legacyDir := filepath.Join(snapDir, legacyID)
-	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	meta, _ := json.Marshal(SnapshotMeta{
-		SchemaVersion: 1,
-		CreatedAt:     time.Now().Add(-time.Hour),
-		Files:         []string{"state.db"},
-	})
-	if err := os.WriteFile(filepath.Join(legacyDir, "meta.json"), meta, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
-	req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", strings.NewReader(`{"snapshot_id":"`+legacyID+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "losing history") {
-		t.Fatalf("legacy rollback = %d %s, want 409 data-loss guard", rr.Code, rr.Body.String())
-	}
-	entries, _ := os.ReadDir(snapDir)
-	if len(entries) != 1 {
-		t.Fatalf("legacy rejection must not create a safety snapshot, got %d entries", len(entries))
-	}
-}
-
-func TestPreRollbackSafetySnapshotDoesNotPruneSelectedTarget(t *testing.T) {
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	snapDir := filepath.Join(dir, "snapshots")
-	oldestID := ""
-	for i := 0; i < snapshotKeepCount; i++ {
-		id := "snapshot-" + strconv.Itoa(i)
-		if i == 0 {
-			oldestID = id
-		}
-		entryDir := filepath.Join(snapDir, id)
-		if err := os.MkdirAll(entryDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		meta, _ := json.Marshal(SnapshotMeta{
-			SchemaVersion:    snapshotSchemaVersion,
-			CreatedAt:        time.Now().Add(time.Duration(i) * time.Minute),
-			CompleteDatabase: true,
-			Files:            []string{"state.db.gz"},
-		})
-		if err := os.WriteFile(filepath.Join(entryDir, "meta.json"), meta, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	srv := New(&Deps{State: st, SnapshotDir: snapDir})
-	if _, err := srv.createPreUpdateSnapshot("pre-rollback", "v1.4.0", oldestID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(snapDir, oldestID)); err != nil {
-		t.Fatalf("selected rollback target was pruned: %v", err)
-	}
-	entries, _ := os.ReadDir(snapDir)
-	if len(entries) != snapshotKeepCount+1 {
-		t.Fatalf("pre-rollback retention = %d, want temporary %d", len(entries), snapshotKeepCount+1)
-	}
-}
-
-// Bad snapshot id → handler refuses without creating any files.
-func TestVersionRollback_ValidatesSnapshotID(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
-	dir := t.TempDir()
-	st, _ := state.Open(filepath.Join(dir, "state.db"))
-	t.Cleanup(func() { st.Close() })
-	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: filepath.Join(dir, "snapshots")})
-
-	cases := []struct {
-		body string
-		want int
-		desc string
-	}{
-		{`{}`, 400, "missing snapshot_id"},
-		{`{"snapshot_id":""}`, 400, "empty snapshot_id"},
-		{`{"snapshot_id":".."}`, 400, "traversal"},
-		{`{"snapshot_id":"nope"}`, 404, "nonexistent id"},
-	}
-	for _, c := range cases {
-		req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", strings.NewReader(c.body))
-		req.Header.Set("Content-Type", "application/json")
-		rr := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rr, req)
-		if rr.Code != c.want {
-			t.Errorf("%s: got %d, want %d (body=%s)", c.desc, rr.Code, c.want, rr.Body.String())
-		}
+	if out.Snapshots[0].ID != "a" || out.Snapshots[0].SizeBytes <= 0 || out.Snapshots[0].FromVersion != "v3.8.0" {
+		t.Fatalf("newest snapshot = %+v", out.Snapshots[0])
 	}
 }
 
 func TestVersionUpdateStatus_Idle(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	c := newCheckerAgainst(t, "v0.133.0", "v0.132.0")
 	srv := New(&Deps{SelfUpdate: c})
 	req := httptest.NewRequest(http.MethodGet, "/api/version/update/status", nil)
 	rr := httptest.NewRecorder()
@@ -992,46 +403,25 @@ func TestVersionUpdateStatus_Idle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.State != "idle" {
-		t.Errorf("state = %q, want idle (no StatusPath configured)", out.State)
+		t.Errorf("state = %q, want idle (no update has run)", out.State)
 	}
 }
 
-func TestVersionRestartSurfacesOldUpdaterRefusal(t *testing.T) {
-	checker := selfupdate.New(selfupdate.Config{
-		CurrentVersion: "v2.14.0-beta.1",
-		SocketPath:     startFakeSidecar(t, http.StatusBadRequest),
-	}, newMemStore())
-	srv := New(&Deps{SelfUpdate: checker})
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/restart", nil))
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
-	}
-	var body map[string]string
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(body["error"], "safe restart requires a newer updater") {
-		t.Fatalf("missing user recovery instruction: %v", body)
-	}
-}
-
-func TestNativeVersionRoutesFailBeforeSnapshotWithoutAvailableRelease(t *testing.T) {
+func TestNativeVersionRoutesRefuseWithoutAvailableRelease(t *testing.T) {
 	root := t.TempDir()
 	checker := selfupdate.New(selfupdate.Config{
 		CurrentVersion: "v0.131.0-beta.1", NativeRoot: root,
-		StatusPath: filepath.Join(root, "update-status.json"),
+		StatusPath:    filepath.Join(root, "update-status.json"),
 		NativeRestart: func() error { return nil },
 	}, newMemStore())
-	snapshotDir := filepath.Join(root, "snapshots")
-	srv := New(&Deps{SelfUpdate: checker, SnapshotDir: snapshotDir})
+	srv := New(&Deps{SelfUpdate: checker, SnapshotDir: filepath.Join(root, "snapshots")})
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/update", nil))
 	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "no newer native release") {
 		t.Fatalf("native update without target: %d %s", rr.Code, rr.Body.String())
 	}
-	if _, err := os.Stat(snapshotDir); !os.IsNotExist(err) {
-		t.Fatalf("created snapshot directory for unavailable release: %v", err)
+	if st := checker.Status(); st.State != "idle" {
+		t.Fatalf("refused update wrote status %+v", st)
 	}
 	rr = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/version/binary-rollback", nil))

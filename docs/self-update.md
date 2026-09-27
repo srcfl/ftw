@@ -20,10 +20,10 @@ is still needed to recover older data or a failed disk.
 
 Keep an existing Docker or earlier native site on its current version. On an
 older Docker install, the web UI's Update and Restart buttons signal the
-`ftw-updater` sidecar, which pulls a pinned image and recreates Core
-([`go/internal/selfupdate`](../go/internal/selfupdate),
-[`go/cmd/ftw-updater`](../go/cmd/ftw-updater)). That path is frozen with its
-line. Do not use its Update button, an old Docker migration script, a moving
+`ftw-updater` sidecar, which pulls a pinned image and recreates Core. That
+path is frozen with its line: the sidecar and its Core counterpart run from
+the installed images, and their source stays on the old release tags, not on
+`master`. Do not use its Update button, an old Docker migration script, a moving
 image alias, or a manual Core/updater swap to cross release lines. The old
 code may still show a previously published update; it cannot be changed on a
 box that has not installed new code. The scripts on `master` for

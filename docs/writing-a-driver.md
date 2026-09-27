@@ -123,7 +123,7 @@ may omit the default hook because Core cannot dispatch commands to them.
 `driver_fingerprint(target)` is an optional passive setup probe. It must never
 reconfigure the device. The host denies mutating verbs (`modbus_write`,
 `mqtt_pub`, `http_post`, `http_patch`) for that VM, including bundled drivers
-that otherwise have no signed write scope.
+that may otherwise write.
 
 Call `host.set_make` and `host.set_sn` as soon as stable identity is known.
 Core then keys durable device state by hardware identity rather than the YAML

@@ -31,8 +31,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		// Don't reuse r.Context() — it's canceled the instant the
-		// response is flushed, and the sidecar dial path needs a live
-		// context to negotiate the unix socket.
+		// response is flushed.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := s.deps.Restart(ctx); err != nil {
