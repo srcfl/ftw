@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/srcfl/ftw/go/internal/config"
@@ -65,7 +64,7 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "battery_export must be unknown, not_allowed, or allowed"})
 		return
 	}
-	if err := s.applyPlannerPrefs(r.Context(), safetyK, export); err != nil {
+	if err := s.applyPlannerPrefs(safetyK, export); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
@@ -80,7 +79,7 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) applyPlannerPrefs(ctx context.Context, safetyK float64, export config.BatteryExport) error {
+func (s *Server) applyPlannerPrefs(safetyK float64, export config.BatteryExport) error {
 	s.configWriteMu.Lock()
 	defer s.configWriteMu.Unlock()
 	safetyK = config.ClampSafetyK(safetyK)
@@ -118,7 +117,7 @@ func (s *Server) applyPlannerPrefs(ctx context.Context, safetyK float64, export 
 				return err
 			}
 			if mm, ok := control.PlannerMPCMode(mapped); ok && s.deps.MPC != nil {
-				s.deps.MPC.SetMode(ctx, mm)
+				s.deps.MPC.SetMode(mm)
 			}
 		}
 	}
@@ -129,7 +128,7 @@ func (s *Server) applyPlannerPrefs(ctx context.Context, safetyK float64, export 
 			planner = s.deps.Cfg.Planner
 			s.deps.CfgMu.RUnlock()
 		}
-		s.deps.MPC.SetSafetyK(ctx, planner.EffectiveSafetyK(safetyK))
+		s.deps.MPC.SetSafetyK(planner.EffectiveSafetyK(safetyK))
 	}
 	return nil
 }

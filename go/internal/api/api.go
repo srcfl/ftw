@@ -1714,14 +1714,14 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	if s.deps.PlannerPrefs != nil && s.deps.State != nil {
 		s.deps.PlannerPrefs.ApplyExportFromMode(req.Mode, s.deps.State.SaveConfig)
 	}
-	// Propagate to MPC if switching to a planner mode and force an
-	// immediate replan. control.PlannerMPCMode is the single source of the
+	// Propagate to MPC if switching to a planner mode and request a
+	// background replan. control.PlannerMPCMode is the single source of the
 	// ModePlanner* → mpc.Mode mapping; ok is false for non-planner modes (and
 	// for any planner mode that hasn't been wired into the mapping), so an
 	// unmapped mode skips the MPC push instead of silently coercing it to the
 	// zero-value mpc.Mode("").
 	if mm, ok := control.PlannerMPCMode(m); ok && s.deps.MPC != nil {
-		s.deps.MPC.SetMode(r.Context(), mm)
+		s.deps.MPC.SetMode(mm)
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
 }

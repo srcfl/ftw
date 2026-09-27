@@ -1985,7 +1985,10 @@ type PricePoint struct {
 	FetchedAtMs int64   `json:"fetched_at_ms"`
 }
 
-// SavePrices upserts a batch of price rows (slot duration per-row).
+// SavePrices upserts a batch of price rows (slot duration per-row). Each row
+// first removes the cached rows of its zone that it overlaps, so a day
+// fetched again at another resolution replaces the old rows instead of
+// leaving an overlapping timeline that the planner rejects.
 func (s *Store) SavePrices(pts []PricePoint) error {
 	if len(pts) == 0 {
 		return nil
@@ -1995,6 +1998,15 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 		return err
 	}
 	defer tx.Rollback()
+	// A cached row that starts before a new one can still reach into it.
+	// maxSlotPadMs bounds how far back, as it does for cost reads.
+	overlapping, err := tx.Prepare(`DELETE FROM prices
+		WHERE zone = ? AND slot_ts_ms > ? AND slot_ts_ms < ?
+			AND slot_ts_ms + slot_len_min * 60000 > ?`)
+	if err != nil {
+		return err
+	}
+	defer overlapping.Close()
 	stmt, err := tx.Prepare(`INSERT INTO prices
 		(zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -2012,6 +2024,10 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 		slot := p.SlotLenMin
 		if slot <= 0 {
 			slot = 60
+		}
+		endMs := p.SlotTsMs + int64(slot)*60_000
+		if _, err := overlapping.Exec(p.Zone, p.SlotTsMs-maxSlotPadMs, endMs, p.SlotTsMs); err != nil {
+			return err
 		}
 		if _, err := stmt.Exec(p.Zone, p.SlotTsMs, slot, p.SpotOreKwh, p.TotalOreKwh, p.Source, p.FetchedAtMs); err != nil {
 			return err
