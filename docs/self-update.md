@@ -97,6 +97,14 @@ runs `make verify`, builds ARM64 and AMD64 packages, verifies their hashes
 and publishes a prerelease. A `dry_run` checks the build without creating a
 tag or release. A retry may keep a published asset only if its bytes match.
 
+Before updating a test site, check that the workflow succeeded for the
+chosen commit. The published `ftw-native-release.json` records that commit,
+tag, channel, state schema and both package hashes. Match it to the release's
+archives and `.sha256` files. Then follow
+[Update a native box](native-beta.md#update-a-native-box) through SSH or a
+local terminal and check the running version, health and live readings.
+Publishing the release and installing it on a box are separate steps.
+
 A native beta must run for a week on the home box and at least one other real
 site with no open `release-blocker`. Only then can the owner dispatch the same
 workflow for `v0.X.Y` stable, naming the tested `source_beta`. Stable checks

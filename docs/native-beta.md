@@ -5,7 +5,7 @@ run the host; FTW gives you a few commands for it
 ([ADR 0007](adr/0007-self-updating-binary.md), decisions 10–14). Install it
 natively with systemd, or run it in Docker. Both run the same release
 package. Report what you find in an issue that names the beta, for example
-`v0.137.1-beta.1`.
+`v0.138.0-beta.1`.
 
 ## Before you start
 
@@ -26,7 +26,7 @@ package. Report what you find in an issue that names the beta, for example
 Use the installer from the same tag you install:
 
 ```bash
-tag=v0.137.1-beta.1
+tag=v0.138.0-beta.1
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --fresh-host --tag "${tag}"
 ```
@@ -98,6 +98,35 @@ sudo systemctl restart ftw                   # restart
 `ftw update` asks nothing, so a timer or an agent can run it. It exits 0
 when the box is current or the update succeeded, and 1 when a step failed.
 
+## Update a native box
+
+Run the commands on the box. From another computer, connect with
+`ssh <user>@<box-address>` first. The native web UI shows the version and
+update notice; it has no Update button.
+
+```bash
+ftw status                    # check the running version, saved channel and health
+ftw update                    # download, check, stage and restart Core
+ftw status                    # confirm the running version and health afterward
+journalctl -u ftw --since "10 minutes ago" --no-pager
+```
+
+`ftw update` follows the saved channel. Use `ftw update --channel beta` if
+you mean to switch this site to beta. Publishing a beta does not update a
+box by itself. Do not rerun the installer for a routine Core update.
+
+The command shows each step and waits until Core is ready. Check that its
+`Now running` line and the final `ftw status` name the expected version,
+that the devices are healthy, and that history has no write failures. Then
+open the local dashboard and check that device readings keep changing and
+the plan is current. A healthy service alone does not prove that a car is
+charging or a battery follows a command.
+
+`Previous:` names the release available through `ftw rollback`. If the
+update fails, follow [When something goes wrong](#when-something-goes-wrong)
+before retrying. Updates to the launcher, command or service use the separate
+[refresh step](#launcher-and-command-updates) only when release notes ask for it.
+
 ## Drivers
 
 Drivers come with the release: `ftw update` and `ftw rollback` move them
@@ -165,7 +194,7 @@ service definition. When a release notes changes to them, refresh them with
 the installer from that release:
 
 ```bash
-tag=v0.137.1-beta.1
+tag=v0.138.0-beta.1
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --refresh --tag "${tag}"
 ```
@@ -182,7 +211,7 @@ mkdir -p ~/ftw-local && cd ~/ftw-local
 base=https://raw.githubusercontent.com/srcfl/ftw/master/deploy/docker
 curl -fsSLO "${base}/compose.yaml" -O "${base}/Dockerfile"
 mkdir -p data && sudo chown 100:101 data
-echo "FTW_VERSION=v0.137.1-beta.1" > .env
+echo "FTW_VERSION=v0.138.0-beta.1" > .env
 docker compose up -d --build
 ```
 
@@ -203,7 +232,7 @@ version; its image is still on the host, so nothing is fetched. Going back
 works while both releases read the same data, as on a native install.
 
 ```bash
-sed -i 's/^FTW_VERSION=.*/FTW_VERSION=v0.137.1-beta.1/' .env
+sed -i 's/^FTW_VERSION=.*/FTW_VERSION=v0.138.0-beta.1/' .env
 docker compose up -d --build
 ```
 
