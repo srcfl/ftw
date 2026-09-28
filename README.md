@@ -32,6 +32,8 @@ Markdown proposal or a focused fix with relevant test evidence.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
 [SUPPORT.md](SUPPORT.md) describes separate commercial services.
 
+Join the [FTW Discord](https://discord.gg/UK2ygPBu8N) for questions and community discussions.
+
 ## Architecture
 
 FTW has three explicit modules:
