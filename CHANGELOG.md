@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.138.1
+
+### Patch Changes
+
+- a2cbfb5: Rename the charger settings labels to "Min power (W)" and "Max power (W)" to make clear that they set power limits.
+- 251bea5: Bundle Pixii 2.1.6 so an unsupported or unknown charge status cannot clear a
+  known calibration fault. Keep battery and meter readings available while
+  reporting the missing status.
+- 833edfa: Use the same battery power limits for planning and control. When a power limit
+  is missing, both use the existing 5 kW control default instead of planning at
+  half the battery's energy capacity. Keep configured limits and one-sided zero
+  limits in both paths.
+- da0002a: Update Energyplan to 0.4.9 for faster planning on supported multi-battery sites,
+  more accurate joint EV charging costs and validated reuse of prior plans.
+  Negotiate published prices with the worker while keeping older workers usable.
+  Core still validates every candidate before dispatch.
+
 ## 0.138.0
 
 ### Minor Changes
