@@ -16,49 +16,46 @@ import (
 // null, never invented zeros. The client owns prose; reasons describe only
 // what Core or the device actually reported, not a guessed physical cause.
 type ControlFeedback struct {
-	SiteBeforeW      *float64 `json:"site_before_w"`
-	SiteAfterW       *float64 `json:"site_after_w"`
-	SiteBeforeAtMs   int64    `json:"site_before_at_ms,omitempty"`
-	SiteAfterAtMs    int64    `json:"site_after_at_ms,omitempty"`
-	ToleranceW       *float64 `json:"tolerance_w"`
-	VerificationTier *int     `json:"verification_tier"`
-	SiteConfirmation string   `json:"site_confirmation"`
-	SiteMeter        string   `json:"site_meter,omitempty"`
-	SiteDeltaW       *float64 `json:"site_delta_w"`
-	DeviceDeltaW     *float64 `json:"device_delta_w"`
-	Response         string   `json:"response"`
-	VerifiedAtMs     int64    `json:"verified_at_ms,omitempty"`
-	Driver           string   `json:"driver"`
-	Kind             string   `json:"kind"`
-	Mode             string   `json:"mode"`
-	State            string   `json:"state"`
-	Reason           string   `json:"reason"`
-	Severity         string   `json:"severity"`
-	RequestedW       *float64 `json:"requested_w"`
-	SentW            *float64 `json:"sent_w"`
-	ReadbackW        *float64 `json:"readback_w"`
-	ActualW          *float64 `json:"actual_w"`
-	RequestedA       *float64 `json:"requested_a"`
-	OfferedA         *float64 `json:"offered_a"`
-	DeviceLimitA     *float64 `json:"device_limit_a"`
-	DeviceReason     string   `json:"device_reason,omitempty"`
-	SinceMs          int64    `json:"since_ms,omitempty"`
-	CommandAtMs      int64    `json:"command_at_ms,omitempty"`
-	ObservedAtMs     int64    `json:"observed_at_ms,omitempty"`
+	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
+	SiteBeforeW      *float64           `json:"site_before_w"`
+	SiteAfterW       *float64           `json:"site_after_w"`
+	SiteBeforeAtMs   int64              `json:"site_before_at_ms,omitempty"`
+	SiteAfterAtMs    int64              `json:"site_after_at_ms,omitempty"`
+	ToleranceW       *float64           `json:"tolerance_w"`
+	VerificationTier *int               `json:"verification_tier"`
+	SiteConfirmation string             `json:"site_confirmation"`
+	SiteMeter        string             `json:"site_meter,omitempty"`
+	SiteDeltaW       *float64           `json:"site_delta_w"`
+	DeviceDeltaW     *float64           `json:"device_delta_w"`
+	Response         string             `json:"response"`
+	VerifiedAtMs     int64              `json:"verified_at_ms,omitempty"`
+	Driver           string             `json:"driver"`
+	Kind             string             `json:"kind"`
+	Mode             string             `json:"mode"`
+	State            string             `json:"state"`
+	Reason           string             `json:"reason"`
+	Severity         string             `json:"severity"`
+	RequestedW       *float64           `json:"requested_w"`
+	SentW            *float64           `json:"sent_w"`
+	ReadbackW        *float64           `json:"readback_w"`
+	ActualW          *float64           `json:"actual_w"`
+	RequestedA       *float64           `json:"requested_a"`
+	OfferedA         *float64           `json:"offered_a"`
+	DeviceLimitA     *float64           `json:"device_limit_a"`
+	DeviceReason     string             `json:"device_reason,omitempty"`
+	SinceMs          int64              `json:"since_ms,omitempty"`
+	CommandAtMs      int64              `json:"command_at_ms,omitempty"`
+	ObservedAtMs     int64              `json:"observed_at_ms,omitempty"`
 }
 
 type feedbackReading struct {
-	SetpointW             *float64 `json:"setpoint_w"`
-	MaxA                  *float64 `json:"max_a"`
-	DeviceLimitA          *float64 `json:"device_limit_a"`
-	DeviceLimitAgeS       *float64 `json:"device_limit_age_s"`
-	ControlPowerW         *float64 `json:"control_power_w"`
-	ControlPowerAvailable *bool    `json:"control_power_available"`
-	Reason                string   `json:"reason_no_current_label"`
-	Connected             *bool    `json:"connected"`
-	Online                *bool    `json:"is_online"`
-	PowerObservedAt       string   `json:"power_observed_at"`
-	PowerMaxAgeS          float64  `json:"power_max_age_s"`
+	SetpointW       *float64 `json:"setpoint_w"`
+	MaxA            *float64 `json:"max_a"`
+	DeviceLimitA    *float64 `json:"device_limit_a"`
+	DeviceLimitAgeS *float64 `json:"device_limit_age_s"`
+	Reason          string   `json:"reason_no_current_label"`
+	Connected       *bool    `json:"connected"`
+	Online          *bool    `json:"is_online"`
 }
 
 func watts(v float64) *float64 {
@@ -129,26 +126,14 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if d.Online != nil && !*d.Online {
 				fresh = false
 			}
-			if d.PowerObservedAt != "" {
-				at, err := time.Parse(time.RFC3339Nano, d.PowerObservedAt)
-				maxAge := time.Duration(d.PowerMaxAgeS * float64(time.Second))
-				if maxAge <= 0 || maxAge > 3*time.Minute {
-					maxAge = time.Minute
-				}
-				fresh = fresh && err == nil && !at.After(now) && now.Sub(at) <= maxAge
-				if err == nil {
-					f.ObservedAtMs = at.UnixMilli()
-				}
+			measurement, powerKnown := telemetry.ControlPowerObservation(rd.RawW, rd.Data, rd.UpdatedAt)
+			if !measurement.At.IsZero() {
+				f.ObservedAtMs = measurement.At.UnixMilli()
 			}
-			if fresh {
-				f.ActualW = watts(rd.RawW)
-				if d.ControlPowerW != nil {
-					f.ActualW = d.ControlPowerW
-				}
-				if d.ControlPowerAvailable != nil && !*d.ControlPowerAvailable {
-					f.ActualW = nil
-				}
+			if fresh && powerKnown && now.Sub(measurement.At) <= time.Minute {
+				f.ActualW = watts(measurement.PowerW)
 			}
+
 			if commanded {
 				f.SentW, f.RequestedW = cmd.PowerW, cmd.PowerW
 				if cmd.PowerW != nil {
@@ -199,24 +184,26 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			}
 			f.SiteConfirmation = "device_response_unconfirmed"
 			if f.VerificationTier != nil && *f.VerificationTier == 1 {
-				from := now.Add(-12 * time.Second)
-				if cmd.PowerMatchSince.After(from) {
-					from = cmd.PowerMatchSince
+				from := now.Add(-telemetry.ControlWindowDuration)
+				if cmd.Since.After(from) {
+					from = cmd.Since
 				}
 				f.SiteMeter = meter
 				after := s.deps.Tel.ControlWindows(from, now)
-				f.SiteConfirmation, f.DeviceDeltaW, f.SiteDeltaW = independentResponse(cmd, meter, s.separateMeterSource(rd.Driver, meter), after, now)
+				comparison := independentResponse(cmd, meter, s.separateMeterSource(rd.Driver, meter), after, now)
+				if !s.controlSourcesComplete(after, now) {
+					comparison = ControlComparison{Reason: "measurement_sources_unclear"}
+				}
+				f.SiteEvidence = &comparison
+				f.SiteConfirmation, f.DeviceDeltaW, f.SiteDeltaW = comparison.Reason, comparison.DeviceDeltaW, comparison.SiteDeltaW
 				if f.SiteDeltaW != nil {
-					before := cmd.Baseline[meter+":meter"].Window
-					current := after[meter+":meter"].Window
-					f.SiteBeforeW = watts(before.MeanW)
-					f.SiteAfterW = watts(current.MeanW)
-					f.SiteBeforeAtMs = before.Last.UnixMilli()
-					f.SiteAfterAtMs = current.Last.UnixMilli()
+					f.SiteBeforeW, f.SiteAfterW = watts(comparison.BeforeW), watts(comparison.AfterW)
+					f.SiteBeforeAtMs, f.SiteAfterAtMs = comparison.BeforeAt.UnixMilli(), comparison.AfterAt.UnixMilli()
 				}
 				if h := s.deps.Tel.DriverHealth(meter); h == nil || !h.TelemetryLive() || h.DeviceFault || blocked != "" {
 					f.SiteConfirmation = "waiting_for_meter"
 					f.SiteDeltaW, f.SiteBeforeW, f.SiteAfterW = nil, nil, nil
+					f.SiteEvidence = nil
 				}
 				if f.SiteConfirmation == "confirmed" {
 					tier := 2

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { feedbackText,feedbackPower,feedbackProof,feedbackRows,feedbackValues,feedbackSite } from './control-feedback.js';
+import { feedbackText,feedbackPower,feedbackProof,feedbackRows,feedbackValues,feedbackSite,feedbackCurve } from './control-feedback.js';
 
 test('command acknowledgement, device measurement and site confirmation stay distinct',()=>{
  const row={driver:'battery',kind:'battery',reason:'power_observed',response:'device_reported'};
@@ -30,4 +30,12 @@ test('known charger limits do not disappear while power flows',()=>{
  assert.match(text.detail,/charger’s own current limit/);
  const values=feedbackValues({requested_a:16,device_limit_a:8,actual_w:5500,kind:'ev'});
  assert.deepEqual(values.find(v=>v[0]==='Charger limit'),['Charger limit','8.0 A']);
+});
+
+test('curve evidence expires with status and rejects invalid samples',()=>{
+ const row={driver:'battery',reason:'power_observed',site_evidence:{trace:[0,1,2].map(i=>({at_ms:1000+i*5000,device_change_w:i*500,adjusted_site_change_w:i*500+10}))}};
+ assert.match(feedbackCurve(row).label,/10 seconds/);
+ assert.equal(feedbackCurve(row,false),null);
+ row.site_evidence.trace[1].device_change_w=NaN;
+ assert.equal(feedbackCurve(row),null);
 });

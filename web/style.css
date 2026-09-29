@@ -2313,3 +2313,7 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 
 .control-proof[data-tier="2"] { color: var(--green); }
 .control-proof[data-tier="1"] { color: var(--cyan); }
+.control-curve { width: 100%; max-height: 160px; }
+.control-curve .zero { stroke: var(--border); stroke-width: 1; }
+.control-curve .device { stroke: var(--cyan); stroke-width: 3; }
+.control-curve .site { stroke: var(--green); stroke-width: 2; stroke-dasharray: 5 4; }

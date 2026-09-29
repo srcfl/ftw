@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func TestControlWindowsAreBoundedAndMissingDataBreaksProof(t *testing.T) {
 		s.recordControlObservation("battery", DerBattery, 1000, []byte(`{}`), now.Add(time.Duration(i)*time.Second))
 	}
 	points := s.controlObservations["battery:battery"]
-	if len(points) != 32 {
+	if len(points) != 64 {
 		t.Fatalf("unbounded series: %d", len(points))
 	}
 	at := now.Add(999 * time.Second)
@@ -55,5 +56,28 @@ func TestProofDoesNotDependOnStatusPolling(t *testing.T) {
 	got, _ = s.CommandEvidence("battery", "battery")
 	if got.PowerMatchSince.IsZero() || got.LastObservation.Sub(got.PowerMatchSince) < 10*time.Second {
 		t.Fatal("no proof without an API poll")
+	}
+}
+
+func TestControlPowerKeepsCloudAndOCPPSourceTimes(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	old := now.Add(-20 * time.Second)
+	cases := []struct {
+		name, data string
+		known      bool
+		at         time.Time
+	}{
+		{"cloud replay", `{"control_power_observed_at":"` + old.Format(time.RFC3339Nano) + `"}`, true, old},
+		{"unavailable", `{"control_power_available":false}`, false, now},
+		{"OCPP status replay", fmt.Sprintf(`{"forecast_power":{"version":1,"known":true,"watts":1000,"measured_at_ms":%d,"received_at_ms":%d}}`, old.UnixMilli(), old.UnixMilli()), true, old},
+		{"OCPP no meter yet", `{"forecast_power":{"version":1,"known":false}}`, false, now},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, known := ControlPowerObservation(1000, []byte(tc.data), now)
+			if known != tc.known || !p.At.Equal(tc.at) {
+				t.Fatalf("%+v known=%v", p, known)
+			}
+		})
 	}
 }

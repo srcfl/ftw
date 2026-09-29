@@ -65,6 +65,16 @@ export function feedbackValues(row, live = true) {
   if (number(row.site_after_w)) values.push(['Site after command', live ? grid(row.site_after_w) : 'Not current']);
   if (number(row.device_delta_w)) values.push(['Device change', live ? `${(Math.abs(row.device_delta_w)/1000).toFixed(2)} kW ${row.device_delta_w < 0 ? "less" : "more"} site demand` : 'Not current']);
   if (number(row.site_delta_w)) values.push(['Site change', live ? `${(Math.abs(row.site_delta_w)/1000).toFixed(2)} kW ${row.site_delta_w < 0 ? 'less' : 'more'} import` : 'Not current']);
+  const e = row.site_evidence;
+  if (e && live) {
+    const change = value => `${(Math.abs(value)/1000).toFixed(2)} kW ${value < 0 ? 'less' : 'more'} site demand`;
+    for (const [label,key] of [['Other measured flows','other_change_w'],['Site after adjustment','adjusted_site_change_w'],['Unexplained change','unexplained_change_w']]) {
+      if (number(e[key])) values.push([label, change(e[key])]);
+    }
+    if (number(e.samples) && e.samples > 0) values.push(['Comparison',`${e.samples} samples across ${Math.round(e.window_s)} s`]);
+    if (number(e.tolerance_w) && e.tolerance_w > 0) values.push(['Site tolerance',`${Math.round(e.tolerance_w)} W`]);
+    if (number(e.max_skew_ms)) values.push(['Largest time gap',`${(e.max_skew_ms/1000).toFixed(1)} s`]);
+  }
   return values;
 }
 export function feedbackProof(row, live = true) {
@@ -77,19 +87,33 @@ export function feedbackProof(row, live = true) {
 export function feedbackSite(row, live = true) {
   if (!live) return 'Waiting for fresh measurements.';
   const text = {
-    confirmed: 'A separate site meter shows the matching power change while other monitored flows stayed steady.',
+    confirmed: 'A separate site meter follows the device’s change across several samples, after accounting for other measured flows.',
     independent_source_unknown: 'Independent confirmation needs a separate, identified meter. These sources do not establish that.',
     no_site_meter: 'No site meter is available for independent confirmation.',
     no_baseline: 'No steady reading before the command is available for a site comparison.',
     waiting_for_meter: 'Waiting for a fresh, stable site-meter window.',
-    readings_not_aligned: 'Device and site readings are too far apart in time to compare.',
+    readings_not_aligned: 'There are not enough distinct, time-aligned measurements to compare the curves.',
     flows_changing: 'Power is changing during the comparison. Independent confirmation remains uncertain.',
     no_clear_change: 'The change is too small to distinguish from other site activity.',
     other_flows_changed: 'Other equipment changed or its readings are missing. FTW cannot isolate this response.',
+    other_flows_missing: 'Another measured flow is missing or stale. FTW cannot account for its effect on the site.',
+    measurement_sources_unclear: 'Some site measurement sources are missing or may overlap. Independent confirmation remains uncertain.',
+    energy_balance_conflict: 'The readings do not form a plausible site power balance. Check measurement sources, signs and shared flows.',
     site_change_differs: 'The site-meter change does not match. Another household load may have changed; the cause is not confirmed.',
     device_response_unconfirmed: 'Independent confirmation waits for the device’s measured response.',
   };
   return text[row.site_confirmation] || 'Independent confirmation is not available.';
+}
+
+export function feedbackCurve(row, live = true) {
+  const trace = row.site_evidence?.trace;
+  if (!live || !Array.isArray(trace) || trace.length < 3 || trace.length > 64) return null;
+  if (!trace.every(p => p && number(p.at_ms) && number(p.device_change_w) && number(p.adjusted_site_change_w))) return null;
+  const start=trace[0].at_ms, span=trace[trace.length-1].at_ms-start;
+  if (span <= 0 || trace.some((p,i) => i > 0 && p.at_ms <= trace[i-1].at_ms)) return null;
+  const scale=Math.max(500,...trace.flatMap(p=>[Math.abs(p.device_change_w),Math.abs(p.adjusted_site_change_w)]));
+  const line=key=>trace.map(p=>`${(10+(p.at_ms-start)/span*260).toFixed(1)},${(55-p[key]/scale*40).toFixed(1)}`).join(' ');
+  return {device:line('device_change_w'),site:line('adjusted_site_change_w'),label:`Measured changes over ${(span/1000).toFixed(0)} seconds. Device: solid line. Site after other measured flows: dashed line.`,scale:`${(scale/1000).toFixed(1)} kW`,duration:`${Math.round(span/1000)} s`};
 }
 
 // On-box renderer. The app uses the same presentation functions in Svelte.
@@ -117,6 +141,15 @@ export function renderFeedback(root, value, live = true) {
     el('summary','Request and measurements',details);
     const dl=el('dl','',details);
     for (const [label,value] of feedbackValues(row,live)) {el('dt',label,dl);el('dd',value,dl);}
+    const curve=feedbackCurve(row,live);
+    if (curve) {
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svg.setAttribute('viewBox','0 0 280 110'); svg.setAttribute('role','img'); svg.setAttribute('aria-label',curve.label); svg.classList.add('control-curve'); details.appendChild(svg);
+      for (const [points,cls] of [['10,55 270,55','zero'],[curve.device,'device'],[curve.site,'site']]) {
+        const line=document.createElementNS(svg.namespaceURI,'polyline'); line.setAttribute('points',points); line.setAttribute('class',cls); line.setAttribute('fill','none'); svg.appendChild(line);
+      }
+      el('p',`Device: solid · Adjusted site: dashed · ±${curve.scale} · ${curve.duration}`,details,'control-time');
+    }
     if (live && row.site_meter && number(row.site_after_at_ms)) el('p',`Site meter: ${row.site_meter} · ${new Date(row.site_after_at_ms).toLocaleTimeString()}`,details,'control-time');
     if (number(row.observed_at_ms)) el('p',`Last reading: ${new Date(row.observed_at_ms).toLocaleTimeString()}`,details,'control-time');
   }

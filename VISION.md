@@ -68,6 +68,19 @@ as independent proof. Missing, stale or conflicting data lowers confidence;
 never smooth it into a successful result. Confirmation expires when its
 supporting readings stop being current.
 
+Treat each command as a chance to observe the whole site. Keep a short window
+before it and follow the measured curves afterwards. Subtract other measured
+flows from grid power before comparing the change with the controlled device.
+Changing solar need not prevent confirmation when its measured contribution
+explains the grid change. Unknown household loads remain an uncertainty:
+matching averages alone must not hide a load starting and stopping.
+
+Use the fastest useful fresh measurements the sources safely provide. A short
+burst around a command may help when the driver supports it, but must respect
+device limits and vendor quotas, preserve command priority and end on its own.
+Polling a cloud cache faster is not faster measurement. Never change a power
+target just to create a test signal without the owner's explicit consent.
+
 Keep success at each step separate. If a user asks for 11 kW, Core permits
 5 kW and the meter shows 5 kW, the device follows the sent command but the
 user's request remains limited. A charging goal needs its own completion

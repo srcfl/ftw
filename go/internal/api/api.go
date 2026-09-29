@@ -73,6 +73,9 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
+	// SiteMeasurementSources reuses the configured physical-flow inventory.
+	// These are source declarations, never forecast values or derived load.
+	SiteMeasurementSources func() telemetry.ForecastOptions
 
 	// MutationPolicy protects every state-changing route at the shared
 	// Handler boundary. Production requires tokens for non-local hostnames;

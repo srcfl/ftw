@@ -21,49 +21,28 @@ type ControlBaseline struct {
 	Driver string
 	Kind   DerType
 	Window ControlWindow
+	Points []ControlObservation
 }
 
-// Caller holds mu. At most one point per second and 32 points per DER.
+const ControlWindowDuration = 20 * time.Second
+
+// Caller holds mu. At most one point per second and 64 points per DER.
 func (s *Store) recordControlObservation(driver string, kind DerType, power float64, data json.RawMessage, now time.Time) {
 	if kind == DerVehicle {
 		return
 	}
 	k := key(driver, kind)
 	invalidate := func() { delete(s.controlObservations, k) }
-	var d struct {
-		ControlPowerW         *float64 `json:"control_power_w"`
-		ControlPowerAvailable *bool    `json:"control_power_available"`
-		PowerObservedAt       string   `json:"power_observed_at"`
-	}
-	if len(data) > 0 && json.Unmarshal(data, &d) != nil {
+	p, known := ControlPowerObservation(power, data, now)
+	if !known || now.Sub(p.At) > 10*time.Second {
 		invalidate()
 		return
 	}
-	if d.ControlPowerAvailable != nil && !*d.ControlPowerAvailable {
-		invalidate()
-		return
-	}
-	if d.ControlPowerW != nil {
-		power = *d.ControlPowerW
-	}
-	if !finite(power) {
-		invalidate()
-		return
-	}
-	at := now
-	if d.PowerObservedAt != "" {
-		var err error
-		at, err = time.Parse(time.RFC3339Nano, d.PowerObservedAt)
-		if err != nil || at.After(now) || now.Sub(at) > 10*time.Second {
-			invalidate()
-			return
-		}
-	}
+	at := p.At
 	if s.controlObservations == nil {
 		s.controlObservations = map[string][]ControlObservation{}
 	}
 	points := s.controlObservations[k]
-	p := ControlObservation{power, at}
 	if len(points) > 0 && !at.After(points[len(points)-1].At) {
 		return
 	}
@@ -72,9 +51,9 @@ func (s *Store) recordControlObservation(driver string, kind DerType, power floa
 	} else {
 		points = append(points, p)
 	}
-	if len(points) > 32 {
-		copy(points, points[len(points)-32:])
-		points = points[:32]
+	if len(points) > 64 {
+		copy(points, points[len(points)-64:])
+		points = points[:64]
 	}
 	s.controlObservations[k] = points
 }
@@ -108,9 +87,10 @@ func (s *Store) controlBaseline(now time.Time) map[string]ControlBaseline {
 		if rd.DerType == DerVehicle {
 			continue
 		}
-		w := observationWindow(s.controlObservations[k], now.Add(-12*time.Second), now)
+		from := now.Add(-ControlWindowDuration)
+		w := observationWindow(s.controlObservations[k], from, now)
 		if w.Usable(now) {
-			result[k] = ControlBaseline{rd.Driver, rd.DerType, w}
+			result[k] = ControlBaseline{rd.Driver, rd.DerType, w, copyControlPoints(s.controlObservations[k], from, now)}
 		}
 	}
 	return result
@@ -123,7 +103,64 @@ func (s *Store) ControlWindows(from, now time.Time) map[string]ControlBaseline {
 		if rd.DerType == DerVehicle {
 			continue
 		}
-		result[k] = ControlBaseline{rd.Driver, rd.DerType, observationWindow(s.controlObservations[k], from, now)}
+		result[k] = ControlBaseline{rd.Driver, rd.DerType, observationWindow(s.controlObservations[k], from, now), copyControlPoints(s.controlObservations[k], from, now)}
 	}
 	return result
+}
+
+func copyControlPoints(points []ControlObservation, from, until time.Time) []ControlObservation {
+	var out []ControlObservation
+	for _, p := range points {
+		if !p.At.Before(from) && !p.At.After(until) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ControlPowerObservation preserves measurement time even when a cloud/status
+// poll is fresh. OCPP status frames and cached vendor observations are not new
+// power samples. Legacy local drivers retain their fresh-read receipt contract.
+func ControlPowerObservation(power float64, data json.RawMessage, receivedAt time.Time) (ControlObservation, bool) {
+	var d struct {
+		ControlPowerW          *float64             `json:"control_power_w"`
+		ControlPowerAvailable  *bool                `json:"control_power_available"`
+		ControlPowerObservedAt string               `json:"control_power_observed_at"`
+		PowerObservedAt        string               `json:"power_observed_at"`
+		PowerMaxAgeS           float64              `json:"power_max_age_s"`
+		ForecastPower          *ForecastPowerSample `json:"forecast_power"`
+	}
+	p := ControlObservation{PowerW: power, At: receivedAt}
+	if len(data) > 0 && json.Unmarshal(data, &d) != nil {
+		return p, false
+	}
+	if d.ControlPowerAvailable != nil && !*d.ControlPowerAvailable {
+		return p, false
+	}
+	if d.ForecastPower != nil {
+		f := d.ForecastPower
+		if f.Version != 1 || !f.Known || f.MeasuredAtMS <= 0 || f.ReceivedAtMS < f.MeasuredAtMS || f.ReceivedAtMS > receivedAt.UnixMilli() {
+			return p, false
+		}
+		p.PowerW, p.At = f.Watts, time.UnixMilli(f.MeasuredAtMS)
+	}
+	if d.ControlPowerW != nil {
+		p.PowerW = *d.ControlPowerW
+	}
+	stamp := d.PowerObservedAt
+	if d.ControlPowerObservedAt != "" {
+		stamp = d.ControlPowerObservedAt
+	}
+	if stamp != "" {
+		at, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil {
+			return p, false
+		}
+		p.At = at
+	}
+	age := time.Duration(d.PowerMaxAgeS * float64(time.Second))
+	if age <= 0 || age > 3*time.Minute {
+		age = time.Minute
+	}
+	return p, finite(p.PowerW) && !p.At.After(receivedAt) && receivedAt.Sub(p.At) <= age
 }

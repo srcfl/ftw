@@ -2,75 +2,235 @@ package api
 
 import (
 	"math"
+	"sort"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// Tier 2 compares a measured change, never a command with an absolute grid
-// reading. Derived house load would make the check circular and is not used.
-// This is corroboration under steady monitored flows, not proof of exclusive
-// ownership or of what every unmetered household appliance did.
-func independentResponse(cmd telemetry.CommandEvidence, meter string, separate bool, after map[string]telemetry.ControlBaseline, now time.Time) (string, *float64, *float64) {
+type ControlResponsePoint struct {
+	AtMS    int64   `json:"at_ms"`
+	DeviceW float64 `json:"device_change_w"`
+	SiteW   float64 `json:"adjusted_site_change_w"`
+}
+
+// ControlComparison keeps the measured correction and residual visible. It does
+// not estimate which household appliance changed or assign a confidence score.
+type ControlComparison struct {
+	BeforeW        float64                `json:"-"`
+	AfterW         float64                `json:"-"`
+	BeforeAt       time.Time              `json:"-"`
+	AfterAt        time.Time              `json:"-"`
+	Reason         string                 `json:"-"`
+	DeviceDeltaW   *float64               `json:"-"`
+	SiteDeltaW     *float64               `json:"-"`
+	OtherDeltaW    *float64               `json:"other_change_w"`
+	AdjustedDeltaW *float64               `json:"adjusted_site_change_w"`
+	ResidualW      *float64               `json:"unexplained_change_w"`
+	ToleranceW     float64                `json:"tolerance_w"`
+	Samples        int                    `json:"samples"`
+	WindowS        float64                `json:"window_s"`
+	MaxSkewMS      int64                  `json:"max_skew_ms"`
+	Trace          []ControlResponsePoint `json:"trace,omitempty"`
+}
+
+type alignedControlPoint struct {
+	at                  time.Time
+	device, grid, other float64
+	skew                time.Duration
+}
+
+// Compare the shape of grid-minus-other-measured-flows with the device's own
+// curve. The command never supplies a measured watt. A before-command baseline
+// is the hypothesis to test, not a derived house-load value reused as evidence.
+func independentResponse(cmd telemetry.CommandEvidence, meter string, separate bool, after map[string]telemetry.ControlBaseline, now time.Time) ControlComparison {
+	out := ControlComparison{}
+	stop := func(reason string) ControlComparison { out.Reason = reason; return out }
 	if meter == "" {
-		return "no_site_meter", nil, nil
+		return stop("no_site_meter")
 	}
 	if cmd.Driver == meter || !separate {
-		return "independent_source_unknown", nil, nil
+		return stop("independent_source_unknown")
 	}
-	beforeDevice, okD := cmd.Baseline[cmd.Driver+":"+cmd.Kind]
-	beforeMeter, okM := cmd.Baseline[meter+":meter"]
-	device, okAD := after[cmd.Driver+":"+cmd.Kind]
-	grid, okAM := after[meter+":meter"]
-	if !okD || !okM {
-		return "no_baseline", nil, nil
+	target := cmd.Driver + ":" + cmd.Kind
+	gridKey := meter + ":meter"
+	if _, ok := cmd.Baseline[target]; !ok {
+		return stop("no_baseline")
 	}
-	if !okAD || !okAM || !device.Window.Usable(now) || !grid.Window.Usable(now) {
-		return "waiting_for_meter", nil, nil
+	if _, ok := cmd.Baseline[gridKey]; !ok {
+		return stop("no_baseline")
 	}
-	if grid.Window.First.Before(cmd.Since) || device.Window.First.Before(cmd.Since) {
-		return "waiting_for_meter", nil, nil
+	keys := []string{target}
+	for k, flow := range after {
+		if flow.Kind == telemetry.DerMeter || flow.Kind == telemetry.DerVehicle {
+			continue
+		}
+		if flow.Kind == telemetry.DerEV {
+			if _, duplicate := after[flow.Driver+":"+telemetry.DerV2X.String()]; duplicate {
+				return stop("measurement_sources_unclear")
+			}
+		}
+		if _, ok := cmd.Baseline[k]; !ok {
+			return stop("other_flows_missing")
+		}
+		if k != target {
+			keys = append(keys, k)
+		}
 	}
-	if math.Abs(grid.Window.Last.Sub(device.Window.Last).Seconds()) > 5 || math.Abs(beforeMeter.Window.Last.Sub(beforeDevice.Window.Last).Seconds()) > 5 {
-		return "readings_not_aligned", nil, nil
+	for k, flow := range cmd.Baseline {
+		if flow.Kind == telemetry.DerVehicle || (flow.Kind == telemetry.DerMeter && k != gridKey) {
+			continue
+		}
+		current, ok := after[k]
+		if !ok || !current.Window.Usable(now) {
+			return stop("other_flows_missing")
+		}
+		if current.Window.First.Before(cmd.Since) {
+			return stop("waiting_for_meter")
+		}
 	}
-	stable := func(w telemetry.ControlWindow) bool { return w.MaxW-w.MinW <= 200 }
-	if !stable(beforeDevice.Window) || !stable(beforeMeter.Window) || !stable(device.Window) || !stable(grid.Window) {
-		return "flows_changing", nil, nil
+	sort.Strings(keys)
+	before := alignControlPoints(cmd.Baseline, gridKey, target, keys)
+	current := alignControlPoints(after, gridKey, target, keys)
+	if len(before) < 3 || len(current) < 3 {
+		return stop("readings_not_aligned")
 	}
-	deltaDevice := device.Window.MeanW - beforeDevice.Window.MeanW
-	deltaGrid := grid.Window.MeanW - beforeMeter.Window.MeanW
+	if before[len(before)-1].at.Sub(before[0].at) < 8*time.Second || current[len(current)-1].at.Sub(current[0].at) < 8*time.Second {
+		return stop("waiting_for_meter")
+	}
+	if now.Sub(current[len(current)-1].at) > 10*time.Second {
+		return stop("waiting_for_meter")
+	}
+	values := func(points []alignedControlPoint, f func(alignedControlPoint) float64) []float64 {
+		v := make([]float64, len(points))
+		for i, p := range points {
+			v[i] = f(p)
+		}
+		return v
+	}
+	device := func(p alignedControlPoint) float64 { return p.device }
+	grid := func(p alignedControlPoint) float64 { return p.grid }
+	other := func(p alignedControlPoint) float64 { return p.other }
+	adjusted := func(p alignedControlPoint) float64 { return p.grid - p.other }
+	residual := func(p alignedControlPoint) float64 { return p.grid - p.other - p.device }
+	baseDevice := meanControlPower(values(before, device))
+	baseAdjusted := meanControlPower(values(before, adjusted))
+	baseResidual := meanControlPower(values(before, residual))
+	// A moving household baseline or moving actuator cannot identify this step.
+	if spread(values(before, residual)) > 200 || spread(values(before, device)) > 200 {
+		return stop("flows_changing")
+	}
+	deltaDevice := meanControlPower(values(current, device)) - baseDevice
+	out.BeforeW, out.AfterW = meanControlPower(values(before, grid)), meanControlPower(values(current, grid))
+	out.BeforeAt, out.AfterAt = before[len(before)-1].at, current[len(current)-1].at
+	out.DeviceDeltaW = watts(deltaDevice)
+	out.SiteDeltaW = watts(out.AfterW - out.BeforeW)
+	out.OtherDeltaW = watts(meanControlPower(values(current, other)) - meanControlPower(values(before, other)))
+	out.AdjustedDeltaW = watts(meanControlPower(values(current, adjusted)) - baseAdjusted)
+	out.ResidualW = watts(meanControlPower(values(current, residual)) - baseResidual)
+	out.ToleranceW = math.Max(150, math.Abs(deltaDevice)*0.15)
+	out.Samples = len(current)
+	out.WindowS = current[len(current)-1].at.Sub(current[0].at).Seconds()
+	for _, p := range before {
+		if p.skew.Milliseconds() > out.MaxSkewMS {
+			out.MaxSkewMS = p.skew.Milliseconds()
+		}
+	}
+	// All points must support the same change. Means alone could hide a household
+	// load starting and stopping inside the window. Do not widen tolerance to fit it.
+	matches := true
+	for _, p := range current {
+		out.Trace = append(out.Trace, ControlResponsePoint{p.at.UnixMilli(), p.device - baseDevice, p.grid - p.other - baseAdjusted})
+		if p.skew.Milliseconds() > out.MaxSkewMS {
+			out.MaxSkewMS = p.skew.Milliseconds()
+		}
+		if math.Abs(residual(p)-baseResidual) > out.ToleranceW {
+			matches = false
+		}
+	}
+	// Negative unmetered consumption beyond measurement tolerance exposes a
+	// missing/duplicated source or incompatible boundaries; it cannot prove control.
+	if baseResidual < -200 {
+		return stop("energy_balance_conflict")
+	}
+	for _, p := range current {
+		if residual(p) < -200 {
+			return stop("energy_balance_conflict")
+		}
+	}
 	if math.Abs(deltaDevice) < 500 {
-		return "no_clear_change", watts(deltaDevice), watts(deltaGrid)
+		return stop("no_clear_change")
 	}
-	// Every other monitored flow needs a stable before/after window. A missing
-	// stream, a new device or a changing PV/battery/EV invalidates attribution.
-	otherChange := 0.0
-	for k, other := range after {
-		if other.Kind == telemetry.DerMeter || other.Kind == telemetry.DerVehicle || k == cmd.Driver+":"+cmd.Kind {
+	if !matches {
+		return stop("site_change_differs")
+	}
+	return stop("confirmed")
+}
+
+// Use only distinct real samples. Never interpolate a missing transition or
+// reuse a slow source to manufacture a dense curve. Bound skew across ALL flows,
+// not just target and grid, because moving solar makes stale alignment unsafe.
+func alignControlPoints(series map[string]telemetry.ControlBaseline, gridKey, target string, keys []string) []alignedControlPoint {
+	var out []alignedControlPoint
+	used := map[string]time.Time{}
+	for _, g := range series[gridKey].Points {
+		p := alignedControlPoint{at: g.At, grid: g.PowerW}
+		first, last := g.At, g.At
+		chosen := map[string]telemetry.ControlObservation{}
+		for _, k := range keys {
+			var nearest telemetry.ControlObservation
+			distance := 3 * time.Second
+			for _, v := range series[k].Points {
+				d := v.At.Sub(g.At)
+				if d < 0 {
+					d = -d
+				}
+				if d < distance {
+					nearest, distance = v, d
+				}
+			}
+			if nearest.At.IsZero() || distance > 2*time.Second || !nearest.At.After(used[k]) {
+				break
+			}
+			chosen[k] = nearest
+			if nearest.At.Before(first) {
+				first = nearest.At
+			}
+			if nearest.At.After(last) {
+				last = nearest.At
+			}
+			if k == target {
+				p.device = nearest.PowerW
+			} else {
+				p.other += nearest.PowerW
+			}
+		}
+		if len(chosen) != len(keys) || last.Sub(first) > 2*time.Second {
 			continue
 		}
-		base, ok := cmd.Baseline[k]
-		if !ok || !other.Window.Usable(now) || !stable(base.Window) || !stable(other.Window) || math.Abs(other.Window.MeanW-base.Window.MeanW) > 100 {
-			return "other_flows_changed", watts(deltaDevice), watts(deltaGrid)
-		}
-		otherChange += math.Abs(other.Window.MeanW - base.Window.MeanW)
-	}
-	if otherChange > 150 {
-		return "other_flows_changed", watts(deltaDevice), watts(deltaGrid)
-	}
-	for k, base := range cmd.Baseline {
-		if base.Kind == telemetry.DerMeter || base.Kind == telemetry.DerVehicle {
-			continue
-		}
-		if _, ok := after[k]; !ok {
-			return "other_flows_changed", watts(deltaDevice), watts(deltaGrid)
+		p.skew = last.Sub(first)
+		out = append(out, p)
+		for k, v := range chosen {
+			used[k] = v.At
 		}
 	}
-	if math.Abs(deltaGrid-deltaDevice) > math.Max(250, math.Abs(deltaDevice)*0.15) {
-		return "site_change_differs", watts(deltaDevice), watts(deltaGrid)
+	return out
+}
+func meanControlPower(values []float64) float64 {
+	total := 0.0
+	for _, value := range values {
+		total += value
 	}
-	return "confirmed", watts(deltaDevice), watts(deltaGrid)
+	return total / float64(len(values))
+}
+
+func spread(values []float64) float64 {
+	lo, hi := values[0], values[0]
+	for _, v := range values {
+		lo = math.Min(lo, v)
+		hi = math.Max(hi, v)
+	}
+	return hi - lo
 }
 
 func (s *Server) separateMeterSource(driver, meter string) bool {
@@ -84,6 +244,40 @@ func (s *Server) separateMeterSource(driver, meter string) bool {
 			a.DeviceID = c.Vendor + ":" + c.Serial
 		}
 	}
-	// Endpoint or configured name alone does not establish two physical meters.
 	return a.Serial != "" && b.Serial != "" && a.Serial != b.Serial && a.DeviceID != "" && b.DeviceID != "" && a.DeviceID != b.DeviceID
+}
+
+func (s *Server) controlSourcesComplete(flows map[string]telemetry.ControlBaseline, now time.Time) bool {
+	if s.deps.SiteMeasurementSources == nil {
+		return false
+	}
+	opts := s.deps.SiteMeasurementSources()
+	if opts.HouseholdInvalidReason != "" || opts.PVInvalidReason != "" {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, f := range opts.ExpectedFlows {
+		if f.DerType == telemetry.DerVehicle || f.DerType == telemetry.DerMeter {
+			continue
+		}
+		if f.FlowID != "" {
+			if seen[f.FlowID] {
+				return false
+			}
+			seen[f.FlowID] = true
+		}
+		r, ok := flows[f.Driver+":"+f.DerType.String()]
+		if !ok || !r.Window.Usable(now) {
+			return false
+		}
+	}
+	for _, f := range flows {
+		if f.Kind == telemetry.DerMeter || f.Kind == telemetry.DerVehicle {
+			continue
+		}
+		if !s.deps.Tel.DriverHealth(f.Driver).TelemetryLive() {
+			return false
+		}
+	}
+	return true
 }

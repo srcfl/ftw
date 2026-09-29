@@ -108,6 +108,7 @@ func (s *Store) CommandEvidence(driver, kind string) (CommandEvidence, bool) {
 	if c.Baseline != nil {
 		copied := make(map[string]ControlBaseline, len(c.Baseline))
 		for k, v := range c.Baseline {
+			v.Points = append([]ControlObservation(nil), v.Points...)
 			copied[k] = v
 		}
 		c.Baseline = copied
@@ -157,11 +158,7 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 		return
 	}
 	var d struct {
-		SetpointW             *float64 `json:"setpoint_w"`
-		ControlPowerW         *float64 `json:"control_power_w"`
-		ControlPowerAvailable *bool    `json:"control_power_available"`
-		PowerObservedAt       string   `json:"power_observed_at"`
-		PowerMaxAgeS          float64  `json:"power_max_age_s"`
+		SetpointW *float64 `json:"setpoint_w"`
 	}
 	if json.Unmarshal(data, &d) != nil {
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
@@ -186,20 +183,8 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 		}
 	}
 	mark(&c.ReadbackMismatchSince, d.SetpointW != nil && finite(*d.SetpointW) && readbackGap > math.Max(100, math.Abs(*c.PowerW)*0.05), now)
-	if d.ControlPowerW != nil {
-		power = *d.ControlPowerW
-	}
-	fresh := d.ControlPowerAvailable == nil || *d.ControlPowerAvailable
-	observedAt := now
-	if d.PowerObservedAt != "" {
-		at, err := time.Parse(time.RFC3339Nano, d.PowerObservedAt)
-		age := time.Duration(d.PowerMaxAgeS * float64(time.Second))
-		if age <= 0 || age > 3*time.Minute {
-			age = time.Minute
-		}
-		fresh = fresh && err == nil && !at.After(now) && now.Sub(at) <= age
-		observedAt = at
-	}
+	observation, fresh := ControlPowerObservation(power, data, now)
+	power, observedAt := observation.PowerW, observation.At
 	// A cached sample from before the command cannot show its response. Repeated
 	// delivery of one source sample also cannot extend a measured time window.
 	if !fresh || !finite(power) || observedAt.Before(c.Since) {
