@@ -5,7 +5,8 @@ Do not install 3.x beta or use it as an intermediate upgrade.**
 
 Start with [Install and update FTW](native-beta.md)
 ([Svenska](setup-guide/update-sv.md)). It covers the old Docker installer,
-Forty Two Watts images, the Raspberry Pi SD image, 1.x/2.x/3.x, Home Assistant
+`ghcr.io/frahlg/forty-two-watts` images, the Raspberry Pi SD image,
+1.x/2.x/3.x, Home Assistant
 and older native services. New native and Docker setups are available now;
 guided migration of old settings and history is not ready.
 

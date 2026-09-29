@@ -21,7 +21,7 @@ on 64-bit Linux use the same release package.
 
 | What runs now | How to switch or update |
 |---|---|
-| Old Docker: 0.x up to 0.130.x, 1.x or 2.x, including Forty Two Watts images | [Switch from an older FTW](#coming-from-an-older-ftw). Use a new SD card/host, or separate Docker project and data. |
+| Old Docker: 0.x up to 0.130.x, 1.x or 2.x, including `ghcr.io/frahlg/forty-two-watts` images | [Switch from an older FTW](#coming-from-an-older-ftw). Use a new SD card/host, or separate Docker project and data. |
 | Docker 3.x, including beta | The same switch. No intermediate release and no further 3.x updates. |
 | The old ready-made FTW Raspberry Pi image | It runs old Docker. Use a second card with Raspberry Pi OS Lite 64-bit; keep the old card. |
 | New 0.x native with launcher/release slots | [Update the native box](#update-a-native-box). Do not reinstall. |
