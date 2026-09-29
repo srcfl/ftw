@@ -16,6 +16,10 @@ import (
 // null, never invented zeros. The client owns prose; reasons describe only
 // what Core or the device actually reported, not a guessed physical cause.
 type ControlFeedback struct {
+	SiteBeforeW      *float64 `json:"site_before_w"`
+	SiteAfterW       *float64 `json:"site_after_w"`
+	SiteBeforeAtMs   int64    `json:"site_before_at_ms,omitempty"`
+	SiteAfterAtMs    int64    `json:"site_after_at_ms,omitempty"`
 	ToleranceW       *float64 `json:"tolerance_w"`
 	VerificationTier *int     `json:"verification_tier"`
 	SiteConfirmation string   `json:"site_confirmation"`
@@ -187,7 +191,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					f.ActualW = nil
 				}
 			}
-			if commanded && cmd.Result == "accepted" && fresh && f.ActualW != nil && f.SentW != nil && telemetry.PowerFollowsCommand(f.Kind, *f.SentW, *f.ActualW) && !cmd.PowerMatchSince.IsZero() && now.Sub(cmd.PowerMatchSince) >= 10*time.Second && now.Sub(cmd.LastObservation) <= 10*time.Second {
+			if commanded && cmd.Result == "accepted" && fresh && f.ActualW != nil && f.SentW != nil && telemetry.PowerFollowsCommand(f.Kind, *f.SentW, *f.ActualW) && !cmd.PowerMatchSince.IsZero() && cmd.LastObservation.Sub(cmd.PowerMatchSince) >= 10*time.Second && now.Sub(cmd.LastObservation) <= 10*time.Second {
 				f.Response = "device_reported"
 				tier := 1
 				f.VerificationTier = &tier
@@ -200,10 +204,19 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					from = cmd.PowerMatchSince
 				}
 				f.SiteMeter = meter
-				f.SiteConfirmation, f.DeviceDeltaW, f.SiteDeltaW = independentResponse(cmd, meter, s.separateMeterSource(rd.Driver, meter), s.deps.Tel.ControlWindows(from, now), now)
+				after := s.deps.Tel.ControlWindows(from, now)
+				f.SiteConfirmation, f.DeviceDeltaW, f.SiteDeltaW = independentResponse(cmd, meter, s.separateMeterSource(rd.Driver, meter), after, now)
+				if f.SiteDeltaW != nil {
+					before := cmd.Baseline[meter+":meter"].Window
+					current := after[meter+":meter"].Window
+					f.SiteBeforeW = watts(before.MeanW)
+					f.SiteAfterW = watts(current.MeanW)
+					f.SiteBeforeAtMs = before.Last.UnixMilli()
+					f.SiteAfterAtMs = current.Last.UnixMilli()
+				}
 				if h := s.deps.Tel.DriverHealth(meter); h == nil || !h.TelemetryLive() || h.DeviceFault || blocked != "" {
 					f.SiteConfirmation = "waiting_for_meter"
-					f.SiteDeltaW = nil
+					f.SiteDeltaW, f.SiteBeforeW, f.SiteAfterW = nil, nil, nil
 				}
 				if f.SiteConfirmation == "confirmed" {
 					tier := 2
@@ -222,7 +235,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				}
 			}
 			if blocked != "" {
-				f.State, f.Reason, f.Severity = "blocked", "site_meter_stale", "warning"
+				f.State, f.Reason, f.Severity = "blocked", blocked, "warning"
 			}
 			if observe[rd.Driver] {
 				f.State, f.Reason, f.Severity = "observing", "observe_only", "info"
@@ -297,7 +310,7 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("limited", "device_limit", "warning")
 		return
 	}
-	if coreReason == "site_meter_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "charger_limit" {
+	if coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "charger_limit" {
 		set("limited", coreReason, "warning")
 		return
 	}

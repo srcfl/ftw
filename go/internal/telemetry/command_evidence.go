@@ -171,12 +171,11 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 	if now.Sub(c.LastObservation) > time.Minute {
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
 	}
-	c.LastObservation = now
-	mark := func(since *time.Time, mismatch bool) {
+	mark := func(since *time.Time, mismatch bool, at time.Time) {
 		if !mismatch {
 			*since = time.Time{}
 		} else if since.IsZero() {
-			*since = now
+			*since = at
 		}
 	}
 	readbackGap := 0.0
@@ -186,11 +185,12 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 			readbackGap = math.Abs(math.Abs(*d.SetpointW) - math.Abs(*c.PowerW))
 		}
 	}
-	mark(&c.ReadbackMismatchSince, d.SetpointW != nil && finite(*d.SetpointW) && readbackGap > math.Max(100, math.Abs(*c.PowerW)*0.05))
+	mark(&c.ReadbackMismatchSince, d.SetpointW != nil && finite(*d.SetpointW) && readbackGap > math.Max(100, math.Abs(*c.PowerW)*0.05), now)
 	if d.ControlPowerW != nil {
 		power = *d.ControlPowerW
 	}
 	fresh := d.ControlPowerAvailable == nil || *d.ControlPowerAvailable
+	observedAt := now
 	if d.PowerObservedAt != "" {
 		at, err := time.Parse(time.RFC3339Nano, d.PowerObservedAt)
 		age := time.Duration(d.PowerMaxAgeS * float64(time.Second))
@@ -198,13 +198,26 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 			age = time.Minute
 		}
 		fresh = fresh && err == nil && !at.After(now) && now.Sub(at) <= age
+		observedAt = at
 	}
+	// A cached sample from before the command cannot show its response. Repeated
+	// delivery of one source sample also cannot extend a measured time window.
+	if !fresh || !finite(power) || observedAt.Before(c.Since) {
+		c.PowerMismatchSince, c.PowerMatchSince, c.LastObservation = time.Time{}, time.Time{}, time.Time{}
+		s.commands[k] = c
+		return
+	}
+	if !observedAt.After(c.LastObservation) {
+		s.commands[k] = c
+		return
+	}
+	c.LastObservation = observedAt
 	gap := math.Abs(power - *c.PowerW)
 	if kind == DerPV {
 		gap = math.Max(0, math.Abs(power)-math.Abs(*c.PowerW))
 	}
-	mark(&c.PowerMismatchSince, fresh && finite(power) && gap > ControlToleranceW(*c.PowerW))
-	mark(&c.PowerMatchSince, fresh && finite(power) && gap <= ControlToleranceW(*c.PowerW))
+	mark(&c.PowerMismatchSince, gap > ControlToleranceW(*c.PowerW), observedAt)
+	mark(&c.PowerMatchSince, gap <= ControlToleranceW(*c.PowerW), observedAt)
 	s.commands[k] = c
 }
 

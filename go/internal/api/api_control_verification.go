@@ -31,7 +31,7 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 	if grid.Window.First.Before(cmd.Since) || device.Window.First.Before(cmd.Since) {
 		return "waiting_for_meter", nil, nil
 	}
-	if math.Abs(grid.Window.Last.Sub(device.Window.Last).Seconds()) > 5 {
+	if math.Abs(grid.Window.Last.Sub(device.Window.Last).Seconds()) > 5 || math.Abs(beforeMeter.Window.Last.Sub(beforeDevice.Window.Last).Seconds()) > 5 {
 		return "readings_not_aligned", nil, nil
 	}
 	stable := func(w telemetry.ControlWindow) bool { return w.MaxW-w.MinW <= 200 }

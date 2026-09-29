@@ -2310,3 +2310,6 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .control-result dd { margin: 0; text-align: right; }
 
 .control-result .control-proof { font-weight: 600; margin-top: .7rem; }
+
+.control-proof[data-tier="2"] { color: var(--green); }
+.control-proof[data-tier="1"] { color: var(--cyan); }

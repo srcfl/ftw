@@ -9,6 +9,7 @@ const messages = {
   default_failed: ['Safe default not confirmed', 'FTW has blocked further control while it retries the device’s safe default.', 'Check the device connection and its own status.'],
   telemetry_stale: ['Waiting for fresh readings', 'FTW cannot verify the effect with the readings available.', 'Check the device connection. This view updates when fresh readings arrive.'],
   site_meter_stale: ['Waiting for the site meter', 'FTW has stopped dispatch because site power readings are missing or too old.', 'Check the site meter connection. Dispatch resumes when readings recover.'],
+  site_phase_currents_stale: ['Waiting for phase currents', 'FTW has stopped dispatch because it lacks fresh current readings for the main-fuse check.', 'Check the site meter connection and its phase readings. Dispatch resumes when readings recover.'],
   device_fault: ['Device cannot follow commands', 'The device or its driver reports a fault that blocks control.', 'Check the reported reason and the device’s status.'],
   fuse_limit: ['Limited by the main fuse', 'FTW reduced the request to keep site current within its limit.', 'The rate can rise when other household demand falls.'],
   fuse_cooldown: ['Waiting after a fuse limit', 'FTW is waiting before restoring the charging rate.', 'Charging resumes when the fuse protection allows it.'],
@@ -59,6 +60,9 @@ export function feedbackValues(row, live = true) {
   if (number(row.requested_a)) values.push(['Requested current', `${row.requested_a.toFixed(1)} A`]);
   if (number(row.offered_a)) values.push(['Charger offer', live ? `${row.offered_a.toFixed(1)} A` : 'Not current']);
   if (number(row.device_limit_a)) values.push(['Charger limit', live ? `${row.device_limit_a.toFixed(1)} A` : 'Not current']);
+  const grid = value => `${(Math.abs(value)/1000).toFixed(2)} kW ${value < 0 ? 'export' : 'import'}`;
+  if (number(row.site_before_w)) values.push(['Site before command', live ? grid(row.site_before_w) : 'Not current']);
+  if (number(row.site_after_w)) values.push(['Site after command', live ? grid(row.site_after_w) : 'Not current']);
   if (number(row.device_delta_w)) values.push(['Device change', live ? `${(Math.abs(row.device_delta_w)/1000).toFixed(2)} kW ${row.device_delta_w < 0 ? "less" : "more"} site demand` : 'Not current']);
   if (number(row.site_delta_w)) values.push(['Site change', live ? `${(Math.abs(row.site_delta_w)/1000).toFixed(2)} kW ${row.site_delta_w < 0 ? 'less' : 'more'} import` : 'Not current']);
   return values;
@@ -107,12 +111,13 @@ export function renderFeedback(root, value, live = true) {
     el('p',text.detail,card);
     if (live && row.device_reason) el('p',`Device reports: ${row.device_reason}`,card,'device-reason');
     el('p',text.action,card,'control-action');
-    el('p',feedbackProof(row,live),card,'control-proof');
+    const proof=el('p',feedbackProof(row,live),card,'control-proof'); proof.dataset.tier=live ? String(row.verification_tier) : '';
     el('p',feedbackSite(row,live),card,'control-action');
     const details=el('details','',card); details.dataset.device=`${row.driver}:${row.kind}`; details.open=open.has(details.dataset.device);
     el('summary','Request and measurements',details);
     const dl=el('dl','',details);
     for (const [label,value] of feedbackValues(row,live)) {el('dt',label,dl);el('dd',value,dl);}
+    if (live && row.site_meter && number(row.site_after_at_ms)) el('p',`Site meter: ${row.site_meter} · ${new Date(row.site_after_at_ms).toLocaleTimeString()}`,details,'control-time');
     if (number(row.observed_at_ms)) el('p',`Last reading: ${new Date(row.observed_at_ms).toLocaleTimeString()}`,details,'control-time');
   }
 }

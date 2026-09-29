@@ -116,3 +116,36 @@ func TestCommandEvidencePVIsCeilingAndStalePowerIsNotProof(t *testing.T) {
 		t.Fatal("stale source claimed proof")
 	}
 }
+
+func TestCommandEvidenceUsesSourceTimeForResponse(t *testing.T) {
+	s := NewStore()
+	start := time.Now()
+	c := s.BeginCommand("charger", []byte(`{"action":"ev_set_current","power_w":1000}`), start)
+	s.CompleteCommand(c, "accepted")
+	sample := func(sourceAt, receivedAt time.Time) CommandEvidence {
+		data, err := json.Marshal(map[string]any{"power_observed_at": sourceAt.Format(time.RFC3339Nano)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		s.observeCommand("charger", DerEV, 1000, data, receivedAt)
+		s.mu.Unlock()
+		got, _ := s.CommandEvidence("charger", "ev")
+		return got
+	}
+	got := sample(start.Add(-time.Second), start.Add(time.Second))
+	if !got.PowerMatchSince.IsZero() {
+		t.Fatal("a pre-command sample claimed a response")
+	}
+	first := start.Add(2 * time.Second)
+	got = sample(first, start.Add(3*time.Second))
+	got = sample(first, start.Add(15*time.Second))
+	if !got.PowerMatchSince.Equal(first) || !got.LastObservation.Equal(first) {
+		t.Fatalf("repeated cached sample advanced proof: %+v", got)
+	}
+	last := start.Add(16 * time.Second)
+	got = sample(last, start.Add(17*time.Second))
+	if !got.PowerMatchSince.Equal(first) || !got.LastObservation.Equal(last) {
+		t.Fatalf("fresh source samples did not extend proof: %+v", got)
+	}
+}

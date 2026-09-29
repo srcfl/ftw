@@ -44,6 +44,15 @@ func TestIndependentControlConfirmation(t *testing.T) {
 				t.Fatalf("got %s, want %s", reason, tc.want)
 			}
 			if tc.want == "confirmed" {
+				before := base["grid:meter"]
+				shifted := before
+				shifted.Window.Last = shifted.Window.Last.Add(-6 * time.Second)
+				base["grid:meter"] = shifted
+				reason, _, _ = independentResponse(c, "grid", true, after, now)
+				base["grid:meter"] = before
+				if reason != "readings_not_aligned" {
+					t.Fatal("unaligned baseline confirmed effect")
+				}
 				for _, missing := range []string{"grid:meter", "battery:battery", "solar:pv"} {
 					saved := after[missing]
 					delete(after, missing)

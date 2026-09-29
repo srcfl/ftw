@@ -91,3 +91,18 @@ func TestControlFeedbackRequiresMeasuredPowerNotSetpoint(t *testing.T) {
 		t.Fatalf("old command survived default: %+v", f)
 	}
 }
+
+func TestControlFeedbackDoesNotVerifyOneCachedSourceSample(t *testing.T) {
+	tel := telemetry.NewStore()
+	now := time.Now()
+	c := tel.BeginCommand("battery", []byte(`{"action":"battery","power_w":1000}`), now.Add(-time.Minute))
+	tel.CompleteCommand(c, "accepted")
+	data := []byte(`{"power_observed_at":"` + now.Add(-10*time.Second).Format(time.RFC3339Nano) + `"}`)
+	tel.Update("battery", telemetry.DerBattery, 1000, nil, data)
+	tel.Update("battery", telemetry.DerBattery, 1000, nil, data)
+	srv := New(&Deps{Tel: tel})
+	f := srv.controlFeedback(now)[0]
+	if f.VerificationTier == nil || *f.VerificationTier != 0 {
+		t.Fatalf("one source sample reached measured tier: %+v", f)
+	}
+}
