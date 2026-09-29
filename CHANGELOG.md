@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.138.2
+
+### Patch Changes
+
+- b6d8d57: Update Energyplan to 0.4.10 to reduce planning time on sites with demand tariffs
+  and stop tariff ranking when its time budget expires. Core still validates
+  every proposed plan before dispatch.
+
 ## 0.138.1
 
 ### Patch Changes
