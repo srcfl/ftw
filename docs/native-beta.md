@@ -358,8 +358,10 @@ this Linux host-network recipe does not establish LAN device access there.
 
 Copy an exact published new 0.x tag from [Releases](https://github.com/srcfl/ftw/releases).
 Replace only `v0.X.Y-beta.N` and paste the **whole block, including `(` and `)`**.
-It stops at the first error. It refuses an existing `~/ftw-local` directory,
-including an earlier test. If that happens, inspect it before doing anything
+It downloads both files to a temporary directory before creating the project,
+so a failed download leaves no project behind. Correct the tag or connection
+and paste the whole block again. It stops at the first error and refuses an
+existing `~/ftw-local` directory, including an earlier test. If that happens, inspect it before doing anything
 else; do not delete it to make the command pass.
 
 ```bash
@@ -373,11 +375,19 @@ else; do not delete it to make the command pass.
   sudo docker compose version
   sudo docker buildx version
   sudo docker info >/dev/null
-  mkdir "$HOME/ftw-local"
-  cd "$HOME/ftw-local"
+  install_dir="$HOME/ftw-local"
+  if [ -e "$install_dir" ] || [ -L "$install_dir" ]; then
+    echo "STOP: $install_dir already exists. Inspect it before retrying." >&2
+    exit 1
+  fi
+  downloads=$(mktemp -d)
+  trap 'rm -rf "$downloads"' EXIT
   base="https://raw.githubusercontent.com/srcfl/ftw/${tag}/deploy/docker"
-  curl -fSL "${base}/compose.yaml" -o compose.yaml
-  curl -fSL "${base}/Dockerfile" -o Dockerfile
+  curl -fSL "${base}/compose.yaml" -o "$downloads/compose.yaml"
+  curl -fSL "${base}/Dockerfile" -o "$downloads/Dockerfile"
+  mkdir "$install_dir"
+  cp "$downloads/compose.yaml" "$downloads/Dockerfile" "$install_dir/"
+  cd "$install_dir"
   printf '*\n!Dockerfile\n!.dockerignore\n' > .dockerignore
   printf 'FTW_VERSION=%s\n' "$tag" > .env
   mkdir data

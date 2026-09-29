@@ -52,7 +52,7 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         block = recipe(EN, marker).replace('v0.X.Y-beta.N', tag)
         # Change only the destination, never the user's HOME or real Docker state.
         if marker == 'compose up':
-            self.assertEqual(block.count('"$HOME/ftw-local"'), 2)
+            self.assertEqual(block.count('"$HOME/ftw-local"'), 1)
             block = block.replace('"$HOME/ftw-local"', shlex.quote(str(self.project)))
         self.env['FTW_TEST_FAIL'] = failure
         result = subprocess.run(['bash', '-c', block], cwd=self.work, env=self.env,
@@ -88,13 +88,20 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         download = shlex.split(calls.splitlines()[0])[-1]
         self.assertFalse(Path(download).exists())
 
-    def test_second_docker_download_failure_stops_before_data_env_or_build(self):
-        result, calls = self.run_recipe('compose up', 'dockerfile')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.project / '.env').exists())
-        self.assertFalse((self.project / 'data').exists())
-        self.assertNotIn('chown', calls)
-        self.assertNotIn('docker compose up', calls)
+    def test_failed_docker_download_leaves_no_project_and_allows_retry(self):
+        for failure in ('download', 'dockerfile'):
+            with self.subTest(failure=failure):
+                result, calls = self.run_recipe('compose up', failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.project.exists())
+                self.assertNotIn('chown', calls)
+                self.assertNotIn('docker compose up', calls)
+                for call in calls.splitlines():
+                    if call.startswith('curl '):
+                        self.assertFalse(Path(shlex.split(call)[-1]).parent.exists())
+        result, calls = self.run_recipe('compose up')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('docker compose up -d --build', calls)
 
     def test_existing_project_stays_untouched(self):
         self.project.mkdir()
