@@ -34,6 +34,58 @@ Core validates every plan and command, including plans supplied by another
 system. Fuse, equipment, SoC, freshness and other quantified safety limits
 always apply. Stale required site-meter data stops dispatch.
 
+## Are you in control?
+
+**Don't trust what you say. Trust what you read.**
+
+FTW must verify control through fresh measurements. Sending a command, getting
+an API success or reading back a setpoint does not prove a physical effect.
+The user should be able to see whether the equipment did what they asked,
+what limited it and what FTW can actually confirm.
+
+Trace each request through Core's limits, the command sent, the device's
+response and the measured result. Keep the time, source and unit of each
+step. Use three explicit levels:
+
+- **Tier 0 — acknowledged:** the command was sent and acknowledged. This
+  confirms communication, not a physical effect.
+- **Tier 1 — device measured:** the device's own fresh power reading follows
+  the sent command. A setpoint echo alone cannot reach this level.
+- **Tier 2 — independently confirmed:** a separate physical meter shows the
+  matching effect. For example, a new 1 kW charging command produces a 1 kW
+  device reading and a corresponding 1 kW increase in site import.
+
+Use time-aligned readings, short measurement windows, tolerances and response
+waits to handle noise and different sample rates. Account for solar and other
+loads. A simultaneous load change may prevent attribution; remain at Tier 1
+until the evidence supports Tier 2. A steady absolute grid value is not proof
+of a command's effect. Check the change against the baseline.
+
+Sensor fusion must respect energy balance and retain each reading's source
+and age. Two fields from the same sensor are not independent confirmation.
+Neither an estimate nor house load derived from those same readings can act
+as independent proof. Missing, stale or conflicting data lowers confidence;
+never smooth it into a successful result. Confirmation expires when its
+supporting readings stop being current.
+
+Keep success at each step separate. If a user asks for 11 kW, Core permits
+5 kW and the meter shows 5 kW, the device follows the sent command but the
+user's request remains limited. A charging goal needs its own completion
+evidence. A matching reading also does not prove that FTW is the only
+controller; report a changed setpoint without guessing who changed it.
+
+Apply this standard to every control mode and supported device. Show waiting,
+limits, failed commands, missing effect and recovery in the normal view, with
+the known cause and a useful next step. Say when the cause is unknown. Keep
+warnings current and clear them when new evidence shows recovery. Make the
+same evidence available to authorized agents and support tools.
+
+Traceability and robustness are product requirements: retain enough evidence to
+explain what happened, and stop depending on an actuator that cannot deliver.
+Recovery needs fresh proof of response. This is the product direction; each
+implementation must state which devices, paths and physical outcomes it has
+verified.
+
 ## Trust through visible behaviour
 
 The live view is a core product feature. It must feel local and fast, and

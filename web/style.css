@@ -2293,3 +2293,20 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .tune-delta-positive { color: #22c55e; }
 .tune-delta-negative { color: #ef4444; }
 .tune-delta-neutral { color: var(--text-dim); }
+
+/* Control results stay visible in the normal overview. */
+.control-results { margin: 1rem 0; }
+.control-results h2 { font-size: 1rem; margin: 0 0 .7rem; }
+.control-result { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; margin: .6rem 0; overflow-wrap: anywhere; }
+.control-result.needs-attention { border-inline-start: 4px solid var(--amber); }
+.control-result.not-current { opacity: .7; }
+.control-result .control-device, .control-result .control-action, .control-result .control-time { color: var(--text-dim); }
+.control-result .control-device { font-size: .8rem; }
+.control-result h3 { font-size: 1rem; margin: .3rem 0 .6rem; }
+.control-result p { font-size: .9rem; line-height: 1.5; margin: .4rem 0; }
+.control-result summary { cursor: pointer; font-size: .85rem; padding-top: .5rem; }
+.control-result dl { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem 1rem; font-size: .85rem; }
+.control-result dt { color: var(--text-dim); }
+.control-result dd { margin: 0; text-align: right; }
+
+.control-result .control-proof { font-weight: 600; margin-top: .7rem; }

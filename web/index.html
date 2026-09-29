@@ -180,6 +180,8 @@
                          load="0" ev="0" soc="0"></ftw-energy-flow>
       </div>
 
+      <section id="control-results" class="control-results" aria-label="Control results" hidden></section>
+
       <div id="power-now-values" class="power-now-panel" role="tabpanel"
            aria-labelledby="power-now-tab-values" hidden>
         <div class="summary-cards">
@@ -964,6 +966,7 @@
   </ftw-modal>
 
   <script src="/lan-auth.js?v=lan1"></script>
+  <script type="module" src="/control-feedback.js"></script>
   <script src="/app.js?v=noask1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>

@@ -819,6 +819,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		invalidateCommandSequence()
 		defaultCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
 		defaultErr := rd.driver.DefaultMode(defaultCtx)
+		if r.tel != nil {
+			r.tel.EndCommandControl(rd.cfg.Name, defaultErr != nil)
+		}
 		cancel()
 		if defaultErr != nil {
 			scheduleRecovery()
@@ -851,6 +854,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			cmdCtx, cancel = context.WithTimeout(context.Background(), defaultRecoveryTimeout)
 		}
 		err := rd.driver.DefaultMode(cmdCtx)
+		if r.tel != nil {
+			r.tel.EndCommandControl(rd.cfg.Name, err != nil)
+		}
 		if cancel != nil {
 			cancel()
 		}
@@ -977,9 +983,23 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					err = rejection
 					break
 				}
+				var evidence telemetry.CommandEvidence
+				if r.tel != nil {
+					evidence = r.tel.BeginCommand(rd.cfg.Name, cmd.payload, time.Now())
+				}
 				err = rd.driver.Command(commandCtx, cmd.payload)
 				if err == nil {
 					err = commandContextError(cmdCtx, commandCtx)
+				}
+				if r.tel != nil {
+					result := "accepted"
+					if err != nil {
+						result = "failed"
+					}
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						result = "unconfirmed"
+					}
+					r.tel.CompleteCommand(evidence, result)
 				}
 				if err != nil {
 					err = restoreAfterCommand(err)

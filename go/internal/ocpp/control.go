@@ -114,7 +114,20 @@ var ErrNotConnected = errors.New("ocpp: charger not connected")
 // Command applies an EV control command to a connected charge point. The
 // signature matches drivers.Registry.Send so it can back a loadpoint
 // SenderFunc directly.
-func (s *Server) Command(ctx context.Context, id string, payload []byte) error {
+func (s *Server) Command(ctx context.Context, id string, payload []byte) (resultErr error) {
+	if s != nil && s.handler != nil && s.handler.tel != nil {
+		record := s.handler.tel.BeginCommand(id, payload, time.Now())
+		defer func() {
+			result := "accepted"
+			if resultErr != nil {
+				result = "failed"
+			}
+			if errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+				result = "unconfirmed"
+			}
+			s.handler.tel.CompleteCommand(record, result)
+		}()
+	}
 	if s == nil || s.cs == nil {
 		return errors.New("ocpp: server not running")
 	}

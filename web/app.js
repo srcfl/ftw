@@ -2,6 +2,7 @@
 
 (function () {
   "use strict";
+  var controlFeedbackExpiry;
 
   const evPlanUI = import("/ev-plan.js").catch(function () { return null; });
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
@@ -1012,6 +1013,11 @@
 
     // Drivers
     renderDrivers(data.drivers || {}, dispatchByDriver);
+    if (window.FTWControlFeedback) {
+      window.FTWControlFeedback.render(document.getElementById("control-results"), data.control_feedback, true);
+      clearTimeout(controlFeedbackExpiry);
+      controlFeedbackExpiry = setTimeout(function () { window.FTWControlFeedback.render(document.getElementById("control-results"), data.control_feedback, false); }, 15000);
+    }
 
     // Dispatch
     renderDispatch(data.dispatch || []);
@@ -2752,6 +2758,10 @@
   // when no hold is active.
   function manualStatusText(lp, d) {
     if (lp && lp.manual_restore_unconfirmed) return "Confirm how to continue charging. FTW could not confirm the charger or connection.";
+    if (lp && lp.control_feedback && lp.control_feedback.severity === "warning" && window.FTWControlFeedback) {
+      var feedback = window.FTWControlFeedback.text(lp.control_feedback);
+      return feedback.detail + " " + feedback.action;
+    }
     var m = lp && lp.manual;
     if (!lp || !lp.manual_active || !m || !m.active) return null;
     var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
@@ -2821,6 +2831,10 @@
     var hasSchedule = lp.schedule && (lp.schedule.finish_at_vehicle_limit === true || lp.schedule.soc > 0);
     if (lp.manual_restore_unconfirmed) {
       text = manualStatusText(lp, d);
+    } else if (lp.control_feedback && lp.control_feedback.severity === "warning" && window.FTWControlFeedback) {
+      var feedback = window.FTWControlFeedback.text(lp.control_feedback);
+      text = feedback.detail + " " + feedback.action;
+      tone = "var(--amber)";
     } else if (lp.charger && !lp.charger.available) {
       text = lp.charger.known
         ? "Charger status is out of date. FTW cannot confirm whether the car is charging."

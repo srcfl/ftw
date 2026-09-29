@@ -27,6 +27,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/srcfl/ftw/go/internal/units"
@@ -232,6 +233,11 @@ func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
 	var b strings.Builder
 	writeReportHeader(&b, s.deps.Version, now)
 	writeFindings(&b, findings)
+	if feedback, err := json.MarshalIndent(s.controlFeedback(now), "", "  "); err == nil {
+		b.WriteString("## Command feedback\n\nDriver-call results, readbacks and measured power are separate evidence. Missing values are unknown.\n\n```json\n")
+		b.Write(feedback)
+		b.WriteString("\n```\n\n")
+	}
 	writeRightNow(&b, ctrl, snap, activeSlot, targets, slotEnergy, now)
 	writePlanControlDecision(&b, plan, slotEnergy)
 	writePlanSection(&b, plan, lastReplanAt, lastReplanReason, now)

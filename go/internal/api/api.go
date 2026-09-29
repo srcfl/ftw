@@ -1219,6 +1219,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// diagnostic — incremented when actual fleet delivery diverges
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
+		"control_feedback":    s.controlFeedback(time.Now()),
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
 	}
 	// A stale or missing site meter is not 0 W. Publishing zero made the
@@ -3672,7 +3673,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"enabled":                      true,
 		"vehicle_limit_goal_supported": true,
-		"loadpoints":                   states,
+		"loadpoints":                   s.loadpointsWithFeedback(states),
 	})
 }
 
