@@ -121,10 +121,11 @@ new Core, and stop new Core before returning to the old install.
 4. **Back on your computer:** open a new SSH connection using the login you
    chose for the new card. The IP address may have changed; check the router.
    If you have not swapped cards, stop here.
-5. **In SSH on the new card:** follow [Install](#install), then open
+5. **Before setting up devices:** stop old FTW on any other host that could
+   control the same equipment. If the old card supplied MQTT, arrange a broker
+   for the new setup. The old card's broker does not move with FTW.
+6. **In SSH on the new card:** follow [Install](#install), then open
    `http://<host>:8080/setup` and set up the site again.
-6. If the old card supplied MQTT, provide a broker for the new setup before
-   connecting the devices. The old card's broker does not move with FTW.
 7. Follow [Verify the switch](#verify-the-switch).
 
 To return, shut down and put the old card back. Also stop any new FTW you ran

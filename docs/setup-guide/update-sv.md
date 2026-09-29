@@ -104,14 +104,14 @@ den igen vid omboot.
 4. **På din vanliga dator:** öppna en ny SSH-anslutning till Pi:n med det
    användarnamn du valde för nya kortet. IP-adressen kan ha ändrats; kontrollera
    routern. Har du inte bytt kort, stanna här.
-5. **I SSH på nya kortet:** följ [Installera på det nya kortet](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin)
+5. **Innan du ställer in enheterna:** stoppa gammal FTW på andra maskiner
+   som kan styra samma utrustning. Ordna MQTT om utrustningen behöver det.
+   En broker på gamla kortet följer inte med.
+6. **I SSH på nya kortet:** följ [Installera på det nya kortet](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin)
    nedan. Öppna sedan `http://<Pi:ns-IP>:8080/setup` och ställ in anläggningen.
    Historik, inlärning och gamla inställningar ligger kvar på gamla kortet;
    de följer inte automatiskt med. Använd mål och ready-by-scheman i stället
    för gamla kalenderhändelser.
-6. Ordna MQTT om utrustningen behöver det. En broker på gamla kortet följer
-   inte med. Stoppa också gammal FTW på andra maskiner innan nya FTW får styra
-   samma utrustning.
 7. Kontrollera rätt version, friska enheter, färska mätvärden och aktuell plan.
    Starta sedan om Pi:n när anläggningen kan tåla avbrottet och kontrollera
    samma saker igen.
@@ -124,8 +124,8 @@ som den nya installationen har samlat ligger kvar på det nya kortet.
 
 **Detta är ett avancerat alternativ till kortbytet ovan.** Välj det bara om
 du kan identifiera och stoppa gamla Core och updater, hantera deras startregler
-och bevara MQTT. Välj annars nytt kort eller be om hjälp. En nekad native-
-installation på gamla kortet är inte ett skäl att fortsätta med Docker.
+och bevara MQTT. Välj annars nytt kort eller be om hjälp. En nekad
+native-installation på gamla kortet är inte ett skäl att fortsätta med Docker.
 
 Den nya Docker-installationen använder en egen katalog och egen data.
 Den flyttar inte gamla data.
