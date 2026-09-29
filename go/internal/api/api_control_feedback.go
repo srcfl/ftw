@@ -23,6 +23,7 @@ type ControlFeedback struct {
 	SiteAfterAtMs    int64              `json:"site_after_at_ms,omitempty"`
 	ToleranceW       *float64           `json:"tolerance_w"`
 	VerificationTier *int               `json:"verification_tier"`
+	SiteSourceIssue  string             `json:"site_source_issue,omitempty"`
 	SiteConfirmation string             `json:"site_confirmation"`
 	SiteMeter        string             `json:"site_meter,omitempty"`
 	SiteDeltaW       *float64           `json:"site_delta_w"`
@@ -200,7 +201,8 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				f.SiteMeter = meter
 				after := s.deps.Tel.ControlWindows(from, now)
 				comparison := independentResponse(cmd, meter, s.separateMeterSource(rd.Driver, meter), after, now)
-				if !s.controlSourcesComplete(after, now) {
+				if issue := s.controlSourceIssue(after, now); issue != "" {
+					f.SiteSourceIssue = issue
 					comparison = ControlComparison{Reason: "measurement_sources_unclear"}
 				}
 				f.SiteEvidence = &comparison

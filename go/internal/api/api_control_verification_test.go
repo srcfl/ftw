@@ -146,13 +146,60 @@ func TestControlConfirmationRequiresConfiguredFlows(t *testing.T) {
 	srv.deps.SiteMeasurementSources = func() telemetry.ForecastOptions {
 		return telemetry.ForecastOptions{ExpectedFlows: []telemetry.ForecastFlow{{Driver: "battery", DerType: telemetry.DerBattery}, {Driver: "solar", DerType: telemetry.DerPV}}}
 	}
-	if srv.controlSourcesComplete(observed, now) {
-		t.Fatal("configured solar that never emitted disappeared from proof")
+	if issue := srv.controlSourceIssue(observed, now); issue != "missing_fresh_power:solar:pv" {
+		t.Fatalf("missing solar cause: %s", issue)
 	}
 	srv.deps.SiteMeasurementSources = func() telemetry.ForecastOptions {
 		return telemetry.ForecastOptions{ExpectedFlows: []telemetry.ForecastFlow{{Driver: "battery", DerType: telemetry.DerBattery}}}
 	}
 	if !srv.controlSourcesComplete(observed, now) {
 		t.Fatal("complete source inventory rejected")
+	}
+}
+
+func TestExternalMeterThroughSameDriver(t *testing.T) {
+	now := time.Now()
+	tel := telemetry.NewStore()
+	srv := New(&Deps{Tel: tel})
+	for _, tc := range []struct {
+		data string
+		want bool
+	}{
+		{`{}`, false}, {`{"power_origin":"derived"}`, false},
+		{`{"power_origin":"inverter"}`, false}, {`{"power_origin":"external_meter"}`, true},
+	} {
+		tel.Update("hybrid", telemetry.DerMeter, 1400, nil, []byte(tc.data))
+		if got := srv.separateMeterSource("hybrid", "hybrid"); got != tc.want {
+			t.Fatalf("origin %s: separate=%v", tc.data, got)
+		}
+	}
+	flat := func(v float64) []float64 { return []float64{v, v, v, v, v} }
+	cmd := telemetry.CommandEvidence{Driver: "hybrid", Kind: "battery", Since: now.Add(-15 * time.Second), Baseline: map[string]telemetry.ControlBaseline{
+		"hybrid:battery": responseSeries("hybrid", telemetry.DerBattery, now.Add(-30*time.Second), flat(0)),
+		"hybrid:meter":   responseSeries("hybrid", telemetry.DerMeter, now.Add(-30*time.Second), flat(400)),
+		"hybrid:pv":      responseSeries("hybrid", telemetry.DerPV, now.Add(-30*time.Second), flat(-1200)),
+	}}
+	after := map[string]telemetry.ControlBaseline{
+		"hybrid:battery": responseSeries("hybrid", telemetry.DerBattery, now.Add(-12*time.Second), flat(1000)),
+		"hybrid:meter":   responseSeries("hybrid", telemetry.DerMeter, now.Add(-12*time.Second), flat(1400)),
+		"hybrid:pv":      responseSeries("hybrid", telemetry.DerPV, now.Add(-12*time.Second), flat(-1200)),
+	}
+	separate := srv.separateMeterSource("hybrid", "hybrid")
+	for _, skew := range []time.Duration{0, 250 * time.Millisecond} {
+		solar := responseSeries("hybrid", telemetry.DerPV, now.Add(-12*time.Second-skew), flat(-1200))
+		after["hybrid:pv"] = solar
+		got := independentResponse(cmd, "hybrid", separate, after, now)
+		if got.Reason != "confirmed" || got.MaxSkewMS == nil || *got.MaxSkewMS != skew.Milliseconds() {
+			t.Fatalf("skew %s: %+v", skew, got)
+		}
+	}
+	missing := cmd
+	missing.Baseline = nil
+	if got := independentResponse(missing, "hybrid", separate, after, now); got.MaxSkewMS != nil {
+		t.Fatalf("missing baseline invented zero timing: %+v", got)
+	}
+	delete(after, "hybrid:meter")
+	if got := independentResponse(cmd, "hybrid", separate, after, now); got.Reason == "confirmed" || got.MaxSkewMS != nil {
+		t.Fatalf("external sensor identity replaced fresh meter evidence: %+v", got)
 	}
 }

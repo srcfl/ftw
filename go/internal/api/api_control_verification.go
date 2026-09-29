@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"math"
 	"sort"
 	"time"
@@ -30,7 +31,7 @@ type ControlComparison struct {
 	ToleranceW     float64                `json:"tolerance_w"`
 	Samples        int                    `json:"samples"`
 	WindowS        float64                `json:"window_s"`
-	MaxSkewMS      int64                  `json:"max_skew_ms"`
+	MaxSkewMS      *int64                 `json:"max_skew_ms"`
 	Trace          []ControlResponsePoint `json:"trace,omitempty"`
 }
 
@@ -49,7 +50,7 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 	if meter == "" {
 		return stop("no_site_meter")
 	}
-	if cmd.Driver == meter || !separate {
+	if !separate {
 		return stop("independent_source_unknown")
 	}
 	target := cmd.Driver + ":" + cmd.Kind
@@ -131,9 +132,11 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 	out.ToleranceW = math.Max(150, math.Abs(deltaDevice)*0.15)
 	out.Samples = len(current)
 	out.WindowS = current[len(current)-1].at.Sub(current[0].at).Seconds()
+	maxSkewMS := int64(0)
+	out.MaxSkewMS = &maxSkewMS
 	for _, p := range before {
-		if p.skew.Milliseconds() > out.MaxSkewMS {
-			out.MaxSkewMS = p.skew.Milliseconds()
+		if p.skew.Milliseconds() > maxSkewMS {
+			maxSkewMS = p.skew.Milliseconds()
 		}
 	}
 	// All points must support the same change. Means alone could hide a household
@@ -141,8 +144,8 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 	matches := true
 	for _, p := range current {
 		out.Trace = append(out.Trace, ControlResponsePoint{p.at.UnixMilli(), p.device - baseDevice, p.grid - p.other - baseAdjusted})
-		if p.skew.Milliseconds() > out.MaxSkewMS {
-			out.MaxSkewMS = p.skew.Milliseconds()
+		if p.skew.Milliseconds() > maxSkewMS {
+			maxSkewMS = p.skew.Milliseconds()
 		}
 		if math.Abs(residual(p)-baseResidual) > out.ToleranceW {
 			matches = false
@@ -234,7 +237,25 @@ func spread(values []float64) float64 {
 }
 
 func (s *Server) separateMeterSource(driver, meter string) bool {
-	if driver == meter || s.deps.Registry == nil {
+	if s.deps.Tel == nil {
+		return false
+	}
+	reading := s.deps.Tel.Get(meter, telemetry.DerMeter)
+	if reading == nil {
+		return false
+	}
+	var data struct {
+		PowerOrigin string `json:"power_origin"`
+	}
+	if json.Unmarshal(reading.Data, &data) != nil || data.PowerOrigin == "derived" {
+		return false
+	}
+	// A driver may relay an external physical meter. Its documented sensor
+	// origin matters here, not whether it shares the inverter's connection.
+	if driver == meter {
+		return data.PowerOrigin == "external_meter"
+	}
+	if s.deps.Registry == nil {
 		return false
 	}
 	a, b := s.runningDriverDevice(driver), s.runningDriverDevice(meter)
@@ -248,12 +269,19 @@ func (s *Server) separateMeterSource(driver, meter string) bool {
 }
 
 func (s *Server) controlSourcesComplete(flows map[string]telemetry.ControlBaseline, now time.Time) bool {
+	return s.controlSourceIssue(flows, now) == ""
+}
+
+func (s *Server) controlSourceIssue(flows map[string]telemetry.ControlBaseline, now time.Time) string {
 	if s.deps.SiteMeasurementSources == nil {
-		return false
+		return "site_inventory_unavailable"
 	}
 	opts := s.deps.SiteMeasurementSources()
-	if opts.HouseholdInvalidReason != "" || opts.PVInvalidReason != "" {
-		return false
+	if opts.HouseholdInvalidReason != "" {
+		return opts.HouseholdInvalidReason
+	}
+	if opts.PVInvalidReason != "" {
+		return opts.PVInvalidReason
 	}
 	seen := map[string]bool{}
 	for _, f := range opts.ExpectedFlows {
@@ -262,13 +290,13 @@ func (s *Server) controlSourcesComplete(flows map[string]telemetry.ControlBaseli
 		}
 		if f.FlowID != "" {
 			if seen[f.FlowID] {
-				return false
+				return "duplicate:" + f.Driver + ":" + f.DerType.String()
 			}
 			seen[f.FlowID] = true
 		}
 		r, ok := flows[f.Driver+":"+f.DerType.String()]
 		if !ok || !r.Window.Usable(now) {
-			return false
+			return "missing_fresh_power:" + f.Driver + ":" + f.DerType.String()
 		}
 	}
 	for _, f := range flows {
@@ -276,8 +304,8 @@ func (s *Server) controlSourcesComplete(flows map[string]telemetry.ControlBaseli
 			continue
 		}
 		if !s.deps.Tel.DriverHealth(f.Driver).TelemetryLive() {
-			return false
+			return "offline:" + f.Driver + ":" + f.Kind.String()
 		}
 	}
-	return true
+	return ""
 }

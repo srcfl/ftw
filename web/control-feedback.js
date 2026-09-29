@@ -74,7 +74,7 @@ export function feedbackValues(row, live = true) {
     }
     if (number(e.samples) && e.samples > 0) values.push(['Comparison',`${e.samples} samples across ${Math.round(e.window_s)} s`]);
     if (number(e.tolerance_w) && e.tolerance_w > 0) values.push(['Site tolerance',`${Math.round(e.tolerance_w)} W`]);
-    if (number(e.max_skew_ms)) values.push(['Largest time gap',`${(e.max_skew_ms/1000).toFixed(1)} s`]);
+    if (e.samples > 0 && number(e.max_skew_ms)) values.push(['Largest time gap',`${Math.round(e.max_skew_ms)} ms`]);
   }
   return values;
 }
@@ -105,6 +105,12 @@ export function feedbackSite(row, live = true) {
     site_change_differs: 'The site-meter change does not match. Another household load may have changed; the cause is not confirmed.',
     device_response_unconfirmed: 'Independent confirmation waits for the device’s measured response.',
   };
+  if (row.site_confirmation === 'measurement_sources_unclear' && typeof row.site_source_issue === 'string') {
+    const [reason, driver, kind] = row.site_source_issue.split(':');
+    if (driver && kind && reason === 'missing_fresh_power') return `Fresh power readings from ${driver} (${kind}) are missing. Independent confirmation waits for these measurements.`;
+    if (driver && kind && reason === 'offline') return `${driver} (${kind}) is offline. Independent confirmation waits for fresh measurements.`;
+    if (driver && kind && reason === 'duplicate') return `${driver} (${kind}) overlaps another measured flow. Check the measurement sources.`;
+  }
   return text[row.site_confirmation] || 'Independent confirmation is not available.';
 }
 
