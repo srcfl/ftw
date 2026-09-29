@@ -72,6 +72,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	}
 	mode, meter := "", ""
 	clamped := map[string]bool{}
+	targeted := map[string]bool{}
 	var hold control.BatteryManualHold
 	var held bool
 	if s.deps.Ctrl != nil && s.deps.CtrlMu != nil {
@@ -80,6 +81,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		meter = s.deps.Ctrl.SiteMeterDriver
 		for _, t := range s.deps.Ctrl.LastTargets {
 			clamped[t.Driver] = t.Clamped
+			targeted[t.Driver] = true
 		}
 		hold, held = s.deps.Ctrl.GetBatteryManualHold(now)
 		s.deps.CtrlMu.Unlock()
@@ -108,6 +110,13 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	for _, kind := range []telemetry.DerType{telemetry.DerBattery, telemetry.DerEV, telemetry.DerPV, telemetry.DerV2X} {
 		for _, rd := range s.deps.Tel.ReadingsByType(kind) {
 			cmd, commanded := s.deps.Tel.CommandEvidence(rd.Driver, kind.String())
+			_, loadpointOwned := lps[rd.Driver]
+			manualBattery := held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver)
+			// Measurements inform the site comparison, but only controlled
+			// functions receive a command result. PV becomes one on curtailment.
+			if !commanded && !(kind == telemetry.DerBattery && targeted[rd.Driver]) && !(kind == telemetry.DerEV && loadpointOwned) && !manualBattery {
+				continue
+			}
 			if kind == telemetry.DerPV && !commanded {
 				continue
 			}
@@ -230,6 +239,12 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if disabled[rd.Driver] {
 				f.State, f.Reason, f.Severity = "blocked", "disabled", "info"
 			}
+			if observe[rd.Driver] || disabled[rd.Driver] {
+				f.VerificationTier, f.SiteEvidence, f.Response = nil, nil, "unconfirmed"
+				f.SiteConfirmation = "not_controlling"
+				f.SiteDeltaW, f.DeviceDeltaW, f.SiteBeforeW, f.SiteAfterW = nil, nil, nil, nil
+				f.SiteBeforeAtMs, f.SiteAfterAtMs = 0, 0
+			}
 			out = append(out, f)
 		}
 	}
@@ -253,6 +268,15 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	}
 	for driver, h := range s.deps.Tel.AllHealth() {
 		if seen[driver] || !h.DeviceFault {
+			continue
+		}
+		controlled := targeted[driver]
+		for _, kind := range []string{"battery", "ev", "pv", "v2x_charger"} {
+			if c, ok := s.deps.Tel.CommandEvidence(driver, kind); ok && c.Result != "released" {
+				controlled = true
+			}
+		}
+		if !controlled {
 			continue
 		}
 		out = append(out, ControlFeedback{Driver: driver, Kind: "device", Mode: mode, State: "blocked", Reason: "device_fault", Severity: "warning", DeviceReason: h.DeviceFaultReason})
@@ -353,6 +377,10 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		return
 	}
 	if f.Response != "device_reported" && f.Response != "site_confirmed" {
+		if f.Kind == "pv" && settled && math.Abs(*f.ActualW) < math.Abs(*f.SentW)-telemetry.ControlToleranceW(*f.SentW) {
+			set("unknown", "solar_below_ceiling", "info")
+			return
+		}
 		set("waiting", "waiting_response", "info")
 		return
 	}

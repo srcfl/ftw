@@ -108,6 +108,9 @@ func TestCommandEvidencePVIsCeilingAndStalePowerIsNotProof(t *testing.T) {
 	if !got.PowerMismatchSince.IsZero() {
 		t.Fatal("weak sun is not failed curtailment")
 	}
+	if !got.PowerMatchSince.IsZero() {
+		t.Fatal("weak sun alone proved curtailment")
+	}
 	s.mu.Lock()
 	s.observeCommand("pv", DerPV, -500, json.RawMessage(`{"power_observed_at":"2020-01-01T00:00:00Z"}`), now.Add(2*time.Second))
 	s.mu.Unlock()

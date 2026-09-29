@@ -45,7 +45,14 @@ what limited it and what FTW can actually confirm.
 
 Trace each request through Core's limits, the command sent, the device's
 response and the measured result. Keep the time, source and unit of each
-step. Use three explicit levels:
+step.
+
+Apply these levels to the device function FTW commands. Other measurements
+provide context: solar normally contributes measured generation, not a control
+verdict. It receives a control verdict when FTW issues curtailment. Household
+load is the residual after measured flows; it is not another independent meter.
+
+Use three explicit levels:
 
 - **Tier 0 — acknowledged:** the command was sent and acknowledged. This
   confirms communication, not a physical effect.

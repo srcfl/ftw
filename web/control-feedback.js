@@ -1,5 +1,6 @@
 // Presentation only. Core owns evidence, freshness, limits and response checks.
 const messages = {
+  solar_below_ceiling: ['Solar is below the requested ceiling', 'The measured output respects the ceiling, but available sunshine may already limit it.', 'FTW cannot yet confirm that curtailment caused the lower output.'],
   device_limit: ['Charger limit', 'The charger’s own current limit is below this request.', 'Check the charger’s current limit in its app or settings.'],
   offered_current_lower: ['Charger offers less current', 'The charger reports a lower current offer than FTW requested.', 'Check its load balancing and current limits. The reason is not confirmed.'],
   setpoint_changed: ['Setpoint does not match', 'The device reports a different setpoint from the command FTW sent.', 'Check for another controller or a device mode that changes the setpoint. FTW cannot tell which caused this.'],
@@ -79,6 +80,7 @@ export function feedbackValues(row, live = true) {
 }
 export function feedbackProof(row, live = true) {
   if (!live) return 'Current effect unknown';
+  if (['observe_only','disabled','device_control'].includes(row.reason)) return 'No active FTW power command';
   if (row.verification_tier === 2) return 'Tier 2 · Confirmed at site meter';
   if (row.verification_tier === 1) return 'Tier 1 · Device reports the expected power';
   if (row.verification_tier === 0) return 'Tier 0 · Driver accepted the command';
@@ -86,6 +88,7 @@ export function feedbackProof(row, live = true) {
 }
 export function feedbackSite(row, live = true) {
   if (!live) return 'Waiting for fresh measurements.';
+  if (['observe_only','disabled','device_control'].includes(row.reason)) return 'Measurements remain context for the site; this device has no current control verdict.';
   const text = {
     confirmed: 'A separate site meter follows the device’s change across several samples, after accounting for other measured flows.',
     independent_source_unknown: 'Independent confirmation needs a separate, identified meter. These sources do not establish that.',

@@ -202,20 +202,21 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 		gap = math.Max(0, math.Abs(power)-math.Abs(*c.PowerW))
 	}
 	mark(&c.PowerMismatchSince, gap > ControlToleranceW(*c.PowerW), observedAt)
-	mark(&c.PowerMatchSince, gap <= ControlToleranceW(*c.PowerW), observedAt)
+	mark(&c.PowerMatchSince, PowerFollowsCommand(c.Kind, *c.PowerW, power), observedAt)
 	s.commands[k] = c
 }
 
 // ControlToleranceW is the response tolerance, not a device rating or safety limit.
 func ControlToleranceW(sent float64) float64 { return math.Max(100, math.Abs(sent)*0.1) }
 
-// PowerFollowsCommand handles PV's ceiling separately from a signed power target.
+// PowerFollowsCommand requires a measured target response. PV below its ceiling
+// is not a failure, but weak sun alone cannot prove that curtailment took effect.
 func PowerFollowsCommand(kind string, sent, actual float64) bool {
 	if !finite(sent) || !finite(actual) {
 		return false
 	}
 	if kind == "pv" {
-		return math.Abs(actual) <= math.Abs(sent)+ControlToleranceW(sent)
+		return math.Abs(math.Abs(actual)-math.Abs(sent)) <= ControlToleranceW(sent)
 	}
 	return math.Abs(actual-sent) <= ControlToleranceW(sent)
 }

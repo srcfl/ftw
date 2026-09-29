@@ -106,3 +106,19 @@ func TestControlFeedbackDoesNotVerifyOneCachedSourceSample(t *testing.T) {
 		t.Fatalf("one source sample reached measured tier: %+v", f)
 	}
 }
+
+func TestControlTiersBelongToCommandedFunctions(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("solar", telemetry.DerPV, -3000, nil, []byte(`{}`))
+	tel.Update("monitored-battery", telemetry.DerBattery, 0, nil, []byte(`{}`))
+	srv := New(&Deps{Tel: tel})
+	if got := srv.controlFeedback(time.Now()); len(got) != 0 {
+		t.Fatalf("measurement sources received control verdicts: %+v", got)
+	}
+	cmd := tel.BeginCommand("solar", []byte(`{"action":"curtail","power_w":-1000}`), time.Now())
+	tel.CompleteCommand(cmd, "accepted")
+	got := srv.controlFeedback(time.Now())
+	if len(got) != 1 || got[0].Driver != "solar" || got[0].VerificationTier == nil || *got[0].VerificationTier != 0 {
+		t.Fatalf("curtailment missing command verdict: %+v", got)
+	}
+}
