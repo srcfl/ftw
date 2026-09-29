@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install one published native 0.x release on a fresh Linux host.
-# Existing FTW installations need the separate guided migration.
+# Existing sites switch through separate setups; this installer does not migrate data.
 set -euo pipefail
 
 usage() {
@@ -17,8 +17,10 @@ an interrupted native install with the same tag and package checksum.
 of an install this script made with those from the given release. Updates
 never replace these files; Core itself moves with ftw update.
 There is no default tag: GitHub releases/latest still serves old Docker boxes.
-An existing FTW installation must wait for the guided 0.x migration. This
-script will not replace it or update a Docker container.
+2.x and 3.x receive no more updates. Existing sites can switch now with a new
+SD card/host or separate Docker project and data. Guided transfer of old data
+is not ready. See https://github.com/srcfl/ftw/blob/master/docs/native-beta.md.
+This script will not replace an existing site or update a Docker container.
 EOF
 }
 
@@ -82,7 +84,7 @@ else
 fi
 for path in "${existing_paths[@]}"; do
   if [[ -e "$path" || -L "$path" ]]; then
-    echo "Existing FTW installation found at $path. Keep it; \"Coming from an older FTW\" in docs/native-beta.md shows how to try 0.x beside it." >&2
+    echo "Existing FTW installation found at $path. Keep its data. Use a new card/host or separate Docker setup as described in https://github.com/srcfl/ftw/blob/master/docs/native-beta.md; only one Core may control the equipment." >&2
     exit 2
   fi
 done
@@ -97,7 +99,7 @@ if [[ "$mode" != --refresh ]] && {
 fi
 # Cards made from the old FTW image logged in as ftw, so people pick it again.
 if [[ "$mode" == --fresh-host ]] && id ftw >/dev/null 2>&1; then
-  echo "A user named ftw already exists. FTW runs as its own ftw account, so install from a login with another name; on a Raspberry Pi, write the card again and choose a different username." >&2
+  echo "A user named ftw already exists. FTW runs as its own ftw account, so install from a login with another name; on a fresh Raspberry Pi card, choose a different username. Keep any card containing an existing FTW site and follow docs/native-beta.md." >&2
   exit 2
 fi
 if [[ "$mode" != --refresh ]] && command -v ss >/dev/null 2>&1 &&
@@ -189,7 +191,7 @@ if [[ "$mode" == --refresh ]]; then
 fi
 for path in "${existing_paths[@]}"; do
   if as_root test -e "$path" || as_root test -L "$path"; then
-    echo "Existing FTW installation found at $path. Keep it; \"Coming from an older FTW\" in docs/native-beta.md shows how to try 0.x beside it." >&2
+    echo "Existing FTW installation found at $path. Keep its data. Use a new card/host or separate Docker setup as described in https://github.com/srcfl/ftw/blob/master/docs/native-beta.md; only one Core may control the equipment." >&2
     exit 2
   fi
 done

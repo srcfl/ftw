@@ -162,10 +162,12 @@ FTW's Core update does not update the host operating system, kernel or Docker
 engine. The operator handles host updates.
 
 The old Docker workflows and receipts remain as historical and recovery
-material, not a path for new releases. The native workflow cannot publish old
-Docker images or move old aliases. New Core code refuses cross-line update
-requests, but that guard
-cannot change an older installed binary. Do not use an old tag or script to
+material, not a path for new releases. Their current definitions refuse
+publication before checkout or registry writes; the Changesets version-PR job
+still runs on pushes for new 0.x. Do not dispatch historical workflow revisions.
+The native workflow cannot publish old Docker images or move old aliases.
+New Core code refuses cross-line update requests, but that guard cannot change
+an older installed binary. Do not use an old tag or script to
 bypass the guided migration.
 
 Release notes keep the old state-schema markers for the remaining Docker

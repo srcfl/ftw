@@ -229,7 +229,8 @@ week-long site check above.
 
 The old Docker workflows, tags and receipts describe past releases and remain
 for recovery and audit. Their presence is not authority to cut another 2.x or
-3.x release. Do not dispatch them or the old Home Assistant publication path.
+3.x release. Current workflow definitions refuse old publication before
+checkout or registry writes. Do not dispatch old workflow revisions or the old Home Assistant path.
 Do not move old `latest` aliases to 0.x: installed old clients cannot migrate
 through them. Use [docs/self-update.md](docs/self-update.md) for current release
 and operator rules.
