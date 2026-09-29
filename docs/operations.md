@@ -11,13 +11,10 @@ safely when it is unavailable.
 
 [Install and update FTW](native-beta.md) is the full guide and explains how
 to choose a published new 0.x beta. Use the installer from the same tag you
-install, on a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host:
+install, on a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host.
 
-```bash
-tag=v0.X.Y-beta.N   # the exact release chosen for this site
-curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
-bash install.sh --fresh-host --tag "${tag}"
-```
+Follow the complete [native install block](native-beta.md#install). It stops
+on errors and uses a temporary download. Do not run it on the old SD card.
 
 Do not use GitHub `releases/latest`; it stays on 2.x for old boxes.
 `--fresh-host` confirms that no FTW site exists, including a stopped Docker

@@ -105,9 +105,14 @@ The new line starts at `v0.131.0-beta.1`; old 0.x releases up to 0.130.x are
 also retired. A lower version number or a saved `beta` channel does not tell
 you which install path you have. Identify it before running commands.
 
-Use a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host for native systemd,
-or run the same release package in Docker on Linux. Existing sites can switch
-using a second SD card/host or a separate Docker project with new data. The
+**Old FTW on a Raspberry Pi? Use a second SD card.** Keep the old card,
+prepare the new one and swap cards before running install commands. Follow
+[the card-by-card steps](docs/native-beta.md#raspberry-pi-use-a-second-sd-card).
+Do not try Docker next if the native installer refuses the old card.
+
+Use a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host for native systemd.
+Docker on the same Linux host is a separate, advanced option: identify and
+stop old Core and its updater, and preserve any MQTT service first. The
 guided migration of settings and history is not ready; preserve the old data
 and get help if those data must move before you switch. Only one Core may
 control the equipment, including after reboot.
