@@ -2327,3 +2327,7 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .control-status[data-tone="unknown"] { color: var(--text-dim); }
 .control-status[data-tone="alarm"], .control-alarm h3 { color: var(--red); }
 .control-result.control-alarm { border-inline-start: 4px solid var(--red); }
+
+.control-results-compact .control-status-list { margin-bottom: .5rem; }
+.control-results-compact .control-status-list li { padding: .3rem .5rem; }
+.control-status-list button { background: transparent; border: 0; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }

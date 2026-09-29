@@ -89,11 +89,13 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		s.deps.CtrlMu.Unlock()
 	}
 	observe, disabled := map[string]bool{}, map[string]bool{}
+	configuredBattery := map[string]bool{}
 	if s.deps.Cfg != nil && s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
 		observe = config.ObserveOnlyDriverSet(s.deps.Cfg)
 		for _, d := range s.deps.Cfg.Drivers {
 			disabled[d.Name] = d.Disabled
+			configuredBattery[d.Name] = d.BatteryCapacityWh > 0 && !d.BatteryTelemetryOnly
 		}
 		s.deps.CfgMu.RUnlock()
 	}
@@ -116,7 +118,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			manualBattery := held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver)
 			// Measurements inform the site comparison, but only controlled
 			// functions receive a command result. PV becomes one on curtailment.
-			if !commanded && !(kind == telemetry.DerBattery && targeted[rd.Driver]) && !(kind == telemetry.DerEV && loadpointOwned) && !manualBattery {
+			if !commanded && !(kind == telemetry.DerBattery && (targeted[rd.Driver] || configuredBattery[rd.Driver])) && !(kind == telemetry.DerEV && loadpointOwned) && !manualBattery {
 				continue
 			}
 			if kind == telemetry.DerPV && !commanded {

@@ -180,10 +180,9 @@
                          load="0" ev="0" soc="0"></ftw-energy-flow>
       </div>
 
-      <section id="control-results" class="control-results" aria-label="Control results" hidden></section>
-
       <div id="power-now-values" class="power-now-panel" role="tabpanel"
            aria-labelledby="power-now-tab-values" hidden>
+        <section id="control-results" class="control-results control-results-compact" aria-label="Control status" hidden></section>
         <div class="summary-cards">
           <div class="summary-card" id="card-pv">
             <div class="card-label">Solar</div>
@@ -930,6 +929,12 @@
 
   <!-- Grid detail popup — peak import ceiling + grid target. Open from
        the GRID planet in the energy-flow hero. -->
+  <ftw-modal id="control-proof-modal" style="--ftw-modal-max-width:640px">
+    <span slot="title">Control evidence</span>
+    <section id="control-proof-details" class="control-results" aria-label="Control results"></section>
+    <button slot="footer" id="control-proof-controls" type="button">Device controls</button>
+  </ftw-modal>
+
   <ftw-modal id="grid-modal" style="--ftw-modal-max-width:420px">
     <span slot="title">Grid</span>
     <div id="grid-modal-body">

@@ -61,8 +61,11 @@ Require fresh readings from the device under test and its independent meter.
 Use other flows as corrections only when their measurements support the same
 before/after window. A changing residual can still prevent confirmation.
 
-Show each level in the overview. Losing measured confirmation on a previously
-verified device must raise a visible alarm after its normal response wait.
+Show each level on its device in the overview, inside the energy-flow bubble.
+Keep power and state of charge prominent. A tap opens the reason, request,
+measurements and curves. Combined bubbles show mixed levels and keep alarms
+visible; they never turn one device’s proof into a verdict for the whole group.
+Losing measured confirmation on a previously verified device must raise a visible alarm after its normal response wait.
 Starting a command, unplugging a car or returning control to a device must not
 create a false loss alarm. Fresh measured proof clears the alarm.
 

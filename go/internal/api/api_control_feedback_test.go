@@ -154,3 +154,14 @@ func TestControlVerificationLossAlarm(t *testing.T) {
 		})
 	}
 }
+
+func TestConfiguredBatteryVisibleBeforeFirstCommand(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("battery", telemetry.DerBattery, -300, nil, []byte(`{}`))
+	cfg := &config.Config{Drivers: []config.Driver{{Name: "battery", BatteryCapacityWh: 10000}}}
+	srv := New(&Deps{Tel: tel, Cfg: cfg, CfgMu: &sync.RWMutex{}})
+	got := srv.controlFeedback(time.Now())
+	if len(got) != 1 || got[0].Reason != "no_command" || got[0].VerificationTier != nil || got[0].VerificationLost {
+		t.Fatalf("pre-command battery needs a neutral status, got %+v", got)
+	}
+}

@@ -11,6 +11,8 @@
 // component's window.FTW_FLOW_IDLE_W wins once that module has loaded;
 // 42 is the no-modules / unit-test fallback. Do not import the
 // component from here — that would pull Custom Elements into Node tests.
+import {withControlProof} from "../control-feedback.js";
+
 function idleW() {
   return (typeof window !== "undefined" && window.FTW_FLOW_IDLE_W) || 42;
 }
@@ -220,7 +222,7 @@ export function flowReadingsFromStatus(status, opts) {
 
   return {
     load: loadW === null ? null : loadW / 1000,
-    planets,
+    planets: withControlProof(planets, status?.control_feedback, opts?.live !== false),
     selfPoweredPctToday,
   };
 }

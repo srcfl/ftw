@@ -54,6 +54,42 @@ export function feedbackStatus(row, live = true) {
   if (row.verification_tier === 0) return {label:'Tier 0 · Waiting',tone:'waiting'};
   return {label:'Waiting for acknowledgement',tone:'waiting'};
 }
+// Both views use the same per-function identity, including combined bubbles.
+export function feedbackForPlanet(value, planet = {}) {
+  const name = planet.id?.startsWith('agg-') ? '' : planet.name;
+  return feedbackRows(value).filter(row => (!name || row.driver === name) &&
+    (!planet.role || row.kind === planet.role || planet.role === 'ev' && row.kind === 'v2x_charger'));
+}
+
+export function withControlProof(planets, value, live = true) {
+  const result = planets.map(p => ({...p}));
+  const corners = {battery:'top-right', ev:'bottom-right', pv:'top-left', v2x_charger:'bottom-right'};
+  for (const row of feedbackRows(value)) {
+    if (!corners[row.kind]) continue;
+    const role = row.kind === 'v2x_charger' ? 'ev' : row.kind;
+    let planet = result.find(p => p.name === row.driver && p.role === role);
+    if (!planet) {
+      // A failed device must remain visible next to a healthy sibling.
+      planet = {id:`proof-${row.kind}-${row.driver}`, name:row.driver, role,
+        corner:corners[row.kind], title:role === 'battery' ? 'BATTERY' : role === 'pv' ? 'SOLAR' : 'EV CHARGER',
+        kw:0, toHub:false, color:'var(--fg-muted)', sub:'no data', placeholder:true};
+      result.push(planet);
+    }
+    if (live && row.actual_w == null && ['telemetry_stale','device_fault'].includes(row.reason)) {
+      planet.placeholder = true; planet.kw = 0; planet.sub = 'no data'; planet.color = 'var(--fg-muted)';
+    }
+    const status = feedbackStatus(row,live);
+    const label = !live ? 'No live proof' : status.tone === 'alarm' ?
+      (row.verification_tier === 0 ? '⚠ Tier 0' : '⚠ No proof') :
+      [0,1,2].includes(row.verification_tier) ? `Tier ${row.verification_tier}` :
+      status.label === 'No active command' ? 'No command' : 'Waiting';
+    const proof = {...status, label, detail:status.label};
+    const order = {alarm:0, waiting:1, unknown:2, measured:3, confirmed:4};
+    if (!planet.controlProof || order[status.tone] < order[planet.controlProof.tone]) planet.controlProof = proof;
+    planet.clickable = true;
+  }
+  return result;
+}
 const number = value => typeof value === 'number' && Number.isFinite(value);
 export function feedbackPower(value, kind) {
   if (!number(value)) return 'Unknown';
@@ -138,7 +174,7 @@ export function feedbackCurve(row, live = true) {
 }
 
 // On-box renderer. The app uses the same presentation functions in Svelte.
-export function renderFeedback(root, value, live = true) {
+export function renderFeedback(root, value, live = true, {compact = false, expanded = false} = {}) {
   if (!root) return;
   const rows = feedbackRows(value);
   root.hidden = rows.length === 0;
@@ -147,13 +183,15 @@ export function renderFeedback(root, value, live = true) {
   root.replaceChildren();
   if (!rows.length) return;
   const el = (tag, text, parent, cls) => { const node=document.createElement(tag); if (text) node.textContent=text; if(cls) node.className=cls; parent.appendChild(node); return node; };
-  el('h2','Are you in control?',root);
+  if (!compact) el('h2','Are you in control?',root);
   const statuses=el('ul','',root,'control-status-list'); statuses.setAttribute('aria-label','Control status by device');
   for (const row of rows) {
     const status=feedbackStatus(row,live), item=el('li','',statuses);
     el('span',`${row.driver} · ${row.kind || 'device'}`,item);
-    const badge=el('strong',status.label,item,'control-status'); badge.dataset.tone=status.tone;
+    const badge=el(compact ? 'button' : 'strong',status.label,item,'control-status'); badge.dataset.tone=status.tone;
+    if (compact) { badge.type='button'; badge.dataset.driver=row.driver; badge.dataset.kind=row.kind; badge.setAttribute('aria-label',`${row.driver}: ${status.label}. View measurements`); }
   }
+  if (compact) return;
   for (const row of rows) {
     const text=feedbackText(row,live);
     const card=el('article','',root,'control-result' + (live && row.severity === 'warning' ? ' needs-attention' : '') + (!live ? ' not-current' : '') + (live && row.verification_lost ? ' control-alarm' : ''));
@@ -164,7 +202,7 @@ export function renderFeedback(root, value, live = true) {
     el('p',text.action,card,'control-action');
     const proof=el('p',feedbackProof(row,live),card,'control-proof'); proof.dataset.tier=live ? String(row.verification_tier) : '';
     el('p',feedbackSite(row,live),card,'control-action');
-    const details=el('details','',card); details.dataset.device=`${row.driver}:${row.kind}`; details.open=open.has(details.dataset.device);
+    const details=el('details','',card); details.dataset.device=`${row.driver}:${row.kind}`; details.open=expanded || open.has(details.dataset.device);
     el('summary','Request and measurements',details);
     const dl=el('dl','',details);
     for (const [label,value] of feedbackValues(row,live)) {el('dt',label,dl);el('dd',value,dl);}
@@ -181,4 +219,4 @@ export function renderFeedback(root, value, live = true) {
     if (number(row.observed_at_ms)) el('p',`Last reading: ${new Date(row.observed_at_ms).toLocaleTimeString()}`,details,'control-time');
   }
 }
-if (typeof window !== 'undefined') window.FTWControlFeedback = {render:renderFeedback,text:feedbackText};
+if (typeof window !== 'undefined') window.FTWControlFeedback = {render:renderFeedback,text:feedbackText,forPlanet:feedbackForPlanet};

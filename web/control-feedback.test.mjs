@@ -64,3 +64,10 @@ test('each device has its own status and unknown background is not a veto',()=>{
  assert.equal(feedbackStatus({driver:'ev',reason:'telemetry_stale',verification_tier:0,verification_lost:true}).tone,'alarm');
  assert.equal(feedbackStatus(row,false).tone,'unknown');
 });
+
+test('bubble details select a function and combined bubbles retain every device',async()=>{
+ const {feedbackForPlanet}=await import('./control-feedback.js');
+ const rows=[{driver:'hybrid',kind:'battery',reason:'power_observed'},{driver:'hybrid',kind:'pv',reason:'power_observed'},{driver:'other',kind:'battery',reason:'telemetry_stale'}];
+ assert.deepEqual(feedbackForPlanet(rows,{role:'battery',name:'hybrid'}),[rows[0]]);
+ assert.deepEqual(feedbackForPlanet(rows,{role:'battery',name:'2×',id:'agg-top-right'}),[rows[0],rows[2]]);
+});

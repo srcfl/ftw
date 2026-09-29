@@ -144,3 +144,18 @@ describe("fmtKwhShort", () => {
     assert.equal(fmtKwhShort(100.6), "101");
   });
 });
+
+it('keeps independent tiers and an offline sibling visible without old watts', () => {
+  const status = {grid_w:1000,load_w:500,drivers:{a:{status:'ok',bat_w:1000},b:{status:'offline',bat_w:5000}},control_feedback:[
+    {driver:'a',kind:'battery',reason:'power_observed',verification_tier:2},
+    {driver:'b',kind:'battery',reason:'telemetry_stale',verification_tier:0,verification_lost:true,actual_w:null},
+  ]};
+  const planets=flowReadingsFromStatus(status).planets;
+  assert.equal(planets.find(p=>p.name==='a').controlProof.label,'Tier 2');
+  const failed=planets.find(p=>p.name==='b');
+  assert.equal(failed.controlProof.tone,'alarm');
+  assert.equal(failed.placeholder,true);
+  assert.equal(failed.kw,0);
+  assert.equal(failed.clickable,true);
+  assert.equal(flowReadingsFromStatus(status,{live:false}).planets.find(p=>p.name==='a').controlProof.label,'No live proof');
+});

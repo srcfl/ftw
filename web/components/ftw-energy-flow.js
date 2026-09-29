@@ -664,7 +664,8 @@ class FtwEnergyFlow extends FtwElement {
         socStale: !p.placeholder && !!p.socStale,
         socSource: p.placeholder ? null : p.socSource,
         radius: p._r,
-        clickable: p.clickable === false ? false : (!p.placeholder && !!p.role),
+        clickable: p.clickable === false ? false : (!!p.controlProof || !p.placeholder && !!p.role),
+        controlProof: p.controlProof,
         role: p.role || "",
         name: p.name || "",
         id: p.id,
@@ -706,6 +707,14 @@ class FtwEnergyFlow extends FtwElement {
     super.update();
   }
 
+  _syncLayerAccess() {
+    for (const layer of this.shadowRoot.querySelectorAll('.ef-layer')) {
+      const visible = layer.classList.contains(this._aggregated ? 'ef-layer-agg' : 'ef-layer-ind');
+      layer.setAttribute('aria-hidden', visible ? 'false' : 'true');
+      for (const node of layer.querySelectorAll('.ef-clickable')) node.setAttribute('tabindex', visible ? '0' : '-1');
+    }
+  }
+
   // Called by FtwElement after each render() replaces the shadow DOM.
   // We cancel any in-flight rAF, bind the freshly-rendered <circle>
   // elements to the particle-param list `render()` just built, and
@@ -726,6 +735,7 @@ class FtwEnergyFlow extends FtwElement {
         this._aggregated = !this._aggregated;
         const svgEl = this.shadowRoot.querySelector("svg");
         if (svgEl) svgEl.dataset.agg = this._aggregated ? "on" : "off";
+        this._syncLayerAccess();
         toggleBtn.setAttribute("aria-checked", this._aggregated ? "true" : "false");
         toggleBtn.setAttribute("title", this._aggregated
           ? "Split multi-device corners into individual bubbles"
@@ -738,6 +748,7 @@ class FtwEnergyFlow extends FtwElement {
     // `ftw-planet-click` so callers (app.js) can route per-role
     // (e.g. ev → open EV modal scoped to this driver).
     const svg = this.shadowRoot.querySelector('svg');
+    this._syncLayerAccess();
     if (svg) {
       const fire = (g) => {
         const role = g.getAttribute('data-role') || '';
@@ -1152,7 +1163,7 @@ class FtwEnergyFlow extends FtwElement {
           <span class="ef-toggle-track"></span>
         </button>
       ` : ""}
-      <svg class="${this._svgClass()}" data-agg="${aggAttr}" viewBox="${P.vbX} 0 ${P.vbW} ${P.H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <svg class="${this._svgClass()}" data-agg="${aggAttr}" viewBox="${P.vbX} 0 ${P.vbW} ${P.H}" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Energy flow">
         <defs>
           <radialGradient id="ef-hub" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stop-color="oklch(0.85 0.18 var(--accent-hue))" stop-opacity="0.55"/>
@@ -1454,7 +1465,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
                             clickable = false, role = "", name = "", id = "",
                             aggregated = false,
                             dailyKwh = null, dailyKwhParts = null,
-                            compact = false }) {
+                            compact = false, controlProof = null }) {
   const r = radius;
   const { x, y } = pos;
   // Daily totals line — empty string when no payload was passed (back-
@@ -1468,7 +1479,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // derived from the visible title/name so the announcement names
   // what activating this node will open.
   const nodeLabel = [title, nameLabel].filter(Boolean).join(" ");
-  const ariaLabel = nodeLabel ? `Open ${nodeLabel}` : "Open node";
+  const ariaLabel = controlProof ? `${nodeLabel}: ${controlProof.detail}. View measurements` : nodeLabel ? `Open ${nodeLabel}` : "Open node";
   const groupAttrs = clickable
     ? ` class="ef-node ef-clickable" data-role="${escapeXml(role)}" data-name="${escapeXml(name)}" data-id="${escapeXml(id)}" tabindex="0" role="button" aria-label="${escapeXml(ariaLabel)}"`
     : ` class="ef-node"`;
@@ -1595,6 +1606,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
               fill="none" stroke="${color}" stroke-width="1"
               stroke-dasharray="2 4"/>
       <g class="ef-icon" transform="translate(${x} ${y}) scale(${iconScale})">${iconSvg}</g>
+      ${controlProof ? renderProofBadge(controlProof, x, y, r) : ''}
       ${titleSvg}
       <text x="${x}" y="${y + valueY}" text-anchor="middle" fill="${color}" class="sv-node-value">
         ${value}
@@ -1609,6 +1621,26 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
       </text>
       ${socText}
     </g>`;
+}
+
+// Evidence has its own label and colour; power-flow colour keeps its meaning.
+function renderProofBadge(proof, x, y, r) {
+  const colors = {confirmed:'var(--green-e)', measured:'var(--cyan)', waiting:'var(--amber)', alarm:'var(--red-e)', unknown:'var(--fg-muted)'};
+  const color = colors[proof.tone] || colors.unknown;
+  const width = Math.min(r * 1.7, Math.max(r * .82, proof.label.length * r * .12));
+  const height = r * .33, top = y - r * .99;
+  return `<g class="ef-control-proof" style="color:${color}">
+    <rect x="${x-width/2}" y="${top}" width="${width}" height="${height}" rx="${height/2}" fill="var(--hero-box-fill)" stroke="currentColor"/>
+    <text x="${x}" y="${top+height*.7}" text-anchor="middle" fill="currentColor" font-size="${r*.21}" font-weight="700">${escapeXml(proof.label)}</text>
+  </g>`;
+}
+function combinedProof(group) {
+  const proofs = group.map(p => p.controlProof).filter(Boolean);
+  if (!proofs.length) return null;
+  const alarms = proofs.filter(p => p.tone === 'alarm').length;
+  if (alarms) return {tone:'alarm', label:`⚠ ${alarms} alarm${alarms === 1 ? '' : 's'}`, detail:`${alarms} device${alarms === 1 ? '' : 's'} need attention`};
+  if (proofs.length === group.length && proofs.every(p => p.label === proofs[0].label && p.tone === proofs[0].tone)) return proofs[0];
+  return {tone:'unknown', label:'Mixed tiers', detail:'Devices have different control evidence'};
 }
 
 // ---------- primitives ----------
@@ -1720,6 +1752,8 @@ function aggregateGroups(groups) {
       socSource,
       name: `${group.length}×`,
       aggregated: true,
+      controlProof: combinedProof(group),
+      placeholder: group.some(p => p.placeholder),
       dailyKwh,
       dailyKwhParts,
     }];
