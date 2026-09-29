@@ -38,7 +38,7 @@ func TestIndependentControlConfirmation(t *testing.T) {
 		{"reported solar change absent from grid", flat(1000), flat(1400), flat(-2200), true, "site_change_differs"},
 		{"same physical sensor", flat(1000), flat(1400), flat(-1200), false, "independent_source_unknown"},
 		{"small change", flat(100), flat(500), flat(-1200), true, "no_clear_change"},
-		{"impossible balance", flat(5000), flat(0), flat(-1200), true, "energy_balance_conflict"},
+		{"impossible balance", flat(5000), flat(0), flat(-1200), true, "site_change_differs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := map[string]telemetry.ControlBaseline{
@@ -62,7 +62,7 @@ func TestIndependentControlConfirmation(t *testing.T) {
 			if got.Samples != 5 || got.WindowS != 12 || len(got.Trace) != 5 {
 				t.Fatalf("missing trace: %+v", got)
 			}
-			for _, missing := range []string{"grid:meter", "battery:battery", "solar:pv"} {
+			for _, missing := range []string{"grid:meter", "battery:battery"} {
 				saved := after[missing]
 				delete(after, missing)
 				if independentResponse(cmd, "grid", true, after, now).Reason == "confirmed" {
@@ -78,8 +78,8 @@ func TestIndependentControlConfirmation(t *testing.T) {
 				delayed.Points[i].At = now.Add(-30 * time.Second)
 			}
 			after["solar:pv"] = delayed
-			if independentResponse(cmd, "grid", true, after, now).Reason == "confirmed" {
-				t.Fatal("cached solar confirmed")
+			if got := independentResponse(cmd, "grid", true, after, now); len(got.UnmeasuredFlows) != 1 || got.UnmeasuredFlows[0] != "solar:pv" {
+				t.Fatalf("cached solar counted as fresh: %+v", got)
 			}
 			after["solar:pv"] = saved
 			if independentResponse(cmd, "grid", true, after, now.Add(time.Minute)).Reason == "confirmed" {
@@ -133,30 +133,6 @@ func TestIndependentResponseReplaysChangingSites(t *testing.T) {
 	}
 }
 
-func TestControlConfirmationRequiresConfiguredFlows(t *testing.T) {
-	now := time.Now()
-	tel := telemetry.NewStore()
-	tel.Update("battery", telemetry.DerBattery, 1000, nil, []byte(`{}`))
-	tel.RecordDriverSuccess("battery")
-	observed := map[string]telemetry.ControlBaseline{"battery:battery": responseSeries("battery", telemetry.DerBattery, now.Add(-12*time.Second), []float64{1000, 1000, 1000, 1000, 1000})}
-	srv := New(&Deps{Tel: tel})
-	if srv.controlSourcesComplete(observed, now) {
-		t.Fatal("missing site inventory claimed complete")
-	}
-	srv.deps.SiteMeasurementSources = func() telemetry.ForecastOptions {
-		return telemetry.ForecastOptions{ExpectedFlows: []telemetry.ForecastFlow{{Driver: "battery", DerType: telemetry.DerBattery}, {Driver: "solar", DerType: telemetry.DerPV}}}
-	}
-	if issue := srv.controlSourceIssue(observed, now); issue != "missing_fresh_power:solar:pv" {
-		t.Fatalf("missing solar cause: %s", issue)
-	}
-	srv.deps.SiteMeasurementSources = func() telemetry.ForecastOptions {
-		return telemetry.ForecastOptions{ExpectedFlows: []telemetry.ForecastFlow{{Driver: "battery", DerType: telemetry.DerBattery}}}
-	}
-	if !srv.controlSourcesComplete(observed, now) {
-		t.Fatal("complete source inventory rejected")
-	}
-}
-
 func TestExternalMeterThroughSameDriver(t *testing.T) {
 	now := time.Now()
 	tel := telemetry.NewStore()
@@ -201,5 +177,89 @@ func TestExternalMeterThroughSameDriver(t *testing.T) {
 	delete(after, "hybrid:meter")
 	if got := independentResponse(cmd, "hybrid", separate, after, now); got.Reason == "confirmed" || got.MaxSkewMS != nil {
 		t.Fatalf("external sensor identity replaced fresh meter evidence: %+v", got)
+	}
+}
+
+func TestControlResponseUsesPerDeviceResidual(t *testing.T) {
+	now := time.Now()
+	flat := func(v float64) []float64 { return []float64{v, v, v, v, v} }
+	for _, tc := range []struct {
+		name                                             string
+		missing, offline, late, pulse, unknownGeneration bool
+	}{
+		{name: "charger never emitted", missing: true},
+		{name: "charger offline", offline: true},
+		{name: "charger returns after command", late: true},
+		{name: "unknown load pulse", missing: true, pulse: true},
+		{name: "unmeasured battery exports", missing: true, unknownGeneration: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := telemetry.NewStore()
+			tel.Update("hybrid", telemetry.DerMeter, 1400, nil, []byte(`{"power_origin":"external_meter"}`))
+			tel.RecordDriverSuccess("hybrid")
+			bgKind := telemetry.DerEV
+			gridBefore, gridAfter := 400.0, 1400.0
+			if tc.unknownGeneration {
+				bgKind = telemetry.DerBattery
+				gridBefore, gridAfter = -4000, -3000
+			}
+			bgKey := "other:" + bgKind.String()
+			srv := New(&Deps{Tel: tel, SiteMeasurementSources: func() telemetry.ForecastOptions {
+				return telemetry.ForecastOptions{ExpectedFlows: []telemetry.ForecastFlow{{Driver: "hybrid", DerType: telemetry.DerBattery}, {Driver: "hybrid", DerType: telemetry.DerPV}, {Driver: "other", DerType: bgKind}}}
+			}})
+			cmd := telemetry.CommandEvidence{Driver: "hybrid", Kind: "battery", Since: now.Add(-15 * time.Second), Baseline: map[string]telemetry.ControlBaseline{
+				"hybrid:battery": responseSeries("hybrid", telemetry.DerBattery, now.Add(-30*time.Second), flat(0)),
+				"hybrid:meter":   responseSeries("hybrid", telemetry.DerMeter, now.Add(-30*time.Second), flat(gridBefore)),
+				"hybrid:pv":      responseSeries("hybrid", telemetry.DerPV, now.Add(-30*time.Second), flat(-1200)),
+			}}
+			grid := flat(gridAfter)
+			if tc.pulse {
+				grid[2] += 2000
+			}
+			after := map[string]telemetry.ControlBaseline{
+				"hybrid:battery": responseSeries("hybrid", telemetry.DerBattery, now.Add(-12*time.Second), flat(1000)),
+				"hybrid:meter":   responseSeries("hybrid", telemetry.DerMeter, now.Add(-12*time.Second), grid),
+				"hybrid:pv":      responseSeries("hybrid", telemetry.DerPV, now.Add(-12*time.Second), flat(-1200)),
+			}
+			if !tc.missing {
+				after[bgKey] = responseSeries("other", bgKind, now.Add(-12*time.Second), flat(6000))
+				if !tc.late {
+					cmd.Baseline[bgKey] = responseSeries("other", bgKind, now.Add(-30*time.Second), flat(3000))
+				}
+				if !tc.offline {
+					tel.RecordDriverSuccess("other")
+				}
+			}
+			got := srv.controlResponse(cmd, "hybrid", after, now)
+			want := "confirmed"
+			if tc.pulse {
+				want = "site_change_differs"
+			}
+			if got.Reason != want || len(got.UnmeasuredFlows) != 1 || got.UnmeasuredFlows[0] != bgKey {
+				t.Fatalf("got %+v, want %s with background %s", got, want, bgKey)
+			}
+			if *got.OtherDeltaW != 0 {
+				t.Fatalf("invented correction from missing source: %+v", got)
+			}
+		})
+	}
+}
+
+func TestUsableOtherFlowCannotBeDroppedToMakeCurvesAgree(t *testing.T) {
+	now := time.Now()
+	flat := func(v float64) []float64 { return []float64{v, v, v, v, v} }
+	cmd := telemetry.CommandEvidence{Driver: "battery", Kind: "battery", Since: now.Add(-15 * time.Second), Baseline: map[string]telemetry.ControlBaseline{
+		"battery:battery": responseSeries("battery", telemetry.DerBattery, now.Add(-30*time.Second), flat(0)),
+		"grid:meter":      responseSeries("grid", telemetry.DerMeter, now.Add(-30*time.Second), flat(400)),
+		"ev:ev":           responseSeries("ev", telemetry.DerEV, now.Add(-30*time.Second), flat(0)),
+	}}
+	after := map[string]telemetry.ControlBaseline{
+		"battery:battery": responseSeries("battery", telemetry.DerBattery, now.Add(-12*time.Second), flat(1000)),
+		"grid:meter":      responseSeries("grid", telemetry.DerMeter, now.Add(-12*time.Second), flat(1400)),
+		"ev:ev":           responseSeries("ev", telemetry.DerEV, now.Add(-12*time.Second), flat(2000)),
+	}
+	got := independentResponse(cmd, "grid", true, after, now)
+	if got.Reason != "site_change_differs" || len(got.UnmeasuredFlows) != 0 {
+		t.Fatalf("ignored available conflicting evidence: %+v", got)
 	}
 }

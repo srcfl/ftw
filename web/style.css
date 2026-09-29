@@ -2317,3 +2317,13 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .control-curve .zero { stroke: var(--border); stroke-width: 1; }
 .control-curve .device { stroke: var(--cyan); stroke-width: 3; }
 .control-curve .site { stroke: var(--green); stroke-width: 2; stroke-dasharray: 5 4; }
+
+.control-status-list { display: flex; flex-wrap: wrap; gap: .6rem; list-style: none; padding: 0; margin: 0 0 1rem; }
+.control-status-list li { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .65rem .8rem; border: 1px solid var(--border); border-radius: 8px; font-size: .85rem; }
+.control-status { font-size: .8rem; }
+.control-status[data-tone="confirmed"] { color: var(--green); }
+.control-status[data-tone="measured"] { color: var(--cyan); }
+.control-status[data-tone="waiting"] { color: var(--amber); }
+.control-status[data-tone="unknown"] { color: var(--text-dim); }
+.control-status[data-tone="alarm"], .control-alarm h3 { color: var(--red); }
+.control-result.control-alarm { border-inline-start: 4px solid var(--red); }

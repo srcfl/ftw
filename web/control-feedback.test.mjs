@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { feedbackText,feedbackPower,feedbackProof,feedbackRows,feedbackValues,feedbackSite,feedbackCurve } from './control-feedback.js';
+import { feedbackStatus,feedbackText,feedbackPower,feedbackProof,feedbackRows,feedbackValues,feedbackSite,feedbackCurve } from './control-feedback.js';
 
 test('command acknowledgement, device measurement and site confirmation stay distinct',()=>{
  const row={driver:'battery',kind:'battery',reason:'power_observed',response:'device_reported'};
@@ -53,4 +53,14 @@ test('a missing measurement names the source holding back site confirmation',()=
  const row={site_confirmation:'measurement_sources_unclear',site_source_issue:'missing_fresh_power:easee:ev'};
  assert.match(feedbackSite(row),/Fresh power readings from easee \(ev\) are missing/);
  assert.doesNotMatch(feedbackSite(row,false),/Fresh power readings/);
+});
+
+test('each device has its own status and unknown background is not a veto',()=>{
+ const row={driver:'battery',reason:'power_observed',verification_tier:2,site_confirmation:'confirmed',site_evidence:{unmeasured_flows:['offline-ev:ev']}};
+ assert.equal(feedbackStatus(row).tone,'confirmed');
+ assert.match(feedbackSite(row),/separate site meter/);
+ assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Included in background'),['Included in background','offline-ev:ev']);
+ assert.equal(feedbackStatus({driver:'ev',reason:'waiting_response',verification_tier:0}).tone,'waiting');
+ assert.equal(feedbackStatus({driver:'ev',reason:'telemetry_stale',verification_tier:0,verification_lost:true}).tone,'alarm');
+ assert.equal(feedbackStatus(row,false).tone,'unknown');
 });

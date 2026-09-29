@@ -18,21 +18,22 @@ type ControlResponsePoint struct {
 // ControlComparison keeps the measured correction and residual visible. It does
 // not estimate which household appliance changed or assign a confidence score.
 type ControlComparison struct {
-	BeforeW        float64                `json:"-"`
-	AfterW         float64                `json:"-"`
-	BeforeAt       time.Time              `json:"-"`
-	AfterAt        time.Time              `json:"-"`
-	Reason         string                 `json:"-"`
-	DeviceDeltaW   *float64               `json:"-"`
-	SiteDeltaW     *float64               `json:"-"`
-	OtherDeltaW    *float64               `json:"other_change_w"`
-	AdjustedDeltaW *float64               `json:"adjusted_site_change_w"`
-	ResidualW      *float64               `json:"unexplained_change_w"`
-	ToleranceW     float64                `json:"tolerance_w"`
-	Samples        int                    `json:"samples"`
-	WindowS        float64                `json:"window_s"`
-	MaxSkewMS      *int64                 `json:"max_skew_ms"`
-	Trace          []ControlResponsePoint `json:"trace,omitempty"`
+	BeforeW         float64                `json:"-"`
+	AfterW          float64                `json:"-"`
+	BeforeAt        time.Time              `json:"-"`
+	AfterAt         time.Time              `json:"-"`
+	Reason          string                 `json:"-"`
+	DeviceDeltaW    *float64               `json:"-"`
+	SiteDeltaW      *float64               `json:"-"`
+	OtherDeltaW     *float64               `json:"other_change_w"`
+	AdjustedDeltaW  *float64               `json:"adjusted_site_change_w"`
+	ResidualW       *float64               `json:"unexplained_change_w"`
+	ToleranceW      float64                `json:"tolerance_w"`
+	Samples         int                    `json:"samples"`
+	WindowS         float64                `json:"window_s"`
+	MaxSkewMS       *int64                 `json:"max_skew_ms"`
+	UnmeasuredFlows []string               `json:"unmeasured_flows,omitempty"`
+	Trace           []ControlResponsePoint `json:"trace,omitempty"`
 }
 
 type alignedControlPoint struct {
@@ -61,46 +62,52 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 	if _, ok := cmd.Baseline[gridKey]; !ok {
 		return stop("no_baseline")
 	}
-	keys := []string{target}
-	for k, flow := range after {
-		if flow.Kind == telemetry.DerMeter || flow.Kind == telemetry.DerVehicle {
-			continue
-		}
-		if flow.Kind == telemetry.DerEV {
-			if _, duplicate := after[flow.Driver+":"+telemetry.DerV2X.String()]; duplicate {
-				return stop("measurement_sources_unclear")
-			}
-		}
-		if _, ok := cmd.Baseline[k]; !ok {
-			return stop("other_flows_missing")
-		}
-		if k != target {
-			keys = append(keys, k)
-		}
-	}
-	for k, flow := range cmd.Baseline {
-		if flow.Kind == telemetry.DerVehicle || (flow.Kind == telemetry.DerMeter && k != gridKey) {
-			continue
-		}
+	// Only the commanded function and site meter are required measurements.
+	// Every other flow is a correction when both windows support it. Otherwise
+	// its real effect stays in the residual; missing data never means zero power.
+	for _, k := range []string{target, gridKey} {
 		current, ok := after[k]
 		if !ok || !current.Window.Usable(now) {
-			return stop("other_flows_missing")
+			return stop("waiting_for_meter")
 		}
 		if current.Window.First.Before(cmd.Since) {
 			return stop("waiting_for_meter")
 		}
 	}
-	sort.Strings(keys)
+	keys := []string{target}
 	before := alignControlPoints(cmd.Baseline, gridKey, target, keys)
 	current := alignControlPoints(after, gridKey, target, keys)
 	if len(before) < 3 || len(current) < 3 {
 		return stop("readings_not_aligned")
 	}
-	if before[len(before)-1].at.Sub(before[0].at) < 8*time.Second || current[len(current)-1].at.Sub(current[0].at) < 8*time.Second {
+	if !controlSpanReady(before, cmd.Since) || !controlSpanReady(current, now) {
 		return stop("waiting_for_meter")
 	}
-	if now.Sub(current[len(current)-1].at) > 10*time.Second {
-		return stop("waiting_for_meter")
+	candidates := map[string]bool{}
+	for _, flows := range []map[string]telemetry.ControlBaseline{cmd.Baseline, after} {
+		for k, flow := range flows {
+			if k != target && flow.Kind != telemetry.DerMeter && flow.Kind != telemetry.DerVehicle {
+				candidates[k] = true
+			}
+		}
+	}
+	ordered := make([]string, 0, len(candidates))
+	for k := range candidates {
+		ordered = append(ordered, k)
+	}
+	sort.Strings(ordered)
+	for _, k := range ordered {
+		old, next := cmd.Baseline[k], after[k]
+		trial := append(append([]string(nil), keys...), k)
+		b := alignControlPoints(cmd.Baseline, gridKey, target, trial)
+		a := alignControlPoints(after, gridKey, target, trial)
+		// Select by sample availability and timing only, never by whether a
+		// correction makes the power curves agree. Use one set on both sides.
+		if !old.Window.Usable(cmd.Since) || !next.Window.Usable(now) || next.Window.First.Before(cmd.Since) || !controlSpanReady(b, cmd.Since) || !controlSpanReady(a, now) {
+			out.UnmeasuredFlows = append(out.UnmeasuredFlows, k)
+			continue
+		}
+		keys, before, current = trial, b, a
 	}
 	values := func(points []alignedControlPoint, f func(alignedControlPoint) float64) []float64 {
 		v := make([]float64, len(points))
@@ -151,16 +158,9 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 			matches = false
 		}
 	}
-	// Negative unmetered consumption beyond measurement tolerance exposes a
-	// missing/duplicated source or incompatible boundaries; it cannot prove control.
-	if baseResidual < -200 {
-		return stop("energy_balance_conflict")
-	}
-	for _, p := range current {
-		if residual(p) < -200 {
-			return stop("energy_balance_conflict")
-		}
-	}
+	// Unmeasured background may include a disconnected battery or solar source,
+	// so its absolute sign cannot establish an impossible energy balance. Its
+	// change must still agree at every point; a load pulse cannot be averaged out.
 	if math.Abs(deltaDevice) < 500 {
 		return stop("no_clear_change")
 	}
@@ -268,44 +268,47 @@ func (s *Server) separateMeterSource(driver, meter string) bool {
 	return a.Serial != "" && b.Serial != "" && a.Serial != b.Serial && a.DeviceID != "" && b.DeviceID != "" && a.DeviceID != b.DeviceID
 }
 
-func (s *Server) controlSourcesComplete(flows map[string]telemetry.ControlBaseline, now time.Time) bool {
-	return s.controlSourceIssue(flows, now) == ""
+// Source inventory helps avoid double counting; it does not require every
+// device to be online. Control proof belongs to one function at a time.
+func (s *Server) controlResponse(cmd telemetry.CommandEvidence, meter string, after map[string]telemetry.ControlBaseline, now time.Time) ControlComparison {
+	opts := telemetry.ForecastOptions{}
+	if s.deps.SiteMeasurementSources != nil {
+		opts = s.deps.SiteMeasurementSources()
+	}
+	counts := map[string]int{}
+	for _, f := range opts.ExpectedFlows {
+		if f.FlowID != "" {
+			counts[f.FlowID]++
+		}
+		k := f.Driver + ":" + f.DerType.String()
+		if _, exists := after[k]; !exists {
+			after[k] = telemetry.ControlBaseline{Driver: f.Driver, Kind: f.DerType}
+		}
+	}
+	duplicates := map[string]bool{}
+	for _, f := range opts.ExpectedFlows {
+		if f.FlowID != "" && counts[f.FlowID] > 1 {
+			duplicates[f.Driver+":"+f.DerType.String()] = true
+		}
+	}
+	target := cmd.Driver + ":" + cmd.Kind
+	for k, f := range after {
+		if k == target || f.Kind == telemetry.DerMeter || f.Kind == telemetry.DerVehicle {
+			continue
+		}
+		_, ev := after[f.Driver+":ev"]
+		_, v2x := after[f.Driver+":v2x_charger"]
+		ambiguous := duplicates[k] || (ev && v2x && (f.Kind == telemetry.DerEV || f.Kind == telemetry.DerV2X))
+		unidentified := opts.HouseholdInvalidReason != "" || f.Kind == telemetry.DerPV && opts.PVInvalidReason != ""
+		h := s.deps.Tel.DriverHealth(f.Driver)
+		if h == nil || !h.TelemetryLive() || h.DeviceFault || ambiguous || unidentified {
+			f.Window, f.Points = telemetry.ControlWindow{}, nil
+			after[k] = f
+		}
+	}
+	return independentResponse(cmd, meter, s.separateMeterSource(cmd.Driver, meter), after, now)
 }
 
-func (s *Server) controlSourceIssue(flows map[string]telemetry.ControlBaseline, now time.Time) string {
-	if s.deps.SiteMeasurementSources == nil {
-		return "site_inventory_unavailable"
-	}
-	opts := s.deps.SiteMeasurementSources()
-	if opts.HouseholdInvalidReason != "" {
-		return opts.HouseholdInvalidReason
-	}
-	if opts.PVInvalidReason != "" {
-		return opts.PVInvalidReason
-	}
-	seen := map[string]bool{}
-	for _, f := range opts.ExpectedFlows {
-		if f.DerType == telemetry.DerVehicle || f.DerType == telemetry.DerMeter {
-			continue
-		}
-		if f.FlowID != "" {
-			if seen[f.FlowID] {
-				return "duplicate:" + f.Driver + ":" + f.DerType.String()
-			}
-			seen[f.FlowID] = true
-		}
-		r, ok := flows[f.Driver+":"+f.DerType.String()]
-		if !ok || !r.Window.Usable(now) {
-			return "missing_fresh_power:" + f.Driver + ":" + f.DerType.String()
-		}
-	}
-	for _, f := range flows {
-		if f.Kind == telemetry.DerMeter || f.Kind == telemetry.DerVehicle {
-			continue
-		}
-		if !s.deps.Tel.DriverHealth(f.Driver).TelemetryLive() {
-			return "offline:" + f.Driver + ":" + f.Kind.String()
-		}
-	}
-	return ""
+func controlSpanReady(points []alignedControlPoint, now time.Time) bool {
+	return len(points) >= 3 && points[len(points)-1].at.Sub(points[0].at) >= 8*time.Second && !points[len(points)-1].at.After(now) && now.Sub(points[len(points)-1].at) <= 10*time.Second
 }

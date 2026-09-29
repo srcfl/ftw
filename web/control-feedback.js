@@ -41,7 +41,18 @@ export function feedbackRows(value) {
 export function feedbackText(row, live = true) {
   if (!live) return {title:'Last known control status', detail:'The box’s current control result is unavailable.', action:'Waiting for a fresh status report.'};
   const words = messages[row.reason] || ['Effect not verified', 'This box reports a control state this app does not recognise.', 'Check the device status.'];
-  return {title:words[0], detail:words[1], action:words[2]};
+  return {title:row.verification_lost ? 'Alarm · Measured control lost' : words[0], detail:words[1], action:words[2]};
+}
+// A per-device status, never a site-wide tier or a verdict inferred by the UI.
+export function feedbackStatus(row, live = true) {
+  if (!live) return {label:'No live proof',tone:'unknown'};
+  if (row.verification_lost) return {label:row.verification_tier === 0 ? 'Alarm · Tier 0' : 'Alarm · No proof',tone:'alarm'};
+  if (['observe_only','disabled','device_control','not_connected','no_command'].includes(row.reason)) return {label:'No active command',tone:'unknown'};
+  if (row.verification_tier === 2) return {label:'Tier 2 · Site confirmed',tone:'confirmed'};
+  if (row.verification_tier === 1) return {label:'Tier 1 · Device measured',tone:'measured'};
+  if (row.severity === 'warning') return {label:row.verification_tier === 0 ? 'Alarm · Tier 0' : 'Alarm · Unconfirmed',tone:'alarm'};
+  if (row.verification_tier === 0) return {label:'Tier 0 · Waiting',tone:'waiting'};
+  return {label:'Waiting for acknowledgement',tone:'waiting'};
 }
 const number = value => typeof value === 'number' && Number.isFinite(value);
 export function feedbackPower(value, kind) {
@@ -74,6 +85,7 @@ export function feedbackValues(row, live = true) {
     }
     if (number(e.samples) && e.samples > 0) values.push(['Comparison',`${e.samples} samples across ${Math.round(e.window_s)} s`]);
     if (number(e.tolerance_w) && e.tolerance_w > 0) values.push(['Site tolerance',`${Math.round(e.tolerance_w)} W`]);
+    if (Array.isArray(e.unmeasured_flows) && e.unmeasured_flows.length) values.push(['Included in background', e.unmeasured_flows.filter(v=>typeof v === 'string').join(', ')]);
     if (e.samples > 0 && number(e.max_skew_ms)) values.push(['Largest time gap',`${Math.round(e.max_skew_ms)} ms`]);
   }
   return values;
@@ -136,9 +148,15 @@ export function renderFeedback(root, value, live = true) {
   if (!rows.length) return;
   const el = (tag, text, parent, cls) => { const node=document.createElement(tag); if (text) node.textContent=text; if(cls) node.className=cls; parent.appendChild(node); return node; };
   el('h2','Are you in control?',root);
+  const statuses=el('ul','',root,'control-status-list'); statuses.setAttribute('aria-label','Control status by device');
+  for (const row of rows) {
+    const status=feedbackStatus(row,live), item=el('li','',statuses);
+    el('span',`${row.driver} · ${row.kind || 'device'}`,item);
+    const badge=el('strong',status.label,item,'control-status'); badge.dataset.tone=status.tone;
+  }
   for (const row of rows) {
     const text=feedbackText(row,live);
-    const card=el('article','',root,'control-result' + (live && row.severity === 'warning' ? ' needs-attention' : '') + (!live ? ' not-current' : ''));
+    const card=el('article','',root,'control-result' + (live && row.severity === 'warning' ? ' needs-attention' : '') + (!live ? ' not-current' : '') + (live && row.verification_lost ? ' control-alarm' : ''));
     el('div',`${row.driver} · ${row.kind || 'device'}`,card,'control-device');
     el('h3',text.title,card);
     el('p',text.detail,card);

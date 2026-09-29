@@ -52,6 +52,20 @@ provide context: solar normally contributes measured generation, not a control
 verdict. It receives a control verdict when FTW issues curtailment. Household
 load is the residual after measured flows; it is not another independent meter.
 
+Each device keeps its own level. One may have Tier 2 while another is offline
+with only a Tier 0 acknowledgement. Missing readings from another device
+leave its effect in the unmeasured background, alongside household load;
+they do not block this device's confirmation by themselves. That residual may
+also contain generation when a battery or solar source stops reporting.
+Require fresh readings from the device under test and its independent meter.
+Use other flows as corrections only when their measurements support the same
+before/after window. A changing residual can still prevent confirmation.
+
+Show each level in the overview. Losing measured confirmation on a previously
+verified device must raise a visible alarm after its normal response wait.
+Starting a command, unplugging a car or returning control to a device must not
+create a false loss alarm. Fresh measured proof clears the alarm.
+
 Use three explicit levels:
 
 - **Tier 0 — acknowledged:** the command was sent and acknowledged. This

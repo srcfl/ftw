@@ -21,6 +21,7 @@ type CommandEvidence struct {
 	PowerMismatchSince    time.Time
 	PowerMatchSince       time.Time
 	LastObservation       time.Time
+	LastVerifiedAt        time.Time
 	Baseline              map[string]ControlBaseline
 }
 
@@ -62,6 +63,9 @@ func (s *Store) BeginCommand(driver string, payload []byte, now time.Time) Comma
 		s.commands = map[string]CommandEvidence{}
 	}
 	k := driver + ":" + kind
+	if old, ok := s.commands[k]; ok && old.Result != "released" {
+		c.LastVerifiedAt = old.LastVerifiedAt
+	}
 	if old, ok := s.commands[k]; ok && old.Result == "accepted" && old.Action == c.Action && samePower(old.PowerW, c.PowerW) {
 		c.Since = old.Since
 		c.ReadbackMismatchSince = old.ReadbackMismatchSince
@@ -145,6 +149,9 @@ func (s *Store) EndCommandControl(driver string, failed bool) {
 			c.Result = "released"
 		}
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
+		if !failed {
+			c.LastVerifiedAt = time.Time{}
+		}
 		s.commands[k] = c
 	}
 }
@@ -203,6 +210,9 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 	}
 	mark(&c.PowerMismatchSince, gap > ControlToleranceW(*c.PowerW), observedAt)
 	mark(&c.PowerMatchSince, PowerFollowsCommand(c.Kind, *c.PowerW, power), observedAt)
+	if !c.PowerMatchSince.IsZero() && observedAt.Sub(c.PowerMatchSince) >= 10*time.Second && now.Sub(observedAt) <= 10*time.Second {
+		c.LastVerifiedAt = observedAt
+	}
 	s.commands[k] = c
 }
 

@@ -23,6 +23,7 @@ type ControlFeedback struct {
 	SiteAfterAtMs    int64              `json:"site_after_at_ms,omitempty"`
 	ToleranceW       *float64           `json:"tolerance_w"`
 	VerificationTier *int               `json:"verification_tier"`
+	VerificationLost bool               `json:"verification_lost,omitempty"`
 	SiteSourceIssue  string             `json:"site_source_issue,omitempty"`
 	SiteConfirmation string             `json:"site_confirmation"`
 	SiteMeter        string             `json:"site_meter,omitempty"`
@@ -200,11 +201,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				}
 				f.SiteMeter = meter
 				after := s.deps.Tel.ControlWindows(from, now)
-				comparison := independentResponse(cmd, meter, s.separateMeterSource(rd.Driver, meter), after, now)
-				if issue := s.controlSourceIssue(after, now); issue != "" {
-					f.SiteSourceIssue = issue
-					comparison = ControlComparison{Reason: "measurement_sources_unclear"}
-				}
+				comparison := s.controlResponse(cmd, meter, after, now)
 				f.SiteEvidence = &comparison
 				f.SiteConfirmation, f.DeviceDeltaW, f.SiteDeltaW = comparison.Reason, comparison.DeviceDeltaW, comparison.SiteDeltaW
 				if f.SiteDeltaW != nil {
@@ -246,6 +243,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				f.SiteConfirmation = "not_controlling"
 				f.SiteDeltaW, f.DeviceDeltaW, f.SiteBeforeW, f.SiteAfterW = nil, nil, nil, nil
 				f.SiteBeforeAtMs, f.SiteAfterAtMs = 0, 0
+			}
+			f.VerificationLost = controlVerificationLost(f, cmd, now)
+			if f.VerificationLost {
+				f.Severity = "warning"
 			}
 			out = append(out, f)
 		}
@@ -290,6 +291,30 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		return out[i].Driver < out[j].Driver
 	})
 	return out
+}
+
+// An acknowledgement is not an alarm during the normal response wait. A
+// function that previously supplied measured proof must recover that proof.
+// This state comes from telemetry, not from whether a browser was open.
+func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, now time.Time) bool {
+	if cmd.LastVerifiedAt.IsZero() || f.VerificationTier != nil && *f.VerificationTier >= 1 {
+		return false
+	}
+	switch f.Reason {
+	case "observe_only", "disabled", "device_control", "not_connected", "idle", "no_command":
+		return false
+	}
+	if cmd.Result == "released" {
+		return false
+	}
+	if f.Reason == "telemetry_stale" || f.Reason == "device_fault" || f.Reason == "command_failed" || f.Reason == "default_failed" {
+		return true
+	}
+	grace := 30 * time.Second
+	if f.Kind == "ev" {
+		grace = 2 * time.Minute
+	}
+	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastVerifiedAt) >= grace
 }
 
 func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, commanded, fresh bool, coreReason string, connected *bool, now time.Time) {

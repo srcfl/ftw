@@ -122,3 +122,35 @@ func TestControlTiersBelongToCommandedFunctions(t *testing.T) {
 		t.Fatalf("curtailment missing command verdict: %+v", got)
 	}
 }
+
+func TestControlVerificationLossAlarm(t *testing.T) {
+	now := time.Now()
+	one, zero := 1, 0
+	for _, tc := range []struct {
+		name, reason, kind   string
+		tier                 *int
+		verified, commandAge time.Duration
+		want                 bool
+	}{
+		{"startup", "waiting_response", "battery", &zero, 0, time.Minute, false},
+		{"new command settling", "waiting_response", "battery", &zero, time.Minute, 5 * time.Second, false},
+		{"lost measured response", "waiting_response", "battery", &zero, time.Minute, time.Minute, true},
+		{"device offline", "telemetry_stale", "battery", &zero, 20 * time.Second, time.Minute, true},
+		{"EV still settling", "waiting_response", "ev", &zero, time.Minute, time.Minute, false},
+		{"EV lost response", "response_unknown", "ev", &zero, 3 * time.Minute, 3 * time.Minute, true},
+		{"unplugged", "not_connected", "ev", &zero, 3 * time.Minute, 3 * time.Minute, false},
+		{"released", "device_control", "battery", nil, time.Minute, time.Minute, false},
+		{"device recovers", "power_observed", "battery", &one, time.Minute, time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := telemetry.CommandEvidence{Result: "accepted", Since: now.Add(-tc.commandAge)}
+			if tc.verified > 0 {
+				cmd.LastVerifiedAt = now.Add(-tc.verified)
+			}
+			f := ControlFeedback{Reason: tc.reason, Kind: tc.kind, VerificationTier: tc.tier}
+			if got := controlVerificationLost(f, cmd, now); got != tc.want {
+				t.Fatalf("alarm=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
