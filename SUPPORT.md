@@ -5,6 +5,11 @@ Sourceful Energy (Sourceful Labs AB). Fredrik owns the product direction.
 
 ## Community support
 
+For installation or update help, start with [Install and update FTW](docs/native-beta.md)
+([Svenska](docs/setup-guide/update-sv.md)). Include the running version and
+install type when asking for help. 2.x and 3.x receive no further updates;
+the guide explains how to switch to new 0.x and keep a recovery path.
+
 The Community edition is provided as-is, without official support, guaranteed
 response times, service-level commitments, or warranties. The AGPL in LICENSE
 and the separate Energyplan binary license contain

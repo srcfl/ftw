@@ -1,15 +1,15 @@
 # Older paired Docker upgrades
 
-The operator-led 2.x-to-3.x Core and updater procedure is retired.
-`scripts/upgrade-paired-release.sh` now exits before reading or changing a
-site. Do not use an older copy of the script or the orange Update button to
-move a 1.x or 2.x box to 3.x.
+**2.x and 3.x receive no further updates. Switch directly to the new 0.x line.
+Do not install 3.x beta or use it as an intermediate upgrade.**
 
-Keep an existing site on its current version. The planned guided migration
-will take 1.x, 2.x and 3.x sites directly to native 0.x after it has been
-tested. The fresh native installer is for an empty host and cannot migrate
-an existing box.
+Start with [Install and update FTW](native-beta.md)
+([Svenska](setup-guide/update-sv.md)). It covers the old Docker installer,
+Forty Two Watts images, the Raspberry Pi SD image, 1.x/2.x/3.x, Home Assistant
+and older native services. New native and Docker setups are available now;
+guided migration of old settings and history is not ready.
 
-Before any manual recovery, make and verify a full backup, then copy it off
-the box. See [backup and restore](backup-and-restore.md) and the current
-[update policy](self-update.md).
+The old Docker-to-Docker and paired Core/updater migration scripts are retired
+and exit without changing the site. Do not run an old copy to bypass them.
+Keep old data and a verified backup off the host. Stop old Core and its start
+rules before new Core controls the equipment, and check again after reboot.

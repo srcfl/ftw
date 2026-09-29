@@ -2,7 +2,7 @@
 
 Diese Anleitung ist für dich, wenn du noch nie einen Raspberry Pi eingerichtet hast. Keine Sorge — es ist leichter, als es klingt. Folge den Schritten einfach einer nach dem anderen.
 
-> **Native 0.x-Beta:** Das alte FTW-Image und der Docker-Installer sind für neue Geräte eingestellt. Diese Anleitung zeigt die Pi-Einrichtung. Betatester mit einem neuen 64-Bit-Rechner nutzen den [nativen Linux-Installer](../native-beta.md#install). Läuft FTW schon: siehe [Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
+> **2.x und 3.x erhalten keine weiteren Updates.** Wechsle zu neuen 0.x-Versionen, um die aktuellen Änderungen zu erhalten. Installiere keine 3.x-Beta. Läuft FTW bereits, beginne mit [Install and update FTW](../native-beta.md). Nutze eine **neue SD-Karte** und behalte die alte Karte mit ihren Daten.
 
 > **Kein Raspberry Pi?** Ein neuer 64-Bit-Rechner mit Debian oder Ubuntu kann denselben nativen Beta-Installer nutzen. Überspringe die Pi-Hardware-Schritte und lies **Schritt 11 — FTW installieren**.
 
@@ -52,7 +52,7 @@ Das ist das Grundprogramm, damit der Raspberry Pi funktioniert — ähnlich wie 
 
 ## Schritt 5 — Die Speicherkarte in deinen Computer stecken
 
-1. Nimm die Speicherkarte aus dem Raspberry Pi (falls sie drin ist). Sei vorsichtig.
+1. Wähle eine neue Speicherkarte. Behalte die Karte mit dem alten FTW und seinen Daten.
 2. Stecke sie in den Kartenleser an deinem normalen Computer.
 3. Klicke im Programm auf das untere Feld ("Storage") und wähle deine Karte aus.
 
@@ -118,13 +118,7 @@ Gut gemacht — du bist jetzt "im" Raspberry Pi.
 
 ## Schritt 11 — FTW installieren
 
-Der alte Docker-Installer mit einem Befehl wird nicht mehr verwendet. Native
-0.x wird noch getestet; diese Anleitung bietet derzeit keine allgemeine
-Installation. Wenn du am Beta-Test teilnimmst und einen neuen 64-Bit-Pi hast,
-folge der Anleitung mit festem Tag in den
-[Installationsschritten](../native-beta.md#install). Läuft FTW schon auf dem
-Pi, lass diese Karte unverändert und lies
-[Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
+Folge [Install and update FTW](../native-beta.md#install) und wähle eine veröffentlichte neue 0.x-Beta mit genauem Tag. Auf einem frischen 64-Bit-Pi kannst du jetzt installieren. Läuft FTW schon, folge zuerst [der Anleitung zum Wechsel](../native-beta.md#coming-from-an-older-ftw): nutze eine neue Karte und richte die Anlage neu ein. Die geführte Übernahme alter Einstellungen und Verlaufsdaten ist noch nicht fertig.
 
 ## Nach der Installation
 

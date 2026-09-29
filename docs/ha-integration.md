@@ -1,5 +1,11 @@
 # Home Assistant
 
+This MQTT integration works with new FTW running on a separate Linux host.
+The old Home Assistant app is on retired 3.x and does not follow new 0.x
+releases. Do not install its beta to get current FTW. Follow
+[Install and update FTW](native-beta.md), including stopping the old app's
+Core and automatic start before the new host controls the equipment.
+
 FTW publishes MQTT autodiscovery and state, and accepts a small command set.
 The bridge is optional and does not participate in the local safety loop.
 

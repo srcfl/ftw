@@ -194,12 +194,16 @@ Native 0.x path:
    refuses because `main` has moved past `drivers-beta`, publish beta first
    (`-f channel=beta`), then promote.
 
-Do not publish routine Docker releases. Existing 1.x, 2.x and 3.x installs
-remain on their current version until their owner uses the guided installer
-to move straight to native 0.x. Their in-app update is not the migration path.
-Old beta clients may still show an already published 3.x candidate; code on
-those boxes cannot be changed retroactively. The native installer must prove
-backup, restore and rollback before it is offered to them.
+The old lines are retired: no further 2.x or 3.x releases, including safety
+hotfixes or betas. All new Core releases use the new 0.x path. Do not recommend
+3.x beta as an install or intermediate upgrade. Old clients and aliases may
+still offer old releases; that is not a recommendation.
+
+For people and agents, [Install and update FTW](docs/native-beta.md) is the
+single entry point. An owner can switch now with a second SD card/host or a
+separate Docker project and new data. Guided migration of settings and history
+has not shipped. Keep the old data, verify backup and recovery, and confirm
+that only one Core controls the equipment, including after reboot.
 
 ### Who releases, and when
 
@@ -221,66 +225,14 @@ The native workflow is dispatched by the owner. The weekly beta cadence in
 first native pilot; a merge does not publish a beta. Stable follows the
 week-long site check above.
 
-### Exceptional repair on the old Docker line
+### Retired release tooling
 
-Only a critical safety fix that cannot wait for guided migration may use the
-old 2.x workflows. This is a separate owner decision, not part of the native
-release path. Start from the affected stable 2.x tag:
-
-1. `git checkout -b hotfix/vX.Y vX.Y.Z` from the affected stable tag.
-2. Land the fix on the branch — cherry-pick from master when it is
-   already fixed there, otherwise fix it here AND on master. A hotfix
-   that misses master regresses at the next release.
-3. Add the changeset and run `npx changeset version` on the branch,
-   then commit. The Version Packages bot only serves master; on a
-   hotfix branch changesets runs by hand, which still counts as
-   "changesets edits the version, not you".
-4. If the old branch needs workflow fixes, use the checked workflow code from
-   master while keeping binaries tied to the immutable hotfix tag.
-5. `gh workflow run beta.yml --ref hotfix/vX.Y -f version=vX.Y.<Z+1>-beta.1`
-6. Validate on an affected site, pinned explicitly via
-   `POST /api/version/update`.
-7. `gh workflow run release.yml --ref vX.Y.<Z+1>-beta.1 -f source_beta=vX.Y.<Z+1>-beta.1`
-
-The old public latest and Docker aliases stay on 2.x. Do not use this path
-for 1.x, 3.x or native 0.x. The new native release workflow never moves those
-old discovery targets.
-
-Do not create a new beta, tag, draft or candidate to recover a failed
-stable publish. Resume the existing draft by its numeric GitHub Release
-id, with workflow code from `master` and binaries from the immutable
-tag. GitHub 5xx is an external retry condition, not a reason to rebuild
-the candidate.
-
-See [docs/self-update.md](docs/self-update.md).
-
-A release is one workflow dispatch, not a manual list of registry commands.
-The following registry and Home Assistant dispatch steps apply only to an
-exceptional old Docker release. The `srcfl/*` images use the job-scoped
-`GITHUB_TOKEN`; each package must grant
-the `srcfl/ftw` repository GitHub Actions write access. The compatibility
-`frahlg/*` mirror uses the dedicated `LEGACY_GHCR_TOKEN`, with only
-`write:packages`. Never use a developer's local `gh` token, create a new token
-for each release, or fall back to `GITHUB_TOKEN` for the personal namespace.
-
-Registry credentials and package access are repository setup, not release
-steps. Before creating a beta tag or starting stable publication, the release
-workflows request a scoped `pull,push` bearer and start an empty GHCR blob
-upload in all four target packages. HTTP 202 proves write access without
-creating a blob, manifest, package version or tag. The workflow then tries to
-cancel the empty session. GHCR currently returns HTTP 405 for that optional
-cleanup, which is accepted; any other unexpected cleanup result fails the
-check. If the write check fails, stop, repair package access or rotate the one
-dedicated secret, then rerun the same immutable version. Do not mint another
-beta tag to work around an access failure.
-The Home Assistant app repository, `srcfl/home-assistant-addons`, follows
-every release on its own. `beta.yml` and `release-assets.yml` end by sending
-it a `repository_dispatch` of type `ftw-release`, authenticated with the
-secret `HA_ADDON_DISPATCH_TOKEN`: a fine-grained token with *Contents: read
-and write* on that repository only. Without the secret the step logs a notice
-and the app repository picks the release up on its hourly sync. The dispatch
-never blocks a release, and the app repository verifies the release against
-its digest receipt and the registry rather than trusting the payload.
+The old Docker workflows, tags and receipts describe past releases and remain
+for recovery and audit. Their presence is not authority to cut another 2.x or
+3.x release. Do not dispatch them or the old Home Assistant publication path.
+Do not move old `latest` aliases to 0.x: installed old clients cannot migrate
+through them. Use [docs/self-update.md](docs/self-update.md) for current release
+and operator rules.
 
 `CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
 

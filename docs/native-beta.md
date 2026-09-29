@@ -1,17 +1,57 @@
-# Try the 0.x beta
+# Install and update FTW
 
-This guide is for people who test the 0.x beta on their own machine. You
-run the host; FTW gives you a few commands for it
-([ADR 0007](adr/0007-self-updating-binary.md), decisions 10–14). Install it
-natively with systemd, or run it in Docker. Both run the same release
-package. Report what you find in an issue that names the beta, for example
-`v0.138.0-beta.1`.
+**FTW 2.x and 3.x will receive no further updates. All new development and
+releases use the new 0.x line. Move to it now to follow the latest fixes and
+features. Do not install 3.x beta or use it as an intermediate upgrade.**
+
+The new line starts at `v0.131.0-beta.1`. Older 0.x releases, up to 0.130.x,
+belong to the retired line too. The lower version number is deliberate.
+Choosing `beta` in an old installation does not move it to the new line.
+
+You can switch now with a new setup and separate data. The guided migration
+that preserves old settings, history, identity and goals is not ready yet.
+If you need those data moved before switching, get help for your exact
+installation; do not copy old databases into a new install.
+
+Use this guide for both people and agents. [Svenska](setup-guide/update-sv.md).
+The owner runs the host; FTW supplies the commands. Native systemd and Docker
+on 64-bit Linux use the same release package.
+
+## Choose your path
+
+| What runs now | How to switch or update |
+|---|---|
+| Old Docker: 0.x up to 0.130.x, 1.x or 2.x, including Forty Two Watts images | [Switch from an older FTW](#coming-from-an-older-ftw). Use a new SD card/host, or separate Docker project and data. |
+| Docker 3.x, including beta | The same switch. No intermediate release and no further 3.x updates. |
+| The old ready-made FTW Raspberry Pi image | It runs old Docker. Use a second card with Raspberry Pi OS Lite 64-bit; keep the old card. |
+| New 0.x native with launcher/release slots | [Update the native box](#update-a-native-box). Do not reinstall. |
+| New 0.x Docker built from the release package | [Change `FTW_VERSION` and rebuild](#docker). `ftw update` does not apply. |
+| Older direct native service without release slots | Identify its unit and data paths first. Use a separate host/card, or a checked migration for that site. The [native migration pilot](self-update.md#pilot-an-older-native-systemd-site) is not a general installer. |
+| Home Assistant app on the old line | Run new FTW on another Linux host. Stop the old app and its automatic start/watchdog before new Core controls the equipment. The app does not provide new 0.x yet. |
+| Custom build, manual binary, macOS or Windows | Identify the process and data first. The release install paths here require 64-bit Linux. |
+
+### Find out what is running
+
+Run these read-only checks on the FTW host, through SSH if needed:
+
+```bash
+sudo docker ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}'
+sudo docker compose ls -a
+systemctl list-units --type=service --all --no-pager | grep -Ei 'ftw|forty|docker'
+systemctl list-unit-files --type=service --no-pager | grep -Ei 'ftw|forty'
+```
+
+Record the version and dashboard address too. A missing command or permission
+error does not prove that no other install exists. Check other hosts, custom
+start scripts and Home Assistant if used. A stored Docker image is not a
+running Core; inspect containers and their restart rules. A service called
+`ftw`, or `ftw status` answering from port 8080, does not identify its layout.
 
 ## Before you start
 
 - A 64-bit Linux host: a Raspberry Pi 4 or 5 with Raspberry Pi OS Lite
   64-bit (Bookworm or Trixie), Debian 12 or 13, or an x86_64 machine.
-- Running FTW 1.x, 2.x or 3.x already, perhaps from the Raspberry Pi image?
+- Running any older FTW already, perhaps from the Raspberry Pi image?
   Read [Coming from an older FTW](#coming-from-an-older-ftw) first.
 - Port 8080 free, `curl`, and `sudo`.
 - FTW needs no MQTT broker of its own. Ferroamp and CTEK equipment runs
@@ -23,10 +63,15 @@ package. Report what you find in an issue that names the beta, for example
 
 ## Install
 
-Use the installer from the same tag you install:
+Choose an exact published new 0.x beta from [Releases](https://github.com/srcfl/ftw/releases).
+Check that it includes the Linux package for your architecture and its SHA-256
+file. Do not use `releases/latest`: it still points to the retired 2.x line.
+Replace `v0.X.Y-beta.N` below with that tag and use its own installer.
+`--fresh-host` confirms that this host has no existing FTW site, including
+stopped containers or data in a custom directory:
 
 ```bash
-tag=v0.138.0-beta.1
+tag=v0.X.Y-beta.N
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --fresh-host --tag "${tag}"
 ```
@@ -40,50 +85,76 @@ To run it in Docker instead, see [Docker](#docker).
 
 ## Coming from an older FTW
 
-Most sites run FTW 1.x, 2.x or 3.x in Docker, many from the Raspberry Pi
-image. The beta does not move their settings or history yet; that comes with
-the guided migration. Try it beside the old installation instead. The old one
-and its data stay as they are, and switching back takes a minute.
+Move directly to the new line using one of the paths below. Keep the old
+installation and its data for recovery; the new setup does not import them.
+Before switching, save device addresses, goals and schedules, and make a
+verified full backup using the tools your installed version supports. Keep
+that backup off the host. Not every old version has the same backup UI.
+Calendar support is gone: use loadpoint targets and ready-by schedules.
 
-Never run both at once: they would control the same equipment. The beta will
-not start while the old one holds port 8080, but an old 1.x-3.x Core started
-while the beta runs keeps controlling in the background, without its web
-page. So stop the old one before the beta, and the beta before the old one.
+**Only one Core may control the equipment.** An old Core can keep controlling
+when it fails to bind port 8080 and has no working web page. A single visible
+dashboard is not proof that only one Core runs. Stop old Core before starting
+new Core, and stop new Core before returning to the old install.
 
-**On a Raspberry Pi, use a second SD card.** This is the safest way.
+### Raspberry Pi: use a second SD card
 
-1. Write Raspberry Pi OS Lite (64-bit) to a new card with Raspberry Pi
-   Imager, as in the [setup guide](setup-guide/README.md). Choose a username
-   other than `ftw`: the installer creates its own `ftw` account, and cards
-   made from the FTW image used that name for the login.
-2. Shut the Pi down, swap the cards, start it and follow [Install](#install).
-   Set the site up again at `http://<host>:8080/setup`.
-3. To go back, shut down and put the old card back.
+1. Keep the old card intact. Write Raspberry Pi OS Lite **64-bit** to a **new**
+   card, as in the [setup guide](setup-guide/README.md). Choose a login name
+   other than `ftw`; the installer creates that service account.
+2. Shut the Pi down, swap cards, start it and follow [Install](#install).
+   Set up the site again at `http://<host>:8080/setup`.
+3. If the old card supplied MQTT, provide a broker for the new setup before
+   connecting the devices. The old card's broker does not move with FTW.
+4. Follow [Verify the switch](#verify-the-switch).
 
-**On the same machine, run the beta in Docker.** Stop the old stack, then
-follow [Docker](#docker); the beta lives in its own folder, `~/ftw-local`.
+To return, shut down and put the old card back. Also stop any new FTW you ran
+on another machine. Data collected by the new setup stays on the new card.
 
-```bash
-cd /opt/ftw && sudo docker compose down      # the Raspberry Pi image
-cd ~/ftw && docker compose down              # the Docker installer (1.x: ~/forty-two-watts)
-```
+### Same Linux host: use a separate Docker project
 
-To go back, stop the beta first, then start the old stack. Its data was never
-touched; what the beta recorded stays in `~/ftw-local/data` for next time.
+1. Identify the old project's directory, Compose files, overrides, name and
+   data mounts. Common paths are `/opt/ftw` on the old Pi image, `~/ftw` and
+   `~/forty-two-watts`; use the path found on this host. Save its Compose files
+   and `.env` with the backup so recovery uses the same old version.
+2. Check whether that project also supplies Mosquitto or another needed
+   service. Arrange continued MQTT before stopping the whole project.
+3. Stop the old project with its actual files and project name. For a standard
+   project, run `docker compose down` from its directory (with `sudo` if
+   required). Do not add `-v`, delete data, or stop Docker as a whole.
+4. Check systemd, timers and custom scripts that could recreate or start old
+   Core or its updater at boot. Disable only the confirmed old start path.
+   Docker's container restart policy is only one possible start path.
+5. Follow [Docker](#docker) in a new directory with separate empty data,
+   normally `~/ftw-local`. If that directory already exists, inspect it first;
+   do not overwrite an earlier test or attach the old data directory.
+6. Set up the site and follow [Verify the switch](#verify-the-switch).
 
-```bash
-cd ~/ftw-local && docker compose down
-cd /opt/ftw && sudo docker compose up -d     # or ~/ftw, ~/forty-two-watts
-```
+To return, stop the new project first, then start the saved old project with
+its original files and version pin. Restore only the start rules you disabled.
+Each installation keeps its own data.
 
-- The old stack's Mosquitto stops with it. Pixii and Heishamon then need
-  [a broker](#an-mqtt-broker).
-- The native installer refuses a machine that still has an older FTW: it
-  finds `/opt/ftw`, `~/ftw` or an `ftw` account. Installing natively over an
-  old site is the guided migration.
-- On Home Assistant, keep the add-on and try the beta on another machine.
+The native installer refuses an existing site. Do not remove its checks or
+old files to make `--fresh-host` pass. Home Assistant users need another Linux
+host for the new line; the old app is not an intermediate upgrade. Stop its
+Core, Start on boot and Watchdog before the new site takes control. Keep a
+Home Assistant backup and the old app's data for recovery. The MQTT integration
+with a separate FTW host still works; see [Home Assistant](ha-integration.md).
+
+## Verify the switch
+
+Check the expected running version, healthy devices, advancing measurements,
+current plan and history without write failures. Confirm that old Core and
+its updater are stopped and cannot start again automatically. Check all hosts
+that could control the equipment; port 8080 alone is not a check for this.
+
+Plan a reboot when the site can tolerate the interruption, then repeat these
+checks. If you have not checked after reboot, say so. Service health does not
+prove physical charging or battery response; verify those on the equipment.
 
 ## Everyday commands
+
+These commands are for the new **native** installation with release slots.
 
 ```bash
 ftw status                                   # version, releases, last update, disk, health
@@ -191,10 +262,10 @@ suits a trusted home network; otherwise add a `password_file`.
 
 `ftw update` replaces Core, not the launcher, the `ftw` command or the
 service definition. When a release notes changes to them, refresh them with
-the installer from that release:
+the installer from that release. Replace the placeholder with its exact tag:
 
 ```bash
-tag=v0.138.0-beta.1
+tag=v0.X.Y-beta.N
 curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
 bash install.sh --refresh --tag "${tag}"
 ```
@@ -204,14 +275,18 @@ bash install.sh --refresh --tag "${tag}"
 Docker runs FTW as well as the native install does. Compose builds a small
 local image from the same checksummed release package; nothing is compiled.
 You need Docker Engine with Compose on Linux. Docker Desktop on macOS or
-Windows keeps the network inside its VM and cannot reach the equipment.
+Windows has a different network setup; this Linux host-network recipe does
+not establish LAN device access there. Choose an exact published new 0.x tag
+as described under [Install](#install). Replace the placeholder below. These
+steps create a new site; use an empty directory, not an existing install.
 
 ```bash
+tag=v0.X.Y-beta.N
 mkdir -p ~/ftw-local && cd ~/ftw-local
-base=https://raw.githubusercontent.com/srcfl/ftw/master/deploy/docker
+base="https://raw.githubusercontent.com/srcfl/ftw/${tag}/deploy/docker"
 curl -fsSLO "${base}/compose.yaml" -O "${base}/Dockerfile"
 mkdir -p data && sudo chown 100:101 data
-echo "FTW_VERSION=v0.138.0-beta.1" > .env
+printf 'FTW_VERSION=%s\n' "$tag" > .env
 docker compose up -d --build
 ```
 
@@ -228,12 +303,14 @@ docker compose restart                       # restart
 ```
 
 To update, set the new version and rebuild. To go back, set the previous
-version; its image is still on the host, so nothing is fetched. Going back
+version. If its image is still on the host, Compose can reuse it. Going back
 works while both releases read the same data, as on a native install.
 
 ```bash
-sed -i 's/^FTW_VERSION=.*/FTW_VERSION=v0.138.0-beta.1/' .env
+# Edit only FTW_VERSION in .env to the chosen exact release; keep other entries.
 docker compose up -d --build
+docker compose ps
+docker compose exec ftw ftw status
 ```
 
 Docker has no automatic fallback. A release that does not start keeps
@@ -265,6 +342,17 @@ Give this section to an agent that operates FTW for you. FTW controls real
 equipment, so the agent uses the same commands a person would and leaves
 decisions about the site to you.
 
+- Identify the host, running version, process/service or Compose project,
+  data paths, restart rules and target release before changing anything. Use
+  [Choose your path](#choose-your-path), including for older 0.x versions.
+- Distinguish an update within the new line, a new setup with separate data,
+  and a migration preserving data. Do not recommend or publish 2.x or 3.x,
+  even if an old UI or a `latest` alias offers one.
+- A diagnosis is read-only. Once the owner has authorized a specific update,
+  carry it through without asking again for the same action.
+- For a switch, confirm an off-host backup, preserve MQTT and stop the old
+  control/start paths. Report the checks in [Verify the switch](#verify-the-switch),
+  including anything not tested, before calling the switch complete.
 - Read the state with `ftw status`. Exit 0 means Core answers and is
   healthy; exit 1 means it is not, and stderr says why. Exit 2 is a usage
   error. The commands never prompt.
@@ -272,8 +360,9 @@ decisions about the site to you.
   it. Exit 0 means the box is current or updated. Exit 1 means a step
   failed; report `ftw status` and `journalctl -u ftw -n 200`, and do not
   repeat the update.
-- Ask the owner before `ftw update --retry`, `ftw rollback`, a restore or
-  the offline rollback in [When something goes wrong](#when-something-goes-wrong).
+- Use `ftw update --retry`, rollback or restore only within the owner's
+  authorized recovery plan. If that authority is missing, ask before changing
+  the site. Do not retry a failed update blindly.
 - Before an update the owner cares about, run
   `ftw backup --output-dir <a directory on another disk>`.
 - Change settings in the web UI or the API. Do not edit files in

@@ -1,16 +1,17 @@
 # Operations
 
-New sites run native 0.x under systemd, or the same release package in
-Docker. Older Docker installs (1.x–3.x) stay on their current version until
-the guided migration ships. The control loop is local; Energyplan ships with
-Core and Core falls back safely when it is unavailable.
+New sites run new 0.x under systemd, or the same release package in Docker.
+2.x and 3.x receive no further updates. Switch using
+[Install and update FTW](native-beta.md); it covers every old and new layout.
+A new setup is available now; guided migration of old data is not ready.
+The control loop is local; Energyplan ships with Core and Core falls back
+safely when it is unavailable.
 
 ## Install
 
-[Try the 0.x beta](native-beta.md) is the full guide and names the current
-beta. Use the installer from the same tag you install, on a fresh 64-bit
-Raspberry Pi OS, Debian or Ubuntu host. During beta, use it only on an agreed
-test site:
+[Install and update FTW](native-beta.md) is the full guide and explains how
+to choose a published new 0.x beta. Use the installer from the same tag you
+install, on a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host:
 
 ```bash
 tag=v0.X.Y-beta.N   # the exact release chosen for this site
@@ -29,9 +30,10 @@ rerun with `--resume --tag` and the same tag. It keeps any data already saved.
 
 Docker runs the same release package; see [Docker](native-beta.md#docker).
 
-Existing Docker, Home Assistant and earlier native installations stay on
-their current version until the guided 0.x migration is tested. No native
-0.x package for macOS has shipped; the old macOS Docker installer is retired.
+Existing Docker, Home Assistant and older native sites can switch with a
+separate new setup; preserve old data and follow the one-Core checks in the
+guide. No native 0.x package for macOS has shipped; the old macOS Docker
+installer is retired.
 
 ## Everyday commands
 

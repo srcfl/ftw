@@ -92,64 +92,44 @@ driver actually changed.
 
 ## Install on Linux
 
-You install FTW yourself and choose how it runs: natively with systemd, or in
-Docker. Both use the same checksummed release package. 0.x is in beta;
-[docs/native-beta.md](docs/native-beta.md) has both paths, the everyday
-commands and recovery. On a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu
-host, the native install is:
+**2.x and 3.x will receive no further updates. New releases use the new 0.x
+line. Switch now to follow the latest fixes and features; do not install
+3.x beta or use it as an intermediate upgrade.**
 
-```bash
-tag=v0.137.1-beta.1   # the newest beta on the Releases page
-curl -fsSLO "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh"
-bash install.sh --fresh-host --tag "${tag}"
-```
+Start with [Install and update FTW](docs/native-beta.md)
+([Svenska](docs/setup-guide/update-sv.md)). It covers old Docker images,
+Raspberry Pi SD-card images, 1.x/2.x/3.x, older native sites, new native and
+Docker installs, Home Assistant, backup, and recovery.
 
-`--fresh-host` confirms there is no
-existing FTW site, even a stopped Docker site in a custom directory. The
-installer checks the package and checksum, creates native release slots under
-`/opt/ftw`, and starts the local
-Core service. It does not install Docker. Open `http://<host>:8080/setup` on
-the LAN, then check storage health and live device readings. If the first
-install is interrupted, use `--resume --tag` with the same tag after checking
-the service log; it keeps any data the first attempt created.
+The new line starts at `v0.131.0-beta.1`; old 0.x releases up to 0.130.x are
+also retired. A lower version number or a saved `beta` channel does not tell
+you which install path you have. Identify it before running commands.
 
-Give the FTW machine a DHCP reservation (a fixed IP) in your router. Devices
-that dial in to FTW — OCPP chargers store their backend URL at commissioning,
-and some hardware whitelists which addresses may talk to it — silently lose
-the connection if DHCP later hands the host a different address.
+Use a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host for native systemd,
+or run the same release package in Docker on Linux. Existing sites can switch
+using a second SD card/host or a separate Docker project with new data. The
+guided migration of settings and history is not ready; preserve the old data
+and get help if those data must move before you switch. Only one Core may
+control the equipment, including after reboot.
 
-Existing 1.x, 2.x, 3.x and earlier native sites stay on their current version
-until the guided 0.x migration is ready. The fresh installer refuses them; do
-not use Update or old Docker migration scripts to cross release lines.
-
-The on-box dashboard remains local. The optional
+Give the FTW host a DHCP reservation in the router so device connections keep
+working. Open `http://<host>:8080/setup` after installation. The optional
 [FTW webapp](https://github.com/srcfl/ftw-webapp) connects through an encrypted
-session and blind relay; relay loss does not stop local control. Cloud MCP
-access is a product goal, not an endpoint provided by this installation guide.
+session and blind relay; relay loss does not stop local control.
 
 ## Install on Home Assistant
 
-The official Home Assistant app repository is
-[`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons).
-It publishes beta builds of the older 3.x line; the 0.x line is not in the
-app yet. There is no stable app — Home Assistant OS and Supervisor
-qualification has to finish first — so treat it as a beta rather than a
-production install.
+The existing [Home Assistant app](https://github.com/srcfl/home-assistant-addons)
+is on the retired 3.x line. It does not follow new 0.x releases. Do not install
+that beta to get current FTW. Run new FTW on a separate Linux host and use the
+[MQTT integration](docs/ha-integration.md) with Home Assistant.
 
-Open **Settings → Apps → App store → Repositories** in Home Assistant and
-add:
-
-```text
-https://github.com/srcfl/home-assistant-addons
-```
-
-Check the add-on repository's
-[compatibility record](https://github.com/srcfl/home-assistant-addons/blob/main/COMPATIBILITY.md)
-before each install or update. Report Home Assistant install, update, backup,
-restore, or container faults in its
-[issue tracker](https://github.com/srcfl/home-assistant-addons/issues).
-Report Core, API, UI, control, or state faults in this repository. Report driver
-faults to [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers/issues).
+Follow [the switch guide](docs/native-beta.md#coming-from-an-older-ftw), including
+backup and stopping the old app's Core, Start on boot and Watchdog. Supervisor
+still owns recovery of the old app; its update controls do not migrate to 0.x.
+Report old app or Supervisor faults in its
+[issue tracker](https://github.com/srcfl/home-assistant-addons/issues), and Core
+faults in this repository.
 
 ## Local development
 
@@ -230,8 +210,7 @@ Changesets produce versions and changelog entries; the native release
 workflow builds the checksummed Linux packages that the installer, `ftw
 update` and the Docker files use. The repository owner cuts every release.
 Details for operators are in [docs/self-update.md](docs/self-update.md); the
-full maintainer rules, including the exceptional repair path for the old
-Docker line, are in the Releases section of [AGENTS.md](AGENTS.md).
+maintainer rules are in the Releases section of [AGENTS.md](AGENTS.md).
 
 ## Documentation
 

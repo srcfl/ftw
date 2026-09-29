@@ -2,7 +2,7 @@
 # with FTW_VERSION in one directory, then see docs/native-beta.md:
 #
 #   mkdir -p data && sudo chown 100:101 data
-#   echo FTW_VERSION=v0.135.1-beta.1 > .env
+#   echo FTW_VERSION=v0.X.Y-beta.N > .env  # replace with an exact published tag
 #   docker compose up -d --build
 #
 # Update: change FTW_VERSION in .env and run `docker compose up -d --build`.
@@ -17,7 +17,7 @@ services:
     build:
       context: .
       args:
-        FTW_VERSION: ${FTW_VERSION:?Set FTW_VERSION in .env, for example FTW_VERSION=v0.135.1-beta.1}
+        FTW_VERSION: ${FTW_VERSION:?Set FTW_VERSION in .env to an exact published new 0.x tag}
     image: ftw-local:${FTW_VERSION}
     restart: unless-stopped
     # Core saves its state on a clean stop.
