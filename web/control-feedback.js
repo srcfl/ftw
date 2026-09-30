@@ -5,6 +5,11 @@ const messages = {
   offered_current_lower: ['Charger offers less current', 'The charger reports a lower current offer than FTW requested.', 'Check its load balancing and current limits. The reason is not confirmed.'],
   setpoint_changed: ['Setpoint does not match', 'The device reports a different setpoint from the command FTW sent.', 'Check for another controller or a device mode that changes the setpoint. FTW cannot tell which caused this.'],
   power_differs: ['Power does not follow the command', 'Fresh measurements differ from the command after the response wait.', 'The device has not reported a confirmed cause. Check its app or status display.'],
+  power_below_target: ['Power is below the target', 'Fresh measurements show less power than FTW sent after the response wait.', 'The cause is not confirmed. A device limit may explain it; measured power alone does not establish the limit.'],
+  power_above_target: ['Power is above the target', 'Fresh measurements show more power than FTW sent after the response wait.', 'The cause is not confirmed. Check the device’s limits and control mode.'],
+  power_wrong_direction: ['Power flows in the wrong direction', 'Fresh measurements show the opposite direction from the command after the response wait.', 'Check the device’s control mode and status. Measurement confirmation does not mean the command was followed.'],
+  no_power_response: ['No power response', 'Fresh readings show no material power although FTW requested it.', 'The cause is not confirmed. Check the device’s status and limits.'],
+  power_while_idle: ['Power continues while idle was requested', 'Fresh readings still show power after the response wait.', 'Check the device’s control mode and status. The cause is not confirmed.'],
   command_failed: ['Command failed', 'The driver could not complete this command. The device may still have received part of it.', 'Check the device connection and status. FTW attempts to restore its safe default.'],
   command_unconfirmed: ['Command result unknown', 'FTW stopped waiting before it could confirm the call’s result.', 'The command may have reached the device. Check fresh power readings before trying again.'],
   default_failed: ['Safe default not confirmed', 'FTW has blocked further control while it retries the device’s safe default.', 'Check the device connection and its own status.'],
@@ -41,14 +46,22 @@ export function feedbackRows(value) {
 export function feedbackText(row, live = true) {
   if (!live) return {title:'Last known control status', detail:'The box’s current control result is unavailable.', action:'Waiting for a fresh status report.'};
   const words = messages[row.reason] || ['Effect not verified', 'This box reports a control state this app does not recognise.', 'Check the device status.'];
-  return {title:row.verification_lost ? 'Alarm · Measured control lost' : words[0], detail:words[1], action:words[2]};
+  const detail = row.reason === 'power_below_target' && number(row.sent_w) && number(row.actual_w)
+    ? `Measured ${feedbackPower(row.actual_w,row.kind)}, ${Math.round(Math.max(0,Math.abs(row.sent_w)-Math.abs(row.actual_w)))} W below the sent target of ${feedbackPower(row.sent_w,row.kind)}.`
+    : words[1];
+  return {title:row.verification_lost ? 'Alarm · Measurements lost' : words[0], detail, action:words[2]};
 }
 // A per-device status, never a site-wide tier or a verdict inferred by the UI.
 export function feedbackStatus(row, live = true) {
   if (!live) return {label:'No live proof',tone:'unknown'};
   if (row.verification_lost) return {label:row.verification_tier === 0 ? 'Alarm · Tier 0' : 'Alarm · No proof',tone:'alarm'};
   if (['observe_only','disabled','device_control','not_connected','no_command'].includes(row.reason)) return {label:'No active command',tone:'unknown'};
-  if (row.severity === 'warning') return {label:[0,1,2].includes(row.verification_tier) ? `Needs attention · Tier ${row.verification_tier}` : 'Alarm · Unconfirmed',tone:'alarm'};
+  if (row.severity === 'warning') {
+    const limits = {power_below_target:'Below target',device_limit:'Charger limit',offered_current_lower:'Lower current offer',fuse_limit:'Fuse limit',fuse_cooldown:'Fuse wait',charger_limit:'Charger setting'};
+    const outcome = limits[row.reason];
+    const evidence = row.verification_tier === 2 ? 'Tier 2 · Site confirmed' : row.verification_tier === 1 ? 'Tier 1 · Device measured' : row.verification_tier === 0 ? 'Tier 0' : 'Unconfirmed';
+    return {label:`${evidence} · ${outcome || 'Needs attention'}`,tone:outcome ? 'warning' : 'alarm'};
+  }
   if (row.verification_tier === 2) return {label:'Tier 2 · Site confirmed',tone:'confirmed'};
   if (row.verification_tier === 1) return {label:'Tier 1 · Device measured',tone:'measured'};
   if (row.verification_tier === 0) return {label:'Tier 0 · Waiting',tone:'waiting'};
@@ -58,7 +71,9 @@ export function feedbackSummary(value, live = true) {
   const statuses = feedbackRows(value).map(row => feedbackStatus(row,live));
   if (statuses.length === 1) return statuses[0];
   const alarms = statuses.filter(status => status.tone === 'alarm').length;
+  const warnings = statuses.filter(status => status.tone === 'warning').length;
   return alarms ? {label:`${alarms} need attention`,tone:'alarm'} :
+    warnings ? {label:`${warnings} need attention`,tone:'warning'} :
     {label:live ? `${statuses.length} devices` : 'No live proof',tone:'unknown'};
 }
 // Both views use the same per-function identity, including combined bubbles.
@@ -86,7 +101,7 @@ export function withControlProof(planets, value, live = true) {
       planet.placeholder = true; planet.kw = 0; planet.sub = 'no data'; planet.color = 'var(--fg-muted)';
     }
     const status = feedbackStatus(row,live);
-    const label = !live ? 'No live proof' : status.tone === 'alarm' ?
+    const label = !live ? 'No live proof' : ['alarm','warning'].includes(status.tone) ?
       ([0,1,2].includes(row.verification_tier) ? `⚠ Tier ${row.verification_tier}` : '⚠ No proof') :
       [0,1,2].includes(row.verification_tier) ? `Tier ${row.verification_tier}` :
       status.label === 'No active command' ? 'No command' : 'Waiting';
@@ -94,7 +109,7 @@ export function withControlProof(planets, value, live = true) {
     // Keep its precise tier in the detail view; the overview shows a quiet wait.
     const detail = status.tone === 'waiting' ? 'Verifying the response' : status.label;
     const proof = {...status, label, detail, inactive:live && status.label === 'No active command'};
-    const order = {alarm:0, waiting:1, unknown:2, measured:3, confirmed:4};
+    const order = {alarm:0, warning:1, waiting:2, unknown:3, measured:4, confirmed:5};
     if (!planet.controlProof || order[status.tone] < order[planet.controlProof.tone]) planet.controlProof = proof;
     planet.clickable = true;
   }
@@ -114,6 +129,9 @@ export function feedbackValues(row, live = true) {
     ['Device setpoint', live ? feedbackPower(row.readback_w, row.kind) : 'Not current'],
     ['Measured', live ? feedbackPower(row.actual_w, row.kind) : 'Not current'],
   ];
+  if (live && row.reason === 'power_below_target' && number(row.sent_w) && number(row.actual_w)) {
+    values.push(['Shortfall from sent target', `${Math.round(Math.max(0,Math.abs(row.sent_w)-Math.abs(row.actual_w)))} W`]);
+  }
   if (number(row.tolerance_w)) values.push(['Response tolerance', `${Math.round(row.tolerance_w)} W`]);
   if (number(row.requested_a)) values.push(['Requested current', `${row.requested_a.toFixed(1)} A`]);
   if (number(row.offered_a)) values.push(['Charger offer', live ? `${row.offered_a.toFixed(1)} A` : 'Not current']);
@@ -140,7 +158,7 @@ export function feedbackProof(row, live = true) {
   if (!live) return 'Current effect unknown';
   if (['observe_only','disabled','device_control'].includes(row.reason)) return 'No active FTW power command';
   if (row.verification_tier === 2) return 'Tier 2 · Confirmed at site meter';
-  if (row.verification_tier === 1) return 'Tier 1 · Device reports the expected power';
+  if (row.verification_tier === 1) return 'Tier 1 · Device power measured';
   if (row.verification_tier === 0) return 'Tier 0 · Driver accepted the command';
   return 'No command acknowledgement';
 }

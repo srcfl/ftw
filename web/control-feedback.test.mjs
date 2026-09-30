@@ -85,3 +85,23 @@ test('bubble details select a function and combined bubbles retain every device'
  assert.deepEqual(feedbackForPlanet(rows,{role:'battery',name:'hybrid'}),[rows[0]]);
  assert.deepEqual(feedbackForPlanet(rows,{role:'battery',name:'2×',id:'agg-top-right'}),[rows[0],rows[2]]);
 });
+
+test('site confirmation and shortfall remain visible together without inventing a limit',async()=>{
+ const {feedbackSummary,withControlProof}=await import('./control-feedback.js');
+ const row={driver:'battery',kind:'battery',reason:'power_below_target',severity:'warning',verification_tier:2,site_confirmation:'confirmed',sent_w:-5000,requested_w:-5000,actual_w:-4400};
+ assert.deepEqual(feedbackStatus(row),{label:'Tier 2 · Site confirmed · Below target',tone:'warning'});
+ assert.equal(feedbackSummary([row]).tone,'warning');
+ assert.equal(withControlProof([], [row])[0].controlProof.tone,'warning');
+ assert.match(feedbackText(row).title,/below the target/);
+ assert.match(feedbackText(row).action,/cause is not confirmed/);
+ assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Shortfall from sent target'),['Shortfall from sent target','600 W']);
+ assert.match(feedbackProof(row),/Tier 2/);
+ assert.doesNotMatch(feedbackProof({...row,verification_tier:1}),/expected|follows/);
+ assert.equal(feedbackValues(row,false).find(v=>v[0]==='Shortfall from sent target'),undefined);
+ assert.equal(feedbackStatus(row,false).tone,'unknown');
+ for(const reason of ['no_power_response','power_wrong_direction','power_above_target','power_while_idle']) {
+  assert.equal(feedbackStatus({...row,reason}).tone,'alarm');
+  assert.match(feedbackProof({...row,reason}),/Tier 2/);
+  assert.doesNotMatch(feedbackText({...row,reason}).title,/follows the command/);
+ }
+});

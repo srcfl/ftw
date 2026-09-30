@@ -153,7 +153,7 @@ func TestCommandEvidenceUsesSourceTimeForResponse(t *testing.T) {
 	}
 }
 
-func TestLastVerifiedResponseSurvivesNewCommandButNotRelease(t *testing.T) {
+func TestLastMeasuredResponseSurvivesNewCommandButNotRelease(t *testing.T) {
 	s := NewStore()
 	now := time.Now()
 	c := s.BeginCommand("battery", []byte(`{"action":"battery","power_w":1000}`), now)
@@ -163,18 +163,18 @@ func TestLastVerifiedResponseSurvivesNewCommandButNotRelease(t *testing.T) {
 	s.observeCommand("battery", DerBattery, 1000, []byte(`{}`), now.Add(12*time.Second))
 	s.mu.Unlock()
 	got, _ := s.CommandEvidence("battery", "battery")
-	if !got.LastVerifiedAt.Equal(now.Add(12 * time.Second)) {
+	if !got.LastMeasuredAt.Equal(now.Add(12 * time.Second)) {
 		t.Fatalf("missing measured proof: %+v", got)
 	}
 	c = s.BeginCommand("battery", []byte(`{"action":"battery","power_w":2000}`), now.Add(15*time.Second))
 	s.CompleteCommand(c, "accepted")
 	next, _ := s.CommandEvidence("battery", "battery")
-	if next.LastVerifiedAt != got.LastVerifiedAt || !next.PowerMatchSince.IsZero() {
+	if next.LastMeasuredAt != got.LastMeasuredAt || !next.PowerMatchSince.IsZero() {
 		t.Fatalf("new command confused past and current proof: %+v", next)
 	}
 	s.EndCommandControl("battery", false)
 	next, _ = s.CommandEvidence("battery", "battery")
-	if !next.LastVerifiedAt.IsZero() {
+	if !next.LastMeasuredAt.IsZero() {
 		t.Fatal("intentional release kept loss alarm armed")
 	}
 }

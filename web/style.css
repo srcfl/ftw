@@ -2326,6 +2326,7 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .control-status[data-tone="waiting"] { color: var(--amber); }
 .control-status[data-tone="unknown"] { color: var(--text-dim); }
 .control-status[data-tone="alarm"], .control-alarm h3 { color: var(--red); }
+.control-status[data-tone="warning"], .control-evidence [data-tone="warning"] { color: var(--amber); }
 .control-result.control-alarm { border-inline-start: 4px solid var(--red); }
 
 .control-results-compact .control-status-list { margin-bottom: .5rem; }

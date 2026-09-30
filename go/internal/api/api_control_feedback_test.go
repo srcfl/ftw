@@ -1,11 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"math"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -18,7 +21,7 @@ func TestControlFeedbackReasons(t *testing.T) {
 		sent, actual, readback, requestedA, limitA float64
 		readMismatch, powerMismatch                bool
 	}{
-		{"driver accepted but no measured effect", "battery", "accepted", "", "power_differs", true, 1000, 0, 1000, 0, 0, false, true},
+		{"driver accepted but no measured effect", "battery", "accepted", "", "no_power_response", true, 1000, 0, 1000, 0, 0, false, true},
 		{"Pixii overwritten while zero requested", "battery", "accepted", "", "setpoint_changed", true, 0, -1500, -1600, 0, 0, true, true},
 		{"8 amp charger limit while charging", "ev", "accepted", "", "device_limit", true, 11040, 5500, 11040, 16, 8, false, true},
 		{"fuse cap before dispatch", "ev", "accepted", "fuse_limit", "fuse_limit", true, 5000, 5000, 5000, 16, 0, false, false},
@@ -31,7 +34,7 @@ func TestControlFeedbackReasons(t *testing.T) {
 		{"Core clamp stays visible when followed", "battery", "accepted", "core_limit", "core_limit", true, 1000, 1000, 1000, 0, 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := telemetry.CommandEvidence{Result: tc.result, Since: now.Add(-3 * time.Minute)}
+			c := telemetry.CommandEvidence{Result: tc.result, Since: now.Add(-3 * time.Minute), PowerMatchSince: now.Add(-time.Minute), LastObservation: now}
 			if tc.readMismatch {
 				c.ReadbackMismatchSince = now.Add(-time.Minute)
 			}
@@ -145,7 +148,7 @@ func TestControlVerificationLossAlarm(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := telemetry.CommandEvidence{Result: "accepted", Since: now.Add(-tc.commandAge)}
 			if tc.verified > 0 {
-				cmd.LastVerifiedAt = now.Add(-tc.verified)
+				cmd.LastMeasuredAt = now.Add(-tc.verified)
 			}
 			f := ControlFeedback{Reason: tc.reason, Kind: tc.kind, VerificationTier: tc.tier}
 			if got := controlVerificationLost(f, cmd, now); got != tc.want {
@@ -163,5 +166,89 @@ func TestConfiguredBatteryVisibleBeforeFirstCommand(t *testing.T) {
 	got := srv.controlFeedback(time.Now())
 	if len(got) != 1 || got[0].Reason != "no_command" || got[0].VerificationTier != nil || got[0].VerificationLost {
 		t.Fatalf("pre-command battery needs a neutral status, got %+v", got)
+	}
+}
+
+// Exercise telemetry-to-API with a fake clock. The site sees actual device
+// watts, not requested watts; no UI poll supplies the proof window.
+func TestControlEvidenceIsIndependentOfTargetFulfilment(t *testing.T) {
+	for _, tc := range []struct {
+		name, action, reason, site        string
+		kind                              telemetry.DerType
+		target, actual, before, extraLoad float64
+		seconds, tier                     int
+	}{
+		{"battery discharge shortfall", "battery", "power_below_target", "confirmed", telemetry.DerBattery, -5000, -4400, 0, 0, 42, 2},
+		{"battery charge shortfall", "battery", "power_below_target", "confirmed", telemetry.DerBattery, 5000, 4400, 0, 0, 42, 2},
+		{"EV shortfall", "ev_set_current", "power_below_target", "confirmed", telemetry.DerEV, 11000, 5500, 0, 0, 132, 2},
+		{"V2X shortfall", "v2x_set_power", "power_below_target", "confirmed", telemetry.DerV2X, -5000, -4400, 0, 0, 42, 2},
+		{"shortfall with unexplained load", "battery", "power_below_target", "site_change_differs", telemetry.DerBattery, -5000, -4400, 0, 2000, 42, 1},
+		{"already at lower output", "battery", "power_below_target", "no_clear_change", telemetry.DerBattery, -5000, -4400, -4400, 0, 42, 1},
+		{"no response is measured but not followed", "battery", "no_power_response", "no_clear_change", telemetry.DerBattery, -5000, 0, 0, 0, 42, 1},
+		{"opposite response is confirmed but wrong", "battery", "power_wrong_direction", "confirmed", telemetry.DerBattery, -5000, 4400, 0, 0, 42, 2},
+		{"overshoot is confirmed but wrong", "battery", "power_above_target", "confirmed", telemetry.DerBattery, -5000, -6000, 0, 0, 42, 2},
+		{"ignored idle is confirmed but wrong", "battery", "power_while_idle", "confirmed", telemetry.DerBattery, 0, -4400, 0, 0, 42, 2},
+		{"PV below ceiling is not proven curtailment", "curtail", "solar_below_ceiling", "confirmed", telemetry.DerPV, -3000, -1000, -5000, 0, 42, 2},
+		{"ordinary response wait", "battery", "waiting_response", "device_response_unconfirmed", telemetry.DerBattery, -5000, -4400, 0, 0, 6, 0},
+		{"matching response", "battery", "power_observed", "confirmed", telemetry.DerBattery, -5000, -5000, 0, 0, 42, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tel := telemetry.NewStore()
+				read := func(power, extra float64) {
+					tel.Update("hybrid", tc.kind, power, nil, []byte(`{}`))
+					tel.Update("hybrid", telemetry.DerMeter, 800+power+extra, nil, []byte(`{"power_origin":"external_meter"}`))
+					tel.RecordDriverSuccess("hybrid")
+				}
+				for range 5 {
+					read(tc.before, 0)
+					time.Sleep(3 * time.Second)
+				}
+				request, _ := json.Marshal(map[string]any{"action": tc.action, "power_w": tc.target})
+				c := tel.BeginCommand("hybrid", request, time.Now())
+				tel.CompleteCommand(c, "accepted")
+				for elapsed := 0; elapsed <= tc.seconds; elapsed += 3 {
+					read(tc.actual, tc.extraLoad)
+					time.Sleep(3 * time.Second)
+				}
+				srv := New(&Deps{Tel: tel, Ctrl: &control.State{SiteMeterDriver: "hybrid"}, CtrlMu: &sync.Mutex{}})
+				f := srv.controlFeedback(time.Now())[0]
+				if f.VerificationTier == nil || *f.VerificationTier != tc.tier || f.Reason != tc.reason || f.SiteConfirmation != tc.site || f.VerificationLost {
+					t.Fatalf("got %+v; want tier %d, %s, %s with no lost-measurement alarm", f, tc.tier, tc.reason, tc.site)
+				}
+				if f.ActualW == nil || *f.ActualW != tc.actual || f.DeviceReason != "" {
+					t.Fatalf("changed watts or invented a cause: %+v", f)
+				}
+				if tc.tier == 2 && (f.DeviceDeltaW == nil || math.Abs(*f.DeviceDeltaW-(tc.actual-tc.before)) > 1) {
+					t.Fatalf("confirmed target instead of actual change: %+v", f)
+				}
+				if tc.reason == "power_below_target" && tc.tier == 2 {
+					tel.Update("hybrid", tc.kind, 0, nil, []byte(`{"control_power_available":false}`))
+					time.Sleep(3 * time.Minute)
+					lost := srv.controlFeedback(time.Now())[0]
+					if lost.VerificationTier == nil || *lost.VerificationTier != 0 || !lost.VerificationLost || lost.ActualW != nil {
+						t.Fatalf("missing power kept proof: %+v", lost)
+					}
+					for range 6 {
+						read(tc.target, 0)
+						time.Sleep(3 * time.Second)
+					}
+					recovered := srv.controlFeedback(time.Now())[0]
+					if recovered.VerificationTier == nil || *recovered.VerificationTier != 2 || recovered.Reason != "power_observed" || recovered.VerificationLost {
+						t.Fatalf("fresh recovery failed: %+v", recovered)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestFailedCallIsNotLostMeasurement(t *testing.T) {
+	now := time.Now()
+	for _, result := range []string{"failed", "unconfirmed", "default_failed", "pending", "released"} {
+		cmd := telemetry.CommandEvidence{Result: result, Since: now.Add(-time.Minute), LastMeasuredAt: now.Add(-time.Minute)}
+		if controlVerificationLost(ControlFeedback{Reason: "command_failed", ActualW: watts(-4400)}, cmd, now) {
+			t.Fatalf("%s call was relabelled as lost measurements", result)
+		}
 	}
 }

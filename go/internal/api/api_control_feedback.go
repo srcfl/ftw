@@ -189,7 +189,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					f.ActualW = nil
 				}
 			}
-			if commanded && cmd.Result == "accepted" && fresh && f.ActualW != nil && f.SentW != nil && telemetry.PowerFollowsCommand(f.Kind, *f.SentW, *f.ActualW) && !cmd.PowerMatchSince.IsZero() && cmd.LastObservation.Sub(cmd.PowerMatchSince) >= 10*time.Second && now.Sub(cmd.LastObservation) <= 10*time.Second {
+			// Evidence describes measured power, not target fulfilment. A device
+			// delivering 4.4 kW against a 5 kW command can still be site-confirmed.
+			if commanded && cmd.Result == "accepted" && fresh && f.ActualW != nil && f.SentW != nil && cmd.HasMeasuredPower(now) {
 				f.Response = "device_reported"
 				tier := 1
 				f.VerificationTier = &tier
@@ -299,24 +301,23 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 // function that previously supplied measured proof must recover that proof.
 // This state comes from telemetry, not from whether a browser was open.
 func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, now time.Time) bool {
-	if cmd.LastVerifiedAt.IsZero() || f.VerificationTier != nil && *f.VerificationTier >= 1 {
+	// Failed or released calls have their own status. They do not by themselves
+	// mean that a previously measured device stopped supplying power readings.
+	if cmd.Result != "accepted" || cmd.LastMeasuredAt.IsZero() || f.VerificationTier != nil && *f.VerificationTier >= 1 {
 		return false
 	}
 	switch f.Reason {
 	case "observe_only", "disabled", "device_control", "not_connected", "idle", "no_command":
 		return false
 	}
-	if cmd.Result == "released" {
-		return false
-	}
-	if f.Reason == "telemetry_stale" || f.Reason == "device_fault" || f.Reason == "command_failed" || f.Reason == "default_failed" {
+	if f.Reason == "telemetry_stale" {
 		return true
 	}
 	grace := 30 * time.Second
 	if f.Kind == "ev" {
 		grace = 2 * time.Minute
 	}
-	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastVerifiedAt) >= grace
+	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastMeasuredAt) >= grace
 }
 
 func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, commanded, fresh bool, coreReason string, connected *bool, now time.Time) {
@@ -387,7 +388,18 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		gap = math.Max(0, math.Abs(*f.ActualW)-math.Abs(*f.SentW))
 	}
 	if !cmd.PowerMismatchSince.IsZero() && now.Sub(cmd.PowerMismatchSince) >= grace && gap > telemetry.ControlToleranceW(*f.SentW) {
-		set("warning", "power_differs", "warning")
+		reason := "power_above_target"
+		switch {
+		case math.Abs(*f.SentW) < 100:
+			reason = "power_while_idle"
+		case math.Abs(*f.ActualW) < 100:
+			reason = "no_power_response"
+		case f.Kind != "pv" && (*f.SentW < 0) != (*f.ActualW < 0):
+			reason = "power_wrong_direction"
+		case math.Abs(*f.ActualW) < math.Abs(*f.SentW):
+			reason = "power_below_target"
+		}
+		set("warning", reason, "warning")
 		return
 	}
 	if coreReason == "core_limit" {
@@ -405,11 +417,11 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("waiting", "waiting_response", "info")
 		return
 	}
-	if f.Response != "device_reported" && f.Response != "site_confirmed" {
-		if f.Kind == "pv" && settled && math.Abs(*f.ActualW) < math.Abs(*f.SentW)-telemetry.ControlToleranceW(*f.SentW) {
-			set("unknown", "solar_below_ceiling", "info")
-			return
-		}
+	if f.Kind == "pv" && math.Abs(*f.ActualW) < math.Abs(*f.SentW)-telemetry.ControlToleranceW(*f.SentW) {
+		set("unknown", "solar_below_ceiling", "info")
+		return
+	}
+	if f.Response != "device_reported" && f.Response != "site_confirmed" || cmd.PowerMatchSince.IsZero() || cmd.LastObservation.Sub(cmd.PowerMatchSince) < 10*time.Second {
 		set("waiting", "waiting_response", "info")
 		return
 	}

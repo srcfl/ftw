@@ -46,6 +46,14 @@ clear result that the owner can review.
 | 3 | Complete first-day commissioning and simple defaults. | A new mixed site reaches safe automatic operation with confirmed fuse/meter, minimal required input and a receipt for observed control. Wrong starting ratings and failed integrations have clear handling; learned power does not replace hard equipment limits. |
 | 4 | Share live evidence with people and agents. | One structured path explains intent, command result, freshness and measured outcome. Both normal Flow and an authorized analysis agent can use it. Target-box latency and differing sampling rates are measured; forecast evaluation covers cold start and learned periods. |
 | 5 | Complete external authority and fair value as separate focused changes. | Temporary control expires to a defined local default; durable goals persist; schedule/plan access can be revoked; cloud MCP does not expose data to the relay. Separately, the validated self-consumption comparison reports FTW's incremental value and missing evidence honestly. |
+
+Battery and inverter learning should build on the existing per-battery response
+model. The digital-twin target needs tests for separate kW and kWh inputs,
+reported versus observed limits, partial delivery confirmed by the site meter,
+charge/discharge and state-of-charge-dependent response, temperature and mode
+changes, stale samples and model recovery. Show source and uncertainty before
+using an estimate in planning. A model prediction must never verify itself or
+raise a safety limit. These are acceptance requirements, not shipped support.
 | Later | Bounded thermal control and further expert extensions. | A named tank/hot-water use case meets comfort, hardware and failure requirements without making ordinary household setup harder. Native expansion still follows its existing Pair + Now verification gates. |
 
 Necessary safety, security, recovery and support fixes continue throughout.

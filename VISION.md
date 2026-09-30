@@ -75,11 +75,20 @@ Use three explicit levels:
 
 - **Tier 0 — acknowledged:** the command was sent and acknowledged. This
   confirms communication, not a physical effect.
-- **Tier 1 — device measured:** the device's own fresh power reading follows
-  the sent command. A setpoint echo alone cannot reach this level.
+- **Tier 1 — device measured:** distinct, fresh device readings establish the
+  actual power after the command. A setpoint echo alone cannot reach this level.
 - **Tier 2 — independently confirmed:** a separate physical meter shows the
   matching effect. For example, a new 1 kW charging command produces a 1 kW
   device reading and a corresponding 1 kW increase in site import.
+
+The tier describes measurement evidence, not whether the target was met.
+Show target fulfilment and its known cause separately. If FTW sends 5 kW,
+the device delivers 4.4 kW and the separate meter supports that change, show
+Tier 2 and the 600 W shortfall together. Do not lower the tier because the
+watts miss the target or hide the shortfall because the tier is high. A wrong
+direction or no response can also be measured reliably and must remain a
+warning. A device limit is a reported fact only when a fresh, relevant source
+establishes it; a sustained shortfall alone does not establish the cause.
 
 Use time-aligned readings, short measurement windows, tolerances and response
 waits to handle noise and different sample rates. Account for solar and other
@@ -158,6 +167,25 @@ inverter power ratings should not normally be required form fields: obtain
 verified device limits where available and learn the usable response within
 safe bounds. Advanced users may set limits explicitly. Do not treat an
 observed power level as proof of an absolute hardware or installation limit.
+
+Develop the per-device battery and inverter model into a digital twin grounded
+in normal operation. Learn charge and discharge response, delay, usable power
+and losses under the observed state of charge, temperature and device mode.
+Keep energy capacity in kWh separate from power in kW. A 10 kWh battery may
+have a 5 kW inverter; reaching 5 kW says nothing by itself about its capacity.
+If user input conflicts with repeated measurements or device ratings, explain
+the conflict and propose a correction rather than silently changing that input.
+
+Keep user input, reported limits and learned estimates distinct, with source,
+age, tested conditions and uncertainty. Prefer independently confirmed samples
+for learning, label device-only samples, and never train on an inferred site
+effect as though it were another meter. A plateau at one state of charge is
+evidence for those conditions, not a permanent nameplate limit. Learn capacity
+only from suitable energy and state-of-charge observations. Detect changed
+behaviour and rebuild confidence after equipment or mode changes. Use the model
+to plan achievable work within verified safety limits; learned estimates must
+never raise those limits or replace fresh measurements as proof of an effect.
+This is the target for the model, not a claim that the full twin has shipped.
 
 For solar, the target is that "I have solar" is enough to start learning.
 Installed kWp is an optional starting estimate. Approximate user input must

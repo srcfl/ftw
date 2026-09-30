@@ -15,3 +15,5 @@ Show compact control levels on energy-flow bubbles. Open each device’s control
 Use small marks in the bubbles: a dot for device measurement, a ring for site confirmation and a warning symbol for faults. Keep normal response waits quiet and put tier labels in the detail view.
 
 Put a collapsed “Are we in control?” section below the battery, charger and solar controls. Keep it scoped to the selected device or group and preserve its open state while measurements refresh.
+
+Separate measurement tiers from target fulfilment. A 4.4 kW response to a 5 kW command can reach Tier 2 when the site meter confirms the actual change. Show the shortfall and unknown cause separately, preserve wrong-direction and missing-response warnings, and expire proof when measurements stop.

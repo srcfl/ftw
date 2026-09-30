@@ -20,8 +20,9 @@ type CommandEvidence struct {
 	ReadbackMismatchSince time.Time
 	PowerMismatchSince    time.Time
 	PowerMatchSince       time.Time
+	PowerObservedSince    time.Time
 	LastObservation       time.Time
-	LastVerifiedAt        time.Time
+	LastMeasuredAt        time.Time
 	Baseline              map[string]ControlBaseline
 }
 
@@ -64,13 +65,14 @@ func (s *Store) BeginCommand(driver string, payload []byte, now time.Time) Comma
 	}
 	k := driver + ":" + kind
 	if old, ok := s.commands[k]; ok && old.Result != "released" {
-		c.LastVerifiedAt = old.LastVerifiedAt
+		c.LastMeasuredAt = old.LastMeasuredAt
 	}
 	if old, ok := s.commands[k]; ok && old.Result == "accepted" && old.Action == c.Action && samePower(old.PowerW, c.PowerW) {
 		c.Since = old.Since
 		c.ReadbackMismatchSince = old.ReadbackMismatchSince
 		c.PowerMismatchSince = old.PowerMismatchSince
 		c.PowerMatchSince = old.PowerMatchSince
+		c.PowerObservedSince = old.PowerObservedSince
 		c.LastObservation = old.LastObservation
 		c.Baseline = old.Baseline
 	}
@@ -149,8 +151,9 @@ func (s *Store) EndCommandControl(driver string, failed bool) {
 			c.Result = "released"
 		}
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
+		c.PowerObservedSince, c.LastObservation = time.Time{}, time.Time{}
 		if !failed {
-			c.LastVerifiedAt = time.Time{}
+			c.LastMeasuredAt = time.Time{}
 		}
 		s.commands[k] = c
 	}
@@ -169,11 +172,13 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 	}
 	if json.Unmarshal(data, &d) != nil {
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
+		c.PowerObservedSince, c.LastObservation = time.Time{}, time.Time{}
 		s.commands[k] = c
 		return
 	}
 	if now.Sub(c.LastObservation) > time.Minute {
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
+		c.PowerObservedSince = time.Time{}
 	}
 	mark := func(since *time.Time, mismatch bool, at time.Time) {
 		if !mismatch {
@@ -196,6 +201,7 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 	// delivery of one source sample also cannot extend a measured time window.
 	if !fresh || !finite(power) || observedAt.Before(c.Since) {
 		c.PowerMismatchSince, c.PowerMatchSince, c.LastObservation = time.Time{}, time.Time{}, time.Time{}
+		c.PowerObservedSince = time.Time{}
 		s.commands[k] = c
 		return
 	}
@@ -204,16 +210,26 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 		return
 	}
 	c.LastObservation = observedAt
+	mark(&c.PowerObservedSince, true, observedAt)
 	gap := math.Abs(power - *c.PowerW)
 	if kind == DerPV {
 		gap = math.Max(0, math.Abs(power)-math.Abs(*c.PowerW))
 	}
 	mark(&c.PowerMismatchSince, gap > ControlToleranceW(*c.PowerW), observedAt)
 	mark(&c.PowerMatchSince, PowerFollowsCommand(c.Kind, *c.PowerW, power), observedAt)
-	if !c.PowerMatchSince.IsZero() && observedAt.Sub(c.PowerMatchSince) >= 10*time.Second && now.Sub(observedAt) <= 10*time.Second {
-		c.LastVerifiedAt = observedAt
+	if c.HasMeasuredPower(now) {
+		c.LastMeasuredAt = observedAt
 	}
 	s.commands[k] = c
+}
+
+// HasMeasuredPower confirms a window of distinct, fresh device readings, even
+// when they show a shortfall, no response or the wrong direction. Whether the
+// device meets the command is a separate verdict; a setpoint echo is not power.
+func (c CommandEvidence) HasMeasuredPower(now time.Time) bool {
+	return !c.PowerObservedSince.IsZero() &&
+		c.LastObservation.Sub(c.PowerObservedSince) >= 10*time.Second &&
+		!c.LastObservation.After(now) && now.Sub(c.LastObservation) <= 10*time.Second
 }
 
 // ControlToleranceW is the response tolerance, not a device rating or safety limit.

@@ -1627,10 +1627,10 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
 // the whole bubble opens the explanation and remains the accessible target.
 function renderProofBadge(proof, x, y, r) {
   if (proof.inactive) return '';
-  const colors = {confirmed:'var(--green-e)', measured:'var(--green-e)', waiting:'var(--fg-muted)', alarm:'var(--red-e)', unknown:'var(--fg-muted)'};
+  const colors = {confirmed:'var(--green-e)', measured:'var(--green-e)', waiting:'var(--fg-muted)', warning:'var(--amber)', alarm:'var(--red-e)', unknown:'var(--fg-muted)'};
   const color = colors[proof.tone] || colors.unknown;
   const size = Math.max(3.5, Math.min(5, r * .065));
-  const mark = proof.tone === 'alarm'
+  const mark = proof.tone === 'alarm' || proof.tone === 'warning'
     ? '<path d="M0 -6 L6 5 H-6 Z" fill="currentColor"/><path d="M0 -2 V1 M0 3 V3.2" stroke="var(--hero-box-fill)" stroke-width="1.5" stroke-linecap="round"/>'
     : proof.tone === 'measured' || proof.tone === 'confirmed'
       ? `<circle r="2.8" fill="currentColor"/>${proof.tone === 'confirmed' ? '<circle r="5" fill="none" stroke="currentColor" stroke-width="1.2"/>' : ''}`
@@ -1646,6 +1646,8 @@ function combinedProof(group) {
   if (!proofs.length) return null;
   const alarms = proofs.filter(p => p.tone === 'alarm').length;
   if (alarms) return {tone:'alarm', label:`⚠ ${alarms} alarm${alarms === 1 ? '' : 's'}`, detail:`${alarms} device${alarms === 1 ? '' : 's'} need attention`};
+  const warnings = proofs.filter(p => p.tone === 'warning').length;
+  if (warnings) return {tone:'warning', label:`⚠ ${warnings} warning${warnings === 1 ? '' : 's'}`, detail:`${warnings} device${warnings === 1 ? '' : 's'} need attention`};
   if (proofs.length === group.length && proofs.every(p => p.label === proofs[0].label && p.tone === proofs[0].tone)) return proofs[0];
   return {tone:'unknown', label:'Mixed tiers', detail:'Devices have different control evidence'};
 }
