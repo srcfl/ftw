@@ -481,6 +481,7 @@ type State struct {
 	MinDispatchIntervalS int
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
+	batteryChargeFull    map[string]bool
 
 	// clock is nil in production. Tests may set it to keep a dispatch
 	// scenario on one instant even when the test runner is delayed.
@@ -1339,6 +1340,7 @@ func ComputeDispatch(
 	// main battery decision.
 	state.controlSlotDecisionID = ""
 	tickAt := state.now()
+	state.updateBatteryChargeFull(store, driverCapacities)
 	state.controlPlanSnapshot = controlPlanSnapshot{active: true, tickAt: tickAt}
 	defer func() { state.controlPlanSnapshot = controlPlanSnapshot{} }()
 	// ---- Per-slot Wh delivery observability (path-agnostic) ----
@@ -1695,7 +1697,7 @@ func ComputeDispatch(
 		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
 		// the clamps so capable siblings receive the blocked battery's share.
 		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0
-		chargeBlocked = chargeBlocked || lim.chargeCap() == 0
+		chargeBlocked = chargeBlocked || lim.chargeCap() == 0 || state.BatteryChargePaused(name)
 		batteries = append(batteries, batteryInfo{
 			driver:           name,
 			capacityWh:       cap,
@@ -2708,6 +2710,7 @@ func applyDispatchSafetyPipeline(
 		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
 	}
 	targets = floorMissingSoCDischarge(targets, store)
+	targets = state.floorFullBatteryCharge(targets)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
 	return targets
@@ -4457,6 +4460,7 @@ func fuseSaverEarlyExit(
 	fuseMaxW float64,
 ) []DispatchTarget {
 	out := fuseSaverFromLivePower(store, state, driverCapacities, fuseMaxW)
+	out = state.stopFullBatteries(out, store, driverCapacities)
 	if out == nil || state == nil {
 		return out
 	}

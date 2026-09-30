@@ -105,3 +105,19 @@ test('site confirmation and shortfall remain visible together without inventing 
   assert.doesNotMatch(feedbackText({...row,reason}).title,/follows the command/);
  }
 });
+
+test('full-battery pause stays calm without adding measurement proof',()=>{
+ const row={driver:'battery',kind:'battery',reason:'battery_full',severity:'info',verification_tier:1,battery_soc:1,charge_resume_soc:.99,requested_w:5000,sent_w:0,actual_w:0};
+ assert.match(feedbackText(row).title,/Battery is full/);
+ assert.equal(feedbackText({...row,battery_soc:.995}).title,'Charging paused after full');
+ assert.match(feedbackText(row).action,/99%/);
+ assert.equal(feedbackStatus(row).tone,'measured');
+ assert.match(feedbackStatus(row).label,/Charging paused/);
+ assert.match(feedbackProof(row),/Tier 1/);
+ assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Battery charge'),['Battery charge','100.0%']);
+ assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Sent to driver'),['Sent to driver','0 W']);
+ assert.equal(feedbackValues(row,false).find(v=>v[0]==='Battery charge')[1],'Not current');
+ assert.equal(feedbackStatus({...row,verification_tier:0}).tone,'waiting');
+ assert.equal(feedbackStatus({...row,verification_lost:true}).tone,'alarm');
+ assert.equal(feedbackStatus({...row,reason:'power_while_idle',severity:'warning',actual_w:500}).tone,'alarm');
+});

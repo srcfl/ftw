@@ -252,3 +252,61 @@ func TestFailedCallIsNotLostMeasurement(t *testing.T) {
 		}
 	}
 }
+
+func TestFullBatteryFeedbackKeepsEvidenceAndFaultsSeparate(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		target, actual float64
+		data, reason   string
+		fault, stale   bool
+	}{
+		{name: "full stop", target: 0, actual: 0, data: `{"setpoint_w":0}`, reason: "battery_full"},
+		{name: "stop ignored", target: 0, actual: 500, data: `{"setpoint_w":0}`, reason: "power_while_idle"},
+		{name: "discharge ignored", target: -1000, actual: 0, data: `{"setpoint_w":-1000}`, reason: "no_power_response"},
+		{name: "discharge allowed", target: -1000, actual: -1000, data: `{"setpoint_w":-1000}`, reason: "power_observed"},
+		{name: "fault", target: 0, actual: 0, data: `{"setpoint_w":0}`, reason: "device_fault", fault: true},
+		{name: "stale", target: 0, actual: 0, data: `{"setpoint_w":0}`, reason: "telemetry_stale", stale: true},
+		{name: "setpoint changed", target: 0, actual: 0, data: `{"setpoint_w":1000}`, reason: "setpoint_changed"},
+		{name: "power unknown", target: 0, actual: 0, data: `{"setpoint_w":0,"control_power_available":false}`, reason: "response_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tel := telemetry.NewStore()
+				soc := 1.0
+				tel.Update("battery", telemetry.DerBattery, 0, &soc, []byte(`{}`))
+				tel.RecordDriverSuccess("battery")
+				tel.Update("meter", telemetry.DerMeter, -1000, nil, []byte(`{}`))
+				tel.RecordDriverSuccess("meter")
+				st := control.NewState(0, 50, "meter")
+				st.Mode = control.ModeCharge
+				targets := control.ComputeDispatch(tel, st, map[string]float64{"battery": 9600}, 13800)
+				if len(targets) != 1 || targets[0].TargetW != 0 {
+					t.Fatalf("full battery not stopped: %+v", targets)
+				}
+				request, _ := json.Marshal(map[string]any{"action": "battery", "power_w": tc.target})
+				c := tel.BeginCommand("battery", request, time.Now())
+				tel.CompleteCommand(c, "accepted")
+				for range 16 {
+					tel.Update("battery", telemetry.DerBattery, tc.actual, &soc, []byte(tc.data))
+					time.Sleep(3 * time.Second)
+				}
+				if tc.fault {
+					tel.SetDriverDeviceFault("battery", true, "test fault")
+				}
+				if tc.stale {
+					time.Sleep(2 * time.Minute)
+				}
+				srv := New(&Deps{Tel: tel, Ctrl: st, CtrlMu: &sync.Mutex{}})
+				f := srv.controlFeedback(time.Now())[0]
+				if f.Reason != tc.reason {
+					t.Fatalf("got %+v want %s", f, tc.reason)
+				}
+				if tc.reason == "battery_full" {
+					if f.Severity != "info" || f.VerificationTier == nil || *f.VerificationTier != 1 || f.ActualW == nil || *f.ActualW != 0 || f.BatterySoC == nil || *f.BatterySoC != 1 || f.ChargeResumeSoC == nil || *f.ChargeResumeSoC != .99 {
+						t.Fatalf("full stop invented proof or lost context: %+v", f)
+					}
+				}
+			})
+		})
+	}
+}

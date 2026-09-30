@@ -1,5 +1,6 @@
 // Presentation only. Core owns evidence, freshness, limits and response checks.
 const messages = {
+  battery_full: ['Battery is full', 'FTW has paused charging because the battery reported 100%.', 'Charging is allowed again at 99% or lower, when the active mode requests it. Discharging remains available.'],
   solar_below_ceiling: ['Solar is below the requested ceiling', 'The measured output respects the ceiling, but available sunshine may already limit it.', 'FTW cannot yet confirm that curtailment caused the lower output.'],
   device_limit: ['Charger limit', 'The charger’s own current limit is below this request.', 'Check the charger’s current limit in its app or settings.'],
   offered_current_lower: ['Charger offers less current', 'The charger reports a lower current offer than FTW requested.', 'Check its load balancing and current limits. The reason is not confirmed.'],
@@ -49,7 +50,8 @@ export function feedbackText(row, live = true) {
   const detail = row.reason === 'power_below_target' && number(row.sent_w) && number(row.actual_w)
     ? `Measured ${feedbackPower(row.actual_w,row.kind)}, ${Math.round(Math.max(0,Math.abs(row.sent_w)-Math.abs(row.actual_w)))} W below the sent target of ${feedbackPower(row.sent_w,row.kind)}.`
     : words[1];
-  return {title:row.verification_lost ? 'Alarm · Measurements lost' : words[0], detail, action:words[2]};
+  const title = row.reason === 'battery_full' && number(row.battery_soc) && row.battery_soc < 1 ? 'Charging paused after full' : words[0];
+  return {title:row.verification_lost ? 'Alarm · Measurements lost' : title, detail, action:words[2]};
 }
 // A per-device status, never a site-wide tier or a verdict inferred by the UI.
 export function feedbackStatus(row, live = true) {
@@ -62,6 +64,7 @@ export function feedbackStatus(row, live = true) {
     const evidence = row.verification_tier === 2 ? 'Tier 2 · Site confirmed' : row.verification_tier === 1 ? 'Tier 1 · Device measured' : row.verification_tier === 0 ? 'Tier 0' : 'Unconfirmed';
     return {label:`${evidence} · ${outcome || 'Needs attention'}`,tone:outcome ? 'warning' : 'alarm'};
   }
+  if (row.reason === 'battery_full') return {label:'Charging paused after full',tone:row.verification_tier === 2 ? 'confirmed' : row.verification_tier === 1 ? 'measured' : 'waiting'};
   if (row.verification_tier === 2) return {label:'Tier 2 · Site confirmed',tone:'confirmed'};
   if (row.verification_tier === 1) return {label:'Tier 1 · Device measured',tone:'measured'};
   if (row.verification_tier === 0) return {label:'Tier 0 · Waiting',tone:'waiting'};
@@ -107,7 +110,7 @@ export function withControlProof(planets, value, live = true) {
       status.label === 'No active command' ? 'No command' : 'Waiting';
     // Tier 0 is acknowledgement, not a new alarm on every setpoint change.
     // Keep its precise tier in the detail view; the overview shows a quiet wait.
-    const detail = status.tone === 'waiting' ? 'Verifying the response' : status.label;
+    const detail = status.tone === 'waiting' && row.reason !== 'battery_full' ? 'Verifying the response' : status.label;
     const proof = {...status, label, detail, inactive:live && status.label === 'No active command'};
     const order = {alarm:0, warning:1, waiting:2, unknown:3, measured:4, confirmed:5};
     if (!planet.controlProof || order[status.tone] < order[planet.controlProof.tone]) planet.controlProof = proof;
@@ -129,6 +132,8 @@ export function feedbackValues(row, live = true) {
     ['Device setpoint', live ? feedbackPower(row.readback_w, row.kind) : 'Not current'],
     ['Measured', live ? feedbackPower(row.actual_w, row.kind) : 'Not current'],
   ];
+  if (number(row.battery_soc)) values.push(['Battery charge', live ? `${(row.battery_soc*100).toFixed(1)}%` : 'Not current']);
+  if (number(row.charge_resume_soc)) values.push(['Charging allowed again', live ? `${Math.round(row.charge_resume_soc*100)}% or lower` : 'Not current']);
   if (live && row.reason === 'power_below_target' && number(row.sent_w) && number(row.actual_w)) {
     values.push(['Shortfall from sent target', `${Math.round(Math.max(0,Math.abs(row.sent_w)-Math.abs(row.actual_w)))} W`]);
   }

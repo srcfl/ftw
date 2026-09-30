@@ -41,6 +41,8 @@ type ControlFeedback struct {
 	SentW            *float64           `json:"sent_w"`
 	ReadbackW        *float64           `json:"readback_w"`
 	ActualW          *float64           `json:"actual_w"`
+	BatterySoC       *float64           `json:"battery_soc,omitempty"`
+	ChargeResumeSoC  *float64           `json:"charge_resume_soc,omitempty"`
 	RequestedA       *float64           `json:"requested_a"`
 	OfferedA         *float64           `json:"offered_a"`
 	DeviceLimitA     *float64           `json:"device_limit_a"`
@@ -74,6 +76,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	}
 	mode, meter := "", ""
 	clamped := map[string]bool{}
+	full := map[string]bool{}
 	targeted := map[string]bool{}
 	var hold control.BatteryManualHold
 	var held bool
@@ -83,6 +86,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		meter = s.deps.Ctrl.SiteMeterDriver
 		for _, t := range s.deps.Ctrl.LastTargets {
 			clamped[t.Driver] = t.Clamped
+			full[t.Driver] = s.deps.Ctrl.BatteryChargePaused(t.Driver)
 			targeted[t.Driver] = true
 		}
 		hold, held = s.deps.Ctrl.GetBatteryManualHold(now)
@@ -146,6 +150,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if fresh && powerKnown && now.Sub(measurement.At) <= time.Minute {
 				f.ActualW = watts(measurement.PowerW)
 			}
+			if fresh && kind == telemetry.DerBattery && rd.SoC != nil &&
+				!rd.SoCUpdatedAt.After(now) && now.Sub(rd.SoCUpdatedAt) <= telemetry.BatterySoCMaxAge && *rd.SoC >= 0 && *rd.SoC <= 1 {
+				f.BatterySoC = watts(*rd.SoC)
+			}
 
 			if commanded {
 				f.SentW, f.RequestedW = cmd.PowerW, cmd.PowerW
@@ -161,6 +169,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			coreReason := ""
 			if clamped[rd.Driver] && kind == telemetry.DerBattery {
 				coreReason = "core_limit"
+			}
+			if full[rd.Driver] && kind == telemetry.DerBattery && f.BatterySoC != nil {
+				coreReason = "battery_full"
+				f.ChargeResumeSoC = watts(control.BatteryChargeResumeSoC)
 			}
 			if held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver) {
 				f.Mode = "manual"
@@ -372,6 +384,14 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	}
 	if f.Kind == "ev" && f.SentW != nil && f.RequestedA != nil && f.OfferedA != nil && *f.SentW > 100 && *f.OfferedA+0.5 < *f.RequestedA && settled {
 		set("limited", "offered_current_lower", "warning")
+		return
+	}
+	// This is a known Core stop, not a BMS diagnosis or new measurement proof.
+	// Continued power, changed setpoints, stale readings and faults keep their
+	// own verdicts. A full battery is still allowed to discharge.
+	if coreReason == "battery_full" && cmd.Result == "accepted" && f.SentW != nil && math.Abs(*f.SentW) < 1 &&
+		f.ActualW != nil && math.Abs(*f.ActualW) <= telemetry.ControlToleranceW(0) {
+		set("limited", "battery_full", "info")
 		return
 	}
 	if cmd.Result == "pending" || (!settled && f.Response == "unconfirmed") || f.ObservedAtMs < cmd.Since.UnixMilli() {
