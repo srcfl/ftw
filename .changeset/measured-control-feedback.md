@@ -11,3 +11,5 @@ Recognize a physical site meter relayed through an inverter, read Sungrow’s ac
 Assess each device separately. Unavailable background devices remain in the residual. Show per-device status in the overview and alarm when measured control is lost after the response wait.
 
 Show compact control levels on energy-flow bubbles. Open each device’s evidence on tap, with alarms visible even when devices are combined.
+
+Use small marks in the bubbles: a dot for device measurement, a ring for site confirmation and a warning symbol for faults. Keep normal response waits quiet and put tier labels in the detail view.

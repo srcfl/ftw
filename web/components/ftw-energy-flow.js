@@ -1623,15 +1623,22 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
     </g>`;
 }
 
-// Evidence has its own label and colour; power-flow colour keeps its meaning.
+// Keep proof quiet in the overview. Shape distinguishes the evidence levels;
+// the whole bubble opens the explanation and remains the accessible target.
 function renderProofBadge(proof, x, y, r) {
-  const colors = {confirmed:'var(--green-e)', measured:'var(--cyan)', waiting:'var(--amber)', alarm:'var(--red-e)', unknown:'var(--fg-muted)'};
+  if (proof.inactive) return '';
+  const colors = {confirmed:'var(--green-e)', measured:'var(--green-e)', waiting:'var(--fg-muted)', alarm:'var(--red-e)', unknown:'var(--fg-muted)'};
   const color = colors[proof.tone] || colors.unknown;
-  const width = Math.min(r * 1.7, Math.max(r * .82, proof.label.length * r * .12));
-  const height = r * .33, top = y - r * .99;
-  return `<g class="ef-control-proof" style="color:${color}">
-    <rect x="${x-width/2}" y="${top}" width="${width}" height="${height}" rx="${height/2}" fill="var(--hero-box-fill)" stroke="currentColor"/>
-    <text x="${x}" y="${top+height*.7}" text-anchor="middle" fill="currentColor" font-size="${r*.21}" font-weight="700">${escapeXml(proof.label)}</text>
+  const size = Math.max(3.5, Math.min(5, r * .065));
+  const mark = proof.tone === 'alarm'
+    ? '<path d="M0 -6 L6 5 H-6 Z" fill="currentColor"/><path d="M0 -2 V1 M0 3 V3.2" stroke="var(--hero-box-fill)" stroke-width="1.5" stroke-linecap="round"/>'
+    : proof.tone === 'measured' || proof.tone === 'confirmed'
+      ? `<circle r="2.8" fill="currentColor"/>${proof.tone === 'confirmed' ? '<circle r="5" fill="none" stroke="currentColor" stroke-width="1.2"/>' : ''}`
+      : `<circle r="4" fill="none" stroke="currentColor" stroke-width="1.2"${proof.tone === 'waiting' ? ' stroke-dasharray="2 2"' : ''}/>`;
+  return `<g class="ef-control-proof" data-tone="${escapeXml(proof.tone)}" transform="translate(${x+r*Math.SQRT1_2} ${y-r*Math.SQRT1_2}) scale(${size/5})" style="color:${color}">
+    <title>${escapeXml(proof.detail)}</title>
+    <circle r="8" fill="var(--hero-box-fill)"/>
+    ${mark}
   </g>`;
 }
 function combinedProof(group) {

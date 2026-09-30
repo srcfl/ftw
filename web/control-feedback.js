@@ -48,9 +48,9 @@ export function feedbackStatus(row, live = true) {
   if (!live) return {label:'No live proof',tone:'unknown'};
   if (row.verification_lost) return {label:row.verification_tier === 0 ? 'Alarm · Tier 0' : 'Alarm · No proof',tone:'alarm'};
   if (['observe_only','disabled','device_control','not_connected','no_command'].includes(row.reason)) return {label:'No active command',tone:'unknown'};
+  if (row.severity === 'warning') return {label:[0,1,2].includes(row.verification_tier) ? `Needs attention · Tier ${row.verification_tier}` : 'Alarm · Unconfirmed',tone:'alarm'};
   if (row.verification_tier === 2) return {label:'Tier 2 · Site confirmed',tone:'confirmed'};
   if (row.verification_tier === 1) return {label:'Tier 1 · Device measured',tone:'measured'};
-  if (row.severity === 'warning') return {label:row.verification_tier === 0 ? 'Alarm · Tier 0' : 'Alarm · Unconfirmed',tone:'alarm'};
   if (row.verification_tier === 0) return {label:'Tier 0 · Waiting',tone:'waiting'};
   return {label:'Waiting for acknowledgement',tone:'waiting'};
 }
@@ -80,10 +80,13 @@ export function withControlProof(planets, value, live = true) {
     }
     const status = feedbackStatus(row,live);
     const label = !live ? 'No live proof' : status.tone === 'alarm' ?
-      (row.verification_tier === 0 ? '⚠ Tier 0' : '⚠ No proof') :
+      ([0,1,2].includes(row.verification_tier) ? `⚠ Tier ${row.verification_tier}` : '⚠ No proof') :
       [0,1,2].includes(row.verification_tier) ? `Tier ${row.verification_tier}` :
       status.label === 'No active command' ? 'No command' : 'Waiting';
-    const proof = {...status, label, detail:status.label};
+    // Tier 0 is acknowledgement, not a new alarm on every setpoint change.
+    // Keep its precise tier in the detail view; the overview shows a quiet wait.
+    const detail = status.tone === 'waiting' ? 'Verifying the response' : status.label;
+    const proof = {...status, label, detail, inactive:live && status.label === 'No active command'};
     const order = {alarm:0, waiting:1, unknown:2, measured:3, confirmed:4};
     if (!planet.controlProof || order[status.tone] < order[planet.controlProof.tone]) planet.controlProof = proof;
     planet.clickable = true;
@@ -121,7 +124,7 @@ export function feedbackValues(row, live = true) {
     }
     if (number(e.samples) && e.samples > 0) values.push(['Comparison',`${e.samples} samples across ${Math.round(e.window_s)} s`]);
     if (number(e.tolerance_w) && e.tolerance_w > 0) values.push(['Site tolerance',`${Math.round(e.tolerance_w)} W`]);
-    if (Array.isArray(e.unmeasured_flows) && e.unmeasured_flows.length) values.push(['Included in background', e.unmeasured_flows.filter(v=>typeof v === 'string').join(', ')]);
+    if (Array.isArray(e.unmeasured_flows) && e.unmeasured_flows.length) values.push(['Background, not required sources', e.unmeasured_flows.filter(v=>typeof v === 'string').join(', ')]);
     if (e.samples > 0 && number(e.max_skew_ms)) values.push(['Largest time gap',`${Math.round(e.max_skew_ms)} ms`]);
   }
   return values;
@@ -144,7 +147,7 @@ export function feedbackSite(row, live = true) {
     no_baseline: 'No steady reading before the command is available for a site comparison.',
     waiting_for_meter: 'Waiting for a fresh, stable site-meter window.',
     readings_not_aligned: 'There are not enough distinct, time-aligned measurements to compare the curves.',
-    flows_changing: 'Power is changing during the comparison. Independent confirmation remains uncertain.',
+    flows_changing: 'The readings before this command varied too much for a reliable comparison. The device or the unmeasured background changed; the cause is not known.',
     no_clear_change: 'The change is too small to distinguish from other site activity.',
     other_flows_changed: 'Other equipment changed or its readings are missing. FTW cannot isolate this response.',
     other_flows_missing: 'Another measured flow is missing or stale. FTW cannot account for its effect on the site.',

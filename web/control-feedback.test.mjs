@@ -59,10 +59,24 @@ test('each device has its own status and unknown background is not a veto',()=>{
  const row={driver:'battery',reason:'power_observed',verification_tier:2,site_confirmation:'confirmed',site_evidence:{unmeasured_flows:['offline-ev:ev']}};
  assert.equal(feedbackStatus(row).tone,'confirmed');
  assert.match(feedbackSite(row),/separate site meter/);
- assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Included in background'),['Included in background','offline-ev:ev']);
+ assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Background, not required sources'),['Background, not required sources','offline-ev:ev']);
  assert.equal(feedbackStatus({driver:'ev',reason:'waiting_response',verification_tier:0}).tone,'waiting');
  assert.equal(feedbackStatus({driver:'ev',reason:'telemetry_stale',verification_tier:0,verification_lost:true}).tone,'alarm');
  assert.equal(feedbackStatus(row,false).tone,'unknown');
+});
+
+test('current warnings override a measured response and normal waits remain quiet',async()=>{
+ const {withControlProof}=await import('./control-feedback.js');
+ const row={driver:'battery',kind:'battery',reason:'waiting_response',verification_tier:0};
+ const proof=withControlProof([], [row])[0].controlProof;
+ assert.equal(proof.detail,'Verifying the response');
+ assert.equal(proof.tone,'waiting');
+ assert.match(feedbackProof(row),/Tier 0/);
+ assert.equal(withControlProof([], [{...row,reason:'not_connected'}])[0].controlProof.inactive,true);
+ for(const verification_tier of [0,1,2]) {
+  assert.equal(feedbackStatus({...row,verification_tier,reason:'device_fault',severity:'warning'}).tone,'alarm');
+ }
+ assert.match(feedbackSite({site_confirmation:'flows_changing'}),/before this command/);
 });
 
 test('bubble details select a function and combined bubbles retain every device',async()=>{
