@@ -862,11 +862,15 @@
   </footer>
 
   <!-- Battery manual-hold popup — opened from the battery planet click. -->
-  <ftw-battery-control id="battery-control"></ftw-battery-control>
+  <ftw-battery-control id="battery-control">
+    <section slot="evidence" id="battery-control-proof" class="control-results" aria-label="Control results"></section>
+  </ftw-battery-control>
 
   <!-- PV curtail manual-hold popup — opened from the solar planet click,
        only meaningful when a PV driver advertises pv-curtail support. -->
-  <ftw-pv-control id="pv-control"></ftw-pv-control>
+  <ftw-pv-control id="pv-control">
+    <section slot="evidence" id="pv-control-proof" class="control-results" aria-label="Control results"></section>
+  </ftw-pv-control>
 
   <!-- Plan numbers — what they mean -->
   <ftw-modal id="plan-help-modal" style="--ftw-modal-max-width:560px">
@@ -920,6 +924,7 @@
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
+    <section id="ev-control-proof" class="control-results" aria-label="Control results"></section>
     <!-- Start/Pause/Resume footer buttons removed: the Manual tab's
          Charge control (amp slider + Start/Stop, built by buildManualChargeSection)
          supersedes them. Start pins a persistent hold at a chosen amperage
@@ -932,7 +937,6 @@
   <ftw-modal id="control-proof-modal" style="--ftw-modal-max-width:640px">
     <span slot="title">Control evidence</span>
     <section id="control-proof-details" class="control-results" aria-label="Control results"></section>
-    <button slot="footer" id="control-proof-controls" type="button">Device controls</button>
   </ftw-modal>
 
   <ftw-modal id="grid-modal" style="--ftw-modal-max-width:420px">

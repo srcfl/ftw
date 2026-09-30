@@ -275,6 +275,7 @@ class FtwBatteryControl extends FtwElement {
 
         <div class="error hidden" data-error></div>
 
+        <slot name="evidence"></slot>
         <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
           <button type="button" class="footer-btn" data-stop disabled>Stop</button>
           <button type="button" class="footer-btn" data-install data-variant="install">Install hold</button>
@@ -332,6 +333,8 @@ class FtwBatteryControl extends FtwElement {
       button.classList.toggle("active", on);
       button.setAttribute("aria-checked", on ? "true" : "false");
     });
+    this.dispatchEvent(new CustomEvent('ftw-battery-scope', {bubbles:true, composed:true,
+      detail:{driver:mode === 'driver' ? this._formState.scopeDriver : ''}}));
   }
 
   _selectDirection(dir) {

@@ -54,6 +54,13 @@ export function feedbackStatus(row, live = true) {
   if (row.verification_tier === 0) return {label:'Tier 0 · Waiting',tone:'waiting'};
   return {label:'Waiting for acknowledgement',tone:'waiting'};
 }
+export function feedbackSummary(value, live = true) {
+  const statuses = feedbackRows(value).map(row => feedbackStatus(row,live));
+  if (statuses.length === 1) return statuses[0];
+  const alarms = statuses.filter(status => status.tone === 'alarm').length;
+  return alarms ? {label:`${alarms} need attention`,tone:'alarm'} :
+    {label:live ? `${statuses.length} devices` : 'No live proof',tone:'unknown'};
+}
 // Both views use the same per-function identity, including combined bubbles.
 export function feedbackForPlanet(value, planet = {}) {
   const name = planet.id?.startsWith('agg-') ? '' : planet.name;
@@ -177,18 +184,41 @@ export function feedbackCurve(row, live = true) {
 }
 
 // On-box renderer. The app uses the same presentation functions in Svelte.
-export function renderFeedback(root, value, live = true, {compact = false, expanded = false} = {}) {
+export function renderFeedback(root, value, live = true, {compact = false, expanded = false, embedded = false, nested = false} = {}) {
   if (!root) return;
   const rows = feedbackRows(value);
   root.hidden = rows.length === 0;
+  if (embedded) {
+    // Keep the disclosure itself in place: polling must not close it or move
+    // focus away from the device's controls.
+    let disclosure = root.querySelector('details[data-control-evidence]');
+    if (!disclosure) {
+      root.replaceChildren();
+      disclosure = document.createElement('details');
+      disclosure.dataset.controlEvidence = '';
+      disclosure.className = 'control-evidence';
+      const summary = document.createElement('summary');
+      const title = document.createElement('span'); title.textContent = 'Are we in control?';
+      summary.append(title, document.createElement('strong'));
+      disclosure.append(summary, document.createElement('div'));
+      root.append(disclosure);
+    }
+    const status = feedbackSummary(rows,live);
+    const badge = disclosure.querySelector('summary strong');
+    badge.textContent = status.label; badge.dataset.tone = status.tone;
+    renderFeedback(disclosure.querySelector('div'),rows,live,{nested:true});
+    return;
+  }
   // Preserve an open evidence table across the two-second status refresh.
   const open = new Set(Array.from(root.querySelectorAll('details[open]')).map(el => el.dataset.device));
   root.replaceChildren();
   if (!rows.length) return;
   const el = (tag, text, parent, cls) => { const node=document.createElement(tag); if (text) node.textContent=text; if(cls) node.className=cls; parent.appendChild(node); return node; };
-  if (!compact) el('h2','Are you in control?',root);
-  const statuses=el('ul','',root,'control-status-list'); statuses.setAttribute('aria-label','Control status by device');
+  if (!compact && !nested) el('h2','Are you in control?',root);
+  const statuses=nested ? null : el('ul','',root,'control-status-list');
+  if (statuses) statuses.setAttribute('aria-label','Control status by device');
   for (const row of rows) {
+    if (!statuses) break;
     const status=feedbackStatus(row,live), item=el('li','',statuses);
     el('span',`${row.driver} · ${row.kind || 'device'}`,item);
     const badge=el(compact ? 'button' : 'strong',status.label,item,'control-status'); badge.dataset.tone=status.tone;

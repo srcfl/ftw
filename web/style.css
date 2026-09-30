@@ -2331,3 +2331,10 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .control-results-compact .control-status-list { margin-bottom: .5rem; }
 .control-results-compact .control-status-list li { padding: .3rem .5rem; }
 .control-status-list button { background: transparent; border: 0; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+
+.control-evidence { border-top: 1px solid var(--border); padding-top: .8rem; margin-top: .8rem; }
+.control-evidence > summary { cursor: pointer; font-size: .85rem; }
+.control-evidence > summary strong { display: block; margin: .3rem 0 0 1rem; font-size: .75rem; font-weight: 500; }
+.control-evidence [data-tone="confirmed"], .control-evidence [data-tone="measured"] { color: var(--green); }
+.control-evidence [data-tone="alarm"] { color: var(--red); }
+.control-evidence [data-tone="unknown"], .control-evidence [data-tone="waiting"] { color: var(--text-dim); }

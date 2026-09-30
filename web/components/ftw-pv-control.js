@@ -186,7 +186,8 @@ class FtwPvControl extends FtwElement {
     const modal = this.shadowRoot.querySelector("ftw-modal");
     if (!modal) return;
     this._showError("");
-    if (driverId) this._formState.driver = driverId;
+    this._formState.driver = driverId || "";
+    this._announceScope();
     this._selectMode(this._formState.mode);
     this._selectDuration(this._formState.holdS);
     modal.open();
@@ -255,6 +256,7 @@ class FtwPvControl extends FtwElement {
 
         <div class="error hidden" data-error></div>
 
+        <slot name="evidence"></slot>
         <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
           <button type="button" class="footer-btn" data-stop disabled>Stop</button>
           <button type="button" class="footer-btn" data-install data-variant="install">Install hold</button>
@@ -271,7 +273,7 @@ class FtwPvControl extends FtwElement {
     root.querySelectorAll(".chip").forEach((c) =>
       c.addEventListener("click", () => this._selectDuration(Number(c.dataset.hold))));
     const sel = root.querySelector("[data-driver]");
-    if (sel) sel.addEventListener("change", (e) => { this._formState.driver = e.target.value; });
+    if (sel) sel.addEventListener("change", (e) => { this._formState.driver = e.target.value; this._announceScope(); });
     root.querySelector("[data-install]").addEventListener("click", () => this._install());
     root.querySelector("[data-stop]").addEventListener("click", () => this._stop());
     modal.addEventListener("ftw-modal-close", () => {
@@ -323,6 +325,11 @@ class FtwPvControl extends FtwElement {
           .map((d) => ({ id: d.name, name: d.name }));
       })
       .catch(() => { this._capableDrivers = []; });
+  }
+
+  _announceScope() {
+    this.dispatchEvent(new CustomEvent('ftw-pv-scope', {bubbles:true, composed:true,
+      detail:{driver:this._formState.driver || ''}}));
   }
 
   _renderDriverOptions() {

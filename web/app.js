@@ -2700,12 +2700,17 @@
   var controlProofModal = document.getElementById("control-proof-modal");
   var controlProofScope = null;
   var controlProofLive = false;
+  var batteryProofDriver = "";
+  var pvProofDriver = "";
   var openPlanetControls = function () {};
   function updateControlFeedback(data, live) {
     controlProofLive = live;
     var feedback = window.FTWControlFeedback;
     if (!feedback) return;
     feedback.render(document.getElementById("control-results"), data.control_feedback, live, {compact:true});
+    feedback.render(document.getElementById("battery-control-proof"), feedback.forPlanet(data.control_feedback, {role:"battery", name:batteryProofDriver}), live, {embedded:true});
+    feedback.render(document.getElementById("ev-control-proof"), feedback.forPlanet(data.control_feedback, {role:"ev", name:evModalDriver || ""}), live, {embedded:true});
+    feedback.render(document.getElementById("pv-control-proof"), feedback.forPlanet(data.control_feedback, {role:"pv", name:pvProofDriver}), live, {embedded:true});
     if (controlProofModal && controlProofModal.hasAttribute("open")) {
       feedback.render(document.getElementById("control-proof-details"), feedback.forPlanet(data.control_feedback, controlProofScope || {}), live);
     }
@@ -2720,16 +2725,23 @@
     controlProofModal.open();
     return true;
   }
-  var proofControls = document.getElementById("control-proof-controls");
-  if (proofControls) proofControls.addEventListener("click", function () {
-    var scope = controlProofScope || {};
-    controlProofModal.close();
-    openPlanetControls(scope);
+  var batteryControls = document.getElementById("battery-control");
+  if (batteryControls) batteryControls.addEventListener("ftw-battery-scope", function (event) {
+    batteryProofDriver = event.detail.driver || "";
+    if (lastStatusPayload) updateControlFeedback(lastStatusPayload, controlProofLive);
+  });
+  var pvControls = document.getElementById("pv-control");
+  if (pvControls) pvControls.addEventListener("ftw-pv-scope", function (event) {
+    pvProofDriver = event.detail.driver || "";
+    if (lastStatusPayload) updateControlFeedback(lastStatusPayload, controlProofLive);
   });
   var proofSummary = document.getElementById("control-results");
   if (proofSummary) proofSummary.addEventListener("click", function (event) {
     var button = event.target.closest("button[data-driver]");
-    if (button) openControlProof({name:button.dataset.driver, role:button.dataset.kind === "v2x_charger" ? "ev" : button.dataset.kind});
+    if (button) {
+      var scope = {name:button.dataset.driver, role:button.dataset.kind === "v2x_charger" ? "ev" : button.dataset.kind};
+      if (!openPlanetControls(scope)) openControlProof(scope);
+    }
   });
 
 
@@ -4655,6 +4667,7 @@
   if (evModal) {
     function openEvModal(driver) {
       evModalDriver = driver || null;
+      if (lastStatusPayload) updateControlFeedback(lastStatusPayload, controlProofLive);
       evModal.open();
       refreshEvModal();
       // Guard against stacked timers if the modal opens again while a
@@ -4676,27 +4689,29 @@
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
         var d = (e && e.detail) || {};
         if (d.id && d.id.indexOf("agg-") === 0) d = {role:d.role, id:d.id, name:""};
-        if (!openControlProof(d)) openPlanetControls(d);
+        if (!openPlanetControls(d)) openControlProof(d);
       });
     }
     openPlanetControls = function (d) {
         if (d.id && d.id.indexOf("agg-") === 0) d = {role:d.role};
-        if (d.role === "ev") openEvModal(d.name || null);
+        if (d.role === "ev") { openEvModal(d.name || null); return true; }
         if (d.role === "battery") {
           var drv = (lastStatusPayload && lastStatusPayload.drivers) || {};
           var clicked = drv[d.name || ""] || {};
           if (clicked.observe_only) return;
           var bc = document.getElementById("battery-control");
-          if (bc && typeof bc.open === "function") bc.open(d.name || d.id || "");
+          if (bc && typeof bc.open === "function") { bc.open(d.name || d.id || ""); return true; }
         }
         if (d.role === "pv") {
           var pc = document.getElementById("pv-control");
           if (pc && typeof pc.open === "function") {
             // The node id includes a role prefix; controls take the driver name.
             pc.open(d.name || "");
+            return true;
           }
         }
-        if (d.role === "grid" && gridModal) gridModal.open();
+        if (d.role === "grid" && gridModal) { gridModal.open(); return true; }
+        return false;
     };
 
     // Tile-mode (numeric cards) parity: when the operator toggles the
