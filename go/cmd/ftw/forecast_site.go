@@ -76,11 +76,12 @@ func (s *forecastSiteConfig) Snapshot() forecastSite {
 	defer s.mu.RUnlock()
 	v := s.value
 	v.Options.ExpectedFlows = append([]telemetry.ForecastFlow(nil), v.Options.ExpectedFlows...)
+	v.HistoryOptions.ExpectedFlows = append([]telemetry.ForecastFlow(nil), v.HistoryOptions.ExpectedFlows...)
 	return v
 }
 
 func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.CatalogEntry) bool {
-	v := forecastSite{Meter: cfg.SiteMeterDriver(), Timezone: forecastTimezone(), Options: forecastMeasurementOptions(cfg, catalog)}
+	v := forecastSite{Meter: cfg.SiteMeterDriver(), Timezone: forecastTimezone(), Options: forecastMeasurementOptions(cfg, catalog), HistoryOptions: historyMeasurementOptions(cfg, catalog)}
 	if cfg.Weather != nil && cfg.Weather.Provider != "" && cfg.Weather.Provider != "none" {
 		v.Latitude, v.Longitude = cfg.Weather.Latitude, cfg.Weather.Longitude
 		v.HasLocation = !math.IsNaN(v.Latitude) && !math.IsNaN(v.Longitude) && math.Abs(v.Latitude) <= 90 && math.Abs(v.Longitude) <= 180

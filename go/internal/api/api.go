@@ -3721,18 +3721,33 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		}
 		delivering := states[i].CurrentPowerW > loadpoint.DeliveringW
 		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
-		if pick.Driver == "" {
-			if states[i].SoCSource == "" {
-				states[i].SoCSource = "inferred"
+		freshVehicle := pick.Driver != ""
+		if !freshVehicle {
+			pick = telemetry.PickBestVehicleForDisplay(tel, delivering, now)
+			if pick.Driver == "" {
+				if states[i].SoCSource == "" {
+					states[i].SoCSource = "inferred"
+				}
+				continue
 			}
-			continue
 		}
 		states[i].VehicleDriver = pick.Driver
 		states[i].VehicleSoC = pick.SoC
 		states[i].VehicleChargeLimit = pick.ChargeLimit
 		states[i].VehicleChargingState = pick.ChargingState
 		states[i].VehicleStale = pick.Stale
-		states[i].SoCSource = "vehicle"
+		if !pick.UpdatedAt.IsZero() {
+			age := now.Sub(pick.UpdatedAt)
+			if age < 0 {
+				age = 0
+			}
+			states[i].VehicleSoCAgeS = int64(age / time.Second)
+		}
+		if freshVehicle {
+			states[i].SoCSource = "vehicle"
+		} else if states[i].SoCSource == "" {
+			states[i].SoCSource = "inferred"
+		}
 	}
 }
 

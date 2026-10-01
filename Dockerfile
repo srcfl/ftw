@@ -6,7 +6,7 @@
 # native Go arch inside the builder image.
 
 # --- Builder ---------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS builder
 
 # Pure Go builds cross-compile without a native database toolchain.
 ARG TARGETARCH
