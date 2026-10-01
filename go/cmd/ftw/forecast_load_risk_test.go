@@ -72,12 +72,16 @@ func TestForecastRiskUsesCalibratedLoadWithoutPVAndJointErrorsOnce(t *testing.T)
 					band := forecasting.Band{LowW: 0, HighW: 5000, Method: forecasting.BandMethodColdStart}
 					p := forecasting.Point{StartMS: at.UnixMilli(), EndMS: end.UnixMilli(), LoadW: 1000,
 						PVKnown: pvKnown, LoadKnown: true, PVQuality: "test", LoadQuality: "test", PVBand: band, LoadBand: band, NetBand: band}
-					f.errors = append(f.errors, forecasting.ErrorSample{Series: "champion", ConfigVersion: f.site().Revision, IssueID: "history",
-						OriginMS: issued.UnixMilli(), IssuedAtMS: issued.UnixMilli(), StartMS: p.StartMS, EndMS: p.EndMS,
-						AvailableAtMS: end.UnixMilli(), Lead: forecasting.LeadBucket(issued.UnixMilli(), p.StartMS),
-						LoadErrorW: 200, PVKnown: pvKnown, LoadKnown: true, Prediction: p})
-					if err := f.errors[len(f.errors)-1].Validate(); err != nil {
-						t.Fatal(err)
+					// The slot plans with Energyplan load and legacy PV; both
+					// series scored the same issue.
+					for _, series := range []string{"energyplan", "legacy_shadow"} {
+						f.errors = append(f.errors, forecasting.ErrorSample{Series: series, ConfigVersion: f.site().Revision, IssueID: "history",
+							OriginMS: issued.UnixMilli(), IssuedAtMS: issued.UnixMilli(), StartMS: p.StartMS, EndMS: p.EndMS,
+							AvailableAtMS: end.UnixMilli(), Lead: forecasting.LeadBucket(issued.UnixMilli(), p.StartMS),
+							LoadErrorW: 200, PVKnown: pvKnown, LoadKnown: true, Prediction: p})
+						if err := f.errors[len(f.errors)-1].Validate(); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 			}

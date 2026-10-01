@@ -705,7 +705,16 @@ func CompareFrozenSeries(samples []ErrorSample, primary, shadow string) []PairMe
 	return compareSeries(samples, primary, shadow, true)
 }
 
-func compareSeries(samples []ErrorSample, champion, candidate string, sameIssue bool) []PairMetric {
+type matchedPair struct {
+	config              string
+	start, end          int64
+	lead                int
+	champion, candidate ErrorSample
+}
+
+// matchedPairs keeps the latest issue per series and target, then pairs the
+// targets both series scored. sameIssue also requires both from one issue.
+func matchedPairs(samples []ErrorSample, champion, candidate string, sameIssue bool) []matchedPair {
 	type targetKey struct {
 		config     string
 		start, end int64
@@ -726,12 +735,7 @@ func compareSeries(samples []ErrorSample, champion, candidate string, sameIssue 
 			target[key] = e
 		}
 	}
-	type accumulator struct {
-		metric PairMetric
-		days   map[int64]bool
-		wins   float64
-	}
-	all := make(map[string]*accumulator)
+	out := make([]matchedPair, 0, len(championByTarget))
 	for key, championSample := range championByTarget {
 		candidateSample, ok := candidateByTarget[key]
 		if !ok {
@@ -741,24 +745,37 @@ func compareSeries(samples []ErrorSample, champion, candidate string, sameIssue 
 			championSample.OriginMS != candidateSample.OriginMS || championSample.IssuedAtMS != candidateSample.IssuedAtMS) {
 			continue
 		}
+		out = append(out, matchedPair{key.config, key.start, key.end, key.lead, championSample, candidateSample})
+	}
+	return out
+}
+
+func compareSeries(samples []ErrorSample, champion, candidate string, sameIssue bool) []PairMetric {
+	type accumulator struct {
+		metric PairMetric
+		days   map[int64]bool
+		wins   float64
+	}
+	all := make(map[string]*accumulator)
+	for _, pair := range matchedPairs(samples, champion, candidate, sameIssue) {
 		for _, signal := range []string{"pv", "pv_daylight", "load", "net"} {
-			if !sameActual(championSample, candidateSample, signal) {
+			if !sameActual(pair.champion, pair.candidate, signal) {
 				continue
 			}
-			championError, _, _, _ := signalError(championSample, signal)
-			candidateError, _, _, _ := signalError(candidateSample, signal)
-			accKey := key.config + "/" + signal + "/" + string(rune('0'+key.lead))
+			championError, _, _, _ := signalError(pair.champion, signal)
+			candidateError, _, _, _ := signalError(pair.candidate, signal)
+			accKey := pair.config + "/" + signal + "/" + string(rune('0'+pair.lead))
 			a := all[accKey]
 			if a == nil {
 				a = &accumulator{metric: PairMetric{
-					Champion: champion, Candidate: candidate, ConfigVersion: key.config, Signal: signal, Lead: key.lead,
+					Champion: champion, Candidate: candidate, ConfigVersion: pair.config, Signal: signal, Lead: pair.lead,
 				}, days: map[int64]bool{}}
 				all[accKey] = a
 			}
 			a.metric.Samples++
 			a.metric.ChampionMAEW += math.Abs(championError)
 			a.metric.CandidateMAEW += math.Abs(candidateError)
-			a.days[key.start/(24*hourMS)] = true
+			a.days[pair.start/(24*hourMS)] = true
 			switch {
 			case math.Abs(candidateError) < math.Abs(championError):
 				a.wins++
@@ -782,6 +799,57 @@ func compareSeries(samples []ErrorSample, champion, candidate string, sameIssue 
 		a.metric.CandidateWinRate = a.wins / n
 		a.metric.Days = len(a.days)
 		out = append(out, a.metric)
+	}
+	return out
+}
+
+// PooledPairMetric is one signal's comparison over every lead bucket. Hours
+// and Days count distinct targets, so a target scored at several leads
+// counts once.
+type PooledPairMetric struct {
+	Samples, Hours, Days        int
+	ChampionMAEW, CandidateMAEW float64
+}
+
+// PoolFrozenSeries compares primary and shadow from the same issues for one
+// signal across all lead buckets. Pass samples from one config.
+func PoolFrozenSeries(samples []ErrorSample, primary, shadow, signal string) PooledPairMetric {
+	var m PooledPairMetric
+	hours, days := map[int64]bool{}, map[int64]bool{}
+	for _, pair := range matchedPairs(samples, primary, shadow, true) {
+		if !sameActual(pair.champion, pair.candidate, signal) {
+			continue
+		}
+		primaryError, _, _, _ := signalError(pair.champion, signal)
+		shadowError, _, _, _ := signalError(pair.candidate, signal)
+		m.Samples++
+		m.ChampionMAEW += math.Abs(primaryError)
+		m.CandidateMAEW += math.Abs(shadowError)
+		hours[pair.start/hourMS] = true
+		days[pair.start/(24*hourMS)] = true
+	}
+	if m.Samples > 0 {
+		m.ChampionMAEW /= float64(m.Samples)
+		m.CandidateMAEW /= float64(m.Samples)
+	}
+	m.Hours, m.Days = len(hours), len(days)
+	return m
+}
+
+// ComposeFrozenSeries scores the forecast that takes PV from pvSeries and
+// load from loadSeries, on targets both series scored in the same issue. The
+// result is named name.
+func ComposeFrozenSeries(samples []ErrorSample, pvSeries, loadSeries, name string) []ErrorSample {
+	pairs := matchedPairs(samples, pvSeries, loadSeries, true)
+	out := make([]ErrorSample, 0, len(pairs))
+	for _, pair := range pairs {
+		pv, e := pair.champion, pair.candidate
+		e.Series = name
+		e.AvailableAtMS = max(pv.AvailableAtMS, e.AvailableAtMS)
+		e.PVErrorW, e.PVKnown, e.Daylight = pv.PVErrorW, pv.PVKnown, pv.Daylight
+		e.Prediction.PVW, e.Prediction.PVKnown, e.Prediction.PVQuality = pv.Prediction.PVW, pv.Prediction.PVKnown, pv.Prediction.PVQuality
+		e.Prediction.PVSource, e.Prediction.ModelPV, e.Prediction.PVBand = pv.Prediction.PVSource, pv.Prediction.ModelPV, pv.Prediction.PVBand
+		out = append(out, e)
 	}
 	return out
 }

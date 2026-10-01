@@ -36,27 +36,15 @@ func chooseForecastSources(history []forecasting.ErrorSample, cohort string, ori
 			recent = append(recent, e)
 		}
 	}
-	metrics := forecasting.CompareFrozenSeries(recent, "energyplan", "legacy_shadow")
-	return forecastSourceChoice{PV: pickForecastSource(metrics, "pv_daylight"), Load: pickForecastSource(metrics, "load")}
+	return forecastSourceChoice{
+		PV:   pickForecastSource(forecasting.PoolFrozenSeries(recent, "energyplan", "legacy_shadow", "pv_daylight")),
+		Load: pickForecastSource(forecasting.PoolFrozenSeries(recent, "energyplan", "legacy_shadow", "load")),
+	}
 }
 
-func pickForecastSource(metrics []forecasting.PairMetric, signal string) forecastSourcePick {
-	var pick forecastSourcePick
-	for _, m := range metrics {
-		if m.Signal != signal {
-			continue
-		}
-		pick.Samples += m.Samples
-		pick.Hours = max(pick.Hours, m.Samples) // one sample per scored hour in each lead bucket
-		pick.Days = max(pick.Days, m.Days)
-		pick.EnergyplanMAEW += m.ChampionMAEW * float64(m.Samples)
-		pick.LegacyMAEW += m.CandidateMAEW * float64(m.Samples)
-	}
-	if pick.Samples == 0 {
-		return pick
-	}
-	pick.EnergyplanMAEW /= float64(pick.Samples)
-	pick.LegacyMAEW /= float64(pick.Samples)
+func pickForecastSource(m forecasting.PooledPairMetric) forecastSourcePick {
+	pick := forecastSourcePick{Samples: m.Samples, Hours: m.Hours, Days: m.Days,
+		EnergyplanMAEW: m.ChampionMAEW, LegacyMAEW: m.CandidateMAEW}
 	if pick.Hours < forecastChoiceMinHours || pick.Days < forecastChoiceMinDays {
 		return pick
 	}
@@ -69,20 +57,37 @@ func pickForecastSource(metrics []forecasting.PairMetric, signal string) forecas
 	return pick
 }
 
-// calibrationEvidence keeps only champion errors made with the sources chosen
-// now, so a band never describes a source the plan stopped using. Until a new
-// choice has its own errors, the bands start cold.
-func calibrationEvidence(history []forecasting.ErrorSample, c forecastSourceChoice) []forecasting.ErrorSample {
-	if c.PV.Source == "" && c.Load.Source == "" {
-		return history
+// forecastSeriesOf names the archived series that holds a source's own
+// forecast.
+func forecastSeriesOf(source string) string {
+	if source == "energyplan" {
+		return "energyplan"
 	}
-	out := make([]forecasting.ErrorSample, 0, len(history))
+	return "legacy_shadow"
+}
+
+// forecastMixSeries names the forecast that takes PV from one series and load
+// from another.
+func forecastMixSeries(pv, load string) string {
+	if pv == load {
+		return pv
+	}
+	return "mix:" + pv + "+" + load
+}
+
+// riskEvidence holds each source's own errors and both mixes of them, scored
+// on the same issues. A slot's margin then describes the sources it plans
+// with, whichever sources earlier plans used.
+func riskEvidence(history []forecasting.ErrorSample) []forecasting.ErrorSample {
+	own := make([]forecasting.ErrorSample, 0, len(history))
 	for _, e := range history {
-		if e.Series == "champion" && ((c.PV.Source != "" && e.Prediction.PVSource != c.PV.Source) ||
-			(c.Load.Source != "" && e.Prediction.LoadSource != c.Load.Source)) {
-			continue
+		if e.Series == "energyplan" || e.Series == "legacy_shadow" {
+			own = append(own, e)
 		}
-		out = append(out, e)
+	}
+	out := append([]forecasting.ErrorSample(nil), own...)
+	for _, mix := range [][2]string{{"energyplan", "legacy_shadow"}, {"legacy_shadow", "energyplan"}} {
+		out = append(out, forecasting.ComposeFrozenSeries(own, mix[0], mix[1], forecastMixSeries(mix[0], mix[1]))...)
 	}
 	return out
 }

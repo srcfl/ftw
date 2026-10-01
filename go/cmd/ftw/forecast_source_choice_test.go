@@ -79,18 +79,27 @@ func TestForecastSourceChoiceSteersResolve(t *testing.T) {
 		_, reply := hostForecastReply(p)
 		return json.Marshal(reply)
 	})
-	f.errors = pairedForecastErrors(t, f.site().Revision, at, 72,
+	site := hostForecastSite()
+	site.HasPVScale = true // legacy PV is known where it has weather
+	f.site = func() forecastSite { return site }
+	f.errors = pairedForecastErrors(t, site.Revision, at, 72,
 		forecastPair{energyplanPV: 1250, legacyPV: 1850, energyplanLoad: 1100, legacyLoad: 3000})
 	in := f.Snapshot(at, trackerWeather(at, at))
-	legacy := trackerSlots(at, 2)
+	legacy := trackerSlots(at, 5) // weather covers the first hour only
 	got := in.Resolve(context.Background(), legacy)
 	if got[0].PVW != legacy[0].PVW || got[0].LoadW != 1100 {
-		t.Fatalf("measured errors did not choose the sources: %+v", got)
+		t.Fatalf("measured errors did not choose the sources: %+v", got[0])
+	}
+	if got[4].PVW != -100 {
+		t.Fatalf("legacy PV without weather replaced Energyplan PV: %+v", got[4])
 	}
 	in.Record(got, got, "decision", at.UnixMilli())
-	point := primarySeries(t, (<-f.queue).issue, "champion").Points[0]
-	if point.PVSource != "legacy" || point.LoadSource != "energyplan" || point.LoadQuality != "cold_start" || point.ModelLoad == nil {
-		t.Fatalf("chosen sources not recorded: %+v", point)
+	points := primarySeries(t, (<-f.queue).issue, "champion").Points
+	if p := points[0]; p.PVSource != "legacy" || p.LoadSource != "energyplan" || p.LoadQuality != "cold_start" || p.ModelLoad == nil {
+		t.Fatalf("chosen sources not recorded: %+v", p)
+	}
+	if points[4].PVSource != "energyplan" {
+		t.Fatalf("fallback to Energyplan PV not recorded: %+v", points[4])
 	}
 
 	// Learned Energyplan load still yields to a clearly better legacy load.
@@ -100,30 +109,44 @@ func TestForecastSourceChoiceSteersResolve(t *testing.T) {
 	in = f.Snapshot(at, trackerWeather(at, at))
 	got = in.Resolve(context.Background(), legacy)
 	if got[0].LoadW != legacy[0].LoadW || got[0].PVW != -100 {
-		t.Fatalf("legacy load or default PV rule lost: %+v", got)
+		t.Fatalf("legacy load or default PV rule lost: %+v", got[0])
 	}
 }
 
-func TestForecastSourceChoiceCalibratesOnlyTheChosenSources(t *testing.T) {
+// Each slot's margin comes from the errors its own sources made, not from
+// champion errors of sources the plan used before.
+func TestForecastRiskUsesTheSlotsOwnSources(t *testing.T) {
 	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
-	f := primaryFixture(at, primaryReply)
-	cohort := f.site().Revision
-	// Legacy load measured far better, so it now feeds the plan. The champion
-	// errors come from before, when Energyplan load overshot by 2 kW.
-	f.errors = append(pairedForecastErrors(t, cohort, at, 8*24, forecastPair{energyplanPV: 2000, legacyPV: 2000, energyplanLoad: 3000, legacyLoad: 1100}),
-		scoredForecastErrors(t, "champion", cohort, at, 8*24, 2000, 3000, "energyplan", "energyplan")...)
-	in := f.Snapshot(at, nil)
-	base := trackerSlots(at.Add(2*time.Hour), 1)
-	base[0].PVW, base[0].LoadW = 0, 1000
-	base = in.Resolve(context.Background(), base)
-	if base[0].LoadW != 1000 {
-		t.Fatalf("legacy load not chosen: %+v", base[0])
-	}
-	planning := append([]mpc.Slot(nil), base...)
-	in.Risk(base, planning, 1)
-	// A band from the old errors would sit 2 kW below the forecast and add
-	// nothing. The cold band for a 1 kW load at lead 1 adds 400 W.
-	if planning[0].LoadW != 1400 {
-		t.Fatalf("band used errors of a source the plan no longer uses: %+v", planning[0])
+	for _, tc := range []struct {
+		name           string
+		energyplanLoad float64 // predicted against a 1,000 W actual
+		legacyLoad     float64
+		championSource string
+		championLoad   float64
+		wantMargin     float64
+	}{
+		// Both loads miss by 1 kW, so the quality rule picks learned
+		// Energyplan load. Its errors set the margin, not legacy's.
+		{"quality rule after legacy", 0, 2000, "legacy", 2000, 1000},
+		// Legacy load wins by measurement. The margin uses its 300 W
+		// shortfall with Energyplan PV, not Energyplan's old overshoot.
+		{"measured legacy load", 3000, 700, "energyplan", 3000, 300},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := primaryFixture(at, primaryReply)
+			cohort := f.site().Revision
+			f.errors = append(pairedForecastErrors(t, cohort, at, 8*24,
+				forecastPair{energyplanPV: 2000, legacyPV: 2000, energyplanLoad: tc.energyplanLoad, legacyLoad: tc.legacyLoad}),
+				scoredForecastErrors(t, "champion", cohort, at, 8*24, 2000, tc.championLoad, tc.championSource, tc.championSource)...)
+			in := f.Snapshot(at, nil)
+			base := trackerSlots(at.Add(2*time.Hour), 1)
+			base[0].PVW, base[0].LoadW = 0, 1000
+			base = in.Resolve(context.Background(), base)
+			planning := append([]mpc.Slot(nil), base...)
+			in.Risk(base, planning, 1)
+			if got := (planning[0].LoadW + planning[0].PVW) - (base[0].LoadW + base[0].PVW); got != tc.wantMargin {
+				t.Fatalf("margin %v W, want %v W: base %+v, planning %+v", got, tc.wantMargin, base[0], planning[0])
+			}
+		})
 	}
 }

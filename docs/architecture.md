@@ -247,7 +247,8 @@ missing, late, partial or invalid, Core retains the matching legacy value.
 When a week of scored errors shows one source clearly better for a signal,
 Core uses that source; otherwise the worker's quality label decides. The
 resulting `champion` can therefore contain Energyplan PV with legacy load, or
-the reverse. `legacy_shadow` keeps both legacy signals from the same frozen
+the reverse. Each slot's planning margin comes from the errors its own sources
+made on earlier issues. `legacy_shadow` keeps both legacy signals from the same frozen
 capture for a fair later comparison.
 
 Complete qualified 15-minute observations update the local models outside
