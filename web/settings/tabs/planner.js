@@ -49,33 +49,50 @@
       " Changes apply at once.";
   }
 
-  // Page state for the margin slider. It outlives a redraw of the tab, so a
-  // save started before the tab was reopened still lands in the open tab.
-  var saveMargin = null; // one queue for the page
-  var marginReply = null; // the open tab's reply handler
-  var marginWaiting = false; // a slider value the box has not answered yet
-  var marginPendingK = null; // that value
+  // marginModel holds what the margin slider shows, for the whole page: the
+  // value the box last confirmed, from any control, unless a save from here
+  // is on its way. A read that started before a confirmed write is older
+  // than it and changes nothing.
+  function marginModel() {
+    var confirmed = null;
+    var rev = 0;
+    var pending = 0;
+    var requested = null;
+    var outcome = ""; // "saved" or "failed" after this page's last save
+    return {
+      confirm: function (k) { confirmed = k; rev++; outcome = ""; },
+      beginRead: function () { return rev; },
+      endRead: function (readRev, k) { if (readRev === rev && pending === 0) confirmed = k; },
+      request: function (k) { pending++; requested = k; outcome = ""; },
+      settle: function (ok) { pending--; if (pending === 0) outcome = ok ? "saved" : "failed"; },
+      view: function () {
+        if (pending > 0) return { k: requested, state: "saving" };
+        return { k: confirmed, state: outcome };
+      },
+    };
+  }
 
-  // marginSaver sends one margin save at a time, with only safety_k, so the
-  // box keeps the export choice it holds. post(change) returns the box's
-  // answer. done(err, sent, saved) runs only when no newer value waits.
-  function marginSaver(post, done) {
-    var sending = false;
-    var wanted = null;
-    function next() {
-      if (sending || wanted === null) return;
-      var k = wanted;
-      wanted = null;
-      sending = true;
-      post({ safety_k: k })
-        .then(function (p) {
-          if (wanted === null) done(null, k, typeof p.safety_k === "number" ? p.safety_k : k);
-        }, function (err) {
-          if (wanted === null) done(err, k);
-        })
-        .then(function () { sending = false; next(); });
-    }
-    return function (k) { wanted = k; next(); };
+  var margin = marginModel(); // outlives a redraw of the tab
+  var paintMargin = null; // the open tab's painter
+  var marginListening = false;
+
+  // savePlannerMargin sends only the margin, through the Plan card's queue so
+  // writes from the card and from here reach the box in the order they were
+  // made. The queue announces the box's answer; without the card, so does
+  // this.
+  function savePlannerMargin(apiFetch, k) {
+    var lib = window.FTWPlanPrefs;
+    if (lib && typeof lib.savePlannerPrefs === "function") return lib.savePlannerPrefs({ safety_k: k }, "settings");
+    return apiFetch("/api/planner/prefs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ safety_k: k }),
+    })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (p) {
+        window.dispatchEvent(new CustomEvent("ftw-planner-prefs", { detail: Object.assign({}, p, { source: "settings" }) }));
+        return p;
+      });
   }
 
   function engineSelect(engine, help) {
@@ -211,70 +228,52 @@
           kNote.textContent = (prefix || "") + styleNote(k, lib);
         };
         var dragging = false;
-        var showStored = function (p) {
-          var k = typeof p.safety_k === "number" ? p.safety_k : p.mapped_k;
-          kInput.value = String(k);
-          show(k);
+        // Paints the page's margin state, unless a drag is under way.
+        paintMargin = function () {
+          if (!kInput.isConnected || dragging) return;
+          var v = margin.view();
+          if (v.k == null) return;
+          kInput.value = String(v.k);
+          show(v.k, v.state === "saving" ? "Saving… " : v.state === "saved" ? "Saved. " : "");
+          if (v.state === "failed") kNote.textContent = "Not saved: the box did not answer. Try again.";
         };
+        if (!marginListening) {
+          marginListening = true;
+          // Every write the box confirms, from the Plan card or from here.
+          window.addEventListener("ftw-planner-prefs", function (e) {
+            var p = e.detail || {};
+            var k = typeof p.safety_k === "number" ? p.safety_k : p.mapped_k;
+            if (typeof k !== "number") return;
+            margin.confirm(k);
+            if (paintMargin) paintMargin();
+          });
+        }
+        paintMargin(); // what the page already knows, before the read answers
+        var readRev = margin.beginRead();
         apiFetch("/api/planner/prefs")
           .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
           .then(function (p) {
             kInput.disabled = false;
-            // A save still on its way answers with the newer value.
-            if (marginWaiting) {
-              kInput.value = String(marginPendingK);
-              show(marginPendingK, "Saving… ");
-            } else {
-              showStored(p);
-            }
+            margin.endRead(readRev, typeof p.safety_k === "number" ? p.safety_k : p.mapped_k);
+            paintMargin();
           })
           .catch(function () { kNote.textContent = "The box did not answer. Reopen Settings to try again."; });
-        // Replies go to the tab as it is drawn now.
-        marginReply = function (err, sent, saved) {
-          marginWaiting = false;
-          if (err) {
-            kNote.textContent = "Not saved: the box did not answer. Try again.";
-            return;
-          }
-          // A drag under way keeps the slider where the finger is.
-          if (!dragging) {
-            kInput.value = String(saved);
-            show(saved, "Saved. ");
-          }
-        };
-        if (!saveMargin) {
-          // Through the Plan card's queue when it is loaded, so writes from
-          // the card and from here reach the box in the order they were made.
-          saveMargin = marginSaver(function (change) {
-            var lib = window.FTWPlanPrefs;
-            if (lib && typeof lib.savePlannerPrefs === "function") return lib.savePlannerPrefs(change, "settings");
-            return apiFetch("/api/planner/prefs", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(change),
-            }).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
-          }, function (err, sent, saved) { marginReply(err, sent, saved); });
-        }
         kInput.addEventListener("input", function () {
           dragging = true;
           show(kInput.value);
         });
         kInput.addEventListener("change", function () {
           dragging = false;
-          marginWaiting = true;
-          marginPendingK = Number(kInput.value);
-          kNote.textContent = "Saving…";
-          saveMargin(marginPendingK);
+          var k = Number(kInput.value);
+          margin.request(k);
+          paintMargin();
+          savePlannerMargin(apiFetch, k)
+            .then(function () { return true; }, function () { return false; })
+            .then(function (ok) {
+              margin.settle(ok);
+              if (paintMargin) paintMargin();
+            });
         });
-        // A style picked on the Plan card changes the same number.
-        var tabState = S.tabs.planner;
-        if (tabState._onPrefs) window.removeEventListener("ftw-planner-prefs", tabState._onPrefs);
-        tabState._onPrefs = function (e) {
-          var p = e.detail;
-          if (!p || p.source === "settings" || !kInput.isConnected || marginWaiting || dragging) return;
-          if (typeof p.safety_k === "number" || typeof p.mapped_k === "number") showStored(p);
-        };
-        window.addEventListener("ftw-planner-prefs", tabState._onPrefs);
         // The same margin as the Plan card, split into sun and use. It
         // follows each plan the Plan card fetches, so a save shows up here.
         if (marginEl && lib) {
@@ -308,5 +307,5 @@
 
   // Escape hatch for node --test (planner.test.mjs); not a public API.
   S.tabs.planner._pure = { strategyLabel: strategyLabel, styleNote: styleNote, formatK: formatK, engineSelect: engineSelect,
-    marginSaver: marginSaver };
+    marginModel: marginModel };
 })();

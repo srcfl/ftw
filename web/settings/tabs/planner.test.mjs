@@ -12,7 +12,7 @@ globalThis.window = {};
 await import("./planner.js");
 const { styleForK } = await import("../../plan-prefs.js");
 const tab = globalThis.window.FTWSettings.tabs.planner;
-const { strategyLabel, styleNote, formatK, engineSelect, marginSaver } = tab._pure;
+const { strategyLabel, styleNote, formatK, engineSelect, marginModel } = tab._pure;
 
 describe("strategyLabel", () => {
   it("maps every planner mode via the local fallback", () => {
@@ -177,37 +177,46 @@ describe("engine selection", () => {
   }
 });
 
-describe("marginSaver", () => {
-  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+describe("marginModel", () => {
+  const stored = (k) => {
+    const m = marginModel();
+    m.endRead(m.beginRead(), k);
+    return m;
+  };
 
-  it("sends only the margin, one save at a time, and reports only the newest value", async () => {
-    const sent = [];
-    const replies = [];
-    const post = (change) => {
-      sent.push(change);
-      return new Promise((resolve) => replies.push(() => resolve({ safety_k: change.safety_k })));
-    };
-    const done = [];
-    const save = marginSaver(post, (err, k, saved) => done.push([err, k, saved]));
-    save(0.6);
-    save(0.8); // replaced before it is sent
-    save(1);
-    await settle();
-    assert.equal(sent.length, 1, "a second save started before the first finished");
-    replies.shift()();
-    await settle();
-    assert.deepEqual(done, [], "an older reply reached the page");
-    replies.shift()();
-    await settle();
-    assert.deepEqual(sent, [{ safety_k: 0.6 }, { safety_k: 1 }]);
-    assert.deepEqual(done, [[null, 1, 1]]);
+  it("ignores a read that started before a confirmed write", () => {
+    const m = marginModel();
+    const read = m.beginRead();
+    m.request(0.6);
+    m.confirm(0.6);
+    m.settle(true);
+    m.endRead(read, 0.3); // the redraw's read answers late with the old value
+    assert.deepEqual(m.view(), { k: 0.6, state: "saved" });
   });
 
-  it("reports a save the box did not take", async () => {
-    const done = [];
-    marginSaver(() => Promise.reject(new Error("HTTP 503")), (err) => done.push(err))(0.3);
-    await settle();
-    assert.equal(done.length, 1);
-    assert.ok(done[0] instanceof Error);
+  it("shows the newest value on its way until every save has answered", () => {
+    const m = stored(0.3);
+    m.request(0.8);
+    m.request(1);
+    assert.deepEqual(m.view(), { k: 1, state: "saving" });
+    m.confirm(0.8);
+    m.settle(true);
+    assert.deepEqual(m.view(), { k: 1, state: "saving" });
+    m.confirm(1);
+    m.settle(true);
+    assert.deepEqual(m.view(), { k: 1, state: "saved" });
+  });
+
+  it("follows a style picked on the Plan card", () => {
+    const m = stored(0.3);
+    m.confirm(0.15);
+    assert.deepEqual(m.view(), { k: 0.15, state: "" });
+  });
+
+  it("keeps the box's value after a failed save", () => {
+    const m = stored(0.3);
+    m.request(0.6);
+    m.settle(false);
+    assert.deepEqual(m.view(), { k: 0.3, state: "failed" });
   });
 });
