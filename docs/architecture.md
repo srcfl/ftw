@@ -255,7 +255,8 @@ state has been saved, and startup restores that saved state. The learning
 revision binds state to forecast inputs and stable hardware identities. A
 binding or input change starts fresh learning, while a compatible program
 upgrade can reuse the state. Issued forecasts use a stricter revision that also
-includes the Core build, worker bytes and pipeline policy.
+includes the worker bytes and pipeline policy, so a Core update that leaves
+forecasting alone keeps its scored errors and bands.
 
 Core keeps issued forecasts, frozen inputs, model-state references and qualified
 truth in a bounded local archive. The read-only `ftw-forecast-evaluate` source

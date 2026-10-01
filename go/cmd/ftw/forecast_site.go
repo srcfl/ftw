@@ -46,6 +46,11 @@ type forecastIdentityReceipt struct {
 }
 
 const forecastIdentityReceiptKey = "forecast/live_identity_v1"
+
+// forecastPipelinePolicy names how Core composes the forecast it plans with.
+// The evaluation cohort keys on it rather than on the Core version, so error
+// bands and baselines survive updates that leave forecasting alone. Bump it
+// whenever Core changes what reaches the planner.
 const forecastPipelinePolicy = "energyplan-primary-v2"
 
 func newForecastSiteConfig(st *state.Store) *forecastSiteConfig {
@@ -212,7 +217,7 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 		learningBase = s.accepted.LearningBaseRevision
 	}
 	learning := fmt.Sprintf("site-v2:%x", sha256.Sum256([]byte(learningBase+"/"+string(data))))
-	cohort := learning + "/" + Version + "/" + s.engineVersion + "/" + forecastPipelinePolicy
+	cohort := learning + "/" + s.engineVersion + "/" + forecastPipelinePolicy
 	revision := fmt.Sprintf("forecast-v1:%x", sha256.Sum256([]byte(cohort)))
 	opts := s.baseOptions
 	if pending && opts.HouseholdInvalidReason == "" {

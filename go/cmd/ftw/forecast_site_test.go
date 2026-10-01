@@ -437,3 +437,38 @@ func TestForecastLearningIDCarriesAcrossPortablePathPolicy(t *testing.T) {
 		t.Fatalf("receipt learning base = %q, want %q", s.accepted.LearningBaseRevision, old)
 	}
 }
+
+// Error bands and baselines are scored per evaluation cohort. A Core update
+// that leaves the site, the worker and the pipeline policy alone must keep
+// the cohort, or the bands never leave their cold-start width (#1489).
+func TestForecastEvaluationCohortSurvivesCoreUpdate(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	script := filepath.Join(t.TempDir(), "meter.lua")
+	if err := os.WriteFile(script, []byte("measurement code"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Drivers: []config.Driver{{Name: "meter", Lua: script, IsSiteMeter: true}},
+		Weather: &config.Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18},
+	}
+	previous := Version
+	defer func() { Version = previous }()
+	s := newForecastSiteConfig(st)
+	Version = "v0.138.0-beta.1"
+	s.Configure(cfg, nil)
+	before := s.Snapshot()
+	Version = "v0.138.1-beta.1"
+	s.Configure(cfg, nil)
+	if got := s.Snapshot().Revision; got != before.Revision {
+		t.Fatal("a Core update without forecast changes started a new evaluation cohort")
+	}
+	s.engineVersion = "another-worker-build"
+	s.Configure(cfg, nil)
+	if s.Snapshot().Revision == before.Revision {
+		t.Fatal("a new forecast worker kept the old evaluation cohort")
+	}
+}
