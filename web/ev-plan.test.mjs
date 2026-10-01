@@ -11,10 +11,26 @@ const known = { ...car, vehicle_driver: 'car', vehicle_soc: .47, vehicle_charge_
 test('reported battery level is distinct from the controller estimate and target', () => {
   const info = chargingLevels(known);
   assert.equal(info.now, '47%'); assert.equal(info.limit, '80%');
-  assert.equal(info.source, 'Reported by car'); assert.equal(info.fromCar, true);
+  assert.equal(info.source, 'From Car · Current'); assert.equal(info.fromCar, true);
   assert.match(info.explanation, /47% to 80%/);
   assert.equal(chargingLevels({ ...known, vehicle_soc: 0 }).now, '0%');
   assert.equal(chargingLevels({ ...known, vehicle_soc: undefined }).now, '0%', 'Core omits zero vehicle_soc');
+});
+
+test('old car SoC keeps provenance and age but is not used for planning', () => {
+  const info = chargingLevels({
+    ...known,
+    current_soc: .49,
+    vehicle_soc: .47,
+    vehicle_stale: true,
+    vehicle_soc_age_s: 12 * 60,
+    soc_source: 'inferred',
+  });
+  assert.equal(info.now, '47%');
+  assert.equal(info.source, 'From Car · 12 min old');
+  assert.equal(info.fromCar, true);
+  assert.equal(info.limit, 'Unknown');
+  assert.match(info.explanation, /49%/);
 });
 
 test('stale, missing or unbound car telemetry cannot become a known car limit', () => {
@@ -117,7 +133,7 @@ test('mounted car view follows source changes and keeps the slider while editing
     ()=>({el:new Element('details'),update(){}}),()=>null,()=>Promise.resolve({ok:true,json:async()=>({ok:true})}),async()=>{},
   );
   const view=api(known,{}); await new Promise(r=>setImmediate(r));
-  assert.match(text(view.el),/47% Reported by car/);
+  assert.match(text(view.el),/47% From Car · Current/);
   assert.equal(view.slider.parentNode.hidden,true);
   view.update(car,{});
   assert.equal(view.slider.parentNode.hidden,false);
