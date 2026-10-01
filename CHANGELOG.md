@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.139.0
+
+### Minor Changes
+
+- 8386721: Show whether each device FTW controls does what FTW asked. A tap on the battery, charger or solar bubble answers "Are we in control?" first: Following FTW, Waiting, Limited, Not following, No contact or Not controlled, with one sentence and, when you can act, the next step. Manual override moves below it.
+  
+  "How FTW knows" lists the evidence: sent, accepted, measured and confirmed by a separate grid meter, with numbers and response curves for experts. Support reports and the API carry the same status and evidence.
+  
+  The overview stays quiet while FTW is in control and marks only devices that need a look (amber) or attention now (red). Proof follows a device through targets retuned every tick and slow cloud sources, a confirmed step survives later household loads, and a battery that takes less power as it fills is explained instead of flagged.
+- bf85123: The Plan card's forecast slider is now five planning styles, from Very careful to Very bold. A line under them says how much of the spare sun the plan counts on, and another says whether extra sun goes into the battery or to the grid. The default style, Balanced, holds back a smaller forecast margin than before (k 0.3 instead of 1), and a box that still runs the old default moves to it once. Settings → Planner fine-tunes the margin and saves at once. Changing the style or battery sales on one device no longer undoes a change made on another.
+
+### Patch Changes
+
+- 9a46d30: Bundle the ESPHome DSMR driver that declares its host, so setup keeps the address you entered.
+- 68fda43: Forecast error bands and baselines now carry over across Core updates that leave forecasting alone. Before, each update started them over, so the planner's forecast margin always used its widest cold-start bands.
+- 608aad5: The solar and load forecasts keep what they have learned when an update installs the same driver scripts in a new release folder. Before, every native update started them over, so they rarely got past their first two days.
+- 1757ce0: The planner now takes each forecast signal from the source that measured better over the last week, once it has three days of scored hours. Before, it used Energyplan solar even while that model was new, and kept the older load model even when that model overshot by 2 kW at night.
+- 8386721: Pause charging for each battery that reports 100% and allow it again at 99% or lower. Keep discharge available and apply the stop to planned and manual charging, including during ramp limits and dispatch waits. Show the full-battery stop separately from measurement confidence and retain warnings when the device ignores the stop.
+- da0d138: The Home Assistant bridge now connects when the broker comes up after FTW or starts to accept FTW's login. FTW retries a failed start every 5 seconds at first, backing off to once a minute, until it connects, the settings change or FTW stops. Before, the bridge stayed off until a restart or a settings save.
+- 274ace8: Keep the history chart and site energy running when a device can report PV but does not, such as a Zap P1 meter with PV reading off, or while a device identity is still unconfirmed. Before, adding such a device stopped history until it was removed, even across restarts. Forecast learning keeps its stricter checks.
+- a9dc0e3: The load forecast now lowers a heating estimate once each of the last three cold days shows it above what the house used, without waiting weeks for each hour to train. One day with the heating off does not move it.
+- 082e5bb: The plan now includes, for each slot, how far live solar beyond the plan may charge the battery.
+- 63cf608: Save Zap PV and battery reads as off when the boxes are unchecked. Before, setup and Settings left `read_pv` out, so Core waited for PV readings the Zap never sends. Open Settings → Devices and save once to fix a Zap added before this release.
+
 ## 0.138.3
 
 ### Patch Changes
