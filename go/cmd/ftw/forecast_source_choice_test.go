@@ -7,36 +7,40 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/forecasting"
+	"github.com/srcfl/ftw/go/internal/mpc"
 )
 
 type forecastPair struct{ energyplanPV, legacyPV, energyplanLoad, legacyLoad float64 }
 
-// pairedForecastErrors scores both sources of each issue against one actual:
-// 2,000 W PV and 1,000 W load in every hour before end.
-func pairedForecastErrors(t *testing.T, cohort string, end time.Time, hours int, p forecastPair) []forecasting.ErrorSample {
+// scoredForecastErrors scores one series in every hour before end against
+// 2,000 W PV and 1,000 W load, from issues made two hours ahead.
+func scoredForecastErrors(t *testing.T, series, cohort string, end time.Time, hours int, pvW, loadW float64, pvSource, loadSource string) []forecasting.ErrorSample {
 	t.Helper()
 	band := forecasting.Band{LowW: 0, HighW: 5000, Method: forecasting.BandMethodColdStart}
 	var out []forecasting.ErrorSample
 	for h := 1; h <= hours; h++ {
 		at := end.Add(-time.Duration(h) * time.Hour)
 		issued := at.Add(-2 * time.Hour)
-		for _, s := range []struct {
-			series   string
-			pv, load float64
-		}{{"energyplan", p.energyplanPV, p.energyplanLoad}, {"legacy_shadow", p.legacyPV, p.legacyLoad}} {
-			e := forecasting.ErrorSample{Series: s.series, ConfigVersion: cohort, IssueID: "issue-" + issued.Format(time.RFC3339),
-				OriginMS: issued.UnixMilli(), IssuedAtMS: issued.UnixMilli(), StartMS: at.UnixMilli(), EndMS: at.Add(15 * time.Minute).UnixMilli(),
-				AvailableAtMS: at.Add(15 * time.Minute).UnixMilli(), Lead: forecasting.LeadBucket(issued.UnixMilli(), at.UnixMilli()),
-				PVErrorW: 2000 - s.pv, LoadErrorW: 1000 - s.load, PVKnown: true, Daylight: true, LoadKnown: true,
-				Prediction: forecasting.Point{StartMS: at.UnixMilli(), EndMS: at.Add(15 * time.Minute).UnixMilli(), PVW: s.pv, LoadW: s.load,
-					PVKnown: true, LoadKnown: true, PVQuality: "test", LoadQuality: "test", PVBand: band, LoadBand: band, NetBand: band}}
-			if err := e.Validate(); err != nil {
-				t.Fatal(err)
-			}
-			out = append(out, e)
+		e := forecasting.ErrorSample{Series: series, ConfigVersion: cohort, IssueID: "issue-" + issued.Format(time.RFC3339),
+			OriginMS: issued.UnixMilli(), IssuedAtMS: issued.UnixMilli(), StartMS: at.UnixMilli(), EndMS: at.Add(15 * time.Minute).UnixMilli(),
+			AvailableAtMS: at.Add(15 * time.Minute).UnixMilli(), Lead: forecasting.LeadBucket(issued.UnixMilli(), at.UnixMilli()),
+			PVErrorW: 2000 - pvW, LoadErrorW: 1000 - loadW, PVKnown: true, Daylight: true, LoadKnown: true,
+			Prediction: forecasting.Point{StartMS: at.UnixMilli(), EndMS: at.Add(15 * time.Minute).UnixMilli(), PVW: pvW, LoadW: loadW,
+				PVKnown: true, LoadKnown: true, PVQuality: "test", LoadQuality: "test", PVSource: pvSource, LoadSource: loadSource,
+				PVBand: band, LoadBand: band, NetBand: band}}
+		if err := e.Validate(); err != nil {
+			t.Fatal(err)
 		}
+		out = append(out, e)
 	}
 	return out
+}
+
+// pairedForecastErrors scores both sources of the same issues.
+func pairedForecastErrors(t *testing.T, cohort string, end time.Time, hours int, p forecastPair) []forecasting.ErrorSample {
+	t.Helper()
+	return append(scoredForecastErrors(t, "energyplan", cohort, end, hours, p.energyplanPV, p.energyplanLoad, "energyplan", "energyplan"),
+		scoredForecastErrors(t, "legacy_shadow", cohort, end, hours, p.legacyPV, p.legacyLoad, "legacy", "legacy")...)
 }
 
 func TestForecastSourceChoiceFollowsMeasuredErrors(t *testing.T) {
@@ -97,5 +101,29 @@ func TestForecastSourceChoiceSteersResolve(t *testing.T) {
 	got = in.Resolve(context.Background(), legacy)
 	if got[0].LoadW != legacy[0].LoadW || got[0].PVW != -100 {
 		t.Fatalf("legacy load or default PV rule lost: %+v", got)
+	}
+}
+
+func TestForecastSourceChoiceCalibratesOnlyTheChosenSources(t *testing.T) {
+	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	f := primaryFixture(at, primaryReply)
+	cohort := f.site().Revision
+	// Legacy load measured far better, so it now feeds the plan. The champion
+	// errors come from before, when Energyplan load overshot by 2 kW.
+	f.errors = append(pairedForecastErrors(t, cohort, at, 8*24, forecastPair{energyplanPV: 2000, legacyPV: 2000, energyplanLoad: 3000, legacyLoad: 1100}),
+		scoredForecastErrors(t, "champion", cohort, at, 8*24, 2000, 3000, "energyplan", "energyplan")...)
+	in := f.Snapshot(at, nil)
+	base := trackerSlots(at.Add(2*time.Hour), 1)
+	base[0].PVW, base[0].LoadW = 0, 1000
+	base = in.Resolve(context.Background(), base)
+	if base[0].LoadW != 1000 {
+		t.Fatalf("legacy load not chosen: %+v", base[0])
+	}
+	planning := append([]mpc.Slot(nil), base...)
+	in.Risk(base, planning, 1)
+	// A band from the old errors would sit 2 kW below the forecast and add
+	// nothing. The cold band for a 1 kW load at lead 1 adds 400 W.
+	if planning[0].LoadW != 1400 {
+		t.Fatalf("band used errors of a source the plan no longer uses: %+v", planning[0])
 	}
 }

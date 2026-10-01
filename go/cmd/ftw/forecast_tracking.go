@@ -450,9 +450,9 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 		}
 		frozen = fresh
 	}
-	calibrator := forecasting.NewCalibrator(history, site.Revision, origin.UnixMilli())
 	choice := chooseForecastSources(history, site.Revision, origin.UnixMilli())
 	f.noteSourceChoice(choice)
+	calibrator := forecasting.NewCalibrator(calibrationEvidence(history, choice), site.Revision, origin.UnixMilli())
 	pvFn := mpc.PVPredictor(nil)
 	if f.pv != nil && site.HasLocation {
 		pvFn = func(t time.Time, cloud float64) float64 {

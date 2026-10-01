@@ -69,6 +69,24 @@ func pickForecastSource(metrics []forecasting.PairMetric, signal string) forecas
 	return pick
 }
 
+// calibrationEvidence keeps only champion errors made with the sources chosen
+// now, so a band never describes a source the plan stopped using. Until a new
+// choice has its own errors, the bands start cold.
+func calibrationEvidence(history []forecasting.ErrorSample, c forecastSourceChoice) []forecasting.ErrorSample {
+	if c.PV.Source == "" && c.Load.Source == "" {
+		return history
+	}
+	out := make([]forecasting.ErrorSample, 0, len(history))
+	for _, e := range history {
+		if e.Series == "champion" && ((c.PV.Source != "" && e.Prediction.PVSource != c.PV.Source) ||
+			(c.Load.Source != "" && e.Prediction.LoadSource != c.Load.Source)) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // noteSourceChoice logs when measured errors move a signal to another source.
 func (f *forecastTracker) noteSourceChoice(c forecastSourceChoice) {
 	f.mu.Lock()
