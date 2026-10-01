@@ -146,6 +146,8 @@
       cursor: pointer;
     }
 
+    .form-group input[type] { background-image: none; cursor: text; padding-right: 12px; }
+
     .form-group input:focus,
     .form-group select:focus {
       outline: none;
@@ -164,11 +166,16 @@
       gap: 12px;
     }
 
-    .form-row-3 {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 12px;
+    .connection-hint {
+      color: var(--fg-dim);
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin: 8px 0 0;
     }
+
+    .connection-advanced { margin: 0 0 20px; }
+    .connection-advanced summary { cursor: pointer; font-size: 0.9rem; }
+    .connection-advanced .form-row { margin-top: 12px; }
 
     .form-check {
       display: flex;
@@ -491,7 +498,7 @@
 
     @media (max-width: 480px) {
       .wizard { padding: 2rem 0.9rem; }
-      .form-row, .form-row-3 { grid-template-columns: 1fr; }
+      .form-row { grid-template-columns: 1fr; }
       .wizard-logo { height: 44px; }
     }
   </style>
@@ -535,32 +542,52 @@
       <input type="text" id="site-name" value="My Home" placeholder="My Home">
     </div>
 
-    <div class="form-row-3">
-      <div class="form-group">
-        <label for="fuse-amps">Fuse rating (A)</label>
-        <input type="number" id="fuse-amps" value="16" min="1" max="100">
-      </div>
-      <div class="form-group">
-        <label for="fuse-phases">Phases</label>
-        <select id="fuse-phases">
-          <option value="1">1</option>
-          <option value="3" selected>3</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label for="fuse-voltage">Voltage (V)</label>
-        <input type="number" id="fuse-voltage" value="230" min="100" max="400">
-      </div>
-    </div>
-
     <div class="form-group">
       <label for="price-country">Country</label>
-      <!-- Both lists are filled from /api/prices/zones on load; these
-           options are the fallback if that request fails. -->
+      <!-- Both price lists come from /api/prices/zones. Keep a fallback
+           so a failed request does not prevent setup. -->
       <select id="price-country">
         <option value="Sweden" selected>Sweden</option>
       </select>
     </div>
+
+    <div class="form-group">
+      <label for="site-connection">Electricity connection</label>
+      <select id="site-connection" aria-describedby="connection-help">
+        <option value="3" selected>Three-phase</option>
+        <option value="1">Single-phase</option>
+        <option value="unknown">I don't know</option>
+        <option value="custom">Custom connection</option>
+      </select>
+      <p class="connection-hint" id="connection-help" role="status"></p>
+    </div>
+
+    <div class="form-group">
+      <label for="fuse-amps">Main fuse (A)</label>
+      <input type="number" id="fuse-amps" min="1" max="100" step="1" required
+        placeholder="e.g. 16, 20 or 25" aria-describedby="fuse-help">
+      <p class="connection-hint" id="fuse-help">Enter the rating from your electricity network contract. Use the main fuse, not a fuse for one appliance.</p>
+    </div>
+
+    <details class="connection-advanced" id="connection-advanced">
+      <summary>Advanced connection settings</summary>
+      <p class="connection-hint">Standard three-phase has 230 V from phase to neutral and 400 V between phases. FTW needs the phase-to-neutral value. The standard choices above set it to 230 V. Changing these values does not add support for a different grid type.</p>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="fuse-phases">Phases</label>
+          <select id="fuse-phases">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3" selected>3</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="fuse-voltage">Phase-to-neutral voltage (V)</label>
+          <input type="number" id="fuse-voltage" value="230" min="100" max="400" step="any" required>
+        </div>
+      </div>
+    </details>
+    <p id="connection-error" class="error-msg" role="alert" hidden></p>
 
     <div class="form-group">
       <label for="price-zone">Electricity price zone</label>
@@ -852,6 +879,6 @@
      the first setup paint. -->
 <script type="module" src="/components/ftw-update-check.js?v=native1"></script>
 <script src="/lan-auth.js?v=lan1"></script>
-<script src="/setup.js?v=zones1"></script>
+<script src="/setup.js?v=connection1"></script>
 </body>
 </html>

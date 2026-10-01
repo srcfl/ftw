@@ -1,6 +1,6 @@
 # Byt till nya FTW och håll det uppdaterat
 
-[English and release commands](../native-beta.md).
+[English](../native-beta.md).
 
 **FTW 2.x och 3.x får inga fler uppdateringar. All fortsatt utveckling går
 till den nya 0.x-serien. Vill du ha de senaste funktionerna och rättningarna
@@ -18,7 +18,23 @@ klar. Behöver du föra över dessa data innan du byter, ta hjälp med just din
 installation. Kopiera inte gamla databaser till den nya installationen på egen
 hand.
 
-## Välj väg efter hur FTW körs
+## Välj en väg
+
+**Sitter det gamla FTW-kortet fortfarande i Pi:n? Kör ingen nyinstallation där.**
+Vägen för dig som vill ha hjälp steg för steg är ett **andra SD-kort**.
+Du ska byta det fysiska kortet innan du kör installationskommandot.
+
+Välj **en** av följande vägar. De är alternativ, inte steg efter varandra:
+
+- **Gammal FTW på Raspberry Pi:** [byt med ett nytt SD-kort](#byt-på-raspberry-pi-med-ett-nytt-sd-kort).
+  Det gamla kortet och dess data blir kvar.
+- **Redan nya 0.x:** [uppdatera din befintliga installation](#uppdatera-när-du-redan-kör-nya-ftw).
+  Kör ingen nyinstallation.
+- **Tom Linux-maskin utan FTW:** [installera native](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin).
+  Docker är ett eget alternativ för dig som kan hantera Docker.
+
+<details>
+<summary>Andra installationer och hela tabellen med vägval</summary>
 
 | Det du har nu | Vägen till nya FTW | Nästa uppdatering |
 |---|---|---|
@@ -34,6 +50,23 @@ hand.
 `ftw.service` eller en fungerande `ftw status` räcker inte för att skilja
 körsätten åt. Samma tjänstenamn har använts tidigare, och status visar den Core
 som svarar på adressen.
+
+</details>
+
+## Om du redan har fått ett fel
+
+**Stanna vid första felet. Kör inte nästa block och byt inte metod för att
+komma förbi felet.** Spara kommandot och svaret. Be om hjälp i
+[Discord](https://discord.gg/UK2ygPBu8N) om nästa steg är oklart.
+
+| Det du ser | Gör så här |
+|---|---|
+| `Existing FTW installation found` eller nekad `--fresh-host` | Du kör på en maskin eller ett kort med FTW-data. Behåll filerna. På Pi: stäng av och byt till det förberedda nya kortet. Äldre publicerade skript kan säga “try 0.x beside it”; det betyder inte att Docker är nästa steg. |
+| `curl: (22)` eller `404` | Nedladdningen misslyckades. Kopiera den exakta taggen från Releases och kontrollera länken. Kör inte en gammal `install.sh` eller kvarlämnade Docker-filer. |
+| `ftw-local` finns redan | Ett tidigare försök har lämnat filer. Kontrollera projektet innan du gör mer. Radera inte data och skriv inte över `.env`. |
+| `requires buildx plugin` | Docker saknar ett byggverktyg. Ordna förkraven i Docker-guiden innan du bygger. |
+| `checking context: no permission to read .../data/applink.json` | Docker försöker läsa privata FTW-data när det bygger. Behåll filernas rättigheter. Se steget med `.dockerignore` under [Docker-uppdatering](#docker-från-det-nya-releasepaketet). Lös inte felet med `chmod` eller genom att bygga som root. |
+| Nya `ftw-local` visar `Restarting` medan gamla Core visar `Up` | Stoppa **den nya testcontainern** med dess kontrollerade namn: `sudo docker stop --time 60 <nya-containerns-namn>`. Behåll båda installationernas data och felsök innan du startar den igen. Stoppa inte en delad MQTT-broker. |
 
 ## Börja här om du inte vet vad som körs
 
@@ -58,26 +91,27 @@ den igen vid omboot.
 
 ## Byt på Raspberry Pi med ett nytt SD-kort
 
-1. Spara uppgifter om enheter, adresser, mål och scheman. Ta en full backup
-   enligt instruktionerna för den installerade versionen och spara den utanför
-   Pi:n. Behåll även det gamla kortet.
-2. Skriv Raspberry Pi OS Lite **64-bit** till ett **nytt** kort. Välj ett
-   användarnamn som inte är `ftw`, och slå på SSH. Skriv inte över det gamla
-   kortet.
-3. Stäng av Pi:n, byt kort och starta. Om gamla FTW körs på en annan maskin,
-   stoppa den innan nya FTW får styra samma utrustning.
-4. Välj en publicerad 0.x-beta från
-   [Releases](https://github.com/srcfl/ftw/releases). Den ska ha paketet för
-   din arkitektur och dess SHA-256-fil. Använd inte `releases/latest`: den
-   länken pekar fortfarande på den gamla serien.
-5. Följ [installationsstegen](https://github.com/srcfl/ftw/blob/master/docs/native-beta.md#install)
-   med den valda taggen. Installationsskriptet och paketet ska komma från samma
-   tagg. `--fresh-host` gäller bara en värd utan en befintlig FTW-installation.
-6. Öppna `http://<Pi:ns-IP>:8080/setup` och ställ in anläggningen på nytt.
-   Historik, inlärning och gamla inställningar ligger kvar på det gamla kortet;
-   de följer inte automatiskt med. Ersätt gamla kalenderhändelser med mål och
-   ready-by-scheman. Kontrollera även MQTT: en broker på det gamla kortet
-   följer inte med till det nya.
+1. **På gamla kortet:** spara enheternas adresser, mål och scheman. Ta en full
+   backup enligt den installerade versionens instruktioner och spara den
+   utanför Pi:n. Kör inget installationskommando på detta kort.
+2. **På din vanliga dator:** skriv Raspberry Pi OS Lite **64-bit** till ett
+   **andra** kort. Följ [Pi-guidens steg 1–7](sv.md#steg-1--hämta-programmet-som-förbereder-minneskortet).
+   Välj ett användarnamn som inte är `ftw`, till exempel `pi`, och slå på SSH.
+   Skriv inte över det gamla kortet.
+3. **Vid Pi:n:** stäng av, dra ur strömmen, ta ut gamla kortet och sätt i det
+   nya. Anslut strömmen igen. **Det fysiska kortbytet ska vara klart innan du
+   kör någon installation.**
+4. **På din vanliga dator:** öppna en ny SSH-anslutning till Pi:n med det
+   användarnamn du valde för nya kortet. IP-adressen kan ha ändrats; kontrollera
+   routern. Har du inte bytt kort, stanna här.
+5. **Innan du ställer in enheterna:** stoppa gammal FTW på andra maskiner
+   som kan styra samma utrustning. Ordna MQTT om utrustningen behöver det.
+   En broker på gamla kortet följer inte med.
+6. **I SSH på nya kortet:** följ [Installera på det nya kortet](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin)
+   nedan. Öppna sedan `http://<Pi:ns-IP>:8080/setup` och ställ in anläggningen.
+   Historik, inlärning och gamla inställningar ligger kvar på gamla kortet;
+   de följer inte automatiskt med. Använd mål och ready-by-scheman i stället
+   för gamla kalenderhändelser.
 7. Kontrollera rätt version, friska enheter, färska mätvärden och aktuell plan.
    Starta sedan om Pi:n när anläggningen kan tåla avbrottet och kontrollera
    samma saker igen.
@@ -88,8 +122,13 @@ som den nya installationen har samlat ligger kvar på det nya kortet.
 
 ## Byt på samma Linux-maskin med Docker
 
-Den nya Docker-installationen använder en egen katalog och egen data. Det är
-en ny installation, inte en flytt av gamla data.
+**Detta är ett avancerat alternativ till kortbytet ovan.** Välj det bara om
+du kan identifiera och stoppa gamla Core och updater, hantera deras startregler
+och bevara MQTT. Välj annars nytt kort eller be om hjälp. En nekad
+native-installation på gamla kortet är inte ett skäl att fortsätta med Docker.
+
+Den nya Docker-installationen använder en egen katalog och egen data.
+Den flyttar inte gamla data.
 
 1. Identifiera det gamla Compose-projektet, dess Core, updater, datakataloger
    och startregler. Vanliga kataloger är `/opt/ftw`, `~/ftw` och
@@ -119,6 +158,39 @@ sin data.
 **Port 8080 är ingen spärr mot dubbel styrning.** Äldre Core kan fortsätta
 styra även om den inte kan starta sin webbsida. En enda synlig webbsida är
 därför inget bevis på att bara en FTW körs.
+
+## Installera på det nya kortet eller en tom Linux-maskin
+
+**Bara på nya kortet eller en tom värd.** Har gamla FTW körts på det här
+kortet, gå tillbaka till kortbytet ovan. `--fresh-host` betyder att ingen
+FTW-installation eller dess data finns här, även om den är stoppad.
+
+1. Öppna [Releases](https://github.com/srcfl/ftw/releases) på din vanliga dator.
+   Välj en publicerad **ny 0.x-beta** med Linux-paket och SHA-256-fil för din
+   maskin. Använd inte `releases/latest`; den pekar på gamla 2.x.
+2. Kopiera taggen från releasens rubrik. Skriv inte av den för hand. Byt bara
+   ut `v0.X.Y-beta.N` i blocket nedan mot taggen du kopierade.
+3. Klistra in **hela blocket, inklusive `(` och `)`**, i SSH på nya kortet.
+   Det stannar vid första felet och hämtar skriptet till en tillfällig fil.
+
+```bash
+(
+  set -eu
+  tag=v0.X.Y-beta.N
+  if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
+    echo "STOP: copy an exact published new 0.x tag from Releases." >&2
+    exit 1
+  fi
+  installer=$(mktemp)
+  trap 'rm -f "$installer"' EXIT
+  curl -fSL "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh" -o "$installer"
+  bash "$installer" --fresh-host --tag "$tag"
+)
+```
+
+Om installationen lyckas, öppna `http://<Pi:ns-IP>:8080/setup` och ställ in
+anläggningen. Om den visar ett fel, stanna och läs [feltabellen](#om-du-redan-har-fått-ett-fel).
+Fortsätt inte med Docker-kommandon.
 
 ## Uppdatera när du redan kör nya FTW
 
@@ -153,6 +225,19 @@ pilotinstallation med annan katalogstruktur behöver sina egna kontroller.
 
 ### Docker från det nya releasepaketet
 
+Detta gäller bara **nya 0.x**, inte gamla 2.x/3.x. Gå till det kontrollerade
+nya projektets katalog, normalt `cd ~/ftw-local`. Om du installerade med den
+tidigare guiden, skapa den saknade `.dockerignore` bredvid `Dockerfile` först:
+
+```bash
+if [ ! -e .dockerignore ]; then
+  printf '*\n!Dockerfile\n!.dockerignore\n' > .dockerignore
+fi
+```
+
+Om filen redan finns, kontrollera att den utesluter `data` och `.env` från
+bygget. Behåll datafilernas rättigheter.
+
 Öppna `.env` i det verifierade nya Compose-projektet och ändra `FTW_VERSION`
 till den exakta publicerade release du vill installera. Behåll övriga rader.
 Kör sedan i samma projekt:
@@ -170,6 +255,9 @@ kompatibla `FTW_VERSION` och köra Compose igen. Docker har ingen automatisk
 
 ## För agenter som hjälper till
 
+- Välj en väg. Native och Docker är alternativ, inte steg efter varandra.
+  Stanna vid nedladdningsfel eller nekad installation. Använd inte gamla
+  nedladdade filer och byt inte metod för att komma förbi spärren.
 - Följ samma vägval som människan. Fastställ värd, version, körsätt,
   tjänst/projekt, datavägar, startregler och målversion innan du ändrar något.
 - Skilj på uppdatering inom nya serien, nyinstallation med nya data och

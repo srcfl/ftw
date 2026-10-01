@@ -1,15 +1,9 @@
-# FTW 0.x in Docker. Put this file, the Dockerfile beside it and a .env
-# with FTW_VERSION in one directory, then see docs/native-beta.md:
-#
-#   mkdir -p data && sudo chown 100:101 data
-#   echo FTW_VERSION=v0.X.Y-beta.N > .env  # replace with an exact published tag
-#   docker compose up -d --build
-#
-# Update: change FTW_VERSION in .env and run `docker compose up -d --build`.
-# Going back is the same with the previous version.
-#
-# The project has its own name so it never mixes with an older FTW stack,
-# whose project is called ftw.
+# FTW 0.x in Docker. Follow docs/native-beta.md#docker before starting.
+# Keep compose.yaml, Dockerfile, .dockerignore and .env together. The ignore
+# file keeps private data out of the build context, including on later builds.
+# Use separate empty data; stop old Core and its updater before starting here.
+# A separate project name does not prevent two Cores controlling one site.
+# Update: change FTW_VERSION in .env and rebuild as the guide describes.
 name: ftw-local
 
 services:

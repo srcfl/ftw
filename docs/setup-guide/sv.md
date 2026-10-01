@@ -118,7 +118,7 @@ Grattis — du är nu "inne" i Raspberry Pin.
 
 ## Steg 11 — Installera FTW
 
-Följ [installationsguiden för nya 0.x](../native-beta.md#install) och välj en exakt publicerad beta. På en ny 64-bitars Pi kan du installera nu. Kör FTW redan på din Pi, följ [bytesguiden](update-sv.md) först: använd ett nytt kort och ställ in anläggningen på nytt. Den guidade flytten av gamla inställningar och historik är ännu inte klar.
+Följ [installationsguiden för nya 0.x på svenska](update-sv.md#installera-på-det-nya-kortet-eller-en-tom-linux-maskin) och välj en exakt publicerad beta. På en ny 64-bitars Pi kan du installera nu. Kör FTW redan på din Pi, följ [bytesguiden](update-sv.md) först: använd ett nytt kort och ställ in anläggningen på nytt. Den guidade flytten av gamla inställningar och historik är ännu inte klar.
 
 ## Efter installationen
 
