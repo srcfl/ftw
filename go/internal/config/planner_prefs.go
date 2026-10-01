@@ -220,14 +220,16 @@ func ResolvePlannerPrefs(storedTrust, storedExport, storedK, persistedMode, yaml
 // MigrateOldDefaultSafetyK moves a box that still runs the old default k=1
 // onto the Balanced style, once. k=1 was both the first-boot default and the
 // old three-step "balanced", so a stored 1 means "the middle", and the middle
-// is now SafetyKDefault. Any other value was chosen on the slider and stays.
-// done is the StateKeyPlanningStyles marker; after the first call the caller
-// stores it and this returns k unchanged forever.
-func MigrateOldDefaultSafetyK(k float64, done string) (float64, bool) {
+// is now SafetyKDefault. Any other stored value was chosen on the slider and
+// stays. stored is the raw SQLite value: a k seeded from YAML on this boot is
+// the operator's choice, not an old default. done is the
+// StateKeyPlanningStyles marker; after the first call the caller stores it and
+// this returns k unchanged forever.
+func MigrateOldDefaultSafetyK(k float64, stored, done string) (float64, bool) {
 	if done != "" {
 		return k, false
 	}
-	if k == oldSafetyKDefault {
+	if old, ok := ParseSafetyK(stored); ok && old == oldSafetyKDefault {
 		return SafetyKDefault, true
 	}
 	return k, true

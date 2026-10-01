@@ -206,20 +206,23 @@ func TestMigrateOldDefaultSafetyKMovesOnlyTheOldDefaultOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		k         float64
+		stored    string
 		done      string
 		wantK     float64
 		wantFirst bool
 	}{
 		// k=1 was the first-boot default and the old "balanced": the middle.
-		{"old default", 1, "", SafetyKDefault, true},
+		{"old default", 1, "1", "", SafetyKDefault, true},
 		// A value picked on the slider stays where the household put it.
-		{"picked bold", 0.15, "", 0.15, true},
-		{"picked careful", 2, "", 2, true},
-		{"already balanced", SafetyKDefault, "", SafetyKDefault, true},
+		{"picked bold", 0.15, "0.15", "", 0.15, true},
+		{"picked careful", 2, "2", "", 2, true},
+		{"already balanced", SafetyKDefault, "0.3", "", SafetyKDefault, true},
+		// A new box seeds k from config.yaml this boot: the operator's choice.
+		{"seeded from YAML", 1, "", "", 1, true},
 		// Once the marker is stored, a later k=1 is a choice and stays.
-		{"after the move", 1, "1", 1, false},
+		{"after the move", 1, "1", "1", 1, false},
 	} {
-		k, first := MigrateOldDefaultSafetyK(tc.k, tc.done)
+		k, first := MigrateOldDefaultSafetyK(tc.k, tc.stored, tc.done)
 		if k != tc.wantK || first != tc.wantFirst {
 			t.Errorf("%s: got (%v, %v), want (%v, %v)", tc.name, k, first, tc.wantK, tc.wantFirst)
 		}

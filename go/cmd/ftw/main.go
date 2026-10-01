@@ -590,7 +590,7 @@ func main() {
 	}
 	trust, export, safetyK, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, storedSafetyK, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
 	stylesDone, _ := st.LoadConfig(config.StateKeyPlanningStyles)
-	if k, first := config.MigrateOldDefaultSafetyK(safetyK, stylesDone); first {
+	if k, first := config.MigrateOldDefaultSafetyK(safetyK, storedSafetyK, stylesDone); first {
 		if k != safetyK {
 			slog.Info("planner: old default forecast margin moved to the Balanced style", "from", safetyK, "to", k)
 		}
