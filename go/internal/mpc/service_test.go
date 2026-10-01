@@ -886,34 +886,31 @@ func TestSlotDirectiveAt(t *testing.T) {
 	slotStart := now.Add(-3 * time.Minute) // we're 3 min into a 15-min slot
 	slotLenMin := 15
 
-	s := &Service{
-		Defaults: Params{Mode: ModeArbitrage},
-		lastParams: Params{
-			Mode: ModeArbitrage, CapacityWh: 10000, ChargeEfficiency: 1,
-		},
-		last: &Plan{
-			DecisionID:    testDecisionID1,
-			GeneratedAtMs: now.Add(-time.Minute).UnixMilli(),
-			Actions: []Action{
-				{
-					SlotStartMs: slotStart.UnixMilli(),
-					SlotLenMin:  slotLenMin,
-					SpotOre:     40,
-					BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
-					SoC:         0.455,
-					GridW:       -150, // plan expects 150 W export
-				},
-				{
-					SlotStartMs: slotStart.Add(15 * time.Minute).UnixMilli(),
-					SlotLenMin:  slotLenMin,
-					PriceOre:    120, // later grid charge costs more than export earns now
-					BatteryW:    2000,
-					GridW:       1500,
-					SoC:         0.8,
-				},
+	s := &Service{Defaults: Params{Mode: ModeArbitrage}}
+	// Publish through InstallPlan: Core stores the live-surplus cap on the
+	// plan when it publishes it, and dispatch only reads it.
+	s.InstallPlan(Plan{
+		DecisionID:    testDecisionID1,
+		GeneratedAtMs: now.Add(-time.Minute).UnixMilli(),
+		Actions: []Action{
+			{
+				SlotStartMs: slotStart.UnixMilli(),
+				SlotLenMin:  slotLenMin,
+				SpotOre:     40,
+				BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
+				SoC:         0.455,
+				GridW:       -150, // plan expects 150 W export
+			},
+			{
+				SlotStartMs: slotStart.Add(15 * time.Minute).UnixMilli(),
+				SlotLenMin:  slotLenMin,
+				PriceOre:    120, // later grid charge costs more than export earns now
+				BatteryW:    2000,
+				GridW:       1500,
+				SoC:         0.8,
 			},
 		},
-	}
+	}, Params{Mode: ModeArbitrage, CapacityWh: 10000, ChargeEfficiency: 1}, "")
 
 	d, ok := s.SlotDirectiveAt(now)
 	if !ok {

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -494,6 +495,9 @@ func (s *Service) InstallPlan(plan Plan, params Params, loadpointID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	copied := plan
+	// Own the actions, so storing the caps never writes into the caller's slice.
+	copied.Actions = slices.Clone(plan.Actions)
+	s.setLivePVSurplusSoCCapsLocked(copied.Actions, params)
 	s.last = &copied
 	s.executionPlan = s.last
 	s.lastParams = params
@@ -556,7 +560,8 @@ type SlotDirective struct {
 	// this slot's effective export revenue and minimum spread. Runtime may
 	// opportunistically move that future charge into live PV now, but only up
 	// to this SoC and only while the meter exports beyond plan. Zero means
-	// preserve the slot exactly.
+	// preserve the slot exactly. The value comes from the published Action,
+	// so the plan API shows the number dispatch uses.
 	LivePVSurplusSoCCap float64
 
 	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
@@ -588,12 +593,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	currentContract := s.executionPlan == p
 	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	lpID := s.lastLoadpointID
-	params := s.lastParams
-	if params.Mode == "" {
-		// Tests and the short startup window before the first replan have no
-		// effective-params snapshot yet. Keep the historical fallback there.
-		params = s.Defaults
-	}
+	params := s.directiveParamsLocked(s.lastParams)
 	s.mu.RUnlock()
 	if p == nil || failedReplacement || !s.planExecutionAllowed(p, params.PVCurtailment, currentContract) {
 		return SlotDirective{}, false
@@ -602,7 +602,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		return SlotDirective{}, false
 	}
 	nowMs := now.UnixMilli()
-	for i, a := range p.Actions {
+	for _, a := range p.Actions {
 		slotLenMs := int64(a.SlotLenMin) * 60 * 1000
 		endMs := a.SlotStartMs + slotLenMs
 		if nowMs < a.ExecutionStart() || nowMs >= endMs {
@@ -622,7 +622,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			PVCurtailActive:     a.PVCurtailActive,
 			PVCurtailment:       params.PVCurtailment,
 			GridW:               a.GridW,
-			LivePVSurplusSoCCap: livePVSurplusSoCCap(p.Actions, i, params),
+			LivePVSurplusSoCCap: a.LivePVSurplusSoCCap,
 		}
 		if len(params.Storages) > 0 && len(a.StoragePowerW) > 0 {
 			d.StorageEnergyWh = make(map[string]float64, len(a.StoragePowerW))
@@ -719,6 +719,26 @@ func (snapshot PlanSnapshot) LoadpointPlanWindows(id string, now time.Time, max 
 		windows = append(windows, PlanWindow{Start: start, End: end, EnergyWh: wh})
 	}
 	return windows, totalWh
+}
+
+// directiveParamsLocked returns the params dispatch pairs with the active
+// plan. Params published without a mode, as some tests do, fall back to
+// Defaults. Callers hold s.mu.
+func (s *Service) directiveParamsLocked(p Params) Params {
+	if p.Mode == "" {
+		return s.Defaults
+	}
+	return p
+}
+
+// setLivePVSurplusSoCCapsLocked stores each slot's live-surplus ceiling on a
+// plan before it becomes active, so dispatch and the plan API read one number.
+// Callers hold s.mu and pass actions no reader can see yet.
+func (s *Service) setLivePVSurplusSoCCapsLocked(actions []Action, p Params) {
+	p = s.directiveParamsLocked(p)
+	for i := range actions {
+		actions[i].LivePVSurplusSoCCap = livePVSurplusSoCCap(actions, i, p)
+	}
 }
 
 // livePVSurplusSoCCap returns a quantified ceiling for moving later
@@ -1907,6 +1927,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 
 	sanitizePlanLoads(&plan)
+	// Every solver path, fallback included, publishes here. No reader has the
+	// actions yet, and nothing edits them after this point.
+	s.setLivePVSurplusSoCCapsLocked(plan.Actions, p)
 	plan.DecisionID = s.nextDecisionIDLocked()
 	s.last = &plan
 	s.executionPlan = s.last

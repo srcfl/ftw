@@ -334,6 +334,15 @@ type Action struct {
 	// SoC remain the stable aggregate dispatch/API contract.
 	StoragePowerW   map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh map[string]float64 `json:"storage_energy_wh,omitempty"`
+
+	// LivePVSurplusSoCCap is a 0–1 SoC fraction that Core sets when it
+	// publishes the plan; solver output leaves it zero. Zero means the
+	// planner gives no permission to move live surplus into the battery in
+	// this slot. Above zero, live export beyond plan may charge the battery
+	// up to this SoC. Dispatch still applies its own limits, and an operator
+	// PVSurplusAbsorbSoCCap overrides it. Always sent, so a client can tell
+	// zero from a box that predates the field.
+	LivePVSurplusSoCCap float64 `json:"live_pv_surplus_soc_cap"`
 }
 
 // Baselines are counter-factual dispatch costs over the same horizon,

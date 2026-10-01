@@ -298,6 +298,9 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	if params.PVChargeBonusOreKwh == 0 && s.Defaults.PVChargeBonusOreKwh > 0 {
 		params.PVChargeBonusOreKwh = s.Defaults.PVChargeBonusOreKwh
 	}
+	// The snapshot does not store the caps. Derive them from the restored
+	// params, as dispatch did before the caps lived on the plan.
+	s.setLivePVSurplusSoCCapsLocked(plan.Actions, params)
 	s.last = plan
 	s.lastSlots = slots
 	s.lastParams = params
