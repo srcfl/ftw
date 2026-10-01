@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -26,5 +27,19 @@ func TestDecorateLoadpointsKeepsCompletedSoCSource(t *testing.T) {
 	}
 	if states[2].SoCSource != "" {
 		t.Errorf("c: unplugged should stay unattributed, got %q", states[2].SoCSource)
+	}
+}
+
+func TestDecorateLoadpointsDisplaysCachedVWAfterRestart(t *testing.T) {
+	tel := telemetry.NewStore()
+	soc := .98
+	tel.Update("audi-vag", telemetry.DerVehicle, 0, &soc, json.RawMessage(`{"soc":98,"soc_fresh":false,"stale":true,"charging_state":"Stopped"}`))
+	tel.EmitMetric("audi-vag", "vehicle_soc_age_s", 156022, "s", "", "")
+	tel.DriverHealthMut("audi-vag").RecordSuccess()
+	states := []loadpoint.State{{ID: "easee", PluggedIn: true, CurrentSoC: .48}}
+	decorateLoadpointsWithVehicle(states, tel)
+	got := states[0]
+	if got.VehicleDriver != "audi-vag" || got.VehicleSoC != .98 || !got.VehicleStale || got.VehicleSoCAgeS < 156022 || got.CurrentSoC != .48 || got.SoCSource != "inferred" {
+		t.Fatalf("cached display/unchanged control: %+v", got)
 	}
 }
