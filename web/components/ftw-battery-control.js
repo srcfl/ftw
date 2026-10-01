@@ -155,45 +155,57 @@ class FtwBatteryControl extends FtwElement {
     }
     .error.hidden { display: none; }
 
-    /* Footer buttons — primary CTA is the accent, on-accent text is
-       near-black per the shared design system. The Stop button is a ghost variant
-       until a hold is active, then it switches to the red status hue
-       to signal a destructive action. */
-    .footer-btn {
-      flex: 1;
+
+    /* The sheet answers "Are we in control?" first; manual override is a
+       deliberate second step, so its form stays folded until opened. */
+    .override {
+      border-top: 1px solid var(--line);
+      margin-top: 14px;
+      padding-top: 12px;
+    }
+    .override > summary {
+      cursor: pointer;
+      font-family: var(--sans);
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--fg-dim);
+      padding: 4px 0 8px;
+    }
+    .override > summary:hover { color: var(--fg); }
+    .override[open] > summary { margin-bottom: 8px; }
+    .install-btn {
+      width: 100%;
       padding: 11px 18px;
       border-radius: 8px;
       cursor: pointer;
       font-family: var(--sans);
       font-weight: 500;
       font-size: 14px;
-      transition: transform 80ms, border-color 120ms, color 120ms, background 120ms;
-    }
-    .footer-btn:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
-    .footer-btn[data-variant="install"] {
-      flex: 2;
       background: var(--accent-e);
-      color: #0a0a0a;
+      color: var(--on-accent, #0a0a0a);
       border: 1px solid var(--accent-e);
+      margin-top: 4px;
     }
-    .footer-btn[data-variant="install"]:hover:not(:disabled) {
-      transform: translateY(-1px);
+    .install-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .active-banner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
-    .footer-btn[data-stop] {
+    .active-text { flex: 1; }
+    .stop-btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: var(--sans);
+      font-weight: 500;
+      font-size: 14px;
       background: transparent;
-      color: var(--fg);
-      border: 1px solid var(--line);
-    }
-    .footer-btn[data-stop]:not(:disabled) {
       color: var(--red-e);
-      border-color: var(--red-e);
+      border: 1px solid var(--red-e);
     }
-    .footer-btn[data-stop]:hover:not(:disabled) {
-      background: color-mix(in srgb, var(--red-e) 12%, transparent);
-    }
+    .stop-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--red-e) 12%, transparent); }
+    .stop-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   `;
 
   constructor() {
@@ -223,6 +235,8 @@ class FtwBatteryControl extends FtwElement {
     this._selectDirection(this._formState.direction);
     this._selectDuration(this._formState.holdS);
     this._renderScope();
+    const title = this.shadowRoot.querySelector("[data-title]");
+    if (title) title.textContent = driver ? "Battery · " + driver : "Batteries";
     modal.open();
     this._refresh();
     if (this._refreshTimer) clearInterval(this._refreshTimer);
@@ -232,12 +246,20 @@ class FtwBatteryControl extends FtwElement {
   render() {
     return `
       <ftw-modal style="--ftw-modal-max-width:420px">
-        <span slot="title">Battery control</span>
+        <span slot="title" data-title>Battery</span>
+
+        <slot name="status"></slot>
 
         <div class="active-banner hidden" data-active>
-          <div class="active-headline"></div>
-          <div class="active-detail"></div>
+          <div class="active-text">
+            <div class="active-headline"></div>
+            <div class="active-detail"></div>
+          </div>
+          <button type="button" class="stop-btn" data-stop disabled>Stop</button>
         </div>
+
+        <details class="override" data-override>
+          <summary>Manual override</summary>
 
         <div class="row hidden" data-scope-row>
           <label class="label">Scope</label>
@@ -274,12 +296,8 @@ class FtwBatteryControl extends FtwElement {
         </div>
 
         <div class="error hidden" data-error></div>
-
-        <slot name="evidence"></slot>
-        <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
-          <button type="button" class="footer-btn" data-stop disabled>Stop</button>
-          <button type="button" class="footer-btn" data-install data-variant="install">Install hold</button>
-        </div>
+          <button type="button" class="install-btn" data-install>Install hold</button>
+        </details>
       </ftw-modal>
     `;
   }

@@ -664,8 +664,8 @@ class FtwEnergyFlow extends FtwElement {
         socStale: !p.placeholder && !!p.socStale,
         socSource: p.placeholder ? null : p.socSource,
         radius: p._r,
-        clickable: p.clickable === false ? false : (!!p.controlProof || !p.placeholder && !!p.role),
-        controlProof: p.controlProof,
+        clickable: p.clickable === false ? false : (!!p.controlMark || !p.placeholder && !!p.role),
+        controlMark: p.controlMark,
         role: p.role || "",
         name: p.name || "",
         id: p.id,
@@ -1465,7 +1465,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
                             clickable = false, role = "", name = "", id = "",
                             aggregated = false,
                             dailyKwh = null, dailyKwhParts = null,
-                            compact = false, controlProof = null }) {
+                            compact = false, controlMark = null }) {
   const r = radius;
   const { x, y } = pos;
   // Daily totals line — empty string when no payload was passed (back-
@@ -1479,7 +1479,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // derived from the visible title/name so the announcement names
   // what activating this node will open.
   const nodeLabel = [title, nameLabel].filter(Boolean).join(" ");
-  const ariaLabel = controlProof ? `${nodeLabel}: ${controlProof.detail}. Open device` : nodeLabel ? `Open ${nodeLabel}` : "Open node";
+  const ariaLabel = controlMark ? `${nodeLabel}: ${controlMark.label}. Open device` : nodeLabel ? `Open ${nodeLabel}` : "Open node";
   const groupAttrs = clickable
     ? ` class="ef-node ef-clickable" data-role="${escapeXml(role)}" data-name="${escapeXml(name)}" data-id="${escapeXml(id)}" tabindex="0" role="button" aria-label="${escapeXml(ariaLabel)}"`
     : ` class="ef-node"`;
@@ -1606,7 +1606,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
               fill="none" stroke="${color}" stroke-width="1"
               stroke-dasharray="2 4"/>
       <g class="ef-icon" transform="translate(${x} ${y}) scale(${iconScale})">${iconSvg}</g>
-      ${controlProof ? renderProofBadge(controlProof, x, y, r) : ''}
+      ${controlMark ? renderControlMark(controlMark, x, y, r) : ''}
       ${titleSvg}
       <text x="${x}" y="${y + valueY}" text-anchor="middle" fill="${color}" class="sv-node-value">
         ${value}
@@ -1623,33 +1623,26 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
     </g>`;
 }
 
-// Keep proof quiet in the overview. Shape distinguishes the evidence levels;
-// the whole bubble opens the explanation and remains the accessible target.
-function renderProofBadge(proof, x, y, r) {
-  if (proof.inactive) return '';
-  const colors = {confirmed:'var(--green-e)', measured:'var(--green-e)', waiting:'var(--fg-muted)', warning:'var(--amber)', alarm:'var(--red-e)', unknown:'var(--fg-muted)'};
-  const color = colors[proof.tone] || colors.unknown;
-  const size = Math.max(3.5, Math.min(5, r * .065));
-  const mark = proof.tone === 'alarm' || proof.tone === 'warning'
-    ? '<path d="M0 -6 L6 5 H-6 Z" fill="currentColor"/><path d="M0 -2 V1 M0 3 V3.2" stroke="var(--hero-box-fill)" stroke-width="1.5" stroke-linecap="round"/>'
-    : proof.tone === 'measured' || proof.tone === 'confirmed'
-      ? `<circle r="2.8" fill="currentColor"/>${proof.tone === 'confirmed' ? '<circle r="5" fill="none" stroke="currentColor" stroke-width="1.2"/>' : ''}`
-      : `<circle r="4" fill="none" stroke="currentColor" stroke-width="1.2"${proof.tone === 'waiting' ? ' stroke-dasharray="2 2"' : ''}/>`;
-  return `<g class="ef-control-proof" data-tone="${escapeXml(proof.tone)}" transform="translate(${x+r*Math.SQRT1_2} ${y-r*Math.SQRT1_2}) scale(${size/5})" style="color:${color}">
-    <title>${escapeXml(proof.detail)}</title>
-    <circle r="8" fill="var(--hero-box-fill)"/>
-    ${mark}
+// The overview stays quiet while FTW is in control. Core's warning draws an
+// amber triangle and its alarm a red disc; the whole bubble stays the target.
+function renderControlMark(mark, x, y, r) {
+  const alarm = mark.tone === 'alarm';
+  const size = Math.max(7, Math.min(11, r * 0.15));
+  const glyph = alarm
+    ? '<circle r="9" fill="var(--red-e)"/><path d="M0 -4.5 V1.2 M0 4.2 V4.4" stroke="var(--hero-box-fill)" stroke-width="2.2" stroke-linecap="round"/>'
+    : '<path d="M0 -9 L9.5 7.5 H-9.5 Z" fill="var(--amber)" stroke-linejoin="round"/><path d="M0 -3.2 V1.8 M0 4.6 V4.8" stroke="var(--hero-box-fill)" stroke-width="2" stroke-linecap="round"/>';
+  return `<g class="ef-control-mark" data-tone="${escapeXml(mark.tone)}" transform="translate(${x + r * Math.SQRT1_2} ${y - r * Math.SQRT1_2}) scale(${size / 9})">
+    <title>${escapeXml(mark.label)}</title>
+    <circle r="12" fill="var(--hero-box-fill)"/>
+    ${glyph}
   </g>`;
 }
-function combinedProof(group) {
-  const proofs = group.map(p => p.controlProof).filter(Boolean);
-  if (!proofs.length) return null;
-  const alarms = proofs.filter(p => p.tone === 'alarm').length;
-  if (alarms) return {tone:'alarm', label:`⚠ ${alarms} alarm${alarms === 1 ? '' : 's'}`, detail:`${alarms} device${alarms === 1 ? '' : 's'} need attention`};
-  const warnings = proofs.filter(p => p.tone === 'warning').length;
-  if (warnings) return {tone:'warning', label:`⚠ ${warnings} warning${warnings === 1 ? '' : 's'}`, detail:`${warnings} device${warnings === 1 ? '' : 's'} need attention`};
-  if (proofs.length === group.length && proofs.every(p => p.label === proofs[0].label && p.tone === proofs[0].tone)) return proofs[0];
-  return {tone:'unknown', label:'Mixed tiers', detail:'Devices have different control evidence'};
+function combinedMark(group) {
+  const marks = group.map(p => p.controlMark).filter(Boolean);
+  if (!marks.length) return null;
+  const tone = marks.some(m => m.tone === 'alarm') ? 'alarm' : 'warning';
+  const n = marks.filter(m => m.tone === tone).length;
+  return {tone, label: n === 1 && marks.length === 1 ? marks[0].label : `${n} ${n === 1 ? 'device needs' : 'devices need'} attention`};
 }
 
 // ---------- primitives ----------
@@ -1761,7 +1754,7 @@ function aggregateGroups(groups) {
       socSource,
       name: `${group.length}×`,
       aggregated: true,
-      controlProof: combinedProof(group),
+      controlMark: combinedMark(group),
       placeholder: group.some(p => p.placeholder),
       dailyKwh,
       dailyKwhParts,

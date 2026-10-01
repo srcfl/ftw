@@ -2703,14 +2703,16 @@
   var batteryProofDriver = "";
   var pvProofDriver = "";
   var openPlanetControls = function () {};
+  // Each device sheet answers "Are we in control?" first. Core decides the
+  // status; the shared view only renders it.
   function updateControlFeedback(data, live) {
     controlProofLive = live;
     var feedback = window.FTWControlFeedback;
     if (!feedback) return;
     feedback.render(document.getElementById("control-results"), data.control_feedback, live, {compact:true});
-    feedback.render(document.getElementById("battery-control-proof"), feedback.forPlanet(data.control_feedback, {role:"battery", name:batteryProofDriver}), live, {embedded:true});
-    feedback.render(document.getElementById("ev-control-proof"), feedback.forPlanet(data.control_feedback, {role:"ev", name:evModalDriver || ""}), live, {embedded:true});
-    feedback.render(document.getElementById("pv-control-proof"), feedback.forPlanet(data.control_feedback, {role:"pv", name:pvProofDriver}), live, {embedded:true});
+    feedback.render(document.getElementById("battery-control-proof"), feedback.forPlanet(data.control_feedback, {role:"battery", name:batteryProofDriver}), live);
+    feedback.render(document.getElementById("ev-control-proof"), feedback.forPlanet(data.control_feedback, {role:"ev", name:evModalDriver || ""}), live);
+    feedback.render(document.getElementById("pv-control-proof"), feedback.forPlanet(data.control_feedback, {role:"pv", name:pvProofDriver}), live);
     if (controlProofModal && controlProofModal.hasAttribute("open")) {
       feedback.render(document.getElementById("control-proof-details"), feedback.forPlanet(data.control_feedback, controlProofScope || {}), live);
     }
@@ -2721,7 +2723,7 @@
     var rows = feedback.forPlanet(lastStatusPayload.control_feedback, scope);
     if (!rows.length) return false;
     controlProofScope = scope;
-    feedback.render(document.getElementById("control-proof-details"), rows, controlProofLive, {expanded:true});
+    feedback.render(document.getElementById("control-proof-details"), rows, controlProofLive);
     controlProofModal.open();
     return true;
   }
@@ -2810,10 +2812,6 @@
   // when no hold is active.
   function manualStatusText(lp, d) {
     if (lp && lp.manual_restore_unconfirmed) return "Confirm how to continue charging. FTW could not confirm the charger or connection.";
-    if (lp && lp.control_feedback && lp.control_feedback.severity === "warning" && window.FTWControlFeedback) {
-      var feedback = window.FTWControlFeedback.text(lp.control_feedback);
-      return feedback.detail + " " + feedback.action;
-    }
     var m = lp && lp.manual;
     if (!lp || !lp.manual_active || !m || !m.active) return null;
     var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
@@ -2883,10 +2881,6 @@
     var hasSchedule = lp.schedule && (lp.schedule.finish_at_vehicle_limit === true || lp.schedule.soc > 0);
     if (lp.manual_restore_unconfirmed) {
       text = manualStatusText(lp, d);
-    } else if (lp.control_feedback && lp.control_feedback.severity === "warning" && window.FTWControlFeedback) {
-      var feedback = window.FTWControlFeedback.text(lp.control_feedback);
-      text = feedback.detail + " " + feedback.action;
-      tone = "var(--amber)";
     } else if (lp.charger && !lp.charger.available) {
       text = lp.charger.known
         ? "Charger status is out of date. FTW cannot confirm whether the car is charging."

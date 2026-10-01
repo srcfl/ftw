@@ -182,7 +182,7 @@
 
       <div id="power-now-values" class="power-now-panel" role="tabpanel"
            aria-labelledby="power-now-tab-values" hidden>
-        <section id="control-results" class="control-results control-results-compact" aria-label="Control status" hidden></section>
+        <section id="control-results" class="control-status control-status-compact" aria-label="Are we in control?" hidden></section>
         <div class="summary-cards">
           <div class="summary-card" id="card-pv">
             <div class="card-label">Solar</div>
@@ -863,13 +863,13 @@
 
   <!-- Battery manual-hold popup — opened from the battery planet click. -->
   <ftw-battery-control id="battery-control">
-    <section slot="evidence" id="battery-control-proof" class="control-results" aria-label="Control results"></section>
+    <section slot="status" id="battery-control-proof" class="control-status" aria-label="Are we in control?"></section>
   </ftw-battery-control>
 
   <!-- PV curtail manual-hold popup — opened from the solar planet click,
        only meaningful when a PV driver advertises pv-curtail support. -->
   <ftw-pv-control id="pv-control">
-    <section slot="evidence" id="pv-control-proof" class="control-results" aria-label="Control results"></section>
+    <section slot="status" id="pv-control-proof" class="control-status" aria-label="Are we in control?"></section>
   </ftw-pv-control>
 
   <!-- Plan numbers — what they mean -->
@@ -921,10 +921,10 @@
   <!-- EV detail popup -->
   <ftw-modal id="ev-modal" style="--ftw-modal-max-width:380px">
     <span slot="title">EV Charger</span>
+    <section id="ev-control-proof" class="control-status" aria-label="Are we in control?"></section>
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
-    <section id="ev-control-proof" class="control-results" aria-label="Control results"></section>
     <!-- Start/Pause/Resume footer buttons removed: the Manual tab's
          Charge control (amp slider + Start/Stop, built by buildManualChargeSection)
          supersedes them. Start pins a persistent hold at a chosen amperage
@@ -932,12 +932,14 @@
          The /api/ev/command endpoint stays for HA / scripts. -->
   </ftw-modal>
 
+  <!-- Control status for a device without its own controls. -->
+  <ftw-modal id="control-proof-modal" style="--ftw-modal-max-width:480px">
+    <span slot="title">Device</span>
+    <section id="control-proof-details" class="control-status" aria-label="Are we in control?"></section>
+  </ftw-modal>
+
   <!-- Grid detail popup — peak import ceiling + grid target. Open from
        the GRID planet in the energy-flow hero. -->
-  <ftw-modal id="control-proof-modal" style="--ftw-modal-max-width:640px">
-    <span slot="title">Control evidence</span>
-    <section id="control-proof-details" class="control-results" aria-label="Control results"></section>
-  </ftw-modal>
 
   <ftw-modal id="grid-modal" style="--ftw-modal-max-width:420px">
     <span slot="title">Grid</span>
@@ -975,7 +977,7 @@
   </ftw-modal>
 
   <script src="/lan-auth.js?v=lan1"></script>
-  <script type="module" src="/control-feedback.js"></script>
+  <script type="module" src="/control-feedback-view.js"></script>
   <script src="/app.js?v=noask1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>

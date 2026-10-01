@@ -1,123 +1,140 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { feedbackStatus,feedbackText,feedbackPower,feedbackProof,feedbackRows,feedbackValues,feedbackSite,feedbackCurve } from './control-feedback.js';
+import {readFileSync} from 'node:fs';
+import {controlRows, controlStatus, controlReceipt, controlNumbers, controlCurve, controlForPlanet,
+  controlSummary, withControlMarks} from './control-feedback.js';
 
-test('command acknowledgement, device measurement and site confirmation stay distinct',()=>{
- const row={driver:'battery',kind:'battery',reason:'power_observed',response:'device_reported'};
- assert.match(feedbackProof({...row,verification_tier:0}),/Tier 0/);
- assert.match(feedbackProof({...row,verification_tier:1}),/Tier 1/);
- assert.match(feedbackProof({...row,verification_tier:2}),/Tier 2/);
- assert.doesNotMatch(feedbackProof({...row,verification_tier:2},false),/Confirmed|Tier 2/);
- assert.match(feedbackText(row).detail,/device’s own/);
- assert.match(feedbackSite({...row,site_confirmation:'other_flows_changed'}),/cannot isolate/);
+const row = extra => ({driver: 'bat', kind: 'battery', mode: 'planner_arbitrage', status: 'following', reason: 'power_observed',
+  severity: 'info', evidence: 'measured', readings_fresh: true, sent_w: -2250, requested_w: -2250, actual_w: -2249,
+  readback_w: -2250, command_at_ms: 1, observed_at_ms: 2, site_confirmation: 'device_response_unconfirmed', ...extra});
+
+// Every reason Core can classify must have words, or the owner sees a code.
+test('every reason Core emits has a title and a sentence', () => {
+  const go = readFileSync(new URL('../go/internal/api/api_control_feedback.go', import.meta.url), 'utf8');
+  const body = go.slice(go.indexOf('func setControlStatus'), go.indexOf('f.Status, f.Severity = status, severity'));
+  const reasons = [...body.matchAll(/"([a-z_]+)"/g)].map(m => m[1])
+    .filter(r => !['waiting', 'info', 'following', 'limited', 'warning', 'not_following', 'alarm', 'no_contact', 'not_controlled'].includes(r));
+  assert.ok(reasons.length > 30, `found only ${reasons.length} reasons`);
+  for (const reason of reasons) {
+    const words = controlStatus(row({reason, status: 'waiting'}));
+    assert.doesNotMatch(words.text, /cannot describe/, reason);
+    assert.ok(words.title && words.title !== 'Checking', reason);
+  }
 });
 
-test('unknown causes and missing readings never become success or zero',()=>{
- assert.equal(feedbackPower(null,'battery'),'Unknown');
- assert.equal(feedbackPower(NaN,'battery'),'Unknown');
- assert.equal(feedbackPower(0,'battery'),'0 W');
- assert.equal(feedbackPower(-1000,'battery'),'1.0 kW discharge');
- assert.match(feedbackText({reason:'power_differs'}).action,/not reported a confirmed cause/);
- assert.match(feedbackText({reason:'future_reason'}).title,/not verified/);
- assert.deepEqual(feedbackRows(undefined),[]);
- assert.deepEqual(feedbackRows([null,{driver:'a'},42]),[]);
- const values=feedbackValues({actual_w:1000,device_limit_a:8},false);
- assert.equal(values.find(v=>v[0]==='Measured')[1],'Not current');
+test('the default view never shows tier numbers or internal codes', () => {
+  for (const [status, reason, severity] of [['following', 'power_observed', 'info'], ['waiting', 'waiting_response', 'info'],
+    ['limited', 'battery_nearly_full', 'info'], ['not_following', 'power_below_target', 'warning'],
+    ['no_contact', 'readings_lost', 'alarm'], ['not_controlled', 'observe_only', 'info']]) {
+    const words = controlStatus(row({status, reason, severity, evidence: 'confirmed', confirmed_at_ms: 3, battery_soc: 0.97}));
+    const shown = [words.title, words.text, words.proof, words.next].join(' ');
+    assert.doesNotMatch(shown, /tier|_|undefined|NaN|null/i, `${reason}: ${shown}`);
+  }
 });
 
-test('known charger limits do not disappear while power flows',()=>{
- const text=feedbackText({reason:'device_limit',actual_w:5500});
- assert.match(text.detail,/charger’s own current limit/);
- const values=feedbackValues({requested_a:16,device_limit_a:8,actual_w:5500,kind:'ev'});
- assert.deepEqual(values.find(v=>v[0]==='Charger limit'),['Charger limit','8.0 A']);
+test('the answer follows Core: following, not following and lost control', () => {
+  const following = controlStatus(row());
+  assert.equal(following.title, 'Following FTW');
+  assert.equal(following.text, 'Discharging 2.2 kW as planned.');
+  assert.equal(following.tone, 'ok');
+  const ignored = controlStatus(row({status: 'not_following', reason: 'no_power_response', severity: 'warning', sent_w: 3000, actual_w: 0}));
+  assert.equal(ignored.title, 'Not following');
+  assert.equal(ignored.text, 'Asked for 3.0 kW charge, but it delivers no power.');
+  assert.match(ignored.next, /has not said why/);
+  assert.equal(ignored.tone, 'warning');
+  const lost = controlStatus(row({status: 'no_contact', reason: 'readings_lost', severity: 'alarm', evidence: 'accepted'}));
+  assert.equal(lost.title, 'Lost control');
+  assert.equal(lost.tone, 'alarm');
+  assert.equal(controlStatus(row(), false).tone, 'stale');
 });
 
-test('curve evidence expires with status and rejects invalid samples',()=>{
- const row={driver:'battery',reason:'power_observed',site_evidence:{trace:[0,1,2].map(i=>({at_ms:1000+i*5000,device_change_w:i*500,adjusted_site_change_w:i*500+10}))}};
- assert.match(feedbackCurve(row).label,/10 seconds/);
- assert.equal(feedbackCurve(row,false),null);
- row.site_evidence.trace[1].device_change_w=NaN;
- assert.equal(feedbackCurve(row),null);
+test('expected limits stay calm and explain themselves', () => {
+  const taper = controlStatus(row({status: 'limited', reason: 'battery_nearly_full', sent_w: 3000, actual_w: 900, battery_soc: 0.98}));
+  assert.equal(taper.title, 'Battery nearly full');
+  assert.equal(taper.text, 'Taking 900 W of 3.0 kW at 98%. A battery charges slower when it is nearly full.');
+  assert.equal(taper.tone, 'neutral');
+  const full = controlStatus(row({status: 'limited', reason: 'battery_full', sent_w: 0, actual_w: 0, battery_soc: 1, charge_resume_soc: 0.99}));
+  assert.match(full.text, /paused charging at 100%\. Charging resumes at 99% or lower/);
+  const car = controlStatus(row({kind: 'ev', reason: 'vehicle_complete', mode: 'plan'}));
+  assert.equal(car.title, 'Car is full');
+  const limit = controlStatus(row({kind: 'ev', status: 'limited', reason: 'device_limit', severity: 'warning', device_limit_a: 8, requested_a: 16}));
+  assert.equal(limit.text, 'The charger’s own limit is 8 A, below the 16 A FTW asked for.');
 });
 
-test('comparison time gaps use milliseconds and require measured evidence',()=>{
- const gap=(e)=>feedbackValues({site_evidence:e}).find(v=>v[0]==='Largest time gap');
- assert.equal(gap({samples:0,max_skew_ms:0}),undefined);
- assert.equal(gap({samples:3,max_skew_ms:null}),undefined);
- assert.deepEqual(gap({samples:3,max_skew_ms:0}),['Largest time gap','0 ms']);
- assert.deepEqual(gap({samples:3,max_skew_ms:37}),['Largest time gap','37 ms']);
- assert.deepEqual(gap({samples:3,max_skew_ms:1250}),['Largest time gap','1250 ms']);
+test('the receipt walks from sent to confirmed without inventing proof', () => {
+  const confirmed = controlReceipt(row({evidence: 'confirmed', confirmed_at_ms: 3, site_confirmation: 'confirmed', site_evidence: {device_change_w: -836}}));
+  assert.deepEqual(confirmed.map(s => [s.step, s.state]), [['Sent', 'done'], ['Accepted', 'done'], ['Measured', 'done'], ['Confirmed', 'done']]);
+  assert.match(confirmed[3].value, /grid meter matched a 836 W change/);
+  const limited = controlReceipt(row({requested_w: -5000, mode: 'manual'}));
+  assert.deepEqual(limited[0], {step: 'Asked', value: '5.0 kW discharge · manual', state: 'done'});
+  const accepted = controlReceipt(row({evidence: 'accepted', status: 'waiting', reason: 'waiting_response'}));
+  assert.deepEqual(accepted.map(s => s.state), ['done', 'done', 'wait', 'wait']);
+  const stale = controlReceipt(row({evidence: 'accepted', readings_fresh: false, actual_w: null}));
+  assert.equal(stale[2].state, 'fail');
+  const failed = controlReceipt(row({evidence: 'none', reason: 'command_failed', status: 'no_contact'}));
+  assert.equal(failed[1].state, 'fail');
+  const noMeter = controlReceipt(row({site_confirmation: 'independent_source_unknown'}));
+  assert.deepEqual([noMeter[3].value, noMeter[3].state], ['The grid meter is not a separate sensor', 'none']);
+  assert.ok(controlReceipt(row(), false).slice(2).every(s => s.value === 'Not current'));
 });
 
-test('a missing measurement names the source holding back site confirmation',()=>{
- const row={site_confirmation:'measurement_sources_unclear',site_source_issue:'missing_fresh_power:easee:ev'};
- assert.match(feedbackSite(row),/Fresh power readings from easee \(ev\) are missing/);
- assert.doesNotMatch(feedbackSite(row,false),/Fresh power readings/);
+test('numbers keep signs and never invent zeros', () => {
+  const values = Object.fromEntries(controlNumbers(row({site_evidence: {grid_before_w: -5663, grid_after_w: -6471,
+    device_change_w: -836, grid_change_w: -808, other_change_w: -28, unexplained_change_w: 56, samples: 4, window_s: 15,
+    unmeasured_flows: ['easee:ev'], max_skew_ms: 0}})));
+  assert.equal(values['Grid before'], '5.7 kW export');
+  assert.equal(values['Device change'], '−836 W');
+  assert.equal(values['Unexplained change'], '+56 W');
+  assert.equal(values['Left in the background'], 'easee (car charger)');
+  const missing = Object.fromEntries(controlNumbers(row({site_evidence: {samples: 0}})));
+  assert.equal(missing['Grid before'], undefined);
+  assert.equal(missing['Largest time gap'], undefined);
+  assert.deepEqual(controlNumbers(row(), false), []);
 });
 
-test('each device has its own status and unknown background is not a veto',()=>{
- const row={driver:'battery',reason:'power_observed',verification_tier:2,site_confirmation:'confirmed',site_evidence:{unmeasured_flows:['offline-ev:ev']}};
- assert.equal(feedbackStatus(row).tone,'confirmed');
- assert.match(feedbackSite(row),/separate site meter/);
- assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Background, not required sources'),['Background, not required sources','offline-ev:ev']);
- assert.equal(feedbackStatus({driver:'ev',reason:'waiting_response',verification_tier:0}).tone,'waiting');
- assert.equal(feedbackStatus({driver:'ev',reason:'telemetry_stale',verification_tier:0,verification_lost:true}).tone,'alarm');
- assert.equal(feedbackStatus(row,false).tone,'unknown');
+test('curve evidence expires with status and rejects invalid samples', () => {
+  const trace = [0, 5000, 10000].map(at_ms => ({at_ms, device_change_w: -800, adjusted_site_change_w: -780}));
+  assert.ok(controlCurve(row({site_evidence: {trace}})));
+  assert.equal(controlCurve(row({site_evidence: {trace}}), false), null);
+  assert.equal(controlCurve(row({site_evidence: {trace: trace.slice(0, 2)}})), null);
+  assert.equal(controlCurve(row({site_evidence: {trace: [trace[0], trace[0], trace[1]]}})), null);
 });
 
-test('current warnings override a measured response and normal waits remain quiet',async()=>{
- const {withControlProof}=await import('./control-feedback.js');
- const row={driver:'battery',kind:'battery',reason:'waiting_response',verification_tier:0};
- const proof=withControlProof([], [row])[0].controlProof;
- assert.equal(proof.detail,'Verifying the response');
- assert.equal(proof.tone,'waiting');
- assert.match(feedbackProof(row),/Tier 0/);
- assert.equal(withControlProof([], [{...row,reason:'not_connected'}])[0].controlProof.inactive,true);
- for(const verification_tier of [0,1,2]) {
-  assert.equal(feedbackStatus({...row,verification_tier,reason:'device_fault',severity:'warning'}).tone,'alarm');
- }
- assert.match(feedbackSite({site_confirmation:'flows_changing'}),/before this command/);
+test('marks appear only when Core asks for attention', () => {
+  const planets = [{name: 'bat', role: 'battery'}, {name: 'car', role: 'ev'}];
+  const calm = withControlMarks(planets, [row(), row({driver: 'car', kind: 'ev', status: 'waiting', reason: 'not_connected'})]);
+  assert.ok(calm.every(p => !p.controlMark));
+  const marked = withControlMarks(planets, [row({status: 'not_following', reason: 'setpoint_changed', severity: 'warning'}),
+    row({driver: 'car', kind: 'device', status: 'not_following', reason: 'device_fault', severity: 'alarm'})]);
+  assert.deepEqual(marked.find(p => p.name === 'bat').controlMark, {tone: 'warning', label: 'Not following'});
+  assert.deepEqual(marked.find(p => p.name === 'car').controlMark, {tone: 'alarm', label: 'Device fault'});
+  assert.ok(withControlMarks(planets, [row({severity: 'alarm', status: 'no_contact', reason: 'readings_lost'})], false).every(p => !p.controlMark));
 });
 
-test('bubble details select a function and combined bubbles retain every device',async()=>{
- const {feedbackForPlanet}=await import('./control-feedback.js');
- const rows=[{driver:'hybrid',kind:'battery',reason:'power_observed'},{driver:'hybrid',kind:'pv',reason:'power_observed'},{driver:'other',kind:'battery',reason:'telemetry_stale'}];
- assert.deepEqual(feedbackForPlanet(rows,{role:'battery',name:'hybrid'}),[rows[0]]);
- assert.deepEqual(feedbackForPlanet(rows,{role:'battery',name:'2×',id:'agg-top-right'}),[rows[0],rows[2]]);
+test('a silent device keeps its bubble without old watts', () => {
+  const planets = withControlMarks([{name: 'a', role: 'battery', kw: 1}], [row({driver: 'a'}),
+    row({driver: 'b', status: 'no_contact', reason: 'readings_lost', severity: 'alarm', readings_fresh: false, actual_w: null})]);
+  const silent = planets.find(p => p.name === 'b');
+  assert.equal(silent.placeholder, true);
+  assert.equal(silent.kw, 0);
+  assert.equal(silent.controlMark.tone, 'alarm');
+  assert.equal(planets.find(p => p.name === 'a').kw, 1);
+  const monitored = withControlMarks([{name: 'm', role: 'battery', kw: 2}], [row({driver: 'm', status: 'not_controlled', reason: 'observe_only', readings_fresh: false})]);
+  assert.equal(monitored[0].kw, 2);
+  assert.notEqual(monitored[0].clickable, true);
 });
 
-test('site confirmation and shortfall remain visible together without inventing a limit',async()=>{
- const {feedbackSummary,withControlProof}=await import('./control-feedback.js');
- const row={driver:'battery',kind:'battery',reason:'power_below_target',severity:'warning',verification_tier:2,site_confirmation:'confirmed',sent_w:-5000,requested_w:-5000,actual_w:-4400};
- assert.deepEqual(feedbackStatus(row),{label:'Tier 2 · Site confirmed · Below target',tone:'warning'});
- assert.equal(feedbackSummary([row]).tone,'warning');
- assert.equal(withControlProof([], [row])[0].controlProof.tone,'warning');
- assert.match(feedbackText(row).title,/below the target/);
- assert.match(feedbackText(row).action,/cause is not confirmed/);
- assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Shortfall from sent target'),['Shortfall from sent target','600 W']);
- assert.match(feedbackProof(row),/Tier 2/);
- assert.doesNotMatch(feedbackProof({...row,verification_tier:1}),/expected|follows/);
- assert.equal(feedbackValues(row,false).find(v=>v[0]==='Shortfall from sent target'),undefined);
- assert.equal(feedbackStatus(row,false).tone,'unknown');
- for(const reason of ['no_power_response','power_wrong_direction','power_above_target','power_while_idle']) {
-  assert.equal(feedbackStatus({...row,reason}).tone,'alarm');
-  assert.match(feedbackProof({...row,reason}),/Tier 2/);
-  assert.doesNotMatch(feedbackText({...row,reason}).title,/follows the command/);
- }
+test('a sheet gets its device rows and combined bubbles keep every device', () => {
+  const rows = [row(), row({driver: 'two'}), row({driver: 'car', kind: 'ev'}), row({driver: 'two', kind: 'device', reason: 'device_fault'})];
+  assert.deepEqual(controlForPlanet(rows, {role: 'battery', name: 'two'}).map(r => r.kind), ['battery', 'device']);
+  assert.equal(controlForPlanet(rows, {role: 'battery', id: 'agg-battery', name: '2×'}).length, 3);
+  assert.equal(controlRows([{driver: 'x'}, null, row()]).length, 1);
 });
 
-test('full-battery pause stays calm without adding measurement proof',()=>{
- const row={driver:'battery',kind:'battery',reason:'battery_full',severity:'info',verification_tier:1,battery_soc:1,charge_resume_soc:.99,requested_w:5000,sent_w:0,actual_w:0};
- assert.match(feedbackText(row).title,/Battery is full/);
- assert.equal(feedbackText({...row,battery_soc:.995}).title,'Charging paused after full');
- assert.match(feedbackText(row).action,/99%/);
- assert.equal(feedbackStatus(row).tone,'measured');
- assert.match(feedbackStatus(row).label,/Charging paused/);
- assert.match(feedbackProof(row),/Tier 1/);
- assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Battery charge'),['Battery charge','100.0%']);
- assert.deepEqual(feedbackValues(row).find(v=>v[0]==='Sent to driver'),['Sent to driver','0 W']);
- assert.equal(feedbackValues(row,false).find(v=>v[0]==='Battery charge')[1],'Not current');
- assert.equal(feedbackStatus({...row,verification_tier:0}).tone,'waiting');
- assert.equal(feedbackStatus({...row,verification_lost:true}).tone,'alarm');
- assert.equal(feedbackStatus({...row,reason:'power_while_idle',severity:'warning',actual_w:500}).tone,'alarm');
+test('the summary answers the question for the whole site', () => {
+  assert.deepEqual(controlSummary([row()]), {title: 'Yes, FTW is in control', tone: 'ok'});
+  assert.equal(controlSummary([row(), row({severity: 'warning'})]).title, '1 device needs a look');
+  assert.equal(controlSummary([row({severity: 'alarm'}), row({severity: 'alarm'})]).title, '2 devices need attention now');
+  assert.equal(controlSummary([row({status: 'not_controlled', reason: 'observe_only'})]).tone, 'neutral');
+  assert.equal(controlSummary([row()], false).tone, 'stale');
 });

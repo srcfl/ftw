@@ -2294,48 +2294,53 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 .tune-delta-negative { color: #ef4444; }
 .tune-delta-neutral { color: var(--text-dim); }
 
-/* Control results stay visible in the normal overview. */
-.control-results { margin: 1rem 0; }
-.control-results h2 { font-size: 1rem; margin: 0 0 .7rem; }
-.control-result { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; margin: .6rem 0; overflow-wrap: anywhere; }
-.control-result.needs-attention { border-inline-start: 4px solid var(--amber); }
-.control-result.not-current { opacity: .7; }
-.control-result .control-device, .control-result .control-action, .control-result .control-time { color: var(--text-dim); }
-.control-result .control-device { font-size: .8rem; }
-.control-result h3 { font-size: 1rem; margin: .3rem 0 .6rem; }
-.control-result p { font-size: .9rem; line-height: 1.5; margin: .4rem 0; }
-.control-result summary { cursor: pointer; font-size: .85rem; padding-top: .5rem; }
-.control-result dl { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem 1rem; font-size: .85rem; }
-.control-result dt { color: var(--text-dim); }
-.control-result dd { margin: 0; text-align: right; }
-
-.control-result .control-proof { font-weight: 600; margin-top: .7rem; }
-
-.control-proof[data-tier="2"] { color: var(--green); }
-.control-proof[data-tier="1"] { color: var(--cyan); }
-.control-curve { width: 100%; max-height: 160px; }
-.control-curve .zero { stroke: var(--border); stroke-width: 1; }
+/* "Are we in control?" — Core's answer comes first in each device sheet.
+   Tone follows Core's severity: ok and neutral stay calm, warning is amber,
+   alarm is red. The receipt and numbers fold away for experts. */
+.control-status { margin: 0 0 12px; }
+.control-status[hidden] { display: none; }
+.cs-question { font-family: var(--mono); font-size: .7rem; font-weight: 500; letter-spacing: .18em; text-transform: uppercase; color: var(--fg-muted); margin: 0 0 8px; }
+.cs-block { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 0 0 10px; background: var(--surface); }
+.cs-block[data-tone="warning"] { border-color: var(--amber); }
+.cs-block[data-tone="alarm"] { border-color: var(--red-e); }
+.cs-block[data-tone="stale"] { opacity: .75; }
+.cs-title { display: flex; align-items: center; gap: 8px; font-size: 1rem; font-weight: 600; margin: 0 0 4px; color: var(--fg); }
+.cs-icon { display: inline-grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; font-size: 12px; font-weight: 700; line-height: 1; background: var(--line); color: var(--fg-dim); }
+.cs-block[data-tone="ok"] .cs-icon { background: color-mix(in srgb, var(--green-e) 22%, transparent); color: var(--green-e); }
+.cs-block[data-tone="warning"] .cs-icon { background: color-mix(in srgb, var(--amber) 22%, transparent); color: var(--amber); }
+.cs-block[data-tone="alarm"] .cs-icon { background: var(--red-e); color: var(--on-accent, #0a0a0a); }
+.cs-text { margin: 0; font-size: .92rem; line-height: 1.45; color: var(--fg); }
+.cs-proof, .cs-next { margin: 4px 0 0; font-size: .85rem; line-height: 1.45; color: var(--fg-dim); }
+.cs-next { color: var(--fg); }
+.cs-text[hidden], .cs-proof[hidden], .cs-next[hidden], .cs-numbers[hidden] { display: none; }
+.cs-receipt { margin-top: 8px; }
+.cs-receipt > summary, .cs-numbers > summary { cursor: pointer; font-size: .82rem; color: var(--fg-dim); padding: 4px 0; }
+.cs-steps { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 6px; }
+.cs-steps li { display: grid; grid-template-columns: 6.5rem 1fr; gap: 8px; align-items: baseline; font-size: .85rem; overflow-wrap: anywhere; }
+.cs-step { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); }
+.cs-step::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--fg-muted); }
+.cs-steps li[data-state="done"] .cs-step::before { background: var(--green-e); border-color: var(--green-e); }
+.cs-steps li[data-state="wait"] .cs-step::before { border-style: dashed; }
+.cs-steps li[data-state="fail"] .cs-step::before { background: var(--red-e); border-color: var(--red-e); }
+.cs-steps li[data-state="none"] { opacity: .65; }
+.cs-numbers { margin-top: 8px; }
+.cs-numbers dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; margin: 6px 0; font-size: .82rem; }
+.cs-numbers dt { color: var(--fg-dim); }
+.cs-numbers dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cs-note { margin: 4px 0 0; font-size: .78rem; color: var(--fg-muted); }
+.control-curve { width: 100%; max-height: 140px; }
+.control-curve .zero { stroke: var(--line); stroke-width: 1; }
 .control-curve .device { stroke: var(--cyan); stroke-width: 3; }
-.control-curve .site { stroke: var(--green); stroke-width: 2; stroke-dasharray: 5 4; }
+.control-curve .site { stroke: var(--green-e); stroke-width: 2; stroke-dasharray: 5 4; }
 
-.control-status-list { display: flex; flex-wrap: wrap; gap: .6rem; list-style: none; padding: 0; margin: 0 0 1rem; }
-.control-status-list li { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .65rem .8rem; border: 1px solid var(--border); border-radius: 8px; font-size: .85rem; }
-.control-status { font-size: .8rem; }
-.control-status[data-tone="confirmed"] { color: var(--green); }
-.control-status[data-tone="measured"] { color: var(--cyan); }
-.control-status[data-tone="waiting"] { color: var(--amber); }
-.control-status[data-tone="unknown"] { color: var(--text-dim); }
-.control-status[data-tone="alarm"], .control-alarm h3 { color: var(--red); }
-.control-status[data-tone="warning"], .control-evidence [data-tone="warning"] { color: var(--amber); }
-.control-result.control-alarm { border-inline-start: 4px solid var(--red); }
-
-.control-results-compact .control-status-list { margin-bottom: .5rem; }
-.control-results-compact .control-status-list li { padding: .3rem .5rem; }
-.control-status-list button { background: transparent; border: 0; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
-
-.control-evidence { border-top: 1px solid var(--border); padding-top: .8rem; margin-top: .8rem; }
-.control-evidence > summary { cursor: pointer; font-size: .85rem; }
-.control-evidence > summary strong { display: block; margin: .3rem 0 0 1rem; font-size: .75rem; font-weight: 500; }
-.control-evidence [data-tone="confirmed"], .control-evidence [data-tone="measured"] { color: var(--green); }
-.control-evidence [data-tone="alarm"] { color: var(--red); }
-.control-evidence [data-tone="unknown"], .control-evidence [data-tone="waiting"] { color: var(--text-dim); }
+/* Values view: one line per controlled device; a tap opens its sheet. */
+.control-status-compact { margin: 0; padding: 12px 10px; border-bottom: 1px solid var(--line); }
+.cs-summary { margin: 0 0 8px; font-weight: 600; color: var(--fg); }
+.cs-summary[data-tone="ok"] { color: var(--green-e); }
+.cs-summary[data-tone="warning"] { color: var(--amber); }
+.cs-summary[data-tone="alarm"] { color: var(--red-e); }
+.cs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.cs-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--fg); font: inherit; font-size: .85rem; cursor: pointer; }
+.cs-row[data-tone="warning"] { border-color: var(--amber); }
+.cs-row[data-tone="alarm"] { border-color: var(--red-e); }
+.cs-device { color: var(--fg-dim); }
