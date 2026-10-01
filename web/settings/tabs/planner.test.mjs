@@ -180,12 +180,10 @@ describe("engine selection", () => {
 describe("marginSaver", () => {
   const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
-  it("reads the current export before each save and reports only the newest value", async () => {
-    let exportNow = "allowed";
+  it("sends only the margin, one save at a time, and reports only the newest value", async () => {
     const sent = [];
     const replies = [];
     const apiFetch = (url, opts) => {
-      if (!opts) return Promise.resolve({ ok: true, json: async () => ({ battery_export: exportNow }) });
       const body = JSON.parse(opts.body);
       sent.push(body);
       return new Promise((resolve) => replies.push(() => resolve({ ok: true, json: async () => ({ safety_k: body.safety_k }) })));
@@ -193,9 +191,8 @@ describe("marginSaver", () => {
     const done = [];
     const save = marginSaver(apiFetch, (err, k, saved) => done.push([err, k, saved]));
     save(0.6);
-    await settle();
-    exportNow = "not_allowed"; // another client turns battery sales off
-    save(1); // while the first save is on its way
+    save(0.8); // replaced before it is sent
+    save(1);
     await settle();
     assert.equal(sent.length, 1, "a second save started before the first finished");
     replies.shift()();
@@ -203,20 +200,14 @@ describe("marginSaver", () => {
     assert.deepEqual(done, [], "an older reply reached the page");
     replies.shift()();
     await settle();
-    assert.deepEqual(sent, [{ safety_k: 0.6, battery_export: "allowed" }, { safety_k: 1, battery_export: "not_allowed" }]);
+    assert.deepEqual(sent, [{ safety_k: 0.6 }, { safety_k: 1 }]);
     assert.deepEqual(done, [[null, 1, 1]]);
   });
 
-  it("does not save when the box does not say its export choice", async () => {
-    const posts = [];
-    const apiFetch = (url, opts) => {
-      if (opts) posts.push(opts);
-      return Promise.resolve({ ok: true, json: async () => ({}) });
-    };
+  it("reports a save the box did not take", async () => {
     const done = [];
-    marginSaver(apiFetch, (err) => done.push(err))(0.3);
+    marginSaver(() => Promise.resolve({ ok: false, status: 503 }), (err) => done.push(err))(0.3);
     await settle();
-    assert.equal(posts.length, 0);
     assert.equal(done.length, 1);
     assert.ok(done[0] instanceof Error);
   });

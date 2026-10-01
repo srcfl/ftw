@@ -49,9 +49,14 @@
       " Changes apply at once.";
   }
 
-  // marginSaver sends one margin save at a time. Each save first reads the
-  // box's current battery-export choice, so a margin change never restores
-  // an older one. done(err, sent, saved) runs only when no newer value waits.
+  // One margin queue for the page. Reopening the tab must not start a second
+  // queue that races the first; marginReply is the open tab's handler.
+  var saveMargin = null;
+  var marginReply = null;
+
+  // marginSaver sends one margin save at a time, with only safety_k, so the
+  // box keeps the export choice it holds. done(err, sent, saved) runs only
+  // when no newer value waits.
   function marginSaver(apiFetch, done) {
     var sending = false;
     var wanted = null;
@@ -60,16 +65,11 @@
       var k = wanted;
       wanted = null;
       sending = true;
-      apiFetch("/api/planner/prefs")
-        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-        .then(function (p) {
-          if (!p.battery_export) throw new Error("no export permission");
-          return apiFetch("/api/planner/prefs", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ safety_k: k, battery_export: p.battery_export }),
-          });
-        })
+      apiFetch("/api/planner/prefs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ safety_k: k }),
+      })
         .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (p) {
           if (wanted === null) done(null, k, typeof p.safety_k === "number" ? p.safety_k : k);
@@ -222,7 +222,8 @@
             show(k);
           })
           .catch(function () { kNote.textContent = "The box did not answer. Reopen Settings to try again."; });
-        var save = marginSaver(apiFetch, function (err, sent, saved) {
+        // Replies go to the tab as it is drawn now.
+        marginReply = function (err, sent, saved) {
           if (err) {
             kNote.textContent = "Not saved: the box did not answer. Try again.";
             return;
@@ -233,11 +234,14 @@
             show(saved, "Saved. ");
           }
           window.dispatchEvent(new CustomEvent("ftw-planner-prefs"));
-        });
+        };
+        if (!saveMargin) {
+          saveMargin = marginSaver(apiFetch, function (err, sent, saved) { marginReply(err, sent, saved); });
+        }
         kInput.addEventListener("input", function () { show(kInput.value); });
         kInput.addEventListener("change", function () {
           kNote.textContent = "Saving…";
-          save(Number(kInput.value));
+          saveMargin(Number(kInput.value));
         });
         // The same margin as the Plan card, split into sun and use. It
         // follows each plan the Plan card fetches, so a save shows up here.

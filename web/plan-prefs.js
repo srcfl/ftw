@@ -142,7 +142,9 @@ export function marginSplitLine(margins) {
 // (site.pv_surplus_absorb_soc_cap) when one is set, otherwise up to Core's
 // per-slot live_pv_surplus_soc_cap, and never during a discharge slot. Above
 // the slot's planned charge it is stored; otherwise it is exported. Silent
-// when the box does not send either cap or the window has no sunny slot.
+// when the box does not send either cap, the window has no sunny slot, or
+// the plan caps the panels in a sunny slot: there extra sun may be held back
+// rather than exported, and the line cannot say which.
 export function extraSunLine(actions, from, until, operatorCap) {
   if (!Number.isFinite(operatorCap)) return null;
   let sunny = 0;
@@ -154,6 +156,7 @@ export function extraSunLine(actions, from, until, operatorCap) {
     if (!Number.isFinite(a.live_pv_surplus_soc_cap)) return null;
     const pv = Number.isFinite(a.forecast_pv_w) ? a.forecast_pv_w : a.pv_w;
     if (!(Math.max(0, -pv) > SUNNY_W)) continue;
+    if (a.pv_curtail_active || Number(a.pv_limit_w) > 0) return null;
     sunny++;
     const cap = operatorCap > 0 ? operatorCap : a.live_pv_surplus_soc_cap;
     const discharging = (Number(a.battery_w) || 0) < -DISCHARGE_W;

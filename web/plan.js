@@ -1222,18 +1222,17 @@ import {
     }
   }
 
-  // postPlannerPrefs stores both prefs and says whether the box took them.
-  async function postPlannerPrefs(k, exportPerm) {
+  // postPlannerPrefs sends one change, the style's k or the export
+  // permission, and says whether the box took it. The box keeps the other
+  // as it holds it, so a change made elsewhere is never undone.
+  async function postPlannerPrefs(change) {
     prefsPosting = true;
     setReplanPending(true);
     try {
       const r = await apiFetch("/api/planner/prefs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          safety_k: clampSafetyK(k),
-          battery_export: exportPerm,
-        }),
+        body: JSON.stringify(change),
       });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const j = await r.json();
@@ -1270,7 +1269,7 @@ import {
       return;
     }
     const k = pickedK;
-    const ok = await postPlannerPrefs(k, currentPrefs().battery_export);
+    const ok = await postPlannerPrefs({ safety_k: clampSafetyK(k) });
     if (pickedK === k) {
       pickedK = null;
       if (!ok) showStyleStatus("Not saved: the box did not answer. Try again.");
@@ -1280,7 +1279,7 @@ import {
   }
 
   async function setExport(exportPerm) {
-    const ok = await postPlannerPrefs(shownK(), exportPerm);
+    const ok = await postPlannerPrefs({ battery_export: exportPerm });
     syncPrefsUI();
     if (ok) await fetchAll();
   }
@@ -1292,10 +1291,15 @@ import {
         const btn = e.target.closest("[data-style]");
         if (btn) pickStyle(btn.dataset.style);
       });
-      // Radio-group keys: arrows move and pick, Home and End jump to an end.
+      // Radio-group keys: arrows move from the focused style and pick, Home
+      // and End jump to an end. Before the box answers no style is checked,
+      // so the focused one is the only honest origin.
       steps.addEventListener("keydown", function (e) {
         const moves = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
-        let i = PLAN_STYLES.indexOf(styleForK(shownK()).style);
+        const focused = e.target.closest("[data-style]");
+        let i = focused
+          ? PLAN_STYLES.findIndex(function (s) { return s.key === focused.dataset.style; })
+          : PLAN_STYLES.indexOf(styleForK(shownK()).style);
         if (e.key in moves) i = Math.min(PLAN_STYLES.length - 1, Math.max(0, i + moves[e.key]));
         else if (e.key === "Home") i = 0;
         else if (e.key === "End") i = PLAN_STYLES.length - 1;

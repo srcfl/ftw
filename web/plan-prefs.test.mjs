@@ -156,6 +156,12 @@ describe("plan lines", () => {
     it("never stores during a planned discharge", () => {
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0, -2000)], 0, q, 0.88), exports);
     });
+
+    it("says nothing where the plan caps the panels", () => {
+      const capped = { ...slot(q, -2000, 0.9, 0), pv_curtail_active: true, pv_limit_w: 500 };
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0), capped], 0, 2 * q, 0), null);
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0), { ...slot(q, -2000, 0.9, 0), pv_limit_w: 500 }], 0, 2 * q, 0), null);
+    });
   });
 });
 
@@ -290,11 +296,15 @@ describe("Plan card markup and wiring", () => {
     for (const s of PLAN_STYLES) assert.doesNotMatch(s.text, /\brisk\b/i);
   });
 
-  it("POSTs safety_k, keeps export unchanged, and marks the plan replanning", () => {
+  it("moves the style keys from the focused style", () => {
+    assert.match(plan, /const focused = e\.target\.closest\("\[data-style\]"\);/);
+    assert.match(plan, /PLAN_STYLES\.findIndex\(function \(s\) \{ return s\.key === focused\.dataset\.style; \}\)/);
+  });
+
+  it("POSTs only the changed preference and marks the plan replanning", () => {
     assert.match(plan, /\/api\/planner\/prefs/);
-    assert.match(plan, /safety_k: clampSafetyK\(k\)/);
-    assert.match(plan, /postPlannerPrefs\(k, currentPrefs\(\)\.battery_export\)/);
-    assert.match(plan, /postPlannerPrefs\(shownK\(\), exportPerm\)/);
+    assert.match(plan, /postPlannerPrefs\(\{ safety_k: clampSafetyK\(k\) \}\)/);
+    assert.match(plan, /postPlannerPrefs\(\{ battery_export: exportPerm \}\)/);
     assert.match(plan, /setReplanPending\(true\)/);
     assert.match(plan, /setReplanPending\(false\)/);
     assert.match(plan, /Replanning…/);

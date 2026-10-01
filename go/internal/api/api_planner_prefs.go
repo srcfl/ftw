@@ -46,25 +46,37 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	var safetyK float64
+	// Each control sends only what it changes; the box keeps the rest.
+	var safetyK *float64
 	if req.SafetyK != nil {
 		// New client: k wins and forecast_trust is whatever k derives to,
 		// so the two can never be posted into disagreement.
-		safetyK = config.ClampSafetyK(*req.SafetyK)
-	} else {
+		k := config.ClampSafetyK(*req.SafetyK)
+		safetyK = &k
+	} else if req.ForecastTrust != "" {
 		trust, ok := config.ParseForecastTrust(req.ForecastTrust)
-		if !ok || req.ForecastTrust == "" {
+		if !ok {
 			writeJSON(w, 400, map[string]string{"error": "forecast_trust must be cautious, balanced, or bold, or send safety_k"})
 			return
 		}
-		safetyK = trust.SafetyK()
+		k := trust.SafetyK()
+		safetyK = &k
 	}
-	export, ok := config.ParseBatteryExport(req.BatteryExport)
-	if !ok {
-		writeJSON(w, 400, map[string]string{"error": "battery_export must be unknown, not_allowed, or allowed"})
+	var export *config.BatteryExport
+	if req.BatteryExport != "" {
+		e, ok := config.ParseBatteryExport(req.BatteryExport)
+		if !ok {
+			writeJSON(w, 400, map[string]string{"error": "battery_export must be unknown, not_allowed, or allowed"})
+			return
+		}
+		export = &e
+	}
+	if safetyK == nil && export == nil {
+		writeJSON(w, 400, map[string]string{"error": "send safety_k, forecast_trust or battery_export"})
 		return
 	}
-	if err := s.applyPlannerPrefs(safetyK, export); err != nil {
+	saved, err := s.applyPlannerChange(safetyK, export)
+	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
@@ -72,16 +84,37 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"status":         "ok",
 		"forecast_trust": trust,
-		"battery_export": export,
+		"battery_export": saved,
 		"safety_k":       resolvedK,
 		"mapped_k":       resolvedK,
 		"mapped_mode":    mappedMode,
 	})
 }
 
+// applyPlannerChange writes what a client sent and keeps the other
+// preference as the box holds it when the write runs. It reads under the same
+// lock as every preference write, so two clients changing different
+// preferences never undo each other.
+func (s *Server) applyPlannerChange(safetyK *float64, export *config.BatteryExport) (config.BatteryExport, error) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	_, e, k, _ := s.plannerPrefsSnapshot()
+	if safetyK != nil {
+		k = *safetyK
+	}
+	if export != nil {
+		e = *export
+	}
+	return e, s.applyPlannerPrefsLocked(k, e)
+}
+
 func (s *Server) applyPlannerPrefs(safetyK float64, export config.BatteryExport) error {
 	s.configWriteMu.Lock()
 	defer s.configWriteMu.Unlock()
+	return s.applyPlannerPrefsLocked(safetyK, export)
+}
+
+func (s *Server) applyPlannerPrefsLocked(safetyK float64, export config.BatteryExport) error {
 	safetyK = config.ClampSafetyK(safetyK)
 	trust := config.TrustFromSafetyK(safetyK)
 	mapped := control.Mode(export.PlannerModeKey())
