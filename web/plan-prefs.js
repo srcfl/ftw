@@ -222,18 +222,42 @@ export function exportSentence({
 }
 
 // prefsQueue runs preference writes one after another, in the order they
-// were made, whichever control made them. send(change) performs one write and
-// returns the box's answer; announce(answer, source) runs after each one the
-// box confirmed.
+// were made, whichever control made them. A newer change to the same
+// preferences replaces one still waiting to be sent, and both callers get the
+// answer to the newer one, so the latest choice always wins. send(change)
+// performs one write and returns the box's answer; announce(answer, source)
+// runs after each write the box confirmed.
 export function prefsQueue(send, announce) {
-  let tail = Promise.resolve();
+  let running = false;
+  const waiting = [];
+  const keys = (change) => Object.keys(change).sort().join();
+  function next() {
+    if (running || waiting.length === 0) return;
+    running = true;
+    const job = waiting.shift();
+    Promise.resolve()
+      .then(() => send(job.change))
+      .then((answer) => {
+        announce(answer, job.source);
+        job.callers.forEach((c) => c.resolve(answer));
+      }, (err) => job.callers.forEach((c) => c.reject(err)))
+      .then(() => {
+        running = false;
+        next();
+      });
+  }
   return function save(change, source) {
-    const run = tail.then(() => send(change)).then((answer) => {
-      announce(answer, source);
-      return answer;
+    return new Promise((resolve, reject) => {
+      const last = waiting[waiting.length - 1];
+      if (last && keys(last.change) === keys(change)) {
+        last.change = change;
+        last.source = source;
+        last.callers.push({ resolve, reject });
+      } else {
+        waiting.push({ change, source, callers: [{ resolve, reject }] });
+      }
+      next();
     });
-    tail = run.catch(() => {});
-    return run;
   };
 }
 

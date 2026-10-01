@@ -342,6 +342,45 @@ describe("prefsQueue", () => {
     assert.deepEqual(announced, [[1, "card"], [0.45, "settings"]]);
   });
 
+  it("lets a newer change to the same preference replace one still waiting", async () => {
+    const sent = [];
+    const answers = [];
+    const send = (change) => {
+      sent.push(change);
+      return new Promise((resolve) => answers.push(() => resolve(change)));
+    };
+    const save = prefsQueue(send, () => {});
+    const veryCareful = save({ safety_k: 1 }, "card"); // on its way
+    const bold = save({ safety_k: 0.15 }, "card"); // waits
+    const fine = save({ safety_k: 0.8 }, "settings"); // the latest choice replaces Bold
+    await settle();
+    answers.shift()();
+    await veryCareful;
+    await settle();
+    answers.shift()();
+    assert.deepEqual(await bold, { safety_k: 0.8 }, "the replaced caller did not get the newer answer");
+    assert.deepEqual(await fine, { safety_k: 0.8 });
+    assert.deepEqual(sent, [{ safety_k: 1 }, { safety_k: 0.8 }]);
+  });
+
+  it("keeps the order of changes to different preferences", async () => {
+    const sent = [];
+    const answers = [];
+    const save = prefsQueue((change) => {
+      sent.push(change);
+      return new Promise((resolve) => answers.push(() => resolve(change)));
+    }, () => {});
+    save({ safety_k: 1 }, "card");
+    save({ battery_export: "allowed" }, "card");
+    save({ safety_k: 0.15 }, "settings");
+    for (let i = 0; i < 3; i++) {
+      await settle();
+      answers.shift()();
+    }
+    await settle();
+    assert.deepEqual(sent, [{ safety_k: 1 }, { battery_export: "allowed" }, { safety_k: 0.15 }]);
+  });
+
   it("goes on after a failed write and announces only confirmed ones", async () => {
     const announced = [];
     const save = prefsQueue((c) => (c.fail ? Promise.reject(new Error("HTTP 503")) : Promise.resolve(c)),

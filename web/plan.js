@@ -1107,8 +1107,7 @@ import {
   // A style POSTs safety_k only; export is sent unchanged so picking a
   // style never turns on battery export.
   let pickedK = null; // picked here, not yet confirmed by the box
-  let postTimer = null;
-  let prefsPosting = false;
+  let prefsPosts = 0; // card writes the box has not answered
   let replanPending = false;
   let statusTimer = null;
 
@@ -1243,7 +1242,7 @@ import {
   // postPlannerPrefs sends one change from the card and says whether the box
   // took it.
   async function postPlannerPrefs(change) {
-    prefsPosting = true;
+    prefsPosts++;
     setReplanPending(true);
     try {
       const j = await savePlannerPrefs(change, "card");
@@ -1256,30 +1255,24 @@ import {
     } catch (e) {
       return false;
     } finally {
-      prefsPosting = false;
-      setReplanPending(false);
+      prefsPosts--;
+      if (prefsPosts === 0) setReplanPending(false);
     }
   }
 
-  // A pick waits a moment, so tapping across the scale sends one request;
-  // the latest pick wins.
+  // A pick goes straight into the page's write queue, so it keeps its place
+  // among choices made in Settings. Picks made while one is on its way
+  // collapse into one write, and the latest wins.
   function pickStyle(key) {
     const style = PLAN_STYLES.find(function (s) { return s.key === key; });
     if (!style) return;
     pickedK = style.k;
     showStyleStatus("");
     renderStyle();
-    clearTimeout(postTimer);
-    postTimer = setTimeout(sendPickedStyle, 400);
+    sendPickedStyle(style.k);
   }
 
-  async function sendPickedStyle() {
-    if (pickedK == null) return;
-    if (prefsPosting) {
-      postTimer = setTimeout(sendPickedStyle, 300);
-      return;
-    }
-    const k = pickedK;
+  async function sendPickedStyle(k) {
     const ok = await postPlannerPrefs({ safety_k: clampSafetyK(k) });
     if (pickedK === k) {
       pickedK = null;

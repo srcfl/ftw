@@ -258,10 +258,19 @@
             paintMargin();
           })
           .catch(function () { kNote.textContent = "The box did not answer. Reopen Settings to try again."; });
-        kInput.addEventListener("input", function () {
-          dragging = true;
-          show(kInput.value);
+        // A drag is a pointer held on the slider. Chrome sends no change when
+        // a drag ends where it began, so the release ends it too. The repaint
+        // waits a turn, after the change a moved thumb sends.
+        var endDrag = function () {
+          if (!dragging) return;
+          dragging = false;
+          setTimeout(function () { if (paintMargin) paintMargin(); }, 0);
+        };
+        kInput.addEventListener("pointerdown", function () { dragging = true; });
+        ["pointerup", "pointercancel", "lostpointercapture", "blur"].forEach(function (type) {
+          kInput.addEventListener(type, endDrag);
         });
+        kInput.addEventListener("input", function () { show(kInput.value); });
         kInput.addEventListener("change", function () {
           dragging = false;
           var k = Number(kInput.value);
