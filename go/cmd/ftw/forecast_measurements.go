@@ -14,7 +14,23 @@ import (
 // forecastMeasurementOptions declares known significant sources. FlowIDs remain
 // unset: driver names and inverter groups do not identify physical measurements.
 func forecastMeasurementOptions(cfg *config.Config, catalog []drivers.CatalogEntry) telemetry.ForecastOptions {
-	opts, _ := forecastMeasurementTopology(cfg, catalog)
+	opts, _, _ := forecastMeasurementTopology(cfg, catalog)
+	return opts
+}
+
+// historyMeasurementOptions qualifies the stored chart and site energy. They
+// need a measured balance, not the learner's proof that an optional source is
+// absent: a source that reports PV is still checked, but one that never
+// reports it does not stop history (#1441). Identity checks stay with learning.
+func historyMeasurementOptions(cfg *config.Config, catalog []drivers.CatalogEntry) telemetry.ForecastOptions {
+	opts, _, optional := forecastMeasurementTopology(cfg, catalog)
+	flows := opts.ExpectedFlows[:0:0]
+	for _, flow := range opts.ExpectedFlows {
+		if !optional[flow] {
+			flows = append(flows, flow)
+		}
+	}
+	opts.ExpectedFlows = flows
 	return opts
 }
 
@@ -22,17 +38,17 @@ func forecastMeasurementOptions(cfg *config.Config, catalog []drivers.CatalogEnt
 // establish. Callers must require fresh observations of these optional flows
 // before qualifying a complete household balance; this is not only a log hint.
 func forecastMeasurementTopologyUnknown(cfg *config.Config, catalog []drivers.CatalogEntry) []string {
-	_, unknown := forecastMeasurementTopology(cfg, catalog)
+	_, unknown, _ := forecastMeasurementTopology(cfg, catalog)
 	return unknown
 }
 
-func forecastMeasurementTopology(cfg *config.Config, catalog []drivers.CatalogEntry) (telemetry.ForecastOptions, []string) {
-	opts := telemetry.ForecastOptions{}
+// optional holds PV flows that config does not declare; see historyMeasurementOptions.
+func forecastMeasurementTopology(cfg *config.Config, catalog []drivers.CatalogEntry) (opts telemetry.ForecastOptions, unknown []string, optional map[telemetry.ForecastFlow]bool) {
+	optional = make(map[telemetry.ForecastFlow]bool)
 	if cfg == nil {
 		opts.HouseholdInvalidReason = "missing_config"
-		return opts, []string{"missing_config"}
+		return opts, []string{"missing_config"}, optional
 	}
-	var unknown []string
 	type configured struct {
 		driver config.Driver
 		entry  drivers.CatalogEntry
@@ -97,6 +113,7 @@ func forecastMeasurementTopology(cfg *config.Config, catalog []drivers.CatalogEn
 			add(d, telemetry.DerPV)
 			if !declared {
 				unknown = append(unknown, d.Name+":optional_pv_requires_measurement")
+				optional[telemetry.ForecastFlow{Driver: d.Name, DerType: telemetry.DerPV}] = true
 			}
 		}
 	}
@@ -117,7 +134,7 @@ func forecastMeasurementTopology(cfg *config.Config, catalog []drivers.CatalogEn
 		opts.HouseholdInvalidReason = "configured_pv_without_measurement_source"
 		unknown = append(unknown, "site:configured_pv_without_measurement_source")
 	}
-	return opts, unknown
+	return opts, unknown, optional
 }
 
 func forecastCapability(e drivers.CatalogEntry, kind string) bool {

@@ -180,8 +180,9 @@ type Deps struct {
 	// manual V2X command) check it. Nil refuses those setpoints.
 	SiteDispatchBlocked func() string
 
-	// Optional: HA MQTT bridge (nil if disabled).
-	HA *ha.Bridge
+	// Optional: returns the running HA MQTT bridge, or nil when HA is
+	// disabled or not connected yet. Nil func means HA is not wired.
+	HA func() *ha.Bridge
 
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
@@ -2019,7 +2020,11 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 // Used by the Settings UI to show a live connection indicator
 // instead of silently relying on "it's saved".
 func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
-	enabled := s.deps.HA != nil
+	var bridge *ha.Bridge
+	if s.deps.HA != nil {
+		bridge = s.deps.HA()
+	}
+	enabled := bridge != nil
 	broker := ""
 	if s.deps.Cfg != nil {
 		if s.deps.CfgMu != nil {
@@ -2041,7 +2046,7 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"enabled": false})
 		return
 	}
-	if s.deps.HA == nil {
+	if bridge == nil {
 		writeJSON(w, 200, map[string]any{
 			"enabled":   true,
 			"connected": false,
@@ -2051,10 +2056,10 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"enabled":           true,
-		"connected":         s.deps.HA.IsConnected(),
-		"broker":            s.deps.HA.BrokerAddr(),
-		"last_publish_ms":   s.deps.HA.LastPublishMs(),
-		"sensors_announced": s.deps.HA.SensorsAnnounced(),
+		"connected":         bridge.IsConnected(),
+		"broker":            bridge.BrokerAddr(),
+		"last_publish_ms":   bridge.LastPublishMs(),
+		"sensors_announced": bridge.SensorsAnnounced(),
 	})
 }
 
@@ -3720,18 +3725,33 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		}
 		delivering := states[i].CurrentPowerW > loadpoint.DeliveringW
 		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
-		if pick.Driver == "" {
-			if states[i].SoCSource == "" {
-				states[i].SoCSource = "inferred"
+		freshVehicle := pick.Driver != ""
+		if !freshVehicle {
+			pick = telemetry.PickBestVehicleForDisplay(tel, delivering, now)
+			if pick.Driver == "" {
+				if states[i].SoCSource == "" {
+					states[i].SoCSource = "inferred"
+				}
+				continue
 			}
-			continue
 		}
 		states[i].VehicleDriver = pick.Driver
 		states[i].VehicleSoC = pick.SoC
 		states[i].VehicleChargeLimit = pick.ChargeLimit
 		states[i].VehicleChargingState = pick.ChargingState
 		states[i].VehicleStale = pick.Stale
-		states[i].SoCSource = "vehicle"
+		if !pick.UpdatedAt.IsZero() {
+			age := now.Sub(pick.UpdatedAt)
+			if age < 0 {
+				age = 0
+			}
+			states[i].VehicleSoCAgeS = int64(age / time.Second)
+		}
+		if freshVehicle {
+			states[i].SoCSource = "vehicle"
+		} else if states[i].SoCSource == "" {
+			states[i].SoCSource = "inferred"
+		}
 	}
 }
 

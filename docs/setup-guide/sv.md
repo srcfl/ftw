@@ -2,7 +2,7 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
-> **Native 0.x-beta:** den gamla FTW-imagen och Docker-installationen används inte för nya boxar. Den här guiden visar Pi-stegen. Betatestare med en ny 64-bitars värd följer [installationen för Linux](../native-beta.md#install). Kör du redan FTW: läs [Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
+> **2.x och 3.x får inga fler uppdateringar.** Byt till nya 0.x för att följa det senaste. Installera inte 3.x-beta. Kör du redan FTW, börja med [Byt till nya FTW](update-sv.md). Använd ett **nytt SD-kort** och behåll det gamla med dess data.
 
 > **Ingen Raspberry Pi?** En ny 64-bitars värd med Debian eller Ubuntu kan använda samma native beta. Hoppa över Pi-stegen och läs **Steg 11 — Installera FTW**.
 
@@ -52,7 +52,7 @@ Det här är grundprogrammet som får Raspberry Pin att fungera — ungefär som
 
 ## Steg 5 — Stoppa in minneskortet i din dator
 
-1. Ta ur minneskortet ur Raspberry Pin (om det sitter i). Var försiktig.
+1. Välj ett nytt minneskort. Behåll kortet med gamla FTW och dess data.
 2. Stoppa det i kortläsaren på din vanliga dator.
 3. Klicka på den nedersta rutan ("Storage") i programmet och välj ditt kort.
 
@@ -118,12 +118,7 @@ Grattis — du är nu "inne" i Raspberry Pin.
 
 ## Steg 11 — Installera FTW
 
-Den gamla Docker-installationen med ett kommando är avslutad. Native 0.x
-testas ännu och den här guiden ger därför ingen allmän installation just nu.
-Om du deltar i betan och har en ny 64-bitars Pi, följ stegen med exakt tagg i
-[installationsguiden](../native-beta.md#install). Kör FTW redan på din Pi,
-behåll det kortet som det är och läs
-[Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
+Följ [installationsguiden för nya 0.x på svenska](update-sv.md#installera-på-det-nya-kortet-eller-en-tom-linux-maskin) och välj en exakt publicerad beta. På en ny 64-bitars Pi kan du installera nu. Kör FTW redan på din Pi, följ [bytesguiden](update-sv.md) först: använd ett nytt kort och ställ in anläggningen på nytt. Den guidade flytten av gamla inställningar och historik är ännu inte klar.
 
 ## Efter installationen
 

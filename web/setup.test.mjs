@@ -167,6 +167,12 @@ describe("setup wizard — read-only battery gateways", () => {
     assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.read_battery/);
     assert.match(DEVICES_JS, /Read PV from devices on this Zap/);
   });
+
+  it("saves an unchecked Zap read as false instead of leaving the key out", () => {
+    // Core counts a missing read_pv as PV that may report and waits for it.
+    assert.match(DEVICES_JS, /if \(d\.config\.read_pv == null\) d\.config\.read_pv = false;/);
+    assert.match(DEVICES_JS, /if \(d\.config\.read_battery == null\) d\.config\.read_battery = false;/);
+  });
 });
 
 describe("price provider defaults", () => {

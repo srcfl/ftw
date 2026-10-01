@@ -13,6 +13,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
+	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/scanner"
 )
 
@@ -33,6 +34,7 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		http.ServeFile(w, r, path)
 	})
+	mux.HandleFunc("GET /api/prices/zones", bootstrapPriceZones)
 	mux.HandleFunc("GET /api/drivers/catalog", func(w http.ResponseWriter, _ *http.Request) {
 		entries, err := drivers.LoadCatalogMulti(config.UserDriversDirOverride, driverDir)
 		if err != nil {
@@ -119,6 +121,18 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		slog.Error("bootstrap server", "err", err)
 		os.Exit(1)
 	}
+}
+
+// Bootstrap needs the same country/zone choices before any config exists.
+func bootstrapPriceZones(w http.ResponseWriter, _ *http.Request) {
+	zones := prices.Zones()
+	items := make([]map[string]string, 0, len(zones))
+	for _, z := range zones {
+		items = append(items, map[string]string{
+			"code": z.Code, "country": z.Country, "currency": z.Currency, "name": z.Name(),
+		})
+	}
+	writeBootstrapJSON(w, http.StatusOK, map[string]any{"zones": items})
 }
 
 func secureBootstrapMutations(next http.Handler) http.Handler {

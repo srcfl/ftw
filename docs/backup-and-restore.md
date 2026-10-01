@@ -1,5 +1,10 @@
 # Full backup and safe restore
 
+For a move from an older FTW, start with [Install and update FTW](native-beta.md).
+2.x and 3.x receive no more updates. A backup is recovery material, not an
+automatic migration to new 0.x. Use the tools and archive format supported by
+the installed version; not every older release has the Full backups UI below.
+
 A full backup (`.ftwbak`) recovers a site after a failed disk, a reinstall or
 a release that changed the stored data, once a copy is on another disk or
 computer. Local rollback does not replace it.

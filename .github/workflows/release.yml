@@ -1,36 +1,9 @@
 name: release
 
-# Changesets version PRs for native 0.x; manual stable publication is reserved
-# for an exceptional 2.x Docker safety repair. Native 0.x beta and stable
-# releases use native-release.yml and never use this workflow's dispatch.
-#
-# On push, this workflow handles the Changesets Version Packages PR only.
-# On an explicit 2.x dispatch, it handles a tag + draft GitHub Release.
-# The cross-platform binaries, docker images, and
-# Discord announcement live in `release-assets.yml` and are triggered
-# explicitly via `gh workflow run release-assets.yml --ref vX.Y.Z` at
-# the end of the draft step. release-assets.yml publishes the release only
-# after it verifies every required output. Keeping the heavy build matrix out of
-# this workflow means regular changeset-PR merges to master don't
-# queue + skip ~half a dozen asset jobs on every single push.
-#
-# Flow:
-#   1. PRs land on master, each carrying a `.changeset/*.md` file (or
-#      touching only allowlisted paths — see changeset-check.yml).
-#   2. This workflow fires on push to master.
-#      - `changesets/action` opens / updates a "Version Packages" PR
-#        whenever unconsumed changesets exist. We deliberately do NOT
-#        pass `publish:` — past experience on admin-next showed
-#        `changeset publish` / `changeset tag` silently no-op'd in
-#        CI, and the action's built-in `createGithubReleases` defaults
-#        to true and 422-collides with our own `gh release create`.
-#      - After the Version PR merges, dispatch native-release.yml from that
-#        exact commit for a native 0.x beta. This workflow does not publish it.
-#      - Only for an exceptional 2.x repair, dispatch beta.yml and then this
-#        workflow with the exact tested 2.x beta tag.
-#
-# Old Docker stable publication is workflow_dispatch-only. A merge creates a
-# native version candidate; it does not publish a Docker release.
+# Pushes keep the Changesets Version Packages PR for new 0.x current.
+# Manual publication of the retired 2.x/3.x Docker line is blocked before
+# checkout or credentials. All new releases use native-release.yml.
+# The old publication steps remain only as recovery/audit records.
 
 on:
   push:
@@ -48,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       source_beta:
-        description: "Exact beta tag validated on real sites"
+        description: "Retired input; manual publication is blocked. Use native-release.yml."
         required: true
         type: string
 
@@ -69,13 +42,19 @@ concurrency:
 
 jobs:
   release:
-    name: changesets (version PR / publish)
+    name: changesets version PR (old publication blocked)
     runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.publish.outputs.published }}
       version:   ${{ steps.publish.outputs.version }}
       beta_tag:  ${{ steps.publish.outputs.beta_tag }}
     steps:
+      - name: Refuse retired Docker publication
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "::error::2.x and 3.x releases are retired. Use native-release.yml for new 0.x."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -95,7 +74,7 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Reserve manual Docker publication for 2.x
+      - name: Historical 2.x input check (publication blocked)
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
@@ -145,15 +124,15 @@ jobs:
           # `version-packages` runs `changeset version` to bump package.json
           # and rewrite CHANGELOG.md, then synchronizes package-lock.json's
           # root package metadata with the generated version.
-          # We deliberately do NOT pass `publish-script:` — see the header
-          # comment for the rationale. The publish step below does
-          # the tag + GitHub Release manually, idempotently.
+          # No publish-script: this action only maintains the version PR.
+          # New releases use native-release.yml. Manual Docker publication
+          # stops at the retirement gate above.
           version-script: npm run version-packages
           pr-title: "chore(release): version packages"
           commit-message: "chore(release): version packages"
 
       - name: Restore default release credential
-        if: always()
+        if: always() && github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |

@@ -160,6 +160,7 @@ type State struct {
 	VehicleChargingState string  `json:"vehicle_charging_state,omitempty"`
 	VehicleDriver        string  `json:"vehicle_driver,omitempty"`
 	VehicleStale         bool    `json:"vehicle_stale,omitempty"`
+	VehicleSoCAgeS       int64   `json:"vehicle_soc_age_s,omitempty"`
 	SoCSource            string  `json:"soc_source,omitempty"`
 	// VehicleName is the vehicle profile the session identified (via the
 	// charging transaction's idTag/idToken), empty when none matched.

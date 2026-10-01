@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,9 +15,15 @@ const forecastPruneBatch = 64
 // acquire SQLite's writer lock. A concurrent insert invalidates the snapshot;
 // retry the selection so it cannot delete from an outdated budget calculation.
 func (s *Store) pruneForecastRows(ctx context.Context, table, selection string, args ...any) (int64, error) {
+	return s.pruneForecastBatches(ctx, table, forecastRowIDs(selection, args...))
+}
+
+type forecastRowSelector func(context.Context, *sql.Tx) ([]any, error)
+
+func (s *Store) pruneForecastBatches(ctx context.Context, table string, selectRows forecastRowSelector) (int64, error) {
 	var total int64
 	for {
-		n, err := s.tryPruneForecastRows(ctx, table, selection, args...)
+		n, err := s.tryPruneForecastBatch(ctx, table, selectRows)
 		if err != nil && !historyWriteBusy(err) && !(ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)) {
 			return total, err
 		}
@@ -34,6 +41,32 @@ func (s *Store) pruneForecastRows(ctx context.Context, table, selection string, 
 
 // Table and selection are static SQL from this package, never client input.
 func (s *Store) tryPruneForecastRows(parent context.Context, table, selection string, args ...any) (int64, error) {
+	return s.tryPruneForecastBatch(parent, table, forecastRowIDs(selection, args...))
+}
+
+func forecastRowIDs(selection string, args ...any) forecastRowSelector {
+	return func(ctx context.Context, tx *sql.Tx) ([]any, error) {
+		rows, err := tx.QueryContext(ctx, selection, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		ids := make([]any, 0, forecastPruneBatch)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+			if len(ids) > forecastPruneBatch {
+				return nil, errors.New("forecast prune exceeds batch limit")
+			}
+		}
+		return ids, errors.Join(rows.Err(), rows.Close())
+	}
+}
+
+func (s *Store) tryPruneForecastBatch(parent context.Context, table string, selectRows forecastRowSelector) (int64, error) {
 	txCtx, cancelTx := context.WithCancel(parent)
 	defer cancelTx()
 	tx, err := s.db.BeginTx(txCtx, nil)
@@ -42,24 +75,7 @@ func (s *Store) tryPruneForecastRows(parent context.Context, table, selection st
 	}
 	defer tx.Rollback()
 	readCtx, cancelRead := context.WithTimeout(parent, 3*time.Second)
-	rows, err := tx.QueryContext(readCtx, selection, args...)
-	if err != nil {
-		cancelRead()
-		return 0, err
-	}
-	ids := make([]any, 0, forecastPruneBatch)
-	for rows.Next() {
-		var id int64
-		if err = rows.Scan(&id); err != nil {
-			break
-		}
-		ids = append(ids, id)
-		if len(ids) > forecastPruneBatch {
-			err = errors.New("forecast prune exceeds batch limit")
-			break
-		}
-	}
-	err = errors.Join(err, rows.Err(), rows.Close())
+	ids, err := selectRows(readCtx, tx)
 	cancelRead()
 	if err != nil {
 		return 0, err
@@ -85,11 +101,52 @@ func (s *Store) tryPruneForecastRows(parent context.Context, table, selection st
 }
 
 func (s *Store) pruneForecastRecords(ctx context.Context, table, order, expiry string, now int64, maxRows, maxBytes int) error {
-	_, err := s.pruneForecastRows(ctx, table, fmt.Sprintf(`SELECT rowid FROM (
- SELECT rowid,%s AS expires,ROW_NUMBER() OVER (ORDER BY %s) AS n,
- SUM(length(payload)) OVER (ORDER BY %s) AS bytes FROM %s)
- WHERE expires<? OR n>? OR bytes>? LIMIT %d`, expiry, order, order, table, forecastPruneBatch),
-		now-ForecastIssueRetention.Milliseconds(), maxRows, maxBytes)
+	// Most pages only replace scores already within the budget. Check without
+	// sorting payloads; reserve the ordered scan for actual eviction.
+	var count, size, oldest int64
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*),
+ COALESCE(SUM(length(payload)),0),COALESCE(MIN(%s),0) FROM %s`, expiry, table)).Scan(&count, &size, &oldest); err != nil {
+		return err
+	}
+	if count == 0 || (count <= int64(maxRows) && size <= int64(maxBytes) && oldest >= now-ForecastIssueRetention.Milliseconds()) {
+		return nil
+	}
+	// Expiry does not need a sorted budget scan. Remove it directly in the
+	// same small transactions, then check the row and byte budgets again.
+	if oldest < now-ForecastIssueRetention.Milliseconds() {
+		if _, err := s.pruneForecastRows(ctx, table, fmt.Sprintf("SELECT rowid FROM %s WHERE %s<? LIMIT %d", table, expiry, forecastPruneBatch), now-ForecastIssueRetention.Milliseconds()); err != nil {
+			return err
+		}
+		return s.pruneForecastRecords(ctx, table, order, expiry, now, maxRows, maxBytes)
+	}
+	// Sort only keys and lengths, then walk the retained prefix in Go. SQL
+	// window queries exhausted the read budget on the ARM64 box before
+	// returning even one row. Keep memory bounded to one delete batch.
+	selection := func(readCtx context.Context, tx *sql.Tx) ([]any, error) {
+		rows, err := tx.QueryContext(readCtx, fmt.Sprintf("SELECT rowid,%s,length(payload) FROM %s ORDER BY %s", expiry, table, order))
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		ids := make([]any, 0, forecastPruneBatch)
+		var count, size int64
+		for rows.Next() {
+			var id, expires, bytes int64
+			if err := rows.Scan(&id, &expires, &bytes); err != nil {
+				return nil, err
+			}
+			count++
+			size += bytes
+			if expires < now-ForecastIssueRetention.Milliseconds() || count > int64(maxRows) || size > int64(maxBytes) {
+				ids = append(ids, id)
+				if len(ids) == forecastPruneBatch {
+					break
+				}
+			}
+		}
+		return ids, errors.Join(rows.Err(), rows.Close())
+	}
+	_, err := s.pruneForecastBatches(ctx, table, selection)
 	return err
 }
 

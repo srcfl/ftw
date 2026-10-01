@@ -1206,6 +1206,14 @@
             '</fieldset>';
         }
         if (isLocalHTTP) {
+          var isZap = (d.lua || '').indexOf('zap.lua') >= 0;
+          if (isZap) {
+            // Zap reads PV and battery only on opt-in. An unchecked box must
+            // save false: Core treats a missing read_pv as PV that may report.
+            d.config = d.config || {};
+            if (d.config.read_pv == null) d.config.read_pv = false;
+            if (d.config.read_battery == null) d.config.read_battery = false;
+          }
           var lcfg = d.config || {};
           // NIBE-style local-API drivers (catalog apicreds + a connection port)
           // also need a username + an optional self-signed cert pin; plain
@@ -1219,7 +1227,7 @@
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. Prefer the device\'s mDNS (.local) name when it broadcasts one — it survives DHCP lease changes. If you use a raw IP, reserve it for the device in your router\'s DHCP settings so it can\'t change.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
-            ((d.lua || '').indexOf('zap.lua') >= 0
+            (isZap
               ? '<p class="zap-p1-note" style="margin:8px 0 0;font-size:0.82rem;color:var(--text-dim);line-height:1.45">This driver is the P1/HAN site meter by default. Prefer a native driver for inverters and batteries. Turn on a read below only when Zap is the only reader — a SolarEdge whose Modbus is closed, or an inverter on RS-485 that Zap already owns. Zap never writes.</p>' +
                 '<label class="drv-read-pv" style="margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:normal">' +
                 '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.read_pv"' +
