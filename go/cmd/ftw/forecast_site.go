@@ -247,34 +247,47 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 
 // forecastStaticRevision identifies what learned models depend on: meter,
 // zone, measurement options, weather settings, the measurement drivers and
-// their script content. Each driver is hashed with its configured path
-// (drivers/<name>.lua), not the release directory it resolved to, so an
-// update that only moves the scripts keeps the learning.
+// their script content. A driver whose content was read is hashed with its
+// configured path (drivers/<name>.lua), not the release directory it resolved
+// to, so an update that only moves the scripts keeps the learning. Without a
+// content digest the resolved path stays, so a different script still resets.
 func forecastStaticRevision(v forecastSite, weather *config.Weather, inputs []config.Driver) (string, error) {
+	scripts := forecastScriptDigests(inputs)
 	portable := config.Config{Drivers: append([]config.Driver(nil), inputs...)}
 	portable.UnresolveDriverPaths("")
-	return forecastRevisionOf(v, weather, inputs, portable.Drivers)
+	for i, d := range inputs {
+		if scripts[d.Name] == forecastScriptUnavailable {
+			portable.Drivers[i].Lua = d.Lua
+		}
+	}
+	return forecastRevisionOf(v, weather, portable.Drivers, scripts)
 }
 
 // forecastResolvedPathRevision is the policy before #1488, which hashed the
 // resolved path. It only recognises learning IDs accepted under that policy.
 func forecastResolvedPathRevision(v forecastSite, weather *config.Weather, inputs []config.Driver) (string, error) {
-	return forecastRevisionOf(v, weather, inputs, inputs)
+	return forecastRevisionOf(v, weather, inputs, forecastScriptDigests(inputs))
 }
 
-// forecastRevisionOf reads script content through the resolved inputs and
-// hashes the given driver entries. Keep this encoding compatible with beta.3
-// so an upgrade can prove that only the hash policy changed. Never infer
-// compatibility from a driver name.
-func forecastRevisionOf(v forecastSite, weather *config.Weather, inputs, hashed []config.Driver) (string, error) {
+const forecastScriptUnavailable = "unavailable"
+
+// forecastScriptDigests reads each driver's script through its resolved path.
+func forecastScriptDigests(inputs []config.Driver) map[string]string {
 	scripts := make(map[string]string)
 	for _, d := range inputs {
 		digest, err := forecastReleaseScriptDigest(d.Lua)
 		if err != nil {
-			digest = "unavailable"
+			digest = forecastScriptUnavailable
 		}
 		scripts[d.Name] = digest
 	}
+	return scripts
+}
+
+// forecastRevisionOf hashes the given driver entries and script digests.
+// Keep this encoding compatible with beta.3 so an upgrade can prove that only
+// the hash policy changed. Never infer compatibility from a driver name.
+func forecastRevisionOf(v forecastSite, weather *config.Weather, hashed []config.Driver, scripts map[string]string) (string, error) {
 	data, err := json.Marshal(struct {
 		Meter, Timezone string
 		Options         telemetry.ForecastOptions

@@ -344,6 +344,43 @@ func TestForecastLearningSurvivesReleaseDirectoryMove(t *testing.T) {
 	}
 }
 
+// A relative drivers directory leaves the script path relative, so Core
+// cannot read the script it runs. The path must then keep identifying the
+// script, or new measurement code in another directory would keep old
+// learning.
+func TestForecastLearningWithoutScriptDigestKeepsPathIdentity(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	previousDir := config.DriversDirOverride
+	defer func() { config.DriversDirOverride = previousDir }()
+	load := func(release string) *config.Config {
+		config.DriversDirOverride = release
+		cfg := &config.Config{
+			Drivers: []config.Driver{{Name: "meter", Lua: "drivers/meter.lua", IsSiteMeter: true}},
+			Weather: &config.Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18},
+		}
+		cfg.ResolveDriverPaths(t.TempDir())
+		return cfg
+	}
+	s := newForecastSiteConfig(st)
+	s.identity = func(string) (string, bool) { return "meter:sn", true }
+	bind := func(cfg *config.Config) forecastSite {
+		s.Configure(cfg, nil)
+		s.RefreshIdentity(s.configuredAt.Add(4 * time.Second))
+		return s.Snapshot()
+	}
+	first := bind(load("releases/a/drivers"))
+	if first.IdentityPending || first.LearningRevision == "" {
+		t.Fatal("ready site did not bind a learning revision")
+	}
+	if got := bind(load("releases/b/drivers")); got.LearningRevision == first.LearningRevision {
+		t.Fatal("unreadable scripts in another directory kept the old learning identity")
+	}
+}
+
 // A site whose scripts do not move (Docker, Home Assistant) accepted its
 // learning ID under the resolved-path policy. The new policy keeps it.
 func TestForecastLearningIDCarriesAcrossPortablePathPolicy(t *testing.T) {
