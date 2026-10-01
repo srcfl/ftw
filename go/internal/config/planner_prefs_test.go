@@ -9,14 +9,14 @@ func TestForecastTrustSafetyK(t *testing.T) {
 	if got := ForecastTrustCautious.SafetyK(); got != 2 {
 		t.Errorf("cautious k=%v, want 2", got)
 	}
-	if got := ForecastTrustBalanced.SafetyK(); got != 1 {
-		t.Errorf("balanced k=%v, want 1", got)
+	if got := ForecastTrustBalanced.SafetyK(); got != SafetyKDefault {
+		t.Errorf("balanced k=%v, want the Balanced style %v", got, SafetyKDefault)
 	}
 	if got := ForecastTrustBold.SafetyK(); got != 0 {
 		t.Errorf("bold k=%v, want 0", got)
 	}
-	if got := ForecastTrust("").SafetyK(); got != 1 {
-		t.Errorf("empty k=%v, want 1", got)
+	if got := ForecastTrust("").SafetyK(); got != SafetyKDefault {
+		t.Errorf("empty k=%v, want %v", got, SafetyKDefault)
 	}
 }
 
@@ -67,12 +67,12 @@ func TestResolvePlannerPrefsStoredWins(t *testing.T) {
 
 func TestResolvePlannerPrefsEnumOnlySiteKeepsItsK(t *testing.T) {
 	// A site upgraded from the three-step slider has no planner_safety_k
-	// row. Its plan must not move: k resolves to the step's own value and
-	// missingStored asks the caller to write the float.
+	// row. k resolves to the step's value, where balanced is the Plan card's
+	// Balanced style, and missingStored asks the caller to write the float.
 	for _, tc := range []struct {
 		trust string
 		wantK float64
-	}{{"cautious", 2}, {"balanced", 1}, {"bold", 0}} {
+	}{{"cautious", 2}, {"balanced", SafetyKDefault}, {"bold", 0}} {
 		trust, _, k, missing := ResolvePlannerPrefs(tc.trust, "allowed", "", "planner_passive_arbitrage", "", "", nil)
 		if k != tc.wantK {
 			t.Errorf("%s → k=%v, want %v", tc.trust, k, tc.wantK)
@@ -128,8 +128,8 @@ func TestResolvePlannerPrefsActiveUpgradeAsks(t *testing.T) {
 	if trust != ForecastTrustBalanced {
 		t.Errorf("trust=%s, want balanced", trust)
 	}
-	if k != 1 {
-		t.Errorf("k=%v, want 1", k)
+	if k != SafetyKDefault {
+		t.Errorf("k=%v, want the Balanced style %v", k, SafetyKDefault)
 	}
 	if export != BatteryExportUnknown {
 		t.Errorf("export=%s, want unknown (must confirm)", export)
@@ -199,5 +199,29 @@ func TestResolvePlannerPrefsSeedsFromYAMLK(t *testing.T) {
 	_, _, k, _ = ResolvePlannerPrefs("bold", "allowed", "1.75", "planner_passive_arbitrage", "", "", &two)
 	if k != 1.75 {
 		t.Fatalf("stored float must win, got %v", k)
+	}
+}
+
+func TestMigrateOldDefaultSafetyKMovesOnlyTheOldDefaultOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		k         float64
+		done      string
+		wantK     float64
+		wantFirst bool
+	}{
+		// k=1 was the first-boot default and the old "balanced": the middle.
+		{"old default", 1, "", SafetyKDefault, true},
+		// A value picked on the slider stays where the household put it.
+		{"picked bold", 0.15, "", 0.15, true},
+		{"picked careful", 2, "", 2, true},
+		{"already balanced", SafetyKDefault, "", SafetyKDefault, true},
+		// Once the marker is stored, a later k=1 is a choice and stays.
+		{"after the move", 1, "1", 1, false},
+	} {
+		k, first := MigrateOldDefaultSafetyK(tc.k, tc.done)
+		if k != tc.wantK || first != tc.wantFirst {
+			t.Errorf("%s: got (%v, %v), want (%v, %v)", tc.name, k, first, tc.wantK, tc.wantFirst)
+		}
 	}
 }

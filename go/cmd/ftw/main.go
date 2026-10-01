@@ -589,12 +589,20 @@ func main() {
 		yamlK = cfg.Planner.PVForecastSafetyK
 	}
 	trust, export, safetyK, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, storedSafetyK, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
+	stylesDone, _ := st.LoadConfig(config.StateKeyPlanningStyles)
+	if k, first := config.MigrateOldDefaultSafetyK(safetyK, stylesDone); first {
+		if k != safetyK {
+			slog.Info("planner: old default forecast margin moved to the Balanced style", "from", safetyK, "to", k)
+		}
+		safetyK, trust, missingPrefs = k, config.TrustFromSafetyK(k), true
+	}
 	plannerPrefs := config.NewPlannerPrefs(trust, export, safetyK)
 	if missingPrefs {
 		if err := st.SaveConfigValues(map[string]string{
-			config.StateKeySafetyK:       config.FormatSafetyK(safetyK),
-			config.StateKeyForecastTrust: string(trust),
-			config.StateKeyBatteryExport: string(export),
+			config.StateKeySafetyK:        config.FormatSafetyK(safetyK),
+			config.StateKeyForecastTrust:  string(trust),
+			config.StateKeyBatteryExport:  string(export),
+			config.StateKeyPlanningStyles: "1",
 		}); err != nil {
 			slog.Error("save planner preferences", "err", err)
 			os.Exit(1)

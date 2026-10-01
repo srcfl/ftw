@@ -4,14 +4,19 @@ import { plannedEVWatts, createChargingTimeline } from "./ev-plan.js";
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
-import { forecastMarginLine, evShortfallWh } from "./plan-forecast.js";
+import { forecastMargins, evShortfallWh } from "./plan-forecast.js";
 import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 import {
+  PLAN_STYLES,
   clampSafetyK,
   formatSafetyK,
-  trustFromSafetyK,
-  hedgeLine,
+  styleForK,
+  prefsKnown,
+  sunWindowLabel,
+  sunLine,
+  marginSplitLine,
+  extraSunLine,
   exportSentence,
   prefsFromStatus,
 } from "./plan-prefs.js";
@@ -599,41 +604,52 @@ import {
       ctx.setLineDash([]);
     }
 
-    // Dashed curves retain the adjusted inputs that drove this plan.
-    if (plan?.actions?.some(a => Number.isFinite(a.forecast_pv_w))) {
-      for (const [field, color] of [["pv_w", "rgba(34,197,94,0.7)"], ["load_w", "#fde68a"]]) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.2;
-        ctx.setLineDash([4, 5]);
-        ctx.beginPath();
-        let first = true;
+    // The margin the plan holds back is shaded between the forecast line and
+    // the value the plan counts on: sun it does not count on, and use it
+    // prepares for beyond the forecast. A band reads on a phone where two
+    // thin lines of one colour did not.
+    const hasPointForecast = Boolean(plan?.actions?.some(a => Number.isFinite(a.forecast_pv_w)));
+    if (hasPointForecast) {
+      const bands = [
+        ["forecast_pv_w", "pv_w", "rgba(34,197,94,0.22)", (v) => v],
+        ["forecast_load_w", "load_w", "rgba(253,230,138,0.22)", siteLoadW],
+      ];
+      ctx.save();
+      ctx.beginPath(); ctx.rect(pad.l, powerY0, plotW, powerH); ctx.clip();
+      for (const [forecastField, planField, fill, value] of bands) {
+        const points = [];
         for (const a of plan.actions) {
           if (a.slot_start_ms > tMax) break;
-          const value = field === "pv_w" ? a[field] : siteLoadW(a[field]);
-          const x = xScale(a.slot_start_ms), y = powerY(value);
-          if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
+          if (!Number.isFinite(a[forecastField]) || !Number.isFinite(a[planField])) continue;
+          points.push([xScale(a.slot_start_ms), powerY(value(a[forecastField])), powerY(value(a[planField]))]);
         }
-        ctx.stroke();
+        if (points.length < 2) continue;
+        ctx.fillStyle = fill;
+        ctx.beginPath();
+        points.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+        for (let i = points.length - 1; i >= 0; i--) ctx.lineTo(points[i][0], points[i][2]);
+        ctx.closePath();
+        ctx.fill();
       }
-      ctx.setLineDash([]);
+      ctx.restore();
     }
-    const hasPointForecast = Boolean(plan?.actions?.some(a => Number.isFinite(a.forecast_pv_w)));
     const legend = canvas.parentElement?.nextElementSibling;
     if (legend?.classList.contains("chart-legend")) {
       const pvLegend = legend.querySelector('[title*="solar forecast"]');
       const loadLegend = legend.querySelector('[title*="load twin"]');
-      if (pvLegend) pvLegend.innerHTML = '<span class="legend-color" style="background:#22c55e"></span> ' + (hasPointForecast ? "PV forecast" : "PV used by plan");
-      if (loadLegend) loadLegend.innerHTML = '<span class="legend-color" style="background:#fde68a"></span> ' + (hasPointForecast ? "Load forecast" : "Load used by plan");
+      if (pvLegend) pvLegend.innerHTML = '<span class="legend-color" style="background:#22c55e"></span> ' + (hasPointForecast ? "PV forecast" : "PV the plan counts on");
+      if (loadLegend) loadLegend.innerHTML = '<span class="legend-color" style="background:#fde68a"></span> ' + (hasPointForecast ? "Load forecast" : "Load the plan prepares for");
       let item = legend.querySelector(".planning-margin-legend");
       if (!item) {
         item = document.createElement("span");
         item.className = "legend-item planning-margin-legend";
-        item.textContent = "Solid: forecast · dashed: used by plan";
+        item.title = "Sun the plan does not count on, and use it prepares for beyond the forecast";
+        item.innerHTML = '<span class="legend-color" style="background:rgba(34,197,94,0.35)"></span> Shaded: margin the plan holds back';
         legend.appendChild(item);
       }
       item.hidden = !hasPointForecast;
     }
-    renderHedge(state.prefs?.safety_k);
+    renderStyle();
 
     // Slot-average EV power, including all configured cars. Draw steps so
     // gaps stay visible rather than connecting two charges across idle time.
@@ -971,11 +987,11 @@ import {
       }
       if (a.pv_w != null) {
         const pvGen = Math.max(0, -a.pv_w) / 1000;
-        lines.push(`<div class="tip-row"><span title="Solar generation used for planning after the forecast margin">PV used by plan</span><b>${pvGen.toFixed(1)} kW</b></div>`);
+        lines.push(`<div class="tip-row"><span title="Solar generation the plan counts on after its forecast margin">PV the plan counts on</span><b>${pvGen.toFixed(1)} kW</b></div>`);
       }
       if (a.load_w != null) {
         const loadW = siteLoadW(a.load_w);
-        lines.push(`<div class="tip-row"><span title="Household load used for planning after the forecast margin">Load used by plan</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
+        lines.push(`<div class="tip-row"><span title="Household load the plan prepares for after its forecast margin">Load the plan prepares for</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
       }
       const evWatts = plannedEVWatts(a);
       if (evWatts > 0) {
@@ -1086,21 +1102,29 @@ import {
     canvas.addEventListener('touchcancel', endTouch);
   }
 
-  // Household prefs (safety k + battery export) on the Plan card.
-  // The slider POSTs safety_k only; export is sent unchanged so moving the
-  // slider never turns on battery export.
-  let trustDirty = false;
+  // Household prefs (planning style + battery export) on the Plan card.
+  // A style POSTs safety_k only; export is sent unchanged so picking a
+  // style never turns on battery export.
+  let pickedK = null; // picked here, not yet confirmed by the box
+  let postTimer = null;
   let prefsPosting = false;
   let replanPending = false;
+  let statusTimer = null;
+
+  // Settings → Planner fine-tunes the same number. It is a classic script,
+  // so it reads the style table and the margin sums from here.
+  window.FTWPlanPrefs = {
+    PLAN_STYLES, styleForK, formatSafetyK, clampSafetyK, marginSplitLine,
+    forecastMargins: (actions, from, until) => forecastMargins(actions, from, until),
+  };
 
   function currentPrefs() {
     return state.prefs || prefsFromStatus(state.status);
   }
 
-  function sliderK() {
-    const slider = document.getElementById("forecast-trust-slider");
-    if (slider) return clampSafetyK(slider.value);
-    return clampSafetyK(currentPrefs().safety_k);
+  // The k the card shows: a fresh pick wins until the box has stored it.
+  function shownK() {
+    return pickedK != null ? pickedK : clampSafetyK(currentPrefs().safety_k);
   }
 
   // The replan a prefs POST triggers takes a moment; without a marker the
@@ -1132,39 +1156,50 @@ import {
     }
   }
 
-  function renderHedge(k) {
-    const hedgeEl = document.getElementById("forecast-trust-hedge");
-    if (!hedgeEl) return;
-    const bounds = horizonBounds(state.horizon);
-    const text = forecastMarginLine(state.plan?.actions, bounds.tMin, bounds.tMax)
-      || hedgeLine(k);
-    if (text == null) {
-      hedgeEl.hidden = true;
-      hedgeEl.textContent = "";
-    } else {
-      hedgeEl.hidden = false;
-      hedgeEl.textContent = text;
-    }
+  function showLine(id, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.hidden = !text;
+    el.textContent = text || "";
   }
 
-  function renderSliderValue(k) {
-    const el = document.getElementById("forecast-trust-value");
-    if (el) el.textContent = "k " + formatSafetyK(k);
+  function showStyleStatus(text) {
+    clearTimeout(statusTimer);
+    showLine("plan-style-status", text);
+    if (text) statusTimer = setTimeout(function () { showLine("plan-style-status", ""); }, 8000);
+  }
+
+  // One step is checked; a stored k between two steps checks the nearest
+  // and says it was fine-tuned. The two plan lines describe the window the
+  // chart shows.
+  function renderStyle() {
+    const root = document.getElementById("plan-style");
+    if (!root) return;
+    const known = pickedK != null || prefsKnown(state.status);
+    const k = shownK();
+    const { style, exact } = styleForK(k);
+    root.querySelectorAll("[data-style]").forEach(function (btn) {
+      const on = known && btn.dataset.style === style.key;
+      btn.setAttribute("aria-checked", on ? "true" : "false");
+      btn.tabIndex = on || !known ? 0 : -1;
+    });
+    showLine("plan-style-text", known ? style.text : "");
+    showLine("plan-style-fine", known && !exact ? "Fine-tuned in Settings: k " + formatSafetyK(k) + "." : "");
+    const bounds = horizonBounds(state.horizon);
+    const actions = (state.plan && state.plan.actions) || [];
+    const margins = forecastMargins(actions, bounds.tMin, bounds.tMax);
+    showLine("plan-style-sun", sunLine(margins, sunWindowLabel(state.horizon, bounds.tMax, localMidnight(1))));
+    // Where extra sun goes follows the household planner modes' dispatch
+    // rules; other modes keep their own, so say nothing there.
+    const mode = String((state.status && state.status.mode) || "");
+    const household = mode === "planner_arbitrage" || mode === "planner_passive_arbitrage";
+    showLine("plan-style-extra", household ? extraSunLine(actions, bounds.tMin, bounds.tMax) : null);
+    root.classList.toggle("is-replanning", replanPending || pickedK != null);
   }
 
   function syncPrefsUI() {
+    renderStyle();
     const p = currentPrefs();
-    const slider = document.getElementById("forecast-trust-slider");
-    if (slider && !trustDirty) {
-      const k = clampSafetyK(p.safety_k);
-      slider.value = String(k);
-      slider.setAttribute("aria-valuenow", String(k));
-      slider.setAttribute("aria-valuetext", "k " + formatSafetyK(k) + ", " + trustFromSafetyK(k));
-    }
-    const kNow = trustDirty ? sliderK() : clampSafetyK(p.safety_k);
-    renderSliderValue(kNow);
-    renderHedge(kNow);
-
     const unknown = p.battery_export === "unknown";
     const banner = document.getElementById("plan-export-banner");
     const row = document.getElementById("plan-export-row");
@@ -1185,8 +1220,8 @@ import {
     }
   }
 
+  // postPlannerPrefs stores both prefs and says whether the box took them.
   async function postPlannerPrefs(k, exportPerm) {
-    if (prefsPosting) return;
     prefsPosting = true;
     setReplanPending(true);
     try {
@@ -1205,54 +1240,92 @@ import {
         battery_export: j.battery_export,
         safety_k: clampSafetyK(typeof j.safety_k === "number" ? j.safety_k : j.mapped_k),
       };
-      trustDirty = false;
-      syncPrefsUI();
-      await fetchAll();
+      return true;
     } catch (e) {
-      trustDirty = false;
-      syncPrefsUI();
+      return false;
     } finally {
       prefsPosting = false;
       setReplanPending(false);
     }
   }
 
+  // A pick waits a moment, so tapping across the scale sends one request;
+  // the latest pick wins.
+  function pickStyle(key) {
+    const style = PLAN_STYLES.find(function (s) { return s.key === key; });
+    if (!style) return;
+    pickedK = style.k;
+    showStyleStatus("");
+    renderStyle();
+    clearTimeout(postTimer);
+    postTimer = setTimeout(sendPickedStyle, 400);
+  }
+
+  async function sendPickedStyle() {
+    if (pickedK == null) return;
+    if (prefsPosting) {
+      postTimer = setTimeout(sendPickedStyle, 300);
+      return;
+    }
+    const k = pickedK;
+    const ok = await postPlannerPrefs(k, currentPrefs().battery_export);
+    if (pickedK === k) {
+      pickedK = null;
+      if (!ok) showStyleStatus("Not saved: the box did not answer. Try again.");
+    }
+    syncPrefsUI();
+    if (ok) await fetchAll();
+  }
+
+  async function setExport(exportPerm) {
+    const ok = await postPlannerPrefs(shownK(), exportPerm);
+    syncPrefsUI();
+    if (ok) await fetchAll();
+  }
+
   function initPrefs() {
-    const slider = document.getElementById("forecast-trust-slider");
-    if (slider) {
-      slider.addEventListener("input", function () {
-        if (slider.disabled) return;
-        trustDirty = true;
-        const k = clampSafetyK(slider.value);
-        slider.setAttribute("aria-valuenow", String(k));
-        slider.setAttribute("aria-valuetext", "k " + formatSafetyK(k) + ", " + trustFromSafetyK(k));
-        renderSliderValue(k);
-        renderHedge(k);
+    const steps = document.getElementById("plan-style-steps");
+    if (steps) {
+      steps.addEventListener("click", function (e) {
+        const btn = e.target.closest("[data-style]");
+        if (btn) pickStyle(btn.dataset.style);
       });
-      slider.addEventListener("change", function () {
-        if (slider.disabled) return;
-        const p = currentPrefs();
-        postPlannerPrefs(clampSafetyK(slider.value), p.battery_export);
+      // Radio-group keys: arrows move and pick, Home and End jump to an end.
+      steps.addEventListener("keydown", function (e) {
+        const moves = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
+        let i = PLAN_STYLES.indexOf(styleForK(shownK()).style);
+        if (e.key in moves) i = Math.min(PLAN_STYLES.length - 1, Math.max(0, i + moves[e.key]));
+        else if (e.key === "Home") i = 0;
+        else if (e.key === "End") i = PLAN_STYLES.length - 1;
+        else return;
+        e.preventDefault();
+        pickStyle(PLAN_STYLES[i].key);
+        const btn = steps.querySelector('[data-style="' + PLAN_STYLES[i].key + '"]');
+        if (btn) btn.focus();
       });
     }
+    const settingsBtn = document.getElementById("plan-style-settings");
+    if (settingsBtn) {
+      settingsBtn.addEventListener("click", function () {
+        const settings = window.FTWSettings;
+        if (settings && typeof settings.open === "function") settings.open("planner");
+      });
+    }
+    // A fine-tune in Settings → Planner changes the same number.
+    window.addEventListener("ftw-planner-prefs", function () { fetchAll(); });
     const check = document.getElementById("plan-export-check");
     if (check) {
       check.addEventListener("change", function () {
-        const p = currentPrefs();
-        postPlannerPrefs(p.safety_k, check.checked ? "allowed" : "not_allowed");
+        setExport(check.checked ? "allowed" : "not_allowed");
       });
     }
     const allow = document.getElementById("plan-export-allow");
     if (allow) {
-      allow.addEventListener("click", function () {
-        postPlannerPrefs(currentPrefs().safety_k, "allowed");
-      });
+      allow.addEventListener("click", function () { setExport("allowed"); });
     }
     const deny = document.getElementById("plan-export-deny");
     if (deny) {
-      deny.addEventListener("click", function () {
-        postPlannerPrefs(currentPrefs().safety_k, "not_allowed");
-      });
+      deny.addEventListener("click", function () { setExport("not_allowed"); });
     }
   }
 

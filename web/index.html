@@ -540,21 +540,32 @@
              Passive/Active are no longer primary buttons (HA/app keep
              those keys). Manual fallbacks stay behind Manual…. -->
         <div class="plan-strategy">
-          <span class="card-label plan-strategy-label">Follow the forecast</span>
-          <!-- The slider's value IS the planner's safety factor k, so the
-               position and the number the plan runs on can never drift
-               apart. Left is k=0 (raw forecast); right is k=2. -->
-          <div class="forecast-trust">
-            <input type="range" id="forecast-trust-slider" min="0" max="2" step="0.05" value="1"
-                   aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
-                   aria-label="Share of the PV forecast uncertainty held in reserve">
-            <div class="forecast-trust-labels">
-              <span>Trust forecast</span>
-              <span id="forecast-trust-value" class="slider-current">k 1</span>
-              <span>Hold reserve</span>
+          <span class="card-label plan-strategy-label" id="plan-style-label">Planning style</span>
+          <!-- Five styles on one stored number, safety_k (PLAN_STYLES in
+               plan-prefs.js). Left keeps the most in the battery; right
+               counts most on the forecast. Settings → Planner fine-tunes
+               the number itself. -->
+          <div class="plan-style" id="plan-style">
+            <div class="plan-style-steps" id="plan-style-steps" role="radiogroup" aria-labelledby="plan-style-label">
+              <button type="button" role="radio" aria-checked="false" data-style="very_careful">Very careful</button>
+              <button type="button" role="radio" aria-checked="false" data-style="careful">Careful</button>
+              <button type="button" role="radio" aria-checked="false" data-style="balanced">Balanced</button>
+              <button type="button" role="radio" aria-checked="false" data-style="bold">Bold</button>
+              <button type="button" role="radio" aria-checked="false" data-style="very_bold">Very bold</button>
             </div>
-            <div id="forecast-trust-hedge" class="forecast-trust-hedge" hidden></div>
-            <p class="forecast-trust-help">Left follows the forecast fully — if it is right, that earns more. Right keeps more in the battery in case the sun misses, closer to using the battery only for the house. Every notch changes how much of each slot's own forecast error the plan holds back.</p>
+            <div class="plan-style-ends" aria-hidden="true">
+              <span>Keeps more in the battery</span>
+              <span>Counts more on the forecast</span>
+            </div>
+            <p id="plan-style-text" class="plan-style-text" aria-live="polite" hidden></p>
+            <p id="plan-style-sun" class="plan-style-sun" hidden></p>
+            <p id="plan-style-extra" class="plan-style-extra" hidden></p>
+            <p class="plan-style-note">
+              <span id="plan-style-fine" hidden></span>
+              Safety limits are the same in every style.
+              <button type="button" class="btn-link" id="plan-style-settings">Fine-tune in Settings</button>
+            </p>
+            <p id="plan-style-status" class="plan-style-status" role="status" hidden></p>
           </div>
           <div class="plan-export">
             <div id="plan-export-banner" class="plan-export-banner" hidden>

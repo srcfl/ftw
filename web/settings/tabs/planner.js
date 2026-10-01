@@ -36,12 +36,17 @@
     return label;
   }
 
-  // The active forecast owns its interval margin; the legacy PV residual
-  // cannot quantify it. The Plan chart shows the actual paired inputs.
-  function hedgeLine(k) {
-    return Number(k) === 0
-      ? "No forecast margin requested."
-      : "The margin varies by interval. See forecast and planning values on the Plan chart.";
+  function formatK(k) {
+    return String(Math.round(Number(k) * 100) / 100);
+  }
+
+  // styleNote names the Plan card style a k belongs to. The style table
+  // comes from plan.js (window.FTWPlanPrefs); without it the note is plain.
+  function styleNote(k, lib) {
+    if (!lib || typeof lib.styleForK !== "function") return "Changes apply at once.";
+    var found = lib.styleForK(k);
+    return (found.exact ? found.style.name + "." : "Between two styles, nearest " + found.style.name + ".") +
+      " Changes apply at once.";
   }
 
   function engineSelect(engine, help) {
@@ -70,15 +75,24 @@
       }
       delete planner.soc_min_pct;
       delete planner.soc_max_pct;
-      var kHtml;
-      if (planner.pv_forecast_safety_k != null) {
-        kHtml = field("PV forecast safety (k)", "planner.pv_forecast_safety_k", "number", 1.0,
-          "How much the planner trusts the solar forecast. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k = trust the forecast less: the battery holds more reserve and charges earlier, drifting toward self-consumption behaviour. 0 = trust the forecast fully (no hedge). On clear, stable days σ shrinks toward zero and k has little effect.") +
-          '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
-      } else {
-        kHtml = '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 8px">PV forecast safety k is not set in YAML. The Plan card slider owns it, anywhere from 0 to 2 in steps of 0.05.</p>' +
-          '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
-      }
+      // The live forecast margin. It saves at once through the same
+      // endpoint as the Plan card's styles, not through config Save.
+      var fineHtml = '<div class="planner-style-fine">' +
+        '<label for="planner-style-k">Forecast margin (k) ' +
+        help("The Plan card's five planning styles set this number: Very careful 1, Careful 0.6, Balanced 0.3, Bold 0.15, Very bold 0. Higher plans for less sun and more use than forecast. Changes apply at once and do not wait for Save.") +
+        '</label>' +
+        '<div style="display:flex;gap:10px;align-items:center">' +
+        '<input type="range" id="planner-style-k" min="0" max="2" step="0.05" value="0.3" disabled style="flex:1">' +
+        '<output id="planner-style-k-value" for="planner-style-k" style="font-family:var(--mono);min-width:4.5em">…</output>' +
+        '</div>' +
+        '<p id="planner-style-k-note" style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 0">Loading…</p>' +
+        '<p id="planner-margin-line" style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 0" hidden></p>' +
+        '</div>';
+      var seedHtml = planner.pv_forecast_safety_k != null
+        ? '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 8px">config.yaml sets pv_forecast_safety_k to ' +
+          (ctx.escHtml || String)(formatK(planner.pv_forecast_safety_k)) +
+          '. It only seeds the first start; the forecast margin above is what the planner uses.</p>'
+        : "";
       return '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
@@ -89,6 +103,7 @@
         field("Max SoC (0–1)", "planner.soc_max", "number", 0.95,
           "Highest SoC the planner will charge to. The default is 0.95 = 95%.") +
         '</div></div>' +
+        fineHtml +
         '</fieldset>' +
         '<details class="engine-details">' +
         '<summary>Engine controls — leave these unless you are debugging.</summary>' +
@@ -101,7 +116,7 @@
         engineSelect(planner.engine, help) +
         '</div></div>' +
         '<p>Energyplan uses a 500 ms solve limit. Core DP runs in the background for comparison and supplies a fallback if needed.</p>' +
-        '<div class="field-row"><div>' + kHtml + '</div></div>' +
+        seedHtml +
         '<div class="field-row"><div>' +
         field("Base load (W)", "planner.base_load_w", "number", 0,
           "Constant household load estimate used when the load twin has no data yet.") +
@@ -155,29 +170,73 @@
         });
       }
 
-      // ---- Live σ/hedge readout under the k field ----
-      var hedgeEl = document.getElementById("planner-hedge-line");
-      var kInput = document.querySelector('input[data-path="planner.pv_forecast_safety_k"]');
-      if (hedgeEl && kInput) {
-        apiFetch("/api/pvmodel")
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            if (!d || d.enabled === false) return; // pvmodel off → line stays hidden
-            var sigma = d.pv_residual_std_w;
-            function update() {
-              var text = hedgeLine(kInput.value, sigma);
-              if (text == null) return;
-              hedgeEl.textContent = text;
-              hedgeEl.style.display = "";
-            }
-            update();
-            kInput.addEventListener("input", update);
+      // ---- Forecast margin: read, fine-tune, save at once ----
+      var kInput = document.getElementById("planner-style-k");
+      var kValue = document.getElementById("planner-style-k-value");
+      var kNote = document.getElementById("planner-style-k-note");
+      var marginEl = document.getElementById("planner-margin-line");
+      if (kInput && kValue && kNote) {
+        var lib = window.FTWPlanPrefs || null;
+        var exportPerm = "unknown";
+        var show = function (k, prefix) {
+          kValue.textContent = "k " + formatK(k);
+          kNote.textContent = (prefix || "") + styleNote(k, lib);
+        };
+        apiFetch("/api/planner/prefs")
+          .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(function (p) {
+            exportPerm = p.battery_export || "unknown";
+            var k = typeof p.safety_k === "number" ? p.safety_k : p.mapped_k;
+            kInput.value = String(k);
+            kInput.disabled = false;
+            show(k);
           })
-          .catch(function () {}); // unreachable → line stays hidden
+          .catch(function () { kNote.textContent = "The box did not answer. Reopen Settings to try again."; });
+        kInput.addEventListener("input", function () { show(kInput.value); });
+        kInput.addEventListener("change", function () {
+          var k = Number(kInput.value);
+          kNote.textContent = "Saving…";
+          apiFetch("/api/planner/prefs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // Export is sent unchanged: the margin never turns on battery sales.
+            body: JSON.stringify({ safety_k: k, battery_export: exportPerm }),
+          })
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+            .then(function (p) {
+              var saved = typeof p.safety_k === "number" ? p.safety_k : k;
+              kInput.value = String(saved);
+              show(saved, "Saved. ");
+              window.dispatchEvent(new CustomEvent("ftw-planner-prefs"));
+            })
+            .catch(function () { kNote.textContent = "Not saved: the box did not answer. Try again."; });
+        });
+        // The same margin as the Plan card, split into sun and use. It
+        // follows each plan the Plan card fetches, so a save shows up here.
+        if (marginEl && lib) {
+          var showMargin = function (actions) {
+            if (!actions || !actions.length) return;
+            var last = actions[actions.length - 1];
+            var text = lib.marginSplitLine(lib.forecastMargins(actions, Date.now() - 30 * 60 * 1000,
+              last.slot_start_ms + last.slot_len_min * 60 * 1000));
+            marginEl.textContent = text || "";
+            marginEl.hidden = !text;
+          };
+          var tab = S.tabs.planner;
+          if (tab._onPlan) window.removeEventListener("ftw-plan-data", tab._onPlan);
+          tab._onPlan = function (e) {
+            if (marginEl.isConnected) showMargin(e.detail && e.detail.plan && e.detail.plan.actions);
+          };
+          window.addEventListener("ftw-plan-data", tab._onPlan);
+          apiFetch("/api/mpc/plan")
+            .then(function (r) { return r.json(); })
+            .then(function (m) { showMargin(m && m.plan && m.plan.actions); })
+            .catch(function () {});
+        }
       }
     },
   };
 
   // Escape hatch for node --test (planner.test.mjs); not a public API.
-  S.tabs.planner._pure = { strategyLabel: strategyLabel, hedgeLine: hedgeLine, engineSelect: engineSelect };
+  S.tabs.planner._pure = { strategyLabel: strategyLabel, styleNote: styleNote, formatK: formatK, engineSelect: engineSelect };
 })();

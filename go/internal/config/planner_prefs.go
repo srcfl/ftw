@@ -11,15 +11,24 @@ const (
 	StateKeyForecastTrust = "forecast_trust"
 	StateKeyBatteryExport = "battery_export"
 	StateKeySafetyK       = "planner_safety_k"
+	// StateKeyPlanningStyles marks a box whose stored k has been through
+	// MigrateOldDefaultSafetyK, so the move happens once and never again.
+	StateKeyPlanningStyles = "planner_planning_styles"
 )
 
 // SafetyK bounds. 0 plans against the raw forecast; 2 holds back twice each
 // slot's own forecast error. Above 2 the haircut erases the sunny shoulders
 // outright, which is a worse plan, not a safer one.
+//
+// SafetyKDefault is the Plan card's Balanced style. The card's five styles
+// live in web/plan-prefs.js (PLAN_STYLES); keep this value in step with it.
 const (
 	SafetyKMin     = 0.0
 	SafetyKMax     = 2.0
-	SafetyKDefault = 1.0
+	SafetyKDefault = 0.3
+
+	// oldSafetyKDefault is the default every box stored before the styles.
+	oldSafetyKDefault = 1.0
 )
 
 // ForecastTrust is how hard the planner bets the PV/price forecast is right.
@@ -64,7 +73,9 @@ func ParseBatteryExport(s string) (BatteryExport, bool) {
 	}
 }
 
-// SafetyK is the PV downside haircut scale for this trust level.
+// SafetyK is the PV downside haircut scale for this trust level. Balanced is
+// the Plan card's Balanced style, so an old client asking for balanced gets
+// the same plan as the card's default.
 func (t ForecastTrust) SafetyK() float64 {
 	switch t {
 	case ForecastTrustCautious:
@@ -72,7 +83,7 @@ func (t ForecastTrust) SafetyK() float64 {
 	case ForecastTrustBold:
 		return 0.0
 	default:
-		return 1.0
+		return SafetyKDefault
 	}
 }
 
@@ -204,6 +215,22 @@ func ResolvePlannerPrefs(storedTrust, storedExport, storedK, persistedMode, yaml
 		missingStored = true
 	}
 	return trust, export, safetyK, missingStored
+}
+
+// MigrateOldDefaultSafetyK moves a box that still runs the old default k=1
+// onto the Balanced style, once. k=1 was both the first-boot default and the
+// old three-step "balanced", so a stored 1 means "the middle", and the middle
+// is now SafetyKDefault. Any other value was chosen on the slider and stays.
+// done is the StateKeyPlanningStyles marker; after the first call the caller
+// stores it and this returns k unchanged forever.
+func MigrateOldDefaultSafetyK(k float64, done string) (float64, bool) {
+	if done != "" {
+		return k, false
+	}
+	if k == oldSafetyKDefault {
+		return SafetyKDefault, true
+	}
+	return k, true
 }
 
 // EffectiveSafetyK is the haircut scale the planner runs with, clamped to the

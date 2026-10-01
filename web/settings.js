@@ -73,6 +73,16 @@
       });
   });
 
+  // Another card can open Settings on one tab, as the Plan card's
+  // "Fine-tune in Settings" does for Planner.
+  S.open = function (tab) {
+    if (tab && S.tabs[tab]) currentTab = tab;
+    tabsEl.querySelectorAll("button").forEach(function (button) {
+      button.classList.toggle("active", button.dataset.tab === currentTab);
+    });
+    openBtn.click();
+  };
+
   function closeSettings() {
     modal.classList.add("hidden");
     if (returnFocus && returnFocus.isConnected && returnFocus.getClientRects().length) {

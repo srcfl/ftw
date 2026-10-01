@@ -1067,19 +1067,52 @@ body.ftw-app .strategy-hint {
 body.ftw-app .strategy-hint:empty {
   display: none;
 }
-body.ftw-app .forecast-trust {
+body.ftw-app .plan-style {
   margin: 0 0 12px;
 }
-body.ftw-app .forecast-trust input[type="range"] {
-  width: 100%;
-  accent-color: var(--accent-e);
+/* Five equal steps, like a fund's risk scale: one row, the chosen step
+   filled. Names wrap to two lines on a phone rather than shrink. */
+body.ftw-app .plan-style-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+body.ftw-app .plan-style-steps button {
+  min-height: 44px;
   margin: 0;
+  padding: 6px 4px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--ink-sunken);
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  hyphens: none;
+  word-break: keep-all;
 }
-body.ftw-app .forecast-trust input[type="range"]:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+body.ftw-app .plan-style-steps button:first-child {
+  border-left: 0;
 }
-body.ftw-app .forecast-trust-labels {
+body.ftw-app .plan-style-steps button:hover {
+  background: var(--ink-elevated);
+  color: var(--fg);
+}
+body.ftw-app .plan-style-steps button[aria-checked="true"] {
+  background: oklch(0.3 0.1 var(--accent-hue) / 0.35);
+  box-shadow: inset 0 0 0 1px var(--accent-e);
+  color: var(--fg);
+}
+body.ftw-app .plan-style-steps button:focus-visible {
+  outline: 2px solid var(--accent-e);
+  outline-offset: -3px;
+}
+body.ftw-app .plan-style-ends {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -1088,20 +1121,40 @@ body.ftw-app .forecast-trust-labels {
   font-family: var(--sans);
   font-size: 12px;
 }
-body.ftw-app .forecast-trust-labels #forecast-trust-value {
+body.ftw-app .plan-style-ends span:last-child {
+  text-align: right;
+}
+body.ftw-app .plan-style-text,
+body.ftw-app .plan-style-sun,
+body.ftw-app .plan-style-extra,
+body.ftw-app .plan-style-note,
+body.ftw-app .plan-style-status {
+  margin: 8px 0 0;
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+}
+body.ftw-app .plan-style-text,
+body.ftw-app .plan-style-sun {
   color: var(--fg);
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
 }
-body.ftw-app .forecast-trust-hedge {
-  margin-top: 8px;
+body.ftw-app .plan-style-extra,
+body.ftw-app .plan-style-note {
   color: var(--fg-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
 }
-body.ftw-app .forecast-trust-help,
-body.ftw-app .forecast-trust-yaml,
+body.ftw-app .plan-style-note .btn-link {
+  font-family: var(--sans);
+  font-size: 13px;
+}
+body.ftw-app .plan-style-status {
+  color: var(--red-e);
+}
+/* The numbers describe the plan that is still running until the new one
+   lands, so they step back while the box replans. */
+body.ftw-app .plan-style.is-replanning .plan-style-sun,
+body.ftw-app .plan-style.is-replanning .plan-style-extra {
+  opacity: 0.55;
+}
 body.ftw-app .plan-export-help,
 body.ftw-app .plan-export-unknown {
   margin: 8px 0 0;
@@ -1170,7 +1223,7 @@ body.ftw-app .plan-export-sentence {
    that width read as a banner, not as something to touch, and prose set
    across it is hard to follow — so both get a comfortable measure and
    the rest of the row stays empty. */
-body.ftw-app .plan-strategy .forecast-trust,
+body.ftw-app .plan-strategy .plan-style,
 body.ftw-app .plan-strategy .plan-export,
 body.ftw-app .plan-strategy .plan-export-banner,
 body.ftw-app .plan-strategy .plan-export-row,
@@ -1178,8 +1231,6 @@ body.ftw-app .plan-strategy .mode-advanced-toggle,
 body.ftw-app .plan-strategy #mode-buttons {
   max-width: 560px;
 }
-body.ftw-app .plan-strategy .forecast-trust-help,
-body.ftw-app .plan-strategy .forecast-trust-yaml,
 body.ftw-app .plan-strategy .plan-export-help,
 body.ftw-app .plan-strategy .plan-export-unknown,
 body.ftw-app .plan-strategy .plan-export-sentence,
@@ -2729,10 +2780,21 @@ body.ftw-app .diagnose-detail {
   }
   body.ftw-app .plan-actions { align-items: stretch; flex-wrap: wrap; }
   body.ftw-app .more-actions { grid-template-columns: 1fr; }
-  body.ftw-app .forecast-trust-help,
+  body.ftw-app .plan-style-text,
+  body.ftw-app .plan-style-sun,
+  body.ftw-app .plan-style-extra,
+  body.ftw-app .plan-style-note,
   body.ftw-app .plan-export-help,
   body.ftw-app .plan-export-sentence {
     font-size: 12px;
+  }
+  /* Five names across a phone: smaller type keeps "Balanced" whole. */
+  body.ftw-app .plan-style-steps button {
+    padding: 6px 2px;
+    font-size: 11px;
+  }
+  body.ftw-app .plan-style-ends {
+    font-size: 11px;
   }
   body.ftw-app .plan-export-banner-actions {
     flex-direction: column;
