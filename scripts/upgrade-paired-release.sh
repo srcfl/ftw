@@ -3,8 +3,9 @@ set -euo pipefail
 
 cat >&2 <<'MESSAGE'
 The 2.x-to-3.x Docker upgrade is retired. This script makes no changes.
-Leave an existing FTW site on its current version. The guided native 0.x
-migration will handle 1.x, 2.x and 3.x after it has been tested.
-See https://github.com/srcfl/ftw/blob/master/docs/self-update.md
+2.x and 3.x receive no further updates. Switch to new 0.x with a separate
+setup and data; guided migration of old settings and history is not ready.
+Do not install 3.x beta or bypass this check with an old script.
+See https://github.com/srcfl/ftw/blob/master/docs/native-beta.md
 MESSAGE
 exit 2

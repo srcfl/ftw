@@ -8,10 +8,13 @@ import (
 	"time"
 )
 
-type chargingTransport struct{ feature bool }
+type chargingTransport struct{ feature, publishedPrices bool }
 
 func (c *chargingTransport) RoundTrip(context.Context, []byte) ([]byte, error) {
 	features := []string{"champion", "ev_duty"}
+	if c.publishedPrices {
+		features = append(features, "published_prices")
+	}
 	if c.feature {
 		features = append(features, "charging_periods")
 	}
@@ -31,7 +34,7 @@ func TestChargingPeriodsNegotiatesEachWorkerAndKeepsLegacyWire(t *testing.T) {
 		if r.FlexLoads[0].Charging != nil {
 			t.Fatal("generic sidecar received an unnegotiated field")
 		}
-		if err := o.addChargingPeriods(context.Background(), &r, p); err != nil {
+		if err := o.prepareEnergyplanRequest(context.Background(), &r, p); err != nil {
 			t.Fatal(err)
 		}
 		c := r.FlexLoads[0].Charging

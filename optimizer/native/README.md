@@ -4,7 +4,11 @@ This directory contains the optional proprietary Sourceful Energyplan worker,
 its license and third-party notices, and public integration checks. Rust source,
 source tests and builds live in the private `srcfl/energyplan` repository.
 
-Energyplan 0.4.8 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
+The [Energyplan contract](../../docs/energyplan-contract.md) defines the shared
+planning and forecast boundary, result meanings, units and failure rules.
+Core owns it; Energyplan keeps an identical copy.
+
+Energyplan 0.4.10 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
 permits private household use with FTW and free noncommercial redistribution
 for that use. Commercial use, OEM bundles, paid installation and services need
 a separate written license from Sourceful Labs AB. FTW's AGPL code has a

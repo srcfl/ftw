@@ -2,7 +2,7 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
-> **Native 0.x beta:** the old FTW image and Docker installer are retired for new sites. This guide covers Pi setup; beta testers with a fresh 64-bit host use the [native Linux installer](../native-beta.md#install). Sites that already run FTW: see [Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
+> **2.x and 3.x receive no further updates.** Switch to new 0.x to follow the latest releases. Do not install 3.x beta. Already running FTW? Start with [Install and update FTW](../native-beta.md). Use a **new SD card** and keep the old card and its data.
 
 > **Don't have a Raspberry Pi?** A fresh 64-bit Debian or Ubuntu host can use the same native beta installer. Skip the Pi hardware steps and read **Step 11 — Install FTW**.
 
@@ -52,7 +52,7 @@ This is the base program that makes the Raspberry Pi work — a bit like Windows
 
 ## Step 5 — Put the memory card in your computer
 
-1. Take the memory card out of the Raspberry Pi (if it's in there). Handle it gently.
+1. Choose a new memory card. Keep the card containing old FTW and its data.
 2. Slide it into the card reader on your regular computer.
 3. Click the bottom box ("Storage") in the program and select your card.
 
@@ -118,12 +118,7 @@ Well done — you're now "inside" the Raspberry Pi.
 
 ## Step 11 — Install FTW
 
-The old one-line Docker installer has been retired. Native 0.x is being tested;
-this beginner guide does not yet offer a general install. If you are part of
-the beta and this is a fresh 64-bit Pi, follow the exact-tag steps in the
-[Linux install guide](../native-beta.md#install). If FTW already runs on this
-Pi, keep that card as it is and see
-[Coming from an older FTW](../native-beta.md#coming-from-an-older-ftw).
+Follow [Install and update FTW](../native-beta.md#install) and choose an exact published new 0.x beta. You can install now on a fresh 64-bit Pi. If FTW already runs on your Pi, follow [the switch guide](../native-beta.md#coming-from-an-older-ftw) first: use a new card and set up the site again. Guided migration of old settings and history is not ready.
 
 ## After installation
 

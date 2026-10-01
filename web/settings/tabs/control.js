@@ -68,21 +68,58 @@
           "Trigger when projected grid export exceeds this many watts after the plan's target. Defaults to 100 W whenever the operator or planner enables absorption.") +
         '</div></div>' +
         '</fieldset>' +
-        '<fieldset><legend>Fuse</legend>' +
+        '<fieldset><legend>Electricity connection</legend>' +
+        '<label for="fuse-connection">Connection</label>' +
+        '<select id="fuse-connection">' +
+          '<option value="3">Three-phase</option>' +
+          '<option value="1">Single-phase</option>' +
+          '<option value="custom">Custom connection</option>' +
+        '</select>' +
+        '<p id="fuse-summary" role="status"></p>' +
+        field("Main fuse (A)", "fuse.max_amps", "number", 16,
+          "Use the rating on your electricity network contract, not a fuse for one appliance.") +
+        '<details id="fuse-advanced"><summary>Advanced connection settings</summary>' +
+        '<p>Standard three-phase uses 230 V from phase to neutral and 400 V between phases. ' +
+        'FTW needs the phase-to-neutral value. The standard choices above set it to 230 V. ' +
+        'Changing these values does not add support for a different grid type.</p>' +
         '<div class="field-row"><div>' +
-        field("Max amps (A)", "fuse.max_amps", "number", 16) +
-        '</div><div>' +
         field("Phases", "fuse.phases", "number", 3) +
-        '</div></div>' +
-        '<div class="field-row"><div>' +
-        field("Phase-to-neutral voltage (V)", "fuse.voltage", "number", 230,
-          "Use phase-to-neutral voltage, normally 230 V on a 400/230 V three-phase supply. FTW multiplies this by the number of phases.") +
         '</div><div>' +
+        field("Phase-to-neutral voltage (V)", "fuse.voltage", "number", 230) +
+        '</div></div>' +
         decimalField("Safety margin (A)", "fuse.safety_margin_a", 0.5,
           "Headroom below max amps so the inverter's own per-phase limiter doesn't trip first. Defaults to 0.5 A.",
           "0.1") +
-        '</div></div>' +
-        '</fieldset>';
+        '</details></fieldset>';
+    },
+    after: function (ctx) {
+      var root = ctx.bodyEl;
+      var connection = root.querySelector("#fuse-connection");
+      var phases = root.querySelector('[data-path="fuse.phases"]');
+      var voltage = root.querySelector('[data-path="fuse.voltage"]');
+      var advanced = root.querySelector("#fuse-advanced");
+      var summary = root.querySelector("#fuse-summary");
+      function sync() {
+        var standard = Number(voltage.value) === 230 && (phases.value === "1" || phases.value === "3");
+        connection.value = standard ? phases.value : "custom";
+        summary.textContent = standard
+          ? (phases.value === "3" ? "Three-phase" : "Single-phase") + " · 230 V per phase"
+          : "Custom connection · " + phases.value + " phases · " + voltage.value + " V per phase. Check Advanced before changing this.";
+        if (!standard) advanced.open = true;
+      }
+      connection.addEventListener("change", function () {
+        if (connection.value === "custom") {
+          advanced.open = true;
+          phases.focus();
+          return;
+        }
+        phases.value = connection.value;
+        voltage.value = "230";
+        sync();
+      });
+      phases.addEventListener("input", sync);
+      voltage.addEventListener("input", sync);
+      sync();
     },
   };
 })();

@@ -3504,58 +3504,12 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 	return out
 }
 
-// driverLimitsFrom builds the driver-name → per-battery PowerLimits map
-// used by control.State for per-battery charge/discharge caps (#145).
-// Reads the drivers section first, then applies any batteries-section
-// override for the same key — operators commonly set per-battery limits
-// only under `batteries:` (the MPC reads them from there), and without
-// this path the dispatcher silently uses the 5 kW MaxCommandW
-// default while the planner schedules against the configured 9 kW.
-// Battery limit pointers preserve omitted versus explicit zero. As in the
-// MPC builder below, exact both-zero battery overrides are a config error and
-// keep driver caps, using 0.5C only for missing limits, as the planner does.
-// Drivers without limits in either place are omitted from the map.
+// driverLimitsFrom gives dispatch the same per-driver limits as the planner.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
-		if d.ObserveOnly {
-			continue
-		}
-		chg, dis := d.MaxChargeW, d.MaxDischargeW
-		chgSet, disSet := chg > 0, dis > 0
-		if b, ok := batteries[d.Name]; ok {
-			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
-				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
-			if bothZero {
-				if defaultP := d.BatteryCapacityWh / 2; defaultP > 0 {
-					if !chgSet {
-						chg, chgSet = defaultP, true
-					}
-					if !disSet {
-						dis, disSet = defaultP, true
-					}
-					slog.Warn("control: ignoring both-zero battery overrides; retaining driver limits with 0.5C for missing limits",
-						"driver", d.Name, "max_charge_w", chg, "max_discharge_w", dis)
-				}
-			} else {
-				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
-					chg = *b.MaxChargeW
-					chgSet = true
-				}
-				if b.MaxDischargeW != nil && *b.MaxDischargeW >= 0 {
-					dis = *b.MaxDischargeW
-					disSet = true
-				}
-			}
-		}
-		if chg == 0 && dis == 0 && !chgSet && !disSet {
-			continue
-		}
-		out[d.Name] = control.PowerLimits{
-			MaxChargeW:       chg,
-			MaxDischargeW:    dis,
-			MaxChargeWSet:    chgSet,
-			MaxDischargeWSet: disSet,
+		if !d.ObserveOnly {
+			out[d.Name] = batteryPowerLimits(d, batteries[d.Name])
 		}
 	}
 	return out
@@ -3679,51 +3633,12 @@ func mpcBatteryFleetFromConfig(cfg *config.Config, capacities map[string]float64
 		if cap <= 0 {
 			continue
 		}
-		// Use configured driver limits, then 0.5C for missing limits. Zero is a
-		// legitimate one-sided constraint — `max_charge_w: 0` means
-		// "forbid charging, allow discharge only" and mpc.Optimize's
-		// action grid (`-MaxDischargeW…+MaxChargeW`) supports it.
-		// Negative is always a config mistake.
-		//
-		// Only the *both-zero* case is treated as a config error (and
-		// almost certainly is — it kills the planner's entire action
-		// space while leaving the service running). We fall back to
-		// driver limits in that case and log a warning.
-		defaultP := cap / 2
-		chg := defaultP
-		dis := defaultP
-		if d.MaxChargeW > 0 {
-			chg = d.MaxChargeW
-		}
-		if d.MaxDischargeW > 0 {
-			dis = d.MaxDischargeW
-		}
-		if b, ok := cfg.Batteries[d.Name]; ok {
-			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
-				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
-			if bothZero {
-				slog.Warn("mpc: ignoring both-zero battery overrides; retaining driver limits with 0.5C for missing limits",
-					"driver", d.Name, "max_charge_w", chg, "max_discharge_w", dis)
-			} else {
-				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
-					chg = *b.MaxChargeW
-				} else if b.MaxChargeW != nil {
-					slog.Warn("mpc: ignoring negative batteries.max_charge_w; retaining charge limit",
-						"driver", d.Name, "value", *b.MaxChargeW, "max_charge_w", chg)
-				}
-				if b.MaxDischargeW != nil && *b.MaxDischargeW >= 0 {
-					dis = *b.MaxDischargeW
-				} else if b.MaxDischargeW != nil {
-					slog.Warn("mpc: ignoring negative batteries.max_discharge_w; retaining discharge limit",
-						"driver", d.Name, "value", *b.MaxDischargeW, "max_discharge_w", dis)
-				}
-			}
-		}
+		limits := batteryPowerLimits(d, cfg.Batteries[d.Name])
 		fleet = append(fleet, mpc.BatteryFleetMember{
 			Driver:        d.Name,
 			CapacityWh:    cap,
-			MaxChargeW:    chg,
-			MaxDischargeW: dis,
+			MaxChargeW:    limits.MaxChargeW,
+			MaxDischargeW: limits.MaxDischargeW,
 		})
 	}
 	return fleet

@@ -22,7 +22,7 @@ func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 	}
 	external.timeBudget = energyplanTimeBudget
 	o := &EnergyplanOptimizer{ExternalOptimizer: external}
-	external.prepareRequest = o.addChargingPeriods
+	external.prepareRequest = o.prepareEnergyplanRequest
 	return o, nil
 }
 

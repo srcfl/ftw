@@ -97,12 +97,12 @@ type externalSettings struct {
 }
 
 type externalSlot struct {
+	Confidence       float64 `json:"confidence,omitempty"` // legacy workers require 1; negotiated workers omit it
 	ExecutionStartMs int64   `json:"execution_start_ms,omitempty"`
 	StartMs          int64   `json:"start_ms"`
 	LenMin           int     `json:"len_min"`
 	PriceOre         float64 `json:"price_per_kwh"`
 	SpotOre          float64 `json:"spot_per_kwh"`
-	Confidence       float64 `json:"confidence"` // required by Energyplan; always 1, every price is published
 	PVW              float64 `json:"pv_w"`
 	LoadW            float64 `json:"load_w"`
 	MaxImportW       float64 `json:"max_import_w"`

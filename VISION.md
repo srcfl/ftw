@@ -212,6 +212,12 @@ continues the earlier 0.x counter at 0.131 so tags that were already published
 stay unique. [ADR 0007](docs/adr/0007-self-updating-binary.md) records that
 choice.
 
+2.x and 3.x receive no more updates. All new releases use the new 0.x line.
+People who want current fixes and features should switch now using the
+[install and update guide](docs/native-beta.md). A new setup is available;
+guided migration of old data remains work to prove. Do not recommend 3.x beta
+as a new install or a step towards the new line.
+
 ## Running it, updating it, and a later hosted service
 
 A person who runs FTW on their own machine is using an early project that

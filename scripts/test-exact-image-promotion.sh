@@ -11,6 +11,38 @@ dockerfile="${root}/Dockerfile"
 core_build="${root}/scripts/build-core.sh"
 release_guard="${root}/scripts/check-stable-release.py"
 
+# The retained promotion code must be unreachable before checkout or credentials.
+python3 - "${beta}" "${release}" "${assets}" <<'PY_GATE'
+import pathlib
+import re
+import subprocess
+import sys
+
+for filename in sys.argv[1:]:
+    text = pathlib.Path(filename).read_text()
+    jobs = dict(re.findall(r"^  ([a-z][a-z0-9_-]*):\n(.*?)(?=^  [a-z][a-z0-9_-]*:|\Z)", text.split("\njobs:\n", 1)[1], re.M | re.S))
+    root = "release" if filename.endswith("/release.yml") else "registry"
+    assert root in jobs, filename
+    for name, body in jobs.items():
+        if name != root:
+            assert re.search(r"^    needs:", body, re.M), (filename, name)
+            if "always()" in body:
+                assert "needs.tag.result == 'success'" in body, (filename, name)
+    first = jobs[root].split("    steps:\n", 1)[1].split("\n      - ", 1)[0]
+    assert "name: Refuse retired Docker publication" in first, filename
+    assert "continue-on-error" not in first and "continue-on-error" not in jobs[root], filename
+    if root == "release":
+        assert "if: github.event_name == 'workflow_dispatch'" in first, filename
+        assert "\n  push:\n" in text, "native version PRs must still run on push"
+        for condition in re.findall(r"^        if: (.*always\(\).*)$", jobs[root], re.M):
+            assert condition == "always() && github.event_name == 'push'", condition
+    else:
+        assert "        if:" not in first, filename
+    run = first.split("        run: |\n", 1)[1]
+    result = subprocess.run(["/bin/bash", "-c", run], env={"PATH": "/nonexistent"}, capture_output=True, text=True)
+    assert result.returncode == 1 and "releases are retired" in result.stdout, filename
+PY_GATE
+
 for workflow in "${beta}" "${release}" "${assets}"; do
   if grep -Eq 'SOURCEFUL_GHCR_(USER|TOKEN)' "${workflow}"; then
     echo "canonical GHCR writes must use the workflow GITHUB_TOKEN: ${workflow}" >&2
@@ -191,8 +223,6 @@ grep -Fq 'name: Validate both exact candidate manifests' "${assets}"
 grep -Fq 'name: Preflight all exact stable aliases' "${assets}"
 grep -Fq 'name: Publish and verify exact stable aliases updater before Core' "${assets}"
 grep -Fq '.release-workflow/scripts/promote-paired-latest.sh' "${assets}"
-grep -Fq -- '--ref master -f tag=vX.Y.Z -f source_beta=vX.Y.Z-beta.N -f release_id=123' "${assets}"
-grep -Fq -- '--ref master -f tag=vX.Y.Z -f release_id=123' "${assets}"
 grep -Fq 'name: verify complete draft assets' "${assets}"
 grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
 grep -Fq 'python3 .release-workflow/scripts/check-stable-release.py assets "${TAG}"' "${assets}"

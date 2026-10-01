@@ -1,6 +1,8 @@
 package mpc
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -8,6 +10,35 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
+
+func TestExternalRequestNegotiatesPublishedPricesAcrossWorkerRollback(t *testing.T) {
+	slots, params := externalTestFixture()
+	transport := &chargingTransport{}
+	external := &ExternalOptimizer{cfg: ExternalOptimizerConfig{Timeout: time.Second}, transport: transport}
+	optimizer := &EnergyplanOptimizer{ExternalOptimizer: external}
+	for _, supported := range []bool{true, false, true} {
+		transport.publishedPrices = supported
+		request := external.buildRequest(slots, params)
+		if err := optimizer.prepareEnergyplanRequest(context.Background(), &request, params); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), `"confidence"`) == supported {
+			t.Fatalf("published_prices=%v request=%s", supported, raw)
+		}
+		for i, slot := range request.Slots {
+			if slot.PriceOre != slots[i].PriceOre || slot.SpotOre != slots[i].SpotOre {
+				t.Fatalf("slot %d changed published prices: %+v", i, slot)
+			}
+			if !supported && slot.Confidence != 1 {
+				t.Fatal("legacy worker lost confidence=1")
+			}
+		}
+	}
+}
 
 func externalTestFixture() ([]Slot, Params) {
 	slots := []Slot{

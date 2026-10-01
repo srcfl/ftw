@@ -499,11 +499,11 @@
 
           '<div class="field-row">' +
           '<div>' +
-          '<label>Min charge (W) ' + help("Lowest sustained power the charger can deliver. IEC 61851 sets a 6 A floor → 1380 W (1φ) / 4140 W (3φ) at 230 V.") + '</label>' +
+          '<label>Min power (W) ' + help("Lowest sustained power the charger can deliver. IEC 61851 sets a 6 A floor → 1380 W (1φ) / 4140 W (3φ) at 230 V.") + '</label>' +
           '<input type="number" min="0" step="10" data-path="' + prefix + '.min_charge_w" value="' + (lp.min_charge_w || 0) + '">' +
           '</div>' +
           '<div>' +
-          '<label>Max charge (W) ' + help("Highest power the planner is allowed to request. Use the fuse limit, not the charger nameplate — leave headroom for household load.") + '</label>' +
+          '<label>Max power (W) ' + help("Highest power the planner is allowed to request. Use the fuse limit, not the charger nameplate — leave headroom for household load.") + '</label>' +
           '<input type="number" min="0" step="10" data-path="' + prefix + '.max_charge_w" value="' + (lp.max_charge_w || 0) + '">' +
           '</div>' +
           '</div>' +

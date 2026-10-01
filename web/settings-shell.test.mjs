@@ -495,3 +495,72 @@ describe("charger setup navigation and saves", () => {
     assert.equal(elements['settings-save'].hidden, false);
   });
 });
+
+async function electricalShell(fuse) {
+  const original = { site: { name: 'Home' }, fuse, hidden: { keep: 17 } };
+  const rig = loadShell(structuredClone(original));
+  rig.loadTab('./settings/tabs/control.js');
+  const fields = {};
+  for (const [key, fallback] of Object.entries({ phases: 3, voltage: 230, max_amps: 16, safety_margin_a: 0.5 })) {
+    fields[key] = Object.assign(stubElement(), {
+      dataset: { path: 'fuse.' + key }, type: 'number', value: String(fuse[key] ?? fallback),
+    });
+  }
+  const connection = stubElement(), advanced = stubElement(), summary = stubElement();
+  const body = rig.elements['settings-body'];
+  body.querySelectorAll = selector => selector === '[data-path]' ? Object.values(fields) : [];
+  body.querySelector = selector => ({ '#fuse-connection': connection, '#fuse-advanced': advanced,
+    '#fuse-summary': summary })[selector] ?? Object.values(fields).find(f => selector === `[data-path="${f.dataset.path}"]`);
+  rig.elements['settings-btn'].handlers.click();
+  await settled();
+  return { ...rig, original, fields, connection, advanced, summary,
+    async save() {
+      rig.elements['settings-save'].handlers.click();
+      await settled();
+      return JSON.parse(rig.requests.filter(r => r.opts?.method === 'POST').at(-1).opts.body);
+    } };
+}
+
+describe('electricity connection settings', () => {
+  for (const fuse of [
+    { phases: 3, voltage: 230, max_amps: 20, safety_margin_a: 0 },
+    { phases: 1, voltage: 230, max_amps: 25, safety_margin_a: 1.2 },
+    { phases: 3, voltage: 400, max_amps: 16, safety_margin_a: 0 },
+    { phases: 2, voltage: 240, max_amps: 32, safety_margin_a: 0.5 },
+    {},
+  ]) {
+    it('preserves the saved config on an untouched form: ' + JSON.stringify(fuse), async () => {
+      const rig = await electricalShell(fuse);
+      const custom = fuse.voltage != null && (fuse.voltage !== 230 || fuse.phases === 2);
+      assert.equal(rig.connection.value, custom ? 'custom' : String(fuse.phases ?? 3));
+      if (custom) {
+        assert.equal(rig.advanced.open, true);
+        assert.match(rig.summary.textContent, /Custom connection/);
+        assert.ok(rig.summary.textContent.includes(String(fuse.voltage)));
+      }
+      assert.deepEqual(await rig.save(), rig.original);
+    });
+  }
+
+  it('only replaces custom voltage when the user picks a standard connection', async () => {
+    const rig = await electricalShell({ phases: 2, voltage: 240, max_amps: 20, safety_margin_a: 0 });
+    rig.connection.value = '3';
+    rig.connection.handlers.change();
+    assert.deepEqual((await rig.save()).fuse, { phases: 3, voltage: 230, max_amps: 20, safety_margin_a: 0 });
+    rig.connection.value = '1';
+    rig.connection.handlers.change();
+    assert.equal((await rig.save()).fuse.phases, 1);
+    rig.fields.voltage.value = '240';
+    rig.fields.voltage.handlers.input();
+    assert.equal(rig.connection.value, 'custom');
+    assert.equal((await rig.save()).fuse.voltage, 240);
+  });
+
+  it('opening Custom does not change stored values', async () => {
+    const rig = await electricalShell({ phases: 3, voltage: 230, max_amps: 20 });
+    rig.connection.value = 'custom';
+    rig.connection.handlers.change();
+    assert.equal(rig.advanced.open, true);
+    assert.deepEqual(await rig.save(), rig.original);
+  });
+});
