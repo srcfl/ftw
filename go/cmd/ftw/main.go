@@ -954,20 +954,22 @@ func main() {
 		}
 	}
 
-	// Pre-declared so the hot-reload Applier can call (*ha.Bridge).Reload
-	// when broker / credentials / publish interval change. Constructed
-	// further down once the registry + control callbacks exist; the
-	// Applier nil-guards against the bridge being disabled.
-	var haBridge *ha.Bridge
+	// haOwner starts, reloads and stops the HA bridge, and retries a start
+	// the broker did not accept. Its start closure reads the registry and
+	// control wiring only when it runs.
+	haOwner := newHABridgeOwner(func(c *config.HomeAssistant, names []string) (haBridgeHandle, error) {
+		b, err := ha.Start(c, tel, ctrl, ctrlMu, names, haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
+		if err != nil {
+			return nil, err
+		}
+		return b, nil
+	}, func() []string { return reg.Names() })
 
 	// deps is the API server's runtime dependency container. Forward-
 	// declared as a *Deps so the hot-reload Applier closure can capture
 	// it as a variable: the closure dereferences `deps` only after the
 	// HTTP server has been wired up (deps is populated below), so
 	// applier-time reads always observe the fully-constructed value.
-	// Updating deps.HA from the applier (e.g. when an operator toggles
-	// HA from disabled to enabled at runtime) keeps the API handler's
-	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
 
 	// Forward-declared so the saved-config callback
@@ -1185,41 +1187,9 @@ func main() {
 		notifSvc.SetPublisher(newPub)
 		notifSvc.Reload(newCfg.Notifications)
 
-		// Home Assistant: hot-reload broker / credentials / publish
-		// interval / driver list. Bridge.Reload tears down the paho
-		// client and re-publishes discovery so an operator changing
-		// the broker IP from Settings sees HA reconnect within a
-		// second — no process restart required.
-		//
-		// Three transitions to handle:
-		//   running → running:  Bridge.Reload swaps connection.
-		//   running → disabled: Stop the existing bridge.
-		//   disabled → enabled: Start a fresh bridge (handles both
-		//                       the "previously toggled off" case and
-		//                       the "Start failed at boot, operator
-		//                       fixed the broker" recovery path).
-		haEnabled := newCfg.HomeAssistant != nil && newCfg.HomeAssistant.Enabled
-		switch {
-		case haBridge != nil && haEnabled:
-			if err := haBridge.Reload(newCfg.HomeAssistant, reg.Names()); err != nil {
-				slog.Warn("HA bridge reload failed", "err", err)
-			} else {
-				slog.Info("HA bridge reloaded", "broker", newCfg.HomeAssistant.Broker)
-			}
-		case haBridge != nil && !haEnabled:
-			haBridge.Stop()
-			haBridge = nil
-			deps.HA = nil
-			slog.Info("HA bridge stopped (disabled in config)")
-		case haBridge == nil && haEnabled:
-			if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
-				slog.Warn("HA bridge start failed", "err", err)
-			} else {
-				haBridge = bridge
-				deps.HA = bridge
-				slog.Info("HA bridge started", "broker", newCfg.HomeAssistant.Broker)
-			}
-		}
+		// Home Assistant: start, reload or stop the bridge to match. A start
+		// the broker refuses keeps retrying in the background.
+		haOwner.Apply(newCfg.HomeAssistant)
 
 		// Forecast workers consume a copied site config. A changed electrical
 		// boundary or location invalidates the learned state for that boundary.
@@ -2351,9 +2321,6 @@ func main() {
 	}
 
 	// ---- Start HTTP API ----
-	// haBridge is forward-declared at the top of the file so the config
-	// hot-reload closure can call Reload on it; the bridge instance gets
-	// wired further down (HA is optional + depends on reg.Names()).
 	// Self-sovereign site identity: always generated on first boot, Nova-
 	// format (P-256 PEM) so federation can reuse it, but never dependent on
 	// Nova being enabled. Canonical path is the same nova.key default so
@@ -2490,7 +2457,7 @@ func main() {
 		SiteDispatchBlocked: func() string {
 			return siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, time.Now()).Reason
 		},
-		HA:               haBridge,
+		HA:               haOwner.Bridge,
 		Registry:         reg,
 		DriverRepository: driverRepository,
 		Events:           bus,
@@ -2640,7 +2607,6 @@ func main() {
 	}
 	// Late-bind onto the Deps literal that was built earlier with a nil
 	// notifSvc (the deps struct is assembled before this block runs).
-	// Same pattern haBridge uses a few lines below.
 	deps.Notifications = notifSvc
 	if cfg.Notifications != nil && cfg.Notifications.Enabled {
 		name := "webpush"
@@ -2651,23 +2617,8 @@ func main() {
 	}
 
 	// ---- HA MQTT bridge (optional) ----
-	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st))
-		if err != nil {
-			slog.Warn("HA MQTT bridge failed to start", "err", err)
-		} else {
-			haBridge = bridge
-			deps.HA = haBridge // late-binding for API
-		}
-	}
-	// Stop deferred for whichever bridge instance is current at exit
-	// time — Reload may have swapped haBridge mid-flight, so re-read here
-	// rather than capturing the boot-time pointer.
-	defer func() {
-		if haBridge != nil {
-			haBridge.Stop()
-		}
-	}()
+	haOwner.Apply(cfg.HomeAssistant)
+	defer haOwner.Stop()
 
 	// ---- Nova Core federation (optional) ----
 	// Publishes telemetry to Sourceful Nova Core's MQTT broker (NATS
@@ -2954,7 +2905,7 @@ func main() {
 				// ctrl, so the stored tick has to show the hold already
 				// released rather than one the blocked tick never executed.
 				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
-				sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+				sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().HistoryOptions)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 				}
@@ -3207,7 +3158,7 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().Options)
+			sampleCount, err := persistTelemetryTick(st, tel, snapshotTickPersistControl(ctrl, ctrlMu), nowMs, watchdogTimeout, energyIdentity, forecastSettings.Snapshot().HistoryOptions)
 			if err != nil {
 				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
