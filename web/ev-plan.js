@@ -13,27 +13,34 @@ const percent = value => `${Math.round(value * 100)}%`;
 export function chargingLevels(lp = {}) {
   if (lp.read_unavailable) return { now: 'Unknown', source: 'Current data unavailable', limit: 'Unknown',
     limitSource: 'Current data unavailable', fromCar: false, explanation: 'Waiting for current car and charger data.' };
-  const freshCar = !!lp.plugged_in && !!lp.vehicle_driver && !lp.vehicle_stale;
-  // A reported 0% is omitted by older Core JSON encoders.
-  const fromCar = freshCar && lp.soc_source === 'vehicle' && fraction(lp.vehicle_soc ?? 0);
-  const now = fromCar ? (lp.vehicle_soc ?? 0) : lp.current_soc;
+  const hasCar = !!lp.plugged_in && !!lp.vehicle_driver && fraction(lp.vehicle_soc ?? 0);
+  const freshCar = hasCar && !lp.vehicle_stale;
+  const fromCar = hasCar;
+  const displayNow = fromCar ? (lp.vehicle_soc ?? 0) : lp.current_soc;
+  const planningNow = freshCar && lp.soc_source === 'vehicle'
+    ? (lp.vehicle_soc ?? 0)
+    : lp.current_soc;
   const limit = freshCar && fraction(lp.vehicle_charge_limit) && lp.vehicle_charge_limit > 0
     ? lp.vehicle_charge_limit : null;
-  const unconfirmed = !fraction(now) || lp.soc_source === 'assumed' || lp.soc_source === 'completed';
+  const unconfirmed = !fraction(planningNow) || lp.soc_source === 'assumed' || lp.soc_source === 'completed';
   const vehicleGoal = lp.schedule?.finish_at_vehicle_limit === true || lp.finish_at_vehicle_limit === true;
   const goal = vehicleGoal ? (limit ?? 1) : (lp.schedule?.soc || lp.target_soc);
   const target = fraction(goal) && goal > 0 ? Math.min(goal, limit ?? 1) : null;
   return {
-    now: fraction(now) ? percent(now) : 'Unknown',
-    source: fromCar ? 'Reported by car' : unconfirmed ? 'Needs confirmation' : 'Estimated by FTW',
+    now: fraction(displayNow) ? percent(displayNow) : 'Unknown',
+    source: fromCar
+      ? (lp.vehicle_stale
+        ? `From Car · ${Math.max(1, Math.round((lp.vehicle_soc_age_s || 0) / 60))} min old`
+        : 'From Car · Current')
+      : unconfirmed ? 'Needs confirmation' : 'Estimated by FTW',
     limit: limit == null ? 'Unknown' : percent(limit),
     limitSource: limit == null ? 'Not reported by car' : 'Reported by car',
     fromCar,
     explanation: lp.manual_active ? 'Your saved goal resumes when you return to the plan.'
       : lp.goal_complete === true ? 'The car has confirmed this goal is complete.'
-      : vehicleGoal && limit == null
+      : vehicleGoal && limit == null && lp.soc_source === 'vehicle'
       ? 'FTW does not know the car’s limit. It reserves charging for up to 100%; the car decides when to stop.'
-      : target != null ? `Planning from ${fraction(now) ? percent(now) : 'an unknown level'} to ${percent(target)}${unconfirmed ? ' · confirm the current level' : ''}.` : 'Set a goal to plan charging.',
+      : target != null ? `Planning from ${fraction(planningNow) ? percent(planningNow) : 'an unknown level'} to ${percent(target)}${unconfirmed ? ' · confirm the current level' : ''}.` : 'Set a goal to plan charging.',
   };
 }
 
