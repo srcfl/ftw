@@ -78,13 +78,15 @@ test('the receipt walks from sent to confirmed without inventing proof', () => {
   assert.ok(controlReceipt(row(), false).slice(2).every(s => s.value === 'Not current'));
 });
 
-test('numbers keep signs and never invent zeros', () => {
+test('numbers use words instead of signs and never invent zeros', () => {
   const values = Object.fromEntries(controlNumbers(row({site_evidence: {grid_before_w: -5663, grid_after_w: -6471,
     device_change_w: -836, grid_change_w: -808, other_change_w: -28, unexplained_change_w: 56, samples: 4, window_s: 15,
     unmeasured_flows: ['easee:ev'], max_skew_ms: 0}})));
   assert.equal(values['Grid before'], '5.7 kW export');
-  assert.equal(values['Device change'], '−836 W');
-  assert.equal(values['Unexplained change'], '+56 W');
+  assert.equal(values['Device change'], '836 W toward discharge');
+  assert.equal(values['Grid change'], '808 W toward export');
+  assert.equal(values['Unexplained change'], '56 W more drawn');
+  assert.doesNotMatch(Object.values(values).join(' '), /[−-]\d|\+\d/);
   assert.equal(values['Left in the background'], 'easee (car charger)');
   const missing = Object.fromEntries(controlNumbers(row({site_evidence: {samples: 0}})));
   assert.equal(missing['Grid before'], undefined);

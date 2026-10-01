@@ -57,7 +57,6 @@ function buildBlock(root, key) {
   el('summary', numbers, '', 'Numbers');
   el('dl', numbers);
   el('div', numbers, 'cs-curve');
-  el('p', numbers, 'cs-note', 'Changes: + draws more from the grid, − draws less.');
   return section;
 }
 

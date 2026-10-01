@@ -205,10 +205,16 @@ export function controlReceipt(row, live = true) {
   return steps;
 }
 
-const signed = watts => num(watts) ? `${watts < 0 ? '−' : '+'}${controlPower(watts)}` : 'unknown';
+// Changes in words, never a bare sign: positive power is drawn into the site.
+function deviceChange(row, watts) {
+  if (row.kind === 'pv') return `${controlPower(watts)} ${watts < 0 ? 'more' : 'less'} solar`;
+  if (row.kind === 'ev') return `${controlPower(watts)} ${watts < 0 ? 'less' : 'more'} charging`;
+  return `${controlPower(watts)} toward ${watts < 0 ? 'discharge' : 'charge'}`;
+}
+const gridChange = watts => `${controlPower(watts)} toward ${watts < 0 ? 'export' : 'import'}`;
+const drawnChange = watts => `${controlPower(watts)} ${watts < 0 ? 'less' : 'more'} drawn`;
 
-// Numbers for experts and support. Changes use the site convention:
-// + draws more from the grid, − draws less.
+// Numbers for experts and support.
 export function controlNumbers(row, live = true) {
   if (!live) return [];
   const values = [];
@@ -222,9 +228,9 @@ export function controlNumbers(row, live = true) {
     for (const [label, key] of [['Grid before', 'grid_before_w'], ['Grid after', 'grid_after_w']]) {
       if (num(e[key])) values.push([label, `${controlPower(e[key])} ${e[key] < 0 ? 'export' : 'import'}`]);
     }
-    for (const [label, key] of [['Device change', 'device_change_w'], ['Grid change', 'grid_change_w'],
-      ['Other measured change', 'other_change_w'], ['Unexplained change', 'unexplained_change_w']]) {
-      if (num(e[key])) values.push([label, signed(e[key])]);
+    for (const [label, key, words] of [['Device change', 'device_change_w', w => deviceChange(row, w)], ['Grid change', 'grid_change_w', gridChange],
+      ['Other measured change', 'other_change_w', drawnChange], ['Unexplained change', 'unexplained_change_w', drawnChange]]) {
+      if (num(e[key])) values.push([label, words(e[key])]);
     }
     if (num(e.samples) && e.samples > 0) values.push(['Compared', `${e.samples} readings over ${Math.round(e.window_s)} s`]);
     if (num(e.tolerance_w) && e.tolerance_w > 0) values.push(['Match tolerance', `±${controlPower(e.tolerance_w)}`]);
