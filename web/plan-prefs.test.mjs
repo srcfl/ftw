@@ -18,6 +18,7 @@ import {
   exportSentence,
   prefsFromStatus,
   SAFETY_K_STEP,
+  prefsQueue,
 } from "./plan-prefs.js";
 
 const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
@@ -123,8 +124,8 @@ describe("plan lines", () => {
     const slot = (start, pv, soc, cap, battery = 0) => ({ slot_start_ms: start, slot_len_min: 15,
       forecast_pv_w: pv, pv_w: pv, soc, live_pv_surplus_soc_cap: cap, battery_w: battery });
     const q = 15 * 60_000;
-    const stores = "If more sun comes than planned, FTW stores it in the battery instead of buying power later.";
-    const exports = "If more sun comes than planned, it goes to the grid.";
+    const stores = "Sun beyond what your home and the plan need goes into the battery.";
+    const exports = "Sun beyond what your home and the plan need goes to the grid.";
 
     it("says nothing when the box does not send either cap", () => {
       const actions = [slot(0, -3000, 0.4, 0.8)];
@@ -141,7 +142,7 @@ describe("plan lines", () => {
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0.6)], 0, 2 * q, 0), stores);
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0), slot(q, -2000, 0.4, 0)], 0, 2 * q, 0), exports);
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0)], 0, 2 * q, 0),
-        "If more sun comes than planned, FTW stores some of it and the rest goes to the grid.");
+        "Sun beyond what your home and the plan need goes partly into the battery and partly to the grid.");
     });
 
     it("needs room above the planned charge to call it stored", () => {
@@ -313,5 +314,40 @@ describe("Plan card markup and wiring", () => {
   it("shades the margin instead of drawing dashed planning lines", () => {
     assert.match(plan, /Shaded: margin the plan holds back/);
     assert.doesNotMatch(plan, /Solid: forecast · dashed: used by plan/);
+  });
+});
+
+describe("prefsQueue", () => {
+  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+
+  it("keeps writes in the order they were made, even when the first answers late", async () => {
+    const order = [];
+    const answers = [];
+    const send = (change) => new Promise((resolve) => answers.push(() => {
+      order.push(change.safety_k);
+      resolve({ safety_k: change.safety_k });
+    }));
+    const announced = [];
+    const save = prefsQueue(send, (answer, source) => announced.push([answer.safety_k, source]));
+    const first = save({ safety_k: 1 }, "card");
+    const second = save({ safety_k: 0.45 }, "settings");
+    await settle();
+    assert.equal(answers.length, 1, "the second write left before the first was answered");
+    answers.shift()();
+    await first;
+    await settle();
+    answers.shift()();
+    await second;
+    assert.deepEqual(order, [1, 0.45]);
+    assert.deepEqual(announced, [[1, "card"], [0.45, "settings"]]);
+  });
+
+  it("goes on after a failed write and announces only confirmed ones", async () => {
+    const announced = [];
+    const save = prefsQueue((c) => (c.fail ? Promise.reject(new Error("HTTP 503")) : Promise.resolve(c)),
+      (answer) => announced.push(answer));
+    await assert.rejects(save({ fail: true }));
+    assert.deepEqual(await save({ safety_k: 0.3 }), { safety_k: 0.3 });
+    assert.deepEqual(announced, [{ safety_k: 0.3 }]);
   });
 });

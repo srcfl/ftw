@@ -183,13 +183,12 @@ describe("marginSaver", () => {
   it("sends only the margin, one save at a time, and reports only the newest value", async () => {
     const sent = [];
     const replies = [];
-    const apiFetch = (url, opts) => {
-      const body = JSON.parse(opts.body);
-      sent.push(body);
-      return new Promise((resolve) => replies.push(() => resolve({ ok: true, json: async () => ({ safety_k: body.safety_k }) })));
+    const post = (change) => {
+      sent.push(change);
+      return new Promise((resolve) => replies.push(() => resolve({ safety_k: change.safety_k })));
     };
     const done = [];
-    const save = marginSaver(apiFetch, (err, k, saved) => done.push([err, k, saved]));
+    const save = marginSaver(post, (err, k, saved) => done.push([err, k, saved]));
     save(0.6);
     save(0.8); // replaced before it is sent
     save(1);
@@ -206,7 +205,7 @@ describe("marginSaver", () => {
 
   it("reports a save the box did not take", async () => {
     const done = [];
-    marginSaver(() => Promise.resolve({ ok: false, status: 503 }), (err) => done.push(err))(0.3);
+    marginSaver(() => Promise.reject(new Error("HTTP 503")), (err) => done.push(err))(0.3);
     await settle();
     assert.equal(done.length, 1);
     assert.ok(done[0] instanceof Error);

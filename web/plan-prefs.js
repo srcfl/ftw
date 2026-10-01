@@ -137,8 +137,9 @@ export function marginSplitLine(margins) {
   return `The current plan counts on ${kwh(margins.sunHeldKWh)} less sun and ${kwh(margins.useAddedKWh)} more use than forecast.`;
 }
 
-// extraSunLine says where sun beyond the plan goes, by dispatch's rule:
-// live surplus may charge the battery up to the operator's cap
+// extraSunLine says where sun beyond what the home and the plan need goes;
+// extra sun first covers planned use and imports. By dispatch's rule, live
+// surplus may charge the battery up to the operator's cap
 // (site.pv_surplus_absorb_soc_cap) when one is set, otherwise up to Core's
 // per-slot live_pv_surplus_soc_cap, and never during a discharge slot. Above
 // the slot's planned charge it is stored; otherwise it is exported. Silent
@@ -163,11 +164,9 @@ export function extraSunLine(actions, from, until, operatorCap) {
     if (!discharging && cap > (Number(a.soc) || 0) + 0.005) stored++;
   }
   if (!sunny) return null;
-  if (stored === sunny) {
-    return "If more sun comes than planned, FTW stores it in the battery instead of buying power later.";
-  }
-  if (stored === 0) return "If more sun comes than planned, it goes to the grid.";
-  return "If more sun comes than planned, FTW stores some of it and the rest goes to the grid.";
+  if (stored === sunny) return "Sun beyond what your home and the plan need goes into the battery.";
+  if (stored === 0) return "Sun beyond what your home and the plan need goes to the grid.";
+  return "Sun beyond what your home and the plan need goes partly into the battery and partly to the grid.";
 }
 
 export function isBatterySale(action) {
@@ -220,6 +219,22 @@ export function exportSentence({
     return "Battery export is allowed, but FTW found no worthwhile sale.";
   }
   return "Battery sale blocked: permission is off or not checked.";
+}
+
+// prefsQueue runs preference writes one after another, in the order they
+// were made, whichever control made them. send(change) performs one write and
+// returns the box's answer; announce(answer, source) runs after each one the
+// box confirmed.
+export function prefsQueue(send, announce) {
+  let tail = Promise.resolve();
+  return function save(change, source) {
+    const run = tail.then(() => send(change)).then((answer) => {
+      announce(answer, source);
+      return answer;
+    });
+    tail = run.catch(() => {});
+    return run;
+  };
 }
 
 // prefsKnown is true once the box has said which margin it runs. Until then

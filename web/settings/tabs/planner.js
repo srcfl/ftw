@@ -49,15 +49,17 @@
       " Changes apply at once.";
   }
 
-  // One margin queue for the page. Reopening the tab must not start a second
-  // queue that races the first; marginReply is the open tab's handler.
-  var saveMargin = null;
-  var marginReply = null;
+  // Page state for the margin slider. It outlives a redraw of the tab, so a
+  // save started before the tab was reopened still lands in the open tab.
+  var saveMargin = null; // one queue for the page
+  var marginReply = null; // the open tab's reply handler
+  var marginWaiting = false; // a slider value the box has not answered yet
+  var marginPendingK = null; // that value
 
   // marginSaver sends one margin save at a time, with only safety_k, so the
-  // box keeps the export choice it holds. done(err, sent, saved) runs only
-  // when no newer value waits.
-  function marginSaver(apiFetch, done) {
+  // box keeps the export choice it holds. post(change) returns the box's
+  // answer. done(err, sent, saved) runs only when no newer value waits.
+  function marginSaver(post, done) {
     var sending = false;
     var wanted = null;
     function next() {
@@ -65,12 +67,7 @@
       var k = wanted;
       wanted = null;
       sending = true;
-      apiFetch("/api/planner/prefs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ safety_k: k }),
-      })
-        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      post({ safety_k: k })
         .then(function (p) {
           if (wanted === null) done(null, k, typeof p.safety_k === "number" ? p.safety_k : k);
         }, function (err) {
@@ -213,36 +210,71 @@
           kValue.textContent = "k " + formatK(k);
           kNote.textContent = (prefix || "") + styleNote(k, lib);
         };
+        var dragging = false;
+        var showStored = function (p) {
+          var k = typeof p.safety_k === "number" ? p.safety_k : p.mapped_k;
+          kInput.value = String(k);
+          show(k);
+        };
         apiFetch("/api/planner/prefs")
           .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
           .then(function (p) {
-            var k = typeof p.safety_k === "number" ? p.safety_k : p.mapped_k;
-            kInput.value = String(k);
             kInput.disabled = false;
-            show(k);
+            // A save still on its way answers with the newer value.
+            if (marginWaiting) {
+              kInput.value = String(marginPendingK);
+              show(marginPendingK, "Saving… ");
+            } else {
+              showStored(p);
+            }
           })
           .catch(function () { kNote.textContent = "The box did not answer. Reopen Settings to try again."; });
         // Replies go to the tab as it is drawn now.
         marginReply = function (err, sent, saved) {
+          marginWaiting = false;
           if (err) {
             kNote.textContent = "Not saved: the box did not answer. Try again.";
             return;
           }
-          // A slider moved again since this save keeps its own position.
-          if (Number(kInput.value) === sent) {
+          // A drag under way keeps the slider where the finger is.
+          if (!dragging) {
             kInput.value = String(saved);
             show(saved, "Saved. ");
           }
-          window.dispatchEvent(new CustomEvent("ftw-planner-prefs"));
         };
         if (!saveMargin) {
-          saveMargin = marginSaver(apiFetch, function (err, sent, saved) { marginReply(err, sent, saved); });
+          // Through the Plan card's queue when it is loaded, so writes from
+          // the card and from here reach the box in the order they were made.
+          saveMargin = marginSaver(function (change) {
+            var lib = window.FTWPlanPrefs;
+            if (lib && typeof lib.savePlannerPrefs === "function") return lib.savePlannerPrefs(change, "settings");
+            return apiFetch("/api/planner/prefs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(change),
+            }).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
+          }, function (err, sent, saved) { marginReply(err, sent, saved); });
         }
-        kInput.addEventListener("input", function () { show(kInput.value); });
-        kInput.addEventListener("change", function () {
-          kNote.textContent = "Saving…";
-          saveMargin(Number(kInput.value));
+        kInput.addEventListener("input", function () {
+          dragging = true;
+          show(kInput.value);
         });
+        kInput.addEventListener("change", function () {
+          dragging = false;
+          marginWaiting = true;
+          marginPendingK = Number(kInput.value);
+          kNote.textContent = "Saving…";
+          saveMargin(marginPendingK);
+        });
+        // A style picked on the Plan card changes the same number.
+        var tabState = S.tabs.planner;
+        if (tabState._onPrefs) window.removeEventListener("ftw-planner-prefs", tabState._onPrefs);
+        tabState._onPrefs = function (e) {
+          var p = e.detail;
+          if (!p || p.source === "settings" || !kInput.isConnected || marginWaiting || dragging) return;
+          if (typeof p.safety_k === "number" || typeof p.mapped_k === "number") showStored(p);
+        };
+        window.addEventListener("ftw-planner-prefs", tabState._onPrefs);
         // The same margin as the Plan card, split into sun and use. It
         // follows each plan the Plan card fetches, so a save shows up here.
         if (marginEl && lib) {

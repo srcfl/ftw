@@ -19,6 +19,7 @@ import {
   extraSunLine,
   exportSentence,
   prefsFromStatus,
+  prefsQueue,
 } from "./plan-prefs.js";
 
 (function () {
@@ -1116,6 +1117,7 @@ import {
   window.FTWPlanPrefs = {
     PLAN_STYLES, styleForK, formatSafetyK, clampSafetyK, marginSplitLine,
     forecastMargins: (actions, from, until) => forecastMargins(actions, from, until),
+    savePlannerPrefs: (change, source) => savePlannerPrefs(change, source),
   };
 
   function currentPrefs() {
@@ -1222,20 +1224,29 @@ import {
     }
   }
 
-  // postPlannerPrefs sends one change, the style's k or the export
-  // permission, and says whether the box took it. The box keeps the other
-  // as it holds it, so a change made elsewhere is never undone.
+  // Every preference write on the page goes through one queue, from the card
+  // and from Settings, so the box applies them in the order they were made.
+  // Each change carries only what it changes; the box keeps the rest. A
+  // confirmed write is announced as "ftw-planner-prefs" with the box's answer.
+  const savePlannerPrefs = prefsQueue(async function (change) {
+    const r = await apiFetch("/api/planner/prefs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(change),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }, function (answer, source) {
+    window.dispatchEvent(new CustomEvent("ftw-planner-prefs", { detail: Object.assign({}, answer, { source }) }));
+  });
+
+  // postPlannerPrefs sends one change from the card and says whether the box
+  // took it.
   async function postPlannerPrefs(change) {
     prefsPosting = true;
     setReplanPending(true);
     try {
-      const r = await apiFetch("/api/planner/prefs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(change),
-      });
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      const j = await r.json();
+      const j = await savePlannerPrefs(change, "card");
       state.prefs = {
         forecast_trust: j.forecast_trust,
         battery_export: j.battery_export,
@@ -1318,7 +1329,9 @@ import {
       });
     }
     // A fine-tune in Settings → Planner changes the same number.
-    window.addEventListener("ftw-planner-prefs", function () { fetchAll(); });
+    window.addEventListener("ftw-planner-prefs", function (e) {
+      if (e.detail && e.detail.source !== "card") fetchAll();
+    });
     const check = document.getElementById("plan-export-check");
     if (check) {
       check.addEventListener("change", function () {
