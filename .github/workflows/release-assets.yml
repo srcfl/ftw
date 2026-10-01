@@ -1,25 +1,8 @@
 name: release-assets
 
-# Publish the artefacts that accompany a tagged release:
-#   - Linux packages (amd64/arm64)
-#   - validated beta manifests promoted unchanged for Core + updater
-#   - Discord release announcement
-#
-# Triggered by `release.yml` via `gh workflow run release-assets.yml
-# --ref vX.Y.Z` immediately after the tag + draft GitHub Release are created.
-# Stable publication is explicit: a hand-pushed tag does not select a beta or
-# publish assets. Run release.yml so the chosen validated beta is bound first.
-#
-# Splitting these jobs out of release.yml means:
-#   - regular changeset-PR merges to master don't queue + skip a half
-#     dozen asset jobs every time.
-#   - asset builds run on the tag ref directly — no need for the meta
-#     job to thread `outputs.version` from a different workflow run.
-#   - failures here don't block the next release. To use a workflow fix that
-#     landed after the tag, rerun the first promotion with
-#     `--ref master -f tag=vX.Y.Z -f source_beta=vX.Y.Z-beta.N -f release_id=123`.
-#     After the receipt exists, rerun with
-#     `--ref master -f tag=vX.Y.Z -f release_id=123`.
+# Retired Docker publication. The first job refuses all runs before checkout
+# or credentials; all new releases use native-release.yml. The old steps
+# remain only as recovery/audit records.
 
 on:
   workflow_dispatch:
@@ -53,6 +36,11 @@ jobs:
     name: verify package write access
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse retired Docker publication
+        run: |
+          echo "::error::2.x and 3.x releases are retired. Use native-release.yml for new 0.x."
+          exit 1
+
       - name: Checkout release checks
         uses: actions/checkout@v7
         with:

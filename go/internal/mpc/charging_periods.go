@@ -19,15 +19,7 @@ func DefaultChargingPeriods(charging bool, seconds float64) ChargingPeriods {
 		InitialCharging: charging, InitialChargeSeconds: min(300, max(0, seconds))}
 }
 
-func (o *EnergyplanOptimizer) addChargingPeriods(ctx context.Context, request *externalRequest, p Params) error {
-	loads := p.activeLoadpoints()
-	needed := false
-	for _, lp := range loads {
-		needed = needed || lp.Charging.MinChargeSeconds > 0 || lp.Charging.StartCostOre > 0
-	}
-	if !needed {
-		return nil
-	}
+func (o *EnergyplanOptimizer) prepareEnergyplanRequest(ctx context.Context, request *externalRequest, p Params) error {
 	// Negotiate against the running worker on every request. Restart or a
 	// binary rollback must not inherit a feature learned from another process.
 	probeCtx, cancel := context.WithTimeout(ctx, o.cfg.Timeout)
@@ -35,6 +27,19 @@ func (o *EnergyplanOptimizer) addChargingPeriods(ctx context.Context, request *e
 	info, err := o.Health(probeCtx)
 	if err != nil {
 		return err
+	}
+	if optimizerHasFeature(info, "published_prices") {
+		for i := range request.Slots {
+			request.Slots[i].Confidence = 0
+		}
+	}
+	loads := p.activeLoadpoints()
+	needed := false
+	for _, lp := range loads {
+		needed = needed || lp.Charging.MinChargeSeconds > 0 || lp.Charging.StartCostOre > 0
+	}
+	if !needed {
+		return nil
 	}
 	if !optimizerHasFeature(info, "charging_periods") {
 		return nil

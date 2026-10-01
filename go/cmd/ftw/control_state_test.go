@@ -152,18 +152,18 @@ func TestBatteryLimitConfigUnsetUsesDriverValue(t *testing.T) {
 	}
 }
 
-func TestBatteryLimitConfigBothZeroUsesHalfC(t *testing.T) {
+func TestBatteryLimitConfigBothZeroUsesDefault(t *testing.T) {
 	cfg := parseBatteryLimitConfig(t, "",
 		"    max_charge_w: 0\n    max_discharge_w: 0\n")
 	ctrl := newControlStateFromConfig(cfg)
 	lim, ok := ctrl.DriverLimits["battery"]
 	if !ok || !lim.MaxChargeWSet || !lim.MaxDischargeWSet || lim.MaxChargeW != 5000 || lim.MaxDischargeW != 5000 {
-		t.Fatalf("both-zero config error did not share MPC 0.5C: %+v ok=%v", lim, ok)
+		t.Fatalf("both-zero config error did not share the MPC default: %+v ok=%v", lim, ok)
 	}
 	ctrl.Mode = control.ModeCharge
 	targets := control.ComputeDispatch(batteryLimitStore(0), ctrl, map[string]float64{"battery": 10000}, 40000)
 	if len(targets) != 1 || targets[0].TargetW != 5000 {
-		t.Fatalf("both-zero config error produced %+v, want 0.5C 5000 W", targets)
+		t.Fatalf("both-zero config error produced %+v, want the default 5000 W", targets)
 	}
 }
 

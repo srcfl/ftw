@@ -13,6 +13,14 @@
   and the Compose and `.env` pinning of the older Docker lines.
   [self-update.md](../self-update.md) describes what ships.
 
+## Current release policy (29 September 2026)
+
+2.x and 3.x receive no further updates, including hotfixes and betas. All new
+Core releases use the new 0.x line. Do not recommend 3.x beta. Owners can
+switch now using a separate new setup; guided migration of old data remains
+unshipped. [Install and update FTW](../native-beta.md) is the current operator
+guide. The context below describes the earlier system, not current advice.
+
 ## Context
 
 The update path is the largest piece of non-control code in Core, and it is
@@ -134,16 +142,16 @@ to it. No native update needs a Docker socket or Docker engine.**
    [`deploy/ftw-native.service`](../../deploy/ftw-native.service), or runs
    FTW in Docker. The monthly image, its Imager listing and the
    `rpi-installer` release are removed. Cards flashed from the image keep
-   Docker 2.x until the guided migration.
+   old Docker until their owners switch; use a second card for a new setup now.
 
 7. **New Docker packaging builds from the release package.**
    [`deploy/docker`](../../deploy/docker) holds a Compose file with one Core
    service and a Dockerfile that installs the same checksummed package as
    the native installer. There is no sidecar, `update-ipc` volume, broker or
    published image. The owner updates by setting `FTW_VERSION` and running
-   `docker compose up -d --build`. Existing 1.x, 2.x and 3.x Docker installs
-   remain in place until their owners use the guided migration. The Home
-   Assistant add-on stays on Supervisor.
+   `docker compose up -d --build`. Existing sites can switch with separate
+   data now. Guided migration of old data remains a goal to prove. The old
+   Home Assistant app stays on Supervisor and does not follow new 0.x.
 
 8. **Betas aim for a weekly cadence.** The owner dispatches
    `native-release.yml` after a Version Packages merge. Once the first
@@ -152,14 +160,14 @@ to it. No native update needs a Docker socket or Docker engine.**
    on the home box and at least one other site.
 
 9. **Transition code is deleted only after the affected boxes have migrated
-   or left support.** A 3.5 version check is not enough: 1.x and 2.x boxes
-   stay on their line until the new installer is proven. Remove each old path
-   after checking the box inventory and its recovery need. Keep the legacy
+   or no longer need it.** A version check is not enough: older boxes may
+   still need their recovery path while owners move to new setups. Remove each
+   old path after checking the box inventory and its recovery need. Keep the legacy
    state-schema marker while any supported reader still needs it. Code on
    `master` that only an installed 1.x, 2.x or 3.x box would run is not part
-   of their migration: those boxes run their installed binaries, and a 2.x
-   repair builds from its own branch. `master` keeps what the migration and
-   its way back need.
+   of their migration: those boxes still run their installed binaries.
+   No further 2.x or 3.x releases will change them. `master` keeps what the
+   migration and its way back need.
 
 10. **The owner operates the host.** FTW's own work is the EMS and the
     Energy Planner. The service manager, when to update, copies of backups
@@ -220,8 +228,8 @@ anything may change, and that is the true state of FTW.
 
 1. **The first binary release is `v0.131.0`.** It continues the counter that
    stopped at `v0.130.4`; those tags exist and cannot be reused. The old
-   Docker lines stop receiving routine releases. A critical safety fix may
-   still need an old-line release before a site can migrate.
+   Docker lines receive no further releases, including critical fixes.
+   Owners who want current fixes use the new 0.x line.
 
 2. **The reset happens at the native cutover, and nowhere else.** No Docker
    box uses Update Center to move between the 1.x/2.x, 3.x and native 0.x
@@ -252,8 +260,9 @@ anything may change, and that is the true state of FTW.
 
 ## What is lost
 
-- **In-app update on Docker installs.** Old installations stay where they are.
-  An owner who wants a new version uses the guided move to native 0.x.
+- **In-app update on old Docker installs.** The old button cannot move a site
+  to new 0.x. Owners can switch now with a separate setup; preserving old data
+  through guided migration remains a goal.
   The old code cannot have its update button removed retroactively.
 - **In-app update on Windows and macOS.** Manual replacement stays until a
   launcher exists for those platforms.
@@ -308,7 +317,7 @@ anything may change, and that is the true state of FTW.
   above.
 - **Release publication must preserve the old stable slot.** #1313 remains a
   user-visible gap. Native 0.x publication must not move GitHub latest or old
-  Docker latest away from the 2.x maintenance line.
+  Docker latest away from the retired 2.x line.
 - **Risk: the launcher is new and small, and it must be right.** It gets a
   shell test suite that runs every branch of its decision, and the home box
   runs an induced crash during a trial before this is accepted.

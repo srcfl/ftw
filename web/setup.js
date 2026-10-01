@@ -33,6 +33,7 @@
 
   window.goStep = function (n) {
     if (n < 1 || n > TOTAL_STEPS) return;
+    if (currentStep === 2 && n > 2 && !validateConnection()) return;
 
     // Pre-step hooks
     if (n === 4) loadCatalog();
@@ -61,6 +62,78 @@
   window.skipUnlistedDevice = function () {
     goStep(configuredDrivers.length > 0 ? 6 : 7);
   };
+
+  // --- Electricity connection ---
+
+  function connectionHelp() {
+    var choice = document.getElementById('site-connection').value;
+    var country = document.getElementById('price-country').value;
+    var text;
+    if (choice === 'unknown') {
+      text = "Check your electricity network contract for the number of phases and main fuse rating. If it is not listed, ask your network operator. FTW has not verified your connection.";
+    } else if (choice === 'custom') {
+      text = 'Custom connection: ' + document.getElementById('fuse-phases').value +
+        ' phases, ' + document.getElementById('fuse-voltage').value +
+        ' V per phase. Check the values in Advanced.';
+    } else if (country === 'Belgium' || country === 'Norway') {
+      text = 'Different grid types exist here. These standard choices use 230 V phase to neutral (400/230 V for three-phase). If your supply is 3 × 230 V without neutral, check compatibility with your installer before continuing.';
+    } else {
+      text = country === 'Sweden'
+        ? 'Three-phase is common in Swedish houses; some homes have single-phase. Check your electricity network contract if unsure.'
+        : 'Choose the connection on your electricity network contract. The standard choices use 230 V per phase.';
+    }
+    document.getElementById('connection-help').textContent = text;
+  }
+
+  function chooseConnection() {
+    var choice = document.getElementById('site-connection').value;
+    if (choice === '1' || choice === '3') {
+      document.getElementById('fuse-phases').value = choice;
+      document.getElementById('fuse-voltage').value = '230';
+    } else if (choice === 'custom') {
+      document.getElementById('connection-advanced').open = true;
+    }
+    document.getElementById('connection-error').hidden = true;
+    connectionHelp();
+  }
+
+  function customConnection() {
+    // An explicit expert edit resolves "I don't know", but never rewrites
+    // another expert field or guesses the fuse rating.
+    var phases = document.getElementById('fuse-phases').value;
+    var voltage = Number(document.getElementById('fuse-voltage').value);
+    document.getElementById('site-connection').value = voltage === 230 && (phases === '1' || phases === '3')
+      ? phases : 'custom';
+    connectionHelp();
+  }
+
+  function validateConnection() {
+    var choice = document.getElementById('site-connection');
+    var amps = document.getElementById('fuse-amps');
+    var voltage = document.getElementById('fuse-voltage');
+    var phases = document.getElementById('fuse-phases');
+    var error = document.getElementById('connection-error');
+    var invalid = null;
+    if (choice.value === 'unknown') {
+      error.textContent = 'Choose your connection before continuing. Your network operator can confirm it.';
+      invalid = choice;
+    } else if (!amps.checkValidity()) {
+      error.textContent = 'Enter your main fuse rating from your electricity network contract (1–100 A).';
+      invalid = amps;
+    } else if (!voltage.checkValidity() || !['1', '2', '3'].includes(phases.value)) {
+      error.textContent = 'Check the number of phases and phase-to-neutral voltage in Advanced.';
+      document.getElementById('connection-advanced').open = true;
+      invalid = voltage;
+    }
+    error.hidden = !invalid;
+    if (invalid) {
+      // A deep link to Review must not bypass the required installation values.
+      if (currentStep !== 2) goStep(2);
+      invalid.focus();
+      return false;
+    }
+    return true;
+  }
 
   // --- Step 3: Scan ---
 
@@ -740,10 +813,16 @@
     // Site
     html += '<div class="review-section"><h3>Site</h3><div class="review-item">';
     html += esc(document.getElementById('site-name').value) + ', ';
-    html += document.getElementById('fuse-phases').value + '&times;' +
-            document.getElementById('fuse-amps').value + 'A @ ' +
-            document.getElementById('fuse-voltage').value + 'V, ' +
-            esc(zone);
+    var connection = document.getElementById('site-connection').value;
+    var connectionLabel = connection === '3' ? 'Three-phase' : connection === '1' ? 'Single-phase' :
+      connection === 'unknown' ? 'Connection not confirmed' : 'Custom connection';
+    html += esc(connectionLabel) + ' · main fuse ' +
+      esc(document.getElementById('fuse-amps').value || 'not confirmed') + ' A';
+    if (connection === 'custom') {
+      html += ' · ' + esc(document.getElementById('fuse-phases').value) + ' phases · ' +
+        esc(document.getElementById('fuse-voltage').value) + ' V per phase';
+    }
+    html += ' · ' + esc(zone);
     html += '</div></div>';
 
     // Devices
@@ -803,6 +882,7 @@
   // --- Save config ---
 
   window.saveConfig = function () {
+    if (!validateConnection()) return;
     // Empty drivers list is valid — e.g. an EV-only site that only
     // configured a cloud EV charger in step 7 and doesn't own local
     // hardware. The backend accepts this and runs with a no-op
@@ -853,9 +933,9 @@
         min_dispatch_interval_s: 5
       },
       fuse: {
-        max_amps: parseFloat(document.getElementById('fuse-amps').value) || 16,
-        phases: parseInt(document.getElementById('fuse-phases').value, 10) || 3,
-        voltage: parseFloat(document.getElementById('fuse-voltage').value) || 230
+        max_amps: Number(document.getElementById('fuse-amps').value),
+        phases: Number(document.getElementById('fuse-phases').value),
+        voltage: Number(document.getElementById('fuse-voltage').value)
       },
       drivers: configuredDrivers.map(function (d) {
         var clean = {};
@@ -1007,6 +1087,11 @@
   }
 
   document.getElementById('drv-ip').addEventListener('input', updateHostHint);
+  document.getElementById('site-connection').addEventListener('change', chooseConnection);
+  document.getElementById('price-country').addEventListener('change', connectionHelp);
+  document.getElementById('fuse-phases').addEventListener('change', customConnection);
+  document.getElementById('fuse-voltage').addEventListener('input', customConnection);
+  connectionHelp();
 
   renderDots();
   loadPriceZones();

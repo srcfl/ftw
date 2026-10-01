@@ -16,9 +16,10 @@ The web UI only shows the version. `install.sh --refresh` replaces the
 launcher, the command and the unit when a release asks for it. Do not copy a
 package into `/opt/ftw` by hand: the launcher expects the slot layout.
 
-The installer is not the guided migration for an existing Docker, Home
-Assistant or earlier native box. Those boxes stay on their current version
-until the guided 0.x migration has been tested and published.
+The installer does not migrate an existing Docker, Home Assistant or older
+native site. Use [Install and update FTW](native-beta.md) to switch with
+separate data now. Guided transfer of old settings and history is not ready.
+2.x and 3.x receive no more updates; do not install 3.x beta.
 [`deploy/docker`](../deploy/docker) builds a local image from the same
 package.
 

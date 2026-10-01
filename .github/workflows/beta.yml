@@ -1,10 +1,12 @@
-name: beta release
+name: retired Docker beta release
+
+# Publication is blocked before checkout or credentials. Use native-release.yml.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Immutable prerelease tag, for example v0.128.0-beta.1"
+        description: "Retired input; publication is blocked. Use native-release.yml."
         required: true
         type: string
 
@@ -23,6 +25,11 @@ jobs:
     name: verify package write access
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse retired Docker publication
+        run: |
+          echo "::error::2.x and 3.x releases are retired. Use native-release.yml for new 0.x."
+          exit 1
+
       - name: Checkout release checks
         uses: actions/checkout@v7
         with:

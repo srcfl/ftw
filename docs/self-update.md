@@ -18,34 +18,27 @@ is still needed to recover older data or a failed disk.
 
 ## Existing 1.x, 2.x and 3.x boxes
 
-Keep an existing Docker or earlier native site on its current version. On an
-older Docker install, the web UI's Update and Restart buttons signal the
-`ftw-updater` sidecar, which pulls a pinned image and recreates Core. That
-path is frozen with its line: the sidecar and its Core counterpart run from
-the installed images, and their source stays on the old release tags, not on
-`master`. Do not use its Update button, an old Docker migration script, a moving
-image alias, or a manual Core/updater swap to cross release lines. The old
-code may still show a previously published update; it cannot be changed on a
-box that has not installed new code. The scripts on `master` for
-Docker-to-Docker migration and 2.x-to-3.x upgrades now exit before changing a
-site.
+**2.x and 3.x will receive no further updates. All new releases use the new
+0.x line. Switch now to follow current development. Do not install 3.x beta
+or use it as an intermediate upgrade.** Old 0.x up to 0.130.x and 1.x are also
+retired. Start with [Install and update FTW](native-beta.md), which identifies
+the install type before giving commands.
 
-The planned guided installer will move 1.x, 2.x and 3.x sites directly to
-native 0.x. It must first make and verify a full backup held off the box,
-then stop the old Core, preserve config, history, identity and goals, install
-the native service, check data and connected devices, and retain a tested way
-back. It is not ready for users. The [fresh Linux installer](../scripts/install.sh)
-is only for an empty 64-bit host and refuses a known existing site. Until
-then, [Try the 0.x beta](native-beta.md#coming-from-an-older-ftw) shows how
-to test 0.x beside an old site.
+A second SD card/host or separate Docker project lets an owner switch now with
+new settings and data. Guided migration preserving config, history, identity
+and goals has not shipped. Do not copy old databases into new Core or bypass
+the fresh installer's checks. If those data must move first, get help for that
+site and retain a verified backup off the host and a tested way back.
 
-GitHub `releases/latest` and the old Docker `:latest` aliases remain on the
-2.x line for installed boxes. Native beta and stable releases use exact tags
-without moving that global latest slot. An urgent safety repair may still
-need an owner-approved 2.x release; it does not restart routine Docker
-releases or provide a hop to 3.x. The old `beta.yml` and `release.yml`
-workflows are guarded to that line. A release from either line does not deploy
-itself to a box.
+Old Docker's Update Center and updater still run their installed code. They
+may offer old releases; choosing beta does not migrate to new 0.x. Do not use
+those controls, moving image aliases, manual Core/updater swaps or retired
+migration scripts to cross lines. The scripts on master refuse the old paths.
+
+GitHub `releases/latest` and old Docker `:latest` aliases remain on old 2.x to
+avoid sending incompatible packages to old clients. They are not current
+release recommendations and will not receive new 2.x updates. New releases use
+exact 0.x tags. Publication never installs a release on a site by itself.
 
 ### Pilot: an older native systemd site
 
@@ -81,10 +74,10 @@ path if automatic recovery fails. The CLI prints the active phase, elapsed time 
 known; it says when a total is unknown. If LAN auth is on, set `FTW_API_TOKEN`
 in the CLI process environment. Never paste that token into a command line.
 
-The pilot refuses Docker and Home Assistant installations; they remain on
-their current line while their own layout and recovery path are tested. A
-successful empty-data smoke test does not prove migration of a live
-household.
+The pilot refuses Docker and Home Assistant installations. Use the separate
+setup paths in [the switch guide](native-beta.md#coming-from-an-older-ftw) for
+those sites. A successful empty-data smoke test does not prove migration of
+a live household.
 
 ## Native 0.x releases
 
@@ -168,10 +161,13 @@ the native install.
 FTW's Core update does not update the host operating system, kernel or Docker
 engine. The operator handles host updates.
 
-The old Docker workflows and their release receipts remain for an exceptional
-2.x repair. The native release workflow cannot publish Docker images or move
-old aliases. New Core code refuses cross-line update requests, but that guard
-cannot change an older installed binary. Do not use an old tag or script to
+The old Docker workflows and receipts remain as historical and recovery
+material, not a path for new releases. Their current definitions refuse
+publication before checkout or registry writes; the Changesets version-PR job
+still runs on pushes for new 0.x. Do not dispatch historical workflow revisions.
+The native workflow cannot publish old Docker images or move old aliases.
+New Core code refuses cross-line update requests, but that guard cannot change
+an older installed binary. Do not use an old tag or script to
 bypass the guided migration.
 
 Release notes keep the old state-schema markers for the remaining Docker

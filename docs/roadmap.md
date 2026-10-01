@@ -75,11 +75,39 @@ or reopen closed issues.
 | Useful analysis and fair savings | Keep enough provenance to explain plans and outcomes. Main savings target compares with ordinary self-consumption on the same installation. | Actual cost reconciles with measured import/export and prices. Specify EV behaviour, initial and final stored-energy accounting, efficiency and coverage. Show missing and negative results. Label the current no-PV/no-battery comparison as total site value until replacement is verified. |
 | External automation and agent access | Give authorized clients structured analysis data, schedule/goal changes and proposed-plan submission. Temporary external control expires; durable goals persist. Support local access and secure cloud MCP access. | Paired Core/client contract tests cover permissions, expiry, replay, rejection, revocation and reconnect. An agent can trace a request through to measured outcome. Prove local fallback when the caller disappears. Reuse the session/relay where suitable and verify that relay and escrow remain blind. Cloud MCP is a target, not a claim of a shipped endpoint. |
 | Less configuration, reliable operation | Every normal setting serves a user need. Keep expert controls discoverable. Installation, updates, backup and recovery remain part of the finished experience. | Audit settings and feature use before removal. Test migration of stored choices so hidden settings cannot keep directing behaviour. Verify restart, upgrade and restore on a target box and review affected UI flows. |
-| Updates the owner runs | The owner operates the host; FTW supplies the steps. `ftw update` runs unattended, falls back on its own when a new release does not stay up, and makes a verified full backup before a change to stored data. The same steps are API calls, so owners and their agents can wrap them. On native, the web UI shows the version and the release notice only. The installer and the Docker migration produce one native layout. | The evidence list in [ADR 0007](adr/0007-self-updating-binary.md#evidence-required-before-rollout), on the home box and one other site: update and rollback timings, a crash during and just after the trial, a slow first start, a state-schema change and its way back, an unattended run, disk use after ten updates, a freshly flashed Pi image, and a Docker 2.x or 3.x box moved to native with a tested return to its old installation. |
+| Updates the owner runs | The owner operates the host; FTW supplies the steps. `ftw update` runs unattended, falls back on its own when a new release does not stay up, and makes a verified full backup before a change to stored data. The same steps are API calls, so owners and their agents can wrap them. On native, the web UI shows the version and the release notice only. The installer and the Docker migration produce one native layout. | The evidence list in [ADR 0007](adr/0007-self-updating-binary.md#evidence-required-before-rollout), on the home box and one other site: update and rollback timings, a crash during and just after the trial, a slow first start, a state-schema change and its way back, an unattended run, disk use after ten updates, a fresh Raspberry Pi OS card, and a Docker 2.x or 3.x box moved to native with a tested return to its old installation. The new setup paths ship now; guided transfer of old data remains unshipped. 2.x and 3.x receive no further updates. |
 
 Safety is part of each row. Core remains the only dispatch authority, every
 plan is untrusted input, stale required site-meter data stops dispatch, and
 failed devices receive their safe default where reachable.
+
+## Planner: robustness and speed after Energyplan 0.4.10
+
+The next planner work should improve both the time to a valid plan and the
+time to prove its quality. These are future development goals, not measured
+production guarantees. Keep the [Energyplan contract](energyplan-contract.md)
+as the shared boundary: Core validates plans and owns dispatch.
+
+| Order | Goal | Acceptance evidence |
+|---|---|---|
+| 1 | Explain where planning time goes. | Separate model preparation, first valid plan, improvement, proof and the full request time. Record memory use and deadline overruns on a named ARM64 box, for cold starts and repeated planning. |
+| 2 | Expand independent comparisons. | Compare equivalent models against HiGHS, SCIP and a commercial reference. Match budgets, thread counts and tolerances; repeat runs and keep held-out cases. Treat license limits and unfinished proofs as missing evidence. Source, algorithms and raw benchmarks stay in the private Energyplan repo or private test artifacts. |
+| 3 | Reduce work on difficult household plans. | Improve tariffs, tight grid limits and multiple assets without changing the physical model or weakening result claims. Keep a change only when independent replay, exact small cases and held-out comparisons confirm both correctness and a useful gain. |
+| 4 | Return safely under load or interruption. | Cover the whole request budget, memory pressure, malformed requests, cancellation, restart and changing measurements. Preserve the best valid candidate for the current request; return an explicit error if none exists. Test Core rejection and fallback separately. |
+| 5 | Prove value on the target box. | Run held-out household traces and rolling replanning on physical ARM64, then verify plan acceptance and measured device behaviour at named sites. Report cost, missed charging goals and uncertainty; solver timings alone do not establish household savings. |
+
+Initial calibration targets remain a valid plan within 100 ms at p99 and
+proven optimum in at least 99% of feasible standard cases within 2 s. The
+standard class is one battery, one or two EVs, and a 48-hour horizon with
+15-minute slots. Freeze the cases, hardware and numerical tolerances first,
+and collect enough observations for tail measurements. Report difficult cases
+separately. These targets need ARM64 evidence before they become a service
+promise; a short time limit cannot guarantee an exact answer for every model.
+
+Every step must preserve physical limits, honest `feasible`/`optimal` status,
+explicit failure and the local operating path. Keep solver implementation and
+its detailed development plan in private Energyplan. Core receives compiled
+workers and integration evidence through paired PRs.
 
 ## Heat: data first, bounded control later
 
