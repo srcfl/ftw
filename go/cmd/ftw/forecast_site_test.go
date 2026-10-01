@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/modelstate"
@@ -290,5 +294,109 @@ func TestForecastWeatherGenerationReceiptSurvivesRestart(t *testing.T) {
 	third.Configure(cfg, nil)
 	if third.Snapshot().WeatherSinceMS != second.Snapshot().WeatherSinceMS {
 		t.Fatal("new generation did not persist")
+	}
+}
+
+// A native update installs the same scripts under a new release directory.
+// That alone must not start the house and PV models over (#1488).
+func TestForecastLearningSurvivesReleaseDirectoryMove(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	previousDir := config.DriversDirOverride
+	defer func() { config.DriversDirOverride = previousDir }()
+	oldRelease, newRelease := t.TempDir(), t.TempDir()
+	for _, dir := range []string{oldRelease, newRelease} {
+		if err := os.WriteFile(filepath.Join(dir, "meter.lua"), []byte("same measurement code"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	load := func(release string) *config.Config {
+		config.DriversDirOverride = release
+		cfg := &config.Config{
+			Drivers: []config.Driver{{Name: "meter", Lua: "drivers/meter.lua", IsSiteMeter: true}},
+			Weather: &config.Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18},
+		}
+		cfg.ResolveDriverPaths(t.TempDir())
+		return cfg
+	}
+	s := newForecastSiteConfig(st)
+	s.identity = func(string) (string, bool) { return "meter:sn", true }
+	bind := func(cfg *config.Config) forecastSite {
+		s.Configure(cfg, nil)
+		s.RefreshIdentity(s.configuredAt.Add(4 * time.Second))
+		return s.Snapshot()
+	}
+	first := bind(load(oldRelease))
+	if first.IdentityPending || first.LearningRevision == "" {
+		t.Fatal("ready site did not bind a learning revision")
+	}
+	if got := bind(load(newRelease)); got.LearningRevision != first.LearningRevision {
+		t.Fatal("moving identical scripts to a new release directory reset learning")
+	}
+	if err := os.WriteFile(filepath.Join(newRelease, "meter.lua"), []byte("changed measurement code"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := bind(load(newRelease)); got.LearningRevision == first.LearningRevision {
+		t.Fatal("changed measurement code kept the old learning identity")
+	}
+}
+
+// A site whose scripts do not move (Docker, Home Assistant) accepted its
+// learning ID under the resolved-path policy. The new policy keeps it.
+func TestForecastLearningIDCarriesAcrossPortablePathPolicy(t *testing.T) {
+	dir := t.TempDir()
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	previousDir := config.DriversDirOverride
+	defer func() { config.DriversDirOverride = previousDir }()
+	release := t.TempDir()
+	if err := os.WriteFile(filepath.Join(release, "meter.lua"), []byte("measurement code"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config.DriversDirOverride = release
+	cfg := &config.Config{
+		Drivers: []config.Driver{{Name: "meter", Lua: "drivers/meter.lua", IsSiteMeter: true}},
+		Weather: &config.Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18},
+	}
+	cfg.ResolveDriverPaths(dir)
+
+	// The receipt an earlier build wrote for this site.
+	options := forecastMeasurementOptions(cfg, nil)
+	v := forecastSite{Meter: cfg.SiteMeterDriver(), Timezone: forecastTimezone(), Options: options}
+	weather := *cfg.Weather
+	learning := forecastLearningDrivers(v.Meter, v.Options.ExpectedFlows, cfg.Drivers)
+	old, err := forecastResolvedPathRevision(v, &weather, learning)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := forecastStaticRevision(v, &weather, learning); current == old {
+		t.Fatal("test needs the two policies to differ")
+	}
+	ids := map[string]string{"meter": "meter:sn"}
+	receipt, _ := json.Marshal(forecastIdentityReceipt{BaseRevision: old, IDs: ids})
+	if err := st.SaveConfig(forecastIdentityReceiptKey, string(receipt)); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newForecastSiteConfig(st)
+	s.identity = func(name string) (string, bool) { return ids[name], ids[name] != "" }
+	s.Configure(cfg, nil)
+	s.RefreshIdentity(s.configuredAt.Add(4 * time.Second))
+	got := s.Snapshot()
+	if got.IdentityPending {
+		t.Fatal("site stayed pending")
+	}
+	idsJSON, _ := json.Marshal(ids)
+	if want := fmt.Sprintf("site-v2:%x", sha256.Sum256([]byte(old+"/"+string(idsJSON)))); got.LearningRevision != want {
+		t.Fatalf("learning revision = %s, want the one accepted before the policy change (%s)", got.LearningRevision, want)
+	}
+	if s.accepted.LearningBaseRevision != old {
+		t.Fatalf("receipt learning base = %q, want %q", s.accepted.LearningBaseRevision, old)
 	}
 }
