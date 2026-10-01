@@ -297,3 +297,72 @@ func TestControlStatusAnswersEveryReason(t *testing.T) {
 		t.Fatalf("a driver reply alone read as following: %+v", f)
 	}
 }
+
+// Easee's cloud records power only when it changes. While the cloud still
+// hears from the charger, each poll confirms the unchanged value, so a steady
+// charge stays measured instead of turning into a lost-control alarm.
+func TestChangeOnlyChargerStaysCurrentWhileSteady(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tel := telemetry.NewStore()
+		tel.DriverHealthMut("cloud")
+		srv := New(&Deps{Tel: tel})
+		start := time.Now()
+		changedAt := time.Time{}
+		power := 0.0
+		var late []ControlFeedback
+		for sec := range 15 * 60 {
+			if sec%60 == 0 {
+				c := tel.BeginCommand("cloud", []byte(`{"action":"ev_set_current","power_w":11000}`), time.Now())
+				tel.CompleteCommand(c, "accepted")
+			}
+			time.Sleep(time.Second)
+			// The charger ramps once, 40 s after the first command, then holds.
+			if sec == 40 {
+				power, changedAt = 10900, time.Now().Add(-3*time.Second)
+			}
+			if sec%10 == 0 && !changedAt.IsZero() {
+				data := fmt.Sprintf(`{"connected":true,"control_power_observed_at":%q,"control_power_confirmed":true,"power_max_age_s":180}`, changedAt.Format(time.RFC3339Nano))
+				tel.Update("cloud", telemetry.DerEV, power, nil, []byte(data))
+			}
+			if time.Since(start) >= 3*time.Minute {
+				late = append(late, srv.controlFeedback(time.Now())...)
+			}
+		}
+		for _, f := range late {
+			if f.Status != "following" || f.Evidence != "measured" || f.Severity != "info" {
+				t.Fatalf("steady confirmed charging read as %s/%s/%s (%s)", f.Status, f.Evidence, f.Severity, f.Reason)
+			}
+		}
+	})
+}
+
+// A confirmed unchanged value after a new target is evidence too: a charger
+// that keeps 11 kW when asked for 4 kW is not following.
+func TestChangeOnlyChargerIgnoringNewTargetWarns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tel := telemetry.NewStore()
+		tel.DriverHealthMut("cloud")
+		srv := New(&Deps{Tel: tel})
+		changedAt := time.Now()
+		target := 11000.0
+		var last ControlFeedback
+		for sec := range 10 * 60 {
+			if sec == 5*60 {
+				target = 4000
+			}
+			if sec%60 == 0 || sec == 5*60 {
+				c := tel.BeginCommand("cloud", []byte(fmt.Sprintf(`{"action":"ev_set_current","power_w":%g}`, target)), time.Now())
+				tel.CompleteCommand(c, "accepted")
+			}
+			time.Sleep(time.Second)
+			if sec%10 == 0 {
+				data := fmt.Sprintf(`{"connected":true,"control_power_observed_at":%q,"control_power_confirmed":true,"power_max_age_s":180}`, changedAt.Format(time.RFC3339Nano))
+				tel.Update("cloud", telemetry.DerEV, 11000, nil, []byte(data))
+			}
+			last = srv.controlFeedback(time.Now())[0]
+		}
+		if last.Status != "not_following" || last.Reason != "power_above_target" {
+			t.Fatalf("ignored target read as %s/%s", last.Status, last.Reason)
+		}
+	})
+}

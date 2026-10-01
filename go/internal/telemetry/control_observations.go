@@ -11,6 +11,10 @@ import (
 type ControlObservation struct {
 	PowerW float64
 	At     time.Time
+	// ConfirmedAt is when a source that reports only changes last confirmed
+	// that this sample is still current. It keeps the sample fresh; it never
+	// makes a repeated sample count as a new measurement.
+	ConfirmedAt time.Time
 }
 type ControlWindow struct {
 	MeanW, MinW, MaxW float64
@@ -125,6 +129,7 @@ func ControlPowerObservation(power float64, data json.RawMessage, receivedAt tim
 	var d struct {
 		ControlPowerW          *float64             `json:"control_power_w"`
 		ControlPowerAvailable  *bool                `json:"control_power_available"`
+		ControlPowerConfirmed  bool                 `json:"control_power_confirmed"`
 		ControlPowerObservedAt string               `json:"control_power_observed_at"`
 		PowerObservedAt        string               `json:"power_observed_at"`
 		ForecastPower          *ForecastPowerSample `json:"forecast_power"`
@@ -157,8 +162,19 @@ func ControlPowerObservation(power float64, data json.RawMessage, receivedAt tim
 		}
 		p.At = at
 	}
+	if d.ControlPowerConfirmed {
+		p.ConfirmedAt = receivedAt
+	}
 	age := ControlPowerMaxAge(data)
-	return p, finite(p.PowerW) && !p.At.After(receivedAt) && receivedAt.Sub(p.At) <= age
+	return p, finite(p.PowerW) && !p.At.After(receivedAt) && receivedAt.Sub(p.Seen()) <= age
+}
+
+// Seen is the latest time the source vouched for this sample.
+func (p ControlObservation) Seen() time.Time {
+	if p.ConfirmedAt.After(p.At) {
+		return p.ConfirmedAt
+	}
+	return p.At
 }
 
 // ControlPowerMaxAge is how long a power observation stays current: the

@@ -153,9 +153,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			}
 			measurement, powerKnown := telemetry.ControlPowerObservation(rd.RawW, rd.Data, rd.UpdatedAt)
 			if !measurement.At.IsZero() {
-				f.ObservedAtMs = measurement.At.UnixMilli()
+				f.ObservedAtMs = measurement.Seen().UnixMilli()
 			}
-			if fresh && powerKnown && now.Sub(measurement.At) <= telemetry.ControlPowerMaxAge(rd.Data) {
+			if fresh && powerKnown && now.Sub(measurement.Seen()) <= telemetry.ControlPowerMaxAge(rd.Data) {
 				f.ActualW = watts(measurement.PowerW)
 			}
 			if fresh && kind == telemetry.DerBattery && rd.SoC != nil &&

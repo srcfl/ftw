@@ -293,7 +293,9 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 	}
 	mark(&c.ReadbackMismatchSince, readbackMismatch, now)
 	observation, fresh := ControlPowerObservation(power, data, now)
-	power, observedAt := observation.PowerW, observation.At
+	// A change-only source that confirms an unchanged sample states the power
+	// at the confirmation time; an unconfirmed repeat adds nothing new.
+	power, observedAt := observation.PowerW, observation.Seen()
 	// A cached sample from before the run cannot show its response. Repeated
 	// delivery of one source sample also cannot extend a measured time window.
 	if !fresh || !finite(power) || observedAt.Before(c.Since) {
