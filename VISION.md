@@ -34,105 +34,53 @@ Core validates every plan and command, including plans supplied by another
 system. Fuse, equipment, SoC, freshness and other quantified safety limits
 always apply. Stale required site-meter data stops dispatch.
 
-## Are you in control?
+## Are we in control?
 
-**Don't trust what you say. Trust what you read.**
+**Trust what you read, not what you sent.**
 
-FTW must verify control through fresh measurements. Sending a command, getting
-an API success or reading back a setpoint does not prove a physical effect.
-The user should be able to see whether the equipment did what they asked,
-what limited it and what FTW can actually confirm.
+For each device function FTW commands, such as a battery, a car charger, a
+solar cap or V2X, the normal view answers one question: is the device doing
+what FTW asked? A successful driver call, an API reply or an echoed setpoint
+does not prove a physical effect.
 
-Trace each request through Core's limits, the command sent, the device's
-response and the measured result. Keep the time, source and unit of each
-step.
+Core decides the answer and its urgency; clients only render it:
 
-Apply these levels to the device function FTW commands. Other measurements
-provide context: solar normally contributes measured generation, not a control
-verdict. It receives a control verdict when FTW issues curtailment. Household
-load is the residual after measured flows; it is not another independent meter.
+- **Following FTW:** fresh readings show the device doing what FTW asked.
+- **Waiting:** a response is still due, or there is nothing to verify yet.
+- **Limited:** the device follows within a known limit, such as a nearly full
+  battery, the main fuse or a charger setting.
+- **Not following:** fresh readings disagree with the command after the
+  device's response time.
+- **No contact:** readings or commands fail. Losing a device FTW had measured
+  is an alarm.
+- **Not controlled:** FTW only reads the device or has handed control back.
 
-Each device keeps its own level. One may have Tier 2 while another is offline
-with only a Tier 0 acknowledgement. Missing readings from another device
-leave its effect in the unmeasured background, alongside household load;
-they do not block this device's confirmation by themselves. That residual may
-also contain generation when a battery or solar source stops reporting.
-Require fresh readings from the device under test and its independent meter.
-Use other flows as corrections only when their measurements support the same
-before/after window. A changing residual can still prevent confirmation.
+Show the evidence as a receipt, not as the headline: sent, accepted, measured
+and confirmed. Accepted means the driver took the command. Measured means
+fresh, distinct device readings across the response window. Confirmed means a
+separate physical meter saw the matching change. Keep the target separate: a
+battery can be confirmed at 4.4 kW against a 5 kW command, and the shortfall
+stays visible.
 
-Show each level with a small mark inside the device's energy-flow bubble.
-Keep power and state of charge prominent, with tier labels in the detail view.
-A tap opens the device's controls. Put “Are we in control?” below them, with
-the reason, request, measurements and curves in a section the user can expand.
-Combined bubbles show mixed levels and keep alarms
-visible; they never turn one device’s proof into a verdict for the whole group.
-Losing measured confirmation on a previously verified device must raise a visible alarm after its normal response wait.
-Starting a command, unplugging a car or returning control to a device must not
-create a false loss alarm. Fresh measured proof clears the alarm.
+- Freshness follows the source. A slow cloud source stays current for as long
+  as it declares; a repeated or cached sample never extends proof.
+- Compare each reading with the commands that could still be in force during
+  the response time. Retuning every tick is normal control, not a new test.
+  A material step starts a new comparison.
+- Confirmation needs a separate physical sensor, aligned readings and a clear
+  step. Subtract other measured flows, and never let an unmeasured load
+  disappear into an average. A confirmed step stays confirmed while the device
+  keeps following with fresh readings.
+- Explain a shortfall only with a fresh, relevant fact, such as state of
+  charge or a reported limit. Say when the cause is unknown.
+- Keep the overview quiet while FTW is in control. Mark warnings amber and
+  alarms red, and clear them when fresh evidence shows recovery.
+- Never change a power target just to create a test signal without the
+  owner's consent.
+- Give authorized agents and support reports the same evidence.
 
-Use three explicit levels:
-
-- **Tier 0 — acknowledged:** the command was sent and acknowledged. This
-  confirms communication, not a physical effect.
-- **Tier 1 — device measured:** distinct, fresh device readings establish the
-  actual power after the command. A setpoint echo alone cannot reach this level.
-- **Tier 2 — independently confirmed:** a separate physical meter shows the
-  matching effect. For example, a new 1 kW charging command produces a 1 kW
-  device reading and a corresponding 1 kW increase in site import.
-
-The tier describes measurement evidence, not whether the target was met.
-Show target fulfilment and its known cause separately. If FTW sends 5 kW,
-the device delivers 4.4 kW and the separate meter supports that change, show
-Tier 2 and the 600 W shortfall together. Do not lower the tier because the
-watts miss the target or hide the shortfall because the tier is high. A wrong
-direction or no response can also be measured reliably and must remain a
-warning. A device limit is a reported fact only when a fresh, relevant source
-establishes it; a sustained shortfall alone does not establish the cause.
-
-Use time-aligned readings, short measurement windows, tolerances and response
-waits to handle noise and different sample rates. Account for solar and other
-loads. A simultaneous load change may prevent attribution; remain at Tier 1
-until the evidence supports Tier 2. A steady absolute grid value is not proof
-of a command's effect. Check the change against the baseline.
-
-Sensor fusion must respect energy balance and retain each reading's source
-and age. Two fields from the same sensor are not independent confirmation.
-Neither an estimate nor house load derived from those same readings can act
-as independent proof. Missing, stale or conflicting data lowers confidence;
-never smooth it into a successful result. Confirmation expires when its
-supporting readings stop being current.
-
-Treat each command as a chance to observe the whole site. Keep a short window
-before it and follow the measured curves afterwards. Subtract other measured
-flows from grid power before comparing the change with the controlled device.
-Changing solar need not prevent confirmation when its measured contribution
-explains the grid change. Unknown household loads remain an uncertainty:
-matching averages alone must not hide a load starting and stopping.
-
-Use the fastest useful fresh measurements the sources safely provide. A short
-burst around a command may help when the driver supports it, but must respect
-device limits and vendor quotas, preserve command priority and end on its own.
-Polling a cloud cache faster is not faster measurement. Never change a power
-target just to create a test signal without the owner's explicit consent.
-
-Keep success at each step separate. If a user asks for 11 kW, Core permits
-5 kW and the meter shows 5 kW, the device follows the sent command but the
-user's request remains limited. A charging goal needs its own completion
-evidence. A matching reading also does not prove that FTW is the only
-controller; report a changed setpoint without guessing who changed it.
-
-Apply this standard to every control mode and supported device. Show waiting,
-limits, failed commands, missing effect and recovery in the normal view, with
-the known cause and a useful next step. Say when the cause is unknown. Keep
-warnings current and clear them when new evidence shows recovery. Make the
-same evidence available to authorized agents and support tools.
-
-Traceability and robustness are product requirements: retain enough evidence to
-explain what happened, and stop depending on an actuator that cannot deliver.
-Recovery needs fresh proof of response. This is the product direction; each
-implementation must state which devices, paths and physical outcomes it has
-verified.
+This is the product direction. Each implementation states which devices,
+paths and physical outcomes it has verified.
 
 ## Trust through visible behaviour
 

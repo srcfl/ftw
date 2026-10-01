@@ -2,18 +2,8 @@
 "ftw": minor
 ---
 
-Show command results, device limits and fresh measured response in the normal overview and charging view. Distinguish driver replies from verified effect, warn when setpoints or power diverge, and include the same evidence in support reports.
+Show whether each device FTW controls does what FTW asked. A tap on the battery, charger or solar bubble answers "Are we in control?" first: Following FTW, Waiting, Limited, Not following, No contact or Not controlled, with one sentence and, when you can act, the next step. Manual override moves below it.
 
-Compare time-aligned device and site curves while accounting for other measured flows, including changing solar. Show the comparison and any unexplained change. Cached device or site-meter samples and conflicting changes cannot confirm control. Other unavailable flows remain in the residual.
+"How FTW knows" lists the evidence: sent, accepted, measured and confirmed by a separate grid meter, with numbers and response curves for experts. Support reports and the API carry the same status and evidence.
 
-Recognize a physical site meter relayed through an inverter, read Sungrow’s active setpoint, name missing measurement sources and show measured time gaps in milliseconds.
-
-Assess each device separately. Unavailable background devices remain in the residual. Show per-device status in the overview and alarm when measured control is lost after the response wait.
-
-Show compact control levels on energy-flow bubbles. Open each device’s controls on tap, with alarms visible even when devices are combined.
-
-Use small marks in the bubbles: a dot for device measurement, a ring for site confirmation and a warning symbol for faults. Keep normal response waits quiet and put tier labels in the detail view.
-
-Put a collapsed “Are we in control?” section below the battery, charger and solar controls. Keep it scoped to the selected device or group and preserve its open state while measurements refresh.
-
-Separate measurement tiers from target fulfilment. A 4.4 kW response to a 5 kW command can reach Tier 2 when the site meter confirms the actual change. Show the shortfall and unknown cause separately, preserve wrong-direction and missing-response warnings, and expire proof when measurements stop.
+The overview stays quiet while FTW is in control and marks only devices that need a look (amber) or attention now (red). Proof follows a device through targets retuned every tick and slow cloud sources, a confirmed step survives later household loads, and a battery that takes less power as it fills is explained instead of flagged.
