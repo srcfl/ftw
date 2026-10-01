@@ -127,7 +127,6 @@ func ControlPowerObservation(power float64, data json.RawMessage, receivedAt tim
 		ControlPowerAvailable  *bool                `json:"control_power_available"`
 		ControlPowerObservedAt string               `json:"control_power_observed_at"`
 		PowerObservedAt        string               `json:"power_observed_at"`
-		PowerMaxAgeS           float64              `json:"power_max_age_s"`
 		ForecastPower          *ForecastPowerSample `json:"forecast_power"`
 	}
 	p := ControlObservation{PowerW: power, At: receivedAt}
@@ -158,9 +157,51 @@ func ControlPowerObservation(power float64, data json.RawMessage, receivedAt tim
 		}
 		p.At = at
 	}
+	age := ControlPowerMaxAge(data)
+	return p, finite(p.PowerW) && !p.At.After(receivedAt) && receivedAt.Sub(p.At) <= age
+}
+
+// ControlPowerMaxAge is how long a power observation stays current: the
+// source's power_max_age_s when it declares one, at most three minutes,
+// otherwise one minute.
+func ControlPowerMaxAge(data json.RawMessage) time.Duration {
+	if age := controlPowerDeclaredMaxAge(data); age > 0 {
+		return age
+	}
+	return time.Minute
+}
+
+func controlPowerDeclaredMaxAge(data json.RawMessage) time.Duration {
+	var d struct {
+		PowerMaxAgeS float64 `json:"power_max_age_s"`
+	}
+	if len(data) == 0 || json.Unmarshal(data, &d) != nil {
+		return 0
+	}
 	age := time.Duration(d.PowerMaxAgeS * float64(time.Second))
 	if age <= 0 || age > 3*time.Minute {
-		age = time.Minute
+		return 0
 	}
-	return p, finite(p.PowerW) && !p.At.After(receivedAt) && receivedAt.Sub(p.At) <= age
+	return age
+}
+
+// freezeStepWindows keeps each completed post-step window with its command,
+// so the site comparison neither depends on when a client asks nor changes
+// when a household load starts later. Caller holds mu.
+func (s *Store) freezeStepWindows(now time.Time) {
+	for k, c := range s.commands {
+		if c.StepAfter != nil || c.Since.IsZero() || now.Sub(c.Since) < ControlWindowDuration {
+			continue
+		}
+		end := c.Since.Add(ControlWindowDuration)
+		windows := map[string]ControlBaseline{}
+		for rk, rd := range s.readings {
+			if rd.DerType == DerVehicle {
+				continue
+			}
+			windows[rk] = ControlBaseline{rd.Driver, rd.DerType, observationWindow(s.controlObservations[rk], c.Since, end), copyControlPoints(s.controlObservations[rk], c.Since, end)}
+		}
+		c.StepAfter, c.StepAfterAt = windows, end
+		s.commands[k] = c
+	}
 }

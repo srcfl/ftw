@@ -459,6 +459,7 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 
 	s.observeCommand(driver, t, rawW, data, now)
 	s.recordControlObservation(driver, t, rawW, data, now)
+	s.freezeStepWindows(now)
 
 	// Auto-buffer the standard fields (raw, not smoothed — we store ground
 	// truth and let consumers smooth as they like).
@@ -749,7 +750,7 @@ func (s *Store) Remove(driver string) {
 		delete(s.controlObservations, key(driver, kind))
 	}
 	for k, c := range s.commands {
-		c.Baseline = nil
+		c.Baseline, c.StepAfter = nil, nil
 		s.commands[k] = c
 	}
 	for k, command := range s.commands {

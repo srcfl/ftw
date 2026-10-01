@@ -20,11 +20,13 @@ type ControlResponsePoint struct {
 type ControlComparison struct {
 	BeforeW         float64                `json:"-"`
 	AfterW          float64                `json:"-"`
+	GridBeforeW     *float64               `json:"grid_before_w,omitempty"`
+	GridAfterW      *float64               `json:"grid_after_w,omitempty"`
 	BeforeAt        time.Time              `json:"-"`
 	AfterAt         time.Time              `json:"-"`
 	Reason          string                 `json:"-"`
-	DeviceDeltaW    *float64               `json:"-"`
-	SiteDeltaW      *float64               `json:"-"`
+	DeviceDeltaW    *float64               `json:"device_change_w"`
+	SiteDeltaW      *float64               `json:"grid_change_w"`
 	OtherDeltaW     *float64               `json:"other_change_w"`
 	AdjustedDeltaW  *float64               `json:"adjusted_site_change_w"`
 	ResidualW       *float64               `json:"unexplained_change_w"`
@@ -130,6 +132,7 @@ func independentResponse(cmd telemetry.CommandEvidence, meter string, separate b
 	}
 	deltaDevice := meanControlPower(values(current, device)) - baseDevice
 	out.BeforeW, out.AfterW = meanControlPower(values(before, grid)), meanControlPower(values(current, grid))
+	out.GridBeforeW, out.GridAfterW = watts(out.BeforeW), watts(out.AfterW)
 	out.BeforeAt, out.AfterAt = before[len(before)-1].at, current[len(current)-1].at
 	out.DeviceDeltaW = watts(deltaDevice)
 	out.SiteDeltaW = watts(out.AfterW - out.BeforeW)

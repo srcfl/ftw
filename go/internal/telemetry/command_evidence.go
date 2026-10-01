@@ -9,6 +9,12 @@ import (
 // CommandEvidence records a driver call, not proof that hardware obeyed it.
 // Keep one command per device function so a hybrid's PV cap cannot replace
 // its battery command. The registry clears these records on driver restart.
+//
+// A device keeps one measurement record while FTW sends it the same action.
+// Modes that retune the target every tick must not restart the proof on each
+// command, so a reading is compared with every command that could still be in
+// force during the device's response delay. Only a material step starts a new
+// run with its own response wait and site comparison.
 type CommandEvidence struct {
 	Driver                string
 	Kind                  string
@@ -23,7 +29,23 @@ type CommandEvidence struct {
 	PowerObservedSince    time.Time
 	LastObservation       time.Time
 	LastMeasuredAt        time.Time
-	Baseline              map[string]ControlBaseline
+	// LastGapW is the latest fresh reading's distance from the commands in
+	// force during the response delay. Nil until such a reading arrives.
+	LastGapW *float64
+	// MaxAge is the power freshness the source declares; zero when it declares none.
+	MaxAge   time.Duration
+	Recent   []CommandPoint
+	Baseline map[string]ControlBaseline
+	// StepAfter freezes the completed window after a material step, so a later
+	// household load cannot rewrite the site comparison for that step.
+	StepAfter   map[string]ControlBaseline
+	StepAfterAt time.Time
+}
+
+// CommandPoint is one command FTW sent, kept for the response-delay check.
+type CommandPoint struct {
+	PowerW float64
+	At     time.Time
 }
 
 func commandKind(action string) string {
@@ -39,6 +61,24 @@ func commandKind(action string) string {
 	default:
 		return ""
 	}
+}
+
+// ResponseDelay bounds how long a device may still show an earlier command.
+// Cloud chargers often report a new current a minute or more after the call.
+func ResponseDelay(kind string) time.Duration {
+	if kind == "ev" {
+		return 2 * time.Minute
+	}
+	return 15 * time.Second
+}
+
+// A material step needs its own response wait and site comparison. Smaller
+// retuning continues the current run.
+func materialStep(old, next *float64) bool {
+	if old == nil || next == nil {
+		return old != nil || next != nil
+	}
+	return math.Abs(*next-*old) >= math.Max(500, ControlToleranceW(*old))
 }
 
 func (s *Store) BeginCommand(driver string, payload []byte, now time.Time) CommandEvidence {
@@ -64,32 +104,38 @@ func (s *Store) BeginCommand(driver string, payload []byte, now time.Time) Comma
 		s.commands = map[string]CommandEvidence{}
 	}
 	k := driver + ":" + kind
-	if old, ok := s.commands[k]; ok && old.Result != "released" {
+	old, ok := s.commands[k]
+	if ok && old.Result != "released" {
 		c.LastMeasuredAt = old.LastMeasuredAt
 	}
-	if old, ok := s.commands[k]; ok && old.Result == "accepted" && old.Action == c.Action && samePower(old.PowerW, c.PowerW) {
-		c.Since = old.Since
-		c.ReadbackMismatchSince = old.ReadbackMismatchSince
-		c.PowerMismatchSince = old.PowerMismatchSince
-		c.PowerMatchSince = old.PowerMatchSince
-		c.PowerObservedSince = old.PowerObservedSince
-		c.LastObservation = old.LastObservation
-		c.Baseline = old.Baseline
+	// Retuning the same action continues one measurement record. A material
+	// step, a failed or unknown call, or a return to device control needs new
+	// proof against the new target.
+	if ok && old.Action == c.Action && (old.Result == "accepted" || old.Result == "pending") {
+		c.Recent, c.MaxAge = append([]CommandPoint(nil), old.Recent...), old.MaxAge
+		if !materialStep(old.PowerW, c.PowerW) {
+			c.Since, c.Baseline, c.StepAfter, c.StepAfterAt = old.Since, old.Baseline, old.StepAfter, old.StepAfterAt
+			c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = old.ReadbackMismatchSince, old.PowerMismatchSince, old.PowerMatchSince
+			c.PowerObservedSince, c.LastObservation, c.LastGapW = old.PowerObservedSince, old.LastObservation, old.LastGapW
+		}
+	}
+	if c.PowerW != nil {
+		c.Recent = append(c.Recent, CommandPoint{PowerW: *c.PowerW, At: now})
+	}
+	if len(c.Recent) > 8 {
+		c.Recent = c.Recent[len(c.Recent)-8:]
 	}
 	if c.Baseline == nil {
 		c.Baseline = s.controlBaseline(now)
 	}
 	s.commands[k] = c
-	c.Baseline = nil // the completion token never owns the stored baseline
+	// The completion token never owns the stored windows or history.
+	c.Baseline, c.StepAfter, c.Recent = nil, nil, nil
 	if c.PowerW != nil {
 		v := *c.PowerW
 		c.PowerW = &v
 	}
 	return c
-}
-
-func samePower(a, b *float64) bool {
-	return a == nil && b == nil || a != nil && b != nil && math.Abs(*a-*b) <= math.Max(100, math.Abs(*a)*0.05)
 }
 
 // CompleteCommand never retains raw driver errors: they may contain vendor
@@ -107,21 +153,29 @@ func (s *Store) CompleteCommand(c CommandEvidence, result string) {
 	}
 }
 
+func copyWindows(in map[string]ControlBaseline) map[string]ControlBaseline {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]ControlBaseline, len(in))
+	for k, v := range in {
+		v.Points = append([]ControlObservation(nil), v.Points...)
+		out[k] = v
+	}
+	return out
+}
+
 func (s *Store) CommandEvidence(driver, kind string) (CommandEvidence, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	c, ok := s.commands[driver+":"+kind]
-	if c.Baseline != nil {
-		copied := make(map[string]ControlBaseline, len(c.Baseline))
-		for k, v := range c.Baseline {
-			v.Points = append([]ControlObservation(nil), v.Points...)
-			copied[k] = v
+	c.Baseline, c.StepAfter = copyWindows(c.Baseline), copyWindows(c.StepAfter)
+	c.Recent = append([]CommandPoint(nil), c.Recent...)
+	for _, p := range []**float64{&c.PowerW, &c.LastGapW} {
+		if *p != nil {
+			v := **p
+			*p = &v
 		}
-		c.Baseline = copied
-	}
-	if c.PowerW != nil {
-		v := *c.PowerW
-		c.PowerW = &v
 	}
 	return c, ok
 }
@@ -151,12 +205,49 @@ func (s *Store) EndCommandControl(driver string, failed bool) {
 			c.Result = "released"
 		}
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
-		c.PowerObservedSince, c.LastObservation = time.Time{}, time.Time{}
+		c.PowerObservedSince, c.LastObservation, c.LastGapW = time.Time{}, time.Time{}, nil
+		c.Recent, c.StepAfter, c.StepAfterAt = nil, nil, time.Time{}
 		if !failed {
 			c.LastMeasuredAt = time.Time{}
 		}
 		s.commands[k] = c
 	}
+}
+
+// commandGap is a reading's distance from the commands that could still be in
+// force at its source time: the last command sent before the response delay
+// and every later one. A PV command is a ceiling, so lower output is no gap.
+func (c CommandEvidence) commandGap(power float64, at time.Time) float64 {
+	cutoff := at.Add(-ResponseDelay(c.Kind))
+	lo, hi := math.Inf(1), math.Inf(-1)
+	var inForce *CommandPoint
+	for i := range c.Recent {
+		p := c.Recent[i]
+		if p.At.After(at) {
+			continue
+		}
+		if !p.At.After(cutoff) {
+			inForce = &c.Recent[i]
+			continue
+		}
+		lo, hi = math.Min(lo, p.PowerW), math.Max(hi, p.PowerW)
+	}
+	if inForce != nil {
+		lo, hi = math.Min(lo, inForce.PowerW), math.Max(hi, inForce.PowerW)
+	}
+	if lo > hi {
+		return math.NaN()
+	}
+	if c.Kind == "pv" {
+		return math.Max(0, math.Abs(power)-math.Max(math.Abs(lo), math.Abs(hi)))
+	}
+	if power < lo {
+		return lo - power
+	}
+	if power > hi {
+		return power - hi
+	}
+	return 0
 }
 
 // Called under mu only when telemetry arrives. UI polling never starts or
@@ -176,7 +267,8 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 		s.commands[k] = c
 		return
 	}
-	if now.Sub(c.LastObservation) > time.Minute {
+	c.MaxAge = controlPowerDeclaredMaxAge(data)
+	if now.Sub(c.LastObservation) > max(time.Minute, c.MaxAge) {
 		c.ReadbackMismatchSince, c.PowerMismatchSince, c.PowerMatchSince = time.Time{}, time.Time{}, time.Time{}
 		c.PowerObservedSince = time.Time{}
 	}
@@ -187,21 +279,26 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 			*since = at
 		}
 	}
-	readbackGap := 0.0
-	if d.SetpointW != nil {
-		readbackGap = math.Abs(*d.SetpointW - *c.PowerW)
+	readbackMismatch := false
+	if d.SetpointW != nil && finite(*d.SetpointW) {
+		setpoint := *d.SetpointW
 		if kind == DerPV {
-			readbackGap = math.Abs(math.Abs(*d.SetpointW) - math.Abs(*c.PowerW))
+			setpoint = -math.Abs(setpoint)
+		}
+		gap := c.commandGap(setpoint, now)
+		readbackMismatch = math.IsNaN(gap) || gap > math.Max(100, math.Abs(*c.PowerW)*0.05)
+		if kind == DerPV {
+			readbackMismatch = math.Abs(math.Abs(*d.SetpointW)-math.Abs(*c.PowerW)) > math.Max(100, math.Abs(*c.PowerW)*0.05)
 		}
 	}
-	mark(&c.ReadbackMismatchSince, d.SetpointW != nil && finite(*d.SetpointW) && readbackGap > math.Max(100, math.Abs(*c.PowerW)*0.05), now)
+	mark(&c.ReadbackMismatchSince, readbackMismatch, now)
 	observation, fresh := ControlPowerObservation(power, data, now)
 	power, observedAt := observation.PowerW, observation.At
-	// A cached sample from before the command cannot show its response. Repeated
+	// A cached sample from before the run cannot show its response. Repeated
 	// delivery of one source sample also cannot extend a measured time window.
 	if !fresh || !finite(power) || observedAt.Before(c.Since) {
 		c.PowerMismatchSince, c.PowerMatchSince, c.LastObservation = time.Time{}, time.Time{}, time.Time{}
-		c.PowerObservedSince = time.Time{}
+		c.PowerObservedSince, c.LastGapW = time.Time{}, nil
 		s.commands[k] = c
 		return
 	}
@@ -211,12 +308,20 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 	}
 	c.LastObservation = observedAt
 	mark(&c.PowerObservedSince, true, observedAt)
-	gap := math.Abs(power - *c.PowerW)
-	if kind == DerPV {
-		gap = math.Max(0, math.Abs(power)-math.Abs(*c.PowerW))
+	gap := c.commandGap(power, observedAt)
+	c.LastGapW = nil
+	if finite(gap) {
+		c.LastGapW = &gap
 	}
-	mark(&c.PowerMismatchSince, gap > ControlToleranceW(*c.PowerW), observedAt)
-	mark(&c.PowerMatchSince, PowerFollowsCommand(c.Kind, *c.PowerW, power), observedAt)
+	tolerance := ControlToleranceW(*c.PowerW)
+	mismatch := !finite(gap) || gap > tolerance
+	mark(&c.PowerMismatchSince, mismatch, observedAt)
+	follows := !mismatch
+	if kind == DerPV {
+		// Weak sun alone cannot prove that a ceiling took effect.
+		follows = PowerFollowsCommand(c.Kind, *c.PowerW, power)
+	}
+	mark(&c.PowerMatchSince, follows, observedAt)
 	if c.HasMeasuredPower(now) {
 		c.LastMeasuredAt = observedAt
 	}
@@ -226,10 +331,11 @@ func (s *Store) observeCommand(driver string, kind DerType, power float64, data 
 // HasMeasuredPower confirms a window of distinct, fresh device readings, even
 // when they show a shortfall, no response or the wrong direction. Whether the
 // device meets the command is a separate verdict; a setpoint echo is not power.
+// A slow source counts as fresh for as long as it declares.
 func (c CommandEvidence) HasMeasuredPower(now time.Time) bool {
 	return !c.PowerObservedSince.IsZero() &&
 		c.LastObservation.Sub(c.PowerObservedSince) >= 10*time.Second &&
-		!c.LastObservation.After(now) && now.Sub(c.LastObservation) <= 10*time.Second
+		!c.LastObservation.After(now) && now.Sub(c.LastObservation) <= max(10*time.Second, c.MaxAge)
 }
 
 // ControlToleranceW is the response tolerance, not a device rating or safety limit.

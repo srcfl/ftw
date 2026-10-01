@@ -12,44 +12,52 @@ import (
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// ControlFeedback is read-only evidence for every mode. Missing numbers are
-// null, never invented zeros. The client owns prose; reasons describe only
-// what Core or the device actually reported, not a guessed physical cause.
+// ControlFeedback answers "Are we in control?" for one device function in
+// every mode. Status and severity are Core's verdict; clients choose words and
+// colours for them and never derive their own. Evidence names the strongest
+// proof behind it: accepted (the driver took the call), measured (fresh device
+// readings) or confirmed (a separate meter saw the change). Missing numbers
+// are null, never invented zeros. Reasons describe only what Core or the
+// device reported, not a guessed physical cause.
 type ControlFeedback struct {
-	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
-	SiteBeforeW      *float64           `json:"site_before_w"`
-	SiteAfterW       *float64           `json:"site_after_w"`
-	SiteBeforeAtMs   int64              `json:"site_before_at_ms,omitempty"`
-	SiteAfterAtMs    int64              `json:"site_after_at_ms,omitempty"`
-	ToleranceW       *float64           `json:"tolerance_w"`
-	VerificationTier *int               `json:"verification_tier"`
-	VerificationLost bool               `json:"verification_lost,omitempty"`
-	SiteSourceIssue  string             `json:"site_source_issue,omitempty"`
-	SiteConfirmation string             `json:"site_confirmation"`
-	SiteMeter        string             `json:"site_meter,omitempty"`
-	SiteDeltaW       *float64           `json:"site_delta_w"`
-	DeviceDeltaW     *float64           `json:"device_delta_w"`
-	Response         string             `json:"response"`
-	VerifiedAtMs     int64              `json:"verified_at_ms,omitempty"`
 	Driver           string             `json:"driver"`
 	Kind             string             `json:"kind"`
 	Mode             string             `json:"mode"`
-	State            string             `json:"state"`
+	Status           string             `json:"status"`
 	Reason           string             `json:"reason"`
 	Severity         string             `json:"severity"`
-	RequestedW       *float64           `json:"requested_w"`
-	SentW            *float64           `json:"sent_w"`
-	ReadbackW        *float64           `json:"readback_w"`
-	ActualW          *float64           `json:"actual_w"`
-	BatterySoC       *float64           `json:"battery_soc,omitempty"`
-	ChargeResumeSoC  *float64           `json:"charge_resume_soc,omitempty"`
-	RequestedA       *float64           `json:"requested_a"`
-	OfferedA         *float64           `json:"offered_a"`
-	DeviceLimitA     *float64           `json:"device_limit_a"`
-	DeviceReason     string             `json:"device_reason,omitempty"`
-	SinceMs          int64              `json:"since_ms,omitempty"`
-	CommandAtMs      int64              `json:"command_at_ms,omitempty"`
-	ObservedAtMs     int64              `json:"observed_at_ms,omitempty"`
+	Evidence         string             `json:"evidence"`
+	ReadingsFresh    bool               `json:"readings_fresh"`
+	ConfirmedAtMs    int64              `json:"confirmed_at_ms,omitempty"`
+	SiteConfirmation string             `json:"site_confirmation"`
+	SiteMeter        string             `json:"site_meter,omitempty"`
+	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
+	ToleranceW       *float64           `json:"tolerance_w"`
+	// Internal steps of the verdict; the API exposes their result above.
+	State            string   `json:"-"`
+	VerificationTier *int     `json:"-"`
+	VerificationLost bool     `json:"-"`
+	Response         string   `json:"-"`
+	SiteBeforeW      *float64 `json:"-"`
+	SiteAfterW       *float64 `json:"-"`
+	SiteBeforeAtMs   int64    `json:"-"`
+	SiteAfterAtMs    int64    `json:"-"`
+	SiteDeltaW       *float64 `json:"-"`
+	DeviceDeltaW     *float64 `json:"-"`
+	VerifiedAtMs     int64    `json:"-"`
+	RequestedW       *float64 `json:"requested_w"`
+	SentW            *float64 `json:"sent_w"`
+	ReadbackW        *float64 `json:"readback_w"`
+	ActualW          *float64 `json:"actual_w"`
+	BatterySoC       *float64 `json:"battery_soc,omitempty"`
+	ChargeResumeSoC  *float64 `json:"charge_resume_soc,omitempty"`
+	RequestedA       *float64 `json:"requested_a"`
+	OfferedA         *float64 `json:"offered_a"`
+	DeviceLimitA     *float64 `json:"device_limit_a"`
+	DeviceReason     string   `json:"device_reason,omitempty"`
+	SinceMs          int64    `json:"since_ms,omitempty"`
+	CommandAtMs      int64    `json:"command_at_ms,omitempty"`
+	ObservedAtMs     int64    `json:"observed_at_ms,omitempty"`
 }
 
 type feedbackReading struct {
@@ -147,7 +155,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if !measurement.At.IsZero() {
 				f.ObservedAtMs = measurement.At.UnixMilli()
 			}
-			if fresh && powerKnown && now.Sub(measurement.At) <= time.Minute {
+			if fresh && powerKnown && now.Sub(measurement.At) <= telemetry.ControlPowerMaxAge(rd.Data) {
 				f.ActualW = watts(measurement.PowerW)
 			}
 			if fresh && kind == telemetry.DerBattery && rd.SoC != nil &&
@@ -216,8 +224,12 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					from = cmd.Since
 				}
 				f.SiteMeter = meter
-				after := s.deps.Tel.ControlWindows(from, now)
-				comparison := s.controlResponse(cmd, meter, after, now)
+				after, at := s.deps.Tel.ControlWindows(from, now), now
+				if cmd.StepAfter != nil {
+					// A completed step keeps the verdict its own window supported.
+					after, at = cmd.StepAfter, cmd.StepAfterAt
+				}
+				comparison := s.controlResponse(cmd, meter, after, at)
 				f.SiteEvidence = &comparison
 				f.SiteConfirmation, f.DeviceDeltaW, f.SiteDeltaW = comparison.Reason, comparison.DeviceDeltaW, comparison.SiteDeltaW
 				if f.SiteDeltaW != nil {
@@ -233,6 +245,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					tier := 2
 					f.VerificationTier = &tier
 					f.Response = "site_confirmed"
+					f.ConfirmedAtMs = comparison.AfterAt.UnixMilli()
 				}
 			}
 			classifyControlFeedback(&f, cmd, commanded, fresh, coreReason, d.Connected, now)
@@ -262,8 +275,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			}
 			f.VerificationLost = controlVerificationLost(f, cmd, now)
 			if f.VerificationLost {
-				f.Severity = "warning"
+				f.Reason = "readings_lost"
 			}
+			f.ReadingsFresh = fresh
 			out = append(out, f)
 		}
 	}
@@ -300,6 +314,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		}
 		out = append(out, ControlFeedback{Driver: driver, Kind: "device", Mode: mode, State: "blocked", Reason: "device_fault", Severity: "warning", DeviceReason: h.DeviceFaultReason})
 	}
+	for i := range out {
+		setControlStatus(&out[i])
+	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Driver == out[j].Driver {
 			return out[i].Kind < out[j].Kind
@@ -307,6 +324,45 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		return out[i].Driver < out[j].Driver
 	})
 	return out
+}
+
+// setControlStatus answers "Are we in control?" from the classified reason.
+// Following needs measured readings; a driver's acknowledgement alone waits.
+// Info needs no action, warning asks the owner to look and alarm means FTW
+// cannot see or steer a device it is meant to control.
+func setControlStatus(f *ControlFeedback) {
+	status, severity := "waiting", "info"
+	switch f.Reason {
+	case "power_observed", "solar_below_ceiling", "idle", "plan", "manual_hold", "pv_surplus",
+		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
+		status = "following"
+	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
+		"fuse_limit", "fuse_cooldown", "charger_limit":
+		status = "limited"
+	case "device_limit", "offered_current_lower":
+		status, severity = "limited", "warning"
+	case "setpoint_changed", "power_below_target", "power_above_target", "power_wrong_direction",
+		"no_power_response", "power_while_idle":
+		status, severity = "not_following", "warning"
+	case "device_fault":
+		status, severity = "not_following", "alarm"
+	case "telemetry_stale", "command_failed", "command_unconfirmed", "response_unknown":
+		status, severity = "no_contact", "warning"
+	case "readings_lost", "default_failed":
+		status, severity = "no_contact", "alarm"
+	case "observe_only", "disabled", "device_control":
+		status = "not_controlled"
+	case "site_meter_stale", "site_phase_currents_stale":
+		status, severity = "not_controlled", "warning"
+	}
+	if status == "following" && (f.VerificationTier == nil || *f.VerificationTier < 1) {
+		status = "waiting"
+	}
+	f.Status, f.Severity = status, severity
+	f.Evidence = "none"
+	if f.VerificationTier != nil {
+		f.Evidence = []string{"accepted", "measured", "confirmed"}[min(max(*f.VerificationTier, 0), 2)]
+	}
 }
 
 // An acknowledgement is not an alarm during the normal response wait. A
@@ -402,12 +458,20 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("unknown", "response_unknown", "info")
 		return
 	}
+	// The gap is measured against every command that could still be in force,
+	// so a target retuned each tick does not read as a missed response.
 	gap := math.Abs(*f.SentW - *f.ActualW)
-	// A PV command is a ceiling; producing less is expected in weak sun.
 	if f.Kind == "pv" {
 		gap = math.Max(0, math.Abs(*f.ActualW)-math.Abs(*f.SentW))
 	}
+	if cmd.LastGapW != nil {
+		gap = *cmd.LastGapW
+	}
 	if !cmd.PowerMismatchSince.IsZero() && now.Sub(cmd.PowerMismatchSince) >= grace && gap > telemetry.ControlToleranceW(*f.SentW) {
+		if reason := batteryChargeLevelLimit(f); reason != "" {
+			set("limited", reason, "info")
+			return
+		}
 		reason := "power_above_target"
 		switch {
 		case math.Abs(*f.SentW) < 100:
@@ -446,6 +510,23 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		return
 	}
 	set("following", "power_observed", "info")
+}
+
+// A battery accepts less charge as it fills and less discharge as it empties.
+// Its own fresh SoC explains that shortfall; wrong direction still warns.
+func batteryChargeLevelLimit(f *ControlFeedback) string {
+	if f.Kind != "battery" || f.BatterySoC == nil || f.SentW == nil || f.ActualW == nil {
+		return ""
+	}
+	soc, sent, actual := *f.BatterySoC, *f.SentW, *f.ActualW
+	tolerance := telemetry.ControlToleranceW(sent)
+	switch {
+	case sent > tolerance && soc >= 0.9 && actual > -tolerance && actual < sent:
+		return "battery_nearly_full"
+	case sent < -tolerance && soc <= 0.1 && actual < tolerance && actual > sent:
+		return "battery_nearly_empty"
+	}
+	return ""
 }
 
 // Keep status and the EV panel on the same explanation. This wrapper adds

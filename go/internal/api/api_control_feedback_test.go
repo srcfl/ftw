@@ -265,7 +265,7 @@ func TestFullBatteryFeedbackKeepsEvidenceAndFaultsSeparate(t *testing.T) {
 		{name: "discharge ignored", target: -1000, actual: 0, data: `{"setpoint_w":-1000}`, reason: "no_power_response"},
 		{name: "discharge allowed", target: -1000, actual: -1000, data: `{"setpoint_w":-1000}`, reason: "power_observed"},
 		{name: "fault", target: 0, actual: 0, data: `{"setpoint_w":0}`, reason: "device_fault", fault: true},
-		{name: "stale", target: 0, actual: 0, data: `{"setpoint_w":0}`, reason: "telemetry_stale", stale: true},
+		{name: "stale", target: 0, actual: 0, data: `{"setpoint_w":0}`, reason: "readings_lost", stale: true},
 		{name: "setpoint changed", target: 0, actual: 0, data: `{"setpoint_w":1000}`, reason: "setpoint_changed"},
 		{name: "power unknown", target: 0, actual: 0, data: `{"setpoint_w":0,"control_power_available":false}`, reason: "response_unknown"},
 	} {
