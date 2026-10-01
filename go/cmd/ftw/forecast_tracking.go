@@ -35,6 +35,7 @@ type forecastSite struct {
 	HasPVScale            bool
 	Timezone              string
 	Options               telemetry.ForecastOptions
+	HistoryOptions        telemetry.ForecastOptions // chart and site energy; outside every revision
 	PVLearningStartedMS   int64
 	LoadLearningStartedMS int64
 }
