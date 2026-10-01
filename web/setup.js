@@ -316,6 +316,10 @@
     }
   }
 
+  function isZapCatalog(entry) {
+    return !!entry && (entry.filename === 'zap.lua' || entry.id === 'zap');
+  }
+
   window.onDriverSelected = function () {
     var sel = document.getElementById('driver-select');
     var btn = document.getElementById('driver-next-btn');
@@ -345,7 +349,7 @@
     btn.disabled = false;
 
     var lines = [];
-    if (selectedCatalog.filename === 'zap.lua' || selectedCatalog.id === 'zap') {
+    if (isZapCatalog(selectedCatalog)) {
       lines.push('This driver is the P1/HAN site meter by default. Add inverters, batteries and chargers as their own devices in FTW when you can. If Zap is the only reader, turn on PV or battery ingest later under Settings → Devices.');
     }
     if (selectedCatalog.description) lines.push(selectedCatalog.description);
@@ -560,6 +564,14 @@
         driver.config = driver.config || {};
         driver.config.host = host;
       }
+    }
+
+    // Zap reads PV and battery only on opt-in. Save the off state, because
+    // Core treats a missing read_pv as PV that may still report.
+    if (isZapCatalog(selectedCatalog)) {
+      driver.config = driver.config || {};
+      driver.config.read_pv = false;
+      driver.config.read_battery = false;
     }
 
     // Persist per-driver secrets the prefill rendered (api_token, etc.)

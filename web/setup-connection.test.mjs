@@ -8,7 +8,7 @@ const source = readFileSync(new URL('./setup.js', import.meta.url), 'utf8');
 
 // Run the wizard's real navigation and save handlers. Initial field values
 // come from the HTML so a changed default also changes the posted config.
-function wizard(search = '', zonesFail = false) {
+function wizard(search = '', zonesFail = false, catalog = []) {
   const elements = {}, requests = [];
   function element(attrs = '') {
     const attr = name => attrs.match(new RegExp('\\b' + name + '="([^"]*)"'))?.[1];
@@ -50,6 +50,7 @@ function wizard(search = '', zonesFail = false) {
     fetch(path, opts) {
       requests.push({ path, opts });
       if (zonesFail && path === '/api/prices/zones') return Promise.reject(new Error('offline'));
+      if (path === '/api/drivers/catalog') return Promise.resolve({ ok: true, json: async () => ({ entries: catalog }) });
       return Promise.resolve({ ok: true, json: async () => path === '/api/prices/zones' ? { zones: [
         { country: 'Sweden', code: 'SE3', currency: 'SEK' },
         { country: 'Belgium', code: 'BE', currency: 'EUR' },
@@ -58,7 +59,7 @@ function wizard(search = '', zonesFail = false) {
   };
   sandbox.window = sandbox;
   vm.runInNewContext(source, sandbox);
-  return { elements, requests, go: sandbox.goStep, save: sandbox.saveConfig,
+  return { elements, requests, go: sandbox.goStep, save: sandbox.saveConfig, sandbox,
     choose(id, value, event = 'change') { elements[id].value = value; elements[id].fire(event); },
     posted: () => JSON.parse(requests.find(r => r.opts?.method === 'POST').opts.body),
     visible: n => elements['step-' + n].classList.contains('visible'),
@@ -157,5 +158,27 @@ describe('setup electricity connection', () => {
     rig.save();
     assert.equal(rig.posted().price.zone, 'SE3');
     assert.deepEqual(rig.posted().fuse, { phases: 3, voltage: 230, max_amps: 16 });
+  });
+});
+
+describe('setup Zap driver', () => {
+  it('saves PV and battery reads as off, not missing', async () => {
+    const zap = { id: 'zap', filename: 'zap.lua', path: 'drivers/zap.lua', protocols: ['http'],
+      capabilities: ['meter', 'pv', 'battery'], read_only: true, connection_defaults: { host: '' } };
+    const rig = wizard('?step=2', false, [zap]);
+    rig.elements['fuse-amps'].value = '20';
+    rig.go(4);
+    await settled();
+    rig.choose('driver-select', '0');
+    rig.sandbox.onDriverSelected();
+    rig.go(5);
+    rig.elements['drv-name'].value = 'sourceful-zap';
+    rig.elements['drv-ip'].value = 'zap.local';
+    rig.sandbox.saveDriver();
+    rig.save();
+    const config = rig.posted().drivers[0].config;
+    assert.equal(config.host, 'zap.local');
+    assert.equal(config.read_pv, false);
+    assert.equal(config.read_battery, false);
   });
 });
