@@ -204,6 +204,8 @@ Predictions state whether a signal is known, its quality, coverage and
 uncertainty. Provisional model bounds are not calibrated quantiles. Missing,
 late, incomplete or rejected predictions trigger per-signal Core fallback;
 current Core also keeps legacy load during Energyplan load cold start.
+When a week of paired, scored errors shows one source clearly better for a
+signal, Core uses that source instead of the quality label.
 Core records which signal supplied each planner input.
 
 Energyplan returns complete opaque model state. Core validates and stores an

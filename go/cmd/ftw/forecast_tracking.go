@@ -88,6 +88,7 @@ type forecastTracker struct {
 	observationPVValid   bool
 	observationLoadValid bool
 	issueArchiveError    bool
+	sourceChoice         forecastSourceChoice // guarded by mu
 }
 
 func (f *forecastTracker) Start(ctx context.Context) error {
@@ -450,6 +451,8 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 		frozen = fresh
 	}
 	calibrator := forecasting.NewCalibrator(history, site.Revision, origin.UnixMilli())
+	choice := chooseForecastSources(history, site.Revision, origin.UnixMilli())
+	f.noteSourceChoice(choice)
 	pvFn := mpc.PVPredictor(nil)
 	if f.pv != nil && site.HasLocation {
 		pvFn = func(t time.Time, cloud float64) float64 {
@@ -597,14 +600,15 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 				continue
 			}
 			selected[i].PredictionStartMS = point.PredictionStartMS
-			if usablePrimaryForecast(point.PVKnown, point.PVQuality, point.PVW) {
+			if choice.PV.Source != "legacy" && usablePrimaryForecast(point.PVKnown, point.PVQuality, point.PVW) {
 				resolved[i].PVW = -point.PVW
 				selected[i].PVW, selected[i].PVKnown, selected[i].PVQuality = point.PVW, true, point.PVQuality
 				selected[i].PVSource, selected[i].ModelPV = "energyplan", point.ModelPV
 			}
-			// A cold load can still be the worker's generic prior. Keep the frozen
-			// profile and heating prior until this interval has learned support.
-			if point.LoadQuality != "cold_start" && usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
+			// Without measured evidence a cold load can still be the worker's
+			// generic prior, so the frozen profile and heating prior stay.
+			loadReady := point.LoadQuality != "cold_start" || choice.Load.Source == "energyplan"
+			if choice.Load.Source != "legacy" && loadReady && usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
 				resolved[i].LoadW = point.LoadW
 				selected[i].LoadW, selected[i].LoadKnown, selected[i].LoadQuality = point.LoadW, true, point.LoadQuality
 				selected[i].LoadSource, selected[i].ModelLoad = "energyplan", point.ModelLoad

@@ -243,7 +243,9 @@ a separate versioned contract. At the start of each replan, Core freezes the
 legacy forecast, weather, occupancy and saved model state. It calls the forecast
 worker once under a deadline, outside control and dispatch locks. Core accepts
 PV and load independently for each covered interval. If either signal is
-missing, late, partial or invalid, Core retains the matching legacy value. The
+missing, late, partial or invalid, Core retains the matching legacy value.
+When a week of scored errors shows one source clearly better for a signal,
+Core uses that source; otherwise the worker's quality label decides. The
 resulting `champion` can therefore contain Energyplan PV with legacy load, or
 the reverse. `legacy_shadow` keeps both legacy signals from the same frozen
 capture for a fair later comparison.

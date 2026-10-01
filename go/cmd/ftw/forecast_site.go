@@ -51,7 +51,7 @@ const forecastIdentityReceiptKey = "forecast/live_identity_v1"
 // The evaluation cohort keys on it rather than on the Core version, so error
 // bands and baselines survive updates that leave forecasting alone. Bump it
 // whenever Core changes what reaches the planner.
-const forecastPipelinePolicy = "energyplan-primary-v2"
+const forecastPipelinePolicy = "energyplan-primary-v3"
 
 func newForecastSiteConfig(st *state.Store) *forecastSiteConfig {
 	id, _ := st.LoadConfig("forecast/site_id")
