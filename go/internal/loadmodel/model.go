@@ -3,6 +3,7 @@ package loadmodel
 
 import (
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -20,6 +21,19 @@ const HeatingAlpha = 0.01
 const HeatingMinDeltaT = 3.0
 
 const HeatingCoefMaxW = 1500.0
+
+// heatingBoundStep is the share of the gap to the bound that an overstated
+// heating coefficient closes when a day ends.
+const heatingBoundStep = 0.5
+
+// heatingBoundDays is how many cold days must each show an overstated
+// coefficient before the bound lowers it. One day with a wood stove or the
+// heating off must not pull a correct coefficient down.
+const heatingBoundDays = 3
+
+// heatingBoundMinSamples is six hours of cold samples at the service's rate.
+// A day with less cold data does not bound the coefficient.
+const heatingBoundMinSamples = int64(6 * time.Hour / defaultSampleInterval)
 
 const PlausibleLoadHeadroom = 1.25
 
@@ -73,6 +87,16 @@ type Model struct {
 
 	// MaxPlausibleW remains for stored-state/API compatibility. Grid limits do not cap gross household load.
 	MaxPlausibleW float64 `json:"max_plausible_w,omitempty"`
+
+	// Sums over the cold samples of the current local day, and the bounds
+	// of the last cold days, newest last. They cap the heating coefficient;
+	// see closeHeatingBoundDay.
+	HeatingBoundDay       string                    `json:"heating_bound_day,omitempty"`
+	HeatingBoundLoadSumW  float64                   `json:"heating_bound_load_sum_w,omitempty"`
+	HeatingBoundDeltaSumC float64                   `json:"heating_bound_delta_sum_c,omitempty"`
+	HeatingBoundSamples   int64                     `json:"heating_bound_samples,omitempty"`
+	HeatingBoundRecent    [heatingBoundDays]float64 `json:"heating_bound_recent"`
+	HeatingBoundRecentN   int                       `json:"heating_bound_recent_n,omitempty"`
 }
 
 func typicalPrior(hourOfWeek int) float64 {
@@ -221,6 +245,11 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	if b.LastMs > 0 && t.UnixMilli() <= b.LastMs {
 		return false
 	}
+	day := m.localTime(t).Format("2006-01-02")
+	if day != m.HeatingBoundDay {
+		m.closeHeatingBoundDay()
+		m.HeatingBoundDay = day
+	}
 	knownTemp := !math.IsNaN(tempC) && !math.IsInf(tempC, 0)
 	if knownTemp {
 		m.LastTemperatureC = tempC
@@ -233,7 +262,13 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	predicted := m.Predict(t, tempC)
 	err := actualLoadW - predicted
 
-	if knownTemp && tempC < HeatingReferenceC-HeatingMinDeltaT && b.Days >= MinTrustSamples {
+	cold := knownTemp && tempC < HeatingReferenceC-HeatingMinDeltaT
+	if cold {
+		m.HeatingBoundLoadSumW += actualLoadW
+		m.HeatingBoundDeltaSumC += HeatingReferenceC - tempC
+		m.HeatingBoundSamples++
+	}
+	if cold && b.Days >= MinTrustSamples {
 		deltaT := HeatingReferenceC - tempC
 		elapsedHours := 1.0
 		if m.LastMs > 0 {
@@ -252,7 +287,6 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	heatEst := heatingGain(m.HeatingW_per_degC, tempC)
 	if heatEst <= actualLoadW {
 		baseSample := actualLoadW - heatEst
-		day := m.localTime(t).Format("2006-01-02")
 		if day != b.LastDay {
 			b.Days++
 			b.LastDay = day
@@ -278,6 +312,26 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		m.MAE = 0.99*m.MAE + 0.01*math.Abs(err)
 	}
 	return true
+}
+
+// closeHeatingBoundDay checks the heating coefficient against the day that
+// ended. Heating is part of the house's load, so over a day's cold samples
+// coef × Σ(18 °C − T) cannot exceed Σ load. Once the last three cold days
+// all put the coefficient above their bound, it moves toward the highest of
+// them. Unlike the fit in Update, this check needs no trained buckets. It
+// only lowers the coefficient; the fit alone raises it.
+func (m *Model) closeHeatingBoundDay() {
+	if m.HeatingBoundSamples >= heatingBoundMinSamples {
+		recent := m.HeatingBoundRecent[:]
+		copy(recent, recent[1:])
+		recent[len(recent)-1] = m.HeatingBoundLoadSumW / m.HeatingBoundDeltaSumC
+		m.HeatingBoundRecentN = min(m.HeatingBoundRecentN+1, heatingBoundDays)
+		if bound := slices.Max(recent); m.HeatingBoundRecentN == heatingBoundDays && m.HeatingW_per_degC > bound {
+			m.HeatingW_per_degC -= heatingBoundStep * (m.HeatingW_per_degC - bound)
+			m.HeatingW_per_degC = math.Min(math.Max(m.HeatingW_per_degC, 0), HeatingCoefMaxW)
+		}
+	}
+	m.HeatingBoundLoadSumW, m.HeatingBoundDeltaSumC, m.HeatingBoundSamples = 0, 0, 0
 }
 
 func (m Model) Quality() float64 {

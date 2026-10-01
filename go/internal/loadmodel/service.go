@@ -29,6 +29,9 @@ const (
 	profileStateKey = "loadmodel/profile"
 )
 
+// defaultSampleInterval is how often the service trains the active model.
+const defaultSampleInterval = time.Minute
+
 // legacyFeatureHash is the fingerprint of the feature space in force when the
 // envelope was introduced. State written before then — both the per-profile
 // keys and legacyStateKey — carries no fingerprint, but it was fitted against
@@ -86,7 +89,7 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW, 
 		Store:          st,
 		Tele:           tel,
 		SiteMeter:      siteMeter,
-		SampleInterval: 60 * time.Second,
+		SampleInterval: defaultSampleInterval,
 		PersistEvery:   10,
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
