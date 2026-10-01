@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.138.3
+
+### Patch Changes
+
+- 8bb3d81: Fix forecast evaluation stalling after restart. Give score writes and retention separate time budgets, skip retention sorting when the archive is within its limits, and resume after the last committed page when a step fails. Refresh calibration from saved scores even when later work needs a retry.
+- 46ae403: Installer messages now direct users to the new 0.x setup paths and explain that 2.x and 3.x receive no more updates. The scripts still exit without changing the site. Docker's missing-version message asks for an exact published new 0.x tag instead of suggesting an old example.
+  
+  Block retired Docker release workflow dispatches before checkout or registry writes, while keeping native Changesets version PRs running.
+- f46deb1: Display cached vehicle SoC after restart with its source age, without using it for control.
+- 9c26d0e: Make electricity setup clearer: choose three-phase or single-phase, enter the confirmed main fuse rating, and keep voltage under Advanced. Standard connections use 230 V per phase. Show saved custom connections without changing their values. Make the country and price-zone list available during a fresh install.
+- 3cdeb81: Keep private FTW data out of the release Docker build context. Install commands stop on download errors and refuse to overwrite an earlier Docker test. The English and Swedish guides put the physical SD-card swap before installation and treat Docker as a separate path.
+
 ## 0.138.2
 
 ### Patch Changes

@@ -491,6 +491,8 @@ func (s *Store) VisitForecastIssues(ctx context.Context, since, until int64, vis
 
 // SaveForecastErrors stores derived scores; immutable issue and observation
 // rows retain the evidence. A newer issue for the same target and lead wins.
+// Success means the page committed. The scoring worker runs PruneForecastErrors
+// under a separate budget before writing another page.
 func (s *Store) SaveForecastErrors(ctx context.Context, samples []forecasting.ErrorSample, now int64) error {
 	if now <= 0 {
 		return errors.New("invalid forecast score time")
@@ -551,9 +553,13 @@ func (s *Store) SaveForecastErrors(ctx context.Context, samples []forecasting.Er
 			}
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
+	return tx.Commit()
+}
+
+// PruneForecastErrors maintains the derived score budget independently of a
+// committed page. Callers must finish it before saving the next page, so failed
+// maintenance can leave at most one page above the retained budget.
+func (s *Store) PruneForecastErrors(ctx context.Context, now int64) error {
 	return s.pruneForecastRecords(ctx, "forecast_errors", "end_ms DESC,start_ms DESC,series DESC,lead DESC,config_version DESC", "end_ms", now, MaxForecastErrors, MaxForecastErrorBytes)
 }
 
