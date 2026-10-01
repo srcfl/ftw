@@ -120,32 +120,41 @@ describe("plan lines", () => {
   });
 
   describe("extra sun", () => {
-    const slot = (start, pv, soc, cap) => ({ slot_start_ms: start, slot_len_min: 15,
-      forecast_pv_w: pv, pv_w: pv, soc, live_pv_surplus_soc_cap: cap });
+    const slot = (start, pv, soc, cap, battery = 0) => ({ slot_start_ms: start, slot_len_min: 15,
+      forecast_pv_w: pv, pv_w: pv, soc, live_pv_surplus_soc_cap: cap, battery_w: battery });
     const q = 15 * 60_000;
+    const stores = "If more sun comes than planned, FTW stores it in the battery instead of buying power later.";
+    const exports = "If more sun comes than planned, it goes to the grid.";
 
-    it("says nothing when the box does not send the capture field", () => {
+    it("says nothing when the box does not send either cap", () => {
       const actions = [slot(0, -3000, 0.4, 0.8)];
+      assert.equal(extraSunLine(actions, 0, q, undefined), null);
       delete actions[0].live_pv_surplus_soc_cap;
-      assert.equal(extraSunLine(actions, 0, q), null);
+      assert.equal(extraSunLine(actions, 0, q, 0), null);
     });
 
     it("says nothing for a window without sun", () => {
-      assert.equal(extraSunLine([slot(0, 0, 0.4, 0.8)], 0, q), null);
+      assert.equal(extraSunLine([slot(0, 0, 0.4, 0.8)], 0, q, 0), null);
     });
 
     it("stores, sends to the grid, or splits, from Core's per-slot permission", () => {
-      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0.6)], 0, 2 * q),
-        "If more sun comes than planned, FTW stores it in the battery instead of buying power later.");
-      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0), slot(q, -2000, 0.4, 0)], 0, 2 * q),
-        "If more sun comes than planned, it goes to the grid.");
-      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0)], 0, 2 * q),
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0.6)], 0, 2 * q, 0), stores);
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0), slot(q, -2000, 0.4, 0)], 0, 2 * q, 0), exports);
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0)], 0, 2 * q, 0),
         "If more sun comes than planned, FTW stores some of it and the rest goes to the grid.");
     });
 
     it("needs room above the planned charge to call it stored", () => {
-      assert.equal(extraSunLine([slot(0, -3000, 0.8, 0.8)], 0, q),
-        "If more sun comes than planned, it goes to the grid.");
+      assert.equal(extraSunLine([slot(0, -3000, 0.8, 0.8)], 0, q, 0), exports);
+    });
+
+    it("follows the operator's cap ahead of the plan's, as dispatch does", () => {
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0)], 0, q, 0.88), stores);
+      assert.equal(extraSunLine([slot(0, -3000, 0.9, 0.95)], 0, q, 0.88), exports);
+    });
+
+    it("never stores during a planned discharge", () => {
+      assert.equal(extraSunLine([slot(0, -3000, 0.4, 0, -2000)], 0, q, 0.88), exports);
     });
   });
 });

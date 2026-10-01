@@ -49,6 +49,38 @@
       " Changes apply at once.";
   }
 
+  // marginSaver sends one margin save at a time. Each save first reads the
+  // box's current battery-export choice, so a margin change never restores
+  // an older one. done(err, sent, saved) runs only when no newer value waits.
+  function marginSaver(apiFetch, done) {
+    var sending = false;
+    var wanted = null;
+    function next() {
+      if (sending || wanted === null) return;
+      var k = wanted;
+      wanted = null;
+      sending = true;
+      apiFetch("/api/planner/prefs")
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (p) {
+          if (!p.battery_export) throw new Error("no export permission");
+          return apiFetch("/api/planner/prefs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ safety_k: k, battery_export: p.battery_export }),
+          });
+        })
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (p) {
+          if (wanted === null) done(null, k, typeof p.safety_k === "number" ? p.safety_k : k);
+        }, function (err) {
+          if (wanted === null) done(err, k);
+        })
+        .then(function () { sending = false; next(); });
+    }
+    return function (k) { wanted = k; next(); };
+  }
+
   function engineSelect(engine, help) {
     var selected = String(engine == null ? "" : engine).trim().toLowerCase();
     if (selected === "go" || selected === "dp") selected = "core";
@@ -177,7 +209,6 @@
       var marginEl = document.getElementById("planner-margin-line");
       if (kInput && kValue && kNote) {
         var lib = window.FTWPlanPrefs || null;
-        var exportPerm = "unknown";
         var show = function (k, prefix) {
           kValue.textContent = "k " + formatK(k);
           kNote.textContent = (prefix || "") + styleNote(k, lib);
@@ -185,37 +216,39 @@
         apiFetch("/api/planner/prefs")
           .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
           .then(function (p) {
-            exportPerm = p.battery_export || "unknown";
             var k = typeof p.safety_k === "number" ? p.safety_k : p.mapped_k;
             kInput.value = String(k);
             kInput.disabled = false;
             show(k);
           })
           .catch(function () { kNote.textContent = "The box did not answer. Reopen Settings to try again."; });
+        var save = marginSaver(apiFetch, function (err, sent, saved) {
+          if (err) {
+            kNote.textContent = "Not saved: the box did not answer. Try again.";
+            return;
+          }
+          // A slider moved again since this save keeps its own position.
+          if (Number(kInput.value) === sent) {
+            kInput.value = String(saved);
+            show(saved, "Saved. ");
+          }
+          window.dispatchEvent(new CustomEvent("ftw-planner-prefs"));
+        });
         kInput.addEventListener("input", function () { show(kInput.value); });
         kInput.addEventListener("change", function () {
-          var k = Number(kInput.value);
           kNote.textContent = "Saving…";
-          apiFetch("/api/planner/prefs", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            // Export is sent unchanged: the margin never turns on battery sales.
-            body: JSON.stringify({ safety_k: k, battery_export: exportPerm }),
-          })
-            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-            .then(function (p) {
-              var saved = typeof p.safety_k === "number" ? p.safety_k : k;
-              kInput.value = String(saved);
-              show(saved, "Saved. ");
-              window.dispatchEvent(new CustomEvent("ftw-planner-prefs"));
-            })
-            .catch(function () { kNote.textContent = "Not saved: the box did not answer. Try again."; });
+          save(Number(kInput.value));
         });
         // The same margin as the Plan card, split into sun and use. It
         // follows each plan the Plan card fetches, so a save shows up here.
         if (marginEl && lib) {
           var showMargin = function (actions) {
-            if (!actions || !actions.length) return;
+            if (!actions || !actions.length) {
+              // No plan now: an old margin must not read as the current one.
+              marginEl.textContent = "";
+              marginEl.hidden = true;
+              return;
+            }
             var last = actions[actions.length - 1];
             var text = lib.marginSplitLine(lib.forecastMargins(actions, Date.now() - 30 * 60 * 1000,
               last.slot_start_ms + last.slot_len_min * 60 * 1000));
@@ -238,5 +271,6 @@
   };
 
   // Escape hatch for node --test (planner.test.mjs); not a public API.
-  S.tabs.planner._pure = { strategyLabel: strategyLabel, styleNote: styleNote, formatK: formatK, engineSelect: engineSelect };
+  S.tabs.planner._pure = { strategyLabel: strategyLabel, styleNote: styleNote, formatK: formatK, engineSelect: engineSelect,
+    marginSaver: marginSaver };
 })();

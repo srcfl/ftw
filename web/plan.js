@@ -1193,7 +1193,9 @@ import {
     // rules; other modes keep their own, so say nothing there.
     const mode = String((state.status && state.status.mode) || "");
     const household = mode === "planner_arbitrage" || mode === "planner_passive_arbitrage";
-    showLine("plan-style-extra", household ? extraSunLine(actions, bounds.tMin, bounds.tMax) : null);
+    showLine("plan-style-extra", household
+      ? extraSunLine(actions, bounds.tMin, bounds.tMax, state.status && state.status.pv_surplus_absorb_soc_cap)
+      : null);
     root.classList.toggle("is-replanning", replanPending || pickedK != null);
   }
 

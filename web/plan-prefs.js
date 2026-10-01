@@ -56,6 +56,8 @@ const SALE_W = 100;
 const KWH_EPS = 0.05;
 // A slot counts as sunny when the forecast expects more than this.
 const SUNNY_W = 200;
+// Planned battery power below this is a discharge slot (mpc.IdleGateThresholdW).
+const DISCHARGE_W = 100;
 
 // safetyK is the legacy enum→k mapping, kept for servers that answer with
 // forecast_trust and no safety_k. Mirrors config.ForecastTrust.SafetyK.
@@ -135,11 +137,14 @@ export function marginSplitLine(margins) {
   return `The current plan counts on ${kwh(margins.sunHeldKWh)} less sun and ${kwh(margins.useAddedKWh)} more use than forecast.`;
 }
 
-// extraSunLine says where sun beyond the plan goes, from Core's per-slot
-// live_pv_surplus_soc_cap: above the slot's planned charge, live surplus
-// may go into the battery; otherwise it is exported. Silent when the box
-// does not send the field or the window has no sunny slot.
-export function extraSunLine(actions, from, until) {
+// extraSunLine says where sun beyond the plan goes, by dispatch's rule:
+// live surplus may charge the battery up to the operator's cap
+// (site.pv_surplus_absorb_soc_cap) when one is set, otherwise up to Core's
+// per-slot live_pv_surplus_soc_cap, and never during a discharge slot. Above
+// the slot's planned charge it is stored; otherwise it is exported. Silent
+// when the box does not send either cap or the window has no sunny slot.
+export function extraSunLine(actions, from, until, operatorCap) {
+  if (!Number.isFinite(operatorCap)) return null;
   let sunny = 0;
   let stored = 0;
   for (const a of actions || []) {
@@ -150,7 +155,9 @@ export function extraSunLine(actions, from, until) {
     const pv = Number.isFinite(a.forecast_pv_w) ? a.forecast_pv_w : a.pv_w;
     if (!(Math.max(0, -pv) > SUNNY_W)) continue;
     sunny++;
-    if (a.live_pv_surplus_soc_cap > (Number(a.soc) || 0) + 0.005) stored++;
+    const cap = operatorCap > 0 ? operatorCap : a.live_pv_surplus_soc_cap;
+    const discharging = (Number(a.battery_w) || 0) < -DISCHARGE_W;
+    if (!discharging && cap > (Number(a.soc) || 0) + 0.005) stored++;
   }
   if (!sunny) return null;
   if (stored === sunny) {

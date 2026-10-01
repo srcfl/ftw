@@ -296,6 +296,29 @@ func TestHandleStatusKeepsFaultedSiteMeterReading(t *testing.T) {
 	}
 }
 
+func TestHandleStatusReportsOperatorSurplusCap(t *testing.T) {
+	for _, cap := range []float64{0, 0.88} {
+		srv := New(&Deps{
+			Tel:        telemetry.NewStore(),
+			Ctrl:       &control.State{PVSurplusAbsorbSoCCap: cap},
+			CtrlMu:     &sync.Mutex{},
+			CapMu:      &sync.RWMutex{},
+			Capacities: map[string]float64{},
+			CfgMu:      &sync.RWMutex{},
+			Cfg:        &config.Config{},
+		})
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		var raw map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := raw["pv_surplus_absorb_soc_cap"]; !ok || got != cap {
+			t.Fatalf("pv_surplus_absorb_soc_cap = %v (sent %v), want %v", got, ok, cap)
+		}
+	}
+}
+
 func TestHandleStatusOmitsWattsWhenSiteMeterIsOffline(t *testing.T) {
 	tel := telemetry.NewStore()
 	ctrl := &control.State{SiteMeterDriver: "ferroamp"}

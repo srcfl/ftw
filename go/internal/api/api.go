@@ -1226,6 +1226,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"control_feedback":    s.controlFeedback(time.Now()),
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
 	}
+	// The operator's cap for storing live PV surplus, 0 when unset. Dispatch
+	// prefers it to the plan's per-slot cap, so the Plan card needs it to say
+	// where extra sun goes.
+	resp["pv_surplus_absorb_soc_cap"] = ctrl.PVSurplusAbsorbSoCCap
 	// A stale or missing site meter is not 0 W. Publishing zero made the
 	// dashboard and the FTW app draw "balanced" / "0 W" as if the house
 	// were idle. JSON null is what the flow mapping already treats as
