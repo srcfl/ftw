@@ -165,12 +165,12 @@ func TestRejectUnsafeProbeTargetsCoversHTTP(t *testing.T) {
 			HTTP: &config.HTTPCapability{AllowedHosts: []string{"127.0.0.1"}},
 		},
 	}
-	if err := rejectUnsafeProbeTargets(cfg); err == nil {
+	if err := rejectUnsafeProbeTargets(cfg, ""); err == nil {
 		t.Fatal("HTTP loopback probe should be refused")
 	}
 	cfg.Config["host"] = "192.168.1.10"
 	cfg.Capabilities.HTTP.AllowedHosts = []string{"inverter.local"}
-	if err := rejectUnsafeProbeTargets(cfg); err != nil {
+	if err := rejectUnsafeProbeTargets(cfg, ""); err != nil {
 		t.Fatalf("LAN HTTP probe refused: %v", err)
 	}
 }

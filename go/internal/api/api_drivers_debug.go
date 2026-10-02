@@ -237,7 +237,7 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	resolved.ResolveDriverPaths(baseDir)
 	cfg = resolved.Drivers[0]
 
-	if err := rejectUnsafeProbeTargets(cfg); err != nil {
+	if err := rejectUnsafeProbeTargets(cfg, s.configuredProbeLoopbackHost(cfg)); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
@@ -267,6 +267,7 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	if displayName == "" {
 		displayName = filepath.Base(cfg.Lua)
 	}
+	secretOwner := displayName
 	testName := "__test_" + safeProbeName(displayName) + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cfg.Name = testName
 	if cfg.BatteryCapacityWh <= 0 {
@@ -280,6 +281,7 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	reg.MQTTFactory = s.deps.DriverMQTTFactory
 	reg.ModbusFactory = s.deps.DriverModbusFactory
 	reg.ARPLookup = s.deps.DriverARPLookup
+	s.wireDriverProbeSecrets(reg, testName, secretOwner)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
@@ -321,9 +323,31 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func driverSecretStateKey(driverName, key string) string {
+	return "driver_secret:" + driverName + ":" + key
+}
+
+func (s *Server) wireDriverProbeSecrets(reg *drivers.Registry, probeName, secretOwner string) {
+	if s.deps.State == nil || strings.TrimSpace(secretOwner) == "" {
+		return
+	}
+	ownerFor := func(driverName string) string {
+		if driverName == probeName {
+			return secretOwner
+		}
+		return driverName
+	}
+	reg.SecretOverride = func(driverName, key string) (string, bool) {
+		return s.deps.State.LoadConfig(driverSecretStateKey(ownerFor(driverName), key))
+	}
+	reg.SecretPersister = func(driverName, key, value string) error {
+		return s.deps.State.SaveConfig(driverSecretStateKey(ownerFor(driverName), key), value)
+	}
+}
+
 // rejectUnsafeProbeTargets checks every host a driver test might dial:
 // MQTT, Modbus, config.host / config.url, and HTTP/WS/TCP allowlists.
-func rejectUnsafeProbeTargets(cfg config.Driver) error {
+func rejectUnsafeProbeTargets(cfg config.Driver, allowedLoopbackHost string) error {
 	if mq := cfg.EffectiveMQTT(); mq != nil {
 		if err := rejectUnsafeProbeHost(mq.Host); err != nil {
 			return fmt.Errorf("mqtt host: %w", err)
@@ -342,7 +366,7 @@ func rejectUnsafeProbeTargets(cfg config.Driver) error {
 		}
 		if u, ok := cfg.Config["url"].(string); ok && strings.TrimSpace(u) != "" {
 			if host := hostFromProbeURL(u); host != "" {
-				if err := rejectUnsafeProbeHost(host); err != nil {
+				if err := rejectUnsafeProbeHostOrConfiguredLoopback(host, allowedLoopbackHost); err != nil {
 					return fmt.Errorf("config.url: %w", err)
 				}
 			}
@@ -353,7 +377,7 @@ func rejectUnsafeProbeTargets(cfg config.Driver) error {
 			if strings.TrimSpace(h) == "" {
 				continue
 			}
-			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+			if err := rejectUnsafeProbeHostOrConfiguredLoopback(hostFromAllowlistEntry(h), allowedLoopbackHost); err != nil {
 				return fmt.Errorf("http allowlist: %w", err)
 			}
 		}
@@ -379,6 +403,62 @@ func rejectUnsafeProbeTargets(cfg config.Driver) error {
 		}
 	}
 	return nil
+}
+
+// configuredProbeLoopbackHost permits a test to reach a loopback URL only
+// when that exact URL is already saved for the same enabled driver and Lua
+// file. A probe cannot introduce a new loopback destination in its request.
+func (s *Server) configuredProbeLoopbackHost(probe config.Driver) string {
+	if probe.Name == "" || probe.Lua == "" || probe.Config == nil {
+		return ""
+	}
+	current, ok := s.configuredDriver(probe.Name)
+	if !ok || current.Disabled || current.Lua == "" ||
+		filepath.Clean(current.Lua) != filepath.Clean(probe.Lua) ||
+		!sameProbeHTTPAllowlist(current.Capabilities.HTTP, probe.Capabilities.HTTP) {
+		return ""
+	}
+	savedURL, ok := current.Config["url"].(string)
+	if !ok || savedURL == "" || probe.Config["url"] != savedURL {
+		return ""
+	}
+	u, err := url.Parse(savedURL)
+	if err != nil || u.Host == "" ||
+		(!strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https")) {
+		return ""
+	}
+	ip := net.ParseIP(u.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return ""
+	}
+	return ip.String()
+}
+
+func sameProbeHTTPAllowlist(saved, probe *config.HTTPCapability) bool {
+	if (saved == nil) != (probe == nil) {
+		return false
+	}
+	if saved == nil {
+		return true
+	}
+	if len(saved.AllowedHosts) != len(probe.AllowedHosts) {
+		return false
+	}
+	for i := range saved.AllowedHosts {
+		if saved.AllowedHosts[i] != probe.AllowedHosts[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func rejectUnsafeProbeHostOrConfiguredLoopback(host, allowedLoopbackHost string) error {
+	host = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() &&
+		allowedLoopbackHost != "" && ip.String() == allowedLoopbackHost {
+		return nil
+	}
+	return rejectUnsafeProbeHost(host)
 }
 
 func hostFromProbeURL(raw string) string {
