@@ -310,7 +310,19 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			TerminalPriceOreKWh: p.TerminalSoCPrice,
 		}}
 	}
-	for _, lp := range p.activeLoadpoints() {
+	// A departure past the horizon becomes a goal at its last slot, as in Core
+	// DP. It must not compete with a car that leaves inside the horizon, so
+	// then it gets no deadline.
+	loadpoints := p.activeLoadpoints()
+	pastHorizon := func(lp *LoadpointSpec) bool { return lp.TargetSoC > 0 && lp.TargetSlotIdx >= len(slots) }
+	departsInside := slices.ContainsFunc(loadpoints, func(lp *LoadpointSpec) bool {
+		return lp.deadlineSlot(len(slots)) >= 0 && !pastHorizon(lp)
+	})
+	for _, lp := range loadpoints {
+		deadline := lp.deadlineSlot(len(slots))
+		if departsInside && pastHorizon(lp) {
+			deadline = -1
+		}
 		steps := lp.normalizedSteps()
 		efficiency := lp.ChargeEfficiency
 		if efficiency <= 0 {
@@ -327,7 +339,7 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			InitialEnergyWh: lp.CapacityWh * initialSoC,
 			MaxEnergyWh:     lp.CapacityWh * maxSoC,
 			TargetEnergyWh:  lp.CapacityWh * targetSoC,
-			TargetSlot:      lp.deadlineSlot(len(slots)), ChargeEfficiency: efficiency,
+			TargetSlot:      deadline, ChargeEfficiency: efficiency,
 			MaxChargeW: lp.MaxChargeW, AllowedStepsW: steps,
 			SurplusOnly: lp.SurplusOnly, NoStorageToLoad: lp.blocksBatteryToEV(),
 		})
@@ -551,7 +563,9 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.0002 {
 				return fmt.Errorf("slot %d loadpoint %s SoC %.4f inconsistent with replay %.4f", i, lp.ID, reportedSoC, evSoC[lp.ID])
 			}
-			if i == lp.deadlineSlot(len(slots)) {
+			// Only a departure inside the horizon can be missed; a later one
+			// is planned when its prices arrive.
+			if lp.TargetSoC > 0 && i == lp.TargetSlotIdx {
 				if missing := max(0, lp.TargetSoC-evSoC[lp.ID]) * lp.CapacityWh; missing > 1 {
 					deadlineShortfall[lp.ID] = missing
 				}
