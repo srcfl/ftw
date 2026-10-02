@@ -129,3 +129,35 @@ func TestEVDeadlineSlot(t *testing.T) {
 		}
 	}
 }
+
+// A car that already holds its target needs nothing before it leaves, so
+// tomorrow's car keeps its goal and takes the surplus instead of the grid.
+func TestEVDeadlineSatisfiedDepartureDoesNotBlock(t *testing.T) {
+	slots, p := departureAndNextDay()
+	p.Loadpoints[0].InitialSoC = .55
+	req := (&ExternalOptimizer{}).buildRequest(slots, p)
+	if req.FlexLoads[1].TargetSlot != len(slots)-1 {
+		t.Fatalf("tomorrow's deadline = %d, want the last slot %d", req.FlexLoads[1].TargetSlot, len(slots)-1)
+	}
+}
+
+func TestNativeEVDeadlineSatisfiedDepartureDoesNotBlock(t *testing.T) {
+	slots, p := departureAndNextDay()
+	p.Loadpoints[0].InitialSoC = .55
+	worker := nativeWorker(t, 500*time.Millisecond)
+	t.Cleanup(func() { _ = worker.Close() })
+	plan, err := worker.Optimize(context.Background(), slots, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatal(err)
+	}
+	var tomorrowWh float64
+	for _, a := range plan.Actions {
+		tomorrowWh += a.LoadpointPowerW["tomorrow"] * a.DurationHours()
+	}
+	if tomorrowWh < 4000 {
+		t.Fatalf("surplus went to the grid instead of tomorrow's car: %.0f Wh", tomorrowWh)
+	}
+}
