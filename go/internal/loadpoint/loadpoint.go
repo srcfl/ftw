@@ -701,32 +701,8 @@ func (m *Manager) Configs() []Config {
 	return out
 }
 
-// Observe updates the measurement side of a loadpoint from raw driver
-// telemetry. The manager derives current SoC internally from the
-// session's plug-in anchor + delivered energy (chargers like Easee
-// don't report the vehicle's actual SoC).
-//
-// Plug-in transitions (prev !pluggedIn → now pluggedIn) reset the
-// session anchor to Config.PluginSoC (default 20 %) so the
-// inference is stable across plug cycles even if the underlying
-// charger's session counter wraps or resets.
-//
-// requestActive expresses whether the vehicle is (or could imminently
-// be) drawing current. Drivers that can distinguish "we throttled to 0"
-// from "the vehicle has explicitly stopped requesting current" pass
-// false on the latter; drivers without that distinction always pass
-// true and pre-existing behaviour is preserved. After
-// SessionCompletionTimeout of sustained !requestActive on a connected
-// session, charging_declined tells the planner to stop allocating energy.
-// This never changes the battery level or claims that its target was reached.
-//
-// No-op for unknown IDs — a misconfigured driver shouldn't crash the
-// manager.
-// SetSurplusWithheld records whether the controller is intentionally
-// withholding power from this loadpoint this tick (a surplus_only pause below
-// the 3-phase floor). When true, the next Observe treats a "not requesting
-// current" report as self-induced and does not advance the session-completion
-// timer. No-op for an unknown id.
+// SetSurplusWithheld marks a surplus pause the controller chose.
+// Observe then ignores "not requesting" for the completion timer.
 func (m *Manager) SetSurplusWithheld(id string, withheld bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -735,6 +711,12 @@ func (m *Manager) SetSurplusWithheld(id string, withheld bool) {
 	}
 }
 
+// Observe updates one loadpoint from charger telemetry. SoC is inferred
+// from the plug-in anchor plus delivered Wh, because the charger does not
+// read the pack. A new plug resets that anchor to Config.PluginSoC.
+// requestActive false means the car stopped asking, not that we throttled
+// it. After SessionCompletionTimeout the planner stops allocating.
+// That does not mark the target reached. Unknown ids are ignored.
 func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) {
 	m.ObserveSession(id, pluggedIn, powerW, deliveredWh, requestActive, "", "")
 }
@@ -1091,25 +1073,10 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	return true
 }
 
-// AnchorVehicleSoC re-anchors the inferred SoC to a trusted vehicle BMS
-// reading. It is the automatic counterpart to the operator's manual
-// SetCurrentSoC: the control loop calls it every tick with the SoC from
-// the vehicle driver paired to this loadpoint (e.g. Tesla via
-// TeslaBLEProxy), so the dashboard's current_soc and the planner's
-// InitialSoC both reflect BMS ground truth instead of the
-// delivered-Wh estimate, which is blind to the real pack (Easee and
-// other chargers can't read the car).
-//
-// Caller is responsible for the trust gate — only call with a reading
-// that is online, fresh, and matched to this loadpoint
-// (telemetry.PickBestVehicleForLoadpoint enforces this). Re-anchoring
-// every tick keeps current_soc locked to the latest BMS value; between
-// refreshes the inference advances from the last anchor on delivered Wh,
-// and if the vehicle goes BLE-silent (caller stops anchoring) the
-// estimate continues from the last known BMS truth rather than snapping
-// back to the plug-in guess.
-//
-// Returns false for unknown IDs or when the loadpoint is unplugged.
+// AnchorVehicleSoC sets inferred SoC from a fresh BMS reading the caller
+// already matched to this loadpoint. Between readings, delivered Wh
+// moves the anchor. If anchoring stops, the last BMS value stays.
+// False when the id is unknown or the car is unplugged.
 func (m *Manager) AnchorVehicleSoC(id string, socPct float64) bool {
 	m.sessionMu.Lock()
 	m.mu.Lock()
