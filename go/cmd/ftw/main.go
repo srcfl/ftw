@@ -1651,9 +1651,9 @@ func main() {
 				}
 				// Map target time → slot index using the DP's
 				// actual slot length (hour-of-prices vs. 15-min
-				// quarters vary by market). Anything past horizon
-				// gets clamped by the DP itself; negative means
-				// "no deadline".
+				// quarters vary by market). Both planners clamp a
+				// deadline past the horizon to its last slot;
+				// negative means "no deadline".
 				if slotLenMin <= 0 {
 					slotLenMin = 60
 				}

@@ -327,7 +327,7 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			InitialEnergyWh: lp.CapacityWh * initialSoC,
 			MaxEnergyWh:     lp.CapacityWh * maxSoC,
 			TargetEnergyWh:  lp.CapacityWh * targetSoC,
-			TargetSlot:      lp.TargetSlotIdx, ChargeEfficiency: efficiency,
+			TargetSlot:      lp.deadlineSlot(len(slots)), ChargeEfficiency: efficiency,
 			MaxChargeW: lp.MaxChargeW, AllowedStepsW: steps,
 			SurplusOnly: lp.SurplusOnly, NoStorageToLoad: lp.blocksBatteryToEV(),
 		})
@@ -551,7 +551,7 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.0002 {
 				return fmt.Errorf("slot %d loadpoint %s SoC %.4f inconsistent with replay %.4f", i, lp.ID, reportedSoC, evSoC[lp.ID])
 			}
-			if lp.TargetSoC > 0 && i == lp.TargetSlotIdx {
+			if i == lp.deadlineSlot(len(slots)) {
 				if missing := max(0, lp.TargetSoC-evSoC[lp.ID]) * lp.CapacityWh; missing > 1 {
 					deadlineShortfall[lp.ID] = missing
 				}

@@ -131,6 +131,16 @@ func (l *LoadpointSpec) normalizedSteps() []float64 {
 
 // active reports whether the DP should include EV dimensions for
 // this spec. Nil or un-plugged = inactive; treat as pure battery.
+// deadlineSlot is the slot by whose end the target must be met in a horizon
+// of n slots: -1 without a target or deadline, and the last slot for a
+// deadline past the horizon, so a planner still works toward it.
+func (l *LoadpointSpec) deadlineSlot(n int) int {
+	if l.TargetSoC <= 0 || l.TargetSlotIdx < 0 || n <= 0 {
+		return -1
+	}
+	return min(l.TargetSlotIdx, n-1)
+}
+
 func (l *LoadpointSpec) active() bool {
 	return l != nil && l.PluggedIn && l.CapacityWh > 0 && l.Levels >= 2
 }
