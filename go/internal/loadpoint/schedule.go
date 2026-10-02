@@ -7,21 +7,10 @@ import (
 	"github.com/srcfl/ftw/go/internal/units"
 )
 
-// Schedule is the user's persistent charging intent for one loadpoint:
-// "be at SoC by TimeOfDayMinUTC each day". When Recurring is true the
-// Manager rolls the loadpoint's targetTime forward to tomorrow once
-// today's deadline passes; when false the schedule still hydrates the
-// one-shot target_soc_pct/target_time fields on save but doesn't refresh
-// itself.
-//
-// SurplusUnlockBatSoC, if > 0, tells the dispatch controller to grab
-// PV surplus into this loadpoint whenever the home battery's SoC sits at
-// or above the threshold — even when SurplusOnly is off and the MPC has
-// nothing planned. Hysteresis (release at threshold − BatSoCUnlockHyst)
-// keeps the contactor from flapping at the boundary.
-//
-// Zero value (Empty) means "no schedule configured". Persistence keys
-// off this — Empty schedules are not written to disk.
+// Schedule is one loadpoint's saved charge intent. Empty is not stored.
+// Recurring rolls the deadline forward; a one-shot does not.
+// SurplusUnlockBatSoC arms surplus charging from the home battery's SoC
+// even when SurplusOnly is off. Release is threshold minus BatSoCUnlockHyst.
 type Schedule struct {
 	// FinishAtVehicleLimit keeps the goal pending until the car ends charging.
 	// SoC remains the explicit percentage goal when this option is false.
@@ -33,12 +22,9 @@ type Schedule struct {
 	SoC             float64 `json:"soc"`
 	TimeOfDayMinUTC int     `json:"time_of_day_min_utc"` // 0..1439
 	Recurring       bool    `json:"recurring"`
-	// Days restricts which weekdays the deadline may land on: a 7-bit
-	// mask, bit 0 = Monday through bit 6 = Sunday (ISO order). Zero
-	// means every day — the value every schedule stored before this
-	// field existed decodes to, so old rows and old clients keep
-	// their behaviour. The weekday is the household's, not UTC's: the
-	// mask is read in the box's own time zone (see NextDeadlineUTC).
+	// Days is an ISO weekday mask, Monday in bit 0. Zero is every day,
+	// which is what rows written before the field decode as. The bit
+	// is read in the box's zone, not UTC.
 	Days                uint8   `json:"days,omitempty"`
 	SurplusUnlockBatSoC float64 `json:"surplus_unlock_bat_soc,omitempty"`
 }
@@ -80,11 +66,8 @@ func (s *Schedule) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// HasTarget reports whether the schedule commits to a SoC by a deadline.
-// A target makes the plan the floor of automatic dispatch: the runtime
-// surplus clamps may add to it but never throttle it (see
-// Controller.surplusActive and surplusAddsToPlan, and the planner spec
-// gate in main.go).
+// HasTarget is true when automatic dispatch must treat the plan as a
+// floor. Surplus may add to it and must not throttle it.
 func (s Schedule) HasTarget() bool { return s.SoC > 0 || s.FinishAtVehicleLimit }
 
 // Empty reports whether the schedule carries no operator intent. The
@@ -95,12 +78,8 @@ func (s Schedule) Empty() bool {
 	return !s.FinishAtVehicleLimit && s.SoC == 0 && s.TimeOfDayMinUTC == 0 && !s.Recurring && s.SurplusUnlockBatSoC == 0
 }
 
-// NextDailyUTC returns the next time-of-day deadline (in UTC) strictly
-// after `now`. If `now` is already past today's slot, returns
-// tomorrow's. Used by RollSchedules to keep recurring deadlines from
-// going stale.
-//
-// `minUTC` is interpreted mod 1440 to defend against UI overflow.
+// NextDailyUTC is the next UTC time-of-day strictly after now.
+// minUTC is taken mod 1440.
 func NextDailyUTC(now time.Time, minUTC int) time.Time {
 	minUTC = ((minUTC % 1440) + 1440) % 1440
 	now = now.UTC()
@@ -112,20 +91,11 @@ func NextDailyUTC(now time.Time, minUTC int) time.Time {
 	return today
 }
 
-// NextDeadlineUTC returns the schedule's next deadline strictly after
-// `now`: the stored time-of-day (UTC minutes, via NextDailyUTC) on the
-// next day whose bit is set in Days. The weekday is read in `loc` — the
-// box's own zone — because "weekdays" must mean the household's
-// weekdays, not UTC's: a 00:30 Saturday deadline in Stockholm is still
-// Friday in UTC, and a mask read in UTC would skip the wrong day. A
-// zero mask means every day; nil loc falls back to time.Local, which
-// is the box's zone.
-//
-// Known drift: the time-of-day itself stays stored as UTC minutes, so
-// when the household crosses a DST change the local wall-clock deadline
-// shifts by an hour until the operator re-saves. Storing local minutes
-// instead needs a migration and a UI save-path change; that is deferred
-// on purpose rather than half-done here.
+// NextDeadlineUTC is the next stored time-of-day on a day Days allows.
+// The weekday is the household's: a 00:30 Saturday in Stockholm is still
+// Friday in UTC. A zero mask is every day. nil loc is time.Local.
+// The clock stays in UTC minutes, so a DST change moves the wall time
+// by an hour until the operator saves again.
 func (s Schedule) NextDeadlineUTC(now time.Time, loc *time.Location) time.Time {
 	next := NextDailyUTC(now, s.TimeOfDayMinUTC)
 	days := s.Days & 0x7F
@@ -141,9 +111,6 @@ func (s Schedule) NextDeadlineUTC(now time.Time, loc *time.Location) time.Time {
 		if days&(1<<iso) != 0 {
 			break
 		}
-		// Adding 24 h in UTC keeps the stored time-of-day fixed; only
-		// the weekday moves. A non-zero 7-bit mask matches within the
-		// 7 candidates this loop examines.
 		next = next.Add(24 * time.Hour)
 	}
 	return next

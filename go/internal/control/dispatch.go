@@ -23,32 +23,19 @@ const (
 	ModePeakShaving     Mode = "peak_shaving"
 	ModeCharge          Mode = "charge"
 
-	// Planner modes: control loop pulls GridTargetW from the MPC plan
-	// for the current 15-min slot. If the plan is stale (>30 min) or
-	// missing, planner_self holds batteries at 0 W until a fresh plan
-	// exists; the price-aware mode must not silently absorb PV during
-	// high-price export windows just because the planner is unavailable.
-	// Other planner modes fall back to self_consumption behavior and log.
-	// The three flavors mirror mpc.Mode — the difference is only what
-	// the planner is allowed to do when it builds the plan:
-	//   - planner_self:        no grid-charging, no battery export
-	//   - planner_cheap:       grid-charge ok, no export discharge
-	//   - planner_passive_arb: charge from cheapest (PV or grid), no
-	//                          export discharge (merges planner_self
-	//                          and planner_cheap as of v0.82)
-	//   - planner_arbitrage:   full freedom within SoC + power limits
+	// Planner modes read the current plan slot. A stale planner_self plan
+	// holds the batteries at 0 W, so a missing plan cannot absorb PV in a
+	// high-price export window. The other planner modes fall back to
+	// self_consumption. planner_self and planner_cheap do not export.
+	// planner_cheap and planner_passive_arbitrage may charge from the grid.
+	// planner_arbitrage may also export, within SoC and power limits.
 	ModePlannerSelf             Mode = "planner_self"
 	ModePlannerCheap            Mode = "planner_cheap"
 	ModePlannerPassiveArbitrage Mode = "planner_passive_arbitrage"
 	ModePlannerArbitrage        Mode = "planner_arbitrage"
 )
 
-// AllModes is the canonical, ordered list of every operator-selectable
-// Mode. It is the single source of truth: the API mode validator and the
-// Home Assistant discovery `select` options both derive from it, so a new
-// mode can't be added to the enum without automatically appearing in both
-// places. Order is operator-facing (simple → advanced → planner), so it's
-// also a safe order to render in a UI dropdown.
+// AllModes is the operator list. The API and Home Assistant both read it.
 func AllModes() []Mode {
 	return []Mode{
 		ModeIdle, ModeSelfConsumption, ModePeakShaving,
@@ -68,14 +55,8 @@ func IsValidMode(m Mode) bool {
 	return false
 }
 
-// PlannerMPCMode maps a planner Mode to the mpc.Mode strategy the planner
-// should build its plan with. ok is false for every non-planner mode, so a
-// caller can gate MPC propagation on it without a separate IsPlannerMode
-// check and without risking a zero-value mpc.Mode("") being pushed for an
-// unmapped planner mode. It is the single source of truth for the
-// control.ModePlanner* → mpc.Mode mapping: the API mode setter, the HA
-// command callback, and the startup mode-restore all derive from it, so a
-// new planner mode can't be wired into one path and forgotten in another.
+// PlannerMPCMode maps a planner mode to the mpc strategy. ok is false
+// for every other mode, so a caller cannot push an empty mpc.Mode.
 func PlannerMPCMode(m Mode) (mpc.Mode, bool) {
 	switch m {
 	case ModePlannerSelf:
@@ -98,18 +79,9 @@ func (m Mode) IsPlannerMode() bool {
 		m == ModePlannerArbitrage
 }
 
-// PlanTargetFunc is injected by main.go: given the current time, returns
-// the plan's directive for the current slot. When ok=false, the plan is
-// stale/missing and the control loop falls back to self_consumption with
-// grid_target=0.
-//
-// Returns (mode_string, grid_target_w, decision_id, ok). mode_string maps to a
-// Mode constant; the dispatch uses its existing mode logic for HOW batteries
-// respond. decision_id is report metadata only. The plan is a scheduler, not a
-// regulator.
-//
-// Legacy — the new contract (energy-allocation per slot, EMS converts to
-// power) uses SlotDirectiveFunc.
+// PlanTargetFunc returns the current slot as mode, grid target W,
+// decision id, and ok. ok false means the plan is missing. The decision
+// id is report metadata. New callers use SlotDirectiveFunc.
 type PlanTargetFunc func(now time.Time) (string, float64, string, bool)
 
 // SlotDirective mirrors mpc.SlotDirective — we redefine here to keep the
@@ -130,33 +102,11 @@ type SlotDirective struct {
 	PVCurtailActive bool
 	PVCurtailment   mpc.PVCurtailment
 
-	// PlannedGridW is the plan's forecast of slot-average gridW given the
-	// planned battery / load / PV mix (site-signed: + = import). The
-	// energy-dispatch path uses it as a CHARGE-ONLY soft reactive cap:
-	// on a charge slot (targetTotalW > 0), don't push live gridW past
-	// plan in the import direction. When live PV / load drifts away
-	// from the plan's forecast — e.g. a cloud cuts PV mid-slot during
-	// a planner_arbitrage charge slot that expected to charge off
-	// solar — the cap pulls the battery target toward "what would make
-	// live gridW match plan", preventing the energy budget from blindly
-	// driving extra grid import.
-	//
-	// Discharge slots are intentionally NOT clamped on the energy-allocation
-	// path: extra export during an EXPORT-INTENT slot (PlannedGridW < 0,
-	// e.g. peak-shave discharge picked by the DP for its export price) is
-	// bonus revenue and backing off would undermine the DP choice.
-	//
-	// Cover-load discharge slots (PlannedGridW ≈ 0 or import) are a
-	// DIFFERENT story: the DP picked discharge to offset an expensive
-	// import, not to export. There the energy path is rerouted to reactive
-	// PI on grid=0 — see the cover-load carve-out a few hundred lines
-	// below where useEnergyPath is decided.
-	//
-	// HasPlannedGridW gates whether the cap should consult PlannedGridW
-	// at all. Stored as a separate bool (rather than a *float64) so the
-	// per-tick directive bridge in main.go doesn't escape-allocate. The
-	// zero-value SlotDirective used by existing tests / legacy callers
-	// has HasPlannedGridW=false → cap opts out by default.
+	// PlannedGridW is the plan's slot-average grid W, site-signed.
+	// On a charge slot it caps live import when PV falls short of the plan.
+	// An export slot is not capped: backing off undoes the plan's sale.
+	// A cover-load discharge (near 0 or import) is routed to grid 0.
+	// HasPlannedGridW is a bool so the zero directive leaves the cap off.
 	PlannedGridW    float64
 	HasPlannedGridW bool
 
@@ -354,59 +304,28 @@ type State struct {
 	GridToleranceW  float64
 	SiteMeterDriver string
 
-	// SiteFuseAmps is the per-phase trip current of the site's main
-	// breaker (cfg.Fuse.MaxAmps). Used by the per-phase clamp inside
-	// applyFuseGuard / forceFuseDischarge: when the meter reports
-	// per-phase amps via DerReading.Data (l1_a / l2_a / l3_a, emitted
-	// by Pixii / Ferroamp / Sungrow), any single phase exceeding
-	// SiteFuseAmps is treated as additional aggregate overage so the
-	// existing scaling+discharge logic responds.
-	//
-	// Zero disables the per-phase clamp (back-compat for tests and
-	// sites without per-phase meter data).
+	// SiteFuseAmps is the per-phase breaker current. A phase over it
+	// counts as aggregate overage. Zero disables that clamp.
 	SiteFuseAmps    float64
 	SiteFuseVoltage float64
 	SiteFusePhases  int
 
-	// SiteFuseSafetyA is the headroom (in amps) the dispatch keeps
-	// below the breaker's nominal trip current. Phase amps are clamped
-	// at SiteFuseAmps − SiteFuseSafetyA on both directions. Without
-	// this margin, hardware-side per-phase protection inside the
-	// inverter (e.g. Pixii's local current limiter) trips before the
-	// dispatch sees the aggregate go over fuse — the inverter cuts
-	// output to 0 in one tick and the dispatch then has to ramp from
-	// idle, producing a visible flap. Defaults to 0.5 A wired in main.
-	// Zero disables the margin (back-compat).
+	// SiteFuseSafetyA is amps held back from the breaker. Without it the
+	// inverter's own limiter trips first, output falls to 0, and dispatch
+	// ramps from idle. Zero disables the margin.
 	SiteFuseSafetyA float64
 
 	// Peak limit — enforced only in PeakShaving mode
 	PeakLimitW float64
 
-	// PeakImportCeilingW is a hard import ceiling enforced in EVERY mode,
-	// parallel to (and at or below) the physical fuse. Default 0 = disabled.
-	// When > 0, the import side of every clamp (applyFuseGuard, joint
-	// EV/battery allocator, forceFuseDischarge) uses min(fuse, peak)
-	// as its threshold; the battery covers transient overruns while
-	// the loadpoint controller ramps the EV down. Steady-state with
-	// BatteryCoversEV=false: EV settles at its throttled rate and the
-	// battery stops being commanded to discharge — the bridge is brief
-	// by construction, not by an explicit timer. Steady-state with
-	// BatteryCoversEV=true: the planner is already aware EV draw is in
-	// scope, no additional behaviour here.
-	//
-	// Export side and per-phase clamp use fuseMaxW unchanged — peak is
-	// an aggregate import-only concept (tariff). Persisted in state.db
-	// under "peak_import_ceiling_w".
+	// PeakImportCeilingW is an import cap in every mode, at or below the
+	// fuse. Zero disables it. The battery covers the overrun while the EV
+	// ramps, then stops. Export and the per-phase clamp still use the fuse.
 	PeakImportCeilingW float64
 
-	// MaxExportW is a hard export ceiling (W, magnitude) enforced in EVERY
-	// mode, at or below the physical fuse. Default 0 = disabled (export
-	// bounded only by the fuse). When > 0 the export side of the fuse
-	// guard uses min(fuse−margin, MaxExportW) as its threshold and scales
-	// battery discharge back so predicted export stays under it. Protects
-	// inverters that trip on sustained export well below the breaker
-	// rating — the recurring Ferroamp EnergyHub 0x8030 fault after ~8 kW
-	// sustained midday export. Sourced from site.max_export_w.
+	// MaxExportW is an export cap in every mode, in watts of magnitude.
+	// Zero leaves only the fuse. Ferroamp EnergyHub 0x8030 trips after
+	// about 8 kW of sustained export, below the breaker.
 	MaxExportW float64
 	// EVChargingW is the effective aggregate vehicle charging load. Self
 	// (manual) keeps it in the raw meter signal; other modes exclude the
@@ -417,18 +336,8 @@ type State struct {
 	ManualEVChargingW float64
 	liveEVChargingW   float64
 
-	// EVSurplusOnlyReserveW is the aggregate PV headroom that must be
-	// kept available for EVs under surplus_only loadpoints. When > 0:
-	//   - the energy-allocation path caps battery aggregate charge so
-	//     it doesn't consume PV that the EV could be claiming
-	//   - the legacy PI / self-consumption path biases the grid setpoint
-	//     so it leaves `reserveRemaining` of export untouched
-	// Where reserveRemaining = max(0, EVSurplusOnlyReserveW -
-	// EVSurplusOnlyChargingW) — once the protected EVs have ramped up to
-	// the reserve, no further headroom is withheld from the battery.
-	// Populated each tick by main.go from loadpoint.Manager.States(). Set
-	// to 0 when no such LP is connected, in which case all behaviour
-	// reverts to the pre-existing path.
+	// EVSurplusOnlyReserveW is PV headroom kept for surplus-only EVs.
+	// Once those EVs are drawing it, the battery may take the rest.
 	EVSurplusOnlyReserveW float64
 	// EVSurplusOnlyChargingW is the actual positive charging draw from the
 	// loadpoints counted by EVSurplusOnlyReserveW. It stays separate from
@@ -437,24 +346,13 @@ type State struct {
 	// every dispatch tick.
 	EVSurplusOnlyChargingW float64
 
-	// EVCurtailHeadroomW is the parallel quantity sized for the
-	// PV-curtail decision. EVSurplusOnlyReserveW above is intentionally
-	// 0 for plugged-but-not-drawing EVs (so the battery can claim
-	// surplus a refusing EV won't), which is wrong when deciding
-	// whether to cut PV — a stopped EV with SoC headroom would start
-	// drawing if PV were allowed to grow above its min charge.
-	// loadpoint.SurplusPotentialW computes this more permissive
-	// reserve and main.go writes it here each tick.
+	// EVCurtailHeadroomW is the curtail reserve. The dispatch reserve is
+	// 0 for a plugged car that is not drawing, which would cut PV a car
+	// with SoC headroom would have used.
 	EVCurtailHeadroomW float64
-	// BatteryCoversEV overrides the default EV-exclusion behaviour. When
-	// false (default), EVChargingW is subtracted from the meter reading
-	// before the PI runs so batteries don't shuffle energy through the
-	// inverter to feed the EV on a normal day. When true, the subtraction
-	// is skipped and the battery is free to discharge into the EV up to
-	// its own SoC / power / fuse clamps — useful in price-arbitrage
-	// situations where the operator wants to drain the battery now and
-	// refill it later from cheap solar. Persisted in state.db via
-	// "battery_covers_ev"; toggled from HA and POST /api/battery_covers_ev.
+	// BatteryCoversEV lets the battery discharge into the EV. Off, EV
+	// load is taken out of the meter before the PI so the battery does
+	// not feed the car.
 	BatteryCoversEV bool
 
 	// BatteryBoostEVChargingW is the live charging draw belonging to
@@ -507,22 +405,9 @@ type State struct {
 	// and flipped via config. Default off preserves today's behavior.
 	UseEnergyDispatch bool
 
-	// PVSurplusAbsorbSoCCap is the operator override for the PV-surplus absorber
-	// underlay: in planner_cheap / planner_arbitrage, when live grid is
-	// exporting more than PVSurplusAbsorbThresholdW BEYOND what the
-	// planner's slot allocation would produce, AND the fleet's average
-	// SoC is below this cap, the energy-path's targetTotalW is bumped
-	// up by min(extra_export, cap_headroom_W) so the surprise lands in
-	// the battery instead of crossing the meter at low spot price.
-	//
-	// 0 = no operator override. The planner may still enable capture for
-	// a slot via SlotDirective.LivePVSurplusSoCCap when doing so moves
-	// a more expensive future grid charge into live PV. >0 turns the
-	// absorber on unconditionally with that 0–1 SoC as the ceiling.
-	//
-	// Never reverses a discharge plan: when the planner has already
-	// committed to discharge this slot (targetTotalW < 0, e.g.
-	// evening-peak export), the absorber stays passive.
+	// PVSurplusAbsorbSoCCap lets surprise export charge the battery while
+	// fleet SoC is under this cap. Zero leaves the choice to the slot.
+	// It never reverses a discharge plan.
 	PVSurplusAbsorbSoCCap float64
 
 	// PVSurplusAbsorbThresholdW is the dead-band on the absorber: how
@@ -544,24 +429,9 @@ type State struct {
 	controlSlotDecisionID string
 	controlPlanSnapshot   controlPlanSnapshot
 
-	// slotActualWh + slotActualLastTs + slotActualSlotStart are the
-	// path-agnostic per-slot delivery accumulator. Updated on EVERY
-	// dispatch tick (every mode, every path) from the live battery
-	// aggregate — independent of the energy-allocation bookkeeping
-	// above (which only updates inside useEnergyPath).
-	//
-	// The point is observability: when reactive paths (cover-load
-	// discharge, planner_self, planner_passive_arbitrage idle slots,
-	// the planner_arbitrage cover-load carve-out from PR #378) execute,
-	// the existing slotDelivered does not track them. Without an
-	// independent accumulator there's no way to measure whether those
-	// paths over- or under-deliver vs the plan's BatteryEnergyWh.
-	//
-	// At slot rollover (SlotStart change) the just-ended slot is
-	// evaluated and over/under-delivery is logged + counted. The
-	// resulting counters surface on /api/status so operators can spot
-	// systemic forecast vs reality drift. Site-signed: negative = the
-	// fleet discharged Wh during the slot.
+	// slotActualWh is battery Wh for the slot on every path. slotDelivered
+	// only moves on the energy path, so cover-load and idle were invisible.
+	// Negative is discharge.
 	slotActualReplans   uint64
 	slotActualDirective SlotDirective
 	slotPlannedPastWh   float64
@@ -1156,54 +1026,16 @@ func (s *State) SetGridTarget(w float64) {
 	s.PI.Setpoint = w
 }
 
-// SetPeakLimit applies the peak-shaving import threshold, rejecting the
-// values a site can never act on. Both operator paths — POST
-// /api/peak_limit and the Home Assistant peak_limit_w number — go
-// through here, so the rule has one home; there is no YAML key for it.
-// Callers hold the control mutex.
+// SetPeakLimit rejects a peak-shaving threshold the site cannot act on.
+// Callers hold the control mutex. There is no YAML key.
 //
-// Two rejections, both about a setting that reads as armed and is not:
-//
-//   - Negative. The threshold is the import level above which shaving
-//     starts correcting. Below zero, dispatch's `gridW > PeakLimitW`
-//     branch turns a site sitting at zero grid into a positive error and
-//     commands discharge to force export; the band between the limit and
-//     zero meanwhile falls into the `gridW < 0` charge arm, so the two
-//     halves of the same setting disagree. A knob named for an import
-//     peak must not be able to order export.
-//
-//   - Above the fuse. Every import-side clamp already binds at the fuse
-//     less its safety margin, so a threshold above that can never be the
-//     first thing to bind: peak-shaving mode would do nothing the fuse
-//     guard was not already doing, while the operator reads their number
-//     back from /api/status and believes the tariff is defended.
-//
-// Zero is accepted and keeps the meaning dispatch already gives it —
-// "correct everything above 0 W of import". This is deliberately NOT the
-// zero-means-disabled convention that PeakImportCeilingW and MaxExportW
-// use. Peak shaving is a mode: it is switched off by leaving the mode,
-// not by zeroing the threshold. Reading 0 as "disabled" here would let a
-// site running peak_shaving import without limit, and a wire value that
-// means two things is how the Ferroamp pplim=0 lock bit us.
-//
-// The comparison is against the fuse, not effectiveImportCeilingW, even
-// though PeakImportCeilingW can bind lower. The fuse is a property of the
-// site; the ceiling is another operator knob that may be set after this
-// one, and validating a knob against a knob makes acceptance depend on
-// the order the two were typed. A peak limit under the fuse but over a
-// tighter tariff ceiling is redundant, not misleading — the tighter
-// number is already doing the operator's stated job.
-//
-// There is no lower bound beyond zero. A threshold under the site's base
-// load binds hard rather than silently, the battery covers what it can,
-// and the rest shows up as import over the limit — visible, and the
-// operator's business. We have no quantified hardware or control risk to
-// point at, so we do not clamp it.
-//
-// A site whose fuse is not described (SiteFuseAmps <= 0, as in test and
-// e2e harnesses) gets the negative check only, matching fuseSafetyMarginW
-// and perPhaseOverageW: an incomplete fuse description yields no clamp
-// rather than an invented one.
+// Negative orders export: zero grid becomes an error, and the band under
+// zero charges. Above the fuse the limit never binds, but status still
+// shows it as armed. Zero means shave every import. It does not mean off.
+// Ferroamp pplim=0 taught us that one wire value cannot mean both.
+// Compare with the fuse, not PeakImportCeilingW. Two knobs must not
+// depend on which was typed last. A limit under the base load is the
+// operator's choice. An undescribed fuse checks only the sign.
 func (s *State) SetPeakLimit(w float64) error {
 	// NaN fails every comparison, so it would pass both checks below and
 	// leave `gridW > PeakLimitW` never true: shaving silently off.
@@ -1343,19 +1175,8 @@ func ComputeDispatch(
 	state.updateBatteryChargeFull(store, driverCapacities)
 	state.controlPlanSnapshot = controlPlanSnapshot{active: true, tickAt: tickAt}
 	defer func() { state.controlPlanSnapshot = controlPlanSnapshot{} }()
-	// ---- Per-slot Wh delivery observability (path-agnostic) ----
-	// Runs on EVERY tick before any mode/short-circuit decision so the
-	// idle / charge / holdoff / reactive-fallback paths all contribute
-	// to the actual-delivered accumulator. Independent of the
-	// energy-allocation bookkeeping (slotDelivered) which only updates
-	// inside useEnergyPath — that's why reactive cover-load discharge
-	// (PR #378) and planner_passive_arbitrage idle slots are invisible
-	// to that accumulator. This one isn't.
-	//
-	// Pure observability — log + counter only. No dispatch decision
-	// reads SlotDeliveryStats; no Wh cap is applied to reactive paths
-	// from this data. The point is to measure first, decide whether a
-	// cap is warranted later.
+	// Count delivered Wh on every path. slotDelivered misses cover-load
+	// and idle. Nothing in dispatch reads the result.
 	{
 		now := tickAt
 		var liveBatTotal float64
@@ -1370,52 +1191,15 @@ func ComputeDispatch(
 		updateSlotDeliveryMetrics(state, liveBatTotal, now)
 	}
 
-	// ---- Planner modes: the plan is a scheduler, not a regulator ----
-	// The plan decides WHEN each strategy applies (self-consumption now,
-	// charge at 02:00, export at 17:00). The EMS decides HOW batteries
-	// respond every 5 s based on the live meter.
-	//
-	// Three execution paths, selected by the operator-picked planner mode:
-	//
-	//   * planner_self — reactive self-consumption with per-slot gates
-	//     from the plan. Idle slots are charge-only unless the plan's
-	//     no-battery baseline explicitly exports PV, in which case the EMS
-	//     holds battery power at 0 to preserve that export/headroom choice.
-	//     Honours the mode's contract ("never imports to charge, never
-	//     exports via the battery") against forecast error.
-	//
-	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=true
-	//     (default): energy-allocation. Plan returns battery energy for
-	//     the slot; EMS converts to instantaneous power from
-	//     (remaining_wh / remaining_s); grid flow is the residual.
-	//
-	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=false
-	//     (opt-out): legacy PI-on-grid-target path. Plan returns
-	//     grid_target_w; PI chases it.
-	//
-	// All three share gather-batteries → distribute → slew → fuse below.
-	// They differ only in how `totalCorrection` is computed and whether
-	// the deadband applies.
+	// The plan picks the slot. This loop picks the watts from the meter.
+	// planner_self stays reactive. The other planner modes follow the
+	// energy budget unless UseEnergyDispatch is off, in which case the PI
+	// chases the plan's grid target.
 	effectiveMode := state.Mode
 	useEnergyPath := false
-	// planner_self gates constrain only the CHARGE direction. "Smart
-	// self-consumption" is about WHEN to refill the battery, never
-	// about importing electricity at any price the operator can't see.
-	// Discharge to cover live load is always allowed; the operator's
-	// floor is "never import what stored energy could've covered".
-	//
-	// plannerSelfIdleGate fires when the plan modeled this slot as
-	// near-balanced (battery_w ≈ 0). Reactive PI runs as in plain
-	// self_consumption; on the charge side, only PV surplus exceeding
-	// IdleGateThresholdW is absorbed so PI noise doesn't trigger churn.
-	//
-	// plannerSelfExportSurplusGate fires when the plan modeled an
-	// explicit export this slot. Reactive PI runs; on the charge side,
-	// any charge is blocked so the surplus stays out the meter.
-	//
-	// plannerSelfNoChargeStalePlan is the missing-plan safety: identical
-	// to exportSurplusGate's charge-block, applied when no fresh plan
-	// exists.
+	// planner_self gates charge only. Discharge to cover load stays on.
+	// An idle slot absorbs surplus above the gate. An export slot, and a
+	// missing plan, block charge.
 	plannerSelfIdleGate := false
 	plannerSelfExportSurplusGate := false
 	plannerSelfNoChargeStalePlan := false
@@ -1583,31 +1367,10 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		// Idle stops the fleet; it does not stop talking to it. A
-		// battery holds the last setpoint it accepted until it is given
-		// another one, so a mode that issues nothing parks the fleet
-		// wherever the previous mode left it — enter idle while the
-		// battery is charging at 5 kW and it charges at 5 kW.
-		//
-		// What happens next is then the vendor's decision rather than
-		// ours, and the vendors disagree. Ferroamp's forced mode
-		// EXPIRES: on 2026-06-10 an EnergyHub reverted to its own
-		// self-consumption and charged 2.6 kW from the grid while FTW
-		// believed it was idling. Sungrow holds instead, so the same
-		// operator action leaves two sites in two different states.
-		// ferroamp.lua's zero branch already re-publishes forced idle
-		// on every command for exactly this reason — it just never
-		// heard from this mode.
-		//
-		// So command it: an explicit 0 W to every battery we may
-		// command, rebuilt and re-sent every tick, which makes the hold
-		// ours and stops it decaying into autonomous behaviour.
-		//
-		// Protection is not off in idle. These zeros go through the
-		// same safety pipeline as every other dispatch path, so the
-		// reactive fuse-saver still overrides them and forces discharge
-		// when an unplanned load (an oven, an EV, a neighbour's pump on
-		// the same fuse) threatens the breaker.
+		// Send 0 W every tick. A battery keeps its last setpoint, and
+		// Ferroamp's forced mode expires. On 2026-06-10 an EnergyHub
+		// charged 2.6 kW from the grid while this mode was idle. Sungrow
+		// holds. The zeros still pass the fuse saver.
 		targets := holdFleetAtZero(store, driverCapacities)
 		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 			updatePrevTargets: true,
@@ -1876,33 +1639,10 @@ func ComputeDispatch(
 		state.SetGridTarget(0)
 		state.PI.Reset()
 
-		// BatteryCoversEV=false safety net: the energy path executes the
-		// plan's BatteryEnergyWh directive blindly, but the MPC may have
-		// planned battery→EV transfers (it joint-optimises both). Cap any
-		// commanded discharge to the level the reactive path would target
-		// — i.e. enough to zero the *house* side, not to feed the EV.
-		// Charging is left untouched. Mirrors the dispatch.go:453 rule on
-		// the legacy path.
-		//
-		// Use a real EV-active threshold (evActiveThresholdW) instead of
-		// `> 0`: connected-but-idle chargers report low-W noise (~1 W
-		// from Easee's last-known reading bleed) that would otherwise
-		// trip this safety net on every evening-peak slot — pinning a
-		// planned -9 kW discharge to just-cover-the-house. The threshold
-		// preserves the EV-protection guarantee for any real draw while
-		// letting noise pass through. Regression:
-		// TestEnergyDispatchIgnoresEVChargingWNoiseUnderThreshold,
-		// TestEnergyDispatchClampsDischargeWhenEVActuallyCharging.
-		//
-		// CANONICAL "battery may not feed EV" accounting. The MPC's
-		// NoBatteryToEV DP feasibility rule (mpc.go, see the
-		// houseResidualW check inside the action loop) mirrors this
-		// computation so the planner stops emitting allocations that
-		// this clamp then has to censor. TODO(refactor): extract the
-		// houseResidualW math + the (battW<0, evW>0) feasibility
-		// predicate into a small helper consumed by both this clamp
-		// and the DP rule, so a future change to the accounting can't
-		// drift between plan and runtime.
+		// With BatteryCoversEV off, discharge stops at the house. Idle
+		// charger noise under evActiveThresholdW must not trip this, or
+		// an evening discharge is pinned to the house. The planner's
+		// NoBatteryToEV rule uses the same split.
 		var plannedLoadpointEnergyWh float64
 		for _, wh := range currentDirective.LoadpointEnergyWh {
 			if wh > 0 {
@@ -1923,25 +1663,8 @@ func ComputeDispatch(
 			}
 		}
 
-		// PV surplus absorber underlay. Catches the gap between
-		// the MPC's 15-min slot allocation and live PV/load drift: when
-		// the plan's target would still leave grid exporting beyond the
-		// threshold AND average SoC is below cap AND we're not already
-		// in a planned discharge, redirect the leftover export into the
-		// battery instead of crossing the meter at low spot price.
-		// The cap comes either from the operator override or from an MPC
-		// proof that current export earns less than a later grid-funded
-		// battery charge costs. An explicit operator cap overrides the
-		// planner-derived cap, preserving the original opt-in policy. When the
-		// plan already exports, only export beyond that planned amount is eligible.
-		//
-		// Only adds charge — never reverses a discharge plan. The slot
-		// Wh accumulator (state.slotDelivered) sees the extra and the
-		// next replan reads true SoC, so the plan adapts naturally.
-		//
-		// Order: runs BEFORE the surplus-only EV reserve cap below, so
-		// any addition the absorber makes is then re-capped if an EV is
-		// reserving PV headroom for itself.
+		// Surprise export can charge the battery. It never reverses a
+		// discharge plan, and the EV reserve below may take it back.
 		absorbCapPct := pvSurplusAbsorbCap(state, currentDirective)
 		if absorbCapPct > 0 && targetTotalW >= 0 {
 			threshold := state.PVSurplusAbsorbThresholdW
@@ -1963,13 +1686,8 @@ func ComputeDispatch(
 			}
 		}
 
-		// Surplus-only EV reserve (energy path): cap battery aggregate
-		// charge to leave PV headroom for an EV that's under a
-		// surplus_only loadpoint. This is a live-PV sharing rule, not a
-		// grid-charge ban: a slot the planner already committed to
-		// importing (PlannedGridW ≥ 100 W) keeps that charge. Discharge
-		// is unaffected. Final cap — runs AFTER the PV surplus absorber
-		// so the absorber can't override an EV reserve on a PV-soak slot.
+		// Leave PV for a surplus-only EV. A planned import of at least
+		// 100 W keeps its charge. Discharge is left alone.
 		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 {
 			deliberateGridCharge := currentDirective.HasPlannedGridW && currentDirective.PlannedGridW >= 100
 			if !deliberateGridCharge {
@@ -1980,67 +1698,18 @@ func ComputeDispatch(
 			}
 		}
 
-		// Plan-grid soft reactive cap (charge-direction only).
-		//
-		// Catches the "cloud cuts PV mid-charge-slot, energy budget
-		// chases plan via grid import" failure mode: plan thought
-		// gridW ≈ 0 with PV doing the charging work, PV drops 3 kW,
-		// live gridW imports — without this cap, `remainingWh × 3600
-		// / remainingS` holds the planned charge power against the
-		// real (now-grid-fed) PV deficit until the reactive replan in
-		// mpc/service.go:266–290 fires (≥10 min later, gated by the
-		// 500 Wh PV-error integral and the 60 s cooldown). The cap
-		// compares the POST-DISPATCH projected grid against the plan,
-		// then pulls the battery target toward "what target would make
-		// projected gridW match plan". Floored at 0 so the cap can
-		// never flip dispatch direction.
-		//
-		// CHARGE-ONLY by design. The mirror case (discharge slot,
-		// live gridW more negative than plan) is intentionally NOT
-		// clamped:
-		//
-		//   - Battery delivers the planned discharge Wh either way;
-		//     the "extra" export to grid comes from load undershooting
-		//     forecast, not from over-discharging. Backing off would
-		//     leave Wh in the battery for a later slot the DP already
-		//     evaluated and rejected — undermining the DP's choice.
-		//   - The economics are asymmetric: extra import during a
-		//     charge slot costs the operator (paying for energy the
-		//     plan assumed PV would supply); extra export during a
-		//     discharge slot is bonus revenue at the slot's chosen
-		//     export price.
-		//   - Discharge-direction divergence (live import > plan,
-		//     e.g. load surged) is left to the reactive replan +
-		//     downstream clamps (fuse, SoC floor, EV-discharge cap).
-		//
-		// The charging slot's opposite-direction case (live gridW
-		// more negative than plan because PV came in higher than
-		// forecast) is handled above by the PV surplus absorber
-		// (dispatch.go ~line 866), which opportunistically *adds*
-		// charge.
-		//
-		// 100 W deadband matches IdleGateThresholdW / evActiveThresholdW
-		// elsewhere in this package — below it, the projected-grid
-		// divergence is meter noise / smoothing residue and the energy
-		// path keeps following plan.
+		// Charge slots only. If PV drops, the energy budget would hold the
+		// planned charge on grid import until the replan, about 10 minutes
+		// later. Export slots stay open: backing off would undo the sale.
+		// Below 100 W is meter noise.
 		if currentDirective.HasPlannedGridW && targetTotalW > 0 {
 			const planGridDeadband = 100.0
 			projectedGridW := gridW + (targetTotalW - currentTotal)
 			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
 				adjusted := targetTotalW - gridErr
-				// The back-off normally floors at 0 (charge → idle): on a
-				// deliberate grid-charge slot the plan meant to import, so a
-				// load surge must not flip it to discharge and undo the refill.
-				// But on a planner_arbitrage charge-from-PV-surplus slot
-				// (PlannedGridW below the grid-charge band — the DP only meant
-				// to soak surplus, not buy from the grid), let the target go
-				// negative so the battery covers the live load surge, driving
-				// projected grid back toward PlannedGridW (~0). This is the
-				// charge-side mirror of the discharge-slot cover-load carve-out;
-				// downstream SoC floor / fuse guard / slew still bound the
-				// discharge, and planHasNonDischargeIntent permits it for exactly
-				// these slots. Operator report 2026-05-30.
+				// A planned grid charge must not flip to discharge. A surplus-soak
+				// slot may. Operator report 2026-05-30.
 				if adjusted < 0 && !coverLoadChargeSlot(state, currentDirective) {
 					adjusted = 0
 				}
@@ -2180,47 +1849,11 @@ func ComputeDispatch(
 		state.PI.Setpoint = prevPISetpoint
 		totalCorrection = out.Output
 
-		// Live-meter clamp on the legacy PI path: plan decides charge or
-		// discharge direction; the live error decides magnitude. Prevents
-		// the load-twin over-prediction case where reactive PI commands a
-		// discharge larger than what's needed to close errW. Scoped to
-		// this default arm only — manualHold, useEnergyPath, and
-		// plannerSelfIdleGate each have their own contracts that
-		// intentionally cross the GridTargetW line.
-		//
-		// Derivation. With load and PV held constant within a tick,
-		// gridW moves 1:1 with bat (conservation: grid = load + bat + pv).
-		// So the new battery target lands gridW at GridTargetW when
-		//
-		//   idealTarget := currentTotal − errW
-		//
-		// The PI's request `targetTotal = currentTotal + totalCorrection`
-		// can fall into three regions:
-		//   - between currentTotal and idealTarget   → on the recovery
-		//                                                path, pass through
-		//   - past idealTarget (overshoot direction) → cap to idealTarget
-		//   - past currentTotal in the OPPOSITE direction (wrong-way move,
-		//     typically PI integrator windup from a prior mode)
-		//                                              → hold at currentTotal
-		//                                                until integrator
-		//                                                unwinds
-		//
-		// History. The earlier formula `allowed = ±errW` (i.e. -errW for
-		// the discharge arm, headroom-style for the charge arm) ignored
-		// currentTotal entirely, which (a) pinned bat at exactly the
-		// level reproducing the current grid error — a self-consistent
-		// stuck state whenever load exceeded |errW|, the steady-state
-		// case for any house with continuous load above the gap; and (b)
-		// in its switch on `targetTotal > 0 / < 0` accidentally folded
-		// the "PI overshooting during a natural recovery" case in with
-		// the "wrong-direction windup" case, hard-cutting bat to 0 mid-
-		// recovery and introducing visible flapping (commit 80456a1
-		// dropped that branch but left the wrong-direction case
-		// unprotected — Copilot caught the regression on PR #276).
-		//
-		// Deadband (state.GridToleranceW) already gated entry to this
-		// arm at the abs(errW) < dead check above; no second deadband
-		// haircut here.
+		// The live error sets magnitude. idealTarget is currentTotal - errW.
+		// A move the wrong way is integrator windup: hold and decay.
+		// On 2026-05-25 that windup lasted about 3 minutes after sunrise.
+		// Capping by errW alone stuck the battery at the current error
+		// whenever house load exceeded it (PR #276).
 		targetTotal := currentTotal + totalCorrection
 		idealTarget := currentTotal - errW
 		// correctionDir = sign(targetTotal − currentTotal); needs to
@@ -2863,34 +2496,8 @@ func applyBatteryBoostReserve(targets []DispatchTarget, store *telemetry.Store, 
 	return out
 }
 
-// ComputePVCurtail returns one CurtailTarget per affected driver for
-// this dispatch tick.
-//
-// When the active plan slot's PVLimitW > 0 (the MPC's annotateCurtailment
-// flagged that exporting more PV than the limit would lose money — e.g.
-// negative spot, no positive feed-in tariff), the limit is allocated
-// proportionally across drivers in `state.SupportsPVCurtail` according
-// to each driver's live PV output. Drivers not in that set are silently
-// skipped — an EV charger or a meter driver wouldn't know what to do
-// with a `curtail` payload.
-//
-// Drivers that received curtail last tick but aren't in the new set
-// (slot rolled over, or PVLimitW dropped to 0) get LimitW=0, which
-// main.go translates to `curtail_disable`. That guarantees the cap
-// is released exactly once when the plan no longer wants it — no
-// silent capping after a mode change or a fresh plan.
-//
-// Returns nil when nothing is curtailed and nothing needs releasing.
-//
-// Idempotent: state mutation (LastCurtailedDrivers) reflects the
-// post-call set of actively-curtailed drivers.
-// protectiveCurtailLimitW returns (limit, true) when live state
-// triggers the DC-link protection: SoC at or above the configured
-// threshold AND PV surplus exceeds the safety margin. The limit
-// shrinks PV output to live-load + margin so a sudden load step
-// inside the margin lands without DC-link stress. Returns
-// (0, false) when protection is disabled, off-threshold, or there
-// is no PV-vs-load surplus to clamp.
+// protectiveCurtailLimitW caps PV at live load plus margin when SoC is
+// high and surplus exceeds that margin. (0, false) means leave PV alone.
 func protectiveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	if state == nil || store == nil || !state.DCLinkProtectionEnabled {
 		return 0, false
@@ -2996,6 +2603,9 @@ func sumOnlineSignedW(store *telemetry.Store, t telemetry.DerType) float64 {
 	return sum
 }
 
+// ComputePVCurtail returns one cap per driver this tick, and a release
+// for a driver that was capped last tick and is no longer. Nil when
+// neither is needed.
 func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	if state == nil {
 		return nil
@@ -3152,28 +2762,10 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	// Release path. A previously-curtailed driver gets an explicit
 	// `curtail_disable` (LimitW: 0) only when one of the following is
 	// true:
-	//   - the curtail directive has cleared (no slot, no manual hold)
-	//   - the driver is no longer in `state.SupportsPVCurtail` (config
-	//     change removed the opt-in)
-	//   - the driver went offline (no harm — driver can't receive
-	//     anyway, but keeps `state.LastCurtailedDrivers` clean)
-	//
-	// We deliberately do NOT release a driver just because it dropped
-	// out of the live proportional allocation due to its own |PV|
-	// crashing to ~0. That very thing often happens as a direct
-	// consequence of our prior curtail (the inverter throttled PV down
-	// to the cap, telemetry reports 0 generation, allocator excludes
-	// it next tick). Emitting a release in that case publishes
-	// `pplim arg=0` on Ferroamp's extapi — same wire bytes as the
-	// release would have, opposite semantics — and locks the inverter
-	// at 0 W PV until the operator clears it from the Ferroamp portal
-	// (sticky-lock trap, 2026-05-27 incident; see #367 for the driver-
-	// side hard-fail that paired with this dispatcher fix).
-	//
-	// While the directive is active and the driver is still online +
-	// supported, the right behaviour is to leave the existing pplim
-	// in place; the driver will get a fresh non-zero target as soon as
-	// its live |PV| returns to a level the allocator can split.
+	// the directive cleared, the driver left SupportsPVCurtail, or it
+	// went offline. Do not release because live PV fell to 0. That is
+	// often the cap we just sent, and Ferroamp reads pplim 0 as a sticky
+	// lock (2026-05-27, #367).
 	var out []CurtailTarget
 	suppressedTrack := map[string]bool{}
 	for d := range state.LastCurtailedDrivers {
@@ -3737,44 +3329,12 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 	return targets
 }
 
-// floorBlockedCharge is the charge-side mirror of floorNegativeTargets: a
-// target may not command charge into a direction this tick already closed.
-//
-// It exists because the slew limiter anchors every target on the battery's
-// MEASURED output rather than on the command, so a battery physically
-// charging at +2000 W is pulled back toward +2000 W from whatever the stages
-// above decided — including the 0 W that noSelfCharge pinned two hundred
-// lines earlier. Nothing below used to undo that: applyFuseGuard only shrinks
-// toward zero, floorNegativeTargets covers the discharge side only, and
-// planSignIntent reports "idle, no opinion" for an idle slot. A
-// passive-arbitrage idle slot with the meter at -2000 W, the battery live at
-// +2000 W and SlewRateW=500 therefore commanded +1500 W of charging on the
-// tick whose entire purpose was to let that surplus reach the meter.
-//
-// Two authorities close the charge direction, both decided before slew runs:
-//
-//   - noSelfCharge — the site-wide block: planner_self's export-surplus gate,
-//     planner_self's stale plan, and the arbitrage-family idle live-export
-//     gate. It pins the fleet TOTAL to zero; this bounds each command.
-//   - chargeBlocked — the driver's own capability report. Its share was
-//     already handed to capable siblings, so re-opening it double-counts the
-//     charge as well as ignoring the hardware.
-//
-// This is a bound on the output, not a list of the reasons the output was
-// closed. The snap-to-zero carve-out inside the slew loop is the list
-// version, and it names only plannerSelfExportSurplusGate and manual hold;
-// the two charge gates added to ComputeDispatch after it were never added to
-// it. That is how this bug was born, and a floor cannot be born that way. It
-// only ever moves a target toward zero, so it can neither create motion nor
-// widen a clamp applied above it — and nothing after it raises charge:
-// applyBatteryBoostReserve touches negative targets only, and
-// forceFuseDischarge only forces discharge.
-//
-// The discharge-side twin of the per-driver half is deliberately NOT here: a
-// dischargeBlocked battery re-opened by slew is the same shape, but flooring
-// it has to answer whether the fuse emergency in forceFuseDischarge outranks
-// a driver's "I cannot discharge". Charge has no such override, so it is the
-// half that can be fixed without deciding that.
+// floorBlockedCharge stops slew from reopening a charge this tick closed.
+// Slew anchors on measured watts, so a battery at +2000 W is pulled back
+// toward charge after noSelfCharge set 0. The snap-to-zero list inside
+// slew never grew the later charge gates, which is how an idle slot
+// commanded +1500 W. This only moves a target toward zero. Discharge
+// stays out: the fuse saver may need it.
 func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlocked map[string]bool) []DispatchTarget {
 	if !noSelfCharge && len(chargeBlocked) == 0 {
 		return targets
@@ -3954,33 +3514,9 @@ func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 	return clamped, wasClamped
 }
 
-// applyFuseGuard enforces the site fuse budget on both directions of
-// grid flow — import AND export. Any dispatched target would shift the
-// grid flow by (target − current_battery_power); the guard predicts
-// the post-dispatch grid reading and, if it would exceed ±fuseMaxW,
-// scales the same-direction targets toward zero until the boundary is
-// respected.
-//
-// Prediction (site sign: grid = load + pv + battery):
-//
-//	predicted_grid = live_grid − Σ current_battery_w + Σ target
-//
-// Because load and pv are invariant in the 5 s dispatch window, only
-// the battery row changes when we apply new targets.
-//
-// Directional scaling:
-//   - predicted > +fuseMaxW (too much import): scale POSITIVE (charge)
-//     targets down. 1 W less charge = 1 W less import, so the reduction
-//     directly offsets the overage.
-//   - predicted < −fuseMaxW (too much export): scale NEGATIVE (discharge)
-//     targets toward zero — the symmetric case.
-//
-// Issue #145 changed the guard from "PV + discharge > fuse → scale
-// discharge" (old, discharge-only, assumed zero load) to this
-// bidirectional predicted-grid approach so heavy PV-free charge slots
-// can't push aggregate imports past the fuse. The new path also uses
-// live load inference so the discharge side no longer over-scales
-// during high-load hours.
+// applyFuseGuard scales charge down on predicted import over the fuse,
+// and discharge down on predicted export over it. The old guard only
+// looked at PV plus discharge and assumed no load (#145).
 func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) []DispatchTarget {
 	if fuseMaxW <= 0 || state == nil {
 		return targets
@@ -4928,48 +4464,12 @@ func predictedGridFromSnapshot(
 	return currentBat, sumTarget, currentGrid - currentBat + sumTarget
 }
 
-// forceFuseDischarge is the reactive fuse-saver primary. It runs AFTER
-// applyFuseGuard and unconditionally drains the home battery whenever
-// predicted grid import would exceed the fuse, regardless of mode,
-// regardless of operator intent (BatteryCoversEV toggle, planner
-// allocation, manual_hold injecting unplanned EV draw, an oven
-// turning on, or any other off-plan load).
-//
-// The contract: under no software-controllable circumstance should
-// the operator's hardware fuse trip because the EMS sat idle while
-// the meter was over the limit. The hardware breaker remains the
-// final cutoff for sub-tick spikes; this layer eliminates
-// steady-state overflow at the 5 s control-tick rate.
-//
-// Why this exists separately from applyFuseGuard:
-//
-//	applyFuseGuard scales POSITIVE (charge) targets DOWN to 0 when
-//	import is over fuse. That helps when the planner asked for a
-//	charge — it prevents the EMS from making the overflow worse —
-//	but cannot help in the common "battery idle, surprise load" case
-//	because there's no charge to shrink. The PR #206 manual_hold
-//	ramp test surfaced this: the EV was pinned at ~5.5 kW while the
-//	home battery sat at 0 W per the planner's idle slot, and gridW
-//	went over fuseSafeMaxW until the operator stopped the test.
-//
-// Algorithm:
-//
-//  1. Recompute predicted gridW after applyFuseGuard's scaling
-//     (currentGrid − currentBat + sumTarget). currentGrid is the
-//     live meter reading and reflects ALL loads including off-plan
-//     EV draw / manual_hold / unplanned spikes.
-//  2. If predicted ≤ fuseMaxW: nothing to do.
-//  3. Otherwise allocate `overage = predicted − fuseMaxW` of
-//     additional relief, distributed proportionally to each online
-//     battery's safe travel toward its lower command bound. Empty packs and
-//     drivers that block discharge may cancel live charge down to 0 W but are
-//     never asked to discharge.
-//  4. Mark every modified target Clamped so the dispatch trace
-//     shows the fuse-saver fired.
-//
-// Out of scope: sub-tick reactivity. A 5 s tick is the floor here;
-// going faster requires pushing the dispatch loop down to ~1 s.
-// Hardware fuse trips remain the only protection for sub-tick spikes.
+// forceFuseDischarge adds discharge when predicted import still exceeds
+// the fuse after applyFuseGuard. That guard can only shrink a charge.
+// It cannot help an idle battery under a surprise load. PR #206 pinned
+// an EV at 5.5 kW on an idle slot and the meter went over the fuse.
+// A pack that cannot discharge may cancel charge down to 0 and no further.
+// Spikes inside one tick remain the breaker's job.
 func forceFuseDischarge(
 	targets []DispatchTarget,
 	store *telemetry.Store,
@@ -5059,17 +4559,8 @@ func forceFuseDischargeWithSnapshot(
 	copy(out, targets)
 	for _, s := range slots {
 		share := allocate * (s.headroom / totalHeadroom)
-		// Subtract `share` from the existing target — that gives the
-		// algorithm one consistent rule across all signs:
-		//   +3000 - 2960 = +40   (still charging, but reduced)
-		//    0    - 2960 = -2960 (idle → discharge)
-		//   -1000 - 960  = -1960 (already discharging → more)
-		// The net change to sumTarget is exactly `share`, so the
-		// post-dispatch predicted gridW lands at fuseMaxW. Setting
-		// TargetW = -share when positive (the prior implementation)
-		// over-corrected by the original charge magnitude — letting
-		// out`predicted` undershoot the fuse and discharging more
-		// than necessary.
+		// Subtract from the current target. Replacing a charge with -share
+		// removed the charge twice and discharged more than the overage.
 		out[s.idx].TargetW -= share
 		out[s.idx].Clamped = true
 	}

@@ -11,26 +11,9 @@ import (
 	"time"
 )
 
-// Controller orchestrates one dispatch cycle for every configured
-// loadpoint: observe driver telemetry, read the planner's per-slot
-// energy budget, translate to an instantaneous W command, and send
-// to the driver.
-//
-// Phase decisions (1Φ vs 3Φ) live IN THE DRIVER, not here. The
-// controller's job is purely energy allocation: how many watts the
-// MPC budget says we can pour into this loadpoint right now. The
-// driver knows its own physical constraints (minimum amps, contactor
-// switching latency, manufacturer's phaseMode wire format) and
-// decides which phase configuration to use given the requested W,
-// the operator's `phase_mode`/`phase_split_w`/`min_phase_hold_s`
-// preferences, and the site's per-phase fuse ceiling — all of which
-// are passed through in the `ev_set_current` command.
-//
-// Dependencies are injected as function types (not interfaces) to
-// avoid pulling mpc and telemetry into loadpoint's import graph —
-// mpc already imports loadpoint for its DP loadpoint_spec, so the
-// cycle must go the other way. main.go wires short adapter closures
-// from mpc.Service / telemetry.Store / drivers.Registry.
+// Controller turns one plan slot into an ev_set_current for each
+// loadpoint. Phase choice stays in the driver. Dependencies are
+// function values because mpc already imports this package.
 type Controller struct {
 	manager *Manager
 	plan    PlanFunc
@@ -61,13 +44,7 @@ type Controller struct {
 	resumeOffers    map[string]resumeOffer // owned by the dispatch tick
 	energySamples   map[string]*meteredEnergy
 
-	// fuseEVMax is the joint fuse-budget allocator's verdict for how much
-	// W this controller may command to the EV this tick. Set by the
-	// dispatch package each control cycle; nil/zero-returning func means
-	// "no fuse constraint" (loadpoint runs at its planner-determined
-	// budget). When the function returns (cap, true) with cap > 0, the
-	// controller clamps the planner's wantW to that cap so battery and
-	// EV cooperatively share the site fuse.
+	// fuseEVMax is this tick's EV share of the site fuse. nil means no cap.
 	fuseEVMax func() (float64, bool)
 
 	// perPhaseMeterAmps returns the live site-meter per-phase currents (L1,
@@ -77,44 +54,25 @@ type Controller struct {
 	// between ticks by the reactive per-phase fuse clamp (tickOne goroutine).
 	fusePhaseCapA map[string]float64
 
-	// siteSurplusForEVW returns the live PV surplus that this loadpoint
-	// could legally claim under surplus_only: leftover PV after house
-	// load, minus home-battery PV-soak. Grid-funded battery charge is
-	// not soak. Wired from main.go via SurplusAvailableForEVW.
-	// Returns (_, false) when any of the inputs are stale; the
-	// controller then pauses rather than guess.
+	// siteSurplusForEVW is live PV left after house load and battery soak.
+	// A false reading pauses surplus_only rather than guessing an import.
 	siteSurplusForEVW func() (float64, bool)
 
-	// site is the grid-boundary fuse. Its values are passed through
-	// to the driver in every ev_set_current cmd so the driver knows
-	// the per-phase ceiling and the mains voltage. Zero MaxAmps
-	// disables the per-phase fields in the cmd; the driver then
-	// falls back to its own configured defaults.
+	// site is the grid fuse passed through on every ev_set_current.
+	// Zero MaxAmps leaves the driver's own defaults.
 	site SiteFuse
 	// siteMu guards site against concurrent SetSiteFuse hot-reloads
 	// (config-reload goroutine) vs the tick goroutine's reads.
 	siteMu sync.RWMutex
 
-	// holds is the manual-override registry: per-loadpoint power +
-	// phase parameters that win over the MPC-driven dispatch until
-	// they expire. Used by the diagnostics endpoint
-	// `POST /api/loadpoints/{id}/manual_hold` so an operator can pin
-	// a specific amperage / phase configuration on the charger for
-	// long enough to observe driver behaviour, without fighting the
-	// 5-second control loop. Missing entries (or expired holds, which
-	// `GetManualHold` lazily evicts) fall through to the normal
-	// compute-from-plan path.
+	// holds win over the plan until they expire or the operator stops them.
 	holdMu          sync.Mutex
 	holds           map[string]ManualHold
 	manualRestored  map[string]bool
 	manualBindings  map[string]manualSessionBinding
 	manualPersistMu sync.Mutex
-	// manualIdleSince[id] is when a loadpoint with an active manual hold
-	// first observed the vehicle "not requesting current" this idle spell.
-	// Once it has stayed not-requesting for SessionCompletionTimeout the
-	// controller auto-releases the hold (the car is full / declined), so
-	// the operator doesn't have to press Stop. Reset whenever the car
-	// requests again or the hold goes away. Guarded by manualIdleMu.
+	// manualIdleSince starts when a held car stops requesting current.
+	// SessionCompletionTimeout then drops the hold, so Stop is not required.
 	manualIdleMu    sync.Mutex
 	manualIdleSince map[string]time.Time
 	// manualHoldSaver, if non-nil, persists operator (Persistent) manual
@@ -135,10 +93,8 @@ type Controller struct {
 	batteryBoostSafety  BatteryBoostSafetyFunc
 	batteryBoostStopped func(id string, reason BatteryBoostStopReason)
 
-	// surplusMu protects surplusWin + surplusPaused, the per-loadpoint
-	// state that smooths the surplus_only pause/resume decision over
-	// a small rolling window so brief PV dips don't cycle the EV
-	// contactor. See computeSurplusCmd for the full rationale.
+	// surplusMu guards the pause/resume window so a brief PV dip does not
+	// cycle the contactor.
 	surplusMu       sync.Mutex
 	surplusWin      map[string]*surplusWindow
 	surplusPaused   map[string]bool
@@ -150,75 +106,39 @@ type Controller struct {
 	// (which would whipsaw the home battery's PI). See computeSurplusCmd.
 	surplusStepW map[string]float64
 
-	// vehicleStatus reports the matched vehicle driver + its
-	// charging_state for a given loadpoint, so the controller can
-	// trigger a charge_start command when the EV detached mid-
-	// session ("Stopped") while we're trying to deliver power.
-	// nil disables the wake feature.
+	// vehicleStatus is the bound vehicle driver and its charging state.
+	// nil disables auto-wake.
 	vehicleStatus      func(loadpointID string) (driver, chargingState string, ok bool)
 	vehicleChargeState func(loadpointID string) (VehicleChargeState, bool)
 
-	// peakRemainingSurplusW returns the peak PV-minus-load surplus
-	// expected for the rest of the local day, used by surplus_only
-	// to decide whether to lock the loadpoint to 1Φ for the day.
-	// When the highest forecasted surplus from now to end-of-day
-	// can't sustain a 3Φ minimum, sticking to 3Φ would mean we
-	// pause the EV for the rest of the day. Falling back to 1Φ
-	// once is far better than flapping 1Φ ↔ 3Φ as cloud cover
-	// shifts. nil disables this — the loadpoint then stays on 3Φ-
-	// only forever (matching the conservative original behaviour).
+	// peakRemainingSurplusW is the best PV-minus-load surplus left today.
+	// Below the 3Φ minimum, surplus_only locks 1Φ for the day. nil keeps 3Φ.
 	peakRemainingSurplusW func() (float64, bool)
-	// nearTermPeakSurplusW returns the peak PV-minus-load surplus
-	// over the next `window` from now (in plan slot resolution).
-	// pickSurplusSteps consults this *before* the whole-day peak so
-	// the LP can fall back to 1Φ when 3Φ isn't imminent — captures
-	// "we have 3 kW now and won't see 4.1 kW for the next 30 min,
-	// start charging at 1Φ instead of waiting." The day-peak gate
-	// still applies for the longer-term "lock 1Φ for the whole day"
-	// decision so a passing cloud doesn't commit the LP to 1Φ for
-	// the entire afternoon. Optional; nil means no near-term gate.
+	// nearTermPeakSurplusW is that peak over the next window. It may
+	// allow 1Φ before the day lock does, so a cloud does not pin 1Φ
+	// for the afternoon. nil skips the near-term gate.
 	nearTermPeakSurplusW func(window time.Duration) (float64, bool)
 
-	// nearTermLogLast throttles the "1Φ allowed (near-term 3Φ
-	// unreachable)" log line to once per nearTermLogCooldown per
-	// loadpoint so it doesn't spam every 5 s when the condition
-	// holds for hours. Reset on day rollover via the existing
-	// phase-lock release path.
+	// nearTermLogLast throttles the 1Φ-allowed log to nearTermLogCooldown.
 	nearTermLogMu   sync.Mutex
 	nearTermLogLast map[string]time.Time
 
-	// fusePauseUntil holds the wall-clock time before which an LP must
-	// stay paused after a fuse-clamp-induced full pause. Operator-stated
-	// behaviour: ramp down if possible, pause if the fuse cap is below
-	// the LP's min step, and keep paused for fusePauseCooldown so a
-	// transient doesn't flap. Cleared lazily when the cooldown expires.
+	// fusePauseUntil keeps a loadpoint at 0 W for fusePauseCooldown after
+	// the fuse cap falls below its minimum step.
 	fusePauseMu    sync.Mutex
 	fusePauseUntil map[string]time.Time
 
-	// phaseLockMu protects phaseLocked1P + phaseLockedAt + phaseSelected3P.
-	// The 1Φ lock is sticky for the rest of the day so a slowly recovering
-	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
-	// cleared at the start of the next local day if the forecast
-	// shows we'll see enough surplus to sustain 3Φ again — that's
-	// the natural reset point that matches the operator's "look at
-	// today vs tomorrow" mental model.
-	// phaseSelected3P + phaseSelectedAt enforce the minimum-dwell rule
-	// on the near-term gate: once a 3Φ-only ↔ 1Φ-allowed decision is
-	// taken, hold it for at least phaseSwitchMinHold before the next
-	// switch is allowed. Without this, a forecast peak hovering around
-	// the 4140 W threshold flaps the step set every tick, which
-	// cascades into Easee phaseMode flips + contactor cycles + battery
-	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per 30 min.
-	// Cleared on day rollover via the same path as phaseLocked1P.
+	// phaseLockMu guards the day-long 1Φ lock and the 30 min phase dwell.
+	// Without the dwell, a forecast near 4140 W flips the Easee contactor
+	// every tick and winds up the battery PI.
 	phaseLockMu     sync.Mutex
 	phaseLocked1P   map[string]bool
 	phaseLockedAt   map[string]time.Time
 	phaseSelected3P map[string]bool
 	phaseSelectedAt map[string]time.Time
 
-	// wakeMu protects the per-loadpoint last-wake timestamp used to
-	// throttle charge_start retries. Tesla rate-limits BLE commands;
-	// retrying every 5 s would just exhaust the radio.
+	// wakeMu guards wake timestamps. Tesla rate-limits BLE, so a 5 s retry
+	// would exhaust the radio.
 	wakeMu        sync.Mutex
 	wakeLast      map[string]time.Time
 	wakeKickUntil map[string]time.Time
@@ -229,109 +149,59 @@ type Controller struct {
 	// the feature entirely — the LP behaves exactly as today.
 	batSoC func() (float64, bool)
 
-	// gridDeferredMu protects gridDeferred. The map is set by main.go's
-	// MPC spec builder when it decides to suppress grid-funded EV
-	// planning (because the deadline lies past the last published price
-	// slot). Runtime dispatch reads it to ALSO enforce surplus-only
-	// behaviour at the tick — so when forecast PV undershoots reality
-	// the EV pauses rather than silently importing from grid against a
-	// plan budget that assumed sun.
+	// gridDeferredMu guards loadpoints whose deadline sits past published
+	// prices. Those ticks follow surplus, so a sunny plan cannot import
+	// after the forecast misses.
 	gridDeferredMu sync.Mutex
 	gridDeferred   map[string]bool
 
-	// batSoCArmed tracks the per-LP arm/release state for the bat-SoC
-	// hysteresis. batSoCNoPV counts consecutive ticks where the live
-	// site surplus dropped to zero — a sustained no-PV run releases
-	// the arm even when the home battery is still above the SoC
-	// threshold, because battery discharge isn't surplus and we don't
-	// want to ride a high-SoC arm through the night kicking the EV.
+	// batSoCArmed is the surplus-unlock hysteresis. batSoCNoPV counts
+	// ticks with no live PV so a full battery does not kick the EV
+	// through the night.
 	batSoCArmedMu sync.Mutex
 	batSoCArmed   map[string]bool
 	batSoCNoPV    map[string]int
 }
 
-// batSoCPVGoneTicks is the consecutive-tick threshold (at the 5 s
-// dispatch cadence ≈ 30 s) of zero/negative live surplus before the
-// bat-SoC unlock disarms. Long enough to swallow a passing cloud
-// without flap; short enough that evening transition releases promptly.
+// batSoCPVGoneTicks is about 30 s of no live PV before the bat-SoC
+// unlock releases. Shorter flaps on a cloud. Longer kicks the EV into the evening.
 const batSoCPVGoneTicks = 6
 
-// wakeKickDuration is how long a wake-kick forces the EV charger to
-// signal min 3Φ current after a charge_start fires. The wallbox must
-// actively present current (not 0 A) for the car to negotiate the new
-// session — sending charge_start while Easee is at 0 A is futile.
-// This briefly violates surplus_only's no-import rule, which is the
-// price of recovering from a detached session without operator
-// intervention. 30 s is enough for Tesla's BLE handshake plus a few
-// seconds of pilot-signal stabilisation.
+// wakeKickDuration is how long the wallbox must offer current after
+// charge_start. Easee at 0 A gives the car nothing to negotiate.
+// The window may import. That is the cost of an unattended recover.
 const wakeKickDuration = 30 * time.Second
 
-// wakeBackoffAfter is the number of consecutive failed wake attempts
-// (vehicle stays detached across the cooldown window) before we
-// stretch the cooldown out. The car's BLE radio gets rate-limited
-// after several rapid sends; pressing every 90 s indefinitely just
-// hammers it without effect. Counter resets on the first
-// `Charging` / `Starting` reading.
+// wakeBackoffAfter is failed wakes before the cooldown stretches.
+// The BLE radio rate-limits a steady 90 s poke. Charging or Starting resets it.
 const wakeBackoffAfter = 5
 
-// wakeBackoffCooldown is the stretched cooldown applied once
-// wakeBackoffAfter is reached. Big enough that an operator who is
-// ignoring the notification doesn't get hammered every 90 s; short
-// enough that recovery is automatic if the car wakes on its own
-// (e.g. user presses "Start" on the Tesla app).
+// wakeBackoffCooldown is the slow retry after wakeBackoffAfter.
 const wakeBackoffCooldown = 10 * time.Minute
 
-// vehicleWakeCooldown caps how often we'll send a charge_start to the
-// same loadpoint's matched vehicle. Tesla's BLE radio is shared with
-// every other proxy poll the driver does (vehicle_data, charge_amps,
-// wake_up); poking it every 90 s on top of routine 60 s polls quickly
-// pushes it into "Command Disallowed" rate-limits, after which all
-// proxy reads start failing and the picker sees stale data. 5 min
-// gives the radio room to breathe between active wake attempts —
-// the wallbox-cycle fired on each wake is what actually rescues
-// detached sessions; charge_start is the secondary signal.
+// vehicleWakeCooldown is the gap between charge_start attempts.
+// The wallbox cycle is what recovers a detached session. charge_start
+// on top of the proxy's own polls trips Tesla's command limit.
 const vehicleWakeCooldown = 5 * time.Minute
 
-// vehicleWakeTimeout caps the wake-send roundtrip when wakeVehicleAuto
-// is invoked fire-and-forget on a background goroutine (e.g. from the
-// wallbox-delivering rising edge in tickOne). Without it a stuck
-// vehicle-proxy HTTP call would leak the goroutine until the process
-// exits. 30 s is comfortably longer than the Tesla proxy's own ~15 s
-// host timeout while still bounded enough that a leaked routine per
-// cooldown window is the worst case.
+// vehicleWakeTimeout bounds a fire-and-forget wake so a stuck proxy
+// call cannot leak the goroutine. The proxy's own timeout is about 15 s.
 const vehicleWakeTimeout = 30 * time.Second
 
-// surplusWindowSize is the length of the rolling-average buffer used
-// for surplus_only pause/resume decisions. At a 5 s tick this is ~20 s
-// of smoothing — long enough to ride out single-tick cloud transients
-// without committing to a stale view of the world.
+// surplusWindowSize is the pause/resume average, about 20 s at a 5 s tick.
 const surplusWindowSize = 4
 
-// surplusResumeMarginW is added to the 3Φ minimum step before we will
-// resume a paused surplus_only loadpoint. Prevents oscillation right
-// at the threshold (snap_to_min ↔ pause).
+// surplusResumeMarginW keeps resume from oscillating on the minimum step.
 const surplusResumeMarginW = 200.0
 
-// surplusMinPauseHold is the minimum dwell time once a surplus_only
-// loadpoint has been paused. Easee documents ~30 s minimum on/off
-// for the contactor; this floor keeps us comfortably above it even
-// if the rolling-avg crosses the resume threshold quickly. The
-// rolling-avg already smooths transients; this is a hard contactor-
-// protection backstop on top.
+// surplusMinPauseHold stays above Easee's ~30 s contactor minimum.
 const surplusMinPauseHold = 35 * time.Second
 
-// nearTermLogCooldown caps the rate of the "1Φ allowed (near-term 3Φ
-// unreachable)" log line so a long morning with sustained low surplus
-// produces one line per 10 min per LP instead of one per 5 s tick.
+// nearTermLogCooldown is one 1Φ-allowed log per 10 min per loadpoint.
 const nearTermLogCooldown = 10 * time.Minute
 
-// phaseSwitchMinHold is the minimum dwell between 1Φ↔3Φ switches on
-// the near-term gate. Operator rule: at most one switch per 30 min.
-// The Easee contactor is rated for limited switching cycles; on a
-// borderline-PV day a frequent 1Φ↔3Φ flip would burn through them
-// quickly and inject load-step transients into the battery PI loop
-// every couple of minutes. 30 min lets the forecast machinery commit
-// to a verdict before the next reconsider.
+// phaseSwitchMinHold is one 1Φ/3Φ change per 30 min. Faster burns the
+// Easee contactor and winds up the battery PI.
 const phaseSwitchMinHold = 30 * time.Minute
 
 // fusePauseCooldown is how long an LP stays at 0 W after a fuse-over-
@@ -481,31 +351,10 @@ type OutcomeSenderFunc func(ctx context.Context, driver string, payload []byte, 
 // continuation id owned by the registry actor.
 type CycleSenderFunc func(ctx context.Context, driver string, payload []byte, cycleID uint64) error
 
-// DispatchOutcomeFunc reports what a charger made of the one command that
-// decides whether core can actuate it: the periodic `ev_set_current`. Core
-// uses it to stop counting on a charger that answers every poll and refuses
-// every command — the storage side of the same law lives in
-// go/cmd/ftw/driver_failure_default.go.
-//
-// Deliberately only that command. The controller emits four other kinds of
-// send, and a refusal of any of them says nothing about whether the charger
-// takes a setpoint:
-//
-//   - the 0 W safety standdown, which core sends while the site meter is
-//     stale. That is core withdrawing, not core actuating, and the staleness
-//     tracker already owns the transition;
-//   - `charge_start` to the bound *vehicle* driver, which a parked car
-//     refuses whenever it is asleep. wakeVehicleAuto has its own backoff for
-//     exactly that, and excluding the vehicle driver would take its SoC out
-//     of the plan because the car was napping;
-//   - `ev_pause`/`ev_resume` in a contactor cycle, which is documented as
-//     free for any charger that implements those actions — a charger that
-//     does not returns an error and is behaving correctly;
-//   - the operator's own force-start and refresh, which are not dispatch.
-//
-// Production calls this from the registry's per-driver actor before that actor
-// accepts another command. Implementations must stay bounded and perform no
-// I/O. Narrow tests without OutcomeSenderFunc call it on the dispatch goroutine.
+// DispatchOutcomeFunc reports the periodic ev_set_current only. A charger
+// that polls and refuses that command must drop out of the plan. Standdown,
+// vehicle charge_start, contactor cycle, and operator force-start are not
+// evidence the charger rejects a setpoint. The callback does no I/O.
 type DispatchOutcomeFunc func(driver string, err error, now time.Time)
 
 // NewController wires the dependencies. Passing nil for plan, tel,
@@ -720,28 +569,9 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 	c.peakRemainingSurplusW = f
 }
 
-// applyFuseClampAndCooldown enforces the joint fuse allocator's
-// FuseEVMax cap on a requested wattage and tracks the operator-stated
-// pause-cooldown semantics:
-//
-//   - In cooldown: force 0 regardless of wantW.
-//   - cap unset / cap >= wantW: pass-through.
-//   - cap < wantW but a snap-step exists at ≤ cap: ramp down to that step.
-//   - cap < min step (or snap returns 0): force 0 AND arm
-//     fusePauseUntil[lpID] = now + fusePauseCooldown.
-//
-// Both tickOne branches (manual hold + normal MPC dispatch) call this
-// just before writing cmd["power_w"] so the protection is uniform:
-// neither a sticky operator hold nor a stale MPC budget can drive
-// the fuse over limit, and the cooldown prevents fuse flap when a
-// transient overload clears momentarily.
-// ---- Per-phase fuse clamp (operator report 2026-05-30) ----
-//
-// The dispatch fuse guard protects the 3-phase TOTAL import; it is blind to
-// per-phase imbalance, so a phase carrying house load + the EV's full offer can
-// exceed the breaker while the site total looks fine (observed: L1 ~18 A on a
-// 16 A fuse). This reactive clamp lowers the EV's per-phase offer whenever the
-// worst measured phase nears the breaker.
+// applyFuseClampAndCooldown caps wantW at the joint fuse share.
+// Below the minimum step it pauses for fusePauseCooldown, so a
+// transient does not flap. A hold cannot override it.
 
 // fusePhaseMarginA is the per-phase amp headroom held below the breaker.
 const fusePhaseMarginA = 1.0
@@ -779,12 +609,8 @@ func nextFusePhaseCapA(prevCapA, worstMeterA, fuseA, marginA, stepA float64) flo
 	return capA
 }
 
-// applyPerPhaseFuseClamp lowers the EV's per-phase offer (cmd["max_amps_per_phase"])
-// when any live site-meter phase nears the breaker. The dispatch fuse guard
-// only protects the 3-phase TOTAL, so an imbalanced phase (house load + the
-// EV's full offer) can trip the breaker while the total looks fine. Reactive:
-// see nextFusePhaseCapA. Called just before the cmd is dispatched so it caps
-// whatever the paths above set. Operator report 2026-05-30.
+// applyPerPhaseFuseClamp caps one phase. The site-total fuse guard
+// misses a phase that is already near the breaker (L1 at 18 A on a 16 A fuse).
 func (c *Controller) applyPerPhaseFuseClamp(lpCfg Config, cmd map[string]any) {
 	if c == nil || c.perPhaseMeterAmps == nil {
 		return
@@ -813,11 +639,7 @@ func (c *Controller) applyPerPhaseFuseClamp(lpCfg Config, cmd map[string]any) {
 	}
 }
 
-// The returned reason is "" when the clamp left wantW untouched,
-// "fuse_limit" when it ramped the offer down, and "fuse_cooldown" when
-// it forced 0 (a running cooldown, or a cap below the minimum step
-// that just armed one). Callers feed it into Manager.SetCommanded so
-// the UI can name the fuse instead of a generic "paused by the box".
+// The reason is "", "fuse_limit", or "fuse_cooldown".
 func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, wantW float64) (float64, string) {
 	if c == nil {
 		return wantW, ""
@@ -904,13 +726,8 @@ func (c *Controller) evalBatSoCArm(lpID string, threshold float64) bool {
 	if c == nil || c.batSoC == nil || threshold <= 0 {
 		return false
 	}
-	// Read the live inputs (bat SoC + site surplus) OUTSIDE the arm
-	// mutex — siteSurplusForEVW is a closure wired in main.go that
-	// itself calls back into AnyLoadpointSurplusActive, which needs
-	// to acquire batSoCArmedMu. Calling it under that lock would
-	// recursively self-deadlock the dispatch loop (debugged: every
-	// tickOne hung on the first LP after we shipped this feature).
-	// Order: gather facts → take lock → mutate the small state map.
+	// Read surplus before batSoCArmedMu. The closure calls back into
+	// AnyLoadpointSurplusActive, which takes the same lock.
 	soc, socOK := c.batSoC()
 	pvGone := true
 	if c.siteSurplusForEVW != nil {
@@ -994,33 +811,14 @@ func (c *Controller) gridDeferredFor(lpID string) bool {
 	return c.gridDeferred[lpID]
 }
 
-// surplusActive reports whether surplus-only dispatch semantics REPLACE
-// the plan for this loadpoint right now: the commanded W is snapped to
-// live PV surplus and the plan budget is at most a ceiling. True when
-// ANY of:
-//   - the operator's configured SurplusOnly flag is on
-//   - no schedule target is set AND MPC has deferred grid-funded planning
-//     (forecast-vs-real divergence guard: even if the cached plan said
-//     "charge 2 kW now", live PV might have collapsed since the last replan)
-//   - no schedule target is set AND the bat-SoC unlock is armed for this LP
-//
-// With a schedule target and SurplusOnly off, surplus never replaces the
-// plan; the bat-SoC unlock then ADDS to it instead — see surplusAddsToPlan.
-//
-// The caller passes the loadpoint's schedule so we read the threshold
-// without re-locking the Manager.
+// surplusActive is true when live surplus replaces the plan: SurplusOnly,
+// a grid-deferred loadpoint, or an armed bat-SoC unlock. A schedule
+// target is a floor instead. See surplusAddsToPlan.
 func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
 	if lpCfg.SurplusOnly {
 		return true
 	}
-	// A committed charge schedule (with surplus_only OFF) overrides the
-	// RUNTIME surplus clamp. Reaching the target SoC by the deadline may need
-	// grid power, so the MPC grid-deferral guard and the bat-SoC arm must NOT
-	// snap the EV's commanded W to live PV surplus — otherwise the schedule's
-	// planned grid charge (e.g. the plan's 11 kW) is silently throttled to the
-	// available surplus and the deadline is missed. The explicit SurplusOnly
-	// config above still wins, so a "surplus-preferred with a deadline floor"
-	// combo is unaffected. Operator directive 2026-05-30.
+	// A deadline may need grid. Do not snap that plan down to live PV.
 	if sched.HasTarget() {
 		return false
 	}
@@ -1138,39 +936,9 @@ var (
 	ErrForceStartNoVehicleBound = errors.New("no vehicle driver bound to loadpoint")
 )
 
-// ForceStartVehicle sends a generic `charge_start` to the loadpoint's
-// bound vehicle driver immediately, bypassing the auto-wake's
-// `vehicleWakeCooldown` + `wakeBackoffCooldown` throttle. Used by the
-// operator-driven "force start" API path when the auto-wake has
-// backed off and the operator wants to break the backoff (typical case:
-// car was unresponsive earlier, has since become reachable, the 10-min
-// stretched cooldown still has minutes to run, operator wants charging
-// to resume now).
-//
-// Side effects on success (after the send returns nil), in order:
-//  1. Reset the wake-attempt counter so subsequent auto-wakes start
-//     from a fresh cooldown.
-//  2. Bump wakeLast so the auto-wake loop will not duplicate this
-//     send on the same tick.
-//  3. Arm the wake-kick window so the next few dispatch ticks force
-//     the wallbox to signal at least min current — without it a
-//     successful charge_start lands on a 0 A wallbox and the car has
-//     nothing to negotiate with.
-//  4. Send the generic `charge_start` action (cross-driver protocol —
-//     Tesla, BMW, Audi drivers all implement it against their own
-//     back-ends).
-//
-// If the send fails, the throttle resets and wake-kick arming still
-// stand — that's intentional: the operator's intent was to break the
-// backoff, and a failed send shouldn't punish a subsequent retry.
-//
-// Returns the driver name actually targeted plus the outcome:
-//
-//	("", ErrForceStartNotReady)        — controller missing wiring
-//	("", ErrForceStartLoadpointGone)   — no such loadpoint id
-//	("", ErrForceStartNoVehicleBound)  — loadpoint exists, no vehicle
-//	(driver, sendErr)                  — send hop returned an error
-//	(driver, nil)                      — sent
+// ForceStartVehicle sends charge_start now, past the auto-wake backoff.
+// A failed send still clears the backoff and arms the wake-kick: the
+// operator asked to retry, and a 0 A wallbox cannot complete the start.
 func (c *Controller) ForceStartVehicle(ctx context.Context, lpID string) (string, error) {
 	if c == nil || c.vehicleStatus == nil || c.send == nil {
 		return "", ErrForceStartNotReady
@@ -1470,21 +1238,6 @@ func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) 
 }
 
 // Tick runs one dispatch cycle for every configured loadpoint.
-// Safe to call even when no loadpoints are configured. Idempotent —
-// calling it twice in the same moment produces the same commands.
-//
-// Behaviour:
-//
-//  1. Read latest charger telemetry for this driver.
-//  2. Feed the observation to the Manager (plug state, session Wh,
-//     inferred SoC).
-//  3. For unplugged loadpoints: skip command entirely.
-//  4. For plugged loadpoints: ask the plan for this slot's Wh
-//     allocation and translate to a W command via the energy-
-//     allocation contract (remaining_wh × 3600 / remaining_s).
-//  5. Send `ev_set_current` with that W plus the operator's phase
-//     preferences and the site's fuse parameters; the driver picks
-//     phases and converts W→A given that it knows the voltage.
 func (c *Controller) Tick(ctx context.Context, now time.Time) {
 	c.TickWithDispatch(ctx, now, true)
 }
@@ -1767,34 +1520,8 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			cmdW = finishW
 			cmdReason = "vehicle_limit_completion"
 		}
-		// Surplus-only live clamp: regardless of what the MPC slot
-		// budget said for this 15-minute window, the EV must not
-		// import grid right now. We smooth the pause/resume decision
-		// across the last `surplusWindowSize` ticks (≈ 20 s) so a
-		// single cloud transient doesn't cycle the contactor, and we
-		// snap the setpoint to 3Φ-eligible steps so a brief deficit
-		// doesn't drop the charger to 1Φ (a phase swap is far more
-		// wear-inducing than holding 3Φ at a slightly lower current).
-		// Any short-term gap between the smoothed setpoint and live
-		// PV is naturally absorbed by the home battery via the
-		// reactive self_consumption PI in dispatch.go — that's the
-		// "battery smooths PV transients for ~1-2 min" path.
-		//
-		// Opportunistic start: when surplus_only is on but the MPC
-		// has no plan budget for this LP (cmdW = 0) — typical when
-		// the LP isn't in the planner's view because the vehicle
-		// driver is offline / has no SoC, or the user has no
-		// deadline set — fall through to the surplus clamp anyway
-		// with the LP's MaxChargeW as the requested ceiling. The
-		// clamp returns 0 if there's no PV surplus, or a snapped
-		// step otherwise. Without this, surplus_only LPs without an
-		// active vehicle telemetry source (Easee + no Tesla, or
-		// any third-party EV without a Go-side vehicle driver)
-		// would never start because (a) MPC won't allocate without
-		// a target, (b) auto-wake requires vehicleStatus, (c) the
-		// surplus clamp was previously gated on cmdW > 0. The
-		// wallbox will silently report what the EV does (op_mode
-		// stays at 2 if the car declines) without grid import.
+		// Surplus replaces the slot budget. A missing plan still tries
+		// MaxChargeW, or a charger with no vehicle driver never starts.
 		if surplusOn {
 			wantW := cmdW
 			if wantW <= 0 {
@@ -1807,16 +1534,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 				cmdReason = "pv_surplus_pause"
 			}
 		}
-		// Schedule + bat-SoC unlock (#1060): spare PV is added ON TOP of
-		// the plan. The plan's watts are the floor — a scheduled grid
-		// charge is never throttled to live surplus (directive
-		// 2026-05-30) — and surplus may only lift the command above it,
-		// snapped to the same steps the surplus-only path uses. The
-		// reason names surplus only when it actually raised the watts;
-		// otherwise the plan's own reason stands. Phase selection below
-		// still sees the schedule as active, so a 3Φ grid charge keeps
-		// its phase behaviour and the additive path never flips the
-		// surplus 1Φ lock.
+		// Spare PV may raise a scheduled charge. It must not lower it.
 		if surplusAdds {
 			surplusW := c.computeSurplusCmd(now, lpCfg, lpCfg.MaxChargeW, sample.PowerW)
 			if surplusW > cmdW {
@@ -1824,21 +1542,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 				cmdReason = "pv_surplus"
 			}
 		}
-		// Wake-kick AFTER the surplus clamp: when an auto-wake just
-		// fired and the surplus clamp paused us to 0, force the
-		// wallbox to signal at least min 3Φ current for a few
-		// seconds so the car-side negotiation has something to land
-		// on. This is the only thing that's empirically observed to
-		// rescue a detached Tesla without operator intervention. The
-		// kick window is bounded by wakeKickDuration; outside it the
-		// normal surplus clamp resumes. Brief grid import here is the
-		// price of recovering from a detached session.
+		// After the surplus clamp, a wake-kick still offers the minimum
+		// step. A 0 A wallbox cannot finish the session the wake started.
 		if c.wakeKickActive(lpCfg.ID, now) {
-			// Honour the surplus_only phase lock: when we've fallen
-			// back to 1Φ for the day, the kick should use the 1Φ
-			// minimum (1380 W) rather than 3Φ (4140 W). pickSurplusSteps
-			// already returns the right step set for the current
-			// lock state.
 			minKick := smallestNonZero(c.pickSurplusSteps(now, lpCfg))
 			if minKick > 0 && cmdW < minKick {
 				slog.Info("loadpoint wake-kick", "lp", lpCfg.ID,
@@ -1865,30 +1571,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			cmdReason = fuseReason
 		}
 		cmd["power_w"] = cmdW
-		// Pass operator's phase preferences through verbatim. The driver
-		// reads these and decides 1Φ vs 3Φ based on its own knowledge of
-		// charger min/max amps, phase-switch latency, and the requested W.
-		// Override to "1p" when surplus_only locked the loadpoint to 1Φ
-		// for the day — without this, Easee (and similar) ignore the
-		// low-power request and stay on 3Φ at zero amps because their
-		// pick_phases respects an operator-set "3p" lock over the
-		// dispatch's wantW. The 1Φ lock IS the operator's intent for
-		// this day.
-		//
-		// Default to "auto" when surplus is active and the operator
-		// didn't explicitly pick a phase mode. The Easee driver
-		// (drivers/easee_cloud.lua:105) interprets an UNSET phase_mode
-		// as "3p" — silently locking the wallbox to 3Φ and rejecting
-		// any 1Φ-eligible step the near-term branch passes through.
-		// Operators who picked surplus_only have clearly opted into
-		// "react to PV"; dynamic phase switching is the only way to
-		// actually deliver low-power surplus to the EV.
-		// Phase selection. An active charge schedule overrides the surplus
-		// 1Φ forecast lock (and the near-term dwell verdict) so a deadline-
-		// driven charge can pull 3Φ grid power instead of being throttled to
-		// ~3.7 kW on a cloudy day; the surplus lock / dwell only applies when
-		// no schedule is committed. resolvePhaseMode keeps the dwell/lock
-		// rationale in one testable place. Operator directive 2026-05-30.
+		// Easee treats an unset phase_mode as 3p and then ignores a 1Φ step.
+		// A schedule still overrides the surplus 1Φ lock, or a deadline
+		// charge stays near 3.7 kW on a cloudy day.
 		phaseMode := resolvePhaseMode(
 			lpCfg.PhaseMode,
 			sched.HasTarget(),
@@ -1977,34 +1662,10 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		return
 	}
 
-	// Auto-wake: if the matched vehicle reports `Stopped` /
-	// `Disconnected` / `Complete` — i.e. it detached mid-session and
-	// won't draw — send a generic `charge_start` action to the
-	// matched vehicle driver. Driver-agnostic: the controller doesn't
-	// know which vehicle protocol is behind it, only that whichever
-	// driver published the latest DerVehicle reading should accept
-	// this action. Today only `tesla_vehicle.lua` implements it (via
-	// TeslaBLEProxy → BLE charge_start); future drivers (BMW, Audi,
-	// Polestar, etc.) inherit auto-wake by implementing the same
-	// action in their own `driver_command`. Throttled by
-	// vehicleWakeCooldown so a flapping radio doesn't get rate-
-	// limited. Fires under two conditions:
-	//
-	//   1. We just commanded power_w > 0 (normal post-restart wake).
-	//   2. Loadpoint is surplus_only — even if cmd power_w is 0
-	//      because the surplus clamp paused us. This breaks the
-	//      chicken-and-egg of "can't see surplus without EV
-	//      drawing, can't command power without surplus" by
-	//      periodically poking the car so it negotiates with Easee.
-	//      The 90 s cooldown caps Tesla BLE wear; if the car is
-	//      genuinely asleep at night the proxy returns 503 and we
-	//      back off.
-	// Forced-wake belongs to the configured surplus_only contract — the
-	// "kick the EV periodically so the car negotiates with the wallbox
-	// even when the surplus clamp paused us" behaviour. The bat-SoC
-	// unlock is opportunistic and tick-level; it must not poke a sleeping
-	// car at night just because the bat is full. Pass the configured flag,
-	// not the runtime-armed one.
+	// Wake on Stopped or Disconnected, including a surplus pause at 0 W.
+	// Otherwise the car never draws, so surplus never appears. The
+	// bat-SoC unlock must not poke a sleeping car, so this is the
+	// configured SurplusOnly flag, not the armed tick.
 	c.maybeWakeVehicle(ctx, now, lpCfg, lpCfg.SurplusOnly, sample.RequestActive, selfWithheld, cmd)
 }
 
@@ -2187,47 +1848,12 @@ func (c *Controller) shouldKickWallboxForResume(now time.Time, lpID string, surp
 	return true
 }
 
-// computeSurplusCmd applies the surplus_only live clamp to the
-// planner-derived wantW, with rolling-average pause/resume hysteresis
-// and a 3Φ-only step floor (when phase mode allows). Returns the
-// adjusted command in W; 0 means "pause this tick".
+// computeSurplusCmd clamps wantW to live surplus. The rolling average
+// decides pause and resume. The magnitude tracks the instant value, or
+// a falling cloud imports before the average catches up. 0 pauses.
 //
-// Inputs:
-//   - lpCfg.SurplusOnly is assumed true by the caller
-//   - wantW is the planner's setpoint after the fuse + planner clamps
-//   - currentEvW is the EV's live draw (site sign, +)
-//
-// Behaviour:
-//
-//  1. Read the live site grid power. No reading → 0 (conservative —
-//     we promised surplus_only and can't verify).
-//  2. Compute instant surplus = currentEvW + max(0, -gridW). This is
-//     the W we could deliver to the EV without crossing into import.
-//  3. Push the instant surplus into the rolling window; the average
-//     drives pause/resume. Pause only when avg drops below the 3Φ
-//     minimum step; resume only when avg ≥ that minimum + a margin
-//     (so we don't oscillate at the boundary).
-//  4. When not paused, snap the lower of (planner wantW, INSTANT surplus)
-//     to a 3Φ-eligible step. Pause/resume uses the rolling avg (so we
-//     don't cycle the contactor on transients) but the magnitude
-//     tracks instant — using avg for magnitude lags reality on a
-//     dropping cloud front and the difference leaks straight into
-//     grid import. The home battery's reactive PI in self_consumption
-//     fills sub-tick gaps. See the long-form rationale immediately
-//     above the `target := wantW` block in the function body.
-//
-// `now` is the dispatch tick's time, threaded from Tick → tickOne so the
-// pause/resume timestamps stay consistent with the rest of the cycle and
-// tests can drive it deterministically with a fixed clock.
-//
-// TODO(multi-loadpoint): siteSurplusForEVW is currently a site-wide PV-
-// minus-house surplus, not a per-loadpoint allowance. With a single EV
-// loadpoint that's correct (the closure already nets the EV's own draw
-// out). With two or more EV loadpoints active concurrently, each
-// controller tick will clamp to the same full-site surplus and they
-// collectively over-allocate, breaking the never-import promise. Fix
-// when a second loadpoint actually exists: switch to a site-level
-// allocator that hands each loadpoint a remaining-budget reading.
+// TODO: siteSurplusForEVW is one site budget. Two surplus loadpoints
+// each take all of it and can import.
 func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW, currentEvW float64) float64 {
 	if c == nil {
 		return wantW
@@ -2558,21 +2184,9 @@ afterNearTerm:
 
 // surplusLockedTo1P reports whether the surplus_only 1Φ lock is
 // currently active for the given loadpoint. Read-only accessor.
-// resolvePhaseMode decides the phase_mode command sent to the charger driver
-// for a loadpoint tick. Precedence:
-//
-//  1. An ACTIVE charge schedule wins: a deadline-driven SoC target may need
-//     3Φ grid power to be met, so it must NOT be throttled to 1Φ by the
-//     surplus optimisation. An explicit operator pin ("1p"/"3p") is honoured;
-//     otherwise "auto" lets the driver pick the phase count for the power.
-//  2. Surplus 1Φ forecast lock: when the day's PV can't sustain 3Φ the
-//     loadpoint is pinned to 1Φ (the operator's surplus-only intent).
-//  3. Surplus-active + auto/unset: hold the 30-min near-term dwell verdict so
-//     a transient pause doesn't flip the contactor; default "auto".
-//  4. Otherwise: the operator's configured phase mode, verbatim.
-//
-// Pure function so the precedence stays unit-testable. Operator directive
-// 2026-05-30 (a schedule must override the 1Φ forecast lock).
+// resolvePhaseMode picks the phase_mode sent to the driver.
+// A schedule wins, or a deadline charge is stuck on the 1Φ lock.
+// Then the day lock, then the 30 min dwell, then the operator pin.
 func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
 	switch {
 	case scheduleActive:
