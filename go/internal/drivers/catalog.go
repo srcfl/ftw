@@ -48,6 +48,8 @@ type CatalogEntry struct {
 	// that reads a vendor cloud has to POST for a token before it can read,
 	// and that POST is not actuation. Only meaningful with ReadOnly.
 	AuthPostPath string `json:"auth_post_path,omitempty"`
+	// AuthPostPaths lists further sign-in paths for a multi-step login.
+	AuthPostPaths []string `json:"auth_post_paths,omitempty"`
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
 	// UI uses it to avoid presenting battery capacity as a control opt-in.
 	ReadOnly bool `json:"read_only,omitempty"`
@@ -227,6 +229,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.WriteCapabilities = pickList(block, "write_capabilities")
 	e.Replaces = pickList(block, "replaces")
 	e.AuthPostPath = pickString(block, "auth_post_path")
+	e.AuthPostPaths = pickList(block, "auth_post_paths")
 	e.Controls = pickControls(block)
 	return e, nil
 }

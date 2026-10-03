@@ -269,6 +269,7 @@ func (m *Manager) directManifestRuntimePolicy(
 		// manifest names. An unsigned or absent value leaves it empty, which
 		// is the same as having no exemption at all.
 		AuthPostPath:  matched.Metadata.AuthPostPath,
+		AuthPostPaths: append([]string(nil), matched.Metadata.AuthPostPaths...),
 		ConfigSecrets: append([]string(nil), matched.Metadata.ConfigSecrets...),
 	}, nil
 }

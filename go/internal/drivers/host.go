@@ -240,15 +240,20 @@ func (h *HostEnv) allowAuthPost(rawURL string) bool {
 	if h.RuntimePolicy == nil || !h.RuntimePolicy.ReadOnly {
 		return false
 	}
-	declared := h.RuntimePolicy.AuthPostPath
-	if declared == "" || !h.RuntimePolicy.allows("http.post") {
+	declared := h.RuntimePolicy.authPaths()
+	if len(declared) == 0 || !h.RuntimePolicy.allows("http.post") {
 		return false
 	}
 	parsed, err := net_url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	return parsed.Path == declared
+	for _, path := range declared {
+		if parsed.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *HostEnv) allowWrite(permission string) error {
