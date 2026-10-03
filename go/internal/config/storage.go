@@ -276,6 +276,9 @@ func saveStored(st *state.Store, path string, cfg *Config, sourceHash string) er
 			return errors.New("move the state database offline; its path cannot change in Settings")
 		}
 	}
+	if err := assignCredentialOwners(cfg); err != nil {
+		return err
+	}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -290,28 +293,16 @@ func saveStored(st *state.Store, path string, cfg *Config, sourceHash string) er
 	if cfg.EVCharger != nil {
 		password = cfg.EVCharger.Password
 	}
-	credentials := map[string]string{
-		"ev_charger_password": password,
-		"lan_auth_password":   cfg.LANPasswordHash,
+	storedSecrets, err := st.LoadConfigByPrefix(driverSecretPrefix)
+	if err != nil {
+		return err
 	}
-	for _, d := range cfg.Drivers {
-		token, ok := d.Config["refresh_token"].(string)
-		if !ok {
-			continue
-		}
-		oldToken := ""
-		if previous != nil {
-			for _, old := range previous.Drivers {
-				if old.Name == d.Name {
-					oldToken, _ = old.Config["refresh_token"].(string)
-					break
-				}
-			}
-		}
-		if previous != nil && token != oldToken {
-			credentials["driver_secret:"+d.Name+":refresh_token"] = token
-		}
+	credentials, err := collectDriverSecretCredentials(cfg, previous, storedSecrets)
+	if err != nil {
+		return err
 	}
+	credentials["ev_charger_password"] = password
+	credentials["lan_auth_password"] = cfg.LANPasswordHash
 	revision, err := st.SaveConfiguration(raw, cfg.Revision, credentials)
 	if err != nil {
 		return err

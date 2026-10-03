@@ -75,6 +75,32 @@ func (s *Store) Configuration() (Configuration, bool, error) {
 	return c, true, err
 }
 
+func escapeConfigPrefix(prefix string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(prefix)
+}
+
+// LoadConfigByPrefix returns unwatched config rows whose keys start with prefix.
+func (s *Store) LoadConfigByPrefix(prefix string) (map[string]string, error) {
+	if s == nil || s.db == nil || prefix == "" {
+		return map[string]string{}, nil
+	}
+	rows, err := s.db.Query(`SELECT key, value FROM config WHERE key LIKE ? ESCAPE '\'`, escapeConfigPrefix(prefix)+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		out[key] = value
+	}
+	return out, rows.Err()
+}
+
 // ConfigValue distinguishes a missing legacy key from a failed read.
 func (s *Store) ConfigValue(key string) (string, bool, error) {
 	var raw string

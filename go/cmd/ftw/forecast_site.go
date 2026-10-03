@@ -293,6 +293,12 @@ func forecastScriptDigests(inputs []config.Driver) map[string]string {
 // Keep this encoding compatible with beta.3 so an upgrade can prove that only
 // the hash policy changed. Never infer compatibility from a driver name.
 func forecastRevisionOf(v forecastSite, weather *config.Weather, hashed []config.Driver, scripts map[string]string) (string, error) {
+	hashed = append([]config.Driver(nil), hashed...)
+	for i := range hashed {
+		// credential_owner is bookkeeping for OAuth rotation. It must not
+		// reset learned PV/load models when Core mints or migrates it.
+		hashed[i].CredentialOwner = ""
+	}
 	data, err := json.Marshal(struct {
 		Meter, Timezone string
 		Options         telemetry.ForecastOptions

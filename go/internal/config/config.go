@@ -903,7 +903,12 @@ func (f Fuse) EffectiveSafetyMarginA() float64 {
 // Driver is one driver entry. Each driver is a Lua script loaded by
 // the driver host at startup (or on hot-reload via the file watcher).
 type Driver struct {
-	Name              string  `yaml:"name" json:"name"`
+	Name string `yaml:"name" json:"name"`
+	// CredentialOwner is a stable id for rotated OAuth secrets. It is not a
+	// household setting: Core mints it on first save and the UI posts it
+	// back unchanged. Secrets are stored as driver_secret:<owner>:<key> so
+	// a rename keeps the rotation and a reused name cannot inherit it.
+	CredentialOwner   string  `yaml:"credential_owner,omitempty" json:"credential_owner,omitempty"`
 	Lua               string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter       bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
@@ -1939,6 +1944,7 @@ func (c *Config) Validate() error {
 	// exists.
 	siteMeters := 0
 	names := make(map[string]bool, len(c.Drivers))
+	owners := make(map[string]string, len(c.Drivers))
 	for _, d := range c.Drivers {
 		if d.Name == "" {
 			return errors.New("driver: name is required")
@@ -1947,6 +1953,15 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("driver %q: duplicate name", d.Name)
 		}
 		names[d.Name] = true
+		if owner := strings.TrimSpace(d.CredentialOwner); owner != "" {
+			if strings.Contains(owner, ":") {
+				return fmt.Errorf("driver %q: credential_owner must not contain ':'", d.Name)
+			}
+			if other, ok := owners[owner]; ok {
+				return fmt.Errorf("drivers %q and %q share credential_owner", other, d.Name)
+			}
+			owners[owner] = d.Name
+		}
 
 		if d.IsSiteMeter {
 			siteMeters++

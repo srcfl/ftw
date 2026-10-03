@@ -521,6 +521,10 @@ func main() {
 	} else if len(removed) > 0 {
 		slog.Info("deleted the stored settings of removed features", "removed", strings.Join(removed, "; "))
 	}
+	if err := config.BindCredentialOwners(st, *configPath, cfg); err != nil {
+		slog.Error("bind driver credential owners", "err", err)
+		os.Exit(1)
+	}
 
 	if cfg.State != nil && cfg.State.ColdRetentionDays != 0 {
 		slog.Warn("state.cold_retention_days is retired; fixed EMS history retention applies", "previous_days", cfg.State.ColdRetentionDays)

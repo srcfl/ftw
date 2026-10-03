@@ -135,7 +135,15 @@ ev_charger:
 	if err != nil {
 		t.Fatal(err)
 	}
-	after, _ := json.Marshal(reloaded)
+	stripped := *reloaded
+	stripped.Drivers = append([]Driver(nil), reloaded.Drivers...)
+	for i := range stripped.Drivers {
+		if stripped.Drivers[i].CredentialOwner == "" {
+			t.Fatalf("import left driver %q without credential_owner", stripped.Drivers[i].Name)
+		}
+		stripped.Drivers[i].CredentialOwner = ""
+	}
+	after, _ := json.Marshal(&stripped)
 	if string(before) != string(after) {
 		t.Fatalf("config meaning changed across SQLite import\nbefore=%s\nafter=%s", before, after)
 	}

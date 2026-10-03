@@ -56,6 +56,22 @@ func buildMyUplinkOAuthServer(t *testing.T) (*Server, *config.Config, *state.Sto
 	return srv, cfg, st
 }
 
+func myUplinkRefreshSecret(t *testing.T, cfg *config.Config, st *state.Store) string {
+	t.Helper()
+	for _, d := range cfg.Drivers {
+		if d.Name != "myuplink" {
+			continue
+		}
+		v, ok := st.LoadConfig(config.DriverSecretStateKey(d.SecretOwner(), "refresh_token"))
+		if !ok {
+			t.Fatalf("missing refresh secret for owner %q", d.SecretOwner())
+		}
+		return v
+	}
+	t.Fatal("myuplink driver missing")
+	return ""
+}
+
 func TestNewPKCEPair(t *testing.T) {
 	v, c, err := newPKCEPair()
 	if err != nil {
@@ -255,8 +271,8 @@ func TestMyUplinkOAuthCallbackExchangesAndPersists(t *testing.T) {
 		t.Errorf("config refresh_token = %v, want RT-from-consent", got)
 	}
 	// ...and in the unwatched KV so SecretOverride supersedes any stale value.
-	if v, ok := st.LoadConfig("driver_secret:myuplink:refresh_token"); !ok || v != "RT-from-consent" {
-		t.Errorf("KV refresh_token = %q (ok=%v), want RT-from-consent", v, ok)
+	if v := myUplinkRefreshSecret(t, cfg, st); v != "RT-from-consent" {
+		t.Errorf("KV refresh_token = %q, want RT-from-consent", v)
 	}
 }
 
@@ -304,8 +320,8 @@ func TestMyUplinkOAuthManualExchange(t *testing.T) {
 	if got := cfg.Drivers[0].Config["refresh_token"]; got != "RT-manual" {
 		t.Errorf("config refresh_token = %v, want RT-manual", got)
 	}
-	if v, ok := st.LoadConfig("driver_secret:myuplink:refresh_token"); !ok || v != "RT-manual" {
-		t.Errorf("KV refresh_token = %q (ok=%v), want RT-manual", v, ok)
+	if v := myUplinkRefreshSecret(t, cfg, st); v != "RT-manual" {
+		t.Errorf("KV refresh_token = %q, want RT-manual", v)
 	}
 }
 

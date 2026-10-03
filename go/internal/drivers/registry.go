@@ -93,15 +93,15 @@ type Registry struct {
 	// Optional — when nil, devices fall back to endpoint-hash IDs.
 	ARPLookup func(host string) (mac string, ok bool)
 	// SecretPersister, when set, durably stores a driver secret (keyed by
-	// driver name + key) in the unwatched state KV. Wired by main.go.
+	// credential owner + key) in the unwatched state KV. Wired by main.go.
 	// Optional — when nil, host.persist_secret returns an error and the
 	// driver degrades (an OAuth driver re-uses its last in-memory token).
-	SecretPersister func(driverName, key, value string) error
+	SecretPersister func(owner, key, value string) error
 	// SecretOverride, when set, returns a durably-persisted secret for a
 	// driver (the counterpart to SecretPersister). Applied over the
 	// config.yaml value at driver_init so a rotated token survives a
 	// restart. Returns ("", false) when no override exists.
-	SecretOverride func(driverName, key string) (string, bool)
+	SecretOverride func(owner, key string) (string, bool)
 	// RuntimePolicyResolver returns the verified signed policy of a managed
 	// read-only artifact. Nil means bundled, local and control-capable
 	// signed drivers, which run without one.
@@ -540,12 +540,12 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	// Wire secret write-back (rotated OAuth tokens). The host must install
 	// SecretPersister and SecretOverride before Add: init may persist a
 	// secret, and the poll loop starts before Add returns.
-	driverName := cfg.Name
+	secretOwner := cfg.SecretOwner()
 	env.PersistSecret = func(key, value string) error {
 		if r.SecretPersister == nil {
 			return fmt.Errorf("persist_secret: not supported on this host")
 		}
-		return r.SecretPersister(driverName, key, value)
+		return r.SecretPersister(secretOwner, key, value)
 	}
 	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
 		dialCfg := *mq
@@ -668,7 +668,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	if r.SecretOverride != nil && len(cfg.Config) > 0 {
 		merged := make(map[string]any, len(cfg.Config))
 		for k, v := range cfg.Config {
-			if ov, ok := r.SecretOverride(cfg.Name, k); ok {
+			if ov, ok := r.SecretOverride(secretOwner, k); ok {
 				merged[k] = ov
 			} else {
 				merged[k] = v
