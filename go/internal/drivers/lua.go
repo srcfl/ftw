@@ -1073,6 +1073,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
 	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string);
 	//   the mutating verb, gated by capabilities.http.allow_write (default off)
+	// host.http_request{method, url, headers?, body?} → response table; see
+	//   lua_http_request.go
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	rawTLSPin := strings.TrimSpace(env.HTTPTLSPinSHA256)
 	tlsPin := normalizeHexFingerprint(rawTLSPin)
@@ -1402,6 +1404,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		L.Push(lua.LString(string(body)))
 		return 1
 	}))
+
+	registerHTTPRequest(L, host, env, httpClient, hostAllowed)
 
 	// ---- WebSocket capability ----
 	// host.ws_open(url, headers?)      → (true, nil) or (nil, error_string)

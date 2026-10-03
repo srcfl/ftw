@@ -25,6 +25,7 @@ func TestManagedPersistSecretScope(t *testing.T) {
 		{name: "listed_path", key: "../refresh_token", change: func(p *RuntimePolicy) { p.ConfigSecrets = []string{"../refresh_token"} }},
 		{name: "listed_long_key", key: strings.Repeat("a", 65), change: func(p *RuntimePolicy) { p.ConfigSecrets = []string{strings.Repeat("a", 65)} }},
 		{name: "no_auth_path", key: "refresh_token", change: func(p *RuntimePolicy) { p.AuthPostPath = "" }},
+		{name: "auth_path_list", key: "refresh_token", allowed: true, change: func(p *RuntimePolicy) { p.AuthPostPath, p.AuthPostPaths = "", []string{"/login/identifier", "/login/authenticate"} }},
 		{name: "no_http_get", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions = nil }},
 		{name: "not_read_only", key: "refresh_token", change: func(p *RuntimePolicy) { p.ReadOnly = false }},
 		{name: "broad_http_write", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions["http.patch"] = true }},

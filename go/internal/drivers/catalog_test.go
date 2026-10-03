@@ -163,6 +163,23 @@ func TestLoadCatalogReadsAuthPostPath(t *testing.T) {
 	}
 }
 
+func TestLoadCatalogReadsAuthPostPaths(t *testing.T) {
+	dir := t.TempDir()
+	src := "DRIVER = {\n  id = \"vag\",\n  name = \"VAG\",\n  read_only = true,\n" +
+		"  auth_post_paths = { \"/a/login/identifier\", \"/a/login/authenticate\" },\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "vag.lua"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := LoadCatalog(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("LoadCatalog: %v %v", entries, err)
+	}
+	got := entries[0].AuthPostPaths
+	if len(got) != 2 || got[0] != "/a/login/identifier" || got[1] != "/a/login/authenticate" {
+		t.Fatalf("AuthPostPaths = %q", got)
+	}
+}
+
 func TestCatalogMyUplinkDeclaresAuthPostPath(t *testing.T) {
 	entries, err := LoadCatalog("../../../drivers")
 	if err != nil {

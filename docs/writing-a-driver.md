@@ -41,7 +41,7 @@ current host API and the source of truth for it. Today it registers:
 | Decoding | `decode_string`, `decode_i16`, `decode_i32_be`, `decode_i32_le`, `decode_u32_be`, `decode_u32_le` |
 | Modbus | `modbus_read`, `write`, `write_registers` (canonical); `modbus_write`, `modbus_write_multi` (legacy aliases) |
 | MQTT | `mqtt_pub`, `mqtt_sub`, `mqtt_publish`, `mqtt_subscribe`, `mqtt_messages` |
-| HTTP | `http_get`, `http_post`, `http_patch` |
+| HTTP | `http_get`, `http_post`, `http_patch`, `http_request`, `http_cookies_clear` |
 | WebSocket | `ws_open`, `ws_send`, `ws_messages`, `ws_is_open`, `ws_close` |
 | Raw TCP | `tcp_open`, `tcp_recv`, `tcp_close`, `tcp_is_open` |
 | Serial | `serial_read` |
@@ -59,6 +59,22 @@ canonical one in a new driver.
 not enough, it also needs `capabilities.http.allow_write`. It refuses to follow
 redirects, because Go re-issues a redirected `PATCH` as a body-less GET and a
 device write that never landed would otherwise report success.
+
+`http_request{method, url, headers, body}` is for a driver that has to sign in
+through a web login before it can read. It returns `{status, headers,
+location, body}` for every status instead of turning 4xx into an error, and it
+never follows a redirect: the driver reads `location` and makes the next call
+itself, so the host checks every hop against `allowed_hosts`. It accepts GET
+and POST over https only, and only with a non-empty `allowed_hosts`. POST has
+the same gate as `http_post`. The host keeps the driver's session cookies in
+an in-memory jar that stores and sends them only for allowed hosts. Lua never
+sees them: `headers` leaves out `Set-Cookie`. `http_cookies_clear()` empties
+the jar before a fresh sign-in. Header names are lowercase, so a driver
+without a wall clock can read the server time from `headers.date`.
+
+A read-only driver may POST only to the sign-in paths its `DRIVER` block
+declares: `auth_post_path` for one path, or `auth_post_paths` when the login
+posts more than one form. The host matches each exactly.
 
 A driver with an opt-in write path names it in its `DRIVER` block —
 `write_capabilities = { "solar_pv" }` for a driver that feeds a heat pump's
@@ -122,7 +138,7 @@ may omit the default hook because Core cannot dispatch commands to them.
 
 `driver_fingerprint(target)` is an optional passive setup probe. It must never
 reconfigure the device. The host denies mutating verbs (`modbus_write`,
-`mqtt_pub`, `http_post`, `http_patch`) for that VM, including bundled drivers
+`mqtt_pub`, `http_post`, `http_patch`, and POST through `http_request`) for that VM, including bundled drivers
 that may otherwise write.
 
 Call `host.set_make` and `host.set_sn` as soon as stable identity is known.

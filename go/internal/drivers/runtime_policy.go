@@ -29,16 +29,36 @@ type RuntimePolicy struct {
 	// init or poll, which allowWrite refuses. Empty for every driver that
 	// does not declare one, which is all of them by default.
 	AuthPostPath string
+	// AuthPostPaths adds further exact sign-in paths, for a login that posts
+	// more than one form (an OIDC identifier step, then a password step).
+	AuthPostPaths []string
 	// ConfigSecrets comes from verified signed metadata. A read-only OAuth
 	// driver may persist only these keys in its own secret namespace.
 	ConfigSecrets []string
+}
+
+// authPaths returns every declared sign-in path.
+func (p *RuntimePolicy) authPaths() []string {
+	if p == nil {
+		return nil
+	}
+	var paths []string
+	if p.AuthPostPath != "" {
+		paths = append(paths, p.AuthPostPath)
+	}
+	for _, path := range p.AuthPostPaths {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func (p *RuntimePolicy) allowsSecretPersistence(key string) bool {
 	if p == nil {
 		return true
 	}
-	if !p.IsReadOnly() || p.AuthPostPath == "" || !p.Permissions["http.get"] {
+	if !p.IsReadOnly() || len(p.authPaths()) == 0 || !p.Permissions["http.get"] {
 		return false
 	}
 	for _, allowed := range p.ConfigSecrets {
@@ -68,7 +88,7 @@ func (p *RuntimePolicy) validate() error {
 		switch permission {
 		case "http.get", "modbus.read", "mqtt.subscribe", "serial.read":
 		case "http.post":
-			if p.AuthPostPath == "" || !p.Permissions["http.get"] {
+			if len(p.authPaths()) == 0 || !p.Permissions["http.get"] {
 				return errors.New("read-only HTTP POST requires a declared auth path and http.get")
 			}
 		default:
