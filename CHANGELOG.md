@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.139.2
+
+### Patch Changes
+
+- 10e5591: A car reading up to an hour old now corrects FTW's charge estimate. FTW anchors the reading at the time it arrived and adds the energy delivered since then. Cloud sources such as the VW Group portal, which reports every 15 minutes, now keep the estimate close to the car's level. Before, FTW used a car reading only in its first five minutes. It also pinned the estimate to the latest reading and dropped the energy delivered after it. A reading from before plug-in, or from before a restart, does not anchor. Display and goal completion still treat readings older than five minutes as old.
+- 1bd74cc: Lua drivers can now sign in through a web login. The new `host.http_request` returns the status, headers and redirect target. The host keeps the session cookies for the driver's allowed hosts, in memory only. A read-only driver may declare several sign-in paths with `auth_post_paths`. This lets the VW Group driver renew its portal session itself, instead of the owner pasting a new cookie every hour.
+
 ## 0.139.1
 
 ### Patch Changes
