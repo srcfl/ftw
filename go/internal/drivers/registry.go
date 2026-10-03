@@ -590,6 +590,19 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	if cfg.Capabilities.HTTP != nil {
 		env.WithHTTP()
 		hosts := mergeAllowedHosts(cfg.Capabilities.HTTP.AllowedHosts, cfg.Config)
+		// Cloud drivers declare their fixed network boundary in DRIVER.http_hosts.
+		// Older saved configs (and connection probes built from them) may predate
+		// that metadata and therefore have no capabilities.http.allowed_hosts.
+		// Hydrate only from the Lua driver's own declaration; never from operator
+		// input. Explicit config hosts are retained and merged above.
+		if entry, err := ParseCatalogFile(cfg.Lua); err == nil {
+			for _, h := range entry.HTTPHosts {
+				h = strings.TrimSpace(h)
+				if h != "" && !slices.Contains(hosts, h) {
+					hosts = append(hosts, h)
+				}
+			}
+		}
 		if len(hosts) > 0 {
 			env.WithHTTPAllowedHosts(hosts)
 		}

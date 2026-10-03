@@ -1186,24 +1186,81 @@
         var isCloudDriver = !isVehicleDriver && !isApiCredsDriver && cap.http != null && !hasHostField &&
           (hasAuthField || Object.keys(dcfg).length === 0);
         if (isVehicleDriver) {
-          // TeslaBLEProxy-style drivers only need the LAN IP of the
-          // proxy and the VIN it's paired to. "Verify connection"
-          // makes the backend issue a one-shot vehicle_data poll so
-          // the operator can confirm pairing before saving.
           var vcfg = d.config || {};
-          html += '<fieldset><legend>Vehicle</legend>' +
-            '<div class="field-row"><div>' +
-            '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy. Bare IP uses port 8080; append ":port" to override (e.g. 192.168.1.50:1234).') + '</label>' +
-            '<input type="text" class="tesla-ip-input" data-driver-idx="' + idx + '" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50 (or 192.168.1.50:1234)">' +
-            '</div><div>' +
-            '<label>VIN ' + help('Vehicle Identification Number the proxy is paired to.') + '</label>' +
-            '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="5YJ3E1EA1KF000000">' +
-            '</div></div>' +
-            '<div style="margin-top:8px;display:flex;gap:10px;align-items:center">' +
-            '<button class="btn-add tesla-verify-btn" type="button" data-driver-idx="' + idx + '">Verify connection</button>' +
-            '<span class="tesla-verify-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
-            '</div>' +
-            '</fieldset>';
+          // Match both the configured logical path and the catalog entry.
+          // Repository-installed drivers may use a versioned/managed path, so
+          // filename-only detection can misclassify VAG as TeslaBLEProxy and
+          // render Proxy IP while hiding the VAG email fieldset.
+          var isVAGVehicle = (d.lua || '').indexOf('vag_vehicle.lua') >= 0 ||
+            !!(catalogEntry && catalogEntry.id === 'vag_vehicle');
+          if (isVAGVehicle) {
+            // Existing VAG configs can predate catalog http_hosts and therefore
+            // carry capabilities.http.allowed_hosts=[] (or no allowlist at all).
+            // host.http_request deliberately refuses that, so hydrate the
+            // driver's signed catalog allowlist before Save/Test connection.
+            // Never derive these cloud hosts from operator input.
+            var vagHTTPHosts = (catalogEntry && catalogEntry.http_hosts) || [];
+            d.capabilities = d.capabilities || {};
+            d.capabilities.http = d.capabilities.http || {};
+            if (vagHTTPHosts.length > 0) {
+              d.capabilities.http.allowed_hosts = vagHTTPHosts.slice();
+            }
+
+            // VAG EU Data Act is a cloud vehicle driver, not a
+            // TeslaBLEProxy-style LAN driver. Brand is required by
+            // vag_vehicle.lua and must be part of the row so the generic
+            // connection probe receives it together with VIN and secrets.
+            var vagBrand = String(vcfg.brand || '').toLowerCase();
+            var vagHasPassword = d.has_password === true ||
+              (typeof vcfg.password === 'string' && vcfg.password !== '');
+            var vagPasswordBadge = vagHasPassword
+              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+            html += '<fieldset><legend>VAG EU Data Act</legend>' +
+              '<div class="field-row"><div>' +
+              '<label>Brand ' + help('Brand account linked to this VIN on the VW Group EU Data Act portal.') + '</label>' +
+              '<select data-path="drivers.' + idx + '.config.brand">' +
+              '<option value=""' + (!vagBrand ? ' selected' : '') + '>Choose brand…</option>' +
+              ['audi', 'volkswagen', 'skoda', 'seat', 'cupra'].map(function (brand) {
+                var labels = { audi: 'Audi', volkswagen: 'Volkswagen', skoda: 'Škoda', seat: 'SEAT', cupra: 'Cupra' };
+                return '<option value="' + brand + '"' + (vagBrand === brand ? ' selected' : '') + '>' + labels[brand] + '</option>';
+              }).join('') +
+              '</select>' +
+              '</div><div>' +
+              '<label>VIN ' + help('Vehicle Identification Number registered to the selected brand account.') + '</label>' +
+              '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="WAUZZZ…">' +
+              '</div></div>' +
+              '<div class="field-row"><div>' +
+              '<label>Email ' + help('Email address for the selected VW Group brand account. VAG driver v0.2.0 and newer use it to renew the portal session automatically.') + '</label>' +
+              '<input type="email" autocomplete="username" data-path="drivers.' + idx + '.config.email" value="' + escHtml(vcfg.email || '') + '" placeholder="name@example.com">' +
+              '</div><div>' +
+              '<label>Password ' + vagPasswordBadge + ' ' + help('Stored as a masked driver secret. Leave empty to keep an already saved password. VAG driver v0.2.0 and newer use it for automatic re-login.') + '</label>' +
+              '<input type="password" autocomplete="current-password" data-path="drivers.' + idx + '.config.password" value="" placeholder="' +
+                (vagHasPassword ? '•••••••• (leave empty to keep)' : 'enter account password') + '">' +
+              '</div></div>' +
+              '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
+              'VAG driver v0.2.0+ signs in again automatically when the portal session expires. A pasted Cookie is only a fallback for older Core/driver versions.' +
+              '</p>' +
+              '</fieldset>';
+          } else {
+            // TeslaBLEProxy-style drivers only need the LAN IP of the
+            // proxy and the VIN it's paired to. "Verify connection"
+            // makes the backend issue a one-shot vehicle_data poll so
+            // the operator can confirm pairing before saving.
+            html += '<fieldset><legend>Vehicle</legend>' +
+              '<div class="field-row"><div>' +
+              '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy. Bare IP uses port 8080; append ":port" to override (e.g. 192.168.1.50:1234).') + '</label>' +
+              '<input type="text" class="tesla-ip-input" data-driver-idx="' + idx + '" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50 (or 192.168.1.50:1234)">' +
+              '</div><div>' +
+              '<label>VIN ' + help('Vehicle Identification Number the proxy is paired to.') + '</label>' +
+              '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="5YJ3E1EA1KF000000">' +
+              '</div></div>' +
+              '<div style="margin-top:8px;display:flex;gap:10px;align-items:center">' +
+              '<button class="btn-add tesla-verify-btn" type="button" data-driver-idx="' + idx + '">Verify connection</button>' +
+              '<span class="tesla-verify-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
+              '</div>' +
+              '</fieldset>';
+          }
         }
         if (isLocalHTTP) {
           var isZap = (d.lua || '').indexOf('zap.lua') >= 0;

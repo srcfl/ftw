@@ -188,8 +188,8 @@ curl_json /api/status
 curl_json /api/drivers
 curl_json /api/config
 
-smoke_page "$browser" / "view-live" "1440,1000" desktop
+smoke_page "$browser" / "view-overview" "1440,1000" desktop
 smoke_page "$browser" /setup "wizard" "1440,1000" desktop
-smoke_page "$browser" / "view-live" "390,844" mobile
+smoke_page "$browser" / "view-overview" "390,844" mobile
 
 log "ok"
