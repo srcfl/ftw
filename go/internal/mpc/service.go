@@ -245,6 +245,8 @@ type Service struct {
 	shadowCancel      context.CancelFunc
 	shadowWG          sync.WaitGroup
 	pendingCoreShadow *coreDPShadowRequest
+	shadowSkip        coreDPShadowSkip
+	shadowTimeout     time.Duration // zero uses coreDPShadowTimeout; tests shorten it
 
 	stop chan struct{}
 	done chan struct{}

@@ -66,6 +66,10 @@ Its result appears in
 `dp_shadow`, tied to the same decision ID. It cannot change the active actions.
 Both plans use Core's grid cost model, with a separate terminal-energy-adjusted
 comparison. A failed comparison reports `rejected`, without a cost verdict.
+After a shadow runs out of time, Core skips shadows with at least as much DP
+work per slot for an hour. Each skip reports `skipped`, with the reason and the
+time of the next try. Smaller shadows still run: a battery-only plan keeps its
+comparison while shadows with a car are skipped.
 
 Energyplan plans from the measured battery energy, including starts below the
 reserve or above the charge limit. Each action must hold or reduce any existing
