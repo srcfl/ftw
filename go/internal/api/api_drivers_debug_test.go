@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // /api/drivers/test handler-level coverage. The probe path runs a real
@@ -262,6 +263,293 @@ func TestHandleDriverTestRestoresMaskedSecrets(t *testing.T) {
 	if live.Drivers[0].Capabilities.MQTT.Password != "real-secret" {
 		t.Errorf("live config password mutated to %q (must remain 'real-secret')",
 			live.Drivers[0].Capabilities.MQTT.Password)
+	}
+}
+
+func TestHandleDriverTestUsesOriginalDriverSecretState(t *testing.T) {
+	dir := t.TempDir()
+	luaPath := filepath.Join(dir, "oauth_probe.lua")
+	luaSrc := `
+function driver_init(config)
+    host.set_poll_interval(50)
+    if config and config.refresh_token == "fresh-token" then
+        host.emit_metric("used_fresh_token", 1)
+        host.persist_secret("refresh_token", "rotated-token")
+    else
+        host.emit_metric("used_stale_token", 1)
+    end
+end
+function driver_poll() end
+function driver_command() end
+function driver_default_mode() end
+function driver_cleanup() end
+`
+	if err := os.WriteFile(luaPath, []byte(luaSrc), 0o644); err != nil {
+		t.Fatalf("write lua: %v", err)
+	}
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveConfig(driverSecretStateKey("myuplink", "refresh_token"), "fresh-token"); err != nil {
+		t.Fatalf("save secret override: %v", err)
+	}
+
+	live := &config.Config{Drivers: []config.Driver{{
+		Name: "myuplink",
+		Lua:  luaPath,
+		Config: map[string]any{
+			"refresh_token": "stale-token",
+		},
+	}}}
+	srv := New(&Deps{
+		Cfg:        live,
+		CfgMu:      &sync.RWMutex{},
+		ConfigPath: filepath.Join(dir, "config.yaml"),
+		State:      st,
+	})
+	body, _ := json.Marshal(map[string]any{
+		"name": "myuplink",
+		"lua":  luaPath,
+		"config": map[string]any{
+			"refresh_token": "stale-token",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/drivers/test", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	var resp driverProbeResp
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, rr.Body.String())
+	}
+	if !resp.OK {
+		t.Fatalf("probe.ok = false, error=%q (body=%s)", resp.Error, rr.Body.String())
+	}
+	if resp.Health == nil || !strings.HasPrefix(resp.Health.Name, "__test_myuplink_") {
+		t.Fatalf("probe health name = %+v, want temporary myuplink probe", resp.Health)
+	}
+	var usedFresh, usedStale bool
+	for _, m := range resp.Metrics {
+		switch m.Name {
+		case "used_fresh_token":
+			usedFresh = m.Value == 1
+		case "used_stale_token":
+			usedStale = true
+		}
+	}
+	if !usedFresh || usedStale {
+		t.Fatalf("metrics = %+v, want fresh token metric only", resp.Metrics)
+	}
+	if got, ok := st.LoadConfig(driverSecretStateKey("myuplink", "refresh_token")); !ok || got != "rotated-token" {
+		t.Fatalf("original driver secret = %q ok=%v, want rotated-token", got, ok)
+	}
+	if _, ok := st.LoadConfig(driverSecretStateKey(resp.Health.Name, "refresh_token")); ok {
+		t.Fatalf("probe wrote secret under temporary name %q", resp.Health.Name)
+	}
+}
+
+func writeOAuthProbeLua(t *testing.T, dir, name string) string {
+	t.Helper()
+	luaPath := filepath.Join(dir, name)
+	luaSrc := `
+function driver_init(config)
+    host.set_poll_interval(50)
+    local token = ""
+    if config and config.refresh_token then
+        token = config.refresh_token
+    end
+    host.emit_metric("token_" .. token, 1)
+    host.persist_secret("refresh_token", "rotated-" .. token)
+end
+function driver_poll() end
+function driver_command() end
+function driver_default_mode() end
+function driver_cleanup() end
+`
+	if err := os.WriteFile(luaPath, []byte(luaSrc), 0o644); err != nil {
+		t.Fatalf("write lua: %v", err)
+	}
+	return luaPath
+}
+
+func metricToken(resp driverProbeResp) string {
+	const prefix = "token_"
+	for _, m := range resp.Metrics {
+		if strings.HasPrefix(m.Name, prefix) && m.Value == 1 {
+			return strings.TrimPrefix(m.Name, prefix)
+		}
+	}
+	return ""
+}
+
+func TestHandleDriverTestDoesNotShareSecretsWithDifferentLua(t *testing.T) {
+	dir := t.TempDir()
+	liveLua := writeOAuthProbeLua(t, dir, "myuplink.lua")
+	otherLua := writeOAuthProbeLua(t, dir, "other.lua")
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveConfig(driverSecretStateKey("myuplink", "refresh_token"), "fresh-token"); err != nil {
+		t.Fatalf("save secret override: %v", err)
+	}
+
+	live := &config.Config{Drivers: []config.Driver{{
+		Name:   "myuplink",
+		Lua:    liveLua,
+		Config: map[string]any{"refresh_token": "stale-token"},
+	}}}
+	srv := New(&Deps{
+		Cfg:        live,
+		CfgMu:      &sync.RWMutex{},
+		ConfigPath: filepath.Join(dir, "config.yaml"),
+		State:      st,
+	})
+	body, _ := json.Marshal(map[string]any{
+		"name":   "myuplink",
+		"lua":    otherLua,
+		"config": map[string]any{"refresh_token": "stale-token"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/drivers/test", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	var resp driverProbeResp
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, rr.Body.String())
+	}
+	if !resp.OK {
+		t.Fatalf("probe.ok = false, error=%q (body=%s)", resp.Error, rr.Body.String())
+	}
+	if got := metricToken(resp); got != "stale-token" {
+		t.Fatalf("used token = %q, want posted stale-token, not the live driver's override", got)
+	}
+	if got, ok := st.LoadConfig(driverSecretStateKey("myuplink", "refresh_token")); !ok || got != "fresh-token" {
+		t.Fatalf("live secret = %q ok=%v, want unchanged fresh-token", got, ok)
+	}
+}
+
+func TestHandleDriverTestKeepsExplicitReauthToken(t *testing.T) {
+	dir := t.TempDir()
+	luaPath := writeOAuthProbeLua(t, dir, "oauth_probe.lua")
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveConfig(driverSecretStateKey("myuplink", "refresh_token"), "fresh-token"); err != nil {
+		t.Fatalf("save secret override: %v", err)
+	}
+
+	live := &config.Config{Drivers: []config.Driver{{
+		Name:   "myuplink",
+		Lua:    luaPath,
+		Config: map[string]any{"refresh_token": "stale-token"},
+	}}}
+	srv := New(&Deps{
+		Cfg:        live,
+		CfgMu:      &sync.RWMutex{},
+		ConfigPath: filepath.Join(dir, "config.yaml"),
+		State:      st,
+	})
+	body, _ := json.Marshal(map[string]any{
+		"name":   "myuplink",
+		"lua":    luaPath,
+		"config": map[string]any{"refresh_token": "new-account-token"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/drivers/test", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	var resp driverProbeResp
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, rr.Body.String())
+	}
+	if !resp.OK {
+		t.Fatalf("probe.ok = false, error=%q (body=%s)", resp.Error, rr.Body.String())
+	}
+	if got := metricToken(resp); got != "new-account-token" {
+		t.Fatalf("used token = %q, want explicit new-account-token", got)
+	}
+	if got, ok := st.LoadConfig(driverSecretStateKey("myuplink", "refresh_token")); !ok || got != "fresh-token" {
+		t.Fatalf("live secret = %q ok=%v, want unchanged fresh-token", got, ok)
+	}
+}
+
+func TestConfiguredProbeLoopbackHostRequiresSameEnabledDriverAndURL(t *testing.T) {
+	driver := config.Driver{
+		Name: "audi-vag",
+		Lua:  "/var/lib/ftw/drivers/vw_merged.lua",
+		Config: map[string]any{
+			"url": "http://127.0.0.1:8787",
+		},
+	}
+	live := &config.Config{Drivers: []config.Driver{driver}}
+	srv := New(&Deps{Cfg: live})
+
+	if got := srv.configuredProbeLoopbackHost(driver); got != "127.0.0.1" {
+		t.Fatalf("configured loopback host = %q, want 127.0.0.1", got)
+	}
+
+	changed := driver
+	changed.Lua = "/var/lib/ftw/drivers/other.lua"
+	if got := srv.configuredProbeLoopbackHost(changed); got != "" {
+		t.Errorf("different Lua file was trusted: %q", got)
+	}
+	changed = driver
+	changed.Config = map[string]any{"url": "http://127.0.0.1:8080"}
+	if got := srv.configuredProbeLoopbackHost(changed); got != "" {
+		t.Errorf("changed URL was trusted: %q", got)
+	}
+	changed = driver
+	changed.Capabilities.HTTP = &config.HTTPCapability{AllowedHosts: []string{"127.0.0.1"}}
+	if got := srv.configuredProbeLoopbackHost(changed); got != "" {
+		t.Errorf("changed HTTP allowlist was trusted: %q", got)
+	}
+	live.Drivers[0].Disabled = true
+	if got := srv.configuredProbeLoopbackHost(driver); got != "" {
+		t.Errorf("disabled configured driver was trusted: %q", got)
+	}
+}
+
+func TestRejectUnsafeProbeTargetsAllowsOnlyConfiguredLoopbackException(t *testing.T) {
+	cfg := config.Driver{
+		Config: map[string]any{"url": "http://127.0.0.1:8787"},
+		Capabilities: config.Capabilities{
+			HTTP: &config.HTTPCapability{AllowedHosts: []string{"127.0.0.1:8787"}},
+		},
+	}
+	if err := rejectUnsafeProbeTargets(cfg, ""); err == nil {
+		t.Fatal("unconfigured loopback URL was accepted")
+	}
+	if err := rejectUnsafeProbeTargets(cfg, "127.0.0.1"); err != nil {
+		t.Fatalf("configured loopback URL was rejected: %v", err)
+	}
+
+	cfg.Config["url"] = "http://127.0.0.2:8787"
+	if err := rejectUnsafeProbeTargets(cfg, "127.0.0.1"); err == nil {
+		t.Fatal("different loopback URL was accepted")
+	}
+	cfg.Config["url"] = "http://169.254.169.254:8787"
+	if err := rejectUnsafeProbeTargets(cfg, "127.0.0.1"); err == nil {
+		t.Fatal("link-local URL was accepted by the loopback exception")
+	}
+	cfg.Config["url"] = "http://127.0.0.1:8787"
+	cfg.MQTT = &config.MQTTConfig{Host: "127.0.0.1"}
+	if err := rejectUnsafeProbeTargets(cfg, "127.0.0.1"); err == nil {
+		t.Fatal("loopback MQTT target was accepted by the HTTP URL exception")
 	}
 }
 
