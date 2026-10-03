@@ -138,6 +138,8 @@ var WriteScopes = []string{
 var RegistryOps = map[string]string{
 	// site.mode.set — Change the site operating mode.
 	"site.mode.set": "ftw.mode.write",
+	// planner.prefs.set — Set household planner preferences.
+	"planner.prefs.set": "ftw.mode.write",
 	// battery.hold — Hold the battery at a fixed setpoint.
 	"battery.hold": "ftw.dispatch.write",
 	// loadpoint.hold — Charge the car now at a fixed current.

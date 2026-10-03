@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/state"
@@ -220,5 +221,23 @@ func TestYAMLKNeverLocksTheSlider(t *testing.T) {
 	}
 	if got["mapped_k"] != 1.0 {
 		t.Errorf("mapped_k=%v, want 1.0 (balanced mapping, YAML ignored)", got["mapped_k"])
+	}
+}
+
+func TestPlannerPrefsCommandIsTheActuateDoor(t *testing.T) {
+	srv, ctrl, _ := plannerPrefsServer(t, control.ModePlannerPassiveArbitrage)
+	facts := srv.Route(httptest.NewRequest(http.MethodPost, "/api/planner/prefs", nil))
+	if facts.CmdOp != appproto.OpPlannerPrefsSet {
+		t.Fatalf("cmd op = %q, want %s", facts.CmdOp, appproto.OpPlannerPrefsSet)
+	}
+	snap, err := srv.ApplyPlannerPrefs(0.4, "allowed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.MappedMode != "planner_arbitrage" || snap.SafetyK != 0.4 || snap.Export != "allowed" {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	if ctrl.Mode != control.ModePlannerArbitrage {
+		t.Fatalf("mode = %q, want planner_arbitrage", ctrl.Mode)
 	}
 }

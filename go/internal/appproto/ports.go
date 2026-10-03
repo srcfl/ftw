@@ -181,6 +181,22 @@ type Loadpoints interface {
 	ObservedSurplusOnly(id string) (v bool, ok bool)
 }
 
+// PlannerPrefsSnapshot is the household planner preference as the box holds
+// it after a write. MappedMode is the planner mode the export permission
+// selects. The caller does not choose it.
+type PlannerPrefsSnapshot struct {
+	SafetyK    float64
+	Export     string
+	MappedMode string
+}
+
+// PlannerPrefs applies the Plan card's safety factor and battery-export
+// permission through the same write POST /api/planner/prefs performs.
+// Nil answers E_UNAVAILABLE.
+type PlannerPrefs interface {
+	Apply(safetyK float64, export string) (PlannerPrefsSnapshot, error)
+}
+
 // PlanReader hands over the planner's current output.
 //
 // Nil means the planner has produced nothing at all, which the wire reports as

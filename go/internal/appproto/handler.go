@@ -48,6 +48,12 @@ type Config struct {
 	// this build and the subsystem is what is missing.
 	Loadpoints Loadpoints
 
+	// PlannerPrefs applies the Plan card's safety factor and battery-export
+	// permission, or nil before the API server is bound. planner.prefs.set
+	// then answers E_UNAVAILABLE, the same 503 a passthrough meets in that
+	// window.
+	PlannerPrefs PlannerPrefs
+
 	// Caller is whose session this is. Required: a session always belongs to
 	// one enrolled device, and a handler that does not know which one cannot
 	// refuse anything.
@@ -866,6 +872,8 @@ func (h *Handler) onCmd(ctx context.Context, env Envelope) error {
 	switch cmd.Op {
 	case OpSetMode:
 		return h.setMode(ctx, cmd, uptimeMs)
+	case OpPlannerPrefsSet:
+		return h.setPlannerPrefs(cmd, uptimeMs)
 	case OpLoadpointHold:
 		return h.loadpointHold(cmd, uptimeMs)
 	case OpLoadpointBoost:

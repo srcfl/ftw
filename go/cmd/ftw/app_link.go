@@ -595,20 +595,21 @@ func startAppLink(
 			// are read-only apart from the mode, and the mode goes through
 			// control's own validation.
 			return appproto.New(appproto.Config{
-				Clock:      appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
-				Site:       site,
-				Info:       info,
-				Modes:      modes,
-				Plans:      plans,
-				History:    history,
-				Prices:     priceReader,
-				Loadpoints: loadpoints,
-				API:        gateway,
-				Caller:     caller,
-				Grants:     grants,
-				Caps:       caps,
-				Codec:      appuplink.Codec(),
-				Sender:     sender,
+				Clock:        appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
+				Site:         site,
+				Info:         info,
+				Modes:        modes,
+				Plans:        plans,
+				PlannerPrefs: gateway,
+				History:      history,
+				Prices:       priceReader,
+				Loadpoints:   loadpoints,
+				API:          gateway,
+				Caller:       caller,
+				Grants:       grants,
+				Caps:         caps,
+				Codec:        appuplink.Codec(),
+				Sender:       sender,
 				// The three frozen power fields point at the source whose
 				// freshness governs them. The site meter is the only one the
 				// box can name without knowing the site's hardware.
@@ -662,6 +663,17 @@ func (l *lateAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	srv.ServeHTTP(w, r)
+}
+
+// Apply stores planner prefs through the API server, once it exists.
+// Until then the command is refused: the session is up a moment before the
+// server is bound, and a write in that window has nowhere to land.
+func (l *lateAPI) Apply(safetyK float64, export string) (appproto.PlannerPrefsSnapshot, error) {
+	srv := l.srv.Load()
+	if srv == nil {
+		return appproto.PlannerPrefsSnapshot{}, errors.New("the box is still starting")
+	}
+	return srv.ApplyPlannerPrefs(safetyK, export)
 }
 
 func (l *lateAPI) Route(r *http.Request) apiauth.RouteFacts {

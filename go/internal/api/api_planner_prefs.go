@@ -1,8 +1,10 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 )
@@ -164,4 +166,23 @@ func (s *Server) applyPlannerPrefsLocked(safetyK float64, export config.BatteryE
 		s.deps.MPC.SetSafetyK(planner.EffectiveSafetyK(safetyK))
 	}
 	return nil
+}
+
+// ApplyPlannerPrefs is the session door into the same write POST
+// /api/planner/prefs performs. The mapped mode in the snapshot is this
+// server's answer; the caller does not choose it.
+func (s *Server) ApplyPlannerPrefs(safetyK float64, export string) (appproto.PlannerPrefsSnapshot, error) {
+	exp, ok := config.ParseBatteryExport(export)
+	if !ok {
+		return appproto.PlannerPrefsSnapshot{}, errors.New("battery_export must be unknown, not_allowed, or allowed")
+	}
+	if err := s.applyPlannerPrefs(safetyK, exp); err != nil {
+		return appproto.PlannerPrefsSnapshot{}, err
+	}
+	_, got, k, mapped := s.plannerPrefsSnapshot()
+	return appproto.PlannerPrefsSnapshot{
+		SafetyK:    k,
+		Export:     string(got),
+		MappedMode: mapped,
+	}, nil
 }

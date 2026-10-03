@@ -423,7 +423,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/fleet-ping", Read, s.handleFleetPing)
 	s.handle("POST /api/mode", Actuate, s.handleSetMode, Via(appproto.OpSetMode))
 	s.handle("GET  /api/planner/prefs", Read, s.handleGetPlannerPrefs)
-	s.handle("POST /api/planner/prefs", Actuate, s.handleSetPlannerPrefs)
+	s.handle("POST /api/planner/prefs", Actuate, s.handleSetPlannerPrefs, Via(appproto.OpPlannerPrefsSet))
 	s.handle("GET  /api/modes", Read, s.handleModes)
 	s.handle("POST /api/target", Actuate, s.handleSetTarget)
 	s.handle("POST /api/peak_limit", Actuate, s.handleSetPeakLimit)

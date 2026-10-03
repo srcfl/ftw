@@ -37,6 +37,10 @@ const (
 	// mode validation the API and Home Assistant use — a second validator
 	// here would be a second place for the two to disagree.
 	OpSetMode = "site.mode.set"
+	// OpPlannerPrefsSet stores the household safety factor and battery-export
+	// permission. The box maps that permission onto a planner mode; the
+	// caller does not name the mode.
+	OpPlannerPrefsSet = "planner.prefs.set"
 	// OpLoadpointHold pins one EV loadpoint to a fixed charging power, or
 	// releases it with `clear`. The same manual hold the HTTP route
 	// installs, reached through this door's gates instead of a verb.

@@ -278,6 +278,11 @@ func (g *fakeGrants) setRole(role string) {
 // all live.
 func newRig(t *testing.T) (*Handler, *fakeBox, *recorder, *fakeClock) {
 	t.Helper()
+	return newRigWith(t, nil)
+}
+
+func newRigWith(t *testing.T, prefs PlannerPrefs) (*Handler, *fakeBox, *recorder, *fakeClock) {
+	t.Helper()
 
 	clock := &fakeClock{uptimeMs: 60_000, now: time.UnixMilli(1_760_000_000_000)}
 	box := &fakeBox{
@@ -309,19 +314,20 @@ func newRig(t *testing.T) (*Handler, *fakeBox, *recorder, *fakeClock) {
 	rec := &recorder{}
 
 	h, err := New(Config{
-		Clock:      clock,
-		Site:       box,
-		Info:       box,
-		Modes:      box,
-		Plans:      box,
-		Codec:      testCodec{},
-		Sender:     rec,
-		Caller:     ownerCaller(),
-		Grants:     newGrants(),
-		SrcGrid:    "meter.p1",
-		SrcPV:      "inverter.sungrow",
-		SrcBattery: "battery.sungrow",
-		NewLeaseID: func() string { return "lease-test" },
+		Clock:        clock,
+		Site:         box,
+		Info:         box,
+		Modes:        box,
+		Plans:        box,
+		PlannerPrefs: prefs,
+		Codec:        testCodec{},
+		Sender:       rec,
+		Caller:       ownerCaller(),
+		Grants:       newGrants(),
+		SrcGrid:      "meter.p1",
+		SrcPV:        "inverter.sungrow",
+		SrcBattery:   "battery.sungrow",
+		NewLeaseID:   func() string { return "lease-test" },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -114,6 +114,7 @@ roles:
 # ---------------------------------------------------------------------------
 ops:
   - { name: site.mode.set, scope: ftw.mode.write, desc: Change the site operating mode }
+  - { name: planner.prefs.set, scope: ftw.mode.write, desc: Set household planner preferences }
   - { name: battery.hold, scope: ftw.dispatch.write, desc: Hold the battery at a fixed setpoint }
   - { name: loadpoint.hold, scope: ftw.dispatch.write, desc: Charge the car now at a fixed current }
   - { name: loadpoint.boost, scope: ftw.dispatch.write, desc: Boost the car from the house battery }
@@ -134,8 +135,8 @@ ops:
 # release, and it is the same degrade-don't-die rule as capabilities.
 #
 # tier decides placement, not permission:
-#   primary  — the forecast-driven strategies, shown as the main choices
-#   advanced — manual fallbacks, behind a "More ways to run it" disclosure
+#   primary  — forecast-driven strategies; the Plan card sets them through household prefs, not buttons
+#   advanced — manual fallbacks, behind "Manual…"
 #   hidden   — valid over the API but never rendered as a button
 # ---------------------------------------------------------------------------
 modes:
