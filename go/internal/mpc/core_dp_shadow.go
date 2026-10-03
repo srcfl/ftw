@@ -56,7 +56,8 @@ func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reaso
 		s.mu.Unlock()
 		return
 	}
-	if skip := s.shadowSkip; work >= skip.work && s.planningNow().Before(skip.until) {
+	// A clock stepped back after boot must not stretch the skip past an hour.
+	if skip, now := s.shadowSkip, s.planningNow(); work >= skip.work && now.Before(skip.until) && skip.until.Sub(now) <= coreDPShadowRetry {
 		s.mu.Unlock()
 		block := &ShadowPlan{ForecastBasis: coreDPShadowBasis, Solver: coreSolverInfo(p, 0)}
 		block.Solver.Status = "skipped"

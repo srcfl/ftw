@@ -150,6 +150,20 @@ func TestCoreDPShadowRetriesAfterAnHour(t *testing.T) {
 	}
 }
 
+// A Pi can boot with a wrong time and step it back later. The skip must not
+// last more than an hour of the new clock.
+func TestCoreDPShadowSkipIgnoresClockStepBack(t *testing.T) {
+	svc, now, slots, _, ev := shadowSkipFixture(t)
+	svc.shadowTimeout = -1
+	publishAndShadow(t, svc, "slow", slots, ev)
+	svc.shadowTimeout = 0
+	*now = now.Add(-3 * time.Hour)
+	got := publishAndShadow(t, svc, "stepped", slots, ev)
+	if got == nil || got.Solver.Status != "optimal" || got.ComparedSlots != len(slots) {
+		t.Fatalf("shadow after the clock stepped back = %+v, want a comparison", got)
+	}
+}
+
 // The same rule through real replans: Energyplan plans, a car is plugged in,
 // and the shadow runs out of time. The next replan with the car records a
 // skip; a replan after the car leaves gets its comparison.
