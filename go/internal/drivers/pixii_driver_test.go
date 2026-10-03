@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -67,6 +68,80 @@ func (m *pixiiTestModbus) WriteMulti(addr uint16, values []uint16) error {
 }
 
 func (m *pixiiTestModbus) Close() error { return nil }
+
+func TestPixiiMeasuredControlPowerUsesSiteSigns(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		target, acRaw, acSF, dcW int16
+		acW                      float64
+		chargeStatus             uint16
+	}{
+		{"discharge", -1244, -1231, 0, -1334, -1231, 3},
+		{"charge", 5626, 5661, 0, 5154, 5661, 4},
+		{"scaled discharge", -1244, -123, 1, -1334, -1230, 3},
+		{"scaled charge", 1244, 123, 1, 1334, 1230, 4},
+		{"idle", 0, 0, 0, 0, 0, 6},
+	} {
+		for _, troubleshooting := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/TS=%t", tc.name, troubleshooting), func(t *testing.T) {
+				tel := telemetry.NewStore()
+				modbus := newPixiiTestModbus()
+				modbus.regs[40083] = uint16(tc.acRaw)
+				modbus.regs[40084] = uint16(tc.acSF)
+				modbus.regs[40168] = uint16(tc.dcW)
+				modbus.regs[40137] = tc.chargeStatus
+				env := NewHostEnv("pixii", tel).WithModbus(modbus)
+				env.BatteryCapacityWh = 15000
+				d, err := NewLuaDriver(filepath.Join("..", "..", "..", "drivers", "pixii.lua"), env)
+				if err != nil {
+					t.Fatalf("load Pixii: %v", err)
+				}
+				defer d.Cleanup()
+				if err := d.Init(context.Background(), map[string]any{"troubleshooting_mode": troubleshooting}); err != nil {
+					t.Fatalf("init: %v", err)
+				}
+				payload := []byte(fmt.Sprintf(`{"action":"battery","power_w":%d}`, tc.target))
+				command := tel.BeginCommand("pixii", payload, time.Now())
+				if err := d.Command(context.Background(), payload); err != nil {
+					t.Fatalf("command: %v", err)
+				}
+				tel.CompleteCommand(command, "accepted")
+				if len(modbus.writeMulti) != 1 {
+					t.Fatalf("setpoint writes = %d, want 1", len(modbus.writeMulti))
+				}
+				write := modbus.writeMulti[0]
+				native := uint32(-int32(tc.target))
+				if write.addr != 39905 || len(write.values) != 2 || write.values[0] != uint16(native>>16) || write.values[1] != uint16(native) {
+					t.Fatalf("setpoint write = %+v, want native power %d", write, -int32(tc.target))
+				}
+				if _, err := d.Poll(context.Background()); err != nil {
+					t.Fatalf("poll: %v", err)
+				}
+				reading := tel.Get("pixii", telemetry.DerBattery)
+				if reading == nil || reading.RawW != float64(tc.dcW) {
+					t.Fatalf("battery reading = %+v, want DC power %d", reading, tc.dcW)
+				}
+				var data struct {
+					SetpointW *float64 `json:"setpoint_w"`
+				}
+				if err := json.Unmarshal(reading.Data, &data); err != nil {
+					t.Fatalf("decode reading: %v", err)
+				}
+				if data.SetpointW == nil || *data.SetpointW != float64(tc.target) {
+					t.Fatalf("setpoint readback = %v, want %d", data.SetpointW, tc.target)
+				}
+				observation, known := telemetry.ControlPowerObservation(reading.RawW, reading.Data, reading.UpdatedAt)
+				if !known || observation.PowerW != tc.acW {
+					t.Fatalf("control observation = %+v known=%t, want AC power %g", observation, known, tc.acW)
+				}
+				evidence, ok := tel.CommandEvidence("pixii", "battery")
+				if !ok || !evidence.ReadbackMismatchSince.IsZero() || !evidence.PowerMismatchSince.IsZero() || evidence.PowerMatchSince.IsZero() {
+					t.Fatalf("command evidence = %+v, want matching setpoint and measured power", evidence)
+				}
+			})
+		}
+	}
+}
 
 func TestPixiiTroubleshootingStatusAndSetpoint(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "drivers", "pixii.lua")
