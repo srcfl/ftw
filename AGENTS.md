@@ -235,7 +235,7 @@ Do not move old `latest` aliases to 0.x: installed old clients cannot migrate
 through them. Use [docs/self-update.md](docs/self-update.md) for current release
 and operator rules.
 
-`CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
+This file is the agent guide. Claude, Codex and other agents follow it directly.
 
 ## Cursor Cloud specific instructions
 
