@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.139.3
+
+### Patch Changes
+
+- 9246e4f: On a slow box such as a Raspberry Pi 4, the Core DP shadow no longer spends 10 s of CPU on almost every replan with a car plugged in, only to run out of time. After a shadow runs out of time, Core skips shadows of that size or larger for an hour and records each skip in the plan diagnostics, with the reason and the time of the next try. Battery-only shadows still run. The active plan and dispatch do not change.
+- e64d587: Update the bundled Energyplan planner to 0.5.0. On a small box such as a Raspberry Pi 4, plans with a car get better within the 0.5 s budget: time that the solver's LP phases cannot use now goes to improving the plan Core gets. A car that cannot charge is planned with the exact battery method, and a car a fraction of a watt-hour short of its goal no longer restarts the charger. The planner keeps a valid plan when its solver fails, reports `gap_satisfied` when it meets Core's gap, fixes a wrong demand-charge sign for the running hour, and closes two ways it could report an unproven optimum. Core still validates every plan.
+- 4dce1ff: Give the Energyplan planner 1.5 s instead of 0.5 s when a car is plugged in. On a Raspberry Pi 4, 0.5 s stopped just before the planner could improve on its first plan for the car, and the published plan could cost about 11% more than the best one. Battery-only plans keep their 0.5 s budget, and the first slot's remaining time still caps every budget.
+
 ## 0.139.2
 
 ### Patch Changes
