@@ -309,8 +309,8 @@ func TestBatterylessEVBudgetDoesNotInventStorage(t *testing.T) {
 	for i := range horizon {
 		horizon[i] = slots[0]
 	}
-	if got := energyplanTimeBudget(horizon, p); got != 500*time.Millisecond {
-		t.Fatalf("batteryless EV budget=%v", got)
+	if got := energyplanTimeBudget(horizon, p); got != energyplanEVBudget {
+		t.Fatalf("batteryless EV budget=%v, want %v", got, energyplanEVBudget)
 	}
 	p.CapacityWh = 20000
 	if got := energyplanTimeBudget(horizon, p); got != 5*time.Second {
@@ -486,5 +486,27 @@ func TestEnergyplanLateFleetReplanDoesNotStartDoomedSolve(t *testing.T) {
 	}
 	if plan == nil || plan.DecisionID != "keep-me" {
 		t.Fatalf("wanted previous plan, got %+v", plan)
+	}
+}
+
+// A car on a short published-price horizon gets more time than a battery
+// alone. A Pi 4 at 0.5 s stopped just before the planner could improve on
+// its first plan for the car.
+func TestEVGetsLongerBudgetThanBatteryAlone(t *testing.T) {
+	slots, p := topologyFixture(1, 1)
+	horizon := make([]Slot, 112)
+	for i := range horizon {
+		horizon[i] = slots[0]
+	}
+	if got := energyplanTimeBudget(horizon, p); got != energyplanEVBudget {
+		t.Fatalf("1b+1EV 112-slot budget=%v, want %v", got, energyplanEVBudget)
+	}
+	battery, pb := topologyFixture(1, 0)
+	short := make([]Slot, 112)
+	for i := range short {
+		short[i] = battery[0]
+	}
+	if got := energyplanTimeBudget(short, pb); got != energyplanSmallBudget {
+		t.Fatalf("battery-only 112-slot budget=%v, want %v", got, energyplanSmallBudget)
 	}
 }

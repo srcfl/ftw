@@ -28,6 +28,10 @@ func NewEnergyplanOptimizer(binary string) (*EnergyplanOptimizer, error) {
 
 const (
 	energyplanSmallBudget = 500 * time.Millisecond
+	// With a car plugged in, a Raspberry Pi 4 needs about 0.6-0.7 s before
+	// the planner can improve on its first plan; at 0.5 s it stopped just
+	// short and published plans about 11% above the proven optimum.
+	energyplanEVBudget    = 1500 * time.Millisecond
 	energyplanFleetBudget = 5 * time.Second
 	// Leave time for ValidatePlan and publication before firstSlotExpired.
 	energyplanPublishMargin = 50 * time.Millisecond
@@ -42,6 +46,9 @@ func energyplanTimeBudget(slots []Slot, p Params) time.Duration {
 	// Core already adjusts PV to one downside horizon. That margin does not
 	// add worker scenarios or change this model's size.
 	budget := energyplanSmallBudget
+	if len(p.activeLoadpoints()) > 0 {
+		budget = energyplanEVBudget
+	}
 	// 1 battery + 1 EV is 5 "assets". A 193-slot villa with demand charges
 	// routes to fleet MILP; 193*6 would leave it on the 500 ms budget.
 	if len(slots)*assets >= 193*5 || p.PVCurtailment.MinW > 0 || len(p.DemandCharges) > 0 {
