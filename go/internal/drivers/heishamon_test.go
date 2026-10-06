@@ -37,6 +37,7 @@ func TestHeishamonEmitsMetricsWithoutFakeBattery(t *testing.T) {
 	}
 
 	mqtt.Push("panasonic_heat_pump/main/Outside_Temp", "-4.5")
+	mqtt.Push("panasonic_heat_pump/main/Heat_Power_Consumption", "1250")
 	mqtt.Push("panasonic_heat_pump/main/Main_Inlet_Temp", "31.2")
 	mqtt.Push("panasonic_heat_pump/main/Main_Outlet_Temp", "35.7")
 	mqtt.Push("panasonic_heat_pump/main/Main_Target_Temp", "36")
@@ -46,7 +47,8 @@ func TestHeishamonEmitsMetricsWithoutFakeBattery(t *testing.T) {
 	}
 
 	wants := map[string]float64{
-		"hp_outside_temp_c": -4.5,
+		"hp_outdoor_temp_c": -4.5,
+		"hp_power_w":        1250,
 		"hp_inlet_temp_c":   31.2,
 		"hp_outlet_temp_c":  35.7,
 		"hp_target_temp_c":  36,
