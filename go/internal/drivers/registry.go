@@ -101,7 +101,8 @@ type Registry struct {
 	// driver (the counterpart to SecretPersister). Applied over the
 	// config.yaml value at driver_init so a rotated token survives a
 	// restart. Returns ("", false) when no override exists.
-	SecretOverride func(owner, key string) (string, bool)
+	SecretOverride         func(owner, key string) (string, bool)
+	VehicleWakeReservation func(makeName, serial string) (bool, time.Duration, error)
 	// RuntimePolicyResolver returns the verified signed policy of a managed
 	// read-only artifact. Nil means bundled, local and control-capable
 	// signed drivers, which run without one.
@@ -540,6 +541,12 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	// Wire secret write-back (rotated OAuth tokens). The host must install
 	// SecretPersister and SecretOverride before Add: init may persist a
 	// secret, and the poll loop starts before Add returns.
+	env.ReserveVehicleWake = func(makeName, serial string) (bool, time.Duration, error) {
+		if cfg.ObserveOnly || r.VehicleWakeReservation == nil {
+			return false, 30 * time.Minute, ErrNoCapability
+		}
+		return r.VehicleWakeReservation(makeName, serial)
+	}
 	secretOwner := cfg.SecretOwner()
 	env.PersistSecret = func(key, value string) error {
 		if r.SecretPersister == nil {
@@ -1018,6 +1025,11 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					err = restoreAfterCommand(err)
 				} else {
 					rd.markCommandApplied()
+				}
+				if action == "wake_up" || action == "ev_wake" {
+					// A telemetry refresh may request an early read even when its
+					// wake was throttled. Apply that interval to the active timer.
+					timer.Reset(rd.env.PollInterval())
 				}
 				finishCommand()
 				if err == nil && cyclePause {

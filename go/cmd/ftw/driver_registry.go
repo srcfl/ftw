@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/state"
@@ -20,6 +22,9 @@ func newDriverRegistry(tel *telemetry.Store, st *state.Store) *drivers.Registry 
 	}
 	reg.SecretOverride = func(owner, key string) (string, bool) {
 		return st.LoadConfig(driverSecretKey(owner, key))
+	}
+	reg.VehicleWakeReservation = func(makeName, serial string) (bool, time.Duration, error) {
+		return st.ReserveVehicleWake(state.ResolveDeviceID(makeName, serial, "", ""), time.Now())
 	}
 	return reg
 }

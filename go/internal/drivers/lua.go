@@ -643,6 +643,28 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 1
 	}))
 
+	// Wall-clock time is separate from millis/now_ms, which measure uptime.
+	host.RawSetString("unix_ms", L.NewFunction(func(L *lua.LState) int {
+		L.Push(lua.LNumber(time.Now().UnixMilli()))
+		return 1
+	}))
+	host.RawSetString("reserve_vehicle_wake", L.NewFunction(func(L *lua.LState) int {
+		allowed, retry, err := false, 30*time.Minute, ErrNoCapability
+		if !env.ProbeReadOnly && !driverDeclaresReadOnly(L) &&
+			(env.RuntimePolicy == nil || !env.RuntimePolicy.ReadOnly) && env.ReserveVehicleWake != nil {
+			makeName, serial := env.Identity()
+			allowed, retry, err = env.ReserveVehicleWake(makeName, serial)
+		}
+		L.Push(lua.LBool(allowed && err == nil))
+		L.Push(lua.LNumber(retry.Milliseconds()))
+		if err != nil {
+			L.Push(lua.LString("vehicle wake reservation failed"))
+		} else {
+			L.Push(lua.LNil)
+		}
+		return 3
+	}))
+
 	// host.sleep(ms) — block the driver goroutine for ms milliseconds.
 	// Used for vendor-required inter-write pacing (Solis 100ms, Deye 50ms);
 	// safe because each driver has its own goroutine and VM lock.

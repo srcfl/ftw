@@ -108,8 +108,9 @@ type Controller struct {
 
 	// vehicleStatus is the bound vehicle driver and its charging state.
 	// nil disables auto-wake.
-	vehicleStatus      func(loadpointID string) (driver, chargingState string, ok bool)
-	vehicleChargeState func(loadpointID string) (VehicleChargeState, bool)
+	vehicleStatus        func(loadpointID string) (driver, chargingState string, ok bool)
+	vehicleRefreshTarget func(loadpointID string) (string, error)
+	vehicleChargeState   func(loadpointID string) (VehicleChargeState, bool)
 
 	// peakRemainingSurplusW is the best PV-minus-load surplus left today.
 	// Below the 3Φ minimum, surplus_only locks 1Φ for the day. nil keeps 3Φ.
@@ -555,6 +556,14 @@ func (c *Controller) SetVehicleStatus(f func(loadpointID string) (driver, chargi
 	c.vehicleStatus = f
 }
 
+// SetVehicleRefreshTarget selects an authorized telemetry recipient from
+// configuration. It must not require a fresh SoC or permit charging.
+func (c *Controller) SetVehicleRefreshTarget(f func(string) (string, error)) {
+	if c != nil {
+		c.vehicleRefreshTarget = f
+	}
+}
+
 // SetPeakRemainingSurplusW wires the forecast-based "best surplus
 // we'll see for the rest of the day" reader used by surplus_only's
 // 1Φ-lock decision. Typical implementation in main.go iterates the
@@ -879,48 +888,23 @@ func (c *Controller) AnyLoadpointSurplusActive() bool {
 	return false
 }
 
-// RefreshVehicle sends a one-off wake command to the vehicle driver
-// bound to the given loadpoint, bypassing the auto-wake cooldown.
-// Used by the API when the operator edits the schedule — wakes
-// Tesla / BMW / whichever vehicle driver is bound so the next poll
-// surfaces any vehicle-side limit / SoC / connection changes
-// immediately rather than waiting up to the next natural wake
-// window.
-//
-// Sends the generic `wake_up` action (cross-driver protocol — any
-// vehicle driver implements it against its own back-end). Distinct
-// from `charge_start` (still used by the auto-wake loop when it's
-// trying to convince a detached car to actually start drawing
-// current) — `wake_up` is purely a telemetry refresh, no charge
-// side effects. Returns nil if no vehicle driver is bound or the
-// controller isn't fully wired (no-op). Errors from the send hop
-// are returned for the caller to surface to the operator.
+// RefreshVehicle requests telemetry only. The driver retains its durable
+// wake limit; refreshing a goal never resets the charge_start cooldown.
 func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
-	if c == nil || c.vehicleStatus == nil || c.send == nil {
+	if c == nil || c.vehicleRefreshTarget == nil || c.send == nil {
 		return nil
 	}
-	driver, _, ok := c.vehicleStatus(lpID)
-	if !ok || driver == "" {
+	driver, err := c.vehicleRefreshTarget(lpID)
+	if err != nil {
+		return err
+	}
+	if driver == "" {
 		return nil
 	}
 	payload, err := json.Marshal(map[string]any{"action": "wake_up"})
 	if err != nil {
 		return err
 	}
-	// Reset the auto-wake throttle so a manual refresh doesn't leave
-	// the LP in a long backoff afterwards — the operator just told us
-	// they want a fresh read, no reason to apply 90s cooldown to the
-	// next legitimate auto-wake.
-	c.wakeMu.Lock()
-	if c.wakeLast == nil {
-		c.wakeLast = map[string]time.Time{}
-		c.wakeKickUntil = map[string]time.Time{}
-		c.wakeAttempts = map[string]int{}
-	}
-	delete(c.wakeAttempts, lpID)
-	c.wakeLast[lpID] = time.Now()
-	c.wakeMu.Unlock()
-	slog.Info("loadpoint manual wake (schedule edit)", "lp", lpID, "vehicle_driver", driver)
 	return c.sendVehicle(ctx, driver, payload)
 }
 

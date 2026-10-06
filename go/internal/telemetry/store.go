@@ -90,7 +90,7 @@ type DerReading struct {
 	RawW         float64
 	SmoothedW    float64
 	SoC          *float64  // optional; 0..1 fraction for every DER including vehicles
-	SoCUpdatedAt time.Time // last fresh SoC receipt time; preserved across cached updates
+	SoCUpdatedAt time.Time // last SoC source observation (receipt time for legacy drivers)
 	Data         json.RawMessage
 	UpdatedAt    time.Time
 }
@@ -426,6 +426,21 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 	var socUpdatedAt time.Time
 	if socFresh {
 		socUpdatedAt = now
+		if t == DerVehicle {
+			var fields map[string]json.RawMessage
+			_ = json.Unmarshal(data, &fields)
+			if raw, present := fields["soc_observed_at_ms"]; present {
+				var ms int64
+				if json.Unmarshal(raw, &ms) != nil || ms <= 0 || ms > now.UnixMilli() {
+					socFresh = false
+				} else {
+					socUpdatedAt = time.UnixMilli(ms)
+					if previous := s.readings[k]; previous != nil && !socUpdatedAt.After(previous.SoCUpdatedAt) {
+						socFresh = false
+					}
+				}
+			}
+		}
 	}
 	// Preserve last-known SoC when the new emit doesn't include one or marks a
 	// non-nil value as a cached replay.
@@ -435,6 +450,7 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 	// persisted metrics can still distinguish it from a fresh number.
 	// A battery SoC older than BatterySoCMaxAge is not carried: it is unknown.
 	if !socFresh {
+		socUpdatedAt = time.Time{}
 		prev, ok := s.readings[k]
 		switch {
 		case !ok || prev.SoC == nil:
@@ -470,7 +486,7 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 	)
 	if socFresh {
 		s.pending = append(s.pending,
-			MetricSample{Driver: driver, Metric: t.String() + "_soc", TsMs: tsMs, Value: *soc},
+			MetricSample{Driver: driver, Metric: t.String() + "_soc", TsMs: socUpdatedAt.UnixMilli(), Value: *soc},
 		)
 	}
 	s.pendingMu.Unlock()

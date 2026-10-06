@@ -179,6 +179,10 @@ type HostEnv struct {
 	// to 1 MiB and checks signed secret-key grants for managed drivers.
 	PersistSecret func(key, value string) error
 
+	// ReserveVehicleWake checkpoints a telemetry wake before the driver sends it.
+	// The host binds this to hardware identity, independent of the driver name.
+	ReserveVehicleWake func(makeName, serial string) (bool, time.Duration, error)
+
 	// Poll-scoped Modbus evidence prevents a Modbus driver from turning failed
 	// reads into fresh zero-valued telemetry. The Lua runtime holds emissions
 	// until driver_poll ends, then commits them only when every read succeeded.

@@ -411,7 +411,7 @@ func TestScheduleRefreshKeepsVehicleCallerDeadline(t *testing.T) {
 		}
 	})
 	c := NewController(NewManager(), nil, nil, send)
-	c.SetVehicleStatus(func(string) (string, string, bool) { return "tesla", "Stopped", true })
+	c.SetVehicleRefreshTarget(func(string) (string, error) { return "tesla", nil })
 	c.SetCommandTimeout(10 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

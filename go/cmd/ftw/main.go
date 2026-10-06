@@ -2119,6 +2119,22 @@ func main() {
 			return pick.Driver, pick.ChargingState, true
 		})
 
+		lpController.SetVehicleRefreshTarget(func(lpID string) (string, error) {
+			lp, ok := lpMgr.State(lpID)
+			if !ok || !lp.PluggedIn {
+				return "", nil
+			}
+			connected := 0
+			for _, other := range lpMgr.States() {
+				if other.PluggedIn {
+					connected++
+				}
+			}
+			cfgMu.RLock()
+			defer cfgMu.RUnlock()
+			return configuredVehicleRefreshDriver(cfg.Drivers, connected)
+		})
+
 		lpController.SetVehicleChargeState(func(lpID string) (loadpoint.VehicleChargeState, bool) {
 			pick := telemetry.PickVehicleForCompletion(tel, time.Now())
 			if pick.Driver == "" || pick.Stale || !lpMgr.VehicleObservationApplies(lpID, pick.UpdatedAt) {
@@ -3154,18 +3170,10 @@ func main() {
 			// plan once with measured-truth instead of the pluginSoC
 			// estimate the startup replan used.
 			if mpcSvc != nil && !vehicleReplanFired {
-				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
-					if vr.SoC == nil {
-						continue
-					}
-					if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
-						continue
-					}
+				if pick := telemetry.PickBestVehicle(tel, time.Now()); pick.Driver != "" {
 					vehicleReplanFired = true
 					go mpcSvc.Replan(ctx)
-					slog.Info("first vehicle SoC seen → MPC replan triggered",
-						"driver", vr.Driver, "soc", *vr.SoC)
-					break
+					slog.Info("fresh vehicle SoC received; MPC replan requested", "driver", pick.Driver, "soc", pick.SoC)
 				}
 			}
 

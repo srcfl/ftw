@@ -208,3 +208,27 @@ For live work, start with telemetry only and a physically supervised device.
 Compare FTW, vendor UI and the site meter before sending a non-zero command.
 Test charge, discharge, zero, offline/default mode and reconnect. Record
 device-specific safety knowledge in the driver next to the code it constrains.
+
+### Vehicle telemetry recovery
+
+A vehicle driver may declare `DRIVER.telemetry_wake = true` for a `wake_up`
+command that only requests telemetry. Core selects it from configuration,
+without requiring a fresh SoC. Without an explicit vehicle-to-loadpoint
+binding, refresh requires one enabled vehicle and one connected loadpoint.
+Read-only and observe-only drivers cannot receive it. Planning and
+`charge_start` still require fresh vehicle evidence.
+
+`host.unix_ms()` returns Unix milliseconds. `host.millis()` and `host.now_ms()`
+remain process uptime. A vehicle emit may include `soc_observed_at_ms` and
+`soc_fresh`; Core retains the source time and rejects invalid, future and
+repeated timestamps as new SoC observations. Old drivers that omit source
+time keep their receipt-time behavior.
+
+Call `host.reserve_vehicle_wake()` before a telemetry wake. It returns
+`allowed, retry_ms, err` and saves the attempt before the network call, keyed
+by the make and serial set by the driver. The limit is three attempts per
+30-minute window, at least 90 seconds apart. Reload, rename, failed HTTP and
+Core restart do not reset it. Missing identity, storage failure and hosts
+without the function must prevent recovery wakes. This API reserves a budget;
+it does not grant a network or command capability. Proxy cache hits do not
+prove a new observation, even when HTTP succeeds.
