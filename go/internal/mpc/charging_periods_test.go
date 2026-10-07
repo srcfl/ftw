@@ -93,3 +93,60 @@ func TestNativeChargingPeriodsContinueMeasuredRun(t *testing.T) {
 		t.Fatalf("preference changed the bill: %g", plan.TotalCostOre)
 	}
 }
+
+func TestDepartureMissFollowsEnergyplanNeedRounding(t *testing.T) {
+	// The home box: one 300 s run at 4140 W stores 310.5 Wh at 0.9.
+	lp := &LoadpointSpec{MaxChargeW: 11000, AllowedStepsW: []float64{0, 4140, 6900, 11000}, ChargeEfficiency: .9,
+		Charging: DefaultChargingPeriods(false, 0)}
+	if got := lp.departureMissWh(); math.Abs(got-155.25) > 1e-9 {
+		t.Fatalf("half a run %.6f, want 155.25", got)
+	}
+	// Core sends 0.9 for an unset efficiency, and MinChargeW as the step.
+	lp.ChargeEfficiency, lp.AllowedStepsW, lp.MinChargeW = 0, nil, 4140
+	if got := lp.departureMissWh(); math.Abs(got-155.25) > 1e-9 {
+		t.Fatalf("defaults give %.6f, want 155.25", got)
+	}
+	for name, lp := range map[string]*LoadpointSpec{
+		"no minimum run":         {MaxChargeW: 11000, Charging: ChargingPeriods{StartCostOre: 5}},
+		"charging at plan start": {MaxChargeW: 11000, Charging: DefaultChargingPeriods(true, 120)},
+		"no charging step":       {Charging: DefaultChargingPeriods(false, 0)},
+		"run below 2 Wh":         {MaxChargeW: 10, ChargeEfficiency: 1, Charging: DefaultChargingPeriods(false, 0)},
+	} {
+		if got := lp.departureMissWh(); got != 1 {
+			t.Fatalf("%s: %.6f, want the 1 Wh rule", name, got)
+		}
+	}
+}
+
+func TestValidatePlanCountsADepartureMissOnlyAboveHalfARun(t *testing.T) {
+	// One run stores 3600 W * 300 s at efficiency 1 = 300 Wh. The car cannot
+	// charge, so it misses its whole need; 150 Wh is 1/512 of 76800 Wh.
+	for _, tc := range []struct {
+		name     string
+		need     float64
+		charging ChargingPeriods
+		counted  bool
+	}{
+		{"below half a run", 149, DefaultChargingPeriods(false, 0), false},
+		{"at half a run", 150, DefaultChargingPeriods(false, 0), false},
+		{"above half a run", 151, DefaultChargingPeriods(false, 0), true},
+		{"charging at plan start", 2, DefaultChargingPeriods(true, 120), true},
+		{"no minimum run", 2, ChargingPeriods{}, true},
+		{"no minimum run, 1 Wh", 1, ChargingPeriods{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slots, p := nearTargetReserveFixture()
+			p.Loadpoint = &LoadpointSpec{ID: "easee", CapacityWh: 76800, InitialSoC: .75 - tc.need/76800, SoCMax: .75,
+				Levels: 11, PluggedIn: true, TargetSoC: .75, TargetSlotIdx: 3, MaxChargeW: 11000,
+				AllowedStepsW: []float64{0, 3600, 11000}, ChargeEfficiency: 1, SurplusOnly: true, Charging: tc.charging}
+			plan := coreReservePlan(context.Background(), slots, p)
+			if err := ValidatePlan(slots, p, &plan); err != nil {
+				t.Fatal(err)
+			}
+			missing, counted := plan.LoadpointShortfallWh["easee"]
+			if counted != tc.counted || (counted && math.Abs(missing-tc.need) > 1e-6) {
+				t.Fatalf("need %.3f Wh: shortfall %v", tc.need, plan.LoadpointShortfallWh)
+			}
+		})
+	}
+}
