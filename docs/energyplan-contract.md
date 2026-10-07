@@ -147,7 +147,7 @@ replay with the same goals, measurements and initial/final stored energy.
 | Status or error | Meaning |
 |---|---|
 | `optimal` | A valid global cost interval closed within numerical tolerances for the stated model and objectives |
-| `gap_satisfied` | The library met its configured gap target; a nonzero gap remains |
+| `gap_satisfied` | The search met its configured gap target; a nonzero gap remains |
 | `feasible` | A validated candidate exists; optimality may be unproved and the bound unknown |
 | `infeasible` | The modeled physical problem has no feasible plan; a failed heuristic or expired budget cannot establish this |
 | `deadline_exceeded` | A resource limit left no usable result; it says nothing about physical feasibility |
