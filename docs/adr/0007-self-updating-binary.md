@@ -3,7 +3,9 @@
 - Status: accepted as direction on 2026-09-23; amended on 2026-09-24 so the
   owner runs updates from the command line or API and native installs have
   no update UI (decisions 2–4, 6, 9 and 10–14); amended on 2026-09-25 so
-  the Lua drivers ship with the Core release; rollout pending
+  the Lua drivers ship with the Core release; amended on 2026-10-07 to
+  allow native updates from More → Version through the same Core API;
+  rollout pending
 - Date: 2026-09-18
 - Issue: [#1308](https://github.com/srcfl/ftw/issues/1308)
 - Also decides the version scheme, tracked in
@@ -195,11 +197,15 @@ to it. No native update needs a Docker socket or Docker engine.**
     so a script or agent can wrap either. Starting, stopping and logs stay
     with systemd.
 
-12. **Native installs have no update UI.** The web UI shows the running
-    version and channel, whether a newer release is published, the command
-    that installs it and the last update's result. It has no update,
-    rollback, restore, channel, snapshot or backup controls, and the setup
-    wizard offers no update. Full backups come from `ftw backup` or the API.
+12. **Native updates can start from More → Version.** The owner chooses
+    when to update, through the web UI, `ftw` or the API. The web button calls
+    the same Core endpoint and follows its saved progress. It shows measured
+    bytes where known, completed steps, lost contact and the actual running
+    version after restart. It never repeats a request automatically when
+    its reply is lost. Retrying a release that failed here requires an
+    explicit retry action. Schema-change and install-readiness guards still
+    apply. Rollback, restore, channel, snapshot and backup controls stay in
+    `ftw` or the API; the setup wizard offers no update.
 
 13. **A release that changes the state schema is still one `ftw update`.**
     Core first makes and verifies a full backup of the current data, then
@@ -269,9 +275,8 @@ anything may change, and that is the true state of FTW.
 - **The capability handshake and the six-hour readiness budget.** Both existed
   to protect Core from an older sidecar. There is no sidecar.
 - **The Compose and `.env` pin.** The launcher reads a directory, not a file.
-- **Update, rollback, snapshot and backup controls in the web UI on native.**
-  The owner, or their agent, runs `ftw` or the API. The UI keeps the version
-  and the notice that a release exists.
+- **Rollback, restore, channel, snapshot and backup controls in the web UI.**
+  The owner, or their agent, runs `ftw` or the API for those operations.
 - **The pre-update rollback point on native.** Nothing on native could restore
   it, and a schema step now takes a full backup instead (decision 13).
 
@@ -301,8 +306,9 @@ anything may change, and that is the true state of FTW.
   and its tests, and installer support for the binary layout. Rough size:
   a few hundred lines of Go and under a hundred of shell. The `ftw` command
   is a thin HTTP client beside them.
-- **Removed from the native UI:** the Updates dialog, its component, channel,
-  snapshot and backup sections, and the setup wizard's update offer.
+- **Replaced in the native UI:** the old Update Center with a Version dialog
+  that can start the existing native update. Channel, snapshot and backup
+  sections and the setup wizard's update offer remain removed.
 - **Existing Docker boxes.** The same guided installer accepts 1.x, 2.x and
   3.x without an intermediate update. It first creates and verifies a full
   backup kept off the box. It preserves config, history, site identity and

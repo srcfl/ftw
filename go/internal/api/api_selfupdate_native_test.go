@@ -119,6 +119,16 @@ func TestNativeUpdateTakesNoRollbackPoint(t *testing.T) {
 	if st := checker.Status(); st.State != "restarting" || st.Step != 3 || st.TotalSteps != 3 {
 		t.Fatalf("native update status %+v", st)
 	}
+	var accepted struct {
+		Target    string    `json:"target"`
+		StartedAt time.Time `json:"started_at"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Target != next || accepted.StartedAt.IsZero() || !accepted.StartedAt.Equal(checker.Status().StartedAt) {
+		t.Fatalf("accepted run does not identify saved progress: %+v", accepted)
+	}
 }
 
 // The slot swap refuses a state-schema change only after the package is on

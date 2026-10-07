@@ -106,9 +106,10 @@ commit. Beta and stable contain different embedded version strings, so each
 package has its own hash and receipt. A tag, green CI run or published package
 alone is not field validation.
 
-On a native site the owner runs updates on the machine, by hand or from their
-own timer or agent. [Try the 0.x beta](native-beta.md) is the tester's
-guide. The installer puts the `ftw` command on `PATH`:
+On a native site the owner chooses when to update, from More → Version, on
+the machine, or from their own timer or agent.
+[Try the 0.x beta](native-beta.md) is the tester's guide. The installer puts
+the `ftw` command on `PATH`:
 
 ```bash
 ftw status                   # version, published release, last update, health
@@ -138,8 +139,13 @@ natively yet; `ftw update` stops before it changes anything.
 `ftw status` also shows free space for releases and backups, and any local
 rollback points an older Core left; native Core does not use them, so they
 can be deleted.
-The web UI on a native install shows the running version, a published
-release and the command; it has no update controls. See
+On a native install, More → Version shows the running version and any newer
+release. **Update FTW** starts the same update through Core's API, with no
+separate updater. The dialog shows downloaded bytes, completed steps and
+connection loss during restart, then reloads and shows the result. A failed
+version needs an explicit **Try this version again** action; an unsupported
+change to stored data or an unready installation cannot start an update.
+`ftw` and the API still handle channel changes, rollback and backups. See
 [ADR 0007](adr/0007-self-updating-binary.md) and
 [full backup and restore](backup-and-restore.md).
 

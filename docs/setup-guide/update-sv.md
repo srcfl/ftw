@@ -206,8 +206,11 @@ journalctl -u ftw --since "10 minutes ago" --no-pager
 ```
 
 `--channel beta` väljer beta och försöker uppdatera. När rätt kanal redan är
-sparad räcker `ftw update` nästa gång. Den nya native-webbsidan visar version
-och uppdateringsbesked; själva uppdateringen sker via kommandot.
+sparad räcker `ftw update` nästa gång. Du kan också välja
+**More → Version → Update FTW** i native-webbsidan. Knappen använder samma
+Core-API och launcher som kommandot. Den visar hämtade byte, klara steg och
+resultatet efter omstart. Behåll strömmen på. Att stänga eller ladda om sidan
+avbryter inte uppdateringen och startar inte ett nytt försök.
 
 Kontrollera vilken version som faktiskt körs efteråt. En publicerad release
 eller ett lyckat kommando som säger att installationen redan är aktuell är

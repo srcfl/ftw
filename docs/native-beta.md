@@ -219,6 +219,10 @@ prove physical charging or battery response; verify those on the equipment.
 ## Everyday commands
 
 These commands are for the new **native** installation with release slots.
+You can also open **More → Version → Update FTW** on the box's web UI. It
+uses the same Core API and launcher, follows progress across restart, and
+shows the version that actually runs afterward. Keep the box powered;
+closing or reloading the page does not cancel or repeat the update.
 
 ```bash
 ftw status                                   # version, releases, last update, disk, health

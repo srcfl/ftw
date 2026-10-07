@@ -183,7 +183,7 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 
 	go s.runVersionUpdate(startedAt, info.Latest)
 
-	writeJSON(w, 202, map[string]any{"status": "started", "action": "update", "target": info.Latest})
+	writeJSON(w, 202, map[string]any{"status": "started", "action": "update", "target": info.Latest, "started_at": startedAt})
 }
 
 func (s *Server) runVersionUpdate(startedAt time.Time, latest string) {
