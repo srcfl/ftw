@@ -14,7 +14,7 @@ SV = ROOT / 'docs/setup-guide/update-sv.md'
 
 def recipe(path, marker):
     blocks = re.findall(r'```bash\n(.*?)\n```', path.read_text(), re.S)
-    matches = [block for block in blocks if marker in block and 'tag=v0.X.Y-beta.N' in block]
+    matches = [block for block in blocks if marker in block and 'tag=v0.X.Y\n' in block]
     assert len(matches) == 1, (path, marker, len(matches))
     return matches[0]
 
@@ -49,7 +49,7 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         path.chmod(0o755)
 
     def run_recipe(self, marker, failure='', tag='v0.138.2-beta.1'):
-        block = recipe(EN, marker).replace('v0.X.Y-beta.N', tag)
+        block = recipe(EN, marker).replace('tag=v0.X.Y\n', f'tag={tag}\n')
         # Change only the destination, never the user's HOME or real Docker state.
         if marker == 'compose up':
             self.assertEqual(block.count('"$HOME/ftw-local"'), 1)
@@ -65,7 +65,7 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
 
     def test_rejects_placeholder_old_line_and_mistyped_tag_before_work(self):
         for marker in ('--fresh-host', 'compose up'):
-            for tag in ('v0.X.Y-beta.N', 'v3.8.0-beta.1', 'v0.130.0', 'v0.0.138-beta.1'):
+            for tag in ('v0.X.Y', 'v0.X.Y-beta.N', 'v3.8.0-beta.1', 'v0.130.0', 'v0.0.138-beta.1'):
                 with self.subTest(marker=marker, tag=tag):
                     result, calls = self.run_recipe(marker, tag=tag)
                     self.assertNotEqual(result.returncode, 0)
@@ -82,11 +82,15 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         self.assertFalse(Path(download).exists())
 
     def test_native_success_runs_download_and_removes_temp_file(self):
-        result, calls = self.run_recipe('--fresh-host')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('INSTALL\n', calls)
-        download = shlex.split(calls.splitlines()[0])[-1]
-        self.assertFalse(Path(download).exists())
+        for tag in ('v0.140.1', 'v0.138.2-beta.1'):
+            with self.subTest(tag=tag):
+                self.log.write_text('')
+                result, calls = self.run_recipe('--fresh-host', tag=tag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('INSTALL\n', calls)
+                self.assertIn(f'/srcfl/ftw/{tag}/scripts/install.sh', calls)
+                download = shlex.split(calls.splitlines()[0])[-1]
+                self.assertFalse(Path(download).exists())
 
     def test_failed_docker_download_leaves_no_project_and_allows_retry(self):
         for failure in ('download', 'dockerfile'):
