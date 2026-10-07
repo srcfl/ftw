@@ -132,16 +132,29 @@ export function updateMigrationBanner(health) {
 }
 
 export function maintenanceHTML(status, writer, { connected = true, now = Date.now() } = {}) {
-  if (!status || status.state === "complete" || status.state === "not_started") return "";
-  if (status.state === "running" && !status.last_error && now - count(status.started_ms) < 30000) return "";
+  if (!status) return "";
+  const failed = status.state === "failed" || !!status.last_error;
+  const writeFailed = connected && !!writer?.last_error;
+  if (!failed && !writeFailed && (status.state === "complete" || status.state === "not_started")) return "";
   const steps = { read_archive: "Reading saved history", copy_samples: "Preparing older readings", copy_buckets: "Preparing history summaries", verify_samples: "Verifying saved readings", verify_buckets: "Verifying history summaries", prune_samples: "Removing verified source readings", prune_buckets: "Removing verified source summaries", aggregate_legacy: "Summarizing older readings" };
   const work = status.work || {};
   const current = work[status.phase] || work.sample_archive || work.aggregate_archive || status;
-  const detail = [current.file, steps[current.operation] || "", count(current.rows_done) > 0 ? `${number(current.rows_done)}${count(current.rows_total) > 0 ? ` of ${number(current.rows_total)}` : ""} records processed in this step` : ""].filter(Boolean).join(" · ");
-  const title = !connected ? "History maintenance status unavailable" : status.last_error ? "History maintenance needs attention" : status.state === "paused" ? "History maintenance paused for backup" : status.state === "pending" ? "Older history will continue from saved progress" : "Maintaining saved history";
+  const detail = [current.file, steps[current.operation] || "", count(current.rows_done) > 0 || count(current.rows_total) > 0 ? `${number(current.rows_done)}${count(current.rows_total) > 0 ? ` of ${number(current.rows_total)}` : ""} records processed in this step` : ""].filter(Boolean).join(" · ");
+  if (connected && !failed && !writeFailed) {
+    if (status.state === "pending" && !detail) return "";
+    if (status.state === "running" && now - count(status.started_ms) < 30000) return "";
+  }
+  const title = !connected ? "History status unavailable" : writeFailed ? "FTW cannot save new readings" : failed ? "Saved history needs attention" : status.state === "paused" ? "History work paused for backup" : status.state === "pending" ? "History work will continue automatically" : "Organizing saved history";
+  const description = !connected ? "The box is not responding. This is its last history report."
+    : writeFailed ? "FTW is retrying. If this continues, report it with the message below and your FTW version."
+    : failed ? "FTW could not finish organizing saved readings. It will try again automatically. If this continues, report it with your FTW version."
+    : status.state === "paused" ? "FTW will continue organizing saved readings after the backup. You do not need to do anything."
+    : status.state === "pending" ? "FTW will continue organizing saved readings in the background. This keeps charts fast and storage within its limits. You do not need to do anything."
+    : "FTW is organizing saved readings to keep charts fast and storage within its limits. You do not need to do anything.";
   const age = writer?.last_commit_ms ? duration(Math.max(0, now - writer.last_commit_ms) / 1000) : "";
-  const writes = !connected ? "The box is not responding. Showing its last report." : writer?.last_error ? "New readings could not be saved: " + writer.last_error : age ? `Latest measurement batch saved ${age} ago.` : "";
-  return `<strong role="status">${escape(title)}</strong>${detail ? `<p>${escape(detail)}</p>` : ""}${writes ? `<p>${escape(writes)}</p>` : ""}${status.last_error ? `<p class="err">${escape(status.last_error)}</p>` : ""}`;
+  const writes = connected && !writeFailed && age ? `FTW saved the latest measurements ${age} ago.` : "";
+  const errors = connected ? [writeFailed ? `New readings: ${writer.last_error}` : "", status.last_error ? `Saved history: ${status.last_error}` : ""].filter(Boolean) : [];
+  return `<strong role="status">${escape(title)}</strong><p>${escape(description)}</p>${detail ? `<p>${escape(detail)}</p>` : ""}${writes ? `<p>${escape(writes)}</p>` : ""}${errors.map(error => `<p class="err">${escape(error)}</p>`).join("")}`;
 }
 
 function updateMaintenanceBanner(health, lastHealth) {

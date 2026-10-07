@@ -7,13 +7,60 @@ const running = { state:"running", phase:"parquet", history_complete:false, file
 test("maintenance shows saved progress, write freshness and failures without a false percentage", () => {
   const status = { state: "pending", work: { sample_archive: { file: "2026-06-04", operation: "copy_samples", rows_done: 10240 } } };
   const html = maintenanceHTML(status, { last_commit_ms: 99000 }, { now: 100000 });
-  assert.match(html, /continue from saved progress/);
+  assert.match(html, /History work will continue automatically/);
+  assert.match(html, /saved readings in the background/);
+  assert.match(html, /You do not need to do anything/);
+  assert.doesNotMatch(html, /import|Older history will continue/);
   assert.match(html, /10,240 records processed/);
-  assert.match(html, /saved 1 s ago/);
+  assert.match(html, /saved the latest measurements 1 s ago/);
   assert.doesNotMatch(html, /%|<progress/);
   assert.match(maintenanceHTML({ ...status, last_error: "disk <failed>" }), /disk &lt;failed&gt;/);
   assert.match(maintenanceHTML(status, null, { connected: false }), /status unavailable/);
   assert.equal(maintenanceHTML({ state: "complete" }), "");
+});
+test("a routine pending pass with no reported backlog stays quiet after restart", () => {
+  const status = { state: "pending", started_ms: 1000, runs: 1, failures: 0, rows_done: 0 };
+  assert.equal(maintenanceHTML(status, { last_commit_ms: 99000 }, { now: 100000 }), "");
+  assert.equal(maintenanceHTML({ ...status, work: {} }), "");
+});
+test("pending work retains a known total even before the first row finishes", () => {
+  const html = maintenanceHTML({ state: "pending", rows_done: 0, rows_total: 100 });
+  assert.match(html, /0 of 100 records processed/);
+  assert.match(html, /continue automatically/);
+});
+test("history errors and failed writes bypass quiet pending and short running passes", () => {
+  for (const state of ["pending", "running"]) {
+    const status = { state, started_ms: 99000, rows_done: 0 };
+    const options = { now: 100000 };
+    assert.match(maintenanceHTML({ ...status, last_error: "disk <failed>" }, null, options), /Saved history needs attention/);
+    const html = maintenanceHTML(status, { last_error: "disk <full>", last_commit_ms: 99000 }, options);
+    assert.match(html, /FTW cannot save new readings/);
+    assert.match(html, /disk &lt;full&gt;/);
+    assert.doesNotMatch(html, /You do not need to do anything|FTW saved the latest/);
+  }
+  assert.match(maintenanceHTML({ state: "failed" }), /Saved history needs attention/);
+  const both = maintenanceHTML({ state: "pending", last_error: "summary unavailable" }, { last_error: "disk full" });
+  assert.match(both, /New readings: disk full/);
+  assert.match(both, /Saved history: summary unavailable/);
+  for (const state of ["complete", "not_started"]) {
+    assert.match(maintenanceHTML({ state }, { last_error: "disk full" }), /FTW cannot save new readings/);
+  }
+});
+test("lost contact shows the last report without claiming fresh writes", () => {
+  for (const state of ["pending", "running"]) {
+    const html = maintenanceHTML({ state, started_ms: 99000 }, { last_commit_ms: 99000 }, { now: 100000, connected: false });
+    assert.match(html, /History status unavailable/);
+    assert.match(html, /last history report/);
+    assert.doesNotMatch(html, /You do not need to do anything|FTW saved the latest/);
+  }
+});
+test("backup and long running passes explain the task and user action", () => {
+  assert.match(maintenanceHTML({ state: "paused" }), /after the backup.*You do not need to do anything/);
+  assert.equal(maintenanceHTML({ state: "running", started_ms: 99000 }, null, { now: 100000 }), "");
+  const html = maintenanceHTML({ state: "running", started_ms: 1000 }, { last_commit_ms: 99000 }, { now: 100000 });
+  assert.match(html, /Organizing saved history/);
+  assert.match(html, /keep charts fast and storage within its limits/);
+  assert.match(html, /FTW saved the latest measurements 1 s ago/);
 });
 test("unknown totals stay indeterminate and incomplete history stays explicit", () => {
   const view = migrationView(running, {now:130000});
