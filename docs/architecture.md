@@ -222,14 +222,14 @@ remains explicit and atomic. See
 
 ## Optimizer
 
-Beta releases use the bundled Energyplan worker when `planner.engine` is unset
+Beta and stable releases use the bundled Energyplan worker when `planner.engine` is unset
 on a supported host. It solves Core's downside PV forecast. Core validates its
 plan before publishing it, then runs a bounded Core DP shadow on the same input.
 A worker error, timeout or rejected plan invokes Core DP fallback. Core validates
 fallback plans too; a failed validation leaves the prior plan in place.
 
 `planner.engine: core` or `energyplan` selects an engine explicitly.
-Stable and development builds default to Core. Older `engine: python` values
+Development builds and other hosts default to Core. Older `engine: python` values
 migrate to Energyplan; retired optimizer settings are ignored and omitted
 when the configuration is saved.
 Energyplan ships as compiled binaries with its own license; source and builds

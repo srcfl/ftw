@@ -257,11 +257,11 @@ fleet_ping:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
-# Energyplan ships with Core and runs first in supported beta builds.
+# Energyplan ships with Core and runs first in supported beta and stable builds.
 # Core DP provides shadow comparisons and validated fallback plans.
 # planner:
 #   enabled: true
-#   # engine: energyplan # beta default; core selects the Go planner
+#   # engine: energyplan # release default; core selects the Go planner
 #   mode: passive_arbitrage
 #   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
 #   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)

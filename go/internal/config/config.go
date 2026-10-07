@@ -764,7 +764,7 @@ const (
 	PlannerEngineEnergyplan = "energyplan"
 )
 
-// EngineName resolves an explicit engine. The launcher applies beta defaults
+// EngineName resolves an explicit engine. The launcher applies release defaults
 // before calling this method; an unset value here keeps Core for other callers.
 func (p *Planner) EngineName() string {
 	if p == nil {
