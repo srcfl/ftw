@@ -441,7 +441,23 @@ func TestHandleDriverTestDoesNotShareSecretsWithDifferentLua(t *testing.T) {
 	}
 }
 
+// Settings posts the whole driver, credential_owner included; scripts may
+// omit it. The probe must behave the same either way.
+var probeCredentialOwnerCases = []struct {
+	name  string
+	owner string
+}{
+	{"without credential_owner", ""},
+	{"with credential_owner", "credential-myuplink"},
+}
+
 func TestHandleDriverTestKeepsExplicitReauthToken(t *testing.T) {
+	for _, tc := range probeCredentialOwnerCases {
+		t.Run(tc.name, func(t *testing.T) { testHandleDriverTestKeepsExplicitReauthToken(t, tc.owner) })
+	}
+}
+
+func testHandleDriverTestKeepsExplicitReauthToken(t *testing.T, owner string) {
 	dir := t.TempDir()
 	luaPath := writeOAuthProbeLua(t, dir, "oauth_probe.lua")
 	st, err := state.Open(filepath.Join(dir, "state.db"))
@@ -449,14 +465,19 @@ func TestHandleDriverTestKeepsExplicitReauthToken(t *testing.T) {
 		t.Fatalf("open state: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	if err := st.SaveConfig(driverSecretStateKey("myuplink", "refresh_token"), "fresh-token"); err != nil {
+	secretOwner := "myuplink"
+	if owner != "" {
+		secretOwner = owner
+	}
+	if err := st.SaveConfig(driverSecretStateKey(secretOwner, "refresh_token"), "fresh-token"); err != nil {
 		t.Fatalf("save secret override: %v", err)
 	}
 
 	live := &config.Config{Drivers: []config.Driver{{
-		Name:   "myuplink",
-		Lua:    luaPath,
-		Config: map[string]any{"refresh_token": "stale-token"},
+		Name:            "myuplink",
+		CredentialOwner: owner,
+		Lua:             luaPath,
+		Config:          map[string]any{"refresh_token": "stale-token"},
 	}}}
 	srv := New(&Deps{
 		Cfg:        live,
@@ -464,11 +485,15 @@ func TestHandleDriverTestKeepsExplicitReauthToken(t *testing.T) {
 		ConfigPath: filepath.Join(dir, "config.yaml"),
 		State:      st,
 	})
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"name":   "myuplink",
 		"lua":    luaPath,
 		"config": map[string]any{"refresh_token": "new-account-token"},
-	})
+	}
+	if owner != "" {
+		payload["credential_owner"] = owner
+	}
+	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/api/drivers/test", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -486,7 +511,7 @@ func TestHandleDriverTestKeepsExplicitReauthToken(t *testing.T) {
 	if got := metricToken(resp); got != "new-account-token" {
 		t.Fatalf("used token = %q, want explicit new-account-token", got)
 	}
-	if got, ok := st.LoadConfig(driverSecretStateKey("myuplink", "refresh_token")); !ok || got != "fresh-token" {
+	if got, ok := st.LoadConfig(driverSecretStateKey(secretOwner, "refresh_token")); !ok || got != "fresh-token" {
 		t.Fatalf("live secret = %q ok=%v, want unchanged fresh-token", got, ok)
 	}
 }
@@ -619,6 +644,14 @@ function driver_cleanup() end
 }
 
 func TestHandleDriverTestRestartsRunningDriverAfterRefreshTokenRotation(t *testing.T) {
+	for _, tc := range probeCredentialOwnerCases {
+		t.Run(tc.name, func(t *testing.T) {
+			testHandleDriverTestRestartsRunningDriverAfterRefreshTokenRotation(t, tc.owner != "")
+		})
+	}
+}
+
+func testHandleDriverTestRestartsRunningDriverAfterRefreshTokenRotation(t *testing.T, postOwner bool) {
 	dir := t.TempDir()
 	luaPath := writeProbeRestartLua(t, dir)
 
@@ -669,7 +702,7 @@ func TestHandleDriverTestRestartsRunningDriverAfterRefreshTokenRotation(t *testi
 		Registry:   reg,
 	})
 
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"name": "myuplink",
 		"lua":  luaPath,
 		"config": map[string]any{
@@ -677,7 +710,11 @@ func TestHandleDriverTestRestartsRunningDriverAfterRefreshTokenRotation(t *testi
 			"rotate_secret": true,
 			"persist_value": "rotated-token",
 		},
-	})
+	}
+	if postOwner {
+		payload["credential_owner"] = liveDriver.CredentialOwner
+	}
+	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/api/drivers/test", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
