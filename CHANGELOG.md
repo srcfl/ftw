@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.140.1
+
+### Patch Changes
+
+- b768453: Keep Test connection from breaking an OAuth driver's login. Settings sends the driver's credential owner, and the probe then missed its own token writes: it tested the saved token instead of a newly pasted one, and rotated the live token without restarting the running driver.
+- 7dd652b: Use Energyplan by default on stable releases too, as betas already do. A beta box that moves to stable keeps the planner it has run, and a new stable install starts with Energyplan. Core DP still runs as shadow and fallback, and `planner.engine: core` still selects it.
+
 ## 0.140.0
 
 ### Minor Changes
