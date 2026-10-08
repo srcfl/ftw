@@ -157,7 +157,12 @@ homeassistant:
 # modbus_proxy:
 #   enabled: true
 #   listen: ":1502"     # used when the site has one unique Modbus TCP endpoint
-#   allow_write: false  # keep off unless you trust every host on the LAN
+#   allow_write: false  # read-only proxy; FTW owns control
+#   # true gives LAN clients write ownership; FTW only reads these endpoints.
+#   # All configured unit IDs on each endpoint share this choice. Unknown unit
+#   # IDs (including broadcast 0) are blocked. The external controller owns
+#   # device safety. A disconnect does not return control to FTW; change the
+#   # setting and restart. Ownership stays in force if the listener fails.
 #
 # Two inverters (different host:port) each need their own listen address:
 #   capabilities.modbus.proxy_listen: ":1502"  /  ":1503"

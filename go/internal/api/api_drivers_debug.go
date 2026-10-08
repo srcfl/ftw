@@ -197,6 +197,7 @@ func (s *Server) configuredDriver(name string) (config.Driver, bool) {
 	}
 	for _, d := range s.deps.Cfg.Drivers {
 		if d.Name == name {
+			d.ObserveOnly = d.ObserveOnly || s.deps.Cfg.ModbusProxyOwnsWrites(d)
 			return d, true
 		}
 	}

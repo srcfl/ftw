@@ -59,6 +59,9 @@ type Config struct {
 	ConfigDatabase         string `yaml:"config_database,omitempty" json:"-"`
 	Revision               int64  `yaml:"-" json:"-"`
 	LANPasswordHash        string `yaml:"-" json:"-"`
+	// Startup write ownership stays in force until restart, including after
+	// saving a different proxy mode or a failed listener start.
+	ModbusProxyWriteOwners map[string]bool `yaml:"-" json:"-"`
 }
 
 // OCPP configures the built-in OCPP 1.6J and 2.0.1 Central System. Chargers connect to
@@ -1352,6 +1355,7 @@ func (c Config) MaskSecrets() Config {
 // wherever the incoming value is empty (the UI sends "" for masked fields).
 // Call this before saving a config received from the API.
 func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
+	incoming.ModbusProxyWriteOwners = existing.ModbusProxyWriteOwners
 	incoming.ConfigDatabase = existing.ConfigDatabase
 	incoming.Revision = existing.Revision
 	incoming.LANPasswordHash = existing.LANPasswordHash

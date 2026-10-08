@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -51,6 +52,8 @@ type sharedConn struct {
 	addr                 string
 	allowUnverifiedLocal bool
 	requestTimeout       time.Duration
+	externalWriteOwner   bool // guarded by mu; only changes at process startup
+	localWaiters         atomic.Int32
 
 	// activeUnitID mirrors what the live client was last programmed
 	// with, so capabilities with different unit ids can share the
@@ -249,7 +252,9 @@ func releaseConn(c *Capability) bool {
 // Read — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) Read(addr, count uint16, kind int32) ([]uint16, error) {
 	conn := c.conn
+	conn.localWaiters.Add(1)
 	conn.mu.Lock()
+	conn.localWaiters.Add(-1)
 	defer conn.mu.Unlock()
 	if err := conn.ensureClient(); err != nil {
 		return nil, err
@@ -299,8 +304,13 @@ func markTransport(err error) error {
 // WriteSingle — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) WriteSingle(addr, value uint16) error {
 	conn := c.conn
+	conn.localWaiters.Add(1)
 	conn.mu.Lock()
+	conn.localWaiters.Add(-1)
 	defer conn.mu.Unlock()
+	if conn.externalWriteOwner {
+		return drivers.ErrObserveOnly
+	}
 	if err := conn.ensureClient(); err != nil {
 		return err
 	}
@@ -326,8 +336,13 @@ func (c *Capability) WriteSingle(addr, value uint16) error {
 // WriteMulti — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
 	conn := c.conn
+	conn.localWaiters.Add(1)
 	conn.mu.Lock()
+	conn.localWaiters.Add(-1)
 	defer conn.mu.Unlock()
+	if conn.externalWriteOwner {
+		return drivers.ErrObserveOnly
+	}
 	if err := conn.ensureClient(); err != nil {
 		return err
 	}
@@ -351,33 +366,45 @@ func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
 }
 
 // executePDU runs one raw PDU on the shared session. Exception PDUs are
-// returned as data so a proxy can forward them. Transport errors follow
-// the same reconnect-once policy as Read. unitID is taken from the
-// request so one TCP session can serve several slaves.
+// returned as data so a proxy can forward them. Local requests have priority;
+// proxy traffic gets one bounded attempt and leaves reconnect to drivers.
 func (c *Capability) executePDU(unitID uint8, pdu []byte) ([]byte, error) {
 	conn := c.conn
-	conn.mu.Lock()
+	// Proxy work never queues ahead of driver reads or writes. A pending
+	// local request wins, and a busy client gets a Modbus busy exception.
+	if conn.localWaiters.Load() > 0 || !conn.mu.TryLock() {
+		return exceptionPDU(pdu[0], modbusExcBusy), nil
+	}
 	defer conn.mu.Unlock()
-	if err := conn.ensureClient(); err != nil {
-		return nil, err
+	if conn.localWaiters.Load() > 0 {
+		return exceptionPDU(pdu[0], modbusExcBusy), nil
+	}
+	// Drivers own reconnect. Proxy requests cannot add a second retry or
+	// repeatedly dial an unavailable device while polls are cooling down.
+	if conn.client == nil {
+		return exceptionPDU(pdu[0], modbusExcGWTarget), nil
 	}
 	conn.applyUnit(int(unitID))
+	oldTimeout := conn.client.timeout
+	if oldTimeout > proxyRequestTimeout {
+		conn.client.timeout = proxyRequestTimeout
+	}
+	defer func() {
+		if conn.client != nil {
+			conn.client.timeout = oldTimeout
+		}
+	}()
 	res, err := conn.client.roundTrip(unitID, pdu)
-	if err == nil {
-		conn.noteLiveResponse()
-		return res, nil
-	}
-	if !isTransportError(err) {
-		conn.noteLiveResponse()
-		return res, err
-	}
-	if rerr := conn.prepareTransportRetry(); rerr != nil {
-		return nil, fmt.Errorf("pdu after reconnect: %w (original: %v)", rerr, err)
-	}
-	conn.applyUnit(int(unitID))
-	res, err = conn.client.roundTrip(unitID, pdu)
 	conn.finishRequest(err)
 	return res, markTransport(err)
+}
+
+// ReadOnly tells the registry that external clients own this device. The
+// transport still checks every write, including tests and lifecycle hooks.
+func (c *Capability) ReadOnly() bool {
+	c.conn.mu.Lock()
+	defer c.conn.mu.Unlock()
+	return c.conn.externalWriteOwner
 }
 
 // applyUnit programs the handle's unit id into the live client when it
@@ -550,7 +577,8 @@ func isTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, drivers.ErrModbusTransport) {
 		return true
 	}
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) ||

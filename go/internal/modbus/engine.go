@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync"
 
 	"github.com/srcfl/ftw/go/internal/drivers"
 )
@@ -12,7 +13,10 @@ import (
 // and the optional LAN proxy all Dial through it. The actual one-socket-
 // per-endpoint pool lives in Dial — master already shares sessions there
 // (#987) — so Open is a named entry point, not a second pool.
-type Engine struct{}
+type Engine struct {
+	mu          sync.Mutex
+	writeOwners map[string]bool
+}
 
 // NewEngine returns the process Modbus wiring. Session sharing is in Dial.
 func NewEngine() *Engine {
@@ -27,7 +31,43 @@ func (e *Engine) Open(host string, port, unitID int, allowUnverifiedLocal bool) 
 	if e == nil {
 		return nil, errors.New("modbus engine is nil")
 	}
-	return DialWithOptions(host, port, unitID, allowUnverifiedLocal)
+	cap, err := DialWithOptions(host, port, unitID, allowUnverifiedLocal)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	owned := e.writeOwners[sessionKey(host, port)]
+	e.mu.Unlock()
+	if owned {
+		cap.conn.mu.Lock()
+		cap.conn.externalWriteOwner = true
+		cap.conn.mu.Unlock()
+	}
+	return cap, nil
+}
+
+// SetWriteOwners installs startup policy even when a listener cannot start.
+// Existing handles share the same gate; new probes cannot acquire a writer.
+func (e *Engine) SetWriteOwners(owners map[string]bool) {
+	e.mu.Lock()
+	e.writeOwners = make(map[string]bool, len(owners))
+	for key, owned := range owners {
+		e.writeOwners[key] = owned
+	}
+	e.mu.Unlock()
+	registryMu.Lock()
+	var conns []*sharedConn
+	for key, owned := range owners {
+		if conn := endpointConns[key]; owned && conn != nil {
+			conns = append(conns, conn)
+		}
+	}
+	registryMu.Unlock()
+	for _, conn := range conns {
+		conn.mu.Lock()
+		conn.externalWriteOwner = true
+		conn.mu.Unlock()
+	}
 }
 
 func (e *Engine) sessionCount() int {

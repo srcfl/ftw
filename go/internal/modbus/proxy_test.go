@@ -21,9 +21,10 @@ func TestProxyMultiplexesOntoSharedSession(t *testing.T) {
 	defer driver.Close()
 
 	proxy, err := engine.Listen([]Bind{{
-		Listen: "127.0.0.1:0",
-		Host:   host,
-		Port:   port,
+		Listen:  "127.0.0.1:0",
+		Host:    host,
+		Port:    port,
+		UnitIDs: []uint8{1},
 	}}, false)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -76,9 +77,10 @@ func TestProxyAllowWriteForwardsRegisterWrites(t *testing.T) {
 	host, port := slave.Addr()
 	engine := NewEngine()
 	proxy, err := engine.Listen([]Bind{{
-		Listen: "127.0.0.1:0",
-		Host:   host,
-		Port:   port,
+		Listen:  "127.0.0.1:0",
+		Host:    host,
+		Port:    port,
+		UnitIDs: []uint8{1},
 	}}, true)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -104,9 +106,10 @@ func TestProxyUnknownFunctionIsIllegal(t *testing.T) {
 	host, port := slave.Addr()
 	engine := NewEngine()
 	proxy, err := engine.Listen([]Bind{{
-		Listen: "127.0.0.1:0",
-		Host:   host,
-		Port:   port,
+		Listen:  "127.0.0.1:0",
+		Host:    host,
+		Port:    port,
+		UnitIDs: []uint8{1},
 	}}, false)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
