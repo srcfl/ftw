@@ -1557,6 +1557,17 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		mpcSvc.PhaseImbalanceW = func() float64 {
+			cfgMu.RLock()
+			timeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			cfgMu.RUnlock()
+			if timeout <= 0 {
+				timeout = 60 * time.Second
+			}
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			return control.PhaseImbalanceW(tel, ctrl, timeout, time.Now())
+		}
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).

@@ -1406,8 +1406,9 @@ func ComputeDispatch(
 
 	// ---- Read site meter ----
 	rawGridW := 0.0
-	if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
-		rawGridW = r.SmoothedW
+	siteMeter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if siteMeter != nil {
+		rawGridW = siteMeter.SmoothedW
 	}
 	// Live EV/V2X charger readings override the manual slider on each tick —
 	// hardware truth beats guesses. Positive V2X is a vehicle charging load;
@@ -2011,6 +2012,8 @@ func ComputeDispatch(
 	// EV plan reserves its demand before optional battery charge, including
 	// while the car ramps up. Unscheduled EV draw retains proportional sharing.
 	// Infer house net power from measured EV draw, never from planned demand.
+	// The ceiling gives up the worst phase's imbalance: a charger's own load
+	// balancer cuts the car on that phase while the total still fits.
 	state.FuseEVMaxW = 0
 	state.FuseSaturated = false
 	plannedEVW := scheduledEVPowerW(state)
@@ -2021,7 +2024,7 @@ func ComputeDispatch(
 		// with peak active and BatteryCoversEV=false: the EV settles
 		// at this scaled rate; the battery's transient discharge to
 		// bridge the ramp-down is handled by forceFuseDischarge below.
-		ceilingW := state.effectiveImportCeilingW(fuseMaxW)
+		ceilingW := state.phaseImportCeilingW(fuseMaxW, siteMeter)
 		targetTotal := currentTotal + totalCorrection
 		B := math.Max(0, targetTotal)
 		Bn := math.Min(0, targetTotal)
@@ -2395,10 +2398,11 @@ func republishFuseEVCapAfterFuseDischarge(targets []DispatchTarget, store *telem
 		}
 	}
 
-	ceilingW := state.effectiveImportCeilingW(fuseMaxW)
+	siteMeter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	ceilingW := state.phaseImportCeilingW(fuseMaxW, siteMeter)
 	var rawGridW float64
-	if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
-		rawGridW = r.SmoothedW
+	if siteMeter != nil {
+		rawGridW = siteMeter.SmoothedW
 	}
 	H := rawGridW - currentBat - state.EVChargingW
 	headroom := ceilingW - H - postBat

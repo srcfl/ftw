@@ -1,5 +1,7 @@
 package mpc
 
+import "time"
+
 // PowerLimits caps the grid flow the DP is allowed to consider in a
 // given slot. Default (zero value) is unlimited — the MPC plans as if
 // the grid connection has unbounded capacity in both directions.
@@ -73,6 +75,36 @@ func clampSlotGridLimits(slots []Slot, fuseMaxW, maxExportW float64) {
 		}
 		if slots[i].Limits.MaxExportW <= 0 || slots[i].Limits.MaxExportW > exportCap {
 			slots[i].Limits.MaxExportW = exportCap
+		}
+	}
+}
+
+// phaseImbalanceWindow is how far ahead the live phase imbalance shapes the
+// plan. House load moves between phases within hours; dispatch applies the
+// live value on every tick and a later replan measures it again.
+const phaseImbalanceWindow = time.Hour
+
+// limitNearImportForPhases takes the live phase imbalance off the import
+// limit of slots that start within phaseImbalanceWindow. The aggregate fuse
+// assumes balanced phases; a charger's load balancer cuts the car on the
+// worst phase first, so without this the plan gives the battery headroom
+// the car cannot use. A slot keeps at least its forecast net load, so
+// doing nothing stays feasible. A tighter limit is never loosened.
+func limitNearImportForPhases(slots []Slot, now time.Time, fuseMaxW, imbalanceW float64) {
+	if fuseMaxW <= 0 || imbalanceW <= 0 {
+		return
+	}
+	until := now.Add(phaseImbalanceWindow).UnixMilli()
+	for i := range slots {
+		if slots[i].StartMs >= until {
+			continue
+		}
+		limit := max(fuseMaxW-imbalanceW, slots[i].LoadW+slots[i].PVW)
+		if limit <= 0 {
+			continue
+		}
+		if slots[i].Limits.MaxImportW <= 0 || limit < slots[i].Limits.MaxImportW {
+			slots[i].Limits.MaxImportW = limit
 		}
 	}
 }
