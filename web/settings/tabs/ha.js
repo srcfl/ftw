@@ -1,4 +1,4 @@
-// Settings → Home Assistant tab: MQTT bridge config + live status.
+// Settings → Integrations tab: Home Assistant MQTT and Modbus proxy.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
