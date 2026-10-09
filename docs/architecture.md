@@ -244,8 +244,12 @@ legacy forecast, weather, occupancy and saved model state. It calls the forecast
 worker once under a deadline, outside control and dispatch locks. Core accepts
 PV and load independently for each covered interval. If either signal is
 missing, late, partial or invalid, Core retains the matching legacy value.
-When a week of scored errors shows one source clearly better for a signal,
-Core uses that source; otherwise the worker's quality label decides. The
+When recent scored errors show one source clearly better for a signal,
+Core uses that source; otherwise the worker's quality label decides. PV source
+choices use each lead bucket's daylight errors, so a distant forecast cannot
+pick the next hour's source. PV and net-load bands use separate day and night
+errors where the site's location is known. Each needs its own sample and day
+coverage before claiming empirical calibration. The
 resulting `champion` can therefore contain Energyplan PV with legacy load, or
 the reverse. Each slot's planning margin comes from the errors its own sources
 made on earlier issues. `legacy_shadow` keeps both legacy signals from the same frozen

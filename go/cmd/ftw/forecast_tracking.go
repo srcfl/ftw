@@ -603,7 +603,7 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 			selected[i].PredictionStartMS = point.PredictionStartMS
 			// Measured errors keep legacy PV only where legacy has weather for
 			// this interval; elsewhere the quality rule decides.
-			pvChoice := choice.PV.Source
+			pvChoice := choice.PV[forecasting.LeadBucket(issued.OriginMS, point.StartMS)].Source
 			if pvChoice == "legacy" && !selected[i].PVKnown {
 				pvChoice = ""
 			}
@@ -637,7 +637,7 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 			}
 			net := s.LoadW + s.PVW
 			end := s.StartMs + int64(s.LenMin)*time.Minute.Milliseconds()
-			band := riskCalibrator.BandForInterval(forecastMixSeries(pvSeries, loadSeries), "net", max(s.StartMs, origin.UnixMilli()), end, net)
+			band := riskCalibrator.BandForSiteInterval(forecastMixSeries(pvSeries, loadSeries), "net", forecastSiteContext(site), max(s.StartMs, origin.UnixMilli()), end, net)
 			if band.Method == forecasting.BandMethodEmpirical {
 				extra := math.Max(0, k*(band.HighW-net))
 				pvLoss := math.Min(-s.PVW, extra)
@@ -956,9 +956,9 @@ func applyForecastBandsWith(issue *forecasting.Issue, calibrator *forecasting.Ca
 		for j := range s.Points {
 			p := &s.Points[j]
 			start := max(p.StartMS, p.PredictionStartMS)
-			p.PVBand = calibrator.BandForInterval(s.Name, "pv", start, p.EndMS, p.PVW)
+			p.PVBand = calibrator.BandForSiteInterval(s.Name, "pv", issue.Site, start, p.EndMS, p.PVW)
 			p.LoadBand = calibrator.BandForInterval(s.Name, "load", start, p.EndMS, p.LoadW)
-			p.NetBand = calibrator.BandForInterval(s.Name, "net", start, p.EndMS, p.LoadW-p.PVW)
+			p.NetBand = calibrator.BandForSiteInterval(s.Name, "net", issue.Site, start, p.EndMS, p.LoadW-p.PVW)
 		}
 	}
 }

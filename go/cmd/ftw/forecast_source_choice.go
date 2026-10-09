@@ -16,7 +16,10 @@ type forecastSourcePick struct {
 	EnergyplanMAEW, LegacyMAEW float64
 }
 
-type forecastSourceChoice struct{ PV, Load forecastSourcePick }
+type forecastSourceChoice struct {
+	PV   [6]forecastSourcePick
+	Load forecastSourcePick
+}
 
 // One sunny or unusual day must not pick the source: require scored hours
 // spread over several days and a clear gap. Evidence older than a week is
@@ -31,15 +34,24 @@ const (
 func chooseForecastSources(history []forecasting.ErrorSample, cohort string, origin int64) forecastSourceChoice {
 	since := origin - forecastChoiceWindow.Milliseconds()
 	recent := make([]forecasting.ErrorSample, 0, len(history))
+	var pvByLead [6][]forecasting.ErrorSample
 	for _, e := range history {
 		if e.ConfigVersion == cohort && e.StartMS >= since && e.AvailableAtMS <= origin {
 			recent = append(recent, e)
+			if e.Lead >= 0 && e.Lead < len(pvByLead) {
+				pvByLead[e.Lead] = append(pvByLead[e.Lead], e)
+			}
 		}
 	}
-	return forecastSourceChoice{
-		PV:   pickForecastSource(forecasting.PoolFrozenSeries(recent, "energyplan", "legacy_shadow", "pv_daylight")),
+	choice := forecastSourceChoice{
 		Load: pickForecastSource(forecasting.PoolFrozenSeries(recent, "energyplan", "legacy_shadow", "load")),
 	}
+	// A source that wins tomorrow can still lose in the next hour. Each PV
+	// horizon needs its own measured gap and sufficient independent hours.
+	for lead, samples := range pvByLead {
+		choice.PV[lead] = pickForecastSource(forecasting.PoolFrozenSeries(samples, "energyplan", "legacy_shadow", "pv_daylight"))
+	}
+	return choice
 }
 
 func pickForecastSource(m forecasting.PooledPairMetric) forecastSourcePick {
@@ -98,18 +110,19 @@ func (f *forecastTracker) noteSourceChoice(c forecastSourceChoice) {
 	old := f.sourceChoice
 	f.sourceChoice = c
 	f.mu.Unlock()
-	if old.PV.Source == c.PV.Source && old.Load.Source == c.Load.Source {
-		return
-	}
-	for _, s := range []struct {
-		signal string
-		pick   forecastSourcePick
-	}{{"pv", c.PV}, {"load", c.Load}} {
-		source := s.pick.Source
+	note := func(signal string, lead int, before, pick forecastSourcePick) {
+		if before.Source == pick.Source {
+			return
+		}
+		source := pick.Source
 		if source == "" {
 			source = "quality_rule"
 		}
-		slog.Info("forecast source chosen", "signal", s.signal, "source", source, "hours", s.pick.Hours,
-			"days", s.pick.Days, "energyplan_mae_w", int(s.pick.EnergyplanMAEW), "legacy_mae_w", int(s.pick.LegacyMAEW))
+		slog.Info("forecast source chosen", "signal", signal, "lead_bucket", lead, "source", source, "hours", pick.Hours,
+			"days", pick.Days, "energyplan_mae_w", int(pick.EnergyplanMAEW), "legacy_mae_w", int(pick.LegacyMAEW))
 	}
+	for lead, pick := range c.PV {
+		note("pv", lead, old.PV[lead], pick)
+	}
+	note("load", -1, old.Load, c.Load)
 }
