@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.140.4
+
+### Patch Changes
+
+- 2dca732: Use a metadata index to keep forecast scores within the archive limits. This avoids reading every score payload and sorting the full archive after each scoring page.
+
 ## 0.140.3
 
 ### Patch Changes
