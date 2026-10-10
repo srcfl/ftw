@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.140.3
+
+### Patch Changes
+
+- 96a9c5b: Expected charge follows the car when the next step charges it, instead of the home battery's state of charge.
+- 6f13aa5: Choose PV and household-load forecast sources for each lead bucket. Keep cold-start load evidence within its horizon and keep day and night errors separate when setting PV uncertainty and planning margins.
+
 ## 0.140.2
 
 ### Patch Changes
