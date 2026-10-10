@@ -1,6 +1,6 @@
 # Install and update FTW
 
-**The first stable release of the new line is `v0.140.1`.** FTW 2.x and 3.x
+**The first stable release of the new line is `v0.140.4`.** FTW 2.x and 3.x
 get no more updates. [Svenska](setup-guide/update-sv.md).
 
 ## Quick answer
@@ -8,14 +8,14 @@ get no more updates. [Svenska](setup-guide/update-sv.md).
 | You run | Do this |
 |---|---|
 | New FTW 0.x, native | Open **More → Version → Update FTW** in the web UI, or run `ftw update` on the box. Nothing else. |
-| New FTW 0.x in Docker | Set `FTW_VERSION=v0.140.1` in `.env` and run `docker compose up -d --build`. [Details](#update-new-docker) |
+| New FTW 0.x in Docker | Set `FTW_VERSION=v0.140.4` in `.env` and run `docker compose up -d --build`. [Details](#update-new-docker) |
 | No FTW yet, on 64-bit Linux or a new Pi card | [Install](#install) with the stable tag. |
 | Old FTW 2.x, 3.x or the old Pi image | No update in place. Set up new FTW on a second SD card or host and keep the old one. [Steps](#coming-from-an-older-ftw) |
 | Home Assistant app | No new app yet. Run new FTW on another Linux host and connect Home Assistant over MQTT. [Steps](#coming-from-an-older-ftw) |
 | Windows or macOS | Not supported. Use a Raspberry Pi or another 64-bit Linux machine. |
 
-While an update runs, keep the box powered and do not press Restart. It takes
-about a minute. To go back, run `ftw rollback`.
+While an update runs, keep the box powered and do not press Restart. Wait for
+the update to finish. To go back, run `ftw rollback`.
 
 The new line starts with empty data. Moving old settings, history, identity
 and goals is not ready yet. Do not copy old databases into a new install;
@@ -184,7 +184,7 @@ return to [the second-card steps](#raspberry-pi-use-a-second-sd-card) first.
 This section does not update or migrate an old installation.
 
 Use the newest stable tag from [Releases](https://github.com/srcfl/ftw/releases),
-`v0.140.1` or later with no `-beta` in it. Choose a beta only if you test new
+`v0.140.4` or later with no `-beta` in it. Choose a beta only if you test new
 builds. Check that the release includes the Linux package for your
 architecture and its SHA-256 file. Do not use `releases/latest`: it still
 points to the retired 2.x line. Copy the tag from the release title; do not
@@ -240,7 +240,7 @@ closing or reloading the page does not cancel or repeat the update.
 ftw status                                   # version, releases, last update, disk, health
 ftw update                                   # install the next release on the saved channel
 ftw rollback                                 # return to the previous release
-ftw backup                                   # make a verified backup in /var/lib/ftw/backups
+ftw backup                                   # make a verified full backup; prints its path
 ftw support                                  # write the redacted support file for a report
 journalctl -u ftw -n 100                     # logs
 sudo systemctl restart ftw                   # restart

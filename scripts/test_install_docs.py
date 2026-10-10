@@ -82,7 +82,7 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         self.assertFalse(Path(download).exists())
 
     def test_native_success_runs_download_and_removes_temp_file(self):
-        for tag in ('v0.140.1', 'v0.138.2-beta.1'):
+        for tag in ('v0.140.4', 'v0.138.2-beta.1'):
             with self.subTest(tag=tag):
                 self.log.write_text('')
                 result, calls = self.run_recipe('--fresh-host', tag=tag)

@@ -1,6 +1,6 @@
 # Byt till nya FTW och håll det uppdaterat
 
-**Första stabila versionen av nya serien är `v0.140.1`.** FTW 2.x och 3.x får
+**Första stabila versionen av nya serien är `v0.140.4`.** FTW 2.x och 3.x får
 inga fler uppdateringar. [English](../native-beta.md).
 
 ## Kort svar
@@ -8,14 +8,14 @@ inga fler uppdateringar. [English](../native-beta.md).
 | Du kör | Gör så här |
 |---|---|
 | Nya FTW 0.x, native | Öppna **More → Version → Update FTW** i webbsidan, eller kör `ftw update` på boxen. Inget mer. |
-| Nya FTW 0.x i Docker | Sätt `FTW_VERSION=v0.140.1` i `.env` och kör `docker compose up -d --build`. [Detaljer](#docker-från-det-nya-releasepaketet) |
+| Nya FTW 0.x i Docker | Sätt `FTW_VERSION=v0.140.4` i `.env` och kör `docker compose up -d --build`. [Detaljer](#docker-från-det-nya-releasepaketet) |
 | Inget FTW än, på 64-bitars Linux eller ett nytt Pi-kort | [Installera](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin) med den stabila taggen. |
 | Gamla FTW 2.x, 3.x eller den gamla Pi-imagen | Går inte att uppdatera på plats. Sätt upp nya FTW på ett andra SD-kort eller en annan maskin och behåll den gamla. [Steg](#byt-på-raspberry-pi-med-ett-nytt-sd-kort) |
 | Home Assistant-appen | Ingen ny app än. Kör nya FTW på en annan Linux-maskin och koppla Home Assistant via MQTT. [Steg](#välj-en-väg) |
 | Windows eller macOS | Stöds inte. Använd en Raspberry Pi eller en annan 64-bitars Linux-maskin. |
 
-Låt boxen ha ström och tryck inte Restart medan uppdateringen pågår. Den tar
-ungefär en minut. Vill du tillbaka, kör `ftw rollback`.
+Låt boxen ha ström och tryck inte Restart medan uppdateringen pågår. Vänta tills
+uppdateringen är klar. Vill du tillbaka, kör `ftw rollback`.
 
 Nya serien börjar med tom data. Flytten av gamla inställningar, historik,
 identitet och mål är inte klar än. Kopiera inte gamla databaser till en ny
@@ -175,7 +175,7 @@ kortet, gå tillbaka till kortbytet ovan. `--fresh-host` betyder att ingen
 FTW-installation eller dess data finns här, även om den är stoppad.
 
 1. Öppna [Releases](https://github.com/srcfl/ftw/releases) på din vanliga dator.
-   Välj den senaste **stabila** taggen, `v0.140.1` eller senare utan `-beta`.
+   Välj den senaste **stabila** taggen, `v0.140.4` eller senare utan `-beta`.
    Välj en beta bara om du provar nya byggen. Releasen ska ha Linux-paket och
    SHA-256-fil för din maskin. Använd inte `releases/latest`; den pekar på
    gamla 2.x.

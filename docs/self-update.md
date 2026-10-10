@@ -1,7 +1,7 @@
 # Updates and release channels
 
 [ADR 0007](adr/0007-self-updating-binary.md) defines the move to a native
-Core. `v0.131.0-beta.1` is the first published native beta and `v0.140.1`
+Core. `v0.131.0-beta.1` is the first published native beta and `v0.140.4`
 the first native stable. Guided migration for an existing old box has not
 shipped.
 
