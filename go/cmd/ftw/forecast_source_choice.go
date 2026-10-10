@@ -18,7 +18,7 @@ type forecastSourcePick struct {
 
 type forecastSourceChoice struct {
 	PV   [6]forecastSourcePick
-	Load forecastSourcePick
+	Load [6]forecastSourcePick
 }
 
 // One sunny or unusual day must not pick the source: require scored hours
@@ -33,23 +33,18 @@ const (
 
 func chooseForecastSources(history []forecasting.ErrorSample, cohort string, origin int64) forecastSourceChoice {
 	since := origin - forecastChoiceWindow.Milliseconds()
-	recent := make([]forecasting.ErrorSample, 0, len(history))
-	var pvByLead [6][]forecasting.ErrorSample
+	var byLead [6][]forecasting.ErrorSample
 	for _, e := range history {
-		if e.ConfigVersion == cohort && e.StartMS >= since && e.AvailableAtMS <= origin {
-			recent = append(recent, e)
-			if e.Lead >= 0 && e.Lead < len(pvByLead) {
-				pvByLead[e.Lead] = append(pvByLead[e.Lead], e)
-			}
+		if e.ConfigVersion == cohort && e.StartMS >= since && e.AvailableAtMS <= origin && e.Lead >= 0 && e.Lead < len(byLead) {
+			byLead[e.Lead] = append(byLead[e.Lead], e)
 		}
 	}
-	choice := forecastSourceChoice{
-		Load: pickForecastSource(forecasting.PoolFrozenSeries(recent, "energyplan", "legacy_shadow", "load")),
-	}
-	// A source that wins tomorrow can still lose in the next hour. Each PV
+	var choice forecastSourceChoice
+	// A source that wins tomorrow can still lose in the next hour. Each
 	// horizon needs its own measured gap and sufficient independent hours.
-	for lead, samples := range pvByLead {
+	for lead, samples := range byLead {
 		choice.PV[lead] = pickForecastSource(forecasting.PoolFrozenSeries(samples, "energyplan", "legacy_shadow", "pv_daylight"))
+		choice.Load[lead] = pickForecastSource(forecasting.PoolFrozenSeries(samples, "energyplan", "legacy_shadow", "load"))
 	}
 	return choice
 }
@@ -124,5 +119,7 @@ func (f *forecastTracker) noteSourceChoice(c forecastSourceChoice) {
 	for lead, pick := range c.PV {
 		note("pv", lead, old.PV[lead], pick)
 	}
-	note("load", -1, old.Load, c.Load)
+	for lead, pick := range c.Load {
+		note("load", lead, old.Load[lead], pick)
+	}
 }

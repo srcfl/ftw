@@ -603,7 +603,8 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 			selected[i].PredictionStartMS = point.PredictionStartMS
 			// Measured errors keep legacy PV only where legacy has weather for
 			// this interval; elsewhere the quality rule decides.
-			pvChoice := choice.PV[forecasting.LeadBucket(issued.OriginMS, point.StartMS)].Source
+			lead := forecasting.LeadBucket(issued.OriginMS, point.StartMS)
+			pvChoice := choice.PV[lead].Source
 			if pvChoice == "legacy" && !selected[i].PVKnown {
 				pvChoice = ""
 			}
@@ -614,8 +615,9 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 			}
 			// Without measured evidence a cold load can still be the worker's
 			// generic prior, so the frozen profile and heating prior stay.
-			loadReady := point.LoadQuality != "cold_start" || choice.Load.Source == "energyplan"
-			if choice.Load.Source != "legacy" && loadReady && usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
+			loadChoice := choice.Load[lead].Source
+			loadReady := point.LoadQuality != "cold_start" || loadChoice == "energyplan"
+			if loadChoice != "legacy" && loadReady && usablePrimaryForecast(point.LoadKnown, point.LoadQuality, point.LoadW) {
 				resolved[i].LoadW = point.LoadW
 				selected[i].LoadW, selected[i].LoadKnown, selected[i].LoadQuality = point.LoadW, true, point.LoadQuality
 				selected[i].LoadSource, selected[i].ModelLoad = "energyplan", point.ModelLoad

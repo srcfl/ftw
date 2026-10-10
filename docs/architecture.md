@@ -245,9 +245,10 @@ worker once under a deadline, outside control and dispatch locks. Core accepts
 PV and load independently for each covered interval. If either signal is
 missing, late, partial or invalid, Core retains the matching legacy value.
 When recent scored errors show one source clearly better for a signal,
-Core uses that source; otherwise the worker's quality label decides. PV source
-choices use each lead bucket's daylight errors, so a distant forecast cannot
-pick the next hour's source. PV and net-load bands use separate day and night
+Core uses that source; otherwise the worker's quality label decides. Both
+signals choose sources within each lead bucket; PV uses daylight errors. A
+distant forecast cannot pick the next hour's source or replace its cold-start
+load prior. PV and net-load bands use separate day and night
 errors where the site's location is known. Each needs its own sample and day
 coverage before claiming empirical calibration. The
 resulting `champion` can therefore contain Energyplan PV with legacy load, or
