@@ -49,7 +49,15 @@ describe("Home Assistant status", () => {
 });
 
 describe("Modbus proxy settings", () => {
-  it("renders the proxy fieldset on the Home Assistant tab", () => {
+  it("keeps an unused proxy absent and explains the write owner", () => {
+    const config = {};
+    const html = haTab.render({field: () => "", config});
+    assert.equal(config.modbus_proxy, undefined);
+    assert.match(html, /only read and FTW keeps control/);
+    assert.match(html, /External control — FTW only reads/);
+    assert.match(html, /Control stays external until you turn this off and restart/);
+  });
+  it("renders the proxy fieldset on the Integrations tab", () => {
     const html = haTab.render({
       field: function (label, path) { return "<span data-path=\"" + path + "\">" + label + "</span>"; },
       config: {},

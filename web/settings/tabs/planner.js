@@ -102,7 +102,7 @@
     var options = [["", "Automatic (release default)"], ["energyplan", "Energyplan"],
       ["core", "Core DP"]];
     return '<label for="planner-engine">Engine ' +
-      help("Automatic uses Energyplan in supported beta builds and Core DP elsewhere. Energyplan runs Core DP as a shadow and uses it as fallback. Changing the engine requires a restart.") +
+      help("Automatic uses Energyplan in supported beta and stable builds and Core DP elsewhere. Energyplan runs Core DP as a shadow and uses it as fallback. Changing the engine requires a restart.") +
       '</label><select id="planner-engine" data-path="planner.engine">' +
       options.map(function (option) {
         return '<option value="' + option[0] + '"' + (selected === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';

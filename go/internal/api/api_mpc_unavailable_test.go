@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/config"
@@ -12,6 +13,12 @@ import (
 
 func TestMPCDisabledEndpointsNameTheSkipReason(t *testing.T) {
 	t.Parallel()
+	// Releases default to Energyplan where the worker ships, and Energyplan
+	// plans without a battery; elsewhere the default is Core DP.
+	stableDefault := mpc.ReasonNoBatteryCapacity
+	if config.SupportsBundledEnergyplan(runtime.GOOS, runtime.GOARCH) {
+		stableDefault = ""
+	}
 	cases := []struct {
 		name string
 		deps *Deps
@@ -47,7 +54,7 @@ func TestMPCDisabledEndpointsNameTheSkipReason(t *testing.T) {
 				Planner: &config.Planner{Enabled: true},
 				Price:   &config.Price{Provider: "elprisetjustnu"},
 			}},
-			want: mpc.ReasonNoBatteryCapacity,
+			want: stableDefault,
 		},
 		{
 			name: "batteryless development default",

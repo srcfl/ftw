@@ -197,6 +197,7 @@ func (s *Server) configuredDriver(name string) (config.Driver, bool) {
 	}
 	for _, d := range s.deps.Cfg.Drivers {
 		if d.Name == name {
+			d.ObserveOnly = d.ObserveOnly || s.deps.Cfg.ModbusProxyOwnsWrites(d)
 			return d, true
 		}
 	}
@@ -272,6 +273,9 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	probe := cfg
 	testName := "__test_" + safeProbeName(displayName) + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	cfg.Name = testName
+	// Settings posts credential_owner. The probe's registry must key secrets
+	// by testName, or wireDriverProbeSecrets cannot recognise its calls.
+	cfg.CredentialOwner = ""
 	if cfg.BatteryCapacityWh <= 0 {
 		// Probe-only: let battery-capable drivers emit enough to prove the
 		// connection even before the operator has entered nameplate capacity.

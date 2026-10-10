@@ -131,6 +131,13 @@ initial charging duration. These are preferences, not safety limits. A final
 top-up may be short. Stale or unknown connection evidence cannot establish
 an uninterrupted run; start preferences do not enter the electricity bill.
 
+A need of at most 1 Wh counts as met. With `charging_periods`, a need below
+one minimum run rounds to the nearest whole run. One run is the smallest
+allowed step for `min_charge_seconds` at `charge_efficiency`. Up to half a run
+counts as met; more becomes one full run, capped at `max_energy_wh`. A car
+charging at plan start keeps its exact target. Core counts a departure miss
+by the same rule. `flex_shortfall_wh` still measures the requested target.
+
 ## Result, cost and failure
 
 `ok: true` means the worker returned a candidate. Core checks response identity,
@@ -147,7 +154,7 @@ replay with the same goals, measurements and initial/final stored energy.
 | Status or error | Meaning |
 |---|---|
 | `optimal` | A valid global cost interval closed within numerical tolerances for the stated model and objectives |
-| `gap_satisfied` | The library met its configured gap target; a nonzero gap remains |
+| `gap_satisfied` | The search met its configured gap target; a nonzero gap remains |
 | `feasible` | A validated candidate exists; optimality may be unproved and the bound unknown |
 | `infeasible` | The modeled physical problem has no feasible plan; a failed heuristic or expired budget cannot establish this |
 | `deadline_exceeded` | A resource limit left no usable result; it says nothing about physical feasibility |

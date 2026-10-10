@@ -223,6 +223,138 @@ describe("plan brief normalization", () => {
     assert.match(brief.next.time, /Settings → Price/);
   });
 
+  it("reports the car's planned charge when the next step charges the EV", () => {
+    // Home battery starts near 17% and ends near 10%. The car is at 76%
+    // and the plan delivers about 3.8 kWh into an 86.5 kWh pack, so the
+    // briefing must follow loadpoint_soc (~79% then ~80%), not soc.
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        initial_soc: 0.17,
+        actions: [
+          slot(68, {
+            loadpoint_w: 11000,
+            loadpoint_soc: 0.792,
+            soc: 0.24,
+            reason: "cheap_grid",
+          }),
+          slot(233, {
+            loadpoint_w: 4400,
+            loadpoint_soc: 0.804,
+            soc: 0.20,
+          }),
+          slot(800, { soc: 0.10 }),
+        ],
+        solver: { engine: "native", backend: "fleet_milp_rust", status: "feasible" },
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.17 },
+      now,
+    });
+
+    assert.equal(brief.next.action, "Charge EV at 11.0 kW");
+    assert.equal(brief.soc.label, "79% in the car after next step");
+    assert.equal(brief.soc.detail, "80% in the car at the end of the plan");
+    assert.doesNotMatch(`${brief.soc.label} ${brief.soc.detail}`, /24%|10%/);
+  });
+
+  it("follows the charging car when another car's SoC is the scalar field", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [
+          slot(30, {
+            loadpoint_power_w: { other: 0, garage: 11000 },
+            loadpoint_soc_by_id: { other: 0.40, garage: 0.792 },
+            loadpoint_soc: 0.40,
+            soc: 0.24,
+          }),
+          slot(200, {
+            loadpoint_power_w: { other: 0, garage: 0 },
+            loadpoint_soc_by_id: { other: 0.40, garage: 0.804 },
+            loadpoint_soc: 0.40,
+            soc: 0.10,
+          }),
+        ],
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.17 },
+      now,
+    });
+
+    assert.equal(brief.soc.label, "79% in the car after next step");
+    assert.equal(brief.soc.detail, "80% in the car at the end of the plan");
+  });
+
+  it("does not collapse two charging cars into one expected charge", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [
+          slot(30, {
+            loadpoint_power_w: { a: 7000, b: 7000 },
+            loadpoint_soc_by_id: { a: 0.50, b: 0.90 },
+            loadpoint_soc: 0.50,
+            soc: 0.24,
+          }),
+        ],
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.17 },
+      now,
+    });
+
+    assert.equal(brief.next.action, "Charge EV at 14.0 kW");
+    assert.equal(brief.soc.label, "24% in the home battery after next step");
+    assert.equal(brief.soc.detail, "24% in the home battery at the end of the plan");
+  });
+
+  it("names the home battery when an EV step has no car SoC", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [
+          slot(30, { loadpoint_w: 11000, soc: 0.24 }),
+          slot(800, { soc: 0.10 }),
+        ],
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.17 },
+      now,
+    });
+
+    assert.equal(brief.soc.label, "24% in the home battery after next step");
+    assert.equal(brief.soc.detail, "10% in the home battery at the end of the plan");
+  });
+
+  it("keeps the home-battery forecast when the next step is not the car", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [
+          slot(-7, { battery_w: -2400, soc: 0.48 }),
+          slot(60, { loadpoint_w: 11000, loadpoint_soc: 0.80, soc: 0.40 }),
+        ],
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.50 },
+      now,
+    });
+
+    assert.equal(brief.next.action, "Use battery at 2.4 kW");
+    assert.equal(brief.soc.label, "48% after next step");
+    assert.equal(brief.soc.detail, "40% at the end of the plan");
+  });
+
+  it("shows the car forecast on a site with no home battery", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [slot(30, { loadpoint_w: 11000, loadpoint_soc: 0.79 })],
+      },
+      status: { mode: "planner_arbitrage", drivers: {} },
+      now,
+    });
+
+    assert.equal(brief.soc.label, "79% in the car after next step");
+    assert.equal(brief.soc.detail, "79% in the car at the end of the plan");
+  });
+
   it("keeps the manual brief when a manual mode is selected and the planner is off", () => {
     const brief = derivePlanBrief({
       enabled: false,

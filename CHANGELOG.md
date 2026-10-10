@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.140.3
+
+### Patch Changes
+
+- 96a9c5b: Expected charge follows the car when the next step charges it, instead of the home battery's state of charge.
+- 6f13aa5: Choose PV and household-load forecast sources for each lead bucket. Keep cold-start load evidence within its horizon and keep day and night errors separate when setting PV uncertainty and planning margins.
+
+## 0.140.2
+
+### Patch Changes
+
+- 5226090: Update the bundled Energyplan planner to 0.5.1. Plans with a car get cheaper within the box's time budget: once the planner has met the car's charging goals, it plans the battery around that charging again instead of keeping the battery schedule its goal search left. On the home box that schedule cost up to about 10 kr in one plan. A car that needs less than two minimum charging runs gets one run at the cheapest time, and a need of at most half a run counts as met instead of starting the charger. Core still validates every plan.
+- 4000391: A planned EV charge now gets its share of the fuse on the worst phase, not only in the site total. When house load sits mostly on one phase, the battery charges less so the car is not cut by its charger's load balancer, and the next hour of the plan leaves the same headroom.
+- e0a57fc: Show an EV departure miss only when it is more than half of one minimum charging run, about 155 Wh for a 4.14 kW charger. Energyplan treats a smaller need as met instead of starting the charger for it. A car that is charging when the plan starts still counts a miss above 1 Wh.
+- 6526638: Keep one Modbus writer per device. The proxy defaults to read only. When external writes are enabled, FTW keeps reading but stops all device writes until the owner changes the setting and restarts Core. Restrict proxy requests to configured unit IDs, give driver traffic priority, and close idle clients on shutdown.
+  
+  Rename the Home Assistant settings tab to Integrations. Home Assistant MQTT and the Modbus proxy each keep their own section.
+
+## 0.140.1
+
+### Patch Changes
+
+- b768453: Keep Test connection from breaking an OAuth driver's login. Settings sends the driver's credential owner, and the probe then missed its own token writes: it tested the saved token instead of a newly pasted one, and rotated the live token without restarting the running driver.
+- 7dd652b: Use Energyplan by default on stable releases too, as betas already do. A beta box that moves to stable keeps the planner it has run, and a new stable install starts with Energyplan. Core DP still runs as shadow and fallback, and `planner.engine: core` still selects it.
+
 ## 0.140.0
 
 ### Minor Changes

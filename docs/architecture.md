@@ -222,14 +222,14 @@ remains explicit and atomic. See
 
 ## Optimizer
 
-Beta releases use the bundled Energyplan worker when `planner.engine` is unset
+Beta and stable releases use the bundled Energyplan worker when `planner.engine` is unset
 on a supported host. It solves Core's downside PV forecast. Core validates its
 plan before publishing it, then runs a bounded Core DP shadow on the same input.
 A worker error, timeout or rejected plan invokes Core DP fallback. Core validates
 fallback plans too; a failed validation leaves the prior plan in place.
 
 `planner.engine: core` or `energyplan` selects an engine explicitly.
-Stable and development builds default to Core. Older `engine: python` values
+Development builds and other hosts default to Core. Older `engine: python` values
 migrate to Energyplan; retired optimizer settings are ignored and omitted
 when the configuration is saved.
 Energyplan ships as compiled binaries with its own license; source and builds
@@ -244,8 +244,13 @@ legacy forecast, weather, occupancy and saved model state. It calls the forecast
 worker once under a deadline, outside control and dispatch locks. Core accepts
 PV and load independently for each covered interval. If either signal is
 missing, late, partial or invalid, Core retains the matching legacy value.
-When a week of scored errors shows one source clearly better for a signal,
-Core uses that source; otherwise the worker's quality label decides. The
+When recent scored errors show one source clearly better for a signal,
+Core uses that source; otherwise the worker's quality label decides. Both
+signals choose sources within each lead bucket; PV uses daylight errors. A
+distant forecast cannot pick the next hour's source or replace its cold-start
+load prior. PV and net-load bands use separate day and night
+errors where the site's location is known. Each needs its own sample and day
+coverage before claiming empirical calibration. The
 resulting `champion` can therefore contain Energyplan PV with legacy load, or
 the reverse. Each slot's planning margin comes from the errors its own sources
 made on earlier issues. `legacy_shadow` keeps both legacy signals from the same frozen

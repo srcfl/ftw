@@ -3,6 +3,7 @@ package mpc
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 // TestPowerLimitsDefaultIsUnlimited asserts the zero value places no
@@ -285,5 +286,34 @@ func TestFuseMaxWPopulatesBothDirections(t *testing.T) {
 	if slots[1].Limits.MaxImportW != 5000 || slots[1].Limits.MaxExportW != 7000 {
 		t.Errorf("slot 1 limits = (imp %.0f, exp %.0f), want (5000, 7000)",
 			slots[1].Limits.MaxImportW, slots[1].Limits.MaxExportW)
+	}
+}
+
+// The live phase imbalance limits import only for the next hour: house load
+// moves between phases, and each replan measures it again.
+func TestLimitNearImportForPhases(t *testing.T) {
+	now := time.Date(2026, 10, 8, 3, 45, 0, 0, time.UTC)
+	slot := func(offset time.Duration, loadW, maxImportW float64) Slot {
+		return Slot{StartMs: now.Add(offset).UnixMilli(), LenMin: 15, LoadW: loadW, Limits: PowerLimits{MaxImportW: maxImportW}}
+	}
+	slots := []Slot{
+		slot(-5*time.Minute, 1000, 17250), // in flight
+		slot(45*time.Minute, 1000, 17250),
+		slot(45*time.Minute, 16500, 17250), // forecast load above the phase limit
+		slot(45*time.Minute, 1000, 9000),   // tighter tariff limit
+		slot(time.Hour, 1000, 17250),
+	}
+	limitNearImportForPhases(slots, now, 17250, 1610)
+	for i, want := range []float64{15640, 15640, 16500, 9000, 17250} {
+		if got := slots[i].Limits.MaxImportW; got != want {
+			t.Errorf("slot %d: import limit %.0f W, want %.0f W", i, got, want)
+		}
+	}
+
+	untouched := []Slot{slot(0, 1000, 17250)}
+	limitNearImportForPhases(untouched, now, 17250, 0)
+	limitNearImportForPhases(untouched, now, 0, 1610)
+	if got := untouched[0].Limits.MaxImportW; got != 17250 {
+		t.Errorf("no imbalance or no fuse changed the limit to %.0f W", got)
 	}
 }

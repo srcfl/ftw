@@ -7,10 +7,11 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 )
 
-func TestEnergyplanBetaSelection(t *testing.T) {
+func TestEnergyplanReleaseSelection(t *testing.T) {
 	for _, tc := range []struct{ version, engine, want string }{
 		{"v2.15.0-beta.1", "", "energyplan"},
-		{"v2.15.0", "", "core"},
+		{"v2.15.0", "", "energyplan"},
+		{"v0.140.1-dev.83867213", "", "core"},
 		{"dev", "", "core"},
 		{"dev-beta.invalid", "", "core"},
 		{"v2.15.0-beta.1", "core", "core"},
@@ -64,7 +65,7 @@ func TestBuildMPCBatterylessEngineAdmission(t *testing.T) {
 		want                  bool
 	}{
 		{"explicit Core in beta", "v3.1.0-beta.1", "core", false},
-		{"stable default", "v3.1.0", "", false},
+		{"stable default", "v3.1.0", "", energyplanSupported(runtime.GOOS, runtime.GOARCH)},
 		{"development default", "dev", "", false},
 		{"invalid beta default", "dev-beta.invalid", "", false},
 		{"explicit Energyplan", "v3.1.0", "energyplan", true},

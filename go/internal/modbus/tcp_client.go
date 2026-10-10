@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
@@ -181,7 +182,7 @@ func (c *tcpClient) roundTrip(unitID uint8, pdu []byte) ([]byte, error) {
 	if c.conn == nil {
 		return nil, io.ErrClosedPipe
 	}
-	if len(pdu) == 0 {
+	if len(pdu) == 0 || len(pdu) > proxyMaxPDUSize {
 		return nil, errors.New("modbus empty request pdu")
 	}
 	c.txID++
@@ -203,18 +204,27 @@ func (c *tcpClient) roundTrip(unitID uint8, pdu []byte) ([]byte, error) {
 		return nil, err
 	}
 	if got := binary.BigEndian.Uint16(hdr[0:2]); got != txID {
-		return nil, fmt.Errorf("modbus transaction id mismatch: got %d want %d", got, txID)
+		return nil, fmt.Errorf("%w: modbus transaction id mismatch: got %d want %d", drivers.ErrModbusTransport, got, txID)
 	}
 	if proto := binary.BigEndian.Uint16(hdr[2:4]); proto != 0 {
-		return nil, fmt.Errorf("modbus protocol id mismatch: got %d", proto)
+		return nil, fmt.Errorf("%w: modbus protocol id mismatch: got %d", drivers.ErrModbusTransport, proto)
+	}
+	if hdr[6] != unitID {
+		return nil, fmt.Errorf("%w: modbus unit id mismatch: got %d want %d", drivers.ErrModbusTransport, hdr[6], unitID)
 	}
 	length := int(binary.BigEndian.Uint16(hdr[4:6]))
-	if length < 2 {
-		return nil, fmt.Errorf("modbus invalid response length %d", length)
+	if length < 2 || length > proxyMaxADULength {
+		return nil, fmt.Errorf("%w: modbus invalid response length %d", drivers.ErrModbusTransport, length)
 	}
 	res := make([]byte, length-1)
 	if _, err := io.ReadFull(c.conn, res); err != nil {
 		return nil, err
+	}
+	if res[0] != pdu[0] && res[0] != pdu[0]|0x80 {
+		return nil, fmt.Errorf("%w: modbus response function mismatch", drivers.ErrModbusTransport)
+	}
+	if res[0]&0x80 != 0 && len(res) != 2 {
+		return nil, fmt.Errorf("%w: modbus invalid exception response", drivers.ErrModbusTransport)
 	}
 	return res, nil
 }

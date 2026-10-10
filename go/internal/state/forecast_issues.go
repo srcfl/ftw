@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS forecast_errors (
 	available_at_ms INTEGER NOT NULL, payload TEXT NOT NULL,
  PRIMARY KEY(series,config_version,lead,start_ms,end_ms));
 CREATE INDEX IF NOT EXISTS forecast_errors_time ON forecast_errors(start_ms);
+CREATE INDEX IF NOT EXISTS forecast_errors_retention ON forecast_errors(
+ end_ms DESC,start_ms DESC,series DESC,lead DESC,config_version DESC,length(payload));
 `)
 	return err
 }

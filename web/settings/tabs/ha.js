@@ -1,4 +1,4 @@
-// Settings → Home Assistant tab: MQTT bridge config + live status.
+// Settings → Integrations tab: Home Assistant MQTT and Modbus proxy.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
@@ -39,7 +39,6 @@
     render: function (ctx) {
       var field = ctx.field, config = ctx.config;
       if (!config.homeassistant) config.homeassistant = {};
-      if (!config.modbus_proxy) config.modbus_proxy = {};
       return '<div id="ha-status-indicator" class="ha-status-indicator">checking…</div>' +
         '<fieldset><legend>Home Assistant MQTT</legend>' +
         '<label><input type="checkbox" data-checkbox-path="homeassistant.enabled"' + (config.homeassistant.enabled ? ' checked' : '') + '> Enabled</label>' +
@@ -58,11 +57,12 @@
           "How often state topics are pushed to HA. 5 s is a good default.") +
         '</fieldset>' +
         '<fieldset><legend>Modbus TCP proxy</legend>' +
-        '<p class="hint">FTW keeps the inverter\'s one Modbus socket and lets other tools on the LAN share it. Point Home Assistant at this box and the listen port, with the same unit id as the device. Reads are multiplexed; writes stay blocked unless you opt in — they bypass FTW\'s control loop.</p>' +
+        '<p class="hint">Point Home Assistant or another local tool at this box and port, using the device\'s unit ID. The proxy shares FTW\'s connection. By default, clients can only read and FTW keeps control.</p>' +
         '<label><input type="checkbox" data-checkbox-path="modbus_proxy.enabled"' + (config.modbus_proxy && config.modbus_proxy.enabled ? ' checked' : '') + '> Enabled</label>' +
         field("Listen", "modbus_proxy.listen", "text", ":1502",
           "Local bind. Default :1502 when the site has one Modbus device. Several inverters need capabilities.modbus.proxy_listen on each driver.") +
-        '<label><input type="checkbox" data-checkbox-path="modbus_proxy.allow_write"' + (config.modbus_proxy && config.modbus_proxy.allow_write ? ' checked' : '') + '> Allow writes from the LAN (bypasses FTW control)</label>' +
+        '<label><input type="checkbox" data-checkbox-path="modbus_proxy.allow_write"' + (config.modbus_proxy && config.modbus_proxy.allow_write ? ' checked' : '') + '> External control — FTW only reads</label>' +
+        '<p class="hint">With external control, FTW keeps measuring but sends no commands to the exposed devices. Your external controller handles device safety. Control stays external until you turn this off and restart FTW. Proxy settings take effect after a restart.</p>' +
         '</fieldset>';
     },
     after: function () {

@@ -579,6 +579,10 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 			return fmt.Errorf("modbus capability: %w", err)
 		}
 		env.WithModbus(cap)
+		if policy, ok := cap.(interface{ ReadOnly() bool }); ok && policy.ReadOnly() {
+			cfg.ObserveOnly = true
+			env.DeviceReadOnly = true
+		}
 		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", dialCfg.Host, dialCfg.Port))
 		if r.ARPLookup != nil {
 			if mac, ok := r.ARPLookup(dialCfg.Host); ok {

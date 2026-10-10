@@ -647,7 +647,8 @@ func main() {
 	// ---- Driver capacities (site, for control + fuse guard) ----
 	// Loadpoint drivers are filtered out — their battery_capacity_wh
 	// is vehicle capacity, not site-battery capacity.
-	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog, true)
+	cfg.PinModbusProxyOwnership()
+	capacities := driverCapacitiesFrom(cfg.ModbusControlDrivers(), cfg.Loadpoints, driverCatalog, true)
 	telemetryCapacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog, false)
 	observeOnly := config.ObserveOnlyDriverSet(cfg)
 	warnIfEVHasBatteryCapacity(cfg.Drivers, cfg.Loadpoints, driverCatalog)
@@ -699,6 +700,7 @@ func main() {
 		return mqttcli.DialWithOptions(c.Host, c.Port, c.Username, c.Password, "ftw-"+name, c.AllowUnverifiedLocal)
 	}
 	modbusEngine := modbuscli.NewEngine()
+	modbusEngine.SetWriteOwners(cfg.ModbusProxyWriteOwners)
 	reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
 		return modbusEngine.Open(c.Host, c.Port, c.UnitID, c.AllowUnverifiedLocal)
 	}
@@ -716,6 +718,7 @@ func main() {
 					Host:                 b.Host,
 					Port:                 b.Port,
 					AllowUnverifiedLocal: b.AllowUnverifiedLocal,
+					UnitIDs:              b.UnitIDs,
 				})
 			}
 			proxy, err := modbusEngine.Listen(mbBinds, cfg.ModbusProxy.AllowWrite)
@@ -735,7 +738,7 @@ func main() {
 	// WithBatterySoCBounds routes each battery's soc_min/soc_max into the
 	// matching driver's config (discharge_floor_soc/charge_ceil_soc) so the
 	// operator's SoC window reaches the driver, not just the planner.
-	for _, d := range config.WithBatterySoCBounds(cfg.Drivers, cfg.Batteries) {
+	for _, d := range config.WithBatterySoCBounds(cfg.ModbusControlDrivers(), cfg.Batteries) {
 		if d.Disabled {
 			slog.Info("driver skipped (disabled)", "name", d.Name)
 			continue
@@ -992,13 +995,14 @@ func main() {
 	// ---- Apply saved configuration ----
 	// Settings commit to SQLite before this callback applies them.
 	applyConfigChange := func(newCfg, oldCfg *config.Config) {
+		newCfg.ModbusProxyWriteOwners = oldCfg.ModbusProxyWriteOwners
 		forecastConfigMu.Lock()
 		defer forecastConfigMu.Unlock()
 		// Driver paths are already resolved by config.Load; no extra
 		// work needed here. Re-apply the battery SoC-window → driver
 		// config mapping so a hot-edited soc_max reaches the driver too.
 		reg.Reload(ctx,
-			config.WithBatterySoCBounds(newCfg.Drivers, newCfg.Batteries),
+			config.WithBatterySoCBounds(newCfg.ModbusControlDrivers(), newCfg.Batteries),
 			newCfg.Site.TroubleshootingMode)
 		// Refresh capacities — mutate the existing map in place so
 		// Deps.Capacities (a map header captured at init) sees the
@@ -1022,7 +1026,7 @@ func main() {
 		} else {
 			driverCatalog = reloadCatalog
 		}
-		for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog, true) {
+		for k, v := range driverCapacitiesFrom(newCfg.ModbusControlDrivers(), newCfg.Loadpoints, reloadCatalog, true) {
 			capacities[k] = v
 		}
 		for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog, false) {
@@ -1040,7 +1044,7 @@ func main() {
 		ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
 		ctrl.SupportsPVCurtail = supportsPVCurtailFrom(newCfg.Drivers)
 		ctrl.SolarFeedDrivers = solarFeedDriversFrom(newCfg.Drivers)
-		ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers, newCfg.Batteries)
+		ctrl.DriverLimits = driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries)
 		// Fuse params + safety margin: previously startup-only.
 		// Hot-reload them so operators can tune the per-phase margin
 		// from the UI without restarting (e.g. raising it after the
@@ -1557,6 +1561,17 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		mpcSvc.PhaseImbalanceW = func() float64 {
+			cfgMu.RLock()
+			timeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			cfgMu.RUnlock()
+			if timeout <= 0 {
+				timeout = 60 * time.Second
+			}
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			return control.PhaseImbalanceW(tel, ctrl, timeout, time.Now())
+		}
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).

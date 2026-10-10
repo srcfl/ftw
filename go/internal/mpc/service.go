@@ -127,6 +127,10 @@ type Service struct {
 	ForecastSnapshot     func(time.Time, []state.ForecastPoint) ForecastInputs
 	HouseholdMeasurement func() telemetry.ForecastReading
 	PVCurtailmentProbe   func() PVCurtailment
+	// PhaseImbalanceW returns the live worst-phase imbalance as aggregate
+	// watts. Nil or 0 plans against the aggregate fuse alone. Called
+	// without s.mu; it may take the control lock.
+	PhaseImbalanceW func() float64
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
 	Load               LoadPredictor // optional — overrides flat BaseLoad
@@ -1573,6 +1577,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// 14:45 slot grid=-14.2 kW past an 11 kW fuse.
 	clampSlotGridLimits(slots, fuseMaxW, maxExportW)
 	clampSlotGridLimits(fallbackSlots, fuseMaxW, maxExportW)
+	var phaseImbalanceW float64
+	if s.PhaseImbalanceW != nil {
+		phaseImbalanceW = s.PhaseImbalanceW()
+	}
+	limitNearImportForPhases(slots, now, fuseMaxW, phaseImbalanceW)
+	limitNearImportForPhases(fallbackSlots, now, fuseMaxW, phaseImbalanceW)
 
 	p := request.params
 	if s.PVCurtailmentProbe != nil {
@@ -1747,6 +1757,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		"soc_start", p.InitialSoC,
 		"loadpoint_active", p.Loadpoint != nil,
 		"loadpoint_id", loadpointID,
+		"phase_imbalance_w", phaseImbalanceW,
 	)
 	if request.wasCanceledByService() {
 		return s.canceledReplan(request, "build-input")

@@ -12,14 +12,15 @@ import (
 // testSlave is a tiny Modbus TCP server with holding/input maps. It
 // records Accept count and unit IDs so sharing tests can see one socket.
 type testSlave struct {
-	ln      net.Listener
-	accepts atomic.Int32
-	mu      sync.Mutex
-	holding map[uint16]uint16
-	input   map[uint16]uint16
-	unitIDs []uint8
-	writes  int
-	closing atomic.Bool
+	ln          net.Listener
+	accepts     atomic.Int32
+	mu          sync.Mutex
+	holding     map[uint16]uint16
+	input       map[uint16]uint16
+	unitIDs     []uint8
+	writes      int
+	closing     atomic.Bool
+	beforeReply func()
 }
 
 func startTestSlave(t *testing.T) *testSlave {
@@ -102,7 +103,11 @@ func (s *testSlave) serve(c net.Conn) {
 		s.mu.Lock()
 		s.unitIDs = append(s.unitIDs, unit)
 		respPDU := s.handlePDU(pdu)
+		beforeReply := s.beforeReply
 		s.mu.Unlock()
+		if beforeReply != nil {
+			beforeReply()
+		}
 
 		resp := make([]byte, 7+len(respPDU))
 		copy(resp[0:2], hdr[0:2])

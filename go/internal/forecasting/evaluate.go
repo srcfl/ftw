@@ -289,10 +289,16 @@ func signalError(e ErrorSample, signal string) (err float64, known bool, band Ba
 		return e.PVErrorW, e.PVKnown, e.Prediction.PVBand, e.Prediction.PVW
 	case "pv_daylight":
 		return e.PVErrorW, e.PVKnown && e.Daylight, e.Prediction.PVBand, e.Prediction.PVW
+	case "pv_night":
+		return e.PVErrorW, e.PVKnown && !e.Daylight, e.Prediction.PVBand, e.Prediction.PVW
 	case "load":
 		return e.LoadErrorW, e.LoadKnown, e.Prediction.LoadBand, e.Prediction.LoadW
 	case "net":
 		return e.LoadErrorW - e.PVErrorW, e.LoadKnown && e.PVKnown, e.Prediction.NetBand, e.Prediction.LoadW - e.Prediction.PVW
+	case "net_daylight":
+		return e.LoadErrorW - e.PVErrorW, e.LoadKnown && e.PVKnown && e.Daylight, e.Prediction.NetBand, e.Prediction.LoadW - e.Prediction.PVW
+	case "net_night":
+		return e.LoadErrorW - e.PVErrorW, e.LoadKnown && e.PVKnown && !e.Daylight, e.Prediction.NetBand, e.Prediction.LoadW - e.Prediction.PVW
 	default:
 		return 0, false, Band{}, 0
 	}
@@ -380,7 +386,8 @@ type Calibrator struct {
 
 // NewCalibrator keeps at most eight recently active series and 256
 // hour-aligned targets per series, lead, duration and signal. Replans for one
-// target count once. Different interval lengths have separate error spreads.
+// target count once. PV and net errors also have separate day and night cells.
+// Different interval lengths have separate error spreads.
 func NewCalibrator(history []ErrorSample, config string, origin int64) *Calibrator {
 	type targetKey struct {
 		series   string
@@ -429,7 +436,7 @@ func NewCalibrator(history []ErrorSample, config string, origin int64) *Calibrat
 		if !allowed[key.series] {
 			continue
 		}
-		for _, signal := range []string{"pv", "load", "net"} {
+		for _, signal := range []string{"pv", "load", "net", "pv_daylight", "pv_night", "net_daylight", "net_night"} {
 			value, known, _, _ := signalError(e, signal)
 			if known {
 				cellKey := calibrationKey{key.series, key.lead, key.duration, signal}
@@ -463,8 +470,26 @@ func (c *Calibrator) Band(series, signal string, start int64, prediction float64
 // BandForInterval returns a calibrated band for one target interval. The
 // cold-start width still depends on this target's prediction and lead time.
 func (c *Calibrator) BandForInterval(series, signal string, start, end int64, prediction float64) Band {
+	return c.bandForInterval(series, signal, signal, start, end, prediction)
+}
+
+// BandForSiteInterval uses the sun position to select day or night errors for
+// PV and net load. Zero night errors must not narrow a daytime PV band or its
+// planning margin. Without a location, retain the all-hours compatibility form.
+func (c *Calibrator) BandForSiteInterval(series, signal string, site *SiteContext, start, end int64, prediction float64) Band {
+	cellSignal := signal
+	if site != nil && site.HasLocation && (signal == "pv" || signal == "net") {
+		cellSignal += "_night"
+		if intervalDaylight(Issue{Site: site}, start, end) {
+			cellSignal = signal + "_daylight"
+		}
+	}
+	return c.bandForInterval(series, signal, cellSignal, start, end, prediction)
+}
+
+func (c *Calibrator) bandForInterval(series, signal, cellSignal string, start, end int64, prediction float64) Band {
 	lead := LeadBucket(c.origin, start)
-	cell := c.cells[calibrationKey{series, lead, end - start, signal}]
+	cell := c.cells[calibrationKey{series, lead, end - start, cellSignal}]
 	b := Band{Samples: cell.samples, Days: cell.days}
 	if cell.samples < 48 || cell.days < 7 {
 		width := math.Max(250, math.Abs(prediction)*(.35+.05*float64(lead)))

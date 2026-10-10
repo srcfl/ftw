@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -16,9 +17,11 @@ const DefaultModbusProxyListen = ":1502"
 // integrations can share the socket FTW already holds. Off by default:
 // Modbus TCP has no authentication, and writes bypass the control loop.
 type ModbusProxy struct {
-	Enabled    bool   `yaml:"enabled" json:"enabled"`
-	Listen     string `yaml:"listen,omitempty" json:"listen,omitempty"`
-	AllowWrite bool   `yaml:"allow_write,omitempty" json:"allow_write,omitempty"`
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Listen  string `yaml:"listen,omitempty" json:"listen,omitempty"`
+	// AllowWrite gives external clients write ownership. FTW only reads
+	// the exposed endpoints until this setting changes and Core restarts.
+	AllowWrite bool `yaml:"allow_write,omitempty" json:"allow_write,omitempty"`
 }
 
 // ModbusProxyBind is one listener attached to a driver Modbus TCP endpoint.
@@ -27,6 +30,50 @@ type ModbusProxyBind struct {
 	Host                 string
 	Port                 int
 	AllowUnverifiedLocal bool
+	UnitIDs              []uint8
+}
+
+func modbusEndpointKey(mb *ModbusConfig) string {
+	port := mb.Port
+	if port == 0 {
+		port = 502
+	}
+	return net.JoinHostPort(mb.Host, strconv.Itoa(port))
+}
+
+// PinModbusProxyOwnership records the selected owner before any driver starts.
+// A missing listener or client does not hand control back to FTW.
+func (c *Config) PinModbusProxyOwnership() {
+	c.ModbusProxyWriteOwners = make(map[string]bool)
+	if !c.ModbusProxy.On() || !c.ModbusProxy.AllowWrite {
+		return
+	}
+	for _, d := range c.Drivers {
+		if mb := d.EffectiveModbus(); mb != nil && !d.Disabled {
+			c.ModbusProxyWriteOwners[modbusEndpointKey(mb)] = true
+		}
+	}
+}
+
+func (c *Config) ModbusProxyOwnsWrites(d Driver) bool {
+	mb := d.EffectiveModbus()
+	if c == nil || mb == nil {
+		return false
+	}
+	if c.ModbusProxyWriteOwners != nil {
+		return c.ModbusProxyWriteOwners[modbusEndpointKey(mb)]
+	}
+	return !d.Disabled && c.ModbusProxy.On() && c.ModbusProxy.AllowWrite
+}
+
+// ModbusControlDrivers makes a runtime copy without saving derived observe_only
+// flags into the user's settings. Telemetry remains available in either mode.
+func (c *Config) ModbusControlDrivers() []Driver {
+	out := append([]Driver(nil), c.Drivers...)
+	for i := range out {
+		out[i].ObserveOnly = out[i].ObserveOnly || c.ModbusProxyOwnsWrites(out[i])
+	}
+	return out
 }
 
 // On reports whether the proxy should bind. Nil-safe.
@@ -65,6 +112,7 @@ func (c *Config) ModbusProxyBinds() ([]ModbusProxyBind, error) {
 		port            int
 		allowUnverified bool
 		drivers         []string
+		units           map[uint8]bool
 	}
 	byKey := map[string]*ep{}
 	order := []string{}
@@ -83,7 +131,7 @@ func (c *Config) ModbusProxyBinds() ([]ModbusProxyBind, error) {
 		key := net.JoinHostPort(mb.Host, strconv.Itoa(port))
 		e := byKey[key]
 		if e == nil {
-			e = &ep{host: mb.Host, port: port, allowUnverified: d.Capabilities.AllowUnverifiedLocal}
+			e = &ep{host: mb.Host, port: port, allowUnverified: d.Capabilities.AllowUnverifiedLocal, units: make(map[uint8]bool)}
 			byKey[key] = e
 			order = append(order, key)
 		}
@@ -91,6 +139,14 @@ func (c *Config) ModbusProxyBinds() ([]ModbusProxyBind, error) {
 			e.allowUnverified = true
 		}
 		e.drivers = append(e.drivers, d.Name)
+		unit := mb.UnitID
+		if unit == 0 {
+			unit = 1
+		}
+		if unit < 1 || unit > 247 {
+			return nil, fmt.Errorf("driver %q: modbus unit_id must be 1..247", d.Name)
+		}
+		e.units[uint8(unit)] = true
 		pl := strings.TrimSpace(mb.ProxyListen)
 		if pl == "" {
 			continue
@@ -121,6 +177,7 @@ func (c *Config) ModbusProxyBinds() ([]ModbusProxyBind, error) {
 	}
 
 	used := map[string]string{}
+	sort.Strings(order)
 	out := make([]ModbusProxyBind, 0, len(order))
 	for _, key := range order {
 		e := byKey[key]
@@ -132,11 +189,17 @@ func (c *Config) ModbusProxyBinds() ([]ModbusProxyBind, error) {
 			return nil, fmt.Errorf("modbus_proxy: listen %s used by both %s and %s", listen, other, key)
 		}
 		used[listen] = key
+		units := make([]uint8, 0, len(e.units))
+		for unit := range e.units {
+			units = append(units, unit)
+		}
+		sort.Slice(units, func(i, j int) bool { return units[i] < units[j] })
 		out = append(out, ModbusProxyBind{
 			Listen:               listen,
 			Host:                 e.host,
 			Port:                 e.port,
 			AllowUnverifiedLocal: e.allowUnverified,
+			UnitIDs:              units,
 		})
 	}
 	return out, nil
@@ -164,7 +227,12 @@ func NormalizeListenAddr(s string) (string, error) {
 
 func modbusProxyRestartReasons(oldCfg, newCfg *Config) []string {
 	var reasons []string
-	if !reflect.DeepEqual(oldCfg.ModbusProxy, newCfg.ModbusProxy) {
+	if !oldCfg.ModbusProxy.On() && !newCfg.ModbusProxy.On() {
+		return reasons
+	}
+	if oldCfg.ModbusProxy.On() != newCfg.ModbusProxy.On() ||
+		oldCfg.ModbusProxy.ListenAddr() != newCfg.ModbusProxy.ListenAddr() ||
+		oldCfg.ModbusProxy.AllowWrite != newCfg.ModbusProxy.AllowWrite {
 		reasons = append(reasons, "modbus_proxy — TCP listener binds at startup")
 	}
 	if oldCfg.ModbusProxy.On() || newCfg.ModbusProxy.On() {
@@ -175,31 +243,7 @@ func modbusProxyRestartReasons(oldCfg, newCfg *Config) []string {
 	return reasons
 }
 
-type proxySig struct {
-	Host, Listen    string
-	Port            int
-	AllowUnverified bool
-}
-
-func modbusProxySignature(c *Config) []proxySig {
-	if c == nil {
-		return nil
-	}
-	var out []proxySig
-	for _, d := range c.Drivers {
-		if d.Disabled {
-			continue
-		}
-		mb := d.EffectiveModbus()
-		if mb == nil {
-			continue
-		}
-		out = append(out, proxySig{
-			Host:            mb.Host,
-			Port:            mb.Port,
-			Listen:          mb.ProxyListen,
-			AllowUnverified: d.Capabilities.AllowUnverifiedLocal,
-		})
-	}
-	return out
+func modbusProxySignature(c *Config) []ModbusProxyBind {
+	binds, _ := c.ModbusProxyBinds()
+	return binds
 }

@@ -562,7 +562,7 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			// Only a departure inside the horizon can be missed; a later one
 			// is planned when its prices arrive.
 			if lp.TargetSoC > 0 && i == lp.TargetSlotIdx {
-				if missing := max(0, lp.TargetSoC-evSoC[lp.ID]) * lp.CapacityWh; missing > 1 {
+				if missing := max(0, lp.TargetSoC-evSoC[lp.ID]) * lp.CapacityWh; missing > lp.departureMissWh() {
 					deadlineShortfall[lp.ID] = missing
 				}
 			}

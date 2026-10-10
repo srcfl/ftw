@@ -157,7 +157,12 @@ homeassistant:
 # modbus_proxy:
 #   enabled: true
 #   listen: ":1502"     # used when the site has one unique Modbus TCP endpoint
-#   allow_write: false  # keep off unless you trust every host on the LAN
+#   allow_write: false  # read-only proxy; FTW owns control
+#   # true gives LAN clients write ownership; FTW only reads these endpoints.
+#   # All configured unit IDs on each endpoint share this choice. Unknown unit
+#   # IDs (including broadcast 0) are blocked. The external controller owns
+#   # device safety. A disconnect does not return control to FTW; change the
+#   # setting and restart. Ownership stays in force if the listener fails.
 #
 # Two inverters (different host:port) each need their own listen address:
 #   capabilities.modbus.proxy_listen: ":1502"  /  ":1503"
@@ -257,11 +262,11 @@ fleet_ping:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
-# Energyplan ships with Core and runs first in supported beta builds.
+# Energyplan ships with Core and runs first in supported beta and stable builds.
 # Core DP provides shadow comparisons and validated fallback plans.
 # planner:
 #   enabled: true
-#   # engine: energyplan # beta default; core selects the Go planner
+#   # engine: energyplan # release default; core selects the Go planner
 #   mode: passive_arbitrage
 #   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
 #   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)

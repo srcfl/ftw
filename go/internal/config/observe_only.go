@@ -9,7 +9,7 @@ func ObserveOnlyDriverSet(cfg *Config) map[string]bool {
 		return out
 	}
 	for _, d := range cfg.Drivers {
-		if d.ObserveOnly {
+		if d.ObserveOnly || cfg.ModbusProxyOwnsWrites(d) {
 			out[d.Name] = true
 		}
 	}

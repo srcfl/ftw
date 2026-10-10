@@ -125,6 +125,9 @@ type HostEnv struct {
 	// this so a buggy driver_fingerprint cannot reconfigure hardware: bundled
 	// drivers otherwise have allowWrite as a no-op.
 	ProbeReadOnly bool
+	// DeviceReadOnly blocks device writes in every Lua phase when an
+	// external Modbus controller owns the endpoint.
+	DeviceReadOnly bool
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
 	// declaration for this driver. Zero means "no physical battery
@@ -261,6 +264,9 @@ func (h *HostEnv) allowAuthPost(rawURL string) bool {
 }
 
 func (h *HostEnv) allowWrite(permission string) error {
+	if h.DeviceReadOnly {
+		return fmt.Errorf("%s: external Modbus client owns control; FTW only reads", permission)
+	}
 	if h.ProbeReadOnly {
 		return fmt.Errorf("%s: fingerprint probe cannot write", permission)
 	}
