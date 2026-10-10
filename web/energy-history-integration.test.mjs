@@ -6,11 +6,32 @@ import vm from 'node:vm';
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const source = readFileSync(new URL('./energy-history.js', import.meta.url), 'utf8');
 
+test('EV costs ignore charging outside the period and days without charging', () => {
+  const calculatorSource = source.slice(source.indexOf('  function calculateEVChargeCost('),
+    source.indexOf('  function renderEVCharging('));
+  const calculate = vm.runInNewContext('(' + calculatorSource.trim() + ')');
+  const point = (start, wh, quality = 'measured') => ({
+    flow: 'vehicle_charge', bucket_start_ms: start, bucket_len_ms: 1800000,
+    energy_wh: wh, quality,
+  });
+  const prices = [{ slot_ts_ms: 1800000, slot_len_min: 30, total_ore_kwh: 200 }];
+  const result = calculate([point(0, 1000), point(1800000, 1500), point(3600000, 0, 'gap')],
+    prices, 1800000, 5400000);
+  assert.equal(result.energyWh, 1500);
+  assert.equal(result.costMinor, 300);
+  assert.equal(result.incomplete, false);
+  const idle = calculate([point(0, 1000), point(1800000, 0, 'gap')], [], 1800000, 3600000);
+  assert.equal(idle.energyWh, 0);
+  assert.equal(idle.costMinor, 0);
+  assert.equal(idle.incomplete, false);
+  assert.equal(calculate([point(1800000, 1500)], [], 1800000, 3600000).incomplete, true);
+});
+
 test('History leads with a daily energy story and keeps raw data optional', () => {
   const history = html.match(/<main id="view-history"[\s\S]*?<main id="view-more"/)?.[0] || '';
   for (const id of [
     'energy-history-period-title', 'energy-history-range', 'energy-history-refresh',
-    'energy-history-chart', 'energy-history-summary', 'energy-history-insight',
+    'energy-history-chart', 'energy-history-summary', 'energy-history-ev-cost', 'energy-history-insight',
     'energy-history-details', 'energy-history-asset', 'energy-history-csv',
     'energy-history-quality', 'energy-history-detail-meta', 'energy-history-rows',
     'energy-history-prev', 'energy-history-page', 'energy-history-next',
@@ -28,6 +49,9 @@ test('History leads with a daily energy story and keeps raw data optional', () =
 test('main History uses daily totals while raw ledger stays a troubleshooting view', () => {
   assert.match(source, /\/api\/energy\/daily\?days=/);
   assert.match(source, /Used at home/);
+  assert.match(source, /calculateEVChargeCost/);
+  assert.match(source, /total_ore_kwh/);
+  assert.match(html, /Based on FTW’s configured spot price, network tariff and VAT/);
   assert.match(source, /Made by solar/);
   assert.match(source, /Bought from grid/);
   assert.match(source, /Sent to grid/);
@@ -64,6 +88,7 @@ test('raw energy rows load only when opened, flag rejected data and page locally
   const ids = [
     'energy-history-period-title', 'energy-history-range', 'energy-history-asset',
     'energy-history-refresh', 'energy-history-csv', 'energy-history-summary',
+    'energy-history-ev-cost',
     'energy-history-insight', 'energy-history-details', 'energy-history-quality',
     'energy-history-rows', 'energy-history-page', 'energy-history-prev',
     'energy-history-next', 'energy-history-detail-meta', 'energy-history-chart',
@@ -85,10 +110,15 @@ test('raw energy rows load only when opened, flag rejected data and page locally
   }];
   let dailyRequests = 0;
   let ledgerRequests = 0;
+  let evHistoryRequests = 0;
+  let priceRequests = 0;
+  let expectedChargeWh = 0;
+  let expectedChargeOre = 0;
+  let omitSecondPrice = false;
   const window = { addEventListener() {}, devicePixelRatio: 1 };
 
   vm.runInNewContext(source, {
-    Array, Date, Map, Math, Number, Object, Promise, Set, String, URLSearchParams,
+    Array, Date, Intl, Map, Math, Number, Object, Promise, Set, String, URLSearchParams,
     document: {
       createElement() { return element({ id: 'option' }); },
       documentElement: {},
@@ -103,8 +133,45 @@ test('raw energy rows load only when opened, flag rejected data and page locally
       if (path === '/api/energy/assets') {
         return { ok: true, json: async () => ({ assets: [] }) };
       }
-      ledgerRequests += 1;
-      return { ok: true, json: async () => ({ points }) };
+      if (path.startsWith('/api/energy/history?')) {
+        const params = new URLSearchParams(path.split('?')[1]);
+        if (params.get('bucket') === '30m') {
+          evHistoryRequests += 1;
+          const since = Number(params.get('since'));
+          const bucket = 1800000;
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const first = Math.floor(today.getTime() / bucket) * bucket;
+          const second = first + bucket;
+          const chargePoints = [first, second].map((start) => ({
+            bucket_start_ms: start, bucket_len_ms: bucket, flow: 'vehicle_charge',
+            energy_wh: 1500, quality: 'measured', source: 'hardware_counter', provenance: 'counter',
+          }));
+          expectedChargeWh = 3000;
+          expectedChargeOre = 450;
+          return { ok: true, json: async () => ({ points: chargePoints, truncated: false }) };
+        }
+        ledgerRequests += 1;
+        return { ok: true, json: async () => ({ points }) };
+      }
+      if (path.startsWith('/api/prices?')) {
+        priceRequests += 1;
+        const params = new URLSearchParams(path.split('?')[1]);
+        // The cost assertion is supplied with slots matching the two readings
+        // by using their query-window relationship (both ranges are whole days).
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const first = Math.floor(today.getTime() / 1800000) * 1800000;
+        return { ok: true, json: async () => ({
+          enabled: true, currency: 'SEK', items: [
+            { slot_ts_ms: first, slot_len_min: 15, total_ore_kwh: 100 },
+            { slot_ts_ms: first + 900000, slot_len_min: 15, total_ore_kwh: 200 },
+            { slot_ts_ms: first + 1800000, slot_len_min: 15, total_ore_kwh: 100 },
+            { slot_ts_ms: first + 2700000, slot_len_min: 15, total_ore_kwh: 200 },
+          ].filter((_, index) => !(omitSecondPrice && index === 1))
+        }) };
+      }
+      return { ok: false, json: async () => ({}) };
     },
     getComputedStyle: () => ({ getPropertyValue: () => '#94a3b8' }),
     window,
@@ -116,6 +183,24 @@ test('raw energy rows load only when opened, flag rejected data and page locally
 
   assert.equal(dailyRequests, 1);
   assert.equal(ledgerRequests, 0);
+  assert.equal(evHistoryRequests, 1);
+  assert.equal(priceRequests, 1);
+  assert.match(elements.get('energy-history-ev-cost').innerHTML, /Today/);
+  assert.match(elements.get('energy-history-ev-cost').innerHTML, /This week/);
+  assert.match(elements.get('energy-history-ev-cost').innerHTML, /This month/);
+  assert.match(elements.get('energy-history-ev-cost').innerHTML, new RegExp(
+    new Intl.NumberFormat(undefined, { minimumFractionDigits: expectedChargeWh / 1000 < 10 ? 1 : 0,
+      maximumFractionDigits: expectedChargeWh / 1000 < 10 ? 1 : 0 }).format(expectedChargeWh / 1000) + ' kWh'
+  ));
+  assert.match(elements.get('energy-history-ev-cost').innerHTML, new RegExp(
+    new Intl.NumberFormat(undefined, { style: 'currency', currency: 'SEK', maximumFractionDigits: 2 })
+      .format(expectedChargeOre / 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  ));
+  omitSecondPrice = true;
+  window.ftwEnergyHistoryLoad();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(elements.get('energy-history-ev-cost').innerHTML, /Partial cost: charger or price data has gaps/);
   assert.match(elements.get('energy-history-summary').innerHTML, /Used at home/);
   assert.match(elements.get('energy-history-summary').innerHTML, /12 kWh/);
 

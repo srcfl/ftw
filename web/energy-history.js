@@ -5,6 +5,7 @@
   var loadedAssets = false;
   var dailyRequest = 0;
   var ledgerRequest = 0;
+  var evCostRequest = 0;
   var lastDays = [];
   var tablePoints = [];
   var tablePage = 0;
@@ -78,6 +79,7 @@
       tab.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
     loadDaily();
+    loadEVCharging();
     var details = document.getElementById('energy-history-details');
     if (details && details.open) loadLedger();
   }
@@ -95,6 +97,133 @@
       return '<article><span>' + card.label + '</span><strong>' +
         formatKWh(sum(days, card.key)) + '</strong><small>' + card.note + '</small></article>';
     }).join('');
+  }
+
+  function formatCost(minorUnits, currency) {
+    var code = String(currency || 'SEK').toUpperCase();
+    var amount = Number(minorUnits || 0) / 100;
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency', currency: code, maximumFractionDigits: 2
+      }).format(amount);
+    } catch (_) {
+      return amount.toFixed(2) + ' ' + code;
+    }
+  }
+
+  function calculateEVChargeCost(points, prices, since, until) {
+    var result = { energyWh: 0, costMinor: 0, incomplete: false };
+    var slots = (prices || []).map(function (slot) {
+      var start = Number(slot.slot_ts_ms);
+      var length = Number(slot.slot_len_min) * 60000;
+      var total = Number(slot.total_ore_kwh);
+      return { start: start, end: start + length, total: total };
+    }).filter(function (slot) {
+      return Number.isFinite(slot.start) && slot.end > slot.start && Number.isFinite(slot.total);
+    }).sort(function (a, b) { return a.start - b.start; });
+
+    (points || []).forEach(function (point) {
+      if (point.flow !== 'vehicle_charge') return;
+      var bucketStart = Number(point.bucket_start_ms);
+      var bucketEnd = bucketStart + Number(point.bucket_len_ms || 0);
+      var start = Math.max(since, bucketStart);
+      var end = Math.min(until, bucketEnd);
+      // Monthly readings outside this day/week are not missing data.
+      if (Number.isFinite(start) && Number.isFinite(end) && end <= start) return;
+      var bucketEnergyWh = Number(point.energy_wh || 0);
+      if (!Number.isFinite(bucketEnergyWh) || bucketEnergyWh < 0 || !Number.isFinite(start) || end <= start || bucketEnd <= bucketStart) {
+        result.incomplete = true;
+        return;
+      }
+      var energyWh = bucketEnergyWh * (end - start) / (bucketEnd - bucketStart);
+      result.energyWh += energyWh;
+      if (energyWh <= 0) return;
+      if (['measured', 'integrated'].indexOf(point.quality) < 0) result.incomplete = true;
+
+      var duration = end - start;
+      var coveredMs = 0;
+      slots.forEach(function (slot) {
+        var overlap = Math.max(0, Math.min(end, slot.end) - Math.max(start, slot.start));
+        if (!overlap) return;
+        var shareWh = energyWh * overlap / duration;
+        result.costMinor += shareWh * slot.total / 1000;
+        coveredMs += overlap;
+      });
+      if (coveredMs < duration) result.incomplete = true;
+    });
+    return result;
+  }
+
+  function renderEVCharging(result, currency, enabled) {
+    var target = document.getElementById('energy-history-ev-cost');
+    if (!target) return;
+    if (!enabled) {
+      target.innerHTML = '<article><span>EV charging</span><strong>' +
+        formatKWh(result.day.energyWh) + ' · cost unavailable</strong><small>Enable price data to calculate charging cost.</small></article>';
+      return;
+    }
+    var labels = [
+      { key: 'day', label: 'Today' },
+      { key: 'week', label: 'This week' },
+      { key: 'month', label: 'This month' }
+    ];
+    target.innerHTML = labels.map(function (period) {
+      var value = result[period.key];
+      var detail = value.incomplete
+        ? '<small class="incomplete">Partial cost: charger or price data has gaps.</small>'
+        : '';
+      return '<article><span>' + period.label + '</span><strong>' + formatKWh(value.energyWh) +
+        ' · ' + formatCost(value.costMinor, currency) + '</strong>' + detail + '</article>';
+    }).join('');
+  }
+
+  function loadEVCharging() {
+    var request = ++evCostRequest;
+    var target = document.getElementById('energy-history-ev-cost');
+    if (target) target.innerHTML = '<article><span>EV charging</span><strong>Loading charging history…</strong></article>';
+    // Charge totals use local calendar boundaries. Half-hour history stays
+    // under the API's 2,000 bucket limit for a 31-day month; costs are split
+    // across the configured price slots by overlap.
+    var until = Math.floor(Date.now() / 900000) * 900000;
+    var now = new Date();
+    var dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    var weekStartDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    weekStartDate.setDate(weekStartDate.getDate() - ((weekStartDate.getDay() + 6) % 7));
+    var weekStart = weekStartDate.getTime();
+    var monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    var periods = { day: dayStart, week: weekStart, month: monthStart };
+    var since = Math.min(dayStart, weekStart, monthStart);
+    var historyParams = new URLSearchParams({
+      scope: 'system', since: String(since), until: String(until), bucket: '30m', limit: '5000'
+    });
+    var priceParams = new URLSearchParams({
+      since_ms: String(since - 86400000), until_ms: String(until)
+    });
+    return Promise.all([
+      fetch('/api/energy/history?' + historyParams.toString()).then(function (response) {
+        if (!response.ok) throw new Error('charging history unavailable');
+        return response.json();
+      }),
+      fetch('/api/prices?' + priceParams.toString()).then(function (response) {
+        if (!response.ok) throw new Error('prices unavailable');
+        return response.json();
+      })
+    ]).then(function (responses) {
+      if (request !== evCostRequest) return;
+      var data = responses[0] || {};
+      var priceData = responses[1] || {};
+      var result = {};
+      Object.keys(periods).forEach(function (period) {
+        result[period] = calculateEVChargeCost(data.points || [], priceData.items || [], periods[period], until);
+        if (data.truncated) result[period].incomplete = true;
+      });
+      renderEVCharging(result, priceData.currency, priceData.enabled !== false);
+    }).catch(function () {
+      if (request === evCostRequest && target) {
+        target.innerHTML = '<article><span>EV charging</span><strong>Charging cost unavailable</strong>' +
+          '<small>Could not load the charger energy and price history.</small></article>';
+      }
+    });
   }
 
   function renderInsights(days) {
@@ -340,6 +469,7 @@
 
   function load() {
     loadDaily();
+    loadEVCharging();
     var details = document.getElementById('energy-history-details');
     if (details && details.open) loadLedger();
   }
