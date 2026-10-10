@@ -41,6 +41,59 @@ func TestForecastScoreCommitSurvivesFailedRetention(t *testing.T) {
 	}
 }
 
+func TestForecastRetentionUsesMetadataIndexAfterUpgrade(t *testing.T) {
+	s := openForecastArchive(t)
+	ctx := context.Background()
+	// Reopen an archive from before the retention index existed.
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS forecast_errors_retention`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	start := now.Add(-2 * time.Hour).UnixMilli()
+	score := archiveError("retained", start-int64(time.Hour/time.Millisecond), start-int64(time.Hour/time.Millisecond), start)
+	if err := s.SaveForecastErrors(ctx, []forecasting.ErrorSample{score}, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.InitForecastArchive(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, query := range map[string]string{
+		"budget": `SELECT COUNT(*),COALESCE(SUM(length(payload)),0),COALESCE(MIN(end_ms),0) FROM forecast_errors`,
+		"eviction": `SELECT rowid,end_ms,length(payload) FROM forecast_errors
+ ORDER BY end_ms DESC,start_ms DESC,series DESC,lead DESC,config_version DESC`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rows, err := s.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var plan []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan = append(plan, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(plan, "; ")
+			if !strings.Contains(joined, "USING COVERING INDEX forecast_errors_retention") || strings.Contains(joined, "TEMP B-TREE") {
+				t.Fatalf("retention reads or sorts score payloads: %s", joined)
+			}
+		})
+	}
+	got, err := s.LoadForecastErrors(ctx, start, now.UnixMilli(), false)
+	if err != nil || len(got) != 1 || got[0].IssueID != score.IssueID {
+		t.Fatalf("upgrade lost existing score: %+v %v", got, err)
+	}
+}
+
 func TestForecastRetentionLimitsAndTies(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
