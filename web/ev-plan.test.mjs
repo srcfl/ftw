@@ -135,6 +135,10 @@ test('mounted car view follows source changes and keeps the slider while editing
   const view=api(known,{}); await new Promise(r=>setImmediate(r));
   assert.match(text(view.el),/47% From Car · Current/);
   assert.equal(view.slider.parentNode.hidden,true);
+  view.update({...known,vehicle_soc:.78,current_soc:.27,vehicle_stale:true,vehicle_soc_age_s:34*60,soc_source:'assumed'},{});
+  assert.equal(view.slider.parentNode.hidden,false, 'a displayed old car report must not hide the planning estimate correction');
+  assert.equal(view.slider.value,'27');
+  assert.match(text(view.el),/78% From Car · 34 min old/);
   view.update(car,{});
   assert.equal(view.slider.parentNode.hidden,false);
   assert.equal(view.slider.value,'45');

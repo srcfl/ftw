@@ -3958,7 +3958,7 @@
       levels.hidden = !lpNow.plugged_in;
       levelsNote.hidden = !lpNow.plugged_in;
       var plugged = !!(lpNow && lpNow.plugged_in);
-      socWrap.hidden = !plugged || !!(info && info.fromCar);
+      socWrap.hidden = !plugged || !!(info && info.fromCar && !lpNow.vehicle_stale && lpNow.soc_source === "vehicle");
       slider.disabled = !!lpNow.read_unavailable;
       if (!plugged) return;
       var cur = (lpNow.current_soc != null) ? Math.max(0, Math.min(100, Math.round(lpNow.current_soc * 100))) : null;

@@ -32,7 +32,7 @@ type VehiclePick struct {
 	SoC           float64 // bounded [0,1]
 	ChargeLimit   float64 // bounded [0,1]
 	ChargingState string
-	Stale         bool      // false for usable picks; retained in the result shape
+	Stale         bool      // unsuitable as a live observation; may still anchor an estimate
 	UpdatedAt     time.Time // wall-clock of the last fresh SoC observation
 }
 
@@ -83,7 +83,7 @@ func VehicleConnectedRank(chargingState string) int {
 // Lives in telemetry/ rather than api/ or cmd/ because both packages
 // need it and the dependency direction otherwise cycles.
 func PickBestVehicle(s *Store, now time.Time) VehiclePick {
-	return pickBestVehicle(s, 0, now, VehicleMaxAge, false)
+	return pickBestVehicle(s, 0, now, VehicleMaxAge, vehiclePickLive)
 }
 
 // PickBestVehicleForLoadpoint adds connection-evidence gating: when
@@ -107,17 +107,19 @@ func PickBestVehicleForLoadpoint(s *Store, lpDeliveringPower bool, now time.Time
 		// loadpoint is at 11 kW is definitely not the connected one.
 		minRank = 3
 	}
-	return pickBestVehicle(s, minRank, now, VehicleMaxAge, false)
+	return pickBestVehicle(s, minRank, now, VehicleMaxAge, vehiclePickLive)
 }
 
 // PickVehicleForAnchor applies the loadpoint gates with VehicleAnchorMaxAge.
-// Its SoC is a past observation: anchor it at UpdatedAt, never as now.
+// A cached cloud report with a measured age may also supply a historical
+// anchor. Its SoC is a past observation: anchor it at UpdatedAt, never as now.
+// The loadpoint must still know the session's energy at that time.
 func PickVehicleForAnchor(s *Store, lpDeliveringPower bool, now time.Time) VehiclePick {
 	minRank := 0
 	if lpDeliveringPower {
 		minRank = 3
 	}
-	return pickBestVehicle(s, minRank, now, VehicleAnchorMaxAge, false)
+	return pickBestVehicle(s, minRank, now, VehicleAnchorMaxAge, vehiclePickAnchor)
 }
 
 // PickBestVehicleForDisplay retains an otherwise valid last-known vehicle
@@ -129,7 +131,7 @@ func PickBestVehicleForDisplay(s *Store, lpDeliveringPower bool, now time.Time) 
 	if lpDeliveringPower {
 		minRank = 3
 	}
-	return pickBestVehicle(s, minRank, now, VehicleMaxAge, true)
+	return pickBestVehicle(s, minRank, now, VehicleMaxAge, vehiclePickDisplay)
 }
 
 // PickVehicleForCompletion requires one vehicle source. Rank and freshness
@@ -139,24 +141,34 @@ func PickVehicleForCompletion(s *Store, now time.Time) VehiclePick {
 	if s == nil || len(s.ReadingsByType(DerVehicle)) != 1 {
 		return VehiclePick{}
 	}
-	return pickBestVehicle(s, 1, now, VehicleMaxAge, false)
+	return pickBestVehicle(s, 1, now, VehicleMaxAge, vehiclePickLive)
 }
 
-func pickBestVehicle(s *Store, minRank int, now time.Time, maxAge time.Duration, allowAgeStale bool) VehiclePick {
+type vehiclePickUse uint8
+
+const (
+	vehiclePickLive vehiclePickUse = iota
+	vehiclePickAnchor
+	vehiclePickDisplay
+)
+
+func pickBestVehicle(s *Store, minRank int, now time.Time, maxAge time.Duration, use vehiclePickUse) VehiclePick {
 	if s == nil {
 		return VehiclePick{}
 	}
 	var best VehiclePick
 	bestRank := -1
+	allowAgeStale := use == vehiclePickDisplay
 	for _, vr := range s.ReadingsByType(DerVehicle) {
 		socValue := vr.SoC
 		socUpdatedAt := vr.SoCUpdatedAt
-		cachedDisplay := false
-		if allowAgeStale {
-			if value, observedAt, ok := cachedVehicleDisplay(s, vr); ok {
+		cachedObservation := false
+		if allowAgeStale || use == vehiclePickAnchor {
+			if value, observedAt, ok := cachedVehicleObservation(s, vr); ok &&
+				(allowAgeStale || socUpdatedAt.IsZero() || !observedAt.Before(socUpdatedAt)) {
 				socValue = &value
 				socUpdatedAt = observedAt
-				cachedDisplay = true
+				cachedObservation = true
 			}
 		}
 		if socValue == nil {
@@ -169,6 +181,9 @@ func pickBestVehicle(s *Store, minRank int, now time.Time, maxAge time.Duration,
 			continue
 		}
 		age := now.Sub(socUpdatedAt)
+		if age < 0 {
+			continue
+		}
 		if age > maxAge && !allowAgeStale {
 			// Reading is older than we're willing to trust as ground
 			// truth — driver probably stopped publishing. Skip rather
@@ -184,7 +199,7 @@ func pickBestVehicle(s *Store, minRank int, now time.Time, maxAge time.Duration,
 		if len(vr.Data) > 0 {
 			_ = json.Unmarshal(vr.Data, &meta)
 		}
-		if meta.Stale && !allowAgeStale {
+		if meta.Stale && !allowAgeStale && !(use == vehiclePickAnchor && cachedObservation) {
 			continue
 		}
 		rank := VehicleConnectedRank(meta.ChargingState)
@@ -201,7 +216,7 @@ func pickBestVehicle(s *Store, minRank int, now time.Time, maxAge time.Duration,
 			SoC:           soc,
 			ChargeLimit:   limit,
 			ChargingState: meta.ChargingState,
-			Stale:         age > VehicleMaxAge || meta.Stale || cachedDisplay,
+			Stale:         age > VehicleMaxAge || meta.Stale || cachedObservation,
 			UpdatedAt:     socUpdatedAt,
 		}
 		bestRank = rank
@@ -211,9 +226,11 @@ func pickBestVehicle(s *Store, minRank int, now time.Time, maxAge time.Duration,
 
 // Cached car reports can arrive before any fresh report after a restart.
 // Store.SoC intentionally retains only control-trusted observations. Read the
-// latest raw report for presentation alone, requiring its explicit cache flag
-// and the driver's measured SoC age. Never synthesize a fresh receipt time.
-func cachedVehicleDisplay(s *Store, vr *DerReading) (float64, time.Time, bool) {
+// latest raw report with its explicit cache flag and measured SoC age. It may
+// be displayed or anchored in a session with known metering history, but must
+// never become a live observation or confirm completion. Never synthesize a
+// fresh receipt time.
+func cachedVehicleObservation(s *Store, vr *DerReading) (float64, time.Time, bool) {
 	var report struct {
 		SoC      *float64 `json:"soc"`
 		SoCFresh *bool    `json:"soc_fresh"`

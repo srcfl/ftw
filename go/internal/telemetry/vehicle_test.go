@@ -364,3 +364,72 @@ func TestPickVehicleForAnchorRejectsTooOldAndDriverMarkedStale(t *testing.T) {
 		t.Fatalf("driver-marked stale reading: %+v", pick)
 	}
 }
+
+func TestCachedCloudSoCCanAnchorWithoutBecomingLive(t *testing.T) {
+	s := NewStore()
+	soc := .78
+	s.Update("vag", DerVehicle, 0, &soc, json.RawMessage(`{"soc":78,"soc_fresh":false,"stale":true,"charging_state":"Stopped"}`))
+	s.EmitMetric("vag", "vehicle_soc_age_s", 34*60, "s", "", "")
+	s.DriverHealthMut("vag").RecordSuccess()
+	_, receivedAt, _ := s.LatestMetric("vag", "vehicle_soc_age_s")
+	now := receivedAt.Add(time.Second)
+	pick := PickVehicleForAnchor(s, false, now)
+	if pick.Driver != "vag" || pick.SoC != .78 || !pick.Stale ||
+		!pick.UpdatedAt.Equal(receivedAt.Add(-34*time.Minute)) {
+		t.Fatalf("cached cloud anchor: %+v", pick)
+	}
+	if got := PickBestVehicleForLoadpoint(s, false, now); got.Driver != "" {
+		t.Fatalf("historical SoC became live: %+v", got)
+	}
+	if got := PickVehicleForCompletion(s, now); got.Driver != "" {
+		t.Fatalf("historical SoC confirmed completion: %+v", got)
+	}
+	if got := PickVehicleForAnchor(s, true, now); got.Driver != "" {
+		t.Fatalf("stopped car matched a different actively charging car: %+v", got)
+	}
+	if got := PickVehicleForAnchor(s, false, receivedAt.Add(27*time.Minute)); got.Driver != "" {
+		t.Fatalf("cached anchor was rejuvenated beyond one hour: %+v", got)
+	}
+}
+
+func TestCachedCloudAnchorRequiresKnownAgeAndOnlineConnectedCar(t *testing.T) {
+	for _, tc := range []struct {
+		name, state string
+		age         float64
+		online      bool
+	}{
+		{"unknown-age", "Stopped", -1, true},
+		{"too-old", "Stopped", 61 * 60, true},
+		{"disconnected", "Disconnected", 34 * 60, true},
+		{"offline", "Stopped", 34 * 60, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewStore()
+			soc := .78
+			data, _ := json.Marshal(map[string]any{"soc": 78, "soc_fresh": false, "stale": true, "charging_state": tc.state})
+			s.Update("vag", DerVehicle, 0, &soc, data)
+			if tc.age >= 0 {
+				s.EmitMetric("vag", "vehicle_soc_age_s", tc.age, "s", "", "")
+			}
+			if tc.online {
+				s.DriverHealthMut("vag").RecordSuccess()
+			}
+			if got := PickVehicleForAnchor(s, false, time.Now()); got.Driver != "" {
+				t.Fatalf("invalid cached anchor: %+v", got)
+			}
+		})
+	}
+}
+
+func TestCachedCloudAnchorDoesNotReplaceNewerCarObservation(t *testing.T) {
+	s := NewStore()
+	pushVehicle(t, s, "vag", .80, .80, "Stopped", false, time.Minute)
+	latest := s.Get("vag", DerVehicle).SoCUpdatedAt
+	soc := .78
+	s.Update("vag", DerVehicle, 0, &soc, json.RawMessage(`{"soc":78,"soc_fresh":false,"stale":false,"charging_state":"Stopped"}`))
+	s.EmitMetric("vag", "vehicle_soc_age_s", 34*60, "s", "", "")
+	got := PickVehicleForAnchor(s, false, time.Now())
+	if got.Driver != "vag" || got.SoC != .80 || !got.UpdatedAt.Equal(latest) {
+		t.Fatalf("older cached report replaced newer car measurement: %+v", got)
+	}
+}
