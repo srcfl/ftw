@@ -1,22 +1,31 @@
 # Byt till nya FTW och håll det uppdaterat
 
-[English](../native-beta.md).
+**Första stabila versionen av nya serien är `v0.140.4`.** FTW 2.x och 3.x får
+inga fler uppdateringar. [English](../native-beta.md).
 
-**FTW 2.x och 3.x får inga fler uppdateringar. All fortsatt utveckling går
-till den nya 0.x-serien. Vill du ha de senaste funktionerna och rättningarna
-är det dags att byta nu. Installera inte 3.x-beta, och uppdatera inte en äldre
-installation till 3.x som ett steg på vägen.**
+## Kort svar
 
-Den nya serien börjar med `v0.131.0-beta.1`. Det lägre versionsnumret är
-avsiktligt. Äldre 0.x-versioner, till och med 0.130.x, hör till den gamla
-serien. `beta` är kanalen inom en serie; ett kanalbyte flyttar inte en gammal
-installation till den nya serien.
+| Du kör | Gör så här |
+|---|---|
+| Nya FTW 0.x, native | Öppna **More → Version → Update FTW** i webbsidan, eller kör `ftw update` på boxen. Inget mer. |
+| Nya FTW 0.x i Docker | Sätt `FTW_VERSION=v0.140.4` i `.env` och kör `docker compose up -d --build`. [Detaljer](#docker-från-det-nya-releasepaketet) |
+| Inget FTW än, på 64-bitars Linux eller ett nytt Pi-kort | [Installera](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin) med den stabila taggen. |
+| Gamla FTW 2.x, 3.x eller den gamla Pi-imagen | Går inte att uppdatera på plats. Sätt upp nya FTW på ett andra SD-kort eller en annan maskin och behåll den gamla. [Steg](#byt-på-raspberry-pi-med-ett-nytt-sd-kort) |
+| Home Assistant-appen | Ingen ny app än. Kör nya FTW på en annan Linux-maskin och koppla Home Assistant via MQTT. [Steg](#välj-en-väg) |
+| Windows eller macOS | Stöds inte. Använd en Raspberry Pi eller en annan 64-bitars Linux-maskin. |
 
-Du kan börja använda nya FTW nu, med nya inställningar och egen datalagring.
-Den guidade flytten som tar med gamla inställningar och historik är ännu inte
-klar. Behöver du föra över dessa data innan du byter, ta hjälp med just din
-installation. Kopiera inte gamla databaser till den nya installationen på egen
-hand.
+Låt boxen ha ström och tryck inte Restart medan uppdateringen pågår. Vänta tills
+uppdateringen är klar. Vill du tillbaka, kör `ftw rollback`.
+
+Nya serien börjar med tom data. Flytten av gamla inställningar, historik,
+identitet och mål är inte klar än. Kopiera inte gamla databaser till en ny
+installation; behöver du gamla data flyttade, ta hjälp med just din
+installation.
+
+Resten av sidan har detaljerna. Den nya serien börjar med `v0.131.0-beta.1`.
+Äldre 0.x-versioner, till och med 0.130.x, hör till den gamla serien. `beta` i
+en gammal installation flyttar den inte till nya serien, och 3.x-beta är inget
+steg på vägen.
 
 ## Välj en väg
 
@@ -166,17 +175,19 @@ kortet, gå tillbaka till kortbytet ovan. `--fresh-host` betyder att ingen
 FTW-installation eller dess data finns här, även om den är stoppad.
 
 1. Öppna [Releases](https://github.com/srcfl/ftw/releases) på din vanliga dator.
-   Välj en publicerad **ny 0.x-beta** med Linux-paket och SHA-256-fil för din
-   maskin. Använd inte `releases/latest`; den pekar på gamla 2.x.
+   Välj den senaste **stabila** taggen, `v0.140.4` eller senare utan `-beta`.
+   Välj en beta bara om du provar nya byggen. Releasen ska ha Linux-paket och
+   SHA-256-fil för din maskin. Använd inte `releases/latest`; den pekar på
+   gamla 2.x.
 2. Kopiera taggen från releasens rubrik. Skriv inte av den för hand. Byt bara
-   ut `v0.X.Y-beta.N` i blocket nedan mot taggen du kopierade.
+   ut `v0.X.Y` i blocket nedan mot taggen du kopierade.
 3. Klistra in **hela blocket, inklusive `(` och `)`**, i SSH på nya kortet.
    Det stannar vid första felet och hämtar skriptet till en tillfällig fil.
 
 ```bash
 (
   set -eu
-  tag=v0.X.Y-beta.N
+  tag=v0.X.Y
   if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
     echo "STOP: copy an exact published new 0.x tag from Releases." >&2
     exit 1
@@ -200,13 +211,16 @@ Kör på FTW-maskinen:
 
 ```bash
 ftw status
-ftw update --channel beta
+ftw update
 ftw status
 journalctl -u ftw --since "10 minutes ago" --no-pager
 ```
 
-`--channel beta` väljer beta och försöker uppdatera. När rätt kanal redan är
-sparad räcker `ftw update` nästa gång. Du kan också välja
+`ftw update` följer kanalen du valt med `--channel`. Har du aldrig valt följer
+den det boxen kör: en stabil version följer stable, en beta följer beta. Beta
+erbjuder också en nyare stable, så en betabox går över till stable när en
+sådan kommer. Vill du stanna på beta efter det, kör `ftw update --channel beta`;
+vill du lämna beta, kör `ftw update --channel stable`. Du kan också välja
 **More → Version → Update FTW** i native-webbsidan. Knappen använder samma
 Core-API och launcher som kommandot. Den visar hämtade byte, klara steg och
 resultatet efter omstart. Behåll strömmen på. Att stänga eller ladda om sidan

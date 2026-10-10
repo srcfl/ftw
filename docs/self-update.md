@@ -1,8 +1,9 @@
 # Updates and release channels
 
 [ADR 0007](adr/0007-self-updating-binary.md) defines the move to a native
-Core. `v0.131.0-beta.1` is the first published native beta. No native stable
-release or guided migration for an existing box has shipped.
+Core. `v0.131.0-beta.1` is the first published native beta and `v0.140.4`
+the first native stable. Guided migration for an existing old box has not
+shipped.
 
 There are two channels:
 
@@ -99,7 +100,8 @@ local terminal and check the running version, health and live readings.
 Publishing the release and installing it on a box are separate steps.
 
 A native beta must run for a week on the home box and at least one other real
-site with no open `release-blocker`. Only then can the owner dispatch the same
+site with no open `release-blocker`; the owner may shorten that and must say
+so in the stable release notes. Only then can the owner dispatch the same
 workflow for `v0.X.Y` stable, naming the tested `source_beta`. Stable checks
 the published beta receipt and package hashes and uses the same source
 commit. Beta and stable contain different embedded version strings, so each
@@ -108,8 +110,8 @@ alone is not field validation.
 
 On a native site the owner chooses when to update, from More → Version, on
 the machine, or from their own timer or agent.
-[Try the 0.x beta](native-beta.md) is the tester's guide. The installer puts
-the `ftw` command on `PATH`:
+[Install and update FTW](native-beta.md) is the guide for everyone. The
+installer puts the `ftw` command on `PATH`:
 
 ```bash
 ftw status                   # version, published release, last update, health
