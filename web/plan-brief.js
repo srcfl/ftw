@@ -56,6 +56,52 @@ function briefPower(watts) {
     : `${Math.round(value)} W`;
 }
 
+function fractionOrNull(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1.001) return null;
+  return Math.min(1, value);
+}
+
+// undefined: this slot does not name chargers, so loadpoint_soc is the one car.
+// false: more than one car is charging, so one percent would pick a car.
+function chargingEvId(action) {
+  const power = action && action.loadpoint_power_w;
+  if (!power || typeof power !== "object" || Array.isArray(power)) return undefined;
+  const charging = Object.entries(power)
+    .filter(([, watts]) => Number(watts) > 100)
+    .map(([id]) => id);
+  if (charging.length === 1) return charging[0];
+  if (charging.length > 1) return false;
+  return undefined;
+}
+
+function evSocFrac(action, id) {
+  if (!action || id === false) return null;
+  const byId = action.loadpoint_soc_by_id;
+  const named = byId && typeof byId === "object" && !Array.isArray(byId);
+  if (typeof id === "string") return named ? fractionOrNull(byId[id]) : null;
+  if (named) {
+    const values = Object.values(byId).map(fractionOrNull).filter((value) => value != null);
+    if (values.length === 1) return values[0];
+    if (values.length > 1) return null;
+  }
+  return fractionOrNull(action.loadpoint_soc);
+}
+
+// Planned SoC of the car the next step charges. Home-battery soc on the
+// same slot is a different battery.
+function carChargeForecast(actions, next) {
+  if (!next || plannedEVWatts(next) <= 100) return null;
+  const id = chargingEvId(next);
+  const nextSoc = evSocFrac(next, id);
+  if (nextSoc == null) return null;
+  let finalSoc = null;
+  for (const action of actions) {
+    const soc = evSocFrac(action, id);
+    if (soc != null) finalSoc = soc;
+  }
+  return { nextSoc, finalSoc };
+}
+
 function batteryIsPresent(status, actions) {
   if (Number.isFinite(status.bat_soc)) return true;
   const drivers = status.drivers || {};
@@ -260,16 +306,25 @@ export function derivePlanBrief({
       ? `Plan until ${formatPlanEnd(finalAction.slot_start_ms + (finalAction.slot_len_min || 15) * 60_000)}`
       : "The plan reaches as far as the published prices",
   };
-  const nextSocPct = next ? socPercent(next.soc) : null;
-  const finalSocPct = finalAction ? socPercent(finalAction.soc) : null;
-  const soc = hasBattery
+  // Expected charge follows the next step. Charging the car reports that
+  // car's planned SoC. The home battery on the same slot (start SoC in
+  // the header) is a different number — a car at 76% must not read as
+  // 24% after the next charge.
+  const evStep = next && plannedEVWatts(next) > 100;
+  const car = carChargeForecast(actions, next);
+  const where = car ? " in the car" : (evStep ? " in the home battery" : "");
+  const nextFrac = car ? car.nextSoc : (next ? next.soc : null);
+  const finalFrac = car ? car.finalSoc : (finalAction ? finalAction.soc : null);
+  const nextSocPct = socPercent(nextFrac);
+  const finalSocPct = socPercent(finalFrac);
+  const soc = (hasBattery || car)
     ? {
         label: nextSocPct != null
-          ? `${nextSocPct.toFixed(0)}% after next step`
+          ? `${nextSocPct.toFixed(0)}%${where} after next step`
           : "—",
         detail: finalSocPct != null
-          ? `${finalSocPct.toFixed(0)}% at the end of the plan`
-          : "No battery forecast available",
+          ? `${finalSocPct.toFixed(0)}%${where} at the end of the plan`
+          : (car ? "No car charge forecast for the rest of the plan" : "No battery forecast available"),
       }
     : null;
 
