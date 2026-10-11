@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.140.10
+
+### Patch Changes
+
+- 644f872: Merge retained Parquet readings before beta history conversion publishes its
+  summaries. Preserve distinct and late rows, keep the selected beta value on
+  overlap, and verify archive fingerprints before Core retires duplicate files.
+
 ## 0.140.9
 
 ### Patch Changes
