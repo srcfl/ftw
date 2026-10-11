@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.140.5
+
+### Patch Changes
+
+- 748a357: Prune forecast records without repeatedly scanning the retained records. Keep short delete transactions and refresh the budget after concurrent writes.
+- a877542: Wait for a cancelled history transaction to finish rollback before retrying. Report the phase of a failed history write.
+- 9c0aeff: Wait for cancelled history maintenance transactions to finish rollback before allowing another writer to enter.
+- f146a1e: Plan EV charging from the car's latest SoC when that reading is newer than the manual level, including a cloud report up to an hour old. The charging view plans from the same number. A newer manual correction still wins, and the slider stays available when the car report is not a live reading.
+
 ## 0.140.4
 
 ### Patch Changes
