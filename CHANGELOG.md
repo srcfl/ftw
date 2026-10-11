@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.140.9
+
+### Patch Changes
+
+- 0bba433: Build chart summaries before selecting converted DuckDB history so the first Core start retains every series when it retires raw rows.
+- e615535: Fix the offline DuckDB history converter build by keeping its separate module in step with Core's dependencies. CI now checks conversion, resume and the Linux ARM64 and AMD64 builds.
+
 ## 0.140.8
 
 ### Patch Changes
