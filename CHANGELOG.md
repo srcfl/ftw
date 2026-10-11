@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.140.7
+
+### Patch Changes
+
+- d002bbc: Report elapsed write phases and the SQL step when a history write fails, so field timeouts can be traced without logging measurements or changing the write deadline.
+
 ## 0.140.6
 
 ### Patch Changes
