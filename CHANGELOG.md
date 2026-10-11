@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.140.6
+
+### Patch Changes
+
+- 6ac681f: Keep imported chart history visible after restart when Core retires raw telemetry samples.
+- b261625: Recover inherited charts from the original state database or a retained history file after an earlier beta lost access to them. Keep new history and accounting.
+
 ## 0.140.5
 
 ### Patch Changes
