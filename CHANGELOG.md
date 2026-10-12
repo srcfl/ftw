@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.141.1
+
+### Patch Changes
+
+- 51bf2d6: Name the box's time zone, for example Europe/Stockholm, wherever Core reports it: the app hello, daily energy, savings and the load research export. A box without TZ set said "Local", which the app and web client cannot use to show plan times in the household's zone.
+- 851eaee: Keep the EV ready time on the household clock. A goal set to 07:00 stays 07:00 when summer time starts or ends; before, it moved an hour until saved again. A goal saved by an older version keeps the time it shows on the day of the update.
+- 97ff226: Show and save the EV ready time on the household clock, even from a browser in another time zone. `GET /api/loadpoints` now sends `time_of_day_min`, minutes after midnight in the box's zone, and the schedule routes accept it. It wins over `time_of_day_min_utc`, which Core still sends and accepts for older clients.
+- afaa603: Keep history for working devices when another device is offline. Show missing power, state of charge and energy as unknown, preserve gaps through retention and backup, and flag incomplete measurements or an invalid household balance. Separate additive schema-7 tables keep partial rows out of older readers and preserve them across a native rollback.
+- af22b48: Accept Core backup timestamps with nanoseconds in the native migration CLI on older Python versions. Keep the verified bytes and backup age checks.
+
 ## 0.141.0
 
 ### Minor Changes
