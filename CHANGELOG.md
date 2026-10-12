@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.141.4
+
+### Patch Changes
+
+- 18945ce: Report connection wait, SQL query, scan and decode times when a forecast read fails, without recording measurement values or extending its deadline.
+
 ## 0.141.3
 
 ### Patch Changes
