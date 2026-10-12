@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.141.3
+
+### Patch Changes
+
+- 3d07f27: Export stopped older split SQLite history without requiring the later partial-history tables. Refuse incomplete quality tables and preserve the source during backup.
+
 ## 0.141.2
 
 ### Patch Changes
