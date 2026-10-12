@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.141.0
+
+### Minor Changes
+
+- 8ac0b4c: Add an offline Home Assistant backup exporter that keeps internal driver links, checks protected archives and leaves existing data in place on failure.
+
+### Patch Changes
+
+- 2f47f63: Record complete restore points before activation. Refuse incomplete or older unverified points before reverting, and retain moved data if rollback fails. Full backups from older releases still import normally.
+- f4f3af0: Bind each restore stage to its own phase so a later extraction-only retry can keep older complete safety points without accepting partial activation.
+- 9618f8f: Keep interrupted revert state separate from complete active data. Retain abandoned extraction copies after a successful retry so normal restore and revert can continue.
+
 ## 0.140.11
 
 ### Patch Changes
