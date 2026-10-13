@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.141.5
+
+### Patch Changes
+
+- 85e1b7a: Limit charging steps to the charger's max power when loading, saving and planning, and show a warning. Show the latest planning failure in Plan instead of leaving it on Preparing.
+
 ## 0.141.4
 
 ### Patch Changes
