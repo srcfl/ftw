@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.142.0
+
+### Minor Changes
+
+- 3c60ca7: Add the owner-controlled FTW Cloud capability, with cloud uplink, phone sessions, signed notifications and owner-facing Cloud APIs. Local operation remains the default; Cloud requires the owner's consent.
+
 ## 0.141.7
 
 ### Patch Changes
