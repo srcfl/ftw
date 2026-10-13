@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.141.7
+
+### Patch Changes
+
+- b1b3469: Let phones read their home from FTW Cloud. While FTW Cloud is on, the box tells every paired phone, over its own encrypted session, the key it signs with and the names behind its anonymous ids, so a phone can check what the service forwards. Boxes that can run the uplink say so to the app. `POST` and `DELETE /api/cloud/stats` record and withdraw an owner's consent to statistics; nothing is sent for it yet.
+- b1b3469: With FTW Cloud on and events in the grant, the box sends its notifications as signed events for the owners' phones; names never leave the house. A restart the box chooses, an update among them, tells FTW Cloud so it holds back "box out of reach". A new notification, "The car may not be ready", tells once per plug-in when the box knows the car's level and the plan cannot reach the goal by the ready time. A car that reports nothing itself gets "Car charged" in kWh once the box's estimate from a level someone set reaches the target. "Car plugged in" now waits 90 seconds and is sent only when the box needs the level or a goal. Each notification transport now has its own 10-second limit, so one that hangs no longer delays the others.
+- c6ab8ee: Release builds know FTW Cloud at `wss://cloud.ftw.energy` by the service's public key, so an owner can turn FTW Cloud on. Nothing changes until they do. The box checks every message from the service against that key and refuses a service that signs with any other.
+- b1b3469: Add the FTW Cloud uplink, off unless an owner turns it on. `GET /api/cloud` shows the grant and the bytes sent in the last 24 hours, `GET /api/cloud/preview` shows the exact bytes that leave the house, and `POST` and `DELETE /api/cloud/grant` turn it on and off. Backups no longer include `cloud.key`.
+
 ## 0.141.6
 
 ### Patch Changes
