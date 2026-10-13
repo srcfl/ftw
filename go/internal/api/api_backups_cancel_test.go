@@ -94,6 +94,21 @@ func TestBackupCreateRefusesOversizedIgnoredBody(t *testing.T) {
 	}
 }
 
+func TestBackupVerifyRefusesOversizedIgnoredBody(t *testing.T) {
+	root := t.TempDir()
+	server := New(&Deps{BackupDir: filepath.Join(root, "backups")})
+	r := httptest.NewRequest(http.MethodPost, "/api/backups/ftw-full-backup-fixture.ftwbak/verify", strings.NewReader(strings.Repeat(" ", maxJSONBody+1)))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized verification body: status %d", w.Code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("oversized verification created backup directory: %v", err)
+	}
+}
+
 func waitBackupCondition(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

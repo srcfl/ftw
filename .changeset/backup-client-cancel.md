@@ -2,4 +2,4 @@
 "ftw": patch
 ---
 
-Stop a full backup when its CLI or HTTP client disconnects, so Ctrl-C releases the backup and update locks.
+Stop full backup creation and verification when the HTTP client disconnects. Ctrl-C releases the backup and update locks instead of leaving work running on the box.
