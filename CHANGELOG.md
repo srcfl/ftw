@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.142.1
+
+### Patch Changes
+
+- 49439b2: Show recorded energy after gaps in today's solar or consumption readings, with a clear mark for partial totals. Keep missing totals unknown in the flow view instead of showing zero.
+
 ## 0.142.0
 
 ### Minor Changes
