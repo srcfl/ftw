@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,6 +82,18 @@ func withoutWriteDeadline(w http.ResponseWriter) {
 
 func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 	withoutWriteDeadline(w)
+	// HTTP/1 detects a disconnected client only after the request body has
+	// been read. The CLI sends {}, although this route takes no options.
+	// Consume it before starting work so Ctrl-C cancels the backup context.
+	if _, err := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxJSONBody)); err != nil {
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": "could not read backup request body"})
+		return
+	}
 	dir, ok := s.backupConfig(w)
 	if !ok {
 		return
