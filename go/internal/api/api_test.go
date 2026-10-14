@@ -170,6 +170,60 @@ func TestHandlePostConfigDoesNotPersistEVPasswordOnInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestHandleStatusReportsAutomaticDriverRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fail.lua")
+	src := "function driver_init(config) error('start failed') end\nfunction driver_poll() return 60000 end\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	reg := drivers.NewRegistry(tel)
+	cfg := config.Driver{Name: "pixii", Lua: path}
+	now := time.Now()
+	reg.MaintainDrivers(context.Background(), now, []config.Driver{cfg}, time.Minute)
+
+	srv := New(&Deps{
+		Tel:      tel,
+		Ctrl:     &control.State{},
+		CtrlMu:   &sync.Mutex{},
+		CapMu:    &sync.RWMutex{},
+		CfgMu:    &sync.RWMutex{},
+		Cfg:      &config.Config{Drivers: []config.Driver{cfg}},
+		Registry: reg,
+	})
+	body := func() map[string]map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+		}
+		var resp struct {
+			Drivers map[string]map[string]any `json:"drivers"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.Drivers
+	}
+
+	pending := body()["pixii"]
+	if pending["not_running"] != true {
+		t.Fatalf("failed driver = %#v", pending)
+	}
+	next, _ := pending["next_auto_restart_ms"].(float64)
+	if int64(next) != now.Add(30*time.Second).UnixMilli() {
+		t.Fatalf("next retry = %v, want %d", pending["next_auto_restart_ms"], now.Add(30*time.Second).UnixMilli())
+	}
+
+	reg.MaintainDrivers(context.Background(), now.Add(30*time.Second), []config.Driver{cfg}, time.Minute)
+	retried := body()["pixii"]
+	if retried["auto_restarts"] != float64(1) || retried["auto_restart_reason"] != "start_failed" || retried["auto_restart_error"] == "" {
+		t.Fatalf("after retry = %#v", retried)
+	}
+}
+
 func TestHandleStatusIgnoresOfflineDERInLiveBalance(t *testing.T) {
 	tel := telemetry.NewStore()
 	ctrl := &control.State{SiteMeterDriver: "site"}
