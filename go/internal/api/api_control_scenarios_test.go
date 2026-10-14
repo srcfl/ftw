@@ -272,6 +272,7 @@ func TestControlStatusAnswersEveryReason(t *testing.T) {
 		"battery_full":         {"limited", "info"},
 		"battery_nearly_full":  {"limited", "info"},
 		"fuse_limit":           {"limited", "info"},
+		"load_balancer_limit":  {"limited", "info"},
 		"device_limit":         {"limited", "warning"},
 		"power_below_target":   {"not_following", "warning"},
 		"setpoint_changed":     {"not_following", "warning"},
@@ -365,4 +366,47 @@ func TestChangeOnlyChargerIgnoringNewTargetWarns(t *testing.T) {
 			t.Fatalf("ignored target read as %s/%s", last.Status, last.Reason)
 		}
 	})
+}
+
+// A tester's Easee load balancer cut an 11 kW charge to 8.3 kW while the
+// battery charged. The charger named its load balancer, so the shortfall is a
+// known limit, not an unexplained warning. Without that name it still warns,
+// and more power than asked is never explained by a limit.
+func TestLoadBalancedChargerReadsAsLimited(t *testing.T) {
+	for _, tc := range []struct {
+		name, extra              string
+		actualW                  float64
+		status, reason, severity string
+	}{
+		{"named", `,"current_limited_by":"load_balancer"`, 8300, "limited", "load_balancer_limit", "info"},
+		{"held at zero", `,"current_limited_by":"load_balancer"`, 0, "limited", "load_balancer_limit", "info"},
+		{"not named", ``, 8300, "not_following", "power_below_target", "warning"},
+		{"above target", `,"current_limited_by":"load_balancer"`, 13000, "not_following", "power_above_target", "warning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				tel := telemetry.NewStore()
+				tel.DriverHealthMut("easee")
+				srv := New(&Deps{Tel: tel})
+				changedAt := time.Now()
+				var last ControlFeedback
+				for sec := range 6 * 60 {
+					if sec%60 == 0 {
+						c := tel.BeginCommand("easee", []byte(`{"action":"ev_set_current","power_w":11000}`), time.Now())
+						tel.CompleteCommand(c, "accepted")
+					}
+					time.Sleep(time.Second)
+					if sec%10 == 0 {
+						data := fmt.Sprintf(`{"connected":true,"max_a":16,"control_power_observed_at":%q,"control_power_confirmed":true,"power_max_age_s":180%s}`,
+							changedAt.Format(time.RFC3339Nano), tc.extra)
+						tel.Update("easee", telemetry.DerEV, tc.actualW, nil, []byte(data))
+					}
+					last = srv.controlFeedback(time.Now())[0]
+				}
+				if last.Status != tc.status || last.Reason != tc.reason || last.Severity != tc.severity {
+					t.Fatalf("got %s/%s/%s, want %s/%s/%s", last.Status, last.Reason, last.Severity, tc.status, tc.reason, tc.severity)
+				}
+			})
+		})
+	}
 }
