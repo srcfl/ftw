@@ -805,6 +805,11 @@ func main() {
 	go func() {
 		defer close(watchdogDone)
 		reg.RunRestartWatchdog(watchdogCtx, func() ([]config.Driver, time.Duration) {
+			// Copy under the lock, then drop it. MaintainDrivers reads this
+			// again after it takes the driver's lifecycle gate and skips the
+			// restart when the driver is now disabled, observe-only, or its
+			// config has changed. Holding cfgMu across the restart would
+			// block a settings save for the whole reconnect.
 			cfgMu.RLock()
 			defer cfgMu.RUnlock()
 			timeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second

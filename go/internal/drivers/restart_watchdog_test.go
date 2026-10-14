@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -332,6 +333,92 @@ func TestRestartWatchdogLeavesMQTTWaitingForData(t *testing.T) {
 	got := r.MaintainDrivers(context.Background(), now, []config.Driver{cfg}, time.Minute)
 	if len(got) != 1 || got[0].Err != nil {
 		t.Fatalf("mqtt driver that had data and went stale was not restarted: %+v", got)
+	}
+}
+
+func TestRestartWatchdogRechecksConfigAfterLifecycleGate(t *testing.T) {
+	path := writeTestDriver(t, restartWatchSessionDriver)
+	enabled := config.Driver{Name: "battery", Lua: path, Config: map[string]any{"fail": "yes"}}
+	cases := []struct {
+		name      string
+		current   func(config.Driver) config.Driver
+		wantStart bool
+	}{
+		{
+			name:      "disabled",
+			current:   func(d config.Driver) config.Driver { d.Disabled = true; return d },
+			wantStart: false,
+		},
+		{
+			name:      "observe-only",
+			current:   func(d config.Driver) config.Driver { d.ObserveOnly = true; return d },
+			wantStart: false,
+		},
+		{
+			name: "config changed",
+			current: func(d config.Driver) config.Driver {
+				d.Config = map[string]any{"fail": "yes", "host": "10.0.0.9"}
+				return d
+			},
+			wantStart: false,
+		},
+		{
+			name:      "unchanged",
+			current:   func(d config.Driver) config.Driver { return d },
+			wantStart: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := telemetry.NewStore()
+			r := NewRegistry(tel)
+			t.Cleanup(r.ShutdownAll)
+			now := time.Now()
+			// A failed start is due 30s later. The second pass still carries
+			// the enabled snapshot; the installed config may have moved.
+			r.MaintainDrivers(context.Background(), now, []config.Driver{enabled}, time.Minute)
+
+			release := r.acquireLifecycle(enabled.Name)
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					release()
+				}
+			})
+			var looked atomic.Int32
+			done := make(chan []DriverMaintenance, 1)
+			go func() {
+				done <- r.maintainDrivers(context.Background(), now.Add(30*time.Second), []config.Driver{enabled}, time.Minute, func() []config.Driver {
+					looked.Add(1)
+					return []config.Driver{tc.current(enabled)}
+				})
+			}()
+			select {
+			case got := <-done:
+				t.Fatalf("watchdog finished while the lifecycle gate was held: %+v", got)
+			case <-time.After(200 * time.Millisecond):
+			}
+			if looked.Load() != 0 {
+				t.Fatal("config was revalidated before the lifecycle gate")
+			}
+			release()
+			released = true
+			var got []DriverMaintenance
+			select {
+			case got = <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("watchdog did not finish after the lifecycle gate was released")
+			}
+			if tc.wantStart {
+				if len(got) != 1 || got[0].Err == nil || got[0].Reason != "start_failed" {
+					t.Fatalf("unchanged config was not restarted: %+v", got)
+				}
+				return
+			}
+			if len(got) != 0 || len(r.Names()) != 0 || looked.Load() == 0 {
+				t.Fatalf("stale snapshot started the driver: events=%+v names=%v revalidated=%d", got, r.Names(), looked.Load())
+			}
+		})
 	}
 }
 

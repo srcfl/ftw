@@ -68,7 +68,10 @@ const (
 // RunRestartWatchdog restarts drivers that stay offline or stale, and
 // retries drivers that failed to start. It stops when ctx is cancelled.
 // snapshot must return the drivers that should be running (the same list
-// startup and reload use) and the site watchdog timeout.
+// startup and reload use) and the site watchdog timeout. It is called
+// again after each driver's lifecycle gate is held. That second read
+// must not take a lifecycle gate itself: the gate is already held, and
+// config reload takes the config lock before the gate.
 func (r *Registry) RunRestartWatchdog(ctx context.Context, snapshot func() ([]config.Driver, time.Duration)) {
 	if r == nil || snapshot == nil {
 		return
@@ -81,7 +84,10 @@ func (r *Registry) RunRestartWatchdog(ctx context.Context, snapshot func() ([]co
 		if timeout <= 0 {
 			timeout = 60 * time.Second
 		}
-		r.MaintainDrivers(ctx, time.Now(), drivers, timeout)
+		r.maintainDrivers(ctx, time.Now(), drivers, timeout, func() []config.Driver {
+			current, _ := snapshot()
+			return current
+		})
 	}
 	tick()
 	ticker := time.NewTicker(restartWatchInterval)
@@ -103,6 +109,15 @@ func (r *Registry) RunRestartWatchdog(ctx context.Context, snapshot func() ([]co
 // still retried. An MQTT, WebSocket, or TCP driver that is polling and has
 // never delivered data is waiting, not dead.
 func (r *Registry) MaintainDrivers(ctx context.Context, now time.Time, drivers []config.Driver, staleAfter time.Duration) []DriverMaintenance {
+	return r.maintainDrivers(ctx, now, drivers, staleAfter, nil)
+}
+
+// maintainDrivers is MaintainDrivers with a second look at the installed
+// config. current is read after the per-driver lifecycle gate is held, so a
+// reload that landed while this pass was between its snapshot and the gate
+// is visible. A nil current trusts the snapshot; the running watchdog always
+// passes one.
+func (r *Registry) maintainDrivers(ctx context.Context, now time.Time, drivers []config.Driver, staleAfter time.Duration, current func() []config.Driver) []DriverMaintenance {
 	if r == nil {
 		return nil
 	}
@@ -117,7 +132,7 @@ func (r *Registry) MaintainDrivers(ctx context.Context, now time.Time, drivers [
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		if ev, ok := r.maintainDriver(ctx, now, cfg, staleAfter); ok {
+		if ev, ok := r.maintainDriver(ctx, now, cfg, staleAfter, current); ok {
 			out = append(out, ev)
 		}
 	}
@@ -152,7 +167,7 @@ func (r *Registry) RestartStatus(name string) (DriverRestartStatus, bool) {
 	return out, true
 }
 
-func (r *Registry) maintainDriver(ctx context.Context, now time.Time, cfg config.Driver, staleAfter time.Duration) (DriverMaintenance, bool) {
+func (r *Registry) maintainDriver(ctx context.Context, now time.Time, cfg config.Driver, staleAfter time.Duration, current func() []config.Driver) (DriverMaintenance, bool) {
 	if cfg.Disabled || cfg.ObserveOnly || cfg.Name == "" {
 		r.deleteRestart(cfg.Name)
 		return DriverMaintenance{}, false
@@ -178,6 +193,15 @@ func (r *Registry) maintainDriver(ctx context.Context, now time.Time, cfg config
 		if err := ctx.Err(); err != nil {
 			return DriverMaintenance{}, false
 		}
+		// The snapshot was copied before this gate. A reload can have
+		// installed a disabled, observe-only, or edited driver in that
+		// window and already decided not to start it. Later passes leave a
+		// running disabled driver alone, so this start would stick.
+		var fresh bool
+		cfg, fresh = r.revalidatedDriver(cfg, current)
+		if !fresh {
+			return DriverMaintenance{}, false
+		}
 		if !r.restartDue(cfg.Name, h, now, staleAfter, live) {
 			return DriverMaintenance{}, false
 		}
@@ -197,6 +221,34 @@ func (r *Registry) maintainDriver(ctx context.Context, now time.Time, cfg config
 	default:
 		return DriverMaintenance{}, false
 	}
+}
+
+// revalidatedDriver compares the snapshot with the config installed now.
+// The caller holds the driver's lifecycle gate. A nil current means the
+// caller has no newer view and the snapshot stands. Otherwise a driver
+// that is gone, disabled, observe-only, or edited since the snapshot is
+// left for reload: this pass does not start the copy it captured earlier.
+func (r *Registry) revalidatedDriver(snapshot config.Driver, current func() []config.Driver) (config.Driver, bool) {
+	if current == nil {
+		return snapshot, true
+	}
+	live, ok := findDriver(current(), snapshot.Name)
+	if !ok || live.Disabled || live.ObserveOnly {
+		r.deleteRestart(snapshot.Name)
+		reason := "removed"
+		if ok && live.Disabled {
+			reason = "disabled"
+		} else if ok && live.ObserveOnly {
+			reason = "observe_only"
+		}
+		slog.Info("automatic driver restart skipped", "name", snapshot.Name, "reason", reason)
+		return config.Driver{}, false
+	}
+	if !sameDriverConfig(snapshot, live) {
+		slog.Info("automatic driver restart skipped", "name", snapshot.Name, "reason", "config_changed")
+		return config.Driver{}, false
+	}
+	return live, true
 }
 
 // restartLocked replaces a running driver, or starts one that is not
