@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.144.0
+
+### Minor Changes
+
+- f024251: The box enforces agent access (`docs/agents.md`): an owner can let an assistant, Sourceful support for one ticket or the release check reach the box through FTW Cloud's tunnel, never the relay. Each grant has scopes, an op allowlist, caps on hold length, power and rate, and a wall-clock expiry that fails closed without NTP; revoke and expiry bite at the next call. Holds end by themselves; durable changes wait as requests until an owner confirms them with a phone's approval key or on the box page with the house password. The box keeps an audit log of who did what, serves log excerpts and configuration redacted on the box, and pushes `agent.added` and `agent.request` to owners.
+- f5cdb92: A phone can reach its box through FTW Cloud, with the relay unreachable. The box links to `cloud.ftw.energy` when it first shows a QR pairing code or has a paired phone, and carries each phone's own Noise session (`ftw.session.v1`) as `tun {dev, sid, d}` on that link. FTW Cloud cannot read or forge `d`; the box admits a session by the key its handshake proves, exactly as over the relay, and drops one the service put under another device. A new phone can pair through FTW Cloud: while a QR code is shown, the roster lists the code's hash, never the code. The readable copy stays a separate grant: with it off the box sends only its roster and the tunnel, and turning it off now deletes the copy at the service while the link and the home id stay. The link ends, and `cloud.key` with it, when no phone may use it and no code is shown. The tunnel has its own queues and a 250 MB a day budget apart from the readable copy's 20 MB: a command and its answer go first, and bulk is paced under FTW Cloud's limits. Each device now holds one session across the relay and FTW Cloud, in place of four places shared by all, and may open at most 12 through FTW Cloud a minute. `GET /api/cloud` shows `link`, `tunBytesLast24h`, `tunBudgetBytes` and `tunDropped`. For every linked home, FTW Cloud sees a stable home id, the box's address and when traffic goes. The relay keeps working as before.
+
+### Patch Changes
+
+- bf5bf50: The registry names agents: an assistant, Sourceful support for one ticket and the release check, with their roles, scopes, the scope that opens each command to an agent, their refusals and two push kinds. `docs/agents.md` specifies how the box will enforce them; this release only names them, and no pairing code or role change can hand an agent's role to a phone.
+- 11a7021: The box follows FTW Cloud to the instance that holds its home. When the service closes the uplink with 4421, the box dials the host named in the close reason once, only if it is `cloud.ftw.energy` or one label under it, and keeps that host with its link so a restart goes there first. It goes back to `cloud.ftw.energy` after a second redirect in a row, or after three failed dials over at least 30 s, so a shard's restart does not send it away. When the service closes with 4503 before a deploy, the box redials at a random moment within the spread the service names, at least 1 s, instead of all boxes coming back within half a second; a 4503 before `hello_ok` counts as a failure and grows the backoff. The box lists `shard` in `hello.caps`. The service still proves itself with the TLS certificate and the service key the box was built with, so a redirect grants nothing.
+- f5cdb92: A box whose FTW Cloud link carries the phones' sessions says so in `hello_ok.caps` as `cloud.tun`, a new registry capability, so a phone uses that path only when the box takes it. The registry also names the carrier state `tunnel` for a session that FTW Cloud carries.
+- c3a4c0a: Update the compiled energy planner so a legal future charging step remains available when choosing cheaper hours. Keep physical power limits, charger pulses and departure goals.
+- 69c4f31: Keep price planning when a load forecast cannot fit the site. Retry with the point forecast and then the configured load prior, keeping hardware limits, current measurements and departure goals. Retain the rejected inputs for support and report when the plan uses a simpler forecast.
+- 69c4f31: Keep a validated point plan when optional forecast caution fails, shortens the plan or worsens a car's departure goal. Try the point forecast before a load prior in Core fallback, and keep raw rejected risk inputs for support.
+- 6b7c245: Update the bundled Pixii drivers. Fresh negative PV totals now report zero
+  generation instead of leaving solar stale or missing after sunset. The battery
+  driver also recovers when Pixii starts after FTW or returns after an outage.
+- 6a40212: Push the plan to every streaming phone the moment the box replans, with each charger's windows, plug state and shortfall on it. A car plugged in now shows its new plan in the app without the app asking again. Viewers, which may not read the plan, get nothing.
+- 69c4f31: Use available prices in reserve charging plans. Move EV charging to cheaper legal slots while retaining the same energy, departure time, battery trajectory and site limits.
+- 9c8436b: Compare delayed car charge readings by measurement time. A newer car reading can now replace an older one even when both arrive late. Keep newer manual corrections and count energy delivered since the measurement once. Keep the measurement time when restart or trimmed history requires using the raw reading.
+
 ## 0.143.1
 
 ### Patch Changes
