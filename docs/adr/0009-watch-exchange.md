@@ -22,6 +22,9 @@
 - Builds on: [ADR 0006](0006-app-uplink.md), the relay as the only path that
   carries commands, and [ADR 0008](0008-ftw-cloud.md), FTW Cloud, which still
   never controls.
+- Revisited by: [ADR 0010](0010-cloud-entry.md), proposed. The watch's
+  exchange moves onto the cloud uplink before the relay is retired. The
+  one-shot read is already at FTW Cloud.
 
 ## Context
 

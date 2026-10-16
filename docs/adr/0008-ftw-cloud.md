@@ -6,6 +6,9 @@
   the recommendation, taken as the working choice until he answers it.
 - Revisits: [ADR 0006](0006-app-uplink.md), which made the relay the only
   remote path. That still holds for homes that do not turn FTW Cloud on.
+- Revisited by: [ADR 0010](0010-cloud-entry.md), proposed, which carries
+  command frames on this connection. The cloud forwards them and still
+  cannot read them.
 - Turns away from: [#1323](https://github.com/srcfl/ftw/issues/1323), which
   asks that no feature need a Sourceful service.
 - Wire format: the normative [FTW Cloud protocol](../protocol-cloud.md).
