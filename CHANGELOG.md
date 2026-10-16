@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.145.1
+
+### Patch Changes
+
+- d0e0144: FTW Cloud's copy carries each car's level and goal as the `car` class, by an opaque id and with no name, VIN or identifier, when it changes and in full every 15 minutes. A charger's level and goal fields in the copy now read from its session's car, so phones that know cars and phones that know only chargers see the same numbers.
+- 7fb84d6: FTW Cloud tells every owner's phone when someone gains access to the box, asks for a change, is about to lose access, can now approve access, or pairs as an owner, with the readable copy on or off. The box's `notice` names the client on `agent.added` only while the copy is on and carries events, and these kinds no longer also go to FTW Cloud as events, so an owner gets one alert and a viewer none. The `agent.added` push now says access was given, not who gave it.
+
 ## 0.145.0
 
 ### Minor Changes
