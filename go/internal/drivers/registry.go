@@ -118,6 +118,11 @@ type Registry struct {
 	lifecycleHook    func(name string)
 	lifecycleMu      sync.Mutex
 	lifecycleGates   map[string]*lifecycleGate
+
+	// restartMu guards the automatic-restart backoff. It is never held
+	// while a driver is started or stopped.
+	restartMu sync.Mutex
+	restarts  map[string]*driverRestartState
 }
 
 // lifecycleGate serializes every lifecycle transition for one driver name.

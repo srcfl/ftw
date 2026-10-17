@@ -760,6 +760,8 @@ func main() {
 			continue
 		}
 		if err := reg.Add(ctx, d); err != nil {
+			// The restart watchdog retries this start. A failed boot is not
+			// terminal.
 			slog.Warn("failed to spawn driver", "name", d.Name, "err", err)
 		}
 	}
@@ -804,6 +806,35 @@ func main() {
 	controlRev := &control.Revision{}
 	capMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
+	// Restart a driver that stays offline, or that never finished starting.
+	// The control-loop watchdog still hands a stale driver its default mode;
+	// this one replaces the process when that is not enough. Disabled and
+	// observe-only drivers are left alone, and a cloud login is not repeated
+	// just because the stream went quiet. Stop it before ShutdownAll, which
+	// was deferred above: a cancelled watchdog must not start a driver the
+	// shutdown has already removed.
+	watchdogCtx, stopRestartWatchdog := context.WithCancel(ctx)
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		reg.RunRestartWatchdog(watchdogCtx, func() ([]config.Driver, time.Duration) {
+			// Copy under the lock, then drop it. MaintainDrivers reads this
+			// again after it takes the driver's lifecycle gate and skips the
+			// restart when the driver is now disabled, observe-only, or its
+			// config has changed. Holding cfgMu across the restart would
+			// block a settings save for the whole reconnect.
+			cfgMu.RLock()
+			defer cfgMu.RUnlock()
+			timeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			return config.WithBatterySoCBounds(cfg.ModbusControlDrivers(), cfg.Batteries), timeout
+		})
+	}()
+	// Registered after ShutdownAll, so this runs first and the watchdog
+	// has left the lifecycle gates before drivers are removed.
+	defer func() {
+		stopRestartWatchdog()
+		<-watchdogDone
+	}()
 
 	// Pre-declare services that the hot-reload Applier needs to touch.
 	// The Applier closure captures these by reference; they're assigned

@@ -747,6 +747,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ---- /api/status ----
 
+// driverAutoRestart is the watchdog's view of one driver: how many times
+// core has restarted it, why, and when the next try is due. Empty when the
+// watchdog has nothing to say.
+func (s *Server) driverAutoRestart(name string) map[string]any {
+	if s == nil || s.deps == nil || s.deps.Registry == nil || name == "" {
+		return nil
+	}
+	st, ok := s.deps.Registry.RestartStatus(name)
+	if !ok {
+		return nil
+	}
+	out := map[string]any{}
+	if st.Restarts > 0 {
+		out["auto_restarts"] = st.Restarts
+	}
+	if st.LastReason != "" {
+		out["auto_restart_reason"] = st.LastReason
+	}
+	if st.LastError != "" {
+		out["auto_restart_error"] = st.LastError
+	}
+	if !st.NextAttempt.IsZero() {
+		out["next_auto_restart_ms"] = st.NextAttempt.UnixMilli()
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func statusDriverOnline(tel *telemetry.Store, name string) bool {
 	if tel == nil || name == "" {
 		return false
@@ -1102,6 +1132,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		for k, v := range s.driverAutoRestart(name) {
+			d[k] = v
+		}
 		drivers[name] = d
 	}
 	// Merge config drivers that aren't in the registry so the UI can
@@ -1114,19 +1147,22 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if _, ok := drivers[dc.Name]; ok {
 			continue
 		}
+		// Configured but not running — spawn probably failed. Show it as
+		// offline so the user sees it and can restart it.
+		row := map[string]any{
+			"status":      "offline",
+			"not_running": true,
+		}
 		if dc.Disabled {
-			drivers[dc.Name] = map[string]any{
+			row = map[string]any{
 				"status":   "disabled",
 				"disabled": true,
 			}
-		} else {
-			// Configured but not running — spawn probably failed. Show
-			// as offline so the user sees it and can Restart.
-			drivers[dc.Name] = map[string]any{
-				"status":      "offline",
-				"not_running": true,
-			}
 		}
+		for k, v := range s.driverAutoRestart(dc.Name) {
+			row[k] = v
+		}
+		drivers[dc.Name] = row
 	}
 	s.deps.CfgMu.RUnlock()
 
