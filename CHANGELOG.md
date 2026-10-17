@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.151.0
+
+### Minor Changes
+
+- 16fbd58: Let the direct private LAN page accept Cloud terms or statistics without requiring a house password to be set first. When password protection is on, saving the choice still requires login. Show a shorter consent card, full sharing details, a clear saved message and errors that allow a retry.
+
+### Patch Changes
+
+- 8f937e7: The box now takes the app's next API request as soon as the previous answer has ended. Before, it freed its one request slot only after it had sent the answer's last frame. An app that asked again at once could be told the box was busy and then wait out a backoff before the view filled in.
+- 6308d04: With two or more managed chargers, unplugging one car during an overage of the import ceiling no longer holds back battery relief. Its offer left the pool, but Core did not cut it, so the battery no longer waits for it. A cut Core has sent to a car that stays plugged still counts, so its landing does not swing the site into export.
+
 ## 0.150.0
 
 ### Minor Changes
