@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.149.2
+
+### Patch Changes
+
+- 61e2563: When an overage of the import ceiling makes Core cut or stop the car, the battery no longer discharges for the same watts. Before, both answered the overage, and when the car's cut reached the meter 5–15 seconds later the battery was still discharging, so the site exported for several seconds. The hour's budget now waits for a cut Core sends during that overage, for at most 20 seconds. The battery covers any part the cut does not remove, a new overage after the cut has shown, and all of it if the car has not followed in time. The fuse still gets battery relief on every reading.
+- f8f5e43: The EV's hard limit now treats the main fuse as heat, as a fuse or breaker does. A short house spike, such as a heat pump or an oven starting, no longer cuts the charge. A phase above the fuse less 1 A cuts it only once that phase's current, weighted over about the last minute, passes the same limit, and at once above 1.2 times the fuse. The charge rises again only once that weighted current has room too, so repeated peaks cut it once instead of every minute. Where the meter reports phase currents, they replace total import as the fuse check, so a short spike on all three phases no longer cuts either. A tariff import ceiling still applies.
+- e40ff96: Switching the peak import limit on now applies the last limit the box had on, not a value one browser kept from earlier. The Grid dialog shows that value while the limit is off, and `/api/status` serves it as `peak_import_ceiling_last_w`. If the box has never had a limit on, switching on applies nothing until you pick a value and press Save, and Save now looks off while there is nothing to apply.
+- 78a67b4: Keep the statistics and Cloud terms prompt readable by making it span the full Overview width.
+
 ## 0.149.1
 
 ### Patch Changes
