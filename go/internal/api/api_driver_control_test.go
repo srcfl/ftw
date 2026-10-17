@@ -142,7 +142,8 @@ function driver_command(action, power_w, cmd)
     end
     if action == "set_offset_fail" then
         applied = tonumber(cmd.value)
-        host.sleep(100)
+        host.emit_metric("command_started", 1, "n")
+        host.sleep(5000)
         return false
     end
     return false
@@ -708,13 +709,27 @@ func TestDriverControlReplacingHoldCancelsTheOldTimer(t *testing.T) {
 func TestDriverControlAmbiguousCommandRestoresDefault(t *testing.T) {
 	srv, tel := controlServerWithLua(t, controlSafetyProbeLua)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodPost, "/api/drivers/heat/control", strings.NewReader(
 		`{"control":"set_offset_fail","value":2,"duration_s":600}`)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	posted := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		posted <- rec
+	}()
+	// Cancellation is ambiguous only after the command has started.
+	// A short deadline can expire before dispatch on a busy race-test runner.
+	waitMetric(t, tel, "heat", "command_started", 1)
+	cancel()
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-posted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("command did not return after cancellation")
+	}
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("ambiguous POST = %d, body %s", rec.Code, rec.Body.String())
 	}
