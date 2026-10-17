@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -125,17 +126,25 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": "component update or rollback already in progress"})
 		return
 	}
+	// The caller may be gone when this ends; the journal keeps the outcome.
+	started := time.Now()
+	slog.Info("full backup started", "dir", dir)
+	s.deps.State.ReportBackupProgress(state.BackupProgress{})
 	info, err := backup.Create(r.Context(), backup.CreateOptions{
 		ConfigPath: s.deps.ConfigPath, State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
 		OutputDir: dir, Components: s.backupComponentInventory(r.Context()),
 		Maintenance: s.deps.DataMaintenanceMu,
 		Progress:    s.deps.State.ReportBackupProgress,
 	})
+	elapsed := time.Since(started).Round(time.Second)
 	if err != nil {
-		s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "failed", Error: err.Error()})
+		last := s.deps.State.BackupProgress()
+		slog.Error("full backup failed", "err", err, "phase", last.Phase, "table", last.Table, "rows_done", last.RowsDone, "elapsed", elapsed)
+		s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "failed", Table: last.Table, RowsDone: last.RowsDone, Error: err.Error()})
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	slog.Info("full backup created", "id", info.ID, "size_bytes", info.SizeBytes, "elapsed", elapsed)
 	s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "complete", CompletedBytes: info.SizeBytes, TotalBytes: info.SizeBytes})
 	warning := ""
 	if err := writeVerification(info.Path, info); err != nil {

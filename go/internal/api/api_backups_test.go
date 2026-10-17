@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,5 +128,58 @@ func TestBackupIDRejectsTraversal(t *testing.T) {
 		if validBackupID(id) {
 			t.Errorf("accepted unsafe backup id %q", id)
 		}
+	}
+}
+
+// The home box's backup on 16 October 2026 failed after its caller had left
+// and logged nothing. The journal and GET /api/backups must keep the reason.
+func TestFailedBackupLogsAndReportsItsReason(t *testing.T) {
+	dataDir := t.TempDir()
+	statePath := filepath.Join(dataDir, "state.db")
+	st, err := state.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	backupDir := filepath.Join(dataDir, "backups")
+	srv := New(&Deps{State: st, StatePath: statePath, DataDir: dataDir, BackupDir: backupDir, Version: "v1.3.1"})
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	create := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/backups", nil).WithContext(ctx))
+	if create.Code != http.StatusInternalServerError || !strings.Contains(create.Body.String(), "context canceled") {
+		t.Fatalf("create = %d %s", create.Code, create.Body.String())
+	}
+	if !strings.Contains(logs.String(), `msg="full backup failed" err="context canceled"`) {
+		t.Fatalf("journal lacks the reason: %s", logs.String())
+	}
+	list := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/backups", nil))
+	var listed struct {
+		Progress state.BackupProgress `json:"progress"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed.Progress.Phase != "failed" || listed.Progress.Error != "context canceled" {
+		t.Fatalf("progress = %+v", listed.Progress)
+	}
+
+	// A run that fails before its first phase must not inherit the last
+	// run's table.
+	st.ReportBackupProgress(state.BackupProgress{Phase: state.BackupPhaseCopying, Table: "ts_buckets", RowsDone: 4_700_000})
+	notDir := filepath.Join(dataDir, "backups-file")
+	if err := os.WriteFile(notDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv = New(&Deps{State: st, StatePath: statePath, DataDir: dataDir, BackupDir: notDir, Version: "v1.3.1"})
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/backups", nil))
+	if p := st.BackupProgress(); p.Phase != "failed" || p.Table != "" || p.RowsDone != 0 || !strings.Contains(p.Error, "create output dir") {
+		t.Fatalf("early failure = %+v", p)
 	}
 }

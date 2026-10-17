@@ -29,6 +29,7 @@ type backupProgress struct {
 	TotalBytes     int64  `json:"total_bytes"`
 	Table          string `json:"table"`
 	RowsDone       int64  `json:"rows_done"`
+	Error          string `json:"error"`
 }
 
 type backupList struct {
@@ -86,6 +87,10 @@ func runBackup(args []string, out io.Writer, e env) error {
 		fmt.Fprintf(out, "Backups:  %s\n", line)
 		if len(before.Backups) > 0 && before.FreeBytes > 0 && before.FreeBytes < before.Backups[0].SizeBytes {
 			fmt.Fprintf(out, "Warning:  less space is free than the last backup took (%s)\n", formatBytes(before.Backups[0].SizeBytes))
+		}
+		// An earlier run may have ended after its caller left.
+		if before.Progress.Phase == "failed" && before.Progress.Error != "" {
+			fmt.Fprintf(out, "Last try: failed: %s\n", before.Progress.Error)
 		}
 	}
 	fmt.Fprintln(out, "Making a full backup. Core keeps running; Ctrl-C stops the backup.")

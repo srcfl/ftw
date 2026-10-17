@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,10 +13,19 @@ import (
 	"time"
 )
 
-const liveBackupTimeout = 2 * time.Hour
+// liveBackupTimeout bounds a live Core backup. A test shortens it.
+var liveBackupTimeout = 2 * time.Hour
+
+// errLiveBackupLimit names the limit in a failed backup's reason. A bare
+// "context deadline exceeded" left the home box's failure unexplained.
+var errLiveBackupLimit = errors.New("live backup reached its time limit")
+
 const backupScratchHeadroom = 64 << 20
 
 var backupDiskAvail = diskAvail
+
+// backupShmDir is the tmpfs for raw scratch copies. A test moves it.
+var backupShmDir = "/dev/shm"
 
 // OfflineBackup reports whether this store is the read-only helper used by
 // ftw-backup. Live Core backups keep their 100 ms yield; the helper does not.
@@ -31,7 +41,7 @@ func (s *Store) backupWorkContextParent(parent context.Context) (context.Context
 	if s.OfflineBackup() {
 		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(parent, liveBackupTimeout)
+	return context.WithTimeoutCause(parent, liveBackupTimeout, fmt.Errorf("%w of %s", errLiveBackupLimit, liveBackupTimeout))
 }
 
 func (s *Store) backupCopyYield(ctx context.Context) func() error {
@@ -133,8 +143,9 @@ func BackupArchiveScratch(sourceBytes, extraBytes int64) int64 {
 // filesystem and is what gets synced.
 func backupScratchFile(dstPath string, sourceBytes int64) (path string, cleanup func()) {
 	need := sourceBytes + backupScratchHeadroom
-	if avail, err := diskAvail("/dev/shm"); err == nil && avail >= need {
-		f, err := os.CreateTemp("/dev/shm", "ftw-backup-*.raw")
+	avail, err := diskAvail(backupShmDir)
+	if err == nil && avail >= need {
+		f, err := os.CreateTemp(backupShmDir, "ftw-backup-*.raw")
 		if err == nil {
 			name := f.Name()
 			_ = f.Close()
@@ -142,8 +153,23 @@ func backupScratchFile(dstPath string, sourceBytes int64) (path string, cleanup 
 			return name, func() { _ = os.Remove(name) }
 		}
 	}
+	if err == nil && avail < need {
+		// A backup cut short by a restart leaves its scratch here until
+		// reboot; on the home box that sent the next copy to the SD card.
+		slog.Warn("backup scratch does not fit in /dev/shm; copying on the data disk is slower and delays history writes",
+			"need_bytes", need, "free_bytes", avail, "backup_scratch_in_shm_bytes", shmBackupScratchBytes())
+	}
 	path = dstPath + ".raw.tmp"
 	return path, func() { _ = os.Remove(path) }
+}
+
+func shmBackupScratchBytes() int64 {
+	names, _ := filepath.Glob(filepath.Join(backupShmDir, "ftw-backup-*.raw*"))
+	var n int64
+	for _, name := range names {
+		n += fileSizeOrZero(name)
+	}
+	return n
 }
 
 // EnsureDiskSpace refuses to start a backup when dir cannot hold needed bytes.
