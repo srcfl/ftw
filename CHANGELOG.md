@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.150.0
+
+### Minor Changes
+
+- 75a8b2c: Limit project statistics to 48 hours under new Cloud and local policies. Earlier choices do not accept the new policy. Collection still waits for the signed privacy review.
+
 ## 0.149.2
 
 ### Patch Changes
