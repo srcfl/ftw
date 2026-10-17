@@ -42,15 +42,19 @@ func (s *Store) archiveTransaction(ctx context.Context, prepare, write func(cont
 	}
 }
 
-func (s *Store) tryArchiveBatch(parent context.Context, prepare, write func(context.Context, *sql.Tx) error) error {
+func (s *Store) tryArchiveBatch(parent context.Context, prepare, write func(context.Context, *sql.Tx) error) (err error) {
+	timing := newHistoryWriteTiming("connection")
 	conn, err := s.history.Conn(parent)
 	if err != nil {
-		return err
+		return timing.failure(err)
 	}
 	var busyMS int
 	var tx *sql.Tx
 	var restoreBusy, viewLocked, writerLocked bool
 	defer func() {
+		// Capture the operation before rollback, busy-timeout restoration and
+		// connection close. Those cleanup steps keep their existing order.
+		err = timing.failure(err)
 		if tx != nil {
 			_ = tx.Rollback()
 		}
@@ -72,6 +76,7 @@ func (s *Store) tryArchiveBatch(parent context.Context, prepare, write func(cont
 			s.archiveViewMu.Unlock()
 		}
 	}()
+	timing.next("busy_timeout")
 	if err := conn.QueryRowContext(parent, `PRAGMA busy_timeout`).Scan(&busyMS); err != nil {
 		return err
 	}
@@ -81,11 +86,13 @@ func (s *Store) tryArchiveBatch(parent context.Context, prepare, write func(cont
 	}
 	txCtx, cancelTx := context.WithCancel(parent)
 	defer cancelTx()
+	timing.next("begin")
 	tx, err = conn.BeginTx(txCtx, nil)
 	if err != nil {
 		return err
 	}
 	if prepare != nil {
+		timing.next("prepare")
 		readCtx, cancel := context.WithTimeout(parent, 30*time.Second)
 		err := prepare(readCtx, tx)
 		cancel()
@@ -101,17 +108,21 @@ func (s *Store) tryArchiveBatch(parent context.Context, prepare, write func(cont
 	defer stopDeadline()
 	// Readers may postpone archive writes, but must never make an archive
 	// operation wait while holding the live writer mutex.
+	timing.next("archive_view_lock")
 	if err := lockContext(ctx, s.archiveViewMu.TryLock); err != nil {
 		return err
 	}
 	viewLocked = true
+	timing.next("writer_lock")
 	if err := lockContext(ctx, s.historyWriteMu.TryLock); err != nil {
 		return err
 	}
 	writerLocked = true
+	timing.next("write")
 	if err := write(ctx, tx); err != nil {
 		return err
 	}
+	timing.next("commit")
 	err = tx.Commit()
 	if err != nil && ctx.Err() != nil {
 		return ctx.Err()

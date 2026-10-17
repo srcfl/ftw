@@ -15,6 +15,8 @@ type historyWriteTiming struct {
 	phases  [12]struct {
 		name    string
 		elapsed time.Duration
+		max     time.Duration
+		steps   int
 	}
 	n int
 }
@@ -34,11 +36,14 @@ func (t *historyWriteTiming) add(phase string, elapsed time.Duration) {
 	for i := 0; i < t.n; i++ {
 		if t.phases[i].name == phase {
 			t.phases[i].elapsed += elapsed
+			t.phases[i].max = max(t.phases[i].max, elapsed)
+			t.phases[i].steps++
 			return
 		}
 	}
 	if t.n < len(t.phases) {
 		t.phases[t.n].name, t.phases[t.n].elapsed = phase, elapsed
+		t.phases[t.n].max, t.phases[t.n].steps = elapsed, 1
 		t.n++
 	}
 }
@@ -51,7 +56,8 @@ func (t *historyWriteTiming) failure(err error) error {
 	t.add(t.phase, now.Sub(t.step))
 	var details strings.Builder
 	for i := 0; i < t.n; i++ {
-		fmt.Fprintf(&details, " %s_ms=%d", t.phases[i].name, t.phases[i].elapsed.Milliseconds())
+		p := &t.phases[i]
+		fmt.Fprintf(&details, " %s_ms=%d %s_max_ms=%d %s_steps=%d", p.name, p.elapsed.Milliseconds(), p.name, p.max.Milliseconds(), p.name, p.steps)
 	}
 	return fmt.Errorf("%w [elapsed_ms=%d phase=%s step_ms=%d%s]", err, now.Sub(t.started).Milliseconds(), t.phase, now.Sub(t.step).Milliseconds(), details.String())
 }
