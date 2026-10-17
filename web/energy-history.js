@@ -82,6 +82,10 @@
     if (details && details.open) loadLedger();
   }
 
+  function recordingGaps(days) {
+    return days.some(function (day) { return day.period_ms > 0 && day.coverage_ms != null && day.coverage_ms < day.period_ms - 120000; });
+  }
+
   function renderSummary(days) {
     var summary = document.getElementById('energy-history-summary');
     if (!summary) return;
@@ -94,7 +98,7 @@
     summary.innerHTML = cards.map(function (card) {
       return '<article><span>' + card.label + '</span><strong>' +
         formatKWh(sum(days, card.key)) + '</strong><small>' +
-        (days.some(function (day) { return day[card.key] == null; }) ? 'Incomplete period · known days only' : card.note) + '</small></article>';
+        (days.some(function (day) { return day[card.key] == null; }) ? 'Incomplete period · known days only' : recordingGaps(days) ? 'Recorded periods only' : card.key === 'load_wh' && days.some(function (day) { return day.history_quality === 'estimated'; }) ? 'Includes estimated home use' : card.note) + '</small></article>';
     }).join('');
   }
 
@@ -120,7 +124,9 @@
       return !best || Number(day.load_wh || 0) > Number(best.load_wh || 0) ? day : best;
     }, null);
     var comparison = totalLoad > 0 ? Math.round(totalPV / totalLoad * 100) : 0;
-    target.innerHTML = '<h3>What stands out</h3><ul>' +
+    target.innerHTML = '<h3>What stands out</h3>' +
+      (recordingGaps(days) ? '<p>Some periods were not recorded. Totals cover recorded periods only.</p>' : '') +
+      (days.some(function (day) { return day.history_quality === 'estimated'; }) ? '<p>Home use includes estimates for brief measurement gaps or imbalances.</p>' : '') + '<ul>' +
       '<li>Solar made <strong>' + comparison + '%</strong> as much energy as the home used.</li>' +
       '<li>Best solar day was <strong>' + escapeHtml(formatDay(bestSolar.day)) + '</strong> at ' +
         formatKWh(bestSolar.pv_wh) + '.</li>' +
@@ -147,7 +153,7 @@
     if (legend) {
       legend.innerHTML = dailySeries.map(function (series) {
         return '<span><i style="background:' + series.color + '"></i>' + series.label + '</span>';
-      }).join('') + (days.some(function (day) { return dailySeries.some(function (series) { return day[series.key] == null; }); }) ? '<span>? Unknown</span>' : '');
+      }).join('') + (days.some(function (day) { return day.history_quality === 'estimated'; }) ? '<span>Home use includes estimates</span>' : '') + (days.some(function (day) { return dailySeries.some(function (series) { return day[series.key] == null; }); }) ? '<span>? Unknown</span>' : '');
     }
     if (!days.length) {
       ctx.fillStyle = C.muted;

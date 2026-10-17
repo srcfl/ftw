@@ -80,7 +80,7 @@ test('raw energy rows load only when opened, flag rejected data and page locally
     provenance: index === 0 ? 'implausible_energy' : 'counter',
   }));
   const days = [{
-    day: '2026-07-24', import_wh: 4000, export_wh: 1000,
+    history_quality: 'estimated', day: '2026-07-24', import_wh: 4000, export_wh: 1000,
     pv_wh: 9000, load_wh: 12000, bat_charged_wh: 2000, bat_discharged_wh: 1500,
   }];
   let dailyRequests = 0;
@@ -132,8 +132,19 @@ test('raw energy rows load only when opened, flag rejected data and page locally
   assert.equal(elements.get('energy-history-prev').disabled, true);
   assert.equal(elements.get('energy-history-next').disabled, false);
 
+  assert.match(elements.get('energy-history-summary').innerHTML, /Includes estimated home use/);
+  assert.match(elements.get('energy-history-insight').innerHTML, /Home use includes estimates/);
+  assert.match(elements.get('energy-history-legend').innerHTML, /Home use includes estimates/);
   elements.get('energy-history-next').click();
   assert.equal(elements.get('energy-history-page').textContent, 'Page 2 of 3');
   assert.equal((elements.get('energy-history-rows').innerHTML.match(/<tr>/g) || []).length, 50);
   assert.equal(ledgerRequests, 1);
+  days[0].coverage_ms = 7_200_000;
+  days[0].period_ms = 10_800_000;
+  details.open = false;
+  window.ftwEnergyHistoryLoad();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(elements.get('energy-history-summary').innerHTML, /Recorded periods only/);
+  assert.match(elements.get('energy-history-insight').innerHTML, /Some periods were not recorded/);
 });

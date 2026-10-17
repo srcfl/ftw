@@ -19,6 +19,7 @@ const (
 	MissingEV
 	MissingV2X
 	BalanceMismatch
+	EstimatedLoad
 )
 const MissingPower = MissingGrid | MissingPV | MissingBattery | MissingLoad | MissingEV | MissingV2X
 const historyQualitySchema = `CREATE TABLE IF NOT EXISTS history_quality(kind TEXT NOT NULL,start_ms INTEGER NOT NULL,resolution_ms INTEGER NOT NULL,missing INTEGER NOT NULL,PRIMARY KEY(kind,start_ms,resolution_ms)) WITHOUT ROWID`
@@ -53,6 +54,9 @@ func (m HistoryMissing) Quality() string {
 	}
 	if m&MissingPower != 0 {
 		return "incomplete"
+	}
+	if m&EstimatedLoad != 0 {
+		return "estimated"
 	}
 	return "complete"
 }

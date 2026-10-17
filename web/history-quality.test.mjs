@@ -23,7 +23,7 @@ test('daily totals distinguish no measurements, measured zero and partial covera
 test('daily view renders unknown home use and a measured grid total',()=>{
  const els={};for(const id of ['energy-history-summary','energy-history-insight']) els[id]={innerHTML:''};
  const c={document:{getElementById:id=>els[id]||null},dailySeries:[{key:'load_wh'},{key:'pv_wh'},{key:'import_wh'},{key:'export_wh'}]};
- vm.createContext(c);vm.runInContext(fn(daily,'sum','formatDay')+fn(daily,'renderSummary','drawDailyChart'),c);
+ vm.createContext(c);vm.runInContext(fn(daily,'sum','formatDay')+fn(daily,'recordingGaps','drawDailyChart'),c);
  const days=[{day:'2026-10-12',load_wh:null,pv_wh:3000,import_wh:1200,export_wh:0,bat_charged_wh:null,bat_discharged_wh:null,history_quality:'incomplete'}];
  c.renderSummary(days);c.renderInsights(days);
  assert.match(els['energy-history-summary'].innerHTML,/Unknown/);

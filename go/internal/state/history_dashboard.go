@@ -84,6 +84,16 @@ func (s *Store) recordDashboardTx(ctx context.Context, tx *sql.Tx, p *HistoryPoi
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
+			var previousEligible int
+			if previousMissing != 0 {
+				err := tx.QueryRowContext(ctx, `SELECT value FROM history_partial_cursor WHERE key='residual_eligible'`).Scan(&previousEligible)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+			}
+			if err := addSiteIntervalEstimateTx(ctx, tx, previous, p, previousMissing, previousMissing == 0 || previousEligible == 1); err != nil {
+				return err
+			}
 			if err := addSiteIntervalTx(ctx, tx, previous, p, previousMissing); err != nil {
 				return err
 			}
@@ -93,6 +103,13 @@ func (s *Store) recordDashboardTx(ctx context.Context, tx *sql.Tx, p *HistoryPoi
 		}
 	}
 	if p.TsMs > previous {
+		eligible := 0
+		if _, ok := residualHouseholdW(p); ok {
+			eligible = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO history_partial_cursor VALUES('residual_eligible',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, eligible); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO history_partial_cursor VALUES('missing',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, p.Missing); err != nil {
 			return err
 		}
@@ -187,6 +204,8 @@ func siteEVWh(p *HistoryPoint, hours float64) float64 {
 }
 
 type siteEnergyRow struct {
+	estimateLoad                              float64
+	estimateCovered                           int64
 	missing                                   HistoryMissing
 	start, width, first, last, covered, n     int64
 	imp, exp, pv, charge, discharge, load, ev float64
@@ -198,14 +217,14 @@ type siteEnergyRow struct {
 func (s *Store) walkSiteEnergy(ctx context.Context, from, to int64, visit func(siteEnergyRow) error) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	rows, err := s.history.QueryContext(ctx, `WITH energy AS (SELECT *, 'energy' AS kind FROM history_site_energy UNION ALL SELECT *, 'partial_energy' AS kind FROM history_site_energy_partial) SELECT e.start_ms,e.resolution_ms,e.first_ms,e.last_ms,e.covered_ms,e.n,e.import_wh,e.export_wh,e.pv_wh,e.bat_charge_wh,e.bat_discharge_wh,e.load_wh,e.ev_wh,COALESCE(q.missing,0) FROM energy e LEFT JOIN history_quality q ON q.kind=e.kind AND q.start_ms=e.start_ms AND q.resolution_ms=e.resolution_ms WHERE e.start_ms>=? AND e.start_ms<? AND first_ms>=? AND last_ms<=? ORDER BY e.start_ms`, bucketStart(from, EnergyLedgerDailyBucketMS), to, from, to)
+	rows, err := s.history.QueryContext(ctx, `WITH energy AS (SELECT *, 'energy' AS kind FROM history_site_energy UNION ALL SELECT *, 'partial_energy' AS kind FROM history_site_energy_partial) SELECT e.start_ms,e.resolution_ms,e.first_ms,e.last_ms,e.covered_ms,e.n,e.import_wh,e.export_wh,e.pv_wh,e.bat_charge_wh,e.bat_discharge_wh,e.load_wh,e.ev_wh,COALESCE(q.missing,0),CASE WHEN e.kind='partial_energy' AND q.missing IN (136,40) THEN COALESCE((SELECT SUM(load_wh) FROM history_load_estimates x WHERE x.start_ms>=e.start_ms AND x.start_ms<e.start_ms+e.resolution_ms AND x.start_ms+x.resolution_ms<=e.start_ms+e.resolution_ms),0) ELSE 0 END,CASE WHEN e.kind='partial_energy' AND q.missing IN (136,40) THEN COALESCE((SELECT SUM(covered_ms) FROM history_load_estimates x WHERE x.start_ms>=e.start_ms AND x.start_ms<e.start_ms+e.resolution_ms AND x.start_ms+x.resolution_ms<=e.start_ms+e.resolution_ms),0) ELSE 0 END FROM energy e LEFT JOIN history_quality q ON q.kind=e.kind AND q.start_ms=e.start_ms AND q.resolution_ms=e.resolution_ms WHERE e.start_ms>=? AND e.start_ms<? AND first_ms>=? AND last_ms<=? ORDER BY e.start_ms`, bucketStart(from, EnergyLedgerDailyBucketMS), to, from, to)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r siteEnergyRow
-		if err := rows.Scan(&r.start, &r.width, &r.first, &r.last, &r.covered, &r.n, &r.imp, &r.exp, &r.pv, &r.charge, &r.discharge, &r.load, &r.ev, &r.missing); err != nil {
+		if err := rows.Scan(&r.start, &r.width, &r.first, &r.last, &r.covered, &r.n, &r.imp, &r.exp, &r.pv, &r.charge, &r.discharge, &r.load, &r.ev, &r.missing, &r.estimateLoad, &r.estimateCovered); err != nil {
 			return err
 		}
 		if err := visit(r); err != nil {
@@ -217,12 +236,24 @@ func (s *Store) walkSiteEnergy(ctx context.Context, from, to int64, visit func(s
 
 func (s *Store) aggregateDayEnergy(ctx context.Context, from, to int64) (DayEnergy, error) {
 	var out DayEnergy
+	var originalLoad float64
+	var originalMissing HistoryMissing
+	var estimatedMS, coveredMS int64
 	err := s.walkSiteEnergy(ctx, from, to, func(r siteEnergyRow) error {
 		out.ImportWh += r.imp
 		out.ExportWh += r.exp
 		out.PVWh += r.pv
 		out.BatChargedWh += r.charge
 		out.BatDischargedWh += r.discharge
+		originalLoad += r.load
+		originalMissing |= r.missing
+		coveredMS += r.covered
+		if r.missing == MissingLoad|BalanceMismatch || r.missing == MissingLoad|MissingEV {
+			if r.estimateCovered > 0 && r.estimateCovered == r.covered {
+				r.load, r.missing = r.estimateLoad, EstimatedLoad
+				estimatedMS += r.covered
+			}
+		}
 		out.LoadWh += r.load
 		out.Intervals += r.n
 		out.Missing |= r.missing
@@ -231,5 +262,9 @@ func (s *Store) aggregateDayEnergy(ctx context.Context, from, to int64) (DayEner
 		}
 		return nil
 	})
+	if out.LoadWh < 0 || (estimatedMS > 120000 && estimatedMS > coveredMS/20) {
+		out.LoadWh = originalLoad
+		out.Missing = originalMissing
+	}
 	return out, err
 }

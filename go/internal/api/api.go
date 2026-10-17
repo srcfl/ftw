@@ -2466,7 +2466,15 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 		if de.Intervals == 0 {
 			de.Missing |= state.MissingPower
 		}
+		periodEnd := min(now.UnixMilli(), dayStart.AddDate(0, 0, 1).UnixMilli())
+		coverage, err := s.deps.State.HistoryEnergyCoverage(r.Context(), dayStart.UnixMilli(), periodEnd)
+		if err != nil {
+			http.Error(w, "history coverage unavailable", http.StatusInternalServerError)
+			return
+		}
 		out = append(out, map[string]any{
+			"coverage_ms":       coverage,
+			"period_ms":         periodEnd - dayStart.UnixMilli(),
 			"history_quality":   de.Missing.Quality(),
 			"day":               dayKey,
 			"import_wh":         de.Missing.Value(state.MissingGrid, de.ImportWh),

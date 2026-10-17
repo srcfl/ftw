@@ -26,7 +26,7 @@ var historyTables = []string{
 }
 var sqliteHistoryBaseTables = append(append([]string{}, historyTables...), "ts_series_hour", "ts_archive_days", "ts_buckets", "ts_bucket_days", "ts_legacy_bucket_days", "ts_aggregate_hours", "ts_latest", "history_dashboard", "history_site_energy", "history_site_cursor")
 var historyQualityTables = []string{"history_quality", "history_daily_quality", "history_dashboard_partial", "history_site_energy_partial", "history_partial_cursor", "energy_daily_partial"}
-var sqliteHistoryTables = append(append([]string{}, sqliteHistoryBaseTables...), historyQualityTables...)
+var sqliteHistoryTables = append(append(append([]string{}, sqliteHistoryBaseTables...), historyQualityTables...), "history_load_estimates")
 
 func ensureHistorySchema(exec func(string) error) error {
 	for _, stmt := range historySchema {
@@ -366,7 +366,7 @@ func historyOrder(table string) string {
 		return " ORDER BY path"
 	case "ts_latest":
 		return " ORDER BY driver_id, metric_id"
-	case "history_dashboard", "history_site_energy", "history_dashboard_partial", "history_site_energy_partial":
+	case "history_load_estimates", "history_dashboard", "history_site_energy", "history_dashboard_partial", "history_site_energy_partial":
 		return " ORDER BY start_ms, resolution_ms"
 	case "ts_buckets":
 		return " ORDER BY driver_id, metric_id, start_ms, resolution_ms"
@@ -487,11 +487,19 @@ func (s *Store) exportHistoryToSQLite(ctx context.Context, path string) error {
 		}
 		qualityTables++
 	}
-	tables := sqliteHistoryTables
+	tables := append(append([]string{}, sqliteHistoryBaseTables...), historyQualityTables...)
 	if qualityTables == 0 {
 		tables = sqliteHistoryBaseTables
 	} else if qualityTables != len(historyQualityTables) {
 		return errors.New("incomplete history quality tables; keep the source and restore a verified full backup")
+	}
+	// Estimates are additive and optional in published older backups.
+	var estimatesExist int
+	if err := src.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='history_load_estimates'`).Scan(&estimatesExist); err != nil {
+		return err
+	}
+	if estimatesExist != 0 {
+		tables = append(append([]string{}, tables...), "history_load_estimates")
 	}
 	// This is an unpublished scratch file. Flush each small commit, then
 	// pause, so the next goal/session sync does not inherit a dirty backlog.

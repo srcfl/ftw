@@ -37,7 +37,7 @@ var plainHistoryTables = []string{
 	"ts_drivers", "ts_metrics", "ts_latest",
 	"energy_daily", "energy_ledger_meta", "energy_assets", "energy_ledger_entries", "energy_ledger_cursors",
 	"ts_buckets", "ts_aggregate_hours", "ts_series_hour", "ts_archive_days",
-	"history_dashboard", "history_site_energy", "history_site_cursor", "history_quality", "history_daily_quality", "history_dashboard_partial", "history_site_energy_partial", "history_partial_cursor", "energy_daily_partial",
+	"history_load_estimates", "history_dashboard", "history_site_energy", "history_site_cursor", "history_quality", "history_daily_quality", "history_dashboard_partial", "history_site_energy_partial", "history_partial_cursor", "energy_daily_partial",
 	"history_migrations", "history_sqlite_progress",
 }
 
