@@ -51,11 +51,22 @@ disk. Keeping a copy somewhere else is the owner's step: point `--output-dir`
 at another disk, or copy the file off the machine. Keep at least one older
 known-good copy.
 
+In `v0.142.1-beta.1`, Ctrl-C can stop the CLI while Core keeps making the
+live backup. Check `/api/backups` for its phase and wait for completion
+before starting an update. [The cancellation fix](https://github.com/srcfl/ftw/pull/1615)
+is not included in that beta.
+
 The archive leaves out other backups and old rollback points. It carries a
 consistent copy of `cache.db`: savings history is costed from its past
 prices, and a price provider sends only today and tomorrow. Managed-driver
 links that point inside the persistent directory become relative links in the
 archive, so restore can move the data to another directory or machine.
+
+The archive also leaves out `cloud.key` and `cloud.key.tmp`. Pairing and
+WebPush keys remain. After a full restore, FTW Cloud stays off until the
+owner grants it again under a new home ID. Local control and stored goals
+remain available.
+
 Backup never follows these
 links to copy a host file; verification rejects link chains that escape the
 data directory or form a cycle.
@@ -79,8 +90,9 @@ in the CLI environment if the site requires LAN auth.
 Set `state.backup_dir` to a mounted external directory to keep Core's own
 copies off the data disk; FTW must be able to write it.
 
-In Docker 0.x, stop FTW and archive the whole data directory, as in
-[Docker](native-beta.md#docker).
+In Docker 0.x, use the release image's offline `ftw-backup` helper to create
+the verified archive on another disk. See
+[Back up and restore new Docker](native-beta.md#back-up-and-restore-new-docker).
 
 On older Docker installs (1.x–3.x), open **FTW Update Center → Full backups**,
 choose **Create full backup**, then **Download** and save the `.ftwbak` file
@@ -167,6 +179,15 @@ fall back to the system temporary directory when the source is read-only.
 Pass `-config` to `create` when the seed has
 a name other than `<data>/config.yaml`. The config seed must be inside the
 data directory.
+
+
+From `v0.141.0-beta.1`, the helper records and checks a complete previous file
+list before revert. An interrupted move or an older safety point without that
+record stops before another import or revert can certify a partial directory.
+Keep Core stopped and retain all directories. Restore a verified full backup
+to a separate target; do not remove the check or discard newer readings.
+A returned `safety_complete: false` refers to the retained rejected target,
+which must not be reactivated. See [the migration guide](migration.md#if-import-or-return-stops).
 
 ## Svenska – kortversion att skicka till en användare
 

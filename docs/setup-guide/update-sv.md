@@ -1,22 +1,38 @@
 # Byt till nya FTW och håll det uppdaterat
 
-[English](../native-beta.md).
+**Detta utkast gäller `v0.142.1`; stable är ännu inte publicerad.** FTW
+2.x och 3.x får inga fler uppdateringar. [English](../native-beta.md).
 
-**FTW 2.x och 3.x får inga fler uppdateringar. All fortsatt utveckling går
-till den nya 0.x-serien. Vill du ha de senaste funktionerna och rättningarna
-är det dags att byta nu. Installera inte 3.x-beta, och uppdatera inte en äldre
-installation till 3.x som ett steg på vägen.**
+## Kort svar
 
-Den nya serien börjar med `v0.131.0-beta.1`. Det lägre versionsnumret är
-avsiktligt. Äldre 0.x-versioner, till och med 0.130.x, hör till den gamla
-serien. `beta` är kanalen inom en serie; ett kanalbyte flyttar inte en gammal
-installation till den nya serien.
+| Du kör | Gör så här |
+|---|---|
+| Nya FTW 0.x, native | Öppna **More → Version → Update FTW** i webbsidan, eller kör `ftw update` på boxen. Inget mer. |
+| Nya FTW 0.x i Docker | Sätt `FTW_VERSION=v0.142.1` i `.env` och kör `docker compose up -d --build`. [Detaljer](#docker-från-det-nya-releasepaketet) |
+| Inget FTW än, på 64-bitars Linux eller ett nytt Pi-kort | [Installera](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin) med den stabila taggen. |
+| Gamla FTW 2.x, 3.x eller den gamla Pi-imagen | Flytta data och config med en full backup till ett andra SD-kort eller en annan maskin. [Steg](#byt-på-raspberry-pi-med-ett-nytt-sd-kort) |
+| Home Assistant-appen | Ingen ny app än. Kör nya FTW på en annan Linux-maskin och koppla Home Assistant via MQTT. [Steg](#välj-en-väg) |
+| Windows eller macOS | Stöds inte. Använd en Raspberry Pi eller en annan 64-bitars Linux-maskin. |
 
-Du kan börja använda nya FTW nu, med nya inställningar och egen datalagring.
-Den guidade flytten som tar med gamla inställningar och historik är ännu inte
-klar. Behöver du föra över dessa data innan du byter, ta hjälp med just din
-installation. Kopiera inte gamla databaser till den nya installationen på egen
-hand.
+Låt boxen ha ström och tryck inte Restart medan uppdateringen pågår. Vänta tills
+uppdateringen är klar. På native återgår `ftw rollback` till föregående
+kompatibla release. För Docker, följ [Docker-steget](#docker-från-det-nya-releasepaketet).
+
+**Ta med inställningar, historik, identitet och mål.** Börja med
+[Flytta med din data](../migration.md#svenska). Ta en full backup, importera
+på en separat kopia och kontrollera resultatet innan nya FTW tar över.
+Behåll gamla installationen och en backup utanför maskinen för återgång.
+En befintlig anläggning använder sina sparade inställningar.
+
+Guiden anger provade datafall och kvarvarande arbete för andra layoutar.
+Vid ett importfel: behåll båda kopiorna och lös felet före start. Maskerad
+API-config är ingen full export. DuckDB använder
+[målversionens konverterare](../history-conversion.md).
+
+Den nya serien börjar med `v0.131.0-beta.1`.
+Äldre 0.x-versioner, till och med 0.130.x, hör till den gamla serien. `beta` i
+en gammal installation flyttar den inte till nya serien, och 3.x-beta är inget
+steg på vägen.
 
 ## Välj en väg
 
@@ -108,10 +124,10 @@ den igen vid omboot.
    som kan styra samma utrustning. Ordna MQTT om utrustningen behöver det.
    En broker på gamla kortet följer inte med.
 6. **I SSH på nya kortet:** följ [Installera på det nya kortet](#installera-på-det-nya-kortet-eller-en-tom-linux-maskin)
-   nedan. Öppna sedan `http://<Pi:ns-IP>:8080/setup` och ställ in anläggningen.
-   Historik, inlärning och gamla inställningar ligger kvar på gamla kortet;
-   de följer inte automatiskt med. Använd mål och ready-by-scheman i stället
-   för gamla kalenderhändelser.
+   nedan. [Importera din backup](../migration.md#restore-a-full-backup-on-a-new-native-target)
+   innan nya Core tar över. Kontrollera sparade mål och inställningar. Den
+   sparade API-porten kan skilja sig från 8080. Använd mål och ready-by-scheman
+   för tidigare kalenderhändelser.
 7. Kontrollera rätt version, friska enheter, färska mätvärden och aktuell plan.
    Starta sedan om Pi:n när anläggningen kan tåla avbrottet och kontrollera
    samma saker igen.
@@ -127,8 +143,8 @@ du kan identifiera och stoppa gamla Core och updater, hantera deras startregler
 och bevara MQTT. Välj annars nytt kort eller be om hjälp. En nekad
 native-installation på gamla kortet är inte ett skäl att fortsätta med Docker.
 
-Den nya Docker-installationen använder en egen katalog och egen data.
-Den flyttar inte gamla data.
+Den nya Docker-installationen använder en egen katalog.
+[Importera en verifierad kopia](../migration.md#svenska) av dina data där.
 
 1. Identifiera det gamla Compose-projektet, dess Core, updater, datakataloger
    och startregler. Vanliga kataloger är `/opt/ftw`, `~/ftw` och
@@ -136,17 +152,25 @@ Den flyttar inte gamla data.
 2. Ta en full backup och spara den utanför maskinen. Behåll också Compose-filer,
    overrides och `.env`, så att du kan återställa rätt gamla version.
 3. Kontrollera om projektet även kör Mosquitto eller andra tjänster som
-   utrustningen behöver. Ordna fortsatt MQTT innan du stoppar hela projektet.
-4. Stoppa den gamla installationen med dess riktiga Compose-filer och
-   projektnamn. Ett vanligt projekt kan stoppas med `docker compose down`
-   från rätt katalog. Använd inte `-v` och radera inga datakataloger.
+   utrustningen behöver. Behåll dem igång. Identifiera tjänsterna med
+   `docker compose config --services`, projektets riktiga filer och projektnamn.
+4. Stoppa bara gamla Core och updater. Heter Core-tjänsten `ftw`, kör
+   `docker compose stop ftw`, sedan
+   `docker update --restart=no "$(docker compose ps -aq ftw)"`. Gör samma sak
+   för updater om den finns. Sätt också `restart: "no"` för dessa tjänster i
+   gamla Compose-filerna. Kontrollera att containrarna är stoppade och har
+   restart policy `no`. Kör inte `docker compose down` om projektet fortfarande
+   ger utrustningen MQTT. Använd inte `-v` och radera inga datakataloger.
    Kontrollera även systemd, timers och egna skript som kan skapa eller starta
-   den igen. Stäng inte av Docker som helhet.
+   den igen. Ange brokerns tjänstenamn i senare Compose-kommandon:
+   `docker compose up -d` för hela gamla projektet startar gamla Core igen,
+   även med `restart: "no"`. Stäng inte av Docker som helhet.
 5. Följ [Docker-guiden för nya FTW](https://github.com/srcfl/ftw/blob/master/docs/native-beta.md#docker).
    Använd en ny katalog, normalt `~/ftw-local`, och en tom datakatalog.
    Återanvänd inte den gamla datakatalogen eller en redan befintlig testkatalog
    utan att först kontrollera vad den innehåller.
-6. Ställ in anläggningen och kontrollera version, enheter, mätvärden och plan.
+6. Importera din backup med nya Core stoppad. Kontrollera sparade inställningar,
+   historik, version, enheter, mätvärden och plan innan den tar över.
    Kontrollera att bara en Core körs och styr utrustningen. Upprepa kontrollen
    efter en planerad omboot.
 
@@ -166,17 +190,19 @@ kortet, gå tillbaka till kortbytet ovan. `--fresh-host` betyder att ingen
 FTW-installation eller dess data finns här, även om den är stoppad.
 
 1. Öppna [Releases](https://github.com/srcfl/ftw/releases) på din vanliga dator.
-   Välj en publicerad **ny 0.x-beta** med Linux-paket och SHA-256-fil för din
-   maskin. Använd inte `releases/latest`; den pekar på gamla 2.x.
+   Välj den senaste **stabila** taggen, `v0.142.1` eller senare utan `-beta`.
+   Välj en beta bara om du provar nya byggen. Releasen ska ha Linux-paket och
+   SHA-256-fil för din maskin. Använd inte `releases/latest`; den pekar på
+   gamla 2.x.
 2. Kopiera taggen från releasens rubrik. Skriv inte av den för hand. Byt bara
-   ut `v0.X.Y-beta.N` i blocket nedan mot taggen du kopierade.
+   ut `v0.X.Y` i blocket nedan mot taggen du kopierade.
 3. Klistra in **hela blocket, inklusive `(` och `)`**, i SSH på nya kortet.
    Det stannar vid första felet och hämtar skriptet till en tillfällig fil.
 
 ```bash
 (
   set -eu
-  tag=v0.X.Y-beta.N
+  tag=v0.X.Y
   if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
     echo "STOP: copy an exact published new 0.x tag from Releases." >&2
     exit 1
@@ -200,13 +226,16 @@ Kör på FTW-maskinen:
 
 ```bash
 ftw status
-ftw update --channel beta
+ftw update
 ftw status
 journalctl -u ftw --since "10 minutes ago" --no-pager
 ```
 
-`--channel beta` väljer beta och försöker uppdatera. När rätt kanal redan är
-sparad räcker `ftw update` nästa gång. Du kan också välja
+`ftw update` följer kanalen du valt med `--channel`. Har du aldrig valt följer
+den det boxen kör: en stabil version följer stable, en beta följer beta. Beta
+erbjuder också en nyare stable, så en betabox går över till stable när en
+sådan kommer. Vill du stanna på beta efter det, kör `ftw update --channel beta`;
+vill du lämna beta, kör `ftw update --channel stable`. Du kan också välja
 **More → Version → Update FTW** i native-webbsidan. Knappen använder samma
 Core-API och launcher som kommandot. Den visar hämtade byte, klara steg och
 resultatet efter omstart. Behåll strömmen på. Att stänga eller ladda om sidan
@@ -255,6 +284,75 @@ Kontrollera även mätvärden och plan. `ftw update` och `ftw rollback` gäller
 inte den här Docker-installationen. Återgång sker genom att välja föregående
 kompatibla `FTW_VERSION` och köra Compose igen. Docker har ingen automatisk
 återgång till föregående version.
+
+### Backup och restore för nya Docker
+
+Använd `ftw-backup` från samma release-image. Verktyget verifierar ett
+portabelt `.ftwbak`-arkiv och behåller tidigare data vid restore. Stegen gäller
+det nya Compose-projektet, inte flytt av en äldre installation. Kör från
+`~/ftw-local`. Bara tjänsten `ftw` stoppas.
+
+Montera en annan disk först. Byt `/media/usb/ftw-backups` till en särskild
+backupkatalog där. Containern använder UID 100 och GID 101; blocket skapar
+katalogen med dessa ägare och privata rättigheter:
+
+```bash
+(
+  set -eu
+  backup_dir=/media/usb/ftw-backups
+  sudo install -d -o 100 -g 101 -m 0700 "$backup_dir"
+  docker compose stop ftw
+  docker compose run --rm --no-deps --entrypoint /app/ftw-backup \
+    --volume "$backup_dir:/backup:z" ftw \
+    create -state /app/data/state.db -data /app/data -output /backup -progress
+  docker compose start ftw
+)
+```
+
+Slutlig JSON anger det verifierade arkivets namn under `/backup`. Filen finns
+i `backup_dir` på värden. Spara namnet. Vid fel stannar blocket och FTW förblir
+stoppad. Lös felet innan du startar igen; en ofärdig fil är ingen backup.
+
+För restore: ange exakt `.ftwbak`-namn och använd en kompatibel release-image:
+
+```bash
+(
+  set -eu
+  backup_dir=/media/usb/ftw-backups
+  archive=ftw-full-backup-YYYYMMDDTHHMMSS.ftwbak
+  test -f "$backup_dir/$archive"
+  docker compose stop ftw
+  docker compose run --rm --no-deps --entrypoint /app/ftw-backup \
+    --volume "$backup_dir:/backup:ro,z" ftw \
+    restore -archive "/backup/$archive" -data /app/data -yes
+  docker compose start ftw
+)
+```
+
+Verktyget verifierar och packar upp innan data ersätts. Ett fel stoppar blocket
+innan Core startar. Tidigare data finns kvar i den utskrivna sökvägen
+`/app/data/.ftw-pre-restore-…`. Behåll dem tills config, identitet, gammal och ny
+historik, mål, färska mätvärden och plan har kontrollerats. Vänta på frisk
+status i `docker compose ps` och kör sedan
+`docker compose exec ftw ftw status`.
+
+För att återgå till sparade data: sätt `safety` till den utskrivna sökvägen i
+containern. Använd en image som kan läsa dessa data:
+
+```bash
+(
+  set -eu
+  safety=/app/data/.ftw-pre-restore-YYYYMMDDTHHMMSS
+  docker compose stop ftw
+  docker compose run --rm --no-deps --entrypoint /app/ftw-backup ftw \
+    revert -data /app/data -safety "$safety" -yes
+  docker compose start ftw
+)
+```
+
+Verktyget läser `.ftwbak`, inte äldre råa `.tar.gz`-arkiv. Behåll sådana arkiv
+och den matchande gamla installationen för återställning. Att döpa om filen
+gör den inte kompatibel. Läs [full backup och restore](../backup-and-restore.md).
 
 ## För agenter som hjälper till
 

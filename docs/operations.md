@@ -10,7 +10,7 @@ safely when it is unavailable.
 ## Install
 
 [Install and update FTW](native-beta.md) is the full guide and explains how
-to choose a published new 0.x beta. Use the installer from the same tag you
+to choose a published stable or beta tag. Use the installer from the same tag you
 install, on a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host.
 
 Follow the complete [native install block](native-beta.md#install). It stops
@@ -430,8 +430,8 @@ the `ftw` command and the unit move with `install.sh --refresh`
 
 ## Release recovery
 
-No 0.x stable has shipped; run a beta only on an agreed test site. A beta and
-its promoted stable build identify the same commit.
+Stable is the default for every site; run a beta only on an agreed test site.
+A beta and its promoted stable build identify the same commit.
 
 - Native: `ftw rollback` returns to the previous release when it reads the
   same data. If Core does not start and `ftw` cannot reach it, roll back
