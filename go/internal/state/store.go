@@ -641,6 +641,8 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 
 	rawPath, cleanupRaw := backupScratchFile(dstPath, sourceBytes)
 	defer cleanupRaw()
+	release := HoldBackupScratch(filepath.Dir(rawPath))
+	defer release()
 	reportBackupProgress(report, BackupProgress{Phase: BackupPhaseCopying})
 	if err := s.copyStateForBackup(ctx, rawPath); err != nil {
 		return fmt.Errorf("backup state: %w", err)
