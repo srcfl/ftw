@@ -532,6 +532,8 @@ type State struct {
 	// command so battery and EV cooperatively share the fuse budget.
 	// Recomputed every dispatch tick.
 	FuseEVMaxW float64
+	// Caller holds the control lock; diagnostic output is limited to once per minute.
+	evFuseEvidenceAt time.Time
 	// FuseSaturated signals that the joint allocator had to scale battery
 	// and/or EV demand to fit under the fuse this tick. Used to gate the
 	// loadpoint controller's read of FuseEVMaxW and as the trigger for

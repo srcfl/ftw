@@ -2866,12 +2866,12 @@
       case "limited":
         if (m.limit_reason === "charger_limit") return "The charger limits this request to " + cmdA + " (" + reqA + " requested).";
         if (m.limit_reason === "fuse_cooldown") {
-          return "Paused: main-fuse protection — " + reqA + " requested; charging resumes on its own." + sinceP;
+          return "Paused by site power limits — " + reqA + " requested; charging resumes on its own." + sinceP;
         }
         if (m.limit_reason === "site_meter_stale") {
           return "Paused for safety: site-meter data is stale — " + reqA + " requested; charging resumes when telemetry recovers.";
         }
-        return "Main fuse limits this charge to " + cmdA + " right now (" + reqA + " requested)." + sinceP;
+        return "Site power limits cap this charge at " + cmdA + " right now (" + reqA + " requested)." + sinceP;
     }
     return "FTW received " + reqA + ". Waiting for charger status." + end;
   }
@@ -2919,7 +2919,7 @@
         ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
         : "Charging.";
       if (lp.commanded_reason === "fuse_limit") {
-        text += " Rate is limited by the main fuse right now.";
+        text += " Rate is limited by site power limits right now.";
       }
     } else if (lp.goal_complete === true) {
       text = "The car confirmed this charging goal is complete.";
@@ -2944,7 +2944,7 @@
       // The specific pauses beat the generic branches — this is the
       // line that stops an operator debugging cable and charger while
       // the box is protecting the main fuse (#1009).
-      text = "Paused: main-fuse protection — the house is using the headroom; charging resumes on its own." + kwPlanned;
+      text = "Paused by site power limits — the house is using the headroom; charging resumes on its own." + kwPlanned;
       tone = "var(--text)";
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "site_meter_stale") {
       text = "Paused for safety: site-meter data is stale — charging resumes when telemetry recovers.";

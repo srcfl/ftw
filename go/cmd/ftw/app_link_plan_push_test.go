@@ -107,8 +107,12 @@ func TestAPlugInReachesAStreamingPhoneAsAPlan(t *testing.T) {
 	mgr.Observe("easee", true, 0, 0, true)
 	cable := owner.waitPlan(t, func(p appproto.Plan) bool { return len(p.Chargers) == 1 && p.Chargers[0].PluggedIn })
 	tookCable := time.Since(plugged)
+	// A push reads plan revision and charger windows separately. A solve
+	// finishing between those reads can expose the new windows with the
+	// preceding revision. Wait for the published revision as well as the
+	// windows; the delivery deadline below still applies to that full result.
 	got := owner.waitPlan(t, func(p appproto.Plan) bool {
-		return len(p.Chargers) == 1 && p.Chargers[0].PluggedIn && !p.Chargers[0].Pending && len(p.Chargers[0].Windows) > 0
+		return p.Rev > first.Rev && len(p.Chargers) == 1 && p.Chargers[0].PluggedIn && !p.Chargers[0].Pending && len(p.Chargers[0].Windows) > 0
 	})
 	took := time.Since(plugged)
 	t.Logf("plug-in to the cable on a phone: %v (pending %v); to the plan: %v, %d windows, %d Wh",

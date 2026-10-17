@@ -140,3 +140,13 @@ test('the summary answers the question for the whole site', () => {
   assert.equal(controlSummary([row({status: 'not_controlled', reason: 'observe_only'})]).tone, 'neutral');
   assert.equal(controlSummary([row()], false).tone, 'stale');
 });
+
+
+test('limited positive EV offer does not explain prolonged zero delivery', () => {
+ const missing=controlStatus(row({kind:'ev',status:'not_following',reason:'no_power_response',severity:'warning',requested_w:10350,sent_w:6900,actual_w:0,requested_a:15,offered_a:10,device_reason:'limited by dynamic charger current'}));
+ assert.equal(missing.title,'Not following');
+ assert.match(missing.text,/6.9 kW charge.*no power/);
+ const capped=controlStatus(row({kind:'ev',status:'limited',reason:'fuse_limit',sent_w:6900,actual_w:6800}));
+ assert.equal(capped.title,'Limited by site power limits');
+ assert.match(capped.text,/fuse and import limits/);
+});

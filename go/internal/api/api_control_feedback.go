@@ -415,6 +415,16 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("waiting", "not_connected", "info")
 		return
 	}
+	// A positive clamp explains the lower offer, not prolonged zero delivery.
+	// Keep known safety pauses and unconfirmed/stale commands authoritative.
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" &&
+		coreReason != "site_meter_stale" && coreReason != "site_phase_currents_stale" && coreReason != "fuse_cooldown" &&
+		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 &&
+		f.OfferedA != nil && *f.OfferedA > 0 && !cmd.Since.IsZero() && now.Sub(cmd.Since) >= 2*time.Minute &&
+		!cmd.PowerMismatchSince.IsZero() && now.Sub(cmd.PowerMismatchSince) >= 2*time.Minute && f.ObservedAtMs >= cmd.Since.UnixMilli() {
+		set("warning", "no_power_response", "warning")
+		return
+	}
 	if f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
 		set("limited", "device_limit", "warning")
 		return

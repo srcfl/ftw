@@ -25,7 +25,7 @@ test('the status line follows the charger through every state', () => {
   assert.match(statusText, /Waiting for the car to start drawing/);
   assert.match(statusText, /but the car is not drawing/);
   assert.match(statusText, /The charger has not acted on/);
-  assert.match(statusText, /Main fuse limits this charge/);
+  assert.match(statusText, /Site power limits cap this charge/);
   // The charger's own words are part of the sentence.
   assert.match(statusText, /Charger reports: " \+ m\.charger_reason/);
   // Elapsed time comes from the box's since_ms, not from click time.
@@ -138,4 +138,15 @@ test('pending manual save is distinct from an actual write failure', () => {
   assert.doesNotMatch(render(paused).textContent, /could not be saved/);
   assert.doesNotMatch(render({ ...paused, manual_save_pending: false }).textContent, /Saving it/);
   assert.match(render({ ...paused, manual_save_error: true }).textContent, /could not be saved/);
+});
+
+
+test('ten amp positive clamp remains distinct from zero delivery with reason 78', () => {
+ const manual = {active:true,state:'not_drawing',requested_a:15,commanded_a:10,limit_reason:'fuse_limit',charger_reason:'limited by dynamic charger current'};
+ const words = describeManual({manual_active:true,current_power_w:0,manual});
+ assert.match(words,/Charger offers 10 A but the car is not drawing/);
+ assert.match(words,/limited by dynamic charger current/);
+ assert.doesNotMatch(words,/Main fuse|charging resumes on its own/);
+ const limited=describeManual({manual_active:true,current_power_w:0,manual:{...manual,state:'limited'}});
+ assert.match(limited,/Site power limits cap this charge at 10 A/);
 });

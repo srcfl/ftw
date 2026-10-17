@@ -25,7 +25,7 @@ func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, st
 		return targets
 	}
 	now := state.now()
-	windows := store.ControlWindows(now.Add(-telemetry.ControlWindowDuration), now)
+	windows := store.ConfirmedControlWindows(now.Add(-telemetry.ControlWindowDuration), now)
 	need := make(map[string]float64, len(state.evFuseDemands))
 	phaseMode := make(map[string]string, len(state.evFuseDemands))
 	for _, demand := range state.evFuseDemands {

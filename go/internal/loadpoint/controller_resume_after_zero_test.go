@@ -194,9 +194,16 @@ func TestTickCancelsResumeRetryWhenSessionProofChanges(t *testing.T) {
 			}
 			samples["easee"] = sample
 			c.Tick(context.Background(), now.Add(10*time.Second))
+			zeroAt := now.Add(15 * time.Second)
+			if change == "delivering" {
+				// Recovery needs sustained delivery, not one startup pulse.
+				c.Tick(context.Background(), now.Add(15*time.Second))
+				c.Tick(context.Background(), now.Add(20*time.Second))
+				zeroAt = now.Add(25 * time.Second)
+			}
 			sample.Connected, sample.ConnectionUnknown, sample.PowerW = true, false, 0
 			samples["easee"] = sample
-			c.Tick(context.Background(), now.Add(15*time.Second))
+			c.Tick(context.Background(), zeroAt)
 			if attempts != 1 {
 				t.Fatalf("stale retry crossed %s boundary: %d attempts", change, attempts)
 			}

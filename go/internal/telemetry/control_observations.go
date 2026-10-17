@@ -40,7 +40,7 @@ func (s *Store) recordControlObservation(driver string, kind DerType, power floa
 	k := key(driver, kind)
 	invalidate := func() { delete(s.controlObservations, k) }
 	p, known := ControlPowerObservation(power, data, now)
-	if !known || now.Sub(p.At) > 10*time.Second {
+	if !known || now.Sub(p.Seen()) > 10*time.Second {
 		invalidate()
 		return
 	}
@@ -50,6 +50,18 @@ func (s *Store) recordControlObservation(driver string, kind DerType, power floa
 	}
 	points := s.controlObservations[k]
 	if len(points) > 0 && !at.After(points[len(points)-1].At) {
+		last := &points[len(points)-1]
+		if at.Equal(last.At) {
+			if p.PowerW != last.PowerW {
+				invalidate() // One source time cannot prove two power levels.
+				return
+			}
+			// A change-only source confirms the same physical sample. Keep
+			// its source time and a single point; extend only its confirmation.
+			if p.ConfirmedAt.After(last.ConfirmedAt) {
+				last.ConfirmedAt = p.ConfirmedAt
+			}
+		}
 		return
 	}
 	if kind != DerEV && kind != DerBattery && kind != DerV2X && len(points) > 0 && at.Unix() == points[len(points)-1].At.Unix() {
@@ -102,6 +114,17 @@ func (s *Store) controlBaseline(now time.Time) map[string]ControlBaseline {
 	return result
 }
 func (s *Store) ControlWindows(from, now time.Time) map[string]ControlBaseline {
+	return s.controlWindows(from, now, false)
+}
+
+// ConfirmedControlWindows also retains a change-only source's confirmed
+// interval for time-aligned power bounds. Window still counts only distinct
+// physical measurements. Response verification uses ControlWindows instead.
+func (s *Store) ConfirmedControlWindows(from, now time.Time) map[string]ControlBaseline {
+	return s.controlWindows(from, now, true)
+}
+
+func (s *Store) controlWindows(from, now time.Time, confirmations bool) map[string]ControlBaseline {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := map[string]ControlBaseline{}
@@ -109,7 +132,11 @@ func (s *Store) ControlWindows(from, now time.Time) map[string]ControlBaseline {
 		if rd.DerType == DerVehicle {
 			continue
 		}
-		result[k] = ControlBaseline{rd.Driver, rd.DerType, observationWindow(s.controlObservations[k], from, now), copyControlPoints(s.controlObservations[k], from, now)}
+		points := copyControlPoints(s.controlObservations[k], from, now)
+		if confirmations {
+			points = copyConfirmedControlPoints(s.controlObservations[k], from, now)
+		}
+		result[k] = ControlBaseline{rd.Driver, rd.DerType, observationWindow(s.controlObservations[k], from, now), points}
 	}
 	return result
 }
@@ -118,6 +145,24 @@ func copyControlPoints(points []ControlObservation, from, until time.Time) []Con
 	var out []ControlObservation
 	for _, p := range points {
 		if !p.At.Before(from) && !p.At.After(until) {
+			if p.ConfirmedAt.After(until) {
+				p.ConfirmedAt = until
+			}
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func copyConfirmedControlPoints(points []ControlObservation, from, until time.Time) []ControlObservation {
+	var out []ControlObservation
+	for _, p := range points {
+		if !p.Seen().Before(from) && !p.At.After(until) {
+			// Keep confirmed anchors for time-aligned bounds, without
+			// moving At or counting them as new response measurements.
+			if p.ConfirmedAt.After(until) {
+				p.ConfirmedAt = until
+			}
 			out = append(out, p)
 		}
 	}
