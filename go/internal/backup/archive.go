@@ -105,7 +105,7 @@ type RestoreResult struct {
 
 // Inspect performs a full verification and returns stable archive metadata.
 func Inspect(ctx context.Context, archivePath string) (Manifest, Info, error) {
-	manifest, err := Verify(archivePath)
+	manifest, err := verifyInWorkspaceContext(ctx, archivePath, "")
 	if err != nil {
 		return Manifest{}, Info{}, err
 	}
