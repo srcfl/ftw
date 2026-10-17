@@ -2383,7 +2383,7 @@ func main() {
 	}
 
 	// The FTW app's uplink. It speaks the app's own protocol end to end and
-	// reaches the box through a relay that holds no keys.
+	// reaches the box through the encrypted FTW Cloud tunnel.
 	appLinkWatchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
 	if appLinkWatchdog <= 0 {
 		appLinkWatchdog = 60 * time.Second
@@ -2410,7 +2410,7 @@ func main() {
 	case appLinkErr != nil:
 		slog.Warn("app link unavailable", "err", appLinkErr)
 	case appLinkEnabled:
-		slog.Info("app link connected", "relay", appuplink.Endpoint,
+		slog.Info("app link ready", "transport", "cloud",
 			"paired_devices", appEnroll.AuthorisedCount())
 	default:
 		slog.Info("app link disabled — set app_link.enabled to turn it on")

@@ -646,8 +646,8 @@ func goalRev(st loadpoint.State) uint32 {
 	return h.Sum32()
 }
 
-// startAppLink connects the box to the app relay when its loaded config leaves
-// the link enabled. Config defaults an omitted app_link section on.
+// startAppLink prepares app sessions for the FTW Cloud tunnel when enabled.
+// Config defaults an omitted app_link section on.
 //
 // It returns the enrollment identity whether or not the uplink runs, because
 // the QR code on the lid is minted from it and a box with the link switched

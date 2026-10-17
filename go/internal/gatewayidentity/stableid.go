@@ -17,7 +17,7 @@ const (
 	// identity resolution fail on the lookup, before any route was read.
 	// The MAC of the answering interface is the identity; the host never
 	// is, so this change re-derives the same identity over a live name.
-	SoftwareIdentityUplinkHost = "relay.ftw.energy"
+	SoftwareIdentityUplinkHost = "cloud.ftw.energy"
 	SoftwareIdentityUplinkPort = 443
 )
 

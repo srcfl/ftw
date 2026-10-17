@@ -16,7 +16,7 @@ import (
 // device with the scopes the box derives for it, a phone's role, or for a
 // watch what its role and its phone's role share. With Tunnel set, a phone
 // may open a session through FTW Cloud and the QR code on the screen is
-// listed; a watch has no stream and reaches the box through its exchange.
+// listed. Watch commands use the paired phone's session.
 type CloudRoster struct {
 	Enroll *appenroll.Identity
 	Tunnel bool

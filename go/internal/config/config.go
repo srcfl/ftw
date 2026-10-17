@@ -213,8 +213,8 @@ func (o *OCPP) ChargerSecrets() map[string]string {
 
 // AppLink controls the outbound connection the FTW app reaches this box
 // through. It defaults on when the section is absent; an explicit false is the
-// opt-out. One switch is enough because the relay is content-blind and fixed
-// by the protocol, so there is no endpoint or transport to choose.
+// opt-out. App sessions use the existing FTW Cloud tunnel, so there is no
+// separate endpoint or transport to choose.
 type AppLink struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 }
@@ -1704,8 +1704,8 @@ func applyDefaults(c *Config) {
 		}
 	}
 	if c.AppLink == nil {
-		// The app relay carries only end-to-end encrypted frames under a handle
-		// that changes every hour. It still sees connection metadata. Existing
+		// FTW Cloud carries end-to-end encrypted app sessions. It sees
+		// connection metadata. Existing
 		// sites with no app_link section join the supported remote path after
 		// upgrading; an explicit enabled:false block remains the operator opt-out.
 		c.AppLink = &AppLink{Enabled: true}

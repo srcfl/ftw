@@ -32,7 +32,7 @@ func planAt(startMs int64) *mpc.Plan {
 }
 
 // newFeedRig is a phone's session on a box with a charger and a feed.
-func newFeedRig(t *testing.T, feed *PlanFeed, caller apiauth.Caller, grants *fakeGrants, exchange bool) (*Handler, *fakeBox, *recorder, *fakeChargers) {
+func newFeedRig(t *testing.T, feed *PlanFeed, caller apiauth.Caller, grants *fakeGrants) (*Handler, *fakeBox, *recorder, *fakeChargers) {
 	t.Helper()
 	clock := &fakeClock{uptimeMs: 60_000, now: time.UnixMilli(1_760_000_000_000)}
 	box := &fakeBox{identity: Identity{ID: "ftw-0001", Build: "test", TZ: "Europe/Stockholm"}}
@@ -42,7 +42,7 @@ func newFeedRig(t *testing.T, feed *PlanFeed, caller apiauth.Caller, grants *fak
 	rec := &recorder{}
 	h, err := New(Config{
 		Clock: clock, Site: box, Info: box, Modes: box, Plans: box,
-		PlanChargers: chargers, PlanFeed: feed, Exchange: exchange,
+		PlanChargers: chargers, PlanFeed: feed,
 		Codec: testCodec{}, Sender: rec, Caller: caller, Grants: grants, Commands: NewCmdLog(),
 	})
 	if err != nil {
@@ -81,7 +81,7 @@ func settled(rec *recorder) []sent {
 
 func TestAReplanPushesThePlanWithTheChargerToAStreamingPhone(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
-	h, box, rec, chargers := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, box, rec, chargers := newFeedRig(t, feed, ownerCaller(), newGrants())
 	subscribe(t, h, rec)
 
 	// A car is plugged in and the planner publishes a plan that charges it.
@@ -116,7 +116,7 @@ func TestAReplanPushesThePlanWithTheChargerToAStreamingPhone(t *testing.T) {
 // is one more push, of the newest plan.
 func TestTheFirstChangeGoesAtOnceAndABurstIsOneFollowUp(t *testing.T) {
 	feed := NewPlanFeed(time.Second)
-	h, box, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, box, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants())
 	subscribe(t, h, rec)
 
 	start := time.Now()
@@ -147,7 +147,7 @@ func TestTheFirstChangeGoesAtOnceAndABurstIsOneFollowUp(t *testing.T) {
 // another, says the same thing.
 func TestTheSamePlanIsNotPushedTwice(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
-	h, box, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, box, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants())
 	subscribe(t, h, rec)
 
 	box.replan(2, box.plan.GeneratedAtMs+60_000)
@@ -167,7 +167,7 @@ func TestTheSamePlanIsNotPushedTwice(t *testing.T) {
 // Pushes race on goroutines of their own; the newest plan still lands last.
 func TestTheNewestPlanLandsLast(t *testing.T) {
 	feed := NewPlanFeed(time.Millisecond)
-	h, box, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, box, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants())
 	subscribe(t, h, rec)
 
 	var plansMu sync.Mutex
@@ -199,7 +199,7 @@ func (l lockedPlans) CeilingW() *int64  { return nil }
 
 func TestAPhoneWithoutThePlanScopeGetsNoPush(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
-	h, _, rec, _ := newFeedRig(t, feed, viewerCaller(), newViewerGrants(), false)
+	h, _, rec, _ := newFeedRig(t, feed, viewerCaller(), newViewerGrants())
 	subscribe(t, h, rec)
 
 	feed.Changed()
@@ -211,7 +211,7 @@ func TestAPhoneWithoutThePlanScopeGetsNoPush(t *testing.T) {
 func TestADemotedPhoneStopsGettingPushes(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
 	grants := newGrants()
-	h, _, rec, _ := newFeedRig(t, feed, ownerCaller(), grants, false)
+	h, _, rec, _ := newFeedRig(t, feed, ownerCaller(), grants)
 	subscribe(t, h, rec)
 
 	grants.setRole(apiauth.RoleViewer)
@@ -223,7 +223,7 @@ func TestADemotedPhoneStopsGettingPushes(t *testing.T) {
 
 func TestNoPushBeforeTheStreamOrAfterTheSessionCloses(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
-	h, _, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, _, rec, _ := newFeedRig(t, feed, ownerCaller(), newGrants())
 
 	feed.Changed()
 	if got := settled(rec); len(got) != 0 {
@@ -238,20 +238,10 @@ func TestNoPushBeforeTheStreamOrAfterTheSessionCloses(t *testing.T) {
 	}
 }
 
-func TestAWatchExchangeIsNotOnTheFeed(t *testing.T) {
-	feed := NewPlanFeed(testSettle)
-	newFeedRig(t, feed, ownerCaller(), newGrants(), true)
-	feed.mu.Lock()
-	defer feed.mu.Unlock()
-	if len(feed.members) != 0 {
-		t.Fatal("an exchange joined the feed")
-	}
-}
-
 // The far tail of a long plan gives way to the chargers, never the session.
 func TestALongPlanWithTwoChargersStillFitsABulkFrame(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
-	h, box, rec, chargers := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, box, rec, chargers := newFeedRig(t, feed, ownerCaller(), newGrants())
 	subscribe(t, h, rec)
 
 	start := box.plan.GeneratedAtMs
@@ -290,7 +280,7 @@ func TestALongPlanWithTwoChargersStillFitsABulkFrame(t *testing.T) {
 // far windows go too, never the session.
 func TestManyChargersGiveUpTheirFarWindowsBeforeTheSession(t *testing.T) {
 	feed := NewPlanFeed(testSettle)
-	h, box, rec, chargers := newFeedRig(t, feed, ownerCaller(), newGrants(), false)
+	h, box, rec, chargers := newFeedRig(t, feed, ownerCaller(), newGrants())
 	subscribe(t, h, rec)
 
 	start := box.plan.GeneratedAtMs

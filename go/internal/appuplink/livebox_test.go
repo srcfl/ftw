@@ -107,7 +107,7 @@ func TestLiveBoxForTheiPhone(t *testing.T) {
 		})
 	}
 	arrivals := make(chan struct{}, 1)
-	uplink, err := New(Options{Endpoint: unreachable(t), Enroll: enroll, Handler: build, Arrivals: arrivals, Logger: logger})
+	uplink, err := New(Options{Enroll: enroll, Handler: build, Arrivals: arrivals, Logger: logger})
 	if err != nil {
 		t.Fatal(err)
 	}

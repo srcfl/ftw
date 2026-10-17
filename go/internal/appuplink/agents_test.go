@@ -47,9 +47,8 @@ func agentTunRig(t *testing.T, now *time.Time) (*tunRig, *AgentAccess) {
 	return r, access
 }
 
-// An agent's session runs through FTW Cloud's tunnel, and the same key over
-// the relay is a stranger.
-func TestAnAgentComesThroughTheTunnelAndNotTheRelay(t *testing.T) {
+// An agent's session runs through FTW Cloud and ends when its grant is revoked.
+func TestAnAgentComesThroughTheTunnel(t *testing.T) {
 	now := time.UnixMilli(1_792_000_000_000)
 	r, access := agentTunRig(t, &now)
 	agent, err := newAppClient()
@@ -61,15 +60,6 @@ func TestAnAgentComesThroughTheTunnelAndNotTheRelay(t *testing.T) {
 		ExpiresAtMs: now.UnixMilli() + time.Hour.Milliseconds()})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	streams := relayTable(r.slots, r.enroll)
-	m1, err := agent.message1(r.enroll.StaticKey().Public(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := streams.open(m1); err == nil {
-		t.Error("the relay took an agent's handshake")
 	}
 
 	r.open(t, agent, row.ID, 3, nil)
