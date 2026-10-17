@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.148.0
+
+### Minor Changes
+
+- 6335dbc: Add a separate, versioned Cloud statistics path for reporting installations,
+  configured capacity and recorded hourly energy. Older consents stay inactive
+  for these fields; the owner must accept the new policy.
+
 ## 0.147.2
 
 ### Patch Changes
