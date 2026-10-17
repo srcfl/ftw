@@ -653,8 +653,9 @@ route on the box does.
 
 ## The grant offer
 
-The MCP consent page shows a short code, a QR code and a universal link. All
-three carry one signed offer, which the app shows the owner before Face ID.
+The MCP consent page shows a short code, a QR code and a universal link. The
+link and the QR code carry one signed offer; the code finds the same offer at
+FTW Cloud's code lookup. The app shows the offer to the owner before Face ID.
 
 **The signed offer** is CBOR `{o, kid, sig}`, base64url without padding in
 the link's fragment, and what FTW Cloud's code lookup returns for a code:
@@ -690,11 +691,17 @@ old one signed has expired.
 | `code` | text | The code on the consent page |
 | `exp` | int | Wall-clock ms when the offer stops being good, at most 10 minutes after FTW Cloud made it |
 
-- **The app** shows `client`, `clientHost` and whether it is `verified`. On
-  the universal-link path the owner types the code the consent page shows,
-  so a link sent by someone else does not reach Face ID; on the QR path the
-  owner compares it. The app picks the home the owner chooses, asks when
-  there are several, and refuses a home it does not have.
+- **The app** shows `client`, `clientHost` and whether it is `verified`. A
+  universal link, tapped or opened by the phone's camera or the app's own
+  scanner from the QR code, goes straight to that review, and the review
+  then also shows the code for an owner who wants to compare it with the
+  page. Nothing asks them to, so a link someone else sent also reaches the
+  review. What stops it there: the pinned-key check before anything shows,
+  for an unverified client the owner's own "I started this" step, Face ID,
+  and the offer's 10 minutes. The owner types the code only when they have
+  neither the QR code nor the link. The app picks the home the owner
+  chooses, asks when there are several, and refuses a home it does not
+  have.
 - **Support** offers count only from `clientId`
   `https://cloud.ftw.energy/clients/sourceful-support`, the support tooling's
   client at FTW Cloud. The app and the box refuse a support offer from any
