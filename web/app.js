@@ -8,6 +8,7 @@
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
   const historyMigrationUI = import("/history-migration.js").catch(function () { return null; });
   const energyTodayUI = import("/energy-today.js").catch(function () { return null; });
+  const carsUI = import("/cars.js").catch(function () { return null; });
   function updateHistoryMigration(health) {
     historyMigrationUI.then(function (ui) { if (ui) ui.updateMigrationBanner(health); }).catch(function () {});
     if (updateBadge && typeof updateBadge.setBootHealth === "function") updateBadge.setBootHealth(health);
@@ -2162,6 +2163,36 @@
   // entries mean "no loadpoint for this driver" and the planet
   // falls back to legacy kW-only rendering.
   var loadpointsByDriver = null;
+  // The owner's cars (GET /api/cars), apart from the chargers: a car shows
+  // while unplugged too. carsFetchedAt dates the list, so a level's age stays
+  // true between reads and an old list says how old it is.
+  var lastCars = [];
+  var carsFetchedAt = 0;
+  // Where a car is comes from the chargers' read, which can fail while the
+  // cars' read answers: each list has its own time.
+  var loadpointsFetchedAt = 0;
+  var carsCard = null;
+  function openChargerOf(lp) {
+    if (energyFlowEl) energyFlowEl.dispatchEvent(new CustomEvent("ftw-planet-click", { detail: { role: "ev", name: lp.driver_name } }));
+  }
+  function tapCar(ui, lp, carId) {
+    return ui.tap(apiFetch, lp, carId).then(function (res) {
+      if (res.ok) fetchStatus();
+      return res;
+    });
+  }
+  function updateCars() {
+    carsUI.then(function (ui) {
+      var host = document.getElementById("overview-cars");
+      if (!ui || !host) return;
+      if (!carsCard) carsCard = ui.createCarsCard(document, host, { onOpenCharger: openChargerOf });
+      carsCard.update({
+        cars: lastCars, loadpoints: chargingNoticePoints, fetchedAt: carsFetchedAt, now: Date.now(),
+        fresh: !document.hidden && Date.now() - carsFetchedAt < 15000,
+        chargersFresh: !document.hidden && Date.now() - loadpointsFetchedAt < 15000,
+      });
+    }).catch(function (err) { console.error("cars:", err); });
+  }
   var chargingNoticePoints = [];
   var chargingNoticeRows = new Map();
   var chargingNoticeTimer = null;
@@ -2201,11 +2232,22 @@
         button.type = "button";
         section.append(title, status, button);
         host.appendChild(section);
-        row = { section: section, title: title, status: status, button: button };
+        row = { section: section, title: title, status: status, button: button, which: null };
         chargingNoticeRows.set(lp.id, row);
       }
       var available = fresh && (!lp.charger || lp.charger.available);
       row.title.textContent = available ? "Car connected" : "Car status is out of date";
+      // The car on this charger by name, and the one tap while the box
+      // cannot say which car it is.
+      carsUI.then(function (ui) {
+        if (!ui || !row.section.isConnected) return;
+        if (!row.which) {
+          row.which = ui.createWhichCar(document, { onTap: function (point, carId) { return tapCar(ui, point, carId); } });
+          row.section.appendChild(row.which.el);
+        }
+        if (available) row.title.textContent = ui.noticeTitle(lp, lastCars);
+        row.which.update(lp, lastCars, chargingNoticePoints, available);
+      }).catch(function (err) { console.error("cars:", err); });
       var message = available ? renderEvPlanStatus(lp, null) : null;
       row.status.textContent = message ? message.textContent : "Waiting for current charger status. The last reading cannot confirm charging.";
       row.button.textContent = "Check charging" + (lp.soc_source !== "vehicle" ? " and battery level" : "");
@@ -2217,6 +2259,7 @@
       if (!keep.has(id)) { row.section.remove(); chargingNoticeRows.delete(id); }
     });
     host.hidden = keep.size === 0;
+    updateCars();
   }
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) updateChargingNotice(null);
@@ -2241,6 +2284,8 @@
       }),
       boundedApiRead("/api/loadpoints", function (r) { return r.ok ? r.json() : null; })
         .catch(function () { return null; }),
+      boundedApiRead("/api/cars", function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; }),
       boundedApiRead("/api/health", function (r) { return r.ok ? r.json() : null; })
         .catch(function () { return null; })
         .then(function (health) {
@@ -2251,18 +2296,24 @@
       .then(function (results) {
         var data = results[0];
         var lp = results[1];
-        var health = results[2];
+        var carList = results[2];
+        var health = results[3];
         lastStatusPayload = data;
         // Surface DB corruption-recovery events (boot-time, immutable per
         // process) as a top banner. Tolerant: health may be null.
         try { updateStorageBanner(health && health.storage); }
         catch (eSb) { /* silent */ }
         if (lp && Array.isArray(lp.loadpoints)) {
+          loadpointsFetchedAt = Date.now();
           var idx = {};
           lp.loadpoints.forEach(function (l) {
             if (l && l.driver_name) idx[l.driver_name] = l;
           });
           loadpointsByDriver = idx;
+        }
+        if (carList && Array.isArray(carList.cars)) {
+          lastCars = carList.cars;
+          carsFetchedAt = Date.now();
         }
         updateChargingNotice(lp);
         setConnected(true);

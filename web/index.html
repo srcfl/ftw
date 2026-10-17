@@ -95,6 +95,7 @@
         <button data-tab="control" class="active">Control</button>
         <button data-tab="devices">Devices</button>
         <button data-tab="loadpoints">Chargers</button>
+        <button data-tab="cars">Cars</button>
         <button data-tab="price">Price</button>
         <button data-tab="weather">Weather</button>
         <button data-tab="batteries">Batteries</button>
@@ -216,6 +217,9 @@
         </div>
       </div>
     </section>
+
+    <!-- The owner's cars, apart from the chargers; filled by cars.js. -->
+    <section class="overview-card overview-cars" id="overview-cars" aria-labelledby="overview-cars-title" hidden></section>
 
     <section class="overview-outlook" aria-label="Immediate outlook">
       <section class="overview-card" id="overview-price" aria-label="Electricity price">
@@ -997,6 +1001,7 @@
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
   <script src="/settings/tabs/devices.js?v=catcards2"></script>
   <script src="/settings/tabs/loadpoints.js?v=lp7"></script>
+  <script src="/settings/tabs/cars.js?v=cars1"></script>
   <script src="/settings/tabs/price.js?v=demand1"></script>
   <script src="/settings/tabs/weather.js?v=mlcov1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>

@@ -1933,6 +1933,73 @@ footer {
 .access-args dd { margin: 0; overflow-wrap: anywhere; }
 .access-why { margin: 6px 0; overflow-wrap: anywhere; }
 
+/* ---- Cars settings tab ---- */
+/* One car per row: what can be changed, then how the box knows it. */
+.cars-lede {
+  margin: 0 0 10px;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.cars-quiet {
+  margin: 4px 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.cars-note { margin: 6px 0 0; font-size: 0.85rem; }
+.cars-note:empty { display: none; }
+.cars-error { margin: 6px 0 0; color: var(--red-e); font-size: 0.85rem; }
+.cars-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.cars-row:last-child { border-bottom: 0; }
+.cars-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: end;
+}
+.modal-body .cars-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.modal-body .cars-edit input[type="text"] { width: 16ch; max-width: 100%; }
+.modal-body .cars-edit input[name="capacity"],
+.modal-body .cars-edit input[inputmode="decimal"] { width: 8ch; }
+.modal-body .cars-edit input[name="vin"] { width: 19ch; }
+.cars-edit .btn-send { margin-top: 0; }
+.cars-edit button:disabled,
+.cars-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.cars-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 12px;
+  margin: 10px 0 4px;
+  font-size: 0.8rem;
+}
+.cars-facts dt { color: var(--text-dim); }
+.cars-facts dd { margin: 0; overflow-wrap: anywhere; }
+.cars-actions { margin-top: 6px; }
+.cars-remove {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--red-e);
+  font: inherit;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* Collapse the generic two-column settings rows to a single column on phones,
    so inputs aren't squeezed to unusable widths. */
 @media (max-width: 560px) {

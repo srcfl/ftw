@@ -4,7 +4,7 @@ import { test } from "node:test";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("./app.js", import.meta.url), "utf8");
-const statusPaths = new Set(["/api/status", "/api/loadpoints", "/api/health"]);
+const statusPaths = new Set(["/api/status", "/api/loadpoints", "/api/cars", "/api/health"]);
 const liveHistoryPath = "/api/history?range=24h&points=288";
 const isHistoryPath = (path) => path.startsWith("/api/history?");
 const apiReadTimeoutMs = 15_000;
@@ -188,7 +188,7 @@ function rig({ hidden = false } = {}) {
 test("dashboard polling stays single-flight while visible", async () => {
   const app = rig();
 
-  assert.equal(app.statusFetches().length, 3, "startup should make the three status GETs once");
+  assert.equal(app.statusFetches().length, 4, "startup should make the four status GETs once");
   assert.equal(app.historyFetches().length, 2, "startup should load each distinct history view once");
   assert.equal(app.liveHistoryFetches().length, 1, "startup should fetch live history once");
   assert.equal(app.statusTimers().length, 1, "startup should own one status timer");
@@ -198,20 +198,20 @@ test("dashboard polling stays single-flight while visible", async () => {
   app.runStatusTimers();
   app.runLiveHistoryTimers();
   app.runLiveHistoryTimers();
-  assert.equal(app.statusFetches().length, 3, "timer ticks must not overlap an unresolved status poll");
+  assert.equal(app.statusFetches().length, 4, "timer ticks must not overlap an unresolved status poll");
   assert.equal(app.historyFetches().length, 2, "timer ticks must not duplicate either unresolved history request");
   assert.equal(app.liveHistoryFetches().length, 1, "forced timer ticks must reuse unresolved live history");
 
   await app.settleStatusFetches();
   app.runStatusTimers();
-  assert.equal(app.statusFetches().length, 6, "a future tick should poll after the prior request settles");
+  assert.equal(app.statusFetches().length, 8, "a future tick should poll after the prior request settles");
   app.runStatusTimers();
-  assert.equal(app.statusFetches().length, 6, "the replacement poll should also stay single-flight");
+  assert.equal(app.statusFetches().length, 8, "the replacement poll should also stay single-flight");
 
   app.setHidden(true);
   app.runStatusTimers();
   app.runLiveHistoryTimers();
-  assert.equal(app.statusFetches().length, 6, "hidden dashboard should make no more status GETs");
+  assert.equal(app.statusFetches().length, 8, "hidden dashboard should make no more status GETs");
   assert.equal(app.liveHistoryFetches().length, 1, "hidden dashboard should make no more live-history GETs");
   assert.equal(app.statusTimers().length, 0, "hidden dashboard should clear its status timer");
   assert.equal(app.liveHistoryTimers().length, 0, "hidden dashboard should clear its live-history timer");
@@ -219,10 +219,10 @@ test("dashboard polling stays single-flight while visible", async () => {
   await app.settleStatusFetches();
   await app.settleLiveHistoryFetches();
   assert.equal(app.liveHistoryFetches().length, 1, "settling while hidden must not start live-history catch-up");
-  assert.equal(app.statusFetches().length, 6, "settling while hidden must not start a catch-up poll");
+  assert.equal(app.statusFetches().length, 8, "settling while hidden must not start a catch-up poll");
 
   app.setHidden(false);
-  assert.equal(app.statusFetches().length, 9, "visible dashboard should refresh all three endpoints at once");
+  assert.equal(app.statusFetches().length, 12, "visible dashboard should refresh all four endpoints at once");
   assert.equal(app.historyFetches().length, 3, "visible catch-up should reuse the unresolved chart load");
   assert.equal(app.liveHistoryFetches().length, 2, "visible dashboard should refresh live history at once");
   assert.equal(app.statusTimers().length, 1, "visible dashboard should restore only one status timer");
@@ -232,7 +232,7 @@ test("dashboard polling stays single-flight while visible", async () => {
   app.runStatusTimers();
   app.runLiveHistoryTimers();
   app.runLiveHistoryTimers();
-  assert.equal(app.statusFetches().length, 9, "timer ticks must not overlap the visible catch-up poll");
+  assert.equal(app.statusFetches().length, 12, "timer ticks must not overlap the visible catch-up poll");
   assert.equal(app.liveHistoryFetches().length, 2, "timer and visibility refreshes must share one live-history request");
 
   await app.settleLiveHistoryFetches();
@@ -251,7 +251,7 @@ test("dashboard starts dormant when loaded in a hidden document", () => {
   assert.equal(app.liveHistoryTimers().length, 0);
 
   app.setHidden(false);
-  assert.equal(app.statusFetches().length, 3);
+  assert.equal(app.statusFetches().length, 4);
   assert.equal(app.historyFetches().length, 2, "first visible event should load both history views at once");
   assert.equal(app.liveHistoryFetches().length, 1);
   assert.equal(app.statusTimers().length, 1);
@@ -267,24 +267,24 @@ test("dashboard starts dormant when loaded in a hidden document", () => {
 test("a timed-out read releases both single-flight gates", async () => {
   const app = rig();
 
-  assert.equal(app.statusFetches().length, 3);
+  assert.equal(app.statusFetches().length, 4);
   assert.equal(app.liveHistoryFetches().length, 1);
 
   // None of the startup reads settle. Expire their controlled deadlines in one
   // step, then let promise rejection and finally handlers drain.
   await app.expireApiReads();
-  assert.equal(app.statusFetches().filter((entry) => entry.aborted).length, 3);
+  assert.equal(app.statusFetches().filter((entry) => entry.aborted).length, 4);
   assert.equal(app.historyFetches().filter((entry) => entry.aborted).length, 2);
 
   app.runStatusTimers();
   app.runLiveHistoryTimers();
-  assert.equal(app.statusFetches().length, 6, "status should retry after its timed-out poll");
+  assert.equal(app.statusFetches().length, 8, "status should retry after its timed-out poll");
   assert.equal(app.liveHistoryFetches().length, 2, "forced history should retry after its timed-out read");
 
   // The replacement reads are still unresolved, so normal single-flight still
   // coalesces later timer ticks.
   app.runStatusTimers();
   app.runLiveHistoryTimers();
-  assert.equal(app.statusFetches().length, 6);
+  assert.equal(app.statusFetches().length, 8);
   assert.equal(app.liveHistoryFetches().length, 2);
 });

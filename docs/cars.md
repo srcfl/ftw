@@ -44,13 +44,21 @@ The Go types are in [`go/protocol/cars.go`](../go/protocol/cars.go).
 | Read | Who | What |
 |---|---|---|
 | `GET /api/cars` with `ftw.cars.read` | The owner role | Every field |
-| `GET /api/cars` without it | Viewers and watches | `id`, `name`, the level fields, `goal`, `surplusOnly` |
+| `GET /api/cars` without it | Viewers, watches and agents | `id`, `name`, the level fields, `goal`, `surplusOnly`, and `redacted: true` |
 | FTW Cloud's `car` class | Phones with `ftw.live.read` | Opaque `id`, the level fields, `goal`, `surplusOnly` |
 | `cars.get` | Agents with `ftw.live.read` | The car class under the agent key ([agents.md](agents.md)) |
 
 An agent asks for a car's goal or level with `car.goal.set` and
 `car.soc.set` as `agent.request`, which waits for an owner, naming the car
 by the id `cars.get` gave it. It never taps and never keeps the list.
+
+On the box's own listener every device is the owner while the house
+password is off. There `GET /api/cars` gives every field only to a request
+that has proved itself as a protected one must: from a local address, from
+the box itself, with the house password, or with `FTW_API_TOKEN` through a
+public name. Any other request gets the shorter list with `redacted: true`,
+so a box published under a public name does not hand out its owners' VINs
+and charge tags.
 
 `car.add`, `car.update` and `car.remove` need `ftw.cars.write`, which only
 the owner role carries. They change no hardware, so they need no passkey
@@ -205,6 +213,21 @@ for what the op acts on, a level as a fraction from 0 to 1.
 | `car.update` | `id`, the fields that change; `new_id` for a `boxMinted` car | Changes a car |
 | `car.remove` | `id` | Removes a car and keeps its tombstone. A session on it becomes a visitor's |
 
+The box's own page speaks HTTP, so it sends the same ops through routes
+that hand the same arguments to the same checks and answer with the same
+code and reason:
+
+| Route | Op |
+|---|---|
+| `POST /api/cars`, the op's arguments as the body | `car.add` |
+| `PATCH /api/cars/{id}`, the fields that change | `car.update` |
+| `DELETE /api/cars/{id}` | `car.remove` |
+| `POST /api/loadpoints/{id}/car` with `{session, car_id}` | `session.car.set` |
+
+The first three are served only on the box's own page: a phone sends the ops,
+with their id and expiry, and the session refuses these routes. The tap is
+actuation, and a phone is told to send `session.car.set`.
+
 `cmd.result` carries `car`, the car's id, level, goal and surplus choice as
 the box holds them after the op, or `charger`, the charger's car after
 `session.car.set`; `car.soc.set` also reads the level back in `observed`, as
@@ -232,6 +255,10 @@ by default: until someone taps, the car charges as a visitor.
 
 ## Where cars appear
 
+- The box's own page shows each car on its overview, plugged in or not,
+  with its level, source and age, its goal and the charger it is on. A
+  charger's notice asks which car it is while the box asks, and Settings
+  has a Cars tab that keeps the list.
 - `GET /api/cars` lists the cars, as above, and `removed`.
   `GET /api/loadpoints` gives each charger `session`, `car_id`,
   `car_identified_by`, `car_corrected`, `car_corrected_from` and `choose`.

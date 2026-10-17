@@ -295,6 +295,130 @@ body.ftw-app #charging-notices .overview-card button {
   text-decoration: underline;
   cursor: pointer;
 }
+/* A charger whose car the box cannot name asks which car it is: one
+   button per car, on its own line under the notice. */
+body.ftw-app #charging-notices .car-which {
+  flex: 1 1 100%;
+}
+body.ftw-app #charging-notices .car-which[hidden],
+body.ftw-app .car-which-row[hidden] {
+  display: none;
+}
+body.ftw-app .car-which-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+body.ftw-app #charging-notices .overview-card .car-which-pick {
+  min-height: 40px;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--fg);
+  text-decoration: none;
+}
+body.ftw-app #charging-notices .overview-card .car-which-pick:hover:not(:disabled) {
+  border-color: var(--accent-e);
+}
+body.ftw-app #charging-notices .overview-card .car-which-pick[aria-pressed="true"] {
+  border-color: var(--accent-e);
+  color: var(--accent-e);
+}
+body.ftw-app #charging-notices .overview-card .car-which-pick:disabled {
+  cursor: default;
+}
+body.ftw-app .car-which-note {
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+body.ftw-app .car-which-note:empty {
+  display: none;
+}
+
+/* The owner's cars: one tile per car, plugged in or not. */
+body.ftw-app #overview-cars {
+  grid-column: 1 / -1;
+}
+body.ftw-app #overview-cars[hidden] {
+  display: none !important;
+}
+body.ftw-app .overview-cars-age {
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+body.ftw-app .car-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+body.ftw-app .car-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+}
+body.ftw-app .car-tile-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+body.ftw-app .car-tile-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.ftw-app .car-tile-where {
+  flex: none;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+body.ftw-app .car-tile-where.is-plugged {
+  color: var(--accent-e);
+}
+body.ftw-app .car-tile-level {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+body.ftw-app .car-tile-level.is-estimate {
+  color: var(--fg-dim);
+}
+body.ftw-app .car-tile-source,
+body.ftw-app .car-tile-facts,
+body.ftw-app .car-tile-foot {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+body.ftw-app .car-tile-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+body.ftw-app .car-tile-open {
+  padding: 0.3rem 0;
+  border: 0;
+  background: none;
+  color: var(--accent-e);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
 body.ftw-app .overview-health {
   display: inline-flex;
   align-items: center;
@@ -2529,6 +2653,7 @@ body.ftw-app .diagnose-detail {
   }
   body.ftw-app .power-now,
   body.ftw-app #charging-notices,
+  body.ftw-app #overview-cars,
   body.ftw-app .overview-outlook,
   body.ftw-app .overview-today,
   body.ftw-app .fuse-row {

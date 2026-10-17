@@ -120,6 +120,26 @@ func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 	})
 }
 
+// remoteProved reports whether a request has shown what a protected request
+// must: it came from a local client to a local host name, or it carries
+// FTW_API_TOKEN where the policy asks remote callers for it. A read that is
+// open to anyone uses it to leave out what identifies a person's property,
+// such as a car's VIN, which a protected request would have had to prove
+// itself to see.
+func remoteProved(r *http.Request, policy MutationPolicy) bool {
+	if !policy.RequireTokenForRemote {
+		return true
+	}
+	reqAuthority, err := parseAuthority(r.Host)
+	if err != nil {
+		return false
+	}
+	if isLocalAuthority(reqAuthority) && isLocalClient(r.RemoteAddr) {
+		return true
+	}
+	return strings.TrimSpace(policy.Token) != "" && validBearerToken(r.Header.Get("Authorization"), policy.Token)
+}
+
 func lanAuthOn(policy MutationPolicy) bool {
 	return policy.LANAuthEnabled != nil && policy.LANAuthEnabled()
 }

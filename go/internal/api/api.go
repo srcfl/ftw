@@ -528,6 +528,15 @@ func (s *Server) routes() {
 	s.handle("GET  /api/ev/providers", Read, s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", Read, s.handleLoadpoints)
 	s.handle("GET  /api/cars", Read, s.handleCars)
+	// The box page keeps the owner's cars with the same ops as the owner's
+	// app (docs/cars.md). Local: a phone sends the ops as cmd frames, with
+	// their id and expiry, and never these routes through the passthrough.
+	s.handle("POST   /api/cars", Local, s.handleCarAdd)
+	s.handle("PATCH  /api/cars/{id}", Local, s.handleCarUpdate)
+	s.handle("DELETE /api/cars/{id}", Local, s.handleCarRemove)
+	// The one tap. It changes what the charger plans for, so it is
+	// actuation; a phone sends the op.
+	s.handle("POST /api/loadpoints/{id}/car", Actuate, s.handleSessionCarSet, Via(protocol.OpSessionCarSet))
 	// Via names the one field of this body the session can set. The target
 	// level and its deadline still have no command; the passthrough refuses
 	// the whole route either way.
@@ -3776,21 +3785,31 @@ type CarViews interface {
 
 // handleCars is GET /api/cars: every car the box keeps, in the registry's
 // names spelled in snake_case, and the ids an owner removed. A caller
-// without ftw.cars.read (a viewer, a watch) sees each car's id, name, level,
-// goal and surplus choice, and nothing that says which car it is.
+// without ftw.cars.read (a viewer, a watch, an agent) sees each car's id,
+// name, level, goal and surplus choice, and nothing that says which car it
+// is, and the answer says so with redacted. So does a request off the LAN
+// listener that has not proved itself as a protected one must: the LAN
+// listener names every caller there an owner while the house password is
+// off, and a box published under a public name would otherwise hand any
+// visitor its owners' VINs and charge tags.
 func (s *Server) handleCars(w http.ResponseWriter, r *http.Request) {
 	list, removed := []protocol.Car{}, []cars.Tombstone{}
 	if s.deps.Cars != nil {
 		list, removed = s.deps.Cars.Cars(), s.deps.Cars.Removed()
 	}
-	if caller, ok := apiauth.FromRequest(r); !ok || !caller.Scopes.Has(protocol.ScopeCarsRead) {
-		for i, c := range list {
-			list[i] = protocol.Car{ID: c.ID, Name: c.Name, SocPermille: c.SocPermille, SocSource: c.SocSource,
-				SocAgeS: c.SocAgeS, EnergySinceWh: c.EnergySinceWh, SocEstimate: c.SocEstimate,
-				ChargeLimitPermille: c.ChargeLimitPermille, Goal: c.Goal, SurplusOnly: c.SurplusOnly}
-		}
+	caller, ok := apiauth.FromRequest(r)
+	full := ok && caller.Scopes.Has(protocol.ScopeCarsRead) &&
+		(caller.Kind != apiauth.KindLAN || remoteProved(r, s.deps.MutationPolicy))
+	if full {
+		writeJSON(w, http.StatusOK, map[string]any{"cars": list, "removed": removed})
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cars": list, "removed": removed})
+	for i, c := range list {
+		list[i] = protocol.Car{ID: c.ID, Name: c.Name, SocPermille: c.SocPermille, SocSource: c.SocSource,
+			SocAgeS: c.SocAgeS, EnergySinceWh: c.EnergySinceWh, SocEstimate: c.SocEstimate,
+			ChargeLimitPermille: c.ChargeLimitPermille, Goal: c.Goal, SurplusOnly: c.SurplusOnly}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cars": list, "removed": removed, "redacted": true})
 }
 
 // decorateLoadpointsWithCar shows each plugged-in charger's level as its

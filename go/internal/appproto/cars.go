@@ -167,31 +167,39 @@ func chargerResult(cmd Cmd, held protocol.ChargerCar, err error) (CmdResult, err
 // carRefusal names why, in machine form, after the ack, as the loadpoint ops
 // do (docs/cars.md, Ops). ok is false for an error that is not a refusal.
 func carRefusal(cmd Cmd, err error) (CmdResult, bool) {
-	var code, reason string
-	switch {
-	case errors.Is(err, cars.ErrUnknownCar):
-		code, reason = ErrNotFound, "car"
-	case errors.Is(err, cars.ErrUnknownCharger):
-		code, reason = ErrNotFound, "charger"
-	case errors.Is(err, cars.ErrSessionEnded):
-		code, reason = ErrPrecondition, "session"
-	case errors.Is(err, cars.ErrUnplugged):
-		code, reason = ErrUnavailable, "unplugged"
-	case errors.Is(err, cars.ErrDuplicate):
-		code, reason = ErrDuplicate, "duplicate"
-	case errors.Is(err, cars.ErrElsewhere):
-		code, reason = ErrPrecondition, "elsewhere"
-	case errors.Is(err, cars.ErrTooMany):
-		code, reason = protocol.ErrCapExceeded, "cars"
-	case errors.Is(err, cars.ErrInvalid):
-		code, reason = ErrPrecondition, "invalid"
-	default:
+	code, reason, ok := CarRefusal(err)
+	if !ok {
 		return CmdResult{}, false
 	}
 	return CmdResult{
 		CmdID: cmd.CmdID, State: CmdRejected,
 		Error: &ErrorBody{Code: code, Retryable: ErrorRetryable[code], Args: map[string]any{"op": cmd.Op, "reason": reason}},
 	}, true
+}
+
+// CarRefusal is the code and reason a car op's error is refused with. The
+// box page's car routes answer with the same pair. ok is false for an error
+// that is not a refusal, such as a save that failed.
+func CarRefusal(err error) (code, reason string, ok bool) {
+	switch {
+	case errors.Is(err, cars.ErrUnknownCar):
+		return ErrNotFound, "car", true
+	case errors.Is(err, cars.ErrUnknownCharger):
+		return ErrNotFound, "charger", true
+	case errors.Is(err, cars.ErrSessionEnded):
+		return ErrPrecondition, "session", true
+	case errors.Is(err, cars.ErrUnplugged):
+		return ErrUnavailable, "unplugged", true
+	case errors.Is(err, cars.ErrDuplicate):
+		return ErrDuplicate, "duplicate", true
+	case errors.Is(err, cars.ErrElsewhere):
+		return ErrPrecondition, "elsewhere", true
+	case errors.Is(err, cars.ErrTooMany):
+		return protocol.ErrCapExceeded, "cars", true
+	case errors.Is(err, cars.ErrInvalid):
+		return ErrPrecondition, "invalid", true
+	}
+	return "", "", false
 }
 
 // carIntentArgs checks car.goal.set's and car.soc.set's arguments as carOp
@@ -334,6 +342,12 @@ func optBool(args map[string]any, k string) (*bool, string) {
 	}
 	return &b, ""
 }
+
+// CarAddArgs and CarUpdateArgs read car.add's and car.update's arguments as
+// the ops do, for the box page's routes. bad names an argument they refuse.
+func CarAddArgs(args map[string]any) (car protocol.Car, bad string) { return carArgs(args) }
+
+func CarUpdateArgs(args map[string]any) (u cars.Update, bad string) { return carUpdateArgs(args) }
 
 // carArgs reads car.add: id, which the owner's app mints, and the car's own
 // fields without the level.
