@@ -33,7 +33,7 @@ import (
 // for the audit log: "box" for the box itself, or "lan:<address>".
 type AgentAdmin interface {
 	Agents() []protocol.AgentRow
-	Requests() []protocol.Request
+	Requests() []AgentRequest
 	ApprovalKeys() []protocol.ApprovalKeyInfo
 	// Home is this box's home id at FTW Cloud, or "" before it links.
 	Home() string
@@ -56,6 +56,17 @@ type AgentAdmin interface {
 	// Facts are what the box page checks before it asks the owner for a
 	// code, which works once.
 	Facts() AgentFacts
+}
+
+// AgentRequest is a request as the box page lists it: the owner's view,
+// with the box's own ids.
+type AgentRequest struct {
+	protocol.Request
+	// Names maps each arg that names a charger or car the box still knows
+	// to what the box calls it. The page is local and its caller an owner,
+	// so it may name them; nothing an agent or FTW Cloud reads carries
+	// this.
+	Names map[string]string `json:"names,omitempty"`
 }
 
 // AgentFacts say whether this box can take a grant now, and where the owner's
@@ -173,12 +184,15 @@ func agentError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, map[string]any{"error": r.Code, "args": r.Args})
 }
 
-// agentsPage is agent.list as the box page reads it, with the box's facts and
-// the registry's view of agent ops, so the page names nothing by hand.
+// agentsPage is agent.list as the box page reads it, its requests with their
+// chargers' and cars' names, the box's facts and the registry's view of
+// agent ops, so the page names nothing by hand.
 type agentsPage struct {
-	protocol.AgentList
-	Box      AgentFacts     `json:"box"`
-	Registry agentsRegistry `json:"registry"`
+	Agents   []protocol.AgentRow        `json:"agents"`
+	Requests []AgentRequest             `json:"requests"`
+	Keys     []protocol.ApprovalKeyInfo `json:"keys"`
+	Box      AgentFacts                 `json:"box"`
+	Registry agentsRegistry             `json:"registry"`
 }
 
 type agentsRegistry struct {
@@ -218,9 +232,7 @@ func (s *Server) handleAgentsList(w http.ResponseWriter, r *http.Request) {
 	facts := a.Facts()
 	facts.Widen, _ = lanSecretFrom(r.Context())
 	writeJSON(w, http.StatusOK, agentsPage{
-		AgentList: protocol.AgentList{
-			Agents: nonNil(a.Agents()), Requests: nonNil(a.Requests()), Keys: nonNil(a.ApprovalKeys()),
-		},
+		Agents: nonNil(a.Agents()), Requests: nonNil(a.Requests()), Keys: nonNil(a.ApprovalKeys()),
 		Box:      facts,
 		Registry: registryForPage(),
 	})

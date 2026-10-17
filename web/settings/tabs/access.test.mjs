@@ -280,6 +280,23 @@ describe("a request waiting for the owner", () => {
     assert.equal(rows[0].label, "evilgnp");
   });
 
+  it("names a charger or car by what the box calls it, and by its id when the box has no name", () => {
+    const car = P.requestArgs({
+      op: "car.goal.set",
+      args: { id: "0123456789abcdef0123456789abcdef", target: 0.8 },
+      names: { id: "Volvo" + String.fromCharCode(0x200b) + " XC40" },
+    }, registry);
+    assert.deepEqual(car.map((r) => r.value), ["Volvo XC40", "80 %"]);
+    const charger = P.requestArgs({
+      op: "loadpoint.hold",
+      args: { id: "garage", power_w: 7400 },
+      names: { id: "Carport Easee", power_w: "not a name" },
+    }, registry);
+    assert.deepEqual(charger.map((r) => r.value), ["Carport Easee", "7.4 kW"]);
+    const gone = P.requestArgs({ op: "car.goal.set", args: { id: "0123456789abcdef0123456789abcdef" }, names: { id: "" } }, registry);
+    assert.equal(gone[0].value, "0123456789abcdef0123456789abcdef");
+  });
+
   it("shows power, length and odd numbers plainly", () => {
     const rows = P.requestArgs({ op: "loadpoint.hold", args: { power_w: 7400, hold_s: 900, id: "lp_1" } }, registry);
     assert.deepEqual(rows.map((r) => r.value), ["lp_1", "7.4 kW", "15 min"]);
