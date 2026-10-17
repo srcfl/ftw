@@ -37,7 +37,6 @@ import (
 	_ "time/tzdata"
 
 	"github.com/srcfl/ftw/go/internal/api"
-	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/cars"
@@ -2410,8 +2409,14 @@ func main() {
 	case appLinkErr != nil:
 		slog.Warn("app link unavailable", "err", appLinkErr)
 	case appLinkEnabled:
-		slog.Info("app link connected", "relay", appuplink.Endpoint,
-			"paired_devices", appEnroll.AuthorisedCount())
+		commandDoor, commandFallback := cfg.AppLink.CommandDoor()
+		if commandFallback == "" {
+			slog.Info("app link connected", "relay", commandDoor,
+				"paired_devices", appEnroll.AuthorisedCount())
+		} else {
+			slog.Info("app link connected", "command", commandDoor, "fallback", commandFallback,
+				"paired_devices", appEnroll.AuthorisedCount())
+		}
 	default:
 		slog.Info("app link disabled — set app_link.enabled to turn it on")
 	}

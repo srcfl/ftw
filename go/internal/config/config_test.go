@@ -980,6 +980,74 @@ func TestSlewExplicitDisablePreserved(t *testing.T) {
 	}
 }
 
+func TestCommandDoorDefaultsToTheRelay(t *testing.T) {
+	primary, fallback := (*AppLink)(nil).CommandDoor()
+	if primary != CommandRelayOrigin || fallback != "" {
+		t.Fatalf("nil door = %q fallback %q", primary, fallback)
+	}
+	primary, fallback = (&AppLink{Enabled: true}).CommandDoor()
+	if primary != CommandRelayOrigin || fallback != "" {
+		t.Fatalf("empty endpoint = %q fallback %q", primary, fallback)
+	}
+	primary, fallback = (&AppLink{Enabled: true, CommandEndpoint: CommandRelayOrigin}).CommandDoor()
+	if primary != CommandRelayOrigin || fallback != "" {
+		t.Fatalf("explicit relay = %q fallback %q", primary, fallback)
+	}
+}
+
+func TestCommandDoorPointsAtTheCloudAndFallsBack(t *testing.T) {
+	for _, ep := range []string{CommandCloudOrigin, CommandCloudOrigin + "/"} {
+		primary, fallback := (&AppLink{Enabled: true, CommandEndpoint: ep}).CommandDoor()
+		if primary != CommandCloudOrigin || fallback != CommandRelayOrigin {
+			t.Fatalf("endpoint %q door = %q fallback %q", ep, primary, fallback)
+		}
+	}
+}
+
+func TestCommandEndpointRejectsAnythingButTheRelayOrTheCloud(t *testing.T) {
+	cases := []struct {
+		endpoint string
+		dataPath bool
+	}{
+		{endpoint: "wss://evil.example"},
+		{endpoint: "ws://cloud.ftw.energy"},
+		{endpoint: "https://cloud.ftw.energy"},
+		{endpoint: "wss://cloud.ftw.energy/v1/box", dataPath: true},
+		{endpoint: "wss://user:pass@cloud.ftw.energy"},
+		{endpoint: "wss://relay.ftw.energy/r/1/abc/box"},
+	}
+	for _, tc := range cases {
+		cfg, err := Parse([]byte(minimalYAML+"app_link:\n  enabled: true\n  command_endpoint: \""+tc.endpoint+"\"\n"), t.TempDir())
+		if err == nil {
+			t.Fatalf("%q was accepted, door %+v", tc.endpoint, cfg.AppLink)
+		}
+		if tc.dataPath && !strings.Contains(err.Error(), "data uplink") {
+			t.Fatalf("%q error %v, want the data-uplink refusal", tc.endpoint, err)
+		}
+	}
+}
+
+func TestCommandEndpointRoundTripsWithoutBecomingTheDefault(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML+"app_link:\n  enabled: true\n  command_endpoint: \""+CommandCloudOrigin+"\"\n"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppLink.CommandEndpoint != CommandCloudOrigin {
+		t.Fatalf("stored endpoint %q", cfg.AppLink.CommandEndpoint)
+	}
+	omitted, err := Parse([]byte(minimalYAML), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.AppLink.CommandEndpoint != "" {
+		t.Fatalf("omitted endpoint was written as %q", omitted.AppLink.CommandEndpoint)
+	}
+	primary, fallback := omitted.AppLink.CommandDoor()
+	if primary != CommandRelayOrigin || fallback != "" {
+		t.Fatalf("omitted door = %q fallback %q", primary, fallback)
+	}
+}
+
 func TestAppLinkDefaultsOnAndPreservesOptOut(t *testing.T) {
 	absent := &Config{}
 	applyDefaults(absent)

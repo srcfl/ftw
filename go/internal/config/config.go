@@ -211,12 +211,29 @@ func (o *OCPP) ChargerSecrets() map[string]string {
 	return out
 }
 
+// CommandRelayOrigin is the Frankfurt relay. Commands go here unless
+// CommandEndpoint names the cloud.
+const CommandRelayOrigin = "wss://relay.ftw.energy"
+
+// CommandCloudOrigin is FTW Cloud's command door. The box dials it outbound
+// and speaks the relay frame format there; Noise still ends at the phone.
+// It is not the data uplink (wss://cloud.ftw.energy/v1/box). That socket's
+// downlink is a closed set and closes on a relay frame, so the two are not
+// multiplexed.
+const CommandCloudOrigin = "wss://cloud.ftw.energy"
+
 // AppLink controls the outbound connection the FTW app reaches this box
 // through. It defaults on when the section is absent; an explicit false is the
-// opt-out. One switch is enough because the relay is content-blind and fixed
-// by the protocol, so there is no endpoint or transport to choose.
+// opt-out. The command door defaults to the Frankfurt relay. Naming the cloud
+// is the transition off that relay; a door that does not answer falls back.
 type AppLink struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
+	// CommandEndpoint is where encrypted app sessions go. Empty keeps the
+	// Frankfurt relay. The only other accepted value is the cloud origin
+	// above: a support call must not be able to point the box at an
+	// attacker's relay. The address is not written in when the section is
+	// filled in, so a household that never set it keeps following the default.
+	CommandEndpoint string `yaml:"command_endpoint,omitempty" json:"command_endpoint,omitempty"`
 }
 
 // On is the single reading of the app-link switch. A nil section means an old
@@ -227,6 +244,48 @@ func (a *AppLink) On() bool {
 		return true
 	}
 	return a.Enabled
+}
+
+// CommandDoor is the origin the command uplink dials, and the relay to try
+// when that origin does not complete a WebSocket handshake. An empty or
+// relay endpoint has no fallback, which is today's behavior. The cloud door
+// falls back to the relay for the transition. A value Validate refused still
+// resolves to the relay, so a skipped check cannot steer the box elsewhere.
+func (a *AppLink) CommandDoor() (primary, fallback string) {
+	ep := ""
+	if a != nil {
+		ep = strings.TrimRight(strings.TrimSpace(a.CommandEndpoint), "/")
+	}
+	switch ep {
+	case "", CommandRelayOrigin:
+		return CommandRelayOrigin, ""
+	case CommandCloudOrigin:
+		return CommandCloudOrigin, CommandRelayOrigin
+	default:
+		return CommandRelayOrigin, ""
+	}
+}
+
+// Validate rejects a command door that is not the relay or the cloud. Nil
+// and empty are the relay, and they are valid.
+func (a *AppLink) Validate() error {
+	if a == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(a.CommandEndpoint)
+	if raw == "" {
+		return nil
+	}
+	ep := strings.TrimRight(raw, "/")
+	switch ep {
+	case CommandRelayOrigin, CommandCloudOrigin:
+		return nil
+	}
+	parsed, err := url.Parse(ep)
+	if err == nil && parsed.Hostname() == "cloud.ftw.energy" && parsed.Path != "" && parsed.Path != "/" {
+		return errors.New("app_link.command_endpoint is the command door wss://cloud.ftw.energy, not the data uplink")
+	}
+	return fmt.Errorf("app_link.command_endpoint must be %s or %s", CommandRelayOrigin, CommandCloudOrigin)
 }
 
 // FleetPing configures the once-a-day count of how many boxes run FTW, on
@@ -1929,6 +1988,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.FleetPing.Validate(); err != nil {
+		return err
+	}
+	if err := c.AppLink.Validate(); err != nil {
 		return err
 	}
 	if err := c.validateModbusProxy(); err != nil {

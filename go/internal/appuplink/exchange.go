@@ -462,10 +462,10 @@ func (x *exchanges) count() int {
 // handle, and reconnects it with its own backoff until the connection ends. A
 // relay that refuses the role, or a socket that drops, costs the watch its
 // door and nothing else.
-func (u *Uplink) keepExchange(ctx context.Context, epoch int64, handle string) {
+func (u *Uplink) keepExchange(ctx context.Context, origin string, epoch int64, handle string) {
 	attempt := 0
 	for ctx.Err() == nil {
-		target := fmt.Sprintf("%s/r/%d/%s/exchange", u.opts.Endpoint, epoch, handle)
+		target := fmt.Sprintf("%s/r/%d/%s/exchange", origin, epoch, handle)
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 		conn, response, err := u.dialer.DialContext(dialCtx, target, nil)
 		cancel()

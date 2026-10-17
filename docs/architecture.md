@@ -369,10 +369,14 @@ from the same SQLite snapshot so older Core versions also read current settings.
 
 ## Remote access boundary
 
-Remote access is the FTW app and nothing else. The box holds one outbound WSS
-connection to `wss://relay.ftw.energy`, and beside it a second socket for a
-watch's one-shot exchanges; there is no inbound listener, no NAT-traversal
-layer, no cloud account and no browser-managed site directory.
+Remote access for commands is the FTW app and nothing else. By default the
+box holds one outbound WSS connection to `wss://relay.ftw.energy`, and beside
+it a second socket for a watch's one-shot exchanges. `app_link.command_endpoint`
+may name `wss://cloud.ftw.energy` instead; that door speaks the same frames
+on its own outbound socket, and a handshake it does not complete falls back
+to the relay. The FTW Cloud data uplink is a separate socket and does not
+carry these frames. There is no inbound listener, no NAT-traversal layer
+and no browser-managed site directory.
 See [ADR 0006](adr/0006-app-uplink.md) for why Home Link was removed rather
 than kept alongside it.
 

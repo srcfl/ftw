@@ -842,7 +842,15 @@ func startAppLink(
 		}
 	}
 
+	// The command door is the relay unless config names the cloud. The data
+	// uplink is a different socket and cannot carry these frames: its
+	// downlink is a closed set and it closes on a relay frame. A cloud door
+	// that does not answer falls back to the relay. Noise still runs between
+	// the phone and this box, and the box still dials out.
+	primary, fallback := cfg.AppLink.CommandDoor()
 	uplink, err := appuplink.New(appuplink.Options{
+		Endpoint:        primary,
+		Fallback:        fallback,
 		Enroll:          enroll,
 		Deadman:         deadman,
 		Handler:         handlerFor(false),

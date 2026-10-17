@@ -1,12 +1,19 @@
-// Package appuplink keeps the box's outbound connection to the content-blind
-// relay, and runs the app sessions that arrive over it.
+// Package appuplink keeps the box's outbound command connection and runs the
+// app sessions that arrive over it.
 //
-// The relay is the only remote path between a box and a phone, and it cannot
-// read a watt: it joins one box uplink to a handful of browser streams under a
-// rendezvous handle and moves opaque bytes between them. Everything that makes
-// those bytes meaningful is in go/protocol/appwire (the Noise session) and
-// go/protocol (the messages). See srcfl/ftw-webapp relay/README.md
-// for the server's half.
+// The default door is the content-blind Frankfurt relay. Config may point the
+// same frames at FTW Cloud; a cloud that does not answer the dial falls back
+// to the relay. Either door joins one box uplink to a handful of browser
+// streams under a rendezvous handle and moves opaque bytes between them. It
+// cannot read a watt. Everything that makes those bytes meaningful is in
+// go/protocol/appwire (the Noise session) and go/protocol (the messages). See
+// srcfl/ftw-webapp relay/README.md for the relay's half. FTW Cloud, when it
+// is the door, speaks that same frame format on its own socket.
+//
+// That socket is not the data uplink. cloudlink dials
+// wss://cloud.ftw.energy/v1/box, whose downlink is a closed set of five
+// message types and which closes on a text frame or a relay frame. Command
+// sessions stay end-to-end Noise on a second outbound socket.
 //
 // One rule shapes the whole file: a dropped connection is this package's
 // problem. There is no reconnect button in the app and no place to put one, so
@@ -37,11 +44,18 @@ import (
 	"github.com/srcfl/ftw/go/internal/appproto"
 )
 
-// Endpoint is the production relay. Not configurable: a box that can be
-// pointed at another relay is a box a support call can point at an attacker's,
-// and the relay is fixed by the protocol, so there is nothing to gain by
-// choosing one.
+// Endpoint is the Frankfurt relay, and the command door when none is
+// configured. Config may name CloudCommandOrigin instead; any other origin
+// is refused there, so a support call cannot point the box at an attacker's
+// relay. This package still accepts a ws origin so a test can dial a local
+// door. A configured cloud door that does not complete the WebSocket
+// handshake falls back to this relay.
 const Endpoint = "wss://relay.ftw.energy"
+
+// CloudCommandOrigin is FTW Cloud's command door. It is an origin, with no
+// path: the box appends /r/{epoch}/{handle}/box the same way it does for the
+// relay. It is not the data uplink at /v1/box.
+const CloudCommandOrigin = "wss://cloud.ftw.energy"
 
 // The relay's close codes and control words. Held here rather than shared with
 // the server so the box builds without it; relay_contract_test.go fails if
@@ -117,8 +131,14 @@ const (
 
 // Options wires the uplink. Everything except the injectable seams is required.
 type Options struct {
-	// Endpoint is the relay origin, no path. Defaults to Endpoint.
+	// Endpoint is the command-door origin, no path. Empty means Endpoint,
+	// the Frankfurt relay.
 	Endpoint string
+
+	// Fallback is dialed when Endpoint does not complete the WebSocket
+	// handshake. Empty means there is no second door, which is the default.
+	// Production sets this to the relay when Endpoint is the cloud.
+	Fallback string
 
 	// Enroll owns the static key, the rendezvous secret and the record of
 	// which phones are allowed in.
@@ -247,18 +267,19 @@ func New(opts Options) (*Uplink, error) {
 		return nil, errors.New("appuplink: Handler is required")
 	}
 
-	endpoint := opts.Endpoint
-	if endpoint == "" {
-		endpoint = Endpoint
+	endpoint, err := parseOrigin(opts.Endpoint, Endpoint)
+	if err != nil {
+		return nil, err
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" {
-		return nil, fmt.Errorf("appuplink: %q is not a relay origin", endpoint)
+	fallback, err := parseOrigin(opts.Fallback, "")
+	if err != nil {
+		return nil, err
 	}
-	if parsed.Scheme != "wss" && parsed.Scheme != "ws" {
-		return nil, fmt.Errorf("appuplink: %q is not a WebSocket scheme", parsed.Scheme)
+	if fallback == endpoint {
+		fallback = ""
 	}
-	opts.Endpoint = strings.TrimRight(endpoint, "/")
+	opts.Endpoint = endpoint
+	opts.Fallback = fallback
 
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
@@ -306,6 +327,25 @@ func New(opts Options) (*Uplink, error) {
 		}
 	}
 	return u, nil
+}
+
+// parseOrigin checks a command-door origin. defaultOrigin is used when
+// endpoint is empty; an empty default means the field is optional.
+func parseOrigin(endpoint, defaultOrigin string) (string, error) {
+	if endpoint == "" {
+		endpoint = defaultOrigin
+	}
+	if endpoint == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return "", fmt.Errorf("appuplink: %q is not a command-door origin", endpoint)
+	}
+	if parsed.Scheme != "wss" && parsed.Scheme != "ws" {
+		return "", fmt.Errorf("appuplink: %q is not a WebSocket scheme", parsed.Scheme)
+	}
+	return strings.TrimRight(endpoint, "/"), nil
 }
 
 func productionDialer() *websocket.Dialer {
@@ -359,16 +399,16 @@ func (u *Uplink) once(ctx context.Context) (time.Duration, error) {
 		return backoffCap, err
 	}
 
-	conn, err := u.dial(ctx, epoch, handle)
+	conn, origin, err := u.dial(ctx, epoch, handle)
 	if err != nil {
-		return u.backoff(), fmt.Errorf("appuplink: dialling the relay: %w", err)
+		return u.backoff(), fmt.Errorf("appuplink: dialling the command uplink: %w", err)
 	}
 
 	// A connection that lasted is not a connection that is failing. Without
 	// this, an hourly rotation would compound the backoff until a box that
 	// works perfectly waits a minute after every rotation.
 	connectedAt := u.now()
-	end := u.ride(ctx, u.start(ctx, conn, epoch, handle))
+	end := u.ride(ctx, u.start(ctx, conn, epoch, handle, origin))
 	if u.now().Sub(connectedAt) >= backoffCap {
 		u.attempt = 0
 	}
@@ -400,11 +440,38 @@ func (u *Uplink) epoch() int64 {
 	return CurrentEpoch(u.now().UnixMilli()) + u.epochOffset
 }
 
-// dial opens a socket under one epoch's handle. The relay answers a wrong
+// dial opens a socket under one epoch's handle. The door answers a wrong
 // epoch after the upgrade, with a close, so an open socket is not yet an
 // accepted one.
-func (u *Uplink) dial(ctx context.Context, epoch int64, handle string) (*websocket.Conn, error) {
-	target := fmt.Sprintf("%s/r/%d/%s/box", u.opts.Endpoint, epoch, handle)
+//
+// When a fallback is configured, a handshake that does not complete is
+// tried again on the relay. A socket that opens and then closes is not a
+// fallback: the door accepted the box, and the usual retry handles the rest.
+// The returned origin is the door that accepted the socket. The exchange
+// socket and the dead-man rows stay on that door, so a phone and a watch
+// meet in the same room.
+func (u *Uplink) dial(ctx context.Context, epoch int64, handle string) (*websocket.Conn, string, error) {
+	origin := u.opts.Endpoint
+	conn, err := u.dialOrigin(ctx, origin, epoch, handle)
+	if err == nil {
+		u.setCommandOrigin(origin)
+		return conn, origin, nil
+	}
+	if u.opts.Fallback == "" {
+		return nil, "", err
+	}
+	u.log.Warn("command uplink unreachable; falling back to the relay",
+		"endpoint", origin, "fallback", u.opts.Fallback, "err", err)
+	conn, ferr := u.dialOrigin(ctx, u.opts.Fallback, epoch, handle)
+	if ferr != nil {
+		return nil, "", fmt.Errorf("%w; relay fallback: %v", err, ferr)
+	}
+	u.setCommandOrigin(u.opts.Fallback)
+	return conn, u.opts.Fallback, nil
+}
+
+func (u *Uplink) dialOrigin(ctx context.Context, origin string, epoch int64, handle string) (*websocket.Conn, error) {
+	target := fmt.Sprintf("%s/r/%d/%s/box", origin, epoch, handle)
 
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -430,15 +497,16 @@ type linkEnd struct {
 	err    error
 }
 
-func (u *Uplink) start(ctx context.Context, conn *websocket.Conn, epoch int64, handle string) *link {
+func (u *Uplink) start(ctx context.Context, conn *websocket.Conn, epoch int64, handle, origin string) *link {
 	ctx, stop := context.WithCancel(ctx)
 	l := &link{epoch: epoch, stop: stop, done: make(chan linkEnd, 1)}
 	go func() {
 		defer stop()
 		// The exchange socket rides beside this connection, under the same
-		// epoch and handle, and ends with it.
+		// epoch, handle and door, and ends with it. A watch that dialled the
+		// other door would sit in an empty room.
 		if u.exchanges != nil {
-			go u.keepExchange(ctx, epoch, handle)
+			go u.keepExchange(ctx, origin, epoch, handle)
 		}
 		code, reason, err := u.serve(ctx, conn)
 		l.done <- linkEnd{code: code, reason: reason, err: err}
@@ -547,12 +615,12 @@ func (u *Uplink) join(ctx context.Context, epoch int64) *link {
 	if err != nil {
 		return nil
 	}
-	conn, err := u.dial(ctx, epoch, handle)
+	conn, origin, err := u.dial(ctx, epoch, handle)
 	if err != nil {
 		u.log.Debug("could not join the new hour's handle yet", "err", err)
 		return nil
 	}
-	return u.start(ctx, conn, epoch, handle)
+	return u.start(ctx, conn, epoch, handle, origin)
 }
 
 // serve runs one connection. It returns the close code and reason when the

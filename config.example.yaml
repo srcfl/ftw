@@ -212,13 +212,19 @@ state:
   path: state.db
   # backup_dir: backups            # use an absolute mounted path for off-device backups
 
-# The FTW app. On by default: the box holds an outbound connection to a relay
-# that carries encrypted frames and holds no keys. The relay still sees the
-# source IP, timing and connection pattern. Set enabled to false to opt out.
-# An empty app_link object is also off. Pair a phone by scanning the box's code;
-# the pairing code is single-use and expires in ten minutes.
+# The FTW app. On by default: the box holds an outbound connection that carries
+# end-to-end encrypted frames. The door still sees the source IP, timing and
+# connection pattern. Set enabled to false to opt out. An empty app_link object
+# is also off. Pair a phone by scanning the box's code; the pairing code is
+# single-use and expires in ten minutes.
+#
+# command_endpoint chooses that door. Omit it, or set the relay, to keep today's
+# behavior. wss://cloud.ftw.energy sends the same frames to FTW Cloud on their
+# own socket (not the data uplink at /v1/box). If that door does not complete
+# the WebSocket handshake, the box dials the relay. Any other origin is refused.
 app_link:
   enabled: true
+  # command_endpoint: wss://cloud.ftw.energy
 
 # Anonymous fleet ping. Once a day, at a time that moves, the box tells the
 # FTW relay six things: its FTW version, its release channel, which driver

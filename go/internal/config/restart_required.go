@@ -41,6 +41,11 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg.AppLink.On() != newCfg.AppLink.On() {
 		reasons = append(reasons, "app_link — the app uplink is connected at startup")
 	}
+	oldDoor, oldFallback := oldCfg.AppLink.CommandDoor()
+	newDoor, newFallback := newCfg.AppLink.CommandDoor()
+	if oldDoor != newDoor || oldFallback != newFallback {
+		reasons = append(reasons, "app_link.command_endpoint — the command uplink is dialed at startup")
+	}
 	if oldCfg.FleetPing.Resolved() != newCfg.FleetPing.Resolved() {
 		reasons = append(reasons, "fleet_ping.endpoint — the sender resolves its endpoint at startup")
 	}

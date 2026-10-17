@@ -96,7 +96,22 @@ func DeadmanID(secret []byte, subscriptionID string) string {
 	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 
-// deadmanOrigin is the relay's HTTPS side of the same host the uplink dials.
+// setCommandOrigin records the door that accepted the latest socket, so
+// dead-man rows are posted to that door and not to one the box failed to
+// reach.
+func (u *Uplink) setCommandOrigin(origin string) {
+	u.deadmanMu.Lock()
+	u.deadmanOrigin = deadmanOrigin(origin)
+	u.deadmanMu.Unlock()
+}
+
+func (u *Uplink) commandHTTPOrigin() string {
+	u.deadmanMu.Lock()
+	defer u.deadmanMu.Unlock()
+	return u.deadmanOrigin
+}
+
+// deadmanOrigin is the HTTPS side of the same host the command socket dials.
 func deadmanOrigin(endpoint string) string {
 	switch {
 	case strings.HasPrefix(endpoint, "wss://"):
@@ -195,7 +210,7 @@ func (u *Uplink) postDeadman(ctx context.Context, id string, row DeadmanRow) err
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		u.deadmanOrigin+"/deadman", bytes.NewReader(body))
+		u.commandHTTPOrigin()+"/deadman", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -205,7 +220,7 @@ func (u *Uplink) postDeadman(ctx context.Context, id string, row DeadmanRow) err
 
 func (u *Uplink) deleteDeadman(ctx context.Context, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
-		u.deadmanOrigin+"/deadman/"+id, nil)
+		u.commandHTTPOrigin()+"/deadman/"+id, nil)
 	if err != nil {
 		return err
 	}
