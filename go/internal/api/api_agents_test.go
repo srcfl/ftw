@@ -27,11 +27,12 @@ type stubAgents struct {
 	unsynced bool
 	resets   int
 	// noKeys is a build that pins no offer key.
-	noKeys bool
+	noKeys   bool
+	requests []AgentRequest
 }
 
 func (a *stubAgents) Agents() []protocol.AgentRow              { return nil }
-func (a *stubAgents) Requests() []protocol.Request             { return nil }
+func (a *stubAgents) Requests() []AgentRequest                 { return a.requests }
 func (a *stubAgents) ApprovalKeys() []protocol.ApprovalKeyInfo { return nil }
 func (a *stubAgents) Home() string                             { return a.home }
 func (a *stubAgents) Wall() (int64, bool)                      { return 1_000_000, !a.unsynced }
@@ -335,6 +336,38 @@ func TestTheListSaysWhetherThisRequestCanWiden(t *testing.T) {
 	}
 	if ok, code := widen("http://192.168.1.1:8080/api/agents", "192.168.1.5:1234"); !ok || code != http.StatusCreated {
 		t.Errorf("another device, signed in: widen %v, grant %d", ok, code)
+	}
+}
+
+// A request on the box page keeps its args and adds the names of the
+// chargers and cars they name; one with nothing to name carries no names.
+func TestTheAgentListNamesARequestsChargerAndCar(t *testing.T) {
+	agents := newStubAgents("")
+	agents.requests = []AgentRequest{
+		{Request: protocol.Request{ReqID: "r1", Op: protocol.OpCarGoalSet, State: protocol.RequestPending,
+			Args: map[string]any{"id": "0123456789abcdef0123456789abcdef", "charger_id": "garage", "target": 0.8}},
+			Names: map[string]string{"id": "Volvo", "charger_id": "garage"}},
+		{Request: protocol.Request{ReqID: "r2", Op: protocol.OpSetMode, State: protocol.RequestPending,
+			Args: map[string]any{"mode": "idle"}}},
+	}
+	s := New(&Deps{Agents: agents})
+	w := httptest.NewRecorder()
+	s.handleAgentsList(w, localRequest(http.MethodGet, "/api/agents", ""))
+	var got struct {
+		Requests []map[string]any `json:"requests"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got.Requests) != 2 {
+		t.Fatalf("%d %v %s", w.Code, err, w.Body.String())
+	}
+	first := got.Requests[0]
+	args, _ := first["args"].(map[string]any)
+	names, _ := first["names"].(map[string]any)
+	if first["reqId"] != "r1" || args["id"] != "0123456789abcdef0123456789abcdef" || names["id"] != "Volvo" ||
+		names["charger_id"] != "garage" {
+		t.Errorf("a car's goal on the box page: %v", first)
+	}
+	if _, ok := got.Requests[1]["names"]; ok {
+		t.Errorf("a request with nothing to name: %v", got.Requests[1])
 	}
 }
 

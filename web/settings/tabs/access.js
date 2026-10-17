@@ -332,16 +332,19 @@
   }
 
   // A request's arguments, in the registry's order and by the labels it
-  // gives them, as the box sent them. One the registry does not name comes
-  // last, by its own name.
+  // gives them, as the box sent them. A charger or car goes by the name the
+  // box gave it, and by its id only when the box no longer knows it. One the
+  // registry does not name comes last, by its own name.
   function requestArgs(req, registry) {
     var known = ((registry && registry.agentArgs) || {})[req.op] || [];
     var args = req.args || {};
+    var names = req.names || {};
     var out = [];
     known.forEach(function (a) {
-      if (Object.prototype.hasOwnProperty.call(args, a.name)) {
-        out.push({ label: a.label || a.name, value: argValue(args[a.name], a) });
-      }
+      if (!Object.prototype.hasOwnProperty.call(args, a.name)) return;
+      var named = (a.kind === "loadpoint" || a.kind === "car") && Object.prototype.hasOwnProperty.call(names, a.name);
+      var name = named ? cleanText(names[a.name], 80) : "";
+      out.push({ label: a.label || a.name, value: name || argValue(args[a.name], a) });
     });
     Object.keys(args).sort().forEach(function (name) {
       if (!known.some(function (a) { return a.name === name; })) out.push({ label: cleanText(name, 40), value: argValue(args[name], {}) });

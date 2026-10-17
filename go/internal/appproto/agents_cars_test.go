@@ -108,3 +108,53 @@ func TestAnAgentsPlanNamesNoChargerOrCar(t *testing.T) {
 		t.Fatalf("a phone's plan chargers %+v", got)
 	}
 }
+
+// The box page names the car and the charger in a request by what the box
+// calls them. One the box no longer knows keeps no name, and the args stay
+// the box's own ids.
+func TestTheBoxPageNamesARequestsCarAndCharger(t *testing.T) {
+	r := newAgentRig(t)
+	r.cars = newFakeCars()
+	row, _ := r.grant(apiauth.RoleAgent, []string{protocol.ScopeGoalsRequest},
+		[]string{OpCarGoalSet, OpCarSoCSet}, protocol.Caps{PerMin: 6}, time.Hour, protocol.Principal{Client: "Claude"})
+	h, rec := r.agentSession(row)
+	deliver(t, h, protocol.MsgAgentRequest, ptrU32(1), protocol.AgentRequest{Op: OpCarGoalSet,
+		Args: map[string]any{"id": carOf("c2"), "target": 0.7, "ready_by_min": int64(420)}})
+	deliver(t, h, protocol.MsgAgentRequest, ptrU32(2), protocol.AgentRequest{Op: OpCarSoCSet,
+		Args: map[string]any{"charger_id": lp1(), "soc": 0.4}})
+	page, _ := r.ownerSession()
+	if n := len(page.Requests()); n != 2 {
+		t.Fatalf("requests taken: %d, %s", n, rec.types())
+	}
+	named := func() map[string]map[string]string {
+		out := map[string]map[string]string{}
+		for _, req := range page.Requests() {
+			out[req.Op] = page.ArgNames(req)
+		}
+		return out
+	}
+	got := named()
+	if len(got[OpCarGoalSet]) != 1 || got[OpCarGoalSet]["id"] != "Volvo" {
+		t.Errorf("the car: %v", got[OpCarGoalSet])
+	}
+	if len(got[OpCarSoCSet]) != 1 || got[OpCarSoCSet]["charger_id"] != "lp1" {
+		t.Errorf("the charger: %v", got[OpCarSoCSet])
+	}
+
+	// The car and the charger go while the requests wait.
+	delete(r.cars.cars, "c2")
+	r.lp.ids["lp1"] = false
+	for op, names := range named() {
+		if names != nil {
+			t.Errorf("%s names what the box no longer knows: %v", op, names)
+		}
+	}
+	for _, req := range page.Requests() {
+		if id, _ := req.Args["id"].(string); req.Op == OpCarGoalSet && id != "c2" {
+			t.Errorf("the car's id in the args: %v", req.Args)
+		}
+		if id, _ := req.Args["charger_id"].(string); req.Op == OpCarSoCSet && id != "lp1" {
+			t.Errorf("the charger's id in the args: %v", req.Args)
+		}
+	}
+}

@@ -411,13 +411,18 @@ func (b boxPageAgents) Agents() []protocol.AgentRow { return b.p.access.Agents()
 
 func (b boxPageAgents) ApprovalKeys() []protocol.ApprovalKeyInfo { return b.p.access.ApprovalKeys() }
 
-func (b boxPageAgents) Requests() []protocol.Request {
+func (b boxPageAgents) Requests() []api.AgentRequest {
 	h, err := b.p.boxPage("box")
 	if err != nil {
 		return nil
 	}
 	defer h.Close()
-	return h.Requests()
+	reqs := h.Requests()
+	out := make([]api.AgentRequest, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, api.AgentRequest{Request: r, Names: h.ArgNames(r)})
+	}
+	return out
 }
 
 func (b boxPageAgents) Home() string {

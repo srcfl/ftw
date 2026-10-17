@@ -577,6 +577,12 @@ above and its approval key, and an agent can never reach them.
   `behind` its mark, and whether this request could widen access. It also
   carries `registry {agentOps, writeScopes,
   agentArgs}`, so the page names no scope, op or argument by hand.
+- **The page names the charger and the car.** A request's `args` hold the
+  box's own ids, as an owner's `agent.list` does. On this route alone each
+  request also carries `names`: for every argument of kind `loadpoint` or
+  `car` that the box still knows, what the box calls it. A charger's name is
+  its id; a car's is the name the owner gave it. The page is local and its
+  caller an owner; nothing an agent or FTW Cloud reads carries `names`.
 - **The box says why it will not take an offer.** `POST /api/agents/offer`
   and `POST /api/agents` answer an offer the box will not take with 400 and
   `{error, reason, boxMs}`: `reason` is `no_offer_keys`, `unsigned`,

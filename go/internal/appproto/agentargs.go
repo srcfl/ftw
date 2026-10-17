@@ -190,6 +190,45 @@ func (h *Handler) resolveLoadpoint(agentID string) (string, bool) {
 	return "", false
 }
 
+// ArgNames names each charger and car in a request as the owner's view
+// holds it, by the box's own id, with what the box calls it: a car by its
+// name, a charger by its id, which is its name on the box. An id the box no
+// longer knows gets none. Only the box page reads these; answers to agents
+// name nothing, since FTW Cloud reads them.
+func (h *Handler) ArgNames(req protocol.Request) map[string]string {
+	var out map[string]string
+	for _, a := range protocol.RegistryAgentArgs[req.Op] {
+		id, _ := req.Args[a.Name].(string)
+		if id == "" {
+			continue
+		}
+		var name string
+		switch a.Kind {
+		case "loadpoint":
+			if h.cfg.Loadpoints != nil && h.cfg.Loadpoints.Exists(id) {
+				name = id
+			}
+		case "car":
+			if h.cfg.Cars != nil {
+				for _, c := range h.cfg.Cars.Cars() {
+					if c.ID == id {
+						name = c.Name
+						break
+					}
+				}
+			}
+		}
+		if name == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[a.Name] = name
+	}
+	return out
+}
+
 // holdRules are the hold rules beyond the args: an agent's hold always ends,
 // and an agent never touches a hold someone else set.
 func (h *Handler) holdRules(cmd Cmd) *ErrorBody {
