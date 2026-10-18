@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,7 +177,7 @@ func setModeCmd(id string) appproto.Cmd {
 func TestATunnelSessionAnswersACommand(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 7, nil)
 	r.hello(t, app, dev, 7)
 
@@ -201,7 +203,7 @@ func TestAForgedDevGetsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.tunnel.Deliver(cloudwire.Tun{Dev: deviceIDOf(other.staticPublic()), Sid: 1, D: m1})
+	r.tunnel.Deliver(cloudwire.Tun{Dev: cloudwire.DeviceID(other.staticPublic()), Sid: 1, D: m1})
 	r.silent(t, 500*time.Millisecond)
 	if r.tunnel.count() != 0 {
 		t.Fatal("a session opened under another device's id")
@@ -224,7 +226,7 @@ func TestAStrangerThroughTheTunnelGetsNothing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r.tunnel.Deliver(cloudwire.Tun{Dev: deviceIDOf(app.staticPublic()), Sid: 1, D: m1})
+		r.tunnel.Deliver(cloudwire.Tun{Dev: cloudwire.DeviceID(app.staticPublic()), Sid: 1, D: m1})
 		r.silent(t, 400*time.Millisecond)
 	}
 	if r.tunnel.count() != 0 || r.enroll.AuthorisedCount() != 0 {
@@ -258,7 +260,7 @@ func TestOneSessionPerDevice(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
 	other := r.pair(t)
-	dev, otherDev := deviceIDOf(app.staticPublic()), deviceIDOf(other.staticPublic())
+	dev, otherDev := cloudwire.DeviceID(app.staticPublic()), cloudwire.DeviceID(other.staticPublic())
 	r.open(t, other, otherDev, 1, nil)
 	r.hello(t, other, otherDev, 1)
 	r.open(t, app, dev, 1, nil)
@@ -291,35 +293,12 @@ func TestOneSessionPerDevice(t *testing.T) {
 	}
 }
 
-// A relay session and a tunnel session of one device share its slot: the
-// newer ends the older, whichever carrier either rides.
-func TestTheRelayAndTheTunnelShareADevicesSlot(t *testing.T) {
-	r := newTunRig(t)
-	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
-	streams := relayTable(r.slots, r.enroll)
-	relayOpen(t, streams, r.enroll, &appClient{static: app.static}, nil)
-	r.open(t, app, dev, 9, nil)
-	r.hello(t, app, dev, 9)
-	if streams.count() != 0 {
-		t.Fatal("the relay session outlived the device's tunnel session")
-	}
-
-	relayOpen(t, streams, r.enroll, &appClient{static: app.static}, nil)
-	if end := r.next(t, 3*time.Second); end.Dev != dev || end.Sid != 9 || !end.Ended() {
-		t.Fatalf("the tunnel session ended with %+v", end)
-	}
-	if r.tunnel.count() != 0 || streams.count() != 1 {
-		t.Fatalf("%d tunnel and %d relay sessions", r.tunnel.count(), streams.count())
-	}
-}
-
 // A message for a session the box does not hold gets an end, so the phone
 // starts again at once instead of waiting.
 func TestAnUnknownSessionGetsAnEnd(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.tunnel.Deliver(cloudwire.Tun{Dev: dev, Sid: 4, D: bytes.Repeat([]byte{1}, 600)})
 	if m := r.next(t, 3*time.Second); m.Dev != dev || m.Sid != 4 || !m.Ended() {
 		t.Fatalf("answer %+v", m)
@@ -331,7 +310,7 @@ func TestAnUnknownSessionGetsAnEnd(t *testing.T) {
 func TestDropEndsEverySession(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 1, nil)
 	r.tunnel.Drop()
 	if r.tunnel.count() != 0 {
@@ -344,7 +323,7 @@ func TestDropEndsEverySession(t *testing.T) {
 func TestAnEmptyDEndsTheSession(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 1, nil)
 	r.tunnel.Deliver(cloudwire.Tun{Dev: dev, Sid: 1})
 	deadline := time.Now().Add(3 * time.Second)
@@ -361,7 +340,7 @@ func TestARevokeEndsATunnelSession(t *testing.T) {
 	r := newTunRig(t)
 	enrolOwner(t, r.enroll)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 1, nil)
 	r.hello(t, app, dev, 1)
 	removed, err := r.enroll.Revoke(dev, appenroll.AtTheBox)
@@ -377,7 +356,7 @@ func TestARevokeEndsATunnelSession(t *testing.T) {
 func TestOneDeviceCannotStarveTheOthersOfHandshakes(t *testing.T) {
 	r := newTunRig(t)
 	busy := r.pair(t)
-	busyDev := deviceIDOf(busy.staticPublic())
+	busyDev := cloudwire.DeviceID(busy.staticPublic())
 	for i := range tunOpensPerDevice + 5 {
 		again := &appClient{static: busy.static}
 		m1, _ := again.message1(r.enroll.StaticKey().Public(), nil)
@@ -414,46 +393,7 @@ drain:
 		t.Fatalf("the busy device got %d handshakes answered, want at most %d", answers, tunOpensPerDevice)
 	}
 	other := r.pair(t)
-	r.open(t, other, deviceIDOf(other.staticPublic()), 1, nil)
-}
-
-// relayTable is a relay connection's session table whose writes a test can
-// read back, one message at a time.
-func relayTable(sl *slots, enroll *appenroll.Identity) *sessions {
-	out := make(chan []byte, 16)
-	return &sessions{
-		slots: sl, build: newHandler, enroll: enroll, static: enroll.StaticKey(), log: slog.New(slog.DiscardHandler),
-		write: func(m []byte) error {
-			select {
-			case out <- append([]byte(nil), m...):
-			default:
-			}
-			return nil
-		},
-		testOut: out,
-	}
-}
-
-// relayOpen runs a phone's handshake on a relay table and proves it with a
-// hello, so the session is live.
-func relayOpen(t *testing.T, streams *sessions, enroll *appenroll.Identity, app *appClient, code []byte) {
-	t.Helper()
-	m1, err := app.message1(enroll.StaticKey().Public(), code)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := streams.open(m1); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.readMessage2(<-streams.testOut); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := appproto.Marshal(appproto.Hello{Proto: appproto.ProtoRange{Max: appproto.ProtoMax}, App: appproto.AppInfo{Build: "t", UA: "pwa"}})
-	frame, _ := appwire.EncodeFrame(appwire.Frame{Lane: appwire.LaneControl, Bucket: 512, Envelope: appwire.Envelope{T: appproto.MsgHello, B: raw}})
-	msg, _ := app.encrypt(frame)
-	streams.deliver(context.Background(), msg)
-	// The hello_ok.
-	<-streams.testOut
+	r.open(t, other, cloudwire.DeviceID(other.staticPublic()), 1, nil)
 }
 
 // A message 1 replayed under a new sid, as the service could, gets an
@@ -462,7 +402,7 @@ func relayOpen(t *testing.T, streams *sessions, enroll *appenroll.Identity, app 
 func TestAReplayedMessage1LeavesTheLiveSession(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	m1, err := app.message1(r.enroll.StaticKey().Public(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -488,55 +428,12 @@ func TestAReplayedMessage1LeavesTheLiveSession(t *testing.T) {
 	r.receive(t, app, appproto.MsgCmdAck)
 }
 
-// The same on the relay: a replayed message 1 takes no device's place.
-func TestAReplayedMessage1LeavesTheLiveRelaySession(t *testing.T) {
-	r := newTunRig(t)
-	app := r.pair(t)
-	streams := relayTable(r.slots, r.enroll)
-	m1, err := app.message1(r.enroll.StaticKey().Public(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := streams.open(m1); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.readMessage2(<-streams.testOut); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := appproto.Marshal(appproto.Hello{Proto: appproto.ProtoRange{Max: appproto.ProtoMax}, App: appproto.AppInfo{Build: "t", UA: "pwa"}})
-	frame, _ := appwire.EncodeFrame(appwire.Frame{Lane: appwire.LaneControl, Bucket: 512, Envelope: appwire.Envelope{T: appproto.MsgHello, B: raw}})
-	msg, _ := app.encrypt(frame)
-	streams.deliver(context.Background(), msg)
-	<-streams.testOut
-	if streams.count() != 1 {
-		t.Fatal("the phone's session is not live")
-	}
-	// Replayed, twice.
-	for range 2 {
-		if err := streams.open(m1); err != nil {
-			t.Fatal(err)
-		}
-		<-streams.testOut
-	}
-	if streams.count() != 1 {
-		t.Fatalf("%d live sessions after replays", streams.count())
-	}
-	frame, _ = appwire.EncodeFrame(appwire.Frame{Lane: appwire.LaneControl, Bucket: 512, Envelope: appwire.Envelope{T: appproto.MsgHello, B: raw}})
-	msg, _ = app.encrypt(frame)
-	streams.deliver(context.Background(), msg)
-	select {
-	case <-streams.testOut:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the live relay session stopped answering after a replay")
-	}
-}
-
 // A dropped tun does not end the session: the next command still gets its
 // ack and its result.
 func TestADroppedTunDoesNotEndTheSession(t *testing.T) {
 	r := newTunRig(t)
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 1, nil)
 	r.hello(t, app, dev, 1)
 	drops := &dropOnce{inner: r.out}
@@ -577,7 +474,7 @@ func TestDropSessionsByAppKeyReachesTheTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := New(Options{Endpoint: "ws://127.0.0.1:1", Enroll: enroll, Handler: newHandler, Logger: slog.New(slog.DiscardHandler)})
+	u, err := New(Options{Enroll: enroll, Handler: newHandler, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -589,7 +486,7 @@ func TestDropSessionsByAppKeyReachesTheTunnel(t *testing.T) {
 	enrolOwner(t, enroll)
 	r := &tunRig{enroll: enroll, tunnel: u.Tunnel(), out: out}
 	app := r.pair(t)
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 1, nil)
 	r.hello(t, app, dev, 1)
 	removed, err := enroll.Revoke(dev, appenroll.AtTheBox)
@@ -598,5 +495,87 @@ func TestDropSessionsByAppKeyReachesTheTunnel(t *testing.T) {
 	}
 	if n := u.DropSessionsByAppKey(removed[0].Key); n != 1 {
 		t.Fatalf("dropped %d", n)
+	}
+}
+
+type heldAPI struct {
+	started   chan struct{}
+	cancelled chan struct{}
+	once      sync.Once
+}
+
+func (h *heldAPI) Route(*http.Request) apiauth.RouteFacts {
+	return apiauth.RouteFacts{Tier: apiauth.TierRead}
+}
+
+func (h *heldAPI) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.once.Do(func() { close(h.started) })
+	<-req.Context().Done()
+	close(h.cancelled)
+	w.WriteHeader(http.StatusOK)
+}
+
+// Revoking a phone cancels its API request already running in Core.
+func TestARevokedShareStopsACallAlreadyInFlight(t *testing.T) {
+	enroll, err := appenroll.LoadOrCreate(filepath.Join(t.TempDir(), "nova.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolOwner(t, enroll)
+	gateway := &heldAPI{started: make(chan struct{}), cancelled: make(chan struct{})}
+	build := func(sender appproto.Sender, caller apiauth.Caller, grants appproto.GrantReader) (*appproto.Handler, error) {
+		return appproto.New(appproto.Config{
+			Clock: appproto.SystemClock{StartedAt: time.Now(), Source: "ntp"},
+			Site:  stubSite{}, Info: stubInfo{}, Modes: stubModes{}, Plans: stubPlans{}, Codec: codec{},
+			Sender: sender, Caller: caller, Grants: grants, API: gateway,
+			Commands: appproto.NewCmdLog(), Caps: append(appproto.DefaultCaps(), appproto.CapApiPassthrough),
+			SrcGrid: "meter", SrcPV: "meter", SrcBattery: "meter", Logger: slog.New(slog.DiscardHandler),
+		})
+	}
+	u, err := New(Options{Enroll: enroll, Handler: build, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &capturedTun{ch: make(chan cloudwire.Tun, 16)}
+	u.Tunnel().Attach(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = u.Run(ctx) }()
+	r := &tunRig{enroll: enroll, tunnel: u.Tunnel(), out: out}
+	app := r.pair(t)
+	dev := cloudwire.DeviceID(app.staticPublic())
+	r.open(t, app, dev, 1, nil)
+	r.hello(t, app, dev, 1)
+	id := uint32(1)
+	body, err := appproto.Marshal(appproto.APIReq{Method: appproto.APIGet, Path: "/api/logs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := appwire.EncodeFrame(appwire.Frame{Lane: appwire.LaneBulk, Bucket: 16384,
+		Envelope: appwire.Envelope{T: appproto.MsgAPIReq, ID: &id, B: body}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := app.encrypt(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.tunnel.Deliver(cloudwire.Tun{Dev: dev, Sid: 1, D: msg})
+	select {
+	case <-gateway.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("API request did not start")
+	}
+	removed, err := enroll.Revoke(dev, appenroll.AtTheBox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := u.DropSessionsByAppKey(removed[0].Key); n != 1 {
+		t.Fatalf("dropped %d sessions", n)
+	}
+	select {
+	case <-gateway.cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("revoked session left its API request running")
 	}
 }

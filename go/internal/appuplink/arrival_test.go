@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
@@ -60,7 +59,7 @@ func newArrivalRig(t *testing.T) *arrivalRig {
 	go r.tunnel.Run(ctx)
 
 	r.app = r.pair(t)
-	dev := deviceIDOf(r.app.staticPublic())
+	dev := cloudwire.DeviceID(r.app.staticPublic())
 	r.open(t, r.app, dev, 7, nil)
 	r.hello(t, r.app, dev, 7)
 	r.send(t, r.app, dev, 7, appproto.MsgSub, appproto.Sub{Bucket: 512, Hz: 1})
@@ -212,7 +211,7 @@ func (r *arrivalRig) arrive(gap, d time.Duration) {
 // second and the three of a burst, no more.
 func TestFastPollsArePacedToFiveFramesASecond(t *testing.T) {
 	r := newArrivalRig(t)
-	dev := deviceIDOf(r.app.staticPublic())
+	dev := cloudwire.DeviceID(r.app.staticPublic())
 	r.gather(t, r.app, dev, 300*time.Millisecond)
 	go r.arrive(20*time.Millisecond, 2*time.Second)
 	if n := len(r.gather(t, r.app, dev, 2*time.Second)); n < 10 || n > 16 {
@@ -224,7 +223,7 @@ func TestFastPollsArePacedToFiveFramesASecond(t *testing.T) {
 func TestEveryLiveSessionHearsAPoll(t *testing.T) {
 	r := newArrivalRig(t)
 	other := r.pair(t)
-	dev2 := deviceIDOf(other.staticPublic())
+	dev2 := cloudwire.DeviceID(other.staticPublic())
 	r.open(t, other, dev2, 8, nil)
 	r.send(t, other, dev2, 8, appproto.MsgHello, appproto.Hello{
 		Proto: appproto.ProtoRange{Min: 0, Max: appproto.ProtoMax},
@@ -280,7 +279,7 @@ func (d *dropLaneZero) TunBudgetUsed() float64 { return float64(d.used.Load()) /
 // carries it, and the session goes on.
 func TestAReadingTheLinkDroppedGoesWithTheNextFrame(t *testing.T) {
 	r := newArrivalRig(t)
-	dev := deviceIDOf(r.app.staticPublic())
+	dev := cloudwire.DeviceID(r.app.staticPublic())
 	link := &dropLaneZero{inner: r.out}
 	r.tunnel.Attach(link)
 	r.gather(t, r.app, dev, 300*time.Millisecond)
@@ -307,7 +306,7 @@ func TestAReadingTheLinkDroppedGoesWithTheNextFrame(t *testing.T) {
 // past 90 % no readings at all, so handshakes, answers and ends still go.
 func TestTheBudgetStopsPushesThenBeats(t *testing.T) {
 	r := newArrivalRig(t)
-	dev := deviceIDOf(r.app.staticPublic())
+	dev := cloudwire.DeviceID(r.app.staticPublic())
 	link := &dropLaneZero{inner: r.out}
 	r.tunnel.Attach(link)
 	r.gather(t, r.app, dev, 300*time.Millisecond)
@@ -329,7 +328,7 @@ func TestTheBudgetStopsPushesThenBeats(t *testing.T) {
 // a beat and each poll goes again.
 func TestHiddenThenVisible(t *testing.T) {
 	r := newArrivalRig(t)
-	dev := deviceIDOf(r.app.staticPublic())
+	dev := cloudwire.DeviceID(r.app.staticPublic())
 	r.send(t, r.app, dev, 7, appproto.MsgSub, appproto.Sub{Bucket: 512, Hz: 0.2})
 	r.gather(t, r.app, dev, 300*time.Millisecond)
 
@@ -352,54 +351,6 @@ func TestHiddenThenVisible(t *testing.T) {
 			}
 			return
 		}
-	}
-}
-
-// The relay keeps its pulse: polls arriving fast change nothing about when
-// a relay session's frames go.
-func TestARelaySessionKeepsItsPulseWhileArrivalsCome(t *testing.T) {
-	arrivals := make(chan struct{}, 1)
-	r := newRigOpts(t, 481234, func(o *Options) { o.Handler = newHandler; o.Arrivals = arrivals })
-	app, err := newAppClient()
-	if err != nil {
-		t.Fatal(err)
-	}
-	code, _, err := r.enroll.MintPairingCode(apiauth.RoleOwner, appenroll.PairingTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn := openSession(t, r, app, code)
-	send(t, conn, app, appproto.MsgSub, 512, appproto.Sub{Bucket: 512, Hz: 1})
-	if f := receive(t, conn, app); f.Envelope.T != appproto.MsgSnap {
-		t.Fatalf("got %s, want the snapshot", f.Envelope.T)
-	}
-
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case arrivals <- struct{}{}:
-			default:
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-	}()
-	frames := 0
-	for start := time.Now(); time.Since(start) < 3*time.Second; {
-		_ = conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		kind, _, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
-		if kind == websocket.BinaryMessage {
-			frames++
-		}
-	}
-	if frames < 2 || frames > 4 {
-		t.Fatalf("a relay session sent %d frames in 3 s of fast polls, want its pulse's 3", frames)
 	}
 }
 

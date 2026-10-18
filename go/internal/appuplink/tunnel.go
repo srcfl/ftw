@@ -18,14 +18,10 @@ import (
 // The tunnel: the phones' sessions that FTW Cloud carries
 // (docs/protocol-cloud.md, "Tunnel").
 //
-// A phone's session through the service is the same ftw.session.v1 session
-// it runs over the relay, byte for byte. Only the routing differs. The relay
-// cannot say whose a message is, so the box lets each session's AEAD try. The
-// service says which device and which session, tun {dev, sid, d}, so the box
-// looks the session up. It still trusts nothing the service says: the
-// handshake proves the phone's key and the box admits it by that key, exactly
-// as over the relay. dev only picks the slot, and a handshake whose key is
-// not the device dev names is dropped.
+// The service names the device and session in tun {dev, sid, d}, so the box
+// can look the session up. The Noise handshake proves the phone's key; the
+// service cannot grant access. A handshake whose key does not match dev is
+// dropped.
 //
 // A new session waits, pending, until its first transport message decrypts.
 // The service sees every message 1 and can replay one under a new sid; the
@@ -34,8 +30,8 @@ import (
 // its handshake on a goroutine of its own, so a slow disk under the
 // enrolment write never holds up routing or the stream.
 //
-// Lane 0 goes on each finished driver poll, not on the relay's one-second
-// pulse, and a beat goes when no frame has gone for the subscribed period.
+// Lane 0 goes on each finished driver poll. A beat goes when no frame has
+// gone for the subscribed period.
 // Frames keep their fixed size. What the service learns from their timing
 // is written in docs/protocol-cloud.md, "Lane 0 through the tunnel".
 
@@ -148,7 +144,7 @@ type tunSession struct {
 }
 
 // Tunnel returns the uplink's tunnel table, for the box's link to FTW Cloud
-// to deliver to. Its sessions take the same slots as the relay's.
+// to deliver to. Each device holds at most one live session.
 func (u *Uplink) Tunnel() *Tunnel { return u.tunnel }
 
 func newTunnel(build HandlerBuilder, enroll *appenroll.Identity, slots *slots, arrivals <-chan struct{}, log *slog.Logger) *Tunnel {
@@ -443,9 +439,8 @@ func (t *Tunnel) handshake(s *tunSession, message1 []byte) (*appwire.Transport, 
 	if cloudwire.DeviceID(hs.RemoteStatic()) != s.dev {
 		return nil, nil, errTunDevice
 	}
-	// Built before the caller is checked and sent only after, as over the
-	// relay. The check changes nothing yet; commit does, once the session
-	// proves itself.
+	// Built before the caller is checked and sent only after. The check
+	// changes nothing yet; commit does, once the session proves itself.
 	reply, err := hs.WriteMessage(nil)
 	if err != nil {
 		return nil, nil, err
@@ -507,8 +502,7 @@ func (t *Tunnel) promote(s *tunSession, transport *appwire.Transport, commit fun
 		// The phone hears that its older session ended.
 		t.remove(old, true)
 	}
-	// The device's one slot, whichever carrier held it before. Claiming it
-	// ends the older session, through the relay or through here.
+	// Claim the device's slot and end any older session.
 	sess.setRelease(t.slots.claim(grant.DeviceID, func() { t.remove(s, true) }))
 	t.kicked()
 	t.log.Info("app session open through FTW Cloud")
@@ -680,8 +674,7 @@ func (t *Tunnel) each(what string, step func(*appproto.Handler) error) {
 	}
 }
 
-// dropByAppKey ends every session a revoked key runs, live or pending, as
-// the relay's table does.
+// dropByAppKey ends every session a revoked key runs, live or pending.
 func (t *Tunnel) dropByAppKey(pub []byte) int {
 	t.mu.Lock()
 	var gone []*tunSession
@@ -711,7 +704,7 @@ func (t *Tunnel) dropByAppKey(pub []byte) int {
 // One slot per device
 // --------------------------------------------------------------------------
 
-// slots holds each device's one session, whichever carrier it rides. A new
+// slots holds each device's one session. A new
 // session from a device ends its older one, so a phone that reconnects, a
 // watch or another phone never pushes out a different device's session.
 type slots struct {

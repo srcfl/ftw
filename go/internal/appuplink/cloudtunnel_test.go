@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -215,18 +214,6 @@ func (k *memState) SaveConfig(key, value string) error {
 	return nil
 }
 
-// unreachable is an address nothing listens on: the relay, gone.
-func unreachable(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return "ws://" + addr
-}
-
 // With the relay unreachable, a phone the roster lists sends a command
 // through FTW Cloud and gets the box's answer. The readable copy stays off:
 // nothing but the roster and the tunnel leaves the box.
@@ -254,16 +241,7 @@ func TestACommandThroughFTWCloudWithTheRelayGone(t *testing.T) {
 			SrcGrid: "meter", SrcPV: "meter", SrcBattery: "meter", Logger: slog.New(slog.DiscardHandler),
 		})
 	}
-	var relayDials atomic.Int64
-	trap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { relayDials.Add(1); w.WriteHeader(503) }))
-	t.Cleanup(trap.Close)
-	relay := "ws" + trap.URL[4:]
-	t.Cleanup(func() {
-		if relayDials.Load() != 0 {
-			t.Errorf("retired relay dialled %d times", relayDials.Load())
-		}
-	})
-	uplink, err := New(Options{Endpoint: relay, Enroll: enroll, Handler: build, Logger: slog.New(slog.DiscardHandler)})
+	uplink, err := New(Options{Enroll: enroll, Handler: build, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}

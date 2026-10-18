@@ -81,12 +81,6 @@ type Config struct {
 	// next session act a second time.
 	Commands *CmdLog
 
-	// Exchange makes this a watch's exchange session (ADR 0009, decision 2).
-	// It takes hello, cmd and now, and answers every other request
-	// E_UNKNOWN_OP. It never streams and pushes no plan after a command.
-	// Every frame it sends is lane 0 apart from hello_ok.
-	Exchange bool
-
 	// Caps is what this box advertises. Names must come from the generated
 	// contract constants; a typo is refused at construction rather than
 	// silently hiding a feature in the app.
@@ -300,7 +294,7 @@ func New(cfg Config) (*Handler, error) {
 	// An exchange sends nothing unasked; a watch reads the plan from FTW
 	// Cloud instead. An agent reads the plan by asking, never by a push,
 	// so its reads stay counted and in the audit.
-	if cfg.PlanFeed != nil && !cfg.Exchange && !h.isAgent() {
+	if cfg.PlanFeed != nil && !h.isAgent() {
 		cfg.PlanFeed.join(h)
 	}
 	return h, nil
@@ -433,9 +427,6 @@ func dropped(err error) error {
 }
 
 func (h *Handler) dispatch(ctx context.Context, env Envelope) error {
-	if h.cfg.Exchange {
-		return h.dispatchExchange(ctx, env)
-	}
 	if h.isAgent() {
 		return h.dispatchAgent(ctx, env)
 	}
@@ -1217,9 +1208,7 @@ func (h *Handler) settleAndReport(cmdID string, res CmdResult) error {
 	if err := h.sendCmdResult(res); err != nil {
 		return err
 	}
-	// An exchange answers with two frames of one size and nothing after
-	// them, so a watch reads the new plan from FTW Cloud instead.
-	if res.State == CmdApplied && !h.cfg.Exchange {
+	if res.State == CmdApplied {
 		return h.sendPlan(nil)
 	}
 	return nil
@@ -1510,4 +1499,16 @@ func (h *Handler) sendInLine(f Frame) error {
 		return fmt.Errorf("appproto: encode %s: %w", f.Envelope.T, err)
 	}
 	return s.SendInLine(bytes)
+}
+
+func encodedSize(t string, body any) (int, error) {
+	env, err := newEnvelope(t, nil, body)
+	if err != nil {
+		return 0, err
+	}
+	raw, err := EncodeEnvelope(env)
+	if err != nil {
+		return 0, err
+	}
+	return len(raw), nil
 }
