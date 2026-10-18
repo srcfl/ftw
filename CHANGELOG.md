@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.152.0
+
+### Minor Changes
+
+- ccdc740: The box's own page shows the owner's cars. The overview has a card for each car, plugged in or not, with its level, where the level came from and how old it is ("72% · From the car · 1 h ago", or "≈" once it is an estimate), its charge limit, its goal and the charger it is on. When a charger is in use and the box cannot tell which car it is, the charger's notice asks "Which car is on garage?" with one button per car and "None of these"; a car the box named itself can be corrected the same way. Settings has a Cars tab that lists each car with its VIN, its level sources and the tags a charger knows it by, and lets the owner rename a car, set its battery size, add one and remove one.
+  
+  New routes carry the car ops for the page only: `POST /api/cars`, `PATCH` and `DELETE /api/cars/{id}`, and `POST /api/loadpoints/{id}/car`, the tap. A phone keeps sending the ops. `GET /api/cars` now leaves out each car's VIN, charge tags and sources for a request that has not proved itself as a protected one must, such as one through a public name without the API token, and says so with `redacted: true`.
+- cec3408: Open Battery history on a car to see its saved sensor levels for 24 hours, 7 days or 30 days. Keep reported levels separate from charging estimates and show gaps and failed reads.
+- 14f6c89: Give authorized MCP sessions the full diagnostic read API, including the energy ledger, raw series, logs, configuration, driver source and support exports. Keep technical names and addresses, list the connected box's routes, and page large answers without a total size limit. Stop reads when access ends.
+- bb6d649: Keep house-password browser sessions for 30 days across Core updates and restarts. Save only token digests in the database, and keep logout, expiry and password changes effective after a restart.
+
+### Patch Changes
+
+- 2a0662c: The Access tab names the car and the charger in an assistant's request by what the box calls them, instead of the car's id.
+- 513fc60: Clear car-choice feedback when the plug-in changes, and ignore replies for an earlier plug-in.
+- ecf51ef: The Access page states that technical diagnostics include source, logs and full backups, which can contain saved credentials, before the owner grants access.
+- 8a45e06: Show Core's current power balance as Home use in Power now. Show the energy mean separately with its own period and age, so a missing or old mean cannot hide current load or replace it with a past zero. Keep missing or invalid current load unknown.
+  
+  Use measured AC power for the live site balance when a driver such as Pixii reports both battery DC and site-side AC power. Do not substitute DC when the AC reading is unavailable.
+  
+  Let a confirmed disconnected charger contribute a separate zero-load estimate between polls, even when it retains old power and session timestamps. Break that interval on reconnect, missing evidence, changed state or a gap.
+- 0922fcc: Keep live household Load visible when current meters report at different times. Use the same Core power balance and each source's freshness; keep source-alignment requirements for history and forecasts.
+- a8b6d64: Keep URL-encoded driver names intact in MCP diagnostic reads and allow large exports five minutes to finish.
+- 4ade7f4: Connect full MCP diagnostics to the running box API. The startup wrapper now
+  forwards typed diagnostic reads and reports that the box is starting until
+  the API is ready.
+- ad16957: Keep household history when a P1 meter has battery reading turned off. Use observed PV power when a zero energy counter cannot account for reported generation, and retain the final power interval when a usable counter arrives.
+- d7f1d7b: Use one qualified Core household power balance for the box page, phone sessions and FTW Cloud. Keep missing or invalid load unavailable instead of recalculating it from smoothed readings or showing zero.
+
 ## 0.151.0
 
 ### Minor Changes
