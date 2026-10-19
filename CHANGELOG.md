@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.153.1
+
+### Patch Changes
+
+- 3739a49: Warn about missing saved charger connections in Settings and setup drafts. Include exact charger-binding evidence in technical diagnostics so assistants can verify connections without guessing from redacted names.
+- f989cce: Warn when a saved charger uses a disabled driver, without changing its binding or treating missing power as zero.
+
 ## 0.153.0
 
 ### Minor Changes
