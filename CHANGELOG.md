@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.154.1
+
+### Patch Changes
+
+- 4d4ce53: Keep the day's Home use when a device drops out or Core restarts. An unknown PV, battery or EV source holds its last known value, and the meter or a restart holds for up to two minutes, marked as estimated. A day's total is unknown only when more than a tenth of it is missing. Days cached under the old rule are recomputed once.
+- 9bd114e: Keep a rejected held value unknown until its source reports again. A charger that finished while silent no longer comes back as a phantom charge when the house later uses more power.
+- 85fa9e1: Train both load models on the closed quarter-hour household energy that daily Home use is built from. The built-in model no longer learns from one instant reading per minute, and the Energyplan forecast no longer keeps its own load collector, so forecasts learn the Home use shown in History.
+  
+  Keep cold-day counters in their stored minute units when training moves to quarter-hours, preserving learned profiles and partial-day evidence.
+- f805c6d: Remove the timing note under the Overview energy flow. Home use still shows current power, and the diagram still marks missing or paused data.
+- bbaf0b3: Keep load-model training strict on hybrid inverters whose PV reading is optional. While such a PV source has not reported, Home use still shows the house, but the interval does not train the forecast; after dark the PV counts as 0 W and the night trains as before.
+- 266b292: Keep the day's Home use when a PV inverter goes silent at night. While the sun is below the horizon at the site's map pin, an unknown PV source counts as 0 W: past civil dusk as a measurement, so the night also trains the load models, and in twilight as a marked estimate. Without a pin, or by day, the gap stays unknown as before.
+
 ## 0.154.0
 
 ### Minor Changes
