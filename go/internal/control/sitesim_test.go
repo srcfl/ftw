@@ -88,13 +88,7 @@ func (s *simSite) boot() {
 	s.ctrl.SetDriverOnline(func(d string) bool { h := s.store.DriverHealth(d); return h != nil && h.IsOnline() })
 	s.ctrl.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: s.p.Fuse.RatingA, Voltage: s.p.Voltage, PhaseCnt: 3})
 	s.ctrl.SetFuseEVMax(func() (float64, bool) {
-		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.mgr.Configs(), s.fuseMaxW())
-	})
-	s.ctrl.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
-		if !s.meterFresh() {
-			return 0, 0, 0, false
-		}
-		return s.meter.PhaseA[0], s.meter.PhaseA[1], s.meter.PhaseA[2], true
+		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.ctrl.FuseConfigs(), s.fuseMaxW())
 	})
 	s.ctrl.SetSiteSurplusForEV(func() (float64, bool) {
 		if !s.meterFresh() {
@@ -488,9 +482,9 @@ func simScenarios() []simScenario {
 		}
 	}
 	return []simScenario{
-		{name: "export start", known: "export counted as import, fuse_heat.go:120 and controller_fuse_budget.go:174", run: 5 * time.Minute,
+		{name: "export start", known: "export counted as import, fuse_heat.go:120", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
-		{name: "export start, unsigned phase currents", known: "export counted as import, fuse_heat.go:120 and controller_fuse_budget.go:174", run: 5 * time.Minute,
+		{name: "export start, unsigned phase currents", known: "export counted as import, fuse_heat.go:120", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW, p.Meter.Unsigned = houseA(2, 2, 2), -22*690, true }},
 		{name: "charger's own load balancer", known: "a cut comes off an offer the car does not draw, ev_fuse_budget.go:172", run: 20 * time.Minute,
 			plant: func(p *sitesim.Plant) {
@@ -531,13 +525,13 @@ func simScenarios() []simScenario {
 				}
 			}},
 		{name: "phase mode 3p, 9 kW surplus", run: 5 * time.Minute, surplus: true, plant: surplus, lp: surplusPhase("3p")},
-		{name: "phase mode empty, 9 kW surplus", known: "empty phase mode gets one phase of room, controller_fuse_budget.go:181", run: 5 * time.Minute, surplus: true,
+		{name: "phase mode empty, 9 kW surplus", run: 5 * time.Minute, surplus: true,
 			plant: surplus, lp: surplusPhase("")},
-		{name: "phase mode auto, 9 kW surplus", known: "auto phase mode gets one phase of room, controller_fuse_budget.go:181", run: 5 * time.Minute, surplus: true,
+		{name: "phase mode auto, 9 kW surplus", run: 5 * time.Minute, surplus: true,
 			plant: surplus, lp: surplusPhase("auto")},
 		{name: "9 kW surplus, readback 10 s late", known: "surplus adds back the charger's late readback, surplus_reserve.go:128", run: 5 * time.Minute, surplus: true,
 			plant: func(p *sitesim.Plant) { surplus(p); p.EVSE.ReadbackLag = 10 * time.Second }, lp: surplusPhase("3p")},
-		{name: "surplus_unlock_bat_soc saved, Charge now", known: "a saved unlock that is not armed sets the fuse phase mode, controller_fuse_budget.go:184", run: 5 * time.Minute,
+		{name: "surplus_unlock_bat_soc saved, Charge now", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) {
 				p.HouseW = houseA(3, 3, 3)
 				p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 5000, MaxDischargeW: 5000, CapacityWh: 10000, SoC: .5}
