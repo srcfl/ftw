@@ -89,7 +89,6 @@ func (c *Controller) restoreOffers(now time.Time, samples map[string]EVSample) {
 			continue
 		}
 		c.manager.setCommandedForManual(cfg.ID, saved.PowerW, saved.Reason, time.Time{})
-		c.recordOfferPeak(now, cfg.ID, saved.PowerW, map[string]any{"phase_mode": saved.PhaseMode})
 		if c.savedOffers == nil {
 			c.savedOffers = map[string]savedOffer{}
 		}

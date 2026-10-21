@@ -2002,7 +2002,8 @@ func main() {
 		lpController.SetFuseEVMax(func() (float64, bool) {
 			ctrlMu.Lock()
 			defer ctrlMu.Unlock()
-			return control.EVFuseBudget(tel, ctrl, lpMgr.States(), lpMgr.Configs(), ctrl.SiteFuseAmps*ctrl.SiteFuseVoltage*float64(ctrl.SiteFusePhases))
+			// The cap is measured for the phases this tick's commands name.
+			return control.EVFuseBudget(tel, ctrl, lpMgr.States(), lpController.FuseConfigs(), ctrl.SiteFuseAmps*ctrl.SiteFuseVoltage*float64(ctrl.SiteFusePhases))
 		})
 		// Every lease is preflighted and re-evaluated on each loadpoint tick.
 		// This closure owns site/battery health because those concepts belong
@@ -2129,31 +2130,6 @@ func main() {
 			}
 			go mpcSvc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_stopped")
 			slog.Info("battery boost stopped — replan requested", "lp", id, "reason", reason)
-		})
-		// Wire the live per-phase site-meter current reader. The EV hard
-		// limit (control.EVFuseBudget) cuts a worst-phase overage; this
-		// reader lets the loadpoint gate an increase on the phase a
-		// runtime 1p or auto charger may land on. Reads the same
-		// meter_lN_a metrics the fuse_over_limit notifier uses.
-		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
-			cfgMu.RLock()
-			siteMeter := cfg.SiteMeterDriver()
-			phaseCount := cfg.Fuse.Phases
-			watchdogTimeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
-			cfgMu.RUnlock()
-			if siteMeter == "" {
-				return 0, 0, 0, false
-			}
-			if watchdogTimeout <= 0 {
-				watchdogTimeout = 60 * time.Second
-			}
-			amps, available, fresh := sitePhaseCurrentsAt(
-				tel, siteMeter, phaseCount, watchdogTimeout, time.Now(),
-			)
-			if !available || !fresh {
-				return 0, 0, 0, false
-			}
-			return amps[0], amps[1], amps[2], true
 		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla

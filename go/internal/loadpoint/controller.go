@@ -47,23 +47,16 @@ type Controller struct {
 	// fuseEVMax is this tick's EV share of the site fuse. nil means no cap.
 	fuseEVMax func() (float64, bool)
 
-	// perPhaseMeterAmps returns the live site-meter per-phase currents (L1,
-	// L2, L3). Wired from telemetry; nil disables the phase increase gate.
-	perPhaseMeterAmps func() (l1, l2, l3 float64, ok bool)
 	// tickFuseCaps belongs to the serial tick, after one shared budget read.
 	tickFuseCaps        map[string]float64
+	tickChoices         map[string]tickChoice // serial tick
 	tickDirectiveActive bool
 	tickDirectiveOK     bool
 	tickDirective       Directive
-	// offerPeaks is each loadpoint's highest recent offer (serial tick).
-	offerPeaks map[string]offerPeak
 	// savedOffers mirrors each loadpoint's last order kept across restarts.
-	savedOffers map[string]savedOffer
-	// fuseResumeTicks is owned by the serial tick. A paused charger needs
-	// two consecutive dispatch ticks with room for a legal step.
-	fuseResumeTicks map[string]int
-	fuseDemandMu    sync.RWMutex
-	fuseDemands     []FuseDemand
+	savedOffers  map[string]savedOffer
+	fuseDemandMu sync.RWMutex
+	fuseDemands  []FuseDemand
 
 	// siteSurplusForEVW is live PV left after house load and battery soak.
 	// A false reading pauses surplus_only rather than guessing an import.
@@ -205,8 +198,6 @@ const nearTermLogCooldown = 10 * time.Minute
 // phaseSwitchMinHold is one 1Φ/3Φ change per 30 min. Faster burns the
 // Easee contactor and winds up the battery PI.
 const phaseSwitchMinHold = 30 * time.Minute
-
-const fuseResumeSafeTicks = 2
 
 // CommandSettle is how long a new current may take to reach the site meter.
 // Easee Cloud needs about 5-15 s (#1674). Until then the meter may still show
@@ -523,14 +514,9 @@ func (c *Controller) SetFuseEVMax(f func() (float64, bool)) {
 	c.fuseEVMax = f
 }
 
-// SetPerPhaseMeterAmps wires the live site-meter per-phase current reader
-// used by the per-phase fuse clamp.
-func (c *Controller) SetPerPhaseMeterAmps(f func() (l1, l2, l3 float64, ok bool)) {
-	if c == nil {
-		return
-	}
-	c.perPhaseMeterAmps = f
-}
+// SetPerPhaseMeterAmps does nothing. Deprecated: control.EVFuseBudget reads
+// the phase currents; this stays until the last test caller is gone.
+func (c *Controller) SetPerPhaseMeterAmps(func() (l1, l2, l3 float64, ok bool)) {}
 
 // SetSiteSurplusForEV wires a per-tick "PV surplus available to the
 // EV" reader for the surplus_only clamp. The function returns watts
@@ -594,13 +580,9 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 	c.peakRemainingSurplusW = f
 }
 
-// fusePhaseMarginA is the per-phase amp headroom held below the breaker.
-const fusePhaseMarginA = 1.0
-
-// applyFuseClampAndCooldown applies the frozen hard cap. A short recovery
-// wait is part of that cap; an unknown startup budget never starts a timer.
-// It snaps to steps that are legal on the phases the command names.
-func (c *Controller) applyFuseClampAndCooldown(lpCfg Config, wantW float64, phaseMode string) (float64, string) {
+// applyFuseClamp applies this loadpoint's share of the frozen hard cap. It
+// snaps to steps that are legal on the phases the command names.
+func (c *Controller) applyFuseClamp(lpCfg Config, wantW float64, phaseMode string) (float64, string) {
 	if c == nil {
 		return wantW, ""
 	}
@@ -614,9 +596,6 @@ func (c *Controller) applyFuseClampAndCooldown(lpCfg Config, wantW float64, phas
 	}
 	if !finite(cap) {
 		cap = 0
-	}
-	if c.fuseResumeTicks[lpCfg.ID] > 0 {
-		return 0, "fuse_cooldown"
 	}
 	if wantW <= cap {
 		return wantW, ""
@@ -1171,11 +1150,6 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 		return
 	}
 	c.clearFuseDemands()
-	if !dispatchAllowed {
-		for id := range c.fuseResumeTicks {
-			c.fuseResumeTicks[id] = 0
-		}
-	}
 	// Stop every affected charger before observing any session. Observation
 	// may restore or sync state.db; a stalled disk must not delay standdown,
 	// including the chargers after the one whose checkpoint is blocked.
@@ -1220,7 +1194,7 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 	if dispatchAllowed {
 		c.tickDirective, c.tickDirectiveOK = c.currentDirective(now)
 		c.tickDirectiveActive = true
-		defer func() { c.tickFuseCaps = nil; c.tickDirectiveActive = false }()
+		defer func() { c.tickFuseCaps = nil; c.tickChoices = nil; c.tickDirectiveActive = false }()
 	}
 	choices := make(map[string]tickChoice, len(observations))
 	for _, observed := range observations {
@@ -1229,8 +1203,9 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 		}
 	}
 	if dispatchAllowed {
+		c.tickChoices = choices
 		c.restoreOffers(now, samples)
-		c.freezeFuseBudget(now, samples, choices)
+		c.freezeFuseBudget(now, samples)
 	}
 	for _, observed := range observations {
 		c.tickOne(ctx, now, observed.config, observed.sample, choices[observed.config.ID], dispatchAllowed, observed.wasPlugged, observed.wasDelivering)
@@ -1238,7 +1213,7 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 }
 
 // tickChoice is one loadpoint's surplus and phase decision for a tick. The
-// shared fuse budget and the command read this one value.
+// fuse cap is measured for its phases, and the command names them.
 type tickChoice struct {
 	surplusOn   bool      // live surplus replaces the plan
 	surplusAdds bool      // live surplus may raise a scheduled charge
@@ -1251,13 +1226,8 @@ type tickChoice struct {
 func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, dispatchAllowed bool) tickChoice {
 	sched, _ := c.manager.GetSchedule(cfg.ID)
 	choice := tickChoice{surplusOn: c.surplusActive(cfg, sched), surplusAdds: c.surplusAddsToPlan(cfg, sched)}
-	if !sample.Connected || !dispatchAllowed {
+	if !sample.Connected || !dispatchAllowed || !c.driverCanDispatch(cfg.DriverName) {
 		return choice // No command this tick.
-	}
-	if !c.driverCanDispatch(cfg.DriverName) {
-		// No command, but the charger may hold its last offer on its phases.
-		choice.phaseMode = c.offerPeaks[cfg.ID].phase
-		return choice
 	}
 	if hold, held := c.GetManualHold(cfg.ID, now); held {
 		choice.phaseMode = holdPhaseMode(hold, cfg, choice.surplusOn)
@@ -1377,7 +1347,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 	// surplusAdds: surplus is ADDED on top of a scheduled plan. Never
 	// both true.
 	surplusOn, surplusAdds := choice.surplusOn, choice.surplusAdds
-	// The fuse budget was frozen for this phase mode.
+	// The fuse cap was measured for this phase mode.
 	phaseMode := choice.phaseMode
 	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
 	selfWithheld := surplusOn && enteringSurplusPaused
@@ -1597,7 +1567,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 				wantW, cmdReason = 0, "fuse_limit"
 			}
 		}
-		limitedW, reason := c.applyFuseClampAndCooldown(lpCfg, wantW, phaseMode)
+		limitedW, reason := c.applyFuseClamp(lpCfg, wantW, phaseMode)
 		cmd["power_w"] = limitedW
 		if reason != "" {
 			cmdReason = reason
@@ -1622,8 +1592,8 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 	if w, ok := cmd["power_w"].(float64); ok {
 		offerW, haveOffer = w, true
 		c.manager.setCommandedForManual(lpCfg.ID, w, cmdReason, manualCommandUpdatedAt)
-		phase := c.recordOfferPeak(now, lpCfg.ID, w, cmd)
-		c.saveOffer(now, lpCfg, sample, w, phase, cmdReason)
+		mode, _ := cmd["phase_mode"].(string)
+		c.saveOffer(now, lpCfg, sample, w, fusePhase(mode), cmdReason)
 	}
 	payload, err := json.Marshal(cmd)
 	if err != nil {

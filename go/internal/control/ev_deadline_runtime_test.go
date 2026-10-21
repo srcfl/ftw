@@ -75,8 +75,7 @@ func TestJoinedNoBatteryNoPlanGoalContinuity(t *testing.T) {
 			return nil
 		})
 	controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	controller.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return phaseA, phaseA, phaseA, true })
-	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(tel, st, mgr.States(), mgr.Configs(), 17250) })
+	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(tel, st, mgr.States(), controller.FuseConfigs(), 17250) })
 	controller.TickWithDispatch(ctx, now, true)
 	if len(commands) == 0 || commands[len(commands)-1] <= 0 {
 		t.Fatalf("goal stopped at integration boundary: %v", commands)
@@ -172,9 +171,7 @@ func TestJoinedMixedPhaseNoCreditBeforeMeasuredReduction(t *testing.T) {
 			return nil
 		})
 	controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	var sampledWorst float64
-	controller.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return sampledWorst, actualB / 690, actualB / 690, true })
-	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(tel, st, mgr.States(), mgr.Configs(), 17250) })
+	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(tel, st, mgr.States(), controller.FuseConfigs(), 17250) })
 	emit := func(driver string, kind telemetry.DerType, at time.Time, w float64, amps bool) {
 		d := map[string]any{"control_power_observed_at": at.Format(time.RFC3339Nano), "control_power_available": true}
 		if amps {
@@ -192,7 +189,6 @@ func TestJoinedMixedPhaseNoCreditBeforeMeasuredReduction(t *testing.T) {
 		at := wall.Add(-9*time.Second + time.Duration(step)*1500*time.Millisecond)
 		emit(cfgA.DriverName, telemetry.DerEV, at, actualA, false)
 		emit(cfgB.DriverName, telemetry.DerEV, at, actualB, false)
-		sampledWorst = actualA/230 + actualB/690
 		emit("meter", telemetry.DerMeter, at.Add(500*time.Millisecond), actualA+actualB, true)
 		emit(cfgA.DriverName, telemetry.DerEV, at.Add(time.Second), actualA, false)
 		emit(cfgB.DriverName, telemetry.DerEV, at.Add(time.Second), actualB, false)

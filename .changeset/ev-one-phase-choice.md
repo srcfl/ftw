@@ -2,4 +2,4 @@
 "ftw": patch
 ---
 
-Charging no longer stalls or switches off when the phase mode is empty or auto, or when a battery-level PV unlock is saved but not active. The fuse guard now counts room on the phases the charger is told to use, and never offers less than 6 A per phase.
+Charging no longer stalls or switches off when the phase mode is empty or auto, when a battery-level PV unlock is saved but not active, or on a one-phase site. The site-meter limit is now the only fuse guard for chargers: it measures room on the phases each charger is told to use, and an offer is never below 6 A per phase.

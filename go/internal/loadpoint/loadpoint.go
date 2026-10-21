@@ -263,9 +263,9 @@ type State struct {
 
 	// CommandedReason names the dispatch branch that decided CommandedW:
 	// "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
-	// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
-	// "wake_kick". Empty until the first dispatch tick. The UI renders
-	// the specific cause instead of a generic "paused by the box".
+	// "fuse_limit", "site_meter_stale", "manual_hold", "wake_kick". Empty
+	// until the first dispatch tick. The UI renders the specific cause
+	// instead of a generic "paused by the box".
 	CommandedReason string `json:"commanded_reason,omitempty"`
 
 	// GridDeferred is true while MPC has deferred grid-funded planning
@@ -561,9 +561,9 @@ func (m *Manager) SetCommandedW(id string, w float64) {
 // dispatch branch chose that value — the fact operators were left to
 // reverse-engineer from amp readings (#1009). Reasons are short stable
 // tokens: "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
-// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
-// "wake_kick". Empty keeps whatever was recorded before (used by the
-// legacy SetCommandedW wrapper). No-op for an unknown id.
+// "fuse_limit", "site_meter_stale", "manual_hold", "wake_kick". Empty keeps
+// whatever was recorded before (used by the legacy SetCommandedW wrapper).
+// No-op for an unknown id.
 func (m *Manager) SetCommanded(id string, w float64, reason string) {
 	m.setCommandedForManual(id, w, reason, time.Time{})
 }

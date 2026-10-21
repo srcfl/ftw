@@ -2,6 +2,7 @@ package loadpoint
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -11,10 +12,29 @@ import (
 var threePhaseSteps = []float64{0, 1380, 1610, 1840, 2070, 2300, 2530, 2760, 2990, 3220, 3450, 3680,
 	4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350, 11040}
 
+// meteredEVCap stands in for control.EVFuseBudget: the plugged cars' last
+// offers plus the room the meter shows below the fuse less 1 A, on the
+// phases FuseConfigs names for this tick.
+func meteredEVCap(c *Controller, worstA func() float64) func() (float64, bool) {
+	return func() (float64, bool) {
+		site := c.siteFuse()
+		phases, offersW := float64(site.Phases()), 0.0
+		for _, cfg := range c.FuseConfigs() {
+			if st, ok := c.manager.State(cfg.ID); ok && st.PluggedIn {
+				if cfg.PhaseMode != "" && cfg.PhaseMode != "3p" {
+					phases = 1
+				}
+				offersW += math.Max(0, st.CommandedW)
+			}
+		}
+		return math.Max(0, offersW+(site.MaxAmps-1-worstA())*site.Voltage*phases), true
+	}
+}
+
 // R2 of the 21 Oct 2026 review: a saved battery-SoC unlock that is not
-// armed made the fuse budget expect "auto" while Charge now sent the
-// driver's 3p. The last offer counted as 0 and new room as one phase, so
-// the charge ran 4,830 / 0 / 0 W with fuse_limit on a 25 A site.
+// armed made the loadpoint's own fuse layer expect "auto" while Charge now
+// sent the driver's 3p. The last offer counted as 0 and new room as one
+// phase, so the charge ran 4,830 / 0 / 0 W with fuse_limit on a 25 A site.
 func TestChargeNowHoldsWithUnarmedBatteryUnlock(t *testing.T) {
 	now := time.Date(2026, 1, 10, 19, 0, 0, 0, time.UTC)
 	cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11040,
@@ -26,15 +46,14 @@ func TestChargeNowHoldsWithUnarmedBatteryUnlock(t *testing.T) {
 	c.SetBatSoCProvider(func() (float64, bool) { return 0.5, true })
 	c.SetSiteSurplusForEV(func() (float64, bool) { return -2000, true })
 	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	c.SetFuseEVMax(func() (float64, bool) { return 11040, true })
 	evW := 0.0 // The meter shows 3 A of house load plus the car's last offer.
-	c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { a := 3 + evW/690; return a, a, a, true })
+	c.SetFuseEVMax(meteredEVCap(c, func() float64 { return 3 + evW/690 }))
 	c.SetManualHold(cfg.ID, ManualHold{PowerW: 11040, Persistent: true, StartedAt: now, UpdatedAt: now})
 	for tick := 0; tick < 20; tick++ {
 		c.Tick(context.Background(), now)
 		command, ok := lastSetCurrent(sender.calls)
 		st, _ := c.manager.State(cfg.ID)
-		if !ok || command.power < cfg.MaxChargeW-690 || st.CommandedReason == "fuse_limit" || st.CommandedReason == "fuse_cooldown" {
+		if !ok || command.power < cfg.MaxChargeW-690 || st.CommandedReason == "fuse_limit" {
 			t.Fatalf("tick %d: offer %+v, reason %q; want about %.0f W", tick, command, st.CommandedReason, cfg.MaxChargeW)
 		}
 		if c.IsBatSoCArmed(cfg.ID) {
@@ -46,9 +65,9 @@ func TestChargeNowHoldsWithUnarmedBatteryUnlock(t *testing.T) {
 	}
 }
 
-// On a one-phase site the command goes out as 1p. The budget expected the
-// empty mode's 3p, so the last offer counted as 0 and Charge now ran
-// 4,830 / 0 / 0 W.
+// On a one-phase site the command goes out as 1p. The loadpoint's own fuse
+// layer expected the empty mode's 3p, so the last offer counted as 0 and
+// Charge now ran 4,830 / 0 / 0 W.
 func TestChargeNowHoldsOnOnePhaseSite(t *testing.T) {
 	now := time.Date(2026, 1, 10, 19, 0, 0, 0, time.UTC)
 	cfg := Config{ID: "garage", DriverName: "easee", MinChargeW: 1380, MaxChargeW: 7360,
@@ -57,9 +76,8 @@ func TestChargeNowHoldsOnOnePhaseSite(t *testing.T) {
 	sender := &fakeSender{}
 	c := newTestController(t, []Config{cfg}, nil, samples, sender)
 	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 1})
-	c.SetFuseEVMax(func() (float64, bool) { return 7360, true })
 	evW := 0.0 // 3 A of house load plus the car's last offer.
-	c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return 3 + evW/230, 0, 0, true })
+	c.SetFuseEVMax(meteredEVCap(c, func() float64 { return 3 + evW/230 }))
 	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4830, Persistent: true, StartedAt: now, UpdatedAt: now})
 	for tick := 0; tick < 20; tick++ {
 		c.Tick(context.Background(), now)
@@ -74,9 +92,9 @@ func TestChargeNowHoldsOnOnePhaseSite(t *testing.T) {
 }
 
 // R1 of the 21 Oct 2026 review: with an unset or auto phase mode the
-// surplus dwell sent 3p while the fuse budget measured room on one phase.
+// surplus dwell sent 3p while the fuse room was measured on one phase.
 // 9 kW of surplus gave 2,300–3,450 W labelled 3p, under 6 A, so the car
-// did not charge.
+// did not charge. The cap must be measured for the dwell's 3p.
 func TestSurplusOnlyAutoPhaseOffersLegalThreePhaseSteps(t *testing.T) {
 	for _, phaseMode := range []string{"", "auto"} {
 		t.Run("mode_"+phaseMode, func(t *testing.T) {
@@ -91,12 +109,8 @@ func TestSurplusOnlyAutoPhaseOffersLegalThreePhaseSteps(t *testing.T) {
 			const surplusW = 9000
 			c.SetSiteSurplusForEV(func() (float64, bool) { return surplusW, true })
 			c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-			c.SetFuseEVMax(func() (float64, bool) { return 11040, true })
 			evW := 0.0 // PV export on every phase, less the car's draw.
-			c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
-				a := (evW - surplusW) / 690
-				return a, a, a, true
-			})
+			c.SetFuseEVMax(meteredEVCap(c, func() float64 { return math.Abs(evW-surplusW) / 690 }))
 			for tick := 0; tick < 20; tick++ {
 				c.Tick(context.Background(), now)
 				command, ok := lastSetCurrent(sender.calls)
@@ -127,8 +141,7 @@ func TestThreePhaseFuseCapNeverSnapsBelowSixAmps(t *testing.T) {
 	sender := &fakeSender{}
 	c := newTestController(t, []Config{cfg}, nil, samples, sender)
 	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	c.SetFuseEVMax(func() (float64, bool) { return 20000, true })
-	c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return 20, 20, 20, true })
+	c.SetFuseEVMax(meteredEVCap(c, func() float64 { return 20 }))
 	c.SetManualHold(cfg.ID, ManualHold{PowerW: 11040, Persistent: true})
 	c.Tick(context.Background(), now)
 	command, ok := lastSetCurrent(sender.calls)
