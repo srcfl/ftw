@@ -24,10 +24,9 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
 	ctrl.SolarFeedDrivers = solarFeedDriversFrom(cfg.Drivers)
-	ctrl.DriverLimits = driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries)
-	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
-	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
-	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
+	ctrl.DriverLimits = driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries, cfg.Planner)
+	// The fuse that control.fusePhases reads with the site meter's
+	// l1_a/l2_a/l3_a for every charger and battery decision.
 	ctrl.SiteFuseAmps = cfg.Fuse.MaxAmps
 	ctrl.SiteFuseVoltage = cfg.Fuse.Voltage
 	ctrl.SiteFusePhases = cfg.Fuse.Phases

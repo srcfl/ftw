@@ -51,12 +51,13 @@ func TestSelfTuneStepYieldsToTheFuseGuard(t *testing.T) {
 	store, st, capacities := selfTuneSite(10000, []idleBattery{
 		{name: "tuned", currentW: 0, soc: 0.50, online: true},
 	})
+	describeFuse(st, 11040)
 
 	targets := SelfTuneDispatch(store, st, capacities, 11040, "tuned", 3000)
 
 	tg := targetFor(t, targets, "tuned")
 	// 10 kW now + 3 kW step would import 13 kW through an 11.04 kW fuse.
-	if predicted := 10000 + tg.TargetW; predicted > 11040+1 {
+	if predicted := 10000 + tg.TargetW; predicted > 11040-690+1 {
 		t.Fatalf("tuned target = %.0f W predicts %.0f W import past the 11040 W fuse", tg.TargetW, predicted)
 	}
 	if !tg.Clamped {
@@ -72,6 +73,7 @@ func TestSelfTuneHoldStillYieldsToTheFuseSaver(t *testing.T) {
 		{name: "tuned", currentW: 0, soc: 0.50, online: true},
 		{name: "sibling", currentW: 0, soc: 0.60, online: true},
 	})
+	describeFuse(st, 11040)
 
 	targets := SelfTuneDispatch(store, st, capacities, 11040, "tuned", 1000)
 

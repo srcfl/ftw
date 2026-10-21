@@ -1,7 +1,7 @@
 {
   "family": "seeded_fuse",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "303f86818a95f056f68e0b652db131a33074a421",
+  "ftw_commit": "2fad850dddba752294301b4555a251cbd71a220c",
   "record_count": 80,
   "records": [
     {
@@ -69,30 +69,26 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3245.228082551051,
+          "target_w": -2165,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -3647.771917448948,
-          "clamped": true
+          "target_w": -2326.4444444444443,
+          "clamped": false
         }
       ],
       "clamp_attributions": {
         "clamped_drivers": [
-          "ferroamp",
-          "sungrow"
+          "ferroamp"
         ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1011.9999999999997,
+        "fuse_saturated": true,
+        "phase_over_a": 4.399999999999999,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 5620,
         "effective_export_ceiling_w": 5580,
         "import_ceiling_binding": false,
@@ -100,9 +96,9 @@
       },
       "site_totals": {
         "battery_current_w": 1432,
-        "battery_target_sum_w": -6892.999999999999,
+        "battery_target_sum_w": -4491.444444444444,
         "raw_grid_w": 8815,
-        "projected_grid_w": 490.0000000000009
+        "projected_grid_w": 2891.5555555555557
       }
     },
     {
@@ -209,11 +205,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1195.9999999999998,
+        "phase_over_a": 0,
+        "phase_export_over_a": 6.199999999999999,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -291,22 +284,21 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
-          "clamped": false
+          "target_w": -582,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "sungrow"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -314,9 +306,9 @@
       },
       "site_totals": {
         "battery_current_w": -1857,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": -582,
         "raw_grid_w": 14791,
-        "projected_grid_w": 16648
+        "projected_grid_w": 16066
       }
     },
     {
@@ -383,7 +375,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 1670,
           "clamped": true
         }
       ],
@@ -391,16 +383,13 @@
         "clamped_drivers": [
           "ferroamp"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 7.286956521739132,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 7395,
         "import_ceiling_binding": false,
@@ -408,9 +397,9 @@
       },
       "site_totals": {
         "battery_current_w": 1670,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 1670,
         "raw_grid_w": -21588,
-        "projected_grid_w": -23258
+        "projected_grid_w": -21588
       }
     },
     {
@@ -488,12 +477,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0.12463768115942031,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -576,11 +562,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 253.00000000000034,
+        "phase_over_a": 0,
+        "phase_export_over_a": 2.1000000000000014,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -658,12 +641,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1035,
+        "fuse_saturated": true,
+        "phase_over_a": 5.5,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 4300,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -757,12 +737,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 1018,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -771,16 +751,13 @@
           "ferroamp",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 184.00000000000017,
+        "phase_over_a": 0,
+        "phase_export_over_a": 1.8000000000000007,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -788,9 +765,9 @@
       },
       "site_totals": {
         "battery_current_w": -224,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 1018,
         "raw_grid_w": -23992,
-        "projected_grid_w": -23768
+        "projected_grid_w": -22750
       }
     },
     {
@@ -870,12 +847,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2534.523809523809,
-          "clamped": true
+          "target_w": -2017.0238095238092,
+          "clamped": false
         },
         {
           "driver": "pixii",
-          "target_w": -2534.523809523809,
+          "target_w": -3227,
           "clamped": true
         },
         {
@@ -886,7 +863,6 @@
       ],
       "clamp_attributions": {
         "clamped_drivers": [
-          "ferroamp",
           "pixii",
           "sungrow"
         ],
@@ -894,12 +870,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 345,
+        "fuse_saturated": true,
+        "phase_over_a": 2,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 10695,
         "effective_export_ceiling_w": 10695,
         "import_ceiling_binding": false,
@@ -907,9 +880,9 @@
       },
       "site_totals": {
         "battery_current_w": -3018,
-        "battery_target_sum_w": -10069.047619047618,
+        "battery_target_sum_w": -10244.02380952381,
         "raw_grid_w": 11913,
-        "projected_grid_w": 4861.952380952382
+        "projected_grid_w": 4686.976190476191
       }
     },
     {
@@ -994,11 +967,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -1064,7 +1034,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3857,
+          "target_w": -3227.000000000001,
           "clamped": true
         }
       ],
@@ -1076,22 +1046,19 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 598.0000000000003,
+        "fuse_saturated": true,
+        "phase_over_a": 3.1000000000000014,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 16905,
         "effective_export_ceiling_w": 16905,
-        "import_ceiling_binding": true,
+        "import_ceiling_binding": false,
         "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -1088,
-        "battery_target_sum_w": -3857,
+        "battery_target_sum_w": -3227.000000000001,
         "raw_grid_w": 19674,
-        "projected_grid_w": 16905
+        "projected_grid_w": 17535
       }
     },
     {
@@ -1171,11 +1138,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 5771,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -1270,22 +1234,21 @@
         },
         {
           "driver": "sungrow",
-          "target_w": -2803.2,
-          "clamped": false
+          "target_w": -3629,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "sungrow"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 5.639130434782608,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 8474,
         "import_ceiling_binding": false,
@@ -1293,9 +1256,9 @@
       },
       "site_totals": {
         "battery_current_w": -157,
-        "battery_target_sum_w": -8701.6,
+        "battery_target_sum_w": -9527.400000000001,
         "raw_grid_w": 14241,
-        "projected_grid_w": 5696.4
+        "projected_grid_w": 4870.5999999999985
       }
     },
     {
@@ -1380,11 +1343,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0.6289855072463766,
         "effective_import_ceiling_w": 7447,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -1469,17 +1429,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3627.6666666666665,
+          "target_w": -3857.6666666666665,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -3627.6666666666665,
+          "target_w": -3857.6666666666665,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -3627.6666666666665,
+          "target_w": -3857.6666666666665,
           "clamped": true
         }
       ],
@@ -1493,22 +1453,19 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 10.128985507246377,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
-        "import_ceiling_binding": true,
+        "import_ceiling_binding": false,
         "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -4584,
-        "battery_target_sum_w": -10883,
+        "battery_target_sum_w": -11573,
         "raw_grid_w": 23549,
-        "projected_grid_w": 17250
+        "projected_grid_w": 16560
       }
     },
     {
@@ -1587,12 +1544,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -507.50000000000006,
+          "target_w": -324.99999999999994,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -507.50000000000006,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -1606,21 +1563,18 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 1015,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 2.436231884057971,
         "effective_import_ceiling_w": 5287,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
-        "export_ceiling_binding": true
+        "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -2006,
-        "battery_target_sum_w": -1015.0000000000001,
+        "battery_target_sum_w": -324.99999999999994,
         "raw_grid_w": -18241,
-        "projected_grid_w": -17250
+        "projected_grid_w": -16560
       }
     },
     {
@@ -1688,30 +1642,24 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3402.6442494330904,
-          "clamped": true
+          "target_w": -1518.5290322580647,
+          "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -3145.9557505669086,
-          "clamped": true
+          "target_w": -959.0709677419356,
+          "clamped": false
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [
-          "ferroamp",
-          "sungrow"
-        ],
+        "clamped_drivers": [],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1356.9999999999998,
+        "fuse_saturated": true,
+        "phase_over_a": 6.899999999999999,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 5311,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -1719,9 +1667,9 @@
       },
       "site_totals": {
         "battery_current_w": 2317,
-        "battery_target_sum_w": -6548.5999999999985,
+        "battery_target_sum_w": -2477.6000000000004,
         "raw_grid_w": 7991,
-        "projected_grid_w": -874.5999999999985
+        "projected_grid_w": 3196.3999999999996
       }
     },
     {
@@ -1789,11 +1737,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 2.8594202898550733,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -1883,17 +1828,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -644.0000000000001,
+          "target_w": -323.0000000000001,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -644.0000000000001,
+          "target_w": -323.0000000000001,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -644.0000000000001,
+          "target_w": -3823,
           "clamped": true
         }
       ],
@@ -1907,12 +1852,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 644.0000000000001,
+        "fuse_saturated": true,
+        "phase_over_a": 3.3000000000000007,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 16905,
         "effective_export_ceiling_w": 16905,
         "import_ceiling_binding": false,
@@ -1920,9 +1862,9 @@
       },
       "site_totals": {
         "battery_current_w": 1308,
-        "battery_target_sum_w": -1932.0000000000005,
+        "battery_target_sum_w": -4469,
         "raw_grid_w": 13971,
-        "projected_grid_w": 10731
+        "projected_grid_w": 8194
       }
     },
     {
@@ -2018,17 +1960,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 3541,
           "clamped": true
         }
       ],
@@ -2038,16 +1980,13 @@
           "pixii",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 920,
+        "phase_over_a": 0,
+        "phase_export_over_a": 4,
         "effective_import_ceiling_w": 16560,
         "effective_export_ceiling_w": 16560,
         "import_ceiling_binding": false,
@@ -2055,9 +1994,9 @@
       },
       "site_totals": {
         "battery_current_w": 1091,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 3541,
         "raw_grid_w": -20267,
-        "projected_grid_w": -21358
+        "projected_grid_w": -17817
       }
     },
     {
@@ -2121,11 +2060,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -2203,11 +2139,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 5.142028985507245,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -2285,12 +2218,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 505.99999999999983,
+        "fuse_saturated": true,
+        "phase_over_a": 3.1999999999999993,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 6067,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -2379,12 +2309,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 420,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 3739,
           "clamped": true
         }
       ],
@@ -2393,16 +2323,13 @@
           "ferroamp",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 8.901449275362317,
         "effective_import_ceiling_w": 6700,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -2410,9 +2337,9 @@
       },
       "site_totals": {
         "battery_current_w": 4159,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 4159,
         "raw_grid_w": -22702,
-        "projected_grid_w": -26861
+        "projected_grid_w": -22702
       }
     },
     {
@@ -2480,30 +2407,24 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2820.0999999999995,
-          "clamped": true
+          "target_w": -1026.1,
+          "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -2820.0999999999995,
-          "clamped": true
+          "target_w": -1026.1,
+          "clamped": false
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [
-          "ferroamp",
-          "sungrow"
-        ],
+        "clamped_drivers": [],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1195.9999999999998,
+        "fuse_saturated": true,
+        "phase_over_a": 5.699999999999999,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 10695,
         "effective_export_ceiling_w": 10695,
         "import_ceiling_binding": false,
@@ -2511,9 +2432,9 @@
       },
       "site_totals": {
         "battery_current_w": 4591,
-        "battery_target_sum_w": -5640.199999999999,
+        "battery_target_sum_w": -2052.2,
         "raw_grid_w": 11072,
-        "projected_grid_w": 840.8000000000011
+        "projected_grid_w": 4428.8
       }
     },
     {
@@ -2581,11 +2502,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 7.3463768115942045,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -2676,12 +2594,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 4.865217391304348,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -2770,12 +2685,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1026.5,
+          "target_w": -249.1749174917494,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -1026.5,
+          "target_w": -1113.825082508251,
           "clamped": true
         }
       ],
@@ -2789,21 +2704,18 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 2053,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
-        "export_ceiling_binding": true
+        "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": 656,
-        "battery_target_sum_w": -2053,
+        "battery_target_sum_w": -1363.0000000000005,
         "raw_grid_w": -14541,
-        "projected_grid_w": -17250
+        "projected_grid_w": -16560
       }
     },
     {
@@ -2866,12 +2778,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 4.763768115942028,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -2949,11 +2858,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -3019,7 +2925,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -5000,
+          "target_w": -1954.999999999999,
           "clamped": true
         }
       ],
@@ -3031,12 +2937,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 16905,
         "effective_export_ceiling_w": 16905,
         "import_ceiling_binding": false,
@@ -3044,9 +2947,9 @@
       },
       "site_totals": {
         "battery_current_w": -2369,
-        "battery_target_sum_w": -5000,
+        "battery_target_sum_w": -1954.999999999999,
         "raw_grid_w": 22237,
-        "projected_grid_w": 19606
+        "projected_grid_w": 22651
       }
     },
     {
@@ -3137,17 +3040,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 2682.924961715161,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 2867.075038284839,
           "clamped": true
         }
       ],
@@ -3157,16 +3060,13 @@
           "pixii",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0.5637681159420289,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -3174,9 +3074,9 @@
       },
       "site_totals": {
         "battery_current_w": 5161,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 5550,
         "raw_grid_w": -16949,
-        "projected_grid_w": -22110
+        "projected_grid_w": -16560
       }
     },
     {
@@ -3239,12 +3139,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 6.959420289855071,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -3361,11 +3258,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 206.99999999999966,
+        "phase_over_a": 0,
+        "phase_export_over_a": 1.8999999999999986,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -3454,11 +3348,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -3564,17 +3455,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": 953,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 2088,
           "clamped": true
         }
       ],
@@ -3584,16 +3475,13 @@
           "pixii",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 275.99999999999983,
+        "phase_over_a": 0,
+        "phase_export_over_a": 2.1999999999999993,
         "effective_import_ceiling_w": 5718,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -3601,9 +3489,9 @@
       },
       "site_totals": {
         "battery_current_w": 3026,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 3041,
         "raw_grid_w": -19353,
-        "projected_grid_w": -22379
+        "projected_grid_w": -19338
       }
     },
     {
@@ -3704,11 +3592,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 10350,
         "effective_export_ceiling_w": 10350,
         "import_ceiling_binding": false,
@@ -3808,11 +3693,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1334.0000000000002,
+        "phase_over_a": 0,
+        "phase_export_over_a": 6.300000000000001,
         "effective_import_ceiling_w": 10695,
         "effective_export_ceiling_w": 10695,
         "import_ceiling_binding": false,
@@ -3897,8 +3779,8 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
-          "clamped": false
+          "target_w": -32.89908256880733,
+          "clamped": true
         },
         {
           "driver": "pixii",
@@ -3907,22 +3789,22 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
-          "clamped": false
+          "target_w": -1760.100917431192,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "ferroamp",
+          "sungrow"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 8138,
         "import_ceiling_binding": false,
@@ -3930,9 +3812,9 @@
       },
       "site_totals": {
         "battery_current_w": 500,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": -1792.9999999999995,
         "raw_grid_w": 14974,
-        "projected_grid_w": 14474
+        "projected_grid_w": 12681
       }
     },
     {
@@ -4004,7 +3886,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 1384,
           "clamped": true
         }
       ],
@@ -4012,16 +3894,13 @@
         "clamped_drivers": [
           "ferroamp"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 713.0000000000003,
+        "phase_over_a": 0,
+        "phase_export_over_a": 3.1000000000000014,
         "effective_import_ceiling_w": 16560,
         "effective_export_ceiling_w": 16560,
         "import_ceiling_binding": false,
@@ -4029,9 +3908,9 @@
       },
       "site_totals": {
         "battery_current_w": 1384,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 1384,
         "raw_grid_w": -21722,
-        "projected_grid_w": -23106
+        "projected_grid_w": -21722
       }
     },
     {
@@ -4109,12 +3988,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0.2260869565217387,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 8579,
         "import_ceiling_binding": false,
@@ -4192,11 +4068,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -4269,12 +4142,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3832.5,
+          "target_w": -4177.5,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -3832.5,
+          "target_w": -4177.5,
           "clamped": true
         }
       ],
@@ -4287,22 +4160,19 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 3.5420289855072475,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
-        "import_ceiling_binding": true,
+        "import_ceiling_binding": false,
         "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -5911,
-        "battery_target_sum_w": -7665,
+        "battery_target_sum_w": -8355,
         "raw_grid_w": 19004,
-        "projected_grid_w": 17250
+        "projected_grid_w": 16560
       }
     },
     {
@@ -4393,17 +4263,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -313,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -313,
+          "target_w": -249.0000000000008,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -313,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -4418,21 +4288,18 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 939,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 6597,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
-        "export_ceiling_binding": true
+        "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": 2664,
-        "battery_target_sum_w": -939,
+        "battery_target_sum_w": -249.0000000000008,
         "raw_grid_w": -13647,
-        "projected_grid_w": -17250
+        "projected_grid_w": -16560
       }
     },
     {
@@ -4512,12 +4379,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 3.4782608695652186,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -4595,11 +4459,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -4689,17 +4550,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2273,
+          "target_w": -1175.6666666666665,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -2273,
+          "target_w": -1175.6666666666665,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -2273,
+          "target_w": -1175.6666666666665,
           "clamped": true
         }
       ],
@@ -4713,22 +4574,19 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 505.99999999999983,
+        "fuse_saturated": true,
+        "phase_over_a": 2.1999999999999993,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 16560,
         "effective_export_ceiling_w": 8534,
-        "import_ceiling_binding": true,
+        "import_ceiling_binding": false,
         "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -2009,
-        "battery_target_sum_w": -6819,
+        "battery_target_sum_w": -3526.9999999999995,
         "raw_grid_w": 21370,
-        "projected_grid_w": 16560
+        "projected_grid_w": 19852
       }
     },
     {
@@ -4800,7 +4658,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1550,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -4808,16 +4666,13 @@
         "clamped_drivers": [
           "ferroamp"
         ],
-        "all_targets_zero_clamped": false,
+        "all_targets_zero_clamped": true,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": false,
+        "plan_sign_floor_zeroed": true,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 1550,
-        "per_phase_overage_w": 1150,
+        "phase_over_a": 0,
+        "phase_export_over_a": 6,
         "effective_import_ceiling_w": 4886,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -4825,9 +4680,9 @@
       },
       "site_totals": {
         "battery_current_w": -3716,
-        "battery_target_sum_w": -1550,
+        "battery_target_sum_w": 0,
         "raw_grid_w": -15970,
-        "projected_grid_w": -13804
+        "projected_grid_w": -12254
       }
     },
     {
@@ -4895,30 +4750,24 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -5000,
-          "clamped": true
+          "target_w": -3102.7,
+          "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -5000,
-          "clamped": true
+          "target_w": -3102.7,
+          "clamped": false
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [
-          "ferroamp",
-          "sungrow"
-        ],
+        "clamped_drivers": [],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1288.0000000000002,
+        "fuse_saturated": true,
+        "phase_over_a": 6.600000000000001,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -4926,9 +4775,9 @@
       },
       "site_totals": {
         "battery_current_w": 2407,
-        "battery_target_sum_w": -10000,
+        "battery_target_sum_w": -6205.4,
         "raw_grid_w": 14354,
-        "projected_grid_w": 1947
+        "projected_grid_w": 5741.6
       }
     },
     {
@@ -5013,11 +4862,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0.7956521739130427,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -5107,17 +4953,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3318.6666666666665,
+          "target_w": -960.9999999999998,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -3318.6666666666665,
+          "target_w": -2865,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -3318.6666666666665,
+          "target_w": -960.9999999999998,
           "clamped": true
         }
       ],
@@ -5131,22 +4977,19 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 45.99999999999984,
+        "fuse_saturated": true,
+        "phase_over_a": 0.1999999999999993,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 16560,
         "effective_export_ceiling_w": 16560,
-        "import_ceiling_binding": true,
+        "import_ceiling_binding": false,
         "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -2745,
-        "battery_target_sum_w": -9956,
+        "battery_target_sum_w": -4787,
         "raw_grid_w": 23771,
-        "projected_grid_w": 16560
+        "projected_grid_w": 21729
       }
     },
     {
@@ -5218,7 +5061,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -5231,11 +5074,8 @@
         "plan_sign_floor_zeroed": true,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1080.9999999999998,
+        "phase_over_a": 0,
+        "phase_export_over_a": 4.699999999999999,
         "effective_import_ceiling_w": 5953,
         "effective_export_ceiling_w": 7823,
         "import_ceiling_binding": false,
@@ -5313,30 +5153,24 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1645.1999999999998,
-          "clamped": true
+          "target_w": -782.6999999999998,
+          "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -1645.1999999999998,
-          "clamped": true
+          "target_w": -782.6999999999998,
+          "clamped": false
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [
-          "ferroamp",
-          "sungrow"
-        ],
+        "clamped_drivers": [],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 575,
+        "fuse_saturated": true,
+        "phase_over_a": 2.5,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 10350,
         "effective_export_ceiling_w": 10350,
         "import_ceiling_binding": false,
@@ -5344,9 +5178,9 @@
       },
       "site_totals": {
         "battery_current_w": 3297,
-        "battery_target_sum_w": -3290.3999999999996,
+        "battery_target_sum_w": -1565.3999999999996,
         "raw_grid_w": 8104,
-        "projected_grid_w": 1516.6000000000004
+        "projected_grid_w": 3241.6000000000004
       }
     },
     {
@@ -5431,11 +5265,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 3.0217391304347814,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -5524,11 +5355,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -5629,17 +5457,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": 900,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 2562,
           "clamped": true
         }
       ],
@@ -5649,16 +5477,13 @@
           "pixii",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 7.760869565217391,
         "effective_import_ceiling_w": 6526,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -5666,9 +5491,9 @@
       },
       "site_totals": {
         "battery_current_w": 2166,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 3462,
         "raw_grid_w": -21915,
-        "projected_grid_w": -24081
+        "projected_grid_w": -20619
       }
     },
     {
@@ -5763,12 +5588,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0.47101449275362306,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -5851,11 +5673,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 943.0000000000003,
+        "phase_over_a": 0,
+        "phase_export_over_a": 4.100000000000001,
         "effective_import_ceiling_w": 10350,
         "effective_export_ceiling_w": 10350,
         "import_ceiling_binding": false,
@@ -5926,12 +5745,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 1.5724637681159415,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -6032,17 +5848,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1366.6666666666665,
+          "target_w": -804.7087342433058,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -1366.6666666666665,
+          "target_w": -1927.6601775192064,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -1366.6666666666665,
+          "target_w": -677.6310882374879,
           "clamped": true
         }
       ],
@@ -6057,21 +5873,18 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 4100,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
-        "export_ceiling_binding": true
+        "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": 814,
-        "battery_target_sum_w": -4100,
+        "battery_target_sum_w": -3410,
         "raw_grid_w": -12336,
-        "projected_grid_w": -17250
+        "projected_grid_w": -16560
       }
     },
     {
@@ -6151,8 +5964,8 @@
         },
         {
           "driver": "pixii",
-          "target_w": -1823.019801980198,
-          "clamped": false
+          "target_w": -2837,
+          "clamped": true
         },
         {
           "driver": "sungrow",
@@ -6161,17 +5974,16 @@
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "pixii"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 2.608695652173914,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -6179,9 +5991,9 @@
       },
       "site_totals": {
         "battery_current_w": -75,
-        "battery_target_sum_w": -7365,
+        "battery_target_sum_w": -8378.980198019803,
         "raw_grid_w": 12150,
-        "projected_grid_w": 4860
+        "projected_grid_w": 3846.0198019801974
       }
     },
     {
@@ -6288,11 +6100,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 184.00000000000017,
+        "phase_over_a": 0,
+        "phase_export_over_a": 1.8000000000000007,
         "effective_import_ceiling_w": 7497,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -6392,22 +6201,21 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
-          "clamped": false
+          "target_w": -1287.0000000000005,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "sungrow"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 16560,
         "effective_export_ceiling_w": 16560,
         "import_ceiling_binding": false,
@@ -6415,9 +6223,9 @@
       },
       "site_totals": {
         "battery_current_w": 4500,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": -1287.0000000000005,
         "raw_grid_w": 20047,
-        "projected_grid_w": 15547
+        "projected_grid_w": 14260
       }
     },
     {
@@ -6513,17 +6321,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2088.5,
+          "target_w": -2403.331993569131,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -2088.5,
+          "target_w": -0,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -2088.5,
+          "target_w": -1776.6680064308678,
           "clamped": true
         }
       ],
@@ -6538,11 +6346,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 6265.5,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0.10000000000000142,
         "effective_import_ceiling_w": 16905,
         "effective_export_ceiling_w": 16905,
         "import_ceiling_binding": false,
@@ -6550,9 +6355,9 @@
       },
       "site_totals": {
         "battery_current_w": -4249,
-        "battery_target_sum_w": -6265.5,
+        "battery_target_sum_w": -4179.999999999999,
         "raw_grid_w": -14716,
-        "projected_grid_w": -16732.5
+        "projected_grid_w": -14647
       }
     },
     {
@@ -6620,12 +6425,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1150,
+        "fuse_saturated": true,
+        "phase_over_a": 6,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 6574,
         "effective_export_ceiling_w": 7458,
         "import_ceiling_binding": false,
@@ -6720,11 +6522,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 6510,
         "effective_export_ceiling_w": 6372,
         "import_ceiling_binding": false,
@@ -6797,12 +6596,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 8.552173913043475,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 5214,
         "import_ceiling_binding": false,
@@ -6896,12 +6692,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1720.5,
+          "target_w": -1403.1836243226974,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -1720.5,
+          "target_w": -1780.816375677303,
           "clamped": true
         }
       ],
@@ -6915,21 +6711,18 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 3441,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0.1999999999999993,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
-        "export_ceiling_binding": true
+        "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -3322,
-        "battery_target_sum_w": -3441,
+        "battery_target_sum_w": -3184.0000000000005,
         "raw_grid_w": -17131,
-        "projected_grid_w": -17250
+        "projected_grid_w": -16993
       }
     },
     {
@@ -7007,12 +6800,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 7.121739130434783,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 7019,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -7095,11 +6885,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1080.9999999999998,
+        "phase_over_a": 0,
+        "phase_export_over_a": 5.199999999999999,
         "effective_import_ceiling_w": 10695,
         "effective_export_ceiling_w": 10695,
         "import_ceiling_binding": false,
@@ -7165,7 +6952,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3174.000000000001,
+          "target_w": -1139.000000000001,
           "clamped": true
         }
       ],
@@ -7177,12 +6964,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 1058.0000000000002,
+        "fuse_saturated": true,
+        "phase_over_a": 5.600000000000001,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -7190,9 +6974,9 @@
       },
       "site_totals": {
         "battery_current_w": 2725,
-        "battery_target_sum_w": -3174.000000000001,
+        "battery_target_sum_w": -1139.000000000001,
         "raw_grid_w": 14295,
-        "projected_grid_w": 8396
+        "projected_grid_w": 10431
       }
     },
     {
@@ -7259,7 +7043,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 183,
           "clamped": true
         }
       ],
@@ -7267,16 +7051,13 @@
         "clamped_drivers": [
           "ferroamp"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 6.492753623188406,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 7364,
         "import_ceiling_binding": false,
@@ -7284,9 +7065,9 @@
       },
       "site_totals": {
         "battery_current_w": 183,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 183,
         "raw_grid_w": -21040,
-        "projected_grid_w": -21223
+        "projected_grid_w": -21040
       }
     },
     {
@@ -7349,12 +7130,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 5203,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -7471,11 +7249,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 184.00000000000017,
+        "phase_over_a": 0,
+        "phase_export_over_a": 1.8000000000000007,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -7560,17 +7335,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2627,
+          "target_w": -3989,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -2627,
+          "target_w": -2856.999999999999,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -2627,
+          "target_w": -2856.999999999999,
           "clamped": true
         }
       ],
@@ -7584,22 +7359,19 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0.21449275362318687,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
-        "import_ceiling_binding": true,
+        "import_ceiling_binding": false,
         "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": -8423,
-        "battery_target_sum_w": -7881,
+        "battery_target_sum_w": -9702.999999999998,
         "raw_grid_w": 16708,
-        "projected_grid_w": 17250
+        "projected_grid_w": 15428.000000000002
       }
     },
     {
@@ -7683,12 +7455,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 0,
+          "target_w": 273,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -7697,16 +7469,13 @@
           "ferroamp",
           "sungrow"
         ],
-        "all_targets_zero_clamped": true,
+        "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": true,
+        "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 345,
+        "phase_over_a": 0,
+        "phase_export_over_a": 2,
         "effective_import_ceiling_w": 16905,
         "effective_export_ceiling_w": 16905,
         "import_ceiling_binding": false,
@@ -7714,9 +7483,9 @@
       },
       "site_totals": {
         "battery_current_w": -1107,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 273,
         "raw_grid_w": -23409,
-        "projected_grid_w": -22302
+        "projected_grid_w": -22029
       }
     },
     {
@@ -7817,11 +7586,8 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 10350,
         "effective_export_ceiling_w": 10350,
         "import_ceiling_binding": false,
@@ -7917,32 +7683,33 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 5000,
-          "clamped": false
+          "target_w": 4571.2304773025835,
+          "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": 5000,
-          "clamped": false
+          "target_w": 4682.539045394833,
+          "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 5000,
-          "clamped": false
+          "target_w": 4571.2304773025835,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "ferroamp",
+          "pixii",
+          "sungrow"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 10350,
         "effective_export_ceiling_w": 10350,
         "import_ceiling_binding": false,
@@ -7950,9 +7717,9 @@
       },
       "site_totals": {
         "battery_current_w": 853,
-        "battery_target_sum_w": 15000,
+        "battery_target_sum_w": 13825,
         "raw_grid_w": -7899,
-        "projected_grid_w": 6248
+        "projected_grid_w": 5073
       }
     },
     {
@@ -8020,12 +7787,9 @@
         "plan_sign_intent": 0,
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
-        "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": false,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 0,
+        "fuse_saturated": true,
+        "phase_over_a": 0.8999999999999986,
+        "phase_export_over_a": 0,
         "effective_import_ceiling_w": 4624,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
@@ -8131,17 +7895,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -716.6666666666667,
+          "target_w": 2602,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -716.6666666666667,
+          "target_w": 2637,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -716.6666666666667,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -8156,21 +7920,18 @@
         "plan_sign_floor_zeroed": false,
         "plan_stale": false,
         "fuse_saturated": false,
-        "fuse_ev_max_w": 0,
-        "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 2150,
-        "per_phase_overage_w": 1173.0000000000002,
+        "phase_over_a": 0,
+        "phase_export_over_a": 6.100000000000001,
         "effective_import_ceiling_w": 17250,
         "effective_export_ceiling_w": 17250,
         "import_ceiling_binding": false,
-        "export_ceiling_binding": true
+        "export_ceiling_binding": false
       },
       "site_totals": {
         "battery_current_w": 1653,
-        "battery_target_sum_w": -2150,
+        "battery_target_sum_w": 5239,
         "raw_grid_w": -13447,
-        "projected_grid_w": -17250
+        "projected_grid_w": -9861
       }
     }
   ]

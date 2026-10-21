@@ -938,7 +938,7 @@ type Driver struct {
 	// with since v0.x. On a hybrid inverter that can actually deliver
 	// more (e.g. Ferroamp 10-15 kW, Sungrow 8-10 kW on 32 A), lifting
 	// the per-driver cap is the right move — site-wide fuse protection
-	// (applyFuseGuard) still enforces the grid-boundary budget above
+	// (control.fusePhases) still enforces the phases' budget above
 	// whatever per-battery cap you set. Issue #145.
 	MaxChargeW    float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
 	MaxDischargeW float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`

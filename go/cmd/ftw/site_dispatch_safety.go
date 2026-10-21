@@ -25,9 +25,9 @@ type siteDispatchDecision struct {
 func (d siteDispatchDecision) Allowed() bool { return d.Reason == siteDispatchReady }
 
 // evaluateSiteDispatchFreshnessAt rejects physical dispatch when the site
-// meter itself is stale. Per-phase currents are optional until the configured
-// meter has emitted at least one of them; once available, every configured
-// phase becomes a required fuse-safety input and must remain fresh.
+// meter itself is stale. Its phase currents are optional; once a reading
+// reports any, every configured phase is a required fuse-safety input. They
+// come with the reading fuse protection reads, so they are as fresh as it.
 func evaluateSiteDispatchFreshnessAt(
 	tel *telemetry.Store,
 	siteMeter string,
@@ -46,8 +46,10 @@ func evaluateSiteDispatchFreshnessAt(
 	if fuseAmps <= 0 {
 		return siteDispatchDecision{}
 	}
-	_, available, fresh := sitePhaseCurrentsAt(tel, siteMeter, phaseCount, timeout, now)
-	if available && !fresh {
+	if phaseCount <= 0 {
+		phaseCount = 3
+	}
+	if _, present, valid := control.SitePhaseCurrents(meter, phaseCount); present && !valid {
 		return siteDispatchDecision{Reason: siteDispatchPhaseCurrentsStale}
 	}
 	return siteDispatchDecision{}
@@ -76,63 +78,6 @@ func siteDispatchNow(
 	phases := ctrl.SiteFusePhases
 	ctrlMu.Unlock()
 	return evaluateSiteDispatchFreshnessAt(tel, siteMeter, fuseAmps, phases, timeout, now)
-}
-
-// sitePhaseCurrentsAt returns the configured phases in L1/L2/L3 order.
-// available is false when this meter has never exposed phase-current
-// telemetry, preserving the documented optional-per-phase behavior. If any
-// phase has appeared, fresh is true only when all configured phases exist and
-// are within the same watchdog window as the aggregate meter.
-func sitePhaseCurrentsAt(
-	tel *telemetry.Store,
-	siteMeter string,
-	phaseCount int,
-	timeout time.Duration,
-	now time.Time,
-) (amps [3]float64, available, fresh bool) {
-	if tel == nil || siteMeter == "" {
-		return amps, false, false
-	}
-	return phaseCurrentsFromSnapshots(
-		tel.LatestMetricsByDriver(siteMeter), phaseCount, timeout, now,
-	)
-}
-
-func phaseCurrentsFromSnapshots(
-	metrics []telemetry.MetricSnapshot,
-	phaseCount int,
-	timeout time.Duration,
-	now time.Time,
-) (amps [3]float64, available, fresh bool) {
-	if phaseCount <= 0 {
-		phaseCount = 3
-	}
-	if phaseCount > len(amps) {
-		phaseCount = len(amps)
-	}
-
-	byName := make(map[string]telemetry.MetricSnapshot, len(metrics))
-	for _, metric := range metrics {
-		byName[metric.Name] = metric
-	}
-	phaseMetricNames := [...]string{"meter_l1_a", "meter_l2_a", "meter_l3_a"}
-	fresh = true
-	for i := 0; i < phaseCount; i++ {
-		metric, ok := byName[phaseMetricNames[i]]
-		if !ok {
-			fresh = false
-			continue
-		}
-		available = true
-		amps[i] = metric.Value
-		if now.Sub(metric.UpdatedAt) > timeout {
-			fresh = false
-		}
-	}
-	if !available {
-		return amps, false, false
-	}
-	return amps, true, fresh
 }
 
 // staleSiteDefaultTracker emits one DefaultMode request per registered driver

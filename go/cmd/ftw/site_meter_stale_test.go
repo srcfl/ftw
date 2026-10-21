@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -26,26 +27,12 @@ func TestEvaluateSiteDispatchFreshnessRejectsStaleMeter(t *testing.T) {
 	}
 }
 
-func TestEvaluateSiteDispatchFreshnessRejectsStalePhaseCurrents(t *testing.T) {
-	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
-	metrics := []telemetry.MetricSnapshot{
-		{Name: "meter_l1_a", Value: 8, UpdatedAt: now},
-		{Name: "meter_l2_a", Value: 9, UpdatedAt: now.Add(-2 * time.Minute)},
-		{Name: "meter_l3_a", Value: 7, UpdatedAt: now},
-	}
-	amps, available, fresh := phaseCurrentsFromSnapshots(metrics, 3, time.Minute, now)
-	if !available {
-		t.Fatal("phase telemetry should be available")
-	}
-	if fresh {
-		t.Fatalf("phase telemetry unexpectedly fresh: %v", amps)
-	}
-}
-
+// The phase currents come with the site reading. Once it reports any, a
+// reading that misses one of the configured phases stops dispatch, and a
+// complete one lets it go again.
 func TestEvaluateSiteDispatchFreshnessPhaseRecovery(t *testing.T) {
 	tel := telemetry.NewStore()
-	tel.Update("meter", telemetry.DerMeter, 1200, nil, nil)
-	tel.EmitMetric("meter", "meter_l1_a", 8, "A", "", "")
+	tel.Update("meter", telemetry.DerMeter, 1200, nil, json.RawMessage(`{"l1_a":8}`))
 	now := time.Now()
 
 	blocked := evaluateSiteDispatchFreshnessAt(tel, "meter", 16, 3, time.Minute, now)
@@ -54,9 +41,7 @@ func TestEvaluateSiteDispatchFreshnessPhaseRecovery(t *testing.T) {
 			blocked.Reason, siteDispatchPhaseCurrentsStale)
 	}
 
-	tel.EmitMetric("meter", "meter_l2_a", 9, "A", "", "")
-	tel.EmitMetric("meter", "meter_l3_a", 7, "A", "", "")
-	tel.Update("meter", telemetry.DerMeter, 1100, nil, nil)
+	tel.Update("meter", telemetry.DerMeter, 1100, nil, json.RawMessage(`{"l1_a":8,"l2_a":9,"l3_a":7}`))
 	recovered := evaluateSiteDispatchFreshnessAt(tel, "meter", 16, 3, time.Minute, time.Now())
 	if !recovered.Allowed() {
 		t.Fatalf("complete fresh phase telemetry remained blocked: %q", recovered.Reason)

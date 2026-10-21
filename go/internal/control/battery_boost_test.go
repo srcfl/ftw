@@ -100,6 +100,7 @@ func TestFuseEmergencyRemainsSuperiorToBatteryBoostReserve(t *testing.T) {
 	state := NewState(0, 0, "ferroamp")
 	state.BatteryBoostReserveSoC = 0.30
 	state.DriverLimits = map[string]PowerLimits{"battery": {MaxDischargeW: 5000}}
+	describeFuse(state, 5000)
 	targets := applyDispatchSafetyPipeline(
 		[]DispatchTarget{{Driver: "battery", TargetW: -1000}},
 		store, state, map[string]float64{"battery": 10000}, 5000,

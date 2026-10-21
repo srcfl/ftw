@@ -122,7 +122,7 @@ func TestSetPeakLimitRejectsNonFinite(t *testing.T) {
 }
 
 // An undescribed fuse yields no ceiling rather than an invented one —
-// the same back-compat rule fuseSafetyMarginW and perPhaseOverageW keep
+// the same back-compat rule fuseSafetyMarginW and fusePhasesAt keep
 // for harnesses that wire only some of the fuse fields.
 func TestSetPeakLimitWithoutFuseChecksOnlyTheSign(t *testing.T) {
 	st := NewState(0, 50, "ferroamp") // no SiteFuse* wired

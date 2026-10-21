@@ -308,6 +308,7 @@ func TestChargeModeRespectsFuseGuard(t *testing.T) {
 	})
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeCharge
+	describeFuse(st, 11040)
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if len(targets) != 1 {
 		t.Fatalf("expected 1 target, got %d", len(targets))
@@ -315,8 +316,9 @@ func TestChargeModeRespectsFuseGuard(t *testing.T) {
 	if !targets[0].Clamped {
 		t.Fatalf("charge target should be clamped by fuse guard: %+v", targets[0])
 	}
-	if math.Abs(targets[0].TargetW-1040) > 1 {
-		t.Fatalf("charge target = %.0f W, want remaining fuse headroom 1040 W", targets[0].TargetW)
+	// 16 A less the 1 A margin is 10,350 W on three phases.
+	if math.Abs(targets[0].TargetW-350) > 1 {
+		t.Fatalf("charge target = %.0f W, want the remaining 350 W of phase room", targets[0].TargetW)
 	}
 }
 
@@ -711,23 +713,21 @@ func TestComputeDispatchPreservesExplicitZeroDirectionLimits(t *testing.T) {
 	})
 }
 
-// ---- Fuse guard ----
+// ---- Site limits: the hour's import limit and max_export_w ----
 
-// Old-world test updated for the bidirectional predicted-grid guard
-// (#145). Previous semantics ("PV + discharge > fuse → scale") assumed
-// zero load and treated discharge as always pushing past the fuse. The
-// new guard predicts site-boundary flow from live telemetry, which is
-// physically accurate AND covers the charge side symmetrically.
-func TestFuseGuardScalesDischargeWhenExportExceedsFuse(t *testing.T) {
+// Predicted export over max_export_w scales discharge back. The prediction
+// holds load and PV at the meter's reading (#145).
+func TestSiteLimitsScaleDischargeOverMaxExport(t *testing.T) {
 	s := telemetry.NewStore()
 	s.Update("meter", telemetry.DerMeter, -8000, nil, nil) // grid exporting 8 kW (PV dominant)
 	s.DriverHealthMut("meter").RecordSuccess()
 	s.Update("a", telemetry.DerBattery, 0, nil, nil)
 	s.DriverHealthMut("a").RecordSuccess()
 	targets := []DispatchTarget{{Driver: "a", TargetW: -6000}} // add 6 kW discharge on top
-	// Predicted grid = -8000 - 0 + (-6000) = -14000 (exporting). Fuse 11040.
+	// Predicted grid = -8000 - 0 + (-6000) = -14000 (exporting). Limit 11040.
 	st := NewState(0, 50, "meter")
-	scaled := applyFuseGuard(targets, s, st, 11040)
+	st.MaxExportW = 11040
+	scaled := applySiteLimits(targets, s, st)
 	if !scaled[0].Clamped {
 		t.Error("expected clamped=true")
 	}
@@ -737,8 +737,8 @@ func TestFuseGuardScalesDischargeWhenExportExceedsFuse(t *testing.T) {
 	}
 }
 
-// Small charge under the fuse → unchanged. No scaling.
-func TestFuseGuardPassesThroughWhenWithinFuse(t *testing.T) {
+// Small charge under the limits → unchanged. No scaling.
+func TestSiteLimitsPassThroughWhenWithin(t *testing.T) {
 	s := telemetry.NewStore()
 	s.Update("meter", telemetry.DerMeter, 0, nil, nil)
 	s.DriverHealthMut("meter").RecordSuccess()
@@ -746,16 +746,15 @@ func TestFuseGuardPassesThroughWhenWithinFuse(t *testing.T) {
 	s.DriverHealthMut("a").RecordSuccess()
 	targets := []DispatchTarget{{Driver: "a", TargetW: 3000}}
 	st := NewState(0, 50, "meter")
-	scaled := applyFuseGuard(targets, s, st, 11040)
+	st.PeakImportCeilingW, st.MaxExportW = 11040, 11040
+	scaled := applySiteLimits(targets, s, st)
 	if scaled[0].TargetW != 3000 || scaled[0].Clamped {
-		t.Errorf("within fuse: got %f clamped=%v, want 3000 false", scaled[0].TargetW, scaled[0].Clamped)
+		t.Errorf("within limits: got %f clamped=%v, want 3000 false", scaled[0].TargetW, scaled[0].Clamped)
 	}
 }
 
-// Charge side now protected (#145). With high load and aggressive
-// charge targets, predicted grid import can exceed the fuse — the
-// guard must scale charge down.
-func TestFuseGuardScalesChargingWhenImportExceedsFuse(t *testing.T) {
+// Predicted import over the hour's import limit scales charge down.
+func TestSiteLimitsScaleChargingOverHoursImportLimit(t *testing.T) {
 	s := telemetry.NewStore()
 	// Grid currently importing 8 kW (load-dominated, night/no PV).
 	s.Update("meter", telemetry.DerMeter, 8000, nil, nil)
@@ -768,10 +767,11 @@ func TestFuseGuardScalesChargingWhenImportExceedsFuse(t *testing.T) {
 		{Driver: "a", TargetW: 5000},
 		{Driver: "b", TargetW: 5000},
 	}
-	// Predicted = 8000 - 0 + 10000 = 18000 W. Fuse 11040.
+	// Predicted = 8000 - 0 + 10000 = 18000 W. Limit 11040.
 	// Overage = 6960. Total charge = 10000. New total = 3040. Scale = 0.304.
 	st := NewState(0, 50, "meter")
-	scaled := applyFuseGuard(targets, s, st, 11040)
+	st.PeakImportCeilingW = 11040
+	scaled := applySiteLimits(targets, s, st)
 	var totalCharge float64
 	for _, tgt := range scaled {
 		if tgt.TargetW > 0 {
@@ -788,16 +788,14 @@ func TestFuseGuardScalesChargingWhenImportExceedsFuse(t *testing.T) {
 	}
 }
 
-// Mirror of the charging test with no grid reading: guard can't predict
-// reliably, stays conservative by NOT scaling (leave the decision to
-// the upstream per-battery cap). Guards against a bare-metal test
-// setup accidentally triggering the guard.
-func TestFuseGuardNoOpWithoutMeterReading(t *testing.T) {
+// With no grid reading the prediction is the targets alone, here inside
+// the limit. Guards against a bare-metal test setup triggering the clamp.
+func TestSiteLimitsNoOpWithoutMeterReading(t *testing.T) {
 	s := telemetry.NewStore()
 	targets := []DispatchTarget{{Driver: "a", TargetW: 5000}}
-	// No meter reading → currentGrid defaults to 0 → predicted = 5000 which is fine.
 	st := NewState(0, 50, "does-not-exist")
-	scaled := applyFuseGuard(targets, s, st, 11040)
+	st.PeakImportCeilingW = 11040
+	scaled := applySiteLimits(targets, s, st)
 	if scaled[0].TargetW != 5000 || scaled[0].Clamped {
 		t.Errorf("absent meter → no prediction-based clamp, got %f clamped=%v",
 			scaled[0].TargetW, scaled[0].Clamped)
@@ -1458,6 +1456,12 @@ func newStateWithEnergyDispatch(dir SlotDirective, siteMeter string) *State {
 	return st
 }
 
+// describeFuse gives st a balanced three-phase 230 V fuse of fuseMaxW in
+// total, as config describes it. fusePhases reads the fuse from these.
+func describeFuse(st *State, fuseMaxW float64) {
+	st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases = fuseMaxW/690, 230, 3
+}
+
 // Core conversion: 200 Wh allocated, whole 15-min slot remaining,
 // no energy delivered yet → target = 200 × 3600 / 900 = 800 W.
 func TestEnergyDispatchConvertsWhToW(t *testing.T) {
@@ -1508,7 +1512,7 @@ func TestEnergyDispatchDoesNotAbsorbPVSurprise(t *testing.T) {
 	}{
 		{"ferroamp", 0, 0.5},
 	})
-	// PV telemetry so applyFuseGuard has something to count.
+	// PV telemetry so the site limits have something to count.
 	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
 	store.DriverHealthMut("pv-1").RecordSuccess()
 
@@ -1603,20 +1607,11 @@ func TestEnergyDispatchBatteryCoversEVOnLetsPlanRun(t *testing.T) {
 	}
 }
 
-// Joint fuse-budget allocator: when EV draw + plan's battery charge would
-// exceed the fuse, both should be scaled proportionally — battery charge
-// reduced AND state.FuseEVMaxW published so the loadpoint controller can
-// curtail the EV. Operator report: oscillation loop where plan ramps
-// battery, fuse guard cuts it, plan ramps again.
-//
-// Scenario: house 200 W, EV at 8 kW, plan wants battery +5 kW, fuse 11 kW.
-// Naive: total grid = 200+8000+5000 = 13.2 kW → fuse busts.
-// Joint allocator: scale = (11000-200-0)/(5000+8000) ≈ 0.831.
-//
-//	battery charge → ~4150 W
-//	FuseEVMaxW    → ~6650 W
-//	sum + house    ≈ 11.0 kW. Fuse respected.
-func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
+// The plan's battery charge must fit the phase room beside a car already
+// drawing. House 200 W and the car at 8 kW put 8.2 kW on an 11 kW fuse
+// (16 A less the 1 A margin is 10,310 W), so the planned 5 kW charge gets
+// 2,110 W and the site reports itself saturated.
+func TestBatteryChargeFitsPhaseRoomBesideACar(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1624,10 +1619,6 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 		BatteryEnergyWh: 1250, // ~5 kW for 15 min
 		Strategy:        "arbitrage",
 	}
-	// rawGridW = 13.2 kW (importing — house 200 + EV 8000 + plan-imminent
-	// battery 5000, but battery currentW=0 means it's not yet charging,
-	// so right now grid is 200+8000=8200. Plan WANTS battery to add 5kW.
-	// Use 8200 to model the live state at the start of the tick.)
 	store := seedStore(8200, []struct {
 		name          string
 		currentW, soc float64
@@ -1637,42 +1628,35 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
 	st.EVChargingW = 8000
 	st.BatteryCoversEV = true // not the toggle under test; let plan run
-
 	const fuseMaxW = 11000
+	describeFuse(st, fuseMaxW)
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), fuseMaxW)
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	got := targets[0].TargetW
-	// Allocator contract: FuseEVMaxW published so loadpoint can throttle.
-	// In *this* tick, EV is still at 8 kW (hasn't seen the cap yet), so the
-	// existing fuse guard further clamps battery to ~2800 W (= 11000 −
-	// 8200). Within 1 follow-up tick (after EV throttles to ~6650 W),
-	// battery climbs to ~4150 W. Joint stable point: 4150 + 6650 = 10800
-	// + 200 house = 11 kW = fuse.
-	if got > 4500 {
-		t.Errorf("TargetW = %.0f W — battery charge not cut by joint allocator (want ≤ 4500)", got)
+	if got, want := targets[0].TargetW, fuseMaxW-690-8200.0; got < 0 || got > want+1 {
+		t.Errorf("TargetW = %.0f W, want at most the %.0f W of phase room", got, want)
 	}
-	if got < 0 {
-		t.Errorf("TargetW = %.0f W — battery shouldn't be discharging here", got)
+	if !st.FuseSaturated || st.FuseSaturatedByImport {
+		t.Errorf("FuseSaturated = %v, by import %v; want the fuse", st.FuseSaturated, st.FuseSaturatedByImport)
 	}
-	if !st.FuseSaturated {
-		t.Errorf("FuseSaturated = false; want true after joint scaling")
-	}
-	// EV cap is the post-republish verdict: after applyFuseGuard +
-	// forceFuseDischarge constrain battery further (and may swing it
-	// into discharge), the cap accounts for the now-greater fuse
-	// headroom. Bound below by ~6000 (the original allocator's
-	// pessimistic cap) and above by the current EV draw — a cap
-	// greater than the EV is currently drawing would be loose.
-	if st.FuseEVMaxW < 6000 || st.FuseEVMaxW > st.EVChargingW {
-		t.Errorf("FuseEVMaxW = %.0f — want in [6000, %.0f] (post-republish cap)",
-			st.FuseEVMaxW, st.EVChargingW)
-	}
-	// Sanity: post-dispatch projected grid stays at or below fuse.
-	projected := 8200.0 + got
-	if projected > fuseMaxW+50 {
-		t.Errorf("projected grid %.0f W > fuse %.0f after dispatch", projected, float64(fuseMaxW))
+}
+
+// The same site under a 9 kW hourly import ceiling: the hour's limit, not
+// the fuse, holds the charge back, and says so.
+func TestBatteryChargeNamesTheHoursImportLimit(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: 1250, Strategy: "arbitrage"}
+	store := seedStore(8200, []struct {
+		name          string
+		currentW, soc float64
+	}{{"ferroamp", 0, 0.5}})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW, st.BatteryCoversEV, st.PeakImportCeilingW = 8000, true, 9000
+	describeFuse(st, 11000)
+	ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11000)
+	if !st.FuseSaturated || !st.FuseSaturatedByImport {
+		t.Fatalf("FuseSaturated = %v, by import %v; want the hour's import limit", st.FuseSaturated, st.FuseSaturatedByImport)
 	}
 }
 
@@ -4239,68 +4223,10 @@ func TestPlannerSelfResetsEnergyBookkeepingOnEntry(t *testing.T) {
 	}
 }
 
-// Regression for the post-forceFuseDischarge republish of FuseEVMaxW.
-// Before the fix, the joint allocator computed FuseEVMaxW assuming the
-// battery target it produced is what gets dispatched. But the reactive
-// fuse-saver (PR #208) runs LAST and may swing battery from charge to
-// discharge, freeing fuse headroom — yet FuseEVMaxW stayed at the
-// original (too-conservative) value, throttling EV unnecessarily for
-// one tick. With the fix, FuseEVMaxW reflects the post-saver battery
-// totals and the EV gets the headroom it actually has.
-func TestFuseEVMaxWRecomputedAfterForceFuseDischarge(t *testing.T) {
-	now := time.Now()
-	dir := SlotDirective{
-		SlotStart:       now,
-		SlotEnd:         now.Add(15 * time.Minute),
-		BatteryEnergyWh: 1250, // plan: charge 5 kW
-		Strategy:        "arbitrage",
-	}
-	// Construct a scenario where the joint allocator engages (EV +
-	// battery charge over fuse), AND the fuse-saver subsequently
-	// flips battery to discharge. Easiest: rawGridW already over
-	// fuseMaxW so applyFuseGuard zeros battery charge AND
-	// forceFuseDischarge then drives it negative.
-	store := seedStore(13000, []struct {
-		name          string
-		currentW, soc float64
-	}{
-		{"ferroamp", 0, 0.6},
-	})
-	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	st.EVChargingW = 8000
-	st.BatteryCoversEV = true
-	const fuseMaxW = 11000
-	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), fuseMaxW)
-	if len(targets) != 1 {
-		t.Fatalf("want 1 target, got %d", len(targets))
-	}
-	if !st.FuseSaturated {
-		t.Fatalf("FuseSaturated = false; expected joint allocator to engage")
-	}
-	// The published FuseEVMaxW must reflect the post-saver battery
-	// total. Concretely: with battery driven into discharge, the EV's
-	// available headroom is greater than the joint allocator's initial
-	// guess. So FuseEVMaxW should be ≥ the initial scaled value.
-	if st.FuseEVMaxW <= 0 {
-		t.Errorf("FuseEVMaxW = %.0f after republish; should publish a positive cap", st.FuseEVMaxW)
-	}
-	// Specifically: with battery target negative (discharging),
-	// projected_grid = H + postBat + E ≤ fuse implies E_cap = fuse − H − postBat.
-	// postBat is whatever the saver landed on; verify the published
-	// value never exceeds the actual EV draw or goes negative.
-	if st.FuseEVMaxW > st.EVChargingW {
-		t.Errorf("FuseEVMaxW = %.0f exceeds current EV draw %.0f — implies the cap is loose",
-			st.FuseEVMaxW, st.EVChargingW)
-	}
-}
-
-// BatteryCoversEV mode regression: the joint allocator's H computation
-// uses rawGridW directly, so its math is independent of the
-// BatteryCoversEV branch (which only affects PI's gridW). Both modes
-// should produce the same allocator behaviour given identical raw
-// telemetry. Documents the design choice — protects against a future
-// refactor that conflates the two.
-func TestJointFuseAllocatorWithBatteryCoversEV(t *testing.T) {
+// BatteryCoversEV only moves the PI's grid reading. The phase room the
+// battery's charge must fit is the meter's either way, so both modes hold
+// the planned charge back beside the car.
+func TestPhaseRoomIndependentOfBatteryCoversEV(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -4318,6 +4244,7 @@ func TestJointFuseAllocatorWithBatteryCoversEV(t *testing.T) {
 		st := newStateWithEnergyDispatch(dir, "ferroamp")
 		st.EVChargingW = 8000
 		st.BatteryCoversEV = coversEV
+		describeFuse(st, 11000)
 		return st, store
 	}
 	st1, store1 := mkState(true)
@@ -4325,22 +4252,10 @@ func TestJointFuseAllocatorWithBatteryCoversEV(t *testing.T) {
 	const fuseMaxW = 11000
 	_ = ComputeDispatch(store1, st1, caps(map[string]float64{"ferroamp": 15200}), fuseMaxW)
 	_ = ComputeDispatch(store2, st2, caps(map[string]float64{"ferroamp": 15200}), fuseMaxW)
-	// Both must engage the joint allocator: same fuse-vs-EV+battery
-	// arithmetic, regardless of operator-toggle for "let battery cover EV".
+	// The same meter, the same room.
 	if !st1.FuseSaturated || !st2.FuseSaturated {
 		t.Errorf("FuseSaturated must engage in both modes: covers=%v others=%v",
 			st1.FuseSaturated, st2.FuseSaturated)
-	}
-	// The PI / energy-path branch produces different battery TARGETS
-	// in the two modes (that's the BatteryCoversEV behaviour). But the
-	// JOINT allocator's E_cap formula depends only on rawGridW + E,
-	// so the published FuseEVMaxW should be in the same ballpark
-	// (within ~500 W, since post-republish accounts for the different
-	// battery targets the two modes produce).
-	delta := math.Abs(st1.FuseEVMaxW - st2.FuseEVMaxW)
-	if delta > 1500 {
-		t.Errorf("FuseEVMaxW differs by %.0f W between BatteryCoversEV true/false (%v vs %v) — math should be mode-independent",
-			delta, st1.FuseEVMaxW, st2.FuseEVMaxW)
 	}
 }
 
@@ -4756,11 +4671,12 @@ func TestBatteryManualHoldRespectsFuseGuard(t *testing.T) {
 	st.Mode = ModeSelfConsumption
 	st.SlewRateW = 100000
 	st.SetBatteryManualHold(BatteryManualHold{PowerW: 5000, ExpiresAt: time.Now().Add(60 * time.Second)})
+	describeFuse(st, 2000)
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 2000)
 	if len(targets) != 1 {
 		t.Fatalf("expected 1 target, got %d", len(targets))
 	}
-	if targets[0].TargetW > 2000+1 {
+	if targets[0].TargetW > 2000-690+1 {
 		t.Errorf("fuse guard must clamp +5000 charge under fuseMaxW=2000, got %f", targets[0].TargetW)
 	}
 	if !targets[0].Clamped {

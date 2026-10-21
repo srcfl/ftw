@@ -1150,7 +1150,7 @@ func main() {
 		ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
 		ctrl.SupportsPVCurtail = supportsPVCurtailFrom(newCfg.Drivers)
 		ctrl.SolarFeedDrivers = solarFeedDriversFrom(newCfg.Drivers)
-		ctrl.DriverLimits = driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries)
+		ctrl.DriverLimits = driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries, newCfg.Planner)
 		// Fuse params + safety margin: previously startup-only.
 		// Hot-reload them so operators can tune the per-phase margin
 		// from the UI without restarting (e.g. raising it after the
@@ -1650,7 +1650,7 @@ func main() {
 		}
 		// Plumb the site fuse so the DP joint-plans battery + EV under
 		// the fuse from the start (instead of producing plans that
-		// dispatch later has to scale via the joint allocator).
+		// dispatch later has to scale to the phases' room).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
 		mpcSvc.PhaseImbalanceW = func() float64 {
 			cfgMu.RLock()
@@ -2010,13 +2010,18 @@ func main() {
 			defer ctrlMu.Unlock()
 			return control.EVFusePhaseRoomA(ctrl)
 		})
+		lpController.SetFuseLimitReason(func() string {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			return control.EVLimitReason(ctrl)
+		})
 		// Every lease is preflighted and re-evaluated on each loadpoint tick.
 		// This closure owns site/battery health because those concepts belong
 		// to core, not to the protocol-neutral loadpoint package.
 		lpController.SetBatteryBoostSafety(func(id string, lease loadpoint.BatteryBoostLease) loadpoint.BatteryBoostStopReason {
 			ctrlMu.Lock()
 			mode := ctrl.Mode
-			fuseBlocked := ctrl.FuseSaturated
+			fuseBlocked, importBlocked := ctrl.FuseSaturated, ctrl.FuseSaturatedByImport
 			_, batteryHeld := ctrl.GetBatteryManualHold(time.Now())
 			siteMeter := ctrl.SiteMeterDriver
 			ctrlMu.Unlock()
@@ -2025,6 +2030,9 @@ func main() {
 			}
 			if batteryHeld {
 				return loadpoint.BatteryBoostStoppedBatteryHold
+			}
+			if fuseBlocked && importBlocked {
+				return loadpoint.BatteryBoostStoppedImportLimit
 			}
 			if fuseBlocked {
 				return loadpoint.BatteryBoostStoppedFuseSafety
@@ -2816,8 +2824,8 @@ func main() {
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
 	var saveCount uint64
-	// Track FuseSaturated edge so we replan once when the joint allocator
-	// kicks in — the plan was made without knowledge of the live overage,
+	// Track FuseSaturated edge so we replan once when dispatch holds the
+	// battery or EV back — the plan was made without knowledge of the live overage,
 	// and a replan with current EV/PV/load state usually finds a feasible
 	// schedule that doesn't fight the fuse.
 	var prevFuseSaturated bool
@@ -3228,8 +3236,8 @@ func main() {
 			// "EV dispatch first" block above.
 
 			// ---- Trigger MPC replan on fuse-saturation rising edge ----
-			// The joint allocator (control.dispatch) just throttled
-			// battery and EV to fit under the fuse. The plan was built
+			// Dispatch just held battery charge or EV need back to fit
+			// the site's room (control.fitBatteryRisesToFuse). The plan was built
 			// without seeing this overage, so let MPC redraw with current
 			// state — usually it finds a slot allocation that doesn't
 			// require both battery charge and full-bore EV simultaneously.
@@ -3607,12 +3615,22 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 	return out
 }
 
-// driverLimitsFrom gives dispatch the same per-driver limits as the planner.
-func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
+// driverLimitsFrom gives dispatch the same per-driver limits as the planner,
+// with each battery's floor: its soc_min, else the planner's (default 10 %).
+func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery, planner *config.Planner) map[string]control.PowerLimits {
+	floor := 0.10
+	if planner != nil && planner.SoCMin > 0 {
+		floor = planner.SoCMin
+	}
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
 		if !d.ObserveOnly {
-			out[d.Name] = batteryPowerLimits(d, batteries[d.Name])
+			limits := batteryPowerLimits(d, batteries[d.Name])
+			limits.SoCMin = floor
+			if b := batteries[d.Name]; b.SoCMin != nil {
+				limits.SoCMin = *b.SoCMin
+			}
+			out[d.Name] = limits
 		}
 	}
 	return out

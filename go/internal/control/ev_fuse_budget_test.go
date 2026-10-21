@@ -127,6 +127,7 @@ func (s *evMeterSite) boot() {
 		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.mgr.Configs(), 17250)
 	})
 	s.ctrl.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(s.state) })
+	s.ctrl.SetFuseLimitReason(func() string { return EVLimitReason(s.state) })
 	s.ctrl.SetManualHold(cfg.ID, loadpoint.ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
 	if s.onBoot != nil {
 		s.onBoot()
@@ -714,20 +715,22 @@ func TestEVHardLimitTrimsPhaseOverageFromOffer(t *testing.T) {
 }
 
 // An overage larger than the offer less one step stops the car; a smaller
-// one never does.
+// one never does. Without phase currents the total stands in, shared over
+// the phases, under the one 1 A margin.
 func TestEVHardLimitStopsOnlyWhenOverageExceedsOfferLessMinimum(t *testing.T) {
 	store, state, points, configs := evMeterBudgetFixture(t, 30000, nil, 10350, "3p")
 	if got, _ := EVFuseBudget(store, state, points, configs, 17250); got != 0 {
 		t.Fatalf("13 kW overage left %.1f W", got)
 	}
 	store, state, points, configs = evMeterBudgetFixture(t, 17250+500, nil, 10350, "3p")
-	if got, _ := EVFuseBudget(store, state, points, configs, 17250); math.Abs(got-9850) > .01 {
-		t.Fatalf("500 W overage gave %.1f W, want 9,850 W", got)
+	if got, _ := EVFuseBudget(store, state, points, configs, 17250); math.Abs(got-9160) > .01 {
+		t.Fatalf("500 W over the fuse gave %.1f W, want 10,350 - 500 - 690 = 9,160 W", got)
 	}
 }
 
 // An idle car starts with a step of margin under the measured room, and a
-// single-phase or auto car may land its whole offer on the worst phase.
+// single-phase or auto car may land its whole offer on the worst phase. A
+// three-phase car needs 6 A on each phase.
 func TestEVHardLimitIdleStartNeedsRoomOnDeclaredPhases(t *testing.T) {
 	for _, tc := range []struct {
 		name, phase string
@@ -738,7 +741,7 @@ func TestEVHardLimitIdleStartNeedsRoomOnDeclaredPhases(t *testing.T) {
 		{"legacy_default", "", 5, (24 - 5 - 1) * 690},
 		{"1p_room", "1p", 5, (24 - 5 - 1) * 230},
 		{"auto_room", "auto", 5, (24 - 5 - 1) * 230},
-		{"3p_below_minimum", "3p", 21.5, 0}, // 1,725 W < 1,380 + 690 W
+		{"3p_below_minimum", "3p", 21.5, 0}, // 2.5 A < 6 A on each phase
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, state, points, configs := evMeterBudgetFixture(t, tc.worstA*690, []float64{tc.worstA, tc.worstA, tc.worstA}, 0, tc.phase)
@@ -777,5 +780,21 @@ func TestEVHardLimitIgnoresChargerReadings(t *testing.T) {
 	store.RecordDriverSuccess("charger")
 	if got, _ := EVFuseBudget(store, state, points, configs, 17250); got > (24-20.45-1)*690+.01 {
 		t.Fatalf("a car reading earned %.1f W before our first command", got)
+	}
+}
+
+// A second car plugging in has no offer of ours yet. It adds nothing to the
+// pool, and the pool is not idle: the first car keeps its charge.
+func TestEVHardLimitSecondCarDoesNotStopTheFirst(t *testing.T) {
+	store, state, points, configs := evMeterBudgetFixture(t, 6900, []float64{10, 10, 10}, 6210, "3p")
+	if got, _ := EVFuseBudget(store, state, points, configs, 17250); got < 6210 {
+		t.Fatalf("setup: cap %.0f W, want the first car's 6,210 W", got)
+	}
+	points = append(points, loadpoint.State{ID: "second", DriverName: "charger-2", PluggedIn: true})
+	configs = append(configs, loadpoint.Config{ID: "second", DriverName: "charger-2", PhaseMode: "3p", MinChargeW: 4140, MaxChargeW: 11040})
+	store.Update("meter", telemetry.DerMeter, 6900, nil, store.Get("meter", telemetry.DerMeter).Data)
+	store.Get("meter", telemetry.DerMeter).UpdatedAt = store.Get("meter", telemetry.DerMeter).UpdatedAt.Add(time.Second)
+	if got, _ := EVFuseBudget(store, state, points, configs, 17250); got < 6210 {
+		t.Fatalf("a second car plugging in cut the pool to %.0f W", got)
 	}
 }

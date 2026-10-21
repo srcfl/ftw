@@ -68,6 +68,28 @@ func meterAt(store *telemetry.Store, at time.Time, phaseA [3]float64) *telemetry
 	return r
 }
 
+// A phase's current takes its direction from the same phase's power: P1
+// reports current as a magnitude, Pixii signs it. Without the power the
+// current counts as import.
+func TestPhaseCurrentsTakeDirectionFromPhasePower(t *testing.T) {
+	_, state := fuseHeatState()
+	for _, tc := range []struct {
+		name string
+		data map[string]float64
+		want []float64
+	}{
+		{"p1", map[string]float64{"l1_a": 20, "l2_a": 3, "l3_a": 5, "l1_w": -4600, "l2_w": 690, "l3_w": 0}, []float64{-20, 3, 5}},
+		{"signed", map[string]float64{"l1_a": -20, "l2_a": -3, "l3_a": 5, "l1_w": -4600, "l2_w": -690, "l3_w": 1150}, []float64{-20, -3, 5}},
+		{"no phase power", map[string]float64{"l1_a": -20, "l2_a": 3, "l3_a": 5}, []float64{20, 3, 5}},
+	} {
+		raw, _ := json.Marshal(tc.data)
+		amps, present, valid := phaseCurrentsA(&telemetry.DerReading{Data: raw}, state)
+		if !present || !valid || len(amps) != 3 || amps[0] != tc.want[0] || amps[1] != tc.want[1] || amps[2] != tc.want[2] {
+			t.Errorf("%s: %v (present %v, valid %v), want %v", tc.name, amps, present, valid, tc.want)
+		}
+	}
+}
+
 // While the meter is silent the heat holds. A gap counts at the last
 // current seen: the reading after it neither fills the gap with its own
 // current nor erases an overload from before it.
@@ -85,17 +107,17 @@ func TestFuseHeatCountsGapAtLastCurrentSeen(t *testing.T) {
 	} {
 		store, state := fuseHeatState()
 		t0 := time.Unix(1_800_000_000, 0)
-		state.stepFuseHeat(meterAt(store, t0.Add(-time.Hour), [3]float64{20, 20, 20}))
-		state.stepFuseHeat(meterAt(store, t0, [3]float64{tc.before, 20, 20}))
+		state.fusePhasesAt(meterAt(store, t0.Add(-time.Hour), [3]float64{20, 20, 20}))
+		state.fusePhasesAt(meterAt(store, t0, [3]float64{tc.before, 20, 20}))
 		held := state.fuseHeat.sq
 		silent := store.Get("meter", telemetry.DerMeter)
 		for range 30 {
-			state.stepFuseHeat(silent) // ticks with no new reading
+			state.fusePhasesAt(silent) // ticks with no new reading
 		}
 		if state.fuseHeat.sq != held {
 			t.Fatalf("%s: heat moved to %v without a reading", tc.name, state.fuseHeat.sq)
 		}
-		state.stepFuseHeat(meterAt(store, t0.Add(gap), [3]float64{tc.after, 20, 20}))
+		state.fusePhasesAt(meterAt(store, t0.Add(gap), [3]float64{tc.after, 20, 20}))
 		a := tc.before
 		want := a*a - (a*a-held[0])*math.Exp(-gap.Seconds()/60)
 		if got := state.fuseHeat.sq[0]; math.Abs(got-want) > 1e-9 {
@@ -110,7 +132,7 @@ func TestFuseHeatCountsGapAtLastCurrentSeen(t *testing.T) {
 // A Core restart has no memory: the first reading sets the heat.
 func TestFuseHeatStartsAtFirstReadingAfterRestart(t *testing.T) {
 	store, state := fuseHeatState()
-	state.stepFuseHeat(meterAt(store, time.Unix(1_800_000_000, 0), [3]float64{26, 3, 0}))
+	state.fusePhasesAt(meterAt(store, time.Unix(1_800_000_000, 0), [3]float64{26, 3, 0}))
 	if state.fuseHeat.sq != [3]float64{676, 9, 0} {
 		t.Fatalf("first reading set %v", state.fuseHeat.sq)
 	}
@@ -461,12 +483,24 @@ func TestEVHardLimitHoldsWhenTotalImportDisagreesWithPhases(t *testing.T) {
 		}
 	}
 
+	// Without phase currents the total stands in, shared over the phases,
+	// under the same heat budget: one reading over cuts nothing, and a
+	// sustained one cuts its overage once the budget is spent.
 	store, state, points, configs = evMeterBudgetFixture(t, 0, nil, 10350, "3p")
 	state.SiteFuseSafetyA = 0.5
 	now = t0
 	state.clock = func() time.Time { return now }
 	read(t0, 15334, nil)
-	if capW := read(t0.Add(time.Second), 19174, nil); math.Abs(capW-8081) > .01 {
-		t.Fatalf("without phase currents 19,174 W gave %.1f W, want 10,350 - 2,269 = 8,081 W", capW)
+	if capW := read(t0.Add(time.Second), 19174, nil); capW < 10350 {
+		t.Fatalf("without phase currents one 19,174 W reading cut the cap to %.1f W", capW)
 	}
+	for i := 2; i <= 120; i++ {
+		if capW := read(t0.Add(time.Duration(i)*time.Second), 19174, nil); capW < 10350 {
+			if math.Abs(capW-(10350-(19174-16560))) > .01 || i < 10 {
+				t.Fatalf("a sustained 19,174 W cut to %.1f W after %d s, want 10,350 - 2,614 = 7,736 W once the budget is spent", capW, i)
+			}
+			return
+		}
+	}
+	t.Fatal("a sustained 19,174 W never cut")
 }

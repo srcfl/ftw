@@ -2,6 +2,7 @@ package loadpoint
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -101,6 +102,27 @@ func TestCommandedReasonFuseCapZero(t *testing.T) {
 	}
 }
 
+// A cap the hour's import ceiling sets carries its own name, never the
+// fuse's, also when it overrides a hold.
+func TestCommandedReasonImportLimit(t *testing.T) {
+	base := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	for _, capW := range []float64{0, 6210} {
+		sender := &fakeSender{}
+		cfg := reasonLoadpoint()
+		samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 0, RequestActive: true}}
+		c := newTestController(t, []Config{cfg}, nil, samples, sender)
+		c.SetManualHold(cfg.ID, ManualHold{PowerW: 11040, PhaseMode: "3p", Persistent: true})
+		c.SetFuseEVMax(func() (float64, bool) { return capW, true })
+		c.SetFuseLimitReason(func() string { return "import_limit" })
+
+		c.Tick(context.Background(), base)
+
+		if w, r := commandedReason(t, c, cfg.ID); w != capW || r != "import_limit" {
+			t.Errorf("cap %.0f W from the hour's ceiling: got (%.0f, %q), want (%.0f, import_limit)", capW, w, r, capW)
+		}
+	}
+}
+
 func TestCommandedReasonFuseLimitOverridesManualHold(t *testing.T) {
 	base := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	sender := &fakeSender{}
@@ -153,5 +175,26 @@ func TestCommandedReasonManualHold(t *testing.T) {
 
 	if w, r := commandedReason(t, c, cfg.ID); w != 11000 || r != "charger_limit" {
 		t.Errorf("hold: want (11000, charger_limit), got (%.0f, %q)", w, r)
+	}
+}
+
+// A command that timed out may still have run: an Easee Cloud write can land
+// after the driver gave up ("driver command may have run: context deadline
+// exceeded"). The offer stays recorded as sent, with its phases, so fuse
+// protection counts it as pending until the charger can have applied it.
+func TestTimedOutCommandStillCountsAsSent(t *testing.T) {
+	base := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	sender := &fakeSender{err: fmt.Errorf("driver command may have run: %w", context.DeadlineExceeded)}
+	cfg := reasonLoadpoint()
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 0, RequestActive: true}}
+	c := newTestController(t, []Config{cfg}, nil, samples, sender)
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 6900, PhaseMode: "3p", Persistent: true})
+
+	c.Tick(context.Background(), base)
+
+	st, _ := c.manager.State(cfg.ID)
+	if len(sender.calls) == 0 || !st.CommandedKnown || st.CommandedW != 6900 || st.CommandedPhases != 3 {
+		t.Fatalf("after a timed-out send: %d calls, offer %.0f W known %v on %d phases; want 6,900 W on 3",
+			len(sender.calls), st.CommandedW, st.CommandedKnown, st.CommandedPhases)
 	}
 }

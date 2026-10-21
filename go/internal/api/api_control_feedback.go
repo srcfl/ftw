@@ -339,6 +339,8 @@ func setControlStatus(f *ControlFeedback) {
 	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
 		"fuse_limit", "fuse_cooldown", "charger_limit":
 		status = "limited"
+	case "import_limit":
+		status = "limited"
 	case "device_limit", "offered_current_lower":
 		status, severity = "limited", "warning"
 	case "setpoint_changed", "power_below_target", "power_above_target", "power_wrong_direction",
@@ -430,7 +432,7 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("limited", "device_limit", "warning")
 		return
 	}
-	if coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "charger_limit" {
+	if coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "import_limit" || coreReason == "charger_limit" {
 		set("limited", coreReason, "warning")
 		return
 	}

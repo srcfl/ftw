@@ -68,10 +68,12 @@ type Tick struct {
 	Restart time.Duration // > 0: Core goes down now for this long
 }
 
-// MeterReading is one site meter reading.
+// MeterReading is one site meter reading. Phase power keeps its sign
+// when the currents lose theirs, as on P1.
 type MeterReading struct {
 	W      float64
 	PhaseA [3]float64
+	PhaseW [3]float64
 }
 
 // BatteryReading is what the battery reports.
@@ -123,11 +125,13 @@ func (p *Plant) Step() Tick {
 	if p.Meter.due(p.Now) {
 		r := &MeterReading{PhaseA: p.A}
 		for i, a := range p.A {
-			r.W += a * p.Voltage
+			r.PhaseW[i] = a * p.Voltage
+			r.W += r.PhaseW[i]
 			if p.Meter.Unsigned {
 				r.PhaseA[i] = math.Abs(a)
 			}
 		}
+		r.W += p.Meter.TotalBiasW
 		tick.Meter = r
 	}
 	if b := p.Battery; b != nil && !p.Offline("battery") {
@@ -156,7 +160,8 @@ type timedW struct {
 // second when Every is zero.
 type Meter struct {
 	Every       time.Duration
-	Unsigned    bool // phase currents as magnitudes
+	Unsigned    bool    // phase currents as magnitudes
+	TotalBiasW  float64 // added to the total alone, as a Pixii total that disagrees with its phases
 	last        time.Time
 	silentUntil time.Time
 }

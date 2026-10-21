@@ -150,6 +150,7 @@ func TestIdleHoldStillYieldsToTheFuseSaver(t *testing.T) {
 		{name: "ferroamp", currentW: 0, soc: 0.60, online: true},
 	})
 	st.DriverLimits = map[string]PowerLimits{"ferroamp": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+	describeFuse(st, 11040)
 
 	targets := ComputeDispatch(store, st, capacities, 11040)
 
@@ -160,8 +161,8 @@ func TestIdleHoldStillYieldsToTheFuseSaver(t *testing.T) {
 	if !tg.Clamped {
 		t.Error("a fuse-saver discharge must be marked clamped so the dispatch trace names it")
 	}
-	// Predicted overage: 14000 − 11040 = 2960 W.
-	if want := -2960.0; math.Abs(tg.TargetW-want) > 1 {
+	// Predicted overage: 14000 − (11040 − 690 of margin) = 3650 W.
+	if want := -3650.0; math.Abs(tg.TargetW-want) > 1 {
 		t.Errorf("ferroamp target = %.0f W, want %.0f W", tg.TargetW, want)
 	}
 }

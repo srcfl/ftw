@@ -2968,7 +2968,9 @@
         ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
         : "Charging.";
       if (lp.commanded_reason === "fuse_limit") {
-        text += " Rate is limited by site power limits right now.";
+        text += " Rate is limited by the main fuse right now.";
+      } else if (lp.commanded_reason === "import_limit") {
+        text += " Rate is limited by the hourly import limit right now.";
       }
     } else if (lp.goal_complete === true) {
       text = "The car confirmed this charging goal is complete.";
@@ -2993,7 +2995,10 @@
       // The specific pauses beat the generic branches — this is the
       // line that stops an operator debugging cable and charger while
       // the box is protecting the main fuse (#1009).
-      text = "Paused by site power limits — the house is using the headroom; charging resumes on its own." + kwPlanned;
+      text = "Paused by the main fuse — the house is using the headroom; charging resumes on its own." + kwPlanned;
+      tone = "var(--text)";
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "import_limit") {
+      text = "Paused by the hourly import limit — this hour’s import budget is used; charging resumes on its own." + kwPlanned;
       tone = "var(--text)";
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "site_meter_stale") {
       text = "Paused for safety: site-meter data is stale — charging resumes when telemetry recovers.";
@@ -3338,6 +3343,7 @@
     battery_hold: "a battery hold took priority",
     core_mode: "the site mode does not allow it",
     fuse_safety_block: "fuse protection stopped it",
+    import_limit_block: "the hourly import limit stopped it",
     restart_lease_invalid: "the saved lease was no longer safe after a restart",
   };
 

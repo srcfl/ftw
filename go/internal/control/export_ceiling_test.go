@@ -7,7 +7,7 @@ import (
 )
 
 // A site exporting 8 kW via battery discharge, with max_export_w = 5 kW set
-// below the fuse: the fuse guard must scale the discharge back so predicted
+// below the fuse: the site limits must scale the discharge back so predicted
 // export lands at the export ceiling, not at the (looser) fuse limit.
 // Models the recurring Ferroamp 0x8030 fault: ~8 kW sustained midday export
 // tripped the EnergyHub even though the 16 A fuse (~11 kW) was never hit.
@@ -21,7 +21,7 @@ func TestExportCeilingScalesBackDischarge(t *testing.T) {
 	state.MaxExportW = 5000
 
 	targets := []DispatchTarget{{Driver: "bat", TargetW: -8000}}
-	out := applyFuseGuard(targets, store, state, 11040) // fuse would allow 8 kW
+	out := applySiteLimits(targets, store, state) // fuse would allow 8 kW
 
 	if len(out) != 1 {
 		t.Fatalf("expected 1 target, got %d", len(out))
@@ -36,9 +36,9 @@ func TestExportCeilingScalesBackDischarge(t *testing.T) {
 	}
 }
 
-// With max_export_w unset (0), the export ceiling is the fuse alone, so an
-// 8 kW export under an 11 kW fuse is left untouched — back-compat guard so
-// the new knob is strictly opt-in.
+// With max_export_w unset (0), no total export limit applies, so an 8 kW
+// export under an 11 kW fuse is left untouched — the knob is strictly
+// opt-in.
 func TestExportCeilingDisabledExportsUpToFuse(t *testing.T) {
 	store := telemetry.NewStore()
 	store.Update("meter", telemetry.DerMeter, -8000, nil, nil)
@@ -47,7 +47,7 @@ func TestExportCeilingDisabledExportsUpToFuse(t *testing.T) {
 
 	state := NewState(0, 50, "meter") // MaxExportW left 0
 	targets := []DispatchTarget{{Driver: "bat", TargetW: -8000}}
-	out := applyFuseGuard(targets, store, state, 11040)
+	out := applySiteLimits(targets, store, state)
 
 	if got := out[0].TargetW; got != -8000 {
 		t.Fatalf("export under fuse with no ceiling should be untouched, got %.1f", got)

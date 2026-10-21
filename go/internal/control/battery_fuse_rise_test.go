@@ -47,7 +47,12 @@ func sent(state *State, driver string, watts ...float64) {
 		log = log.add(at, w)
 	}
 	if driver == "ev" {
+		for i := range log {
+			log[i].three = true
+		}
 		state.evOffers, state.EVCommandedW = log, watts[len(watts)-1]
+		state.evLimit.offers = map[string]chargerOffers{"car": {driver: "car", log: log, settle: evSettle}}
+		state.evCommanded = map[string]float64{"car": watts[len(watts)-1]}
 		return
 	}
 	state.batteryCommands[driver] = log
@@ -68,7 +73,7 @@ func TestEVBatteryChargeYieldsToEVNeed(t *testing.T) {
 	store, state := evSplitFixture(t, 7140, nil, 10350, "3p")
 	sent(state, "ev", 4140, 4140)
 	sent(state, "first", 0, 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state)
 	if got, want := targetW(out, "first"), 16560.0-7140-6210; math.Abs(got-want) > .01 {
 		t.Fatalf("battery %.1f W, want %.1f W", got, want)
 	}
@@ -80,7 +85,7 @@ func TestEVBatteryRecentEVRiseIsStillNeed(t *testing.T) {
 	store, state := evSplitFixture(t, 7140, nil, 10350, "3p")
 	sent(state, "ev", 4140, 10350)
 	sent(state, "first", 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state)
 	if got, want := targetW(out, "first"), 16560.0-7140-6210; math.Abs(got-want) > .01 {
 		t.Fatalf("battery %.1f W spent the unseen EV rise, want %.1f W", got, want)
 	}
@@ -93,7 +98,7 @@ func TestEVBatteryReductionDoesNotFundSibling(t *testing.T) {
 	sent(state, "ev", 5000)
 	sent(state, "first", 4000, 0)
 	sent(state, "second", 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 0}, {Driver: "second", TargetW: 8000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 0}, {Driver: "second", TargetW: 8000}}, store, state)
 	if got, want := targetW(out, "second"), 16560.0-12000-1000; got > want+.01 {
 		t.Fatalf("sibling %.1f W used an unseen reduction, want <= %.1f W", got, want)
 	}
@@ -106,7 +111,7 @@ func TestEVBatteryStoppingDischargeReservesItsSupply(t *testing.T) {
 	sent(state, "ev", 0)
 	sent(state, "first", -5000)
 	sent(state, "second", 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 0}, {Driver: "second", TargetW: 8000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 0}, {Driver: "second", TargetW: 8000}}, store, state)
 	if got, want := targetW(out, "second"), 16560.0-6000-2000-5000; got > want+.01 {
 		t.Fatalf("sibling %.1f W, want <= %.1f W", got, want)
 	}
@@ -119,7 +124,7 @@ func TestEVBatteryOwnPendingRiseCountsOnce(t *testing.T) {
 		store, state := evSplitFixture(t, 9000, nil, 2000, "3p")
 		sent(state, "ev", 0)
 		sent(state, "first", 2000, 6000)
-		out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: tc.target}}, store, state, 17250)
+		out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: tc.target}}, store, state)
 		if got := targetW(out, "first"); math.Abs(got-tc.want) > .01 {
 			t.Fatalf("order %.0f W became %.1f W, want %.1f W", tc.target, got, tc.want)
 		}
@@ -131,7 +136,7 @@ func TestEVBatterySinglePhaseNeedUsesWorstPhase(t *testing.T) {
 	store, state := evSplitFixture(t, 4600, []float64{10, 5, 5}, 3680, "1p")
 	sent(state, "ev", 0)
 	sent(state, "first", 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 3000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 3000}}, store, state)
 	if got := targetW(out, "first"); got != 0 {
 		t.Fatalf("battery %.1f W; L1 10 A + 16 A car leaves no room under 24 A", got)
 	}
@@ -142,7 +147,7 @@ func TestEVBatterySinglePhaseNeedUsesWorstPhase(t *testing.T) {
 func TestEVBatteryWithoutCommandsReservesDischarge(t *testing.T) {
 	store, state := evSplitFixture(t, 5000, nil, 4140, "3p")
 	sent(state, "ev", 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state)
 	if got, want := targetW(out, "first"), 16560.0-5000-4140-5000; got > want+.01 {
 		t.Fatalf("battery %.1f W, want <= %.1f W", got, want)
 	}
@@ -151,7 +156,7 @@ func TestEVBatteryWithoutCommandsReservesDischarge(t *testing.T) {
 func TestEVBatteryUnknownMeterClampsOnlyPositiveOffers(t *testing.T) {
 	store, state := evSplitFixture(t, 0, nil, 4140, "3p")
 	store.Remove("meter")
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 3000}, {Driver: "second", TargetW: -2000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 3000}, {Driver: "second", TargetW: -2000}}, store, state)
 	if targetW(out, "first") != 0 || targetW(out, "second") != -2000 {
 		t.Fatalf("unknown meter: %+v", out)
 	}
@@ -162,7 +167,7 @@ func TestEVBatteryKeepsChargeNeededForMeasuredExportRelief(t *testing.T) {
 	store, state := evSplitFixture(t, -19000, nil, 4140, "3p")
 	state.MaxExportW = 10000
 	sent(state, "ev", 0)
-	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 12000}}, store, state, 17250)
+	out := fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 12000}}, store, state)
 	if got := targetW(out, "first"); got < 9000-.01 {
 		t.Fatalf("export relief cut to %.1f W, want >= 9,000 W", got)
 	}
@@ -176,7 +181,7 @@ func TestEVBatterySplitIgnoresDeviceReadings(t *testing.T) {
 		sent(state, "ev", 4140, 4140)
 		sent(state, "first", 0, 0)
 		readings(store)
-		return targetW(clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state, 17250), "first")
+		return targetW(fitBatteryRisesToFuse([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state), "first")
 	}
 	want := run(func(*telemetry.Store) {})
 	for name, readings := range map[string]func(*telemetry.Store){

@@ -19,7 +19,7 @@ type fuseRequest struct {
 // limit here: control.EVFuseBudget reads the site meter for the phases that
 // FuseConfigs names.
 func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample) {
-	c.tickFuseCaps = nil
+	c.tickFuseCaps, c.tickFuseReason = nil, ""
 	if c.fuseEVMax == nil {
 		return
 	}
@@ -27,6 +27,7 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 	if !ok || total < 0 {
 		return
 	}
+	c.tickFuseReason = c.capReason()
 	if !finite(total) {
 		total = 0
 	}

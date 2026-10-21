@@ -32,6 +32,7 @@ const (
 	BatteryBoostStoppedBatteryHold        BatteryBoostStopReason = "battery_hold"
 	BatteryBoostStoppedCoreMode           BatteryBoostStopReason = "core_mode"
 	BatteryBoostStoppedFuseSafety         BatteryBoostStopReason = "fuse_safety_block"
+	BatteryBoostStoppedImportLimit        BatteryBoostStopReason = "import_limit_block"
 	BatteryBoostStoppedRestartInvalid     BatteryBoostStopReason = "restart_lease_invalid"
 )
 

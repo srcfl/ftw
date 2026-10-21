@@ -1887,9 +1887,9 @@ func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 // ---- /api/peak_import_ceiling ----
 //
 // Import ceiling on each clock hour's mean import, in every mode. Default
-// 0 = disabled. When > 0, dispatch's import-side clamps (joint EV/battery
-// allocator, applyFuseGuard import branch, forceFuseDischarge, the EV hard
-// limit) use the tighter of the fuse and the hour's import limit.
+// 0 = disabled. When > 0, dispatch's import-side clamps (the battery's rise
+// cap, applySiteLimits, forceFuseDischarge, the EV hard limit) hold the
+// hour's import limit as well as the fuse.
 // Persisted in state.db so the operator's tariff stays armed across
 // restarts. See control.State.PeakImportCeilingW.
 func (s *Server) handleSetPeakImportCeiling(w http.ResponseWriter, r *http.Request) {

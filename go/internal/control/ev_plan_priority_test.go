@@ -24,6 +24,7 @@ func TestFuseLimitedManualDemandMakesBatteryYield(t *testing.T) {
 		name          string
 		currentW, soc float64
 	}{{"battery", 0, .5}})
+	describeFuse(st, 5000)
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"battery": 10000}), 5000)
 	if len(targets) != 1 || targets[0].TargetW > 650.001 {
 		t.Fatalf("battery used space requested by the car: %v", targets)
@@ -81,18 +82,17 @@ func TestScheduledEVKeepsBudgetBeforeBatteryCharge(t *testing.T) {
 			st := newStateWithEnergyDispatch(dir, "ferroamp")
 			st.EVChargingW = draw
 			st.BatteryCoversEV = true
+			describeFuse(st, 11000)
 			targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11000)
 			if len(targets) != 1 {
 				t.Fatalf("targets %v", targets)
 			}
-			if !st.FuseSaturated || math.Abs(st.FuseEVMaxW-8000) > 1 {
-				t.Fatalf("EV budget lost while drawing %.0f: cap %.0f saturated %v", draw, st.FuseEVMaxW, st.FuseSaturated)
+			if !st.FuseSaturated {
+				t.Fatalf("EV budget lost while drawing %.0f", draw)
 			}
-			if targets[0].TargetW < 0 || targets[0].TargetW > 2800.1 {
-				t.Fatalf("optional battery charge exceeds remaining 2800 W: %v", targets)
-			}
-			if 200+st.FuseEVMaxW+targets[0].TargetW > 11000.1 {
-				t.Fatal("planned EV and battery exceed fuse")
+			// 11,000 W less the 1 A margin on three phases, the house and the car.
+			if roomW := 11000 - 690 - 200 - 8000.0; targets[0].TargetW < 0 || targets[0].TargetW > roomW+0.1 {
+				t.Fatalf("optional battery charge exceeds remaining %.0f W: %v", roomW, targets)
 			}
 		})
 	}
@@ -125,14 +125,15 @@ func TestScheduledEVReservesOnPowerNotMean(t *testing.T) {
 		name          string
 		currentW, soc float64
 	}{{"ferroamp", 0, .5}})
+	describeFuse(st, 11000)
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11000)
 	if len(targets) != 1 {
 		t.Fatalf("targets %v", targets)
 	}
-	if !st.FuseSaturated || math.Abs(st.FuseEVMaxW-10350) > 1 {
-		t.Fatalf("on-power not reserved: cap %.0f saturated %v", st.FuseEVMaxW, st.FuseSaturated)
+	if !st.FuseSaturated {
+		t.Fatal("on-power not reserved")
 	}
-	if targets[0].TargetW < 0 || targets[0].TargetW > 450.1 {
+	if targets[0].TargetW < 0 || targets[0].TargetW > 0.1 {
 		t.Fatalf("optional battery charge took EV on-power: %v", targets)
 	}
 }
@@ -178,9 +179,10 @@ func TestChargerOfferReservesFuseBeforeOptionalBatteryCharge(t *testing.T) {
 			if got := scheduledEVPowerW(st); got != 11000 {
 				t.Fatalf("ramping offer lost in %s: %v", mode, got)
 			}
+			describeFuse(st, 5000)
 			targets := ComputeDispatch(store, st, caps(map[string]float64{"battery": 10000}), 5000)
-			if len(targets) != 1 || targets[0].TargetW > 0.001 || (st.FuseSaturated && st.FuseEVMaxW < 10999) {
-				t.Fatalf("battery took the EV's offered room: targets=%v evcap=%v", targets, st.FuseEVMaxW)
+			if len(targets) != 1 || targets[0].TargetW > 0.001 {
+				t.Fatalf("battery took the EV's offered room: targets=%v", targets)
 			}
 			if mode.IsPlannerMode() && !st.PlanStale {
 				t.Fatal("EV-only directive claimed a fresh battery plan")
@@ -195,10 +197,11 @@ func TestBatterylessGoalIntentPublishesJointFuseBudget(t *testing.T) {
 		LoadpointEnergyWh: map[string]float64{"car": 11000.0 / 60}, LoadpointMaxPowerW: map[string]float64{"car": 11000}}, "ferroamp")
 	st.EVCommandedW = 11000
 	store := seedStore(4000, nil)
+	describeFuse(st, 10000)
 	if targets := ComputeDispatch(store, st, nil, 10000); len(targets) != 0 {
 		t.Fatalf("invented a battery: %v", targets)
 	}
-	if !st.FuseSaturated || st.FuseEVMaxW > 6000.001 || st.FuseEVMaxW <= 0 {
-		t.Fatalf("no-battery cap=%v saturated=%v", st.FuseEVMaxW, st.FuseSaturated)
+	if !st.FuseSaturated {
+		t.Fatal("11 kW of EV demand beside 4 kW of house fits a 10 kW site")
 	}
 }

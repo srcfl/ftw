@@ -579,7 +579,7 @@ func TestScenario_E22_FuseNeverExceeded(t *testing.T) {
 	const fuseMaxW = 11040.0
 
 	// Representative adversarial states that could theoretically bust the fuse.
-	// Only modes that route through applyFuseGuard are included.
+	// Only modes that route through the dispatch safety pipeline are included.
 	type invariantCase struct {
 		name  string
 		gridW float64
@@ -634,6 +634,7 @@ func TestScenario_E22_FuseNeverExceeded(t *testing.T) {
 			if c.dir != nil {
 				st.SlotDirective = c.dir
 			}
+			describeFuse(st, fuseMaxW)
 			targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), fuseMaxW)
 			projected := c.gridW + totalTarget(targets)
 			if projected > fuseMaxW+50 {

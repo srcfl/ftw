@@ -220,7 +220,7 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 	if pp, ok := byID["targeted/per_phase_overage_import"]; !ok {
 		t.Error("missing targeted/per_phase_overage_import")
 	} else {
-		if pp.ClampAttributions.PerPhaseOverageW <= 0 {
+		if pp.ClampAttributions.PhaseOverA <= 0 {
 			t.Errorf("per-phase overage not attributed: %+v", pp.ClampAttributions)
 		}
 		if sumGoldenTargets(pp) >= 0 {
@@ -240,15 +240,12 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 	assertGoldenEarlyExitCoverage(t, all, byID)
 
 	// Generic scans across the whole corpus.
-	var nFuseSaturated, nHoldLatched, nPerPhase, nStale, nBlocked, nEmpty int
+	var nFuseSaturated, nPerPhase, nStale, nBlocked, nEmpty int
 	for _, r := range all {
 		if r.ClampAttributions.FuseSaturated {
 			nFuseSaturated++
 		}
-		if r.ClampAttributions.FuseHoldLatched {
-			nHoldLatched++
-		}
-		if r.ClampAttributions.PerPhaseOverageW > 0 {
+		if r.ClampAttributions.PhaseOverA > 0 {
 			nPerPhase++
 		}
 		if r.ClampAttributions.PlanStale {
@@ -264,9 +261,9 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 			}
 		}
 	}
-	t.Logf("coverage: fuse_saturated=%d hold_latched=%d per_phase=%d stale_plan=%d blocked_batteries=%d no_dispatch=%d",
-		nFuseSaturated, nHoldLatched, nPerPhase, nStale, nBlocked, nEmpty)
-	if nFuseSaturated == 0 || nHoldLatched == 0 || nPerPhase == 0 || nStale == 0 {
+	t.Logf("coverage: fuse_saturated=%d per_phase=%d stale_plan=%d blocked_batteries=%d no_dispatch=%d",
+		nFuseSaturated, nPerPhase, nStale, nBlocked, nEmpty)
+	if nFuseSaturated == 0 || nPerPhase == 0 || nStale == 0 {
 		t.Error("coverage gap: one of the generic families never fired its clamp")
 	}
 }
@@ -506,14 +503,14 @@ func assertGoldenEarlyExitCoverage(t *testing.T, all []goldenRecord, byID map[st
 			t.Errorf("missing %s", id)
 			continue
 		}
-		overage := r.ClampAttributions.PerPhaseOverageW
-		if overage <= 0 {
+		overA := r.ClampAttributions.PhaseOverA
+		if overA <= 0 {
 			t.Errorf("%s: no per-phase overage recorded, so the record no longer exercises the breaker", id)
 			continue
 		}
-		if got, want := sumGoldenTargets(r), -overage*phases; math.Abs(got-want) > 1 {
-			t.Errorf("%s: fleet total = %.0f W, want %.0f W — %.0f W over on the worst phase, across %.0f phases",
-				id, got, want, overage, phases)
+		if got, want := sumGoldenTargets(r), -overA*r.Inputs.State.SiteFuseVoltage*phases; math.Abs(got-want) > 1 {
+			t.Errorf("%s: fleet total = %.0f W, want %.0f W — %.2f A over on the worst phase, across %.0f phases",
+				id, got, want, overA, phases)
 		}
 		if float64(r.Inputs.State.SiteFusePhases) != phases {
 			t.Errorf("%s: recorded with site_fuse_phases=%d, not the %.0f the assertion names",
@@ -528,7 +525,7 @@ func assertGoldenEarlyExitCoverage(t *testing.T, all []goldenRecord, byID map[st
 	if r, ok := byID["early_exit/deadband_per_phase_export_side_quiet"]; !ok {
 		t.Error("missing early_exit/deadband_per_phase_export_side_quiet")
 	} else {
-		if r.ClampAttributions.PerPhaseOverageW <= 0 {
+		if r.ClampAttributions.PhaseExportOverA <= 0 {
 			t.Errorf("export-side control no longer has a phase over the breaker: %+v", r.ClampAttributions)
 		}
 		if len(r.PerDriverTargets) != 0 {
@@ -688,11 +685,8 @@ func diffGoldenRecord(want, got goldenRecord) []string {
 	addBool("plan_sign_floor_zeroed", wa.PlanSignFloorZeroed, ga.PlanSignFloorZeroed)
 	addBool("plan_stale", wa.PlanStale, ga.PlanStale)
 	addBool("fuse_saturated", wa.FuseSaturated, ga.FuseSaturated)
-	addWatts("fuse_ev_max_w", wa.FuseEVMaxW, ga.FuseEVMaxW)
-	addBool("fuse_hold_latched", wa.FuseHoldLatched, ga.FuseHoldLatched)
-	addWatts("fuse_hold_max_charge_w", wa.FuseHoldMaxChargeW, ga.FuseHoldMaxChargeW)
-	addWatts("fuse_hold_max_discharge_w", wa.FuseHoldMaxDischargeW, ga.FuseHoldMaxDischargeW)
-	addWatts("per_phase_overage_w", wa.PerPhaseOverageW, ga.PerPhaseOverageW)
+	addWatts("phase_over_a", wa.PhaseOverA, ga.PhaseOverA)
+	addWatts("phase_export_over_a", wa.PhaseExportOverA, ga.PhaseExportOverA)
 	addWatts("effective_import_ceiling_w", wa.EffectiveImportCeilingW, ga.EffectiveImportCeilingW)
 	addWatts("effective_export_ceiling_w", wa.EffectiveExportCeilingW, ga.EffectiveExportCeilingW)
 	addBool("import_ceiling_binding", wa.ImportCeilingBinding, ga.ImportCeilingBinding)

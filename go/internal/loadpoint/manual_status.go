@@ -40,7 +40,7 @@ type ManualStatus struct {
 	// current, in its words (reason_no_current_label). Empty when it has none.
 	ChargerReason string `json:"charger_reason,omitempty"`
 	// LimitReason names the clamp behind ManualLimited: "fuse_limit",
-	// "fuse_cooldown" or "site_meter_stale".
+	// "import_limit", "fuse_cooldown" or "site_meter_stale".
 	LimitReason string `json:"limit_reason,omitempty"`
 }
 
@@ -108,7 +108,7 @@ const (
 // before the hold was installed and says nothing about it.
 func holdClampReason(reason string) bool {
 	switch reason {
-	case "fuse_limit", "fuse_cooldown", "site_meter_stale", "charger_limit":
+	case "fuse_limit", "import_limit", "fuse_cooldown", "site_meter_stale", "charger_limit":
 		return true
 	}
 	return false

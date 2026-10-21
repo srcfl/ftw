@@ -147,6 +147,10 @@ test('limited positive EV offer does not explain prolonged zero delivery', () =>
  assert.equal(missing.title,'Not following');
  assert.match(missing.text,/6.9 kW charge.*no power/);
  const capped=controlStatus(row({kind:'ev',status:'limited',reason:'fuse_limit',sent_w:6900,actual_w:6800}));
- assert.equal(capped.title,'Limited by site power limits');
- assert.match(capped.text,/fuse and import limits/);
+ assert.equal(capped.title,'Limited by the main fuse');
+ assert.match(capped.text,/protect the main fuse/);
+ const hour=controlStatus(row({kind:'ev',status:'limited',reason:'import_limit',sent_w:4140,actual_w:4100}));
+ assert.equal(hour.title,'Limited by the hourly import limit');
+ assert.match(hour.text,/this hour’s grid import/);
+ assert.doesNotMatch(hour.text,/fuse/);
 });

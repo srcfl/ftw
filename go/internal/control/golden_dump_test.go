@@ -147,11 +147,8 @@ type goldenClampAttribution struct {
 	PlanSignFloorZeroed     bool     `json:"plan_sign_floor_zeroed"`
 	PlanStale               bool     `json:"plan_stale"`
 	FuseSaturated           bool     `json:"fuse_saturated"`
-	FuseEVMaxW              float64  `json:"fuse_ev_max_w"`
-	FuseHoldLatched         bool     `json:"fuse_hold_latched"`
-	FuseHoldMaxChargeW      float64  `json:"fuse_hold_max_charge_w"`
-	FuseHoldMaxDischargeW   float64  `json:"fuse_hold_max_discharge_w"`
-	PerPhaseOverageW        float64  `json:"per_phase_overage_w"`
+	PhaseOverA              float64  `json:"phase_over_a"`
+	PhaseExportOverA        float64  `json:"phase_export_over_a"`
 	EffectiveImportCeilingW float64  `json:"effective_import_ceiling_w"`
 	EffectiveExportCeilingW float64  `json:"effective_export_ceiling_w"`
 	ImportCeilingBinding    bool     `json:"import_ceiling_binding"`
@@ -212,8 +209,15 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	store := telemetry.NewStore()
 
 	var meterData json.RawMessage
-	if sc.Inputs.MeterPhases != nil {
-		b, err := json.Marshal(sc.Inputs.MeterPhases)
+	if ph := sc.Inputs.MeterPhases; ph != nil {
+		// Each phase's power carries the current's sign, as meter drivers
+		// emit it.
+		v := sc.Inputs.State.SiteFuseVoltage
+		if v <= 0 {
+			v = 230
+		}
+		b, err := json.Marshal(map[string]float64{"l1_a": ph.L1A, "l2_a": ph.L2A, "l3_a": ph.L3A,
+			"l1_w": ph.L1A * v, "l2_w": ph.L2A * v, "l3_w": ph.L3A * v})
 		if err == nil {
 			meterData = b
 		}
@@ -290,6 +294,11 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	st.SiteFuseVoltage = si.SiteFuseVoltage
 	st.SiteFusePhases = si.SiteFusePhases
 	st.SiteFuseSafetyA = si.SiteFuseSafetyA
+	if st.SiteFuseAmps == 0 && sc.Inputs.FuseMaxW > 0 {
+		// A record that names only the fuse's watts: a balanced
+		// three-phase 230 V fuse of that size, as config describes it.
+		st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases = sc.Inputs.FuseMaxW/690, 230, 3
+	}
 	st.PVSurplusAbsorbSoCCap = si.PVSurplusAbsorbSoCCap
 	st.PVSurplusAbsorbThresholdW = si.PVSurplusAbsorbThresholdW
 	if len(limits) > 0 {
@@ -331,7 +340,12 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 
 	// Pre-dispatch attribution reads (pure).
 	intent := planSignIntent(st)
-	perPhase := perPhaseOverageW(store, st)
+	var phaseOverA, phaseExportOverA float64
+	if meter := store.Get(st.SiteMeterDriver, telemetry.DerMeter); meter != nil {
+		if f, ok := st.fusePhasesAt(meter); ok {
+			phaseOverA, phaseExportOverA = f.importOverA([3]float64{}), f.exportOverA()
+		}
+	}
 	effImp := st.effectiveImportCeilingW(sc.Inputs.FuseMaxW)
 	effExp := st.effectiveExportCeilingW(sc.Inputs.FuseMaxW)
 
@@ -374,11 +388,8 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 		PlanSignFloorZeroed:     planSignFloorZeroed,
 		PlanStale:               st.PlanStale,
 		FuseSaturated:           st.FuseSaturated,
-		FuseEVMaxW:              st.FuseEVMaxW,
-		FuseHoldLatched:         st.FuseHoldUntil.After(st.now()),
-		FuseHoldMaxChargeW:      st.FuseHoldMaxChargeW,
-		FuseHoldMaxDischargeW:   st.FuseHoldMaxDischargeW,
-		PerPhaseOverageW:        perPhase,
+		PhaseOverA:              phaseOverA,
+		PhaseExportOverA:        phaseExportOverA,
 		EffectiveImportCeilingW: effImp,
 		EffectiveExportCeilingW: effExp,
 		ImportCeilingBinding:    len(targets) > 0 && math.Abs(projected-effImp) <= 25,
@@ -1007,8 +1018,8 @@ func earlyExitScenarios() []goldenScenario {
 	}))
 	// Export side. The worst phase is 10 A over the breaker, and relief must
 	// NOT fire: this function's only lever is more discharge, which would
-	// push that phase further over. applyFuseGuard owns the export side, and
-	// it has no charge target to shrink here. The record exists so a change
+	// push that phase further over. fitBatteryRisesToFuse owns the export
+	// side. The record exists so a change
 	// that drops forceFuseDischarge's import-only gate is visible as watts
 	// appearing on a tick that must stay quiet.
 	out = append(out, mk("deadband_per_phase_export_side_quiet", goldenInputs{
@@ -1141,7 +1152,7 @@ func earlyExitScenarios() []goldenScenario {
 // beyond where the battery happens to be: it re-anchors on the measured output
 // (SmoothedW) and walks a step from there, so a target of 0 W becomes
 // ±SlewRateW whenever the battery is not already still. Nothing downstream
-// floors the charge side of that — applyFuseGuard only shrinks,
+// floors the charge side of that — applySiteLimits only shrinks,
 // floorNegativeTargets is discharge-only, and planSignIntent returns 0 for an
 // idle slot.
 //

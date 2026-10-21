@@ -119,6 +119,7 @@ func TestFullBatteryStillProvidesFuseRelief(t *testing.T) {
 		currentW, soc float64
 	}{{"battery", 0, 1}})
 	st.Mode = ModeIdle
+	describeFuse(st, 13800)
 	got := ComputeDispatch(tel, st, capacities, 13800)
 	if len(got) != 1 || got[0].TargetW >= 0 {
 		t.Fatalf("full stop blocked fuse relief: %+v", got)

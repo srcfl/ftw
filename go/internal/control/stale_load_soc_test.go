@@ -155,6 +155,7 @@ func TestMissingSoCFuseReliefUsesKnownBattery(t *testing.T) {
 	st := NewState(0, 50, "meter")
 	st.Mode = ModeIdle
 	st.MinDispatchIntervalS = 0
+	describeFuse(st, 11040)
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"unknown": 15200, "known": 15200}), 11040)
 	knownDischarges := false
 	for _, target := range targets {
