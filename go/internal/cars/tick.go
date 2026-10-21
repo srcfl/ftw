@@ -811,7 +811,7 @@ func (r *Runtime) syncLocked(now time.Time) []func() {
 }
 
 func bindingFor(car *Car) loadpoint.CarBinding {
-	return loadpoint.CarBinding{ID: car.ID, Name: car.Name, CapacityWh: car.CapacityWh, MaxW: car.MaxW}
+	return loadpoint.CarBinding{ID: car.ID, Name: car.Name, CapacityWh: car.CapacityWh, MaxW: car.MaxW, Phases: car.Phases}
 }
 
 // planningLimitLocked is the car's charge limit as the plan and the reserve

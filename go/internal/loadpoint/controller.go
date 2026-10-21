@@ -1292,7 +1292,7 @@ func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, disp
 func holdPhaseMode(hold ManualHold, cfg Config, surplusOn bool) string {
 	switch {
 	case hold.PhaseMode != "":
-		return hold.PhaseMode
+		return limitPhaseMode(hold.PhaseMode, cfg.PhaseMode)
 	case cfg.PhaseMode != "":
 		return cfg.PhaseMode
 	case surplusOn:
@@ -2015,6 +2015,9 @@ func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW float6
 // timestamps share the same clock as the rest of the cycle and tests
 // can drive it deterministically.
 func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
+	if c != nil && lpCfg.PhaseMode == "2p" {
+		return PlanningSteps(lpCfg, c.siteFuse())
+	}
 	if c == nil {
 		return surplus3PhaseSteps(lpCfg)
 	}
@@ -2240,8 +2243,8 @@ func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surp
 		// defends against a stale lock left from a previous "auto"/"1p"
 		// config. pickSurplusSteps also refuses to set the lock for a
 		// "3p" loadpoint, so this is belt-and-braces.
-		if operatorMode == "3p" {
-			return "3p"
+		if operatorMode == "3p" || operatorMode == "2p" {
+			return operatorMode
 		}
 		return "1p"
 	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
@@ -2310,7 +2313,7 @@ func sameLocalDay(a, b time.Time) bool {
 // locked the install to 1Φ, so a 3Φ-only set would just wedge the
 // loadpoint at 0.
 func surplus3PhaseSteps(lpCfg Config) []float64 {
-	if lpCfg.PhaseMode == "1p" {
+	if lpCfg.PhaseMode == "1p" || lpCfg.PhaseMode == "2p" {
 		return lpCfg.AllowedStepsW
 	}
 	split := lpCfg.PhaseSplitW

@@ -450,8 +450,8 @@ type Loadpoint struct {
 	PluginSoC         float64 `yaml:"plugin_soc,omitempty" json:"plugin_soc,omitempty"`
 	PluginSoCPct      float64 `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 
-	// PhaseMode selects how the controller picks between 1Φ and 3Φ
-	// delivery: "3p" (default) | "1p" | "auto". Empty == "3p" for
+	// PhaseMode selects the charging count: "3p" (default), "2p", "1p"
+	// or "auto". The car's two-phase limit also selects "2p". Empty == "3p" for
 	// backward compat with pre-switching configs. See loadpoint.Config.
 	PhaseMode     string  `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
 	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`

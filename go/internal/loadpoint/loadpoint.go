@@ -55,8 +55,8 @@ type Config struct {
 	// override per-loadpoint or pre-plug-in.
 	PluginSoC float64 `yaml:"plugin_soc,omitempty" json:"plugin_soc,omitempty"`
 
-	// PhaseMode selects how the controller picks between 1Φ and 3Φ
-	// delivery each tick. "3p" (default) and "1p" lock the install to
+	// PhaseMode selects the charging phases each tick. "3p" (default),
+	// "2p" and "1p" lock the charging count to
 	// one mode and filter AllowedStepsW accordingly. "auto" lets the
 	// controller switch based on the MPC budget, with a hysteresis
 	// timer (MinPhaseHoldS) preventing flap. Empty == "3p" for
@@ -202,6 +202,7 @@ type State struct {
 	// when unknown. The plan and the reserve hold to them (LimitPower,
 	// PlanningTarget).
 	CarMaxW        float64 `json:"-"`
+	CarPhases      int     `json:"-"`
 	CarChargeLimit float64 `json:"-"`
 
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
@@ -260,7 +261,7 @@ type State struct {
 	CommandedSinceMs int64 `json:"commanded_since_ms,omitempty"`
 	// Internal identity of the manual choice used to compute the order.
 	ManualCommandUpdatedAt time.Time `json:"-"`
-	// CommandedPhases is 1 or 3: the phases the last command lands on, from
+	// CommandedPhases is 1, 2 or 3: the phases the last command lands on, from
 	// its phase_mode and split. Zero before the first command.
 	CommandedPhases int `json:"-"`
 
@@ -510,7 +511,7 @@ type loadpointRuntime struct {
 	commandedW      float64
 	commandedKnown  bool
 	commandedReason string
-	commandedPhases int // 1 or 3: where the last command lands; 0 before it
+	commandedPhases int // 1, 2 or 3: where the last command lands; 0 before it
 	// commandedSince is when the current (commandedW, commandedReason) pair
 	// was first ordered. The manual status counts elapsed time from it.
 	commandedSince         time.Time
@@ -781,7 +782,11 @@ func (m *Manager) Configs() []Config {
 	out := make([]Config, 0, len(m.order))
 	for _, id := range m.order {
 		if lp, ok := m.byID[id]; ok {
-			out = append(out, lp.Config)
+			cfg := lp.Config
+			if lp.pluggedIn {
+				cfg = WithCarLimits(cfg, lp.car.Phases, lp.car.MaxW)
+			}
+			out = append(out, cfg)
 		}
 	}
 	return out
@@ -1334,8 +1339,12 @@ func vehicleSupersedesLocked(lp *loadpointRuntime, observedAt time.Time) bool {
 }
 
 func (lp *loadpointRuntime) snapshot() State {
-	steps := make([]float64, len(lp.AllowedStepsW))
-	copy(steps, lp.AllowedStepsW)
+	cfg := lp.Config
+	if lp.pluggedIn {
+		cfg = WithCarLimits(cfg, lp.car.Phases, lp.car.MaxW)
+	}
+	steps := make([]float64, len(cfg.AllowedStepsW))
+	copy(steps, cfg.AllowedStepsW)
 	sort.Float64s(steps)
 	st := State{
 		ManualRestoreUnconfirmed: lp.manualRestoreUnconfirmed,
@@ -1355,14 +1364,15 @@ func (lp *loadpointRuntime) snapshot() State {
 		GoalComplete:             lp.finishGoalCompleted,
 		TargetTime:               lp.targetTime,
 		UpdatedAtMs:              lp.updatedAtMs,
-		MinChargeW:               lp.MinChargeW,
-		MaxChargeW:               lp.MaxChargeW,
+		MinChargeW:               cfg.MinChargeW,
+		MaxChargeW:               cfg.MaxChargeW,
 		AllowedStepsW:            steps,
 		SurplusOnly:              lp.Config.SurplusOnly,
 		Schedule:                 lp.schedule,
 		ChargingDeclined:         lp.chargingDeclined,
 		SoCRetention:             lp.socRetention,
 		CarMaxW:                  lp.car.MaxW,
+		CarPhases:                lp.car.Phases,
 		CarChargeLimit:           lp.car.ChargeLimit,
 		CommandedW:               lp.commandedW,
 		CommandedReason:          lp.commandedReason,

@@ -13,5 +13,8 @@ func planningStepsForLoadpoint(st loadpoint.State, cfg *config.Config) []float64
 			break
 		}
 	}
+	if st.CarPhases == 2 && lp.PhaseMode != "1p" {
+		lp.PhaseMode = "2p"
+	}
 	return loadpoint.PlanningSteps(lp, loadpoint.SiteFuse{MaxAmps: cfg.Fuse.MaxAmps, Voltage: cfg.Fuse.Voltage, PhaseCnt: cfg.Fuse.Phases})
 }

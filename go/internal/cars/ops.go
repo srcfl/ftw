@@ -687,7 +687,7 @@ func applyUpdate(car *Car, u Update) error {
 		car.MaxW = v
 	}
 	if u.Phases != nil {
-		if p := *u.Phases; p != 0 && p != 1 && p != 3 {
+		if p := *u.Phases; p < 0 || p > 3 {
 			return fmt.Errorf("%w: phases", ErrInvalid)
 		} else {
 			car.Phases = p

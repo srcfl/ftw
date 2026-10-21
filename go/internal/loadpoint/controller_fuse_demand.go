@@ -31,7 +31,7 @@ func (c *Controller) recordFuseDemand(driver string, powerW float64, phaseMode s
 	}
 	if phaseMode == "" {
 		phaseMode = "3p" // The completed command leaves the driver's default in force.
-	} else if phaseMode != "1p" && phaseMode != "3p" {
+	} else if phaseMode != "1p" && phaseMode != "2p" && phaseMode != "3p" {
 		phaseMode = "auto"
 	}
 	c.fuseDemandMu.Lock()

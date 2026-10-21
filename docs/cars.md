@@ -175,9 +175,12 @@ lower of the charger's maximum and the car's own (`maxW`), keeping the
 charger's lowest step when that is above the car's maximum. The charge
 limit the car reports caps the plan only while the level is the car's own
 and still exact. The reserve that keeps a goal charging while no plan is
-accepted holds to the same power and limit. `phases` is the owner's note:
-`maxW` already counts the car's phases, and the controller follows the
-charger's phase mode. A change of car or goal rolls the charger's deadline
+accepted holds to the same power and limit. `phases` accepts 0 (unknown),
+1, 2 or 3. A two-phase car on a three-phase charger uses two-phase steps
+and current limits; an explicit one-phase choice still wins. The car's
+limits apply only to its session. Easee uses Auto for a two-phase car:
+its API value `phaseMode=2` means Auto, not a measured phase count.
+A change of car or goal rolls the charger's deadline
 before the replan, so that plan has the car's goal in it.
 
 - **One goal per car**, used wherever the car is plugged in. `readyByMin` is

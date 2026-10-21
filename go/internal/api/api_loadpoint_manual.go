@@ -120,10 +120,10 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	switch req.PhaseMode {
-	case "", "auto", "1p", "3p":
+	case "", "auto", "1p", "2p", "3p":
 	default:
 		writeJSON(w, 400, map[string]string{
-			"error": "phase_mode must be omitted/empty or one of: auto, 1p, 3p",
+			"error": "phase_mode must be omitted/empty or one of: auto, 1p, 2p, 3p",
 		})
 		return
 	}
@@ -280,6 +280,13 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 		switch phaseModeByID[states[i].ID] {
 		case "1p":
 			phases = 1
+		case "2p":
+			phases = min(2, fusePhases)
+			minimum := states[i].MinChargeW
+			if phases == 1 {
+				minimum /= 2
+			}
+			states[i].MinChargeW = math.Max(minimum, 6*voltage*float64(phases))
 		case "3p":
 			phases = 3
 		}

@@ -29,9 +29,10 @@ type CarBinding struct {
 	// holds. Zero is config.yaml's vehicle_capacity_wh, or the default when
 	// that is unset: a visitor's capacity is not known either.
 	CapacityWh float64
-	// MaxW is the most the car's own charger takes, zero when unknown. Its
-	// phases are in the rating already, so they bound nothing further.
+	// MaxW is the most the car's own charger takes, zero when unknown.
 	MaxW float64
+	// Phases is the car's AC phase count, independently of the site wiring.
+	Phases int
 	// ChargeLimit is the car's own charge limit as the plan and the reserve
 	// read it: only while the level is the car's own exact reading. Zero is
 	// none.
@@ -64,6 +65,10 @@ func (m *Manager) SetCarBinding(id string, b CarBinding) bool {
 	if lp == nil {
 		m.mu.Unlock()
 		return false
+	}
+	if lp.car.Phases != b.Phases {
+		// The old count cannot fund a rise on the newly declared phases.
+		lp.commandedPhases = 0
 	}
 	lp.car = b
 	capacity := b.CapacityWh

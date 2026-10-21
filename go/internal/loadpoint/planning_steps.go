@@ -12,13 +12,19 @@ func PlanningSteps(cfg Config, site SiteFuse) []float64 {
 	phases := site.Phases()
 	if cfg.PhaseMode == "1p" {
 		phases = 1
+	} else if cfg.PhaseMode == "2p" {
+		phases = min(2, phases)
 	}
 	voltage := site.Voltage
 	if voltage <= 0 {
 		voltage = 230
 	}
 	step := voltage * float64(phases)
-	minimum := math.Max(6, math.Ceil(cfg.MinChargeW/step))
+	minW := cfg.MinChargeW
+	if cfg.PhaseMode == "2p" && phases == 1 {
+		minW = phaseMinChargeW(cfg, "1p", site)
+	}
+	minimum := math.Max(6, math.Ceil(minW/step))
 	maximum := math.Floor(cfg.MaxChargeW / step)
 	if site.MaxAmps > 0 {
 		maximum = math.Min(maximum, math.Floor(site.MaxAmps))

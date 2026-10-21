@@ -95,7 +95,7 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 	}
 }
 
-// commandPhases is where a command of w lands: 1 or 3 phases, as the
+// commandPhases is where a command of w lands: 1, 2 or 3 phases, as the
 // driver resolves its phase_mode and split. A 1-phase site has one.
 func (c *Controller) commandPhases(mode string, w, split float64) int {
 	if c.siteFuse().Phases() == 1 {

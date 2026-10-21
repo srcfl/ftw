@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -27,6 +28,19 @@ func newManualHoldServer(t *testing.T) (*Server, *loadpoint.Controller) {
 	}})
 	ctrl := loadpoint.NewController(mgr, nil, nil, nil)
 	return New(&Deps{Loadpoints: mgr, LoadpointCtrl: ctrl}), ctrl
+}
+
+func TestTwoPhaseCarReachesTheAmpSlider(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee", PhaseMode: "3p", MinChargeW: 4140, MaxChargeW: 11000}})
+	mgr.Observe("garage", true, 0, 0, true)
+	mgr.SetCarBinding("garage", loadpoint.CarBinding{ID: "volvo", Phases: 2, MaxW: 6400})
+	srv := New(&Deps{Loadpoints: mgr, Cfg: &config.Config{Fuse: config.Fuse{Phases: 3, Voltage: 230}}})
+	states := mgr.States()
+	srv.decorateLoadpointsWithManual(states)
+	if len(states) != 1 || states[0].Phases != 2 || states[0].VoltageV != 230 || states[0].MinChargeW != 2760 || states[0].MaxChargeW != 6400 {
+		t.Fatalf("two-phase slider uses the site's three phases: %+v", states)
+	}
 }
 
 func TestManualHoldUnavailableWithoutController(t *testing.T) {
@@ -70,6 +84,7 @@ func TestManualHoldValidatesBody(t *testing.T) {
 		{"hold_s too large", `{"power_w":1380,"hold_s":99999}`, http.StatusBadRequest},
 		{"negative power", `{"power_w":-1,"hold_s":30}`, http.StatusBadRequest},
 		{"bad phase_mode", `{"power_w":1380,"hold_s":30,"phase_mode":"5p"}`, http.StatusBadRequest},
+		{"two-phase car", `{"power_w":4600,"hold_s":30,"phase_mode":"2p"}`, http.StatusOK},
 		{"malformed json", `{`, http.StatusBadRequest},
 	}
 	for _, tc := range cases {

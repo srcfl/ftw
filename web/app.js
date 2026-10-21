@@ -3576,7 +3576,8 @@
     function aToW(a) { return Math.round(a * perA); }
 
     var minA = Math.max(1, Math.round(wToA((lp && lp.min_charge_w) || 0)) || 6);
-    var maxA = Math.round(wToA((lp && lp.max_charge_w) || 0)) || 16;
+    if (phases === 2) minA = Math.max(6, Math.ceil(wToA((lp && lp.min_charge_w) || 0)));
+    var maxA = (phases === 2 ? Math.floor : Math.round)(wToA((lp && lp.max_charge_w) || 0)) || 16;
     if (maxA <= minA) { maxA = minA + 1; }
 
     var active = !!(lp && lp.manual_active);
@@ -3765,7 +3766,7 @@
         body: JSON.stringify({
           power_w: pause ? 0 : aToW(a),
           hold_s: 0,
-          phase_mode: phases === 1 ? "1p" : "3p",
+          phase_mode: phases === 1 ? "1p" : phases === 2 ? "2p" : "3p",
         }),
       }).then(failOn).then(function () {
         busy = false;

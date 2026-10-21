@@ -221,8 +221,8 @@ func (s *State) offerPhaseA(w float64, phases int) float64 {
 		return 0
 	}
 	n := 1
-	if phases == 3 && s.SiteFusePhases > 1 {
-		n = s.SiteFusePhases
+	if (phases == 2 || phases == 3) && s.SiteFusePhases > 1 {
+		n = min(phases, s.SiteFusePhases)
 	}
 	return w / (s.SiteFuseVoltage * float64(n))
 }
@@ -537,12 +537,16 @@ func evPoolFor(state *State, points []loadpoint.State, configs []loadpoint.Confi
 		cfg := byID[point.ID]
 		// Empty is the declared three-phase default. The controller's own
 		// gate covers runtime auto/manual phase changes.
-		if cfg.PhaseMode != "" && cfg.PhaseMode != "3p" {
+		if cfg.PhaseMode == "2p" {
+			pool.phases = math.Min(pool.phases, 2)
+		} else if cfg.PhaseMode != "" && cfg.PhaseMode != "3p" {
 			pool.phases = 1
 		}
 		minW := cfg.MinChargeW
 		if cfg.PhaseMode == "3p" && state.SiteFuseVoltage > 0 {
 			minW = math.Max(minW, evMinPhaseA*state.SiteFuseVoltage*3)
+		} else if cfg.PhaseMode == "2p" && state.SiteFuseVoltage > 0 {
+			minW = math.Max(minW, evMinPhaseA*state.SiteFuseVoltage*min(2, float64(state.SiteFusePhases)))
 		}
 		if minW > 0 && (pool.minW == 0 || minW < pool.minW) {
 			pool.minW = minW

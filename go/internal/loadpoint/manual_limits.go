@@ -18,6 +18,7 @@ func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) float64 {
 	if mode == "" {
 		mode = cfg.PhaseMode
 	}
+	mode = limitPhaseMode(mode, cfg.PhaseMode)
 	if site.Phases() == 1 {
 		mode = "1p"
 	} else if mode == "" && cfg.SurplusOnly {
@@ -44,7 +45,8 @@ func manualMinChargeW(cfg Config, hold ManualHold, site SiteFuse) float64 {
 	if mode == "" {
 		mode = cfg.PhaseMode
 	}
-	if mode == "1p" || mode == "auto" {
+	mode = limitPhaseMode(mode, cfg.PhaseMode)
+	if mode == "1p" || mode == "2p" || mode == "auto" {
 		return phaseMinChargeW(cfg, mode, site)
 	}
 	return cfg.MinChargeW
@@ -54,12 +56,18 @@ func manualMinChargeW(cfg Config, hold ManualHold, site SiteFuse) float64 {
 // 6 A on one phase for 1p or auto, 6 A on each phase for 3p. An empty mode
 // names no phases; the charger decides, and its configured minimum stands.
 func phaseMinChargeW(cfg Config, mode string, site SiteFuse) float64 {
-	if site.Phases() != 3 {
-		return cfg.MinChargeW
-	}
 	voltage := site.Voltage
 	if !finite(voltage) || voltage <= 0 {
 		voltage = 230
+	}
+	if cfg.PhaseMode == "2p" && (mode == "1p" || site.Phases() == 1) {
+		return math.Max(cfg.MinChargeW/2, 6*voltage)
+	}
+	if mode == "2p" {
+		return math.Max(cfg.MinChargeW, 12*voltage)
+	}
+	if site.Phases() != 3 {
+		return cfg.MinChargeW
 	}
 	switch mode {
 	case "1p", "auto":
@@ -125,7 +133,11 @@ func chargerPhaseAmps(cfg Config, voltage float64) float64 {
 	if !finite(maxW) || maxW < 0 {
 		maxW = 0
 	}
-	return math.Max(maxW/(3*voltage), split/voltage)
+	phases := PhaseFor(cfg.PhaseMode, maxW, split)
+	if cfg.PhaseMode == "auto" || cfg.PhaseMode == "" {
+		phases = 3
+	}
+	return math.Max(maxW/(float64(phases)*voltage), split/voltage)
 }
 
 // The watt order must reflect the final current ceiling too. In particular,
@@ -156,6 +168,13 @@ func applyCurrentCeiling(cmd map[string]any) bool {
 	}
 	phases := PhaseFor(mode, w, split)
 	ceiling := v * float64(phases) * math.Floor(a)
+	if mode == "2p" {
+		amps := math.Floor(math.Min(w, ceiling)/(2*v) + 1e-9)
+		if amps < 6 {
+			amps = 0
+		}
+		ceiling = amps * 2 * v
+	}
 	if w > ceiling {
 		cmd["power_w"] = ceiling
 		return true

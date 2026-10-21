@@ -23,7 +23,7 @@ func (state *State) SetEVFuseDemands(demands []loadpoint.FuseDemand) {
 			continue
 		}
 		phase := demand.PhaseMode
-		if phase != "1p" && phase != "3p" {
+		if phase != "1p" && phase != "2p" && phase != "3p" {
 			phase = "auto"
 		}
 		if i, ok := byDriver[demand.DriverName]; ok {

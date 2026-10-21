@@ -108,3 +108,17 @@ func TestEaseeLockedThreePhaseStillHonorsOperatorChoice(t *testing.T) {
 		t.Errorf("amps = %d, want 0 below Easee minimum in explicitly locked 3p mode", amps)
 	}
 }
+
+func TestBundledEaseeTwoPhaseCurrent(t *testing.T) {
+	L := loadEaseePhaseFunctions(t)
+	phases := callEaseePickPhases(t, L, "2p", 4600, 230, 16, 0)
+	if phases != 2 {
+		t.Fatalf("the pinned Easee driver selected %d phases for a two-phase car", phases)
+	}
+	if got := callEaseePerPhaseAmps(t, L, 4600, 230, phases, 16); got != 10 {
+		t.Fatalf("two-phase current = %d A, want 10 A", got)
+	}
+	if got := callEaseePerPhaseAmps(t, L, 6400, 230, phases, 16); got != 13 {
+		t.Fatalf("two-phase watt ceiling rounded up: %d A", got)
+	}
+}

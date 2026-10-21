@@ -58,13 +58,15 @@ func floorChargeW(want, min, max float64, steps []float64) float64 {
 	return best
 }
 
-// PhaseFor maps mode and splitW to 1 or 3. Unknown modes stay on 3.
+// PhaseFor maps mode and splitW to the charging phase count.
 // splitW must come from the site, not a hard-coded 230 V. Drivers own
 // the decision this function documents.
 func PhaseFor(mode string, wantW, splitW float64) int {
 	switch mode {
 	case "1p":
 		return 1
+	case "2p":
+		return 2
 	case "auto":
 		if splitW > 0 && wantW < splitW {
 			return 1

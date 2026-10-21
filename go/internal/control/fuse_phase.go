@@ -190,7 +190,9 @@ func (s *State) evCutsSent(since, at time.Time) (w float64, phaseA [3]float64) {
 func (s *State) evNeedW(at time.Time) (w, phases float64) {
 	w, phases = scheduledEVPowerW(s), 3
 	for _, demand := range s.evFuseDemands {
-		if demand.phaseMode != "3p" {
+		if demand.phaseMode == "2p" {
+			phases = math.Min(phases, 2)
+		} else if demand.phaseMode != "3p" {
 			phases = 1
 		}
 	}
