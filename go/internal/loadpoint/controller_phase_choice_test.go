@@ -131,6 +131,32 @@ func TestSurplusOnlyAutoPhaseOffersLegalThreePhaseSteps(t *testing.T) {
 	}
 }
 
+// A one-phase charger left on an empty phase mode names no phases. Its own
+// 6 A minimum stands; a three-phase floor of 4,140 W is above its 3,680 W
+// maximum, and it would never charge.
+func TestOnePhaseChargerWithEmptyModeCharges(t *testing.T) {
+	now := time.Date(2026, 10, 21, 19, 0, 0, 0, time.UTC)
+	cfg := Config{ID: "garage", DriverName: "charger", MinChargeW: 1380, MaxChargeW: 3680,
+		AllowedStepsW: []float64{0, 1380, 1610, 1840, 2070, 2300, 2530, 2760, 2990, 3220, 3450, 3680}}
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, RequestActive: true}}
+	sender := &fakeSender{}
+	c := newTestController(t, []Config{cfg}, nil, samples, sender)
+	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
+	evW := 0.0 // 3 A of house load plus the car on one phase.
+	c.SetFuseEVMax(meteredEVCap(c, func() float64 { return 3 + evW/230 }))
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 3680, Persistent: true})
+	for tick := 0; tick < 12; tick++ {
+		c.Tick(context.Background(), now)
+		command, ok := lastSetCurrent(sender.calls)
+		if st, _ := c.manager.State(cfg.ID); !ok || command.power != 3680 {
+			t.Fatalf("tick %d: offer %+v, reason %q; want 3680 W", tick, command, st.CommandedReason)
+		}
+		evW = command.power
+		samples[cfg.DriverName] = EVSample{Connected: true, RequestActive: true, PowerW: evW}
+		now = now.Add(5 * time.Second)
+	}
+}
+
 // A fuse cap snaps to steps the commanded phases can carry. Four amps of
 // room per phase is 2,760 W, but on three phases that is under 6 A.
 func TestThreePhaseFuseCapNeverSnapsBelowSixAmps(t *testing.T) {

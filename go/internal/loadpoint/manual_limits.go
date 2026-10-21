@@ -51,7 +51,8 @@ func manualMinChargeW(cfg Config, hold ManualHold, site SiteFuse) float64 {
 }
 
 // phaseMinChargeW is the smallest legal offer on the phases a command names:
-// 6 A on one phase for 1p or auto, 6 A on each phase for 3p or empty.
+// 6 A on one phase for 1p or auto, 6 A on each phase for 3p. An empty mode
+// names no phases; the charger decides, and its configured minimum stands.
 func phaseMinChargeW(cfg Config, mode string, site SiteFuse) float64 {
 	if site.Phases() != 3 {
 		return cfg.MinChargeW
@@ -60,10 +61,13 @@ func phaseMinChargeW(cfg Config, mode string, site SiteFuse) float64 {
 	if !finite(voltage) || voltage <= 0 {
 		voltage = 230
 	}
-	if mode == "1p" || mode == "auto" {
+	switch mode {
+	case "1p", "auto":
 		return math.Max(cfg.MinChargeW/3, 6*voltage)
+	case "3p":
+		return math.Max(cfg.MinChargeW, 18*voltage)
 	}
-	return math.Max(cfg.MinChargeW, 18*voltage)
+	return cfg.MinChargeW
 }
 
 func (c *Controller) applyInstallationLimits(cmd map[string]any) {
