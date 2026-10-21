@@ -98,6 +98,9 @@ type chargerState struct {
 	// transactionRef is the 2.0.1 transaction id, which is a string rather
 	// than the int transactionID above. Empty on the 1.6 path.
 	transactionRef string
+	// stoppedTxID is the last transaction this charger stopped. A late meter
+	// value for it must not take it up again.
+	stoppedTxID int
 	// vendor and model come from BootNotification and exist so the UI can
 	// label a charger with what it actually is rather than its URL segment.
 	// serial is the hardware-stable half of its identity — what the device
@@ -146,8 +149,20 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 		approved:            map[string]bool{},
 		probing:             map[string]bool{},
 		identityProbeTiming: defaultIdentityProbeTiming,
-		nextTxID:            1,
+		nextTxID:            firstTxID(time.Now()),
 	}
+}
+
+// txIDEpoch keeps clock-based transaction ids far below the 32-bit limit
+// many chargers store them in.
+var txIDEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// firstTxID starts a run's transaction ids at the seconds since txIDEpoch.
+// A charger keeps its transaction id while Core restarts, so a restart must
+// not hand that id to another transaction. The start moves on one per
+// second, and a home starts far fewer transactions than that.
+func firstTxID(now time.Time) int {
+	return max(1, int(now.Sub(txIDEpoch)/time.Second))
 }
 
 // SetApprovedIDs declares which charger ids are part of the site — the ids
@@ -612,6 +627,9 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 				if sv.Unit == types.UnitOfMeasureKWh {
 					val *= 1000
 				}
+				if s.transactionID < 0 && sv.Phase == "" && req.TransactionId != nil {
+					h.takeUpTransactionLocked(id, s, *req.TransactionId, val)
+				}
 				if s.transactionID >= 0 {
 					s.sessionMeterWh = val - s.sessionStartMeterWh
 				}
@@ -626,6 +644,21 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 	h.pushReading(id, s)
 	h.telSuccess(id)
 	return core.NewMeterValuesConfirmation(), nil
+}
+
+// takeUpTransactionLocked adopts a transaction that started before this run:
+// the charger kept it, and its meter values name it, while Core restarted.
+// The start meter reading went with the old process, so session energy
+// counts from this first reading. The caller holds h.mu.
+func (h *Handler) takeUpTransactionLocked(id string, s *chargerState, txID int, meterWh float64) {
+	if txID <= 0 || txID == s.stoppedTxID {
+		return
+	}
+	s.transactionID = txID
+	s.sessionStartMeterWh = meterWh
+	s.sessionMeterWh = 0
+	h.nextTxID = max(h.nextTxID, txID+1)
+	slog.Info("OCPP running transaction taken up", "charger", id, "txid", txID, "meter_wh", meterWh)
 }
 
 func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionRequest) (*core.StartTransactionConfirmation, error) {
@@ -658,7 +691,14 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest) (*core.StopTransactionConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
-	sessionWh := float64(req.MeterStop) - s.sessionStartMeterWh
+	// With no start and no meter value seen for the transaction, MeterStop is
+	// only the meter's lifetime total, not the session's energy.
+	known := s.transactionID >= 0
+	sessionWh := s.sessionMeterWh
+	if known {
+		sessionWh = float64(req.MeterStop) - s.sessionStartMeterWh
+	}
+	s.stoppedTxID = req.TransactionId
 	s.transactionID = -1
 	s.charging = false
 	// A charger may report Available before the stop. The car is gone then.
@@ -672,7 +712,9 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 		"charger", id, "txid", req.TransactionId,
 		"session_wh", sessionWh, "reason", req.Reason)
 	h.pushReading(id, s)
-	h.telMetric(id, "ev_session_wh", sessionWh, "Wh")
+	if known {
+		h.telMetric(id, "ev_session_wh", sessionWh, "Wh")
+	}
 	h.telSuccess(id)
 	return core.NewStopTransactionConfirmation(), nil
 }
