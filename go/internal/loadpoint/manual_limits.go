@@ -40,19 +40,30 @@ func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) float64 {
 }
 
 func manualMinChargeW(cfg Config, hold ManualHold, site SiteFuse) float64 {
-	floor := cfg.MinChargeW
 	mode := hold.PhaseMode
 	if mode == "" {
 		mode = cfg.PhaseMode
 	}
-	if (mode == "1p" || mode == "auto") && site.Phases() == 3 {
-		voltage := site.Voltage
-		if !finite(voltage) || voltage <= 0 {
-			voltage = 230
-		}
-		floor = math.Max(floor/3, 6*voltage)
+	if mode == "1p" || mode == "auto" {
+		return phaseMinChargeW(cfg, mode, site)
 	}
-	return floor
+	return cfg.MinChargeW
+}
+
+// phaseMinChargeW is the smallest legal offer on the phases a command names:
+// 6 A on one phase for 1p or auto, 6 A on each phase for 3p or empty.
+func phaseMinChargeW(cfg Config, mode string, site SiteFuse) float64 {
+	if site.Phases() != 3 {
+		return cfg.MinChargeW
+	}
+	voltage := site.Voltage
+	if !finite(voltage) || voltage <= 0 {
+		voltage = 230
+	}
+	if mode == "1p" || mode == "auto" {
+		return math.Max(cfg.MinChargeW/3, 6*voltage)
+	}
+	return math.Max(cfg.MinChargeW, 18*voltage)
 }
 
 func (c *Controller) applyInstallationLimits(cmd map[string]any) {

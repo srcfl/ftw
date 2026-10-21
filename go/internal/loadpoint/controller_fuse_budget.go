@@ -8,6 +8,7 @@ import (
 
 type fuseRequest struct {
 	cfg      Config
+	phase    string
 	deadline time.Time
 	wantW    float64
 	baseW    float64
@@ -17,9 +18,9 @@ type fuseRequest struct {
 // freezeFuseBudget divides one cap for the whole tick, before any command.
 // A later callback or goal update cannot give a second car the first car's
 // already offered share. Metered reductions earn new room only next tick.
-func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample) {
+// Each car is budgeted on the phases its command will name.
+func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample, choices map[string]tickChoice) {
 	c.tickFuseCaps = nil
-	c.tickFusePhases = 0
 	if c.fuseEVMax == nil {
 		clear(c.fuseResumeTicks)
 		return
@@ -39,11 +40,12 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 		sample := samples[cfg.DriverName]
 		st, _ := c.manager.State(cfg.ID)
 		st.PluggedIn = sample.Connected && !sample.ConnectionUnknown
-		request := fuseRequest{cfg: c.fuseConfig(now, cfg), deadline: st.TargetTime}
+		phase := choices[cfg.ID].phaseMode
+		request := fuseRequest{cfg: c.fuseConfig(cfg, phase), phase: fusePhase(phase), deadline: st.TargetTime}
 		// The meter may still show a car's highest recent offer on the same
 		// phases. Up to that is not an increase; the car's own readings,
 		// late or lone, never count.
-		if peak := c.offerPeaks[cfg.ID]; st.PluggedIn && peak.phase == c.phaseModeForFuse(now, request.cfg) {
+		if peak := c.offerPeaks[cfg.ID]; st.PluggedIn && peak.phase == request.phase {
 			request.baseW = peak.w
 		}
 		baseTotal += request.baseW
@@ -83,7 +85,7 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 	})
 	c.tickFuseCaps = make(map[string]float64, len(requests))
 	remaining, increase := total, math.Max(0, total-baseTotal)
-	if phaseIncrease, known := c.sharedPhaseIncreaseW(now, requests); known {
+	if phaseIncrease, known := c.sharedPhaseIncreaseW(requests); known {
 		increase = math.Max(0, math.Min(increase, phaseIncrease))
 	}
 	for _, request := range requests {
@@ -107,10 +109,8 @@ type offerPeak struct {
 // recordOfferPeak keeps the highest offer the meter may still show. A new
 // phase mode starts over: the same watts on other phases are other currents.
 func (c *Controller) recordOfferPeak(now time.Time, id string, w float64, cmd map[string]any) string {
-	phase, _ := cmd["phase_mode"].(string)
-	if phase == "" {
-		phase = "3p" // The driver's locked default, as in phaseModeForFuse.
-	}
+	mode, _ := cmd["phase_mode"].(string)
+	phase := fusePhase(mode)
 	if c.offerPeaks == nil {
 		c.offerPeaks = map[string]offerPeak{}
 	}
@@ -120,10 +120,18 @@ func (c *Controller) recordOfferPeak(now time.Time, id string, w float64, cmd ma
 	return phase
 }
 
-func (c *Controller) fuseConfig(now time.Time, cfg Config) Config {
-	if hold, held := c.GetManualHold(cfg.ID, now); held {
-		cfg.MinChargeW = manualMinChargeW(cfg, hold, c.siteFuse())
+// fusePhase names the phases a command uses. Empty is the driver's locked 3p.
+func fusePhase(mode string) string {
+	if mode == "" {
+		return "3p"
 	}
+	return mode
+}
+
+// fuseConfig snaps a fuse cap to the smallest legal step on the phases the
+// command names. A 3p label on a 1p-sized offer is below 6 A and never charges.
+func (c *Controller) fuseConfig(cfg Config, phaseMode string) Config {
+	cfg.MinChargeW = phaseMinChargeW(cfg, phaseMode, c.siteFuse())
 	return cfg
 }
 
@@ -152,7 +160,7 @@ func (c *Controller) recoverFuseCap(id string, wantW, capW float64) float64 {
 
 // A new single-phase offer can land on the busiest phase, so an increase
 // needs measured room there. Cutting an overage is the shared budget's job.
-func (c *Controller) sharedPhaseIncreaseW(now time.Time, requests []fuseRequest) (float64, bool) {
+func (c *Controller) sharedPhaseIncreaseW(requests []fuseRequest) (float64, bool) {
 	if c.perPhaseMeterAmps == nil {
 		return 0, false
 	}
@@ -166,42 +174,12 @@ func (c *Controller) sharedPhaseIncreaseW(now time.Time, requests []fuseRequest)
 	}
 	phaseCount := site.Phases()
 	for _, request := range requests {
-		if c.phaseModeForFuse(now, request.cfg) != "3p" {
+		if request.phase != "3p" {
 			phaseCount = 1
 		}
 	}
-	c.tickFusePhases = phaseCount
 	worst := math.Max(math.Abs(l1), math.Max(math.Abs(l2), math.Abs(l3)))
 	return (site.MaxAmps - fusePhaseMarginA - worst) * site.Voltage * float64(phaseCount), true
-}
-
-// Empty is the driver's locked-3p default unless the command branch selects
-// auto or the surplus day lock selects 1p. Do not advance surplus hysteresis
-// here: an enabled unlock may arm later in this tick, so retain its 1p bound.
-func (c *Controller) phaseModeForFuse(now time.Time, cfg Config) string {
-	sched, _ := c.manager.GetSchedule(cfg.ID)
-	surplus := cfg.SurplusOnly
-	if !sched.HasTarget() && sched.SurplusUnlockBatSoC > 0 && c.batSoC != nil &&
-		!(c.tickDirectiveActive && c.tickDirectiveOK && c.tickDirective.LoadpointFallback[cfg.ID]) {
-		surplus = true
-	}
-	mode := cfg.PhaseMode
-	if hold, held := c.GetManualHold(cfg.ID, now); held {
-		if hold.PhaseMode != "" {
-			mode = hold.PhaseMode
-		}
-		if mode == "" && surplus {
-			mode = "auto"
-		}
-	} else {
-		// A surplus dwell can change while the offer is computed. Only a
-		// fixed 3p mode earns three phases of new headroom in this guard.
-		mode = resolvePhaseMode(mode, sched.HasTarget(), c.surplusLockedTo1P(cfg.ID), surplus, "")
-	}
-	if mode == "" {
-		return "3p"
-	}
-	return mode
 }
 
 func (c *Controller) currentDirective(now time.Time) (Directive, bool) {
