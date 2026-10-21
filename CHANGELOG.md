@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.155.0
+
+### Minor Changes
+
+- 767b144: Add a Home Assistant ingress mode. The HA app can use the owner's HA login for setup and settings, including installs with a saved FTW password. The ingress listener accepts Supervisor requests and local health checks; other clients cannot open the UI. Ordinary native installs keep their existing access rules.
+
+### Patch Changes
+
+- 8d5c6bf: Charge now keeps charging after an update or restart. Before, a restart turned it into a pause until someone pressed Start again. It still ends on Stop, when the car is unplugged or full, and a different car on the charger does not inherit it.
+- c14d31d: A charger is never asked for more current per phase than it supports. When FTW moves a charger that can run three phases onto one phase, the order now stops at that charger's own current per phase instead of the site fuse. Before, a 16 A charger on a 25 A fuse could be offered 18–25 A on one phase while charging from surplus or on Charge now.
+- 6aa082f: EV charging no longer pushes a phase past the fuse when a charger is slow to apply a new current, when a charge moves between three phases and one, or when one car is raised while another is cut. Each raise now counts as current on the phases its command names until the charger can have applied it: the time its driver declares, or 3 minutes when it declares none. A car takes only room that no other charger's raise holds. After a rise, a charger that declares no response time may wait up to 3 minutes before it climbs further.
+- fc621be: Charging no longer stalls or switches off when the phase mode is empty or auto, when a battery-level PV unlock is saved but not active, or on a one-phase site. The site-meter limit is now the only fuse guard for chargers: it measures room on the phases each charger is told to use, and a three-phase offer is never below 6 A per phase.
+- a2330c0: Home use is marked "≈" as soon as a device stops answering. Before, Core kept the device's last power for up to 90 s and still called Home use measured, so the page could show a wrong value and "% self-powered now" while every watt came from the grid. The last value is still shown until the age limit, but as an estimate that names the device. A device the watchdog has taken offline now stays offline until it delivers data again. Each failed read used to bring it back for a moment, so Home use flipped every few seconds and the watchdog reported the device lost again each time.
+- b5702e7: When the hourly import limit holds a car back, FTW now says so instead of blaming the main fuse. The charger's reason is `import_limit` ("Limited by the hourly import limit") whenever this hour's import budget leaves less room than the fuse, and a battery boost stopped by that budget says "Hourly import limit stopped boost". `fuse_limit` now means the main fuse alone, and the web page says "Limited by the main fuse".
+- 98e5c79: Home use is no longer marked estimated because an OCPP charger has no car. When the charger reports Available, no car is connected and no current flows, so its power counts as a measured 0 W in live Home use and in history. Each heartbeat or other message from the charger keeps that reading current, and it ends as soon as a car arrives. Unavailable and Faulted still leave the charger's power unknown. The Available a charger sends for itself (connector 0) at boot or reconnect no longer reads as an unplugged car. Core now asks OCPP chargers for a heartbeat every 30 s instead of every 60 s, so one late heartbeat no longer marks an idle charger offline: one more small request and reply a minute per charger. A heartbeat_interval_s set in the config is kept.
+- db5aec8: An idle OCPP charger no longer loses its connection about once a minute. The OCPP library closed a charger socket that had sent nothing for 60 s, the same as a 60 s heartbeat, so a charger that only sends heartbeats could be dropped as each one arrived, reconnect, and briefly show Home use as "≈". A charger socket may now stay silent for five heartbeat intervals (150 s with the default 30 s heartbeat). FTW's own watchdog still decides when a quiet charger is offline.
+
 ## 0.154.4
 
 ### Patch Changes
