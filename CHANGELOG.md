@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.154.4
+
+### Patch Changes
+
+- 5e8e417: Stop full backup creation and verification when the HTTP client disconnects. Ctrl-C releases the backup and update locks instead of leaving work running on the box.
+- df21447: A failed full backup now says why. Core writes when a backup starts, ends and fails to the journal, with the phase, table and row count it reached. A backup stopped by the two-hour limit for a live copy names that limit instead of only "context deadline exceeded". GET /api/backups keeps the reason, table and row count until the next backup starts, and `ftw backup` shows the last failure before it begins. When the raw copy does not fit in /dev/shm, Core warns that it is copying on the data disk and reports how much space earlier backups' scratch files still take there.
+- 7ad6948: Core now removes what a stopped full backup left behind before it accepts a new one. A backup cut short when Core stops, for example by an update, left its raw copy in /dev/shm until the next reboot. On a Raspberry Pi that held more than a gigabyte of RAM and sent the next backup's copy to the SD card, where it ran past its two-hour limit. At start Core removes such raw copies, the stage and verification folders and any unfinished archive in the backups folder, and logs each path and its size. It leaves them when another backup is running, and it removes nothing else.
+- aa8bc17: Report the longest step and step count beside each total phase time when a history write or forecast read fails. Archive failures also report connection, preparation, locks, write and commit times before cleanup. This separates one slow operation from many short operations without logging sample values or changing storage behavior.
+- 18f75ac: Home use on the energy flow no longer shows "≈" when every device is read, and "% self-powered now" is back. The page marked Home use as an estimate whenever /api/status carried a second, energy-averaged value, which it always did. It now follows Core's `load_quality` alone, and /api/status no longer sends `load_estimate`.
+  
+  Home use has one value. 0.154.3 was never published as a beta; its change also ships here: Home use is the site meter minus every device that is read, shown when one device is offline (marked "≈"), and blank only when the site meter is missing or stale. The Home Assistant sensor "Load Power (energy average)" announced for 0.154.3 is removed before release; "Load Power" stays.
+
 ## 0.154.3
 
 ### Patch Changes
