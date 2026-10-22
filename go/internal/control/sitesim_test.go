@@ -194,7 +194,8 @@ func (s *simSite) step() {
 	}
 	if s.downUntil.IsZero() {
 		if m := tick.Meter; m != nil {
-			s.emit("meter", telemetry.DerMeter, m.W, nil, map[string]any{"l1_a": m.PhaseA[0], "l2_a": m.PhaseA[1], "l3_a": m.PhaseA[2]})
+			s.emit("meter", telemetry.DerMeter, m.W, nil, map[string]any{"l1_a": m.PhaseA[0], "l2_a": m.PhaseA[1], "l3_a": m.PhaseA[2],
+				"l1_w": m.PhaseW[0], "l2_w": m.PhaseW[1], "l3_w": m.PhaseW[2]})
 		}
 		if b := tick.Battery; b != nil {
 			s.emit("battery", telemetry.DerBattery, b.W, &b.SoC, nil)
@@ -499,9 +500,9 @@ func simScenarios() []simScenario {
 		}
 	}
 	return []simScenario{
-		{name: "export start", known: "export counted as import, fuse_heat.go:120", run: 5 * time.Minute,
+		{name: "export start", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
-		{name: "export start, unsigned phase currents", known: "export counted as import, fuse_heat.go:120", run: 5 * time.Minute,
+		{name: "export start, unsigned phase currents", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW, p.Meter.Unsigned = houseA(2, 2, 2), -22*690, true }},
 		{name: "charger's own load balancer", known: "a cut comes off an offer the car does not draw, ev_fuse_budget.go:172", run: 20 * time.Minute,
 			plant: func(p *sitesim.Plant) {

@@ -193,8 +193,9 @@ func (s *State) offerPhaseA(w float64, phases int) float64 {
 }
 
 // EVFusePhaseRoomA is the current the chargers may still add on the
-// busiest phase: below the fuse less its margin, the last reading's
-// current or heat, and every charger's offers that reading may not show.
+// busiest phase: below the fuse less its margin, the last reading's level
+// (see fuseHeat.levelA), and every charger's offers that reading may not
+// show.
 // false when the site meter reports no phase currents.
 func EVFusePhaseRoomA(state *State) (float64, bool) {
 	if state == nil || !state.evLimit.set || !state.evLimit.phaseRoomKnown {
@@ -405,7 +406,7 @@ func EVLimitReason(state *State) string {
 // evMeterRoom is the measured room in EV watts. The fuse's part holds on
 // every reading. The import ceiling's parts are +Inf while it is off.
 type evMeterRoom struct {
-	fuseW          float64 // below the fuse less its margin and the worst phase, read or heat, and what we sent; rises and starts
+	fuseW          float64 // below the fuse less its margin and the highest phase level, and what we sent; rises and starts
 	fuseCutW       float64 // what the fuse needs cut now, negative; see fuseHeat
 	limitW         float64 // below the hour's import limit; negative is an overage
 	riseW          float64 // below the level an increase may reach, less what we sent
@@ -413,7 +414,7 @@ type evMeterRoom struct {
 	hourly         bool    // the hour's import is measured, so a short overage may wait
 	measured       bool    // false when the meter reports phase currents that cannot be read
 	worstA         float64
-	phaseRoomA     float64 // below the working limit on the busiest phase, read or heat
+	phaseRoomA     float64 // below the working limit on the highest phase level
 	phaseRoomKnown bool    // the meter reports phase currents
 }
 
@@ -446,8 +447,10 @@ func (s *State) evMeterRoom(meter *telemetry.DerReading, gridW, phases, fuseMaxW
 	return r
 }
 
-// worstPhaseA reads the site's configured phases. present is false when the
-// meter reports no phase currents; valid is false when they cannot be used.
+// worstPhaseA is the highest import on the site's configured phases, with
+// direction (phaseCurrentsA), and 0 when every phase exports. present is
+// false when the meter reports no phase currents; valid is false when they
+// cannot be used.
 func worstPhaseA(meter *telemetry.DerReading, state *State) (worstA float64, present, valid bool) {
 	amps, present, valid := phaseCurrentsA(meter, state)
 	for _, a := range amps {

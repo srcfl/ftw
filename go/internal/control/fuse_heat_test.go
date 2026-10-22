@@ -68,6 +68,28 @@ func meterAt(store *telemetry.Store, at time.Time, phaseA [3]float64) *telemetry
 	return r
 }
 
+// A phase's current takes its direction from the same phase's power: P1
+// reports current as a magnitude, Pixii signs it. Without the power the
+// current counts as import.
+func TestPhaseCurrentsTakeDirectionFromPhasePower(t *testing.T) {
+	_, state := fuseHeatState()
+	for _, tc := range []struct {
+		name string
+		data map[string]float64
+		want []float64
+	}{
+		{"p1", map[string]float64{"l1_a": 20, "l2_a": 3, "l3_a": 5, "l1_w": -4600, "l2_w": 690, "l3_w": 0}, []float64{-20, 3, 5}},
+		{"signed", map[string]float64{"l1_a": -20, "l2_a": -3, "l3_a": 5, "l1_w": -4600, "l2_w": -690, "l3_w": 1150}, []float64{-20, -3, 5}},
+		{"no phase power", map[string]float64{"l1_a": -20, "l2_a": 3, "l3_a": 5}, []float64{20, 3, 5}},
+	} {
+		raw, _ := json.Marshal(tc.data)
+		amps, present, valid := phaseCurrentsA(&telemetry.DerReading{Data: raw}, state)
+		if !present || !valid || len(amps) != 3 || amps[0] != tc.want[0] || amps[1] != tc.want[1] || amps[2] != tc.want[2] {
+			t.Errorf("%s: %v (present %v, valid %v), want %v", tc.name, amps, present, valid, tc.want)
+		}
+	}
+}
+
 // While the meter is silent the heat holds. A gap counts at the last
 // current seen: the reading after it neither fills the gap with its own
 // current nor erases an overload from before it.

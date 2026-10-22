@@ -53,8 +53,9 @@ func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, st
 	// Battery charge stays under the level the EV may rise to.
 	spare := state.importRiseCeilingW(fuseMaxW) - meter.RawW - needW
 	// During measured export overflow, the existing fuse pipeline may
-	// require charge to reduce export. Magnitudes alone cannot label that
-	// worst phase as import; leave this direction to the existing guard.
+	// require charge to reduce export; leave that direction to it. The
+	// phases carry their direction (phaseCurrentsA): the worst phase is the
+	// one importing most, and an exporting phase leaves the charge more room.
 	if meter.RawW >= -state.effectiveExportCeilingW(fuseMaxW) && state.SiteFuseVoltage > 0 {
 		if phaseSpare, known := evBatteryPhaseSpareW(meter, state, needW/(state.SiteFuseVoltage*phases)); known {
 			spare = math.Min(spare, phaseSpare)
