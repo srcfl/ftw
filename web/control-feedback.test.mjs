@@ -59,6 +59,14 @@ test('expected limits stay calm and explain themselves', () => {
   assert.equal(car.title, 'Car is full');
   const limit = controlStatus(row({kind: 'ev', status: 'limited', reason: 'device_limit', severity: 'warning', device_limit_a: 8, requested_a: 16}));
   assert.equal(limit.text, 'The charger’s own limit is 8 A, below the 16 A FTW asked for.');
+  const balanced = controlStatus(row({kind: 'ev', mode: 'plan', status: 'limited', reason: 'load_balancer_limit', sent_w: 11000, actual_w: 8300}));
+  assert.equal(balanced.title, 'Limited by the charger’s load balancer');
+  assert.equal(balanced.text, 'Asked for 11.0 kW charge, delivering 8.3 kW. The charger’s load balancer is limiting the car.');
+  assert.match(balanced.next, /main fuse setting matches the load balancer/);
+  assert.doesNotMatch(balanced.next, /has not said why/);
+  assert.equal(balanced.tone, 'neutral');
+  const held = controlStatus(row({kind: 'ev', status: 'limited', reason: 'load_balancer_limit', sent_w: 11000, actual_w: 0}));
+  assert.equal(held.text, 'Asked for 11.0 kW charge, but the charger’s load balancer gives the car no current.');
 });
 
 test('the receipt walks from sent to confirmed without inventing proof', () => {
