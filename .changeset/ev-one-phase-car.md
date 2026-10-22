@@ -1,5 +1,0 @@
----
-"ftw": patch
----
-
-A one-phase car, as many plug-in hybrids are, now gets what it can take from a three-phase charger. Such a car draws the order's current per phase on one phase only, so a 4.8 kW three-phase order gave it 1.6 kW while the plan counted 4.8 kW, and the charger panel said it was not following. FTW now sees it on the site meter: when its order rises, one phase rises by about the order's current and the other two stay put, while the charger's own reading shows the car drawing that much. For the rest of that charging session the plan counts the car's one-phase levels, up to the charger's current per phase (3.7 kW at 16 A), the charger stays on three phases, and the order names the current the car should take. The charger panel says "Charging on one phase, at most 3.7 kW" instead of "Not following". A house load, a three-phase car or a two-phase car is never taken for a one-phase car, and the next car starts unknown. The fuse limit is unchanged: it counts a three-phase order's current on every phase.
