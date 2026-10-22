@@ -141,9 +141,9 @@ func (c *Controller) creditA(id string, phases int) float64 {
 // roomA to the busiest phase. An auto command below the split lands on one
 // phase. Room limits rises only: keeping the last command is never a cut,
 // since the meter or the pending count already holds it, and only a
-// measured overage cuts (EVFuseBudget). Fewer phases are a rise on the ones
-// left, so the last command is kept only when the order it allows lands on
-// as many phases or more.
+// measured overage cuts (EVFuseBudget). The same watts on other phases are
+// a rise on some of them, so the last command is kept only when the order
+// it allows lands on the same phases.
 func (c *Controller) phaseRoomCapW(id, mode string, wantW, split, roomA float64) float64 {
 	site := c.siteFuse()
 	if site.Voltage <= 0 {
@@ -156,7 +156,7 @@ func (c *Controller) phaseRoomCapW(id, mode string, wantW, split, roomA float64)
 		capW = math.Min(capW, (c.creditA(id, 1)+roomA)*site.Voltage)
 	}
 	if st, ok := c.manager.State(id); ok && st.CommandedKnown && st.CommandedPhases > 0 && st.CommandedW > capW &&
-		c.commandPhases(mode, math.Min(wantW, st.CommandedW), split) >= st.CommandedPhases {
+		c.commandPhases(mode, math.Min(wantW, st.CommandedW), split) == st.CommandedPhases {
 		capW = st.CommandedW
 	}
 	return capW

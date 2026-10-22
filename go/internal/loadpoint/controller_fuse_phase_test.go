@@ -13,9 +13,10 @@ func TestSharedFuseGuardUsesCommandPhase(t *testing.T) {
 		manual, schedule, surplus                           bool
 		wantW, worstA, commandW                             float64
 	}{
-		{name: "legacy_plan", wantW: 13110, worstA: 5, commandW: 13110, demandMode: "3p"},
-		{name: "legacy_manual", manual: true, wantW: 13110, worstA: 5, commandW: 13110, demandMode: "3p"},
-		{name: "legacy_manual_over_schedule", manual: true, schedule: true, wantW: 13110, worstA: 5, commandW: 13110, demandMode: "3p"},
+		// An unset mode is auto: three phases, named in the order.
+		{name: "legacy_plan", wantW: 13110, worstA: 5, commandW: 13110, commandMode: "3p", demandMode: "3p"},
+		{name: "legacy_manual", manual: true, wantW: 13110, worstA: 5, commandW: 13110, commandMode: "3p", demandMode: "3p"},
+		{name: "legacy_manual_over_schedule", manual: true, schedule: true, wantW: 13110, worstA: 5, commandW: 13110, commandMode: "3p", demandMode: "3p"},
 		{name: "scheduled_1p", configMode: "1p", schedule: true, wantW: 2760, worstA: 20, commandMode: "1p", demandMode: "1p"},
 		// Planned charging on auto runs on three phases: the 3Φ minimum does
 		// not fit 4 A of room, and no one-phase order takes its place.

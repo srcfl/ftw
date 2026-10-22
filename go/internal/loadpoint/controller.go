@@ -1269,7 +1269,7 @@ func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, disp
 		return choice // No command this tick.
 	}
 	if hold, held := c.GetManualHold(cfg.ID, now); held {
-		choice.phaseMode = holdPhaseMode(hold, cfg, choice.surplusOn, c.siteFuse())
+		choice.phaseMode = holdPhaseMode(hold, cfg, c.siteFuse())
 	} else {
 		if choice.surplusOn || choice.surplusAdds {
 			choice.steps = c.pickSurplusSteps(now, cfg)
@@ -1277,7 +1277,9 @@ func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, disp
 		// Easee treats an unset phase_mode as 3p and then ignores a 1Φ step.
 		// A schedule still overrides the surplus 1Φ lock, or a deadline
 		// charge stays near 3.7 kW on a cloudy day.
-		choice.phaseMode = resolvePhaseMode(cfg.PhaseMode, sched.HasTarget(),
+		// A solar-only loadpoint charges from surplus whatever its goal, so
+		// its schedule does not make the charge a planned one.
+		choice.phaseMode = resolvePhaseMode(cfg.PhaseMode, threePhaseCapable(cfg, c.siteFuse()), sched.HasTarget() && !cfg.SurplusOnly,
 			c.surplusLockedTo1P(cfg.ID), choice.surplusOn, c.dwellSelectedPhaseMode(cfg.ID))
 	}
 	if c.siteFuse().Phases() == 1 {
@@ -1287,24 +1289,23 @@ func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, disp
 }
 
 // holdPhaseMode: a pinned hold or loadpoint mode wins. Otherwise Charge now
-// runs on three phases, as planned charging does. A hold below the 3Φ
-// minimum may run on one phase under auto or surplus: a sticky Start on a
-// 1380 W surplus slot must not die at the Easee driver's unset → "3p".
-func holdPhaseMode(hold ManualHold, cfg Config, surplusOn bool, site SiteFuse) string {
+// runs as planned charging does: three phases on a charger that can, one on
+// a charger that cannot. A hold below the 3Φ minimum goes out as auto, so a
+// sticky Start on a 1380 W surplus slot does not die at 3Φ's 6 A.
+func holdPhaseMode(hold ManualHold, cfg Config, site SiteFuse) string {
 	mode := hold.PhaseMode
 	if mode == "" {
 		mode = cfg.PhaseMode
 	}
-	low := hold.PowerW < phaseMinChargeW(cfg, "3p", site)
 	switch {
 	case mode != "" && mode != "auto":
 		return mode
-	case low && (mode == "auto" || surplusOn):
+	case !threePhaseCapable(cfg, site):
+		return "1p"
+	case hold.PowerW < phaseMinChargeW(cfg, "3p", site):
 		return "auto"
-	case mode == "auto":
-		return "3p"
 	}
-	return ""
+	return "3p"
 }
 
 func (c *Controller) observeTick(now time.Time, cfg Config, sample EVSample, dispatchAllowed bool) {
@@ -1473,7 +1474,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		cmd["power_w"] = holdW
 		// A hold changed after the budget froze names its own phases; the
 		// phase check below makes it wait for the next tick's budget.
-		phaseMode = holdPhaseMode(hold, lpCfg, surplusOn, c.siteFuse())
+		phaseMode = holdPhaseMode(hold, lpCfg, c.siteFuse())
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
 		}
@@ -2232,23 +2233,21 @@ afterNearTerm:
 // surplusLockedTo1P reports whether the surplus_only 1Φ lock is
 // currently active for the given loadpoint. Read-only accessor.
 // resolvePhaseMode picks the phase_mode sent to the driver. An operator pin
-// wins; a 3Φ-only charger never gets the surplus 1Φ lock. Planned charging
-// runs on three phases: one phase never helps the fuse, it puts all the
-// current on one, caps the car near 3.7 kW, and an Easee pauses to switch
-// and may stay there. "auto" is "3p", and unset stays the driver's own
-// default. Only surplus charging without a schedule may use one phase: the
-// day lock, then the 30 min dwell, then auto.
-func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
-	if operatorMode != "" && operatorMode != "auto" {
-		return operatorMode
-	}
-	if scheduleActive || !surplusOn {
-		if operatorMode == "auto" {
-			return "3p"
-		}
-		return ""
-	}
+// wins; a 3Φ-only charger never gets the surplus 1Φ lock. Unset and "auto"
+// mean the same. A charger that cannot reach 6 A on three phases runs on
+// one. Otherwise planned charging runs on three: one phase never helps the
+// fuse, it puts all the current on one, caps the car near 3.7 kW, and an
+// Easee pauses to switch and may stay there. Only surplus charging without
+// a schedule may use one phase: the day lock, then the 30 min dwell, then
+// auto.
+func resolvePhaseMode(operatorMode string, threePhase, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
 	switch {
+	case operatorMode != "" && operatorMode != "auto":
+		return operatorMode
+	case !threePhase:
+		return "1p"
+	case scheduleActive || !surplusOn:
+		return "3p"
 	case surplusLocked1P:
 		return "1p"
 	case dwell != "":
