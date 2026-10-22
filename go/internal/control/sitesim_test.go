@@ -62,6 +62,8 @@ type simSite struct {
 	peakA                float64
 	overLimit            time.Duration // time with a phase over the fuse less its margin
 	idleWithRoom         time.Duration // time the car was idle with room for it
+	overAt               time.Time     // last second a phase was over the fuse less its margin
+	cutsWithRoom         int           // car orders lowered with no phase over that limit within the response time
 	failure              string
 }
 
@@ -151,6 +153,7 @@ func (s *simSite) send(_ context.Context, driver string, payload []byte) error {
 		PowerW    float64 `json:"power_w"`
 		PhaseMode string  `json:"phase_mode"`
 		SplitW    float64 `json:"phase_split_w"`
+		MaxA      float64 `json:"max_amps_per_phase"`
 	}
 	if err := json.Unmarshal(payload, &cmd); err != nil {
 		return err
@@ -168,8 +171,16 @@ func (s *simSite) send(_ context.Context, driver string, payload []byte) error {
 	if cmd.PowerW > s.offerW {
 		s.raisedAt = s.p.Now
 	}
+	if cmd.PowerW < s.offerW && (s.overAt.IsZero() || s.p.Now.Sub(s.overAt) > s.responseTime(true)) {
+		s.cutsWithRoom++
+	}
 	s.offerW = cmd.PowerW
 	s.commands = append(s.commands, simCommand{s.p.Now, "evse", cmd.PowerW})
+	// Without a split the Easee driver splits auto at the fuse's current
+	// on one phase (easee_cloud.lua pick_phases).
+	if cmd.SplitW <= 0 && cmd.MaxA > 0 {
+		cmd.SplitW = s.p.Voltage * cmd.MaxA
+	}
 	s.p.EVSE.Command(s.p.Now, cmd.PowerW, cmd.PhaseMode, cmd.SplitW, s.p.Voltage)
 	return nil
 }
@@ -328,6 +339,7 @@ func (s *simSite) check() {
 	}
 	s.heatSet = true
 	if overLimit {
+		s.overAt = now
 		s.overLimit += sitesim.Step
 		if s.limitSince.IsZero() {
 			s.limitSince, s.ownRaise = now, !s.raisedAt.IsZero() && now.Sub(s.raisedAt) <= s.responseTime(true) && !s.outsideAt.After(s.raisedAt)
@@ -421,6 +433,7 @@ type simScenario struct {
 	start   time.Time // zero: simStart
 	run     time.Duration
 	surplus bool
+	plan    loadpoint.PlanFunc
 	plant   func(*sitesim.Plant)
 	lp      func(*loadpoint.Config)
 	setup   func(*simSite)
@@ -454,6 +467,16 @@ func simLoadpoint() loadpoint.Config {
 }
 
 func houseA(l1, l2, l3 float64) [3]float64 { return [3]float64{l1 * 230, l2 * 230, l3 * 230} }
+
+// planEV is a saved goal and a plan that gives the car w in every quarter
+// hour: the path Core takes overnight.
+func planEV(w float64) loadpoint.PlanFunc {
+	return func(now time.Time) (loadpoint.Directive, bool) {
+		slot := now.Truncate(15 * time.Minute)
+		return loadpoint.Directive{SlotStart: slot, SlotEnd: slot.Add(15 * time.Minute),
+			LoadpointEnergyWh: map[string]float64{"garage": w / 4}}, true
+	}
+}
 
 // planBatteryCharge has the plan charge the battery at w for the hour.
 func planBatteryCharge(w float64) func(*simSite) {
@@ -596,6 +619,35 @@ func simScenarios() []simScenario {
 				}
 				return nil
 			}}}},
+		// Field report 22 Oct 2026, v0.155.0-beta.1: a 3x20 A site, phase_mode
+		// auto, an Easee step table with one-phase levels, a plan for 11.1 kW.
+		// The car ran on one phase at 3.3 kW and FTW cut it with room on every
+		// phase. Planned charging now runs on three phases and only measured
+		// overage cuts.
+		{name: "night plan, auto, one-phase steps", start: time.Date(2026, 10, 22, 3, 0, 0, 0, time.Local), run: 40 * time.Minute,
+			plant: func(p *sitesim.Plant) {
+				p.Fuse.RatingA, p.HouseW, p.EVSE.Delay = 20, houseA(1.6, 1.7, 2.3), 40*time.Second
+			},
+			lp: func(c *loadpoint.Config) {
+				c.MinChargeW, c.MaxChargeW, c.PhaseMode = 1600, 11100, "auto"
+				c.AllowedStepsW = []float64{0, 1600, 1900, 2100, 2400, 2600, 2800, 3100, 3300, 3500, 3800,
+					4800, 5500, 6200, 6900, 7600, 8300, 9000, 9700, 10400, 11100}
+			},
+			plan: planEV(11100),
+			expect: []simExpect{
+				{2 * time.Minute, func(s *simSite) error {
+					if s.p.EVSE.DrawPhases != 3 || s.p.EVSE.DrawW < 4140 {
+						return fmt.Errorf("car draws %.0f W on %d phases, want three", s.p.EVSE.DrawW, s.p.EVSE.DrawPhases)
+					}
+					return nil
+				}},
+				{40*time.Minute - time.Second, func(s *simSite) error {
+					if s.cutsWithRoom > 0 || s.p.EVSE.SessionWh < 6000 {
+						return fmt.Errorf("%d cuts with room on every phase, %.2f kWh in 40 min", s.cutsWithRoom, s.p.EVSE.SessionWh/1000)
+					}
+					return nil
+				}},
+			}},
 		{name: "a day", start: time.Date(2026, 10, 21, 0, 0, 0, 0, time.Local), run: 24 * time.Hour, plant: simDay},
 	}
 }
@@ -611,7 +663,16 @@ func runSimScenario(sc simScenario, start time.Time) *simSite {
 	if sc.lp != nil {
 		sc.lp(&lp)
 	}
-	s := &simSite{p: p, lp: lp, surplus: sc.surplus, setup: sc.setup}
+	s := &simSite{p: p, lp: lp, surplus: sc.surplus, plan: sc.plan, setup: sc.setup}
+	if sc.plan != nil {
+		setup := sc.setup
+		s.setup = func(s *simSite) {
+			s.mgr.SetSchedule(s.lp.ID, loadpoint.Schedule{SoC: .8})
+			if setup != nil {
+				setup(s)
+			}
+		}
+	}
 	s.boot()
 	for _, e := range sc.expect {
 		s.run(start.Add(e.at).Sub(p.Now))

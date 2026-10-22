@@ -54,11 +54,17 @@ func runPhaseTick(t *testing.T, cfg Config, site SiteFuse, wantWh float64) sentC
 	return sender.calls[0]
 }
 
+// Planned charging on an auto loadpoint runs on three phases. A plan of
+// 4,000 W, below 6 A a phase, goes out as the 3Φ minimum, not as one phase.
 func TestCommandCarriesPhaseModePreference(t *testing.T) {
 	cfg := phaseLoadpoint("auto", 0, 0)
 	cmd := runPhaseTick(t, cfg, SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3}, 4000)
-	if cmd.phaseMode != "auto" {
-		t.Errorf("phase_mode in cmd = %q, want \"auto\"", cmd.phaseMode)
+	if cmd.phaseMode != "3p" || cmd.power != 4140 {
+		t.Errorf("cmd = %.0f W phase_mode %q, want 4140 W \"3p\"", cmd.power, cmd.phaseMode)
+	}
+	cfg = phaseLoadpoint("1p", 0, 0)
+	if cmd := runPhaseTick(t, cfg, SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3}, 3000); cmd.phaseMode != "1p" {
+		t.Errorf("a 1p pin sent phase_mode %q", cmd.phaseMode)
 	}
 }
 

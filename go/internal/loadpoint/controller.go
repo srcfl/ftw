@@ -1269,7 +1269,7 @@ func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, disp
 		return choice // No command this tick.
 	}
 	if hold, held := c.GetManualHold(cfg.ID, now); held {
-		choice.phaseMode = holdPhaseMode(hold, cfg, choice.surplusOn)
+		choice.phaseMode = holdPhaseMode(hold, cfg, choice.surplusOn, c.siteFuse())
 	} else {
 		if choice.surplusOn || choice.surplusAdds {
 			choice.steps = c.pickSurplusSteps(now, cfg)
@@ -1286,17 +1286,23 @@ func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, disp
 	return choice
 }
 
-// holdPhaseMode: explicit hold > explicit loadpoint config > surplus default
-// ("auto") > driver default. A sticky Start hold on a 1380 W surplus slot
-// must not die at the Easee driver's unset → "3p" interpretation.
-func holdPhaseMode(hold ManualHold, cfg Config, surplusOn bool) string {
+// holdPhaseMode: a pinned hold or loadpoint mode wins. Otherwise Charge now
+// runs on three phases, as planned charging does. A hold below the 3Φ
+// minimum may run on one phase under auto or surplus: a sticky Start on a
+// 1380 W surplus slot must not die at the Easee driver's unset → "3p".
+func holdPhaseMode(hold ManualHold, cfg Config, surplusOn bool, site SiteFuse) string {
+	mode := hold.PhaseMode
+	if mode == "" {
+		mode = cfg.PhaseMode
+	}
+	low := hold.PowerW < phaseMinChargeW(cfg, "3p", site)
 	switch {
-	case hold.PhaseMode != "":
-		return hold.PhaseMode
-	case cfg.PhaseMode != "":
-		return cfg.PhaseMode
-	case surplusOn:
+	case mode != "" && mode != "auto":
+		return mode
+	case low && (mode == "auto" || surplusOn):
 		return "auto"
+	case mode == "auto":
+		return "3p"
 	}
 	return ""
 }
@@ -1467,7 +1473,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		cmd["power_w"] = holdW
 		// A hold changed after the budget froze names its own phases; the
 		// phase check below makes it wait for the next tick's budget.
-		phaseMode = holdPhaseMode(hold, lpCfg, surplusOn)
+		phaseMode = holdPhaseMode(hold, lpCfg, surplusOn, c.siteFuse())
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
 		}
@@ -1503,7 +1509,8 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			cmd["site_phases"] = site.Phases()
 		}
 	} else {
-		cmdW, planReady, _ := c.computeCommandForBudget(now, lpCfg, sample.PowerW, false)
+		// Snap to steps legal on the phases this command names.
+		cmdW, planReady, _ := c.computeCommandForBudget(now, c.fuseConfig(lpCfg, phaseMode), sample.PowerW, false)
 		cmdReason = "plan"
 		if c.plan != nil {
 			if d, ok := c.currentDirective(now); ok && d.LoadpointFallback[lpCfg.ID] {
@@ -2224,37 +2231,30 @@ afterNearTerm:
 
 // surplusLockedTo1P reports whether the surplus_only 1Φ lock is
 // currently active for the given loadpoint. Read-only accessor.
-// resolvePhaseMode picks the phase_mode sent to the driver.
-// A schedule wins, or a deadline charge is stuck on the 1Φ lock.
-// Then the day lock, then the 30 min dwell, then the operator pin.
+// resolvePhaseMode picks the phase_mode sent to the driver. An operator pin
+// wins; a 3Φ-only charger never gets the surplus 1Φ lock. Planned charging
+// runs on three phases: one phase never helps the fuse, it puts all the
+// current on one, caps the car near 3.7 kW, and an Easee pauses to switch
+// and may stay there. "auto" is "3p", and unset stays the driver's own
+// default. Only surplus charging without a schedule may use one phase: the
+// day lock, then the 30 min dwell, then auto.
 func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
-	switch {
-	case scheduleActive:
-		if operatorMode == "" {
-			return "auto"
-		}
-		return operatorMode
-	case surplusLocked1P:
-		// A 3Φ-only charger (operator pinned "3p") physically cannot
-		// trickle at 1Φ, so the surplus 1Φ lock must never override it —
-		// defends against a stale lock left from a previous "auto"/"1p"
-		// config. pickSurplusSteps also refuses to set the lock for a
-		// "3p" loadpoint, so this is belt-and-braces.
-		if operatorMode == "3p" {
-			return "3p"
-		}
-		return "1p"
-	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
-		if dwell != "" {
-			return dwell
-		}
-		if operatorMode == "" {
-			return "auto"
-		}
-		return operatorMode
-	default:
+	if operatorMode != "" && operatorMode != "auto" {
 		return operatorMode
 	}
+	if scheduleActive || !surplusOn {
+		if operatorMode == "auto" {
+			return "3p"
+		}
+		return ""
+	}
+	switch {
+	case surplusLocked1P:
+		return "1p"
+	case dwell != "":
+		return dwell
+	}
+	return "auto"
 }
 
 func (c *Controller) surplusLockedTo1P(id string) bool {

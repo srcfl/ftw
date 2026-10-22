@@ -16,7 +16,11 @@ func TestSharedFuseGuardUsesCommandPhase(t *testing.T) {
 		{name: "legacy_plan", wantW: 13110, worstA: 5, commandW: 13110, demandMode: "3p"},
 		{name: "legacy_manual", manual: true, wantW: 13110, worstA: 5, commandW: 13110, demandMode: "3p"},
 		{name: "legacy_manual_over_schedule", manual: true, schedule: true, wantW: 13110, worstA: 5, commandW: 13110, demandMode: "3p"},
-		{name: "scheduled_auto", schedule: true, wantW: 2760, worstA: 20, commandMode: "auto", demandMode: "auto"},
+		{name: "scheduled_1p", configMode: "1p", schedule: true, wantW: 2760, worstA: 20, commandMode: "1p", demandMode: "1p"},
+		// Planned charging on auto runs on three phases: the 3Φ minimum does
+		// not fit 4 A of room, and no one-phase order takes its place.
+		{name: "scheduled_auto_runs_3p", configMode: "auto", schedule: true, wantW: 4140, worstA: 20, commandMode: "3p", demandMode: "3p"},
+		{name: "scheduled_auto_room", configMode: "auto", schedule: true, wantW: 13110, worstA: 5, commandW: 13110, commandMode: "3p", demandMode: "3p"},
 		{name: "surplus_manual_auto", manual: true, surplus: true, wantW: 2760, worstA: 20, commandMode: "auto", demandMode: "auto"},
 		{name: "manual_1p_over_3p", configMode: "3p", manual: true, holdMode: "1p", wantW: 2760, worstA: 20, commandMode: "1p", demandMode: "1p"},
 		{name: "manual_3p_over_auto", configMode: "auto", manual: true, holdMode: "3p", wantW: 13110, worstA: 5, commandW: 13110, commandMode: "3p", demandMode: "3p"},
@@ -59,7 +63,7 @@ func TestAutomaticManualReleasePrecedesSharedPhaseBudget(t *testing.T) {
 		t.Run(release, func(t *testing.T) {
 			now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 			cfg := Config{ID: "garage", DriverName: "charger", MinChargeW: 1380, MaxChargeW: 13110,
-				AllowedStepsW: []float64{0, 1380, 2760, 4140, 13110}, VehicleCapacityWh: 60000, PluginSoC: .8}
+				AllowedStepsW: []float64{0, 1380, 2760, 4140, 13110}, VehicleCapacityWh: 60000, PluginSoC: .8, PhaseMode: "1p"}
 			d := &Directive{SlotStart: now, SlotEnd: now.Add(15 * time.Minute),
 				LoadpointEnergyWh: map[string]float64{cfg.ID: 690}, LoadpointMaxPowerW: map[string]float64{cfg.ID: 2760}}
 			samples := map[string]EVSample{cfg.DriverName: {Connected: true, RequestActive: release != "idle"}}
@@ -84,7 +88,7 @@ func TestAutomaticManualReleasePrecedesSharedPhaseBudget(t *testing.T) {
 				t.Fatal("completed manual hold was not released")
 			}
 			command, known := lastSetCurrent(sender.calls)
-			if !known || command.phaseMode != "auto" || command.power != 0 {
+			if !known || command.phaseMode != "1p" || command.power != 0 {
 				t.Fatalf("automatic order reused the earlier manual 3p budget: %+v", command)
 			}
 		})

@@ -110,12 +110,13 @@ func TestManualHoldExpiresFallsBackToPlan(t *testing.T) {
 	cmd := sender.calls[0]
 	// Should have followed the plan, not the hold. Plan allocates
 	// 6 kWh / 1 h = 6000 W, snapped to nearest step 6210 W (3Φ-flavored
-	// budget). And phase_mode comes from lpCfg ("auto"), not hold ("1p").
+	// budget). And phase_mode comes from lpCfg ("auto", which planned
+	// charging sends as "3p"), not hold ("1p").
 	if cmd.power != 6210 {
 		t.Errorf("power = %.0f, want 6210 (plan path), hold should have expired", cmd.power)
 	}
-	if cmd.phaseMode != "auto" {
-		t.Errorf("phase_mode = %q, want \"auto\" (lpCfg path), hold should have expired", cmd.phaseMode)
+	if cmd.phaseMode != "3p" {
+		t.Errorf("phase_mode = %q, want \"3p\" (lpCfg path), hold should have expired", cmd.phaseMode)
 	}
 	// Expired hold should have been lazily evicted on the read.
 	if _, active := c.GetManualHold(cfg.ID, now); active {

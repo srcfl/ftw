@@ -41,7 +41,7 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 			if hold, held := c.GetManualHold(cfg.ID, now); held {
 				request.wantW = clampManualPower(cfg, hold, c.siteFuse())
 			} else {
-				request.wantW, _, _ = c.computeCommandForBudget(now, cfg, sample.PowerW, false)
+				request.wantW, _, _ = c.computeCommandForBudget(now, request.cfg, sample.PowerW, false)
 			}
 			request.goal = request.wantW > 0 && !cfg.SurplusOnly
 			if _, held := c.GetManualHold(cfg.ID, now); !held {
@@ -138,8 +138,12 @@ func (c *Controller) creditA(id string, phases int) float64 {
 }
 
 // phaseRoomCapW is the most a command may offer when it can add at most
-// roomA to the busiest phase. It always keeps the last command's current.
-// An auto command below the split lands on one phase.
+// roomA to the busiest phase. An auto command below the split lands on one
+// phase. Room limits rises only: keeping the last command is never a cut,
+// since the meter or the pending count already holds it, and only a
+// measured overage cuts (EVFuseBudget). Fewer phases are a rise on the ones
+// left, so the last command is kept only when the order it allows lands on
+// as many phases or more.
 func (c *Controller) phaseRoomCapW(id, mode string, wantW, split, roomA float64) float64 {
 	site := c.siteFuse()
 	if site.Voltage <= 0 {
@@ -150,6 +154,10 @@ func (c *Controller) phaseRoomCapW(id, mode string, wantW, split, roomA float64)
 	capW := (c.creditA(id, phases) + roomA) * site.Voltage * float64(phases)
 	if phases == 3 && c.commandPhases(mode, capW, split) == 1 {
 		capW = math.Min(capW, (c.creditA(id, 1)+roomA)*site.Voltage)
+	}
+	if st, ok := c.manager.State(id); ok && st.CommandedKnown && st.CommandedPhases > 0 && st.CommandedW > capW &&
+		c.commandPhases(mode, math.Min(wantW, st.CommandedW), split) >= st.CommandedPhases {
+		capW = st.CommandedW
 	}
 	return capW
 }

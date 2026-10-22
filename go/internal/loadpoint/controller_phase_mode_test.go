@@ -2,9 +2,11 @@ package loadpoint
 
 import "testing"
 
-// TestResolvePhaseMode locks the phase_mode precedence — in particular the
-// operator directive (2026-05-30) that an active charge schedule overrides the
-// surplus 1Φ forecast lock so a deadline-driven charge can pull 3Φ grid power.
+// TestResolvePhaseMode locks the phase_mode precedence: an operator pin wins,
+// planned charging runs on three phases (Fredrik, 22 Oct 2026: one phase
+// never helps the fuse and caps the car near 3.7 kW), and only surplus
+// charging without a schedule may use one phase. The 2026-05-30 directive
+// stands: a schedule overrides the surplus 1Φ forecast lock.
 func TestResolvePhaseMode(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -15,9 +17,10 @@ func TestResolvePhaseMode(t *testing.T) {
 		dwell          string
 		want           string
 	}{
-		// The fix: a schedule beats the 1Φ forecast lock.
-		{"schedule overrides 1p lock (auto)", "auto", true, true, true, "1p", "auto"},
-		{"schedule overrides 1p lock (unset)", "", true, true, true, "1p", "auto"},
+		// A schedule beats the 1Φ forecast lock: auto is three phases, unset
+		// is the driver's own default.
+		{"schedule overrides 1p lock (auto)", "auto", true, true, true, "1p", "3p"},
+		{"schedule overrides 1p lock (unset)", "", true, true, true, "1p", ""},
 		// An explicit operator pin is still honoured under a schedule.
 		{"schedule honours explicit 3p", "3p", true, true, false, "", "3p"},
 		{"schedule honours explicit 1p", "1p", true, true, false, "", "1p"},
@@ -31,10 +34,12 @@ func TestResolvePhaseMode(t *testing.T) {
 		{"dwell verdict when surplus auto", "auto", false, false, true, "3p", "3p"},
 		{"auto default when no dwell", "auto", false, false, true, "", "auto"},
 		{"unset → auto under surplus", "", false, false, true, "", "auto"},
-		// No schedule, no surplus → operator's mode verbatim.
-		{"operator verbatim, no surplus", "auto", false, false, false, "", "auto"},
+		// No schedule, no surplus: auto is three phases, a pin is verbatim.
+		{"auto is 3p without surplus", "auto", false, false, false, "", "3p"},
 		{"operator explicit 1p verbatim", "1p", false, false, false, "", "1p"},
 		{"operator unset verbatim", "", false, false, false, "", ""},
+		// The day lock and the dwell belong to surplus charging alone.
+		{"1p lock ignored without surplus", "auto", false, true, false, "1p", "3p"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

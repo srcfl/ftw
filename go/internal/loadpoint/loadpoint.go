@@ -57,10 +57,10 @@ type Config struct {
 
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
 	// delivery each tick. "3p" (default) and "1p" lock the install to
-	// one mode and filter AllowedStepsW accordingly. "auto" lets the
-	// controller switch based on the MPC budget, with a hysteresis
-	// timer (MinPhaseHoldS) preventing flap. Empty == "3p" for
-	// backward compatibility with pre-switching configs.
+	// one mode and filter AllowedStepsW accordingly. "auto" charges on
+	// three phases; only surplus charging below the 3Φ minimum switches
+	// to one, with a hysteresis timer (MinPhaseHoldS) preventing flap.
+	// Empty == "3p" for backward compatibility with pre-switching configs.
 	PhaseMode string `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
 
 	// PhaseSplitW is the wantW threshold below which "auto" picks 1Φ.
