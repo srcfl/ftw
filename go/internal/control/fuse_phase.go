@@ -333,7 +333,10 @@ func capBatteryCharge(targets []DispatchTarget, latest map[string]float64, pendi
 			out[i].TargetW, out[i].Clamped = capped, true
 		}
 	}
-	if short := -spare - holdW; short > 0 && lostW > 0 {
+	// Pending rises consume room when ending relief too, not only when
+	// adding positive charge. Otherwise two successive reductions of
+	// discharge (or charge on the export pass) can spend the same room.
+	if short := pendingW - spare - holdW; short > 0 && lostW > 0 {
 		k := math.Min(1, short/lostW)
 		for i := range out {
 			if keep := math.Min(lost[i]*k, keepW[out[i].Driver]); keep > 0 {
