@@ -115,3 +115,19 @@ func TestDeadlineReservePreservesAcceptedLegacyZero(t *testing.T) {
 		t.Fatalf("known cheap-future zero turned into a charge reserve: %+v", d)
 	}
 }
+
+// A car whose own charger takes less than a stepless charger's minimum, such
+// as a 3.7 kW plug-in hybrid on an 11 or 22 kW charger, gets the charger's
+// minimum without a plan, as it does with one: the car takes what it can.
+func TestGoalReserveGivesASmallCarTheChargersMinimum(t *testing.T) {
+	now := time.Now()
+	for _, maxW := range []float64{11040, 22080} {
+		st := deadlineGoalState(now, "a")
+		st.MinChargeW, st.MaxChargeW, st.AllowedStepsW, st.CarMaxW = 4140, maxW, nil, 3680
+		svc := &Service{LoadpointStates: func() []loadpoint.State { return []loadpoint.State{st} }}
+		d, ok := svc.SlotDirectiveAt(now)
+		if !ok || !d.LoadpointFallback["a"] || d.LoadpointMaxPowerW["a"] != 4140 || d.LoadpointEnergyWh["a"] <= 0 {
+			t.Fatalf("%.0f W charger: reserve %+v ok=%v, want 4140 W", maxW, d, ok)
+		}
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/sitesim"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -54,6 +55,7 @@ const (
 	usePause   fieldUse = "pause"     // Charge now, Pause for 25 s, then Start
 	useRestart fieldUse = "restart"   // a planned charge across a 20 s Core restart
 	usePhaseUp fieldUse = "1p-to-3p"  // a held 1p order changed to 3p after 5 min
+	useNoPlan  fieldUse = "noplan"    // a ready-by goal with no plan: Core's deadline reserve, the car's own maximum known
 )
 
 // fieldCase is one site and one request. The name is stable: the known rows
@@ -291,6 +293,13 @@ func probeCases() []fieldCase {
 		// level, which must be a third of an order the table has.
 		c := helpReport(usePlanned, tm)
 		c.carPhases, c.needW = 1, 1000
+		out = append(out, c)
+	}
+	for _, tm := range []fieldTiming{timingFast, timingEasee} {
+		// A plug-in hybrid whose own charger (3,680 W) takes less than the
+		// charger's minimum, with the planner down.
+		c := homeBox(useNoPlan, tm)
+		c.carPhases = 1
 		out = append(out, c)
 	}
 	c := helpReport(usePlanned, timingEasee)
@@ -744,6 +753,13 @@ func runFieldCase(c fieldCase, trace func(string, ...any)) (*simSite, *fieldRun)
 		f.plan = &fieldPlan{id: lp.ID, deadline: start.Add(run), run: f, planning: func() []float64 { return fieldPlanningSteps(s) },
 			fixedW: c.planW, needWh: math.Min(askW*run.Hours(), .8*roomW*run.Hours())}
 		s.plan = f.plan.directive
+	case useNoPlan:
+		run, kettle = time.Hour, []time.Duration{20 * time.Minute}
+		svc := &mpc.Service{LoadpointStates: func() []loadpoint.State { return s.mgr.States() }}
+		s.plan = func(now time.Time) (loadpoint.Directive, bool) {
+			d, ok := svc.SlotDirectiveAt(now)
+			return d.LoadpointDirective(), ok
+		}
 	case usePause:
 		run, kettle = 15*time.Minute, []time.Duration{11 * time.Minute}
 		actions = []fieldAction{
@@ -811,6 +827,11 @@ func runFieldCase(c fieldCase, trace func(string, ...any)) (*simSite, *fieldRun)
 		if f.plan != nil || c.goal {
 			deadline := start.Add(run).Local()
 			s.mgr.SetSchedule(lp.ID, loadpoint.NewSchedule(1, deadline.Hour()*60+deadline.Minute(), false, 0, false))
+		}
+		if c.use == useNoPlan {
+			// The goal is out of reach in the run, so the car always asks.
+			s.mgr.SetCarBinding(lp.ID, loadpoint.CarBinding{ID: "car", MaxW: s.p.Car.MaxW})
+			s.mgr.SetTarget(lp.ID, .8, start.Add(3*time.Hour))
 		}
 		if c.battery {
 			fieldBatteryPlan(s, 6000)

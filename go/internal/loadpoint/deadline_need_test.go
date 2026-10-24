@@ -23,6 +23,10 @@ func TestLimitPowerKeepsTheChargersLowestStep(t *testing.T) {
 	if _, maxW, steps = LimitPower(st, []float64{4140, 7360, 11000}); len(steps) != 3 || maxW != 11000 {
 		t.Fatalf("a car above the charger: %v %v", maxW, steps)
 	}
+	st.CarMaxW = 3680
+	if minW, maxW, steps = LimitPower(st, nil); len(steps) != 0 || maxW != 4140 || minW != 4140 {
+		t.Fatalf("a 3.7 kW car on a stepless charger: power %v–%v %v, want the charger's minimum", minW, maxW, steps)
+	}
 }
 
 // The reserve's need and on-power hold to the session car's own charger and
@@ -41,6 +45,11 @@ func TestDeadlineNeedHoldsToTheCar(t *testing.T) {
 	if _, w, ok := DeadlineNeed(st); !ok || w != 7400 {
 		t.Fatalf("a 7.4 kW car on a stepless charger: %v %v", w, ok)
 	}
+	st.CarMaxW = 3680
+	if _, w, ok := DeadlineNeed(st); !ok || w != 4140 {
+		t.Fatalf("a 3.7 kW car on a stepless charger: %v %v, want the charger's minimum", w, ok)
+	}
+	st.CarMaxW = 7400
 	st.CarChargeLimit = .6
 	if need, _, ok := DeadlineNeed(st); !ok || math.Abs(need-(.6-.3)*40000/DefaultChargeEfficiency) > 1e-6 {
 		t.Fatalf("a 60 %% limit: %v %v", need, ok)

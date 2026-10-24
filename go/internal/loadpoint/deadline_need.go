@@ -42,9 +42,10 @@ func DeadlineNeed(st State) (energyWh, powerW float64, ok bool) {
 // LimitPower holds a loadpoint's power to the session car's own charger: the
 // lower of the charger's and the car's maximum, and the charger's steps up to
 // it. When the charger's lowest step is above the car's maximum it keeps that
-// one step: the car takes what it can, and a plan with no step would never
-// charge. The minimum is never below the lowest step: PlanningSteps leaves
-// out levels the charger's phases cannot run.
+// one step, or without steps the charger's minimum: the car takes what it
+// can, and a plan with no step would never charge. The minimum is never below
+// the lowest step: PlanningSteps leaves out levels the charger's phases cannot
+// run.
 func LimitPower(st State, steps []float64) (minW, maxW float64, out []float64) {
 	minW, maxW = st.MinChargeW, st.MaxChargeW
 	lowest := 0.0
@@ -71,6 +72,9 @@ func LimitPower(st State, steps []float64) (minW, maxW float64, out []float64) {
 	if !kept && lowest > 0 {
 		out = append(out, lowest)
 		maxW = lowest
+	}
+	if lowest == 0 && minW > maxW {
+		maxW = minW
 	}
 	if minW > maxW {
 		minW = maxW
