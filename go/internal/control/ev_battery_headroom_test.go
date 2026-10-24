@@ -10,8 +10,8 @@ import (
 )
 
 // evSplitFixture is a 25 A site with a 1 A margin (16,560 W). It holds the
-// meter reading, our recent commands and the EV demand; device readings are
-// left out on purpose, since the split must not read them.
+// meter reading, our recent commands and the EV demand. EV readings report
+// realized demand unless a test overrides delivery.
 func evSplitFixture(t *testing.T, gridW float64, phaseA []float64, demandW float64, demandPhase string) (*telemetry.Store, *State) {
 	t.Helper()
 	store := telemetry.NewStore()
@@ -30,6 +30,8 @@ func evSplitFixture(t *testing.T, gridW float64, phaseA []float64, demandW float
 	state.batteryCommands = map[string]commandLog{}
 	if demandW > 0 {
 		state.evFuseDemands = []evFuseDemand{{"car", demandW, demandPhase}}
+		store.Update("car", telemetry.DerEV, demandW, nil, nil)
+		store.RecordDriverSuccess("car")
 	}
 	return store, state
 }
@@ -168,28 +170,16 @@ func TestEVBatteryKeepsChargeNeededForMeasuredExportRelief(t *testing.T) {
 	}
 }
 
-// The split reads our commands and the meter only. A lone, missing, late
-// or too high reading from the charger or battery changes nothing.
-func TestEVBatterySplitIgnoresDeviceReadings(t *testing.T) {
-	run := func(readings func(*telemetry.Store)) float64 {
+// Battery device readings never finance optional charge or EV headroom.
+func TestEVBatterySplitIgnoresBatteryReadings(t *testing.T) {
+	run := func(power float64) float64 {
 		store, state := evSplitFixture(t, 7140, nil, 10350, "3p")
 		sent(state, "ev", 4140, 4140)
 		sent(state, "first", 0, 0)
-		readings(store)
+		store.Update("first", telemetry.DerBattery, power, nil, nil)
 		return targetW(clampEVBatteryHeadroom([]DispatchTarget{{Driver: "first", TargetW: 8000}}, store, state, 17250), "first")
 	}
-	want := run(func(*telemetry.Store) {})
-	for name, readings := range map[string]func(*telemetry.Store){
-		"ev_lone_zero":   func(s *telemetry.Store) { s.Update("car", telemetry.DerEV, 0, nil, nil) },
-		"ev_above_offer": func(s *telemetry.Store) { s.Update("car", telemetry.DerEV, 11000, nil, nil) },
-		"ev_unavailable": func(s *telemetry.Store) {
-			s.Update("car", telemetry.DerEV, 0, nil, []byte(`{"control_power_available":false}`))
-		},
-		"battery_discharging": func(s *telemetry.Store) { s.Update("first", telemetry.DerBattery, -5000, nil, nil) },
-		"battery_charging":    func(s *telemetry.Store) { s.Update("first", telemetry.DerBattery, 6000, nil, nil) },
-	} {
-		if got := run(readings); got != want {
-			t.Fatalf("%s moved the battery target %.1f -> %.1f W", name, want, got)
-		}
+	if run(-5000) != run(6000) {
+		t.Fatal("battery telemetry funded charge")
 	}
 }

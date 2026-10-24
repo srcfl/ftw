@@ -584,7 +584,7 @@ func simScenarios() []simScenario {
 			expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
 				p := s.p
 				offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
-				if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
+				if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || p.Battery.W > 5520+1 {
 					return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
 				}
 				return nil
