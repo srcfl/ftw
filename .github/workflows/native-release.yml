@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: write
+  statuses: read
 
 concurrency:
   group: native-release-${{ inputs.tag }}
@@ -122,6 +123,33 @@ jobs:
             "${RUNNER_TEMP}/native-release-pages.json"
           printf 'tag=%s\ncommit=%s\nschema=%s\n' "${TAG}" "${source_commit}" "${schema}" >> "${GITHUB_OUTPUT}"
         id: source
+      # A beta publishes only a commit on which every site-test scenario
+      # passed, with known failures still failing: the commit status
+      # siterig/full that the site-test runner (go/test/site/runner) posts
+      # from its own machine. This step only reads it. Stable promotes a
+      # beta, whose commit already passed.
+      - name: Require siterig/full on the exact source
+        if: ${{ inputs.channel == 'beta' }}
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Statuses come newest first; the latest siterig/full counts.
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_COMMIT}/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "siterig/full")][0].state // "missing"')
+          if [ "${state}" = success ]; then
+            echo "siterig/full is success on ${SOURCE_COMMIT}."
+            exit 0
+          fi
+          msg="siterig/full is ${state} on ${SOURCE_COMMIT}; the site-test runner posts it after a full run of that commit (go/test/site/runner/README.md)"
+          if [ "${DRY_RUN}" = true ]; then
+            echo "::warning::${msg}"
+            exit 0
+          fi
+          echo "::error::${msg}"
+          exit 1
       - name: Build complete ARM64 and AMD64 packages
         env:
           TAG: ${{ inputs.tag }}
