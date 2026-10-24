@@ -3556,7 +3556,7 @@
   }
 
   // buildManualChargeSection renders the Tesla-style manual override: an
-  // amp slider (range = the charger's min/max charge current) plus Start /
+  // amp slider (range = the charger's minimum up to evChargeNowTopW) plus Start /
   // Stop. Start pins a persistent manual hold at the slider's amps,
   // which overrides surplus_only and the plan (the fuse clamp still
   // applies); Stop clears the hold and drops back to whatever mode the
@@ -3568,6 +3568,20 @@
       lp.manual && (lp.manual.requested_w === 0 || lp.manual.state === "paused" || lp.manual.state === "pausing")));
   }
 
+  // evChargeNowTopW is the most a hold can order. Core treats the hold as a
+  // ceiling and floors it to the step table within max_charge_w, so a
+  // one-phase charger rated 7,360 W with a table that stops at 3,680 W
+  // charges at 16 A, not 32.
+  function evChargeNowTopW(lp) {
+    var maxW = (lp && lp.max_charge_w) || 0;
+    var steps = lp && Array.isArray(lp.allowed_steps_w) ? lp.allowed_steps_w : [];
+    var topW = 0;
+    steps.forEach(function (w) {
+      if (w > topW && (maxW <= 0 || w <= maxW)) topW = w;
+    });
+    return topW || maxW;
+  }
+
   function buildManualChargeSection(lp) {
     var phases = (lp && lp.phases) || 3;
     var voltage = (lp && lp.voltage_v) || 230;
@@ -3576,7 +3590,7 @@
     function aToW(a) { return Math.round(a * perA); }
 
     var minA = Math.max(1, Math.round(wToA((lp && lp.min_charge_w) || 0)) || 6);
-    var maxA = Math.round(wToA((lp && lp.max_charge_w) || 0)) || 16;
+    var maxA = Math.round(wToA(evChargeNowTopW(lp))) || 16;
     if (maxA <= minA) { maxA = minA + 1; }
 
     var active = !!(lp && lp.manual_active);
