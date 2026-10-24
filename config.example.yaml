@@ -192,7 +192,7 @@ ocpp:
   path: /
   username: ftw
   password: ""                     # required when enabled; use a long random string
-  heartbeat_interval_s: 60
+  heartbeat_interval_s: 30
   # Serve wss:// instead of ws://. client_ca_file additionally requires each
   # charger to present a certificate signed by that CA whose CN or DNS SAN
   # matches the identity in the URL — OCPP 2.0.1 security profile 3.
@@ -220,16 +220,20 @@ state:
 app_link:
   enabled: true
 
-# Anonymous fleet ping. Once a day, at a time that moves, the box tells the
-# FTW relay six things: its FTW version, its release channel, which driver
-# types it runs, roughly how much battery it has, its price zone and roughly
-# how old the install is. No id, no key, no serial, no site name, no counter
-# and no timestamp — nothing in the message says which box sent it. Two
-# limits: those six fields still describe a household, so a rare mix may be
-# the only one of its kind, and the relay sees the address during the request.
-# It saves only daily totals, so the result counts reports, not unique boxes.
-# Settings → FTW app → Fleet statistics shows the exact message this box would send. On by
-# default; `enabled: false` turns it off without a restart.
+# Anonymous daily reports. Statistics are one answer on the box: part of FTW
+# Cloud, and on for a box without Cloud until its owner turns them off under
+# Settings → FTW app → Anonymous statistics, which shows each message. Two
+# reports, each alone and at its own time. The fleet report carries six
+# things: FTW version, release channel, driver types, roughly how much
+# battery, price zone and roughly how old the install is. The energy report
+# carries a closed UTC day's six whole-kWh sums. No box id, no key, no serial,
+# no site name, no counter. Once a release names a relay, both go through it,
+# sealed with a random number drawn new for each report and the day it was
+# sent, so FTW Cloud never sees the address; until then the fleet report goes
+# straight to `endpoint`, which sees the address, and the energy report is not
+# sent.
+# `enabled: false` from an earlier release is read once and kept as "off"; it
+# is no longer a switch of its own.
 fleet_ping:
   enabled: true
   # endpoint: https://cloud.ftw.energy/v1/fleet

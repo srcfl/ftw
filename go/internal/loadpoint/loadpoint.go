@@ -57,10 +57,10 @@ type Config struct {
 
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
 	// delivery each tick. "3p" (default) and "1p" lock the install to
-	// one mode and filter AllowedStepsW accordingly. "auto" lets the
-	// controller switch based on the MPC budget, with a hysteresis
-	// timer (MinPhaseHoldS) preventing flap. Empty == "3p" for
-	// backward compatibility with pre-switching configs.
+	// one mode and filter AllowedStepsW accordingly. "auto" charges on
+	// three phases; only surplus charging below the 3Φ minimum switches
+	// to one, with a hysteresis timer (MinPhaseHoldS) preventing flap.
+	// Empty == "3p" for backward compatibility with pre-switching configs.
 	PhaseMode string `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
 
 	// PhaseSplitW is the wantW threshold below which "auto" picks 1Φ.
@@ -203,6 +203,13 @@ type State struct {
 	// PlanningTarget).
 	CarMaxW        float64 `json:"-"`
 	CarChargeLimit float64 `json:"-"`
+	// CarPhases is 1 when this session's car draws on one phase of a
+	// three-phase order, seen on the site meter, and 0 when unknown; a car
+	// profile's phases may set it later. CarPhase is that phase, 1-3. The
+	// plan counts the car's one-phase levels (OnePhaseCarSteps) and the
+	// order names the current per phase it should take.
+	CarPhases int `json:"-"`
+	CarPhase  int `json:"-"`
 
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
 	// UI has everything for rendering in one fetch.
@@ -260,12 +267,15 @@ type State struct {
 	CommandedSinceMs int64 `json:"commanded_since_ms,omitempty"`
 	// Internal identity of the manual choice used to compute the order.
 	ManualCommandUpdatedAt time.Time `json:"-"`
+	// CommandedPhases is 1 or 3: the phases the last command lands on, from
+	// its phase_mode and split. Zero before the first command.
+	CommandedPhases int `json:"-"`
 
 	// CommandedReason names the dispatch branch that decided CommandedW:
 	// "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
-	// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
-	// "wake_kick". Empty until the first dispatch tick. The UI renders
-	// the specific cause instead of a generic "paused by the box".
+	// "fuse_limit", "import_limit", "site_meter_stale", "manual_hold",
+	// "wake_kick". Empty until the first dispatch tick. The UI renders the specific cause
+	// instead of a generic "paused by the box".
 	CommandedReason string `json:"commanded_reason,omitempty"`
 
 	// GridDeferred is true while MPC has deferred grid-funded planning
@@ -405,6 +415,9 @@ type loadpointRuntime struct {
 	goalRiskNotified  bool
 	vehicleAnchored   bool
 	chargedSinceStart bool
+	// carPhases is this session's evidence of a one-phase car
+	// (one_phase_car.go).
+	carPhases carPhases
 	Config
 
 	pluggedIn            bool
@@ -507,6 +520,7 @@ type loadpointRuntime struct {
 	commandedW      float64
 	commandedKnown  bool
 	commandedReason string
+	commandedPhases int // 1 or 3: where the last command lands; 0 before it
 	// commandedSince is when the current (commandedW, commandedReason) pair
 	// was first ordered. The manual status counts elapsed time from it.
 	commandedSince         time.Time
@@ -561,9 +575,9 @@ func (m *Manager) SetCommandedW(id string, w float64) {
 // dispatch branch chose that value — the fact operators were left to
 // reverse-engineer from amp readings (#1009). Reasons are short stable
 // tokens: "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
-// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
-// "wake_kick". Empty keeps whatever was recorded before (used by the
-// legacy SetCommandedW wrapper). No-op for an unknown id.
+// "fuse_limit", "import_limit", "site_meter_stale", "manual_hold",
+// "wake_kick". Empty keeps whatever was recorded before (used by the legacy SetCommandedW wrapper).
+// No-op for an unknown id.
 func (m *Manager) SetCommanded(id string, w float64, reason string) {
 	m.setCommandedForManual(id, w, reason, time.Time{})
 }
@@ -583,6 +597,15 @@ func (m *Manager) setCommandedForManual(id string, w float64, reason string, upd
 		if changed {
 			lp.commandedSince = time.Now()
 		}
+	}
+}
+
+// setCommandedPhases records the phases the last command lands on.
+func (m *Manager) setCommandedPhases(id string, phases int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp, ok := m.byID[id]; ok {
+		lp.commandedPhases = phases
 	}
 }
 
@@ -834,11 +857,13 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.deliveredHistory = nil
 		lp.notRequestingSince = time.Time{}
 		lp.chargingDeclined = false
+		lp.carPhases = carPhases{}
 	}
 	if !pluggedIn {
 		// Plug-out: drop any pending completion timer / latch.
 		lp.notRequestingSince = time.Time{}
 		lp.chargingDeclined = false
+		lp.carPhases = carPhases{}
 		if lp.capacityFromCar {
 			// The car that measured its own capacity left with its
 			// session — the next one may be different.
@@ -1354,6 +1379,11 @@ func (lp *loadpointRuntime) snapshot() State {
 		CommandedW:               lp.commandedW,
 		CommandedReason:          lp.commandedReason,
 		CommandedKnown:           lp.commandedKnown,
+		CommandedPhases:          lp.commandedPhases,
+		CarPhase:                 lp.carPhases.phase,
+	}
+	if lp.carPhases.phase > 0 {
+		st.CarPhases = 1
 	}
 	if lp.VehicleCapacityWh <= 0 {
 		st.VehicleCapacityWh = 60000

@@ -4,7 +4,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/cloudlink"
@@ -16,7 +15,8 @@ import (
 // device with the scopes the box derives for it, a phone's role, or for a
 // watch what its role and its phone's role share. With Tunnel set, a phone
 // may open a session through FTW Cloud and the QR code on the screen is
-// listed; a watch has no stream and reaches the box through its exchange.
+// listed, and a watch may reach the box's exchange through it: the box
+// answers a watch's key on the exchange alone, never on a stream.
 type CloudRoster struct {
 	Enroll *appenroll.Identity
 	Tunnel bool
@@ -31,7 +31,7 @@ func (r CloudRoster) devices(entries []appenroll.RosterEntry) []cloudlink.Roster
 	var out []cloudlink.RosterDevice
 	for _, e := range entries {
 		d := cloudlink.RosterDevice{ID: e.ID, Key: e.Key, Role: e.Role, Epoch: e.Epoch,
-			Scopes: appproto.GrantScopes(e.Role, e.ParentRole), Tun: r.Tunnel && e.Role != apiauth.RoleWatch}
+			Scopes: appproto.GrantScopes(e.Role, e.ParentRole), Tun: r.Tunnel}
 		if a := e.Agent; a != nil {
 			// An agent row carries its grant, at its approver's scopes now,
 			// so FTW Cloud can hold to it as well (docs/agents.md). It has

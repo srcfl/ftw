@@ -46,25 +46,26 @@ type Controller struct {
 
 	// fuseEVMax is this tick's EV share of the site fuse. nil means no cap.
 	fuseEVMax func() (float64, bool)
+	// fusePhaseRoomA is the current chargers may still add on the busiest
+	// phase. nil, or false, leaves the cap alone to limit them.
+	fusePhaseRoomA func() (float64, bool)
+	// fuseLimitReason names the site limit behind the cap.
+	fuseLimitReason func() string
+	// sitePhases reads the site meter's phases for the one-phase car check.
+	sitePhases func() (SitePhases, bool)
 
-	// perPhaseMeterAmps returns the live site-meter per-phase currents (L1,
-	// L2, L3). Wired from telemetry; nil disables the phase increase gate.
-	perPhaseMeterAmps func() (l1, l2, l3 float64, ok bool)
 	// tickFuseCaps belongs to the serial tick, after one shared budget read.
 	tickFuseCaps        map[string]float64
-	tickFusePhases      int
+	tickFuseRooms       map[string]fuseRoom // serial tick, beside tickFuseCaps
+	tickFuseReason      string
+	tickChoices         map[string]tickChoice // serial tick
 	tickDirectiveActive bool
 	tickDirectiveOK     bool
 	tickDirective       Directive
-	// offerPeaks is each loadpoint's highest recent offer (serial tick).
-	offerPeaks map[string]offerPeak
 	// savedOffers mirrors each loadpoint's last order kept across restarts.
-	savedOffers map[string]savedOffer
-	// fuseResumeTicks is owned by the serial tick. A paused charger needs
-	// two consecutive dispatch ticks with room for a legal step.
-	fuseResumeTicks map[string]int
-	fuseDemandMu    sync.RWMutex
-	fuseDemands     []FuseDemand
+	savedOffers  map[string]savedOffer
+	fuseDemandMu sync.RWMutex
+	fuseDemands  []FuseDemand
 
 	// siteSurplusForEVW is live PV left after house load and battery soak.
 	// A false reading pauses surplus_only rather than guessing an import.
@@ -206,8 +207,6 @@ const nearTermLogCooldown = 10 * time.Minute
 // phaseSwitchMinHold is one 1Φ/3Φ change per 30 min. Faster burns the
 // Easee contactor and winds up the battery PI.
 const phaseSwitchMinHold = 30 * time.Minute
-
-const fuseResumeSafeTicks = 2
 
 // CommandSettle is how long a new current may take to reach the site meter.
 // Easee Cloud needs about 5-15 s (#1674). Until then the meter may still show
@@ -524,14 +523,42 @@ func (c *Controller) SetFuseEVMax(f func() (float64, bool)) {
 	c.fuseEVMax = f
 }
 
-// SetPerPhaseMeterAmps wires the live site-meter per-phase current reader
-// used by the per-phase fuse clamp.
-func (c *Controller) SetPerPhaseMeterAmps(f func() (l1, l2, l3 float64, ok bool)) {
+// SetFusePhaseRoomA wires control.EVFusePhaseRoomA: the current the
+// chargers may still add on the busiest phase, net of every charger's
+// commands the meter may not show yet. Read once per tick, with the cap.
+func (c *Controller) SetFusePhaseRoomA(f func() (float64, bool)) {
 	if c == nil {
 		return
 	}
-	c.perPhaseMeterAmps = f
+	c.fusePhaseRoomA = f
 }
+
+// SetFuseLimitReason wires control.EVLimitReason: "import_limit" when the
+// clock hour's import ceiling holds the cap, else "fuse_limit". Read once
+// per tick, after the cap.
+func (c *Controller) SetFuseLimitReason(f func() string) {
+	if c == nil {
+		return
+	}
+	c.fuseLimitReason = f
+}
+
+// capReason is the reason a command the cap lowered carries.
+func (c *Controller) capReason() string {
+	if c.tickFuseReason != "" {
+		return c.tickFuseReason
+	}
+	if c.fuseLimitReason != nil {
+		if r := c.fuseLimitReason(); r != "" {
+			return r
+		}
+	}
+	return "fuse_limit"
+}
+
+// SetPerPhaseMeterAmps does nothing. Deprecated: control.EVFuseBudget reads
+// the phase currents; this stays until the last test caller is gone.
+func (c *Controller) SetPerPhaseMeterAmps(func() (l1, l2, l3 float64, ok bool)) {}
 
 // SetSiteSurplusForEV wires a per-tick "PV surplus available to the
 // EV" reader for the surplus_only clamp. The function returns watts
@@ -595,16 +622,13 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 	c.peakRemainingSurplusW = f
 }
 
-// fusePhaseMarginA is the per-phase amp headroom held below the breaker.
-const fusePhaseMarginA = 1.0
-
-// applyFuseClampAndCooldown applies the frozen hard cap. A short recovery
-// wait is part of that cap; an unknown startup budget never starts a timer.
-func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, wantW float64) (float64, string) {
+// applyFuseClamp applies this loadpoint's share of the frozen hard cap. It
+// snaps to steps that are legal on the phases the command names.
+func (c *Controller) applyFuseClamp(lpCfg Config, wantW float64, phaseMode string) (float64, string) {
 	if c == nil {
 		return wantW, ""
 	}
-	lpCfg = c.fuseConfig(now, lpCfg)
+	lpCfg = c.fuseConfig(lpCfg, phaseMode)
 	if c.fuseEVMax == nil {
 		return wantW, ""
 	}
@@ -615,9 +639,6 @@ func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, want
 	if !finite(cap) {
 		cap = 0
 	}
-	if c.fuseResumeTicks[lpCfg.ID] > 0 {
-		return 0, "fuse_cooldown"
-	}
 	if wantW <= cap {
 		return wantW, ""
 	}
@@ -626,12 +647,12 @@ func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, want
 	if snapped > 0 && snapped >= lpCfg.MinChargeW {
 		slog.Info("loadpoint fuse-clamp: ramped down",
 			"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap, "snapped_w", snapped)
-		return snapped, "fuse_limit"
+		return snapped, c.capReason()
 	}
 	slog.Info("loadpoint fuse-clamp: below minimum step",
 		"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap,
 		"min_step_w", lpCfg.MinChargeW)
-	return 0, "fuse_limit"
+	return 0, c.capReason()
 }
 
 // SetNearTermPeakSurplusW wires the short-horizon "peak surplus over
@@ -1171,11 +1192,6 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 		return
 	}
 	c.clearFuseDemands()
-	if !dispatchAllowed {
-		for id := range c.fuseResumeTicks {
-			c.fuseResumeTicks[id] = 0
-		}
-	}
 	// Stop every affected charger before observing any session. Observation
 	// may restore or sync state.db; a stalled disk must not delay standdown,
 	// including the chargers after the one whose checkpoint is blocked.
@@ -1220,13 +1236,86 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 	if dispatchAllowed {
 		c.tickDirective, c.tickDirectiveOK = c.currentDirective(now)
 		c.tickDirectiveActive = true
+		defer func() {
+			c.tickFuseCaps, c.tickFuseRooms, c.tickFuseReason = nil, nil, ""
+			c.tickChoices = nil
+			c.tickDirectiveActive = false
+		}()
+	}
+	choices := make(map[string]tickChoice, len(observations))
+	for _, observed := range observations {
+		if !observed.sample.ConnectionUnknown {
+			choices[observed.config.ID] = c.chooseTick(now, observed.config, observed.sample, dispatchAllowed)
+		}
+	}
+	if dispatchAllowed {
+		c.tickChoices = choices
 		c.restoreOffers(now, samples)
 		c.freezeFuseBudget(now, samples)
-		defer func() { c.tickFuseCaps = nil; c.tickFusePhases = 0; c.tickDirectiveActive = false }()
 	}
 	for _, observed := range observations {
-		c.tickOne(ctx, now, observed.config, observed.sample, dispatchAllowed, observed.wasPlugged, observed.wasDelivering)
+		c.tickOne(ctx, now, observed.config, observed.sample, choices[observed.config.ID], dispatchAllowed, observed.wasPlugged, observed.wasDelivering)
 	}
+}
+
+// tickChoice is one loadpoint's surplus and phase decision for a tick. The
+// fuse cap is measured for its phases, and the command names them.
+type tickChoice struct {
+	surplusOn   bool      // live surplus replaces the plan
+	surplusAdds bool      // live surplus may raise a scheduled charge
+	steps       []float64 // surplus steps, picked once
+	phaseMode   string    // the command's phase_mode; "" is the driver's 3p
+}
+
+// chooseTick advances the battery-SoC unlock and the surplus phase dwell
+// once, before the shared fuse budget freezes.
+func (c *Controller) chooseTick(now time.Time, cfg Config, sample EVSample, dispatchAllowed bool) tickChoice {
+	sched, _ := c.manager.GetSchedule(cfg.ID)
+	choice := tickChoice{surplusOn: c.surplusActive(cfg, sched), surplusAdds: c.surplusAddsToPlan(cfg, sched)}
+	if !sample.Connected || !dispatchAllowed || !c.driverCanDispatch(cfg.DriverName) {
+		return choice // No command this tick.
+	}
+	if hold, held := c.GetManualHold(cfg.ID, now); held {
+		choice.phaseMode = holdPhaseMode(hold, cfg, c.siteFuse())
+	} else {
+		if choice.surplusOn || choice.surplusAdds {
+			choice.steps = c.pickSurplusSteps(now, cfg)
+		}
+		// Easee treats an unset phase_mode as 3p and then ignores a 1Φ step.
+		// A schedule still overrides the surplus 1Φ lock, or a deadline
+		// charge stays near 3.7 kW on a cloudy day.
+		// A solar-only loadpoint charges from surplus whatever its goal, so
+		// its schedule does not make the charge a planned one.
+		choice.phaseMode = resolvePhaseMode(cfg.PhaseMode, threePhaseCapable(cfg, c.siteFuse()), sched.HasTarget() && !cfg.SurplusOnly,
+			c.surplusLockedTo1P(cfg.ID), choice.surplusOn, c.dwellSelectedPhaseMode(cfg.ID))
+	}
+	if c.siteFuse().Phases() == 1 {
+		choice.phaseMode = "1p" // As applyInstallationLimits sends it.
+	}
+	return choice
+}
+
+// holdPhaseMode: a pinned hold or loadpoint mode wins. Otherwise Charge now
+// runs as planned charging does: three phases on a charger that can, one on
+// a charger that cannot. A hold below the 3Φ minimum goes out as auto, so a
+// sticky Start on a 1380 W surplus slot does not die at 3Φ's 6 A. A
+// client's 3p on a charger that cannot run three phases is not a pin: the
+// app sends the phases the API reported, and a 3p order there is 0 W. The
+// loadpoint's own mode decides.
+func holdPhaseMode(hold ManualHold, cfg Config, site SiteFuse) string {
+	mode := hold.PhaseMode
+	if mode == "" || (mode == "3p" && !threePhaseCapable(cfg, site)) {
+		mode = cfg.PhaseMode
+	}
+	switch {
+	case mode != "" && mode != "auto":
+		return mode
+	case !threePhaseCapable(cfg, site):
+		return "1p"
+	case hold.PowerW < phaseMinChargeW(cfg, "3p", site):
+		return "auto"
+	}
+	return "3p"
 }
 
 func (c *Controller) observeTick(now time.Time, cfg Config, sample EVSample, dispatchAllowed bool) {
@@ -1246,6 +1335,7 @@ func (c *Controller) observeTick(now time.Time, cfg Config, sample EVSample, dis
 	wasSurplus := cfg.SurplusOnly || (!sched.HasTarget() && armed)
 	c.manager.SetSurplusWithheld(cfg.ID, wasSurplus && enteringSurplusPaused)
 	c.manager.ObserveSample(cfg.ID, sample)
+	c.observePhases(cfg, sample, now)
 	c.restoreManualHoldForSession(cfg.ID)
 	c.evaluateBatteryBoost(cfg.ID, now, sample.Connected, dispatchAllowed && !sample.PowerUnavailable)
 }
@@ -1305,24 +1395,17 @@ func (c *Controller) standDownBeforeStorage(ctx context.Context, now time.Time, 
 	}
 }
 
-func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, sample EVSample, dispatchAllowed, wasPlugged, wasDelivering bool) {
+func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, sample EVSample, choice tickChoice, dispatchAllowed, wasPlugged, wasDelivering bool) {
 	if sample.ConnectionUnknown {
 		delete(c.resumeOffers, lpCfg.ID)
 		return
 	}
-	// Resolve the schedule once per tick — used for the bat-SoC unlock
-	// (surplusActive / surplusAddsToPlan) and the phase decision below.
-	// Zero value when no schedule is set, which makes evalBatSoCArm a
-	// no-op.
-	var sched Schedule
-	if c.manager != nil {
-		sched, _ = c.manager.GetSchedule(lpCfg.ID)
-	}
 	// surplusOn: surplus REPLACES the plan (surplus-only semantics).
 	// surplusAdds: surplus is ADDED on top of a scheduled plan. Never
 	// both true.
-	surplusOn := c.surplusActive(lpCfg, sched)
-	surplusAdds := c.surplusAddsToPlan(lpCfg, sched)
+	surplusOn, surplusAdds := choice.surplusOn, choice.surplusAdds
+	// The fuse cap was measured for this phase mode.
+	phaseMode := choice.phaseMode
 	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
 	selfWithheld := surplusOn && enteringSurplusPaused
 	// Detect the disconnected→connected edge (state.PluggedIn flips
@@ -1400,18 +1483,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		// guard a manual hold can never override. (surplusOn still drives
 		// the phase-mode fallback further down.)
 		cmd["power_w"] = holdW
-		// Phase mode: explicit hold > explicit LP config > surplus
-		// default ("auto") > driver default. Same surplus-active fallback
-		// as the non-hold branch so a sticky Start hold on a 1380 W
-		// surplus slot actually delivers instead of dying at the Easee
-		// driver's unset → "3p" interpretation.
-		switch {
-		case hold.PhaseMode != "":
-			cmd["phase_mode"] = hold.PhaseMode
-		case lpCfg.PhaseMode != "":
-			cmd["phase_mode"] = lpCfg.PhaseMode
-		case surplusOn:
-			cmd["phase_mode"] = "auto"
+		// A hold changed after the budget froze names its own phases; the
+		// phase check below makes it wait for the next tick's budget.
+		phaseMode = holdPhaseMode(hold, lpCfg, c.siteFuse())
+		if phaseMode != "" {
+			cmd["phase_mode"] = phaseMode
 		}
 		switch {
 		case hold.PhaseSplitW > 0:
@@ -1445,7 +1521,8 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			cmd["site_phases"] = site.Phases()
 		}
 	} else {
-		cmdW, planReady, _ := c.computeCommandForBudget(now, lpCfg, sample.PowerW, false)
+		// Snap to steps legal on the phases this command names.
+		cmdW, planReady, _ := c.computeCommandForBudget(now, c.fuseConfig(lpCfg, phaseMode), sample.PowerW, false)
 		cmdReason = "plan"
 		if c.plan != nil {
 			if d, ok := c.currentDirective(now); ok && d.LoadpointFallback[lpCfg.ID] {
@@ -1473,7 +1550,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			if wantW <= 0 {
 				wantW = lpCfg.MaxChargeW
 			}
-			cmdW = c.computeSurplusCmd(now, lpCfg, wantW, sample.PowerW)
+			cmdW = c.computeSurplusCmd(now, lpCfg, wantW, choice.steps)
 			if cmdW > 0 {
 				cmdReason = "pv_surplus"
 			} else {
@@ -1482,7 +1559,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		}
 		// Spare PV may raise a scheduled charge. It must not lower it.
 		if surplusAdds {
-			surplusW := c.computeSurplusCmd(now, lpCfg, lpCfg.MaxChargeW, sample.PowerW)
+			surplusW := c.computeSurplusCmd(now, lpCfg, lpCfg.MaxChargeW, choice.steps)
 			if surplusW > cmdW {
 				cmdW = surplusW
 				cmdReason = "pv_surplus"
@@ -1509,16 +1586,6 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			cmdW = 0
 		}
 		cmd["power_w"] = cmdW
-		// Easee treats an unset phase_mode as 3p and then ignores a 1Φ step.
-		// A schedule still overrides the surplus 1Φ lock, or a deadline
-		// charge stays near 3.7 kW on a cloudy day.
-		phaseMode := resolvePhaseMode(
-			lpCfg.PhaseMode,
-			sched.HasTarget(),
-			c.surplusLockedTo1P(lpCfg.ID),
-			surplusOn,
-			c.dwellSelectedPhaseMode(lpCfg.ID),
-		)
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
 		}
@@ -1545,11 +1612,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 	// A manual diagnostic may lower a site limit, but never replace the
 	// installation's voltage, phase count or fuse with a larger offer.
 	c.applyInstallationLimits(cmd)
+	applyChargerPhaseLimit(cmd, lpCfg, c.siteFuse())
 	if applyCurrentCeiling(cmd) {
 		cmdReason = "charger_limit"
 	}
 	if wantW, ok := cmd["power_w"].(float64); ok {
-		phaseMode, _ := cmd["phase_mode"].(string)
+		phaseMode, _ = cmd["phase_mode"].(string)
 		c.recordFuseDemand(lpCfg.DriverName, wantW, phaseMode)
 		// The reserve directive requires a known physical ceiling. Capture
 		// its intent above, but never turn an unknown cap into permission.
@@ -1558,21 +1626,27 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 				wantW, cmdReason = 0, "fuse_limit"
 			}
 		}
-		limitedW, reason := c.applyFuseClampAndCooldown(now, lpCfg, wantW)
+		limitedW, reason := c.applyFuseClamp(lpCfg, wantW, phaseMode)
 		cmd["power_w"] = limitedW
 		if reason != "" {
 			cmdReason = reason
 		}
 	}
 	// A new API choice can change phase after the shared budget was frozen.
-	// Do not spend a 3p share on one phase; the next tick uses the new choice.
-	if w, ok := cmd["power_w"].(float64); ok && w > 0 && c.tickFusePhases > 1 {
-		if mode, _ := cmd["phase_mode"].(string); mode != "" && mode != "3p" {
+	// Do not spend that budget on other phases; the next tick uses the choice.
+	if w, ok := cmd["power_w"].(float64); ok && w > 0 && c.tickFuseCaps != nil {
+		if mode, _ := cmd["phase_mode"].(string); fusePhase(mode) != fusePhase(choice.phaseMode) {
 			cmd["power_w"], cmdReason = float64(0), "fuse_limit"
 		}
 	}
 	if applyCurrentCeiling(cmd) {
 		cmdReason = "fuse_limit"
+	}
+	// cap_amps_per_phase is how far this order may rise on its phases. A
+	// driver that briefly offers more than the order, as easee_cloud does to
+	// start a car at 6 A, must stay within it. Absent: Core knows no cap.
+	if capA, known := c.capAmpsPerPhase(lpCfg, cmd); known {
+		cmd["cap_amps_per_phase"] = capA
 	}
 	// Tell the manager what was ordered, after every clamp has spoken.
 	// The interruption latch reads this to keep a pause the box chose —
@@ -1583,8 +1657,17 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 	if w, ok := cmd["power_w"].(float64); ok {
 		offerW, haveOffer = w, true
 		c.manager.setCommandedForManual(lpCfg.ID, w, cmdReason, manualCommandUpdatedAt)
-		phase := c.recordOfferPeak(now, lpCfg.ID, w, cmd)
-		c.saveOffer(now, lpCfg, sample, w, phase, cmdReason)
+		mode, _ := cmd["phase_mode"].(string)
+		split, _ := cmd["phase_split_w"].(float64)
+		c.manager.setCommandedPhases(lpCfg.ID, c.commandPhases(mode, w, split))
+		c.saveOffer(now, lpCfg, sample, w, fusePhase(mode), cmdReason)
+	}
+	// A one-phase car takes a third of a three-phase order: command evidence
+	// compares its draw with that.
+	if st, known := c.manager.State(lpCfg.ID); known && haveOffer && st.CarPhases == 1 && c.siteFuse().Phases() == 3 {
+		if mode, _ := cmd["phase_mode"].(string); fusePhase(mode) == "3p" {
+			cmd["expected_w"] = offerW / 3
+		}
 	}
 	payload, err := json.Marshal(cmd)
 	if err != nil {
@@ -1843,9 +1926,12 @@ func (c *Controller) shouldKickWallboxForResume(now time.Time, lpID string, surp
 // decides pause and resume. The magnitude tracks the instant value, or
 // a falling cloud imports before the average catches up. 0 pauses.
 //
+// steps comes from pickSurplusSteps, called once per tick before the
+// shared fuse budget freezes.
+//
 // TODO: siteSurplusForEVW is one site budget. Two surplus loadpoints
 // each take all of it and can import.
-func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW, currentEvW float64) float64 {
+func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW float64, steps []float64) float64 {
 	if c == nil {
 		return wantW
 	}
@@ -1872,21 +1958,16 @@ func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW, curre
 	// `−pvW − loadW`, i.e. PV-magnitude minus house load — invariant
 	// under whatever the home battery is currently doing with the
 	// surplus. The EV's own draw is part of that closure already, so
-	// we don't add currentEvW here.
+	// we don't add it here.
 	instant := surplusW
 	if instant < 0 {
 		instant = 0
 	}
 	avg := c.recordSurplus(lpCfg.ID, instant)
 
-	// Pick the step set: 3Φ-only by default, but fall back to all
-	// allowed steps (which lets the driver hand the wallbox a 1Φ-
-	// eligible amperage) when the forecast says we won't see enough
-	// surplus to sustain 3Φ for the rest of the day. The lock is
-	// sticky: once we've gone 1Φ for the session we stay 1Φ to
-	// avoid cycling the contactor across the phase-mode boundary
-	// each time clouds shift.
-	steps := c.pickSurplusSteps(now, lpCfg)
+	if steps == nil {
+		steps = c.pickSurplusSteps(now, lpCfg) // A hold ended after chooseTick.
+	}
 	minStep := smallestNonZero(steps)
 
 	// Compatibility variables for the rest of the function — the
@@ -2175,37 +2256,28 @@ afterNearTerm:
 
 // surplusLockedTo1P reports whether the surplus_only 1Φ lock is
 // currently active for the given loadpoint. Read-only accessor.
-// resolvePhaseMode picks the phase_mode sent to the driver.
-// A schedule wins, or a deadline charge is stuck on the 1Φ lock.
-// Then the day lock, then the 30 min dwell, then the operator pin.
-func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
+// resolvePhaseMode picks the phase_mode sent to the driver. An operator pin
+// wins; a 3Φ-only charger never gets the surplus 1Φ lock. Unset and "auto"
+// mean the same. A charger that cannot reach 6 A on three phases runs on
+// one. Otherwise planned charging runs on three: one phase never helps the
+// fuse, it puts all the current on one, caps the car near 3.7 kW, and an
+// Easee pauses to switch and may stay there. Only surplus charging without
+// a schedule may use one phase: the day lock, then the 30 min dwell, then
+// auto.
+func resolvePhaseMode(operatorMode string, threePhase, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
 	switch {
-	case scheduleActive:
-		if operatorMode == "" {
-			return "auto"
-		}
+	case operatorMode != "" && operatorMode != "auto":
 		return operatorMode
-	case surplusLocked1P:
-		// A 3Φ-only charger (operator pinned "3p") physically cannot
-		// trickle at 1Φ, so the surplus 1Φ lock must never override it —
-		// defends against a stale lock left from a previous "auto"/"1p"
-		// config. pickSurplusSteps also refuses to set the lock for a
-		// "3p" loadpoint, so this is belt-and-braces.
-		if operatorMode == "3p" {
-			return "3p"
-		}
+	case !threePhase:
 		return "1p"
-	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
-		if dwell != "" {
-			return dwell
-		}
-		if operatorMode == "" {
-			return "auto"
-		}
-		return operatorMode
-	default:
-		return operatorMode
+	case scheduleActive || !surplusOn:
+		return "3p"
+	case surplusLocked1P:
+		return "1p"
+	case dwell != "":
+		return dwell
 	}
+	return "auto"
 }
 
 func (c *Controller) surplusLockedTo1P(id string) bool {
@@ -2435,8 +2507,19 @@ func (c *Controller) computeCommandForBudget(now time.Time, lpCfg Config, curren
 	}
 	remainingWh := budgetWh - alreadyWh
 	wantW := EnergyBudgetToPowerW(remainingWh, remainingS)
+	// A one-phase car takes a three-phase order's current per phase on its
+	// one phase. The plan counts what it takes; the order names that current
+	// on all three, within the charger's maximum.
+	onePhaseCar := false
+	if st, known := c.manager.State(lpCfg.ID); known && st.CarPhases == 1 && c.siteFuse().Phases() == 3 &&
+		fusePhase(c.tickChoices[lpCfg.ID].phaseMode) == "3p" {
+		onePhaseCar, wantW = true, wantW*3
+	}
 	maxW := lpCfg.MaxChargeW
 	if ceiling, ok := d.LoadpointMaxPowerW[lpCfg.ID]; ok {
+		if onePhaseCar {
+			ceiling *= 3
+		}
 		maxW = min(maxW, ceiling)
 		if maxW <= 0 || remainingWh <= 1e-6 || remainingS <= 0 {
 			return 0, true, false

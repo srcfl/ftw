@@ -104,8 +104,7 @@ func TestOnePhaseCarsShareWorstPhaseBudget(t *testing.T) {
 	sender := &fakeSender{}
 	c := newTestController(t, configs, d, map[string]EVSample{"charger-a": {Connected: true, RequestActive: true}, "charger-b": {Connected: true, RequestActive: true}}, sender)
 	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return 1000.0 / 230, 1000.0 / 230, 1000.0 / 230, true })
-	c.SetFuseEVMax(func() (float64, bool) { return 14250, true })
+	c.SetFuseEVMax(meteredEVCap(c, func() float64 { return 1000.0 / 230 }))
 	c.Tick(context.Background(), now)
 	total := 0.0
 	commands := map[string]float64{}

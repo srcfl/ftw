@@ -291,7 +291,7 @@ func parseLANPasswordHash(encoded string) (salt, key []byte, timeCost, memory ui
 	return salt, key, uint32(t), uint32(m), uint8(p), uint32(len(key)), true
 }
 
-func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	lanAuth := false
 	if s.deps.Cfg != nil && s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
@@ -299,8 +299,9 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
 		s.deps.CfgMu.RUnlock()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"lan_auth":   lanAuth,
-		"configured": lanPasswordConfigured(s.deps.State),
+		"lan_auth":       lanAuth,
+		"home_assistant": HomeAssistantIngress(r),
+		"configured":     lanPasswordConfigured(s.deps.State),
 	})
 }
 

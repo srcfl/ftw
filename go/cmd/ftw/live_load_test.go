@@ -76,11 +76,12 @@ func TestLiveLoadAppAndLANShareSourcePowerAndValidity(t *testing.T) {
 				want = 1500
 			case "negative":
 				tel.Update("battery", telemetry.DerBattery, 2000, nil, nil)
-				valid = false
+				want = -1000 // shown as is: production Core cannot see
 			case "offline_ev":
 				tel.Update("charger", telemetry.DerEV, 500, nil, nil)
 				tel.DriverHealthMut("charger").SetOffline()
-				valid = false
+				// Left out, as before #1592: Home use is an estimate, not blank.
+				want = 1000
 			case "idle_ev", "paused_ev":
 				fields := map[string]any{"connected": scenario == "paused_ev", "charging": false,
 					"control_power_observed_at": time.Now().Add(-time.Hour).Format(time.RFC3339Nano),
@@ -136,11 +137,16 @@ func TestLiveLoadOptionsFollowConfigurationForAppLANAndCloud(t *testing.T) {
 		snap := site.Snapshot()
 		status := liveLoadStatus(t, tel, ctrl, options)
 		_, cloudKnown := (&cloudSite{site: site}).Live().Fields[strconv.Itoa(int(appproto.FidLoadW))]
-		known := !batteryDeclared
-		if snap.LoadWKnown != known || (status["load_w"] != nil) != known || cloudKnown != known {
+		// A declared battery that never reported is left out: Home use stays
+		// known on every client and is marked estimated on the LAN.
+		if !snap.LoadWKnown || status["load_w"] == nil || !cloudKnown {
 			t.Fatal("configured never-emitted flow differs between clients")
 		}
-		if known && (snap.LoadW != 1000 || status["load_w"] != float64(1000)) {
+		wantQuality := map[bool]string{true: "estimated", false: "measured"}[batteryDeclared]
+		if status["load_quality"] != wantQuality {
+			t.Fatalf("load_quality = %v, want %s", status["load_quality"], wantQuality)
+		}
+		if snap.LoadW != 1000 || status["load_w"] != float64(1000) {
 			t.Fatal("learning-only identity gate affected live load")
 		}
 		if batteryDeclared {

@@ -254,7 +254,7 @@
     if (state.cloudChecked && (!state.cloud || state.cloud.link !== "on" || state.cloud.statisticsOnly || !state.cloud.cloudTermsAccepted)) return {kind:"cloud"};
     if (unavailable) return { kind: "unavailable" };
     if (!list) return { kind: "loading" };
-    if (!auth || !auth.lan_auth || !auth.configured) return { kind: "password" };
+    if (!auth || (!auth.home_assistant && (!auth.lan_auth || !auth.configured))) return { kind: "password" };
     var box = list.box || {};
     // The box's answer for this very request: on the box itself, or through
     // an SSH tunnel to it, the house password does not count.
@@ -1133,7 +1133,9 @@
         '<p class="access-lede">Let an AI assistant, such as Claude or ChatGPT, read this home and, ' +
         "if you allow it, control it within limits. It connects through FTW Cloud. This box " +
         "decides what it may do and checks every call. No phone app is needed.</p>" +
-        '<p class="access-quiet">For a new box: sign in with the house password you chose, review Cloud terms, then ask your assistant to begin FTW setup. Approve its setup connection below. If its connection page offers a choice, choose “Set up and configure”. The assistant can resume the draft stored on this box.</p>' +
+        '<p class="access-quiet">' + (window.FTWHomeAssistant ?
+          'Home Assistant has signed you in. Review Cloud terms, then ask your assistant to begin FTW setup and approve its connection below.' :
+          'For a new box: sign in with the house password you chose, review Cloud terms, then ask your assistant to begin FTW setup. Approve its setup connection below. If its connection page offers a choice, choose “Set up and configure”. The assistant can resume the draft stored on this box.') + '</p>' +
         '<div id="access-cloud-settings" data-project-statistics-settings></div>' +
         '<div id="access-ready"></div>' +
         '<form id="access-code-form" class="access-code-form" autocomplete="off">' +

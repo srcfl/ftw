@@ -215,10 +215,7 @@ type Identity struct {
 	prepareInviteHome func() (string, error)
 	onInviteClaimed   func(protocol.AgentInvite, protocol.AgentRow)
 	pairing           *pairingCode
-	// watchPairing is the watch code, in a slot of its own so that adding a
-	// watch never cancels a phone's pending code. See MintWatchCode.
-	watchPairing *pairingCode
-	now          func() time.Time
+	now               func() time.Time
 	// randRead is the entropy source. Injectable so a test can prove the
 	// failure path instead of only the happy one.
 	randRead func([]byte) (int, error)
@@ -298,9 +295,6 @@ type pairingCode struct {
 	kind string
 	// attempts counts wrong guesses against this code. See Authorise.
 	attempts int
-	// parent is the full key of the phone a watch code was minted for, and
-	// empty on a phone's code.
-	parent string
 }
 
 // Kinds of pairing code.
@@ -654,7 +648,7 @@ func knownRole(role string) error {
 }
 
 // phoneRole refuses a role a phone cannot hold: one the registry does not
-// define, watch, which only MintWatchCode hands out, and an agent's, which
+// define, watch, which only an owner's phone hands out by key (AddWatch), and an agent's, which
 // only an owner's signed grant hands out.
 func phoneRole(role string) error {
 	if err := knownRole(role); err != nil {
@@ -1142,10 +1136,6 @@ func (i *Identity) Revoke(id string, from Presence) ([]Removed, error) {
 	sort.Strings(gone[1:])
 	for _, key := range gone {
 		delete(i.authorised, key)
-	}
-	// A watch code minted by this phone dies with it, as its watches do.
-	if i.watchPairing != nil && i.watchPairing.parent == fullKey {
-		i.watchPairing = nil
 	}
 	i.mu.Unlock()
 

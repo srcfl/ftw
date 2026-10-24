@@ -18,11 +18,16 @@ func TestManualRestrictionSurvivesRestartWithoutHardwareIdentity(t *testing.T) {
 			restarted.ObserveSession("garage", true, 0, 1000, true, device, "")
 			c := NewController(restarted, nil, nil, nil)
 			c.restoreManualHoldForSession("garage")
-			if h, ok := c.GetManualHold("garage", time.Now()); !ok || !h.Persistent || h.PowerW != 0 {
+			// Only hardware identity can carry power across a restart.
+			want := 0.0
+			if device == "easee:ABC" {
+				want = watts
+			}
+			if h, ok := c.GetManualHold("garage", time.Now()); !ok || !h.Persistent || h.PowerW != want {
 				t.Fatalf("%q/%v: restart lost restriction: %+v %v", device, watts, h, ok)
 			}
 			st, _ := restarted.State("garage")
-			if st.ManualRestoreUnconfirmed != (watts > 0) {
+			if st.ManualRestoreUnconfirmed != (watts != want) {
 				t.Fatalf("%q/%v: confirmation=%v", device, watts, st.ManualRestoreUnconfirmed)
 			}
 			if err := restarted.PersistManualHold("garage", ManualHold{}, true); err != nil {

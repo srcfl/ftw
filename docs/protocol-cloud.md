@@ -6,9 +6,13 @@ or the phone. The bytes live in `go/protocol/cloudwire`, with golden vectors
 in its `testdata`: `cloud-vectors.json` for the uplink,
 `cloud-app-vectors.json` for one whole app session, its
 [tunnel](#tunnel) messages and a pairing proof, and
-`cloud-once-vectors.json` for one [one-shot read](#one-shot-read), and
+`cloud-once-vectors.json` for one [one-shot read](#one-shot-read),
+`cloud-once-x-vectors.json` for one request of the [exchange](#exchange)
+through the service, and
 `cloud-shard-vectors.json` for which hosts a client may follow and how it
-reads a restart's spread ([Shards and restarts](#shards-and-restarts)).
+reads a restart's spread ([Shards and restarts](#shards-and-restarts)), and
+`cloud-tile-vectors.json` for the three shapes of a [tile](#tiles-ftwhistoryread)
+and how they lay back together.
 `srcfl/ftw-cloud`, the phone and the watch replay them. `cloudwire.View` is the phone's
 [freshness](#freshness) rules in Go, and the cases listed there are its tests.
 
@@ -43,7 +47,7 @@ for both live in `go/protocol`, under Apache-2.0
 |---|---|---|---|
 | Uplink | Box | `wss://cloud.ftw.energy/v1/box` | TLS 1.3, a handshake bound to the TLS session on both sides, every box message signed |
 | App session | Phone | `wss://cloud.ftw.energy/v1/app?home=<id>` | TLS 1.3, then Noise IK to the service's static key. Inside it, the phone's own Noise session with its box rides as [`tun`](#tunnel) |
-| One-shot read | Watch | `POST https://cloud.ftw.energy/v1/app/once?home=<id>` | TLS 1.3, then Noise IK to the service's static key, inside one request |
+| One-shot read | Watch | `POST https://cloud.ftw.energy/v1/app/once?home=<id>` | TLS 1.3, then Noise IK to the service's static key, inside one request. Inside it, a watch's [exchange](#exchange) with its box rides as `x` |
 | Extension read | Extension | `GET https://cloud.ftw.energy/v1/now` | TLS and an extension token; the data inside is box-signed |
 | Push | Service | APNs | Box-signed payloads where they carry data |
 
@@ -360,7 +364,7 @@ with two different values, so neither side's check passes through it.
    |---|---|---|
    | `boxNonce` | bstr, 32 B | Echo |
    | `ekm` | bstr, 32 B | The service's exporter value for this TLS session |
-   | `have` | map text→text | Tile id to etag, for the tiles the service holds |
+   | `have` | map text→text | Tile id to etag, for the closed tiles the service holds |
    | `rosterSeq` | uint | The roster number the service holds |
    | `statsPolicy` | text, optional | The statistics policy this service is approved to ingest. Missing means no statistics; the box sends none |
 
@@ -376,9 +380,10 @@ with two different values, so neither side's check passes through it.
    before this check passes.** A proxy that reads `hello` learns the box's
    public key and grant id, and cannot use them.
 4. **Box → service:** a `roster`, at every connect (see [Roster](#roster));
-   then one full message of each class the grant allows; then the tiles
-   missing from `have`. While the link waits for a purge, the box sends only
-   `bye` instead (see [Revocation](#revocation-and-deletion)).
+   then one full message of each class the grant allows; then the trailing
+   tile whole and the closed tiles missing from `have` (see
+   [`tiles`](#tiles-ftwhistoryread)). While the link waits for a purge, the
+   box sends only `bye` instead (see [Revocation](#revocation-and-deletion)).
 5. After that the box sends on change, by the cadence rules.
 
 ## Classes
@@ -617,16 +622,71 @@ when its own rules (enabled, cooldown) allow. Delivery is best effort.
 
 ### `tiles`: `ftw.history.read`
 
-The body is the app protocol's `hist.chunk` body: `tileId`, `etag`, `res`,
-`startMs`, `stepMs`, `series`, `data` and `partial`. A closed tile has the
-same tile id, etag and bytes as the box serves over Noise.
+The box's 5-minute history of the last 48 hours, so a phone can draw it while
+the box cannot answer. The body is the app protocol's `hist.chunk` body:
 
-- `res` is `5m`. The service keeps 48 hours.
-- `series` is drawn from `grid_w`, `pv_w`, `battery_w` and `load_w`, which the
-  box serves today, and `ev_w` and `battery_soc`, which C2 adds.
-- When a 5-minute bucket closes, the box appends to the trailing tile. Only
-  then does `startMs` differ from the Noise meaning: it is the first new
-  bucket, and `partial` is true.
+| Field | Type | Meaning |
+|---|---|---|
+| `tileId` | text | `5m/1/<index>`: the 12-hour tile, at stride 1, as the app protocol names it |
+| `etag` | text | FNV-1a of `data`, as the app protocol computes it |
+| `res` | text | `5m` |
+| `startMs` | int | Wall time of the first point. The tile's start, except in an append |
+| `stepMs` | uint | 300,000 |
+| `series` | [text] | `grid_w`, `pv_w`, `battery_w` and `load_w`, in that order and no other: the series the app asks for over Noise |
+| `data` | bstr | int32 LE, one block per series, the app protocol's missing value where the box has no record |
+| `partial` | bool | The tile is still filling |
+
+A body is one of three shapes. `cloudwire.Tiles.Check` holds them, and
+`cloud-tile-vectors.json` has one of each. A tiles envelope is at most 4 KiB
+(`TileEnvelopeMax`); a whole tile is about 2.6 KB.
+
+- **Closed:** `partial` false, `startMs` the tile's start, all 144 points.
+  It has the same tile id, etag and bytes as the box serves over Noise for a
+  query of those series at 5 minutes.
+- **Whole:** `partial` true, `startMs` the tile's start, all 144 points, with
+  the missing value from the first bucket that has not closed. It replaces
+  every piece of that tile the receiver holds.
+- **Append:** `partial` true, `startMs` a later bucket, and only the buckets
+  that closed since the last piece of that tile: `data` holds as many points
+  per series as fit. The receiver lays it over what it holds.
+
+The box counts a bucket closed 30 s after it ends, when the history writer
+has committed it. Then:
+
+- It sends an append for the trailing tile, or the tile whole when no piece
+  of it has gone on this connection or after 11 appends, so the service holds
+  at most 12 pieces of it and the box rereads it once an hour.
+- When the tile's last bucket closes it sends the closed tile instead, and
+  nothing for the next tile until a bucket of it closes.
+- Once an hour it packs the closed tiles of the last 48 hours again and
+  sends any whose etag changed, as when the ledger repaired a gap.
+- At each connect, after the full state, it sends the trailing tile whole
+  and every closed tile of the last 48 hours that `hello_ok.have` lacks at
+  that etag, newest first. `resync {what: [tiles]}` sends the tiles it names,
+  or all of them when it names none, whatever `have` says.
+- When `ftw.history.read` leaves the grant it forgets what it sent, since the
+  service drops what it held; when it comes back, the box sends every tile
+  again, as at connect.
+
+The box reads its ledger at most once per tick, one tile at a time, so a
+reading never waits long behind a pass. It sends tiles only while NTP has
+synced its clock, since tiles are dated by wall time, and only under a grant
+with `ftw.history.read`, which it checks again before each one. They count
+against the byte budget: about 100 KB a day.
+
+The service keeps each tile until 48 hours after it ends, so up to 60 hours
+of history, and drops them all when the roster runs out. A phone reads them
+only while the roster is in force, so with the box away that is 18 to 24
+hours after the box was last heard. The service sends the box
+`resync {what: [tiles]}`, at most once per 5 minutes, when a roster gives
+history back and when room frees after it dropped a tile for lack of it.
+
+`cloudwire.Lay` puts what a receiver holds back together: a closed tile as
+it is, and the trailing tile from its newest whole piece with each later
+append laid over it, in the order the box sent them, by `wallMs` and then
+`seq`, since `seq` starts again when the box does. A later closed tile
+replaces an earlier one, never an older one a later. The trailing tile stays
+partial, and its etag is never offered as held.
 
 ### `hb`: every device in the roster
 
@@ -850,7 +910,7 @@ a lane 0 frame closes the uplink. A fuzz test covers it.
 | `challenge` | `{v, nonce}` | First message. Unsigned |
 | `hello_ok` | See Handshake | Signed by the service key |
 | `watch` | `{hz: 1}` | Raises the period to 1 s for 60 s. While any phone of the home looks, the service sends it at once, every 50 s after that, and again when the box connects. Without it the box returns to 5 s. The box ignores any other `hz` |
-| `resync` | `{what, tiles}` | `what` holds `full`, `tiles` or `roster`; `tiles` lists tile ids. The box honours at most one per 5 minutes and ignores the rest |
+| `resync` | `{what, tiles}` | `what` holds `full`, `tiles` or `roster`; `tiles` lists tile ids, and none means every tile of the last 48 hours. The box honours at most one per 5 minutes and ignores the rest. The service sends one for tiles when a roster gives history back, and when room frees after it dropped a tile |
 | `purged` | `{atMs, what, grantId, statsId}` | Signed by the service key. `what` is `home`, `copy` or `stats`. Sent once every deletion it names is done |
 | `tun` | `{dev, sid, d}` | A phone's own session with the box. See [Tunnel](#tunnel). Only to a box that lists `tun` in `hello.caps` |
 
@@ -898,6 +958,9 @@ as it decides for the same session over the relay.
 - **Effective scope** of a device is its `scopes` intersected with
   `grant.scopes`. It is empty while the readable copy is off, and a device
   with `tun` still opens a session for its [tunnel](#tunnel).
+- A watch has `tun` whenever a phone may have it. For a watch it opens the
+  [exchange](#exchange) and nothing else: the box answers a watch's key on
+  the stream with silence.
 - A device that leaves the roster loses its sessions (4403), tokens and APNs
   registrations within a second of the service receiving the roster, which
   needs the uplink to be up. A device whose `epoch`, `role` or effective scope
@@ -937,7 +1000,7 @@ as it decides for the same session over the relay.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `envelopes` | [Envelope] | Box envelopes in rising `seq`, each the box's own CBOR map, unchanged: for each class the device may read, the newest one the service holds; the newest `live` that carried `sources`; and the newest `hb`. Empty after an hour without the box, and while the readable copy is off |
+| `envelopes` | [Envelope] | Box envelopes in rising `seq`, each the box's own CBOR map, unchanged: for each class the device may read but `tiles`, the newest one the service holds; the newest `live` that carried `sources`; and the newest `hb`. Empty after an hour without the box, and while the readable copy is off. A phone asks for tiles with `tiles.get` |
 | `lastSeenMs` | int | Service wall time when it last heard from the box |
 | `online` | bool | The box's uplink is up now |
 | `more` | uint | How many envelopes did not fit in message 2. They follow it as ordinary frames, in rising `seq` |
@@ -959,7 +1022,7 @@ the table.
 |---|---|---|
 | `watch` | Any device | `{hz}`: 1 when the phone looks at the home, 0 when it looks away. It holds until the next `watch` or the end of the session |
 | `tun` | A device with `tun` | `{sid, d}`. The phone's session with its box. See [Tunnel](#tunnel). The service answers `tun` the same way |
-| `tiles.get` | Devices with `ftw.history.read` | `{have}`, tile id to etag. The service answers with the `tiles` envelopes the phone lacks |
+| `tiles.get` | Devices with `ftw.history.read` | `{have}`, tile id to etag of the closed tiles the phone holds. The service answers with the `tiles` envelopes the phone lacks: each closed tile it holds that `have` does not name at that etag, and every piece of the trailing tile, oldest tile first and each tile's pieces in the order the box sent them. Then `tiles.end {n}`, where `n` counts them. It answers this while the box is away too, and a device without the scope gets `tiles.end {n: 0}` |
 | `token.get` | Any device | Answered with `token {token, expiresInS}`. A new token replaces the device's old one |
 | `push.register` | Any device | `{apnsToken, environment, kind, activityId, app}`. One registration per APNs token; a Live Activity and its push-to-start each register their own. `app` is `iphone`, the default when absent, or `watch`, and picks the APNs topic |
 | `push.unregister` | Any device | `{apnsToken}` |
@@ -1219,12 +1282,15 @@ exactly as `/v1/app` admits a phone and keeps nothing after the answer.
    one-shot handshake and an app session handshake never stand in for each
    other.
 2. Message 1 carries one unsigned envelope: `read`, `token.get`,
-   `push.register` or `push.unregister`. The service refuses any other type,
-   an owner's `suspend` among them, with 400 before message 2.
+   `push.register`, `push.unregister` or `x` (see [Exchange](#exchange)).
+   The service refuses any other type, an owner's `suspend` among them,
+   with 400 before message 2.
 3. The service admits the watch by the rules of the app session: its key in
    the home's roster, a roster that has not run out, no suspension, and a
-   non-empty effective scope, so the readable copy must be on. A refusal is 403 with an empty body, before message 2, and does
-   not say which check failed.
+   non-empty effective scope, so the readable copy must be on. For `x` the
+   roster entry's `tun` stands in for the effective scope, as it does for a
+   phone's tunnel, so commands work with the copy off. A refusal is 403 with
+   an empty body, before message 2, and does not say which check failed.
 4. The answer is 200 with `content-type: application/octet-stream`. Its body
    is message 2 and then, for a `read`, the envelopes that did not fit, as
    transport messages. Each message, message 2 included, comes after its
@@ -1249,8 +1315,95 @@ has stored the change.
 4 KiB; the whole answer within 10 s. Past a limit the service answers 429, a
 longer message 1 gets 400, and a service without a Noise key answers 501.
 
-When FTW Cloud is off, a watch on its own reads `now` on the box's exchange
-through the relay instead, and prices and the plan wait for the phone.
+With the readable copy off, a watch on its own shows what it holds and the
+age of it, and prices and the plan wait for the phone.
+
+## Exchange
+
+A watch's commands go to its box through the box's exchange
+([ADR 0009](adr/0009-watch-exchange.md), decisions 1 and 2): short Noise
+sessions, `ftw.exchange.v1`, IK to the box's static key, which live on the
+box and answer one request at a time. The relay that first carried them is
+gone (17 October 2026), so each request rides one
+[one-shot request](#one-shot-read) to the service, and the service hands it
+to the box on the uplink. It reads neither the request nor the answer.
+
+1. The watch posts a one-shot request whose message 1 carries `x {d}`. `d`
+   is one exchange message: handshake message 1 with the watch's `hello`
+   (608 bytes), or a request of one lane 0 frame, `cmd` or `now` (536).
+2. The service admits the watch as step 3 of the one-shot read says, with
+   `tun` in place of the effective scope, and only a roster entry with role
+   `watch`.
+3. It sends `x {dev, id, d}` down the uplink: `dev` the roster id its own
+   handshake proved, `id` a number of its own for this request. It never
+   takes either from the watch.
+4. The box answers `x {dev, id, d}` with the same `dev` and `id`. `d` is the
+   exchange's answer: message 2 with `hello_ok` (1,072 bytes), or two lane
+   0 frames (1,072), `cmd.ack` and `cmd.result`, or `now` and a `tick`. An
+   empty `d` is the box's silence: a stranger, a key that is not the device
+   `dev` names, a spent session, or a message it could not read.
+5. The service answers 200 with message 2 carrying `x {d}`, the box's `d`
+   unchanged, and keeps nothing.
+
+**`x`**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `dev` | text | The roster device id of the watch. On the uplink only; the service sets it |
+| `id` | uint | The service's number for one request, below 2³², which the box copies into its answer. On the uplink only |
+| `d` | bstr | One exchange message, or empty for no answer |
+
+- **No answer.** The service answers `x` with an empty `d` at once when the
+  box is not connected, did not say `x` in `hello.caps`, or has 8 requests
+  open; and after 5 s without the box's answer. The watch cannot tell
+  these apart, and does not need to: an exchange session that got no
+  answer is spent, and a command that got none is sent again under its
+  `cmdId`, which the box's command log answers with the stored outcome,
+  unless the box restarted meanwhile (below).
+- **A restart forgets.** The command log lives in the box's memory. A box
+  that restarted between a command and its retry no longer knows the
+  `cmdId`, and would act again. `hello_ok.clock.uptimeMs` says so: a new
+  session's uptime below the one the command was sent in means a restart.
+  The watch then sends the command no more, and says no answer came, which
+  may mean it ran.
+- **The box checks it again.** `dev` must name a watch of this box; one
+  that does not costs the box nothing, not even a Diffie-Hellman. The box
+  runs the handshake and admits the watch by its key, exactly as ADR 0009
+  says, and answers only if the key the handshake proved is the device
+  `dev` names. A request is tried only against that device's sessions.
+- **Replays end nothing.** A new session stamps nothing and writes nothing
+  until its first transport message decrypts. A watch holds at most 2
+  sessions and the box 8; past either, the oldest session that has not
+  proved itself goes first, never the newcomer. The box takes 12 handshakes
+  a minute from one watch and 60 in all.
+- **What the service can do.** Drop, delay or replay a request. It cannot
+  read or forge `d`. A replayed message 1 opens a session nobody can use
+  and ends no working one; a replayed request fails in its session's
+  transport, and a replayed `cmd` in a new session meets the command log.
+  Every `cmd` carries its own expiry, in box uptime.
+- **What a watch may do.** The exchange takes `cmd` with `loadpoint.hold`
+  alone, which Charge now, Pause and Back to the plan send, and `now`. Any
+  other op is answered `E_OP_NOT_GRANTED` before it runs, whatever the
+  watch role's scopes reach (ADR 0009, decision B).
+- **The box's share.** `x` answers count against the tunnel's 24-hour
+  budget and against their own tenth of it, and stop once the tunnel has
+  spent nine tenths, so phones keep the last of it. The box takes 120
+  requests a minute. A request whose answer could not leave is dropped
+  unanswered and runs nothing.
+- **What the service learns.** That a watch of this home sent a request
+  and when, and when the answer came. Every request and every answer after
+  the handshake has one length, and the box answers a `cmd` no sooner than
+  400 ms after it arrived, applied or refused, so the service cannot tell a
+  read from a command, or a refusal from a success.
+- **Limits.** The one-shot read's: one request at a time per device and 30
+  a minute. A command takes two (the handshake and the `cmd`) and a third
+  when its result had not settled. `d` is at most 2,048 bytes either way.
+- **Enrolment.** An owner's phone adds a watch over its own box session,
+  with a passkey step-up, by the watch's public key:
+  `POST /api/app-link/pairing {"role": "watch", "key": "<base64url>"}`. The
+  box lists it in the next roster, so its first request is admitted like
+  any other. No code crosses the service, and a request for a watch
+  without a key is refused.
 
 ## Extension token
 
@@ -1495,7 +1648,9 @@ writes do not gain access. CGNAT is not a private network for this choice.
   deletes the home's unpublished rows before accepting another report. If
   the box is offline, this happens on reconnect.
 - **Silence:** after an hour without the box's socket, the service serves only
-  `lastSeenMs` and no readings. When the roster runs out, it closes sessions
+  `lastSeenMs`, no readings, and the tiles, each until 48 hours after its
+  end or until the roster runs out. A tile is dated history and never reads
+  as now. When the roster runs out, it closes sessions
   and refuses reads. After 30 days it drops tokens and APNs registrations.
   After 90 days without a valid roster it deletes the home as in a purge.
 - **A new home** that sends no roster within 24 hours is deleted.
@@ -1576,7 +1731,12 @@ applied.
 
 Per home, the service keeps in memory the newest envelope of each class, the
 newest `live` that carried `sources`, 48 hours of tiles and a one-hour ring of
-events. It writes no live readings to disk; the statistics files hold the
+events. For tiles that is at most five closed tiles and 16 pieces of the
+trailing tile, each as the box signed it, and at most 64 KiB per home; a
+tile that fails `cloudwire.Tiles.Check` or is over 4 KiB is dropped and
+counted. All homes together hold at most a fixed number of tile bytes, past
+which new tiles are dropped and counted. `have` in `hello_ok` names the
+closed tiles held. It writes no live readings to disk; the statistics files hold the
 only readings it stores. Its registry holds the home id, the box key, the
 roster, suspensions, the current and deleted `statsId`s, APNs registrations
 and token hashes.
@@ -1665,11 +1825,17 @@ constants, so `srcfl/ftw-cloud` need not spell them by hand.
 | Phone messages | 20 in a burst, then 2 a second |
 | App session message 1 | Within 10 s |
 | One-shot reads | One at a time per device, 30 a minute; message 1 at most 4 KiB; answered within 10 s |
+| Exchange through the service | Answered within 5 s or with an empty `d`; 8 open per box; `d` at most 2,048 bytes |
+| Exchange at the box | 8 sessions, 2 per watch; 12 handshakes a minute per watch, 60 in all; 120 requests a minute; `x` a tenth of the tunnel budget, stopped at nine tenths |
 | Roster `ttlS`, renewal | 24 hours, every 6 hours |
 | Extension token | 7 days |
 | Alert age for buttons | 10 minutes |
 | `box.unreachable` after | 600 s |
-| Readings served after silence | 1 hour |
+| Readings served after silence | 1 hour; tiles until 48 hours after their end, or until the roster runs out |
+| Tiles | `5m`, 12-hour tiles, the last 48 hours: at most 5 closed and 16 pieces of the trailing one, 64 KiB, per home; 4 KiB an envelope |
+| Bucket counted closed | 30 s after it ends |
+| Trailing tile sent whole | At each connect, after 11 appends, and when its first bucket closes |
+| Closed tiles packed again | Every hour, sent when the etag changed |
 | Sessions closed | When the roster runs out |
 | Tokens and APNs dropped after | 30 days |
 | Home deleted after | 90 days without a roster; 24 hours for a new home without one |
@@ -1692,3 +1858,9 @@ codes, Noise key or browser subscriptions. It grants no remote access. Core
 also rejects tunnels locally in that mode and emits no live or event data.
 Collection stays off until the signed C8 review; the default operator setting
 is empty. Withdrawal and retention continue while it is paused.
+
+Since 24 October 2026 a box without Cloud no longer starts a statistics-only
+roster: its statistics are the two anonymous daily reports, through the
+Oblivious HTTP relay (ADR 0008, "Anonymous daily reports and one statistics
+answer"). Statistics-only rosters already running keep working until the
+owner turns statistics off.

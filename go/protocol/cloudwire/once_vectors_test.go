@@ -320,3 +320,165 @@ func TestPushRegisterNamesTheApp(t *testing.T) {
 		t.Fatalf("a watch registration read app %q: %v", back.App, err)
 	}
 }
+
+// testdata/cloud-once-x-vectors.json freezes one exchange request through
+// the service byte for byte: the watch's x {d} in message 1, the x {dev, id,
+// d} the service sends the box and the one the box sends back, and message 2
+// with the box's d as the service writes it. d is filler of the exchange's
+// real lengths; the exchange's own bytes are in srcfl/ftw
+// go/internal/appuplink/testdata/exchange-vectors.json.
+const onceXVectorsPath = "testdata/cloud-once-x-vectors.json"
+
+type onceXVectorFile struct {
+	ServiceStatic    string            `json:"serviceStatic"`
+	ServicePublic    string            `json:"servicePublic"`
+	ServiceEphemeral string            `json:"serviceEphemeral"`
+	WatchStatic      string            `json:"watchStatic"`
+	WatchPublic      string            `json:"watchPublic"`
+	WatchEphemeral   string            `json:"watchEphemeral"`
+	Home             string            `json:"home"`
+	Prologue         string            `json:"prologue"`
+	Msg1Payload      string            `json:"msg1Payload"`
+	Request          string            `json:"request"`
+	Down             string            `json:"down"`
+	Up               string            `json:"up"`
+	Msg2Payload      string            `json:"msg2Payload"`
+	Answer           string            `json:"answer"`
+	Notes            map[string]string `json:"notes"`
+}
+
+func TestOnceExchangeVectors(t *testing.T) {
+	labels := map[string]string{
+		"serviceStatic":    "ftw.cloud once vector service static",
+		"serviceEphemeral": "ftw.cloud once x vector service ephemeral",
+		"watchStatic":      "ftw.cloud once vector watch static",
+		"watchEphemeral":   "ftw.cloud once x vector watch ephemeral",
+	}
+	serviceStatic := fixedX25519(t, labels["serviceStatic"])
+	serviceEph := fixedX25519(t, labels["serviceEphemeral"])
+	watchStatic := fixedX25519(t, labels["watchStatic"])
+	watchEph := fixedX25519(t, labels["watchEphemeral"])
+	raw, err := os.ReadFile(vectorsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var signed vectorFile
+	if err := json.Unmarshal(raw, &signed); err != nil {
+		t.Fatal(err)
+	}
+	home := signed.BoxKey.Home
+	prologue := OncePrologue(home)
+	dev := DeviceID(watchStatic.Public())
+
+	// An exchange handshake's message 1, and its message 2 from the box.
+	request := bytes.Repeat([]byte{0x5a}, appwire.Message1Overhead+512)
+	answer := bytes.Repeat([]byte{0xa5}, appwire.Message2Overhead+1024)
+	msg1Payload, err := Unsigned(MsgX, AppX{D: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg2Payload, err := Unsigned(MsgX, AppX{D: answer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := func(x X) []byte {
+		body, err := Marshal(x)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := Envelope{T: MsgX, B: body}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := EncodeFrame(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(f) > MaxXFrame {
+			t.Fatalf("an x frame is %d bytes, over %d", len(f), MaxXFrame)
+		}
+		return f
+	}
+	down := frame(X{Dev: dev, ID: 1, D: request})
+	up := frame(X{Dev: dev, ID: 1, D: answer})
+
+	watch, err := appwire.NewInitiator(appwire.InitiatorOptions{
+		StaticKey: watchStatic, RemoteStatic: serviceStatic.Public(), Prologue: prologue, Ephemeral: &watchEph,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := appwire.NewResponder(appwire.HandshakeOptions{StaticKey: serviceStatic, Prologue: prologue, Ephemeral: &serviceEph})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg1, err := watch.WriteMessage(msg1Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg1) > OnceMessage1MaxBytes {
+		t.Fatalf("message 1 is %d bytes", len(msg1))
+	}
+	got1, err := service.ReadMessage(msg1)
+	if err != nil || !bytes.Equal(got1, msg1Payload) {
+		t.Fatalf("message 1: %v", err)
+	}
+	msg2, err := service.WriteMessage(msg2Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := OnceAnswer(msg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := SplitOnceAnswer(body)
+	if err != nil || len(parts) != 1 {
+		t.Fatalf("split %d parts: %v", len(parts), err)
+	}
+	got2, err := watch.ReadMessage(parts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := DecodeEnvelope(got2)
+	var x AppX
+	if err != nil || env.T != MsgX || len(env.Sig) != 0 || Unmarshal(env.B, &x) != nil || !bytes.Equal(x.D, answer) {
+		t.Fatalf("the watch read message 2 as %+v: %v", env, err)
+	}
+
+	out := onceXVectorFile{
+		ServiceStatic: secretHex(labels["serviceStatic"]), ServicePublic: hex.EncodeToString(serviceStatic.Public()),
+		ServiceEphemeral: secretHex(labels["serviceEphemeral"]),
+		WatchStatic:      secretHex(labels["watchStatic"]), WatchPublic: hex.EncodeToString(watchStatic.Public()),
+		WatchEphemeral: secretHex(labels["watchEphemeral"]),
+		Home:           home, Prologue: hex.EncodeToString(prologue),
+		Msg1Payload: hex.EncodeToString(msg1Payload), Request: hex.EncodeToString(msg1),
+		Down: hex.EncodeToString(down), Up: hex.EncodeToString(up),
+		Msg2Payload: hex.EncodeToString(msg2Payload), Answer: hex.EncodeToString(body),
+		Notes: map[string]string{
+			"keys":    "Secrets are SHA-256 of the labels in once_vectors_test.go. X25519 clamps them.",
+			"request": "The POST body is message 1, which carries x {d}: one exchange message.",
+			"down":    "The frame the service sends the box: x {dev, id, d}, dev from its own handshake, id its own number.",
+			"up":      "The box's answer under the same dev and id; d goes to the watch unchanged.",
+			"answer":  "Message 2 after its length as u16 big endian. An empty d means no answer came.",
+		},
+	}
+	gotJSON, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotJSON = append(gotJSON, '\n')
+	if *update {
+		if err := os.WriteFile(onceXVectorsPath, gotJSON, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(onceXVectorsPath)
+	if err != nil {
+		t.Fatalf("%v (run with -update to create it)", err)
+	}
+	if !bytes.Equal(gotJSON, want) {
+		t.Fatalf("the bytes no longer match %s. If the wire change is intended, "+
+			"regenerate with -update and pair the change with srcfl/ftw-cloud and the watch", onceXVectorsPath)
+	}
+}

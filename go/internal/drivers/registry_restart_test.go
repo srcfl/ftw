@@ -1332,3 +1332,29 @@ function driver_command(action, w, cmd) end
 		t.Errorf("LastSuccess advanced without any host.emit call: %v", h.LastSuccess)
 	}
 }
+
+// The fleet report's share of failed polls counts the poll loop's polls,
+// failed or not, and nothing else.
+func TestRunLoopCountsPollsAndFailedPolls(t *testing.T) {
+	r := NewRegistry(telemetry.NewStore())
+	src := `
+local n = 0
+function driver_init(config) host.set_poll_interval(50) end
+function driver_poll()
+  n = n + 1
+  if n % 2 == 0 then error("meter did not answer") end
+  return 50
+end
+function driver_command(action, w, cmd) end
+`
+	path := writeTestDriver(t, src)
+	if err := r.Add(context.Background(), config.Driver{Name: "d1", Lua: path}); err != nil {
+		t.Fatal(err)
+	}
+	defer r.Remove("d1")
+	time.Sleep(400 * time.Millisecond)
+	polls, errors, _ := r.tel.PollsLastDay(time.Now())
+	if polls < 4 || errors < 2 || errors > polls/2+1 {
+		t.Fatalf("polls %d, failed %d after 400ms of 50ms polls, every second one failing", polls, errors)
+	}
+}

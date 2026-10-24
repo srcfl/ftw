@@ -41,6 +41,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/coverage"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/energyreport"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/fleetping"
@@ -114,6 +115,10 @@ type Deps struct {
 	// that could quietly disagree with it. Nil in tests and minimal
 	// embeddings; GET /api/fleet-ping then says so.
 	FleetPing *fleetping.Pinger
+
+	// EnergyReport is the anonymous daily energy report, held for the same
+	// reason: Settings shows the report it would send. Nil leaves it out.
+	EnergyReport *energyreport.Sender
 
 	// Cloud is the box's FTW Cloud grant and uplink. Nil in tests and
 	// minimal embeddings; the /api/cloud routes then say it is unavailable.

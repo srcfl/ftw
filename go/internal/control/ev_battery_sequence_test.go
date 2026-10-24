@@ -53,12 +53,15 @@ func TestJoinedEVWaitsForMeasuredBatteryBackoffThenResumes(t *testing.T) {
 		})
 	controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
 	controller.SetManualHold(config.ID, loadpoint.ManualHold{PowerW: desiredEVW, PhaseMode: "3p", Persistent: true})
-	controller.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return sampledPhaseA, sampledPhaseA, sampledPhaseA, true })
-	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(store, st, mgr.States(), mgr.Configs(), 17250) })
+	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(store, st, mgr.States(), controller.FuseConfigs(), 17250) })
+	controller.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(st) })
 	emit := func(driver string, kind telemetry.DerType, watts float64) {
 		d := map[string]any{"control_power_available": true, "control_power_observed_at": now.Format(time.RFC3339Nano)}
 		if kind == telemetry.DerMeter {
 			d["l1_a"], d["l2_a"], d["l3_a"] = sampledPhaseA, sampledPhaseA, sampledPhaseA
+		}
+		if kind == telemetry.DerEV {
+			d["power_max_age_s"] = 5 // A local charger that answers within seconds.
 		}
 		data, _ := json.Marshal(d)
 		soc := .5
@@ -216,11 +219,10 @@ func newEVBatterySiteAt(t *testing.T, houseW float64, start time.Time) *evBatter
 		})
 	s.ctrl.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
 	s.ctrl.SetManualHold(config.ID, loadpoint.ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
-	s.ctrl.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
-		a := s.gridW() / 690
-		return a, a, a, true
+	s.ctrl.SetFuseEVMax(func() (float64, bool) {
+		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.ctrl.FuseConfigs(), 17250)
 	})
-	s.ctrl.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(s.store, s.state, s.mgr.States(), s.mgr.Configs(), 17250) })
+	s.ctrl.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(s.state) })
 	return s
 }
 

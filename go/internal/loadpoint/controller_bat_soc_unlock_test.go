@@ -289,10 +289,10 @@ func TestTickScheduleUnlockAddsSurplusOverEmptyPlan(t *testing.T) {
 	if sent.power != 4140 || w != 4140 || r != "pv_surplus" {
 		t.Fatalf("want 4140 W / pv_surplus; sent %.0f W, recorded (%.0f W, %q)", sent.power, w, r)
 	}
-	// A scheduled charge keeps the schedule's phase behaviour: "auto" for
-	// an unset operator mode, never the surplus 1Φ lock.
-	if sent.phaseMode != "auto" {
-		t.Errorf("phase_mode = %q, want auto while a schedule is active", sent.phaseMode)
+	// A scheduled charge keeps the schedule's phase behaviour: three phases
+	// for an unset operator mode, never the surplus 1Φ lock.
+	if sent.phaseMode != "3p" {
+		t.Errorf("phase_mode = %q, want 3p while a schedule is active", sent.phaseMode)
 	}
 }
 

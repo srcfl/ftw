@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/cloudlink"
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/energyreport"
 	"github.com/srcfl/ftw/go/internal/fleetping"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 type silentProvider string
@@ -24,7 +28,13 @@ func fleetPingServer(t *testing.T, cfg *config.Config) *Server {
 
 func fleetPingServerAt(t *testing.T, cfg *config.Config, endpoint string) *Server {
 	t.Helper()
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
 	pinger, err := fleetping.New(fleetping.Options{
+		Enabled:  func() bool { return cloudlink.SharesStatistics(st) },
 		Provider: silentProvider(endpoint),
 		Facts: func() fleetping.Facts {
 			return fleetping.FactsFromConfig(cfg, "v1.4.0",
@@ -35,7 +45,12 @@ func fleetPingServerAt(t *testing.T, cfg *config.Config, endpoint string) *Serve
 	if err != nil {
 		t.Fatalf("fleetping.New: %v", err)
 	}
-	return New(&Deps{CfgMu: &sync.RWMutex{}, Cfg: cfg, FleetPing: pinger})
+	// The box's one statistics answer, written from this config the way
+	// Core writes it once at start.
+	if err := cloudlink.MigrateStatistics(st, !cfg.FleetPing.On()); err != nil {
+		t.Fatal(err)
+	}
+	return New(&Deps{CfgMu: &sync.RWMutex{}, Cfg: cfg, FleetPing: pinger, State: st})
 }
 
 func TestFleetPingShowsTheRealPayload(t *testing.T) {
@@ -147,5 +162,52 @@ func TestFleetPingSaysSoWhenItIsNotRunning(t *testing.T) {
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status %d, want 503", w.Code)
+	}
+}
+
+// dayLedger is one site meter that recorded every bucket of every day.
+type dayLedger struct{}
+
+func (dayLedger) EnergyAssets() ([]state.EnergyAsset, error) {
+	return []state.EnergyAsset{{AssetID: "m/grid_meter", Kind: state.AssetGridMeter, FirstSeenMS: 0, LastSeenMS: 1 << 62}}, nil
+}
+
+func (dayLedger) LoadEnergyHistoryContext(_ context.Context, q state.EnergyHistoryQuery) ([]state.EnergyLedgerPoint, bool, error) {
+	var out []state.EnergyLedgerPoint
+	for at := q.SinceMS; at < q.UntilMS; at += state.EnergyLedgerBucketMS {
+		out = append(out, state.EnergyLedgerPoint{Flow: state.FlowGridImport, BucketStartMS: at, BucketLenMS: state.EnergyLedgerBucketMS, EnergyWh: 50, Quality: "measured"})
+	}
+	return out, false, nil
+}
+
+// The daily energy report rides under the same switch, so Settings shows it
+// beside the fleet report, built by the call its sender uses. A build with no
+// relay says it sends nothing.
+func TestFleetPingShowsTheEnergyReportItWouldSend(t *testing.T) {
+	cfg := &config.Config{FleetPing: &config.FleetPing{Enabled: true}}
+	srv := fleetPingServer(t, cfg)
+	sender, err := energyreport.New(energyreport.Options{Ledger: dayLedger{}, Enabled: func() bool { return true },
+		Now: func() time.Time { return time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.deps.EnergyReport = sender
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
+	var got struct {
+		Energy struct {
+			Relay   string         `json:"relay"`
+			Sending bool           `json:"sending"`
+			Day     string         `json:"day"`
+			Payload map[string]any `json:"payload"`
+		} `json:"energy"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	e := got.Energy
+	if e.Relay != "" || e.Sending || e.Day != "2026-10-23" || e.Payload["grid_import_kwh"] != 14.0 || e.Payload["date"] != "2026-10-23" || len(e.Payload) != 8 {
+		t.Fatalf("energy = %+v", e)
 	}
 }

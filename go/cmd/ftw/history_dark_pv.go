@@ -36,6 +36,19 @@ func (s historySun) zenith(atMS int64) (float64, bool) {
 	return sunpos.At(time.UnixMilli(atMS), s.Lat, s.Lon).ZenithDeg, true
 }
 
+// darkness tells live Home use how dark it is at the site, by the same
+// sunset and civil-dusk limits as history.
+func (s historySun) darkness(at time.Time) telemetry.Darkness {
+	z, placed := s.zenith(at.UnixMilli())
+	switch {
+	case !placed || z <= sunsetZenithDeg:
+		return telemetry.DarknessUnknown
+	case z <= civilDuskZenithDeg:
+		return telemetry.DarknessTwilight
+	}
+	return telemetry.DarknessNight
+}
+
 // darkPV records an unknown PV source as 0 W while the sun is down at the
 // site: physics, not interpolation. Past civil dusk the 0 W is as good as a
 // reading and carries no marker, so a night with a sleeping inverter also

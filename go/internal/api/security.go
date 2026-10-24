@@ -34,6 +34,10 @@ func WithSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		w.Header().Set("X-Frame-Options", "DENY")
+		if HomeAssistantIngress(r) {
+			w.Header().Set("Content-Security-Policy", "frame-ancestors 'self'")
+			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)

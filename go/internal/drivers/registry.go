@@ -1110,6 +1110,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			pollCtx, finishPoll := rd.beginCommand(ctx)
 			returned, err := rd.driver.Poll(pollCtx)
 			finishPoll()
+			if r.tel != nil {
+				r.tel.CountPoll(err != nil)
+			}
 			if err != nil {
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
 				if r.tel != nil {

@@ -18,9 +18,6 @@ func (s *Server) qualifyStatusHistory(resp map[string]any, siteMeter string) {
 		opts = s.deps.HistoryMeasurementSources()
 	}
 	r := s.deps.Tel.LiveMeasurementNow(siteMeter, opts)
-	// Interval metadata remains separate from the current live balance.
-	opts.UseWatchdogTimeout, opts.UseControlPower = true, true
-	resp["load_estimate"] = s.deps.Tel.HomeUseEstimate(time.Now(), siteMeter, opts)
 	var missing state.HistoryMissing
 	for kind, flag := range map[telemetry.DerType]state.HistoryMissing{telemetry.DerMeter: state.MissingGrid, telemetry.DerPV: state.MissingPV, telemetry.DerBattery: state.MissingBattery, telemetry.DerEV: state.MissingEV, telemetry.DerV2X: state.MissingV2X} {
 		if !r.Known[kind] {
@@ -37,14 +34,26 @@ func (s *Server) qualifyStatusHistory(resp map[string]any, siteMeter string) {
 		missing |= state.BalanceMismatch
 	}
 	resp["grid_w"] = missing.Value(state.MissingGrid, r.GridW)
-	resp["pv_w"] = missing.Value(state.MissingPV, r.PVW)
+	// Live power is not history: a dark inverter is 0 W and Home use stays
+	// known while the site meter is read (load_quality says how).
+	if r.PVLiveKnown && opts.PVInvalidReason == "" {
+		resp["pv_w"] = r.PVW
+	} else {
+		resp["pv_w"] = nil
+	}
 	resp["bat_w"] = missing.Value(state.MissingBattery, r.BatteryW)
 	resp["ev_w"] = missing.Value(state.MissingEV, r.EVW)
 	if missing&state.MissingEV != 0 {
 		resp["ev_charging_w"] = nil
 	}
 	resp["v2x_w"] = missing.Value(state.MissingV2X, r.V2XW)
-	resp["load_w"] = missing.Value(state.MissingLoad, r.HouseholdW)
+	if r.LoadKnown {
+		resp["load_w"] = r.LoadW
+	} else {
+		resp["load_w"] = nil
+	}
+	resp["load_quality"] = r.LoadQuality
+	resp["load_reason"] = r.LoadReason
 	resp["history_quality"] = missing.Quality()
 	resp["history_reason"] = r.Reason
 	drivers, _ := resp["drivers"].(map[string]any)

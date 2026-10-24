@@ -2,6 +2,7 @@ package ha
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,9 +100,9 @@ func TestLoadPublishClearsUnknownAndRecovers(t *testing.T) {
 	}
 	check("1000.00")
 
+	// A declared battery that never reported is left out, not a blank.
 	options.ExpectedFlows = []telemetry.ForecastFlow{{Driver: "battery", DerType: telemetry.DerBattery}}
-	check("None") // HA ignores an empty numeric payload; None clears it to unknown.
-	check("None")
+	check("1000.00")
 	b.tel.EnsureDriverHealth("battery")
 	b.tel.Update("battery", telemetry.DerBattery, -200, nil, nil)
 	check("1200.00")
@@ -110,8 +111,40 @@ func TestLoadPublishClearsUnknownAndRecovers(t *testing.T) {
 	b.tel.Update("battery", telemetry.DerBattery, 0, nil, nil)
 	check("0.00")
 
+	// Unresolved topology still has a read site meter: an estimate.
 	options.HouseholdInvalidReason = "unresolved_topology"
-	check("None")
+	check("0.00")
+	b.tel.DriverHealthMut("meter").SetOffline()
+	check("None") // HA ignores an empty numeric payload; None clears it to unknown.
+	b.tel.DriverHealthMut("meter").RecordSuccess()
 	options.HouseholdInvalidReason = ""
 	check("0.00")
+}
+
+// HA gets one Home use: the live balance as the dashboard shows it,
+// negative included.
+func TestLoadPublishesOneHomeUse(t *testing.T) {
+	b, client := liveLoadBridge(nil)
+	for _, d := range []string{"meter", "battery"} {
+		b.tel.EnsureDriverHealth(d)
+	}
+	b.tel.Update("meter", telemetry.DerMeter, 1200, nil, nil)
+	b.tel.Update("battery", telemetry.DerBattery, 2000, nil, nil)
+	b.publishState()
+	if got := client.last(t, b.stateTopic("load_w")); got != "-800.00" {
+		t.Fatalf("display load = %s, want the negative balance as is", got)
+	}
+	b.publishDiscovery()
+	var display, energy bool
+	client.mu.Lock()
+	for topic, payloads := range client.payloads {
+		for _, p := range payloads {
+			display = display || strings.Contains(topic, "load_power/config") && strings.Contains(p, b.stateTopic("load_w"))
+			energy = energy || strings.Contains(topic, "load_energy_power/config")
+		}
+	}
+	client.mu.Unlock()
+	if !display || energy {
+		t.Fatalf("discovery: display=%t energy=%t", display, energy)
+	}
 }

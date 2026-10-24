@@ -86,6 +86,19 @@ func (s *Store) LoadDiagnosticsInRange(sinceMs, untilMs int64,
 	return out, rows.Err()
 }
 
+// PlannerDay sums the plans kept since sinceMs: how many, the longest any
+// took to solve in milliseconds, and how many were a fallback plan. The
+// anonymous fleet report coarsens these into buckets; nothing else of a plan
+// leaves this query.
+func (s *Store) PlannerDay(sinceMs int64) (plans int, slowestMs float64, fallbacks int, err error) {
+	err = s.db.QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(MAX(json_extract(json, '$.solver.solve_ms')), 0),
+		        COALESCE(SUM(json_extract(json, '$.solver.fallback') = 1), 0)
+		 FROM planner_diagnostics WHERE ts_ms >= ?`, sinceMs).Scan(&plans, &slowestMs, &fallbacks)
+	return plans, slowestMs, fallbacks, err
+}
+
 // LoadDiagnosticAt returns the snapshot that was active at tsMs — the
 // most recent one with ts_ms <= tsMs. This is the correct semantics for
 // "what plan was driving the EMS at this moment?": if a replan ran at

@@ -140,6 +140,6 @@ func (s *Server) handleCloudStatsPolicy(w http.ResponseWriter, r *http.Request) 
 		"retention":                  "48 hours. Leaving Cloud or stopping local sharing deletes unpublished household rows; published group totals remain.",
 		"publication_minimum_homes":  cloudwire.StatsMinimumHomes,
 		"publication_max_home_share": 0.3,
-		"controller":                 "sourceful", "local_default": "ask_yes", "local_optional": true, "cloud_required": true,
+		"controller":                 "sourceful", "local_default": "on", "local_optional": true, "cloud_required": true,
 	})
 }

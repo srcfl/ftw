@@ -52,7 +52,7 @@ ocpp:
   port_v201: 8888
   username: ftw
   password: sim-ocpp
-  heartbeat_interval_s: 60
+  heartbeat_interval_s: 30
 
 state:
   # `make dev` starts the Go process from go/, so keep disposable state in

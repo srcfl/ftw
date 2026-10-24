@@ -14,20 +14,25 @@ import (
 	"github.com/srcfl/ftw/go/internal/apiauth"
 )
 
-// addWatch walks one watch through a code its phone minted and returns the
-// watch's key and the grant the box stamped on it.
+// addWatch adds one watch by its key, as its phone does over a session, and
+// returns the watch's key and the grant the box stamped on it.
 func addWatch(t *testing.T, id *Identity, phone Grant) ([]byte, Grant) {
 	t.Helper()
-	code, _, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatalf("MintWatchCode: %v", err)
-	}
 	key := appKey(t)
-	grant, err := id.AuthoriseWatch(key, code)
+	grant, err := id.AddWatch(phone.DeviceID, key)
 	if err != nil {
 		t.Fatalf("adding a watch: %v", err)
 	}
 	return key, grant
+}
+
+// checkWatch is the exchange's door, decided and committed at once.
+func checkWatch(id *Identity, key []byte) (Grant, error) {
+	_, commit, err := id.CheckWatch(key)
+	if err != nil {
+		return Grant{}, err
+	}
+	return commit()
 }
 
 func TestAnOwnerPhoneAddsAWatchThatNamesItAsParent(t *testing.T) {
@@ -42,8 +47,8 @@ func TestAnOwnerPhoneAddsAWatchThatNamesItAsParent(t *testing.T) {
 		t.Fatalf("the watch's parent is %q (%q), want %q (owner)", watch.Parent, watch.ParentRole, phone.DeviceID)
 	}
 
-	// Its next handshake needs no code, as a phone's does not.
-	again, err := id.AuthoriseWatch(key, nil)
+	// Its handshake needs no code: the box knows its key.
+	again, err := checkWatch(id, key)
 	if err != nil {
 		t.Fatalf("the watch's second handshake was refused: %v", err)
 	}
@@ -53,64 +58,6 @@ func TestAnOwnerPhoneAddsAWatchThatNamesItAsParent(t *testing.T) {
 }
 
 // A viewer cannot add a watch, and neither can a phone the box does not know.
-func TestOnlyAnOwnerPhoneMintsAWatchCode(t *testing.T) {
-	id, _ := newIdentity(t)
-	pair(t, id, apiauth.RoleOwner)
-	viewer := pair(t, id, apiauth.RoleViewer)
-
-	if _, _, err := id.MintWatchCode(viewer.DeviceID, WatchTTL); !errors.Is(err, ErrWatchNeedsOwner) {
-		t.Fatalf("a viewer minted a watch code: %v", err)
-	}
-	if _, _, err := id.MintWatchCode("nosuchid", WatchTTL); !errors.Is(err, ErrUnknownDevice) {
-		t.Fatalf("a stranger minted a watch code: %v", err)
-	}
-}
-
-// The watch code has a slot of its own: adding a watch leaves an invite that
-// somebody is about to scan alone, and the invite leaves the watch code alone.
-func TestAWatchCodeDoesNotCancelAPhoneCode(t *testing.T) {
-	id, _ := newIdentity(t)
-	phone := pair(t, id, apiauth.RoleOwner)
-
-	invite, _, err := id.MintPairingCode(apiauth.RoleViewer, InviteTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	watchCode, _, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := id.Authorise(appKey(t), invite); err != nil {
-		t.Fatalf("the invite died when a watch code was minted: %v", err)
-	}
-	if _, err := id.AuthoriseWatch(appKey(t), watchCode); err != nil {
-		t.Fatalf("the watch code died when the invite was spent: %v", err)
-	}
-}
-
-// A watch code is spent once, and a phone's door never spends it.
-func TestAWatchCodeWorksOnceAndOnlyAtTheWatchDoor(t *testing.T) {
-	id, _ := newIdentity(t)
-	phone := pair(t, id, apiauth.RoleOwner)
-	code, _, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := id.Authorise(appKey(t), code); !errors.Is(err, ErrBadPairing) {
-		t.Fatalf("a watch code opened a phone's stream: %v", err)
-	}
-	if _, err := id.AuthoriseWatch(appKey(t), code); err != nil {
-		t.Fatalf("the watch code was spent by the stream: %v", err)
-	}
-	if _, err := id.AuthoriseWatch(appKey(t), code); !errors.Is(err, ErrBadPairing) {
-		t.Fatalf("a watch code let a second watch in: %v", err)
-	}
-	if n := id.AuthorisedCount(); n != 2 {
-		t.Fatalf("%d enrolments, want the phone and one watch", n)
-	}
-}
-
 // Each door admits its own kind and answers the other as a stranger.
 func TestAWatchHasNoStreamAndAPhoneNoWatchDoor(t *testing.T) {
 	id, _ := newIdentity(t)
@@ -128,59 +75,8 @@ func TestAWatchHasNoStreamAndAPhoneNoWatchDoor(t *testing.T) {
 	if _, err := id.Authorise(watchKey, nil); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("a watch opened a stream: %v", err)
 	}
-	if _, err := id.AuthoriseWatch(phoneKey, nil); !errors.Is(err, ErrNoPairing) {
+	if _, err := checkWatch(id, phoneKey); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("a phone came through the watch's door: %v", err)
-	}
-}
-
-func TestAnExpiredWatchCodeIsRefused(t *testing.T) {
-	id, _ := newIdentity(t)
-	phone := pair(t, id, apiauth.RoleOwner)
-	now := time.UnixMilli(1_760_000_000_000)
-	id.now = func() time.Time { return now }
-
-	code, expires, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now = expires.Add(time.Millisecond)
-	if _, err := id.AuthoriseWatch(appKey(t), code); !errors.Is(err, ErrBadPairing) {
-		t.Fatalf("an expired watch code was redeemed: %v", err)
-	}
-}
-
-func TestAWatchCodeIsBurnedByGuessing(t *testing.T) {
-	id, _ := newIdentity(t)
-	phone := pair(t, id, apiauth.RoleOwner)
-	code, _, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrong := make([]byte, PairingCodeBytes)
-	for i := 0; i < MaxPairingAttempts; i++ {
-		if _, err := id.AuthoriseWatch(appKey(t), wrong); !errors.Is(err, ErrBadPairing) {
-			t.Fatalf("guess %d: %v", i, err)
-		}
-	}
-	if _, err := id.AuthoriseWatch(appKey(t), code); !errors.Is(err, ErrBadPairing) {
-		t.Fatalf("the right code still worked after %d wrong guesses: %v", MaxPairingAttempts, err)
-	}
-}
-
-// The phone must still be an owner when the watch spends the code.
-func TestAWatchCodeDiesWithItsPhonesOwnerRole(t *testing.T) {
-	id, _ := newIdentity(t)
-	pair(t, id, apiauth.RoleOwner)
-	phone := pair(t, id, apiauth.RoleOwner)
-	code, _, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := id.SetRole(phone.DeviceID, apiauth.RoleViewer); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := id.AuthoriseWatch(appKey(t), code); !errors.Is(err, ErrBadPairing) {
-		t.Fatalf("a watch joined under a phone that is no longer an owner: %v", err)
 	}
 }
 
@@ -206,14 +102,10 @@ func TestRemovalRunsFromPhoneToWatchAndNeverBack(t *testing.T) {
 	if _, ok := id.GrantFor(second.DeviceID); !ok {
 		t.Fatal("removing one watch removed another")
 	}
-	if _, err := id.AuthoriseWatch(firstKey, nil); !errors.Is(err, ErrNoPairing) {
+	if _, err := checkWatch(id, firstKey); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("a removed watch's next message 1 was answered: %v", err)
 	}
 
-	pending, _, err := id.MintWatchCode(phone.DeviceID, WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	removed, err = id.Revoke(phone.DeviceID, OverASession)
 	if err != nil {
 		t.Fatal(err)
@@ -224,16 +116,13 @@ func TestRemovalRunsFromPhoneToWatchAndNeverBack(t *testing.T) {
 	if _, ok := id.GrantFor(second.DeviceID); ok {
 		t.Fatal("a watch outlived its phone")
 	}
-	if _, err := id.AuthoriseWatch(secondKey, nil); !errors.Is(err, ErrNoPairing) {
+	if _, err := checkWatch(id, secondKey); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("a watch whose phone was removed was answered: %v", err)
 	}
 	for _, d := range id.Roster() {
 		if d.ID == second.DeviceID {
 			t.Fatal("a removed watch is still in the roster")
 		}
-	}
-	if _, err := id.AuthoriseWatch(appKey(t), pending); !errors.Is(err, ErrBadPairing) {
-		t.Fatalf("a watch code outlived the phone that asked for it: %v", err)
 	}
 }
 
@@ -342,7 +231,7 @@ func TestAWatchAndItsParentSurviveARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, err := again.AuthoriseWatch(key, nil)
+	grant, err := checkWatch(again, key)
 	if err != nil {
 		t.Fatalf("the watch was forgotten across a restart: %v", err)
 	}
@@ -385,5 +274,101 @@ func TestAWatchWithoutItsPhoneIsDroppedAtLoad(t *testing.T) {
 	}
 	if n := again.AuthorisedCount(); n != 0 {
 		t.Fatalf("%d enrolments after loading an orphan", n)
+	}
+}
+
+// A watch added by its key is the same watch a code adds: the owner phone is
+// its parent, it opens with no code, a viewer cannot add one, and it goes
+// with its phone.
+func TestAWatchAddedByItsKey(t *testing.T) {
+	id, _ := newIdentity(t)
+	phone := pair(t, id, apiauth.RoleOwner)
+	viewer := pair(t, id, apiauth.RoleViewer)
+	key := appKey(t)
+
+	if _, err := id.AddWatch(viewer.DeviceID, key); !errors.Is(err, ErrWatchNeedsOwner) {
+		t.Fatalf("a viewer added a watch: %v", err)
+	}
+	if _, err := id.AddWatch("nobody00", key); !errors.Is(err, ErrUnknownDevice) {
+		t.Fatalf("an unknown phone added a watch: %v", err)
+	}
+	if _, err := id.AddWatch(phone.DeviceID, key[:31]); !errors.Is(err, ErrWatchKey) {
+		t.Fatalf("a short key was taken: %v", err)
+	}
+
+	watch, err := id.AddWatch(phone.DeviceID, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watch.Role != apiauth.RoleWatch || watch.Parent != phone.DeviceID || watch.ParentRole != apiauth.RoleOwner {
+		t.Fatalf("the box wrote down %+v", watch)
+	}
+	opened, err := checkWatch(id, key)
+	if err != nil || opened.DeviceID != watch.DeviceID {
+		t.Fatalf("the watch could not open with its key alone: %+v %v", opened, err)
+	}
+	if again, err := id.AddWatch(phone.DeviceID, key); err != nil || again.DeviceID != watch.DeviceID {
+		t.Fatalf("adding it again gave %+v %v", again, err)
+	}
+
+	// Under another phone, or as a phone's key, it is no watch to add.
+	other := pair(t, id, apiauth.RoleOwner)
+	if _, err := id.AddWatch(other.DeviceID, key); !errors.Is(err, ErrWatchKey) {
+		t.Fatalf("another phone took the watch: %v", err)
+	}
+
+	if _, err := id.Revoke(phone.DeviceID, OverASession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkWatch(id, key); err == nil {
+		t.Fatal("the watch outlived its phone")
+	}
+}
+
+// The exchange's check writes nothing: a message 1 that FTW Cloud replays
+// stamps no visit until the session proves itself and commits.
+func TestCheckingAWatchWritesNothingUntilItCommits(t *testing.T) {
+	id, _ := newIdentity(t)
+	phone := pair(t, id, apiauth.RoleOwner)
+	key, watch := addWatch(t, id, phone)
+	seen := func() int64 {
+		for _, d := range id.Devices() {
+			if d.ID == watch.DeviceID {
+				return d.LastSeenMs
+			}
+		}
+		t.Fatal("the watch is not listed")
+		return 0
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := id.CheckWatch(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seen() != 0 {
+		t.Fatal("a check stamped the watch's visit")
+	}
+	_, commit, err := id.CheckWatch(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commit(); err != nil || seen() == 0 {
+		t.Fatalf("a commit did not stamp the visit: %v", err)
+	}
+	if !id.HasWatch(watch.DeviceID) || id.HasWatch(phone.DeviceID) || id.HasWatch("nobody00") {
+		t.Fatal("HasWatch names the wrong devices")
+	}
+
+	// A watch removed between the check and the commit is not let in.
+	_, commit, err = id.CheckWatch(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := id.Revoke(watch.DeviceID, OverASession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commit(); !errors.Is(err, ErrNoPairing) {
+		t.Fatalf("a removed watch committed: %v", err)
 	}
 }

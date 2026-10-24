@@ -155,11 +155,15 @@ type liveSnapshot struct {
 	EVW         float64
 	V2XW        float64
 	LoadW       float64
-	HaveLoad    bool
-	SoCPct      float64
-	HaveSoC     bool
-	PredictedPV float64
-	PredictedLd float64
+	// HaveLoad: a measured balance, fit for forecast comparisons.
+	// LoadEstimated: the site meter is read but a flow was left out.
+	HaveLoad      bool
+	LoadEstimated bool
+	LoadReason    string
+	SoCPct        float64
+	HaveSoC       bool
+	PredictedPV   float64
+	PredictedLd   float64
 }
 
 func (s *Server) liveNow(ctrl control.State, now time.Time) liveSnapshot {
@@ -172,7 +176,8 @@ func (s *Server) liveNow(ctrl control.State, now time.Time) liveSnapshot {
 		GridW: live.GridW, HaveGrid: live.Known[telemetry.DerMeter],
 		PVW: live.PVW, HavePV: live.Known[telemetry.DerPV],
 		BatW: live.BatteryW, HaveBattery: live.Known[telemetry.DerBattery],
-		EVW: live.EVW, V2XW: live.V2XW, LoadW: live.HouseholdW, HaveLoad: live.Valid,
+		EVW: live.EVW, V2XW: live.V2XW, LoadW: live.LoadW, HaveLoad: live.LoadKnown && live.LoadQuality == telemetry.LoadMeasured,
+		LoadEstimated: live.LoadKnown && live.LoadQuality == telemetry.LoadEstimated, LoadReason: live.LoadReason,
 	}
 	var socSum, socWeight float64
 	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerBattery) {
@@ -316,7 +321,11 @@ func writeRightNow(
 		b.WriteString("| Grid | **no site meter reading** |\n")
 	}
 	fmt.Fprintf(b, "| Solar | %s |\n", fmtReportLiveW(snap.PVW, snap.HavePV))
-	fmt.Fprintf(b, "| House load | %s |\n", fmtReportLiveW(snap.LoadW, snap.HaveLoad))
+	if snap.LoadEstimated {
+		fmt.Fprintf(b, "| House load | ≈ %s (estimated: `%s`) |\n", fmtReportW(snap.LoadW), snap.LoadReason)
+	} else {
+		fmt.Fprintf(b, "| House load | %s |\n", fmtReportLiveW(snap.LoadW, snap.HaveLoad))
+	}
 	fmt.Fprintf(b, "| Battery | %s |\n", fmtReportLiveW(snap.BatW, snap.HaveBattery))
 	if snap.EVW != 0 {
 		fmt.Fprintf(b, "| EV | %s |\n", fmtReportW(snap.EVW))
@@ -711,7 +720,11 @@ func (s *Server) collectFindings(
 				"guesswork until the meter reports again."})
 	}
 
-	if !snap.HaveLoad {
+	if snap.LoadEstimated {
+		out = append(out, finding{sevNote, "Household load is an estimate",
+			fmt.Sprintf("The site meter is read, but `%s` is left out of the balance. "+
+				"Load forecast comparisons are skipped until every flow is read.", snap.LoadReason)})
+	} else if !snap.HaveLoad {
 		out = append(out, finding{sevWarning, "Household load is unavailable",
 			"The required power measurements do not form a valid balance. " +
 				"Load forecast comparisons are skipped until that balance is available."})

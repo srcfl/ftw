@@ -77,13 +77,15 @@ func TestLiveHistoryQualitySeparatesOfflineFromInvalidBalance(t *testing.T) {
 	}})
 	resp := map[string]any{}
 	srv.qualifyStatusHistory(resp, "meter")
-	if resp["grid_w"] != float64(1200) || resp["bat_w"] != nil || resp["load_w"] != nil || resp["history_quality"] != "incomplete" {
+	// Live Home use leaves the offline battery out; history stays incomplete.
+	if resp["grid_w"] != float64(1200) || resp["bat_w"] != nil || resp["load_w"] != float64(1200) || resp["load_quality"] != "estimated" || resp["history_quality"] != "incomplete" {
 		t.Fatal(resp)
 	}
 	tel.Update("battery", telemetry.DerBattery, 2000, nil, nil)
 	tel.RecordDriverSuccess("battery")
 	srv.qualifyStatusHistory(resp, "meter")
-	if resp["bat_w"] != float64(2000) || resp["load_w"] != nil || resp["history_quality"] != "balance_mismatch" {
+	// Negative balance: shown as is, history still records the mismatch.
+	if resp["bat_w"] != float64(2000) || resp["load_w"] != float64(-800) || resp["load_reason"] != "invalid_balance" || resp["history_quality"] != "balance_mismatch" {
 		t.Fatal(resp)
 	}
 	tel.Update("battery", telemetry.DerBattery, 0, nil, nil)
@@ -130,7 +132,50 @@ func TestLiveHistoryQualityConfiguredPVWithoutMeasurementIsUnknown(t *testing.T)
 	}})
 	resp := map[string]any{}
 	srv.qualifyStatusHistory(resp, "meter")
-	if resp["pv_w"] != nil || resp["load_w"] != nil {
-		t.Fatal("unmeasured configured PV reported as zero", resp)
+	if resp["pv_w"] != nil || resp["load_w"] != float64(1200) || resp["load_quality"] != "estimated" || resp["history_quality"] != "incomplete" {
+		t.Fatal("unmeasured configured PV reported as zero, or Home use blanked", resp)
+	}
+}
+
+// Anders (Discord, v0.154.1): Growatt offline after sunset, Pixii meter and
+// battery read. /api/status showed pv_w and load_w null.
+func TestStatusAndersNightAndDay(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dark     telemetry.Darkness
+		pv       any
+		quality  string
+		loadWant any
+	}{
+		{"night", telemetry.DarknessNight, float64(0), "measured", float64(980)},
+		{"day", telemetry.DarknessUnknown, nil, "estimated", float64(980)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := telemetry.NewStore()
+			for _, name := range []string{"pixii", "growatt"} {
+				tel.EnsureDriverHealth(name)
+			}
+			tel.Update("pixii", telemetry.DerMeter, 780, nil, nil)
+			tel.Update("pixii", telemetry.DerBattery, -200, nil, nil)
+			tel.RecordDriverSuccess("pixii")
+			tel.Update("growatt", telemetry.DerPV, -40, nil, nil)
+			tel.DriverHealthMut("growatt").SetOffline()
+			dark := tc.dark
+			srv := New(&Deps{Tel: tel, HistoryMeasurementSources: func() telemetry.ForecastOptions {
+				return telemetry.ForecastOptions{PVDark: func(time.Time) telemetry.Darkness { return dark }}
+			}})
+			resp := map[string]any{"drivers": map[string]any{"growatt": map[string]any{}}}
+			srv.qualifyStatusHistory(resp, "pixii")
+			if resp["grid_w"] != float64(780) || resp["pv_w"] != tc.pv || resp["load_w"] != tc.loadWant || resp["load_quality"] != tc.quality {
+				t.Fatal(resp)
+			}
+			// History quality stays separate from live Home use.
+			if resp["history_quality"] != "incomplete" || resp["history_reason"] != "offline:growatt:pv" {
+				t.Fatal("live display changed history quality", resp)
+			}
+			if tc.dark == telemetry.DarknessNight && resp["drivers"].(map[string]any)["growatt"].(map[string]any)["pv_w"] == nil {
+				t.Fatal("dark inverter not shown as 0 W")
+			}
+		})
 	}
 }

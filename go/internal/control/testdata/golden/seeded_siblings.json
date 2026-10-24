@@ -1,7 +1,7 @@
 {
   "family": "seeded_siblings",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
+  "ftw_commit": "b3af71859a912dcae3a512f6c1ca79a21c2bb631",
   "record_count": 60,
   "records": [
     {
@@ -396,12 +396,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": 1303.9,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 1303.9,
           "clamped": false
         }
       ],
@@ -424,9 +424,9 @@
       },
       "site_totals": {
         "battery_current_w": -13,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 2607.8,
         "raw_grid_w": -4368,
-        "projected_grid_w": -4355
+        "projected_grid_w": -1747.1999999999998
       }
     },
     {
@@ -1060,17 +1060,19 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 2568.0000044676126,
+          "target_w": 3716.1290322580644,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 4066.0000070737206,
-          "clamped": false
+          "target_w": 5000,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
-        "clamped_drivers": [],
+        "clamped_drivers": [
+          "sungrow"
+        ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": 1,
         "plan_sign_floor_zeroed": false,
@@ -1088,9 +1090,9 @@
       },
       "site_totals": {
         "battery_current_w": 850,
-        "battery_target_sum_w": 6634.000011541333,
+        "battery_target_sum_w": 8716.129032258064,
         "raw_grid_w": -5208,
-        "projected_grid_w": 576.0000115413332
+        "projected_grid_w": 2658.1290322580644
       }
     },
     {
@@ -1714,12 +1716,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 402.6,
+          "target_w": 1459.9333333333334,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 805.2,
+          "target_w": 2919.866666666667,
           "clamped": false
         }
       ],
@@ -1742,9 +1744,9 @@
       },
       "site_totals": {
         "battery_current_w": 1639,
-        "battery_target_sum_w": 1207.8000000000002,
+        "battery_target_sum_w": 4379.8,
         "raw_grid_w": -4568,
-        "projected_grid_w": -4999.2
+        "projected_grid_w": -1827.1999999999998
       }
     },
     {
@@ -2162,7 +2164,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 3287.6712395762556,
+          "target_w": 3287.671232876712,
           "clamped": false
         }
       ],
@@ -2188,9 +2190,9 @@
       },
       "site_totals": {
         "battery_current_w": -479,
-        "battery_target_sum_w": 8287.671239576255,
+        "battery_target_sum_w": 8287.671232876712,
         "raw_grid_w": -5443,
-        "projected_grid_w": 3323.671239576255
+        "projected_grid_w": 3323.6712328767117
       }
     },
     {
@@ -2365,12 +2367,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 1122.2709677419355,
+          "target_w": 2943.5612903225806,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 1776.9290322580644,
+          "target_w": 4660.63870967742,
           "clamped": false
         }
       ],
@@ -2393,9 +2395,9 @@
       },
       "site_totals": {
         "battery_current_w": 4063,
-        "battery_target_sum_w": 2899.2,
+        "battery_target_sum_w": 7604.200000000001,
         "raw_grid_w": -5902,
-        "projected_grid_w": -7065.8
+        "projected_grid_w": -2360.7999999999993
       }
     },
     {
@@ -3016,12 +3018,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": 196.83168316831683,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 598.3683168316832,
           "clamped": false
         }
       ],
@@ -3044,9 +3046,9 @@
       },
       "site_totals": {
         "battery_current_w": -1063,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 795.2,
         "raw_grid_w": -3097,
-        "projected_grid_w": -2034
+        "projected_grid_w": -1238.8
       }
     },
     {
@@ -3237,12 +3239,12 @@
         },
         {
           "driver": "pixii",
-          "target_w": 3243.243246846847,
+          "target_w": 3243.2432432432433,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 3113.5135169729733,
+          "target_w": 3113.5135135135138,
           "clamped": false
         }
       ],
@@ -3267,9 +3269,9 @@
       },
       "site_totals": {
         "battery_current_w": -4513,
-        "battery_target_sum_w": 6656.75676381982,
+        "battery_target_sum_w": 6656.756756756757,
         "raw_grid_w": -5457,
-        "projected_grid_w": 5712.75676381982
+        "projected_grid_w": 5712.756756756757
       }
     },
     {
@@ -3664,12 +3666,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 0,
+          "target_w": 729.5049504950495,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 0,
+          "target_w": 2217.6950495049505,
           "clamped": false
         }
       ],
@@ -3692,9 +3694,9 @@
       },
       "site_totals": {
         "battery_current_w": 627,
-        "battery_target_sum_w": 0,
+        "battery_target_sum_w": 2947.2,
         "raw_grid_w": -3867,
-        "projected_grid_w": -4494
+        "projected_grid_w": -1546.8000000000002
       }
     },
     {
@@ -3772,7 +3774,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": -3200.0000029653334,
+          "target_w": -3200,
           "clamped": false
         }
       ],
@@ -3797,9 +3799,9 @@
       },
       "site_totals": {
         "battery_current_w": -1969,
-        "battery_target_sum_w": -3200.0000029653334,
+        "battery_target_sum_w": -3200,
         "raw_grid_w": 5401,
-        "projected_grid_w": 4169.999997034667
+        "projected_grid_w": 4170
       }
     },
     {
@@ -4324,12 +4326,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 3142.0000053333333,
+          "target_w": 4800,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 3142.0000053333333,
+          "target_w": 4800,
           "clamped": false
         }
       ],
@@ -4352,9 +4354,9 @@
       },
       "site_totals": {
         "battery_current_w": -3448,
-        "battery_target_sum_w": 6284.000010666667,
+        "battery_target_sum_w": 9600,
         "raw_grid_w": -5478,
-        "projected_grid_w": 4254.000010666667
+        "projected_grid_w": 7570
       }
     },
     {
@@ -4976,12 +4978,12 @@
       "per_driver_targets": [
         {
           "driver": "pixii",
-          "target_w": 1670.3000000000002,
+          "target_w": 3996.8,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 1670.3000000000002,
+          "target_w": 3996.8,
           "clamped": false
         }
       ],
@@ -5004,9 +5006,9 @@
       },
       "site_totals": {
         "battery_current_w": 5215,
-        "battery_target_sum_w": 3340.6000000000004,
+        "battery_target_sum_w": 7993.6,
         "raw_grid_w": -4631,
-        "projected_grid_w": -6505.4
+        "projected_grid_w": -1852.3999999999996
       }
     },
     {
@@ -5419,12 +5421,12 @@
         },
         {
           "driver": "pixii",
-          "target_w": 4800.000008448,
+          "target_w": 4800,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 4800.000008448,
+          "target_w": 4800,
           "clamped": false
         }
       ],
@@ -5449,9 +5451,9 @@
       },
       "site_totals": {
         "battery_current_w": -1477,
-        "battery_target_sum_w": 9600.000016896,
+        "battery_target_sum_w": 9600,
         "raw_grid_w": -3251,
-        "projected_grid_w": 7826.000016896
+        "projected_grid_w": 7826
       }
     },
     {
@@ -6501,12 +6503,12 @@
         },
         {
           "driver": "pixii",
-          "target_w": 1920.0000032,
+          "target_w": 1920,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 3840.0000064,
+          "target_w": 3840,
           "clamped": false
         }
       ],
@@ -6531,9 +6533,9 @@
       },
       "site_totals": {
         "battery_current_w": -3067,
-        "battery_target_sum_w": 6060.000009599999,
+        "battery_target_sum_w": 6060,
         "raw_grid_w": -3266,
-        "projected_grid_w": 5861.000009599999
+        "projected_grid_w": 5861
       }
     }
   ]

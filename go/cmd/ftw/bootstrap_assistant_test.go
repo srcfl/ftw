@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 )
@@ -105,5 +106,30 @@ func TestSetupCannotEnableChangedMeterConfiguration(t *testing.T) {
 	candidate.Drivers[0].Config["host"] = "192.0.2.2"
 	if sameSetupMeterConfiguration(active, candidate) {
 		t.Fatal("old readings accepted for another endpoint")
+	}
+}
+
+func TestHomeAssistantBootstrapNeedsNoSecondPassword(t *testing.T) {
+	t.Setenv("FTW_API_TOKEN", "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	restarted := make(chan struct{}, 1)
+	handler := api.WithHomeAssistantIngress(secureBootstrapMutations(bootstrapAssistant(func(cfg *config.Config) error { return saveInitialConfig(path, cfg) }, func() error { restarted <- struct{}{}; return nil })))
+	req := httptest.NewRequest("POST", "http://ha.local/api/setup/assistant", strings.NewReader(`{"confirmed":true}`))
+	req.RemoteAddr = "172.30.32.2:1234"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ingress-Path", "/api/hassio_ingress/test")
+	req.Header.Set("X-Remote-User-Id", "owner")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("%d: %s", w.Code, w.Body.String())
+	}
+	<-restarted
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MeasurementOnly() || cfg.API.LANAuth || cfg.LANPasswordHash != "" || len(cfg.Drivers) != 0 {
+		t.Fatal("HA setup invented a password or equipment")
 	}
 }

@@ -1656,8 +1656,8 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	if got < 0 {
 		t.Errorf("TargetW = %.0f W — battery shouldn't be discharging here", got)
 	}
-	if !st.FuseSaturated {
-		t.Errorf("FuseSaturated = false; want true after joint scaling")
+	if !st.FuseSaturated || st.FuseSaturatedByImport {
+		t.Errorf("FuseSaturated = %v, by import %v; want the fuse after joint scaling", st.FuseSaturated, st.FuseSaturatedByImport)
 	}
 	// EV cap is the post-republish verdict: after applyFuseGuard +
 	// forceFuseDischarge constrain battery further (and may swing it
@@ -1673,6 +1673,23 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	projected := 8200.0 + got
 	if projected > fuseMaxW+50 {
 		t.Errorf("projected grid %.0f W > fuse %.0f after dispatch", projected, float64(fuseMaxW))
+	}
+}
+
+// The same site under a 9 kW hourly import ceiling: the hour's limit, not
+// the fuse, sets the ceiling the allocator hits, and says so.
+func TestJointFuseAllocatorNamesTheHoursImportLimit(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: 1250, Strategy: "arbitrage"}
+	store := seedStore(8200, []struct {
+		name          string
+		currentW, soc float64
+	}{{"ferroamp", 0, 0.5}})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW, st.BatteryCoversEV, st.PeakImportCeilingW = 8000, true, 9000
+	ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11000)
+	if !st.FuseSaturated || !st.FuseSaturatedByImport {
+		t.Fatalf("FuseSaturated = %v, by import %v; want the hour's import limit", st.FuseSaturated, st.FuseSaturatedByImport)
 	}
 }
 
@@ -3495,6 +3512,43 @@ func TestInverterAffinity_FallsBackToProportionalOnOverflow(t *testing.T) {
 	// Sungrow gets its capacity share of the 2 kW overflow = 2000 * 9600/24800 ≈ 774.
 	if math.Abs(got["sungrow"]-774) > 1 {
 		t.Errorf("sungrow target = %f, want ≈774 (overflow × capacity share)", got["sungrow"])
+	}
+}
+
+// PV on an inverter whose battery cannot charge is not DC-local to any
+// battery that can. It reaches them over the AC bus, so the fleet total
+// is split by capacity and nothing is lost. Before, that group's PV share
+// of the total went to no battery (golden seeded_siblings/039 lost 3,316 W
+// of a 9,600 W target).
+func TestInverterAffinity_PVWithoutItsBatteryKeepsTheTotal(t *testing.T) {
+	online := []batteryInfo{
+		{driver: "sungrow", capacityWh: 15200, soc: 0.5, online: true, group: "sg"},
+		{driver: "pixii", capacityWh: 15200, soc: 0.5, online: true, group: "px"},
+	}
+	blocked := append([]batteryInfo{
+		{driver: "ferroamp", capacityWh: 10000, soc: 0.5, online: true, group: "fa", chargeBlocked: true},
+	}, online...)
+	for _, tc := range []struct {
+		name     string
+		bats     []batteryInfo
+		targetW  float64
+		wantEach float64
+	}{
+		{"battery offline", online, 6000, 3000},
+		{"battery cannot charge", blocked, 6000, 3000},
+		// Below the down group's PV, master gave the whole target to it: 0 W each.
+		{"target below that PV", online, 2000, 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			groupPV := map[string]float64{"fa": 3316}
+			got := map[string]float64{}
+			for _, tg := range distributeProportional(tc.bats, tc.targetW, groupPV) {
+				got[tg.Driver] = tg.TargetW
+			}
+			if math.Abs(got["sungrow"]-tc.wantEach) > 1 || math.Abs(got["pixii"]-tc.wantEach) > 1 || got["ferroamp"] != 0 {
+				t.Errorf("targets = %v, want sungrow and pixii %.0f each, ferroamp 0", got, tc.wantEach)
+			}
+		})
 	}
 }
 

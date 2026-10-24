@@ -216,8 +216,8 @@ func TestHandleStatusKeepsOfflineFlowsUnavailable(t *testing.T) {
 	// balance. This policy also applies when the config callback is absent.
 	for field, want := range map[string]any{
 		"grid_w": float64(8000), "ev_w": float64(1000),
-		"pv_w": nil, "bat_w": nil, "load_w": nil, "bat_soc": nil,
-		"history_quality": "incomplete",
+		"pv_w": nil, "bat_w": nil, "load_w": float64(10000), "bat_soc": nil,
+		"history_quality": "incomplete", "load_quality": "estimated",
 	} {
 		if resp[field] != want {
 			t.Fatalf("%s differs from the qualified live value", field)

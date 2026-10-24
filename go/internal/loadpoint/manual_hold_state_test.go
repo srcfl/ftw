@@ -141,7 +141,7 @@ func TestManualHoldRestoreRequiresHardwareAndActiveSession(t *testing.T) {
 	}{
 		{"easee:ABC", "session-1", "restored", 4140},
 		{"easee:ABC", "session-2", "unconfirmed", 0},
-		{"easee:ABC", "", "unconfirmed", 0},
+		{"easee:ABC", "", "pending", 0},
 		{"easee:OTHER", "session-1", "unconfirmed", 0},
 	} {
 		m := sessionManager(store, "garage", "charger")

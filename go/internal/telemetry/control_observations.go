@@ -183,13 +183,15 @@ func (p ControlObservation) Seen() time.Time {
 // source's power_max_age_s when it declares one, at most three minutes,
 // otherwise one minute.
 func ControlPowerMaxAge(data json.RawMessage) time.Duration {
-	if age := controlPowerDeclaredMaxAge(data); age > 0 {
+	if age := DeclaredPowerMaxAge(data); age > 0 {
 		return age
 	}
 	return time.Minute
 }
 
-func controlPowerDeclaredMaxAge(data json.RawMessage) time.Duration {
+// DeclaredPowerMaxAge is the power_max_age_s a source declares, at most
+// three minutes, otherwise 0.
+func DeclaredPowerMaxAge(data json.RawMessage) time.Duration {
 	var d struct {
 		PowerMaxAgeS float64 `json:"power_max_age_s"`
 	}

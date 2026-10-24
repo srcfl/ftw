@@ -44,16 +44,23 @@ Bara en FTW får styra anläggningen.
 
 ## 4. Öppna FTW och ställ in
 
-Välj **Öppna webbgränssnittet** (eller `http://<home-assistant-adress>:8080`).
+Välj **Öppna webbgränssnittet** inne i Home Assistant. Appversioner med
+ingress använder din HA-inloggning; du behöver inget eget FTW-lösenord.
+Du kan slå på **Visa i sidofältet** på appens sida. HA kräver en administratör
+för att öppna FTW. Den direkta webbporten på hemnätverket är stängd.
+
 Följ installationsguiden och lägg till dina enheter ([guide](sv.md)).
+Det gäller också en befintlig app med ett sparat FTW-lösenord: efter uppdatering
+öppnar du FTW via HA. Inställningar och historik finns kvar.
+
 Ge Home Assistant en fast adress (DHCP-reservation i routern).
-Knappen öppnar FTW direkt på hemnätverket. Appen använder inte Home Assistants
-ingress. För fjärråtkomst parkopplar du en FTW-klient enligt nästa steg.
 
 ## 5. Koppla FTW-appen eller webappen
 
 Nya FTW-webappen och iOS-appen kräver nya FTW 0.x, som den här appen ger.
-I FTW: **Inställningar → FTW app**, och följ [parkopplingen](../pairing.md).
+Ingress ger åtkomst till webbgränssnittet genom HA. Direkt LAN-åtkomst från
+en separat FTW-klient ingår inte i detta läge. För en separat klient behöver
+du aktivera FTW Cloud och följa [parkopplingen](../pairing.md).
 Har du använt webappen mot äldre FTW: ta bort den från hemskärmen och
 parkoppla igen.
 
@@ -67,5 +74,5 @@ parkoppla igen.
   Native-installationens automatiska återgång finns inte här; HA äger uppdateringen.
 - Syns inte appen: kontrollera repo-URL:en och ladda om. Misslyckas
   installationen: se **Inställningar → System → Loggar → Supervisor**.
-  Öppnas inte webbgränssnittet: kolla appens logg, port 8080 måste vara ledig.
+  Öppnas inte webbgränssnittet: öppna appen genom HA och kolla appens logg. Ingressport 18099 måste vara ledig.
 - Fråga i [Discord](https://discord.gg/UK2ygPBu8N) och bifoga appens logg.

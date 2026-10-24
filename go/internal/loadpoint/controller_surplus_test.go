@@ -49,7 +49,7 @@ func TestSurplusCmd_PauseResumeHysteresis(t *testing.T) {
 	surplus = 3000
 	var got float64
 	for i := 0; i < 4; i++ {
-		got = c.computeSurplusCmd(now, cfg, 6900, 0)
+		got = c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 	}
 	if got != 0 {
 		t.Fatalf("after 4 below-min ticks expected paused (got=%v)", got)
@@ -64,7 +64,7 @@ func TestSurplusCmd_PauseResumeHysteresis(t *testing.T) {
 	now = now.Add(60 * time.Second) // past surplusMinPauseHold (35s)
 	surplus = 4140                  // exactly minStep3, no margin
 	for i := 0; i < 4; i++ {
-		got = c.computeSurplusCmd(now, cfg, 6900, 0)
+		got = c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 		now = now.Add(5 * time.Second)
 	}
 	if got != 0 {
@@ -77,7 +77,7 @@ func TestSurplusCmd_PauseResumeHysteresis(t *testing.T) {
 	surplus = 5000
 	resumed := false
 	for i := 0; i < 4; i++ {
-		got = c.computeSurplusCmd(now, cfg, 6900, 0)
+		got = c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 		now = now.Add(5 * time.Second)
 		if got > 0 {
 			resumed = true
@@ -110,7 +110,7 @@ func TestSurplusCmd_UpStepGatedOnAverage(t *testing.T) {
 	c.SetSiteSurplusForEV(func() (float64, bool) { return surplus, true })
 	step := func(s float64) float64 {
 		surplus = s
-		got := c.computeSurplusCmd(now, cfg, 11040, 0)
+		got := c.computeSurplusCmd(now, cfg, 11040, c.pickSurplusSteps(now, cfg))
 		now = now.Add(5 * time.Second)
 		return got
 	}
@@ -168,7 +168,7 @@ func TestSurplusCmd_MinPauseHold(t *testing.T) {
 	// Force pause via 4 below-min ticks.
 	surplus = 1000
 	for i := 0; i < 4; i++ {
-		c.computeSurplusCmd(now, cfg, 6900, 0)
+		c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 	}
 	if !c.surplusPausedFor(cfg.ID) {
 		t.Fatalf("setup: expected paused")
@@ -179,7 +179,7 @@ func TestSurplusCmd_MinPauseHold(t *testing.T) {
 	now = now.Add(10 * time.Second)
 	surplus = 9000
 	for i := 0; i < 4; i++ {
-		got := c.computeSurplusCmd(now, cfg, 6900, 0)
+		got := c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 		if got != 0 {
 			t.Fatalf("within %v of pause edge expected still paused, got=%v",
 				surplusMinPauseHold, got)
@@ -191,7 +191,7 @@ func TestSurplusCmd_MinPauseHold(t *testing.T) {
 	now = now.Add(35 * time.Second)
 	resumed := false
 	for i := 0; i < 4; i++ {
-		got := c.computeSurplusCmd(now, cfg, 6900, 0)
+		got := c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 		now = now.Add(5 * time.Second)
 		if got > 0 {
 			resumed = true
@@ -222,9 +222,9 @@ func TestSurplusCmd_StepSnap(t *testing.T) {
 	surplus = 8000
 	for i := 0; i < 4; i++ {
 		// prime the rolling window so the pause hysteresis stays open
-		c.computeSurplusCmd(now, cfg, 6900, 0)
+		c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 	}
-	if got := c.computeSurplusCmd(now, cfg, 6900, 0); got != 6900 {
+	if got := c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg)); got != 6900 {
 		t.Fatalf("with 8000 W surplus + 6900 W wantW expected snap to 6900, got=%v", got)
 	}
 
@@ -234,9 +234,9 @@ func TestSurplusCmd_StepSnap(t *testing.T) {
 	// higher would leak grid import.
 	surplus = 5500
 	for i := 0; i < 4; i++ {
-		c.computeSurplusCmd(now, cfg, 6900, 0)
+		c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg))
 	}
-	if got := c.computeSurplusCmd(now, cfg, 6900, 0); got != 4140 {
+	if got := c.computeSurplusCmd(now, cfg, 6900, c.pickSurplusSteps(now, cfg)); got != 4140 {
 		t.Fatalf("with 5500 W surplus expected snap down to 4140, got=%v", got)
 	}
 }
@@ -249,7 +249,7 @@ func TestSurplusCmd_NoReader_ReturnsWantW(t *testing.T) {
 	c := NewController(NewManager(), nil, nil, nil)
 	cfg := surplusTestConfig()
 	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
-	if got := c.computeSurplusCmd(now, cfg, 4140, 0); got != 4140 {
+	if got := c.computeSurplusCmd(now, cfg, 4140, c.pickSurplusSteps(now, cfg)); got != 4140 {
 		t.Fatalf("no-reader fallback should pass wantW through, got=%v", got)
 	}
 }
@@ -263,7 +263,7 @@ func TestSurplusCmd_StaleReader_Returns0(t *testing.T) {
 	cfg := surplusTestConfig()
 	c.SetSiteSurplusForEV(func() (float64, bool) { return 0, false })
 	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
-	if got := c.computeSurplusCmd(now, cfg, 4140, 0); got != 0 {
+	if got := c.computeSurplusCmd(now, cfg, 4140, c.pickSurplusSteps(now, cfg)); got != 0 {
 		t.Fatalf("stale reader expected pause-to-0, got=%v", got)
 	}
 }

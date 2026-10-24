@@ -9,6 +9,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/protocol/appwire"
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 // watchClient is a watch, in Go: the initiator side of the exchange, built on
@@ -19,6 +20,9 @@ type watchClient struct {
 	handshake *appwire.InitiatorState
 	transport *appwire.Transport
 }
+
+// dev is the device id FTW Cloud names this watch by.
+func (w *watchClient) dev() string { return cloudwire.DeviceID(w.static.Public()) }
 
 func newWatchClient() (*watchClient, error) {
 	static, err := appwire.GenerateKeyPair()

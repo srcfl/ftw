@@ -109,6 +109,7 @@
     battery_hold: 'Battery hold took priority',
     core_mode: 'Core mode does not allow boost',
     fuse_safety_block: 'Fuse protection stopped boost',
+    import_limit_block: 'Hourly import limit stopped boost',
     restart_lease_invalid: 'Saved lease was no longer safe',
   };
 

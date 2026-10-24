@@ -506,8 +506,8 @@
 
   S.tabs.app = {
     afterSave: function () {
-      // These two switches share a page, not a state. The app link has its
-      // own restart boundary; fleet sharing takes effect as soon as it saves.
+      // These share a page, not a state. The app link has its own restart
+      // boundary; the statistics switch writes at once.
       var panel = S.fleetPing;
       if (panel && panel.afterSave) panel.afterSave();
       refreshStatus(pairingCtx);

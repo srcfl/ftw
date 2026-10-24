@@ -1,4 +1,6 @@
-// One owner choice: statistics come with Cloud; local use asks first.
+// FTW Cloud's terms. Statistics are part of Cloud; a box without Cloud shares
+// anonymous statistics until its owner turns them off under Anonymous
+// statistics (settings/tabs/fleet.js), so nobody is asked here any more.
 (function (window, document) {
   "use strict";
   var read = window.fetch.bind(window);
@@ -35,11 +37,23 @@
   function write(method,path,body) {
     return window.fetch(path,{method:method,headers:{"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined}).then(function(r){return r.json().then(function(v){if(!r.ok)throw Error(v.error||"The box refused the choice.");justAnswered=true;return v;});});
   }
+  // What FTW Cloud's statistics add, for a panel that offers or holds Cloud.
+  function cloudScope(parent) {
+    say(parent,"Shares recorded hourly energy and configured system capacities. Reports stay for 48 hours; public totals require at least 20 homes.");
+    var disclosure=node("details",null,parent);
+    node("summary","What is shared and how it is used",disclosure);
+    say(disclosure,details);
+    say(disclosure,privacy);
+    var link=node("a","Privacy and Cloud terms",parent);link.href="https://ftw.sourceful.energy/privacy#statistics";link.target="_blank";link.rel="noopener";
+    if(!policy.available) say(parent,"You can save your choice now. Hourly reports wait for privacy review and activation.");
+  }
   function paint(host,settings) {
     host.textContent="";
-    if (!status || !policy || (!settings && !status.statisticsDecisionRequired && !justAnswered)) {host.hidden=true;return;}
+    // Only a Cloud box under older terms has something to answer.
+    var needsTerms=!!status && status.link==="on" && !status.statisticsOnly && !status.cloudTermsAccepted;
+    if (!status || !policy || (!settings && !needsTerms && !justAnswered)) {host.hidden=true;return;}
     host.hidden=false;
-    if(!settings && !status.statisticsDecisionRequired && justAnswered) {
+    if(!settings && !needsTerms && justAnswered) {
       var saved=status.link==="ending"?"Stopping Cloud and deleting its stored copy. The box continues locally.":status.cloudTermsAccepted?"Cloud terms accepted and saved on this box.":status.statisticsActive?"Statistics choice saved. Change it in Settings → FTW app.":"Statistics sharing is off. The box continues locally.";
       var receipt=say(host,saved);receipt.className="project-statistics-saved";receipt.setAttribute("role","status");
       return;
@@ -48,24 +62,21 @@
     panel.className="project-statistics-panel";
     var assistant=host.id === "access-cloud-settings";
     var cloud=status.link==="on" && !status.statisticsOnly;
-    node("legend",assistant?"FTW Cloud for assistants":cloud?(status.cloudTermsAccepted?"FTW Cloud":"Review FTW Cloud terms"):"Contribute to FTW statistics?",panel);
+    node("legend",assistant?"FTW Cloud for assistants":cloud?(status.cloudTermsAccepted?"FTW Cloud":"Review FTW Cloud terms"):"FTW Cloud",panel);
     if(assistant && !cloud) say(panel,"FTW Cloud lets your assistant reach this box. Sourceful can read its Cloud copy of your energy data. Cloud includes project statistics. Review the terms below before accepting.");
     else if(cloud) say(panel,status.cloudTermsAccepted?"The current Cloud terms are accepted. FTW Cloud includes project statistics.":"FTW Cloud includes project statistics. Sourceful can read its copy of your energy data. Accept the updated terms for the app and remote access, or turn Cloud off and keep using the box locally.");
-    else say(panel,"For local FTW use, sharing is your choice. Yes is the suggested choice. Nothing starts until you answer, and saying no leaves local operation working. Statistics-only sharing gives no app, phone or assistant remote access.");
-    say(panel,"Shares recorded hourly energy and configured system capacities. Reports stay for 48 hours; public totals require at least 20 homes.");
-    var disclosure=node("details",null,panel);
-    node("summary","What is shared and how it is used",disclosure);
-    say(disclosure,details);
-    say(disclosure,privacy);
-    var link=node("a","Privacy and Cloud terms",panel);link.href="https://ftw.sourceful.energy/privacy#statistics";link.target="_blank";link.rel="noopener";
-    if(!policy.available) say(panel,"You can save your choice now. Hourly reports wait for privacy review and activation.");
-    if(!status.cloudTermsAccepted) {
-      say(panel,authStatus && authStatus.lan_auth
+    else say(panel,"FTW Cloud is off, and the box works locally. The anonymous statistics it shares, and the switch for them, are under Anonymous statistics below.");
+    if(cloud || assistant) cloudScope(panel);
+    var signIn=function(parent){
+      say(parent,authStatus && authStatus.home_assistant
+        ?"Home Assistant manages sign-in for this choice."
+        :authStatus && authStatus.lan_auth
         ?"Your house password protects this choice. The box will ask you to log in if needed."
         :authStatus && authStatus.lan_auth===false
           ?"No house password is required. With password protection off, anyone who can reach this box on your private network can save this choice."
           :"This choice uses the same sign-in rules as Settings. A house password is optional.");
-    }
+    };
+    if(!status.cloudTermsAccepted && (cloud || assistant)) signIn(panel);
     var actions=node("div",null,panel);actions.className="app-link-actions";
     var feedback=node("p",null,panel);feedback.className="project-statistics-error";feedback.setAttribute("role","alert");feedback.hidden=true;
     if(status.link==="ending") {say(panel,"Cloud is stopping and deleting its stored copy. Refresh after the box receives the deletion receipt.");return;}
@@ -78,22 +89,12 @@
       },false,feedback);
     } else if(assistant) {
       button(actions,"Accept Cloud terms and turn it on",function(){return write("POST","/api/cloud/grant",{scopes:policy.cloud_scopes,policy:policy.cloud_policy});},true,feedback);
-      var local=node("details",null,panel);node("summary","Statistics without assistant remote access",local);
-      say(local,"Statistics-only sharing gives no app, phone or assistant remote access.");
-      if(status.statisticsOnly) button(local,"Stop sharing statistics",function(){return write("DELETE","/api/cloud/stats");},false,feedback);
-      else {button(local,"Yes, contribute",function(){return write("POST","/api/cloud/stats",{policy:policy.policy});},false,feedback);}
-    } else if(status.statisticsOnly) {
-      say(panel,"Local statistics sharing is on. Remote Cloud functions are off.");
-      button(actions,"Stop sharing statistics",function(){return write("DELETE","/api/cloud/stats");},false,feedback);
     } else {
-      button(actions,"Yes, contribute",function(){return write("POST","/api/cloud/stats",{policy:policy.policy});},true,feedback);
-      if(status.statisticsDecisionRequired) button(actions,"No, keep it local",function(){return write("DELETE","/api/cloud/stats");},false,feedback);
-      else say(panel,"Local statistics sharing is off.");
-    }
-    if(settings && !cloud && !assistant) {
       var more=node("details",null,panel);
       node("summary","Use FTW Cloud and the app",more);
-      say(more,"FTW Cloud adds app and assistant remote access and a readable state copy. Statistics are included for every Cloud user. Read the information above before accepting.");
+      say(more,"FTW Cloud adds app and assistant remote access and a readable state copy. Statistics are part of Cloud, with no separate off switch.");
+      cloudScope(more);
+      signIn(more);
       button(more,"Accept Cloud terms and turn it on",function(){return write("POST","/api/cloud/grant",{scopes:policy.cloud_scopes,policy:policy.cloud_policy});},true,feedback);
     }
   }

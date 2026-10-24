@@ -207,11 +207,25 @@ func newListener(cfg *Config, auth *authorizer, sockets *socketSessions) (ws.WsS
 	} else {
 		srv = ws.NewServer()
 	}
+	// The library closes a socket that has sent nothing for its PingWait,
+	// 60 s by default. An idle charger that sends only heartbeats, at our
+	// interval or its own 60 s, lands on that edge and is dropped. The
+	// telemetry watchdog decides when a quiet charger is offline; this timer
+	// only has to outlast a few missed heartbeats.
+	timeouts := ws.NewServerTimeoutConfig()
+	timeouts.PingWait = socketReadWait(cfg.HeartbeatIntervalS)
+	srv.SetTimeoutConfig(timeouts)
 	if auth.requiresCredential() {
 		srv.SetBasicAuthHandler(auth.basicAuth)
 	}
 	srv.SetCheckClientHandler(auth.checkClient)
 	return &guardedServer{Server: srv, check: auth.checkClient, sessions: sockets}, nil
+}
+
+// socketReadWait is how long a charger socket may stay silent: five
+// heartbeat intervals.
+func socketReadWait(heartbeatS int) time.Duration {
+	return 5 * time.Duration(heartbeatS) * time.Second
 }
 
 // guardedServer keeps our connection check installed.

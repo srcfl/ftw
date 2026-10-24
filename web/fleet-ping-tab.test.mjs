@@ -45,69 +45,71 @@ function render(config) {
 }
 
 const payload = {
-  schema: "ftw.fleet/1",
+  schema: "ftw.fleet/2",
   ftw_version: "v1.4.0-beta.2",
   channel: "beta",
   drivers: ["easee_cloud", "sungrow"],
   battery_kwh: "5-15",
   price_zone: "SE3",
   install_age: "6-12m",
+  plan_solve: "1-5s",
+  plan_fallbacks: "0",
+  driver_errors: "0-1%",
+  update: "failed",
 };
 
 describe("the fleet statistics panel", () => {
-  it("offers a checkbox bound to fleet_ping.enabled", () => {
-    const html = render({});
-    assert.match(html, /data-checkbox-path="fleet_ping\.enabled"/);
-    assert.match(html, /type="checkbox"/);
-  });
-
-  it("reflects the saved setting", () => {
-    assert.doesNotMatch(render({ fleet_ping: { enabled: false } }), /checkbox"[^>]*checked/);
-    assert.match(render({ fleet_ping: { enabled: true } }), /checked/);
-  });
-
-  it("mirrors the box's default when the section is missing", () => {
-    // A box that has never had fleet_ping in its YAML is sending, because
-    // applyDefaults turns it on. An unchecked box here would say the opposite
-    // of what is true, which is the one thing this screen must never do.
+  it("offers one statistics switch, not a config setting", () => {
+    // Statistics are one answer for both reports, kept by the box, not a
+    // field in the config document that Save writes.
     const config = {};
     const html = render(config);
-    // Compared field by field: the object is built inside the vm sandbox, so
-    // its prototype comes from another realm and deepStrictEqual refuses it.
-    assert.ok(config.fleet_ping, "fleet_ping was not created");
-    assert.equal(config.fleet_ping.enabled, true);
-    assert.match(html, /checked/);
+    assert.match(html, /id="statistics-share"/);
+    assert.doesNotMatch(html, /data-checkbox-path/);
+    assert.equal(config.fleet_ping, undefined, "render() wrote a config section");
   });
 
-  it("says the switch needs no restart", () => {
-    // The one thing about this setting that differs from the FTW app tab
-    // next to it, where saving is not enough.
-    assert.match(render({}), /[Nn]o restart/);
+  it("says what goes beside each message through the relay", () => {
+    // The sealed request carries a random report id and the send day. A
+    // screen that says "no id, no timestamp" and leaves those out would be
+    // the claim this tab exists not to make.
+    const html = render({});
+    assert.match(html, /random number, drawn new for each report so FTW Cloud counts it once/);
+    assert.match(html, /UTC day it was sent/);
+    assert.match(html, /with what goes beside it/);
+  });
+
+  it("names both reports and says they never travel together", () => {
+    const html = render({});
+    assert.match(html, /two anonymous reports a day/);
+    assert.match(html, /never travel together/);
+    assert.match(html, /part of Cloud/);
   });
 
   it("names every field the message carries", () => {
     // This screen is the whole argument for a feature that is on by default,
     // and the sentence people actually read is the paragraph, not the table
-    // under it. A paragraph that names four of six fields is the screen
+    // under it. A paragraph that names some of the fields is the screen
     // making its case with the awkward ones left out — the price zone above
     // all, since it is the only field that says roughly where the house is.
     const html = render({});
-    for (const field of [/version/i, /channel/i, /device|driver/i, /battery/i, /price zone/i, /how old/i]) {
+    for (const field of [/version/i, /channel/i, /device|driver/i, /battery/i, /price zone/i, /how old/i,
+      /slowest plan/i, /fell back/i, /failed to read/i, /update/i]) {
       assert.match(html, field, `the paragraph does not name ${field}`);
     }
   });
 
   it("counts the fields it names, and the count is the fixture's", () => {
-    // "six things" is a claim like any other on this screen, and the only one
+    // "ten things" is a claim like any other on this screen, and the only one
     // that can go stale in silence.
     //
     // What this holds is the sentence against the fixture above, which is a
     // copy of the payload written here by hand. It is not a guard on the box:
-    // a seventh field would leave this passing. That guard is
+    // an eleventh field would leave this passing. That guard is
     // TestPayloadCarriesOnlyTheAgreedFields in go/internal/fleetping, which
-    // counts the marshalled fields and fails on the seventh — and whoever
+    // counts the marshalled fields and fails on the eleventh — and whoever
     // answers it has to come back through here.
-    const words = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight"];
+    const words = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven"];
     const fields = Object.keys(payload).length - 1; // schema names the format, not the box
     assert.ok(words[fields], `no number word for ${fields} fields`);
     assert.match(render({}), new RegExp(words[fields] + " things"));
@@ -200,6 +202,42 @@ describe("the line under the payload", () => {
   });
 });
 
+describe("the statistics switch", () => {
+  const { shareLine } = tab._pure;
+
+  it("is part of FTW Cloud while Cloud is on", () => {
+    const line = shareLine({ statistics: true, statisticsRequired: true });
+    assert.match(line, /Part of FTW Cloud/);
+    assert.match(line, /no separate off switch/);
+  });
+
+  it("says nothing goes under earlier Cloud terms", () => {
+    const line = shareLine({ statistics: false, statisticsRequired: false, statisticsNeedTerms: true });
+    assert.match(line, /earlier terms/);
+    assert.match(line, /Nothing is sent until you accept the current terms/);
+  });
+
+  it("says what on and off mean without Cloud", () => {
+    assert.match(shareLine({ statistics: true, statisticsRequired: false }), /takes effect at once, with no restart/);
+    assert.match(shareLine({ statistics: false, statisticsRequired: false }), /^Off\. Nothing is sent/);
+    assert.match(shareLine(null), /Could not read/);
+  });
+
+  it("does not claim a report goes while it waits for the relay", () => {
+    const line = whereLine({ enabled: false, waits_for_relay: true, endpoint: "https://cloud.ftw.energy/v1/fleet", ftw_relay: true, payload });
+    assert.match(line, /^Not sent yet/);
+    assert.match(line, /only through an independent relay/);
+    assert.doesNotMatch(line, /^Sent/);
+  });
+
+  it("says who sees what when the report goes through the relay", () => {
+    const line = whereLine({ enabled: true, endpoint: "https://relay.example.net/ftw", ftw_relay: true, through_relay: true, payload });
+    assert.match(line, /^Sent through https:\/\/relay\.example\.net\/ftw, an independent relay, to FTW Cloud/);
+    assert.match(line, /sees this box's address but not the report/);
+    assert.match(line, /reads the report but not the address/);
+  });
+});
+
 describe("keeping the line true after a save", () => {
   it("registers a post-save hook, because render() runs only on a tab switch", () => {
     // Without this the line keeps whatever the box said when the tab opened:
@@ -222,7 +260,8 @@ describe("keeping the line true after a save", () => {
     vm.createContext(sandbox);
     vm.runInContext(source, sandbox);
     sandbox.window.FTWSettings.fleetPing.afterSave();
-    assert.deepEqual(asked, ["/api/fleet-ping"]);
+    // And the statistics answer, which the switch shows.
+    assert.deepEqual([...asked].sort(), ["/api/cloud", "/api/cloud/stats-policy", "/api/fleet-ping"]);
   });
 });
 
@@ -237,8 +276,13 @@ describe("payloadRows", () => {
     assert.equal(byKey.battery_kwh.value, "5 to 15 kWh");
     assert.equal(byKey.price_zone.value, "SE3");
     assert.equal(byKey.install_age.value, "six to twelve months");
+    assert.equal(byKey.plan_solve.value, "one to five seconds");
+    assert.equal(byKey.plan_fallbacks.value, "none");
+    assert.equal(byKey.driver_errors.value, "under 1 in 100");
+    assert.equal(byKey.update.value, "failed");
 
     assert.equal(byKey.battery_kwh.label, "Battery size");
+    assert.equal(byKey.plan_solve.label, "Slowest plan, last day");
   });
 
   it("drops only the schema name", () => {
@@ -269,5 +313,52 @@ describe("payloadRows", () => {
     assert.equal(payloadRows(null).length, 0);
     assert.equal(payloadRows(undefined).length, 0);
     assert.equal(payloadRows("not an object").length, 0);
+  });
+});
+
+describe("the daily energy report", () => {
+  const { energyRows, energyLine } = tab._pure;
+  const energy = {
+    schema: "ftw.energy/1", date: "2026-10-23", pv_generation_kwh: 12, grid_import_kwh: 30, grid_export_kwh: 4,
+    battery_charge_kwh: 9, battery_discharge_kwh: 8, vehicle_charge_kwh: 0,
+  };
+
+  it("shows every field the report carries, in kWh", () => {
+    const rows = energyRows(energy);
+    const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
+    assert.equal(rows.length, Object.keys(energy).length - 1);
+    assert.equal(byKey.pv_generation_kwh.value, "12 kWh");
+    assert.equal(byKey.vehicle_charge_kwh.label, "Vehicle charge");
+    assert.equal(byKey.date.value, "2026-10-23");
+    const extra = energyRows({ ...energy, home: "x" }).find((r) => r.key === "home");
+    assert.ok(extra, "an unexpected field was silently dropped");
+  });
+
+  it("says nothing is sent from a release without a relay", () => {
+    const line = energyLine({ relay: "", sending: false, day: "2026-10-23", payload: energy });
+    assert.match(line, /no relay yet/i);
+    assert.doesNotMatch(line, /^Sent/);
+  });
+
+  it("does not point at a report it is not showing", () => {
+    assert.doesNotMatch(energyLine({ relay: "", day: "2026-10-23", payload: null }), /this is the report/i);
+    assert.doesNotMatch(energyLine({ relay: "https://relay.example.net/ftw", day: "2026-10-23", payload: null }), /this is the report/i);
+  });
+
+  it("says who sees what while it is sent, and nothing is sent while it is off", () => {
+    const relay = "https://relay.example.net/ftw";
+    const on = energyLine({ relay, sending: true, payload: energy });
+    assert.match(on, /^Sent through https:\/\/relay\.example\.net/);
+    assert.match(on, /sees this box's address but not the report/);
+    assert.match(on, /reads the report but not the address/);
+    assert.match(energyLine({ relay, sending: false, payload: energy }), /^Nothing is sent/);
+  });
+
+  it("names the fields, the missing id and the relay in its paragraph", () => {
+    const html = render({});
+    assert.match(html, /id="fleet-energy-payload"/);
+    for (const want of [/solar generation/i, /grid import and export/i, /battery charge/i, /vehicle charge/i, /whole kWh/i, /no box id/i, /independent relay/i, /skipped/i]) {
+      assert.match(html, want, `the paragraph does not say ${want}`);
+    }
   });
 });

@@ -189,7 +189,7 @@ func (s *Server) handleCloudStats(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, link.Status())
 	case errors.Is(err, cloudlink.ErrGrantRequest):
 		writeAppLinkError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, cloudlink.ErrNotGranted), errors.Is(err, cloudlink.ErrPurgePending):
+	case errors.Is(err, cloudlink.ErrNotGranted), errors.Is(err, cloudlink.ErrPurgePending), errors.Is(err, cloudlink.ErrCloudTermsFirst):
 		writeAppLinkError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, cloudlink.ErrNoService):
 		writeAppLinkError(w, http.StatusServiceUnavailable, err.Error())

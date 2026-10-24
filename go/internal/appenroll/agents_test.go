@@ -259,7 +259,7 @@ func TestAnAgentComesOnlyThroughTheTunnel(t *testing.T) {
 	if _, _, err := b.id.Check(key, nil); !errors.Is(err, ErrNoPairing) {
 		t.Errorf("the relay admitted an agent: %v", err)
 	}
-	if _, err := b.id.AuthoriseWatch(key, nil); !errors.Is(err, ErrNoPairing) {
+	if _, _, err := b.id.CheckWatch(key); !errors.Is(err, ErrNoPairing) {
 		t.Errorf("the watch door admitted an agent: %v", err)
 	}
 	grant, commit, err := b.id.CheckTunnel(key, nil)

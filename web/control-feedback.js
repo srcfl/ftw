@@ -63,9 +63,12 @@ const REASON_TITLES = {
   no_plan_budget: 'Waiting for the plan', pv_surplus_pause: 'Waiting for spare solar', wake_kick: 'Starting the charger',
   vehicle_complete: 'Car is full', vehicle_limit_completion: 'Car reached its limit', vehicle_not_requesting: 'Car not taking power',
   battery_full: 'Battery full', battery_nearly_full: 'Battery nearly full', battery_nearly_empty: 'Battery nearly empty',
-  core_limit: 'Limited by FTW', fuse_limit: 'Limited by site power limits', fuse_cooldown: 'Waiting after a site power limit',
+  core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
+  import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
   load_balancer_limit: 'Limited by the charger’s load balancer',
+  one_phase: 'Charging on one phase',
+
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
   response_unknown: 'No power reading', observe_only: 'Monitoring only', disabled: 'Disabled', device_control: 'Own control',
@@ -93,7 +96,8 @@ function sentence(row) {
     case 'battery_nearly_full': return `Taking ${controlPower(actual)} of ${controlPower(row.sent_w)} at ${percent(row.battery_soc)}. A battery charges slower when it is nearly full.`;
     case 'battery_nearly_empty': return `Giving ${controlPower(actual)} of ${controlPower(row.sent_w)} at ${percent(row.battery_soc)}. A battery limits discharge when it is nearly empty.`;
     case 'core_limit': return `FTW’s safety limits set the target to ${target(row)}.`;
-    case 'fuse_limit': return `FTW lowered the rate to ${target(row)} to stay within the site’s fuse and import limits.`;
+    case 'fuse_limit': return `FTW lowered the rate to ${target(row)} to protect the main fuse.`;
+    case 'import_limit': return `FTW lowered the rate to ${target(row)} to keep this hour’s grid import within its limit.`;
     case 'fuse_cooldown': return 'FTW waits a moment after a site power limit before it raises the rate.';
     case 'charger_limit': return 'The charger limit in FTW’s settings caps the rate.';
     case 'device_limit': return `The charger’s own limit is ${amps(row.device_limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
@@ -101,6 +105,8 @@ function sentence(row) {
     case 'load_balancer_limit': return num(actual) && actual >= 100
       ? `Asked for ${target(row)}, delivering ${controlPower(actual)}. The charger’s load balancer is limiting the car.`
       : `Asked for ${target(row)}, but the charger’s load balancer gives the car no current.`;
+    case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
+
     case 'power_below_target': case 'power_above_target': return `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
     case 'power_wrong_direction': return `Asked for ${target(row)}, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
     case 'no_power_response': return `Asked for ${target(row)}, but it delivers no power.`;

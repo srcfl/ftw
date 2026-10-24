@@ -1,0 +1,18 @@
+# systemd unit for siterig-runner (README.md). Replace USER and the paths,
+# then: sudo cp siterig-runner.service /etc/systemd/system/ &&
+# sudo systemctl enable --now siterig-runner
+[Unit]
+Description=FTW site test runner (siterig/short, siterig/full commit statuses)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=USER
+Environment=HOME=/home/USER
+Environment=PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/USER/siterig/bin/siterig-runner -work /home/USER/siterig -lanes 3
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

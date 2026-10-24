@@ -70,7 +70,7 @@ func TestSupportLiveLoadMatchesLANSourcePowerAndKnownZero(t *testing.T) {
 }
 
 func TestSupportUnknownLoadRendersUnavailableWithoutForecastClaims(t *testing.T) {
-	for _, scenario := range []string{"negative_balance", "declared_never_emitted", "stale_power"} {
+	for _, scenario := range []string{"stale_power"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, ctrl, tel := reportTestServer(t)
 			switch scenario {
@@ -157,5 +157,30 @@ func TestSupportUnknownLoadNeverBlamesEitherForecast(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSupportEstimatedLoadRendersEstimateWithoutForecastClaims(t *testing.T) {
+	s, ctrl, _ := reportTestServer(t)
+	s.deps.HistoryMeasurementSources = func() telemetry.ForecastOptions {
+		return telemetry.ForecastOptions{ExpectedFlows: []telemetry.ForecastFlow{{Driver: "battery", DerType: telemetry.DerBattery}}}
+	}
+	if st := supportLoadStatus(t, s); st["load_w"] == nil || st["load_quality"] != "estimated" {
+		t.Fatal("left-out battery blanked LAN Home use", st)
+	}
+	snap := s.liveNow(*ctrl, time.Now())
+	if snap.HaveLoad || !snap.LoadEstimated {
+		t.Fatal("estimated load counted as measured")
+	}
+	snap.PredictedLd = 50000
+	var b strings.Builder
+	writeRightNow(&b, *ctrl, snap, nil, nil, control.SlotEnergySnapshot{}, time.Now())
+	if !strings.Contains(b.String(), "(estimated: `missing:battery:battery`)") {
+		t.Fatal("estimate not rendered as one", b.String())
+	}
+	for _, f := range s.collectFindings(*ctrl, snap, nil, nil, nil, nil, control.SlotEnergySnapshot{}, time.Now()) {
+		if strings.Contains(f.Title, "load forecast") {
+			t.Fatal("estimated load caused a forecast claim")
+		}
 	}
 }

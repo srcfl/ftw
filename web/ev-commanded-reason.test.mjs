@@ -9,7 +9,9 @@ const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
 
 test('every pause reason has its own sentence', () => {
   assert.match(source, /commanded_reason === "fuse_cooldown" \|\| lp\.commanded_reason === "fuse_limit"/);
-  assert.match(source, /Paused by site power limits/);
+  assert.match(source, /Paused by the main fuse/);
+  assert.match(source, /commanded_reason === "import_limit"/);
+  assert.match(source, /Paused by the hourly import limit/);
   assert.match(source, /commanded_reason === "site_meter_stale"/);
   assert.match(source, /Paused for safety: site-meter data is stale/);
   assert.match(source, /commanded_reason === "pv_surplus_pause"/);
@@ -19,6 +21,7 @@ test('every pause reason has its own sentence', () => {
   assert.match(source, /commanded_reason === "no_plan_budget"/);
   assert.match(source, /The ready time has passed, so FTW is not charging/);
   assert.match(source, /Battery level is assumed, not read from the car/);
-  // A fuse-limited ongoing charge says so too.
-  assert.match(source, /Rate is limited by site power limits right now/);
+  // A limited ongoing charge names its limit too.
+  assert.match(source, /Rate is limited by the main fuse right now/);
+  assert.match(source, /Rate is limited by the hourly import limit right now/);
 });

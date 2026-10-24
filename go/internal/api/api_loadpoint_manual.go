@@ -249,14 +249,16 @@ func (s *Server) handleLoadpointManualHoldGet(w http.ResponseWriter, r *http.Req
 // slider (range from min/max charge W ÷ phases ÷ voltage) and reflect
 // whether a manual hold is currently pinned. Phases come from the
 // loadpoint's phase_mode (1p/3p) or the site fuse; voltage from the
-// site fuse. Mutates states in place.
+// site fuse. A charger that cannot run three phases reports one unless
+// pinned to 3p, as Core runs it. Mutates states in place.
 func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 	var fusePhases int
-	var voltage float64
+	var voltage, maxAmps float64
 	if s.deps.CfgMu != nil && s.deps.Cfg != nil {
 		s.deps.CfgMu.RLock()
 		fusePhases = s.deps.Cfg.Fuse.Phases
 		voltage = s.deps.Cfg.Fuse.Voltage
+		maxAmps = s.deps.Cfg.Fuse.MaxAmps
 		s.deps.CfgMu.RUnlock()
 	}
 	if fusePhases <= 0 {
@@ -266,10 +268,11 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 		voltage = 230
 	}
 
-	phaseModeByID := map[string]string{}
+	site := loadpoint.SiteFuse{MaxAmps: maxAmps, Voltage: voltage, PhaseCnt: fusePhases}
+	cfgByID := map[string]loadpoint.Config{}
 	if s.deps.Loadpoints != nil {
 		for _, c := range s.deps.Loadpoints.Configs() {
-			phaseModeByID[c.ID] = c.PhaseMode
+			cfgByID[c.ID] = c
 		}
 	}
 
@@ -277,11 +280,14 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 	chargers := s.chargerReadings()
 	for i := range states {
 		phases := fusePhases
-		switch phaseModeByID[states[i].ID] {
-		case "1p":
+		cfg, known := cfgByID[states[i].ID]
+		switch {
+		case cfg.PhaseMode == "1p":
 			phases = 1
-		case "3p":
+		case cfg.PhaseMode == "3p":
 			phases = 3
+		case known && !loadpoint.ThreePhaseCapable(cfg, site):
+			phases = 1
 		}
 		states[i].Phases = phases
 		states[i].VoltageV = voltage
