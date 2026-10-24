@@ -627,3 +627,101 @@ func TestANoticeGoesPastTheBudget(t *testing.T) {
 	}
 	svc.waitFor(cloudwire.MsgNotice, 3*time.Second)
 }
+
+// fakeExchange is the box's exchange, as the link sees it.
+type fakeExchange struct{ ch chan cloudwire.X }
+
+func (f *fakeExchange) Deliver(x cloudwire.X) { f.ch <- x }
+
+// x goes both ways unsigned and reaches the Exchange unread, and the box says
+// x in hello.caps only when it has an Exchange beside its Tunnel.
+func TestXGoesBothWaysAndIsSaidOnlyWithAnExchange(t *testing.T) {
+	svc := newFakeService(t)
+	svc.afterHello = func(conn uplinkConn, home string) {
+		svc.write(conn, nil, home, cloudwire.MsgX, cloudwire.X{Dev: "wAtCh123", ID: 4, D: []byte{1, 2, 3}})
+	}
+	exchange := &fakeExchange{ch: make(chan cloudwire.X, 4)}
+	h := newHarnessWith(t, svc, []*ecdsa.PublicKey{&svc.key.PublicKey}, nil, func(o *Options) { o.Exchange = exchange })
+	h.setRoster(func(r *fakeRosterState) { r.tun = true })
+
+	select {
+	case got := <-exchange.ch:
+		if got.Dev != "wAtCh123" || got.ID != 4 || !bytes.Equal(got.D, []byte{1, 2, 3}) {
+			t.Fatalf("the Exchange got %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no x reached the Exchange")
+	}
+	if !h.link.TakesX() {
+		t.Fatal("a link with an Exchange beside its Tunnel does not take x")
+	}
+	var hello cloudwire.Hello
+	svc.mu.Lock()
+	payload, _ := cloudwire.DecodeFrame(svc.hello)
+	svc.mu.Unlock()
+	env, _ := cloudwire.DecodeEnvelope(payload)
+	if err := cloudwire.Unmarshal(env.B, &hello); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(hello.Caps, cloudwire.CapX) {
+		t.Fatalf("hello caps %v name no x", hello.Caps)
+	}
+
+	if err := h.link.SendX(cloudwire.X{Dev: "wAtCh123", ID: 4, D: []byte{4, 5}}); err != nil {
+		t.Fatalf("SendX refused with the uplink up: %v", err)
+	}
+	up := svc.waitFor(cloudwire.MsgX, 3*time.Second)
+	var x cloudwire.X
+	if err := cloudwire.Unmarshal(up.B, &x); err != nil || x.ID != 4 || x.Dev != "wAtCh123" || !bytes.Equal(x.D, []byte{4, 5}) || len(up.Sig) != 0 {
+		t.Fatalf("the service got %+v: %v", x, err)
+	}
+
+	// Without an Exchange the box says no x.
+	plain := newFakeService(t)
+	h2 := newHarness(t, plain)
+	h2.setRoster(func(r *fakeRosterState) { r.tun = true })
+	h2.nextRoster(t)
+	plain.mu.Lock()
+	payload, _ = cloudwire.DecodeFrame(plain.hello)
+	plain.mu.Unlock()
+	env, _ = cloudwire.DecodeEnvelope(payload)
+	if err := cloudwire.Unmarshal(env.B, &hello); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(hello.Caps, cloudwire.CapX) || h2.link.TakesX() {
+		t.Fatalf("a box with no Exchange says x: %v", hello.Caps)
+	}
+}
+
+// x keeps to its share: a tenth of the tunnel's budget, and nothing once the
+// tunnel has spent nine tenths, so the phones keep the last of it. Past
+// either, an answer may not leave, and the exchange runs nothing.
+func TestXKeepsToItsShareOfTheTunnelBudget(t *testing.T) {
+	svc := newFakeService(t)
+	exchange := &fakeExchange{ch: make(chan cloudwire.X, 4)}
+	h := newHarnessWith(t, svc, []*ecdsa.PublicKey{&svc.key.PublicKey}, nil, func(o *Options) { o.Exchange = exchange })
+	h.setRoster(func(r *fakeRosterState) { r.tun = true })
+	h.nextRoster(t)
+	if !h.link.XAllowed() || h.link.SendX(cloudwire.X{Dev: "w", ID: 1}) != nil {
+		t.Fatal("x refused with its share unspent")
+	}
+
+	h.link.mu.Lock()
+	h.link.xBudget.add(h.link.uptimeMs(), xBudgetBytes)
+	h.link.mu.Unlock()
+	if h.link.XAllowed() || h.link.SendX(cloudwire.X{Dev: "w", ID: 2}) == nil {
+		t.Fatal("x left past its own share")
+	}
+
+	h.link.mu.Lock()
+	h.link.xBudget = budget{}
+	h.link.tunBudget.add(h.link.uptimeMs(), int64(xStopsAt*tunBudgetBytes))
+	h.link.mu.Unlock()
+	if h.link.XAllowed() {
+		t.Fatal("x left with the phones' last share of the tunnel")
+	}
+	// The phones still have theirs.
+	if h.link.SendTun(cloudwire.Tun{Dev: "p", Sid: 1, D: []byte{1}}, false) != nil {
+		t.Fatal("a phone's tun was refused at nine tenths")
+	}
+}

@@ -3,7 +3,9 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -39,6 +41,7 @@ type evMeterSite struct {
 	mgr                          *loadpoint.Manager
 	ctrl                         *loadpoint.Controller
 	chargerDelay, telemetryDelay time.Duration
+	chargerMaxAgeS               float64 // the driver's power_max_age_s, as Easee Cloud declares 180
 	readings                     evReadings
 	houseW                       float64
 	housePhaseA                  [3]float64
@@ -123,6 +126,8 @@ func (s *evMeterSite) boot() {
 	s.ctrl.SetFuseEVMax(func() (float64, bool) {
 		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.mgr.Configs(), 17250)
 	})
+	s.ctrl.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(s.state) })
+	s.ctrl.SetFuseLimitReason(func() string { return EVLimitReason(s.state) })
 	s.ctrl.SetManualHold(cfg.ID, loadpoint.ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
 	if s.onBoot != nil {
 		s.onBoot()
@@ -157,7 +162,11 @@ func (s *evMeterSite) emit(driver string, kind telemetry.DerType, w float64, ext
 // report delivers one poll. The receipt time is all the driver knows.
 func (s *evMeterSite) report(w float64) {
 	s.reportedW, s.reportedAt = w, s.now
-	s.emit("easee", telemetry.DerEV, w, nil)
+	var extra map[string]any
+	if s.chargerMaxAgeS > 0 {
+		extra = map[string]any{"power_max_age_s": s.chargerMaxAgeS}
+	}
+	s.emit("easee", telemetry.DerEV, w, extra)
 }
 
 func (s *evMeterSite) cloudW() float64 {
@@ -393,45 +402,132 @@ func TestEVHardLimitCutsOnNextReadingWhenCarResumesIntoHouseLoad(t *testing.T) {
 	}
 }
 
-// After a cut the cap rises one step at a time. The next rise follows as
-// soon as the meter shows import rising with the last one; a car that does
-// not follow gets one step per settle time at most.
-func TestEVHardLimitRiseWaitsForMeterOrDwell(t *testing.T) {
-	for _, paused := range []bool{false, true} {
-		s := newEVMeterSite(t, 7500, 900)
-		s.steady(5520)
-		s.setHouse(2900) // 920 W over: cut to 4,140 W
-		s.run(10 * time.Second)
-		if s.offer() != 4140 {
-			t.Fatalf("offer %.0f W after a 920 W overage", s.offer())
+// After a cut the cap rises once evSettle has passed, then one step per
+// reading. It does not wait for the meter to show each rise: every rise
+// counts as flowing until the charger can have applied it, so the car
+// stops a step below the room.
+func TestEVHardLimitRisesOnceCutApplied(t *testing.T) {
+	s := newEVMeterSite(t, 7500, 900)
+	s.steady(5520)
+	stepAt := s.now
+	s.setHouse(2900) // 920 W over: cut to 4,140 W
+	s.run(10 * time.Second)
+	cuts := s.offersSince(stepAt)
+	if len(cuts) == 0 || s.offer() != 4140 {
+		t.Fatalf("offer %.0f W after a 920 W overage", s.offer())
+	}
+	var cutAt time.Time
+	for _, o := range cuts {
+		if o.w < 5520 {
+			cutAt = o.at
+			break
 		}
-		s.setHouse(900)
-		s.carPaused = paused
-		recoveredAt := s.now
-		s.run(2 * time.Minute)
-		var rises []evTimed
-		got := s.offersSince(recoveredAt)
-		for i := 1; i < len(got); i++ {
-			if got[i].w-got[i-1].w > 690 {
-				t.Fatalf("paused=%v: rose more than one step at once: %v", paused, offerWatts(got))
-			}
-			if got[i].w > got[i-1].w {
-				rises = append(rises, got[i])
-			}
+	}
+	s.setHouse(900)
+	recoveredAt := s.now
+	s.run(time.Minute)
+	got := s.offersSince(recoveredAt)
+	var firstRise time.Time
+	for i := 1; i < len(got); i++ {
+		if got[i].w-got[i-1].w > 690 {
+			t.Fatalf("rose more than one step at once: %v", offerWatts(got))
 		}
-		if len(rises) < 2 {
-			t.Fatalf("paused=%v: rises %v, want at least two", paused, offerWatts(got))
+		if got[i].w > got[i-1].w && firstRise.IsZero() {
+			firstRise = got[i].at
 		}
-		gap := rises[1].at.Sub(rises[0].at)
-		if !paused && gap >= evSettle {
-			t.Fatalf("a rise the meter confirmed still waited %v", gap)
+	}
+	if firstRise.IsZero() || firstRise.Sub(cutAt) < evSettle {
+		t.Fatalf("first rise %v after the cut, want at least %v", firstRise.Sub(cutAt), evSettle)
+	}
+	if s.offer() != 5520 || s.houseW+s.evW > 7500-690 {
+		t.Fatalf("recovered to %.0f W at %.0f W grid, want 5,520 W with a step of margin", s.offer(), s.houseW+s.evW)
+	}
+}
+
+// Easee Cloud may take one to three minutes to apply a new current and
+// declares power_max_age_s 180. Beside 15 A of house load on the 25 A fuse,
+// rises sent before the meter showed the last one stacked: a 60 s delay
+// peaked at 25.0 A, a 120 s delay at 28.0 A. Each rise now counts as flowing
+// until the charger can have applied it, and a charger that declares nothing
+// counts as just as slow. The car settles in the measured room and climbs
+// again when the house lets go.
+func TestEVHardLimitSlowChargerRisesDoNotStack(t *testing.T) {
+	for _, declaredS := range []float64{180, 0} {
+		for _, delay := range []time.Duration{60 * time.Second, 120 * time.Second} {
+			t.Run(fmt.Sprintf("declared_%.0fs/delay_%v", declaredS, delay), func(t *testing.T) {
+				s := newEVMeterSite(t, 0, 15*690)
+				s.chargerDelay, s.chargerMaxAgeS = delay, declaredS
+				limitA := s.state.SiteFuseAmps - evPhaseMarginA
+				var maxA float64
+				var overSince time.Time
+				watch := func(d time.Duration) {
+					t.Helper()
+					for end := s.now.Add(d); s.now.Before(end); {
+						s.step()
+						a := s.phaseA()
+						worst := math.Max(a[0], math.Max(a[1], a[2]))
+						maxA = math.Max(maxA, worst)
+						switch {
+						case worst <= limitA:
+							overSince = time.Time{}
+						case overSince.IsZero():
+							overSince = s.now
+						case s.now.Sub(overSince) > delay+3*time.Second:
+							t.Fatalf("worst phase %.1f A above %.0f A for %v", worst, limitA, s.now.Sub(overSince))
+						}
+					}
+				}
+				watch(10 * time.Minute)
+				// 24 - 15 A leaves 9 A; one step stays free.
+				if s.offer() != 5520 || s.evW != 5520 {
+					t.Fatalf("offer %.0f W draw %.0f W, want 5,520 W", s.offer(), s.evW)
+				}
+				s.setHouse(10 * 690)
+				watch(15 * time.Minute)
+				// 24 - 10 A leaves 14 A; one step stays free.
+				if s.offer() != 8970 || s.evW != 8970 {
+					t.Fatalf("after the house fell: offer %.0f W draw %.0f W, want 8,970 W", s.offer(), s.evW)
+				}
+				t.Logf("worst phase peaked at %.1f A", maxA)
+			})
 		}
-		if paused && gap < evSettle {
-			t.Fatalf("an unconfirmed rise followed after %v", gap)
-		}
-		if !paused && (s.offer() != 5520 || s.houseW+s.evW > 7500-690) {
-			t.Fatalf("recovered to %.0f W at %.0f W grid, want 5,520 W with a step of margin", s.offer(), s.houseW+s.evW)
-		}
+	}
+}
+
+// A fast local charger that declares no response time counts its offers
+// as flowing for evUnknownSettle, beside what the meter already shows. It
+// still takes the whole room in one move, and the pending count never cuts
+// it: only a measured overage does.
+func TestEVHardLimitUndeclaredFastChargerTakesRoomAtOnce(t *testing.T) {
+	s := newEVMeterSite(t, 0, 15*690)
+	for s.offer() == 0 {
+		s.step()
+	}
+	startedAt := s.now
+	s.run(s.chargerDelay + 2*time.Second)
+	// 24 - 15 A leaves 9 A; one step stays free.
+	if s.offer() != 5520 || s.evW != 5520 {
+		t.Fatalf("started at %.0f W, drawing %.0f W; want the 5,520 W room in one move", s.offer(), s.evW)
+	}
+	// 23.5 A measured, under the 24 A working limit, while the start still
+	// counts as flowing.
+	s.setHouse(15.5 * 690)
+	s.run(time.Minute)
+	if got := offerWatts(s.offersSince(startedAt)); slices.Min(got) != 5520 {
+		t.Fatalf("the pending start cut the car: %v", got)
+	}
+
+	// Under a 7.5 kW import ceiling the house falls by 1,380 W: one run of
+	// rises, a step per reading, takes the car to the room less a step.
+	s = newEVMeterSite(t, 7500, 2280)
+	s.run(5 * time.Minute)
+	if s.offer() != 4140 {
+		t.Fatalf("setup: offer %.0f W", s.offer())
+	}
+	s.setHouse(900)
+	s.run(s.chargerDelay + 5*time.Second)
+	if s.offer() != 5520 || s.evW != 5520 {
+		t.Fatalf("offer %.0f W draw %.0f W after the house fell, want 5,520 W", s.offer(), s.evW)
 	}
 }
 
@@ -652,6 +748,57 @@ func TestEVHardLimitIdleStartNeedsRoomOnDeclaredPhases(t *testing.T) {
 				t.Fatalf("cap %.1f W, want %.1f W", got, tc.want)
 			}
 		})
+	}
+}
+
+// Our own battery order the meter may not show yet counts as a
+// three-phase battery puts it: the same current on each phase. A one-phase
+// car's room is one phase's, so the whole order there counted it three
+// times: 4,703 W of battery order left 661 W below one phase's limit, under
+// the 1,610 W a start needs, and the car stayed at 0 W (fuse_limit) until
+// the order had shown for evSettle and the meter had shown room for
+// evRestartDwell (the rig of 22 Oct 2026, 42 s). The cap counts 6.8 A on
+// each phase instead; a three-phase car's cap does not change.
+func TestEVHardLimitBatteryOrderCountsOnEachPhase(t *testing.T) {
+	for _, tc := range []struct {
+		phase string
+		want  float64
+	}{
+		{"1p", (24 - 0.68 - 4703.0/690 - 1) * 230},
+		{"auto", (24 - 0.68 - 4703.0/690 - 1) * 230},
+		{"3p", (24 - 0.68 - 4703.0/690 - 1) * 690},
+	} {
+		t.Run(tc.phase, func(t *testing.T) {
+			store, state, points, configs := evMeterBudgetFixture(t, -466, []float64{-0.68, -0.68, -0.68}, 0, tc.phase)
+			now := time.Now()
+			state.batteryCommands = map[string]commandLog{"ferroamp": commandLog{}.add(now, 4703)}
+			got, known := EVFuseBudget(store, state, points, configs, 17250)
+			if !known || math.Abs(got-tc.want) > .01 {
+				t.Fatalf("cap %.1f W, want %.1f W", got, tc.want)
+			}
+		})
+	}
+}
+
+// While the hour's import ceiling holds an idle car back, the label names
+// the ceiling. The fuse's room counts our battery order on its way, so the
+// ceiling's room in the comparison must count it too, or a 5,500 W order
+// with 2,750 W of fuse room read fuse_limit from the second reading on.
+func TestEVHardLimitIdleCeilingLabelCountsBatteryOrder(t *testing.T) {
+	store, state, points, configs := evMeterBudgetFixture(t, 9000, []float64{13, 13, 13}, 0, "3p")
+	now := time.Now()
+	state.clock = func() time.Time { return now }
+	state.PeakImportCeilingW = 12000
+	state.importHour = hourImport{start: state.importHourStart(now), ceilingW: 12000, limitW: 12000, riseW: 12000,
+		changedAt: now, seen: true, seenCeiling: 12000, lastAt: now.Add(-time.Second)}
+	state.batteryCommands = map[string]commandLog{"battery": commandLog{}.add(now, 5500)}
+	for reading := 1; reading <= 2; reading++ {
+		store.Get("meter", telemetry.DerMeter).UpdatedAt = now
+		got, _ := EVFuseBudget(store, state, points, configs, 17250)
+		if reason := EVLimitReason(state); got != 0 || reason != "import_limit" {
+			t.Fatalf("reading %d: cap %.1f W %s, want 0 W import_limit", reading, got, reason)
+		}
+		now = now.Add(2 * time.Second)
 	}
 }
 

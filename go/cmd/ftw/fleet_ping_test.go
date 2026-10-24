@@ -13,13 +13,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
+	"github.com/srcfl/ftw/go/internal/fleetping"
+	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // A config saved from the Settings screen does not pass through applyDefaults:
@@ -117,7 +121,7 @@ func TestRunningFleetPingSeesADriverInstalledLater(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, "v1.4.0", active)
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{st: store}, nil, nil, "v1.4.0", active)
 	if err != nil {
 		t.Fatalf("startFleetPing: %v", err)
 	}
@@ -339,7 +343,7 @@ func TestNoNameTheHouseholdChoseReachesThePostedPing(t *testing.T) {
 	// path unchanged. Payload() is what sendOnce marshals and posts.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, "v1.4.0", active)
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{st: store}, nil, nil, "v1.4.0", active)
 	if err != nil {
 		t.Fatalf("startFleetPing: %v", err)
 	}
@@ -469,7 +473,7 @@ func TestARepositoryRootInsideTheBundledTreeIsNotTheShippedCatalogue(t *testing.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, "v1.4.0", active)
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{st: store}, nil, nil, "v1.4.0", active)
 	if err != nil {
 		t.Fatalf("startFleetPing: %v", err)
 	}
@@ -498,4 +502,54 @@ func slicesContain(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// The report's health comes from the plans the box kept, the drivers' polls
+// and the newest update, and leaves only as buckets. A box without an updater
+// reads as no update, like a box that had none.
+func TestFleetHealthReadsTheBoxsLastDay(t *testing.T) {
+	store := openStore(t)
+	now := time.Now()
+	for i, js := range []string{`{"solver":{"solve_ms":6100,"fallback":true}}`, `{"solver":{"solve_ms":300}}`} {
+		if err := store.SaveDiagnostic(now.Add(-time.Duration(i+1)*time.Hour).UnixMilli(), "scheduled", "SE3", 0, 96, js); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tel := telemetry.NewStore()
+	for range 99 {
+		tel.CountPoll(false)
+	}
+	tel.CountPoll(true)
+	updates := selfupdate.New(selfupdate.Config{StatusPath: filepath.Join(t.TempDir(), "update-status.json")}, nil)
+	if err := updates.WriteStatus(selfupdate.UpdateStatus{State: "failed", Action: "update", Target: "v9.9.9", UpdatedAt: now.Add(-48 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Just after a start the poll count covers too little to say anything.
+	if h := fleetHealth(store, tel, updates, now); h.Polls != 0 || h.PollErrors != 0 || h.Plans != 2 {
+		t.Fatalf("a fresh count was reported: %+v", h)
+	}
+	// Seven hours on, it covers enough; the polls and plans are still in
+	// their 24 hours.
+	h := fleetHealth(store, tel, updates, now.Add(7*time.Hour))
+	if h.Plans != 2 || h.SlowestSolve != 6100*time.Millisecond || h.Fallbacks != 1 || h.Polls != 100 || h.PollErrors != 1 || h.Update != "failed" {
+		t.Fatalf("%+v", h)
+	}
+	p := fleetping.Build(fleetping.Facts{Health: h}, now)
+	if p.Solve != "5s+" || p.Fallbacks != "1-3" || p.Errors != "1%+" || p.Update != "failed" {
+		t.Fatalf("%+v", p)
+	}
+
+	// A week on, the failed update is no longer news; a restart is not an
+	// update at all.
+	if h := fleetHealth(store, tel, updates, now.Add(6*24*time.Hour)); h.Update != "" {
+		t.Fatalf("a week-old update still reads %q", h.Update)
+	}
+	_ = updates.WriteStatus(selfupdate.UpdateStatus{State: "done", Action: "restart", UpdatedAt: now})
+	if h := fleetHealth(store, tel, updates, now); h.Update != "" {
+		t.Fatalf("a restart reads as an update: %q", h.Update)
+	}
+	if h := fleetHealth(store, tel, nil, now); h.Update != "" || h.Plans != 2 {
+		t.Fatalf("without an updater: %+v", h)
+	}
 }

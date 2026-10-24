@@ -37,9 +37,10 @@ func TestTheLargestTunFitsItsFrame(t *testing.T) {
 	}
 }
 
-// The downlink grows by tun alone.
-func TestTheDownlinkIsSixTypes(t *testing.T) {
-	want := []string{MsgChallenge, MsgHelloOK, MsgWatch, MsgResync, MsgPurged, MsgTun}
+// The downlink grows by tun and x alone: the two carry ciphertext the box
+// judges itself.
+func TestTheDownlinkIsSevenTypes(t *testing.T) {
+	want := []string{MsgChallenge, MsgHelloOK, MsgWatch, MsgResync, MsgPurged, MsgTun, MsgX}
 	if !slices.Equal(Downlink, want) {
 		t.Fatalf("Downlink is %v, want %v", Downlink, want)
 	}

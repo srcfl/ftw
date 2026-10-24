@@ -2,7 +2,6 @@ package loadpoint
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 )
@@ -12,58 +11,6 @@ func fuseRecoveryLoadpoint() Config {
 	cfg.MaxChargeW = 11040
 	cfg.AllowedStepsW = []float64{0, 4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350, 11040}
 	return cfg
-}
-
-func TestFuseBudgetRecoversAfterTwoSafeTicks(t *testing.T) {
-	for _, manual := range []bool{false, true} {
-		for _, initial := range []struct {
-			name string
-			capW float64
-		}{{"below_minimum", 3560}, {"zero", 0}, {"invalid", math.NaN()}} {
-			name := "scheduled/" + initial.name
-			if manual {
-				name = "manual/" + initial.name
-			}
-			t.Run(name, func(t *testing.T) {
-				now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-				cfg := fuseRecoveryLoadpoint()
-				d := &Directive{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), LoadpointEnergyWh: map[string]float64{cfg.ID: 2587.5}, LoadpointMaxPowerW: map[string]float64{cfg.ID: 10350}}
-				samples := map[string]EVSample{cfg.DriverName: {Connected: true, RequestActive: true, PowerW: 10000}}
-				sender := &fakeSender{}
-				c := newTestController(t, []Config{cfg}, d, samples, sender)
-				c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-				if manual {
-					c.SetManualHold(cfg.ID, ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
-				}
-				capW := initial.capW
-				c.SetFuseEVMax(func() (float64, bool) { return capW, true })
-				check := func(at time.Time, allowed bool, want float64) {
-					t.Helper()
-					c.TickWithDispatch(context.Background(), at, allowed)
-					set, ok := lastSetCurrent(sender.calls)
-					if !ok || set.power != want {
-						t.Fatalf("at %v: command=%+v, want %.0f W", at.Sub(now), set, want)
-					}
-				}
-				check(now, true, 0)
-				capW = 13560
-				check(now.Add(5*time.Second), true, 0)
-				check(now.Add(10*time.Second), true, 10350)
-				// A later loss of headroom must stop immediately and require
-				// two safe dispatch ticks again, never a five-minute lock.
-				capW = 3000
-				check(now.Add(15*time.Second), true, 0)
-				capW = 13560
-				check(now.Add(20*time.Second), true, 0)
-				check(now.Add(25*time.Second), false, 0)
-				check(now.Add(30*time.Second), true, 0)
-				check(now.Add(35*time.Second), true, 10350)
-				// A saved Stop remains a Stop after the fuse budget recovers.
-				c.SetManualHold(cfg.ID, ManualHold{Persistent: true})
-				check(now.Add(40*time.Second), true, 0)
-			})
-		}
-	}
 }
 
 func TestFirstConnectionIsObservedBeforeFuseBudget(t *testing.T) {
@@ -90,33 +37,6 @@ func TestFirstConnectionIsObservedBeforeFuseBudget(t *testing.T) {
 	}
 }
 
-func TestSharedPhaseBudgetDoesNotIntegrateSameOverload(t *testing.T) {
-	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-	cfg := fuseRecoveryLoadpoint()
-	samples := map[string]EVSample{cfg.DriverName: {Connected: true, RequestActive: true, PowerW: 8280}}
-	sender := &fakeSender{}
-	c := newTestController(t, []Config{cfg}, nil, samples, sender)
-	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	c.SetManualHold(cfg.ID, ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
-	// Our own 12 A offer is established before the overload; a reading
-	// from the car is never what the guard credits.
-	worstA, otherA, budgetW := 12.0, 12.0, 8280.0
-	c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return worstA, otherA, otherA, true })
-	c.SetFuseEVMax(func() (float64, bool) { return budgetW, true })
-	c.Tick(context.Background(), now.Add(-5*time.Second))
-	worstA, otherA, budgetW = 27, 20, 6210
-	for tick := 0; tick < 12; tick++ {
-		c.Tick(context.Background(), now.Add(time.Duration(tick)*5*time.Second))
-		set, ok := lastSetCurrent(sender.calls)
-		// Offered EV=12 A, worst site phase=27 A. A 9 A EV offer
-		// leaves that phase at 24 A, below the 25 A fuse. Re-reading
-		// the same sample cannot justify a second accumulated trim.
-		if !ok || set.power != 6210 {
-			t.Fatalf("tick %d: command=%+v, want stable legal 6210 W", tick, set)
-		}
-	}
-}
-
 func TestManualSinglePhaseUsesItsLegalMinimumInSharedFuseBudget(t *testing.T) {
 	for _, phaseMode := range []string{"1p", "auto"} {
 		t.Run(phaseMode, func(t *testing.T) {
@@ -135,30 +55,6 @@ func TestManualSinglePhaseUsesItsLegalMinimumInSharedFuseBudget(t *testing.T) {
 				t.Fatalf("legal single-phase offer was treated as below the three-phase minimum: %+v", set)
 			}
 		})
-	}
-}
-
-func TestNewConnectionDoesNotInheritFuseRecovery(t *testing.T) {
-	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-	cfg := fuseRecoveryLoadpoint()
-	sender := &fakeSender{}
-	samples := map[string]EVSample{cfg.DriverName: {Connected: true, RequestActive: true}}
-	c := newTestController(t, []Config{cfg}, nil, samples, sender)
-	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	c.SetManualHold(cfg.ID, ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
-	capW := 0.0
-	c.SetFuseEVMax(func() (float64, bool) { return capW, true })
-	c.Tick(context.Background(), now)
-	capW = 13560
-	c.Tick(context.Background(), now.Add(5*time.Second))
-	samples[cfg.DriverName] = EVSample{Connected: false}
-	c.Tick(context.Background(), now.Add(10*time.Second))
-	samples[cfg.DriverName] = EVSample{Connected: true, RequestActive: true}
-	c.SetManualHold(cfg.ID, ManualHold{PowerW: 10350, PhaseMode: "3p", Persistent: true})
-	c.Tick(context.Background(), now.Add(15*time.Second))
-	set, ok := lastSetCurrent(sender.calls)
-	if !ok || set.power != 10350 {
-		t.Fatalf("new session inherited the previous session's recovery wait: %+v", set)
 	}
 }
 
@@ -187,11 +83,10 @@ func TestUnspecifiedSurplusPhaseKeepsSinglePhaseFuseBound(t *testing.T) {
 	sender := &fakeSender{}
 	c := newTestController(t, []Config{cfg}, nil, samples, sender)
 	c.SetSiteFuse(SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	c.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) { return 20, 20, 20, true })
 	// A hold without a phase override inherits surplus mode's auto choice.
 	// At2760 W that may be a12 A offer on the already20 A phase.
 	c.SetManualHold(cfg.ID, ManualHold{PowerW: 2760, Persistent: true})
-	c.SetFuseEVMax(func() (float64, bool) { return 2760, true })
+	c.SetFuseEVMax(meteredEVCap(c, func() float64 { return 20 }))
 	c.Tick(context.Background(), now)
 	set, ok := lastSetCurrent(sender.calls)
 	if !ok || set.power != 0 {

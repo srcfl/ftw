@@ -34,6 +34,12 @@ const (
 	// holding a session open all day at 1 Hz sends about 50 MB; this is five
 	// of them, and stops a runaway before it eats a household's uplink.
 	tunBudgetBytes = 250_000_000
+	// xBudgetBytes is the watches' share of it: their exchange answers, a
+	// tenth. An answer is about a kilobyte, so this is some twenty thousand
+	// a day. xStopsAt is the share of the tunnel's budget past which x
+	// stops, so the phones keep the last of it.
+	xBudgetBytes = tunBudgetBytes / 10
+	xStopsAt     = 0.9
 )
 
 // sentFrame is the last frame of a class that left the house, exactly.
@@ -101,6 +107,9 @@ type cadence struct {
 	// arrived says a driver finished a poll since live was last composed,
 	// while a phone watches.
 	arrived bool
+
+	// tiles is what this connection sent of the tiles class.
+	tiles tileState
 }
 
 // liveCheckEvery is how often the source table is looked at, so a table
@@ -115,7 +124,7 @@ func (w *writer) run(ctx context.Context, events <-chan cloudwire.Envelope) erro
 	connHome := l.current().home
 	// A roster goes at every connect, which also renews its ttlS: the
 	// service counts that from when it received the last one.
-	st := &cadence{full: true}
+	st := &cadence{full: true, tiles: newTileState(w.have)}
 	var purgeSince time.Time
 	// slot fires when an arrival waits for the watched live's period.
 	var slot <-chan time.Time
@@ -207,6 +216,9 @@ func (w *writer) downlink(snap grantSnapshot, st *cadence, env cloudwire.Envelop
 		}
 		if slices.Contains(b.What, cloudwire.ResyncRoster) {
 			st.rosterAt = time.Time{}
+		}
+		if slices.Contains(b.What, cloudwire.ResyncTiles) {
+			st.tiles.resync(b.Tiles)
 		}
 	}
 	return nil
@@ -385,7 +397,8 @@ func (w *writer) tick(snap grantSnapshot, st *cadence, now time.Time) error {
 			st.anyAt = now
 		}
 	}
-	return nil
+	// Tiles go last: a reading never waits for the ledger.
+	return w.tiles(snap, st, now)
 }
 
 // takeRoster says whether a roster is due, and builds it from the link as it

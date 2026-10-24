@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -71,12 +72,13 @@ func (h *fuseHeat) overA(amps []float64, limitA, instantA float64) float64 {
 }
 
 // levelA is the highest phase current, taking each phase at the higher of
-// the reading and its heat. Rises and starts read it, so a rise never spends
-// heat the last minute has already used.
-func (h *fuseHeat) levelA(amps []float64) float64 {
+// the reading and its heat, plus what we sent that it may not show yet.
+// Rises and starts read it, so a rise never spends heat the last minute has
+// already used, nor room an earlier rise will take.
+func (h *fuseHeat) levelA(amps []float64, pendingA [3]float64) float64 {
 	level := 0.0
 	for i, a := range amps {
-		level = math.Max(level, math.Max(a, math.Sqrt(h.sq[i])))
+		level = math.Max(level, math.Max(a, math.Sqrt(h.sq[i]))+pendingA[i])
 	}
 	return level
 }
@@ -120,4 +122,22 @@ func phaseCurrentsA(meter *telemetry.DerReading, state *State) (amps []float64, 
 		amps = append(amps, math.Abs(*a))
 	}
 	return amps, true, true
+}
+
+// SitePhases is the site meter's last reading of its phase currents, for
+// the loadpoints' one-phase car check. false when the meter reports no
+// usable phase currents or the site has fewer than three phases.
+func SitePhases(store *telemetry.Store, state *State) (loadpoint.SitePhases, bool) {
+	if store == nil || state == nil || state.SiteFusePhases != 3 {
+		return loadpoint.SitePhases{}, false
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil {
+		return loadpoint.SitePhases{}, false
+	}
+	amps, _, valid := phaseCurrentsA(meter, state)
+	if !valid || len(amps) != 3 {
+		return loadpoint.SitePhases{}, false
+	}
+	return loadpoint.SitePhases{A: [3]float64(amps), At: meter.UpdatedAt}, true
 }

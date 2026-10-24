@@ -430,20 +430,28 @@ func TestTheConsentRoundTripShowsThePurposes(t *testing.T) {
 		return st
 	}
 
+	current := `{"policy":"` + cloudwire.StatsPolicy + `"}`
 	call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", statsBody, http.StatusConflict)
 	call(s.handleCloudGrant, http.MethodPost, "/api/cloud/grant", grantBody, http.StatusOK)
-	call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", statsBody, http.StatusOK)
+	// Older terms did not include statistics: the current ones come first.
+	if st := call(s.handleCloudStatus, http.MethodGet, "/api/cloud", "", http.StatusOK); !st.StatisticsNeedTerms || st.Statistics {
+		t.Fatalf("status under older terms: %+v", st)
+	}
+	call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", current, http.StatusConflict)
+	call(s.handleCloudGrant, http.MethodPost, "/api/cloud/grant", `{"scopes":["ftw.live.read"],"policy":"`+cloudwire.CloudTermsPolicy+`"}`, http.StatusOK)
 	if st := call(s.handleCloudStatus, http.MethodGet, "/api/cloud", "", http.StatusOK); st.State != "on" ||
-		strings.Join(st.Purposes, ",") != "serve,stats" {
-		t.Fatalf("status with statistics on: %+v", st)
+		strings.Join(st.Purposes, ",") != "serve,stats" || !st.Statistics || !st.StatisticsRequired {
+		t.Fatalf("status under the current terms: %+v", st)
 	}
-	if st := call(s.handleCloudStopStats, http.MethodDelete, "/api/cloud/stats", "", http.StatusOK); strings.Join(st.Purposes, ",") != "serve" {
-		t.Fatalf("status with statistics off: %+v", st)
-	}
+	call(s.handleCloudStopStats, http.MethodDelete, "/api/cloud/stats", "", http.StatusConflict)
 	if st := call(s.handleCloudRevoke, http.MethodDelete, "/api/cloud/grant", "", http.StatusOK); st.State != "revoking" {
 		t.Fatalf("status after FTW Cloud off: %+v", st)
 	}
+	// While the copy is deleted, the box's own answer can still change.
 	call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", statsBody, http.StatusConflict)
+	if st := call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", current, http.StatusOK); !st.Statistics {
+		t.Fatalf("status after the local yes: %+v", st)
+	}
 }
 
 type cloudSiteStub struct{}

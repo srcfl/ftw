@@ -198,7 +198,7 @@ func (h *handlerV201) OnNotifyEVChargingNeeds(id string, req *smartcharging.Noti
 		"departure", n.DepartureTime)
 
 	h.noteChargingNeeds(id, n)
-	h.telSuccess(id)
+	h.telHealth(id) // from the car, so no proof of Available
 	return smartcharging.NewNotifyEVChargingNeedsResponse(smartcharging.EVChargingNeedsStatusAccepted), nil
 }
 
@@ -207,7 +207,7 @@ func (h *handlerV201) OnNotifyEVChargingNeeds(id string, req *smartcharging.Noti
 // acknowledged and dropped — accepting it costs nothing and refusing would
 // make the charger retry forever.
 func (h *handlerV201) OnNotifyEVChargingSchedule(id string, _ *smartcharging.NotifyEVChargingScheduleRequest) (*smartcharging.NotifyEVChargingScheduleResponse, error) {
-	h.telSuccess(id)
+	h.telHealth(id)
 	return smartcharging.NewNotifyEVChargingScheduleResponse(types201.GenericStatusAccepted), nil
 }
 

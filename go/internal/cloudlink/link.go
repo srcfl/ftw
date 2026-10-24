@@ -6,11 +6,12 @@
 //
 // FTW Cloud never chooses an action. This package holds that line in its
 // build: it reaches the box only through the read-only ports below and the
-// Tunnel port, and may import nothing from the box (CI checks it with go list
-// -deps). What the service may send back is a closed set of six messages.
-// Five ask the box for nothing but to send sooner, send again or forget a
-// key. The sixth, tun, carries a phone's Noise session, which this package
-// hands to the Tunnel unread.
+// Tunnel and Exchange ports, and may import nothing from the box (CI checks
+// it with go list -deps). What the service may send back is a closed set of
+// seven messages. Five ask the box for nothing but to send sooner, send again
+// or forget a key. tun carries a phone's Noise session, which this package
+// hands to the Tunnel unread, and x a watch's exchange with the box, which it
+// hands to the Exchange unread.
 //
 // The box links when it first shows a pairing code, has a phone that may
 // open a tunnel, or an owner grants the readable copy. A link record or a
@@ -210,6 +211,15 @@ type Tunnel interface {
 	Drop()
 }
 
+// Exchange answers the watches' requests that FTW Cloud carries (ADR 0009).
+// The box's exchange table implements it; the link hands it each x from the
+// service unread.
+type Exchange interface {
+	// Deliver takes one x from the service. It must not block: the link
+	// reads the service on the same goroutine.
+	Deliver(x cloudwire.X)
+}
+
 // WebPushSource renders and encrypts the notices the service may send when the box is away.
 type WebPushSource interface {
 	WebPushRows() ([]cloudwire.WebPushRow, error)
@@ -234,6 +244,9 @@ type Options struct {
 	// Tunnel serves the phones' sessions. Nil takes no tun: the box does not
 	// list tun in hello.caps, and the service sends it none.
 	Tunnel Tunnel
+	// Exchange answers the watches. Nil, or no Tunnel, takes no x: the box
+	// does not list x in hello.caps, and the service sends it none.
+	Exchange Exchange
 	// Arrivals hears each finished driver poll (telemetry.Store.Arrivals).
 	// While a phone watches, live goes when a poll lands rather than on the
 	// next check. Nil leaves live on its checks alone.
@@ -296,9 +309,12 @@ type Link struct {
 	// tunOut and tunBulk carry framed tun messages, lane 0 and bulk, to
 	// the connection's tun writer. Nil while no uplink is up. tunBudget counts what left, apart from
 	// the readable copy's budget, and tunDropped what never did.
-	tunOut     chan []byte
-	tunBulk    chan []byte
-	tunBudget  budget
+	tunOut    chan []byte
+	tunBulk   chan []byte
+	tunBudget budget
+	// xBudget counts the watches' exchange answers apart, as well as in
+	// tunBudget once they leave.
+	xBudget    budget
 	tunDropped int64
 	sent       map[string]sentFrame
 	srcRev     uint64
@@ -756,26 +772,36 @@ type StatsRequest struct {
 	By string `json:"-"`
 }
 
-// Stats adds the stats purpose to a grant already on. The first time, it
-// draws the statsId that names this box's rows at the service; later calls
-// keep it. It sends no statistics itself.
+// Stats turns statistics on. For a box without FTW Cloud that is the one
+// answer on the box, and nothing links to Cloud. Under a grant already on it
+// also adds the stats purpose; the first time, it draws the statsId that
+// names this box's rows at the service, and later calls keep it. It sends no
+// statistics itself.
 func (l *Link) Stats(req StatsRequest) error {
-	if len(l.opts.ServiceKeys) == 0 {
-		return ErrNoService
-	}
 	if strings.TrimSpace(req.Policy) == "" {
 		return fmt.Errorf("%w: name the policy the owner accepted", ErrGrantRequest)
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch {
-	case l.grant == nil:
+	case l.grant == nil || l.grant.Revoked || l.disabled:
+		// The box's own answer, which needs no grant: also while a Cloud
+		// that was turned off waits for its deletion receipt.
 		if req.Policy != cloudwire.StatsPolicy {
 			return ErrNotGranted
 		}
-		return l.startStatisticsOnly(req)
-	case l.grant.Revoked:
-		return ErrPurgePending
+		if err := l.opts.KV.SaveConfig(statsShareKey, "on"); err != nil {
+			return err
+		}
+		l.log.Info("audit: statistics on", "by", req.By)
+		return nil
+	case cloudUnderOlderTerms(l.grant):
+		return ErrCloudTermsFirst
+	case len(l.opts.ServiceKeys) == 0:
+		return ErrNoService
+	}
+	if err := l.opts.KV.SaveConfig(statsShareKey, "on"); err != nil {
+		return err
 	}
 	g := *l.grant
 	if len(g.StatsID) == 0 || g.StatsPolicy != req.Policy {
@@ -796,16 +822,21 @@ func (l *Link) Stats(req StatsRequest) error {
 	return l.storeLocked(g, "statistics on")
 }
 
-// StopStats removes the stats purpose and forgets the statsId. Turning it on
-// again draws a new one.
+// StopStats turns statistics off for a box without FTW Cloud, removes the
+// stats purpose and forgets the statsId. Turning it on again draws a new one.
+// With Cloud under the current terms statistics are part of Cloud.
 func (l *Link) StopStats(by string) error {
 	l.mu.Lock()
-	if l.grant != nil && !l.grant.Revoked && l.grant.Policy == cloudwire.CloudTermsPolicy {
+	if cloudRequiresStatistics(l.grant) {
 		l.mu.Unlock()
 		return ErrCloudNeedsStatistics
 	}
 	only := l.grant != nil && l.grant.statisticsOnly()
 	l.mu.Unlock()
+	if err := l.opts.KV.SaveConfig(statsShareKey, "off"); err != nil {
+		return err
+	}
+	l.log.Info("audit: statistics off", "by", by)
 	if only {
 		if err := l.End(by); err != nil {
 			return err
@@ -921,6 +952,13 @@ type Status struct {
 	CloudTermsAccepted         bool   `json:"cloudTermsAccepted"`
 	StatisticsOnly             bool   `json:"statisticsOnly"`
 	StatisticsDecisionRequired bool   `json:"statisticsDecisionRequired"`
+	// Statistics is the one answer for both anonymous daily reports, and
+	// StatisticsRequired says it is part of FTW Cloud, with no off switch.
+	Statistics         bool `json:"statistics"`
+	StatisticsRequired bool `json:"statisticsRequired"`
+	// StatisticsNeedTerms is Cloud on under older terms: statistics wait
+	// until the owner accepts the current ones.
+	StatisticsNeedTerms bool `json:"statisticsNeedTerms"`
 	// State is the readable copy's: off, on or revoking.
 	State            string `json:"state"`
 	StatisticsPolicy string `json:"statisticsPolicy"`
@@ -979,17 +1017,23 @@ func (l *Link) Status() Status {
 		TunDropped: l.tunDropped,
 	}
 	s.CloudPolicy = cloudwire.CloudTermsPolicy
-	decision, _ := l.opts.KV.LoadConfig(statsDecisionKey)
-	s.StatisticsDecisionRequired = decision != cloudwire.StatsPolicy
-	if l.grant != nil && !l.grant.Revoked && l.grant.StatsPolicy == cloudwire.StatsPolicy && len(l.grant.StatsID) == 16 {
-		s.StatisticsDecisionRequired = false
+	// Nobody is asked any more: statistics are part of Cloud, and on for a
+	// box without it until its owner turns them off. The field stays false
+	// for clients that still read it.
+	share, _ := l.opts.KV.LoadConfig(statsShareKey)
+	g := l.grant
+	if l.disabled {
+		g = nil
 	}
+	s.Statistics = sharesStatistics(g, share)
+	s.StatisticsRequired = cloudRequiresStatistics(g)
+	s.StatisticsNeedTerms = cloudUnderOlderTerms(g)
 	s.StatisticsOnly = l.grant.statisticsOnly()
 	s.CloudTermsAccepted = l.grant != nil && !l.grant.Revoked && l.grant.Policy == cloudwire.CloudTermsPolicy
 	s.StatisticsPolicy = cloudwire.StatsPolicy
 	s.StatisticsReady = l.connected && l.serviceStatsPolicy == cloudwire.StatsPolicy
 	if g := l.grant; g != nil {
-		s.StatisticsActive = !g.Revoked && g.StatsAtMs > 0 && g.StatsPolicy == cloudwire.StatsPolicy && len(g.StatsID) == 16 && slices.Contains(g.Purposes, protocol.CloudPurposeStats)
+		s.StatisticsActive = s.Statistics && !g.Revoked && g.StatsAtMs > 0 && g.StatsPolicy == cloudwire.StatsPolicy && len(g.StatsID) == 16 && slices.Contains(g.Purposes, protocol.CloudPurposeStats)
 	}
 	s.BudgetReached = s.BytesLast24h >= budgetBytes
 	if !l.lastSend.IsZero() {
@@ -1036,6 +1080,11 @@ func (l *Link) TakesTun() bool {
 	defer l.mu.Unlock()
 	return l.Available() && l.opts.Tunnel != nil && !l.disabled && !l.grant.statisticsOnly()
 }
+
+// TakesX reports whether the link carries the watches' exchange as x, which
+// it does only beside the tunnel: a watch's roster entry opens its door
+// through tun.
+func (l *Link) TakesX() bool { return l.TakesTun() && l.opts.Exchange != nil }
 
 // SessionInfo is what a phone needs, over its Noise session with the box, to
 // reach this home through FTW Cloud: the home id, the key that signs the
@@ -1196,14 +1245,18 @@ func (snap grantSnapshot) allowed(class string) bool {
 func (l *Link) caps(snap grantSnapshot) []string {
 	var out []string
 	_, cars := l.opts.Site.(CarSite)
-	for _, c := range []string{cloudwire.MsgLive, cloudwire.MsgLP, cloudwire.MsgCar, cloudwire.MsgPrices, cloudwire.MsgHB, cloudwire.MsgEvent} {
-		if snap.allowed(c) && (c != cloudwire.MsgCar || cars) {
+	_, history := l.opts.Site.(HistorySite)
+	for _, c := range []string{cloudwire.MsgLive, cloudwire.MsgLP, cloudwire.MsgCar, cloudwire.MsgPrices, cloudwire.MsgHB, cloudwire.MsgEvent, cloudwire.MsgTiles} {
+		if snap.allowed(c) && (c != cloudwire.MsgCar || cars) && (c != cloudwire.MsgTiles || history) {
 			out = append(out, c)
 		}
 	}
 	out = append(out, cloudwire.MsgRoster, cloudwire.MsgNotice)
 	if l.opts.Tunnel != nil {
 		out = append(out, cloudwire.CapTun)
+		if l.opts.Exchange != nil {
+			out = append(out, cloudwire.CapX)
+		}
 	}
 	return append(out, cloudwire.CapShard)
 }

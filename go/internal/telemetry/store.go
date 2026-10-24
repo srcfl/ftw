@@ -217,11 +217,13 @@ func (h *DriverHealth) RecordTick() {
 }
 
 // RecordError bumps the error counter and degrades the status after 3 in a row.
+// An offline driver stays offline: only fresh data brings it back. Lifting it
+// to degraded made its held readings live again until the next watchdog scan.
 func (h *DriverHealth) RecordError(err string) {
 	h.ConsecutiveErrors++
 	h.LastError = err
 	h.TickCount++
-	if h.ConsecutiveErrors >= 3 {
+	if h.ConsecutiveErrors >= 3 && h.Status != StatusOffline {
 		h.Status = StatusDegraded
 	}
 }
@@ -274,6 +276,13 @@ func (h *DriverHealth) TelemetryLive() bool {
 	return h != nil && h.Status != StatusOffline
 }
 
+// LastReadFailed reports whether the driver's latest poll failed, so its
+// readings are held from an earlier one. Only failed reads count: a refused
+// command sets DeviceFault and leaves this alone.
+func (h *DriverHealth) LastReadFailed() bool {
+	return h != nil && h.ConsecutiveErrors > 0
+}
+
 // MetricSample is one (driver, metric, ts, value) tuple buffered for the
 // long-format TS database. State.Store consumes these via FlushSamples.
 type MetricSample struct {
@@ -296,10 +305,6 @@ type Store struct {
 	health              map[string]*DriverHealth
 	commands            map[string]CommandEvidence
 	controlObservations map[string][]ControlObservation
-	homeObservations    map[string][]ControlObservation // display estimates only
-	homeSourceTime      map[string]bool                 // reported source time, otherwise receipt time
-	homeIdleState       map[string]time.Time            // disconnected state time; zero means unqualified
-	homeEnergy          map[string]*homeEnergySeries    // timestamped session counters, display only
 
 	processNoise     float64
 	measurementNoise float64
@@ -319,6 +324,17 @@ type Store struct {
 	// arrivals hear of each finished poll (see Arrived).
 	arrivalsMu sync.Mutex
 	arrivals   map[chan struct{}]struct{}
+
+	// pollHours counts driver polls and their errors, all drivers together,
+	// one slot per clock hour of the last day, since born. Guarded by mu.
+	pollHours [24]pollHour
+	born      time.Time
+}
+
+// pollHour is one clock hour's driver polls, all drivers together.
+type pollHour struct {
+	hour          int64 // Unix hours
+	polls, errors uint64
 }
 
 type metricSnap struct {
@@ -336,6 +352,7 @@ func NewStore() *Store {
 		filters:          make(map[string]*KalmanFilter1D),
 		health:           make(map[string]*DriverHealth),
 		latestMetric:     make(map[string]metricSnap),
+		born:             time.Now(),
 		processNoise:     100, // W of expected change between samples
 		measurementNoise: 50,  // W of sensor noise
 	}
@@ -478,7 +495,6 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 
 	s.observeCommand(driver, t, rawW, data, now)
 	s.recordControlObservation(driver, t, rawW, data, now)
-	s.recordHomeObservation(driver, t, rawW, data, now)
 	s.freezeStepWindows(now)
 
 	// Auto-buffer the standard fields (raw, not smoothed — we store ground
@@ -766,6 +782,48 @@ func (s *Store) RecordDriverError(name, err string) {
 	s.driverHealthLocked(name).RecordError(err)
 }
 
+// CountPoll counts one finished driver poll, failed or not. The driver
+// registry's poll loop is the one caller: an OCPP charger's messages are not
+// polls and are counted neither way.
+func (s *Store) CountPoll(failed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.countPollLocked(time.Now(), failed)
+}
+
+// countPollLocked counts one poll in its clock hour, reusing the slot of the
+// same hour a day before.
+func (s *Store) countPollLocked(now time.Time, failed bool) {
+	hour := now.Unix() / 3600
+	slot := &s.pollHours[hour%int64(len(s.pollHours))]
+	if slot.hour != hour {
+		*slot = pollHour{hour: hour}
+	}
+	slot.polls++
+	if failed {
+		slot.errors++
+	}
+}
+
+// PollsLastDay is how many driver polls ran in the 24 clock hours up to now,
+// all drivers together, how many of them failed, and how much of the day the
+// count covers: the counts live in memory, so after a restart they cover
+// only the time since. The anonymous fleet report coarsens the share into a
+// bucket; no driver's name is counted.
+func (s *Store) PollsLastDay(now time.Time) (polls, errors uint64, covered time.Duration) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	covered = min(24*time.Hour, max(0, now.Sub(s.born)))
+	hour := now.Unix() / 3600
+	for _, slot := range s.pollHours {
+		if slot.hour > hour-int64(len(s.pollHours)) && slot.hour <= hour {
+			polls += slot.polls
+			errors += slot.errors
+		}
+	}
+	return polls, errors, covered
+}
+
 // Remove drops all in-memory state for a driver: readings, Kalman
 // filters, the health entry and the latest emit_metric snapshots. Called
 // from the driver Registry when a driver is removed from config (or
@@ -785,10 +843,6 @@ func (s *Store) Remove(driver string) {
 	delete(s.health, driver)
 	for _, kind := range allDerTypes {
 		delete(s.controlObservations, key(driver, kind))
-		delete(s.homeObservations, key(driver, kind))
-		delete(s.homeSourceTime, key(driver, kind))
-		delete(s.homeIdleState, key(driver, kind))
-		delete(s.homeEnergy, key(driver, kind))
 	}
 	for k, c := range s.commands {
 		c.Baseline, c.StepAfter = nil, nil

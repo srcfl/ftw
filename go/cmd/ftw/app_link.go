@@ -81,7 +81,7 @@ func (a *appSite) Snapshot() appproto.Snapshot {
 	live := a.tel.LiveMeasurementNow(siteMeterDriver, opts)
 	snap := appproto.Snapshot{Mode: mode, ControlRev: rev, FuseA: fuseA,
 		GridW: live.GridW, PVW: live.PVW, BatteryW: live.BatteryW, EVW: live.EVW,
-		LoadW: live.HouseholdW, LoadWKnown: live.Valid}
+		LoadW: live.LoadW, LoadWKnown: live.LoadKnown}
 
 	uptimeMs := time.Since(a.started).Milliseconds()
 	seen := map[string]bool{}
@@ -766,11 +766,11 @@ func startAppLink(
 	// the same whichever session reads it.
 	views := agentViews{site: &cloudSite{site: site, api: gateway, cars: carsRT}, cars: carsRT}
 
-	// handlerFor builds one handler for one session: a phone's stream, or a
-	// watch's exchange. They share the ports above, which are read-only
-	// apart from the mode and the command log, and the mode goes through
-	// control's own validation.
-	handlerFor := func() appuplink.HandlerBuilder {
+	// handlerFor builds one handler for one session: a phone's stream, or
+	// with exchange set a watch's exchange. They share the ports above, which
+	// are read-only apart from the mode and the command log, and the mode
+	// goes through control's own validation.
+	handlerFor := func(exchange bool) appuplink.HandlerBuilder {
 		return func(
 			sender appproto.Sender,
 			caller apiauth.Caller,
@@ -793,6 +793,7 @@ func startAppLink(
 				Caller:       caller,
 				Grants:       grants,
 				Commands:     cmds,
+				Exchange:     exchange,
 				Access:       agents.access,
 				Agents:       agents.state,
 				Audit:        agents.audit,
@@ -818,16 +819,17 @@ func startAppLink(
 	}
 
 	uplink, err := appuplink.New(appuplink.Options{
-		Enroll:   enroll,
-		Handler:  handlerFor(),
-		Arrivals: arrivalsFor(ctx, tel),
+		Enroll:          enroll,
+		Handler:         handlerFor(false),
+		ExchangeHandler: handlerFor(true),
+		Arrivals:        arrivalsFor(ctx, tel),
 	})
 	if err != nil {
 		return enroll, nil, enabled, err
 	}
 	agents.access.Drop = func(key []byte) { uplink.DropSessionsByAppKey(key) }
 	agents.boxPage = func(by string) (*appproto.Handler, error) {
-		return handlerFor()(discardSender{}, boxPageCaller(by), boxPageGrant{})
+		return handlerFor(false)(discardSender{}, boxPageCaller(by), boxPageGrant{})
 	}
 	go sweepAgents(ctx, agents)
 
@@ -940,10 +942,10 @@ func (a *appLinkAPI) MintPairingCode(role string) ([]byte, time.Time, error) {
 	return code, expires, appLinkError(err)
 }
 
-// MintWatchCode issues a watch code bound to the owner phone that asked.
-func (a *appLinkAPI) MintWatchCode(parentID string) ([]byte, time.Time, error) {
-	code, expires, err := a.enroll.MintWatchCode(parentID, appenroll.WatchTTL)
-	return code, expires, appLinkError(err)
+// AddWatch adds a watch by its key under the owner phone that asked.
+func (a *appLinkAPI) AddWatch(parentID string, key []byte) (string, error) {
+	grant, err := a.enroll.AddWatch(parentID, key)
+	return grant.DeviceID, appLinkError(err)
 }
 
 func (a *appLinkAPI) MintSpokenCode(role string) (string, time.Time, error) {
@@ -1068,6 +1070,8 @@ func appLinkError(err error) error {
 		return api.ErrWatchAppRole
 	case errors.Is(err, appenroll.ErrWatchNeedsOwner):
 		return api.ErrWatchNeedsOwner
+	case errors.Is(err, appenroll.ErrWatchKey):
+		return api.ErrWatchAppKey
 	default:
 		return err
 	}

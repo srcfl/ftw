@@ -15,8 +15,9 @@ import (
 // application/octet-stream. The body is IK message 1 to a service Noise key,
 // with OncePrologue(home) as the prologue, so a once handshake and an app
 // session handshake can never stand in for each other. Message 1 carries one
-// unsigned envelope: read, token.get, push.register or push.unregister. The
-// answer body is message 2 with the reply and then, for a read, the
+// unsigned envelope: read, token.get, push.register, push.unregister or x
+// (exchange.go). The answer body is message 2 with the reply and then, for a
+// read, the
 // envelopes that did not fit, each message after its length as u16 big
 // endian. The service keeps no session and no Noise state after the answer.
 
@@ -48,7 +49,7 @@ const (
 
 // OnceMessages are the types message 1 may carry. The service refuses every
 // other type, an owner's suspend among them, before message 2.
-var OnceMessages = []string{MsgRead, MsgTokenGet, MsgPushRegister, MsgPushUnregister}
+var OnceMessages = []string{MsgRead, MsgTokenGet, MsgPushRegister, MsgPushUnregister, MsgX}
 
 // Read asks for the snapshot, less what the watch already holds.
 type Read struct {

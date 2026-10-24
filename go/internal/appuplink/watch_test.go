@@ -4,57 +4,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"github.com/srcfl/ftw/go/internal/apiauth"
-	"github.com/srcfl/ftw/go/internal/appenroll"
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 // A watch reaches the box through the exchange and never through the stream,
-// so it can never take a phone's place. Its key on the stream
-// gets the silence a stranger gets.
+// so it can never take a phone's place. The roster gives it tun, because its
+// exchange rides FTW Cloud, but its key in the tunnel gets the silence a
+// stranger gets.
 func TestAWatchKeyGetsNoStream(t *testing.T) {
-	r := newRig(t, 481234)
-
-	code, _, err := r.enroll.MintPairingCode(apiauth.RoleOwner, appenroll.PairingTTL)
-	if err != nil {
-		t.Fatalf("MintPairingCode: %v", err)
-	}
-	phone, err := newAppClient()
-	if err != nil {
-		t.Fatalf("newAppClient: %v", err)
-	}
-	grant, err := r.enroll.Authorise(phone.staticPublic(), code)
-	if err != nil {
-		t.Fatalf("pairing the phone: %v", err)
-	}
-	watchCode, _, err := r.enroll.MintWatchCode(grant.DeviceID, appenroll.WatchTTL)
-	if err != nil {
-		t.Fatalf("MintWatchCode: %v", err)
+	r := newTunRig(t)
+	phone := r.pair(t)
+	grant, ok := r.enroll.GrantFor(cloudwire.DeviceID(phone.staticPublic()))
+	if !ok {
+		t.Fatal("the phone did not pair")
 	}
 	watch, err := newAppClient()
 	if err != nil {
-		t.Fatalf("newAppClient: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := r.enroll.AuthoriseWatch(watch.staticPublic(), watchCode); err != nil {
+	if _, err := r.enroll.AddWatch(grant.DeviceID, watch.staticPublic()); err != nil {
 		t.Fatalf("adding the watch: %v", err)
 	}
 
-	conn := r.dialApp(t, 481234)
-	message1, err := watch.message1(r.enroll.StaticKey().Public(), nil)
+	m1, err := watch.message1(r.enroll.StaticKey().Public(), nil)
 	if err != nil {
-		t.Fatalf("message1: %v", err)
+		t.Fatal(err)
 	}
-	if err := conn.WriteMessage(websocket.BinaryMessage, message1); err != nil {
-		t.Fatalf("sending message 1: %v", err)
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
-	for {
-		kind, _, err := conn.ReadMessage()
-		if err != nil {
-			return // the deadline, which is the pass
-		}
-		if kind == websocket.BinaryMessage {
-			t.Fatal("the box opened a stream for a watch")
-		}
+	r.tunnel.Deliver(cloudwire.Tun{Dev: cloudwire.DeviceID(watch.staticPublic()), Sid: 1, D: m1})
+	r.silent(t, 750*time.Millisecond)
+	if r.tunnel.count() != 0 {
+		t.Fatal("the box opened a stream for a watch")
 	}
 }

@@ -551,6 +551,9 @@ type State struct {
 	// loadpoint controller's read of FuseEVMaxW and as the trigger for
 	// an MPC reactive replan from main.go.
 	FuseSaturated bool
+	// FuseSaturatedByImport says the clock hour's import limit, not the
+	// fuse, set the ceiling FuseSaturated hit.
+	FuseSaturatedByImport bool
 
 	// DriverLimits maps driver name → per-battery charge/discharge cap.
 	// Missing entries and unset fields fall through to the global
@@ -1140,6 +1143,7 @@ type batteryInfo struct {
 	// batteryDirectionBlocks + distributeProportional.
 	dischargeBlocked bool
 	chargeBlocked    bool
+	socMissing       bool // no fresh SoC reading; soc is 0
 }
 
 // chargeCap returns the effective per-battery charge ceiling, falling
@@ -1474,7 +1478,8 @@ func ComputeDispatch(
 		soc := 0.0
 		lim := state.DriverLimits[name]
 		dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-		if r.SoC != nil {
+		socMissing := r.SoC == nil
+		if !socMissing {
 			soc = *r.SoC
 		} else {
 			// Never reported SoC: do not discharge a pack we cannot
@@ -1499,6 +1504,7 @@ func ComputeDispatch(
 			maxDischargeWSet: lim.MaxDischargeWSet,
 			dischargeBlocked: dischargeBlocked,
 			chargeBlocked:    chargeBlocked,
+			socMissing:       socMissing,
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))
@@ -2040,7 +2046,7 @@ func ComputeDispatch(
 	// The ceiling gives up the worst phase's imbalance: a charger's own load
 	// balancer cuts the car on that phase while the total still fits.
 	state.FuseEVMaxW = 0
-	state.FuseSaturated = false
+	state.FuseSaturated, state.FuseSaturatedByImport = false, false
 	plannedEVW := scheduledEVPowerW(state)
 	evInMeterW := state.evInMeterW()
 	if fuseMaxW > 0 && math.Max(evInMeterW, plannedEVW) > 0 {
@@ -2069,7 +2075,7 @@ func ComputeDispatch(
 				totalCorrection = Bn + B*scale - currentTotal
 				state.FuseEVMaxW = E * scale
 			}
-			state.FuseSaturated = true
+			state.FuseSaturated, state.FuseSaturatedByImport = true, state.importLimitSets(ceilingW)
 		}
 	}
 
@@ -3081,8 +3087,10 @@ func distributeProportional(bats []batteryInfo, totalCorrection float64, groupPV
 // same split over a subset of batteries.
 func splitByCapacityAndPV(bats []batteryInfo, desiredTotal float64, groupPV map[string]float64) []DispatchTarget {
 	var totalCap float64
+	capByGroup := map[string]float64{}
 	for _, b := range bats {
 		totalCap += b.capacityWh
+		capByGroup[b.group] += b.capacityWh
 	}
 	if totalCap <= 0 {
 		return nil
@@ -3091,9 +3099,15 @@ func splitByCapacityAndPV(bats []batteryInfo, desiredTotal float64, groupPV map[
 	// Discharge, idle, or no PV locality info → capacity-only split.
 	// Discharge energy flows to the AC bus regardless of where it
 	// originated, so DC-locality has no win for the negative branch.
+	// PV in a group with no battery here (offline, faulted or unable to
+	// charge) is not DC-local to any of them; it reaches them over the
+	// AC bus, so it stays out of the local pool. Counting it would hand
+	// its share of the total to no battery.
 	var totalPV float64
-	for _, w := range groupPV {
-		totalPV += w
+	for g, w := range groupPV {
+		if capByGroup[g] > 0 {
+			totalPV += w
+		}
 	}
 	if desiredTotal <= 0 || totalPV <= 0 {
 		return distributeByCapacity(bats, desiredTotal, totalCap)
@@ -3111,11 +3125,6 @@ func splitByCapacityAndPV(bats []batteryInfo, desiredTotal float64, groupPV map[
 	// by capacity (same rule as the fleet-wide split).
 	localCap := math.Min(desiredTotal, totalPV)
 	overflow := desiredTotal - localCap
-
-	capByGroup := map[string]float64{}
-	for _, b := range bats {
-		capByGroup[b.group] += b.capacityWh
-	}
 
 	out := make([]DispatchTarget, 0, len(bats))
 	for _, b := range bats {
@@ -3524,6 +3533,9 @@ func clampTargetsToPowerLimits(targets []DispatchTarget, limits map[string]Power
 	return targets
 }
 
+// dischargeFloorSoC is where Core stops a battery's discharge on its own.
+const dischargeFloorSoC = 0.05
+
 // clampWithSoC applies the hard safety clamps for one battery command:
 //   - don't discharge below SoC 5 % (site: don't make target < 0 when SoC < 0.05);
 //     BMS handles fine-grained SoC but we never ask it to pull an empty pack.
@@ -3537,7 +3549,7 @@ func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 	clamped := target
 	wasClamped := false
 	// Block discharge when the battery is empty.
-	if b.soc < 0.05 && target < 0 {
+	if b.soc < dischargeFloorSoC && target < 0 {
 		clamped = 0
 		wasClamped = true
 	}
@@ -3770,6 +3782,13 @@ func (s *State) fuseSafetyMarginW() float64 {
 		return 0
 	}
 	return s.SiteFuseSafetyA * s.SiteFuseVoltage * float64(s.SiteFusePhases)
+}
+
+// importLimitSets reports whether the clock hour's import limit is the
+// ceiling ceilingW, rather than the fuse.
+func (s *State) importLimitSets(ceilingW float64) bool {
+	limitW, _, ok := s.importHourLimitsW()
+	return ok && limitW <= ceilingW
 }
 
 // effectiveImportCeilingW returns the binding ceiling for grid import in
@@ -4081,7 +4100,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if r.SoC == nil || *r.SoC < 0.05 || dischargeBlocked {
+	if r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked {

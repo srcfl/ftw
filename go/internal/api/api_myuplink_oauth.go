@@ -64,7 +64,11 @@ func validMyUplinkCallback(raw string) bool {
 	if u.Host == "" {
 		return false
 	}
-	return u.Path == myUplinkCallbackPath && u.RawQuery == "" && u.Fragment == ""
+	callbackPath := u.Path == myUplinkCallbackPath
+	if prefix, ok := strings.CutSuffix(u.Path, myUplinkCallbackPath); ok && ingressPath.MatchString(prefix) {
+		callbackPath = true
+	}
+	return callbackPath && u.RawQuery == "" && u.Fragment == ""
 }
 
 // oauthPending is an in-flight authorization-code request, created by /start
@@ -113,6 +117,10 @@ func pruneOAuthStateLocked(now time.Time) {
 // byte-for-byte across authorize + token exchange + portal registration, so
 // it is derived once and stored with the pending state.
 func requestOrigin(r *http.Request) string {
+	if HomeAssistantIngress(r) {
+		base, _ := r.Context().Value(homeAssistantURLKey{}).(string)
+		return base
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"

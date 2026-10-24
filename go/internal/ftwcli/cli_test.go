@@ -459,6 +459,19 @@ func TestBackupCopiesOnlyAVerifiedMatch(t *testing.T) {
 	}
 }
 
+// A backup can fail after its caller has left, as on the home box on
+// 16 October 2026. The next run names that failure and its own.
+func TestBackupNamesTheLastFailureAndItsOwn(t *testing.T) {
+	const reason = "live backup reached its time limit of 2h0m0s: backup history: copy ts_buckets: context deadline exceeded"
+	f, srv := newFakeCore(t)
+	f.on("GET", "/api/backups", reply(200, `{"dir":"/var/lib/ftw/backups","progress":{"phase":"failed","table":"ts_buckets","rows_done":14200000,"error":"`+reason+`"}}`))
+	f.on("POST", "/api/backups", reply(500, `{"error":"`+reason+`"}`))
+	code, out, errOut := runCLI(t, testEnv(), "backup", "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(out, "Last try: failed: "+reason) || !strings.Contains(errOut, "HTTP 500: "+reason) {
+		t.Fatalf("exit %d\n%s%s", code, out, errOut)
+	}
+}
+
 func TestSupportWritesAPrivateReadableZip(t *testing.T) {
 	var archive bytes.Buffer
 	zw := zip.NewWriter(&archive)

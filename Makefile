@@ -12,7 +12,7 @@
 #   make clean                — remove all build artifacts
 
 .PHONY: help test compose-migration-test container-boundary-test release-workflow-test build build-arm64 build-amd64 release release-linux release-linux-arm64 release-linux-amd64 \
-        run-sim sim-ocpp dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
+        run-sim sim-ocpp dev fmt vet clean e2e siterig siterig-full siterig-random siterig-coverage siterig-judge ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions protocol-boundary cloudlink-boundary \
         drivers drivers-present driver-versions-across-pin
 
@@ -120,6 +120,32 @@ release-workflow-test:
 
 e2e: drivers-present
 	cd go && FTW_E2E=1 go test ./test/e2e -v -timeout 180s
+
+# FTW against device-simulator's house with a real fuse
+# (go/test/site/README.md). SITERIG_SET is short, full or scenario names;
+# SITERIG_LANES runs that many at once on ports 100 apart.
+SITERIG_SET ?= short
+SITERIG_LANES ?= 2
+siterig: drivers-present
+	cd go && FTW_SITE=$(SITERIG_SET) FTW_SITE_LANES=$(SITERIG_LANES) \
+		go test -count=1 -timeout 300m -run 'TestSite$$' -v ./test/site/
+
+siterig-full:
+	$(MAKE) siterig SITERIG_SET=full
+
+# Random cases: SEED=n replays one, COUNT=m runs m seeds from SEED.
+SEED ?= 1
+COUNT ?= 1
+siterig-random:
+	$(MAKE) siterig SITERIG_SET=random:$(SEED):$(COUNT)
+
+# Which fault-catalog entries have a scenario: CATALOG=path/to/catalog.yaml
+siterig-coverage:
+	cd go && FTW_SITE_CATALOG=$(CATALOG) go test -count=1 -run TestCatalogCoverage -v ./test/site/
+
+# Judge a recorded run again with the current criteria: DIR=results directory
+siterig-judge:
+	cd go && FTW_SITE_JUDGE=$(DIR) go test -count=1 -run 'TestJudge$$' -v ./test/site/
 
 driver-repository-validate: drivers-present
 	cd go && go run ./cmd/ftw-driver-repository publish -unsigned -drivers ../drivers -output ../dist/driver-repository -base-url https://example.invalid/releases/download/drivers-local -repository https://github.com/srcfl/ftw

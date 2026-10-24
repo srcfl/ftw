@@ -56,9 +56,9 @@ func (e *realEnroller) MintSpokenCode(role string) (string, time.Time, error) {
 	return code, expires, enrollError(err)
 }
 
-func (e *realEnroller) MintWatchCode(parentID string) ([]byte, time.Time, error) {
-	code, expires, err := e.id.MintWatchCode(parentID, appenroll.WatchTTL)
-	return code, expires, enrollError(err)
+func (e *realEnroller) AddWatch(parentID string, key []byte) (string, error) {
+	grant, err := e.id.AddWatch(parentID, key)
+	return grant.DeviceID, enrollError(err)
 }
 
 func (e *realEnroller) EnrollmentURL(code []byte, lanHint string) (string, error) {
@@ -101,6 +101,8 @@ func enrollError(err error) error {
 		return ErrWatchAppRole
 	case errors.Is(err, appenroll.ErrWatchNeedsOwner):
 		return ErrWatchNeedsOwner
+	case errors.Is(err, appenroll.ErrWatchKey):
+		return ErrWatchAppKey
 	default:
 		return err
 	}
@@ -495,10 +497,10 @@ func TestNoDoorButItsPhoneHandsOutAWatch(t *testing.T) {
 		name  string
 		serve func(http.ResponseWriter)
 	}{
-		{"a scanned watch code from the LAN", func(w http.ResponseWriter) {
+		{"a watch from the LAN", func(w http.ResponseWriter) {
 			s.handleAppLinkPairing(w, lan(http.MethodPost, "/api/app-link/pairing", `{"role":"watch"}`))
 		}},
-		{"a spoken watch code from the LAN", func(w http.ResponseWriter) {
+		{"a spoken watch from the LAN", func(w http.ResponseWriter) {
 			s.handleAppLinkPairing(w, lan(http.MethodPost, "/api/app-link/pairing", `{"role":"watch","kind":"spoken"}`))
 		}},
 		{"the guest changed into a watch from the LAN", func(w http.ResponseWriter) {
@@ -514,12 +516,11 @@ func TestNoDoorButItsPhoneHandsOutAWatch(t *testing.T) {
 		}
 	}
 
+	// Over a session, from a phone this box does not know as an owner.
 	rig := newAppSession(t, apiauth.RoleOwner, withEnrolment(enrol))
-	status, refusal, body := rig.call(t, 1, appproto.APIReq{
-		Method: appproto.APIPost, Path: "/api/app-link/pairing",
-		Body: []byte(`{"role":"watch"}`), StepUp: true})
+	status, refusal, body := rig.call(t, 1, watchByKey(appKey(9), true))
 	if status != http.StatusForbidden {
-		t.Fatalf("a watch code over the session answered %d %q %s, want 403", status, refusal, body)
+		t.Fatalf("a watch over the session answered %d %q %s, want 403", status, refusal, body)
 	}
 
 	for _, d := range enrol.Devices() {

@@ -614,10 +614,26 @@ The box's anonymous daily report is separate from the Cloud readable-copy
 grant. Once a day it posts its FTW version and channel, the driver types in use, a
 battery-capacity bucket, its price zone and an install-age bucket. It answers
 how many reports arrive and what they describe, which helps size engineering
-bets.
+bets. It is one of two anonymous daily reports under one statistics answer, with
+the energy report beside it (ADR 0008).
 
-It goes over HTTPS to `https://cloud.ftw.energy/v1/fleet`. It never enters the
-Noise session. The HTTP handler validates the fixed payload, adds it to the UTC
+Since `ftw.fleet/2` it also says, in four buckets, how the box ran: the
+slowest plan of the last 24 hours (`none`, `0-1s`, `1-5s`, `5s+`), how many of
+those plans fell back (`none`, `0`, `1-3`, `4+`), the share of driver polls
+that failed (`none`, `0`, `0-1%`, `1%+`) and the newest update of the last 7
+days (`none`, `ok`, `failed`). Core reads them from the plans it already keeps
+(`planner_diagnostics`), a 24-hour count of the driver registry's polls in
+the telemetry store and the updater's status. The poll count lives in memory,
+so until it covers six hours, as after a restart, the share says `none`.
+An OCPP charger's messages are not polls and are not counted. A box that does not update itself says `none`, so how it
+was installed does not become a field. The service accepts both schemas and
+counts health only from reports that carry it.
+
+Once a release names an Oblivious HTTP relay (`go/internal/statsrelay`), it goes
+through that relay to FTW Cloud's gateway, sealed, so FTW Cloud never sees the
+box's address. Until then it goes over HTTPS to
+`https://cloud.ftw.energy/v1/fleet`, and only from a box that said yes. It never
+enters the Noise session. The HTTP handler validates the fixed payload, adds it to the UTC
 day's counters and drops it. It keeps 90 calendar days of totals, not raw
 reports. An operator reads totals only on the loopback metrics listener. An
 explicitly saved former default resolves to Cloud; a private collector keeps
@@ -627,7 +643,11 @@ Fleet totals must not form a household record. The message carries no gateway ID
 name, no counter and no timestamp — nothing in it says which box sent it —
 values are bucketed rather than reported, the version travels only when it is a
 release tag so a developer's build reports as unknown, and the send time is
-drawn fresh each day rather than sitting in one slot.
+drawn fresh each day rather than sitting in one slot. Through the relay the
+sealed request also carries a random number, drawn new for each report so FTW
+Cloud counts a report once if it arrives twice, and the UTC day it was sent, so
+an old request is refused. Neither names the box, and FTW Cloud keeps a hash of
+the number for three days only.
 
 Driver names get their own rule, because a driver file's name is whatever the
 thing that installed it called it, and a household can install its own. A name
@@ -673,15 +693,20 @@ Three things this does not fix, and each is said on the Settings screen or the
 Cloud service's loopback stats response. The fields still describe a household, so the
 payload remains a quasi-identifier: a beta box in a small price zone with a big
 battery may be the only one like it, and coarse buckets with a small field set
-are what keep that population large rather than a proof that it is. The endpoint
-also sees the source IP while the request is open, though the Cloud service writes no
-request log or source address. And with no id there is no way to dedupe, so the totals count
-reports, not unique boxes.
+are what keep that population large rather than a proof that it is. The health
+buckets are each at most four words wide, describe the last day or week rather
+than the house, and most boxes share the common answer; the service keeps each
+field's daily count apart, never the combination. The endpoint
+also sees the source IP while the request is open when the report goes straight
+to it, though the Cloud service writes no request log or source address; through
+the relay it does not. And nothing ties two reports to one box, so the totals
+count reports, not unique boxes.
 
-A failed send is forgotten, never retried. Settings → FTW app → Fleet statistics renders the
-exact payload from the same call the sender uses, so the claim is checkable
-rather than promised. It is on by default; saving `enabled: false` opts out
-without a restart. See [`go/internal/fleetping`](../go/internal/fleetping).
+A failed send is forgotten, never retried. Settings → FTW app → Anonymous
+statistics renders the exact payload from the same call the sender uses, and
+what goes beside it, so the claim is checkable rather than promised. It follows
+the one statistics answer, whose switch is on that screen. See
+[`go/internal/fleetping`](../go/internal/fleetping).
 
 ## Releases
 

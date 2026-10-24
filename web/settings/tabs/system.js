@@ -104,6 +104,8 @@
         '<label class="checkbox-row"><input type="checkbox" id="savings-compare-self"> Compare with a plain self-use battery</label>' +
         '<p class="sys-help-secondary">The card compares with no solar and no battery. Tick this to compare with a battery that only stores surplus solar and covers the house. It changes at once.</p>' +
         '</fieldset>' +
+        (window.FTWHomeAssistant ?
+          '<fieldset><legend>Home Assistant access</legend><p>Home Assistant manages access to FTW. No separate FTW password is needed.</p></fieldset>' :
         '<fieldset>' +
         '<legend>LAN password</legend>' +
         '<p class="sys-meta" id="sys-lan-auth-status">…</p>' +
@@ -117,7 +119,7 @@
         '</div>' +
         '<p class="sys-help-secondary" id="sys-lan-auth-msg"></p>' +
         '<p class="sys-help-secondary">Asks for this password on the LAN before settings and writes. Live status stays visible. curl still uses Bearer.</p>' +
-        '</fieldset>' +
+        '</fieldset>') +
         '<fieldset>' +
         '<legend>Host</legend>' +
         '<div class="sys-grid">' +

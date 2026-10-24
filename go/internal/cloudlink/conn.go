@@ -300,6 +300,7 @@ func (l *Link) serve(ctx context.Context, conn uplinkConn, snap grantSnapshot) e
 		// so revokes made since then still arrive.
 		l.bumpRoster(ok.RosterSeq)
 	}
+	w.have = ok.Have
 
 	tunOut, tunBulk := make(chan []byte, tunQueue), make(chan []byte, tunBulkQueue)
 	l.mu.Lock()
@@ -412,10 +413,11 @@ func parseDownlink(kind int, msg []byte) (cloudwire.Envelope, error) {
 }
 
 // read is the downlink. After the handshake the service may send watch,
-// resync, purged and tun; challenge and hello_ok a second time are refused
+// resync, purged, tun and x; challenge and hello_ok a second time are refused
 // like any stranger. watch and resync go to the sender, which owns the
 // cadence. A purge receipt is taken here, before the service hangs up, so the
-// box never misses one it was sent. A tun goes to the Tunnel unread.
+// box never misses one it was sent. A tun goes to the Tunnel and an x to the
+// Exchange, unread.
 func (l *Link) read(conn uplinkConn, snap grantSnapshot, events chan<- cloudwire.Envelope) error {
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	conn.SetPingHandler(func(data string) error {
@@ -441,6 +443,14 @@ func (l *Link) read(conn uplinkConn, snap grantSnapshot, events chan<- cloudwire
 			if l.TakesTun() {
 				l.opts.Tunnel.Deliver(t)
 			}
+		case cloudwire.MsgX:
+			var x cloudwire.X
+			if len(env.Sig) != 0 || cloudwire.Unmarshal(env.B, &x) != nil || len(x.D) > cloudwire.XDataMax || x.Dev == "" {
+				return fmt.Errorf("%w: an x the box cannot read", errService)
+			}
+			if l.opts.Exchange != nil && l.opts.Tunnel != nil {
+				l.opts.Exchange.Deliver(x)
+			}
 		case cloudwire.MsgWatch, cloudwire.MsgResync:
 			events <- env
 		default:
@@ -454,6 +464,8 @@ type writer struct {
 	conn uplinkConn
 	link *Link
 	mu   sync.Mutex
+	// have is the closed tiles hello_ok said the service holds.
+	have map[string]string
 }
 
 // send seals body as type t, frames it and writes it. The byte budget is
@@ -537,6 +549,64 @@ func (l *Link) SendTun(t cloudwire.Tun, bulk bool) error {
 		l.tunDropped++
 		return ErrTunDropped
 	}
+}
+
+// SendX queues a watch's exchange answer for the uplink. It is small and goes
+// with the tun lane 0 frames, first and never held, under the tun budget and
+// a share of its own (xAllowedLocked). It never blocks. nil means the message
+// is queued.
+func (l *Link) SendX(x cloudwire.X) error {
+	frame, err := xFrame(x)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case l.tunOut == nil:
+		l.tunDropped++
+		return ErrNoUplink
+	case err != nil || !l.xAllowedLocked():
+		l.tunDropped++
+		return ErrTunDropped
+	}
+	select {
+	case l.tunOut <- frame:
+		l.xBudget.add(l.uptimeMs(), int64(len(frame)))
+		return nil
+	default:
+		l.tunDropped++
+		return ErrTunDropped
+	}
+}
+
+// XAllowed reports whether a watch's exchange answer may leave now. The
+// exchange asks before it runs a request, so a command never acts when its
+// answer could not go.
+func (l *Link) XAllowed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.tunOut != nil && l.xAllowedLocked()
+}
+
+// xAllowedLocked keeps x to xBudgetBytes over a rolling 24 hours, and stops
+// it once the tunnel has spent xStopsAt of its own budget, so the phones keep
+// the rest for their handshakes, commands and ends. The caller holds l.mu.
+func (l *Link) xAllowedLocked() bool {
+	up := l.uptimeMs()
+	return l.xBudget.total(up) < xBudgetBytes && l.tunBudget.total(up) < int64(xStopsAt*tunBudgetBytes)
+}
+
+func xFrame(x cloudwire.X) ([]byte, error) {
+	if len(x.D) > cloudwire.XDataMax {
+		return nil, ErrTunDropped
+	}
+	body, err := cloudwire.Marshal(x)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := cloudwire.Envelope{T: cloudwire.MsgX, B: body}.Encode()
+	if err != nil {
+		return nil, err
+	}
+	return cloudwire.EncodeFrame(raw)
 }
 
 func tunFrame(t cloudwire.Tun) ([]byte, error) {

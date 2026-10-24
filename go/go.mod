@@ -13,6 +13,7 @@ require (
 	github.com/quic-go/quic-go v0.63.0
 	github.com/shirou/gopsutil/v4 v4.26.8
 	github.com/simonvetter/modbus v1.6.4
+	github.com/srcfl/device-simulator v0.5.1-0.20261023051213-736051fbcf91
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.58.0
@@ -35,7 +36,7 @@ require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.2 // indirect
-	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/lorenzodonini/ocpp-go v0.19.0
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect

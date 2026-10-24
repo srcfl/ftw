@@ -128,8 +128,11 @@ func (c *Config) Defaults() {
 	if c.Path == "" {
 		c.Path = "/"
 	}
+	// Half the 60 s watchdog and history age limit: an idle charger often
+	// sends nothing else, so one late heartbeat would otherwise mark it
+	// offline and its Available 0 W stale.
 	if c.HeartbeatIntervalS == 0 {
-		c.HeartbeatIntervalS = 60
+		c.HeartbeatIntervalS = 30
 	}
 }
 

@@ -130,8 +130,8 @@ type Options struct {
 	Handler HandlerBuilder
 
 	// ExchangeHandler builds one handler per watch session, with
-	// appproto.Config.Exchange set (ADR 0009). Nil leaves the exchange
-	// socket closed: the box takes no watch, and nothing else changes.
+	// appproto.Config.Exchange set (ADR 0009). Nil opens no exchange: the
+	// box takes no x from FTW Cloud, and nothing else changes.
 	ExchangeHandler HandlerBuilder
 
 	Logger *slog.Logger
@@ -190,10 +190,10 @@ type Uplink struct {
 	liveMu sync.Mutex
 	live   []*liveLink
 
-	// exchanges is the box's table of watch sessions, nil without an
-	// ExchangeHandler. One for the box rather than one per connection, so a
+	// exchange is the watches' door through FTW Cloud and their table of
+	// sessions, nil without an ExchangeHandler. One for the box, so a
 	// watch's session survives the hour turning under it.
-	exchanges *exchanges
+	exchange *Exchange
 
 	// slots holds each device's one session, across the relay's
 	// connections and the tunnel through FTW Cloud.
@@ -231,8 +231,8 @@ func (u *Uplink) DropSessionsByAppKey(pub []byte) int {
 	for _, l := range live {
 		dropped += l.sessions.dropByAppKey(pub)
 	}
-	if u.exchanges != nil {
-		dropped += u.exchanges.dropByAppKey(pub)
+	if u.exchange != nil {
+		dropped += u.exchange.table.dropByAppKey(pub)
 	}
 	dropped += u.tunnel.dropByAppKey(pub)
 	return dropped
@@ -296,14 +296,14 @@ func New(opts Options) (*Uplink, error) {
 	u.slots = &slots{}
 	u.tunnel = newTunnel(opts.Handler, opts.Enroll, u.slots, opts.Arrivals, u.log)
 	if opts.ExchangeHandler != nil {
-		u.exchanges = &exchanges{
+		u.exchange = newExchange(&exchanges{
 			build:    opts.ExchangeHandler,
 			enroll:   opts.Enroll,
 			static:   opts.Enroll.StaticKey(),
 			log:      u.log,
 			now:      time.Now,
 			cmdFloor: ExchangeCmdFloor,
-		}
+		}, u.log)
 	}
 	return u, nil
 }
@@ -321,9 +321,12 @@ func productionDialer() *websocket.Dialer {
 	}
 }
 
-// Run serves phone sessions carried by FTW Cloud until the context ends.
-// It opens no connection to the retired relay.
+// Run serves phone sessions and watch exchanges carried by FTW Cloud until
+// the context ends. It opens no connection to the retired relay.
 func (u *Uplink) Run(ctx context.Context) error {
+	if u.exchange != nil {
+		go u.exchange.Run(ctx)
+	}
 	u.tunnel.Run(ctx)
 	return ctx.Err()
 }
@@ -414,11 +417,6 @@ func (u *Uplink) start(ctx context.Context, conn *websocket.Conn, epoch int64, h
 	l := &link{epoch: epoch, stop: stop, done: make(chan linkEnd, 1)}
 	go func() {
 		defer stop()
-		// The exchange socket rides beside this connection, under the same
-		// epoch and handle, and ends with it.
-		if u.exchanges != nil {
-			go u.keepExchange(ctx, epoch, handle)
-		}
 		code, reason, err := u.serve(ctx, conn)
 		l.done <- linkEnd{code: code, reason: reason, err: err}
 	}()

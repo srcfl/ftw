@@ -36,7 +36,7 @@ test('every controller stop reason has words', () => {
     'cancelled', 'expired', 'vehicle_unplugged', 'ev_target_reached', 'departure_reached',
     'surplus_only', 'site_safety_block', 'loadpoint_driver_unavailable',
     'battery_unavailable', 'battery_reserve_reached', 'battery_hold', 'core_mode',
-    'fuse_safety_block', 'restart_lease_invalid',
+    'fuse_safety_block', 'import_limit_block', 'restart_lease_invalid',
   ]) {
     assert.match(app, new RegExp(reason + ': "'));
   }

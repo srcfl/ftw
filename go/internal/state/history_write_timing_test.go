@@ -60,9 +60,14 @@ func TestHistoryWriteFailureReportsSQLTimingsAndRetries(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("timings lost the original error: %v", err)
 			}
-			for _, want := range []string{"history tick: samples:", "phase=" + phase, "elapsed_ms=", "step_ms=", "prepare_ms=", "writer_lock_ms=", "connection_ms=", "begin_ms=", "tick_ms="} {
+			for _, want := range []string{"history tick: samples:", "phase=" + phase, "elapsed_ms=", "step_ms=", "prepare_ms=", "writer_lock_ms=", "connection_ms=", "begin_ms=", "tick_ms=", phase + "_max_ms=", phase + "_steps=1"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("missing %q: %v", want, err)
+				}
+			}
+			for _, private := range []string{"timing", "payload", "grid_w", fmt.Sprint(base + 1000)} {
+				if strings.Contains(err.Error(), private) {
+					t.Fatalf("failure timings exposed a sample or batch value: %v", err)
 				}
 			}
 			for i := 0; i < 2; i++ {
@@ -76,6 +81,21 @@ func TestHistoryWriteFailureReportsSQLTimingsAndRetries(t *testing.T) {
 				t.Fatalf("retry lost or duplicated samples: n=%d sum=%v err=%v", n, sum, err)
 			}
 		})
+	}
+}
+
+func TestHistoryWriteTimingSeparatesRepeatedStepMaximumFromTotal(t *testing.T) {
+	timing := newHistoryWriteTiming("other")
+	timing.add("read_bucket", 2*time.Millisecond)
+	timing.add("read_bucket", 7*time.Millisecond)
+	err := timing.failure(context.Canceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("timing lost cancellation: %v", err)
+	}
+	for _, want := range []string{"read_bucket_ms=9", "read_bucket_max_ms=7", "read_bucket_steps=2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("repeated step timing missing %q: %v", want, err)
+		}
 	}
 }
 

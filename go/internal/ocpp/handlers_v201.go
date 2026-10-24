@@ -66,7 +66,7 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	h.mu.Unlock()
 	h.setVersion(id, Version201)
 	h.noteIdentity(id)
-	h.telSuccess(id)
+	h.telHealth(id)
 
 	return provisioning.NewBootNotificationResponse(
 		types201.NewDateTime(time.Now()),
@@ -98,8 +98,19 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 	s := h.state(id)
 	h.mu.Lock()
 	s.connectedKnown = true
+	if req.ConnectorStatus != availability.ConnectorStatusAvailable {
+		s.leaveAvailable()
+	}
 	switch req.ConnectorStatus {
-	case availability.ConnectorStatusAvailable, availability.ConnectorStatusUnavailable:
+	case availability.ConnectorStatusAvailable:
+		s.connected = false
+		s.charging = false
+		var at time.Time
+		if req.Timestamp != nil {
+			at = req.Timestamp.Time
+		}
+		s.holdAvailablePower(time.Now(), at)
+	case availability.ConnectorStatusUnavailable:
 		s.connected = false
 		s.charging = false
 		s.clearMeasuredPower()
@@ -143,6 +154,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 	h.mu.Lock()
 	acceptedPower := false
 	if req.EventType != transactions.TransactionEventEnded {
+		// A live transaction may mean a car, unless it says none is there.
+		if req.TransactionInfo.ChargingState != transactions.ChargingStateIdle {
+			s.leaveAvailable()
+		}
 		acceptedPower = s.recordPowerV201(req.MeterValue, time.Now())
 	}
 	switch req.EventType {
@@ -178,7 +193,10 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		s.transactionID = -1
 		s.transactionRef = ""
 		s.charging = false
-		s.clearMeasuredPower()
+		// Available may come first; the car has gone then.
+		if !s.available {
+			s.clearMeasuredPower()
+		}
 	}
 
 	powerW := s.lastPowerW

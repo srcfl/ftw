@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -10,6 +11,21 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+func TestInspectCanceledContextDoesNotParseArchive(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "interrupted.ftwbak")
+	// A canceled inspection must stop before reading even an incomplete
+	// archive. Otherwise its full verification runs without the caller.
+	if err := os.WriteFile(archive, []byte("incomplete archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := Inspect(ctx, archive)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled inspection parsed the archive: %v", err)
+	}
+}
 
 func TestBackupMutexWaitCanBeCancelled(t *testing.T) {
 	root := t.TempDir()

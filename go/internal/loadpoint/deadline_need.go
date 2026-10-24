@@ -43,21 +43,29 @@ func DeadlineNeed(st State) (energyWh, powerW float64, ok bool) {
 // lower of the charger's and the car's maximum, and the charger's steps up to
 // it. When the charger's lowest step is above the car's maximum it keeps that
 // one step: the car takes what it can, and a plan with no step would never
-// charge.
+// charge. The minimum is never below the lowest step: PlanningSteps leaves
+// out levels the charger's phases cannot run.
 func LimitPower(st State, steps []float64) (minW, maxW float64, out []float64) {
 	minW, maxW = st.MinChargeW, st.MaxChargeW
+	lowest := 0.0
+	for _, w := range steps {
+		if w > 0 && (lowest == 0 || w < lowest) {
+			lowest = w
+		}
+	}
+	minW = math.Max(minW, lowest)
 	if st.CarMaxW <= 0 || (maxW > 0 && st.CarMaxW >= maxW) {
+		if maxW > 0 && minW > maxW {
+			minW = maxW
+		}
 		return minW, maxW, steps
 	}
 	maxW = st.CarMaxW
-	lowest, kept := 0.0, false
+	kept := false
 	for _, w := range steps {
 		if w <= maxW {
 			out = append(out, w)
 			kept = kept || w > 0
-		}
-		if w > 0 && (lowest == 0 || w < lowest) {
-			lowest = w
 		}
 	}
 	if !kept && lowest > 0 {

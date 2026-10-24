@@ -61,8 +61,11 @@ func (c *Controller) restoreManualHoldForSession(id string) {
 	}
 	// A Start before the first hardware reading binds here. Once bound, a
 	// different hardware/session/config generation must not inherit its power.
+	// A restore still waiting for proof has no power to inherit; the saved
+	// record is checked against the next identity instead of overwritten.
 	c.manualBindings[id] = current
-	if changed {
+	restored, seen := c.manualRestored[id]
+	if pending := seen && !restored; changed && !pending {
 		if hold, held := c.holds[id]; held {
 			if hold.PowerW > 0 {
 				c.holds[id] = ManualHold{Persistent: true}

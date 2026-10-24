@@ -245,6 +245,7 @@ describe("what stops a grant before a code is spent", () => {
 
   it("is nothing once the house password is on and the box can take an offer", () => {
     assert.equal(P.readiness(ok, "", on), null);
+    assert.equal(P.readiness(ok, "", { home_assistant: true, lan_auth: false, configured: false }), null);
   });
 
   it("names each block, in the order to fix them", () => {

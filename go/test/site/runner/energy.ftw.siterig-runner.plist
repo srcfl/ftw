@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd agent for siterig-runner (README.md). Replace USER and the
+     paths, copy to ~/Library/LaunchAgents/ and load with launchctl. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>energy.ftw.siterig-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USER/siterig/bin/siterig-runner</string>
+    <string>-work</string><string>/Users/USER/siterig</string>
+    <string>-lanes</string><string>3</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>/Users/USER</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/USER/siterig/runner.log</string>
+  <key>StandardErrorPath</key><string>/Users/USER/siterig/runner.log</string>
+</dict>
+</plist>

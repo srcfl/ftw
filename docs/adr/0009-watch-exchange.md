@@ -2,10 +2,11 @@
 
 - Status: accepted. This repository has milestones 1, 2, 3, 5 and 6: the
   command log on the box, the registry names, the watch role with its
-  enrolment, the exchange socket with its sessions, so the box says
-  `cmd.exchange`, and the wire for FTW Cloud's one-shot read. The relay's
-  half is milestone 4, in srcfl/ftw-webapp. Nothing else described here has
-  shipped.
+  enrolment, the exchange sessions, and the wire for FTW Cloud's one-shot
+  read. The relay stopped on 17 October 2026, and its exchange socket went
+  with it. [Through FTW Cloud](#through-ftw-cloud) (accepted by Fredrik on
+  23 October 2026) moves the exchange onto FTW Cloud's one-shot request, where the
+  box says `cmd.exchange` again.
 - Date: 2026-10-14
 - Decided by: Fredrik on 14 October 2026. Before the design: a watch controls
   the box directly as well as through the phone; an unlocked watch on the
@@ -185,6 +186,49 @@ to remove it.**
      the next roster arriving. If the box's uplink is down, FTW Cloud learns
      it when the box returns or when the roster runs out after 24 hours. An
      owner can suspend the watch at FTW Cloud from the phone until then.
+
+## Through FTW Cloud
+
+Accepted by Fredrik on 23 October 2026, after he asked to finish FTW Cloud. The
+relay was stopped on 17 October 2026, and since the one-door decision of 15
+October every phone reaches its box through FTW Cloud's tunnel. FTW Cloud
+carries ciphertext and never chooses an action; that is the line this ADR
+keeps, and the watch's commands now sit on the same side of it as the
+phone's.
+
+1. **The exchange rides the one-shot request.** A watch's exchange message
+   goes to `POST /v1/app/once` as `x {d}`. The service sends the box
+   `x {dev, id, d}` on the uplink and returns the box's `d` in message 2.
+   Decisions 1 and 2 stand, apart from the socket: the sessions, their
+   limits, the shapes and the 400 ms floor are the box's, unchanged. The
+   wire is in [protocol-cloud.md](../protocol-cloud.md#exchange).
+2. **The phone adds its watch by key.** Decision 4's code had to cross the
+   service inside a handshake from a device the roster does not list yet.
+   Instead the owner's phone sends the watch's public key over its own
+   session, with the same step-up: `POST /api/app-link/pairing
+   {"role": "watch", "key": …}`. The box lists the watch in its next
+   roster. The code path is gone: a request for a watch without a key is
+   refused, and a hello with a code is answered with silence.
+3. **A watch has `tun`.** The roster gives a watch `tun` whenever it gives
+   a phone `tun`, so the service admits its exchange with the readable copy
+   off. The box answers a watch's key on the exchange alone.
+4. **Reads stay as decision 7 says**, with one change: with the copy off a
+   watch on its own shows what it holds and its age. Reading `now` through
+   the exchange is not built.
+5. **The exchange takes the charger's hold alone.** Decision B said a
+   watch reads and charges. The watch role's `ftw.dispatch.write` reaches
+   further, so the exchange answers any op but `loadpoint.hold` with
+   `E_OP_NOT_GRANTED`.
+6. **Replays end nothing, and a restart forgets.** A session proves itself
+   with its first transport message before it writes anything, and a
+   watch holds two. The command log lives in memory, so a box that
+   restarted between a command and its retry would act again; the watch
+   sees the uptime in `hello_ok` go back and does not resend.
+
+The service learns that a watch of the home sent a request and when, and
+when the box answered; the relay learned the same. One `cmdId` sent by the
+phone and through FTW Cloud still acts once, because the command log keys
+it by the phone that added the watch.
 
 ## What does not change
 

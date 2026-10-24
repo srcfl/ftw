@@ -25,6 +25,7 @@ type sentCommand struct {
 	voltage         float64
 	maxAmpsPerPhase float64
 	sitePhases      int
+	capAmpsPerPhase *float64
 }
 
 func lastSetCurrent(calls []sentCommand) (sentCommand, bool) {
@@ -48,14 +49,15 @@ func countAction(calls []sentCommand, action string) int {
 
 func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) error {
 	var d struct {
-		Action          string  `json:"action"`
-		PowerW          float64 `json:"power_w"`
-		PhaseMode       string  `json:"phase_mode"`
-		PhaseSplitW     float64 `json:"phase_split_w"`
-		MinPhaseHoldS   int     `json:"min_phase_hold_s"`
-		Voltage         float64 `json:"voltage"`
-		MaxAmpsPerPhase float64 `json:"max_amps_per_phase"`
-		SitePhases      int     `json:"site_phases"`
+		Action          string   `json:"action"`
+		PowerW          float64  `json:"power_w"`
+		PhaseMode       string   `json:"phase_mode"`
+		PhaseSplitW     float64  `json:"phase_split_w"`
+		MinPhaseHoldS   int      `json:"min_phase_hold_s"`
+		Voltage         float64  `json:"voltage"`
+		MaxAmpsPerPhase float64  `json:"max_amps_per_phase"`
+		SitePhases      int      `json:"site_phases"`
+		CapAmpsPerPhase *float64 `json:"cap_amps_per_phase"`
 	}
 	if err := json.Unmarshal(payload, &d); err != nil {
 		return err
@@ -65,7 +67,7 @@ func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) er
 		phaseMode: d.PhaseMode, phaseSplitW: d.PhaseSplitW,
 		minPhaseHoldS: d.MinPhaseHoldS,
 		voltage:       d.Voltage, maxAmpsPerPhase: d.MaxAmpsPerPhase,
-		sitePhases: d.SitePhases,
+		sitePhases: d.SitePhases, capAmpsPerPhase: d.CapAmpsPerPhase,
 	})
 	return f.err
 }

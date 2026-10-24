@@ -452,7 +452,9 @@ type Loadpoint struct {
 
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
 	// delivery: "3p" (default) | "1p" | "auto". Empty == "3p" for
-	// backward compat with pre-switching configs. See loadpoint.Config.
+	// backward compat with pre-switching configs. "auto" charges on three
+	// phases and uses one only for surplus charging below the 3Φ minimum.
+	// See loadpoint.Config.
 	PhaseMode     string  `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
 	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
 	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`

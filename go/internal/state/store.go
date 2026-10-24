@@ -621,7 +621,7 @@ func (s *Store) backupToCompressed(dstPath string, report func(BackupProgress), 
 	return s.backupToCompressedContext(context.Background(), dstPath, report, capture)
 }
 
-func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error) error {
+func (s *Store) backupToCompressedContext(parent context.Context, dstPath string, report func(BackupProgress), capture func(string) error) (err error) {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -633,6 +633,11 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 
 	ctx, cancel := s.backupWorkContextParent(parent)
 	defer cancel()
+	defer func() {
+		if cause := context.Cause(ctx); err != nil && errors.Is(cause, errLiveBackupLimit) {
+			err = fmt.Errorf("%w: %w", cause, err)
+		}
+	}()
 	ctx = context.WithValue(ctx, backupReportKey{}, report)
 	sourceBytes := s.BackupSourceBytes()
 	if err := EnsureDiskSpace(filepath.Dir(dstPath), backupCopyScratch(sourceBytes)); err != nil {
@@ -641,6 +646,8 @@ func (s *Store) backupToCompressedContext(parent context.Context, dstPath string
 
 	rawPath, cleanupRaw := backupScratchFile(dstPath, sourceBytes)
 	defer cleanupRaw()
+	release := HoldBackupScratch(filepath.Dir(rawPath))
+	defer release()
 	reportBackupProgress(report, BackupProgress{Phase: BackupPhaseCopying})
 	if err := s.copyStateForBackup(ctx, rawPath); err != nil {
 		return fmt.Errorf("backup state: %w", err)

@@ -42,9 +42,9 @@ const (
 )
 
 // Downlink is the closed set of types the service may send the box. None of
-// the first five asks the box to act. tun carries ciphertext the box decrypts
-// itself and judges as it judges the same session over the relay.
-var Downlink = []string{MsgChallenge, MsgHelloOK, MsgWatch, MsgResync, MsgPurged, MsgTun}
+// the first five asks the box to act. tun and x carry ciphertext the box
+// decrypts itself and judges as it judges the same session anywhere else.
+var Downlink = []string{MsgChallenge, MsgHelloOK, MsgWatch, MsgResync, MsgPurged, MsgTun, MsgX}
 
 // ClassScope is the scope a device needs to read each class the service
 // forwards. hb maps to "" because every device in the roster gets it: it

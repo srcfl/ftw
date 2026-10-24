@@ -1,0 +1,44 @@
+# Field matrix rows that fail on master: case, invariant and the fix that
+# turns the row green. TestSiteSimFieldMatrix fails when a listed row passes
+# and when a row fails that is not listed. FTW_FIELD_KNOWN=write rewrites
+# this file from a run, keeps each label and marks unlisted failures "new".
+#
+# B         srcfl/ftw#1799: planned charging and Charge now run on three
+#           phases; the planner gets steps a three-phase order can deliver.
+# #1795     srcfl/ftw#1795: a charger drawing against its order reads not
+#           following.
+# export    srcfl/ftw#1782, draft: an exporting phase counts as import, so
+#           surplus never finds room to start.
+# readback  no fix yet: surplus raises again before the charger applied the
+#           last raise, then pauses when both land (surplus_reserve.go:128).
+# relief    srcfl/ftw#1789, draft: the battery ends its relief before the
+#           car's cut shows.
+pr1763/25A/3p/3p-15A/cloud60s/car3p/6-2-2/chargenow+battery own-raise relief
+pr1763/25A/3p/3p-15A/cloud60s/car3p/6-2-2/pause+battery own-raise relief
+pr1763/25A/3p/3p-15A/easee120s/car3p/6-2-2/chargenow+battery own-raise relief
+pr1763/25A/3p/3p-15A/easee40s/car3p/6-2-2/chargenow+battery own-raise relief
+pr1763/25A/3p/3p-15A/easee40s/car3p/6-2-2/pause+battery own-raise relief
+pr1763/25A/3p/3p-15A/fast2s/car3p/6-2-2/pause+battery own-raise relief
+probe/25A/auto/mixed/easee40s/car3p/balanced/surplus+goal+export2500W idle readback
+timing/16A/3p/3p/cloud60s/car3p/L1/surplus idle export
+timing/16A/3p/3p/easee120s/car3p/L1/surplus idle export
+timing/16A/3p/3p/easee40s/car3p/L1/surplus idle export
+timing/16A/3p/3p/fast2s/car3p/L1/surplus idle export
+timing/16A/auto/mixed/cloud60s/car3p/L1/surplus idle export
+timing/16A/auto/mixed/easee120s/car3p/L1/surplus idle export
+timing/16A/auto/mixed/easee40s/car3p/L1/surplus idle export
+timing/16A/auto/mixed/fast2s/car3p/L1/surplus idle export
+timing/16A/empty/none/cloud60s/car3p/L1/surplus idle export
+timing/16A/empty/none/easee120s/car3p/L1/surplus idle export
+timing/16A/empty/none/easee40s/car3p/L1/surplus idle export
+timing/16A/empty/none/fast2s/car3p/L1/surplus idle export
+timing/25A/3p/3p/cloud60s/car3p/L1/surplus idle readback
+timing/25A/3p/3p/easee120s/car3p/L1/surplus idle readback
+timing/25A/3p/3p/easee40s/car3p/L1/surplus idle readback
+timing/25A/auto/mixed/cloud60s/car3p/L1/surplus idle readback
+timing/25A/auto/mixed/easee120s/car3p/L1/surplus idle readback
+timing/25A/auto/mixed/easee40s/car3p/L1/surplus idle readback
+timing/25A/empty/none/cloud60s/car3p/L1/surplus idle readback
+timing/25A/empty/none/easee120s/car3p/L1/surplus idle readback
+timing/25A/empty/none/easee40s/car3p/L1/surplus idle readback
+timing/25A/empty/none/fast2s/car3p/L1/surplus idle export

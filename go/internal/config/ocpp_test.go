@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // The OCPP listener cannot be pinned to one interface — the library builds its
 // listen address from the port alone. Basic auth is therefore the only thing
@@ -140,5 +145,41 @@ func TestConfigValidateCoversOCPP(t *testing.T) {
 	c.OCPP = &OCPP{Enabled: true, Username: "ftw", Password: "secret"}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("config with a credentialed ocpp section should validate, got %v", err)
+	}
+}
+
+// Only the default heartbeat changed (60 s to 30 s). An unset value must stay
+// unset through a save, and a saved 60 must stay 60.
+func TestOCPPHeartbeatSurvivesSave(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want int
+	}{
+		{"ocpp:\n  enabled: false\n", 0},
+		{"ocpp:\n  enabled: false\n  heartbeat_interval_s: 60\n", 60},
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "c.yaml")
+		c, err := Parse([]byte(minimalYAML+tc.yaml), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveAtomic(path, c); err != nil {
+			t.Fatal(err)
+		}
+		saved, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.want == 0 && strings.Contains(string(saved), "heartbeat_interval_s") {
+			t.Fatalf("an unset heartbeat was written:\n%s", saved)
+		}
+		c2, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c2.OCPP == nil || c2.OCPP.HeartbeatIntervalS != tc.want {
+			t.Fatalf("heartbeat after save: got %+v, want %d", c2.OCPP, tc.want)
+		}
 	}
 }

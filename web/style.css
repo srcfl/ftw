@@ -1836,6 +1836,15 @@ footer {
   color: var(--text-dim);
 }
 
+.fleet-energy-title {
+  margin: 18px 0 4px;
+  font-size: 0.9rem;
+}
+/* .hint carries no margin; without this the report's notes read as one slab. */
+.fleet-energy-note {
+  margin-top: 8px;
+}
+
 /* ---- Access settings tab ---- */
 /* Who outside the house may reach it. The page reads top to bottom in the
    order an owner acts: what is missing, the code, the offer, what waits for

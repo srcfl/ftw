@@ -105,7 +105,7 @@ type RestoreResult struct {
 
 // Inspect performs a full verification and returns stable archive metadata.
 func Inspect(ctx context.Context, archivePath string) (Manifest, Info, error) {
-	manifest, err := Verify(archivePath)
+	manifest, err := verifyInWorkspaceContext(ctx, archivePath, "")
 	if err != nil {
 		return Manifest{}, Info{}, err
 	}
@@ -155,6 +155,8 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return Info{}, fmt.Errorf("backup: create output dir: %w", err)
 	}
+	release := state.HoldBackupScratch(outputDir)
+	defer release()
 	if opts.Progress != nil {
 		opts.Progress(state.BackupProgress{Phase: "waiting_for_maintenance"})
 	}
@@ -658,6 +660,8 @@ func verifyInWorkspaceProgressContext(ctx context.Context, archivePath, workspac
 	if allowFallback {
 		workspace = filepath.Dir(archivePath)
 	}
+	release := state.HoldBackupScratch(workspace)
+	defer release()
 	tmpDir, err := os.MkdirTemp(workspace, ".ftw-backup-verify-")
 	if err != nil && allowFallback {
 		tmpDir, err = os.MkdirTemp("", ".ftw-backup-verify-")

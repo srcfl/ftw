@@ -162,6 +162,9 @@ Owners who decline use the box locally without Cloud.
 
 Local-only users get a separate question, with Yes as the suggested action.
 Nothing starts before an active answer. No leaves local control working.
+(Replaced on 24 October 2026: a box without Cloud shares the two anonymous
+reports until its owner turns them off; see "Anonymous daily reports and one
+statistics answer" below.)
 This statistics-only link publishes no phone keys, pairing codes, Noise key,
 read grant, live state or remote access. It reuses the signed upload path.
 A policy or purpose change requires a new version and a fresh answer.
@@ -212,6 +215,7 @@ The privacy notice says so.
 | Store | Kept |
 |---|---|
 | Live state | Memory only; readings dropped an hour after the box goes quiet |
+| History tiles | Memory only; each 12-hour tile of 5-minute history until 48 hours after it ends or the roster runs out, box online or not |
 | Registry | Until purge, or 90 days without a roster |
 | APNs registrations | Until purge, or 30 days without the box |
 | Events | A one-hour ring in memory |
@@ -328,6 +332,8 @@ who declines its terms pauses Cloud on that phone and keeps its local keys.
 
 The daily anonymous report also waits for the current project choice.
 Its saved config switch cannot bypass a missing answer or a local No.
+(Replaced on 24 October 2026; see "Anonymous daily reports and one
+statistics answer" below.)
 A new policy rotates the stats id and starts a new reporting window. An
 unset wall clock starts that window only once time is known; no earlier
 hours are filled in.
@@ -349,3 +355,107 @@ even if an owner previously chose to contribute. The owner policy response
 reports this readiness so native clients can explain the wait. Pausing the
 service policy stops collection while withdrawal and retention still run.
 Deploying this code does not sign the DPIA or accept a household's consent.
+
+### Anonymous daily reports and one statistics answer, October 2026
+
+Fredrik decided this on 24 October 2026, so that stats.ftw.energy can show
+energy without C8's household rows, and so that statistics are one thing:
+"antingen delar man med sig av stats eller inte".
+
+**One answer.** Statistics are one answer on the box that covers both
+anonymous daily reports, with no second setting:
+
+- With FTW Cloud they are part of Cloud, with no separate off switch, as in
+  the 17 October amendment. A Cloud grant under older terms sends nothing
+  until the owner accepts the current ones.
+- Without Cloud they are on until the owner turns them off, under Settings →
+  FTW app → Anonymous statistics, where the box shows each message. Nobody is
+  asked any more; the local question and its "nothing before an answer" rule
+  are gone.
+- Stored state is read once (`cloudlink.MigrateStatistics`). A local No, a
+  fleet report switched off in the config (`fleet_ping.enabled: false`), or
+  Cloud turned off before this release (whose screen said that stops
+  statistics) stays off. Every other box is on. `fleet_ping.enabled` is no
+  longer a switch.
+- A box without Cloud no longer starts a statistics-only Cloud link. Those
+  already running keep working until turned off. Hourly C8 rows for local
+  boxes therefore have no way in; if C8 is ever activated for them, it needs
+  its own consent.
+- The hourly C8 upload follows the same answer: off, or Cloud under older
+  terms, sends no hour whatever the grant carries, and an answer that is off
+  takes the stats purpose out of the grant. Under older terms, asking for
+  statistics is refused until the owner accepts the current terms.
+- A stored grant counts only through the running link, which honours it only
+  with the key it was made with.
+
+**Two reports, never one message.** Each leaves at its own random time:
+
+- the fleet report (`go/internal/fleetping`): version, channel, drivers,
+  battery size, price zone, install age, as before;
+- the energy report (`go/internal/energyreport`): once per closed UTC day,
+  1 to 12 hours after it closes, the date and six whole-kWh sums (solar
+  generation, grid import and export, battery charge and discharge, vehicle
+  charge). A day with a gap in the energy ledger is skipped, never sent in
+  part. Never for a site a partner controls.
+
+With a fleet of about eight boxes, a driver set such as Sungrow, Easee,
+myuplink and tesla-ha in SE4 points at one home. Energy sent beside it would
+be that home's energy again. So the two share no field and never travel
+together.
+
+**Path.** Both go through one independent Oblivious HTTP relay (RFC 9458) to
+FTW Cloud's gateway, `POST /v1/ohttp` in `ftwcloudd`, as one padded inner
+request each (`go/protocol/reportwire`, 1,536 bytes; the relay always sees
+1,591). Inside, each report carries a random id and the UTC date it was
+sent. The gateway reads the schema, adds the report to its own day totals
+(`/v1/fleet/public`, `/v1/energy/public`) and keeps nothing per report but
+a hash of its id, for three days, so a replay or a retry counts once
+(RFC 9458, section 6.5). A report sent before yesterday is refused. Both
+public views list closed days only, so nobody can match a new count to the
+report that just arrived.
+`go/internal/statsrelay` holds the relay URL and the gateway key as
+compile-time pins. The box encrypts only to the pinned key and never asks the
+service for one, so every box on a release uses the same key and a key
+swapped in at the service opens nothing. Until both pins are set, the energy
+report is not sent, and the fleet report posts straight to `/v1/fleet` as
+before, but only from a box that said yes: FTW Cloud's terms or a local yes.
+A box that shares only by default never posts straight to FTW Cloud, which
+would see its address; it waits for the relay (Fredrik, 24 October 2026). A
+build with the relay sends the fleet report to FTW Cloud only through it.
+`POST /v1/fleet` stays for boxes on older releases; it can go one stable
+release after the first that pins the relay. A collector the household set
+in `fleet_ping.endpoint` is still posted to directly.
+
+**Who sees what.** The relay sees the box's address, the time and a
+ciphertext of fixed length, never a report. Cloudflare's relay, if chosen,
+keeps those logs for about 124 days. The gateway sees each report, the
+relay's address and the time, never the box's address. FTW Cloud keeps per
+date only the counts and sums; a public energy date appears once no report
+may still name it, four days after it ends, and needs at least 5 reports. A
+sum that one to four of them had any of shows null: five reports with one car
+would otherwise publish that car's charge.
+
+Limits, plainly:
+
+- The relay and Sourceful together could join reports to addresses by time.
+  The relay's independence is the control.
+- FTW Cloud holds readings from homes whose owners turned on the readable
+  copy, including 48 hours of history tiles. The same daily sums could be
+  computed from them and matched with a report. The gateway does not do this
+  and keeps nothing to match with, but that is a rule in code, not one the
+  cryptography enforces.
+- The floor of five counts reports, not boxes; Fredrik accepted this on
+  24 October 2026. An anonymous report cannot prove that a real box sent
+  it. The relay alone can drop the other reports and add fakes to isolate
+  one home's day, and that shows on our side as missing reports. Anyone
+  else can do it only on a day when one real home reported. Rejecting
+  replays and listing closed days only remove the cheap attacks. Anonymous
+  tokens (Privacy Pass) are the later fix, once the fleet grows or someone
+  shows a need.
+
+**Open for Fredrik's lawyer, not decided here.** Reports that are anonymous
+to Sourceful through OHTTP should be outside GDPR. Reading data from the
+owner's equipment to make them may still need consent under the ePrivacy
+rule (Swedish LEK, chapter 9, section 28). If it does, neither the opt-out for
+boxes without Cloud nor the requirement with Cloud holds, and both need an
+active yes. Fredrik chose this design; it is built as he asked. C8 stays off.

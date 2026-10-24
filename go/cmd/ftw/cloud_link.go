@@ -50,6 +50,9 @@ type cloudSite struct {
 	// With it, the link sends the car class, and a charger's level and
 	// goal fields are views of its session's car.
 	cars *cars.Runtime
+	// history is the energy ledger, read as the app's history over Noise
+	// reads it, so a closed tile is the same bytes either way.
+	history *appHistory
 
 	sessMu   sync.Mutex
 	sessions map[string]*plugSession
@@ -61,6 +64,16 @@ type cloudSite struct {
 type plugSession struct {
 	plugged bool
 	n       int
+}
+
+var _ cloudlink.HistorySite = (*cloudSite)(nil)
+
+// HistoryWindow serves the tiles class.
+func (c *cloudSite) HistoryWindow(ctx context.Context, names []string, stepMs, fromMs, toMs int64) (map[string][]protocol.HistorySample, error) {
+	if c.history == nil {
+		return nil, errors.New("no energy ledger")
+	}
+	return c.history.Window(ctx, names, stepMs, fromMs, toMs)
 }
 
 func (c *cloudSite) Statistics(ctx context.Context, now time.Time) (cloudwire.Stats, bool) {
@@ -384,17 +397,18 @@ func (n *cloudNotices) notify(kind string) {
 // enrolment, which holds the phones the roster lists; without either it
 // returns nil and the routes say FTW Cloud is unavailable. tunnel is the app
 // uplink's session table, nil when the app link is off, and then the box
-// takes no tun and links only for a grant.
+// takes no tun and links only for a grant. exchange is the watches' door, nil
+// with the app link off; it rides beside the tunnel.
 func startCloudLink(
 	ctx context.Context, statePath, build string, st *state.Store, enroll *appenroll.Identity,
 	tel *telemetry.Store, ctrl *control.State, ctrlMu *sync.Mutex, revision *control.Revision,
 	siteMeterStale time.Duration, measurementOptions func() telemetry.ForecastOptions, priceSvc *prices.Service, gateway *lateAPI, notices *cloudNotices,
-	tunnel *appuplink.Tunnel, carsRT *cars.Runtime, webPush *notifications.WebPush,
+	tunnel *appuplink.Tunnel, exchange *appuplink.Exchange, carsRT *cars.Runtime, webPush *notifications.WebPush,
 ) *cloudlink.Link {
 	if st == nil || enroll == nil {
 		return nil
 	}
-	site := &cloudSite{api: gateway, cars: carsRT,
+	site := &cloudSite{api: gateway, cars: carsRT, history: &appHistory{st: st},
 		site: newAppSite(tel, ctrl, ctrlMu, revision, siteMeterStale, measurementOptions)}
 	if priceSvc != nil && priceSvc.Zone != "" && priceSvc.Store != nil {
 		site.prices = &appPrices{svc: priceSvc}
@@ -417,6 +431,9 @@ func startCloudLink(
 	if tunnel != nil {
 		opts.Tunnel = tunnel
 	}
+	if exchange != nil {
+		opts.Exchange = exchange
+	}
 	link, err := cloudlink.New(opts)
 	if err != nil {
 		slog.Warn("FTW Cloud unavailable", "err", err)
@@ -424,6 +441,9 @@ func startCloudLink(
 	}
 	if tunnel != nil {
 		tunnel.Attach(link)
+	}
+	if exchange != nil {
+		exchange.Attach(link)
 	}
 	enroll.OnChange(link.RosterChanged)
 	// A code shown links the box at once, so a QR that names the home can.
@@ -467,6 +487,11 @@ func (c *cloudSession) caps(caps []string) []string {
 	caps = append(slices.Clip(caps), appproto.CapCloudLink)
 	if link.TakesTun() {
 		caps = append(caps, appproto.CapCloudTun)
+	}
+	// A watch reaches the box through FTW Cloud's exchange, so the phone
+	// offers to add one only while the link carries it.
+	if link.TakesX() {
+		caps = append(caps, appproto.CapCmdExchange)
 	}
 	return caps
 }

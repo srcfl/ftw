@@ -45,10 +45,10 @@ func TestAnExchangeHelloNamesTheRevAndNoCatalogue(t *testing.T) {
 	}
 }
 
-// The relay answers a watch with at most 4 KiB, so hello_ok never takes the
-// 4 KiB bucket. A house too big for 1 KiB leaves FTW Cloud out, and the watch
-// reads now instead.
-func TestAnExchangeHelloTooBigForTheRelayLeavesCloudOut(t *testing.T) {
+// FTW Cloud carries an exchange message of at most 2 KiB, so hello_ok never
+// takes the 4 KiB bucket. A house too big for 1 KiB leaves FTW Cloud out, and
+// the watch keeps the names its phone gave it.
+func TestAnExchangeHelloTooBigForItsAnswerLeavesCloudOut(t *testing.T) {
 	h, _, _, rec := newExchangeRig(t)
 	sources := map[string]string{}
 	for i := 0; i < 80; i++ {
@@ -77,6 +77,22 @@ func TestAnExchangeCommandPushesNoPlan(t *testing.T) {
 	}
 	if res := body[CmdResult](t, rec.only(t, MsgCmdResult)); res.State != CmdApplied {
 		t.Fatalf("the hold ended %q", res.State)
+	}
+}
+
+// A watch charges and does nothing else: every other op its role's scope
+// would reach is refused before it runs, and the charger hears nothing.
+func TestAnExchangeTakesTheChargersHoldAlone(t *testing.T) {
+	for _, op := range []string{OpLoadpointBoost, OpLoadpointSoCSet, OpLoadpointSurplusOnlySet, OpCarGoalSet, OpCarSoCSet, OpSessionCarSet, OpSetMode} {
+		h, lp, _, rec := newExchangeRig(t)
+		deliver(t, h, MsgCmd, nil, cmdLoadpoint(op, "x-"+op, holdArgs(), 7, 200_000))
+		e := body[ErrorBody](t, rec.only(t, MsgError))
+		if e.Code != protocol.ErrOpNotGranted {
+			t.Fatalf("%s through the exchange answered %q", op, e.Code)
+		}
+		if lp.holdCalls+lp.boostCalls+lp.socCalls+lp.surplusCalls != 0 {
+			t.Fatalf("%s through the exchange reached the charger", op)
+		}
 	}
 }
 

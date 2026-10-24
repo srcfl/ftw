@@ -153,10 +153,12 @@ func (m *Manager) setManualPersistenceError(id string, err error) {
 	}
 }
 
-// RestoreManualHold returns pending until hardware identity is known. A
-// verified same-session positive hold or a hardware-bound pause is restored.
-// Unknown/changed sessions and legacy records return a persistent zero-W hold
-// plus unconfirmed: failed restoration must not start automatic charging.
+// RestoreManualHold returns pending until the record's proof is known: the
+// hardware identity, and the session ID when the record has one. A record
+// without a session ID is checked by hardware alone; most chargers never
+// report one, and an observed unplug still ends the hold. Changed hardware or
+// sessions and legacy records return a persistent zero-W hold plus
+// unconfirmed: failed restoration must not start automatic charging.
 func (m *Manager) RestoreManualHold(id string) (ManualHold, string) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
@@ -227,8 +229,13 @@ func (m *Manager) RestoreManualHold(id string) (ManualHold, string) {
 		!record.Hold.ExpiresAt.IsZero() || !finite(record.Hold.PowerW) || record.Hold.PowerW < 0 {
 		return ManualHold{Persistent: true}, "unconfirmed"
 	}
-	if record.Hold.PowerW == 0 || (sessionID != "" && sessionID == record.SessionID) {
+	if record.Hold.PowerW == 0 || record.SessionID == "" || sessionID == record.SessionID {
 		return record.Hold, "restored"
+	}
+	if sessionID == "" {
+		// A charger can report its session after its identity. Deciding now
+		// would turn Charge now into a pause on every restart.
+		return ManualHold{Persistent: true}, "pending"
 	}
 	return ManualHold{Persistent: true}, "unconfirmed"
 }

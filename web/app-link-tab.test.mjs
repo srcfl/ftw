@@ -91,16 +91,16 @@ describe("the app tab", () => {
     assert.match(render({}), /id="app-link-pair"[^>]*disabled/);
   });
 
-  it("keeps fleet statistics with the app, but independent of its switch", () => {
+  it("keeps statistics with the app, but independent of its switch", () => {
     const appWithFleet = loadTab(true);
     const config = { app_link: { enabled: false } };
     const html = appWithFleet.render({ config });
 
-    assert.match(html, /<legend>Anonymous daily report<\/legend>/);
-    assert.match(html, /data-checkbox-path="fleet_ping\.enabled"/);
-    assert.equal(config.fleet_ping.enabled, true, "fleet sharing should still default on");
+    assert.match(html, /<legend>Anonymous statistics<\/legend>/);
+    assert.match(html, /id="statistics-share"/);
+    assert.doesNotMatch(html, /data-checkbox-path="fleet_ping\.enabled"/);
+    assert.equal(config.fleet_ping, undefined, "statistics are not a config field");
     assert.doesNotMatch(html, /id="app-link-enabled"[^>]*checked/);
-    assert.match(html, /id="fleet-ping-enabled"[^>]*checked/);
   });
 
   it("refreshes the fleet payload after saving from the app page", () => {
@@ -119,7 +119,7 @@ describe("the app tab", () => {
     vm.runInContext(fleetSource, sandbox);
 
     win.FTWSettings.tabs.app.afterSave();
-    assert.deepEqual(asked, ["/api/fleet-ping", "/api/app-link/status"]);
+    assert.deepEqual([...asked].sort(), ["/api/app-link/status", "/api/cloud", "/api/cloud/stats-policy", "/api/fleet-ping"]);
   });
 
   it("does not leave a standalone Fleet ping destination behind", () => {

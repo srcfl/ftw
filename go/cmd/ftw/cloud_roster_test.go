@@ -53,11 +53,7 @@ func TestTheRosterNarrowsAWatchToWhatItsPhoneHolds(t *testing.T) {
 	}
 	rosterPhone(t, id, apiauth.RoleOwner)
 	phone := rosterPhone(t, id, apiauth.RoleOwner)
-	code, _, err := id.MintWatchCode(phone.DeviceID, appenroll.WatchTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	watch, err := id.AuthoriseWatch(rosterKey(t), code)
+	watch, err := id.AddWatch(phone.DeviceID, rosterKey(t))
 	if err != nil {
 		t.Fatal(err)
 	}

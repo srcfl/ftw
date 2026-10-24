@@ -34,6 +34,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
 
 Join the [FTW Discord](https://discord.gg/UK2ygPBu8N) for questions and community discussions.
 
+See [project statistics](https://stats.ftw.energy/) for public development
+activity and anonymous usage totals.
+
 ## Architecture
 
 FTW has three explicit modules:

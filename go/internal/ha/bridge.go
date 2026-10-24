@@ -492,6 +492,7 @@ func (b *Bridge) publishDiscovery() {
 		{"battery_power", "Battery Power", "W", "power", "measurement", b.stateTopic("bat_w")},
 		{"ev_power", "EV Power", "W", "power", "measurement", b.stateTopic("ev_w")},
 		{"v2x_power", "V2X Power", "W", "power", "measurement", b.stateTopic("v2x_w")},
+		// Live balance as the dashboard shows it.
 		{"load_power", "Load Power", "W", "power", "measurement", b.stateTopic("load_w")},
 		{"battery_soc", "Battery SoC", "%", "battery", "measurement", b.stateTopic("bat_soc_pct")},
 		// Control setpoints
@@ -949,8 +950,8 @@ func (b *Bridge) publishState() {
 	b.publishValue("bat_w", batW)
 	b.publishValue("ev_w", evW)
 	b.publishValue("v2x_w", v2xW)
-	if live.Valid {
-		b.publishValue("load_w", live.HouseholdW)
+	if live.LoadKnown {
+		b.publishValue("load_w", live.LoadW)
 	} else {
 		// HA's numeric MQTT sensors ignore an empty payload. The literal
 		// None replaces the previous value with unknown.

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -32,11 +33,13 @@ type ControlFeedback struct {
 	SiteConfirmation string             `json:"site_confirmation"`
 	SiteMeter        string             `json:"site_meter,omitempty"`
 	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
+	SiteHeadroom     *EVSiteHeadroom    `json:"site_headroom,omitempty"`
 	ToleranceW       *float64           `json:"tolerance_w"`
 	// Internal steps of the verdict; the API exposes their result above.
 	State            string   `json:"-"`
 	VerificationTier *int     `json:"-"`
 	VerificationLost bool     `json:"-"`
+	Escalated        bool     `json:"-"` // not following long enough to be an alarm
 	Response         string   `json:"-"`
 	LimitedBy        string   `json:"-"`
 	SiteBeforeW      *float64 `json:"-"`
@@ -56,9 +59,13 @@ type ControlFeedback struct {
 	OfferedA         *float64 `json:"offered_a"`
 	DeviceLimitA     *float64 `json:"device_limit_a"`
 	DeviceReason     string   `json:"device_reason,omitempty"`
-	SinceMs          int64    `json:"since_ms,omitempty"`
-	CommandAtMs      int64    `json:"command_at_ms,omitempty"`
-	ObservedAtMs     int64    `json:"observed_at_ms,omitempty"`
+	// ChargingPhase names the one phase (L1-L3) a one-phase car charges on
+	// under a three-phase order, and ChargingPhaseMaxW the most it takes.
+	ChargingPhase     string   `json:"charging_phase,omitempty"`
+	ChargingPhaseMaxW *float64 `json:"charging_phase_max_w,omitempty"`
+	SinceMs           int64    `json:"since_ms,omitempty"`
+	CommandAtMs       int64    `json:"command_at_ms,omitempty"`
+	ObservedAtMs      int64    `json:"observed_at_ms,omitempty"`
 }
 
 type feedbackReading struct {
@@ -104,8 +111,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	}
 	observe, disabled := map[string]bool{}, map[string]bool{}
 	configuredBattery := map[string]bool{}
+	var site loadpoint.SiteFuse
 	if s.deps.Cfg != nil && s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
+		site = loadpoint.SiteFuse{MaxAmps: s.deps.Cfg.Fuse.MaxAmps, Voltage: s.deps.Cfg.Fuse.Voltage, PhaseCnt: s.deps.Cfg.Fuse.Phases}
 		observe = config.ObserveOnlyDriverSet(s.deps.Cfg)
 		for _, d := range s.deps.Cfg.Drivers {
 			disabled[d.Name] = d.Disabled
@@ -206,6 +215,18 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				if f.RequestedW != nil && lp.Phases > 0 && lp.VoltageV > 0 {
 					f.RequestedA = watts(*f.RequestedW / float64(lp.Phases) / lp.VoltageV)
 				}
+				// A one-phase car takes a third of a three-phase order.
+				if lp.CarPhases == 1 && lp.CarPhase > 0 {
+					f.ChargingPhase = fmt.Sprintf("L%d", lp.CarPhase)
+					maxW := loadpoint.OnePhaseCarMaxW(loadpoint.Config{MaxChargeW: lp.MaxChargeW}, site)
+					if lp.CarMaxW > 0 {
+						maxW = math.Min(maxW, lp.CarMaxW)
+					}
+					f.ChargingPhaseMaxW = watts(maxW)
+					if f.RequestedW != nil && lp.Phases == 3 {
+						f.RequestedW = watts(*f.RequestedW / 3)
+					}
+				}
 				if lp.PowerUnavailable {
 					fresh = false
 					f.ActualW = nil
@@ -280,6 +301,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				f.Reason = "readings_lost"
 			}
 			f.ReadingsFresh = fresh
+			f.SiteHeadroom = s.evSiteHeadroom(f, lps[rd.Driver], meter, now)
 			out = append(out, f)
 		}
 	}
@@ -339,7 +361,9 @@ func setControlStatus(f *ControlFeedback) {
 		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
 	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
-		"fuse_limit", "fuse_cooldown", "charger_limit", "load_balancer_limit":
+		"fuse_limit", "fuse_cooldown", "charger_limit", "load_balancer_limit", "one_phase":
+		status = "limited"
+	case "import_limit":
 		status = "limited"
 	case "device_limit", "offered_current_lower":
 		status, severity = "limited", "warning"
@@ -359,6 +383,9 @@ func setControlStatus(f *ControlFeedback) {
 	}
 	if status == "following" && (f.VerificationTier == nil || *f.VerificationTier < 1) {
 		status = "waiting"
+	}
+	if status == "not_following" && f.Escalated {
+		severity = "alarm"
 	}
 	f.Status, f.Severity = status, severity
 	f.Evidence = "none"
@@ -390,6 +417,15 @@ func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, n
 	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastMeasuredAt) >= grace
 }
 
+// evMismatchWait is how long a charger's fresh readings must disagree with
+// the orders in force before it is not following. evOverdrawAlarm is how
+// much longer one that draws more than ordered may go on before the warning
+// becomes an alarm.
+const (
+	evMismatchWait  = 2 * time.Minute
+	evOverdrawAlarm = 10 * time.Minute
+)
+
 func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, commanded, fresh bool, coreReason string, connected *bool, now time.Time) {
 	set := func(state, reason, severity string) { f.State, f.Reason, f.Severity = state, reason, severity }
 	if !fresh {
@@ -420,8 +456,9 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	// A positive clamp explains the lower offer, not prolonged zero delivery.
 	// An explicit load-balancer reason can explain zero delivery. Keep known
 	// safety pauses and unconfirmed/stale commands authoritative.
-	evMismatchObserved := !cmd.PowerMismatchSince.IsZero() && cmd.LastObservation.Sub(cmd.PowerMismatchSince) >= 2*time.Minute
-	noPowerObserved := evMismatchObserved || !cmd.NoPowerSince.IsZero() && cmd.NoPowerAt.Sub(cmd.NoPowerSince) >= 2*time.Minute
+	evMismatchObserved := !cmd.PowerMismatchSince.IsZero() && cmd.LastObservation.Sub(cmd.PowerMismatchSince) >= evMismatchWait
+	noPowerObserved := evMismatchObserved || !cmd.NoPowerSince.IsZero() && cmd.NoPowerAt.Sub(cmd.NoPowerSince) >= evMismatchWait
+
 	if f.Kind == "ev" && commanded && cmd.Result == "accepted" &&
 		f.LimitedBy != "load_balancer" &&
 		coreReason != "site_meter_stale" && coreReason != "site_phase_currents_stale" && coreReason != "fuse_cooldown" &&
@@ -434,7 +471,11 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("limited", "device_limit", "warning")
 		return
 	}
-	if coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "charger_limit" {
+	// A limit explains a lower order, not a draw that differs from it. A
+	// charger whose fresh readings have disagreed with the order past its
+	// response time is judged below, as under any other order.
+	limit := coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "import_limit" || coreReason == "charger_limit"
+	if limit && !(f.Kind == "ev" && evMismatchObserved) {
 		set("limited", coreReason, "warning")
 		return
 	}
@@ -467,6 +508,14 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	}
 	if cmd.Result == "pending" || (!settled && f.Response == "unconfirmed") || f.ObservedAtMs < cmd.Since.UnixMilli() {
 		set("waiting", "waiting_response", "info")
+		return
+	}
+	// A one-phase car drawing a third of a three-phase order does what it
+	// can: the order is its current per phase, on its one phase. A limit, a
+	// changed setpoint or a response still due says more, and comes first.
+	if f.ChargingPhase != "" && cmd.Result == "accepted" && f.SentW != nil && *f.SentW > 100 &&
+		f.ActualW != nil && math.Abs(*f.ActualW-*f.SentW) <= telemetry.ControlToleranceW(*f.SentW) {
+		set("limited", "one_phase", "info")
 		return
 	}
 	if f.SentW == nil || f.ActualW == nil {
@@ -509,6 +558,11 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 			reason = "power_below_target"
 		}
 		set("warning", reason, "warning")
+		// FTW cannot stop a charger that draws more than it is told. A car
+		// that takes less only charges slower.
+		if f.Kind == "ev" && (reason == "power_while_idle" || reason == "power_above_target") {
+			f.Escalated = !cmd.PowerOverSince.IsZero() && cmd.LastObservation.Sub(cmd.PowerOverSince) >= evMismatchWait+evOverdrawAlarm
+		}
 		return
 	}
 	if coreReason == "core_limit" {

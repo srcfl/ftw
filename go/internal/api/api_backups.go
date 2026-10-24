@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -79,8 +81,27 @@ func withoutWriteDeadline(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 }
 
+func readBackupRequestBody(w http.ResponseWriter, r *http.Request) bool {
+	// HTTP/1 detects a disconnected client only after the request body has
+	// been read. Backup creation and verification take no body options.
+	// Consume it before starting work so a disconnect cancels the context.
+	if _, err := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxJSONBody)); err != nil {
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": "could not read backup request body"})
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 	withoutWriteDeadline(w)
+	if !readBackupRequestBody(w, r) {
+		return
+	}
 	dir, ok := s.backupConfig(w)
 	if !ok {
 		return
@@ -125,17 +146,25 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": "component update or rollback already in progress"})
 		return
 	}
+	// The caller may be gone when this ends; the journal keeps the outcome.
+	started := time.Now()
+	slog.Info("full backup started", "dir", dir)
+	s.deps.State.ReportBackupProgress(state.BackupProgress{})
 	info, err := backup.Create(r.Context(), backup.CreateOptions{
 		ConfigPath: s.deps.ConfigPath, State: s.deps.State, StatePath: s.deps.StatePath, DataDir: s.deps.DataDir,
 		OutputDir: dir, Components: s.backupComponentInventory(r.Context()),
 		Maintenance: s.deps.DataMaintenanceMu,
 		Progress:    s.deps.State.ReportBackupProgress,
 	})
+	elapsed := time.Since(started).Round(time.Second)
 	if err != nil {
-		s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "failed", Error: err.Error()})
+		last := s.deps.State.BackupProgress()
+		slog.Error("full backup failed", "err", err, "phase", last.Phase, "table", last.Table, "rows_done", last.RowsDone, "elapsed", elapsed)
+		s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "failed", Table: last.Table, RowsDone: last.RowsDone, Error: err.Error()})
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	slog.Info("full backup created", "id", info.ID, "size_bytes", info.SizeBytes, "elapsed", elapsed)
 	s.deps.State.ReportBackupProgress(state.BackupProgress{Phase: "complete", CompletedBytes: info.SizeBytes, TotalBytes: info.SizeBytes})
 	warning := ""
 	if err := writeVerification(info.Path, info); err != nil {
@@ -151,6 +180,9 @@ func (s *Server) handleBackupCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBackupVerify(w http.ResponseWriter, r *http.Request) {
 	withoutWriteDeadline(w)
+	if !readBackupRequestBody(w, r) {
+		return
+	}
 	dir, ok := s.backupConfig(w)
 	if !ok {
 		return

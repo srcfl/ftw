@@ -135,7 +135,7 @@ ocpp:
   path: /             # default /
   username: ftw
   password: <a long random string>
-  heartbeat_interval_s: 60
+  heartbeat_interval_s: 30
 ```
 
 **Credentials are mandatory.** FTW refuses to start with `enabled: true` and an

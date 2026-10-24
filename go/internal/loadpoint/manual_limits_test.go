@@ -86,7 +86,7 @@ func TestFusePowerBudgetNeverRoundsUp(t *testing.T) {
 			cfg.AllowedStepsW = tc.steps
 			c := newTestController(t, []Config{cfg}, nil, map[string]EVSample{}, &fakeSender{})
 			c.SetFuseEVMax(func() (float64, bool) { return tc.cap, true })
-			got, _ := c.applyFuseClampAndCooldown(time.Now(), cfg, tc.want)
+			got, _ := c.applyFuseClamp(cfg, tc.want, "")
 			if got != tc.expected || got > tc.cap || got > tc.want {
 				t.Fatalf("want %v cap %v: sent %v, expected %v", tc.want, tc.cap, got, tc.expected)
 			}

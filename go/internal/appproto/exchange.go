@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"github.com/srcfl/ftw/go/protocol"
+	"slices"
 	"sort"
 
 	"github.com/srcfl/ftw/go/internal/units"
@@ -12,17 +13,27 @@ import (
 // A watch's exchange session (ADR 0009, decision 2).
 //
 // A watch speaks HTTPS and nothing lower, so each of its requests is one Noise
-// message through the relay and each answer one HTTP body. The session takes
-// hello, cmd and now. It never streams: there is no socket to stream on. Every
-// answer is two lane 0 frames of one size whatever the op or the outcome, so
-// the relay cannot tell a read from a command or a refusal from a success by
-// length. appuplink pads an answer to two frames with Pad.
+// message that FTW Cloud carries and each answer one HTTP body. The session
+// takes hello, cmd and now. It never streams: there is no socket to stream on.
+// Every answer is two lane 0 frames of one size whatever the op or the
+// outcome, so the service cannot tell a read from a command or a refusal from
+// a success by length. appuplink pads an answer to two frames with Pad.
+
+// ExchangeOps are the commands a watch's exchange takes: the charger's hold,
+// which Charge now, Pause and Back to the plan send. A watch reads and
+// charges and does nothing else (ADR 0009, decision B); its role's
+// ftw.dispatch.write reaches further, and the exchange does not.
+var ExchangeOps = []string{OpLoadpointHold}
 
 func (h *Handler) dispatchExchange(ctx context.Context, env Envelope) error {
 	switch env.T {
 	case MsgHello:
 		return h.onExchangeHello(env)
 	case MsgCmd:
+		var cmd Cmd
+		if err := Unmarshal(env.B, &cmd); err == nil && !slices.Contains(ExchangeOps, cmd.Op) {
+			return h.sendError(env.ID, ErrorBody{Code: protocol.ErrOpNotGranted, Args: map[string]any{"op": cmd.Op}})
+		}
 		return h.onCmd(ctx, env, "")
 	case MsgNow:
 		return h.onNow()
@@ -92,8 +103,8 @@ func (h *Handler) onExchangeHello(env Envelope) error {
 		}
 		if bucket := bulkBucketFor(size); bucket == 0 || bucket > ExchangeHelloMaxBucket {
 			// A house with too many sources to name in 1 KiB says less. The
-			// watch then reads now on the exchange, as with FTW Cloud off.
-			h.log.Warn("exchange hello_ok left FTW Cloud out to fit the relay's answer", "bytes", size)
+			// watch then keeps the names its phone gave it.
+			h.log.Warn("exchange hello_ok left FTW Cloud out to fit the exchange's answer", "bytes", size)
 			body.Cloud = nil
 		}
 	}
@@ -101,9 +112,8 @@ func (h *Handler) onExchangeHello(env Envelope) error {
 }
 
 // ExchangeHelloMaxBucket is the largest bucket an exchange hello_ok may take:
-// the smallest one. The relay answers a watch with at most 4 KiB behind its
-// id, and handshake message 2 adds 48 bytes to the frame, so the next bucket,
-// 4 KiB, never fits.
+// the smallest one. FTW Cloud carries an exchange message of at most 2 KiB
+// (cloudwire.XDataMax), so the next bucket, 4 KiB, never fits.
 const ExchangeHelloMaxBucket = 1024
 
 func encodedSize(t string, body any) (int, error) {

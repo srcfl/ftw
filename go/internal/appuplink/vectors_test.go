@@ -10,15 +10,17 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/protocol/appwire"
+	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
 // The exchange's golden vectors (ADR 0009, "Vectors").
 //
 // testdata/exchange-vectors.json holds the bytes of every step of one watch
-// session, from fixed keys: X1 with a pairing code, a command answered by its
-// ack and result, and a read answered by now and a tick. The Swift client in
-// srcfl/ftw-app replays the same file, so Go and Swift agree on every byte or
-// one of them fails. Regenerate with
+// session, from fixed keys: X1 for a watch its phone added by its key, a
+// command answered by its ack and result, and a read answered by now and a
+// tick, each also as the x that carries it on the uplink to FTW Cloud. The
+// Swift client in srcfl/ftw-app replays the same file, so Go and Swift agree
+// on every byte or one of them fails. Regenerate with
 //
 //	go test ./internal/appuplink -run TestExchangeVectors -update-exchange-vectors
 
@@ -40,16 +42,16 @@ type exchangeVectors struct {
 	Steps []exchangeVectorStep `json:"steps"`
 }
 
-// exchangeVectorStep is one message across the relay. Frames are the
-// plaintext lane frames inside it; Body is what follows the relay's id, the
-// bytes the watch posts or the answer it receives; Relay is id ‖ Body as it
-// crosses the box's exchange socket.
+// exchangeVectorStep is one message of the exchange. Frames are the
+// plaintext lane frames inside it; Body is the exchange message itself, the d
+// of the watch's x {d} in its one-shot request or of the answer it receives;
+// Uplink is the frame x {dev, id, d} as it crosses the box's uplink.
 type exchangeVectorStep struct {
 	Name   string   `json:"name"`
 	From   string   `json:"from"`
 	Frames []string `json:"frames"`
 	Body   string   `json:"body"`
-	Relay  string   `json:"relay"`
+	Uplink string   `json:"uplink"`
 }
 
 // fixed is n bytes counting up from first: a key nobody would use, which is
@@ -88,7 +90,7 @@ func buildExchangeVectors(t *testing.T) exchangeVectors {
 	}
 	boxStatic, boxEphemeral := keyPair(0x01), keyPair(0x61)
 	watchStatic, watchEphemeral := keyPair(0x21), keyPair(0x41)
-	id := fixed(0x81, ExchangeIDBytes)
+	dev := cloudwire.DeviceID(watchStatic.Public())
 	prologueBytes := exchangePrologue(boxStatic.Public())
 
 	watch, err := appwire.NewInitiator(appwire.InitiatorOptions{
@@ -117,19 +119,31 @@ func buildExchangeVectors(t *testing.T) exchangeVectors {
 		WatchEphemeral:    hex.EncodeToString(fixed(0x41, appwire.DHBytes)),
 	}
 	step := func(name, from string, frames [][]byte, body []byte) {
-		s := exchangeVectorStep{Name: name, From: from, Body: hex.EncodeToString(body),
-			Relay: hex.EncodeToString(append(append([]byte(nil), id...), body...))}
+		// A request and its answer share the service's number.
+		x, err := cloudwire.Marshal(cloudwire.X{Dev: dev, ID: uint32(len(v.Steps)/2 + 1), D: body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := cloudwire.Envelope{T: cloudwire.MsgX, B: x}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		uplink, err := cloudwire.EncodeFrame(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := exchangeVectorStep{Name: name, From: from, Body: hex.EncodeToString(body), Uplink: hex.EncodeToString(uplink)}
 		for _, f := range frames {
 			s.Frames = append(s.Frames, hex.EncodeToString(f))
 		}
 		v.Steps = append(v.Steps, s)
 	}
 
-	// X1: hello with the pairing code in message 1, hello_ok in message 2.
+	// X1: hello in message 1, hello_ok in message 2. The phone added the
+	// watch by its key, so the hello carries no code.
 	hello := frameOf(t, appwire.LaneControl, exchangeFrameBytes, appproto.MsgHello, appproto.Hello{
 		Proto: appproto.ProtoRange{Min: appproto.ProtoMin, Max: appproto.ProtoMax},
 		App:   appproto.AppInfo{Build: "vectors", UA: "watchos"},
-		Code:  fixed(0xa1, 16),
 	})
 	message1, err := watch.WriteMessage(hello)
 	if err != nil {
@@ -262,7 +276,7 @@ func TestExchangeVectors(t *testing.T) {
 			"; if the change is meant, regenerate it and update srcfl/ftw-app's copy in the same pair of PRs")
 	}
 
-	// The sizes the relay checks and the docs promise.
+	// The sizes the docs promise, each inside one x on the uplink.
 	var v exchangeVectors
 	if err := json.Unmarshal(want, &v); err != nil {
 		t.Fatal(err)
@@ -275,6 +289,9 @@ func TestExchangeVectors(t *testing.T) {
 	for _, s := range v.Steps {
 		if n := len(s.Body) / 2; n != sizes[s.Name] {
 			t.Fatalf("%s is %d bytes, want %d", s.Name, n, sizes[s.Name])
+		}
+		if n := len(s.Uplink) / 2; n > cloudwire.MaxXFrame {
+			t.Fatalf("%s's x is %d bytes, over %d", s.Name, n, cloudwire.MaxXFrame)
 		}
 	}
 }

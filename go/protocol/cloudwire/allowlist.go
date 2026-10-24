@@ -39,6 +39,10 @@ var Fields = map[string][]string{
 
 	MsgHB: {"clock", "srcRev", "liveSeq", "lpSeq", "ages"},
 
+	// The app protocol's hist.chunk: power means over 5-minute buckets of
+	// the four series the app draws (TileSeries), and nothing else.
+	MsgTiles: {"tileId", "etag", "res", "startMs", "stepMs", "series", "data", "partial"},
+
 	MsgEvent: {"eventId", "ts", "kind", "severity", "args", "src", "lp", "cars"},
 
 	MsgRoster: {"rosterSeq", "ttlS", "devices", "grant", "pending", "noise", "webpush"},
@@ -63,10 +67,13 @@ var Fields = map[string][]string{
 	// tun carries no header and no signature: d is Noise ciphertext its two
 	// ends authenticate, and the service reads only dev and sid.
 	MsgTun: {"dev", "sid", "d"},
+	// x is the same: d is a watch's exchange with the box, and the service
+	// reads only dev and id.
+	MsgX: {"dev", "id", "d"},
 }
 
 // Bodies maps each class the box sends to its body type. Classes the box does
-// not send yet (plan, health, tiles) have no entry; the service treats their
+// not send yet (plan, health) have no entry; the service treats their
 // bytes as opaque either way. tun is not here: it has no header and is not a
 // class, and Unheaded holds it.
 var Bodies = map[string]any{
@@ -76,6 +83,7 @@ var Bodies = map[string]any{
 	MsgCar:    Cars{},
 	MsgPrices: Prices{},
 	MsgHB:     HB{},
+	MsgTiles:  Tiles{},
 	MsgEvent:  Event{},
 	MsgRoster: Roster{},
 	MsgBye:    Bye{},
@@ -86,4 +94,5 @@ var Bodies = map[string]any{
 // Unheaded are the box's messages without the common header.
 var Unheaded = map[string]any{
 	MsgTun: Tun{},
+	MsgX:   X{},
 }

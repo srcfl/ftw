@@ -223,3 +223,30 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// The fleet report's planner facts: plans kept since a time, the slowest
+// solve and the fallbacks. Older plans and plans without solver details do
+// not move the slowest.
+func TestPlannerDaySumsThePlansSinceATime(t *testing.T) {
+	st := openTestStore(t)
+	day := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC).UnixMilli()
+	for i, js := range []string{
+		`{"solver":{"solve_ms":90000,"fallback":true}}`, // before the window
+		`{"solver":{"solve_ms":850}}`,
+		`{"solver":{"solve_ms":4200,"status":"fallback","fallback":true}}`,
+		`{"zone":"SE3"}`,
+		`{"solver":{"solve_ms":12.5,"fallback":false}}`,
+	} {
+		ts := day + int64(i-1)*3_600_000
+		if err := st.SaveDiagnostic(ts, "scheduled", "SE3", 0, 96, js); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plans, slowest, fallbacks, err := st.PlannerDay(day)
+	if err != nil || plans != 4 || slowest != 4200 || fallbacks != 1 {
+		t.Fatalf("plans %d, slowest %v, fallbacks %d, err %v", plans, slowest, fallbacks, err)
+	}
+	if plans, slowest, fallbacks, err := st.PlannerDay(day + 10*3_600_000); err != nil || plans != 0 || slowest != 0 || fallbacks != 0 {
+		t.Fatalf("an empty window: %d %v %d %v", plans, slowest, fallbacks, err)
+	}
+}

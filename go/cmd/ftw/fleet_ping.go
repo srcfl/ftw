@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +14,10 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/fleetping"
+	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/statsrelay"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // The anonymous fleet ping, wired to the box.
@@ -62,6 +66,9 @@ func startFleetPing(
 	cfg *config.Config,
 	cfgMu *sync.RWMutex,
 	st *state.Store,
+	answer statsAnswer,
+	tel *telemetry.Store,
+	updates *selfupdate.Checker,
 	version string,
 	managedDriverDir string,
 ) (*fleetping.Pinger, error) {
@@ -69,7 +76,7 @@ func startFleetPing(
 	endpoint := cfg.FleetPing.Resolved()
 	cfgMu.RUnlock()
 
-	provider, err := fleetping.NewHTTPProvider(endpoint, nil)
+	provider, err := fleetProvider(endpoint, statsrelay.Pinned())
 	if err != nil {
 		return nil, err
 	}
@@ -77,15 +84,18 @@ func startFleetPing(
 	installedAt := firstSeen(st, time.Now())
 
 	pinger, err := fleetping.New(fleetping.Options{
-		Enabled: func() bool { return fleetPingEnabled(cfg, cfgMu)() && cloudlink.StatisticsChoice(st) },
+		Enabled: fleetReportAllowed(answer, endpoint, provider),
 		Facts: func() fleetping.Facts {
 			// Drivers can be installed without restarting FTW. Read the signed
 			// catalogue at the same time as the config so tomorrow's report and
 			// the Settings preview both see the install.
 			catalogue := fleetCatalogue(st, managedDriverDir)
+			health := fleetHealth(st, tel, updates, time.Now())
 			cfgMu.RLock()
 			defer cfgMu.RUnlock()
-			return fleetping.FactsFromConfig(cfg, version, catalogue, installedAt)
+			f := fleetping.FactsFromConfig(cfg, version, catalogue, installedAt)
+			f.Health = health
+			return f
 		},
 		Provider: provider,
 	})
@@ -97,7 +107,114 @@ func startFleetPing(
 	return pinger, nil
 }
 
-// fleetPingEnabled reads the switch, under the config lock, at each send.
+// fleetHealth reads how the box ran lately, for the report's health buckets:
+// the planner's last 24 hours from the plans it kept, the drivers' last 24
+// hours of polls once the count covers six of them, and the newest update of
+// the last 7 days. A source that is missing or too short, as the updater is
+// on a box that does not update itself, reads as nothing to report.
+func fleetHealth(st *state.Store, tel *telemetry.Store, updates *selfupdate.Checker, now time.Time) fleetping.Health {
+	var h fleetping.Health
+	if st != nil {
+		plans, slowestMs, fallbacks, err := st.PlannerDay(now.Add(-24 * time.Hour).UnixMilli())
+		if err != nil {
+			slog.Debug("fleet report: planner day unavailable", "err", err)
+		} else {
+			h.Plans, h.SlowestSolve, h.Fallbacks = plans, time.Duration(slowestMs*float64(time.Millisecond)), fallbacks
+		}
+	}
+	// Counts that cover under six hours, as after an update's restart, say
+	// too little: a start-up burst of failed polls would read as trouble.
+	if tel != nil {
+		if polls, errors, covered := tel.PollsLastDay(now); covered >= 6*time.Hour {
+			h.Polls, h.PollErrors = polls, errors
+		}
+	}
+	if updates != nil {
+		u := updates.Status()
+		if u.Action == "update" && !u.UpdatedAt.IsZero() && now.Sub(u.UpdatedAt) <= 7*24*time.Hour {
+			switch u.State {
+			case "done":
+				h.Update = "ok"
+			case "failed":
+				h.Update = "failed"
+			}
+		}
+	}
+	return h
+}
+
+// fleetProvider sends the report to FTW Cloud through the relay when this
+// build names one, and only then: FTW Cloud then never sees the box's
+// address. A build without a relay posts straight to /v1/fleet as before. An
+// endpoint the household chose is its own collector and is posted to
+// directly.
+func fleetProvider(endpoint string, relay *statsrelay.Client) (fleetping.Provider, error) {
+	if relay != nil && strings.TrimSpace(endpoint) == config.DefaultFleetPingEndpoint {
+		return fleetping.NewRelayProvider(relay), nil
+	}
+	return fleetping.NewHTTPProvider(endpoint, nil)
+}
+
+// statsAnswer is the one answer for both anonymous daily reports, the fleet
+// report and the energy report: part of FTW Cloud, and on for a box without
+// it until the owner turns it off. One reader, so the two reports cannot come
+// to read different answers. It asks the running Cloud link, which counts a
+// grant only with the key it was made with; with no link, the box's own
+// answer alone. fleet_ping.enabled is no longer a second switch;
+// migrateStatistics read it once.
+type statsAnswer struct {
+	st   *state.Store
+	link *cloudlink.Link
+}
+
+func (a statsAnswer) shares() bool {
+	if a.link != nil {
+		return a.link.SharesStatistics()
+	}
+	return a.st != nil && cloudlink.SharesStatistics(a.st)
+}
+
+func (a statsAnswer) saidYes() bool {
+	if a.link != nil {
+		return a.link.SaidYesToStatistics()
+	}
+	return a.st != nil && cloudlink.SaidYesToStatistics(a.st)
+}
+
+// fleetReportAllowed is the one answer, with one more rule for the direct
+// path (Fredrik, 24 October 2026): a box that shares only by default, never
+// having said yes, posts nothing straight to FTW Cloud, which would see its
+// address; it waits for the relay. Through the relay, or to a collector the
+// household chose, the answer alone decides.
+func fleetReportAllowed(answer statsAnswer, endpoint string, provider fleetping.Provider) func() bool {
+	_, relayed := provider.(*fleetping.RelayProvider)
+	direct := !relayed && strings.TrimSpace(endpoint) == config.DefaultFleetPingEndpoint
+	return func() bool {
+		return answer.shares() && (!direct || answer.saidYes())
+	}
+}
+
+// migrateStatistics turns what an earlier release stored into the one
+// answer, once: a fleet report switched off in the config stays off. Then
+// the Cloud grant follows it, so an answer that came out off also stops an
+// hourly upload the grant still carried.
+func migrateStatistics(cfg *config.Config, cfgMu *sync.RWMutex, st *state.Store, link *cloudlink.Link) {
+	if st == nil {
+		return
+	}
+	if err := cloudlink.MigrateStatistics(st, !fleetPingEnabled(cfg, cfgMu)()); err != nil {
+		slog.Warn("could not record the statistics answer; nothing is sent until it is", "err", err)
+		return
+	}
+	if link != nil {
+		if err := link.ReconcileStatistics("statistics answer"); err != nil {
+			slog.Warn("could not make the FTW Cloud grant follow the statistics answer", "err", err)
+		}
+	}
+}
+
+// fleetPingEnabled reads the old switch under the config lock. Since the one
+// statistics answer it is read once, by migrateStatistics.
 //
 // On() and not a second reading of nil. A config posted to /api/config never
 // passes through applyDefaults and configreload.Apply swaps it in whole, so a

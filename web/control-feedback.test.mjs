@@ -67,6 +67,13 @@ test('expected limits stay calm and explain themselves', () => {
   assert.equal(balanced.tone, 'neutral');
   const held = controlStatus(row({kind: 'ev', status: 'limited', reason: 'load_balancer_limit', sent_w: 11000, actual_w: 0}));
   assert.equal(held.text, 'Asked for 11.0 kW charge, but the charger’s load balancer gives the car no current.');
+  const onePhase = controlStatus(row({kind: 'ev', mode: 'plan', status: 'limited', reason: 'one_phase', severity: 'info',
+    sent_w: 3680, actual_w: 3650, charging_phase: 'L1', charging_phase_max_w: 3680}));
+  assert.equal(onePhase.title, 'Charging on one phase');
+  assert.equal(onePhase.text, 'The car charges on L1 only, at most 3.7 kW. FTW plans with what it takes.');
+  assert.equal(onePhase.next, '');
+  assert.equal(onePhase.tone, 'neutral');
+
 });
 
 test('the receipt walks from sent to confirmed without inventing proof', () => {
@@ -149,12 +156,51 @@ test('the summary answers the question for the whole site', () => {
   assert.equal(controlSummary([row()], false).tone, 'stale');
 });
 
+test('calculated site headroom explains an EV shortfall without claiming a vendor cause', () => {
+  const ev = row({kind: 'ev', status: 'not_following', reason: 'power_below_target', severity: 'warning', sent_w: 10350, actual_w: 4155,
+    site_headroom: {evidence: 'calculated', fuse_a: 25, margin_a: 0.5, projected_max_a: 29.5, battery_charge_w: 9383}});
+  const words = controlStatus(ev);
+  assert.equal(words.title, 'Insufficient site headroom');
+  assert.match(words.text, /home battery is charging at 9.4 kW/);
+  assert.match(words.next, /other loads unchanged/);
+  assert.match(words.next, /25 A/);
+  assert.match(words.proof, /Calculated.*projection/);
+  assert.equal(controlStatus(ev, false).title, 'Status not current');
+  assert.equal(controlStatus({...ev, reason: 'command_failed'}).title, 'Commands failing');
+  assert.equal(controlStatus({...ev, readings_fresh: false}).title, 'Not following');
+  assert.doesNotMatch(controlStatus({...ev, site_headroom: {...ev.site_headroom, battery_charge_w: 0}}).text, /battery/);
+  assert.equal(controlStatus({...ev, site_headroom: {...ev.site_headroom, projected_max_a: NaN}}).title, 'Not following');
+});
+
 
 test('limited positive EV offer does not explain prolonged zero delivery', () => {
  const missing=controlStatus(row({kind:'ev',status:'not_following',reason:'no_power_response',severity:'warning',requested_w:10350,sent_w:6900,actual_w:0,requested_a:15,offered_a:10,device_reason:'limited by dynamic charger current'}));
  assert.equal(missing.title,'Not following');
  assert.match(missing.text,/6.9 kW charge.*no power/);
  const capped=controlStatus(row({kind:'ev',status:'limited',reason:'fuse_limit',sent_w:6900,actual_w:6800}));
- assert.equal(capped.title,'Limited by site power limits');
- assert.match(capped.text,/fuse and import limits/);
+ assert.equal(capped.title,'Limited by the main fuse');
+ assert.match(capped.text,/protect the main fuse/);
+ const hour=controlStatus(row({kind:'ev',status:'limited',reason:'import_limit',sent_w:4140,actual_w:4100}));
+ assert.equal(hour.title,'Limited by the hourly import limit');
+ assert.match(hour.text,/this hour’s grid import/);
+ assert.doesNotMatch(hour.text,/fuse/);
+});
+
+test('a projected shortfall names the working limit rather than claiming the fuse rating is exceeded', () => {
+  const words = controlStatus(row({kind: 'ev', status: 'not_following', reason: 'power_below_target', severity: 'warning',
+    sent_w: 10350, actual_w: 8300,
+    site_headroom: {evidence: 'calculated', fuse_a: 25, margin_a: 1, projected_max_a: 24.8, battery_charge_w: 0}}));
+  assert.match(words.next, /24\.8 A/);
+  assert.match(words.next, /24 A working limit/);
+  assert.match(words.next, /25 A fuse/);
+  assert.doesNotMatch(words.next, /above the 25 A/);
+});
+
+test('a calculated projection does not deny raw charger reason evidence', () => {
+  const words = controlStatus(row({kind: 'ev', status: 'not_following', reason: 'power_below_target', severity: 'warning',
+    sent_w: 10350, actual_w: 4155, device_reason: 'limited by charger max current',
+    site_headroom: {evidence: 'calculated', fuse_a: 25, margin_a: .5, projected_max_a: 29.5, battery_charge_w: 9383}}));
+  assert.match(words.proof, /projection/);
+  assert.match(words.proof, /not a charger-reported cause/);
+  assert.doesNotMatch(words.proof, /has not reported|has not said/);
 });

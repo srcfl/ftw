@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,8 +43,10 @@ type miniCloud struct {
 	conn     *websocket.Conn
 	home     string
 	roster   *cloudwire.Roster
+	caps     []string
 	got      []string
 	toApp    chan cloudwire.Tun
+	toWatch  chan cloudwire.X
 	rostered chan struct{}
 	wmu      sync.Mutex
 }
@@ -51,7 +54,8 @@ type miniCloud struct {
 func newMiniCloud(t *testing.T) *miniCloud {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	c := &miniCloud{t: t, key: key, toApp: make(chan cloudwire.Tun, 64), rostered: make(chan struct{}, 8)}
+	c := &miniCloud{t: t, key: key, toApp: make(chan cloudwire.Tun, 64), toWatch: make(chan cloudwire.X, 64),
+		rostered: make(chan struct{}, 8)}
 	c.srv = httptest.NewUnstartedServer(http.HandlerFunc(c.serve))
 	c.srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
 	c.srv.StartTLS()
@@ -113,7 +117,7 @@ func (c *miniCloud) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.mu.Lock()
-	c.conn, c.home = conn, home
+	c.conn, c.home, c.caps = conn, home, hello.Caps
 	c.mu.Unlock()
 	for {
 		_, msg, err := conn.ReadMessage()
@@ -138,6 +142,11 @@ func (c *miniCloud) serve(w http.ResponseWriter, r *http.Request) {
 			var t cloudwire.Tun
 			if cloudwire.Unmarshal(env.B, &t) == nil {
 				c.toApp <- t
+			}
+		case cloudwire.MsgX:
+			var x cloudwire.X
+			if cloudwire.Unmarshal(env.B, &x) == nil {
+				c.toWatch <- x
 			}
 		case cloudwire.MsgRoster:
 			var ro cloudwire.Roster
@@ -167,6 +176,35 @@ func (c *miniCloud) fromApp(key []byte, sid uint32, d []byte) bool {
 		}
 	}
 	return false
+}
+
+// fromWatch is a watch's x, as /v1/app/once hands it on: the service finds
+// the roster entry by the key its own handshake proved, needs tun on it, and
+// names the device from it. Only a box that said x gets one.
+func (c *miniCloud) fromWatch(key []byte, id uint32, d []byte) bool {
+	c.mu.Lock()
+	conn, home, ro, caps := c.conn, c.home, c.roster, c.caps
+	c.mu.Unlock()
+	if conn == nil || ro == nil || !slices.Contains(caps, cloudwire.CapX) {
+		return false
+	}
+	for _, dev := range ro.Devices {
+		if dev.Tun && bytes.Equal(dev.Key, key) {
+			return c.write(conn, nil, home, cloudwire.MsgX, cloudwire.X{Dev: dev.ID, ID: id, D: d}) == nil
+		}
+	}
+	return false
+}
+
+func (c *miniCloud) toWatchNext(t *testing.T) cloudwire.X {
+	t.Helper()
+	select {
+	case m := <-c.toWatch:
+		return m
+	case <-time.After(5 * time.Second):
+		t.Fatal("no x from the box")
+		return cloudwire.X{}
+	}
 }
 
 // forward sends a tun to the box as it is, with no roster check: a service
@@ -410,5 +448,126 @@ wait:
 	}
 	if ok.Cloud == nil || ok.Cloud.Home != link.Status().Home || len(ok.Cloud.Sources) != 0 {
 		t.Fatalf("hello_ok.cloud %+v", ok.Cloud)
+	}
+}
+
+// The watch's half of the one door, end to end: a watch its phone added by
+// its key charges through FTW Cloud with the readable copy off. The box says
+// x, the roster lists the watch with tun, and each exchange message rides one
+// x each way through the real cloud link.
+func TestAWatchCommandThroughFTWCloud(t *testing.T) {
+	enroll, err := appenroll.LoadOrCreate(filepath.Join(t.TempDir(), "nova.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	charger := &fakeCharger{}
+	cmds := appproto.NewCmdLog()
+	uplink, err := New(Options{
+		Enroll: enroll, Handler: handlerWith(false, charger, cmds), ExchangeHandler: handlerWith(true, charger, cmds),
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloud := newMiniCloud(t)
+	link, err := cloudlink.New(cloudlink.Options{
+		Site: quietSite{}, Roster: CloudRoster{Enroll: enroll, Tunnel: true}, KV: &memState{m: map[string]string{}},
+		KeyPath: filepath.Join(t.TempDir(), "cloud.key"), Build: "test",
+		Tunnel: uplink.Tunnel(), Exchange: uplink.Exchange(),
+		Endpoint: cloud.endpoint(), ServiceKeys: []*ecdsa.PublicKey{&cloud.key.PublicKey}, RootCAs: cloud.roots(),
+		Tick: 20 * time.Millisecond, Logger: slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uplink.Tunnel().Attach(link)
+	uplink.Exchange().Attach(link)
+	enroll.OnChange(link.RosterChanged)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = uplink.Run(ctx) }()
+	go func() { _ = link.Run(ctx) }()
+
+	code, _, err := enroll.MintPairingCode(apiauth.RoleOwner, appenroll.PairingTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := newAppClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone, err := enroll.Authorise(app.staticPublic(), code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := newWatchClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enroll.AddWatch(phone.DeviceID, w.static.Public()); err != nil {
+		t.Fatal(err)
+	}
+	link.RosterChanged()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-cloud.rostered:
+		case <-deadline:
+			t.Fatal("the box never sent a roster with the watch")
+		}
+		cloud.mu.Lock()
+		listed := false
+		if cloud.roster != nil {
+			for _, d := range cloud.roster.Devices {
+				listed = listed || d.ID == w.dev() && d.Tun && d.Role == apiauth.RoleWatch
+			}
+		}
+		cloud.mu.Unlock()
+		if listed {
+			break
+		}
+	}
+
+	message1, err := w.open(enroll.StaticKey().Public(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cloud.fromWatch(w.static.Public(), 1, message1) {
+		t.Fatal("the service would not carry the watch's handshake; the box must say x")
+	}
+	reply := cloud.toWatchNext(t)
+	if reply.Dev != w.dev() || reply.ID != 1 {
+		t.Fatalf("the handshake's answer is %+v", reply)
+	}
+	if _, _, err := w.opened(reply.D); err != nil {
+		t.Fatal(err)
+	}
+	request, err := w.request(appproto.MsgCmd, chargeNow("through-cloud"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cloud.fromWatch(w.static.Public(), 2, request) {
+		t.Fatal("the service would not carry the command")
+	}
+	reply = cloud.toWatchNext(t)
+	frames, err := w.answer(reply.D)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kinds := types(frames); reply.ID != 2 || len(kinds) != 2 || kinds[1] != appproto.MsgCmdResult {
+		t.Fatalf("the answer %d carries %v", reply.ID, kinds)
+	}
+	if decodeAs[appproto.CmdResult](t, frames[1]).State != appproto.CmdApplied || charger.count() != 1 {
+		t.Fatalf("the charge did not apply: %d holds", charger.count())
+	}
+
+	// The readable copy stayed off: only the roster, the notice and the
+	// exchange left the box.
+	cloud.mu.Lock()
+	defer cloud.mu.Unlock()
+	for _, typ := range cloud.got {
+		if typ != cloudwire.MsgRoster && typ != cloudwire.MsgX && typ != cloudwire.MsgNotice {
+			t.Fatalf("the box sent %s with the copy off", typ)
+		}
 	}
 }

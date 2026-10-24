@@ -45,20 +45,25 @@ Only one FTW may control a site.
 
 ## 4. Open FTW and set it up
 
-Choose **Open web UI** (or go to `http://<home-assistant-address>:8080`).
-A new install opens the setup wizard. Follow it to add your devices. The
-[setup guide](setup-guide/en.md) explains each step.
-The button opens FTW directly on your home network. The app does not use
-Home Assistant ingress. For remote access, pair an FTW client as described below.
+Choose **Open web UI** inside Home Assistant. App versions with ingress use
+HA's login; no separate FTW password is needed. You can enable **Show in
+sidebar** on the app page. HA requires an administrator to open FTW.
+The direct web port on the home network is closed.
 
-Give Home Assistant a fixed address (DHCP reservation in the router), so the
-FTW apps and your devices keep finding it.
+A new install opens the setup wizard. Follow it to add your devices. The
+[setup guide](setup-guide/en.md) explains each step. An existing app with a
+saved FTW password uses HA's login after the update too. Its settings and
+history stay in place.
+
+Give Home Assistant a fixed address (DHCP reservation in the router), so your
+devices keep finding it.
 
 ## 5. Connect the FTW app (iPhone) or webapp
 
 The new FTW webapp and iOS app need new FTW 0.x — this app provides it.
-In FTW's web UI choose **Settings → FTW app** and follow
-[Pair with one iPhone](pairing.md). If you used the webapp with an older FTW,
+Ingress opens the web UI through HA. Direct LAN access from a separate FTW
+client is not part of this mode. For a separate client, enable FTW Cloud and
+follow [Pair with one iPhone](pairing.md). If you used the webapp with an older FTW,
 remove it from the home screen and pair again.
 
 ## 6. Home Assistant entities (optional)
@@ -87,7 +92,7 @@ This restores its version and data together. Keep other FTW instances stopped.
 |---|---|
 | The app is not in the store | Check the repository URL, reload the page, or **⋮ → Check for updates**. |
 | Install fails | Open **Settings → System → Logs → Supervisor**. A download or checksum error means the package could not be fetched; try again later. |
-| Web UI does not open | Check the app **Log**. Port 8080 must be free; another app on 8080 stops FTW. |
+| Web UI does not open | Check the app **Log**. Open it through HA. Ingress port 18099 must be free. |
 | FTW cannot reach a device | Check the device's IP address and that it is on the same network. |
 | The FTW app/webapp says the box is too old | Make sure you installed **FTW (0.x beta)**, not the old **FTW (beta)**. |
 
