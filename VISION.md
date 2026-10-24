@@ -5,10 +5,12 @@ ahead, controls against current measurements and shows what actually happened.
 Its default experience must be simple enough for a first-time user and good
 enough to earn the trust of someone who builds their own energy system.
 
-The product is a lean core: FTW Core and the Energy Planner. They are the
-primitives an agent or another automation needs in order to work with the
-home's energy system. Home Assistant, MQTT and a database the owner runs for
-their own analysis sit on top. Core does not absorb those tools.
+FTW Core is a primitive for energy control, chargers included: a hard,
+simple core that a person, an automation or an AI agent can build on. It reads
+every device, protects the main fuse and the equipment, carries out requests
+within those limits and keeps the record. Forecasts, the Energy Planner and
+analysis are layers on top of it. So are Home Assistant, MQTT and a database
+the owner runs for their own analysis. Core does not absorb them.
 
 An owner must be able to set up the full system through an authorized
 assistant, starting with a new box. The conversation should ask only for
@@ -23,6 +25,58 @@ This is the product direction set by Fredrik. It guides design and review;
 it does not claim that every outcome below has shipped. The
 [roadmap](docs/roadmap.md) names the work and evidence needed to reach it.
 The [architecture](docs/architecture.md) describes the running system.
+
+## A hard, simple core
+
+The core must be small enough for a person to hold in their head and for a
+test to prove what it does. It does four things.
+
+- **Read.** Core reads every device and shows each reading as it is, with its
+  source and age. A missing reading is shown as missing, and it never hides a
+  reading that is present. Home use is the site meter minus the flows Core
+  read. When a flow is missing, Core says which one beside the number. Home
+  use is blank only when the site meter reading is missing or stale.
+- **Protect.** Fuse protection is physics. On each phase, the current after a
+  change Core is about to command, counted with its direction, stays within
+  the fuse less a margin. Until a device has had time to respond, Core counts
+  the change as already made. One calculation serves every decision and every
+  explanation. When it limits, the user sees the phase, the amperes and the
+  device it held back. A tariff limit on hourly import is a separate limit
+  with its own name.
+- **Act.** Core carries out what the user, the planner or an agent asks,
+  within those limits. "Charge now" charges at the highest current the fuse
+  allows, and other flexible devices make room. Nothing else stops it: not a
+  guessed state of charge, a plan or a car Core cannot name. Stale site-meter
+  data stops dispatch.
+- **Record.** Core stores what it read, what was asked, what it sent and
+  what happened.
+
+A rule belongs in the core only if it protects against a quantified physical
+risk or carries out a request. A rule that serves a forecast, a chart or a
+message belongs in the layer that needs it. Every change to the core is tested
+against a simulated house with a real fuse, devices that respond late or not
+at all, and restarts. That simulation is a target; it has not shipped.
+
+## Layers on top of the core
+
+Forecasts for household load and solar, the Energy Planner, savings and
+analysis are layers. Forecasts for other measured things may follow. A layer
+reads what the core records and proposes; the core decides. A layer that
+fails, lags or is wrong never changes what the core shows or how it protects
+the site, and it never holds up the core's control loop. Without its layers,
+the core keeps the site safe with simple local rules.
+
+Data reaches the layers in three separate streams:
+
+- **Live:** readings as the devices report them, for people and for control.
+- **History:** readings summed over intervals. Each interval carries a
+  quality stamp: measured, estimated or missing. History never rewrites a
+  reading.
+- **Training data:** only the intervals that history marks as fully
+  measured. Models learn from these and nothing else.
+
+A new layer attaches to these streams. It adds no options or special cases to
+the core.
 
 ## One system for mixed equipment
 
