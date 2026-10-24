@@ -1512,6 +1512,11 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 		return nil, err
 	}
 	sourceMode = sourceMode && untilMs >= cut
+	if !sourceMode {
+		if err := s.history.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM history_load_estimates WHERE start_ms>=? AND start_ms<? AND method GLOB 'historical_power_repair_v1:*')`, sinceMs, untilMs).Scan(&sourceMode); err != nil {
+			return nil, err
+		}
+	}
 	queryFrom := sinceMs
 	bucketMs := int64(0)
 	if maxPoints > 0 {
@@ -1622,6 +1627,10 @@ func (s *Store) loadArchiveHistory(ctx context.Context, sinceMs, untilMs int64, 
 			return nil, err
 		}
 	}
+	all, err = s.applyHistoricalLoadChart(ctx, all, queryFrom, untilMs, bucketMs)
+	if err != nil {
+		return nil, err
+	}
 	return all, nil
 }
 
@@ -1640,6 +1649,10 @@ type DayEnergy struct {
 	BatChargedWh    float64
 	BatDischargedWh float64
 	LoadWh          float64
+	// Historical repairs use completed minute evidence, not an extrapolated
+	// current tail. Status exposes this bound independently of live power.
+	LoadUntilMS int64
+	PVUntilMS   int64
 	// Intervals is the number of integration intervals that contributed to
 	// the totals — i.e. the count of rows that had a predecessor (prev_ts IS
 	// NOT NULL). Zero means there was at most one history row in the range, so
@@ -1685,7 +1698,14 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 		return DayEnergy{}, err
 	}
 	if !ok || untilMs <= from {
-		return s.legacyDailyEnergy(sinceMs, untilMs)
+		d, err := s.legacyDailyEnergy(sinceMs, untilMs)
+		if err == nil {
+			err = s.applyHistoricalDailyLoad(ctx, sinceMs, untilMs, &d)
+			if err == nil {
+				err = s.applyEndpointDailyPV(ctx, sinceMs, untilMs, &d)
+			}
+		}
+		return d, err
 	}
 	out, err := s.aggregateDayEnergy(ctx, max(from, sinceMs), untilMs)
 	if err != nil {
@@ -1697,6 +1717,12 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 			return out, err
 		}
 		out = addDayEnergy(old, out)
+	}
+	if err := s.applyEndpointDailyPV(ctx, sinceMs, untilMs, &out); err != nil {
+		return out, err
+	}
+	if err := s.applyHistoricalDailyLoad(ctx, sinceMs, untilMs, &out); err != nil {
+		return out, err
 	}
 	return out, nil
 }

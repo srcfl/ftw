@@ -221,7 +221,7 @@ export function flowReadingsFromStatus(status, opts) {
   // quiet meter blanks % SELF-POWERED NOW (unknown instantaneous load)
   // but must not hide a day that already happened.
   let selfPoweredPctToday = null;
-  if (loadWh > 1 && importWh !== null && today.history_quality !== "estimated") {
+  if (loadWh > 1 && importWh !== null && today.history_quality !== "estimated" && today.load_quality !== "estimated") {
     selfPoweredPctToday = Math.max(0, Math.min(100, (1 - importWh / loadWh) * 100));
   }
 
