@@ -23,7 +23,7 @@ type fakeWS struct {
 	dials  []string
 }
 
-func (f *fakeWS) Open(url string, headers map[string]string) error {
+func (f *fakeWS) Open(_ context.Context, url string, headers map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.open = true

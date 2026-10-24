@@ -1485,7 +1485,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 				}
 			})
 		}
-		if err := env.WS.Open(url, headers); err != nil {
+		if err := env.WS.Open(luaCallContext(L), url, headers); err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
 			return 2

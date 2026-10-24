@@ -32,6 +32,7 @@ type CatalogEntry struct {
 	Protocols          []string       `json:"protocols,omitempty"`    // mqtt / modbus / http
 	Capabilities       []string       `json:"capabilities,omitempty"` // meter / pv / battery
 	HTTPHosts          []string       `json:"http_hosts,omitempty"`
+	WSHosts            []string       `json:"ws_hosts,omitempty"`
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
@@ -220,6 +221,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Protocols = pickList(block, "protocols")
 	e.Capabilities = pickList(block, "capabilities")
 	e.HTTPHosts = pickList(block, "http_hosts")
+	e.WSHosts = pickList(block, "ws_hosts")
 	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
 	e.ReadOnly, e.ReadOnlyDeclared = pickOptionalBool(block, "read_only")
 	e.VerificationStatus = normalizeVerificationStatus(pickString(block, "verification_status"))

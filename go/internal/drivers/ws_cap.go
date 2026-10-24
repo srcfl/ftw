@@ -1,7 +1,9 @@
 package drivers
 
 import (
+	"context"
 	"fmt"
+	"net"
 	net_http "net/http"
 	net_url "net/url"
 	"strings"
@@ -45,9 +47,15 @@ func NewGorillaWS(driverName string, allowUnverifiedLocal ...bool) WSCap {
 	return &gorillaWS{driverName: driverName, allowUnverifiedLocal: allow}
 }
 
+// wsDialTimeout bounds Open: the TCP dial, TLS and the upgrade. Open runs
+// inside driver_poll, and the driver's commands wait for the poll, so a hung
+// server must not hold a charger's current cut for long. A healthy cloud
+// endpoint answers in well under a second.
+const wsDialTimeout = 5 * time.Second
+
 func newGorillaWSDialer(allowUnverifiedLocal bool, proxy func(*net_http.Request) (*net_url.URL, error)) websocket.Dialer {
 	dialer := *websocket.DefaultDialer
-	dialer.HandshakeTimeout = 15 * time.Second
+	dialer.HandshakeTimeout = wsDialTimeout
 	if proxy == nil {
 		proxy = dialer.Proxy
 	}
@@ -62,7 +70,7 @@ func newGorillaWSDialer(allowUnverifiedLocal bool, proxy func(*net_http.Request)
 // `Sec-WebSocket-Protocol: graphql-transport-ws`, for instance). Calling
 // Open on an already-open cap is a no-op so a driver that re-runs
 // driver_init doesn't double-dial.
-func (g *gorillaWS) Open(url string, headers map[string]string) error {
+func (g *gorillaWS) Open(ctx context.Context, url string, headers map[string]string) error {
 	g.mu.Lock()
 	if g.open {
 		g.mu.Unlock()
@@ -94,9 +102,48 @@ func (g *gorillaWS) Open(url string, headers map[string]string) error {
 	if len(subprotocols) > 0 {
 		dialer.Subprotocols = subprotocols
 	}
+	// gorilla stops the TCP dial and TLS when ctx ends, but bounds the
+	// upgrade reply only by HandshakeTimeout. Ending ctx also ends that wait:
+	// the raw connection's deadline moves to now. On plain ws:// a cancel in
+	// the first microseconds can still be lost to gorilla setting its own
+	// deadline; that dial then ends at the timeout.
+	var rawMu sync.Mutex
+	var raw net.Conn
+	dial := dialer.NetDialContext
+	dialer.NetDialContext = func(dctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dial(dctx, network, addr)
+		if err == nil {
+			rawMu.Lock()
+			raw = c
+			rawMu.Unlock()
+		}
+		return c, err
+	}
+	stopWatch := context.AfterFunc(ctx, func() {
+		rawMu.Lock()
+		defer rawMu.Unlock()
+		if raw != nil {
+			_ = raw.SetDeadline(time.Now())
+		}
+	})
 	// EnableCompression default is true on DefaultDialer; leave it.
-	conn, _, err := dialer.Dial(url, hdr)
+	conn, resp, err := dialer.DialContext(ctx, url, hdr)
+	if !stopWatch() && err == nil {
+		// ctx ended as the dial finished, so the deadline may already have
+		// moved on the new connection. A cancelled call opens nothing.
+		conn.Close()
+		return fmt.Errorf("ws dial: %w", ctx.Err())
+	}
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("ws dial: %w", ctxErr)
+		}
+		// A refused upgrade says only "bad handshake"; the status tells a
+		// driver whether its token, its path or the server is wrong. The
+		// body stays out: it may echo what the driver sent.
+		if resp != nil {
+			return fmt.Errorf("ws dial: %w (HTTP %d)", err, resp.StatusCode)
+		}
 		return fmt.Errorf("ws dial: %w", err)
 	}
 	// Set a generous read deadline. Tibber's graphql-transport-ws

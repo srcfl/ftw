@@ -678,10 +678,33 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	if cfg.Capabilities.AllowUnverifiedLocal {
 		env.WithAllowUnverifiedLocal()
 	}
+	// A cloud driver that streams from a fixed vendor host declares it in
+	// DRIVER.ws_hosts, as it declares http_hosts. For a driver whose config
+	// already grants HTTP, the declaration grants the WebSocket for those
+	// hosts, so a saved config needs no capabilities.websocket entry. A
+	// driver without HTTP gets no network access from a file edit. Hosts
+	// come only from the Lua driver's own declaration and are merged into
+	// any the config lists.
+	var wsHosts []string
 	if cfg.Capabilities.WebSocket != nil {
+		wsHosts = append(wsHosts, cfg.Capabilities.WebSocket.AllowedHosts...)
+	}
+	declaredWS := false
+	if entry, err := ParseCatalogFile(cfg.Lua); err == nil && cfg.Capabilities.HTTP != nil {
+		for _, h := range entry.WSHosts {
+			h = strings.TrimSpace(h)
+			if h != "" {
+				declaredWS = true
+				if !slices.Contains(wsHosts, h) {
+					wsHosts = append(wsHosts, h)
+				}
+			}
+		}
+	}
+	if cfg.Capabilities.WebSocket != nil || declaredWS {
 		env.WithWS(NewGorillaWS(cfg.Name, cfg.Capabilities.AllowUnverifiedLocal))
-		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
-			env.WithWSAllowedHosts(hosts)
+		if len(wsHosts) > 0 {
+			env.WithWSAllowedHosts(wsHosts)
 		}
 	}
 	if cfg.Capabilities.TCP != nil {

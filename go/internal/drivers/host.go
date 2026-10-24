@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,7 +62,10 @@ type SerialCap interface {
 // implementation's background goroutine buffers inbound frames so
 // PopMessages is non-blocking.
 type WSCap interface {
-	Open(url string, headers map[string]string) error
+	// Open dials until ctx ends or the dial times out. The Lua binding
+	// passes the driver call's context, so a default or a stop can cancel
+	// a dial that holds the poll.
+	Open(ctx context.Context, url string, headers map[string]string) error
 	Send(text string) error
 	PopMessages() []string
 	IsOpen() bool
