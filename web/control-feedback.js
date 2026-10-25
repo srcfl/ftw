@@ -66,6 +66,7 @@ const REASON_TITLES = {
   core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
   import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
+  load_balancer_limit: 'Limited by the charger’s load balancing',
   one_phase: 'Charging on one phase',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
@@ -99,7 +100,11 @@ function sentence(row) {
     case 'fuse_cooldown': return 'FTW waits a moment after a site power limit before it raises the rate.';
     case 'charger_limit': return 'The charger limit in FTW’s settings caps the rate.';
     case 'device_limit': return `The charger’s own limit is ${amps(row.device_limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
-    case 'offered_current_lower': return `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
+    case 'offered_current_lower': return num(row.limit_a) && !(num(row.offered_a) && num(row.requested_a) && row.offered_a + 0.5 < row.requested_a)
+      ? `The charger lets the car take ${amps(row.limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`
+      : `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
+    case 'load_balancer_limit': return `${row.make ? `${row.make} limits the charger to ${amps(row.limit_a)} (its load balancing)`
+      : `The charger’s load balancing limits it to ${amps(row.limit_a)}`}. FTW asked for ${amps(row.requested_a)}; the car takes ${controlPower(actual)}.`;
     case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
     case 'power_below_target': case 'power_above_target': return `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
     case 'power_wrong_direction': return `Asked for ${target(row)}, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
@@ -137,6 +142,7 @@ function nextStep(row) {
     case 'site_meter_stale': case 'site_phase_currents_stale': return 'Check the grid meter’s connection.';
     case 'device_limit': return 'Raise the limit in the charger’s app if you want faster charging.';
     case 'offered_current_lower': return 'Check the charger’s load balancing and limits.';
+    case 'load_balancer_limit': return 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.';
     case 'observe_only': return 'Turn on control in the device settings if you want FTW to steer it.';
     default: return '';
   }
@@ -227,6 +233,7 @@ export function controlNumbers(row, live = true) {
   if (num(row.requested_a)) values.push(['Requested current', amps(row.requested_a)]);
   if (num(row.offered_a)) values.push(['Charger offer', amps(row.offered_a)]);
   if (num(row.device_limit_a)) values.push(['Charger limit', amps(row.device_limit_a)]);
+  if (num(row.limit_a)) values.push([row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
   const e = row.site_evidence;
   if (e && typeof e === 'object') {
     for (const [label, key] of [['Grid before', 'grid_before_w'], ['Grid after', 'grid_after_w']]) {

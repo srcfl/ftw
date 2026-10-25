@@ -56,7 +56,13 @@ type ControlFeedback struct {
 	RequestedA       *float64 `json:"requested_a"`
 	OfferedA         *float64 `json:"offered_a"`
 	DeviceLimitA     *float64 `json:"device_limit_a"`
-	DeviceReason     string   `json:"device_reason,omitempty"`
+	// LimitA is the current a charger lets the car take now, when its driver
+	// reports it below the order; LimitedBy names the cause when the driver
+	// shows it, and Make the charger for the sentence.
+	LimitA       *float64 `json:"limit_a,omitempty"`
+	LimitedBy    string   `json:"limited_by,omitempty"`
+	Make         string   `json:"make,omitempty"`
+	DeviceReason string   `json:"device_reason,omitempty"`
 	// ChargingPhase names the one phase (L1-L3) a one-phase car charges on
 	// under a three-phase order, and ChargingPhaseMaxW the most it takes.
 	ChargingPhase     string   `json:"charging_phase,omitempty"`
@@ -72,6 +78,8 @@ type feedbackReading struct {
 	DeviceLimitA    *float64 `json:"device_limit_a"`
 	DeviceLimitAgeS *float64 `json:"device_limit_age_s"`
 	Reason          string   `json:"reason_no_current_label"`
+	LimitA          *float64 `json:"current_limit_a"`
+	LimitedBy       string   `json:"current_limited_by"`
 	Connected       *bool    `json:"connected"`
 	Online          *bool    `json:"is_online"`
 }
@@ -148,6 +156,14 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			var d feedbackReading
 			_ = json.Unmarshal(rd.Data, &d)
 			f.ReadbackW, f.OfferedA, f.DeviceReason = d.SetpointW, d.MaxA, d.Reason
+			if d.LimitA != nil {
+				f.LimitA, f.LimitedBy = d.LimitA, d.LimitedBy
+				if s.deps.Registry != nil {
+					if env := s.deps.Registry.Env(rd.Driver); env != nil {
+						f.Make, _ = env.Identity()
+					}
+				}
+			}
 			if d.DeviceLimitAgeS != nil && *d.DeviceLimitAgeS >= 0 && *d.DeviceLimitAgeS <= 120 {
 				f.DeviceLimitA = d.DeviceLimitA
 			}
@@ -357,7 +373,7 @@ func setControlStatus(f *ControlFeedback) {
 		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
 	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
-		"fuse_limit", "fuse_cooldown", "charger_limit", "one_phase":
+		"fuse_limit", "fuse_cooldown", "charger_limit", "load_balancer_limit", "one_phase":
 		status = "limited"
 	case "import_limit":
 		status = "limited"
@@ -425,7 +441,7 @@ const (
 func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, commanded, fresh bool, coreReason string, connected *bool, now time.Time) {
 	set := func(state, reason, severity string) { f.State, f.Reason, f.Severity = state, reason, severity }
 	if !fresh {
-		f.ActualW, f.ReadbackW, f.OfferedA, f.DeviceLimitA = nil, nil, nil, nil
+		f.ActualW, f.ReadbackW, f.OfferedA, f.DeviceLimitA, f.LimitA, f.LimitedBy, f.Make = nil, nil, nil, nil, nil, "", ""
 		set("unknown", "telemetry_stale", "warning")
 		return
 	}
@@ -490,6 +506,27 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	if f.Kind == "ev" && f.SentW != nil && f.RequestedA != nil && f.OfferedA != nil && *f.SentW > 100 && *f.OfferedA+0.5 < *f.RequestedA && settled {
 		set("limited", "offered_current_lower", "warning")
 		return
+	}
+	// The charger holds the order but its driver reports that it lets the car
+	// take less, and names its load balancing when the charger's allocation
+	// shows it (easee_cloud 1.4.1). That explains a car taking about that
+	// much, never more: within 10 %, or as the car follows a step, within
+	// 2 A but at most 15 % of the limit. A car taking far less, nothing, or
+	// more keeps its verdict. A lower current whose cause the driver does
+	// not show still asks for a look.
+	if f.Kind == "ev" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && f.LimitA != nil && f.ActualW != nil &&
+		*f.SentW > 100 && *f.RequestedA > 0 && *f.LimitA > 0 && *f.LimitA+0.5 < *f.RequestedA && settled {
+		perA := *f.RequestedW / *f.RequestedA
+		limitW := *f.LimitA * perA
+		tolerance := telemetry.ControlToleranceW(limitW)
+		if *f.ActualW >= limitW-math.Max(tolerance, math.Min(2*perA, 0.15*limitW)) && *f.ActualW <= limitW+tolerance && *f.ActualW < *f.SentW {
+			if f.LimitedBy == "load_balancer" {
+				set("limited", "load_balancer_limit", "info")
+			} else {
+				set("limited", "offered_current_lower", "warning")
+			}
+			return
+		}
 	}
 	// This is a known Core stop, not a BMS diagnosis or new measurement proof.
 	// Continued power, changed setpoints, stale readings and faults keep their

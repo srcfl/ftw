@@ -82,6 +82,7 @@ type fieldCase struct {
 	exportW   []float64     // surplus: export each quarter hour
 	houseStep time.Duration // > 0: L1 +8 A for 10 min from this time into the run
 	warm      bool          // the fuse starts warm: the house has carried its load all evening
+	balancerA float64       // > 0: the charger's own load balancing keeps each phase under this
 }
 
 func (c fieldCase) key() string {
@@ -99,7 +100,7 @@ func (c fieldCase) key() string {
 		text string
 	}{
 		{c.battery, "battery"}, {c.charger != "", "charger" + c.charger}, {c.planW > 0, fmt.Sprintf("plan%gW", c.planW)}, {c.needW > 0, fmt.Sprintf("need%gW", c.needW)},
-		{c.goal, "goal"}, {export != "", export}, {c.houseStep > 0, "L1step"},
+		{c.goal, "goal"}, {export != "", export}, {c.houseStep > 0, "L1step"}, {c.balancerA > 0, fmt.Sprintf("balancer%gA", c.balancerA)},
 	} {
 		if v.on {
 			name += "+" + v.text
@@ -172,7 +173,9 @@ func helpReport(use fieldUse, tm fieldTiming) fieldCase {
 
 // pr1763Site is the site in srcfl/ftw#1763's comments: 3 × 25 A, Easee Cloud
 // and Pixii, the battery charging from the plan while the car charges,
-// offers to 15 A of which the car takes about 12 A, pause and restart.
+// offers to 15 A of which the car takes about 12 A, pause and restart. Here
+// the car holds itself at 8.3 kW. The trace of 23 Oct 2026 showed that on
+// this site Easee's own load balancing did it; probeCases has that charger.
 func pr1763Site(use fieldUse, tm fieldTiming) fieldCase {
 	return fieldCase{report: "pr1763", fuseA: 25, mode: "3p", steps: "3p-15A", timing: tm, carPhases: 3, use: use,
 		house: [3]float64{6, 2, 2}, houseName: "6-2-2", battery: true,
@@ -300,6 +303,14 @@ func probeCases() []fieldCase {
 		// charger's minimum, with the planner down.
 		c := homeBox(useNoPlan, tm)
 		c.carPhases = 1
+		out = append(out, c)
+	}
+	for _, use := range []fieldUse{usePlanned, useNow} {
+		// The charger in srcfl/ftw#1763's trace: Easee's own load balancing
+		// keeps each phase under 18 A after the house, so the car gets 12 A
+		// of a 15 A order, and the driver reports it (easee_cloud 1.4.1).
+		c := pr1763Site(use, timingEasee)
+		c.battery, c.balancerA, c.car = false, 18, nil
 		out = append(out, c)
 	}
 	c := helpReport(usePlanned, timingEasee)
@@ -430,6 +441,8 @@ type fieldRun struct {
 	trace         func(format string, args ...any) // FTW_FIELD_TRACE names the case
 	tracedReason  string
 	exportPeak    func(window time.Duration) (float64, bool) // surplus: the forecast from now
+	balancedA     float64                                    // what the charger's own load balancing lets the car take, 0 for none
+	balancedSince time.Time
 }
 
 // FieldVerdict returns a reader of the EV verdict the API shows for a store
@@ -459,6 +472,24 @@ func (s *simSite) evData() map[string]any {
 	d := map[string]any{"connected": s.ev.Plugged, "control_power_confirmed": true}
 	if age := s.field.c.timing.declared; age > 0 {
 		d["power_max_age_s"] = age.Seconds()
+	}
+	// The charger's own load balancing, reported as easee_cloud 1.4.1 does
+	// from Easee's allocation and pilot: the whole amps it lets the car take
+	// while that is below the order in force.
+	f, e, limitA := s.field, s.p.EVSE, 0.0
+	if e.LoadBalancerA > 0 && s.ev.Plugged && e.OfferA > 0 {
+		d["max_a"] = e.OfferA // the order the charger holds, Easee's observation 48
+		a := e.OfferA
+		for i := range min(max(e.OfferPhases, 1), e.Phases, s.p.Car.Phases) {
+			a = math.Min(a, e.LoadBalancerA-s.p.HouseW[i]/s.p.Voltage)
+		}
+		if a = math.Floor(a); a >= e.MinA && a < e.OfferA-0.5 {
+			limitA = a
+			d["current_limit_a"], d["current_limited_by"] = a, "load_balancer"
+		}
+	}
+	if limitA != f.balancedA {
+		f.balancedA, f.balancedSince = limitA, s.p.Now
 	}
 	return d
 }
@@ -661,9 +692,22 @@ func (f *fieldRun) check(s *simSite) {
 	// Core waits its response time for an order to take hold, then two
 	// minutes of measured disagreement (srcfl/ftw#1795). A car marked
 	// one-phase is judged against a third of a three-phase order, the
-	// expected_w Core sends with it (srcfl/ftw#1801).
+	// expected_w Core sends with it (srcfl/ftw#1801). A car held at what the
+	// charger's own load balancing allows, as its driver reports, is
+	// limited and must say so (srcfl/ftw#1763); in the first 30 s after the
+	// balancer moves, Core's reading may still show the old draw.
 	if f.verdict != nil && !f.mismatchSince.IsZero() && now.Sub(f.mismatchSince) >= 2*time.Minute+30*time.Second {
-		if status, reason := f.verdict(); status != "not_following" && reason != "one_phase" {
+		status, reason := f.verdict()
+		ok := status == "not_following" || reason == "one_phase"
+		if limitW := f.balancedA * p.Voltage * float64(p.EVSE.DrawPhases); f.balancedA > 0 &&
+			math.Abs(p.EVSE.DrawW-limitW) <= telemetry.ControlToleranceW(limitW) {
+			if now.Sub(f.balancedSince) >= 30*time.Second {
+				ok = reason == "load_balancer_limit"
+			} else {
+				ok = ok || reason == "load_balancer_limit"
+			}
+		}
+		if !ok {
 			f.fail(s, failVerdict, "the car draws %.0f W against an expected %.0f W (%v), the verdict says %s/%s",
 				p.EVSE.DrawW, f.expectW, now.Sub(f.orderAt).Round(time.Second), status, reason)
 		}
@@ -679,6 +723,9 @@ func fieldRoomW(c fieldCase, e *sitesim.EVSE, car *sitesim.Car) float64 {
 		worst = math.Max(worst, c.house[i])
 	}
 	roomA := math.Min(c.fuseA-evPhaseMarginA-worst, e.MaxA)
+	if e.LoadBalancerA > 0 {
+		roomA = math.Min(roomA, e.LoadBalancerA-worst)
+	}
 	if roomA < e.MinA {
 		return 0
 	}
@@ -704,6 +751,7 @@ func runFieldCase(c fieldCase, trace func(string, ...any)) (*simSite, *fieldRun)
 	if c.charger == "1p32A" {
 		p.EVSE.Phases, p.EVSE.MaxA = 1, 32
 	}
+	p.EVSE.LoadBalancerA = c.balancerA
 	if c.timing.cloud {
 		p.EVSE.ReadbackLag, p.EVSE.SplitAtA, p.EVSE.PhaseHold = 10*time.Second, c.fuseA, 90*time.Second
 	}

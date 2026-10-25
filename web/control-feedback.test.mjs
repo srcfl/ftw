@@ -59,6 +59,27 @@ test('expected limits stay calm and explain themselves', () => {
   assert.equal(car.title, 'Car is full');
   const limit = controlStatus(row({kind: 'ev', status: 'limited', reason: 'device_limit', severity: 'warning', device_limit_a: 8, requested_a: 16}));
   assert.equal(limit.text, 'The charger’s own limit is 8 A, below the 16 A FTW asked for.');
+  // Field trace, 23 Oct 2026: 15 A ordered, Easee's load balancing allowed 13 A.
+  const lb = {kind: 'ev', mode: 'plan', status: 'limited', reason: 'load_balancer_limit', severity: 'info',
+    sent_w: 10350, actual_w: 8850, requested_a: 15, offered_a: 15, device_limit_a: 16, limit_a: 13, limited_by: 'load_balancer'};
+  const balanced = controlStatus(row({...lb, make: 'Easee'}));
+  assert.equal(balanced.title, 'Limited by the charger’s load balancing');
+  assert.equal(balanced.text, 'Easee limits the charger to 13 A (its load balancing). FTW asked for 15 A; the car takes 8.8 kW.');
+  assert.equal(balanced.next, 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.');
+  assert.equal(balanced.tone, 'neutral');
+  assert.equal(controlStatus(row(lb)).text, 'The charger’s load balancing limits it to 13 A. FTW asked for 15 A; the car takes 8.8 kW.');
+  assert.deepEqual(controlNumbers(row(lb)).filter(([label]) => /current|offer|limit|allows/i.test(label)), [
+    ['Requested current', '15 A'], ['Charger offer', '15 A'], ['Charger limit', '16 A'], ['Load balancing allows', '13 A']]);
+  // A lower current with no cause shown says what the charger does, no more.
+  const unexplained = {...lb, reason: 'offered_current_lower', severity: 'warning', limited_by: undefined};
+  assert.equal(controlStatus(row(unexplained)).text, 'The charger lets the car take 13 A, below the 15 A FTW asked for.');
+  assert.deepEqual(controlNumbers(row(unexplained)).at(-1), ['Charger lets the car take', '13 A']);
+  // A charger holding a lower order than FTW sent.
+  const lower = controlStatus(row({kind: 'ev', status: 'limited', reason: 'offered_current_lower', severity: 'warning', offered_a: 12, requested_a: 15}));
+  assert.equal(lower.text, 'The charger offers 12 A, below the 15 A FTW asked for.');
+  // A lower held order is said first, even when the driver reports less.
+  const both = controlStatus(row({kind: 'ev', status: 'limited', reason: 'offered_current_lower', severity: 'warning', offered_a: 12, limit_a: 10, requested_a: 15}));
+  assert.equal(both.text, 'The charger offers 12 A, below the 15 A FTW asked for.');
   const onePhase = controlStatus(row({kind: 'ev', mode: 'plan', status: 'limited', reason: 'one_phase', severity: 'info',
     sent_w: 3680, actual_w: 3650, charging_phase: 'L1', charging_phase_max_w: 3680}));
   assert.equal(onePhase.title, 'Charging on one phase');
