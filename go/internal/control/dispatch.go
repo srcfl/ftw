@@ -230,10 +230,20 @@ type PowerLimits struct {
 	// SoCMin is the battery's floor, 0..1: its soc_min, else the planner's.
 	// Fuse relief discharges no further. Zero leaves the 5 % empty guard.
 	SoCMin float64
+	// SoCMax is the battery's charge ceiling, 0..1. An unset limit uses 100%.
+	SoCMax    float64
+	SoCMaxSet bool
 }
 
 // socFloor is the SoC fuse relief stops discharging at.
 func (l PowerLimits) socFloor() float64 { return math.Max(0.05, l.SoCMin) }
+
+func (l PowerLimits) socCeiling() float64 {
+	if (l.SoCMaxSet || l.SoCMax > 0) && l.SoCMax >= 0 && l.SoCMax <= 1 {
+		return l.SoCMax
+	}
+	return 1
+}
 
 func effectivePowerLimit(value float64, set bool) float64 {
 	if set && value >= 0 {
@@ -2280,6 +2290,7 @@ func applyDispatchSafetyPipeline(
 	// ---- The hour's import limit and the export limit (#145) ----
 	if state != nil {
 		state.FuseSaturated, state.FuseSaturatedByImport = false, false
+		state.updateBatteryChargeFull(store, driverCapacities)
 	}
 	targets = applySiteLimits(targets, store, state)
 
@@ -2322,8 +2333,8 @@ func applyDispatchSafetyPipeline(
 		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
 	}
 	targets = floorMissingSoCDischarge(targets, store)
-	targets = state.floorFullBatteryCharge(targets)
 	targets = fitBatteryRisesToFuse(targets, store, state)
+	targets = state.floorFullBatteryCharge(targets)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
 	return targets
 }
@@ -3745,7 +3756,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	if r.SoC == nil || *r.SoC <= lim.socFloor() || dischargeBlocked {
 		lower = 0
 	}
-	if chargeBlocked {
+	if chargeBlocked || r.SoC != nil && *r.SoC >= lim.socCeiling() {
 		upper = 0
 	}
 	return lower, upper
