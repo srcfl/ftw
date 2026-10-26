@@ -90,7 +90,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	}
 	mode, meter := "", ""
 	clamped := map[string]bool{}
-	full := map[string]bool{}
+	full := map[string]float64{}
 	targeted := map[string]bool{}
 	var hold control.BatteryManualHold
 	var held bool
@@ -100,7 +100,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 		meter = s.deps.Ctrl.SiteMeterDriver
 		for _, t := range s.deps.Ctrl.LastTargets {
 			clamped[t.Driver] = t.Clamped
-			full[t.Driver] = s.deps.Ctrl.BatteryChargePaused(t.Driver)
+			if s.deps.Ctrl.BatteryChargePaused(t.Driver) {
+				full[t.Driver] = s.deps.Ctrl.BatteryChargeResumeSoC(t.Driver)
+			}
 			targeted[t.Driver] = true
 		}
 		hold, held = s.deps.Ctrl.GetBatteryManualHold(now)
@@ -186,9 +188,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if clamped[rd.Driver] && kind == telemetry.DerBattery {
 				coreReason = "core_limit"
 			}
-			if full[rd.Driver] && kind == telemetry.DerBattery && f.BatterySoC != nil {
+			if resume, paused := full[rd.Driver]; paused && kind == telemetry.DerBattery && f.BatterySoC != nil {
 				coreReason = "battery_full"
-				f.ChargeResumeSoC = watts(control.BatteryChargeResumeSoC)
+				f.ChargeResumeSoC = watts(resume)
 			}
 			if held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver) {
 				f.Mode = "manual"

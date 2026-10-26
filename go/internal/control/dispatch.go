@@ -227,6 +227,16 @@ type PowerLimits struct {
 	MaxDischargeW    float64
 	MaxChargeWSet    bool
 	MaxDischargeWSet bool
+	// SoCMax is the battery's charge ceiling, 0..1. An unset limit uses 100%.
+	SoCMax    float64
+	SoCMaxSet bool
+}
+
+func (l PowerLimits) socCeiling() float64 {
+	if (l.SoCMaxSet || l.SoCMax > 0) && l.SoCMax >= 0 && l.SoCMax <= 1 {
+		return l.SoCMax
+	}
+	return 1
 }
 
 func effectivePowerLimit(value float64, set bool) float64 {
@@ -2336,6 +2346,9 @@ func applyDispatchSafetyPipeline(
 	fuseMaxW float64,
 	opts dispatchSafetyOptions,
 ) []DispatchTarget {
+	if state != nil {
+		state.updateBatteryChargeFull(store, driverCapacities)
+	}
 	// ---- Fuse guard (bidirectional, #145) ----
 	targets = applyFuseGuard(targets, store, state, fuseMaxW)
 
@@ -2378,8 +2391,8 @@ func applyDispatchSafetyPipeline(
 		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
 	}
 	targets = floorMissingSoCDischarge(targets, store)
-	targets = state.floorFullBatteryCharge(targets)
 	targets = clampEVBatteryHeadroom(targets, store, state, fuseMaxW)
+	targets = state.floorFullBatteryCharge(targets)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
 	return targets
@@ -4103,7 +4116,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	if r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked {
 		lower = 0
 	}
-	if chargeBlocked {
+	if chargeBlocked || r.SoC != nil && *r.SoC >= lim.socCeiling() {
 		upper = 0
 	}
 	return lower, upper

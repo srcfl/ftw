@@ -6,9 +6,14 @@ import (
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// A one percentage point gap prevents repeated starts at a rounded 100%.
-// This limits charging only; the plan can discharge a full battery at once.
-const BatteryChargeResumeSoC = 0.99
+// A one percentage point gap prevents repeated starts at the charge ceiling.
+const batteryChargeHysteresisSoC = 0.01
+
+// BatteryChargeResumeSoC uses the same ceiling as dispatch. Callers hold the
+// control lock, as they do for BatteryChargePaused.
+func (s *State) BatteryChargeResumeSoC(driver string) float64 {
+	return math.Max(0, s.DriverLimits[driver].socCeiling()-batteryChargeHysteresisSoC)
+}
 
 // BatteryChargePaused reports the dispatcher's full-battery stop. Callers use
 // the same lock as ComputeDispatch; this state is local to the running device.
@@ -17,6 +22,9 @@ func (s *State) BatteryChargePaused(driver string) bool {
 }
 
 func (s *State) updateBatteryChargeFull(store *telemetry.Store, capacities map[string]float64) {
+	if s == nil || store == nil {
+		return
+	}
 	if s.batteryChargeFull == nil {
 		s.batteryChargeFull = map[string]bool{}
 	}
@@ -36,9 +44,9 @@ func (s *State) updateBatteryChargeFull(store *telemetry.Store, capacities map[s
 		if age < 0 || age > telemetry.BatterySoCMaxAge || math.IsNaN(soc) || math.IsInf(soc, 0) || soc < 0 || soc > 1 {
 			continue
 		}
-		if soc == 1 {
+		if soc >= s.DriverLimits[name].socCeiling() {
 			s.batteryChargeFull[name] = true
-		} else if soc <= BatteryChargeResumeSoC {
+		} else if soc <= s.BatteryChargeResumeSoC(name) {
 			delete(s.batteryChargeFull, name)
 		}
 	}

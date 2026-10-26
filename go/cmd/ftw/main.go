@@ -1157,7 +1157,7 @@ func main() {
 		ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
 		ctrl.SupportsPVCurtail = supportsPVCurtailFrom(newCfg.Drivers)
 		ctrl.SolarFeedDrivers = solarFeedDriversFrom(newCfg.Drivers)
-		ctrl.DriverLimits = driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries)
+		ctrl.DriverLimits = driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries, newCfg.Planner)
 		// Fuse params + safety margin: previously startup-only.
 		// Hot-reload them so operators can tune the per-phase margin
 		// from the UI without restarting (e.g. raising it after the
@@ -3624,12 +3624,23 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 	return out
 }
 
-// driverLimitsFrom gives dispatch the same per-driver limits as the planner.
-func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
+// driverLimitsFrom gives dispatch the same per-driver power limits and charge
+// ceilings as the planner. Each battery's soc_max overrides the planner's.
+func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery, planner *config.Planner) map[string]control.PowerLimits {
+	ceiling := 1.0
+	if planner != nil && planner.SoCMax > 0 {
+		ceiling = planner.SoCMax
+	}
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
 		if !d.ObserveOnly {
-			out[d.Name] = batteryPowerLimits(d, batteries[d.Name])
+			limits := batteryPowerLimits(d, batteries[d.Name])
+			limits.SoCMax = ceiling
+			if b := batteries[d.Name]; b.SoCMax != nil {
+				limits.SoCMax = *b.SoCMax
+				limits.SoCMaxSet = true
+			}
+			out[d.Name] = limits
 		}
 	}
 	return out
