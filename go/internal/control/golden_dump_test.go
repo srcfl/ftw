@@ -333,7 +333,7 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	intent := planSignIntent(st)
 	// The worst phase's overage either way, in watts on that phase.
 	var perPhase float64
-	importW, exportW := phaseFuseReliefW(store.Get(st.SiteMeterDriver, telemetry.DerMeter), st, 0)
+	importW, exportW := phaseFuseReliefW(livePhaseSample(store, st.SiteMeterDriver, store.Get(st.SiteMeterDriver, telemetry.DerMeter)), st, 0)
 	if st.SiteFusePhases > 0 {
 		perPhase = math.Max(importW, exportW) / float64(st.SiteFusePhases)
 	}

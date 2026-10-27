@@ -556,7 +556,7 @@ func TestFuseReliefLeavesOnlyCeilingWattsToCommandedEVCut(t *testing.T) {
 		targets := []DispatchTarget{{Driver: "pixii"}}
 		batteries := map[string]*telemetry.DerReading{"pixii": {}}
 		meter := &telemetry.DerReading{SmoothedW: tc.gridW, Data: tc.data}
-		got := fuseReliefFromSnapshot(targets, batteries, meter, st, 17250)
+		got := fuseReliefFromSnapshot(targets, batteries, meter, phaseSample{meter: meter, totalW: meter.RawW}, st, 17250)
 		if math.Abs(math.Max(0, got)-tc.wantW) > 1e-6 {
 			t.Errorf("%s: relief %.0f W, want %.0f W", tc.name, got, tc.wantW)
 		}
@@ -597,7 +597,7 @@ func TestUnpluggedCarIsNoCutTheBatteryWaitsFor(t *testing.T) {
 		st.SetEVCommanded(points)
 		targets := []DispatchTarget{{Driver: "pixii"}}
 		batteries := map[string]*telemetry.DerReading{"pixii": {}}
-		return math.Max(0, fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, st, 17250))
+		return math.Max(0, fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, phaseSample{}, st, 17250))
 	}
 	// 400 W over the ceiling, less than a step: the guard waits.
 	if got := tick(7900, true, 5520); math.Abs(got-400) > 1e-6 {
@@ -661,7 +661,7 @@ func TestCutOnStayingCarStillWaitsWhenAnotherLeaves(t *testing.T) {
 		st.SetEVCommanded(points)
 		targets := []DispatchTarget{{Driver: "pixii"}}
 		batteries := map[string]*telemetry.DerReading{"pixii": {SmoothedW: batteryW}}
-		relief := fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, st, 17250)
+		relief := fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, phaseSample{}, st, 17250)
 		batteryW = -math.Max(0, relief) // The battery follows within a tick.
 		if batteryW < 0 && tick < 10 {
 			t.Fatalf("%ds: battery %.0f W for watts a's stop removes; pending cut %.0f W", tick, batteryW, st.pendingEVCutW())
