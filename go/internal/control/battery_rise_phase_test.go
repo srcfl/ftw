@@ -170,3 +170,67 @@ func TestBatteryRiseLeavesRoomForUnshownCarRaise(t *testing.T) {
 		})
 	}
 }
+
+// A meter that reports current magnitudes and no phase power, as Tibber
+// Pulse does (l1_a..l3_a only). L1 reads 15.5 A, L2 and L3 8.7 A, and the
+// total exports 1300 W. L2 and L3 alone can carry that export, so L1 may be
+// a load importing 15.5 A beside them, and a three-phase charge rise adds to
+// it: the order stays at or below (16 − 15.5) × 690 W. When the currents add
+// up to the export, every phase must export, and charge may soak it up.
+func TestBatteryRiseMagnitudeOnlyMeter(t *testing.T) {
+	st := riseState(3000)
+	sent(st, "bat", 0)
+	store := phaseDirectionStore(t, -1300, 0, map[string]any{"l1_a": 15.5, "l2_a": 8.7, "l3_a": 8.7})
+	if got, limit := batteryOrder(t, store, st), (16-15.5)*690; got > limit+1e-6 {
+		t.Fatalf("order %.0f W: L1 would reach %.2f A if it imports; want <= %.0f W", got, 15.5+got/690, limit)
+	}
+
+	st = riseState(3000)
+	sent(st, "bat", 0)
+	store = phaseDirectionStore(t, -12075, 0, map[string]any{"l1_a": 17.5, "l2_a": 17.5, "l3_a": 17.5})
+	if got := batteryOrder(t, store, st); math.Abs(got-3000) > 1e-6 {
+		t.Fatalf("order %.0f W with every phase exporting 17.5 A; want the whole 3000 W ask", got)
+	}
+}
+
+// A battery that ramps 50 W a tick toward its order, so it has not reached
+// an order older than evSettle, and a meter that shows the battery two ticks
+// after the battery reads it. The order counts as unshown until evSettle
+// after the battery reads it: L3 never passes the 16 A line and the order
+// never falls.
+func TestBatteryRiseSlowBatteryLaggingMeter(t *testing.T) {
+	house := [3]float64{13.77, 13.97, 14.27}
+	st := riseState(3000)
+	now := st.now()
+	st.clock = func() time.Time { return now }
+	var hist, orders []float64
+	batW, maxL3 := 0.0, 0.0
+	for tick := 0; tick < 120; tick++ {
+		meterBatW := 0.0
+		if n := len(hist); n >= 2 {
+			meterBatW = hist[n-2]
+		}
+		var a [3]float64
+		for i := range a {
+			a[i] = house[i] + meterBatW/690
+		}
+		order := batteryOrder(t, riseStore(t, a, batW), st)
+		orders = append(orders, math.Round(order))
+		maxL3 = math.Max(maxL3, house[2]+batW/690)
+		hist = append(hist, batW)
+		batW = math.Min(order, batW+50)
+		now = now.Add(2 * time.Second)
+	}
+	if maxL3 > 16+1e-3 {
+		t.Errorf("L3 reached %.3f A, over the 16 A line", maxL3)
+	}
+	for i := 1; i < len(orders); i++ {
+		if orders[i] < orders[i-1]-0.5 {
+			t.Errorf("tick %d: order fell %.0f -> %.0f W", i, orders[i-1], orders[i])
+			break
+		}
+	}
+	if t.Failed() {
+		t.Logf("orders %v", orders)
+	}
+}

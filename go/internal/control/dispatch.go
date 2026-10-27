@@ -398,6 +398,9 @@ type State struct {
 	// batteryCommands and evLimit.offers are our own recent commands, the
 	// only device input the EV hard limit and the EV/battery split use.
 	batteryCommands map[string]commandLog
+	// batteryReadings is each battery's own reading at our last commands,
+	// for the power the site meter may not show yet (unshownBatteryW).
+	batteryReadings map[string]commandLog
 	// batteryFuseRelief is the discharge the fuse guard added to each
 	// battery's last dispatched command (forceFuseDischarge). It ends once
 	// the site fits without it, so an EV rise or start never counts it as
@@ -2434,6 +2437,7 @@ func applyDispatchSafetyPipeline(
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
 	if opts.recordDispatch {
 		state.recordFuseRelief(beforeRelief, targets)
+		state.recordBatteryReadings(targets, store)
 	}
 	return targets
 }
@@ -3903,8 +3907,12 @@ func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.Der
 
 // signedPhasesA is the sample's phase currents, import positive
 // (phaseCurrentsA). When no phase reads as export while the total does, the
-// meter gives no direction per phase, and every phase takes the total's.
-// false without usable phase currents.
+// meter gives no direction per phase. A phase then counts as export only
+// when it must: when the other phases' currents, at most V × A of real power
+// each, cannot carry the exported total on their own (tolerance as in
+// phasePowersAddUp). A phase that may import counts as import,
+// phaseCurrentsA's safe side, since a reactive load can draw its whole
+// current beside exporting phases. false without usable phase currents.
 func (p phaseSample) signedPhasesA(state *State) ([]float64, bool) {
 	if p.meter == nil || state == nil {
 		return nil, false
@@ -3914,22 +3922,72 @@ func (p phaseSample) signedPhasesA(state *State) ([]float64, bool) {
 		return nil, false
 	}
 	exports := p.totalW < 0
+	var sumW float64
 	for _, a := range amps {
 		exports = exports && a >= 0
+		sumW += a * state.SiteFuseVoltage
 	}
-	if exports {
-		for i := range amps {
-			amps[i] = -amps[i]
+	if !exports {
+		return amps, true
+	}
+	tolW := math.Max(250, sumW/10)
+	for i, a := range amps {
+		if sumW-a*state.SiteFuseVoltage < -p.totalW-tolW {
+			amps[i] = -a
 		}
 	}
 	return amps, true
+}
+
+// unshownBatteryW is the batteries' increase the site meter may not show
+// yet: each battery's latest order less the least the meter may show of it,
+// the lowest order of the last evSettle (as pendingBatteryCommandsW) or the
+// lowest of the battery's own readings over that time, the current one
+// included. A battery that ramps slower than evSettle has not reached an
+// order older than evSettle, so the order stays unshown until evSettle after
+// the battery reads it.
+func (s *State) unshownBatteryW(now time.Time, store *telemetry.Store) float64 {
+	var unshown float64
+	for driver, log := range s.batteryCommands {
+		low, _, latest, ok := log.span(now)
+		if !ok {
+			continue
+		}
+		if read, _, _, seen := s.batteryReadings[driver].span(now); seen {
+			low = math.Min(low, read)
+		}
+		if r := store.Get(driver, telemetry.DerBattery); r != nil {
+			low = math.Min(low, r.RawW)
+		}
+		unshown += math.Max(0, latest-low)
+	}
+	return unshown
+}
+
+// recordBatteryReadings logs each dispatched battery's reading for
+// unshownBatteryW.
+func (s *State) recordBatteryReadings(targets []DispatchTarget, store *telemetry.Store) {
+	if store == nil {
+		return
+	}
+	now := s.now()
+	for _, t := range targets {
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		if r == nil {
+			continue
+		}
+		if s.batteryReadings == nil {
+			s.batteryReadings = map[string]commandLog{}
+		}
+		s.batteryReadings[t.Driver] = s.batteryReadings[t.Driver].add(now, r.RawW)
+	}
 }
 
 // fitBatteryRisesToFuse keeps battery charge rises inside the room the site
 // meter shows on its busiest phase: the working limit (fuseLineA) less the
 // phase's reading and less our own rises that reading may not show yet, the
 // chargers' offers (counted as evShownW does) and the batteries' orders
-// (pendingBatteryCommandsW). A three-phase battery puts its power evenly on
+// (unshownBatteryW). A three-phase battery puts its power evenly on
 // every phase. A rise is charge above the battery's latest order, or above
 // its reading before our first order. Holding an order is never a rise, and
 // a discharge we end uses room first. Nothing here cuts below the hold: an
@@ -3950,7 +4008,7 @@ func fitBatteryRisesToFuse(targets []DispatchTarget, store *telemetry.Store, sta
 	}
 	now := state.now()
 	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
-	unshownA := state.pendingBatteryCommandsW(now) / perA
+	unshownA := state.unshownBatteryW(now, store) / perA
 	for _, c := range state.evLimit.offers {
 		_, a := c.log.unshown(now, c.batterySettle())
 		unshownA += a // A one-phase offer may land on any phase.
