@@ -38,8 +38,7 @@ func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, st
 		return floorPositiveEVBatteryTargets(targets)
 	}
 	offeredW := state.evShownW(now)
-	consumptionW := gridW - sumOnlineSignedW(store, telemetry.DerBattery) - sumOnlineSignedW(store, telemetry.DerPV) - store.SumOnlineV2XW()
-	offeredW += state.evFoundDrawW(store, now, consumptionW, offeredW)
+	offeredW += state.evFoundDrawW(store, meter, now, offeredW)
 	needW := math.Max(0, demandW-offeredW)
 	latest := make(map[string]float64, len(targets))
 	lowest := make(map[string]float64, len(targets))

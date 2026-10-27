@@ -375,15 +375,26 @@ func (s *State) evShownW(at time.Time) float64 {
 // surely landed: after a restart or a plug-in, until its first logged offer
 // is older than its settle time. Core then does not know which offer the
 // charger runs on, and its first offers (often 0 A) say nothing of what the
-// meter shows. A car seen drawing in that window is in the reading: each
-// such charger counts its live measured draw, the lower of raw and smoothed,
+// meter shows. A car seen drawing in that window is in the reading when the
+// charger measured it within one control interval of the site reading: a
+// fast charger may have applied a 0 A offer since an older sample, and a
+// held reading after a failed poll says nothing of now. Each such charger
+// counts its measured draw, the lowest of the sample, raw and smoothed,
 // never above its latest offer, and in all no more than the consumption the
-// site meter shows (consumptionW) less shownW. The car's own limit never
-// reads this; only how much of our latest offers the battery reserves as a
-// rise to come.
-func (s *State) evFoundDrawW(store *telemetry.Store, at time.Time, consumptionW, shownW float64) float64 {
-	if store == nil || !finiteFuseValue(consumptionW) {
+// site meter shows (siteConsumptionW) less shownW. The car's own limit
+// never reads this; only how much of our latest offers the battery reserves
+// as a rise to come.
+func (s *State) evFoundDrawW(store *telemetry.Store, meter *telemetry.DerReading, at time.Time, shownW float64) float64 {
+	if store == nil || meter == nil {
 		return 0
+	}
+	consumptionW := siteConsumptionW(store, meter.RawW)
+	if !finiteFuseValue(consumptionW) {
+		return 0
+	}
+	skew := time.Duration(s.ControlIntervalS) * time.Second
+	if skew <= 0 {
+		skew = 2 * time.Second // config's default control_interval_s
 	}
 	var w float64
 	for _, c := range s.evLimit.offers {
@@ -392,10 +403,14 @@ func (s *State) evFoundDrawW(store *telemetry.Store, at time.Time, consumptionW,
 			continue
 		}
 		r := store.Get(c.driver, telemetry.DerEV)
-		if r == nil || !store.DriverHealth(c.driver).TelemetryLive() {
+		if h := store.DriverHealth(c.driver); r == nil || !h.TelemetryLive() || h.LastReadFailed() {
 			continue
 		}
-		drawW := math.Min(r.RawW, r.SmoothedW)
+		p, ok := qualifiedFuseObservation(r, at)
+		if !ok || p.Seen().Before(meter.UpdatedAt.Add(-skew)) || p.At.After(meter.UpdatedAt.Add(skew)) {
+			continue
+		}
+		drawW := math.Min(p.PowerW, math.Min(r.RawW, r.SmoothedW))
 		if !finiteFuseValue(drawW) {
 			continue
 		}
@@ -404,6 +419,22 @@ func (s *State) evFoundDrawW(store *telemetry.Store, at time.Time, consumptionW,
 		w += math.Max(0, math.Min(latest, drawW)-math.Max(0, latest-unshown))
 	}
 	return math.Max(0, math.Min(w, consumptionW-shownW))
+}
+
+// siteConsumptionW is the consumption a site reading of gridW shows: grid
+// less each live battery, PV and V2X reading, each at the higher of raw and
+// smoothed. A smoothed value lags an output that just fell; the higher one
+// keeps the estimate at or below what the meter shows.
+func siteConsumptionW(store *telemetry.Store, gridW float64) float64 {
+	w := gridW
+	for _, t := range []telemetry.DerType{telemetry.DerBattery, telemetry.DerPV, telemetry.DerV2X} {
+		for _, r := range store.ReadingsByType(t) {
+			if store.DriverHealth(r.Driver).TelemetryLive() {
+				w -= math.Max(r.RawW, r.SmoothedW)
+			}
+		}
+	}
+	return w
 }
 
 // batterySettle is how long the battery side counts a raise of this

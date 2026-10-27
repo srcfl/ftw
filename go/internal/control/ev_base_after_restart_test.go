@@ -91,8 +91,9 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 		want float64
 	}{
 		{"latest offer bounds the draw", func(*telemetry.Store, *State) {}, 6210},
-		{"measured draw below the offer", func(store *telemetry.Store, _ *State) {
+		{"measured draw below the offer", func(store *telemetry.Store, state *State) {
 			store.Update("charger", telemetry.DerEV, 4000, nil, nil)
+			store.Get("charger", telemetry.DerEV).UpdatedAt = state.now()
 		}, 4000},
 		{"charger offline", func(store *telemetry.Store, _ *State) {
 			store.DriverHealthMut("charger").SetOffline()
@@ -107,12 +108,103 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 			c.found.at = state.now().Add(-c.settle)
 			state.evLimit.offers["garage"] = c
 		}, 0},
+		{"a 40 s charger's window outlasts evSettle", func(_ *telemetry.Store, state *State) {
+			c := state.evLimit.offers["garage"]
+			c.settle, c.declared = 40*time.Second, true
+			c.found.at = state.now().Add(-30 * time.Second)
+			c.log[0].at = c.found.at
+			state.evLimit.offers["garage"] = c
+		}, 6210},
+		{"the shown part of the latest offer is not counted twice", func(_ *telemetry.Store, state *State) {
+			c := state.evLimit.offers["garage"]
+			c.found.at = state.now().Add(-60 * time.Second)
+			c.log = commandLog{c.found, {at: state.now().Add(-25 * time.Second), w: 6210, a: 9, n: 3}}
+			state.evLimit.offers["garage"] = c
+		}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, state := restartFixture(t, 780, [3]float64{2.03, 4.97, .47}, -5000, -3000, 8222)
 			tc.edit(store, state)
-			if got := state.evFoundDrawW(store, state.now(), 1e6, 0); math.Abs(got-tc.want) > 1e-6 {
-				t.Fatalf("credit %.0f W, want %.0f W", got, tc.want)
+			shownW := state.evShownW(state.now())
+			if got := state.evFoundDrawW(store, store.Get("meter", telemetry.DerMeter), state.now(), shownW); math.Abs(got-tc.want) > 1e-6 {
+				t.Fatalf("credit %.0f W beside %.0f W shown, want %.0f W", got, shownW, tc.want)
+			}
+		})
+	}
+}
+
+// Offers the meter already shows come off the consumption the credit may
+// fill: here another charger's 5 kW is shown, so of the 8,780 W the meter
+// shows as consumption only 3,780 W is left for this car.
+func TestEVFoundDrawWLeavesOutShownOffers(t *testing.T) {
+	store, state := restartFixture(t, 780, [3]float64{2.03, 4.97, .47}, -5000, -3000, 8222)
+	if got := state.evFoundDrawW(store, store.Get("meter", telemetry.DerMeter), state.now(), 5000); math.Abs(got-3780) > 1e-6 {
+		t.Fatalf("credit %.0f W, want 3780 W", got)
+	}
+}
+
+// A charger reading the meter may not show gives no credit. A fast charger
+// applied the 0 A sent while the meter was silent, so the car draws
+// nothing, but its reading still shows the 8.2 kW from before: held after a
+// failed poll, or a sample older than the site reading (an OCPP
+// MeterValues interval). The house draws 7 kW on balanced phases, the
+// battery runs the -5 kW discharge Core ordered in this run, and the meter
+// shows 2.9 A per phase. The 9 A order still to come leaves room to end
+// only (16 - 2.9 - 9) × 690 W of the discharge.
+func TestEVBaseAfterRestartNeedsACurrentChargerSample(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*telemetry.Store, *State)
+	}{
+		{"last poll failed", func(store *telemetry.Store, _ *State) {
+			store.RecordDriverError("charger", "timeout")
+		}},
+		{"sample older than the site reading", func(store *telemetry.Store, state *State) {
+			data, _ := json.Marshal(map[string]any{"power_observed_at": state.now().Add(-10 * time.Second).Format(time.RFC3339Nano)})
+			store.Update("charger", telemetry.DerEV, 8222, nil, data)
+			store.Get("charger", telemetry.DerEV).UpdatedAt = state.now()
+			store.RecordDriverSuccess("charger")
+		}},
+		{"site reading older than the sample", func(store *telemetry.Store, state *State) {
+			store.Get("meter", telemetry.DerMeter).UpdatedAt = state.now().Add(-10 * time.Second)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, state := restartFixture(t, 2000, [3]float64{2.9, 2.9, 2.9}, -5000, 0, 8222)
+			tc.edit(store, state)
+			out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "sungrow", TargetW: 0}}, store, state, 16*230*3)
+			got := targetW(out, "sungrow")
+			if afterA := 2.9 + (got+5000)/690 + 9; afterA > 16+1e-6 {
+				t.Fatalf("battery ends its discharge to %.0f W on a charger reading the meter may not show: %.2f A per phase once the car's order lands", got, afterA)
+			}
+		})
+	}
+}
+
+// The consumption bound reads the devices as the meter does. A battery
+// that just ended a discharge, or PV that just dropped, still shows its old
+// output in the smoothed value; counting that would raise the consumption
+// the meter shows, and the credit with it, by the lag.
+func TestEVBaseAfterRestartConsumptionReadsCurrentOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pvW          float64
+		driver       string
+		kind         telemetry.DerType
+		consumptionW float64
+	}{
+		{"battery ended its discharge", 0, "sungrow", telemetry.DerBattery, 680},
+		{"PV dropped", -500, "pv", telemetry.DerPV, 1180},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, state := restartFixture(t, 680, [3]float64{4.97, -1, -1}, 0, tc.pvW, 8222)
+			store.Get(tc.driver, tc.kind).SmoothedW = -3000
+			state.batteryCommands["sungrow"] = commandLog{}.add(state.now().Add(-time.Second), -5000)
+			out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "sungrow", TargetW: 0}}, store, state, 16*230*3)
+			riseA := (6210 - tc.consumptionW) / 690
+			want := -(5000 - (16-4.97-riseA)*690)
+			if got := targetW(out, "sungrow"); math.Abs(got-want) > 1 {
+				t.Fatalf("battery %.0f W, want %.0f W: the meter shows %.0f W of consumption", got, want, tc.consumptionW)
 			}
 		})
 	}
