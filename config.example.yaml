@@ -288,6 +288,7 @@ fleet_ping:
 # Tests and development only: read elprisetjustnu-format prices from another
 # server, with no Nord Pool fallback. The site rig serves pinned prices this
 # way (go/test/site/prices_test.go). Leave it unset on a real site.
+# Only the elprisetjustnu provider reads base_url; other providers ignore it.
 # price:
 #   provider: elprisetjustnu
 #   base_url: http://127.0.0.1:8099

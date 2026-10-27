@@ -1135,6 +1135,7 @@ type Price struct {
 	// BaseURL is for tests and development only. It points the
 	// elprisetjustnu provider at another server with the same API and
 	// turns off the Nord Pool fallback, so the site rig can pin prices.
+	// Only the elprisetjustnu provider reads it; other providers ignore it.
 	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 
 	// Currency is the ISO code for pricing (default "SEK"). ENTSOE
