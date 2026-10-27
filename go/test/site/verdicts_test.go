@@ -615,14 +615,14 @@ func judgeR1(d *runData) (metrics, []criterion) {
 // overage is judged by that contract: above 1.2 x it lasts no longer than
 // the charger takes to answer, and the 60 s heat stays under the 1.13 x a
 // miniature circuit breaker carries for an hour. How long the site stays
-// over fuse - 1 A and when Core sends the cut are recorded.
+// over the fuse and when Core sends the cut are recorded.
 func judgeR2(d *runData) (metrics, []criterion) {
 	fuse, delay := d.metaF("fuse"), d.metaF("charger_delay_s")
 	tCN, tOff, tOn, t1 := d.marks["charge_now"], d.marks["offline"], d.marks["online"], d.marks["end"]
 	pre := meanOf(d.window(tOff-30, tOff), batSigned)
 	allowed := delay + 7
 	instant, _ := d.runsOver(tOff, tOn+60, fuseInstantFactor*fuse)
-	over1, _ := d.runsOver(tOff, tOn+60, fuse-1)
+	overFuse, _ := d.runsOver(tOff, tOn+60, fuse)
 	heatOver, heatPeak := d.i2Over(tOff-60, tOn+60, mcbHourFactor*fuse)
 	during := summarize(d.window(tOff+15, tOn))
 	marked := 0
@@ -634,7 +634,7 @@ func judgeR2(d *runData) (metrics, []criterion) {
 	rises := d.offerRises(tOff, tOn)
 	cut := d.firstOffer(tOff, func(p profile) bool { return p.Limit == 0 })
 	m := metrics{"battery_w_before": math.Round(pre), "allowed_over_s": allowed,
-		"over_fuse_x1_2_longest_s": instant, "over_fuse_minus1_longest_s": over1,
+		"over_fuse_x1_2_longest_s": instant, "over_fuse_longest_s": overFuse,
 		"heat_peak_a": heatPeak, "heat_over_x1_13_s": heatOver, "cut_sent_s": roundp(cut, 1),
 		"offer_rises_while_offline": rises, "during": during,
 		"max_i_after_drop": round(maxOf(d.window(tOff, tOn+60), maxAbsI), 2)}
@@ -671,20 +671,18 @@ func judgeR3(d *runData) (metrics, []criterion) {
 		swing = hi - lo
 	}
 	minSoC := minOf(run, func(r *sample) float64 { return r.Bat.SoCPct })
-	// Once the car is the only lever, Core holds the worst phase at its own
-	// line, between fuse - 1 A and fuse - 0.5 A (see s3): the overage that
-	// counts is above fuse - 0.5 A; the one above fuse - 1 A is recorded.
-	over, _ := d.runsOver(tCN, t1, fuse-0.5)
-	over1, _ := d.runsOver(tCN, t1, fuse-1)
+	// Core may work up to the fuse rating; safety_margin_a is a site's
+	// opt-in, so the overage that counts is above the fuse.
+	over, _ := d.runsOver(tCN, t1, fuse)
 	allowed := delay + 7
 	m := metrics{"discharge_below_floor_samples": below, "battery_order_swing_last5min_w": math.Round(swing),
-		"soc_min_pct": round(minSoC, 2), "over_fuse_minus_half_longest_s": over, "over_fuse_minus1_longest_s": over1,
+		"soc_min_pct": round(minSoC, 2), "over_fuse_longest_s": over,
 		"allowed_over_s": allowed, "max_i": round(maxOf(run, maxAbsI), 2)}
 	return m, []criterion{
 		crit("the battery reached the planner floor", len(run) > 0 && minSoC <= floor+0.5), // the setup
 		crit("no discharge ordered below the planner floor", below <= 10),
 		crit("the battery order swings at most 100 W over the last 5 min", len(last) > 0 && swing <= 100),
-		crit("over fuse - 0.5 A no longer than the charger's delay + 7 s", over <= allowed),
+		crit("over the fuse no longer than the charger's delay + 7 s", over <= allowed),
 		crit("fuse holds", !anyBlown(run)),
 	}
 }
@@ -719,13 +717,13 @@ func judgeR4(d *runData) (metrics, []criterion) {
 		return v
 	}
 	recovery := d.logLines("database corrupt", "INTEGRITY CHECK FAILED")
-	overAfter, _ := d.runsOver(u2, t1, fuse-1)
+	overAfter, _ := d.runsOver(u2, t1, fuse)
 	m := metrics{"charge_now_back_s": []*float64{roundp(back1, 1), roundp(back2, 1)},
 		"today_load_wh_before_kill1": before, "today_load_wh_before_kill2": after, "today_load_wh_null_after_kill1": nullAfter,
 		"today_load_wh_end":        todayLoadWh(d.window(u2, t1)),
 		"session_wh_before_kills":  []float64{session(k1-30, k1), session(k2-30, k2)},
 		"session_wh_90s_after_ups": []float64{session(u1, u1+90), session(u2, u2+90)},
-		"recovery_log_lines":       len(recovery), "over_fuse_minus1_longest_after_up2_s": overAfter}
+		"recovery_log_lines":       len(recovery), "over_fuse_longest_after_up2_s": overAfter}
 	return m, []criterion{
 		crit("Charge now back at its minimum within 60 s of each restart, and held", le(back1, 60) && le(back2, 60)),
 		crit("the day's Home use kept within 1 % across the first kill", kept),
@@ -742,17 +740,17 @@ func (d *runData) homeUseBack(t0 float64) *float64 {
 
 // judgeR5a: Core starting beside a car that already draws its maximum, with
 // the site over the fuse, brings the site under the limit within 30 s and
-// keeps it there. Core holds the worst phase at its own line, between
-// fuse - 1 A and fuse - 0.5 A (see s3, r3), so the limit is fuse - 0.5 A.
+// keeps it there. The limit is the fuse: Core may work up to the rating,
+// and safety_margin_a is a site's opt-in.
 func judgeR5a(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	tS, tUp, t1 := d.marks["ftw_start"], d.marks["ftw_up"], d.marks["end"]
 	pre := meanOf(d.window(tS-20, tS), func(r *sample) float64 { return carW(r, 0) })
 	preI := maxOf(d.window(tS-20, tS), maxAbsI)
-	fit := d.firstT(tUp, func(r *sample) bool { return maxAbsI(r) <= fuse-0.5 })
+	fit := d.firstT(tUp, func(r *sample) bool { return maxAbsI(r) <= fuse })
 	overAfter := 0.0
 	if fit != nil {
-		overAfter, _ = d.runsOver(tUp+*fit, t1, fuse-0.5)
+		overAfter, _ = d.runsOver(tUp+*fit, t1, fuse)
 	}
 	shown := d.homeUseBack(tUp)
 	m := metrics{"car_w_before_start": math.Round(pre), "under_limit_s": roundp(fit, 1), "over_after_that_longest_s": overAfter,
@@ -760,8 +758,8 @@ func judgeR5a(d *runData) (metrics, []criterion) {
 	return m, []criterion{
 		crit("the car charged before Core started", pre >= minW),            // the setup
 		crit("the site was over the fuse before Core started", preI > fuse), // the setup
-		crit("under fuse - 0.5 A within 30 s of Core answering", le(fit, 30)),
-		crit("over fuse - 0.5 A at most 3 s once under it", fit != nil && overAfter <= 3),
+		crit("under the fuse within 30 s of Core answering", le(fit, 30)),
+		crit("over the fuse at most 3 s once under it", fit != nil && overAfter <= 3),
 		crit("Home use shown within 30 s of Core answering", le(shown, 30)),
 		crit("fuse holds", !anyBlown(d.window(tS, t1))),
 	}

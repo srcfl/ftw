@@ -260,7 +260,7 @@ func TestJudgeR4SeesAStopAfterTheRestart(t *testing.T) {
 }
 
 // r2Run is R2's record: the battery offline from 100 to 280 s, the site at
-// 24.015 A (Core's own line) before the drop and after the return, and
+// 25.0 A (Core's own line, the fuse) before the drop and after the return, and
 // overA per phase for the first overS s of the drop, then 20 A.
 func r2Run(overA float64, overS int) *runData {
 	marks := map[string]float64{"charge_now": 0, "offline": 100, "online": 280, "end": 400}
@@ -277,7 +277,7 @@ func r2Run(overA float64, overS int) *runData {
 		case i >= 100 && i < 280:
 			r.PhaseA = [3]float64{20, 20, 20}
 		default:
-			r.PhaseA = [3]float64{24.015, 24.015, 24.015}
+			r.PhaseA = [3]float64{25.0, 25.0, 25.0}
 		}
 	})
 	d.frames = []frame{profileAt(50, 8), profileAt(float64(100+overS-2), 0), profileAt(285, 8)}
@@ -310,9 +310,9 @@ func TestJudgeR2Overage(t *testing.T) {
 }
 
 // r5aRun is R5a's record: Core starts at 60 s and answers at 70 s; the site
-// runs preA per phase with the car at 16 A until 80 s, then Core's own line
-// with the car at 10 A.
-func r5aRun(preA float64) *runData {
+// runs preA per phase with the car at 16 A until 80 s, then afterA(i) with
+// the car at 10 A.
+func r5aRun(preA float64, afterA func(i int) float64) *runData {
 	marks := map[string]float64{"ftw_start": 60, "ftw_up": 70, "end": 250}
 	return synth(250, marks, map[string]any{"fuse": 25.0}, func(i int, r *sample) {
 		w := 3000.0
@@ -321,19 +321,75 @@ func r5aRun(preA float64) *runData {
 			r.PhaseA, r.CarW[0] = [3]float64{preA, preA, preA}, 11040
 			return
 		}
-		r.PhaseA, r.CarW[0] = [3]float64{24.015, 24.015, 24.015}, 6900
+		a := afterA(i)
+		r.PhaseA, r.CarW[0] = [3]float64{a, a, a}, 6900
 	})
 }
 
+// atFuse is Core's own line on a 25 A fuse: the rating itself.
+func atFuse(int) float64 { return 25.0 }
+
 func TestJudgeR5a(t *testing.T) {
-	_, cs := judgeR5a(r5aRun(30))
+	_, cs := judgeR5a(r5aRun(30, atFuse))
 	for name, ok := range verdictsOf(cs) {
 		if !ok {
-			t.Errorf("30 A cut to Core's own 24.015 A line 10 s after it answers: %q fails", name)
+			t.Errorf("30 A cut to Core's own 25.0 A line 10 s after it answers: %q fails", name)
 		}
 	}
-	_, cs = judgeR5a(r5aRun(22.75))
+	_, cs = judgeR5a(r5aRun(22.75, atFuse))
 	if verdictsOf(cs)["the site was over the fuse before Core started"] {
 		t.Error("a site at 22.75 A before Core starts passes the setup: the run proves nothing")
+	}
+}
+
+// R5a judges at the fuse: exactly 25.0 A on a 25 A fuse passes, and 0.1 A
+// over it for longer than the 3 s budget fails.
+func TestJudgeR5aJudgesAtTheFuse(t *testing.T) {
+	const under, over = "under the fuse within 30 s of Core answering", "over the fuse at most 3 s once under it"
+	judge := func(afterA func(int) float64) map[string]bool {
+		_, cs := judgeR5a(r5aRun(30, afterA))
+		return verdictsOf(cs)
+	}
+	if v := judge(atFuse); !v[under] || !v[over] {
+		t.Errorf("held at exactly 25.0 A: %v", v)
+	}
+	// Under the fuse at 80 s, then 25.1 A from 100 to 109 s.
+	v := judge(func(i int) float64 {
+		if i >= 100 && i < 110 {
+			return 25.1
+		}
+		return 25.0
+	})
+	if v[over] {
+		t.Error("25.1 A for 9 s once under the fuse passes")
+	}
+	if v := judge(func(int) float64 { return 25.1 }); v[under] {
+		t.Error("held at 25.1 A after Core answers passes")
+	}
+}
+
+// R3 allows the charger's delay + 7 s (67 s here) over the fuse: exactly
+// 25.0 A throughout passes, and 25.1 A for 80 s fails.
+func TestJudgeR3JudgesAtTheFuse(t *testing.T) {
+	const over = "over the fuse no longer than the charger's delay + 7 s"
+	marks := map[string]float64{"plug": 0, "charge_now": 20, "end": 400}
+	judge := func(a func(int) float64) bool {
+		d := synth(400, marks, map[string]any{"fuse": 25.0, "charger_delay_s": 60.0, "planner_floor_pct": 10.0}, func(i int, r *sample) {
+			v := a(i)
+			r.PhaseA = [3]float64{v, v, v}
+		})
+		_, cs := judgeR3(d)
+		return verdictsOf(cs)[over]
+	}
+	if !judge(atFuse) {
+		t.Error("held at exactly 25.0 A fails")
+	}
+	if judge(func(i int) float64 {
+		if i >= 100 && i < 180 {
+			return 25.1
+		}
+		return 25.0
+	}) {
+		t.Error("25.1 A for 80 s passes")
 	}
 }
