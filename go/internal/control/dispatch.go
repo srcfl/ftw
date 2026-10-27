@@ -2373,6 +2373,7 @@ func applyDispatchSafetyPipeline(
 		targets = floorNegativeTargets(targets)
 	}
 	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
+	targets = floorBlockedDischarge(targets, store, state, fuseMaxW)
 
 	// A battery-boost lease may never draw the stationary fleet below its
 	// explicit reserve. Apply this immediately before forceFuseDischarge:
@@ -3394,7 +3395,7 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 // toward charge after noSelfCharge set 0. The snap-to-zero list inside
 // slew never grew the later charge gates, which is how an idle slot
 // commanded +1500 W. This only moves a target toward zero. Discharge
-// stays out: the fuse saver may need it.
+// has its own twin, floorBlockedDischarge, which yields to the fuse.
 func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlocked map[string]bool) []DispatchTarget {
 	if !noSelfCharge && len(chargeBlocked) == 0 {
 		return targets
@@ -3409,6 +3410,43 @@ func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlock
 		}
 	}
 	return targets
+}
+
+// floorBlockedDischarge is the discharge twin of floorBlockedCharge. Slew
+// anchors on measured watts, so a pack the distributor parked at 0 W (SoC
+// below the floor, discharge_capable=false) is walked back toward its live
+// discharge. Stop it at 0 W unless that stop alone would put the site over
+// its fuse or import limit; then keep the slewed ramp, which only moves
+// toward 0 W. Fuse relief never adds discharge to such a pack.
+func floorBlockedDischarge(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) []DispatchTarget {
+	if store == nil || state == nil {
+		return targets
+	}
+	var out []DispatchTarget
+	readings := make(map[string]*telemetry.DerReading, len(targets))
+	for i, t := range targets {
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		readings[t.Driver] = r
+		if t.TargetW >= 0 || r == nil {
+			continue
+		}
+		if lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver]); lower < 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]DispatchTarget(nil), targets...)
+		}
+		out[i].TargetW = 0
+		out[i].Clamped = true
+	}
+	if out == nil {
+		return targets
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if fuseReliefFromSnapshot(out, readings, meter, state, fuseMaxW, false) > 0 {
+		return targets
+	}
+	return out
 }
 
 // coverLoadChargeSlot reports whether the current plan slot is a charge-from-
