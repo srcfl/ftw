@@ -289,3 +289,71 @@ func TestBatteryFuseLineProperty(t *testing.T) {
 		}
 	}
 }
+
+// C3, rig seed 207533, on a 16 A fuse with no margin: the battery holds a
+// 3 kW discharge with L1 at 14.4 A, then PV drops 1280 W and L1 reads
+// 16.3 A. The relief brings L1 to the line. On the next ticks the reading
+// sits at the line with the battery at its relief power, and the relief
+// stays: L1 crosses the rating once, on the PV step, and never again while
+// PV is low. Each tick the battery reaches the order it was sent the tick
+// before, and the meter reads it there.
+func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
+	st := phaseDirectionState(0)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	st.clock = func() time.Time { return now }
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: -3005, ExpiresAt: now.Add(time.Hour)})
+
+	store := telemetry.NewStore()
+	load := [3]float64{23.44, 11.04, 11.54} // house and car, A import per phase
+	pvW, batW := -3200.0, -3005.0
+	line := st.fuseLineA()
+	var targets, l1 []float64
+	for tick := 0; tick < 40; tick++ {
+		switch tick {
+		case 5:
+			pvW = -1920
+		case 30:
+			pvW = -3200
+		}
+		var a [3]float64
+		data := map[string]any{}
+		var totalW float64
+		for i := range a {
+			a[i] = load[i] + (pvW+batW)/690
+			data[fmt.Sprintf("l%d_a", i+1)] = math.Abs(a[i])
+			data[fmt.Sprintf("l%d_w", i+1)] = a[i] * 230
+			totalW += a[i] * 230
+		}
+		raw, _ := json.Marshal(data)
+		store.Update("meter", telemetry.DerMeter, totalW, nil, raw)
+		store.DriverHealthMut("meter").RecordSuccess()
+		soc := 0.6
+		store.Update("bat", telemetry.DerBattery, batW, &soc, nil)
+		store.DriverHealthMut("bat").RecordSuccess()
+
+		for _, o := range ComputeDispatch(store, st, map[string]float64{"bat": 15200}, 16*230*3) {
+			if o.Driver == "bat" {
+				batW = o.TargetW
+			}
+		}
+		targets = append(targets, math.Round(batW))
+		l1 = append(l1, math.Round(a[0]*100)/100)
+		now = now.Add(5 * time.Second)
+	}
+	crossings := 0
+	for i := range l1 {
+		if l1[i] > line+0.01 && (i == 0 || l1[i-1] <= line+0.01) {
+			crossings++
+		}
+		if i > 5 && i < 30 && (l1[i] > line+0.01 || l1[i] < line-0.05) {
+			t.Errorf("tick %d: L1 %.2f A, want the %.1f A line while PV is low", i, l1[i], line)
+		}
+	}
+	if crossings != 1 {
+		t.Errorf("L1 crossed the %.1f A line %d times, want once (the PV step)", line, crossings)
+	}
+	if t.Failed() {
+		t.Logf("targets %v", targets)
+		t.Logf("L1 %v", l1)
+	}
+}
