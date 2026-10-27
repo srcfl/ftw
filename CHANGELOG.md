@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.157.1
+
+### Patch Changes
+
+- 34f425e: End manual battery Charge when FTW restarts. Return to automatic planning
+  with the saved battery export permission, or Idle when the planner is disabled.
+  Ignore old retained MQTT Charge commands so reconnecting cannot resume the
+  override. A new Charge command still works.
+- 34f425e: Stop battery charging at the configured maximum charge level in every EMS mode,
+  including manual holds and self-tuning. Use each battery's soc_max, or the
+  planner's limit when the battery has none. Charging resumes one percentage
+  point below that limit; discharge remains available.
+
 ## 0.157.0
 
 ### Minor Changes
