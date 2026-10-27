@@ -200,9 +200,14 @@ func (s *Store) RetireRawHistory(ctx context.Context) error {
 // The files are removed only after every day has been stored. Archive scratch
 // goes with them, and so does a sample day whose hourly summary receipt
 // matches the file. Other sample days stay readable until the background
-// rollup summarizes them. Diagnostics files are left in place. An unreadable
-// bucket file is kept, logged and listed in HistoryBackend; it never stops
-// boot.
+// rollup summarizes them. Diagnostics files are left in place.
+//
+// An unreadable bucket file never stops boot. It moves aside under
+// unreadableColdSuffix, out of every reader's glob, so reads for that day
+// still work. It stays on disk, and HistoryBackend lists it. The day's legacy
+// copy stays on disk unimported and serves reads. A good copy of the original
+// restored under its normal name imports on the next boot, and the legacy
+// copy then goes without a conflict.
 func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	if s == nil || s.history == nil || strings.TrimSpace(cold) == "" {
 		return nil
@@ -217,9 +222,22 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	}
 	var imported int
 	unreadable := map[string]bool{}
+	// held lists files kept at their normal name: an unreadable file that
+	// could not move aside, or the legacy copy of an unreadable original.
+	held := map[string]bool{}
 	skip := func(path string, err error) {
-		slog.Warn("history bucket file unreadable; kept", "path", path, "err", err)
 		unreadable[path] = true
+		aside := path + unreadableColdSuffix
+		if _, statErr := os.Lstat(aside); errors.Is(statErr, os.ErrNotExist) {
+			renameErr := os.Rename(path, aside)
+			if renameErr == nil {
+				slog.Warn("history bucket file unreadable; moved aside", "path", aside, "err", err)
+				return
+			}
+			slog.Warn("history bucket file could not move aside", "path", path, "err", renameErr)
+		}
+		slog.Warn("history bucket file unreadable; kept in place", "path", path, "err", err)
+		held[path] = true
 	}
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
@@ -228,6 +246,14 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 		if strings.Contains(path, ".legacy-buckets.") {
 			original := strings.Replace(path, ".legacy-buckets.parquet", ".buckets.parquet", 1)
 			if _, statErr := os.Stat(original); statErr == nil && !unreadable[original] {
+				continue
+			}
+			// Importing these hours would conflict with a good copy of the
+			// original restored later, and stop that boot. Keep the file;
+			// it serves reads for the day until then.
+			if _, statErr := os.Lstat(original + unreadableColdSuffix); statErr == nil || unreadable[original] {
+				slog.Warn("history legacy bucket file kept while its original is unreadable", "path", path)
+				held[path] = true
 				continue
 			}
 		}
@@ -267,10 +293,22 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	if err != nil {
 		return err
 	}
+	sampleDays := len(keep)
+	// Earlier boots moved unreadable files aside; list them on every boot.
+	aside, err := filepath.Glob(filepath.Join(cold, "[0-9][0-9][0-9][0-9]", "[0-9][0-9]", "[0-9][0-9].*"+unreadableColdSuffix))
+	if err != nil {
+		return err
+	}
 	var kept []string
-	for path := range unreadable {
+	for _, path := range aside {
 		keep[path] = true
-		kept = append(kept, filepath.Base(filepath.Dir(filepath.Dir(path)))+"/"+filepath.Base(filepath.Dir(path))+"/"+filepath.Base(path))
+		kept = append(kept, coldRel(path))
+	}
+	for path := range held {
+		keep[path] = true
+		if unreadable[path] {
+			kept = append(kept, coldRel(path))
+		}
 	}
 	slices.Sort(kept)
 	s.maintenanceStatusMu.Lock()
@@ -283,11 +321,20 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	if err != nil {
 		return err
 	}
-	if len(keep) > 0 {
-		slog.Warn("history sample days kept until they have hourly summaries", "days", len(keep))
+	if sampleDays > 0 {
+		slog.Warn("history sample days kept until they have hourly summaries", "days", sampleDays)
 	}
 	slog.Info("history cold files absorbed", "days", imported, "retired_files", removed)
 	return nil
+}
+
+// unreadableColdSuffix marks a bucket file that failed to read. The name no
+// longer ends in .parquet, so no reader, importer or converter opens it.
+const unreadableColdSuffix = ".unreadable"
+
+// coldRel names a cold file as YYYY/MM/<file>.
+func coldRel(path string) string {
+	return filepath.Base(filepath.Dir(filepath.Dir(path))) + "/" + filepath.Base(filepath.Dir(path)) + "/" + filepath.Base(path)
 }
 
 // A sample day counts as absorbed only through the summary receipt for this
