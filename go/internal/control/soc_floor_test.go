@@ -3,6 +3,8 @@ package control
 import (
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // A planner mode with no plan falls back to self-consumption. It must keep
@@ -105,5 +107,108 @@ func TestFuseReliefPassesBoostReserveButKeepsSoCFloor(t *testing.T) {
 	}
 	if got := run(0.08); got < 0 {
 		t.Fatalf("fuse overage at SoC 8 %%, floor 10 %%: got %.0f W, want no discharge", got)
+	}
+}
+
+func staleFloorState(slew float64) *State {
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerCheap
+	st.UseEnergyDispatch = true
+	st.SlewRateW = slew
+	st.MinDispatchIntervalS = 0
+	st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}, "bat2": {SoCMin: 0.10}}
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
+	st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "", 0, "", false }
+	return st
+}
+
+// SoC drifts under the floor while the battery already covers the house.
+// Inside the deadband a tick with no targets leaves the driver on its last
+// -2000 W setpoint, and outside it slew hands back -1500 W. Both must stop.
+func TestStaleFloorStopsRunningDischarge(t *testing.T) {
+	cases := []struct {
+		name         string
+		gridW, slewW float64
+	}{
+		{"inside deadband", 20, 10000},
+		{"after slew", 2000, 500},
+	}
+	for _, c := range cases {
+		for _, soc := range []float64{0.08, 0.04} {
+			store := seedStore(c.gridW, []struct {
+				name          string
+				currentW, soc float64
+			}{{"bat", -2000, soc}})
+			st := staleFloorState(c.slewW)
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+			if len(targets) == 0 {
+				t.Errorf("%s, SoC %.2f: no target, the -2000 W setpoint stays", c.name, soc)
+			}
+			for _, tg := range targets {
+				if tg.TargetW < 0 {
+					t.Errorf("%s, SoC %.2f: %s %.0f W under the floor", c.name, soc, tg.Driver, tg.TargetW)
+				}
+			}
+		}
+	}
+}
+
+// A battery under the floor hands its share to a sibling above it.
+func TestStaleFloorSiblingTakesShare(t *testing.T) {
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.08}, {"bat2", 0, 0.50}})
+	st := staleFloorState(10000)
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200, "bat2": 15200}), 11040)
+	var sum float64
+	for _, tg := range targets {
+		if tg.Driver == "bat" && tg.TargetW < 0 {
+			t.Errorf("bat under the floor discharged %.0f W", tg.TargetW)
+		}
+		sum += tg.TargetW
+	}
+	if sum > -1000 {
+		t.Errorf("sibling did not take the share: sum %.0f W", sum)
+	}
+}
+
+// Plain self_consumption keeps Core's 5 % floor; soc_min is a planner rule.
+func TestSelfConsumptionStillDischargesUnderSoCMin(t *testing.T) {
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.08}})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}}
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+	if len(targets) == 0 || targets[0].TargetW >= 0 {
+		t.Errorf("self_consumption at SoC 8 %%: %+v", targets)
+	}
+}
+
+// Two batteries, one under the boost reserve. 3 kW fuse overage plus 5 kW
+// that only the hourly limit asks for. The battery above the reserve takes
+// the limit part; the other still serves the fuse.
+func TestSplitReliefUsesBothBatteries(t *testing.T) {
+	store, st, cp := setupPerPhaseSite(3, 230, 20250, 29.35, 29.35, 29.35, 0.20, 5000)
+	soc := 0.60
+	store.Update("bat2", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("bat2").RecordSuccess()
+	cp["bat2"] = 15200
+	st.DriverLimits["bat2"] = PowerLimits{MaxChargeW: 10000, MaxDischargeW: 5000}
+	st.SiteFuseAmps = 25
+	st.PeakImportCeilingW = 12250
+	st.BatteryBoostReserveSoC = 0.30
+	out := applyDispatchSafetyPipeline([]DispatchTarget{{Driver: "bat"}, {Driver: "bat2"}}, store, st, cp, 25*230*3, dispatchSafetyOptions{})
+	got := map[string]float64{}
+	for _, o := range out {
+		got[o.Driver] = o.TargetW
+	}
+	if got["bat"] > -2999 || got["bat2"] > -4999 {
+		t.Errorf("want bat -3000 W, bat2 -5000 W; got bat %.0f W, bat2 %.0f W", got["bat"], got["bat2"])
 	}
 }
