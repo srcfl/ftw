@@ -784,7 +784,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// storage: surface DB corruption-recovery events from this boot so a
 	// corrupt database is never a silent, blank-dashboard failure again.
 	if s.deps.State != nil {
-		storage := map[string]any{"state": "ok", "cache": "ok"}
+		storage := map[string]any{"state": "ok", "cache": "ok", "history": "ok"}
 		for _, ev := range s.deps.State.HealEvents() {
 			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
 			storage["last_event_ms"] = ev.AtMs
@@ -1714,6 +1714,9 @@ func (s *Server) handlePostConfigWith(w http.ResponseWriter, r *http.Request, re
 		// declared via DRIVER.config_secrets — keeps config-package
 		// catalog-agnostic.
 		restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
+		// A reviewed draft must save exactly as reviewed; the next load
+		// fills its unset timings instead.
+		newCfg.Site.FillUnsetTimings()
 	}
 	s.deps.CfgMu.RUnlock()
 

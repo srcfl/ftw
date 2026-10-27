@@ -194,6 +194,9 @@ func TestOCPPReconnectIsNotAnUnplug(t *testing.T) {
 				}
 				status(cp, false)
 				tick()
+				// The cable stays out for UnplugGrace.
+				now = now.Add(loadpoint.UnplugGrace)
+				tick()
 				if _, ok := ctrl.GetManualHold("garage", now); ok {
 					t.Fatal("physical unplug did not clear hold")
 				}
