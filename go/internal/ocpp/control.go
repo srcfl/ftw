@@ -286,28 +286,36 @@ func (s *Server) attemptLimit(ctx context.Context, id, alias string, amps float6
 	done := make(chan profileResult, 1)
 
 	// The two versions describe the same intent with different types, so the
-	// request is built per dialect and the outcome normalised back.
-	var err error
-	switch version, _ := s.handler.Version(id); version {
-	case Version201:
-		err = s.sendProfileV201(alias, amps, numberPhases, connectorID, done)
-	default:
-		err = s.sendProfileV16(alias, amps, numberPhases, connectorID, done)
-	}
-	if err != nil {
-		return profileResult{}, fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
-	}
+	// request is built per dialect and the outcome normalised back. The
+	// library's send blocks while its request queue is full, so it runs on
+	// its own goroutine and the wait below still ends on ctx.
+	version, _ := s.handler.Version(id)
+	sent := make(chan error, 1)
+	go func() {
+		if version == Version201 {
+			sent <- s.sendProfileV201(alias, amps, numberPhases, connectorID, done)
+			return
+		}
+		sent <- s.sendProfileV16(alias, amps, numberPhases, connectorID, done)
+	}()
 
 	timeout := time.NewTimer(commandTimeout)
 	defer timeout.Stop()
 
-	select {
-	case r := <-done:
-		return r, nil
-	case <-ctx.Done():
-		return profileResult{}, fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, ctx.Err())
-	case <-timeout.C:
-		return profileResult{}, fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
+	for {
+		select {
+		case err := <-sent:
+			if err != nil {
+				return profileResult{}, fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
+			}
+			sent = nil
+		case r := <-done:
+			return r, nil
+		case <-ctx.Done():
+			return profileResult{}, fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, ctx.Err())
+		case <-timeout.C:
+			return profileResult{}, fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
+		}
 	}
 }
 
