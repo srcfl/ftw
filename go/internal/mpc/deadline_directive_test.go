@@ -171,3 +171,22 @@ func TestGoalReserveHoldsToThePlansLimits(t *testing.T) {
 		}
 	}
 }
+
+// srcfl/ftw#1861: Charge now at full power on a loadpoint pinned to 3p with
+// a 3,800 W maximum runs at 4,140 W, 6 A on each phase. The reserve holds
+// what Core orders, not the configured maximum.
+func TestManualReserveHoldsTheLowestThreePhaseLevel(t *testing.T) {
+	now := time.Now()
+	cfg := loadpoint.Config{ID: "a", MinChargeW: 3800, MaxChargeW: 3800, AllowedStepsW: []float64{0, 3800}, PhaseMode: "3p"}
+	site := loadpoint.SiteFuse{MaxAmps: 20, Voltage: 230, PhaseCnt: 3}
+	for _, holdW := range []float64{3800, 4140} {
+		st := deadlineGoalState(now, "a")
+		st.MinChargeW, st.MaxChargeW, st.AllowedStepsW = cfg.MinChargeW, cfg.MaxChargeW, cfg.AllowedStepsW
+		st.ManualActive, st.ManualChargeW = true, holdW
+		svc := &Service{LoadpointStates: func() []loadpoint.State { return []loadpoint.State{st} },
+			PlanningLimits: func(st loadpoint.State) (float64, float64, []float64) { return loadpoint.PlanningLimits(st, cfg, site) }}
+		if d, ok := svc.SlotDirectiveAt(now); !ok || d.LoadpointMaxPowerW["a"] != 4140 {
+			t.Errorf("Charge now %.0f W: reserve %+v ok=%v, want 4140 W", holdW, d, ok)
+		}
+	}
+}

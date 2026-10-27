@@ -32,10 +32,14 @@ func (s *Service) withDeadlineReserve(now time.Time, d SlotDirective, accepted b
 		if st.ManualActive && st.PluggedIn {
 			// Manual intent has already passed the charger's own clamps.
 			// Reserve its ceiling, including an explicit Stop, without
-			// turning it into a saved scheduled goal.
+			// turning it into a saved scheduled goal. Full power below the
+			// least order its phases run is that order (srcfl/ftw#1861).
 			peak, ok = 0, true
 			if finite(st.ManualChargeW) && st.ManualChargeW > 0 && finite(st.MaxChargeW) && st.MaxChargeW > 0 {
 				peak = min(st.ManualChargeW, st.MaxChargeW)
+				if peak == st.MaxChargeW && finite(minW) {
+					peak = max(peak, minW)
+				}
 			}
 			need = peak * d.SlotEnd.Sub(now).Hours()
 		}

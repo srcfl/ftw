@@ -90,6 +90,14 @@ test('pause status waits for the charger before claiming it stopped', () => {
 });
 
 
+test('a hold below 6 A a phase says it gets no order', () => {
+  const words = describeManual({ ...lp, manual: { ...lp.manual, state: 'limited', limit_reason: 'below_phase_minimum', commanded_a: 0 } });
+  assert.match(words, /Not charging/);
+  assert.match(words, /6 A on each phase/);
+  assert.doesNotMatch(words, /Site power limits/);
+});
+
+
 test('a charger limit does not blame the main fuse', () => {
   const words = describeManual({ ...lp, manual: { ...lp.manual, state: 'limited', limit_reason: 'charger_limit', commanded_a: 10 } });
   assert.match(words, /The charger limits this request to 10 A/);

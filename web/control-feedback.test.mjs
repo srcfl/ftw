@@ -160,3 +160,11 @@ test('limited positive EV offer does not explain prolonged zero delivery', () =>
  assert.match(hour.text,/this hour’s grid import/);
  assert.doesNotMatch(hour.text,/fuse/);
 });
+
+test('no order below 6 A a phase says why the car gets nothing', () => {
+ const below=controlStatus(row({kind:'ev',status:'limited',reason:'below_phase_minimum',severity:'warning',sent_w:0,actual_w:0}));
+ assert.equal(below.title,'Below 6 A a phase');
+ assert.match(below.text,/6 A on each phase/);
+ assert.match(below.next,/phase mode/);
+ assert.doesNotMatch(below.text,/cannot describe/);
+});

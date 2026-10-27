@@ -14,7 +14,7 @@ func TestManualSelectionIsAPowerCeiling(t *testing.T) {
 		{1000, 11000, 0}, {0, 11000, 0}, {math.NaN(), 11000, 0},
 	} {
 		cfg.MaxChargeW = tc.max
-		got := clampManualPower(cfg, ManualHold{PowerW: tc.request, PhaseMode: "3p"}, SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3})
+		got, _ := clampManualPower(cfg, ManualHold{PowerW: tc.request, PhaseMode: "3p"}, SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3})
 		if got != tc.want {
 			t.Errorf("request %v max %v: got %v want %v", tc.request, tc.max, got, tc.want)
 		}

@@ -66,7 +66,7 @@ const REASON_TITLES = {
   core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
   import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
-  one_phase: 'Charging on one phase',
+  one_phase: 'Charging on one phase', below_phase_minimum: 'Below 6 A a phase',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
   response_unknown: 'No power reading', observe_only: 'Monitoring only', disabled: 'Disabled', device_control: 'Own control',
@@ -98,6 +98,7 @@ function sentence(row) {
     case 'import_limit': return `FTW lowered the rate to ${target(row)} to keep this hour’s grid import within its limit.`;
     case 'fuse_cooldown': return 'FTW waits a moment after a site power limit before it raises the rate.';
     case 'charger_limit': return 'The charger limit in FTW’s settings caps the rate.';
+    case 'below_phase_minimum': return 'Not charging: the request is below 6 A on each phase, and no charger runs lower.';
     case 'device_limit': return `The charger’s own limit is ${amps(row.device_limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
     case 'offered_current_lower': return `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
     case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
@@ -136,6 +137,7 @@ function nextStep(row) {
       return `Check the ${name}’s connection.`;
     case 'site_meter_stale': case 'site_phase_currents_stale': return 'Check the grid meter’s connection.';
     case 'device_limit': return 'Raise the limit in the charger’s app if you want faster charging.';
+    case 'below_phase_minimum': return 'Ask for 6 A or more, or set the charger’s phase mode to auto if it can switch to one phase.';
     case 'offered_current_lower': return 'Check the charger’s load balancing and limits.';
     case 'observe_only': return 'Turn on control in the device settings if you want FTW to steer it.';
     default: return '';

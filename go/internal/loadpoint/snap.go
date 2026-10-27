@@ -4,19 +4,20 @@ import "math"
 
 // SnapChargeW picks the nearest feasible step. want <= 0 is off, not
 // the minimum step. Nearest, not floor: float error just under a step
-// must still hit that step.
+// must still hit that step. A maximum below the minimum cannot be met:
+// the minimum is the lowest level the charger can run, so it runs there.
 func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	if math.IsNaN(want) || math.IsInf(want, 0) || want <= 0 {
 		return 0
+	}
+	if max > 0 && max < min {
+		max = min
 	}
 	if want < min {
 		want = min
 	}
 	if max > 0 && want > max {
 		want = max
-	}
-	if max > 0 && max < min {
-		return 0
 	}
 	if len(steps) == 0 {
 		return want

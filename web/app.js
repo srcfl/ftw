@@ -2894,6 +2894,7 @@
           (reason || " Check the car's own charge limit or schedule, then the charger's app.");
       case "limited":
         if (m.limit_reason === "charger_limit") return "The charger limits this request to " + cmdA + " (" + reqA + " requested).";
+        if (m.limit_reason === "below_phase_minimum") return "Not charging: " + reqA + " is below 6 A on each phase, and no charger runs lower. Ask for 6 A or more.";
         if (m.limit_reason === "fuse_cooldown") {
           return "Paused by site power limits — " + reqA + " requested; charging resumes on its own." + sinceP;
         }
@@ -3571,6 +3572,9 @@
 
     var minA = Math.max(1, Math.round(wToA((lp && lp.min_charge_w) || 0)) || 6);
     var topW = evChargeNowTopW(lp);
+    // No charger runs below 6 A a phase: Core orders a top below that at
+    // 6 A (srcfl/ftw#1861).
+    if (topW > 0 && topW < aToW(6)) { topW = aToW(6); }
     var maxA = Math.round(wToA(topW)) || 16;
     if (maxA <= minA) { maxA = minA + 1; }
     // orderW is the hold a slider position sends. The top sends the top step
@@ -3578,6 +3582,8 @@
     // watts to the step below (10,400 W at 3 × 230 V reads 15 A, and
     // 15 A = 10,350 W orders 9,700 W).
     function orderW(a) { return a >= maxA && topW > 0 ? topW : aToW(a); }
+    // orderA is the current that order names: the top is the top step's.
+    function orderA(a) { return Math.round(wToA(orderW(a))); }
 
     var active = !!(lp && lp.manual_active);
     var curA = active ? Math.round(wToA((lp && lp.manual_charge_w) || 0)) : maxA;
@@ -3631,7 +3637,7 @@
     readout.style.color = "var(--fg)";
     function renderReadout() {
       var a = parseInt(slider.value, 10) || minA;
-      readout.textContent = a + " A · " + (orderW(a) / 1000).toFixed(1) + " kW";
+      readout.textContent = orderA(a) + " A · " + (orderW(a) / 1000).toFixed(1) + " kW";
     }
     renderReadout();
     var currentEditingUntil = 0;
@@ -3651,7 +3657,7 @@
     status.style.minHeight = "1em";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
-    var idleText = "Starts at up to " + maxA + " A · " + (orderW(maxA) / 1000).toFixed(1) + " kW. Ignores the goal and solar rule until you return to the plan or unplug.";
+    var idleText = "Starts at up to " + orderA(maxA) + " A · " + (orderW(maxA) / 1000).toFixed(1) + " kW. Ignores the goal and solar rule until you return to the plan or unplug.";
     status.textContent = active ? "Changes apply when you release the slider." : idleText;
     box.appendChild(status);
 
@@ -3756,7 +3762,7 @@
       startBtn.disabled = true;
       var a = parseInt(slider.value, 10) || minA;
       pauseBtn.disabled = true;
-      status.textContent = pause ? "Sending pause request…" : "Asking FTW for " + a + " A…";
+      status.textContent = pause ? "Sending pause request…" : "Asking FTW for " + orderA(a) + " A…";
       // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0)
       // with no SoC release — see the note above the slider.
       evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
@@ -3770,7 +3776,7 @@
       }).then(failOn).then(function () {
         busy = false;
         slider.disabled = false;
-        status.textContent = pause ? "Pause requested. Waiting for the charger to stop…" : "FTW received " + a + " A. Waiting for the charger…";
+        status.textContent = pause ? "Pause requested. Waiting for the charger to stop…" : "FTW received " + orderA(a) + " A. Waiting for the charger…";
         holdLineUntil = Date.now() + 6000;
         refreshEvModalAfterWrite(); // read the hold and charger response without rebuilding focused inputs
       }).catch(function (e) {

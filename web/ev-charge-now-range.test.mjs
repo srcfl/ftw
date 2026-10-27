@@ -121,3 +121,17 @@ test('a hold at the top step reads as the top', () => {
   assert.equal(ui.slider.value, '15');
   assert.equal(ui.readout.textContent, '15 A · 10.4 kW');
 });
+
+// srcfl/ftw#1861: a three-phase loadpoint with a maximum of 3,800 W, below
+// 6 A on each phase. Core orders 4,140 W, the lowest three-phase level; the
+// slider read "7 A · 3.8 kW".
+test('a top below 6 A a phase reads and orders 6 A, as Core does', () => {
+  const ui = build({
+    id: 'rav4', phases: 3, voltage_v: 230, plugged_in: true,
+    min_charge_w: 3800, max_charge_w: 3800, allowed_steps_w: [0, 3800],
+  });
+  assert.equal(ui.readout.textContent, '6 A · 4.1 kW');
+  assert.match(ui.status.textContent, /^Starts at up to 6 A · 4\.1 kW\./);
+  ui.start.fire('click');
+  assert.deepEqual(ui.sent, [{ power_w: 4140, hold_s: 0, phase_mode: '3p' }]);
+});

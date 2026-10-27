@@ -23,6 +23,7 @@ func TestPositiveEVClampDoesNotHideNoPowerResponse(t *testing.T) {
 		{"stale charger", "fuse_limit", 6900, 0, false, 3 * time.Minute, "telemetry_stale"},
 		{"stale site", "site_meter_stale", 6900, 0, true, 3 * time.Minute, "site_meter_stale"},
 		{"cooldown", "fuse_cooldown", 6900, 0, true, 3 * time.Minute, "fuse_cooldown"},
+		{"below the phase minimum", "below_phase_minimum", 0, 0, true, 3 * time.Minute, "below_phase_minimum"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := ControlFeedback{Kind: "ev", RequestedA: watts(15), OfferedA: watts(10), SentW: watts(tc.sent), ActualW: watts(tc.actual), ObservedAtMs: now.UnixMilli(), DeviceReason: "limited by dynamic charger current"}
@@ -34,6 +35,9 @@ func TestPositiveEVClampDoesNotHideNoPowerResponse(t *testing.T) {
 			}
 			if tc.want == "no_power_response" && f.Status != "not_following" {
 				t.Fatalf("zero power must be visible: %+v", f)
+			}
+			if tc.want == "below_phase_minimum" && (f.Status != "limited" || f.Severity != "warning") {
+				t.Fatalf("no valid order must ask for a look: %+v", f)
 			}
 		})
 	}

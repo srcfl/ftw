@@ -363,7 +363,7 @@ func setControlStatus(f *ControlFeedback) {
 		status = "limited"
 	case "import_limit":
 		status = "limited"
-	case "device_limit", "offered_current_lower":
+	case "device_limit", "offered_current_lower", "below_phase_minimum":
 		status, severity = "limited", "warning"
 	case "setpoint_changed", "power_below_target", "power_above_target", "power_wrong_direction",
 		"no_power_response", "power_while_idle":
@@ -469,7 +469,7 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	// A limit explains a lower order, not a draw that differs from it. A
 	// charger whose fresh readings have disagreed with the order past its
 	// response time is judged below, as under any other order.
-	limit := coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "import_limit" || coreReason == "charger_limit"
+	limit := coreReason == "site_meter_stale" || coreReason == "site_phase_currents_stale" || coreReason == "fuse_cooldown" || coreReason == "fuse_limit" || coreReason == "import_limit" || coreReason == "charger_limit" || coreReason == "below_phase_minimum"
 	if limit && !(f.Kind == "ev" && evMismatchObserved) {
 		set("limited", coreReason, "warning")
 		return

@@ -83,6 +83,11 @@ func TestManualStatusFrom(t *testing.T) {
 			now: t0.Add(50 * time.Second), wantState: ManualLimited, wantCmdA: 0, wantLimit: "fuse_cooldown",
 		},
 		{
+			name: "a hold below 6 A on each phase gets no order",
+			st:   ordered(0, "below_phase_minimum", t0.Add(2*time.Second)), ch: easee(0, false, "", false),
+			now: t0.Add(10 * time.Second), wantState: ManualLimited, wantCmdA: 0, wantLimit: "below_phase_minimum",
+		},
+		{
 			name: "a charger without a limit reading is only ever sent or charging",
 			st:   ordered(11040, "manual_hold", t0.Add(2*time.Second)), ch: ChargerReading{Known: true},
 			now: t0.Add(time.Minute), wantState: ManualSent, wantCmdA: 16,

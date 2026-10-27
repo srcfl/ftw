@@ -11,10 +11,14 @@ import (
 // charger's explicit steps keep those at or above 6 A on its phases; one-
 // phase levels in a shared table would let the plan spread a night at 3 kW
 // that only one phase can deliver. Other explicit steps keep their meaning.
+// A three-phase charger whose maximum or table stops below 6 A on each
+// phase gets that level alone, as phaseLimits orders it.
 func PlanningSteps(cfg Config, site SiteFuse) []float64 {
 	phases := site.Phases()
 	if !threePhaseCapable(cfg, site) {
 		phases = 1
+	} else {
+		cfg = phaseLimits(cfg, "3p", site)
 	}
 	voltage := site.Voltage
 	if voltage <= 0 {
@@ -33,11 +37,13 @@ func PlanningSteps(cfg Config, site SiteFuse) []float64 {
 		}
 		return steps
 	}
-	minimum := math.Max(6, math.Ceil(cfg.MinChargeW/step))
-	maximum := math.Floor(cfg.MaxChargeW / step)
+	minimum := math.Max(6, math.Ceil(cfg.MinChargeW/step-1e-9))
+	maximum := math.Floor(cfg.MaxChargeW/step + 1e-9)
 	if site.MaxAmps > 0 {
 		maximum = math.Min(maximum, math.Floor(site.MaxAmps))
 	}
+	// A minimum and maximum between two whole amps leave the highest.
+	minimum = math.Min(minimum, math.Max(maximum, 6))
 	steps := []float64{0}
 	// IEC home charging is bounded here even if stored configuration is bad.
 	if !finite(minimum) || !finite(maximum) || maximum > 1000 {
@@ -57,6 +63,14 @@ func PlanningSteps(cfg Config, site SiteFuse) []float64 {
 // minimum allow. The charger's own minimum would leave the planner no level.
 func PlanningLimits(st State, cfg Config, site SiteFuse) (minW, maxW float64, steps []float64) {
 	planning := PlanningSteps(cfg, site)
+	// The session's range holds the levels the charger can run: a maximum
+	// below the lowest is raised to it, a minimum above the highest lowered.
+	if levels := slices.DeleteFunc(slices.Clone(planning), func(w float64) bool { return w <= 0 }); len(levels) > 0 {
+		if lowest := slices.Min(levels); st.MaxChargeW > 0 && st.MaxChargeW < lowest {
+			st.MaxChargeW = lowest
+		}
+		st.MinChargeW = math.Min(st.MinChargeW, slices.Max(levels))
+	}
 	if st.CarPhases == 1 && threePhaseCapable(cfg, site) {
 		topW := OnePhaseCarMaxW(cfg, site)
 		levels := []float64{0}
@@ -101,6 +115,9 @@ func ThreePhaseCapable(cfg Config, site SiteFuse) bool { return threePhaseCapabl
 func threePhaseCapable(cfg Config, site SiteFuse) bool {
 	if site.Phases() != 3 || cfg.PhaseMode == "1p" {
 		return false
+	}
+	if cfg.PhaseMode == "3p" {
+		return true // Pinned: it runs three phases, at 6 A on each or more.
 	}
 	voltage := site.Voltage
 	if !finite(voltage) || voltage <= 0 {

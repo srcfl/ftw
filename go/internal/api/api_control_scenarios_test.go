@@ -273,6 +273,7 @@ func TestControlStatusAnswersEveryReason(t *testing.T) {
 		"battery_nearly_full":  {"limited", "info"},
 		"fuse_limit":           {"limited", "info"},
 		"device_limit":         {"limited", "warning"},
+		"below_phase_minimum":  {"limited", "warning"},
 		"power_below_target":   {"not_following", "warning"},
 		"setpoint_changed":     {"not_following", "warning"},
 		"device_fault":         {"not_following", "alarm"},

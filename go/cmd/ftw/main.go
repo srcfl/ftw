@@ -424,6 +424,9 @@ func main() {
 	for _, w := range cfg.LoadWarnings {
 		slog.Error(w)
 	}
+	for _, w := range cfg.LoadpointWarnings {
+		slog.Warn(w)
+	}
 	for _, notice := range cfg.Retired {
 		slog.Warn(notice)
 	}

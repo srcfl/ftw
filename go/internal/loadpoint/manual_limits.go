@@ -1,27 +1,46 @@
 package loadpoint
 
-import "math"
+import (
+	"math"
+	"slices"
+)
 
 // A manual selection is a ceiling. Never round it up to a larger step or
-// let it bypass the configured charger's rating.
-func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) float64 {
-	minimum := manualMinChargeW(cfg, hold, site)
-	w := floorChargeW(hold.PowerW, minimum, cfg.MaxChargeW, cfg.AllowedStepsW)
+// let it bypass the configured charger's rating. The app's full power is
+// the configured maximum: on phases whose minimum is above it, full power
+// is that minimum. The reason names what held the order below the hold:
+// below_phase_minimum when the hold is under the lowest level its phases
+// can run, charger_limit for any other limit.
+func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) (float64, string) {
+	mode := holdPhaseMode(hold, cfg, site)
+	limits := phaseLimits(cfg, mode, site)
+	ceiling := hold.PowerW
+	if cfg.MaxChargeW > 0 && ceiling >= cfg.MaxChargeW {
+		ceiling = math.Max(ceiling, limits.MaxChargeW)
+	}
+	w := floorChargeW(ceiling, limits.MinChargeW, limits.MaxChargeW, limits.AllowedStepsW)
 	amps := hold.MaxAmpsPerPhase
 	if site.MaxAmps > 0 && (!finite(amps) || amps <= 0 || amps > site.MaxAmps) {
 		amps = site.MaxAmps
 	}
-	if amps <= 0 {
-		return w
+	if amps > 0 {
+		w = manualCurrentCeiling(w, amps, mode, cfg, hold, site)
+		w = floorChargeW(w, limits.MinChargeW, limits.MaxChargeW, limits.AllowedStepsW)
 	}
-	mode := hold.PhaseMode
-	if mode == "" {
-		mode = cfg.PhaseMode
+	switch {
+	case w >= hold.PowerW:
+		return w, ""
+	case w == 0 && ceiling < limits.MinChargeW:
+		return 0, "below_phase_minimum"
 	}
+	return w, "charger_limit"
+}
+
+// manualCurrentCeiling is w under the hold's current ceiling, as the
+// command's own check will apply it.
+func manualCurrentCeiling(w, amps float64, mode string, cfg Config, hold ManualHold, site SiteFuse) float64 {
 	if site.Phases() == 1 {
 		mode = "1p"
-	} else if mode == "" && cfg.SurplusOnly {
-		mode = "auto"
 	}
 	voltage := site.Voltage
 	if voltage <= 0 {
@@ -36,18 +55,26 @@ func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) float64 {
 	// Apply the same final ceiling until that phase choice is stable.
 	for applyCurrentCeiling(cmd) {
 	}
-	return floorChargeW(cmd["power_w"].(float64), minimum, cfg.MaxChargeW, cfg.AllowedStepsW)
+	return cmd["power_w"].(float64)
 }
 
-func manualMinChargeW(cfg Config, hold ManualHold, site SiteFuse) float64 {
-	mode := hold.PhaseMode
-	if mode == "" {
-		mode = cfg.PhaseMode
+// phaseLimits holds cfg to the orders a command on mode's phases can run:
+// at least 6 A on each phase. A maximum below that cannot be met on those
+// phases, so the order runs at the minimum, the lowest level the charger
+// has there. So does a step table with no level in reach. Startup and save
+// warn about such a loadpoint (srcfl/ftw#1861).
+func phaseLimits(cfg Config, mode string, site SiteFuse) Config {
+	cfg.MinChargeW = phaseMinChargeW(cfg, mode, site)
+	if cfg.MaxChargeW > 0 && cfg.MaxChargeW < cfg.MinChargeW {
+		cfg.MaxChargeW = cfg.MinChargeW
 	}
-	if mode == "1p" || mode == "auto" {
-		return phaseMinChargeW(cfg, mode, site)
+	inReach := func(w float64) bool {
+		return w > 0 && w >= cfg.MinChargeW && (cfg.MaxChargeW <= 0 || w <= cfg.MaxChargeW)
 	}
-	return cfg.MinChargeW
+	if cfg.MinChargeW > 0 && len(cfg.AllowedStepsW) > 0 && !slices.ContainsFunc(cfg.AllowedStepsW, inReach) {
+		cfg.AllowedStepsW = []float64{0, cfg.MinChargeW}
+	}
+	return cfg
 }
 
 // phaseMinChargeW is the smallest legal offer on the phases a command names:

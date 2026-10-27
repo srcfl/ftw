@@ -192,6 +192,29 @@ func homeBox(use fieldUse, tm fieldTiming) fieldCase {
 		lp: func(c *loadpoint.Config) { c.VehicleCapacityWh = 76000 }}
 }
 
+// issue1861 is srcfl/ftw#1861, v0.155.1-beta.1: a three-phase charger
+// pinned to 3p with min = max = 3,800 W and steps [0, 3800], below three
+// phases' 6 A each. Every planned slot went out as 0 W. The report has no
+// fuse; it runs at 20 A, as the help report's site. steps own is the
+// report's table, one level only one phase can run; 3p is three-phase
+// levels, all above the maximum; none is no table. Unset, the same
+// numbers read as a one-phase charger (srcfl/ftw#1799), and it is one here,
+// without a table: 3,800 W is above its 16 A on one phase.
+func issue1861(use fieldUse, tm fieldTiming, mode, steps string, carPhases int) fieldCase {
+	c := fieldCase{report: "issue1861", fuseA: 20, mode: mode, steps: steps, timing: tm, carPhases: carPhases, use: use,
+		house: houseBalanced, houseName: "balanced",
+		lp: func(c *loadpoint.Config) {
+			if steps == "own" {
+				c.AllowedStepsW = []float64{0, 3800}
+			}
+			c.MinChargeW, c.MaxChargeW = 3800, 3800
+		}}
+	if mode == "" {
+		c.charger = "1p32A"
+	}
+	return c
+}
+
 // fieldCases crosses the axes. The field reports run with every charger
 // timing. The sweep crosses fuse, phase mode, step table, car and house for
 // planned charging and Charge now with an Easee Cloud charger; the timing
@@ -248,6 +271,24 @@ func fieldCases() []fieldCase {
 	}
 	for _, c := range probeCases() {
 		add(c)
+	}
+	for _, steps := range []string{"own", "3p", "none"} {
+		for _, use := range []fieldUse{usePlanned, useNow} {
+			for _, tm := range []fieldTiming{timingFast, timingEasee} {
+				for _, car := range []int{3, 1} {
+					add(issue1861(use, tm, "3p", steps, car))
+				}
+			}
+			if steps == "none" {
+				add(issue1861(use, timingEasee, "", steps, 3))
+			}
+		}
+	}
+	for _, car := range []int{3, 1} {
+		add(issue1861(useNoPlan, timingEasee, "3p", "own", car))
+	}
+	for _, steps := range []string{"own", "3p", "none"} {
+		add(issue1861(useSurplus, timingEasee, "3p", steps, 3))
 	}
 	return out
 }
@@ -685,14 +726,16 @@ func (f *fieldRun) check(s *simSite) {
 }
 
 // fieldRoomW is the most the car can draw under Core's limit with the
-// house's steady load: what a deadline goal can be held to.
+// house's steady load and the loadpoint's maximum, which still runs at 6 A
+// a phase: what a deadline goal can be held to.
 func fieldRoomW(c fieldCase, e *sitesim.EVSE, car *sitesim.Car) float64 {
 	phases := min(e.Phases, car.Phases)
 	worst := 0.0
 	for i := range phases {
 		worst = math.Max(worst, c.house[i])
 	}
-	roomA := math.Min(c.fuseA-evPhaseMarginA-worst, e.MaxA)
+	lpA := math.Max(e.MinA, fieldLoadpoint(c).MaxChargeW/(230*float64(e.Phases)))
+	roomA := min(c.fuseA-evPhaseMarginA-worst, e.MaxA, lpA)
 	if roomA < e.MinA {
 		return 0
 	}

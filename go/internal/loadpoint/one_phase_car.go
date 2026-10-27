@@ -242,6 +242,7 @@ func (m *Manager) observeSteadyPhase(s *carPhases, amps [3]float64, drawA float6
 
 // chargerPhaseMaxA is the most current a charger offers on each phase of a
 // three-phase order: its maximum over three phases, within the site fuse.
+// A maximum below 6 A a phase still runs at 6 A (srcfl/ftw#1861).
 func chargerPhaseMaxA(cfg Config, site SiteFuse) float64 {
 	voltage := site.Voltage
 	if !finite(voltage) || voltage <= 0 {
@@ -249,7 +250,7 @@ func chargerPhaseMaxA(cfg Config, site SiteFuse) float64 {
 	}
 	maxA := 32.0
 	if finite(cfg.MaxChargeW) && cfg.MaxChargeW > 0 {
-		maxA = math.Floor(cfg.MaxChargeW/(3*voltage) + 1e-9)
+		maxA = math.Max(6, math.Floor(cfg.MaxChargeW/(3*voltage)+1e-9))
 	}
 	if finite(site.MaxAmps) && site.MaxAmps > 0 {
 		maxA = math.Min(maxA, math.Floor(site.MaxAmps))
