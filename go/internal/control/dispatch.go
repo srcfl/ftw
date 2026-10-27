@@ -1451,7 +1451,7 @@ func ComputeDispatch(
 	if siteMeter != nil {
 		rawGridW = siteMeter.SmoothedW
 	}
-	meterHeld := state.siteMeterHeld(store, siteMeter)
+	meterHeld := state.siteMeterHeld(siteMeter)
 	// Live EV/V2X charger readings override the manual slider on each tick —
 	// hardware truth beats guesses. Positive V2X is a vehicle charging load;
 	// negative V2X is kept separate so the default controller does not
@@ -1771,10 +1771,22 @@ func ComputeDispatch(
 		//     already handled above)
 		//   - planner_cheap / planner_arbitrage when UseEnergyDispatch=false
 
+		// A battery doing what a limit forbids. The deadband exit below
+		// and the held-meter exit both fall through to cut it.
+		batteryBreaksLimit := (noSelfDischarge && anyBatteryDischarging(onlineBats)) ||
+			anyExplicitZeroDischargeViolation(onlineBats) ||
+			anyBlockedBatteryCharging(onlineBats, noSelfCharge)
+
 		// The PI acts on the meter alone. A held sample carries no new
-		// error, so hold the targets and do not integrate it again.
+		// error, so hold the targets and do not integrate it again. When
+		// a battery breaks a limit, skip the PI with no correction; the
+		// clamps, holdTowardZero and the safety pipeline then cut it.
 		if meterHeld {
-			return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
+			if !batteryBreaksLimit {
+				return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
+			}
+			totalCorrection = 0
+			break
 		}
 
 		// Surplus-only EV reserve (legacy/reactive path): when an EV
@@ -1865,10 +1877,7 @@ func ComputeDispatch(
 		// full pipeline ends in the same forceFuseDischarge the
 		// early exit's fuse-saver would have run.
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
-		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
-			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) &&
-			!anyExplicitZeroDischargeViolation(onlineBats) &&
-			!anyBlockedBatteryCharging(onlineBats, noSelfCharge) {
+		if !surplusActive && math.Abs(errW) < state.GridToleranceW && !batteryBreaksLimit {
 			// A small grid error is not a statement that the site is
 			// safe. errW compares one aggregate number against one
 			// aggregate target; two protections bind on numbers this
@@ -4093,16 +4102,14 @@ func fuseSaverEarlyExit(
 // UpdatedAt, and the dispatch gate passes it until the watchdog expires. Acting
 // on it again moves the battery one more held error each tick: a held +2 kW
 // import wound a battery to -10 kW in ten ticks while the site exported 8 kW.
-// Before the first sample is used, a failed latest read also counts as held.
+// A failed read does not count by itself: a poll that emits and then errors
+// still delivers a new sample.
 // The EV fuse limit follows the same rule (ev_fuse_budget.go).
-func (s *State) siteMeterHeld(store *telemetry.Store, meter *telemetry.DerReading) bool {
+func (s *State) siteMeterHeld(meter *telemetry.DerReading) bool {
 	if meter == nil {
 		return false
 	}
 	if !meter.UpdatedAt.After(s.dispatchMeterAt) {
-		return true
-	}
-	if s.dispatchMeterAt.IsZero() && store.DriverHealth(s.SiteMeterDriver).LastReadFailed() {
 		return true
 	}
 	s.dispatchMeterAt = meter.UpdatedAt

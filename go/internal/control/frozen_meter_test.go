@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -102,5 +103,95 @@ func TestHeldMeterOnlyCutsTowardZero(t *testing.T) {
 	store.Update("ferroamp", telemetry.DerMeter, 2000, nil, nil)
 	if got := targetFor(t, ComputeDispatch(store, st, capsMap, 3*25*230), "bat").TargetW; got != 3000 {
 		t.Fatalf("new sample did not release the hold: %.0f W", got)
+	}
+}
+
+func heldMeterState() (*State, map[string]float64) {
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.MinDispatchIntervalS = 0
+	st.SlewEnabled = false
+	st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+	return st, caps(map[string]float64{"bat": 10000})
+}
+
+func reportBattery(store *telemetry.Store, w float64, data json.RawMessage) {
+	soc := 0.5
+	for i := 0; i < 40; i++ {
+		store.Update("bat", telemetry.DerBattery, w, &soc, data)
+	}
+	store.DriverHealthMut("bat").RecordSuccess()
+}
+
+func sentTo(targets []DispatchTarget, driver string) *DispatchTarget {
+	for i := range targets {
+		if targets[i].Driver == driver {
+			return &targets[i]
+		}
+	}
+	return nil
+}
+
+// A held meter must not keep a battery discharging after max_discharge_w
+// becomes an explicit 0. The deadband exit falls through for this; so must
+// the held exit.
+func TestHeldMeterStillSendsExplicitZeroDischarge(t *testing.T) {
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.5}})
+	st, capsMap := heldMeterState()
+	first := targetFor(t, ComputeDispatch(store, st, capsMap, 3*25*230), "bat").TargetW
+	if first >= 0 {
+		t.Fatalf("fresh +2000 W import did not discharge: %.0f W", first)
+	}
+	reportBattery(store, first, nil)
+	st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 10000, MaxDischargeW: 0, MaxDischargeWSet: true}}
+	sent := sentTo(ComputeDispatch(store, st, capsMap, 3*25*230), "bat")
+	if sent == nil || sent.TargetW < 0 {
+		t.Fatalf("held meter left battery discharging at %.0f W under max_discharge_w=0: %+v", first, sent)
+	}
+}
+
+// A held meter must not keep a battery charging after its driver reports
+// charge_capable=false.
+func TestHeldMeterStillStopsBlockedCharge(t *testing.T) {
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.5}})
+	st, capsMap := heldMeterState()
+	first := targetFor(t, ComputeDispatch(store, st, capsMap, 3*25*230), "bat").TargetW
+	if first <= 0 {
+		t.Fatalf("fresh -2000 W export did not charge: %.0f W", first)
+	}
+	reportBattery(store, first, json.RawMessage(`{"charge_capable":false}`))
+	sent := sentTo(ComputeDispatch(store, st, capsMap, 3*25*230), "bat")
+	if sent == nil || sent.TargetW > 0 {
+		t.Fatalf("held meter left battery charging at %.0f W after charge_capable=false: %+v", first, sent)
+	}
+}
+
+// A meter poll that emits and then returns an error leaves the latest read
+// marked failed on every tick, but each tick still brings a new sample.
+// Dispatch must act on it from a fresh start.
+func TestEmitThenErrorMeterIsNotHeld(t *testing.T) {
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.5}})
+	st, capsMap := heldMeterState()
+	acted := false
+	for tick := 0; tick < 10; tick++ {
+		time.Sleep(time.Millisecond) // UpdatedAt is wall-clock time
+		store.Update("ferroamp", telemetry.DerMeter, 2000, nil, nil)
+		store.DriverHealthMut("ferroamp").RecordSuccess()
+		store.DriverHealthMut("ferroamp").RecordError("secondary register timeout")
+		if sent := sentTo(ComputeDispatch(store, st, capsMap, 3*25*230), "bat"); sent != nil && sent.TargetW < 0 {
+			acted = true
+		}
+	}
+	if !acted {
+		t.Fatal("ten new +2000 W meter samples, battery never dispatched")
 	}
 }
