@@ -6496,17 +6496,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1335.8333333333328,
+          "target_w": -1393.3333333333328,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -1335.8333333333328,
+          "target_w": -1393.3333333333328,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -1335.8333333333328,
+          "target_w": -1393.3333333333328,
           "clamped": true
         }
       ],
@@ -6524,7 +6524,7 @@
         "fuse_ev_max_w": 0,
         "fuse_hold_latched": true,
         "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 4007.499999999998,
+        "fuse_hold_max_discharge_w": 4179.999999999998,
         "per_phase_overage_w": 23.000000000000327,
         "effective_import_ceiling_w": 16905,
         "effective_export_ceiling_w": 16905,
@@ -6533,9 +6533,9 @@
       },
       "site_totals": {
         "battery_current_w": -4249,
-        "battery_target_sum_w": -4007.499999999998,
+        "battery_target_sum_w": -4179.999999999998,
         "raw_grid_w": -14716,
-        "projected_grid_w": -14474.499999999998
+        "projected_grid_w": -14646.999999999998
       }
     },
     {
@@ -7900,17 +7900,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 4493.333333333333,
+          "target_w": 4608.333333333333,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": 4493.333333333333,
+          "target_w": 4608.333333333333,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 4493.333333333333,
+          "target_w": 4608.333333333333,
           "clamped": true
         }
       ],
@@ -7927,7 +7927,7 @@
         "fuse_saturated": false,
         "fuse_ev_max_w": 0,
         "fuse_hold_latched": true,
-        "fuse_hold_max_charge_w": 13480,
+        "fuse_hold_max_charge_w": 13825,
         "fuse_hold_max_discharge_w": 0,
         "per_phase_overage_w": 0,
         "effective_import_ceiling_w": 10350,
@@ -7937,9 +7937,9 @@
       },
       "site_totals": {
         "battery_current_w": 853,
-        "battery_target_sum_w": 13480,
+        "battery_target_sum_w": 13825,
         "raw_grid_w": -7899,
-        "projected_grid_w": 4728
+        "projected_grid_w": 5073
       }
     },
     {

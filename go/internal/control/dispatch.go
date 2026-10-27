@@ -3693,20 +3693,11 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		return out
 	}
 
-	// Headroom buffer: shrink targets by `overage + half the configured
-	// safety margin` so post-clamp the grid sits *below* the threshold
-	// instead of riding right at it. Without this, the next dispatch
-	// tick lets the planner re-ramp into the threshold and the system
-	// oscillates at the boundary — the operator's "safety margin"
-	// becomes the active steady-state instead of a buffer below it.
-	//
-	// Half-margin chosen so the post-clamp phase amps still cluster
-	// near the threshold (operator wants the fuse used efficiently)
-	// but with enough buffer to absorb load fluctuations and per-phase
-	// imbalance on the next tick. Operators wanting tighter or looser
-	// buffer just adjust safety_margin_a.
-	buffer := state.fuseSafetyMarginW() * 0.5
-
+	// Cut by the overage only, so the grid lands on the line, not below it.
+	// The prediction from the held targets above keeps the next dispatch
+	// from re-ramping through the line, and the 30 s hold below keeps the
+	// planner at the clamped total. A site that wants headroom sets
+	// safety_margin_a, which lowers the line itself.
 	switch {
 	case importOverage > 0:
 		// Too much import (aggregate or per-phase) → shrink charging.
@@ -3723,7 +3714,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 			// still flip idle batteries to discharge.
 			return out
 		}
-		newTotal := totalCharge - importOverage - buffer
+		newTotal := totalCharge - importOverage
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -3751,7 +3742,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 			// is the lever in that scenario (annotateCurtailment).
 			return out
 		}
-		newTotal := totalDischarge - exportOverage - buffer
+		newTotal := totalDischarge - exportOverage
 		if newTotal < 0 {
 			newTotal = 0
 		}
