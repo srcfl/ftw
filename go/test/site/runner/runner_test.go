@@ -75,6 +75,50 @@ func TestPlanRunsWhatIsDue(t *testing.T) {
 	}
 }
 
+func TestTouchesWatched(t *testing.T) {
+	for _, tc := range []struct {
+		file string
+		want bool
+	}{
+		{"go/cmd/ftw/main.go", true},
+		{"go/internal/control/dispatch.go", true},
+		{"go/internal/loadpoint/loadpoint.go", true},
+		{"go/internal/ocpp/handlers.go", true},
+		{"go/internal/telemetry/store.go", true},
+		{"go/internal/drivers/lua.go", true},
+		{"go/internal/mpc/mpc.go", true},
+		{"go/internal/optimizercontract/contract.go", true},
+		{"go/internal/config/config.go", true},
+		{"go/internal/configreload/apply.go", true},
+		{"go/internal/cars/cars.go", true},
+		{"go/internal/sitepower/sitepower.go", true},
+		{"drivers/sungrow.lua", true},
+		{"drivers/BUNDLED_SOURCE.json", true},
+		{"optimizer/native/bundle/manifest.json", true},
+		{"go/test/site/rig_test.go", true},
+		{"go/test/site/runner/runner.go", true},
+		{"docs/architecture.md", false},
+		{"web/components/theme.css", false},
+		{"go/internal/api/api.go", false},
+		{"go/internal/driverrepo/repo.go", false}, // shares a prefix with drivers/, not a path
+		{"go/internal/configx/x.go", false},       // shares a prefix with config/
+		{"optimizer/native/src/main.rs", false},   // only the bundle ships
+		{"go/cmd/ftwctl/main.go", false},          // shares a prefix with cmd/ftw/
+		{"web/drivers/list.js", false},            // drivers/ only at the root
+		{".changeset/a.md", false},
+	} {
+		if got := touchesWatched([]string{tc.file}); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.file, got, tc.want)
+		}
+	}
+	if touchesWatched(nil) {
+		t.Error("no files: watched")
+	}
+	if !touchesWatched([]string{"README.md", "go/internal/mpc/plan.go"}) {
+		t.Error("one watched file among others: not watched")
+	}
+}
+
 func TestDescribe(t *testing.T) {
 	state, desc := describe([]byte(`[{"name":"s1-25","verdict":"pass"},{"name":"s2-16","verdict":"known"},{"name":"s9-25","verdict":"fail"}]`), 24*time.Minute)
 	if state != "failure" || desc != "1 pass, 1 known, 1 fail of 3 in 24m0s: s9-25" {

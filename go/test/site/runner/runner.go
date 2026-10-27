@@ -15,9 +15,16 @@ const (
 )
 
 // watchedPaths are the parts of the tree whose changes get the short set on
-// a pull request.
+// a pull request: everything on the path from a reading to a command, and
+// the rig itself.
 var watchedPaths = []string{
+	"go/cmd/ftw/", // control tick wiring
 	"go/internal/control/", "go/internal/loadpoint/", "go/internal/ocpp/", "go/internal/telemetry/",
+	"go/internal/drivers/",                               // driver host, command deadlines
+	"go/internal/mpc/", "go/internal/optimizercontract/", // plans
+	"go/internal/config/", "go/internal/configreload/", // limits
+	"go/internal/cars/", "go/internal/sitepower/",
+	"drivers/", "optimizer/native/bundle/", // bundled drivers and solver
 	"go/test/site/",
 }
 
