@@ -127,10 +127,9 @@ func TestSoCMaxReloadTakesEffectOnNextTick(t *testing.T) {
 }
 
 func TestSoCMaxStillAllowsFuseRelief(t *testing.T) {
-	tel, st, capacities := cappedBatterySite(.9, 0)
-	tel.Update("ferroamp", telemetry.DerMeter, 16000, nil, nil)
+	tel, st, capacities := setupFuseSaver(16000, 0, .9, 10000)
+	st.DriverLimits["bat"] = PowerLimits{SoCMax: .9, MaxChargeW: 10000, MaxDischargeW: 10000}
 	st.Mode = ModeIdle
-	st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases = 20, 230, 3
 	got := ComputeDispatch(tel, st, capacities, 13800)
 	if len(got) != 1 || got[0].TargetW >= 0 {
 		t.Fatalf("charge ceiling blocked fuse relief: %+v", got)
