@@ -692,9 +692,16 @@ func (s *Store) SumOnlineV2XW() float64 {
 // while its driver is still reporting. A watchdog-offline meter returns
 // false, so its last value never counts as a new reading.
 func (s *Store) OnlineMeterW(driver string) (w float64, at time.Time, ok bool) {
+	return s.OnlineRawW(driver, DerMeter)
+}
+
+// OnlineRawW returns a driver's latest raw power of one type and when it
+// arrived, while the driver is still reporting. A watchdog-offline driver
+// returns false.
+func (s *Store) OnlineRawW(driver string, t DerType) (w float64, at time.Time, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	r, found := s.readings[key(driver, DerMeter)]
+	r, found := s.readings[key(driver, t)]
 	if !found || math.IsNaN(r.RawW) || math.IsInf(r.RawW, 0) {
 		return 0, time.Time{}, false
 	}
