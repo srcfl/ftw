@@ -47,8 +47,8 @@ type historyDamage struct{ err error }
 func (e *historyDamage) Error() string { return e.err.Error() }
 func (e *historyDamage) Unwrap() error { return e.err }
 
-// openHistory heals a damaged or missing history.db instead of refusing to
-// start: history holds charts and the ledger, never control state. The old
+// openHistory heals a damaged, empty or missing history.db instead of refusing
+// to start: history holds charts and the ledger, never control state. The old
 // files move aside as .corrupt-<ms>, a fresh file binds a new generation and
 // /api/health reports the loss. A readable file with another generation is
 // still refused, because that is a wrong file from a restore.
@@ -63,11 +63,15 @@ func (s *Store) openHistory() error {
 		return err
 	}
 	nowMs := time.Now().UnixMilli()
-	slog.Error("state: "+detail, "path", s.historyPath, "err", err)
+	beta, _ := s.historyConfig("history_duckdb_generation")
+	slog.Error("state: "+detail, "path", s.historyPath, "err", err, "beta_generation", beta)
 	if err := quarantine(s.historyPath, nowMs); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM config WHERE key IN ('history_sqlite_generation','history_sqlite_pending_generation')`); err != nil {
+	// Both heal paths need a bound SQLite generation, so a beta key here
+	// belongs to a finished conversion. Left in place, the fresh file would
+	// be refused as beta history that still needs conversion.
+	if _, err := s.db.Exec(`DELETE FROM config WHERE key IN ('history_sqlite_generation','history_sqlite_pending_generation','history_duckdb_generation')`); err != nil {
 		return err
 	}
 	s.healEvents = append(s.healEvents, HealEvent{Tier: tierHistory, Action: healRebuilt, Detail: detail, AtMs: nowMs})
@@ -123,12 +127,35 @@ func (s *Store) openHistoryOnce() error {
 	ok := false
 	defer func() {
 		if !ok {
+			// RetireRawHistory may have swapped in a new handle.
+			if s.history != nil && s.history != db {
+				s.history.Close()
+			}
 			db.Close()
 			s.history = nil
 		}
 	}()
+	// current is the open history.db handle. After a failed swap it is the
+	// closed old one, whose check fails without reporting damage.
+	current := func() *sql.DB {
+		if s.history != nil {
+			return s.history
+		}
+		return db
+	}
 	damaged := func(err error) error {
-		if restore == "" && historyCorrupt(db, err) {
+		if err != nil && restore == "" && historyCorrupt(current(), err) {
+			return &historyDamage{err}
+		}
+		return err
+	}
+	// Steps that also read state.db or other files must not take their
+	// error code as proof: only a failed check of history.db itself counts.
+	checkedDamage := func(err error) error {
+		if err == nil || restore != "" {
+			return err
+		}
+		if ok, qerr := quickCheck(current()); (qerr == nil && !ok) || sqliteCorrupt(qerr) {
 			return &historyDamage{err}
 		}
 		return err
@@ -161,6 +188,17 @@ func (s *Store) openHistoryOnce() error {
 		ok = true
 		return s.openHistory()
 	}
+	if active != "" && restore == "" && generation == "" {
+		// No marker of any kind means an empty file, such as a 0-byte
+		// history.db after power loss. A wrong file from a restore has one.
+		var markers int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM history_migrations`).Scan(&markers); err != nil {
+			return damaged(err)
+		}
+		if markers == 0 {
+			return &historyDamage{errors.New("history.db has no generation marker")}
+		}
+	}
 	if active != "" && restore == "" && active != generation {
 		return errors.New("state and history generations differ; restore a full backup")
 	}
@@ -185,7 +223,7 @@ func (s *Store) openHistoryOnce() error {
 	}
 	var complete int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM history_migrations WHERE name='sqlite-v1'`).Scan(&complete); err != nil {
-		return err
+		return damaged(err)
 	}
 	if complete == 0 && s.historyMigration == nil {
 		return errors.New("history import is incomplete; start Core to resume")
@@ -198,17 +236,17 @@ func (s *Store) openHistoryOnce() error {
 		return err
 	}
 	if err := s.ensureEnergyLedgerVersion(); err != nil {
-		return err
+		return damaged(err)
 	}
 	if err := os.Chmod(s.historyPath, 0600); err != nil {
 		return err
 	}
 	if RetireRawOnOpen {
 		if err := s.recoverLegacyCharts(context.Background(), generation); err != nil {
-			return err
+			return checkedDamage(err)
 		}
 		if err := s.RetireRawHistory(context.Background()); err != nil {
-			return err
+			return checkedDamage(err)
 		}
 	}
 	// A process stop has no continuous sampling proof, even when it was brief.
@@ -218,10 +256,10 @@ func (s *Store) openHistoryOnce() error {
  INSERT INTO history_source_cursor VALUES('stopped','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
  UPDATE history_partial_cursor SET value=0 WHERE key IN ('last','residual_eligible');
  UPDATE history_site_cursor SET value=0 WHERE key='last'`); err != nil {
-		return err
+		return damaged(err)
 	}
 	if err := s.refreshSourceDayCache(context.Background()); err != nil {
-		return err
+		return damaged(err)
 	}
 	ok = true
 	return nil
@@ -838,7 +876,11 @@ func requireConvertedBeta(path string) error {
 	if err == nil && beta != "" {
 		// An older converter may already have selected SQLite. Check its
 		// summaries before Open can upgrade config or retire raw history.
-		if _, err := os.Stat(historyDatabasePath(path)); err != nil {
+		// A missing, empty or unreadable file has nothing left to retire;
+		// openHistory moves it aside and starts an empty history.
+		if _, err := os.Stat(historyDatabasePath(path)); errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err != nil {
 			return fmt.Errorf("converted beta history is unavailable; preserve the originals and restore a full backup: %w", err)
 		}
 		history, err := sql.Open("sqlite", ReadOnlyDatabaseURI(historyDatabasePath(path)))
@@ -846,13 +888,29 @@ func requireConvertedBeta(path string) error {
 			return err
 		}
 		defer history.Close()
+		var tables int
+		if err := history.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='history_migrations'`).Scan(&tables); err != nil {
+			if sqliteCorrupt(err) {
+				return nil
+			}
+			return fmt.Errorf("check converted chart summaries: %w", err)
+		}
+		if tables == 0 {
+			return nil
+		}
 		var summarized int
 		if err := history.QueryRowContext(ctx, `SELECT COUNT(*) FROM history_migrations WHERE name=?`, convertedChartSummaries).Scan(&summarized); err != nil {
+			if sqliteCorrupt(err) {
+				return nil
+			}
 			return fmt.Errorf("check converted chart summaries: %w", err)
 		}
 		if summarized == 0 {
 			var raw int
 			if err := history.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM ts_samples)`).Scan(&raw); err != nil {
+				if sqliteCorrupt(err) {
+					return nil
+				}
 				return fmt.Errorf("check remaining converted raw history: %w", err)
 			}
 			if raw != 0 {
