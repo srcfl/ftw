@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -199,7 +200,9 @@ func (s *Store) RetireRawHistory(ctx context.Context) error {
 // The files are removed only after every day has been stored. Archive scratch
 // goes with them, and so does a sample day whose hourly summary receipt
 // matches the file. Other sample days stay readable until the background
-// rollup summarizes them. Diagnostics files are left in place.
+// rollup summarizes them. Diagnostics files are left in place. An unreadable
+// bucket file is kept, logged and listed in HistoryBackend; it never stops
+// boot.
 func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	if s == nil || s.history == nil || strings.TrimSpace(cold) == "" {
 		return nil
@@ -213,19 +216,28 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 		return err
 	}
 	var imported int
+	unreadable := map[string]bool{}
+	skip := func(path string, err error) {
+		slog.Warn("history bucket file unreadable; kept", "path", path, "err", err)
+		unreadable[path] = true
+	}
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if strings.Contains(path, ".legacy-buckets.") {
 			original := strings.Replace(path, ".legacy-buckets.parquet", ".buckets.parquet", 1)
-			if _, statErr := os.Stat(original); statErr == nil {
+			if _, statErr := os.Stat(original); statErr == nil && !unreadable[original] {
 				continue
 			}
 		}
 		digest, err := historyFileHashContext(ctx, path)
 		if err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			skip(path, err)
+			continue
 		}
 		receipt := "plain-archive:" + digest
 		hours := map[string]*namedHour{}
@@ -240,7 +252,11 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 			h.sources = append(h.sources, b.BucketSummary)
 			return nil
 		}); err != nil {
-			return fmt.Errorf("read %s: %w", filepath.Base(path), err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			skip(path, err)
+			continue
 		}
 		if err := s.writeHourBuckets(ctx, hours, receipt); err != nil {
 			return err
@@ -251,6 +267,15 @@ func (s *Store) AbsorbColdHistory(ctx context.Context, cold string) error {
 	if err != nil {
 		return err
 	}
+	var kept []string
+	for path := range unreadable {
+		keep[path] = true
+		kept = append(kept, filepath.Base(filepath.Dir(filepath.Dir(path)))+"/"+filepath.Base(filepath.Dir(path))+"/"+filepath.Base(path))
+	}
+	slices.Sort(kept)
+	s.maintenanceStatusMu.Lock()
+	s.coldUnreadable = kept
+	s.maintenanceStatusMu.Unlock()
 	if err := removeColdHistory(cold, keep); err != nil {
 		return err
 	}

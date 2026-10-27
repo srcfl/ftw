@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -367,6 +368,11 @@ func historyFloatBits(value float64) uint64 {
 func (s *Store) HistoryBackend() map[string]any {
 	info := map[string]any{"engine": "sqlite", "archive": "sqlite", "file": filepath.Base(s.historyPath), "writer": s.HistoryWriterStatus(), "migration": s.HistoryMigrationStatus(), "series_hour": s.SeriesHourBackfillStatus()}
 	info["maintenance"] = s.HistoryMaintenanceStatus()
+	s.maintenanceStatusMu.Lock()
+	if len(s.coldUnreadable) > 0 {
+		info["unreadable_cold_files"] = slices.Clone(s.coldUnreadable)
+	}
+	s.maintenanceStatusMu.Unlock()
 	if s.aggregateHistory.Load() {
 		info["policy"] = map[string]any{"id": "sqlite-v1", "recent_resolution_ms": HistoryResolutionMS, "recent_retention_hours": int(plainTenSecondKeep.Hours()), "archive_resolution_ms": ArchiveResolutionMS, "archive_minute_days": int(plainMinuteKeep.Hours() / 24), "older_resolution_ms": HistoryHourResolutionMS, "detailed_retention_days": int(plainHourKeep.Hours() / 24)}
 	}

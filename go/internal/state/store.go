@@ -87,6 +87,7 @@ type Store struct {
 
 	maintenanceStatusMu sync.Mutex
 	maintenanceStatus   HistoryMaintenanceStatus
+	coldUnreadable      []string // guarded by maintenanceStatusMu
 	// offlineBackup is set by OpenBackupSource. Live Core backups yield
 	// between copy batches so goal and control writes stay within latency
 	// limits; the offline helper must not inherit that 100 ms live pause.
