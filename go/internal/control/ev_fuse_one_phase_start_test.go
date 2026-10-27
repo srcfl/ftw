@@ -61,3 +61,55 @@ func TestIdleOnePhasePoolStartsOnSixAmpsOfRoom(t *testing.T) {
 		})
 	}
 }
+
+// The start point is exact: on a 16 A fuse an idle 1p or auto pool starts at
+// 1,380 W, its least order, once the worst phase leaves 6 A of room under the
+// working line, and waits while it leaves 5.7 A. A hidden margin on the
+// one-phase minimum would move the start and fail here. The cases are set
+// from the working line, so they follow it if the line moves.
+func TestIdleOnePhasePoolStartBoundary(t *testing.T) {
+	steps := []float64{0, 1380, 1610, 1840, 2070, 2300, 2530, 2760, 2990, 3220, 3450, 3680,
+		4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350, 11040}
+	const fuseA = 16.0
+	lineA := fuseA - evPhaseMarginA // the EV working line on each phase
+	site := func(t *testing.T, houseA float64, mode string) *phaseSite {
+		cfg := loadpoint.Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11040,
+			PhaseMode: "auto", AllowedStepsW: steps}
+		s := newPhaseSite(t, cfg, houseA)
+		s.state.SiteFuseAmps = fuseA
+		s.ctrl.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: fuseA, Voltage: 230, PhaseCnt: 3})
+		s.ctrl.SetFuseEVMax(func() (float64, bool) {
+			return EVFuseBudget(s.store, s.state, s.mgr.States(), s.ctrl.FuseConfigs(), fuseA*230*3)
+		})
+		s.ctrl.SetManualHold(cfg.ID, loadpoint.ManualHold{PowerW: 3680, PhaseMode: mode, Persistent: true})
+		return s
+	}
+	for _, mode := range []string{"1p", "auto"} {
+		t.Run(mode+" 6.0 A of room starts", func(t *testing.T) {
+			s := site(t, lineA-6, mode)
+			start := s.now
+			for s.now.Sub(start) < evRestartDwell+5*time.Second && s.offerW == 0 {
+				s.tick()
+			}
+			if s.offerW != 1380 || !s.offer1p {
+				t.Fatalf("worst phase %.1f A: offer %.0f W, one phase %v; want 1380 W on one phase",
+					lineA-6, s.offerW, s.offer1p)
+			}
+			for i := 0; i < 60; i++ {
+				s.tick()
+				if s.worstA() > fuseA {
+					t.Fatalf("tick %d: %.2f A on a %.0f A fuse", i, s.worstA(), fuseA)
+				}
+			}
+		})
+		t.Run(mode+" 5.7 A of room waits", func(t *testing.T) {
+			s := site(t, lineA-5.7, mode)
+			for i := 0; i < 40; i++ {
+				s.tick()
+				if s.offerW != 0 {
+					t.Fatalf("tick %d: offer %.0f W with 5.7 A of room; want 0", i, s.offerW)
+				}
+			}
+		})
+	}
+}
