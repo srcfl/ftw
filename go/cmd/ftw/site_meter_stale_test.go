@@ -92,6 +92,27 @@ func TestEvaluateSiteDispatchFreshnessAllowsMeterWithoutPhaseTelemetry(t *testin
 	}
 }
 
+// A frozen site meter (control.State.SiteMeterFrozen) closes the gate as a
+// stale meter, and leaves an already closed gate's reason alone.
+func TestFrozenSiteMeterClosesDispatchGate(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("meter", telemetry.DerMeter, 2667, nil, nil)
+	open := evaluateSiteDispatchFreshnessAt(tel, "meter", 0, 3, time.Minute, time.Now())
+	if !open.Allowed() {
+		t.Fatalf("fresh meter blocked: %q", open.Reason)
+	}
+	if got := open.frozenMeter(false); !got.Allowed() {
+		t.Fatalf("meter that is not frozen blocked: %q", got.Reason)
+	}
+	if got := open.frozenMeter(true); got.Reason != siteDispatchMeterStale {
+		t.Fatalf("frozen meter reason = %q, want %q", got.Reason, siteDispatchMeterStale)
+	}
+	phases := siteDispatchDecision{Reason: siteDispatchPhaseCurrentsStale}
+	if got := phases.frozenMeter(true); got.Reason != siteDispatchPhaseCurrentsStale {
+		t.Fatalf("frozen meter replaced reason %q with %q", siteDispatchPhaseCurrentsStale, got.Reason)
+	}
+}
+
 func TestStaleSiteDefaultTrackerIncludesOwnerOnceAndRearmsOnRecovery(t *testing.T) {
 	var tracker staleSiteDefaultTracker
 	names := []string{"ferroamp", "sungrow", "easee"}

@@ -24,6 +24,16 @@ type siteDispatchDecision struct {
 
 func (d siteDispatchDecision) Allowed() bool { return d.Reason == siteDispatchReady }
 
+// frozenMeter closes the gate when the site meter repeats one reading while
+// FTW's orders moved (control.State.ObserveSiteMeterFreeze). Such a meter
+// answers every poll, so its UpdatedAt alone looks fresh.
+func (d siteDispatchDecision) frozenMeter(frozen bool) siteDispatchDecision {
+	if frozen && d.Allowed() {
+		d.Reason = siteDispatchMeterStale
+	}
+	return d
+}
+
 // evaluateSiteDispatchFreshnessAt rejects physical dispatch when the site
 // meter itself is stale. Per-phase currents are optional until the configured
 // meter has emitted at least one of them; once available, every configured
@@ -74,8 +84,9 @@ func siteDispatchNow(
 	siteMeter := ctrl.SiteMeterDriver
 	fuseAmps := ctrl.SiteFuseAmps
 	phases := ctrl.SiteFusePhases
+	frozen := ctrl.SiteMeterFrozen()
 	ctrlMu.Unlock()
-	return evaluateSiteDispatchFreshnessAt(tel, siteMeter, fuseAmps, phases, timeout, now)
+	return evaluateSiteDispatchFreshnessAt(tel, siteMeter, fuseAmps, phases, timeout, now).frozenMeter(frozen)
 }
 
 // sitePhaseCurrentsAt returns the configured phases in L1/L2/L3 order.

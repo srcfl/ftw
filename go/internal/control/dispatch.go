@@ -407,6 +407,9 @@ type State struct {
 	// dispatchMeterAt is the UpdatedAt of the last site-meter sample the
 	// battery dispatch acted on. See siteMeterHeld.
 	dispatchMeterAt time.Time
+	// meterFreeze finds a site meter that repeats one reading while FTW's
+	// orders move. See ObserveSiteMeterFreeze.
+	meterFreeze meterFreeze
 
 	// Slew + holdoff
 	SlewRateW float64

@@ -3050,6 +3050,8 @@ func main() {
 			// standdown/default commands remain permitted.
 			ctrlMu.Lock()
 			ctrl.ObserveSiteImport(tel)
+			ctrl.ObserveSiteMeterFreeze(tel)
+			meterFrozen := ctrl.SiteMeterFrozen()
 			siteMeterDriver := ctrl.SiteMeterDriver
 			siteFuseAmps := ctrl.SiteFuseAmps
 			siteFusePhases := ctrl.SiteFusePhases
@@ -3058,7 +3060,7 @@ func main() {
 			forecastCurtail.ObserveIntent(forecastIntent)
 			freshness := evaluateSiteDispatchFreshnessAt(
 				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
-			)
+			).frozenMeter(meterFrozen)
 			if reason := setupRuntimeBlockReason(); reason != "" {
 				freshness.Reason = reason
 			}
