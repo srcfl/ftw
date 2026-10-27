@@ -136,6 +136,68 @@ func TestBootWithCarAlreadyReportedGetsNoBootLimit(t *testing.T) {
 	}
 }
 
+// reconnectAndBoot drops the charger's socket, waits for FTW to see it go,
+// then dials again and sends a BootNotification before any status, as much
+// firmware does after a Wi-Fi drop. It returns the new socket's charger.
+func reconnectAndBoot(t *testing.T, srv *Server, stop func()) *fakeCharger {
+	t.Helper()
+	stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.Handler().IsOnline("garage") {
+		if time.Now().After(deadline) {
+			t.Fatal("FTW never saw the socket drop")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	fake := newFakeCharger()
+	cp, _, err := dialChargePoint16(t, wsURL(srv.cfg.Port), "garage", nil, func(cp ocpp16.ChargePoint) { cp.SetSmartChargingHandler(fake) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cp.BootNotification("Dawn", "Charge Amps"); err != nil {
+		t.Fatal(err)
+	}
+	return fake
+}
+
+// A Wi-Fi drop mid-session: the charger had reported Charging and taken
+// FTW's 16 A. It reconnects and boots before any status. The car is most
+// likely still charging, so FTW keeps its live order rather than pausing it.
+func TestReconnectBootMidSessionKeepsFTWOrder(t *testing.T) {
+	srv := startManagedServer(t, false)
+	cp, fake, stop := connectCharger(t, srv, srv.cfg.Port, "garage")
+	awaitProfiles(t, fake.count, 1) // the real boot's 0 A
+	if _, err := cp.StatusNotification(1, core.NoError, core.ChargePointStatusCharging); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Command(context.Background(), "garage", setCurrent11kW(t)); err != nil {
+		t.Fatal(err)
+	}
+
+	after := reconnectAndBoot(t, srv, stop)
+	settle()
+	if n := after.count(); n != 0 {
+		t.Fatalf("reconnect boot mid-session got %d profile(s), last %v A; want FTW's live 16 A kept", n, after.lastLimit(t))
+	}
+}
+
+// The same reconnect after the car left: no car to pause, so the charger
+// gets its start limit again.
+func TestReconnectBootWithNoCarGetsBootLimit(t *testing.T) {
+	srv := startManagedServer(t, false)
+	cp, fake, stop := connectCharger(t, srv, srv.cfg.Port, "garage")
+	awaitProfiles(t, fake.count, 1)
+	if _, err := cp.StatusNotification(1, core.NoError, core.ChargePointStatusAvailable); err != nil {
+		t.Fatal(err)
+	}
+
+	after := reconnectAndBoot(t, srv, stop)
+	awaitProfiles(t, after.count, 1)
+	if got := after.lastLimit(t); got != 0 {
+		t.Fatalf("reconnect boot with no car: limit %v A, want 0 A", got)
+	}
+}
+
 // After a Core restart the charger reconnects without booting, and FTW asks
 // it for a BootNotification. That boot is FTW's own request, not a charger
 // restart; the car may be charging on FTW's last order.

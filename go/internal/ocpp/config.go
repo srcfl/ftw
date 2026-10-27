@@ -58,7 +58,8 @@ type Config struct {
 
 	// ManagedIDs is the part of ApprovedIDs a loadpoint names: the chargers
 	// FTW orders. Each starts at 0 A on boot (see boot_limit.go). Derived by
-	// the caller, never read from YAML.
+	// the caller, never read from YAML, and empty while Core blocks every
+	// charger write (setup measurement mode).
 	ManagedIDs []string `yaml:"-"`
 }
 

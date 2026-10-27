@@ -39,6 +39,17 @@ func ocppApprovedIDs(cfg *config.Config) []string {
 	return out
 }
 
+// ocppStartLimitIDs is the chargers that get the 0 A start limit on boot.
+// Setup measurement mode blocks every charger write, standdowns included, so
+// none does then. measurementAtBoot is the mode Core started in: leaving it
+// takes a restart, so a reload that clears it must not lift the block early.
+func ocppStartLimitIDs(cfg *config.Config, measurementAtBoot bool) []string {
+	if measurementAtBoot {
+		return nil
+	}
+	return ocppManagedIDs(cfg)
+}
+
 // ocppManagedIDs is the OCPP chargers a loadpoint names: the ones FTW orders.
 // An id listed only under ocpp.chargers is approved but never ordered.
 func ocppManagedIDs(cfg *config.Config) []string {

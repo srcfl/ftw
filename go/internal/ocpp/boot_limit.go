@@ -36,8 +36,11 @@ func (h *Handler) SetManagedIDs(ids []string) {
 // maybeSendBootLimit sends the 0 A start limit after a BootNotification.
 //
 // It skips a boot that answers FTW's own identity probe: that charger did not
-// restart, and may be charging under FTW's last order. It also skips a boot on
-// a socket that already reported a car: FTW orders that car every tick.
+// restart, and may be charging under FTW's last order. It also skips a boot
+// when the last status FTW holds shows a car or an open transaction, on this
+// socket or the one before: FTW orders that car every tick. Much firmware
+// sends its own BootNotification on every reconnect, before any status, so
+// after a Wi-Fi drop the new socket alone says nothing about the car.
 // The send runs on its own goroutine, as the capability probe does, and goes
 // through the same one-at-a-time slot as every other order. A refusal is
 // logged once; the next boot tries again.
@@ -45,7 +48,7 @@ func (h *Handler) maybeSendBootLimit(id string) {
 	h.mu.Lock()
 	s := h.chargersLocked(id)
 	send := h.bootLimit
-	if !h.approved[id] || !h.managed[id] || s.identityProbeAttempts > 0 || (s.connectedKnown && s.connected) {
+	if !h.approved[id] || !h.managed[id] || s.identityProbeAttempts > 0 || s.connected || s.transactionID >= 0 {
 		send = nil
 	}
 	h.mu.Unlock()
