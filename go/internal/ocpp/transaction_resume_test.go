@@ -141,3 +141,70 @@ func TestOCPP16FirstTransactionID(t *testing.T) {
 		t.Fatalf("first id %d in 2090 does not fit the 32 bits chargers store it in", got)
 	}
 }
+
+// Core restarts while the charger is in transaction 42. The car finishes
+// while still plugged in. The stop carries the meter's lifetime register, so
+// the session must count from the reading the transaction was taken up at.
+func TestOCPP16StopAfterRestartReportsSessionNotLifetimeRegister(t *testing.T) {
+	tel := telemetry.NewStore()
+	h := restartedHandler(t, tel, "charger")
+
+	meterRegister(h, "charger", 42, "12345000")
+	h.OnStatusNotification("charger", &core.StatusNotificationRequest{ConnectorId: 1, Status: core.ChargePointStatusSuspendedEV})
+	h.OnStopTransaction("charger", &core.StopTransactionRequest{TransactionId: 42, MeterStop: 12345678, Reason: core.ReasonEVDisconnected})
+	h.OnStatusNotification("charger", &core.StatusNotificationRequest{ConnectorId: 1, Status: core.ChargePointStatusFinishing})
+
+	if got := readingSessionWh(t, tel, "charger"); got != 678 {
+		t.Fatalf("reading session_wh = %.0f, want 678", got)
+	}
+	if m, _, ok := tel.LatestMetric("charger", "ev_session_wh"); !ok || m != 678 {
+		t.Fatalf("ev_session_wh metric = %v (ok %v), want 678", m, ok)
+	}
+}
+
+// A stop that names another transaction than the running one leaves the
+// running one alone.
+func TestOCPP16StopForAnotherTransactionKeepsTheRunningOne(t *testing.T) {
+	tel := telemetry.NewStore()
+	h := restartedHandler(t, tel, "charger")
+	conf, err := h.OnStartTransaction("charger", &core.StartTransactionRequest{ConnectorId: 1, IdTag: "card", MeterStart: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meterRegister(h, "charger", conf.TransactionId, "3000")
+
+	if _, err := h.OnStopTransaction("charger", &core.StopTransactionRequest{TransactionId: 999, MeterStop: 9_000_000}); err != nil {
+		t.Fatal(err)
+	}
+
+	v := h.Snapshot()["charger"]
+	if v.TxID != conf.TransactionId || v.SessionWh != 2000 || !v.Charging {
+		t.Fatalf("tx %d, session %.0f Wh, charging %v; want tx %d, 2000 Wh, charging",
+			v.TxID, v.SessionWh, v.Charging, conf.TransactionId)
+	}
+	if _, _, ok := tel.LatestMetric("charger", "ev_session_wh"); ok {
+		t.Fatal("ev_session_wh recorded for a stop of another transaction")
+	}
+}
+
+// A NaN or Inf register must not become the start reading of a taken-up
+// transaction. The next finite reading starts the session instead.
+func TestOCPP16NonFiniteRegisterIsNotTakenUp(t *testing.T) {
+	for _, bad := range []string{"NaN", "Inf", "-Inf"} {
+		t.Run(bad, func(t *testing.T) {
+			tel := telemetry.NewStore()
+			h := restartedHandler(t, tel, "charger")
+
+			meterRegister(h, "charger", 41, bad)
+			if v := h.Snapshot()["charger"]; v.TxID != -1 {
+				t.Fatalf("tx %d taken up from a %s register", v.TxID, bad)
+			}
+			meterRegister(h, "charger", 41, "15200")
+			meterRegister(h, "charger", 41, "15700")
+
+			if got := readingSessionWh(t, tel, "charger"); got != 500 {
+				t.Fatalf("reading session_wh = %.0f, want 500", got)
+			}
+		})
+	}
+}

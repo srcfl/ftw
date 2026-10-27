@@ -611,7 +611,9 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 				measurand = types.MeasurandEnergyActiveImportRegister
 			}
 			val, err := strconv.ParseFloat(sv.Value, 64)
-			if err != nil {
+			// ParseFloat accepts "NaN" and "Inf". Taken up as a start
+			// reading, one would spoil every later session value.
+			if err != nil || math.IsNaN(val) || math.IsInf(val, 0) {
 				continue
 			}
 			switch measurand {
@@ -691,6 +693,16 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest) (*core.StopTransactionConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	// A stop for another transaction than the running one, such as a queued
+	// stop from before a restart, must not end the running one.
+	if s.transactionID >= 0 && req.TransactionId != s.transactionID {
+		current := s.transactionID
+		h.mu.Unlock()
+		slog.Warn("OCPP stop for another transaction ignored",
+			"charger", id, "txid", req.TransactionId, "current_txid", current)
+		h.telSuccess(id)
+		return core.NewStopTransactionConfirmation(), nil
+	}
 	// With no start and no meter value seen for the transaction, MeterStop is
 	// only the meter's lifetime total, not the session's energy.
 	known := s.transactionID >= 0
