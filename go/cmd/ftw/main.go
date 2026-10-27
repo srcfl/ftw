@@ -3263,7 +3263,7 @@ func main() {
 			// planner state. That must not wait for the normal 15 min
 			// interval; rebuild immediately, retrying briefly if prices /
 			// forecasts / telemetry were not ready during startup.
-			if mpcSvc != nil && planMissingNow && time.Since(lastMissingPlanReplan) > missingPlanReplanCooldown {
+			if missingPlanRetryDue(mpcSvc, planMissingNow, lastMissingPlanReplan, missingPlanReplanCooldown) {
 				lastMissingPlanReplan = time.Now()
 				go mpcSvc.ReplanWithReason(ctx, "missing_plan_retry")
 				slog.Info("missing MPC plan → replan triggered")
