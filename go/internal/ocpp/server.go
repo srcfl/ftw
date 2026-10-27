@@ -65,6 +65,10 @@ type Server struct {
 	done     chan struct{}
 	doneV201 chan struct{}
 	stopOnce sync.Once
+	// profileSlots admits one unanswered charging profile per charger id;
+	// see attemptLimit.
+	profileMu    sync.Mutex
+	profileSlots map[string]chan struct{}
 }
 
 // Start brings up the OCPP CS on the configured bind:port. It returns once
