@@ -179,6 +179,10 @@ type chargerOffers struct {
 	// charger as 0 before it; a cut takes it as shown, since the reading is
 	// all Core knows of it.
 	found sentCommand
+	// driver is the charger's driver, whose power reading only the battery
+	// side reads, and only before any offer of this run has surely landed
+	// (evFoundDrawW).
+	driver string
 	// carPhases is how many phases the car draws on, as the loadpoint saw
 	// it on the site meter: 1 or 3, or 0 when unknown. carPhase is the phase
 	// a car on one phase draws on, 1-3.
@@ -366,6 +370,42 @@ func (s *State) evShownW(at time.Time) float64 {
 	return w
 }
 
+// evFoundDrawW is EV draw the battery side may count as shown beyond
+// evShownW (shownW) while a charger has no order of this run that has
+// surely landed: after a restart or a plug-in, until its first logged offer
+// is older than its settle time. Core then does not know which offer the
+// charger runs on, and its first offers (often 0 A) say nothing of what the
+// meter shows. A car seen drawing in that window is in the reading: each
+// such charger counts its live measured draw, the lower of raw and smoothed,
+// never above its latest offer, and in all no more than the consumption the
+// site meter shows (consumptionW) less shownW. The car's own limit never
+// reads this; only how much of our latest offers the battery reserves as a
+// rise to come.
+func (s *State) evFoundDrawW(store *telemetry.Store, at time.Time, consumptionW, shownW float64) float64 {
+	if store == nil || !finiteFuseValue(consumptionW) {
+		return 0
+	}
+	var w float64
+	for _, c := range s.evLimit.offers {
+		n := len(c.log)
+		if n == 0 || c.found.at.IsZero() || at.Sub(c.found.at) >= c.settle || c.driver == "" {
+			continue
+		}
+		r := store.Get(c.driver, telemetry.DerEV)
+		if r == nil || !store.DriverHealth(c.driver).TelemetryLive() {
+			continue
+		}
+		drawW := math.Min(r.RawW, r.SmoothedW)
+		if !finiteFuseValue(drawW) {
+			continue
+		}
+		unshown, _ := c.log.unshown(at, c.batterySettle())
+		latest := c.log[n-1].w
+		w += math.Max(0, math.Min(latest, drawW)-math.Max(0, latest-unshown))
+	}
+	return math.Max(0, math.Min(w, consumptionW-shownW))
+}
+
 // batterySettle is how long the battery side counts a raise of this
 // charger's as unshown: its declared response time, else evSettle
 // (evShownW).
@@ -466,7 +506,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			continue
 		}
 		c := s.evLimit.offers[point.ID]
-		c.settle, c.declared, c.carPhases, c.carPhase = evUnknownSettle, false, point.CarPhases, point.CarPhase
+		c.settle, c.declared, c.carPhases, c.carPhase, c.driver = evUnknownSettle, false, point.CarPhases, point.CarPhase, point.DriverName
 		if r := store.Get(point.DriverName, telemetry.DerEV); r != nil {
 			if declared := telemetry.DeclaredPowerMaxAge(r.Data); declared > 0 {
 				c.settle, c.declared = max(evSettle, declared), true
