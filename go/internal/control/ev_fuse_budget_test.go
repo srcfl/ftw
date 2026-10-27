@@ -457,7 +457,7 @@ func TestEVHardLimitSlowChargerRisesDoNotStack(t *testing.T) {
 			t.Run(fmt.Sprintf("declared_%.0fs/delay_%v", declaredS, delay), func(t *testing.T) {
 				s := newEVMeterSite(t, 0, 15*690)
 				s.chargerDelay, s.chargerMaxAgeS = delay, declaredS
-				limitA := s.state.SiteFuseAmps - evPhaseMarginA
+				limitA := s.state.fuseLineA()
 				var maxA float64
 				var overSince time.Time
 				watch := func(d time.Duration) {
@@ -478,15 +478,15 @@ func TestEVHardLimitSlowChargerRisesDoNotStack(t *testing.T) {
 					}
 				}
 				watch(10 * time.Minute)
-				// 24 - 15 A leaves 9 A; one step stays free.
-				if s.offer() != 5520 || s.evW != 5520 {
-					t.Fatalf("offer %.0f W draw %.0f W, want 5,520 W", s.offer(), s.evW)
+				// 24.5 - 15 A leaves 9.5 A: 9 A fits under the line.
+				if s.offer() != 6210 || s.evW != 6210 {
+					t.Fatalf("offer %.0f W draw %.0f W, want 6,210 W", s.offer(), s.evW)
 				}
 				s.setHouse(10 * 690)
 				watch(15 * time.Minute)
-				// 24 - 10 A leaves 14 A; one step stays free.
-				if s.offer() != 8970 || s.evW != 8970 {
-					t.Fatalf("after the house fell: offer %.0f W draw %.0f W, want 8,970 W", s.offer(), s.evW)
+				// 24.5 - 10 A leaves 14.5 A: 14 A fits under the line.
+				if s.offer() != 9660 || s.evW != 9660 {
+					t.Fatalf("after the house fell: offer %.0f W draw %.0f W, want 9,660 W", s.offer(), s.evW)
 				}
 				t.Logf("worst phase peaked at %.1f A", maxA)
 			})
@@ -505,15 +505,15 @@ func TestEVHardLimitUndeclaredFastChargerTakesRoomAtOnce(t *testing.T) {
 	}
 	startedAt := s.now
 	s.run(s.chargerDelay + 2*time.Second)
-	// 24 - 15 A leaves 9 A; one step stays free.
-	if s.offer() != 5520 || s.evW != 5520 {
-		t.Fatalf("started at %.0f W, drawing %.0f W; want the 5,520 W room in one move", s.offer(), s.evW)
+	// 24.5 - 15 A leaves 9.5 A: 9 A fits under the line.
+	if s.offer() != 6210 || s.evW != 6210 {
+		t.Fatalf("started at %.0f W, drawing %.0f W; want the 6,210 W room in one move", s.offer(), s.evW)
 	}
-	// 23.5 A measured, under the 24 A working limit, while the start still
-	// counts as flowing.
-	s.setHouse(15.5 * 690)
+	// 24.25 A measured, under the 24.5 A working limit, while the start
+	// still counts as flowing.
+	s.setHouse(15.25 * 690)
 	s.run(time.Minute)
-	if got := offerWatts(s.offersSince(startedAt)); slices.Min(got) != 5520 {
+	if got := offerWatts(s.offersSince(startedAt)); slices.Min(got) != 6210 {
 		t.Fatalf("the pending start cut the car: %v", got)
 	}
 
@@ -703,14 +703,14 @@ func evMeterBudgetFixture(t *testing.T, gridW float64, phaseA []float64, offerW 
 	return store, state, points, configs
 }
 
-// A 3p car offered 15 A beside 11 A of house load on L1: 26 A on a 24 A
-// working limit. With no earlier reading the fuse heat starts at 26 A, so
-// two amps on three phases come off the offer at once.
+// A 3p car offered 15 A beside 11 A of house load on L1: 26 A on the 25 A
+// working limit (no safety margin). With no earlier reading the fuse heat
+// starts at 26 A, so one amp on three phases comes off the offer at once.
 func TestEVHardLimitTrimsPhaseOverageFromOffer(t *testing.T) {
 	store, state, points, configs := evMeterBudgetFixture(t, 8280, []float64{26, 20, 20}, 10350, "3p")
 	got, known := EVFuseBudget(store, state, points, configs, 17250)
-	if !known || math.Abs(got-8970) > .01 {
-		t.Fatalf("cap %.1f W, want 10,350 - 2 A x 690 = 8,970 W", got)
+	if !known || math.Abs(got-9660) > .01 {
+		t.Fatalf("cap %.1f W, want 10,350 - 1 A x 690 = 9,660 W", got)
 	}
 }
 
@@ -727,20 +727,22 @@ func TestEVHardLimitStopsOnlyWhenOverageExceedsOfferLessMinimum(t *testing.T) {
 	}
 }
 
-// An idle car's minimum must fit below the working limit, and a
-// single-phase or auto car may land its whole offer on the worst phase.
+// An idle car's minimum must fit below the working limit, the 25 A fuse
+// with no safety margin, and a single-phase or auto car may land its whole
+// offer on the worst phase. The start takes the whole room: the charger
+// rounds it down to a step.
 func TestEVHardLimitIdleStartNeedsRoomOnDeclaredPhases(t *testing.T) {
 	for _, tc := range []struct {
 		name, phase string
 		worstA      float64
 		want        float64
 	}{
-		{"3p_room", "3p", 5, (24 - 5 - 1) * 690},
-		{"legacy_default", "", 5, (24 - 5 - 1) * 690},
-		{"1p_room", "1p", 5, (24 - 5 - 1) * 230},
-		{"auto_room", "auto", 5, (24 - 5 - 1) * 230},
-		{"3p_minimum_fits", "3p", 21.5, 1380},
-		{"3p_below_minimum", "3p", 22.5, 0}, // 1,035 W < 1,380 W
+		{"3p_room", "3p", 5, (25 - 5) * 690},
+		{"legacy_default", "", 5, (25 - 5) * 690},
+		{"1p_room", "1p", 5, (25 - 5) * 230},
+		{"auto_room", "auto", 5, (25 - 5) * 230},
+		{"3p_minimum_fits", "3p", 23, 1380}, // exactly the minimum
+		{"3p_below_minimum", "3p", 23.5, 0}, // 1,035 W < 1,380 W
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, state, points, configs := evMeterBudgetFixture(t, tc.worstA*690, []float64{tc.worstA, tc.worstA, tc.worstA}, 0, tc.phase)
@@ -765,9 +767,9 @@ func TestEVHardLimitBatteryOrderCountsOnEachPhase(t *testing.T) {
 		phase string
 		want  float64
 	}{
-		{"1p", (24 - 0.68 - 4703.0/690 - 1) * 230},
-		{"auto", (24 - 0.68 - 4703.0/690 - 1) * 230},
-		{"3p", (24 - 0.68 - 4703.0/690 - 1) * 690},
+		{"1p", math.Floor(25-0.68-4703.0/690) * 230},
+		{"auto", math.Floor(25-0.68-4703.0/690) * 230},
+		{"3p", math.Floor(25-0.68-4703.0/690) * 690},
 	} {
 		t.Run(tc.phase, func(t *testing.T) {
 			store, state, points, configs := evMeterBudgetFixture(t, -466, []float64{-0.68, -0.68, -0.68}, 0, tc.phase)
@@ -828,7 +830,7 @@ func TestEVHardLimitIgnoresChargerReadings(t *testing.T) {
 	points[0].CommandedKnown = false
 	store.Update("charger", telemetry.DerEV, 10242, nil, nil)
 	store.RecordDriverSuccess("charger")
-	if got, _ := EVFuseBudget(store, state, points, configs, 17250); got > (24-20.45-1)*690+.01 {
+	if got, _ := EVFuseBudget(store, state, points, configs, 17250); got > (25-20.45)*690+.01 {
 		t.Fatalf("a car reading earned %.1f W before our first command", got)
 	}
 }

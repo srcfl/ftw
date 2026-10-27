@@ -108,10 +108,10 @@ func (r *cutRig) deliver(gridW float64, data []byte) float64 {
 }
 
 // A raise on its way adds to the cut. The car draws 10 A while its 14 A
-// raise travels, and the house adds 8 A on L1: 26 A on the 24 A working
-// limit. Once the heat budget is spent, the cut takes the 2 A the meter
-// shows and the 4 A it does not show yet, so L1 ends at 24 A when the raise
-// lands. Taking the overage from the raise alone left L1 at 28 A.
+// raise travels, and the house adds 8 A on L1: 26 A on the 25 A working
+// limit. Once the heat budget is spent, the cut takes the 1 A the meter
+// shows and the 4 A it does not show yet, so L1 ends at 25 A when the raise
+// lands. Taking the overage from the raise alone left L1 at 29 A.
 func TestEVFuseRaiseOnItsWayAddsToCut(t *testing.T) {
 	r := newCutRig(t, 6900, 180)
 	for range 300 {
@@ -124,11 +124,11 @@ func TestEVFuseRaiseOnItsWayAddsToCut(t *testing.T) {
 		r.read([3]float64{26, 15, 15})
 		cutAt = i
 	}
-	if r.offerW != 5520 {
-		t.Fatalf("offer %.0f W after %d s over, want 9,660 W less 2 A measured and 4 A on its way = 5,520 W", r.offerW, cutAt)
+	if r.offerW != 6210 {
+		t.Fatalf("offer %.0f W after %d s over, want 9,660 W less 1 A measured and 4 A on its way = 6,210 W", r.offerW, cutAt)
 	}
 	for range 60 {
-		if r.read([3]float64{26, 15, 15}); r.offerW != 5520 {
+		if r.read([3]float64{26, 15, 15}); r.offerW != 6210 {
 			t.Fatalf("cut again to %.0f W while the first cut travels", r.offerW)
 		}
 	}

@@ -171,8 +171,8 @@ func evBatteryPhaseSpareW(meter *telemetry.DerReading, state *State, gridW, evIn
 	if !valid {
 		return math.Inf(-1), true
 	}
-	margin := math.Max(1, state.SiteFuseSafetyA) // Same working margin as the EV phase guard.
-	return (state.SiteFuseAmps - margin - worst - evIncreaseA) * state.SiteFuseVoltage * float64(state.SiteFusePhases), true
+	// The same working limit as the EV phase guard, with no floor under it.
+	return (state.fuseLineA() - worst - evIncreaseA) * state.SiteFuseVoltage * float64(state.SiteFusePhases), true
 }
 
 func floorPositiveEVBatteryTargets(targets []DispatchTarget) []DispatchTarget {

@@ -518,8 +518,15 @@ func TestFuseOverageGetsBatteryReliefUntilEVCutShows(t *testing.T) {
 			t.Fatalf("%v: meter %.0f W, want within the 25 A breaker and no export", m.at.Sub(stepAt), m.w)
 		}
 	}
-	if s.offer() >= 10350 || s.batteryW != 0 {
-		t.Fatalf("after the cut: offer %.0f W battery %.0f W, want a cut car and an idle battery", s.offer(), s.batteryW)
+	// The car rises one step once that step fits under the 24 A line, and
+	// the reading it rises on still holds part of the battery's relief.
+	// Ending a discharge needs room after the car's raise (EV first), so
+	// the battery keeps less than that step and the phase sits at the line.
+	if s.offer() >= 10350 || s.batteryW < -690 || s.batteryW > 0 {
+		t.Fatalf("after the cut: offer %.0f W battery %.0f W, want a cut car and at most one car step of battery relief", s.offer(), s.batteryW)
+	}
+	if a := s.gridW() / 690; a > 24+1e-6 {
+		t.Fatalf("after the cut: %.2f A on each phase, over the 24 A line", a)
 	}
 }
 
