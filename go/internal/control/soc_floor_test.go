@@ -212,3 +212,74 @@ func TestSplitReliefUsesBothBatteries(t *testing.T) {
 		t.Errorf("want bat -3000 W, bat2 -5000 W; got bat %.0f W, bat2 %.0f W", got["bat"], got["bat2"])
 	}
 }
+
+// No discharge order goes out at exactly the floor (C7: rig seeds 207534
+// and 207536 ordered discharge at 5.0 %).
+func TestClampWithSoCBlocksDischargeAtFloor(t *testing.T) {
+	if v, was := clampWithSoC(-1000, batteryInfo{soc: dischargeFloorSoC}); v != 0 || !was {
+		t.Fatalf("SoC exactly 5 %%: got %.0f W clamped=%v, want 0 W", v, was)
+	}
+	if v, was := clampWithSoC(-1000, batteryInfo{soc: 0.051}); v != -1000 || was {
+		t.Fatalf("SoC 5.1 %%: got %.0f W clamped=%v, want -1000 W", v, was)
+	}
+}
+
+// A fresh plan that asks for discharge at exactly 5 % gets no discharge.
+func TestFreshPlanNoDischargeAtFloor(t *testing.T) {
+	for _, energy := range []bool{false, true} {
+		store := seedStore(2000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", 0, 0.05}})
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModePlannerArbitrage
+		st.UseEnergyDispatch = energy
+		st.SlewRateW = 10000
+		st.MinDispatchIntervalS = 0
+		st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
+			return SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: -500, Strategy: "arbitrage"}, true
+		}
+		st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "discharge", -2000, "discharge", true }
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+		if st.PlanStale {
+			t.Fatalf("energy=%v: expected a fresh plan", energy)
+		}
+		for _, tg := range targets {
+			if tg.TargetW < 0 {
+				t.Errorf("energy=%v: SoC exactly 5 %%, %s ordered %.0f W", energy, tg.Driver, tg.TargetW)
+			}
+		}
+	}
+}
+
+// Stale plan, soc_min 10 %: just under the floor (207531, 207532 at
+// 5.5-5.8 %) and exactly at it, the battery gets 0 W.
+func TestStaleFloorZeroAtAndUnderFloor(t *testing.T) {
+	for _, soc := range []float64{0.058, 0.10} {
+		store := seedStore(2000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", -1500, soc}})
+		st := staleFloorState(10000)
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+		if !st.PlanStale {
+			t.Fatalf("SoC %.3f: expected stale-plan fallback", soc)
+		}
+		if len(targets) != 1 || targets[0].TargetW != 0 {
+			t.Errorf("SoC %.3f, floor 10 %%: got %+v, want bat 0 W", soc, targets)
+		}
+	}
+}
+
+// Fuse relief and the hourly import limit stop at exactly the floor.
+func TestFuseTargetBoundsAtFloor(t *testing.T) {
+	soc := 0.10
+	r := &telemetry.DerReading{SoC: &soc}
+	if lower, _ := fuseTargetBounds(r, PowerLimits{SoCMin: 0.10}); lower != 0 {
+		t.Fatalf("SoC exactly at the 10 %% floor: lower bound %.0f W, want 0", lower)
+	}
+	soc = 0.101
+	if lower, _ := fuseTargetBounds(r, PowerLimits{SoCMin: 0.10}); lower >= 0 {
+		t.Fatalf("SoC 10.1 %%, floor 10 %%: lower bound %.0f W, want discharge allowed", lower)
+	}
+}

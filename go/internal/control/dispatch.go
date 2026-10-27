@@ -1528,7 +1528,7 @@ func ComputeDispatch(
 		// A configured zero is a hard direction block, not the legacy
 		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
 		// the clamps so capable siblings receive the blocked battery's share.
-		belowStaleFloor := staleFloor && soc < lim.socFloor()
+		belowStaleFloor := staleFloor && soc <= lim.socFloor()
 		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0 || belowStaleFloor
 		chargeBlocked = chargeBlocked || lim.chargeCap() == 0 || state.BatteryChargePaused(name)
 		batteries = append(batteries, batteryInfo{
@@ -3654,7 +3654,7 @@ func clampTargetsToPowerLimits(targets []DispatchTarget, limits map[string]Power
 const dischargeFloorSoC = 0.05
 
 // clampWithSoC applies the hard safety clamps for one battery command:
-//   - don't discharge below SoC 5 % (site: don't make target < 0 when SoC < 0.05);
+//   - don't discharge at or below SoC 5 % (no target < 0 when SoC <= 0.05);
 //     BMS handles fine-grained SoC but we never ask it to pull an empty pack.
 //   - cap charge at the battery's MaxChargeW (falls back to MaxCommandW default).
 //   - cap discharge at the battery's MaxDischargeW (same fallback).
@@ -3666,7 +3666,7 @@ func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 	clamped := target
 	wasClamped := false
 	// Block discharge when the battery is empty.
-	if b.soc < dischargeFloorSoC && target < 0 {
+	if b.soc <= dischargeFloorSoC && target < 0 {
 		clamped = 0
 		wasClamped = true
 	}
@@ -4251,7 +4251,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if r.SoC == nil || *r.SoC < lim.socFloor() || dischargeBlocked {
+	if r.SoC == nil || *r.SoC <= lim.socFloor() || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked || r.SoC != nil && *r.SoC >= lim.socCeiling() {
