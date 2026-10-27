@@ -359,15 +359,21 @@ func (s *State) evShownW(at time.Time) float64 {
 	var w float64
 	for _, c := range s.evLimit.offers {
 		if n := len(c.log); n > 0 {
-			settle := evSettle
-			if c.declared {
-				settle = c.settle
-			}
-			unshown, _ := c.log.unshown(at, settle)
+			unshown, _ := c.log.unshown(at, c.batterySettle())
 			w += math.Max(0, c.log[n-1].w-unshown)
 		}
 	}
 	return w
+}
+
+// batterySettle is how long the battery side counts a raise of this
+// charger's as unshown: its declared response time, else evSettle
+// (evShownW).
+func (c chargerOffers) batterySettle() time.Duration {
+	if c.declared {
+		return c.settle
+	}
+	return evSettle
 }
 
 func (s *State) pendingLoad(at time.Time) pendingLoad {

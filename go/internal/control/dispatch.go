@@ -2385,6 +2385,7 @@ func applyDispatchSafetyPipeline(
 	}
 	// ---- Fuse guard (bidirectional, #145) ----
 	targets = applyFuseGuard(targets, store, state, fuseMaxW)
+	targets = fitBatteryRisesToFuse(targets, store, state)
 
 	// ---- Plan/exec sign-mismatch floor (energy planner modes only) ----
 	// Operator-report 2026-04-28 (08:00-08:15 CEST): planner_arbitrage
@@ -3900,6 +3901,91 @@ func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.Der
 	return phaseSample{meter: meter, totalW: totalW}
 }
 
+// signedPhasesA is the sample's phase currents, import positive
+// (phaseCurrentsA). When no phase reads as export while the total does, the
+// meter gives no direction per phase, and every phase takes the total's.
+// false without usable phase currents.
+func (p phaseSample) signedPhasesA(state *State) ([]float64, bool) {
+	if p.meter == nil || state == nil {
+		return nil, false
+	}
+	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
+	if !valid || len(amps) == 0 {
+		return nil, false
+	}
+	exports := p.totalW < 0
+	for _, a := range amps {
+		exports = exports && a >= 0
+	}
+	if exports {
+		for i := range amps {
+			amps[i] = -amps[i]
+		}
+	}
+	return amps, true
+}
+
+// fitBatteryRisesToFuse keeps battery charge rises inside the room the site
+// meter shows on its busiest phase: the working limit (fuseLineA) less the
+// phase's reading and less our own rises that reading may not show yet, the
+// chargers' offers (counted as evShownW does) and the batteries' orders
+// (pendingBatteryCommandsW). A three-phase battery puts its power evenly on
+// every phase. A rise is charge above the battery's latest order, or above
+// its reading before our first order. Holding an order is never a rise, and
+// a discharge we end uses room first. Nothing here cuts below the hold: an
+// overage is the relief's (applyFuseGuard, forceFuseDischarge), which reads
+// the battery's own power. Without usable phase currents the aggregate guard
+// is the check.
+func fitBatteryRisesToFuse(targets []DispatchTarget, store *telemetry.Store, state *State) []DispatchTarget {
+	if store == nil || state == nil || len(targets) == 0 || state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
+		return targets
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil {
+		return targets
+	}
+	amps, ok := livePhaseSample(store, state.SiteMeterDriver, meter).signedPhasesA(state)
+	if !ok {
+		return targets
+	}
+	now := state.now()
+	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
+	unshownA := state.pendingBatteryCommandsW(now) / perA
+	for _, c := range state.evLimit.offers {
+		_, a := c.log.unshown(now, c.batterySettle())
+		unshownA += a // A one-phase offer may land on any phase.
+	}
+	worstA := math.Inf(-1)
+	for _, a := range amps {
+		worstA = math.Max(worstA, a)
+	}
+	roomW := (state.fuseLineA() - worstA - unshownA) * perA
+	holds := make([]float64, len(targets))
+	var riseW float64
+	for i, t := range targets {
+		var base float64
+		if _, _, latest, sent := state.batteryCommands[t.Driver].span(now); sent {
+			base = latest
+		} else if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			base = r.RawW
+		}
+		roomW -= math.Max(0, math.Min(0, t.TargetW)-math.Min(0, base))
+		holds[i] = math.Min(t.TargetW, math.Max(0, base))
+		riseW += t.TargetW - holds[i]
+	}
+	if riseW <= 0 || roomW >= riseW {
+		return targets
+	}
+	scale := math.Max(0, roomW) / riseW
+	out := append([]DispatchTarget(nil), targets...)
+	for i := range out {
+		if out[i].TargetW > holds[i] {
+			out[i].TargetW, out[i].Clamped = holds[i]+(out[i].TargetW-holds[i])*scale, true
+		}
+	}
+	return out
+}
+
 // phaseMoveW is the batteries' change from the raw power their readings hold
 // to the targets. The phase currents are raw, so the move is too.
 func phaseMoveW(targets []DispatchTarget, batteries map[string]*telemetry.DerReading) float64 {
@@ -3932,24 +4018,17 @@ func phaseMoveW(targets []DispatchTarget, batteries map[string]*telemetry.DerRea
 // export, and a battery on one phase, which is read as balanced. 0, 0
 // without usable phase currents.
 func phaseFuseReliefW(p phaseSample, state *State, moveW float64) (importW, exportW float64) {
-	if p.meter == nil || state == nil {
+	if state == nil {
 		return 0, 0
 	}
-	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
-	if !valid || len(amps) == 0 {
+	amps, ok := p.signedPhasesA(state)
+	if !ok {
 		return 0, 0
 	}
 	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases) // aggregate W per phase ampere
 	limitA := state.fuseLineA()
-	exports := p.totalW < 0
-	for _, a := range amps {
-		exports = exports && a >= 0
-	}
 	hi, lo := math.Inf(-1), math.Inf(1)
 	for _, a := range amps {
-		if exports {
-			a = -a
-		}
 		a += moveW / perA
 		hi, lo = math.Max(hi, a), math.Min(lo, a)
 	}
