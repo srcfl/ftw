@@ -63,6 +63,10 @@ A criterion named in a scenario's `known` map fails on master for the
 finding it names. The run passes while it keeps failing, and fails once it
 passes: a fix deletes its line in the same pull request.
 
+A scenario with a `skip` waits for a device-simulator change the pinned
+commit lacks. `TestSite` reports it as `skip` with the knob it needs; the
+pull request that pins a simulator with the knob deletes the skip.
+
 ## The fault catalog
 
 Each scenario names the entries of FTW's field fault catalog it covers and
@@ -102,3 +106,13 @@ tick as 2 s more.
 | `s14-25` One-phase car | an 11 kW charger with a one-phase car, a plan it cannot meet, 20 min | 3.4–3.8 kW over the last 10 min; never called not following | |
 | `s16-25` Import ceiling | 25 A, house 1.3 kW, battery idle at its floor, `peak_import_ceiling_w` 4 500, Charge now 16 A: house and the car's 4 140 W minimum are above the ceiling. Starts in an hour's first minutes or waits for :56, then runs one whole clock hour and 3 min | the car starts on the hour's room before :45; every clock hour's recorded import averages at most the ceiling + 1 %; the next hour stops the car within 60 s; while held it says `import_limit` 90 % of the time and never `fuse_limit`; fuse holds | |
 | `s17-25` Two equal batteries | 25 A, house 3 kW, no PV, two hybrids with 10 kWh at 74 % and 60 %, Energyplan whatever `FTW_SITE_ENGINE` says (Core DP plans one battery), a 6 h horizon (over 48 h the plan keeps the batteries for tomorrow's dearer hours). Waits up to an hour for a quarter the plan discharges, then 15 min | Energyplan's plan moves the batteries in half the polls (setup; tolerated, the day's prices decide); while the fleet moves 500 W or more, each battery takes at least a quarter of it 90 % of the time; while the plan moves them, the charge gap shrinks by over 0.2 points; fuse holds | |
+| `r1-25` Meter silent, then offline | 25 A, 15 A per phase, battery at 50 %, Charge now 16 A; the site meter silent (Modbus timeouts) for 120 s, then gone for 90 s. **Skipped**: the pinned simulator cannot silence the site meter | the battery relieved the fuse (setup); while silent no offer rises and the battery order only moves toward 0 (**known**: A1); a 0 W order and the battery back on its own within 64 s; the meter never shows live; Charge now back within 95 s of each return; fuse holds | |
+| `r2-25`, `r2-60-25` Battery drops out | 25 A, 20 A per phase, the battery held at a 3 kW discharge, a car taking 10 A on Charge now, the charger at once or 60 s late; the inverter gone for 180 s | the battery discharged (setup); fuse holds; over the limit at most the charger's delay + 7 s after the drop; no offer rises while it is gone; Home use shown as estimated throughout | |
+| `r3-25` Planner floor | 25 A, 15 A per phase, battery at 12 %, planner `soc_min` 10 %, inverter floor 5 %, charger 60 s late, Charge now 16 A for 600 s | the battery reaches the floor (setup); no discharge ordered below it (**known**: A4); the battery order swings at most 100 W over the last 5 min (**known**: A3, A4); over fuse − 0.5 A at most the delay + 7 s (Core holds the phase at its own line, as in s3); fuse holds | |
+| `r4-25` Hard kill | 25 A, 12 A per phase, the battery held at a 3 kW discharge, Charge now 16 A; once the day's Home use is known and 15 min more, SIGKILL for 20 s, and 2 min later for 120 s while the house steps to 16 A | Charge now back at its minimum within 60 s of each restart; the day's Home use kept within 1 % across the first kill; session energy counts again (**known**: E1); no state.db recovery in the log; fuse holds | |
+| `r5a-25` Start beside a charging car | 25 A, 14 A per phase, a car charging on its own at 16 A for 60 s before Core starts | the car charged (setup); under the limit within 30 s of Core answering, and over it at most 3 s after; Home use shown within 30 s; fuse holds | |
+| `r5b-25` Start on a stale plan | a goal 40 → 60 % 8 h out, Core stopped for 20 min | no positive order in the first 30 s before a fresh plan (**known**: D6); Home use shown within 30 s; fuse holds | |
+| `r5c-25` Start into a new session | Charge now, Core stopped for 10 min while the car leaves and another plugs in | Core sees the car within 60 s; Home use shown within 30 s; fuse holds. Whether Charge now carries over is recorded, not judged: ev-088 waits for the owner | |
+
+The `r` scenarios are R1-R5 of the stable plan. A **known** line names the
+Wave 1 item whose fix deletes it.

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -155,7 +156,7 @@ func runPlan(c *runCtx, p randomPlan) (map[string]any, error) {
 			case "plan":
 				_, err = st.planTo("garage", a.SoCPct, a.GoalPct, time.Duration(a.ReadyMin*float64(time.Minute)))
 			case "restart":
-				st.stopFTW()
+				st.stopFTW(syscall.SIGTERM)
 				sleepS(a.DownS)
 				err = st.startFTW()
 				st.mark("ftw:up")

@@ -204,12 +204,13 @@ func split(scs []scenario, n int) [][]scenario {
 type outcome struct {
 	Name      string      `json:"name"`
 	Dir       string      `json:"dir"`
-	Verdict   string      `json:"verdict"` // pass, known, fail
+	Verdict   string      `json:"verdict"` // pass, known, fail, skip
 	DurationS float64     `json:"duration_s"`
 	Criteria  []criterion `json:"criteria"`
 	Known     []string    `json:"known,omitempty"`
 	Failures  []string    `json:"failures,omitempty"`
 	Error     string      `json:"error,omitempty"`
+	Skipped   string      `json:"skipped,omitempty"` // what the simulator lacks
 }
 
 // TestSite runs the scenarios FTW_SITE names. FTW_SITE_LANES runs that many
@@ -239,6 +240,16 @@ func TestSite(t *testing.T) {
 	env := setup(t)
 	var mu sync.Mutex
 	var outcomes []outcome
+	var runnable []scenario
+	for _, sc := range scs {
+		if sc.skip == "" {
+			runnable = append(runnable, sc)
+			continue
+		}
+		t.Logf("%s skipped: %s", sc.name, sc.skip)
+		outcomes = append(outcomes, outcome{Name: sc.name, Dir: sc.dir, Verdict: "skip", Skipped: sc.skip})
+	}
+	scs = runnable
 	t.Run("lanes", func(t *testing.T) {
 		for k, group := range split(scs, lanes) {
 			k, group := k, group
@@ -404,6 +415,9 @@ func writeSummary(t *testing.T, out string, outs []outcome) {
 		notes := append(append([]string{}, o.Failures...), o.Known...)
 		if o.Error != "" {
 			notes = append([]string{o.Error}, notes...)
+		}
+		if o.Skipped != "" {
+			notes = append(notes, o.Skipped)
 		}
 		fmt.Fprintf(&md, "| %s | %s | %s | %s |\n", o.Name, o.Verdict,
 			(time.Duration(o.DurationS) * time.Second).String(), strings.ReplaceAll(strings.Join(notes, "; "), "|", "/"))

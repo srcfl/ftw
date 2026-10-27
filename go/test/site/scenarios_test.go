@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,9 @@ type scenario struct {
 	// tolerate names criteria that may fail for a known finding but need
 	// not: random cases, where a seed may or may not reach it.
 	tolerate map[string]string
+	// skip, when set, says what the pinned device-simulator lacks for this
+	// scenario: TestSite reports it skipped instead of running it.
+	skip string
 }
 
 var scenarios = []scenario{
@@ -412,7 +416,7 @@ func s7(c *runCtx, fuse float64, short bool) (map[string]any, error) {
 			sleepS(900)
 		}
 		st.mark("ftw_stop")
-		st.stopFTW()
+		st.stopFTW(syscall.SIGTERM)
 		sleepS(20)
 		st.mark("ftw_start")
 		if err := st.startFTW(); err != nil {

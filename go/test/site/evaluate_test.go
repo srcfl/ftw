@@ -42,24 +42,28 @@ type plantDevice struct {
 	W         float64 `json:"w"`         // a charger's draw
 	BatteryW  float64 `json:"battery_w"` // an inverter's battery, + charging
 	SoCPct    float64 `json:"soc_pct"`
-	EMSCmd    float64 `json:"ems_cmd"` // 170 charge, 187 discharge, 204 stop
+	EMSMode   float64 `json:"ems_mode"` // 2 forced, as Core drives it
+	EMSCmd    float64 `json:"ems_cmd"`  // 170 charge, 187 discharge, 204 stop
 	EMSSetW   float64 `json:"ems_setpoint_w"`
 	Connected bool    `json:"connected"`
 }
 
 type ftwStatus struct {
-	Drivers map[string]struct {
-		Status string `json:"status"`
-	} `json:"drivers"`
-	LoadQuality *string  `json:"load_quality"`
-	LoadReason  *string  `json:"load_reason"`
-	LoadW       *float64 `json:"load_w"`
+	Drivers     map[string]ftwDriver `json:"drivers"`
+	LoadQuality *string              `json:"load_quality"`
+	LoadReason  *string              `json:"load_reason"`
+	LoadW       *float64             `json:"load_w"`
 	Energy      struct {
 		Today struct {
 			LoadWh         *float64 `json:"load_wh"`
 			HistoryQuality *string  `json:"history_quality"`
 		} `json:"today"`
 	} `json:"energy"`
+}
+
+type ftwDriver struct {
+	Status      string   `json:"status"`
+	EVSessionWh *float64 `json:"ev_session_wh"` // a charger's session energy
 }
 
 type ftwLoadpoint struct {
@@ -69,6 +73,7 @@ type ftwLoadpoint struct {
 	Charger struct {
 		Known bool `json:"known"`
 	} `json:"charger"`
+	ManualActive    bool   `json:"manual_active"`
 	CommandedReason string `json:"commanded_reason"`
 	Manual          struct {
 		LimitReason string `json:"limit_reason"` // the clamp behind a limited Charge now
@@ -686,4 +691,81 @@ func (d *runData) disconnects(t0, t1 float64) []float64 {
 		}
 	})
 	return out
+}
+
+// ---- the battery, the charger's orders and the log, for R1-R5 ----
+
+// batOrder is Core's battery order as the inverter holds it: + charge, -
+// discharge, 0 when not forced.
+func batOrder(r *sample) float64 {
+	if r.Bat.EMSMode != 2 {
+		return 0
+	}
+	switch r.Bat.EMSCmd {
+	case 170:
+		return r.Bat.EMSSetW
+	case 187:
+		return -r.Bat.EMSSetW
+	}
+	return 0
+}
+
+// batForced is true while Core drives the battery: forced mode with a charge
+// or discharge command.
+func batForced(r *sample) bool {
+	return r.Bat.EMSMode == 2 && (r.Bat.EMSCmd == 170 || r.Bat.EMSCmd == 187)
+}
+
+// offers is every SetChargingProfile on connector 1 of charger 0, timed in
+// Unix seconds.
+func (d *runData) offers() []profile { return connector1(profiles(d.frames, 0, math.Inf(1))) }
+
+// offerRises counts orders sent in [t0, t1) that offer more than the order
+// before them.
+func (d *runData) offerRises(t0, t1 float64) int {
+	n := 0
+	prs := d.offers()
+	for i := 1; i < len(prs); i++ {
+		if prs[i].T >= t0 && prs[i].T < t1 && prs[i].offerW() > prs[i-1].offerW()+1 {
+			n++
+		}
+	}
+	return n
+}
+
+// firstOffer is the seconds from t0 to the first order from t0 on that
+// satisfies pred, or nil.
+func (d *runData) firstOffer(t0 float64, pred func(profile) bool) *float64 {
+	for _, p := range d.offers() {
+		if p.T >= t0 && pred(p) {
+			v := p.T - t0
+			return &v
+		}
+	}
+	return nil
+}
+
+// logLines are the lines of FTW's log that hold any of subs.
+func (d *runData) logLines(subs ...string) []string {
+	var out []string
+	readLines(filepath.Join(d.dir, "ftw.log"), func(b []byte) {
+		for _, s := range subs {
+			if strings.Contains(string(b), s) {
+				out = append(out, string(b))
+				return
+			}
+		}
+	})
+	return out
+}
+
+// todayLoadWh is the day's Home use FTW last showed in ws, or nil.
+func todayLoadWh(ws []*sample) *float64 {
+	var v *float64
+	for _, r := range ws {
+		if r.Status != nil && r.Status.Energy.Today.LoadWh != nil {
+			v = r.Status.Energy.Today.LoadWh
+		}
+	}
+	return v
 }
