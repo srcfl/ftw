@@ -39,6 +39,9 @@ type simSite struct {
 
 	every time.Duration // control_interval_s; zero: simCoreEvery
 	field *fieldRun     // the field matrix's own checks; nil outside it
+	// evMaxAge is the power_max_age_s the charger driver declares outside
+	// the field matrix; zero declares none.
+	evMaxAge time.Duration
 
 	downUntil, nextTick time.Time
 	meter               sitesim.MeterReading

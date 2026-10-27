@@ -12,7 +12,7 @@ site:
   smoothing_alpha: 0.3
   slew_rate_w: 3000             # W per cycle. Both Ferroamp and Sungrow ramp internally — this is a soft ceiling, not the primary protection
   # slew_enabled: false         # disable the external slew limiter entirely and trust the inverter's internal ramp control (experimental)
-  min_dispatch_interval_s: 2    # debounce; keep == control_interval_s
+  min_dispatch_interval_s: 2    # least time between battery commands; at or below control_interval_s it never skips a tick
 
 fuse:
   max_amps: 16

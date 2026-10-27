@@ -22,6 +22,9 @@ func issue1868Site(t *testing.T) (*telemetry.Store, *State, []loadpoint.State, [
 	tel.Update("battery", telemetry.DerBattery, 4000, &soc, nil)
 	tel.RecordDriverSuccess("battery")
 	sent(st, "ev", 4140)
+	// The car's 4140 W offer has run for longer than any charger's response time.
+	a, n := st.offerPhaseA(4140, 3)
+	st.evLimit.offers = map[string]chargerOffers{"rav4": {log: commandLog{{at: st.now().Add(-evUnknownSettle - time.Second), w: 4140, a: a, n: n}}}}
 	sent(st, "battery", 4000)
 	points := []loadpoint.State{{ID: "rav4", DriverName: "car", PluggedIn: true, CommandedKnown: true, CommandedW: 4140, CommandedPhases: 3}}
 	configs := []loadpoint.Config{{ID: "rav4", DriverName: "car", PhaseMode: "3p", MinChargeW: 4140, MaxChargeW: 4140, AllowedStepsW: []float64{0, 4140}}}
