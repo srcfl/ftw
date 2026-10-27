@@ -7,8 +7,9 @@ import (
 
 // Reproductions ported from srcfl/ftw#1816 (segran2) to master's
 // capBatteryCharge and clampEVBatteryHeadroom. Master's keepEndingDischarge
-// (#1847) holds them. Import direction only: master leaves the export
-// direction to the fuse pipeline.
+// (#1847) holds them, but only while a car charges, and only on import.
+// Nothing on master holds the same case with no car, on import or export,
+// and these tests do not cover those gaps.
 //
 // Site: 25 A, three phases, 230 V, 1 A margin. Phases read 22.3/12.3/12.3 A,
 // which leaves 1.7 A on L1, or 1,173 W of balanced battery change.
