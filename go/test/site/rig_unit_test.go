@@ -4,6 +4,7 @@ package site
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -113,7 +114,7 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 		for i := 0; i <= 100; i++ {
 			a := 10.0
 			if i >= 50 && i < 56 {
-				a = 26 // 6 s over the 24 A limit
+				a = 26 // 6 s over the 25 A fuse
 			}
 			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
 		}
@@ -137,5 +138,49 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 	_, cs := judgeInvariants(mk(false))
 	if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
 		t.Fatalf("without a step: %v", f)
+	}
+}
+
+// The limit is the fuse rating: a phase may sit at exactly the fuse until
+// the end of the run, and 0.1 A above it fails once the time budget is up.
+func TestInvariantsJudgeAtTheFuse(t *testing.T) {
+	const fuse = 25.0
+	const own = "over the limit at most 3 s after FTW's own raise"
+	const step = "over the limit no longer than an outside step allows"
+	for _, c := range []struct {
+		name     string
+		a        float64
+		to       int // the level holds from 50 s until this second
+		withStep bool
+		want     []string
+	}{
+		{"at the fuse", fuse, 101, false, nil},
+		{"at the fuse after a step", fuse, 101, true, nil},
+		// 20 s is past the 3 s for FTW's own raise, and past the
+		// 2 + 2 + 3 s a step allows while the battery can answer.
+		{"0.1 A over", fuse + 0.1, 70, false, []string{own}},
+		{"0.1 A over after a step", fuse + 0.1, 70, true, []string{step}},
+	} {
+		d := &runData{marks: map[string]float64{"start": 0, "end": 100}, meta: map[string]any{"fuse": fuse}}
+		for i := 0; i <= 100; i++ {
+			a := 10.0
+			if i >= 50 && i < c.to {
+				a = c.a
+			}
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
+		}
+		if c.withStep {
+			d.events = append(d.events, houseEventLine{T: 49.5, Event: houseEvent{Do: "loads"}})
+		}
+		var failed []string
+		_, cs := judgeInvariants(d)
+		for _, x := range cs {
+			if !x.OK {
+				failed = append(failed, x.Name)
+			}
+		}
+		if !slices.Equal(failed, c.want) {
+			t.Errorf("%s: failed %v, want %v", c.name, failed, c.want)
+		}
 	}
 }
