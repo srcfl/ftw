@@ -181,3 +181,71 @@ func TestCarBeforeBatteryEnergyPathPVChargeOnly(t *testing.T) {
 		}
 	}
 }
+
+// runPeakShavingCar drives manual peak_shaving against the same plant as
+// runCarBeforeBattery. The peak limit sits far above the site, so the
+// import the car causes lands in peak_shaving's dead zone.
+func runPeakShavingCar(t *testing.T, coversEV bool, siteW, carW, startBatteryW float64) []float64 {
+	t.Helper()
+	store := seedStore(siteW+startBatteryW, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", startBatteryW, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 30000
+	st.EVChargingW = carW
+	st.BatteryCoversEV = coversEV
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	const fuseW = 3 * 25 * 230
+	batteryW := startBatteryW
+	var got []float64
+	for i := 0; i < 20; i++ {
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), fuseW)
+		if len(targets) == 1 {
+			batteryW = targets[0].TargetW
+		}
+		got = append(got, batteryW)
+		store.Update("ferroamp", telemetry.DerBattery, batteryW, ptrF64(0.5), nil)
+		store.Update("ferroamp", telemetry.DerMeter, siteW+batteryW, nil, nil)
+		store.DriverHealthMut("ferroamp").RecordSuccess()
+	}
+	return got
+}
+
+// The 207535 shape in manual peak_shaving. The battery was charging 871 W
+// from the house surplus when the car started. The site now imports for
+// the car, inside peak_shaving's dead zone, so nothing used to cut the
+// charge. The car comes first: the charge goes, and the battery never
+// discharges, because the import is under the peak limit.
+func TestCarBeforeBatteryPeakShavingDropsARunningCharge(t *testing.T) {
+	const pv, house, car = 5000.0, 3611.0, 11040.0
+	for _, cover := range []bool{false, true} {
+		got := runPeakShavingCar(t, cover, house+car-pv, car, 871)
+		for i, w := range got {
+			if w < -1 {
+				t.Fatalf("cover=%v tick %d: battery discharges %.0f W under the peak limit: %v", cover, i, w, got)
+			}
+		}
+		if final := lastOr(got, 871); final > 1 {
+			t.Fatalf("cover=%v: battery still charges %.0f W while the site imports %.0f W for the car: %v",
+				cover, final, house+car-pv+final, got)
+		}
+	}
+}
+
+// With more PV than house and car together, peak_shaving still charges
+// from what the car leaves: 18000 − 3611 − 11040 = 3349 W.
+func TestCarBeforeBatteryPeakShavingChargesTheSurplusAfterTheCar(t *testing.T) {
+	const pv, house, car = 18000.0, 3611.0, 11040.0
+	want := pv - house - car
+	for _, cover := range []bool{false, true} {
+		got := runPeakShavingCar(t, cover, house+car-pv, car, 0)
+		if final := lastOr(got, 0); math.Abs(final-want) > 60 {
+			t.Fatalf("cover=%v: battery settled at %.0f W, want the %.0f W left after the car: %v", cover, final, want, got)
+		}
+	}
+}

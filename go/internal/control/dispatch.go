@@ -1877,6 +1877,12 @@ func ComputeDispatch(
 				errW = gridW - state.PeakLimitW
 			} else if gridW < 0 {
 				errW = gridW // exporting → charge with surplus
+			} else if chargeGridW > 0 && currentTotal > 0 && state.EVChargingW > evActiveThresholdW {
+				// The car before battery charge: the site imports while
+				// the car and the battery both charge. Take the charge
+				// down by the import, to 0 at most; under the peak limit
+				// the battery does not discharge.
+				errW = math.Min(chargeGridW, currentTotal)
 			} else {
 				errW = 0
 			}
