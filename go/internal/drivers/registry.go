@@ -61,8 +61,11 @@ func (e *commandMayHaveRunError) Is(target error) bool {
 
 const (
 	defaultRecoveryTimeout = 5 * time.Second
-	defaultRetryInitial    = 100 * time.Millisecond
-	defaultRetryMax        = 30 * time.Second
+	// commandRunTimeout is the least time a started command gets to finish.
+	// The caller's deadline bounds its wait, not the device's answer.
+	commandRunTimeout   = defaultRecoveryTimeout
+	defaultRetryInitial = 100 * time.Millisecond
+	defaultRetryMax     = 30 * time.Second
 )
 
 // DriverControlStatus describes the safety state that the API may expose to
@@ -359,6 +362,26 @@ func (rd *runningDriver) markDefaultRecoveryPending() {
 	rd.statusMu.Unlock()
 }
 
+// commandRunContext gives a started command at least commandRunTimeout. A
+// caller deadline shorter than that ends only the caller's wait; an explicit
+// cancel still stops the command.
+func commandRunContext(caller context.Context) (context.Context, func()) {
+	deadline, ok := caller.Deadline()
+	if !ok || time.Until(deadline) >= commandRunTimeout {
+		return caller, func() {}
+	}
+	run, cancel := context.WithTimeout(context.WithoutCancel(caller), commandRunTimeout)
+	stop := context.AfterFunc(caller, func() {
+		if errors.Is(caller.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	return run, func() {
+		stop()
+		cancel()
+	}
+}
+
 func (rd *runningDriver) beginCommand(ctx context.Context) (context.Context, func()) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -436,9 +459,12 @@ func (s *commandState) snapshot() (err error, started, completed bool) {
 	return err, started, completed
 }
 
+// commandContextError says whether a command that returned success was cut
+// short. The caller's deadline only ends its wait, so a success that arrives
+// after it still counts; an explicit cancel does not.
 func commandContextError(requestCtx, executionCtx context.Context) error {
 	if requestCtx != nil {
-		if err := requestCtx.Err(); err != nil {
+		if err := requestCtx.Err(); errors.Is(err, context.Canceled) {
 			return err
 		}
 	}
@@ -1073,13 +1099,15 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					// own (manual ev_resume does not require a cycle id).
 					invalidateCommandSequence()
 				}
-				commandCtx, finishCommand := rd.beginCommand(cmdCtx)
+				runCtx, finishRun := commandRunContext(cmdCtx)
+				commandCtx, finishCommand := rd.beginCommand(runCtx)
 				// SendDefault may close the control window after the earlier queue
 				// check but before this actor installs activeCancel. Recheck once the
 				// cancel hook exists; after this point a racing default cancels the
 				// context passed to the runtime.
 				if rejection := rd.commandRejection(cmd.controlEpoch); rejection != nil {
 					finishCommand()
+					finishRun()
 					err = rejection
 					break
 				}
@@ -1112,6 +1140,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					timer.Reset(rd.env.PollInterval())
 				}
 				finishCommand()
+				finishRun()
 				if err == nil && cyclePause {
 					rd.evPausePending = true
 					rd.evPauseRevision = rd.commandRevision
