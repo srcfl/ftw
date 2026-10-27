@@ -3542,7 +3542,7 @@ func floorBlockedDischarge(
 		if t.TargetW >= 0 || r == nil {
 			continue
 		}
-		if lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver]); lower < 0 {
+		if !dischargeParked(r, state.DriverLimits[t.Driver]) {
 			continue
 		}
 		if out == nil {
@@ -3573,6 +3573,15 @@ func floorBlockedDischarge(
 		}
 	}
 	return out
+}
+
+// dischargeParked reports whether the distributor parks a pack's discharge
+// at 0 W: no SoC, SoC under Core's 5 % floor, discharge_capable=false or a
+// zero discharge limit. The owner's soc_min is a planner rule; the stale-plan
+// floor applies it separately (floorBelowStaleFloorDischarge).
+func dischargeParked(r *telemetry.DerReading, lim PowerLimits) bool {
+	dischargeBlocked, _ := batteryDirectionBlocks(r.Data)
+	return r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked || lim.dischargeCap() == 0
 }
 
 // blockedDischargeKeepW is the discharge the blocked packs must keep after
