@@ -66,6 +66,8 @@ func decodeStored(c state.Configuration, database, baseDir string) (*Config, err
 	cfg.applyRetiredControl(legacyControl.Config)
 	// This is the same typed config that was validated on save. Do not apply new
 	// defaults during a storage-only reload: nil, false and zero stay distinct.
+	// The only exception is the site timings, which have no meaning at zero.
+	cfg.Site.FillUnsetTimings()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("stored settings: %w", err)
 	}

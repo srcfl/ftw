@@ -2837,10 +2837,13 @@ func main() {
 
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
+	if controlInterval <= 0 {
+		controlInterval = 2 * time.Second // same guard as the tick
+	}
 	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
 	// the config apply callback updates those fields directly, so a
 	// startup snapshot here would go stale on the first hot-reload.
-	dtS := float64(cfg.Site.ControlIntervalS)
+	dtS := controlInterval.Seconds()
 	// Every dispatch command carries its own deadline — see
 	// driverCommandTimeout for the stall it bounds.
 	driverCmdTimeout := driverCommandTimeout(controlInterval)

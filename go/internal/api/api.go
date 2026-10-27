@@ -1714,6 +1714,9 @@ func (s *Server) handlePostConfigWith(w http.ResponseWriter, r *http.Request, re
 		// declared via DRIVER.config_secrets — keeps config-package
 		// catalog-agnostic.
 		restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
+		// A reviewed draft must save exactly as reviewed; the next load
+		// fills its unset timings instead.
+		newCfg.Site.FillUnsetTimings()
 	}
 	s.deps.CfgMu.RUnlock()
 
