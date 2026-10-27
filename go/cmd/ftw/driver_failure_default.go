@@ -119,6 +119,12 @@ type refusalState struct {
 	// first failed read can come just after the exclusion. A failed read
 	// with no good read since this time is that same outage.
 	readAtExclusion time.Time
+	// retried is set once update has let the driver back in for a trial.
+	// A trial refused while reads were fine is the device's answer, so a
+	// failed read after that exclusion does not count as an outage. On a
+	// flaky link that refuses for real, it would otherwise send a default
+	// and a trial on every good read after a failed one.
+	retried bool
 }
 
 func newDriverActuationTracker(tel *telemetry.Store) *driverActuationTracker {
@@ -187,6 +193,9 @@ func (t *driverActuationTracker) recordCommandOutcomeFor(name, action string, er
 			// driver. A later success from the same tick must not bypass it.
 			if st.excludedAt.IsZero() || action != st.excludedAction {
 				delete(st.consecutive, action)
+			}
+			if st.excludedAt.IsZero() && action == st.excludedAction {
+				st.retried = false
 			}
 			if len(st.consecutive) == 0 {
 				delete(t.refusals, name)
@@ -317,9 +326,9 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 		// a command that hit the dead link before a poll did, in an outage
 		// shorter than the watchdog timeout. A device that has read fine
 		// since it refused keeps the full window, even if a later read
-		// fails.
+		// fails, and so does one that refused its trial with good reads.
 		noReadSince := h.LastSuccess == nil || !h.LastSuccess.After(st.readAtExclusion)
-		if !st.outage && (h.Status == telemetry.StatusOffline || (h.LastReadFailed() && noReadSince)) {
+		if !st.outage && (h.Status == telemetry.StatusOffline || (!st.retried && h.LastReadFailed() && noReadSince)) {
 			st.outage = true
 			t.refusals[name] = st
 		}
@@ -336,6 +345,7 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 		st.consecutive[st.excludedAction] = driverRefusalLimit - 1
 		st.excludedAt = time.Time{}
 		st.outage = false
+		st.retried = true
 		t.refusals[name] = st
 		t.tel.SetDriverCommandFault(name, false, "")
 		// health holds copies, so apply the release to this tick's

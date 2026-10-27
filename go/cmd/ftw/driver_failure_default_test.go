@@ -463,3 +463,45 @@ func TestDriverExcludedJustBeforeShortOutageGetsDefaultWhenItReadsAgain(t *testi
 		})
 	}
 }
+
+// A device that refuses for real on a flaky link: it is excluded with good
+// reads, the next read fails, and it gets its one early trial on the good
+// read after. It refuses that trial while reading fine. From then on a
+// failed read between good ones is the link, not an outage, so it waits the
+// full retry window instead of getting a default and a trial on every good
+// read after a failed one.
+func TestDriverRefusingOnFlakyLinkGetsOneEarlyTrial(t *testing.T) {
+	tel := pollingStore(t, "sungrow")
+	tracker := newDriverActuationTracker(tel)
+	sender := refusingSender("modbus write refused")
+	payload := []byte(`{"action":"battery","power_w":-3000}`)
+	now := time.Now()
+	for i := 0; i < driverRefusalLimit; i++ {
+		tracker.dispatchCommand(context.Background(), sender, "driver send", "sungrow", payload, time.Second, now)
+	}
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+
+	// Within one retry window of the first exclusion, the early trial
+	// comes 4 s in and its window has not elapsed by the end.
+	end := now.Add(driverRefusalRetryInterval)
+	trials, defaults := 0, 0
+	for now.Before(end) {
+		now = now.Add(2 * time.Second)
+		tel.RecordDriverError("sungrow", "one modbus read timed out")
+		if pending := tracker.update(now, nil); len(pending) != 0 {
+			t.Fatalf("default sent while a read failed: %v", pending)
+		}
+		now = now.Add(2 * time.Second)
+		time.Sleep(time.Millisecond) // LastSuccess is wall time
+		tel.RecordDriverSuccess("sungrow")
+		defaults += len(tracker.update(now, nil))
+		if tel.DriverHealth("sungrow").IsOnline() {
+			trials++
+			tracker.dispatchCommand(context.Background(), sender, "driver send", "sungrow", payload, time.Second, now)
+			defaults += len(tracker.update(now, nil))
+		}
+	}
+	if trials != 1 || defaults != 2 {
+		t.Fatalf("refusing driver on a flaky link got %d trials and %d defaults inside the retry window, want 1 and 2", trials, defaults)
+	}
+}
