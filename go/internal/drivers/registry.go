@@ -1099,7 +1099,13 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					// own (manual ev_resume does not require a cycle id).
 					invalidateCommandSequence()
 				}
-				runCtx, finishRun := commandRunContext(cmdCtx)
+				// A wallbox-cycle step keeps its caller's deadline. Its owner gives
+				// up at that deadline and sends no resume, so a pause that lands
+				// late must fail and restore the default, not latch as pending.
+				runCtx, finishRun := cmdCtx, func() {}
+				if cmd.cycleID == 0 {
+					runCtx, finishRun = commandRunContext(cmdCtx)
+				}
 				commandCtx, finishCommand := rd.beginCommand(runCtx)
 				// SendDefault may close the control window after the earlier queue
 				// check but before this actor installs activeCancel. Recheck once the

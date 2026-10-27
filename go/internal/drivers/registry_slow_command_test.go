@@ -103,3 +103,36 @@ func TestSlowSuccessfulCommandKeepsControlEveryTick(t *testing.T) {
 		t.Fatalf("every accepted setpoint was followed by driver_default_mode: commands=%d defaults=%d", rt.commands.Load(), rt.defaults.Load())
 	}
 }
+
+// A wallbox-cycle pause that succeeds after its caller gave up must not latch
+// as pending: the cycle owner sends no resume, so the late pause restores the
+// default and a later cycle can pause again.
+func TestLateWallboxCyclePauseRestoresDefaultAndDoesNotLatch(t *testing.T) {
+	r, rt := newSlowOKRegistry(60 * time.Millisecond)
+	defer r.remove("d1", true)
+	r.tel.DriverHealthMut("d1").RecordSuccess()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := r.SendEVContinuation(ctx, "d1", []byte(`{"action":"ev_pause"}`), 1)
+	cancel()
+	if !errors.Is(err, ErrCommandMayHaveRun) {
+		t.Fatalf("cycle 1 pause err = %v, want may-have-run", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && rt.defaults.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := rt.defaults.Load(); got != 1 {
+		t.Fatalf("defaults after late cycle pause = %d, want 1", got)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	err = r.SendEVContinuation(ctx2, "d1", []byte(`{"action":"ev_pause"}`), 2)
+	cancel2()
+	if err != nil {
+		t.Fatalf("cycle 2 pause err = %v, want nil (commands=%d defaults=%d)", err, rt.commands.Load(), rt.defaults.Load())
+	}
+	if got := rt.commands.Load(); got != 2 {
+		t.Fatalf("commands = %d, want 2", got)
+	}
+}
