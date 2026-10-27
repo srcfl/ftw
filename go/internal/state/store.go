@@ -70,7 +70,7 @@ type Store struct {
 	// cache.db gets no marker: it is tiny + disposable, so it is always checked.
 	mainDBPath string
 
-	// healMu guards corrupt + verifyCancel. corrupt is set by the background
+	// healMu guards healEvents, corrupt and verifyCancel. corrupt is set by the background
 	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
 	// marked clean). verifyCancel interrupts the in-flight background scan so
 	// Close can stop it before closing the DB — otherwise db.Close() blocks on
@@ -430,7 +430,16 @@ func (s *Store) HealEvents() []HealEvent {
 	if s == nil {
 		return nil
 	}
-	return s.healEvents
+	s.healMu.Lock()
+	defer s.healMu.Unlock()
+	return append([]HealEvent(nil), s.healEvents...)
+}
+
+// RecordHealEvent adds a recovery made outside Open, such as HealBeforeLoad.
+func (s *Store) RecordHealEvent(ev HealEvent) {
+	s.healMu.Lock()
+	s.healEvents = append(s.healEvents, ev)
+	s.healMu.Unlock()
 }
 
 // SnapshotTo writes a self-contained, defragmented copy of the database

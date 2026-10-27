@@ -409,6 +409,12 @@ func main() {
 	config.ManagedDriversDirOverride = filepath.Join(filepath.Dir(*configPath), "driver-repository", "active")
 
 	// ---- Load config ----
+	// Load reads settings from state.db, so heal a corrupt file first.
+	settingsHeal, err := config.HealSettingsDatabase(*configPath)
+	if err != nil {
+		slog.Error("heal settings database", "err", err)
+		os.Exit(1)
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		if isConfigMissing(*configPath) {
@@ -508,6 +514,9 @@ func main() {
 	if err != nil {
 		slog.Error("open state", "err", err)
 		os.Exit(1)
+	}
+	if settingsHeal != nil {
+		st.RecordHealEvent(*settingsHeal)
 	}
 	if err := st.EnableHistoryAggregation(); err != nil {
 		slog.Error("enable history aggregation", "err", err)

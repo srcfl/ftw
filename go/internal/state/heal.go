@@ -15,6 +15,9 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
+
+	"modernc.org/sqlite"
 )
 
 // HealEvent records a corruption-recovery action taken at boot, for surfacing
@@ -200,6 +203,30 @@ func openChecked(path, tier string, nowMs int64) (*sql.DB, *HealEvent, error) {
 	}
 	ev := &HealEvent{Tier: tier, Action: healRebuilt, AtMs: nowMs, Detail: detail}
 	return db, ev, nil
+}
+
+// HealBeforeLoad restores state.db from its snapshot when its settings cannot
+// be read because the file is corrupt. Boot reads settings before Open, so a
+// damaged file would otherwise stop every start before the heal in Open runs.
+// The verified-good marker cannot skip this check, because it starts from a
+// failed read rather than the marker. Without a usable snapshot it changes
+// nothing. The caller adds the event to the Store with RecordHealEvent.
+func HealBeforeLoad(path string) (*HealEvent, error) {
+	_, readErr := ReadConfiguration(path)
+	var sqliteErr *sqlite.Error
+	if !errors.As(readErr, &sqliteErr) || (sqliteErr.Code()&0xff != 11 && sqliteErr.Code()&0xff != 26) {
+		return nil, nil // readable, missing or busy: not corruption
+	}
+	if !snapshotUsable(path + ".snapshot") {
+		slog.Error("state: settings database is corrupt and has no usable snapshot", "path", path, "err", readErr)
+		return nil, nil
+	}
+	_ = os.Remove(cleanMarkerPath(path))
+	db, ev, err := openChecked(path, tierState, time.Now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	return ev, db.Close()
 }
 
 // quarantine renames the corrupt DB and its WAL/shm sidecars out of the way so
