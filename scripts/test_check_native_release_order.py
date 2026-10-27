@@ -62,6 +62,30 @@ class NativeReleaseOrderTest(unittest.TestCase):
                 {"tag_name": "v0.159.0-beta.1", "draft": False},
             ]])
 
+    def test_after_late_stable_betas_stay_above_every_release(self):
+        # The updater stops at the first beta it lists (selfupdate.go
+        # resolveChannel), so no beta may rank below a published release.
+        pages = [[
+            {"tag_name": "v0.158.0", "draft": False},
+            {"tag_name": "v0.159.0-beta.1", "draft": False},
+        ]]
+        release_order.check("v0.159.0-beta.2", pages)
+        release_order.check("v0.159.1-beta.1", pages)
+        release_order.check("v0.158.0", pages)
+        with self.assertRaises(ValueError):
+            release_order.check("v0.158.0-beta.4", pages)
+
+    def test_newer_stable_on_a_later_page_blocks_stable(self):
+        with self.assertRaises(ValueError):
+            release_order.check("v0.158.0", [
+                [{"tag_name": "v0.160.0-beta.1", "draft": False}],
+                [{"tag_name": "v0.159.0", "draft": False}],
+            ])
+        release_order.check("v0.158.0", [[
+            {"tag_name": "v0.159.0", "draft": True},
+            {"tag_name": "v0.159.0-beta.1", "draft": False},
+        ]])
+
     def test_drafts_do_not_block_recovery(self):
         release_order.check("v0.131.0-beta.1", [[
             {"tag_name": "v0.131.0-beta.2", "draft": True},

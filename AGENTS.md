@@ -202,7 +202,8 @@ Native 0.x path:
    The workflow checks the source commit and release assets, and keeps GitHub
    `releases/latest` on the old 2.x line. Newer betas may ship while the
    sites test the candidate; the workflow refuses a stable only when a newer
-   stable exists.
+   stable exists. Beta boxes still take the highest release, so a late stable
+   does not hide a newer beta.
 5. Promote the signed driver channel for installs that read `drivers-stable`:
    `gh workflow run ftw-drivers-release.yml -R srcfl/device-drivers --ref main -f channel=stable`.
    It promotes the driver commit already published as `drivers-beta`. If it

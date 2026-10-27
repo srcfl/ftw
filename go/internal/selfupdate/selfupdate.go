@@ -390,16 +390,33 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 // resolveChannel selects the newest 0.x release on channel. Beta includes
 // stable releases, so beta testers converge back to a promoted stable build
 // instead of remaining pinned to the final prerelease.
+//
+// GitHub lists releases newest-created first. The release-order check
+// (scripts/check-native-release-order.py) refuses a stable below a published
+// stable and a beta below any published release. So the first stable listed
+// is the newest stable, and nothing listed after the first beta outranks it.
+// A stable may be promoted after newer betas, so on beta the walk keeps the
+// higher of the first stable and the first beta.
 func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghRelease, error) {
-	return c.fetchReleaseList(ctx, func(rel ghRelease) bool {
+	var best ghRelease
+	err := c.walkReleases(ctx, func(rel ghRelease) bool {
 		if !strings.HasPrefix(rel.TagName, "v0.") {
 			return false
 		}
-		if channel == ChannelStable {
-			return !rel.Prerelease && isStableTag(rel.TagName)
+		stable := !rel.Prerelease && isStableTag(rel.TagName)
+		beta := channel != ChannelStable && rel.Prerelease && isBetaTag(rel.TagName)
+		if !stable && !beta {
+			return false
 		}
-		return !rel.Prerelease && isStableTag(rel.TagName) || rel.Prerelease && isBetaTag(rel.TagName)
+		if best.TagName == "" || isNewer(rel.TagName, best.TagName) {
+			best = rel
+		}
+		return beta || channel == ChannelStable
 	})
+	if err != nil {
+		return ghRelease{}, err
+	}
+	return best, nil
 }
 
 func hasNativeAssets(rel ghRelease, arch string) bool {
@@ -480,40 +497,42 @@ type ghRelease struct {
 	} `json:"assets"`
 }
 
-func (c *Checker) fetchReleaseList(ctx context.Context, accept func(ghRelease) bool) (ghRelease, error) {
+// walkReleases visits published releases in list order, page by page, until
+// visit returns true or the list ends.
+func (c *Checker) walkReleases(ctx context.Context, visit func(ghRelease) bool) error {
 	rawURL := c.cfg.ReleasesURL
 	seen := make(map[string]bool)
 	for rawURL != "" {
 		if seen[rawURL] {
-			return ghRelease{}, errors.New("github releases list: repeated page")
+			return errors.New("github releases list: repeated page")
 		}
 		seen[rawURL] = true
 		resp, err := c.getGitHub(ctx, rawURL)
 		if err != nil {
-			return ghRelease{}, err
+			return err
 		}
 		if resp.StatusCode >= 400 {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 			_ = resp.Body.Close()
-			return ghRelease{}, fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			return fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 		var releases []ghRelease
 		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases)
 		_ = resp.Body.Close()
 		if decodeErr != nil {
-			return ghRelease{}, decodeErr
+			return decodeErr
 		}
 		for _, rel := range releases {
-			if !rel.Draft && accept(rel) {
-				return rel, nil
+			if !rel.Draft && visit(rel) {
+				return nil
 			}
 		}
 		rawURL, err = nextReleasePage(resp.Header.Get("Link"), rawURL)
 		if err != nil {
-			return ghRelease{}, err
+			return err
 		}
 	}
-	return ghRelease{}, nil
+	return nil
 }
 
 func nextReleasePage(linkHeader, currentURL string) (string, error) {
